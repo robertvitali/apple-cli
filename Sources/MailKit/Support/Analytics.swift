@@ -171,8 +171,14 @@ public enum Analytics {
 
     // MARK: Needs response
 
-    /// Unread, non-automated messages ranked by likelihood of needing a reply (direct + "?"
-    /// in subject → HIGH). Mirrors MCP B's `get_needs_response` heuristic.
+    /// Unread, non-automated messages ranked by likelihood of needing a reply ("?" in subject
+    /// + urgent keywords + flagged → HIGH). Mirrors MCP B's `get_needs_response` heuristic.
+    ///
+    /// Two documented deltas vs MCP B: (1) the unread filter uses the Envelope Index read-bit,
+    /// which can diverge from Mail's server-synced seen-state (observed diverging on one INBOX),
+    /// so a few items here may already be read in Mail; (2) MCP B's "direct-To-you" boost is not
+    /// yet applied — it needs a per-message recipient join (the account's own address in `To`),
+    /// deferred as a follow-up. The `?`/urgent/flagged ranking is applied.
     public static func needsResponse(_ rows: [Row], maxResults: Int) -> [NeedsResponseItem] {
         let candidates = rows.filter { !$0.read && !isAutomatedSender(address: $0.senderAddress, name: $0.senderName) }
         let ranked = candidates.sorted { a, b in

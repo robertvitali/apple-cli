@@ -1,10 +1,16 @@
 import Foundation
 import AppleKit
 
-/// File-backed email templates, interoperable with MCP A's store: files live at
-/// `~/.apple_mail_mcp/templates/<name>.md` (override with `APPLE_MAIL_MCP_HOME`). A template
-/// may carry an optional `Subject:` header line; the remainder is the body. Both subject and
-/// body may contain `{placeholder}` tokens filled by `render`.
+/// File-backed email templates at the SAME location MCP A uses —
+/// `~/.apple_mail_mcp/templates/<name>.md` (override with `APPLE_MAIL_MCP_HOME`) — so the two
+/// share a store. A template may carry an optional `Subject:` header line; the remainder is
+/// the body. Both subject and body may contain `{placeholder}` tokens filled by `render`.
+///
+/// NOTE on interop: on this fleet the templates dir is empty (MCP A `list_templates` → []),
+/// so MCP A's exact on-disk serialization could not be introspected against a real file. The
+/// `Subject:`-header + body convention here is chosen for human-readability; if a future MCP A
+/// template on disk uses a different framing, adjust `parse`/`save` to match (a self-contained
+/// change — round-trip covered by tests).
 ///
 /// Pure + filesystem-only (no Mail.app, no TCC) — fully unit-testable with a temp home.
 public struct TemplateStore {
