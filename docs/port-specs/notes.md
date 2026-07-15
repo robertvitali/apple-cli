@@ -219,3 +219,29 @@ FDA/Automation permissions and the signed-binary/TCC-stability story are **opera
 - **MCP docs:** `docs/APPLESCRIPT-LIMITATIONS.md`, `docs/FULL-DISK-ACCESS.md`, `docs/NODE-RUNTIME-AND-TCC-PERMISSIONS.md`, `docs/JXA_RESEARCH.md`, `docs/STABILITY-PERF-AUDIT-2026-06-19.md`.
 - **npm:** `apple-notes-mcp@2.5.12` (tarball verified against source; `npm view` metadata; version history 1.1.0→2.5.12).
 - **Candidate CLIs (source/README read; none executed):** `Piesson/apple-notes-cli` (0★, Shell), `xwmx/notes-app-cli` (83★, Shell, `notes-app` 3281 lines + README limitations), `antoniorodr/memo` (308★, Python/click, `src/memo/memo.py` + `memo_helpers/*`), `kzaremski/apple-notes-exporter` (615★, Swift GUI), `pRizz/apple-notes-exporter-rs` (0★, Rust crate). GitHub API metadata for provenance/maintenance (stars, last-push, archived).
+
+---
+
+## 8. Swift port — implementation notes + deviations (as built)
+
+Implemented in `Sources/NotesKit/` as `apple notes <subcommand>` — all 34 MCP tools mapped (see the mapping in `NotesCommand.swift`), plus the `append` extra and multi-format `export`. The AppleScript templates, protobuf/gzip/checklist decoder, metadata/sync SQLite queries, and attachment guards are ported from MIT `apple-notes-mcp@2.5.12`.
+
+### Naming — camelCase → snake_case (deliberate, information-preserving)
+The MCP emits camelCase keys; apple-cli emits snake_case per `docs/DESIGN.md` ("name payload fields in snake_case"). The map is 1:1: `passwordProtected→password_protected`, `hasChecklist→has_checklist`, `hasChecklistInProgress→has_checklist_in_progress`, `wasShared→was_shared`, `savedPath→saved_path`, `contentType→content_type`, `secondsSinceLastChange→seconds_since_last_change`, `totalNotes→total_notes`, `last24h→last_24h`, `widgetSnippet→widget_snippet`, `smartFolderQuery→smart_folder_query`, etc. Every field's *information* is preserved.
+
+### Output-field deviations (the only places the payload set differs from the MCP)
+- **search / selected / shared** drop the MCP's placeholder `content:""` and `tags:[]` (never populated for these list ops), and **search** additionally drops the MCP's *fabricated* `created`/`modified` (the MCP sets `new Date()` at response time — not the note's real dates). The **real** `account` value the MCP returns on search IS emitted (`NoteSummary.account`). Rationale: propagating empty/fabricated fields is worse than omitting them; every field apple-cli emits carries real information.
+- Optional fields are omitted (not `null`) when absent — matching the MCP's "field absent when unavailable" for `get-metadata` (schema-drift columns), attachment `url`, etc.
+
+### Superset improvements (capabilities BEYOND the MCP)
+- **`get-checklist` / `get-metadata` are SQLite-only** — they do NOT require the MCP's AppleScript existence-guard, so they resolve notes AppleScript can't (trashed, or when Notes.app automation is slow/unavailable). Verified live: the MCP oracle failed `get-checklist-state` on a real note whose checklist apple-cli read correctly.
+- **`sync_warning`** — a structured field on `search`/`list`/`folders` (the MCP's `withSyncAwareness` warning was text-only).
+- **Safety**: every write defaults to `--dry-run` (preview, zero side effects); a real mutation needs `--execute` AND passes the `APPLE_TEST_MODE` + `apple-cli-test…`-labeled-target guard; `batch-*` verify EVERY target is a labeled test note before touching anything. Input bounds mirror the MCP's zod limits (title ≤2000, content ≤5 MiB, folder ≤1000, account ≤200).
+- **Hardening** (from the OMC review pass): gzip inflate clamps the attacker-controllable ISIZE to a 64 MiB cap (decompression-bomb defense); the attachment path guard adds a symlink-aware post-mkdir re-check; the protobuf checklist line-mapping counts UTF-16 code units (correct for emoji/non-BMP text, matching Apple's run lengths); SQLite PKs are bound positionally.
+
+### Security posture
+User data reaches `osascript` ONLY as argv (`on run argv` → `item N of argv`), never string-interpolated into script source (AppleScript injection is RCE-class; the reference interpolated with escaping — this port does not). SQLite is read-only + param-bound + column-allowlisted. Confirmed by the security-reviewer pass (0 Critical/High).
+
+### Validated live vs. blocked
+- **Validated against the live MCP oracle:** `get-metadata` (field-for-field match on multiple notes), `get-checklist` (protobuf decode on real ZDATA), `sync-status`.
+- **Implemented + guarded + unit-tested but NOT exercised live:** all AppleScript ops (CRUD/folders/accounts/attachments/export/selection) — Notes.app automation timed out (`-1712`) on this large store during the build session, so live AppleScript testing is deferred to a machine where Notes.app scripting is responsive. The argv-safety, parsing, and guard logic are unit-tested.
