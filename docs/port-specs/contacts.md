@@ -156,7 +156,7 @@ contacts update <id> [--set field=v | --clear field | --json <blob>]       # Non
 contacts delete <id> [--group <id>] [--force]   # test-mode/safety gated
 
 contacts note get <id>                          # → read_note   (HARD: AppleScript)
-contacts note set <id> (--text <s> | --file <p> | --clear)   # → write_note (HARD)
+contacts note set <id> (--note <s> | --file <p> | --clear)   # → write_note (HARD); --note, NOT --text (--text is the global human-output flag)
 
 contacts photo get <id> [--out <file>|--base64]              # → read_photo (HARD)
 contacts photo set <id> (--file <p> | --base64 <s> | --clear)# → write_photo (HARD)
@@ -170,7 +170,7 @@ contacts groups add    <contact-id> <group-id>
 contacts groups remove <contact-id> <group-id>  # HARD: AppleScript fallback
 
 contacts vcard export <id...> [--out <file>]    # → export_vcard (atomic, vCard 3.0)
-contacts vcard import (--file <p>|--text <s>) [--group <id>]  # → import_vcard (HARD: 3.0/4.0)
+contacts vcard import (--file <p>|--vcard <s>) [--group <id>] # → import_vcard (HARD: 3.0/4.0); --vcard, NOT --text (global-flag collision)
 
 contacts containers list                        # → list_containers
 contacts mcp serve                              # dual-frontend (Contactbook model)
@@ -196,6 +196,48 @@ contacts mcp serve                              # dual-frontend (Contactbook mod
 ### 6.4 Build cost
 - **Fork the Python MCP connector → add CLI frontend: `S–M`.** Hard parts already solved; effort is CLI arg design, `--json/--text/--csv` formatting, `--deep`/flat-field extras, packaging/SemVer/CI. **Recommended path.**
 - **Greenfield Swift single binary: `L`.** Re-solve items 1–5 above in Swift + build the dual CLI/MCP core. Justified only if self-contained `brew` binary + large-book performance outweigh reusing the working Python connector.
+
+---
+
+## 6.5 As-built implementation notes (Swift port — `Sources/ContactsKit/`)
+
+The domain was built as the **greenfield Swift single binary** (§6.2 alternative), over
+Contacts.framework with the two AppleScript fallbacks (notes r/w, group remove-member).
+All 21 MCP tools are mapped and live-parity-verified against the oracle. Deviations from
+a literal MCP transcription, and why:
+
+- **Write-safety gate (intentionally more conservative than the MCP).** Every destructive
+  command **defaults to a `--dry-run` preview that mutates nothing**. A real mutation
+  requires `--execute --test-mode` **and** `APPLE_TEST_MODE=1`; `create` / `groups create`
+  additionally require the new item's name to carry the `apple-cli-test` sandbox prefix.
+  The MCP writes real data outside test mode (gating only deletes) — the CLI is stricter per
+  the repo `AGENTS.md` safety mandate (no separate sandbox; real address book). **Every MCP
+  write capability remains reachable** via `--execute --test-mode` with `APPLE_TEST_MODE=1`;
+  nothing is dropped, only gated. The refusal preserves the MCP's `safety_violation`
+  `error.type` (mapped to exit 77).
+- **`CONTACTS_TEST_GROUP` / per-op `group_identifier` assertion parameter is inert by
+  design.** The MCP's assertion-only `group_identifier` (on update / write_note / write_photo
+  / rename_group / delete_group, used only to match `CONTACTS_TEST_GROUP` in its test mode) is
+  replaced by the CLI's equivalent gate (`APPLE_TEST_MODE` + labeled name). `create` and
+  `vcard import` keep `--group` as the **functional** group-add; `delete` keeps `--group` as a
+  parity echo.
+- **`check_authorization` structured fields.** `contacts auth` returns `{status,
+  remediation?}` structurally — full parity with the MCP diagnostic. On *data* commands, an
+  `authorization_denied` failure folds `status` + `remediation` into `error.message` (the
+  shared CLI error envelope is `{type, message}` only); use `contacts auth` for the structured
+  form.
+- **AppleScript ops bind via osascript argv (`on run argv`), never string interpolation** —
+  strictly safer than the MCP (which escapes-then-interpolates). They need Contacts.app
+  launchable + Automation TCC; failures classify as `error.type: unknown` (MCP parity) with a
+  stable message (raw osascript stderr is kept out of the envelope).
+- **Curated extras (supersets, not in the MCP):** `search --deep` (match a value across all
+  four fields, unioned + de-duped); `--dry-run` / `--execute`; `--out` (vcard/photo to file),
+  `--file` (note/vcard/photo/base64 inputs), `--json` (full-fidelity create/update); `--text`
+  human output. File / base64 / json inputs are size-bounded (25 MB) as a DoS guard.
+- **Parse-layer input** (e.g. space-form `--limit -1`, missing required args, wrong types)
+  surfaces as an ArgumentParser usage error on stderr (exit 64), not the JSON envelope — a
+  shared entry-point behavior uniform across all six domains, tracked for a central fix. The
+  `--limit=-1` equals-form and all domain-level validation return the JSON envelope.
 
 ---
 
