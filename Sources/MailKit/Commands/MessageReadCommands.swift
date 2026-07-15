@@ -213,7 +213,7 @@ struct AttachmentsCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "attachments",
         abstract: "List and save message attachments.",
-        subcommands: [AttachmentsList.self],
+        subcommands: [AttachmentsList.self, AttachmentsSave.self],
         defaultSubcommand: AttachmentsList.self)
 }
 

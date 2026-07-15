@@ -30,8 +30,13 @@ require_index() {
 # Keep this list in sync with MailCommand's registered subcommands.
 @test "every mail subcommand --help exits 0 (guards GlobalOptions flag collisions)" {
   local leaves=(
-    "accounts list" "mailboxes list" unread-counts search list get selected thread
-    "attachments list" doctor
+    "accounts list" "mailboxes list" "mailboxes create" unread-counts search list get selected
+    thread "attachments list" "attachments save" doctor
+    "rules list" "rules create" "rules update" "rules delete" "rules enable" "rules disable"
+    "templates list" "templates get" "templates save" "templates delete" "templates render"
+    "analytics overview" "analytics needs-response" "analytics awaiting-reply"
+    "analytics top-senders" "analytics stats" "analytics dashboard" export
+    send reply forward draft draft-rich move mark flag delete "trash empty"
   )
   run "$BIN" mail --help
   [ "$status" -eq 0 ]
@@ -39,6 +44,38 @@ require_index() {
     run "$BIN" mail $c --help
     [ "$status" -eq 0 ] || { echo "FAIL: 'mail $c --help' exited $status"; return 1; }
   done
+}
+
+@test "mail send defaults to a dry-run preview (no live send)" {
+  run "$BIN" mail send --to nobody@example.invalid --subject "apple-cli-test" --body "hi"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"action" : "send"'
+  echo "$output" | grep -q '"dry_run" : true'
+  echo "$output" | grep -q '"executed" : false'
+}
+
+@test "mail templates render fills placeholders from a temp store" {
+  export APPLE_MAIL_MCP_HOME="$BATS_TEST_TMPDIR/mcp-home"
+  run "$BIN" mail templates save greet --body "Hi {name}" --subject "Hello"
+  [ "$status" -eq 0 ]
+  run "$BIN" mail templates render greet --var name=World
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "Hi World"
+}
+
+@test "mail delete --permanent --execute is refused (dangerous)" {
+  require_index
+  run "$BIN" mail delete --match-subject apple-cli-nonexistent-zzz --permanent --execute --account iCloud
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q '"validation_error"'
+}
+
+@test "mail move with a filter previews (dry-run, filter_based)" {
+  require_index
+  run "$BIN" mail move --match-subject apple-cli-nonexistent-zzz --to Archive --account iCloud
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"filter_based" : true'
+  echo "$output" | grep -q '"dry_run" : true'
 }
 
 @test "mail search --limit 0 does not report has_more with next_offset 0 (no pagination loop)" {

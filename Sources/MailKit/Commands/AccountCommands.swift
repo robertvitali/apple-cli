@@ -40,7 +40,7 @@ struct MailboxesCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "mailboxes",
         abstract: "List and create mailboxes.",
-        subcommands: [MailboxesList.self],
+        subcommands: [MailboxesList.self, MailboxesCreate.self],
         defaultSubcommand: MailboxesList.self)
 }
 

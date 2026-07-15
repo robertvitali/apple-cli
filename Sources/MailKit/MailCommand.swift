@@ -25,7 +25,23 @@ public struct MailCommand: ParsableCommand {
             SelectedCommand.self,
             ThreadCommand.self,
             AttachmentsCommand.self,
+            RulesCommand.self,
+            TemplatesCommand.self,
             MailDoctor.self,
+            // P3 — derived analytics + export (structured supersets of MCP B's text blobs)
+            AnalyticsCommand.self,
+            ExportCommand.self,
+            // P2 — write/manage (dry-run default; live mutation gated + not wired for safety)
+            SendCommand.self,
+            ReplyCommand.self,
+            ForwardCommand.self,
+            DraftCommand.self,
+            DraftRichCommand.self,
+            MoveCommand.self,
+            MarkCommand.self,
+            FlagCommand.self,
+            DeleteCommand.self,
+            TrashCommand.self,
         ])
     @OptionGroup public var global: GlobalOptions
     public init() {}

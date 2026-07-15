@@ -94,6 +94,66 @@ public struct MailScript {
     end run
     """
 
+    // MARK: Rules (list is a live read; mutations are gated behind --execute)
+
+    private static let listRulesScript = """
+    set US to (ASCII character 31)
+    set RS to (ASCII character 30)
+    tell application "Mail"
+        set out to ""
+        set i to 0
+        repeat with r in rules
+            set i to i + 1
+            set out to out & i & US & (name of r) & US & (enabled of r) & RS
+        end repeat
+        return out
+    end tell
+    """
+
+    public struct ScriptRule { public let index: Int; public let name: String; public let enabled: Bool }
+
+    public func listRules() throws -> [ScriptRule] {
+        let raw = try runner.run(MailScript.listRulesScript)
+        var rules: [ScriptRule] = []
+        for record in raw.components(separatedBy: MailScript.RS)
+        where !record.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let f = record.components(separatedBy: MailScript.US)
+            guard f.count >= 3, let idx = Int(f[0].trimmingCharacters(in: .whitespacesAndNewlines)) else { continue }
+            rules.append(ScriptRule(index: idx, name: f[1],
+                                    enabled: f[2].trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "true"))
+        }
+        return rules
+    }
+
+    /// Enable/disable a rule by 1-based index (trivially reversible). argv-passed.
+    private static let setRuleEnabledScript = """
+    on run argv
+        set idx to (item 1 of argv) as integer
+        set en to (item 2 of argv) is "1"
+        tell application "Mail"
+            set enabled of (rule idx) to en
+            return "ok"
+        end tell
+    end run
+    """
+    public func setRuleEnabled(index: Int, enabled: Bool) throws {
+        _ = try runner.run(MailScript.setRuleEnabledScript, arguments: [String(index), enabled ? "1" : "0"])
+    }
+
+    /// Delete a rule by 1-based index (irreversible). argv-passed.
+    private static let deleteRuleScript = """
+    on run argv
+        set idx to (item 1 of argv) as integer
+        tell application "Mail"
+            delete (rule idx)
+            return "ok"
+        end tell
+    end run
+    """
+    public func deleteRule(index: Int) throws {
+        _ = try runner.run(MailScript.deleteRuleScript, arguments: [String(index)])
+    }
+
     // MARK: Unread counts (Mail.app live property — matches the MCP oracle)
 
     /// The Envelope Index `read` bit diverges from server-synced seen-state (observed: index

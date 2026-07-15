@@ -304,7 +304,7 @@ public final class EnvelopeIndex {
         let sql = """
         SELECT m.ROWID AS rowid, sa.address AS sender_address, sa.comment AS sender_name,
                COALESCE(m.subject_prefix,'') || COALESCE(s.subject,'') AS subject,
-               m.date_received AS date_received, m.read AS read, m.flagged AS flagged,
+               m.date_received AS date_received, m.date_sent AS date_sent, m.read AS read, m.flagged AS flagged,
                m.mailbox AS mailbox_rowid,
                (SELECT COUNT(*) FROM attachments at WHERE at.message = m.ROWID) AS attachment_count
         FROM messages m
