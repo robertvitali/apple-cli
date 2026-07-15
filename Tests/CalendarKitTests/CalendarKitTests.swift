@@ -118,6 +118,13 @@ struct RecurrenceSpecTests {
         let r = try RecurrenceSpec.parse("freq=weekly;byday=8")
         #expect(throws: AppleError.self) { _ = try RecurrenceMapping.ekRule(from: r) }
     }
+
+    @Test("count + until together → until wins (MCP precedence)")
+    func countUntilPrecedence() throws {
+        let r = try RecurrenceSpec.parse("freq=daily;count=10;until=2026-12-31")
+        #expect(r.end_date != nil)
+        #expect(r.occurrence_count == nil) // dropped so endDate wins, matching the MCP
+    }
 }
 
 // MARK: - Read window default (parity with the MCP's resolveReadDateRange)

@@ -233,11 +233,15 @@ public enum RecurrenceSpec {
             throw AppleError.validation("--recurrence requires freq=daily|weekly|monthly|yearly")
         }
         let interval = try fields["interval"].map { try intOf($0, "interval") } ?? 1
-        let count = try fields["count"].map { try intOf($0, "count") }
+        var count = try fields["count"].map { try intOf($0, "count") }
         var endDate: Date?
         if let until = fields["until"] {
             endDate = try DateArg.date(until)
         }
+        // RFC-5545 forbids COUNT and UNTIL together; if both are given, endDate wins — matching
+        // the MCP (its recurrenceRuleFromJSON checks endDate first). EventKitCore's ekRule would
+        // otherwise let count win, so normalize here rather than diverge from the oracle.
+        if endDate != nil { count = nil }
         return RecurrenceRule(
             frequency: freq.lowercased(),
             interval: interval,
