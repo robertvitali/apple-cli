@@ -44,5 +44,6 @@ let package = Package(
         ),
 
         .testTarget(name: "AppleKitTests", dependencies: ["AppleKit"]),
+        .testTarget(name: "MailKitTests", dependencies: ["MailKit", "AppleKit"]),
     ]
 )
