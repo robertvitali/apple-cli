@@ -1,0 +1,24 @@
+apple-cli NOTICE
+================
+
+`apple` is derived from / informed by the following MIT-licensed projects. Where
+code is ported, their copyright notice and license text MUST be retained per the
+MIT terms, and the specific copyright line added below before the port lands.
+
+- openclaw/imsg (MIT) — Messages: WAL-aware chat.db reader + AppleScript send /
+  iMessage→SMS routing patterns.
+- FradSer/event (MIT) — Calendar & Reminders: EventKit model layer + command
+  surface (the apple-events MCP's own backend).
+- sweetrb/apple-notes-mcp (MIT) — Notes: AppleScript templates, NoteStore.sqlite
+  checklist protobuf decoder, markdown conversion, attachment handling.
+- gumadeiras/fruitmail-cli (MIT) — Mail: Envelope Index SQLite fast-read approach.
+
+License verification REQUIRED before lifting any code from these references
+(their licenses were flagged "verify" during scoping):
+
+- s-morgan-jeffries/apple-contacts-mcp — Contacts reference (PyObjC logic).
+- s-morgan-jeffries/apple-mail-mcp — Mail reference (rules/templates/ID-precise).
+- patrickfreyer/apple-mail-mcp — Mail reference (HTML/drafts/analytics/export).
+
+Per-domain rule: confirm the upstream license permits reuse and add its exact
+copyright line here BEFORE porting any of its code.

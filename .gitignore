@@ -1,0 +1,33 @@
+# Swift / SwiftPM
+.build/
+.swiftpm/
+*.xcodeproj
+
+# OMC runtime / session state (machine-local; never commit)
+.omc/
+
+# In-repo per-domain worktrees (each a checkout of a feature branch)
+.worktrees/
+
+# Ephemeral session-handoff brief — MUST NEVER be committed
+START-HERE.md
+
+# Live test-cleanup log (machine-local run state; lists created test items to delete)
+TEST-CLEANUP.md
+
+# PII-bearing artifacts — NEVER commit real Apple data into this public repo. Golden-JSON
+# snapshots MUST be synthetic and may be committed; live dumps go under live-dumps/.
+*.eml
+*.sqlite
+*.sqlite-wal
+*.sqlite-shm
+*.abcddb
+*.log
+.env
+.env.*
+live-dumps/
+
+# macOS
+.DS_Store
+
+# Note: Package.resolved IS committed (this is an executable, so we pin deps).

@@ -1,0 +1,42 @@
+name: CI
+
+on:
+  push:
+    branches: ["**"]        # every branch, incl. the per-domain feat/asana-* branches
+  pull_request:
+
+# Least privilege: the build/test job needs only read access to repo contents.
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-test:
+    # GitHub-hosted macOS runners ship full Xcode, so swift-testing is available here.
+    # Free for public repositories. (Uses pull_request, NOT pull_request_target — forked
+    # PRs get a read-only token and no secrets.)
+    runs-on: macos-15
+    steps:
+      - uses: actions/checkout@v4   # TODO(hardening): pin to a commit SHA + add Dependabot
+
+      - name: Swift version
+        run: swift --version
+
+      - name: Build
+        run: swift build -v
+
+      - name: Unit tests (logic tier — swift-testing, no TCC / Apple permissions required)
+        run: swift test -v
+
+      - name: Install bats
+        run: brew install bats-core
+
+      - name: CLI smoke tests (bats)
+        run: bats -r bats/
+
+      # NOTE: the LIVE end-to-end tier (drives EventKit/Contacts/Mail/Notes/Messages against
+      # real data under track-and-cleanup) is NOT run in CI — it needs a real Mac with granted
+      # TCC permissions. It must NEVER be wired to a pull_request trigger from a fork.
