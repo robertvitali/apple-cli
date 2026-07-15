@@ -1,0 +1,390 @@
+import Foundation
+
+// Encodable payloads for the `data` field of the apple-cli envelope. Each mirrors the
+// corresponding `apple-notes-mcp` tool's `structuredContent`, with camelCase MCP keys
+// mapped to apple-cli snake_case (docs/DESIGN.md: "name payload fields in snake_case").
+// The camelCase→snake_case map is 1:1 and information-preserving (a strict superset):
+//   passwordProtected→password_protected, wasShared→was_shared, savedPath→saved_path,
+//   contentType→content_type, secondsSinceLastChange→seconds_since_last_change,
+//   totalNotes→total_notes, last24h→last_24h, hasChecklist→has_checklist, etc.
+// Optional (`?`) fields are OMITTED by JSONEncoder when nil, matching the reference's
+// "field absent when unavailable" behavior (metadata, attachment url, etc.).
+
+// MARK: Notes
+
+struct CreatedNote: Encodable {
+    let ok: Bool
+    let id: String
+    let title: String
+    let folder: String?
+    let account: String?
+}
+
+/// A search hit. The MCP emits `{id, title, content:"", tags:[], created:now, modified:now,
+/// folder, account}`. apple-cli emits `id, title, folder, account` — every field carrying real
+/// information. It deliberately drops content/tags (always the empty placeholders `""`/`[]`) and
+/// created/modified (fabricated `now` values the MCP never actually fetches for search); see
+/// docs/port-specs/notes.md §"Output-field deviations" for the documented rationale.
+struct NoteSummary: Encodable {
+    let id: String
+    let title: String
+    let folder: String?
+    let account: String?
+}
+
+/// `sync_warning` is apple-cli's structured equivalent of the MCP's `withSyncAwareness` text
+/// warning: populated (else omitted) when an iCloud sync is in progress and results may be
+/// incomplete. Present on the three MCP tools the reference wraps: search / list / folders.
+struct NoteList: Encodable {
+    let notes: [NoteSummary]
+    let count: Int
+    let sync_warning: String?
+}
+
+struct NoteTitleList: Encodable {
+    let notes: [String]
+    let count: Int
+    let sync_warning: String?
+}
+
+struct NoteContent: Encodable {
+    let title: String
+    let content: String
+    let hashtags: [String]
+}
+
+struct NotePlaintext: Encodable {
+    let title: String
+    let plaintext: String
+}
+
+struct NoteMarkdown: Encodable {
+    let markdown: String
+}
+
+/// Note metadata (get-by-id / get-details). Dates are `Date` so the shared encoder renders
+/// ISO-8601 (docs/DESIGN.md). `account` is present only for the by-title `get-details` path.
+struct NoteMetaByLookup: Encodable {
+    let id: String
+    let title: String
+    let created: Date
+    let modified: Date
+    let shared: Bool
+    let password_protected: Bool
+    let account: String?
+}
+
+/// Drops the MCP's placeholder `content:""`/`tags:[]` (never populated for selection) — same
+/// documented deviation as NoteSummary; every other field is real. See docs/port-specs/notes.md.
+struct SelectedNote: Encodable {
+    let id: String
+    let title: String
+    let created: Date
+    let modified: Date
+    let shared: Bool
+    let password_protected: Bool
+    let folder: String?
+    let account: String?
+}
+
+struct SelectedNoteList: Encodable {
+    let notes: [SelectedNote]
+    let count: Int
+}
+
+/// Drops the MCP's placeholder `content:""`/`tags:[]` (never populated for the shared-notes
+/// listing) — same documented deviation as NoteSummary. See docs/port-specs/notes.md.
+struct SharedNote: Encodable {
+    let id: String
+    let title: String
+    let account: String?
+    let created: Date
+    let modified: Date
+    let shared: Bool
+    let password_protected: Bool
+}
+
+struct SharedNoteList: Encodable {
+    let notes: [SharedNote]
+    let count: Int
+}
+
+struct UpdatedNote: Encodable {
+    let ok: Bool
+    let id: String?
+    let title: String
+    let shared: Bool
+}
+
+struct DeletedNote: Encodable {
+    let ok: Bool
+    let id: String?
+    let title: String
+    let was_shared: Bool
+}
+
+struct MovedNote: Encodable {
+    let ok: Bool
+    let id: String?
+    let title: String
+    let folder: String
+}
+
+struct ShownEntity: Encodable {
+    let id: String
+    let separately: Bool
+}
+
+// MARK: Folders / accounts
+
+struct Folder: Encodable {
+    let id: String
+    let name: String
+    let account: String
+    let shared: Bool
+}
+
+struct FolderList: Encodable {
+    let folders: [Folder]
+    let count: Int
+    let sync_warning: String?
+}
+
+struct CreatedFolder: Encodable {
+    let ok: Bool
+    let folder: String
+}
+
+struct Account: Encodable {
+    let id: String?
+    let name: String
+    let upgraded: Bool?
+    let default_folder_id: String?
+    let default_folder: String?
+}
+
+struct AccountList: Encodable {
+    let accounts: [Account]
+    let count: Int
+}
+
+struct DefaultLocation: Encodable {
+    let account: Account
+    let folder: Folder
+}
+
+// MARK: Attachments
+
+struct Attachment: Encodable {
+    let id: String
+    let name: String
+    let content_type: String
+    let content_id: String?
+    let url: String?
+    let created: Date?
+    let modified: Date?
+    let shared: Bool?
+}
+
+struct AttachmentList: Encodable {
+    let attachments: [Attachment]
+    let count: Int
+}
+
+struct SavedAttachment: Encodable {
+    let saved_path: String
+    let name: String?
+    let content_type: String?
+}
+
+struct FetchedAttachment: Encodable {
+    let name: String?
+    let content_type: String?
+    let bytes: Int?
+    let base64: String
+}
+
+struct ShownAttachment: Encodable {
+    let note_id: String
+    let attachment_id: String
+    let separately: Bool
+}
+
+// MARK: Batch
+
+struct BatchItemResult: Encodable {
+    let id: String
+    let success: Bool
+    let error: String?
+}
+
+struct BatchDeleteResult: Encodable {
+    let ok: Bool
+    let succeeded: Int
+    let failed: Int
+    let results: [BatchItemResult]
+}
+
+struct BatchMoveResult: Encodable {
+    let ok: Bool
+    let folder: String
+    let succeeded: Int
+    let failed: Int
+    let results: [BatchItemResult]
+}
+
+// MARK: Diagnostics
+
+struct HealthCheckItem: Encodable {
+    let name: String
+    let passed: Bool
+    let message: String
+}
+
+struct HealthResult: Encodable {
+    let healthy: Bool
+    let checks: [HealthCheckItem]
+    let full_disk_access: Bool
+}
+
+struct DoctorCheck: Encodable {
+    let name: String
+    let status: String // "ok" | "warn" | "fail"
+    let detail: String
+}
+
+struct DoctorResult: Encodable {
+    let healthy: Bool
+    let checks: [DoctorCheck]
+}
+
+/// get-sync-status. `seconds_since_last_change` is Int? (nil when no WAL file — the reference
+/// uses Infinity there, which JSON renders as null); it is populated whenever a WAL exists,
+/// which is the normal case for a live Notes store.
+public struct NotesSyncStatus: Encodable {
+    public var sync_detected = false
+    public var pending_upload = 0
+    public var seconds_since_last_change: Int?
+    public var recent_activity = false
+    public var warning: String?
+    public var error: String?
+    public init() {}
+}
+
+struct FolderStat: Encodable {
+    let name: String
+    let note_count: Int
+}
+
+struct AccountStat: Encodable {
+    let name: String
+    let total_notes: Int
+    let folder_count: Int
+    let folders: [FolderStat]
+}
+
+struct RecentlyModified: Encodable {
+    let last_24h: Int
+    let last_7d: Int
+    let last_30d: Int
+}
+
+struct CoverageWarning: Encodable {
+    let scope: String
+    let reason: String
+}
+
+struct Coverage: Encodable {
+    let complete: Bool
+    let scanned: Int
+    let covered: Int
+    let warnings: [CoverageWarning]
+}
+
+struct NotesStats: Encodable {
+    let total_notes: Int
+    let accounts: [AccountStat]
+    let recently_modified: RecentlyModified
+    let coverage: Coverage
+}
+
+// MARK: Checklist / metadata (SQLite/FDA)
+
+struct ChecklistState: Encodable {
+    let items: [NotesStore.ChecklistItem]
+    let checked: Int
+    let total: Int
+}
+
+/// BETA note metadata read from NoteStore.sqlite. All fields optional so absent columns
+/// (schema drift across macOS releases) and null values are simply omitted from the output.
+public struct NotesMetadata: Encodable {
+    public var pinned: Bool?
+    public var has_checklist: Bool?
+    public var has_checklist_in_progress: Bool?
+    public var recovering_from_trash: Bool?
+    public var password_protected: Bool?
+    public var password_hint: String?
+    public var snippet: String?
+    public var widget_snippet: String?
+    public var smart_folder_query: String?
+    public init() {}
+
+    mutating func set(_ key: String, bool value: Bool) {
+        switch key {
+        case "pinned": pinned = value
+        case "has_checklist": has_checklist = value
+        case "has_checklist_in_progress": has_checklist_in_progress = value
+        case "recovering_from_trash": recovering_from_trash = value
+        case "password_protected": password_protected = value
+        default: break
+        }
+    }
+    mutating func set(_ key: String, text value: String) {
+        switch key {
+        case "password_hint": password_hint = value
+        case "snippet": snippet = value
+        case "widget_snippet": widget_snippet = value
+        case "smart_folder_query": smart_folder_query = value
+        default: break
+        }
+    }
+}
+
+// MARK: Export
+
+struct ExportNote: Encodable {
+    let id: String
+    let title: String
+    let content: String
+    let plaintext: String
+    let folder: String
+    let account: String
+    let created: Date
+    let modified: Date
+    let shared: Bool
+    let password_protected: Bool
+}
+
+struct ExportFolder: Encodable {
+    let name: String
+    let notes: [ExportNote]
+}
+
+struct ExportAccount: Encodable {
+    let name: String
+    let folders: [ExportFolder]
+}
+
+struct ExportSummary: Encodable {
+    let total_notes: Int
+    let total_folders: Int
+    let total_accounts: Int
+}
+
+struct NotesExport: Encodable {
+    let export_date: Date
+    let version: String
+    let accounts: [ExportAccount]
+    let summary: ExportSummary
+}
