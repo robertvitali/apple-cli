@@ -508,8 +508,8 @@ public enum ReminderMapping {
             recurrence_rules: r.recurrenceRules?.map { RecurrenceMapping.rule(from: $0) },
             alarms: r.alarms?.map { AlarmMapping.alarm(from: $0) },
             location_trigger: locationTrigger,
-            tags: nil,        // populated by RemindersKit (native tags / notes-parsed) — see Models.swift
-            parent_id: nil,   // populated by RemindersKit (native parent/child subtask model)
+            tags: nil,        // populated by RemindersKit from the notes [#tag] markers — see Models.swift
+            parent_id: nil,   // reserved (no native parent linkage in public EventKit); subtasks live in notes
             last_modified: r.lastModifiedDate,
             creation_date: r.creationDate
         )

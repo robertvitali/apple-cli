@@ -45,5 +45,6 @@ let package = Package(
 
         .testTarget(name: "AppleKitTests", dependencies: ["AppleKit"]),
         .testTarget(name: "EventKitCoreTests", dependencies: ["EventKitCore", "AppleKit"]),
+        .testTarget(name: "RemindersKitTests", dependencies: ["RemindersKit", "EventKitCore", "AppleKit"]),
     ]
 )
