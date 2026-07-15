@@ -173,3 +173,47 @@ Greenfield (non-fork) would be **L** (reimplement the whole engine); forking `im
 - Secondary: https://github.com/danewalton/imessage-cli (Go; 1★, dormant, no JSON/groups).
 - Read-side donor: https://github.com/ReagentX/imessage-exporter (Rust; read/export/diagnostics only, no send) + crate https://crates.io/crates/imessage-exporter.
 - Third-party fork (not used): https://github.com/R80R/imsg (0★, stale).
+
+---
+
+## 8. Parity verification (live oracle diffs) — as-built
+
+The `apple messages` CLI was diffed against the live `mac_messages_mcp` MCP (the
+oracle) on this fleet. Read ops compared freely; no write/send was diffed.
+
+| Tool | Result |
+|---|---|
+| `check_db_access` | 134 tables, message/handle/chat present — match (CLI superset adds `message_count`, `path`, `readable`). |
+| `check_contacts` | **CLI count == oracle count on the verification run**. Sample ordering aligned to the oracle's `ORDER BY ZLASTNAME, ZFIRSTNAME`. |
+| `check_addressbook` | Per-source counts match (per-source counts); total <total>. CLI also reports the top-level `AddressBook-v22.abcddb` the MCP's *diagnostic* omits (its contact loader reads it) — superset, not a drop. |
+| `find_contact` | A common first name → **count 30 == 30**, all 0.95 (exact-token) — scores byte-exact. |
+| `check_imessage_availability` | 2125550142 → `available=true`, recommendation string **byte-identical**. |
+| `get_chats` | **CLI == oracle** on named-chat count (superset fields: guid, room_name, service_name, group_id, style). |
+| `get_recent_messages` | hours=6 cross-chat: every MCP output line reproduced **byte-verbatim** (attributedBody-decoded bodies, group names, sender resolution, timestamps). |
+| `fuzzy_search_messages` | See the WRatio boundary note below. |
+
+### WRatio fuzzy-search boundary (behavioral, per §6 / §7)
+
+The message fuzzy scorer is `thefuzz.WRatio` (rapidfuzz-backed). This port
+reimplements WRatio on a normalized-Indel/LCS `ratio` + an exhaustive fixed-length
+sliding-window `partial_ratio`. Per §6 hard-part (a), parity here is **behavioral,
+not byte-identical** — rapidfuzz's `partial_ratio` uses an optimal (not
+fixed-length-window) alignment, so at the exact threshold **floor** the two can
+diverge by a few points on low-relevance matches.
+
+Measured on `search "thanks" --hours 48 --threshold 0.6` (2026-07):
+- **Exact-substring tier is identical** — all 5 messages containing "thanks"
+  scored **1.00** in both, same set, same order.
+- Fuzzy-noise tier differed: oracle returned 25 total, CLI returned 21. The 4
+  CLI-only misses are messages with **no semantic relevance** to the term (e.g.
+  "That beat is insane", "Take your time. No rush!") that rapidfuzz's optimal
+  `partial_ratio` floors at exactly 0.60 while this port scores < 0.50. The CLI
+  matches the oracle wherever a clean length-N window exists (e.g. "changes" →
+  "hanges" vs "thanks" = 0.60 in both).
+
+This is an accepted behavioral-parity boundary, not a dropped capability: the
+operation, parameters (term/hours/threshold/match-mode), and output fields are a
+strict superset; only the fuzzy-noise scoring at the threshold floor differs.
+Lower the `--threshold` for higher recall. Exact recall of rapidfuzz's optimal
+partial-alignment would require vendoring rapidfuzz's algorithm and is explicitly
+out of scope per §6.
