@@ -260,16 +260,47 @@ public struct CalendarEvent: Encodable, Sendable, Equatable {
     }
 }
 
+// MARK: - Subtask (notes-field checklist item; RemindersKit populates these on read)
+
+/// A reminder subtask/checklist item. EventKit's public API exposes NO native subtask surface,
+/// so both the apple-events MCP and this port store subtasks inside the reminder notes field
+/// (`---SUBTASKS---` block, `[ ] {id} title` lines). RemindersKit parses that block and populates
+/// `Reminder.subtasks` + `Reminder.subtask_progress` on read. `completed` is the snake_case wire
+/// key (there is no MCP JSON subtask contract to byte-match; the MCP surfaces subtasks in markdown).
+public struct Subtask: Encodable, Sendable, Equatable {
+    public let id: String
+    public let title: String
+    public let completed: Bool
+    public init(id: String, title: String, completed: Bool) {
+        self.id = id
+        self.title = title
+        self.completed = completed
+    }
+}
+
+/// Subtask completion progress (mirrors the MCP's SubtaskProgress; empty → 100%).
+public struct SubtaskProgress: Encodable, Sendable, Equatable {
+    public let completed: Int
+    public let total: Int
+    public let percentage: Int
+    public init(completed: Int, total: Int, percentage: Int) {
+        self.completed = completed
+        self.total = total
+        self.percentage = percentage
+    }
+}
+
 // MARK: - Reminder
 
 /// A reminder (EKReminder). Used by the Reminders lane; modeled here because it shares the
 /// EventKit alarm/recurrence/priority machinery. `priority` follows the MCP convention
 /// (0 none, 1 high, 5 medium, 9 low — EventKit stores 0…9, surfaced raw).
 ///
-/// `tags` and `parent_id` extend the MCP's read output (which stored tags/subtasks inline in
-/// notes). The native-parent subtask model is the port-spec recommendation; RemindersKit
-/// populates these — they default nil so the frozen contract already carries the fields and
-/// the Reminders lane never has to edit this shared core.
+/// `tags`, `subtasks`, and `subtask_progress` extend the MCP's read output; EventKit has no
+/// native tag/subtask API, so RemindersKit parses them from the notes field (`[#tag]` markers /
+/// `---SUBTASKS---` block) and populates them on read. `parent_id` is reserved for a future native
+/// parent/child linkage (none exists in the public EventKit API today) and stays nil. All of these
+/// default nil so the shared contract already carries the fields (additive, schema-MINOR).
 public struct Reminder: Encodable, Sendable, Equatable {
     public let id: String
     public let title: String?
@@ -292,6 +323,8 @@ public struct Reminder: Encodable, Sendable, Equatable {
     public let location_trigger: LocationTrigger?
     public let tags: [String]?
     public let parent_id: String?
+    public let subtasks: [Subtask]?
+    public let subtask_progress: SubtaskProgress?
     public let last_modified: Date?
     public let creation_date: Date?
 
@@ -303,6 +336,7 @@ public struct Reminder: Encodable, Sendable, Equatable {
         start_date: Date? = nil, priority: Int, has_recurrence: Bool,
         recurrence_rules: [RecurrenceRule]? = nil, alarms: [Alarm]? = nil,
         location_trigger: LocationTrigger? = nil, tags: [String]? = nil, parent_id: String? = nil,
+        subtasks: [Subtask]? = nil, subtask_progress: SubtaskProgress? = nil,
         last_modified: Date? = nil, creation_date: Date? = nil
     ) {
         self.id = id
@@ -326,6 +360,8 @@ public struct Reminder: Encodable, Sendable, Equatable {
         self.location_trigger = location_trigger
         self.tags = tags
         self.parent_id = parent_id
+        self.subtasks = subtasks
+        self.subtask_progress = subtask_progress
         self.last_modified = last_modified
         self.creation_date = creation_date
     }
