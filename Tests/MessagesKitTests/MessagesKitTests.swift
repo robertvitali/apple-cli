@@ -246,6 +246,29 @@ struct SendTests {
         #expect(Send.directScript().contains("item 1 of argv"))
         #expect(Send.groupScript().contains("chat id chatId"))
     }
+
+    // [L3] Allowlist footgun fix: normalize BOTH sides before comparing.
+    @Test func normalizeForAllowlist() {
+        #expect(Send.normalizeForAllowlist("+1 (212) 555-0142") == "12125550142")
+        #expect(Send.normalizeForAllowlist("  Bob@Example.COM ") == "bob@example.com")
+    }
+
+    @Test func phonesEquivalentAcrossCountryCode() {
+        #expect(Send.phonesEquivalent("12125550142", "2125550142"))  // CC vs no-CC
+        #expect(Send.phonesEquivalent("2125550142", "2125550142"))
+        #expect(Send.phonesEquivalent("12125550142", "12125550142"))
+        #expect(!Send.phonesEquivalent("12125550142", "12125550150"))
+        // A digit-normalized handle matches a raw "+1…" allowlist entry once both
+        // are run through normalizeForAllowlist.
+        let handle = Send.normalizeForAllowlist("2125550142")
+        let allow = Send.normalizeForAllowlist("+1-212-555-0142")
+        #expect(Send.phonesEquivalent(allow, handle))
+    }
+
+    @Test func assertAllowedRecipientFailsClosedWithoutTestMode() {
+        // APPLE_TEST_MODE is unset in the test process → must throw (fail-closed).
+        #expect(throws: (any Error).self) { try Send.assertAllowedRecipient("2125550142") }
+    }
 }
 
 // MARK: - Phone format variants

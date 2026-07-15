@@ -37,6 +37,48 @@ public enum Send {
         return .ambiguous(matches)
     }
 
+    // MARK: - Fail-closed allowlist check (normalized on BOTH sides)
+
+    public enum AllowError: Error, CustomStringConvertible {
+        case notTestMode
+        case notAllowed(String)
+        public var description: String {
+            switch self {
+            case .notTestMode: return "APPLE_TEST_MODE is not set — refusing a live write"
+            case .notAllowed(let h): return "recipient '\(h)' is not in the test allowlist (APPLE_TEST_RECIPIENTS)"
+            }
+        }
+    }
+
+    /// Fail-closed allowlist gate that normalizes BOTH the resolved handle AND the
+    /// operator's `APPLE_TEST_RECIPIENTS` entries before comparing — so a `+1 555…`
+    /// allowlist entry matches a digits-normalized handle. The shared
+    /// `TestMode.requireAllowedRecipient` does an EXACT string compare, which is a
+    /// footgun given `resolve()` digit-normalizes phones. Still fail-closed: requires
+    /// `APPLE_TEST_MODE=1` AND a normalized match (a group id / unknown handle → refused).
+    public static func assertAllowedRecipient(_ handle: String) throws {
+        guard TestMode.isEnabled else { throw AllowError.notTestMode }
+        let target = normalizeForAllowlist(handle)
+        let allowed = TestMode.allowedRecipients.map(normalizeForAllowlist)
+        guard allowed.contains(where: { phonesEquivalent($0, target) }) else {
+            throw AllowError.notAllowed(handle)
+        }
+    }
+
+    /// Emails → trimmed/lowercased; everything else (phones) → digits only.
+    static func normalizeForAllowlist(_ s: String) -> String {
+        let t = s.trimmingCharacters(in: .whitespaces)
+        return t.contains("@") ? t.lowercased() : Fuzzy.normalizePhone(t)
+    }
+
+    /// Equal, or (for all-digit phone forms) equal after dropping a leading US "1".
+    static func phonesEquivalent(_ a: String, _ b: String) -> Bool {
+        if a == b { return true }
+        guard !a.isEmpty, !b.isEmpty, a.allSatisfy(\.isNumber), b.allSatisfy(\.isNumber) else { return false }
+        func stripCC(_ x: String) -> String { (x.count == 11 && x.hasPrefix("1")) ? String(x.dropFirst()) : x }
+        return stripCC(a) == stripCC(b)
+    }
+
     // MARK: - AppleScript builders (pure — argv-driven, unit-testable)
 
     /// Individual send with iMessage→SMS fallback. Reads recipient/body from argv.

@@ -68,6 +68,9 @@ struct Recent: ParsableCommand {
             guard hours <= MessageTime.maxHours else {
                 throw AppleError.validation("hours too large (max \(MessageTime.maxHours) = 10 years)")
             }
+            guard (1...10_000).contains(limit) else {
+                throw AppleError.validation("limit must be between 1 and 10000")
+            }
             let book = AddressBook.load()
             var db = try ChatDB(book: book)
 
@@ -114,7 +117,9 @@ struct Recent: ParsableCommand {
             }
 
             let messages = db.recent(hours: hours, handleRowIds: rowIds, limit: limit)
-            try emit(global, RecentData(hours: hours, limit: limit, contact: contact,
+            // Echo the effective filter (contact OR handle) so a `--handle`-only
+            // invocation yields a self-describing envelope instead of contact:null.
+            try emit(global, RecentData(hours: hours, limit: limit, contact: filter,
                 resolved_handle_rowids: rowIds, ambiguous: false, candidates: nil,
                 note: messages.isEmpty ? (note ?? "No messages found in the specified time period.") : note,
                 count: messages.count, messages: messages)) {
@@ -161,7 +166,9 @@ struct Send_: ParsableCommand {
             case .resolved(let handle, let displayName):
                 let plan = group ? "group chat" : "iMessage→SMS auto"
                 if !global.willExecute {
-                    let preview = SendPreview(action: "send", executed: false, dry_run: !global.execute,
+                    // `--execute --dry-run` is not-executing (willExecute false); report it
+                    // as a dry run rather than dry_run:false.
+                    let preview = SendPreview(action: "send", executed: false, dry_run: !global.willExecute,
                         group_chat: group, recipient: recipient, resolved_handle: handle,
                         display_name: displayName, service_plan: plan, message: message,
                         note: "Dry run — nothing sent. Re-run with --execute (and APPLE_TEST_MODE=1 + an allowlisted recipient) to send.")
@@ -176,13 +183,20 @@ struct Send_: ParsableCommand {
                     throw AppleError.validation("refusing live send: --test-mode is required for a live send (together with APPLE_TEST_MODE=1 and an allowlisted recipient in APPLE_TEST_RECIPIENTS)")
                 }
                 do {
-                    try TestMode.requireAllowedRecipient(handle)
+                    // Normalized on BOTH sides so `+1 555…` allowlist entries match the
+                    // digit-normalized handle (fail-closed: needs APPLE_TEST_MODE + a match).
+                    try Send.assertAllowedRecipient(handle)
                 } catch {
                     throw AppleError.validation("refusing live send: \(String(describing: error))")
                 }
                 let result = try Send.perform(handle: handle, message: message, groupChat: group)
                 guard result.ok else {
-                    throw AppleError.upstream("send failed: \(result.error ?? "unknown error")")
+                    // Keep the raw osascript error text OFF the JSON envelope (unstable +
+                    // potential info-leak); surface it on stderr (the human channel) only.
+                    if let raw = result.error {
+                        FileHandle.standardError.write(Data(("osascript: " + raw + "\n").utf8))
+                    }
+                    throw AppleError.upstream("send failed (Messages returned an error)")
                 }
                 let data = SendResult(action: "send", executed: true, ok: true, group_chat: group,
                     recipient: recipient, resolved_handle: handle, display_name: displayName,
@@ -260,6 +274,11 @@ struct Search: ParsableCommand {
         try runGuarded(tool: tool) {
             guard !term.trimmingCharacters(in: .whitespaces).isEmpty else {
                 throw AppleError.validation("search term cannot be empty")
+            }
+            // Cap term length: an unbounded term drives O(term·window) WRatio work over
+            // up to 10k rows (a ~40KB term measured ~30s CPU) — a local DoS.
+            guard term.count <= 1024 else {
+                throw AppleError.validation("search term too long (max 1024 characters)")
             }
             guard hours >= 0 else { throw AppleError.validation("hours cannot be negative") }
             guard hours <= MessageTime.maxHours else {
@@ -344,8 +363,18 @@ struct CheckContacts: ParsableCommand {
     func run() throws {
         try runGuarded(tool: tool) {
             let book = AddressBook.load()
-            let samples = book.contacts.sorted { $0.key < $1.key }.prefix(10)
-                .map { ContactsCheckData.Sample(number: $0.key, name: $0.value) }
+            // Order samples by (last name, first name) to match the oracle's SQL
+            // `ORDER BY ZLASTNAME, ZFIRSTNAME`. `count` is the contract; this aligns the
+            // illustrative "first 10" sample set with the MCP's too (handle-key tiebreak).
+            let samples = book.contacts.keys.sorted { a, b in
+                let la = (book.details[a]?.lastName ?? "").lowercased()
+                let lb = (book.details[b]?.lastName ?? "").lowercased()
+                if la != lb { return la < lb }
+                let fa = (book.details[a]?.firstName ?? "").lowercased()
+                let fb = (book.details[b]?.firstName ?? "").lowercased()
+                if fa != fb { return fa < fb }
+                return a < b
+            }.prefix(10).map { ContactsCheckData.Sample(number: $0, name: book.contacts[$0] ?? "") }
             let data = ContactsCheckData(count: book.contacts.count, samples: samples)
             try emit(global, data) {
                 if book.contacts.isEmpty { return "No contacts found in AddressBook." }

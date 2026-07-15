@@ -357,7 +357,7 @@ public struct ChatDB {
         if hasIMessage {
             service = "iMessage"
             recommendation = "✅ \(recipient) has iMessage available - messages will be sent via iMessage"
-        } else if recipient.contains(where: \.isNumber) {
+        } else if recipient.contains(where: { $0.isASCII && $0.isNumber }) { // MCP uses ASCII isdigit()
             service = "SMS"
             recommendation = "📱 \(recipient) does not have iMessage - messages will automatically fall back to SMS/RCS"
         } else {

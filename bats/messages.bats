@@ -108,3 +108,46 @@ setup() {
   echo "$output" | grep -q "path:"
   ! echo "$output" | grep -q '"schema_version"'
 }
+
+# --- flagless read leaves must actually be invoked (a GlobalOptions collision
+#     would otherwise never surface). FDA is granted so these run. ---
+
+@test "chats runs and emits ok=true with a count" {
+  run "$BIN" messages chats
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"ok" : true'
+  echo "$output" | grep -q '"count"'
+}
+
+@test "check-contacts runs and emits ok=true with a count" {
+  run "$BIN" messages check-contacts
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"ok" : true'
+  echo "$output" | grep -q '"count"'
+}
+
+@test "check-addressbook runs and emits ok=true with database_count" {
+  run "$BIN" messages check-addressbook
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"ok" : true'
+  echo "$output" | grep -q '"database_count"'
+}
+
+@test "doctor runs and emits ok=true with full_disk_access" {
+  run "$BIN" messages doctor
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"ok" : true'
+  echo "$output" | grep -q '"full_disk_access"'
+}
+
+@test "search term over 1024 chars → validation error (exit 64, DoS guard)" {
+  long=$(printf 'a%.0s' {1..1100})
+  run "$BIN" messages search "$long"
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -qi "too long"
+}
+
+@test "recent --limit out of range → validation error (exit 64)" {
+  run "$BIN" messages recent --limit 0
+  [ "$status" -eq 64 ]
+}
