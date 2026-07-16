@@ -14,9 +14,10 @@ func splitRecipients(_ raw: [String]) -> [String] {
 
 /// Common outbound guard: refuse a live send unless test-mode is on and EVERY recipient is
 /// the operator's own allowlisted address. Never sends to a non-self recipient autonomously.
-func guardOutbound(recipients: [String]) throws {
-    guard TestMode.isEnabled else {
-        throw AppleError.validation("live send requires APPLE_TEST_MODE=1 (and --test-mode); refusing. Use the default dry-run to preview.")
+func guardOutbound(recipients: [String], testMode: Bool) throws {
+    // Two-factor, matching every sibling write domain: the --test-mode flag AND APPLE_TEST_MODE=1.
+    guard testMode && TestMode.isEnabled else {
+        throw AppleError.validation("live send requires --test-mode AND APPLE_TEST_MODE=1; refusing. Use the default dry-run to preview.")
     }
     // Fail-closed: EVERY recipient must be the operator's allowlisted self-address.
     for r in recipients {
@@ -70,12 +71,27 @@ struct SendCommand: ParsableCommand {
 
             // Real send is guarded (self-only + test-mode) BEFORE any output — one envelope.
             let willSend = global.willExecute && mode == "send"
-            if willSend { try guardOutbound(recipients: toL + ccL + bccL) }
+            var executed = false
+            var note: String?
+            if willSend {
+                try guardOutbound(recipients: toL + ccL + bccL, testMode: global.testMode)
+                if html == nil && attach.isEmpty {
+                    // Plain-text live send via Mail.app — already self-only + test-mode guarded.
+                    try MailScript().send(subject: subject, body: body, to: toL, cc: ccL, bcc: bccL)
+                    executed = true
+                } else {
+                    // HTML/attachment delivery goes via the generated .eml (reliable rendering);
+                    // live HTML/attachment SEND is not wired — open the .eml in Mail to send.
+                    note = "generated .eml for reliable HTML/attachment delivery — open it in Mail to send"
+                        + " (live HTML/attachment send is not wired; plain-text --mode send delivers directly)"
+                }
+            } else if global.willExecute {
+                note = "mode '\(mode)' is preview-only; use --mode send (plain text) to deliver"
+            }
 
             let preview = Preview(action: "send", mode: mode, account: account, to: toL, cc: ccL, bcc: bccL,
                                   subject: subject, has_html: html != nil, attachments: attach,
-                                  eml_path: emlPath, dry_run: !global.willExecute, executed: false,
-                                  note: global.willExecute ? "live send/draft is disabled in this build (safety); this is a preview" + (emlPath != nil ? " + .eml" : "") : nil)
+                                  eml_path: emlPath, dry_run: !global.willExecute, executed: executed, note: note)
             try Output.emit(tool: "mail", data: preview)
         }
     }
@@ -149,7 +165,7 @@ struct ForwardCommand: ParsableCommand {
             let toL = splitRecipients(to)
             guard !toL.isEmpty else { throw AppleError.validation("--to is required.") }
             // Outbound guard fires BEFORE emit → one envelope.
-            if global.willExecute { try guardOutbound(recipients: toL) }
+            if global.willExecute { try guardOutbound(recipients: toL, testMode: global.testMode) }
             let ctx = try MailContext()
             var targetID: String?
             if let id {

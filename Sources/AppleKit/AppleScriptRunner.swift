@@ -29,7 +29,10 @@ public struct AppleScriptRunner {
         let process = Process()
         process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
         // Array args → no shell, no re-splitting; user data never re-enters script source.
-        process.arguments = ["-e", script] + arguments
+        // `--` ends osascript's OPTION parsing, so a value that happens to start with `-`
+        // (e.g. `-l`, `-e`, `-s`) is passed as positional argv (`on run argv`), never an
+        // osascript option — closing an argument-injection gap (CWE-88) in this shared sink.
+        process.arguments = ["-e", script, "--"] + arguments
 
         let stdoutPipe = Pipe()
         let stderrPipe = Pipe()

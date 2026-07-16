@@ -154,6 +154,58 @@ public struct MailScript {
         _ = try runner.run(MailScript.deleteRuleScript, arguments: [String(index)])
     }
 
+    // MARK: Send (outbound)
+
+    /// Compose + send a plain-text message via Mail.app. Recipients are US-delimited argv
+    /// (never interpolated — injection-safe). The CALLER MUST have passed the self-only
+    /// `guardOutbound` (test-mode + allowlist) first; this method performs NO gating.
+    private static let sendScript = """
+    on run argv
+        set theSubject to item 1 of argv
+        set theBody to item 2 of argv
+        set toRaw to item 3 of argv
+        set ccRaw to item 4 of argv
+        set bccRaw to item 5 of argv
+        set US to (ASCII character 31)
+        tell application "Mail"
+            set newMsg to make new outgoing message with properties {subject:theSubject, content:theBody, visible:false}
+            my addRecipients(newMsg, toRaw, US, "to")
+            my addRecipients(newMsg, ccRaw, US, "cc")
+            my addRecipients(newMsg, bccRaw, US, "bcc")
+            send newMsg
+        end tell
+        return "sent"
+    end run
+
+    on addRecipients(msg, raw, US, kind)
+        if raw is "" then return
+        set AppleScript's text item delimiters to US
+        set parts to text items of raw
+        set AppleScript's text item delimiters to ""
+        tell application "Mail"
+            repeat with p in parts
+                set addr to (p as string)
+                if addr is not "" then
+                    if kind is "to" then
+                        make new to recipient at end of to recipients of msg with properties {address:addr}
+                    else if kind is "cc" then
+                        make new cc recipient at end of cc recipients of msg with properties {address:addr}
+                    else
+                        make new bcc recipient at end of bcc recipients of msg with properties {address:addr}
+                    end if
+                end if
+            end repeat
+        end tell
+    end addRecipients
+    """
+    public func send(subject: String, body: String, to: [String], cc: [String], bcc: [String]) throws {
+        let US = MailScript.US
+        _ = try runner.run(MailScript.sendScript, arguments: [
+            subject, body,
+            to.joined(separator: US), cc.joined(separator: US), bcc.joined(separator: US),
+        ])
+    }
+
     // MARK: Unread counts (Mail.app live property — matches the MCP oracle)
 
     /// The Envelope Index `read` bit diverges from server-synced seen-state (observed: index
