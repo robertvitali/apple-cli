@@ -200,6 +200,44 @@ public final class ContactsStore {
         return results.first
     }
 
+    /// Fetched-target write-safety: throw unless the CONTACT at `identifier` is a labeled test
+    /// item (its primary name — given/family/org — carries `prefix`). Call before any id-addressed
+    /// contact mutation so `update`/`delete`/`note`/`photo --id <real> --execute --test-mode`
+    /// cannot touch real data. The `resolveWrite` gate checks execute+test-mode; this checks the
+    /// TARGET itself — matching the fetched-target guard Calendar/Reminders/Notes already apply.
+    public func requireLabeledContactTarget(_ identifier: String, prefix: String) throws {
+        guard let c = unifiedContact(identifier, includeNiche: false) else {
+            throw AppleError.notFound("contact '\(identifier)' not found")
+        }
+        let name = ContactsLabel.primaryName(given: c.given_name, family: c.family_name, organization: c.organization)
+        guard ContactsLabel.isLabeled(name, prefix: prefix) else {
+            throw AppleError.safetyViolation(
+                "refusing to mutate a non-test contact: its name '\(name)' does not start with "
+                + "'\(prefix)' — id-addressed writes only touch labeled test data.")
+        }
+    }
+
+    /// Same fetched-target guard for a GROUP (rename/delete + membership add/remove).
+    public func requireLabeledGroupTarget(_ identifier: String, prefix: String) throws {
+        guard let g = try fetchGroup(identifier) else {
+            throw AppleError.notFound("group '\(identifier)' not found")
+        }
+        guard ContactsLabel.isLabeled(g.name, prefix: prefix) else {
+            throw AppleError.safetyViolation(
+                "refusing to mutate a non-test group: its name '\(g.name)' does not start with "
+                + "'\(prefix)' — id-addressed writes only touch labeled test data.")
+        }
+    }
+
+    /// TCC-free: the primary name of every contact a vCard would import — so `import` can
+    /// enforce (in test mode) that every card is labeled before any live create. `parseVCard`
+    /// is static + does not touch the store, so this needs no authorization.
+    public static func vcardPrimaryNames(text: String) throws -> [String] {
+        try parseVCard(text: text).map {
+            ContactsLabel.primaryName(given: $0.givenName, family: $0.familyName, organization: $0.organizationName)
+        }
+    }
+
     private func resolveContainerId(forGroup groupIdentifier: String) -> String {
         let pred = CNContainer.predicateForContainerOfGroup(withIdentifier: groupIdentifier)
         guard let containers = try? store.containers(matching: pred), let first = containers.first else {

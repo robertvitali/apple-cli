@@ -42,11 +42,10 @@ private var simpleFieldKeyPaths: [String: WritableKeyPath<ContactFields, String?
 }
 
 /// First non-empty of given/family/org — the "primary name" the create gate label-checks.
+/// Delegates to the shared `ContactsLabel` selector so create-label and fetched-target-guard
+/// selection stay identical (no drift).
 private func primaryName(_ f: ContactFields) -> String {
-    for v in [f.given_name, f.family_name, f.organization] {
-        if let v, !v.trimmingCharacters(in: .whitespaces).isEmpty { return v }
-    }
-    return ""
+    ContactsLabel.primaryName(given: f.given_name, family: f.family_name, organization: f.organization)
 }
 
 // MARK: - create → create_contact
@@ -127,6 +126,7 @@ struct UpdateCommand: ParsableCommand {
             case .execute:
                 let store = ContactsStore()
                 try store.requireAuthorization()
+                try store.requireLabeledContactTarget(identifier, prefix: TestMode.sandboxPrefix)
                 let id = try store.updateContact(identifier: identifier, fields: fields)
                 try emitContacts(global, IdentifierResult(identifier: id))
             }
@@ -185,6 +185,7 @@ struct DeleteCommand: ParsableCommand {
             case .execute:
                 let store = ContactsStore()
                 try store.requireAuthorization()
+                try store.requireLabeledContactTarget(identifier, prefix: TestMode.sandboxPrefix)
                 let id = try store.deleteContact(identifier: identifier)
                 try emitContacts(global, IdentifierResult(identifier: id))
             }
@@ -216,6 +217,7 @@ struct NoteSetCommand: ParsableCommand {
             case .execute:
                 let store = ContactsStore()
                 try store.requireAuthorization()
+                try store.requireLabeledContactTarget(identifier, prefix: TestMode.sandboxPrefix)
                 try store.writeNote(identifier, note: noteText)
                 try emitContacts(global, IdentifierResult(identifier: identifier))
             }
@@ -256,6 +258,7 @@ struct PhotoSetCommand: ParsableCommand {
             case .execute:
                 let store = ContactsStore()
                 try store.requireAuthorization()
+                try store.requireLabeledContactTarget(identifier, prefix: TestMode.sandboxPrefix)
                 let id = try store.writePhoto(identifier: identifier, imageData: imageData)
                 try emitContacts(global, IdentifierResult(identifier: id))
             }
@@ -305,6 +308,19 @@ struct VCardImportCommand: ParsableCommand {
             case .execute:
                 let store = ContactsStore()
                 try store.requireAuthorization()
+                // Fetched-target write-safety (import is create-class but the sole path that
+                // previously skipped it): every imported card must be labeled test data, and a
+                // --group target must itself be a labeled test group. Reject the WHOLE atomic
+                // import otherwise — never leave unlabeled real-looking contacts prefix-cleanup
+                // would miss, and never add to a real group.
+                for name in try ContactsStore.vcardPrimaryNames(text: vcardText) {
+                    guard ContactsLabel.isLabeled(name, prefix: TestMode.sandboxPrefix) else {
+                        throw AppleError.safetyViolation(
+                            "refusing to import an unlabeled contact '\(name)': in test mode every "
+                            + "imported card's name must start with '\(TestMode.sandboxPrefix)'.")
+                    }
+                }
+                if let group { try store.requireLabeledGroupTarget(group, prefix: TestMode.sandboxPrefix) }
                 let ids = try store.importVCard(text: vcardText, groupIdentifier: group)
                 try emitContacts(global, ImportVCardResult(identifiers: ids, count: ids.count, group_id: group))
             }
@@ -370,6 +386,14 @@ struct GroupsRenameCommand: ParsableCommand {
             case .execute:
                 let store = ContactsStore()
                 try store.requireAuthorization()
+                try store.requireLabeledGroupTarget(identifier, prefix: TestMode.sandboxPrefix)
+                // Result must STAY labeled — a rename to an unlabeled name would create real-
+                // looking data that prefix-based cleanup then misses.
+                guard ContactsLabel.isLabeled(newName, prefix: TestMode.sandboxPrefix) else {
+                    throw AppleError.safetyViolation(
+                        "refusing to rename a test group to the unlabeled name '\(newName)': it must "
+                        + "stay prefixed with '\(TestMode.sandboxPrefix)'.")
+                }
                 let g = try store.renameGroup(identifier: identifier, newName: newName)
                 try emitContacts(global, GroupResult(group: g))
             }
@@ -396,6 +420,7 @@ struct GroupsDeleteCommand: ParsableCommand {
             case .execute:
                 let store = ContactsStore()
                 try store.requireAuthorization()
+                try store.requireLabeledGroupTarget(identifier, prefix: TestMode.sandboxPrefix)
                 let id = try store.deleteGroup(identifier: identifier)
                 try emitContacts(global, IdentifierResult(identifier: id))
             }
@@ -422,6 +447,10 @@ struct GroupsAddCommand: ParsableCommand {
             case .execute:
                 let store = ContactsStore()
                 try store.requireAuthorization()
+                try store.requireLabeledGroupTarget(groupId, prefix: TestMode.sandboxPrefix)
+                // Both sides labeled: add only a test contact to a test group (remove needs only
+                // the group check — it just detaches from an already-verified test group).
+                try store.requireLabeledContactTarget(contactId, prefix: TestMode.sandboxPrefix)
                 try store.addContactToGroup(contactIdentifier: contactId, groupIdentifier: groupId)
                 try emitContacts(global, MembershipResult(contact_identifier: contactId, group_identifier: groupId))
             }
@@ -448,6 +477,7 @@ struct GroupsRemoveCommand: ParsableCommand {
             case .execute:
                 let store = ContactsStore()
                 try store.requireAuthorization()
+                try store.requireLabeledGroupTarget(groupId, prefix: TestMode.sandboxPrefix)
                 try store.removeContactFromGroup(contactIdentifier: contactId, groupIdentifier: groupId)
                 try emitContacts(global, MembershipResult(contact_identifier: contactId, group_identifier: groupId))
             }

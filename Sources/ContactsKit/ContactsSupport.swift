@@ -85,6 +85,28 @@ public func detectImageFormat(_ data: [UInt8]) -> String {
 
 public func detectImageFormat(_ data: Data) -> String { detectImageFormat([UInt8](data)) }
 
+// MARK: - Contact label selection (test-data sandbox prefix) — single source of truth
+
+/// The name a contact/group is labeled by for the test-data gate. The create-side label
+/// check AND the fetched-target write guard both route through this, so the two can never
+/// drift. Pure + CI-testable (no Contacts.framework, no TCC) — see ContactsKitTests.
+public enum ContactsLabel {
+    /// First non-empty (trimmed) of given → family → organization — how a contact is labeled.
+    public static func primaryName(given: String?, family: String?, organization: String?) -> String {
+        for v in [given, family, organization] {
+            if let v, !v.trimmingCharacters(in: .whitespaces).isEmpty { return v }
+        }
+        return ""
+    }
+
+    /// A name is a labeled test item iff it carries the sandbox prefix (strict prefix, not
+    /// substring). `prefix` comes from `TestMode.sandboxPrefix`, which normalizes empty/
+    /// whitespace to "apple-cli-test" so the gate can't be vacated via `hasPrefix("")`.
+    public static func isLabeled(_ name: String, prefix: String) -> Bool {
+        name.hasPrefix(prefix)
+    }
+}
+
 // MARK: - Domain errors + error-type parity
 
 /// `error.type` strings the MCP emits. AppleKit's `AppleErrorType` covers most;
