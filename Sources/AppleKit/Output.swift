@@ -33,10 +33,40 @@ public enum Output {
         if let data = try? encodeError(tool: tool, type: type, message: message) {
             write(data)
         } else {
-            // Never leave stdout empty on an error path: hand-roll a minimal valid envelope.
-            let safe = message.replacingOccurrences(of: "\"", with: "'")
-            write(Data(#"{"schema_version":\#(schemaVersion),"tool":"\#(tool)","ok":false,"error":{"type":"unknown","message":"\#(safe)"}}"#.utf8))
+            // Never leave stdout empty on an error path: hand-roll a minimal valid envelope,
+            // JSON-escaping every interpolated string (RFC 8259) so this last-ditch path can
+            // never itself emit malformed JSON — a raw ", \, or control char in `message`
+            // would otherwise break the very parse the fallback exists to guarantee.
+            write(Data(#"{"schema_version":\#(schemaVersion),"tool":\#(jsonString(tool)),"ok":false,"error":{"type":\#(jsonString(type)),"message":\#(jsonString(message))}}"#.utf8))
         }
+    }
+
+    /// Minimal RFC-8259 JSON string encoder (returns the value WITH surrounding quotes).
+    /// Used only by the `emitError` fallback, which must not depend on `JSONEncoder` — the
+    /// whole reason it's the fallback is that `JSONEncoder` just failed.
+    static func jsonString(_ s: String) -> String {
+        var out = "\""
+        for scalar in s.unicodeScalars {
+            switch scalar {
+            case "\"": out += "\\\""
+            case "\\": out += "\\\\"
+            case "\n": out += "\\n"
+            case "\r": out += "\\r"
+            case "\t": out += "\\t"
+            default:
+                if scalar.value < 0x20 {
+                    // Only C0 controls (≤2 hex digits) reach here today, so 4 - hex.count is
+                    // never negative — but `max(0,…)` keeps this total if the guard is ever
+                    // widened to escape scalars > 0xFFFF (which would trap on a negative count).
+                    let hex = String(scalar.value, radix: 16)
+                    out += "\\u" + String(repeating: "0", count: max(0, 4 - hex.count)) + hex
+                } else {
+                    out.unicodeScalars.append(scalar)
+                }
+            }
+        }
+        out += "\""
+        return out
     }
 
     // MARK: Internals

@@ -12,7 +12,16 @@ public enum TestMode {
 
     /// Prefix every test item's name carries so it's recognizable + cleanable.
     public static var sandboxPrefix: String {
-        ProcessInfo.processInfo.environment["APPLE_TEST_SANDBOX"] ?? "apple-cli-test"
+        normalizedPrefix(from: ProcessInfo.processInfo.environment["APPLE_TEST_SANDBOX"])
+    }
+
+    /// Pure normalization (unit-testable without mutating process env): an empty or
+    /// whitespace-only `APPLE_TEST_SANDBOX` is treated as ABSENT and falls back to the
+    /// default prefix — otherwise the override would vacate the label gate
+    /// (`name.hasPrefix("")` is always true), letting ANY name pass `requireLabeledTarget`.
+    static func normalizedPrefix(from raw: String?) -> String {
+        let trimmed = (raw ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? "apple-cli-test" : trimmed
     }
 
     /// Allowlisted recipients for Messages/Mail test SENDS (operator self only). Comma-sep
