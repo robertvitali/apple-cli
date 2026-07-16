@@ -37,14 +37,47 @@ public final class SQLiteReader {
         }
         self.tempURL = temp
 
+        // Open mode depends on whether we copied first:
+        // • copyToTemp — the snapshot is a PRIVATE file with its `-wal`/`-shm` copied alongside,
+        //   so a plain read-only open applies the WAL and yields the freshest state.
+        // • direct (live store) — open with `immutable=1` (URI). The live store is held open by
+        //   its app (Messages/…); `immutable=1` ASSERTS to SQLite that the file won't change under
+        //   us, so it SKIPS locking and the `-wal`/`-shm` bookkeeping a read-only connection can't
+        //   perform — turning "database is locked" / "unable to open database file" into a clean
+        //   read. Trade-offs, both consciously accepted: (a) it reads the main DB file as-is and may
+        //   miss the newest un-checkpointed WAL writes; (b) per SQLite's immutable contract the file
+        //   CAN in fact change (the app may checkpoint mid-read), so a torn read / `SQLITE_CORRUPT`
+        //   is possible. Tolerated because the ONLY direct callers are best-effort `try?` reads
+        //   (AddressBook sender-name resolution, ChatDB diagnostics) that degrade to empty/nil;
+        //   every correctness-critical read passes `copyToTemp: true` (snapshot + WAL, freshest).
+        let (openArg, openFlags): (String, Int32)
+        if temp != nil {
+            (openArg, openFlags) = (openPath, SQLITE_OPEN_READONLY)
+        } else {
+            (openArg, openFlags) = (SQLiteReader.immutableURI(forPath: openPath),
+                                    SQLITE_OPEN_READONLY | SQLITE_OPEN_URI)
+        }
+
         var handle: OpaquePointer?
-        guard sqlite3_open_v2(openPath, &handle, SQLITE_OPEN_READONLY, nil) == SQLITE_OK, let opened = handle else {
+        guard sqlite3_open_v2(openArg, &handle, openFlags, nil) == SQLITE_OK, let opened = handle else {
             let msg = handle.map { String(cString: sqlite3_errmsg($0)) } ?? "unable to open \(openPath)"
             sqlite3_close(handle)
             if let temp { SQLiteReader.removeTempDB(temp) }
             throw DBError.open(msg)
         }
         self.db = opened
+    }
+
+    /// Build a `file:` URI with `?immutable=1` for a direct open. The path is percent-encoded so
+    /// spaces (e.g. "Application Support") and other reserved characters survive SQLite's URI
+    /// parser; `/` is preserved as the path separator. A non-absolute path is returned unchanged
+    /// (falls back to a plain filename open) rather than producing a malformed URI.
+    static func immutableURI(forPath path: String) -> String {
+        guard path.hasPrefix("/") else { return path }
+        var allowed = CharacterSet.alphanumerics
+        allowed.insert(charactersIn: "/-._~")
+        let encoded = path.addingPercentEncoding(withAllowedCharacters: allowed) ?? path
+        return "file:" + encoded + "?immutable=1"
     }
 
     deinit {
