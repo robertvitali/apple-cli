@@ -31,3 +31,4 @@ live-dumps/
 .DS_Store
 
 # Note: Package.resolved IS committed (this is an executable, so we pin deps).
+PARITY-TEST-MATRIX.md
