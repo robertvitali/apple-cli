@@ -135,3 +135,54 @@ require_index() {
   echo "$output" | grep -q '"tool" : "mail"'
   echo "$output" | grep -q '"messages"'
 }
+
+# ── Write-safety gates ─────────────────────────────────────────────────────────
+# These fire BEFORE any Mail/Envelope-Index access, so they run anywhere (no FDA /
+# no Mail needed). They regression-lock the refusals verified in the live e2e run.
+
+@test "mail send to a NON-self recipient is refused (safety_violation, exit 77)" {
+  APPLE_TEST_MODE=1 APPLE_TEST_RECIPIENTS="me@self.test" \
+    run "$BIN" mail send --to someone-else@example.com --subject "apple-cli-test x" --body y --mode send --execute --test-mode
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q '"type" : "safety_violation"'
+}
+
+@test "mail send with --execute but WITHOUT --test-mode is refused (exit 77)" {
+  # No APPLE_TEST_MODE, no --test-mode → two-factor outbound gate refuses.
+  run "$BIN" mail send --to me@self.test --subject "apple-cli-test x" --body y --mode send --execute
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q '"type" : "safety_violation"'
+}
+
+@test "mail send default (no --execute) is a dry-run preview (exit 0, dry_run true)" {
+  run "$BIN" mail send --to me@self.test --subject "apple-cli-test x" --body y
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"dry_run" : true'
+  echo "$output" | grep -q '"executed" : false'
+}
+
+@test "mail rules create with an UNLABELED name is refused under --execute --test-mode (exit 77)" {
+  APPLE_TEST_MODE=1 \
+    run "$BIN" mail rules create --name "real-inbox-rule" --condition "from:contains:boss@x.io" --action "mark_read=true" --execute --test-mode
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q '"type" : "safety_violation"'
+}
+
+@test "mail draft create with an UNLABELED subject is refused under --execute --test-mode (exit 77)" {
+  APPLE_TEST_MODE=1 \
+    run "$BIN" mail draft create --subject "Quarterly report" --body y --to me@self.test --execute --test-mode
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q '"type" : "safety_violation"'
+}
+
+@test "mail delete --permanent --execute is a hard-refused dangerous action (exit 64)" {
+  run "$BIN" mail delete 1 --permanent --execute
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q '"validation_error"'
+}
+
+@test "mail trash empty --execute is a hard-refused dangerous action (exit 64)" {
+  run "$BIN" mail trash empty --account "Any" --execute
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q '"validation_error"'
+}

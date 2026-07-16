@@ -48,7 +48,65 @@ struct RulesCreate: ParsableCommand {
             let conditions = try condition.map { try RuleSchema.parseCondition($0) }
             let actions = try RuleSchema.parseActions(action)
             let rule = RuleSchema.Rule(name: name, conditions: conditions, actions: actions, match_logic: match, enabled: !disabled)
-            try emitRulePreview(rule, willExecute: global.willExecute, json: global.json)
+            guard global.willExecute else {
+                try emitRulePreview(rule, willExecute: false, json: global.json); return
+            }
+            // ---- Live create: SELF-SCOPED, non-destructive, force-disabled. ----
+            // A test rule must be UNABLE to affect real mail even if later enabled by the same
+            // agent, so it must (a) be bound to the test label so it only ever matches test mail,
+            // and (b) carry no destructive/redirect action. Force-disabled is the third layer.
+            guard global.testMode && TestMode.isEnabled else {
+                throw AppleError.mailSafety("creating a rule requires --test-mode AND APPLE_TEST_MODE=1; refusing. The default dry-run previews instead.")
+            }
+            guard name.hasPrefix(TestMode.sandboxPrefix) else {
+                throw AppleError.mailSafety("rule name '\(name)' is not a labeled test item (must start with \"\(TestMode.sandboxPrefix)\") — refusing.")
+            }
+            // Reject the argv field delimiters so a stray control char can't desync the blob parse.
+            let ctrl = CharacterSet(charactersIn: "\u{1e}\u{1f}")
+            if name.rangeOfCharacter(from: ctrl) != nil || conditions.contains(where: { $0.value.rangeOfCharacter(from: ctrl) != nil }) {
+                throw AppleError.validation("rule name/condition values must not contain RS/US (0x1E/0x1F) control characters.")
+            }
+            // (a) Self-scoping: --match all AND a subject condition bound to the test label, so the
+            // rule can only ever fire on `apple-cli-test…` mail — never real mail, even once enabled.
+            guard match == "all" else {
+                throw AppleError.mailSafety("a live-created test rule must use --match all so its test-label condition always constrains it — refusing (use the preview for --match any).")
+            }
+            let selfScoped = conditions.contains {
+                $0.field == "subject" && ["contains", "begins_with", "equals"].contains($0.operator) && $0.value.contains(TestMode.sandboxPrefix)
+            }
+            guard selfScoped else {
+                throw AppleError.mailSafety("a live-created test rule must include a subject condition bound to the test label (e.g. --condition \"subject:contains:\(TestMode.sandboxPrefix)\") so it only ever acts on test mail — refusing.")
+            }
+            // (b) No destructive / redirect / unresolved actions on a live-created rule.
+            if let fwd = actions.forward_to, !fwd.isEmpty {
+                throw AppleError.mailSafety("a live-created rule with forward_to can auto-send to others — refused; create such a rule in Mail.app.")
+            }
+            if actions.delete == true {
+                throw AppleError.mailSafety("a live-created rule with a delete action could auto-trash mail once enabled — refused; test delete-action rules in Mail.app.")
+            }
+            if actions.move_to != nil || actions.copy_to != nil {
+                throw AppleError.validation("live rule create supports mark_read/mark_flagged; move_to/copy_to need a resolved mailbox — set them in Mail.app or use the preview.")
+            }
+            if actions.flag_color != nil {
+                throw AppleError.validation("live rule create does not wire the flag_color action yet — set it in Mail.app or use the preview.")
+            }
+            if conditions.contains(where: { $0.field == "header_name" }) {
+                throw AppleError.validation("live rule create does not support header_name conditions yet — set them in Mail.app or use the preview.")
+            }
+            let conds = conditions.map { (type: $0.field, op: $0.operator, value: $0.value) }
+            var actToks: [String] = []
+            if actions.mark_read == true { actToks.append("mark_read") }
+            if actions.mark_flagged == true { actToks.append("mark_flagged") }
+            guard !actToks.isEmpty else {
+                throw AppleError.validation("live rule create needs at least one of mark_read/mark_flagged (delete/forward/color/move are refused or preview-only).")
+            }
+            // match=all is enforced above, so the rule is an AND rule — thread it so execute matches preview.
+            try MailScript().createRule(name: name, enabled: false, matchAll: true, conditions: conds, actions: actToks)
+            try Output.emit(tool: "mail", data: [
+                "created_rule": AnyEncodableBox(name), "conditions": AnyEncodableBox(conditions),
+                "actions": AnyEncodableBox(actToks), "match_logic": AnyEncodableBox("all"),
+                "enabled": AnyEncodableBox(false), "dry_run": AnyEncodableBox(false), "executed": AnyEncodableBox(true),
+                "note": AnyEncodableBox("created SELF-SCOPED to the test label + DISABLED — it can only ever act on apple-cli-test mail; `rules enable <index>` to activate")])
         }
     }
 }
@@ -85,10 +143,13 @@ struct RulesDelete: ParsableCommand {
     @Argument(help: "1-based rule index.") var index: Int
     func run() throws {
         try runGuarded(tool: "mail") {
-            // Rules are pre-existing real data; live mutation is disabled in this build (safety) —
-            // emit exactly one preview envelope, never a second (error) envelope.
-            let note = global.willExecute ? "live rule deletion is disabled in this build (rules are pre-existing real data); this is a preview" : nil
-            try Output.emit(tool: "mail", data: ["would_delete_rule_index": AnyEncodableBox(index), "dry_run": AnyEncodableBox(!global.willExecute), "note": AnyEncodableBox(note)])
+            guard global.willExecute else {
+                try Output.emit(tool: "mail", data: ["would_delete_rule_index": AnyEncodableBox(index), "dry_run": AnyEncodableBox(true), "note": AnyEncodableBox(Optional<String>.none)])
+                return
+            }
+            let r = try requireLabeledRule(index: index, testMode: global.testMode)
+            try MailScript().deleteRule(index: r.index)
+            try Output.emit(tool: "mail", data: ["deleted_rule_index": AnyEncodableBox(index), "rule_name": AnyEncodableBox(r.name), "dry_run": AnyEncodableBox(false), "executed": AnyEncodableBox(true)])
         }
     }
 }
@@ -106,12 +167,32 @@ struct RulesDisable: ParsableCommand {
     func run() throws { try setEnabled(index: index, enabled: false, global: global) }
 }
 
+/// Resolve a rule by 1-based index and FAIL-CLOSED unless test-mode is on AND the rule's name is
+/// a labeled `apple-cli-test…` item — so an autonomous run can only toggle/delete rules it
+/// created, never a pre-existing real rule (AGENTS.md dangerous-action rule).
+func requireLabeledRule(index: Int, testMode: Bool) throws -> MailScript.ScriptRule {
+    guard testMode && TestMode.isEnabled else {
+        throw AppleError.mailSafety("live rule mutation requires --test-mode AND APPLE_TEST_MODE=1; refusing. The default dry-run previews instead.")
+    }
+    let rules = try MailScript().listRules()
+    guard let r = rules.first(where: { $0.index == index }) else {
+        throw AppleError.notFound("no rule at index \(index) (see `rules list`).")
+    }
+    guard r.name.hasPrefix(TestMode.sandboxPrefix) else {
+        throw AppleError.mailSafety("rule \(index) ('\(r.name)') is not a labeled test item (must start with \"\(TestMode.sandboxPrefix)\") — refusing to mutate a real rule.")
+    }
+    return r
+}
+
 private func setEnabled(index: Int, enabled: Bool, global: GlobalOptions) throws {
     try runGuarded(tool: "mail") {
-        // Rules are pre-existing real data; live mutation is disabled in this build (safety) —
-        // exactly one preview envelope.
-        let note = global.willExecute ? "live rule enable/disable is disabled in this build (rules are pre-existing real data); this is a preview" : nil
-        try Output.emit(tool: "mail", data: ["rule_index": AnyEncodableBox(index), "would_set_enabled": AnyEncodableBox(enabled), "dry_run": AnyEncodableBox(!global.willExecute), "note": AnyEncodableBox(note)])
+        guard global.willExecute else {
+            try Output.emit(tool: "mail", data: ["rule_index": AnyEncodableBox(index), "would_set_enabled": AnyEncodableBox(enabled), "dry_run": AnyEncodableBox(true), "note": AnyEncodableBox(Optional<String>.none)])
+            return
+        }
+        let r = try requireLabeledRule(index: index, testMode: global.testMode)
+        try MailScript().setRuleEnabled(index: r.index, enabled: enabled)
+        try Output.emit(tool: "mail", data: ["rule_index": AnyEncodableBox(index), "rule_name": AnyEncodableBox(r.name), "set_enabled": AnyEncodableBox(enabled), "executed": AnyEncodableBox(true), "dry_run": AnyEncodableBox(false)])
     }
 }
 

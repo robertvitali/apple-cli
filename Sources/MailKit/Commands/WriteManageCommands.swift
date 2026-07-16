@@ -2,10 +2,21 @@ import Foundation
 import ArgumentParser
 import AppleKit
 
-// P2 manage/mutate surface: move, mark, flag, delete, trash empty, mailboxes create,
-// attachments save. Dual targeting (explicit ids OR --match filters). EVERY filter-based bulk
-// op is mandatory dry-run; a real mutation requires --execute (gated, and NOT wired to live
-// mutation in this build — the SQLite match preview is the safe, tested surface).
+// P2 manage/mutate surface: move, mark, flag, delete-to-trash, trash empty (refused), mailboxes
+// create, attachments save. Dual targeting (explicit ids OR --match filters). Live mutation
+// requires --execute AND the two-factor test gate; the per-message SUBJECT-LABEL check is the
+// bulk-safety mechanism (NOT a forced dry-run): `executeMessageMutation` validates EVERY target
+// before mutating any, so a filter-matched batch containing any unlabeled/real message aborts
+// before touching anything (all-or-nothing). permanent-delete + empty-trash are hard-refused.
+
+/// Note for an executed mutation envelope when some targets weren't located. The bounded Mail.app
+/// locator skips Gmail's "[Gmail]/*" system mailboxes (All Mail, Sent, …) to avoid O(n) hangs, but
+/// the Envelope Index (what `search`/`list` read) DOES include them — so an archived/sent message
+/// a search surfaced can't be mutated in place, and would otherwise return `applied:[]` silently.
+func notLocatedNote(_ notFound: [String]) -> String? {
+    notFound.isEmpty ? nil
+        : "\(notFound.count) message(s) could not be located to mutate: the Mail.app locator skips Gmail '[Gmail]/*' mailboxes (All Mail, Sent, Trash, …). Mutate archived/sent mail in Mail.app, or move it to INBOX first."
+}
 
 /// Filter selector for bulk ops (MCP B move/update/trash filter model).
 struct MatchOptions: ParsableArguments {
@@ -50,11 +61,9 @@ struct BulkPreview: Encodable {
     let messages: [MailMessage]
     let detail: [String: String]
     let note: String?
+    var applied: [String]? = nil     // ids the live mutation applied to (executed path)
+    var not_found: [String]? = nil   // ids Mail could not locate (executed path)
 }
-
-/// Single-envelope note when --execute is requested but the live mutation path is not wired
-/// in this build (safety). Keeps stdout to exactly one JSON envelope.
-let liveNotWiredNote = "live mutation is disabled in this build (safety); this is a preview only"
 
 struct MoveCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "move", abstract: "Move messages by id or --match to a mailbox (dry-run by default).")
@@ -70,9 +79,22 @@ struct MoveCommand: ParsableCommand {
         try runGuarded(tool: "mail") {
             let ctx = try MailContext()
             let (msgs, filterBased) = try resolveTargets(ctx: ctx, ids: ids, match: match, account: account, mailbox: source)
+            let detail = ["to": to, "gmail_mode": String(gmailMode)]
+            guard global.willExecute else {
+                try Output.emit(tool: "mail", data: BulkPreview(action: "move", matched: msgs.count, filter_based: filterBased,
+                    dry_run: true, executed: false, messages: msgs, detail: detail, note: nil)); return
+            }
+            // --gmail-mode (Gmail copy+delete label semantics) is NOT wired for live move — reject
+            // rather than silently doing a plain move that ignores the flag.
+            if gmailMode {
+                throw AppleError.validation("--gmail-mode (Gmail copy+delete label semantics) is not yet wired for live move; omit it, or move the message in Mail.app.")
+            }
+            let script = MailScript()
+            let (applied, notFound) = try executeMessageMutation(msgs, testMode: global.testMode) { imid, acct in
+                try script.move(internetMessageID: imid, accountName: acct, toMailbox: to)
+            }
             try Output.emit(tool: "mail", data: BulkPreview(action: "move", matched: msgs.count, filter_based: filterBased,
-                dry_run: !global.willExecute, executed: false, messages: msgs, detail: ["to": to, "gmail_mode": String(gmailMode)],
-                note: global.willExecute ? liveNotWiredNote : nil))
+                dry_run: false, executed: true, messages: msgs, detail: detail, note: notLocatedNote(notFound), applied: applied, not_found: notFound))
         }
     }
 }
@@ -93,9 +115,17 @@ struct MarkCommand: ParsableCommand {
             guard let markRead = target else { throw AppleError.validation("specify --read or --unread.") }
             let ctx = try MailContext()
             let (msgs, filterBased) = try resolveTargets(ctx: ctx, ids: ids, match: match, account: account, mailbox: mailbox)
-            try Output.emit(tool: "mail", data: BulkPreview(action: markRead ? "mark_read" : "mark_unread",
-                matched: msgs.count, filter_based: filterBased, dry_run: !global.willExecute, executed: false, messages: msgs,
-                detail: [:], note: global.willExecute ? liveNotWiredNote : nil))
+            let action = markRead ? "mark_read" : "mark_unread"
+            guard global.willExecute else {
+                try Output.emit(tool: "mail", data: BulkPreview(action: action, matched: msgs.count, filter_based: filterBased,
+                    dry_run: true, executed: false, messages: msgs, detail: [:], note: nil)); return
+            }
+            let script = MailScript()
+            let (applied, notFound) = try executeMessageMutation(msgs, testMode: global.testMode) { imid, acct in
+                try script.setRead(internetMessageID: imid, accountName: acct, read: markRead)
+            }
+            try Output.emit(tool: "mail", data: BulkPreview(action: action, matched: msgs.count, filter_based: filterBased,
+                dry_run: false, executed: true, messages: msgs, detail: [:], note: notLocatedNote(notFound), applied: applied, not_found: notFound))
         }
     }
 }
@@ -118,9 +148,21 @@ struct FlagCommand: ParsableCommand {
             let ctx = try MailContext()
             let (msgs, filterBased) = try resolveTargets(ctx: ctx, ids: ids, match: match, account: account, mailbox: mailbox)
             let act = unflag ? "unflag" : "flag"
+            let colorName = color ?? (unflag ? "none" : "red")
+            let detail = ["color": colorName]
+            guard global.willExecute else {
+                try Output.emit(tool: "mail", data: BulkPreview(action: act, matched: msgs.count, filter_based: filterBased,
+                    dry_run: true, executed: false, messages: msgs, detail: detail, note: nil)); return
+            }
+            // unflag → flagged:false; flag → flagged:true with the resolved color index (red default).
+            let flagged = !unflag
+            let colorIndex = flagged ? (MailFlagColor.fromToken(colorName)?.rawValue) : nil
+            let script = MailScript()
+            let (applied, notFound) = try executeMessageMutation(msgs, testMode: global.testMode) { imid, acct in
+                try script.setFlag(internetMessageID: imid, accountName: acct, flagged: flagged, colorIndex: colorIndex)
+            }
             try Output.emit(tool: "mail", data: BulkPreview(action: act, matched: msgs.count, filter_based: filterBased,
-                dry_run: !global.willExecute, executed: false, messages: msgs, detail: ["color": color ?? (unflag ? "none" : "red")],
-                note: global.willExecute ? liveNotWiredNote : nil))
+                dry_run: false, executed: true, messages: msgs, detail: detail, note: notLocatedNote(notFound), applied: applied, not_found: notFound))
         }
     }
 }
@@ -142,9 +184,20 @@ struct DeleteCommand: ParsableCommand {
             }
             let ctx = try MailContext()
             let (msgs, filterBased) = try resolveTargets(ctx: ctx, ids: ids, match: match, account: account, mailbox: mailbox)
-            try Output.emit(tool: "mail", data: BulkPreview(action: permanent ? "delete_permanent" : "delete_to_trash",
-                matched: msgs.count, filter_based: filterBased, dry_run: !global.willExecute, executed: false, messages: msgs,
-                detail: ["permanent": String(permanent)], note: global.willExecute ? liveNotWiredNote : nil))
+            let action = permanent ? "delete_permanent" : "delete_to_trash"
+            let detail = ["permanent": String(permanent)]
+            guard global.willExecute else {
+                try Output.emit(tool: "mail", data: BulkPreview(action: action, matched: msgs.count, filter_based: filterBased,
+                    dry_run: true, executed: false, messages: msgs, detail: detail, note: nil)); return
+            }
+            // Only the recoverable move-to-Trash executes (permanent was refused above). Each
+            // target is label-gated, so an autonomous run can only trash its own test messages.
+            let script = MailScript()
+            let (applied, notFound) = try executeMessageMutation(msgs, testMode: global.testMode) { imid, acct in
+                try script.deleteToTrash(internetMessageID: imid, accountName: acct)
+            }
+            try Output.emit(tool: "mail", data: BulkPreview(action: action, matched: msgs.count, filter_based: filterBased,
+                dry_run: false, executed: true, messages: msgs, detail: detail, note: notLocatedNote(notFound), applied: applied, not_found: notFound))
         }
     }
 }
@@ -223,9 +276,23 @@ struct MailboxesCreate: ParsableCommand {
             let ctx = try MailContext()
             let uuid = try ctx.requireAccountUUID(account)
             let fullPath = parent.map { "\($0)/\(name)" } ?? name
+            var executed = false
+            let note: String? = nil
+            if global.willExecute {
+                // Creating a folder is additive, but gate it: test-mode + the new folder's name
+                // must be a labeled test item, so autonomous runs only create cleanable folders.
+                guard global.testMode && TestMode.isEnabled else {
+                    throw AppleError.mailSafety("creating a mailbox requires --test-mode AND APPLE_TEST_MODE=1; refusing. The default dry-run previews instead.")
+                }
+                guard name.hasPrefix(TestMode.sandboxPrefix) else {
+                    throw AppleError.mailSafety("mailbox name '\(name)' is not a labeled test item (must start with \"\(TestMode.sandboxPrefix)\") — refusing.")
+                }
+                try MailScript().createMailbox(accountName: account, path: fullPath)
+                executed = true
+            }
             try Output.emit(tool: "mail", data: ["action": AnyEncodableBox("create_mailbox"), "account": AnyEncodableBox(account),
                 "account_id": AnyEncodableBox(uuid), "path": AnyEncodableBox(fullPath), "dry_run": AnyEncodableBox(!global.willExecute),
-                "note": AnyEncodableBox(global.willExecute ? liveNotWiredNote : Optional<String>.none)])
+                "executed": AnyEncodableBox(executed), "note": AnyEncodableBox(note)])
         }
     }
 }

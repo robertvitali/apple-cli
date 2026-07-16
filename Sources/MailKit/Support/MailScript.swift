@@ -14,31 +14,38 @@ public struct MailScript {
 
     // MARK: Body fetch (get --include-content)
 
-    /// Full plaintext body of the message whose RFC-5322 `message id` matches. Scans the
-    /// given account's mailboxes first (fast), then all accounts. Returns nil if not found.
-    /// The scan is Mail's inherent cost when addressing by Message-ID (no index for bodies).
+    /// Full plaintext body of the message whose RFC-5322 `message id` matches. BOUNDED like the
+    /// mutation `locator` (see below): Mail has no message-id index, so `whose message id is` is a
+    /// client-side linear scan — and Gmail's "[Gmail]/All Mail" holds the whole archive, so an
+    /// unbounded scan hangs. INBOX of the target account(s) first, then non-"All Mail" mailboxes;
+    /// a body that lives only in a deep archive returns "" (caller falls back to the index snippet)
+    /// rather than hanging.
     private static let bodyScript = """
     on run argv
         set targetID to item 1 of argv
         set acctName to item 2 of argv
         tell application "Mail"
+            set accts to accounts
             if acctName is not "" then
                 try
-                    set a to first account whose name is acctName
-                    repeat with mbx in mailboxes of a
+                    set accts to {first account whose name is acctName}
+                end try
+            end if
+            repeat with a in accts
+                try
+                    set msgs to (messages of (mailbox "INBOX" of a) whose message id is targetID)
+                    if (count of msgs) > 0 then return (content of (item 1 of msgs))
+                end try
+            end repeat
+            repeat with a in accts
+                repeat with mbx in mailboxes of a
+                    set mname to (name of mbx)
+                    if mname is not "INBOX" and mname does not contain "[Gmail]" then
                         try
                             set msgs to (messages of mbx whose message id is targetID)
                             if (count of msgs) > 0 then return (content of (item 1 of msgs))
                         end try
-                    end repeat
-                end try
-            end if
-            repeat with a in accounts
-                repeat with mbx in mailboxes of a
-                    try
-                        set msgs to (messages of mbx whose message id is targetID)
-                        if (count of msgs) > 0 then return (content of (item 1 of msgs))
-                    end try
+                    end if
                 end repeat
             end repeat
         end tell
@@ -278,5 +285,366 @@ public struct MailScript {
                 content: includeContent ? f[6] : nil))
         }
         return result
+    }
+
+    // MARK: - Message mutations (P2). Located by RFC message-id (tries bracketed + bare form).
+    //
+    // SAFETY: these methods perform NO gating. The CALLER MUST have passed the 3-flag gate
+    // (--execute + --test-mode + APPLE_TEST_MODE) AND a subject-label check (mutations on an
+    // existing message) or `guardOutbound` (outbound) BEFORE calling. Every user value is
+    // argv-passed (never interpolated). The shared `findMsg` locator is appended to each
+    // mutation script; a mutation returns "ok" (applied) / "notfound" (no matching message).
+
+    /// AppleScript handler that locates a message by RFC `message id`. PERFORMANCE: Mail has no
+    /// index on message-id, so `whose message id is` is a client-side linear scan per mailbox —
+    /// and Gmail's "[Gmail]/All Mail" holds the entire archive (tens of thousands of messages),
+    /// which makes a naive all-mailbox scan hang. So this is BOUNDED: INBOX of the target
+    /// account(s) first (small, the common mutation case), then other mailboxes EXCEPT the
+    /// "All Mail" archive. A message that lives only in a deep archive returns `missing value`
+    /// (caller reports not_found) rather than hanging — mutate those in Mail.app. Appended to
+    /// every mutation script below.
+    private static let locator = """
+
+    on findMsg(targetID, acctName)
+        tell application "Mail"
+            set accts to accounts
+            if acctName is not "" then
+                try
+                    set accts to {first account whose name is acctName}
+                end try
+            end if
+            repeat with a in accts
+                try
+                    set ms to (messages of (mailbox "INBOX" of a) whose message id is targetID)
+                    if (count of ms) > 0 then return item 1 of ms
+                end try
+            end repeat
+            repeat with a in accts
+                repeat with mbx in mailboxes of a
+                    set mname to (name of mbx)
+                    if mname is not "INBOX" and mname does not contain "[Gmail]" then
+                        try
+                            set ms to (messages of mbx whose message id is targetID)
+                            if (count of ms) > 0 then return item 1 of ms
+                        end try
+                    end if
+                end repeat
+            end repeat
+        end tell
+        return missing value
+    end findMsg
+    """
+
+    /// Run a mutation script (defines `on run argv`, calls `my findMsg`) trying the bracketed
+    /// then bare message-id form. Returns true when the script applied the change ("ok").
+    @discardableResult
+    private func mutateLocated(_ body: String, id: String, account: String?, extra: [String]) throws -> Bool {
+        let script = body + "\n" + MailScript.locator
+        let bare = MailFormat.stripAngleBrackets(id) ?? id
+        for candidate in ["<\(bare)>", bare] {
+            let out = try runner.run(script, arguments: [candidate, account ?? ""] + extra)
+            if out == "ok" { return true }
+        }
+        return false   // notfound on both candidate forms
+    }
+
+    private static let setReadScript = """
+    on run argv
+        set msg to my findMsg(item 1 of argv, item 2 of argv)
+        if msg is missing value then return "notfound"
+        tell application "Mail" to set read status of msg to ((item 3 of argv) is "1")
+        return "ok"
+    end run
+    """
+    /// Set read/unread on a located message. Trivially reversible.
+    @discardableResult
+    public func setRead(internetMessageID: String, accountName: String?, read: Bool) throws -> Bool {
+        try mutateLocated(MailScript.setReadScript, id: internetMessageID, account: accountName, extra: [read ? "1" : "0"])
+    }
+
+    private static let setFlagScript = """
+    on run argv
+        set msg to my findMsg(item 1 of argv, item 2 of argv)
+        if msg is missing value then return "notfound"
+        set doFlag to (item 3 of argv) is "1"
+        set idx to (item 4 of argv) as integer
+        tell application "Mail"
+            set flagged status of msg to doFlag
+            if doFlag and idx is greater than or equal to 0 then set flag index of msg to idx
+        end tell
+        return "ok"
+    end run
+    """
+    /// Flag/unflag a located message, optionally with a color (0-6). Reversible.
+    @discardableResult
+    public func setFlag(internetMessageID: String, accountName: String?, flagged: Bool, colorIndex: Int?) throws -> Bool {
+        try mutateLocated(MailScript.setFlagScript, id: internetMessageID, account: accountName,
+                          extra: [flagged ? "1" : "0", String(colorIndex ?? -1)])
+    }
+
+    private static let moveScript = """
+    on run argv
+        set msg to my findMsg(item 1 of argv, item 2 of argv)
+        if msg is missing value then return "notfound"
+        set mbxName to item 3 of argv
+        tell application "Mail"
+            set acctOfMsg to account of (mailbox of msg)
+            set destMbx to (first mailbox of acctOfMsg whose name is mbxName)
+            set mailbox of msg to destMbx
+        end tell
+        return "ok"
+    end run
+    """
+    /// Move a located message to another mailbox WITHIN its own account. Reversible.
+    @discardableResult
+    public func move(internetMessageID: String, accountName: String?, toMailbox: String) throws -> Bool {
+        try mutateLocated(MailScript.moveScript, id: internetMessageID, account: accountName, extra: [toMailbox])
+    }
+
+    private static let trashScript = """
+    on run argv
+        set msg to my findMsg(item 1 of argv, item 2 of argv)
+        if msg is missing value then return "notfound"
+        tell application "Mail" to delete msg
+        return "ok"
+    end run
+    """
+    /// Move a located message to Trash (Mail's `delete` = move-to-Trash, recoverable). The
+    /// permanent form is never wired — see DeleteCommand's --permanent hard-refuse.
+    @discardableResult
+    public func deleteToTrash(internetMessageID: String, accountName: String?) throws -> Bool {
+        try mutateLocated(MailScript.trashScript, id: internetMessageID, account: accountName, extra: [])
+    }
+
+    // MARK: Mailbox + rule creation (caller gates: create only labeled `apple-cli-test…` items)
+
+    private static let createMailboxScript = """
+    on run argv
+        set acctName to item 1 of argv
+        set mbxName to item 2 of argv
+        tell application "Mail"
+            set a to first account whose name is acctName
+            make new mailbox at end of mailboxes of a with properties {name:mbxName}
+        end tell
+        return "ok"
+    end run
+    """
+    /// Create a mailbox/folder under an account. Caller MUST have label-checked the name.
+    public func createMailbox(accountName: String, path: String) throws {
+        let out = try runner.run(MailScript.createMailboxScript, arguments: [accountName, path])
+        guard out == "ok" else { throw AppleScriptRunner.RunError.scriptFailed(status: 1, stderr: "createMailbox returned '\(out)'") }
+    }
+
+    private static let createRuleScript = """
+    on run argv
+        set ruleName to item 1 of argv
+        set isEnabled to (item 2 of argv) is "1"
+        set condBlob to item 3 of argv
+        set actBlob to item 4 of argv
+        set RS to (ASCII character 30)
+        set US to (ASCII character 31)
+        -- Parse conditions + resolve enums OUTSIDE the Mail tell block. Two AppleScript rules:
+        -- (1) a handler call (`my ruleType(...)`) inside `tell application "Mail"` is misparsed as
+        -- a Mail command; (2) a handler call inside a record literal `{...}` is a syntax error.
+        -- So: precompute each enum into a variable here, collect {rtype,qual,expr} records, then
+        -- build the rule inside the tell block from those plain values.
+        set condList to {}
+        set AppleScript's text item delimiters to RS
+        set condRecs to text items of condBlob
+        set AppleScript's text item delimiters to ""
+        repeat with cr in condRecs
+            set crs to cr as string
+            if crs is not "" then
+                set AppleScript's text item delimiters to US
+                set fld to text items of crs
+                set AppleScript's text item delimiters to ""
+                set rtv to my ruleType(item 1 of fld)
+                set qfv to my qualifier(item 2 of fld)
+                set exv to (item 3 of fld)
+                set end of condList to {rtype:rtv, qual:qfv, expr:exv}
+            end if
+        end repeat
+        set AppleScript's text item delimiters to RS
+        set actToks to text items of actBlob
+        set AppleScript's text item delimiters to ""
+        tell application "Mail"
+            set r to make new rule with properties {name:ruleName, enabled:isEnabled}
+            try
+                set all conditions must be met of r to ((item 5 of argv) is "1")
+            end try
+            repeat with c in condList
+                set rt to rtype of c
+                set qf to qual of c
+                set ex to expr of c
+                try
+                    make new rule condition at end of rule conditions of r with properties {rule type:rt, qualifier:qf, expression:ex}
+                end try
+            end repeat
+            repeat with atk in actToks
+                set tok to atk as string
+                if tok is "mark_read" then
+                    try
+                        set mark read of r to true
+                    end try
+                else if tok is "mark_flagged" then
+                    try
+                        set mark flagged of r to true
+                    end try
+                else if tok is "delete" then
+                    try
+                        set delete message of r to true
+                    end try
+                end if
+            end repeat
+        end tell
+        return "ok"
+    end run
+
+    on ruleType(f)
+        tell application "Mail"
+            if f is "from" then return from header
+            if f is "to" then return to header
+            if f is "subject" then return subject header
+            if f is "body" then return message content
+            if f is "any_recipient" then return to or cc header
+            return from header
+        end tell
+    end ruleType
+
+    on qualifier(op)
+        tell application "Mail"
+            if op is "contains" then return does contain value
+            if op is "does_not_contain" then return does not contain value
+            if op is "begins_with" then return begins with value
+            if op is "ends_with" then return ends with value
+            if op is "equals" then return equal to value
+            return does contain value
+        end tell
+    end qualifier
+    """
+    /// Create a Mail rule with the safe action subset (mark_read / mark_flagged / delete;
+    /// move_to/copy_to/forward_to are refused on live create by the caller — a forwarding rule
+    /// is a latent auto-send-to-others surface). Caller MUST have label-checked the rule name.
+    public func createRule(name: String, enabled: Bool, matchAll: Bool,
+                           conditions: [(type: String, op: String, value: String)],
+                           actions: [String]) throws {
+        let condBlob = conditions.map { [$0.type, $0.op, $0.value].joined(separator: MailScript.US) }
+            .joined(separator: MailScript.RS)
+        let actBlob = actions.joined(separator: MailScript.RS)
+        let out = try runner.run(MailScript.createRuleScript,
+                                 arguments: [name, enabled ? "1" : "0", condBlob, actBlob, matchAll ? "1" : "0"])
+        guard out == "ok" else { throw AppleScriptRunner.RunError.scriptFailed(status: 1, stderr: "createRule returned '\(out)'") }
+    }
+
+    // MARK: Drafts (Mail's real Drafts mailbox — list is a read; create/delete caller-gated)
+
+    public struct DraftInfo { public let subject: String; public let recipient: String; public let date_sent: String }
+
+    private static let listDraftsScript = """
+    set US to (ASCII character 31)
+    set RS to (ASCII character 30)
+    tell application "Mail"
+        set out to ""
+        repeat with a in accounts
+            repeat with dmbx in mailboxes of a
+                -- Any "Drafts"-named mailbox: Gmail keeps drafts in "[Gmail]/Drafts", not "Drafts".
+                if (name of dmbx) contains "Drafts" then
+                    try
+                        repeat with m in messages of dmbx
+                            set rcpt to ""
+                            try
+                                set rcpt to address of item 1 of to recipients of m
+                            end try
+                            set out to out & (subject of m) & US & rcpt & US & ((date sent of m) as string) & RS
+                        end repeat
+                    end try
+                end if
+            end repeat
+        end repeat
+        return out
+    end tell
+    """
+    public func listDrafts() throws -> [DraftInfo] {
+        let raw = try runner.run(MailScript.listDraftsScript)
+        var out: [DraftInfo] = []
+        for record in raw.components(separatedBy: MailScript.RS)
+        where !record.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+            let f = record.components(separatedBy: MailScript.US)
+            guard f.count >= 3 else { continue }
+            out.append(DraftInfo(subject: f[0], recipient: f[1].trimmingCharacters(in: .whitespacesAndNewlines),
+                                 date_sent: f[2].trimmingCharacters(in: .whitespacesAndNewlines)))
+        }
+        return out
+    }
+
+    private static let createDraftScript = """
+    on run argv
+        set theSubject to item 1 of argv
+        set theBody to item 2 of argv
+        set toRaw to item 3 of argv
+        set US to (ASCII character 31)
+        tell application "Mail"
+            set m to make new outgoing message with properties {subject:theSubject, content:theBody, visible:false}
+            set AppleScript's text item delimiters to US
+            set parts to text items of toRaw
+            set AppleScript's text item delimiters to ""
+            repeat with p in parts
+                set addr to (p as string)
+                if addr is not "" then make new to recipient at end of to recipients of m with properties {address:addr}
+            end repeat
+            save m
+        end tell
+        return "ok"
+    end run
+    """
+    /// Save a message to Mail's Drafts (no send). Caller MUST have label-checked the subject.
+    public func createDraft(subject: String, body: String, to: [String]) throws {
+        let out = try runner.run(MailScript.createDraftScript, arguments: [subject, body, to.joined(separator: MailScript.US)])
+        guard out == "ok" else { throw AppleScriptRunner.RunError.scriptFailed(status: 1, stderr: "createDraft returned '\(out)'") }
+    }
+
+    private static let deleteDraftScript = """
+    on run argv
+        set wantSubject to item 1 of argv
+        set thePrefix to item 2 of argv
+        set n to 0
+        tell application "Mail"
+            -- STABLE indexed references throughout (`account ai` / `mailbox mi of a` /
+            -- `message j of dmbx`): a `repeat with x in <every ...>` loop variable is an unstable
+            -- "item N of every message of every mailbox of every account" reference that fails on
+            -- `delete`. Delete from the END (high index → low) so removals don't reindex the
+            -- messages still to visit. Match subject in code — `whose subject is` doesn't filter
+            -- draft (outgoing-message) objects reliably.
+            repeat with ai from 1 to (count of accounts)
+                set a to account ai
+                repeat with mi from 1 to (count of mailboxes of a)
+                    set dmbx to mailbox mi of a
+                    if (name of dmbx) contains "Drafts" then
+                        try
+                            set k to (count of messages of dmbx)
+                            repeat with j from k to 1 by -1
+                                set m to message j of dmbx
+                                set sj to ""
+                                try
+                                    set sj to subject of m
+                                end try
+                                if sj is wantSubject and sj starts with thePrefix then
+                                    delete m
+                                    set n to n + 1
+                                end if
+                            end repeat
+                        end try
+                    end if
+                end repeat
+            end repeat
+        end tell
+        return (n as string)
+    end run
+    """
+    /// Delete drafts whose subject EXACTLY matches AND starts with the test prefix (double guard).
+    /// Returns the count deleted. Caller MUST have verified the subject is labeled.
+    public func deleteDrafts(subject: String, prefix: String) throws -> Int {
+        let out = try runner.run(MailScript.deleteDraftScript, arguments: [subject, prefix])
+        return Int(out.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
     }
 }

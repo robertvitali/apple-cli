@@ -14,14 +14,19 @@ func splitRecipients(_ raw: [String]) -> [String] {
 
 /// Common outbound guard: refuse a live send unless test-mode is on and EVERY recipient is
 /// the operator's own allowlisted address. Never sends to a non-self recipient autonomously.
+/// Refusals are typed `safety_violation` (exit 77) so they read as deliberate, not as bugs.
 func guardOutbound(recipients: [String], testMode: Bool) throws {
     // Two-factor, matching every sibling write domain: the --test-mode flag AND APPLE_TEST_MODE=1.
     guard testMode && TestMode.isEnabled else {
-        throw AppleError.validation("live send requires --test-mode AND APPLE_TEST_MODE=1; refusing. Use the default dry-run to preview.")
+        throw AppleError.mailSafety("live send requires --test-mode AND APPLE_TEST_MODE=1; refusing. Use the default dry-run to preview.")
     }
-    // Fail-closed: EVERY recipient must be the operator's allowlisted self-address.
-    for r in recipients {
-        try TestMode.requireAllowedRecipient(r)
+    guard !recipients.isEmpty else { throw AppleError.validation("no recipients to send to.") }
+    // Fail-closed: EVERY recipient must be the operator's allowlisted self-address. Compare
+    // case-insensitively (email addresses are case-insensitive) so a legit self-reply whose
+    // stored sender_address differs in case from APPLE_TEST_RECIPIENTS isn't wrongly refused.
+    let allow = Set(TestMode.allowedRecipients.map { $0.lowercased() })
+    for r in recipients where !allow.contains(r.lowercased()) {
+        throw AppleError.mailSafety("recipient '\(r)' is not in the self-only test allowlist — refusing. Set APPLE_TEST_RECIPIENTS to your own address.")
     }
 }
 
@@ -114,32 +119,70 @@ struct ReplyCommand: ParsableCommand {
     struct Preview: Encodable {
         let action: String; let target: String; let matched_message_id: String?
         let reply_all: Bool; let mode: String; let has_html: Bool
-        let cc: [String]; let bcc: [String]; let attachments: [String]
-        let dry_run: Bool; let note: String?
+        let to: [String]; let cc: [String]; let bcc: [String]; let attachments: [String]
+        let dry_run: Bool; let executed: Bool; let note: String?
     }
 
     func run() throws {
         try runGuarded(tool: "mail") {
             let ctx = try MailContext()
-            var targetID: String?
+            // Resolve the target to a full summary (need original sender + subject to compose).
+            let row: [String: String?]
             if let id {
-                guard let row = try resolveMessageRow(ctx: ctx, id: id) else { throw AppleError.notFound("no message for id '\(id)'.") }
-                targetID = String(intVal(row["rowid"]) ?? 0)
+                guard let r = try resolveMessageRow(ctx: ctx, id: id) else { throw AppleError.notFound("no message for id '\(id)'.") }
+                row = r
             } else if let subject {
                 var f = EnvelopeIndex.MessageFilters()
                 if let account { f.accountUUID = try ctx.requireAccountUUID(account) }
                 f.mailboxName = "All"; f.subjectContains = subject; f.limit = 1
-                targetID = try ctx.index.queryMessages(f).first.map { String(intVal($0["rowid"]) ?? 0) }
-                guard targetID != nil else { throw AppleError.notFound("no message matching subject '\(subject)'.") }
+                guard let r = try ctx.index.queryMessages(f).first else { throw AppleError.notFound("no message matching subject '\(subject)'.") }
+                row = r
             } else {
                 throw AppleError.validation("provide a message id argument or --subject.")
             }
-            let preview = Preview(action: "reply", target: id ?? "subject:\(subject ?? "")", matched_message_id: targetID,
-                                  reply_all: all, mode: mode, has_html: html != nil,
-                                  cc: splitRecipients(cc), bcc: splitRecipients(bcc), attachments: attach,
-                                  dry_run: !global.willExecute,
-                                  note: global.willExecute ? "live reply is disabled in this build (safety); this is a preview" : nil)
-            try Output.emit(tool: "mail", data: preview)
+            var target = ctx.decodeSummary(row)
+            // reply-all folds in the original to/cc — but the summary decode omits recipients, so
+            // hydrate them from the index (same source `mail get` uses) or --all would fold nothing.
+            if all {
+                let recips = try ctx.index.recipients(messageRowid: intVal(row["rowid"]) ?? 0)
+                target.to = recips.to
+                target.cc = recips.cc
+            }
+            // Reply addresses the ORIGINAL SENDER (never a user-supplied recipient) — so a reply
+            // can only be self-safe when the original message is from self. reply-all also folds
+            // in the original to/cc. guardOutbound then requires EVERY recipient to be the
+            // operator's allowlisted self-address → replying to real mail is refused, fail-closed.
+            guard let sender = target.sender_address, !sender.isEmpty else {
+                throw AppleError.upstream("cannot determine the original sender address to reply to.")
+            }
+            var recipients = [sender]
+            if all { recipients += (target.to ?? []) + (target.cc ?? []) }
+            let ccL = splitRecipients(cc), bccL = splitRecipients(bcc)
+
+            let willSend = global.willExecute && mode == "send"
+            var executed = false
+            var note: String?
+            if willSend {
+                if html != nil || !attach.isEmpty {
+                    note = "HTML/attachment reply is not wired for live send; use plain --body (live) or draft-rich (.eml)."
+                } else {
+                    try guardOutbound(recipients: recipients + ccL + bccL, testMode: global.testMode)
+                    let replySubject = target.subject.lowercased().hasPrefix("re:") ? target.subject : "Re: \(target.subject)"
+                    // Quote from the index snippet/content already in hand — avoids a slow full-body
+                    // AppleScript scan (message-id has no Mail index; a body fetch can hang on Gmail).
+                    let original = target.content ?? target.snippet
+                    let quoted = original.map { "\n\n> " + $0.replacingOccurrences(of: "\n", with: "\n> ") } ?? ""
+                    try MailScript().send(subject: replySubject, body: body + quoted, to: recipients, cc: ccL, bcc: bccL)
+                    executed = true
+                }
+            } else if global.willExecute {
+                note = "mode '\(mode)' is preview-only; use --mode send (plain text) to deliver"
+            }
+
+            try Output.emit(tool: "mail", data: Preview(action: "reply", target: id ?? "subject:\(subject ?? "")",
+                matched_message_id: target.id, reply_all: all, mode: mode, has_html: html != nil,
+                to: recipients, cc: ccL, bcc: bccL, attachments: attach,
+                dry_run: !global.willExecute, executed: executed, note: note))
         }
     }
 }
@@ -157,32 +200,44 @@ struct ForwardCommand: ParsableCommand {
 
     struct Preview: Encodable {
         let action: String; let matched_message_id: String?; let to: [String]
-        let cc: [String]; let bcc: [String]; let dry_run: Bool; let note: String?
+        let cc: [String]; let bcc: [String]; let dry_run: Bool; let executed: Bool; let note: String?
     }
 
     func run() throws {
         try runGuarded(tool: "mail") {
-            let toL = splitRecipients(to)
+            let toL = splitRecipients(to), ccL = splitRecipients(cc), bccL = splitRecipients(bcc)
             guard !toL.isEmpty else { throw AppleError.validation("--to is required.") }
-            // Outbound guard fires BEFORE emit → one envelope.
-            if global.willExecute { try guardOutbound(recipients: toL, testMode: global.testMode) }
+            // Outbound guard (self-only) fires BEFORE any resolve/emit → one envelope.
+            if global.willExecute { try guardOutbound(recipients: toL + ccL + bccL, testMode: global.testMode) }
             let ctx = try MailContext()
-            var targetID: String?
+            let target: MailMessage
             if let id {
                 guard let row = try resolveMessageRow(ctx: ctx, id: id) else { throw AppleError.notFound("no message for id '\(id)'.") }
-                targetID = String(intVal(row["rowid"]) ?? 0)
+                target = ctx.decodeSummary(row)
             } else if let subject {
                 var f = EnvelopeIndex.MessageFilters()
                 if let account { f.accountUUID = try ctx.requireAccountUUID(account) }
                 f.mailboxName = "All"; f.subjectContains = subject; f.limit = 1
-                targetID = try ctx.index.queryMessages(f).first.map { String(intVal($0["rowid"]) ?? 0) }
-                guard targetID != nil else { throw AppleError.notFound("no message matching subject '\(subject)'.") }
+                guard let row = try ctx.index.queryMessages(f).first else { throw AppleError.notFound("no message matching subject '\(subject)'.") }
+                target = ctx.decodeSummary(row)
             } else {
                 throw AppleError.validation("provide a message id argument or --subject.")
             }
-            try Output.emit(tool: "mail", data: Preview(action: "forward", matched_message_id: targetID, to: toL,
-                cc: splitRecipients(cc), bcc: splitRecipients(bcc), dry_run: !global.willExecute,
-                note: global.willExecute ? "live forward is disabled in this build (safety); this is a preview" : nil))
+            // Forward composes a NEW message to the self-only --to (guardOutbound above), carrying
+            // the original body — so forwarding real mail to yourself is fine (recipient is self).
+            var executed = false
+            let note: String? = nil
+            if global.willExecute {
+                let fwdSubject = target.subject.lowercased().hasPrefix("fwd:") ? target.subject : "Fwd: \(target.subject)"
+                // Quote from the index snippet/content already in hand (avoids a slow body scan).
+                let original = target.content ?? target.snippet
+                let intro = body.map { $0 + "\n\n" } ?? ""
+                let fwdBody = intro + "---------- Forwarded message ----------\nFrom: \(target.sender)\nSubject: \(target.subject)\n\n" + (original ?? "")
+                try MailScript().send(subject: fwdSubject, body: fwdBody, to: toL, cc: ccL, bcc: bccL)
+                executed = true
+            }
+            try Output.emit(tool: "mail", data: Preview(action: "forward", matched_message_id: target.id, to: toL,
+                cc: ccL, bcc: bccL, dry_run: !global.willExecute, executed: executed, note: note))
         }
     }
 }
@@ -231,15 +286,55 @@ struct DraftCommand: ParsableCommand {
             guard ["list", "create", "send", "open", "delete"].contains(action) else {
                 throw AppleError.validation("draft action must be list, create, send, open, or delete.")
             }
-            // Drafts live in Mail; listing/creating/sending them is a Mail.app write surface.
-            // Preview-only in this build (safety): report the intended action + parameters.
+            let script = MailScript()
+
+            // list — a live READ of Mail's real Drafts mailbox (no gate).
+            if action == "list" {
+                let drafts = try script.listDrafts()
+                struct DraftRow: Encodable { let subject: String; let recipient: String; let date_sent: String }
+                struct DraftsResult: Encodable { let action: String; let drafts: [DraftRow]; let count: Int }
+                let rows = drafts.map { DraftRow(subject: $0.subject, recipient: $0.recipient, date_sent: $0.date_sent) }
+                try Output.emit(tool: "mail", data: DraftsResult(action: "list", drafts: rows, count: rows.count))
+                return
+            }
+
+            // create / delete — live Mail Drafts mutations behind the 3-flag gate + subject label.
+            // send — routed to `mail send` (note); open — Mail-UI only (note).
+            var executed = false
+            var note: String?
+            let subj = subject ?? draftSubject
+            if global.willExecute {
+                switch action {
+                case "create":
+                    guard global.testMode && TestMode.isEnabled else {
+                        throw AppleError.mailSafety("creating a draft requires --test-mode AND APPLE_TEST_MODE=1; refusing.")
+                    }
+                    guard let s = subj, s.hasPrefix(TestMode.sandboxPrefix) else {
+                        throw AppleError.mailSafety("draft --subject must be a labeled test item (start with \"\(TestMode.sandboxPrefix)\") — refusing.")
+                    }
+                    try script.createDraft(subject: s, body: body ?? "", to: splitRecipients(to))
+                    executed = true
+                case "delete":
+                    guard global.testMode && TestMode.isEnabled else {
+                        throw AppleError.mailSafety("deleting a draft requires --test-mode AND APPLE_TEST_MODE=1; refusing.")
+                    }
+                    guard let s = subj, s.hasPrefix(TestMode.sandboxPrefix) else {
+                        throw AppleError.mailSafety("draft --subject (or --draft-subject) must be a labeled test item to delete — refusing.")
+                    }
+                    let n = try script.deleteDrafts(subject: s, prefix: TestMode.sandboxPrefix)
+                    executed = n > 0
+                    note = "deleted \(n) draft(s) matching \"\(s)\""
+                case "send":
+                    note = "draft send is routed through `mail send` — compose + send there (self-only gated)"
+                default: // open
+                    note = "draft open is a Mail-UI action; use `mail draft-rich` to generate an .eml and open it"
+                }
+            }
             let payload: [String: AnyEncodableBox] = [
-                "action": AnyEncodableBox(action),
-                "account": AnyEncodableBox(account),
-                "subject": AnyEncodableBox(subject ?? draftSubject),
-                "to": AnyEncodableBox(splitRecipients(to)),
-                "dry_run": AnyEncodableBox(!global.willExecute),
-                "note": AnyEncodableBox(global.willExecute ? "live draft \(action) is disabled in this build (safety); this is a preview" : Optional<String>.none),
+                "action": AnyEncodableBox(action), "account": AnyEncodableBox(account),
+                "subject": AnyEncodableBox(subj), "to": AnyEncodableBox(splitRecipients(to)),
+                "dry_run": AnyEncodableBox(!global.willExecute), "executed": AnyEncodableBox(executed),
+                "note": AnyEncodableBox(note),
             ]
             try Output.emit(tool: "mail", data: payload)
         }
