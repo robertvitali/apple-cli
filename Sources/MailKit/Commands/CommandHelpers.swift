@@ -72,6 +72,101 @@ func requireISODate(_ iso: String, name: String, endOfDay: Bool = false) throws 
     return unix
 }
 
+// MARK: Attachment save selection (pure, testable — see Tests/MailKitTests/AttachmentSelectionTests.swift)
+//
+// `attachments save` selects POSITIONALLY (matches MCP A's own `items {i} of mail attachments of
+// msg`), never by name — a message with two identically-named attachments must not let an
+// `--indices 0` request silently also grab index 2 (or a --name request silently save both when
+// only one was meant). Index resolution, the --dir/--out mode choice, and de-collision of
+// same-basename outputs all happen HERE in Swift (pure, unit-testable) BEFORE any AppleScript
+// runs; MailScript.saveAttachments only does positional `save` calls against caller-supplied
+// (index, exact destination path) pairs — no name-matching, no path composition.
+
+/// Validate --name/--indices are mutually exclusive. Chaining them (filter by name, then re-index
+/// the ALREADY-filtered list) was the prior, confusing/buggy behavior. Pure/store-independent.
+func requireNameXorIndices(name: String?, indices: String?) throws {
+    guard name != nil, indices != nil else { return }
+    throw AppleError.validation("--name and --indices are mutually exclusive.")
+}
+
+/// Validate --dir/--out: exactly one save mode must be chosen. Pure/store-independent.
+func requireDirXorOut(dir: String?, out: String?) throws {
+    switch (dir, out) {
+    case (nil, nil):
+        throw AppleError.validation("provide --dir (save multiple attachments into a directory) or --out (save one attachment to an exact path).")
+    case (.some, .some):
+        throw AppleError.validation("--dir and --out are mutually exclusive.")
+    default:
+        return
+    }
+}
+
+/// When --out is given, the selection MUST resolve to exactly one attachment — an exact
+/// destination path is a rename of ONE file (MCP B `save_email_attachment`), not a fan-out.
+func requireSingleForOut(out: String?, selectedCount: Int) throws {
+    guard out != nil else { return }
+    guard selectedCount == 1 else {
+        throw AppleError.validation("--out requires exactly one selected attachment (matched \(selectedCount)); narrow the selection with --name/--indices, or use --dir to save multiple.")
+    }
+}
+
+/// Resolve the 0-based POSITIONAL indices (into `names`, the message's attachment list) selected
+/// by --name (EVERY position whose name matches exactly — duplicates all included) or --indices
+/// (a comma-separated list, clamped to the valid range) — or every position when neither is given
+/// (default all). Always returned ascending, regardless of the order --indices was typed in.
+/// Caller has already enforced --name/--indices mutual exclusion (`requireNameXorIndices`).
+func resolveAttachmentIndices(names: [String], name: String?, indices: String?) -> [Int] {
+    if let name {
+        return names.enumerated().filter { $0.element == name }.map(\.offset)
+    }
+    if let indices {
+        let want = Set(indices.split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) })
+        return names.indices.filter { want.contains($0) }
+    }
+    return Array(names.indices)
+}
+
+/// Reduce an attachment's Mail-reported name to a safe basename for path composition — strips any
+/// directory components (a crafted name like "../../etc/passwd" collapses to "passwd") and
+/// substitutes a safe placeholder for the degenerate empty/"."/".." cases, so a hostile attachment
+/// name can never compose a destination path outside the target directory (zip-slip class).
+func safeAttachmentBasename(_ raw: String, fallbackIndex: Int) -> String {
+    let base = (raw as NSString).lastPathComponent
+    if base.isEmpty || base == "." || base == ".." {
+        return "attachment-\(fallbackIndex)"
+    }
+    return base
+}
+
+/// De-collide a list of basenames so EVERY output name is globally unique — the 2nd+ time a
+/// basename would appear gets "-N" spliced before its extension, incrementing N until the
+/// candidate is free. Checks against the full set of names ALREADY EMITTED (not just a per-input
+/// repeat count), so a literal name that coincidentally matches what de-collision would produce
+/// (e.g. ["image.png", "image-1.png", "image.png"] — a genuinely distinct second attachment
+/// already named "image-1.png") still can't collide: the second "image.png" skips straight to
+/// "image-2.png". Same-named (or accidentally-colliding) sibling attachments from one message
+/// never silently overwrite one another on disk.
+func deCollidedBasenames(_ names: [String]) -> [String] {
+    var used: Set<String> = []
+    var out: [String] = []
+    for n in names {
+        guard used.contains(n) else {
+            used.insert(n)
+            out.append(n)
+            continue
+        }
+        let ns = n as NSString
+        let ext = ns.pathExtension
+        let stem = ns.deletingPathExtension
+        func candidate(_ suffix: Int) -> String { ext.isEmpty ? "\(stem)-\(suffix)" : "\(stem)-\(suffix).\(ext)" }
+        var suffix = 1
+        while used.contains(candidate(suffix)) { suffix += 1 }
+        used.insert(candidate(suffix))
+        out.append(candidate(suffix))
+    }
+    return out
+}
+
 /// Resolve a user-supplied message identifier — Envelope Index ROWID, RFC-5322 Message-ID,
 /// or a `message://` deep link — to a message row. Returns nil if not found.
 func resolveMessageRow(ctx: MailContext, id: String) throws -> [String: String?]? {

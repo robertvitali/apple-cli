@@ -223,42 +223,153 @@ struct TrashEmpty: ParsableCommand {
 }
 
 struct AttachmentsSave: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "save", abstract: "Save attachments from a message to a directory (preview by default).")
+    static let configuration = CommandConfiguration(commandName: "save", abstract: "Save attachments from a message to a directory or an exact path (preview by default).")
     @OptionGroup var global: GlobalOptions
     @Argument(help: "Message id (ROWID / RFC Message-ID); or use --subject.") var id: String?
     @Option(name: .long, help: "Subject keyword to find the message.") var subject: String?
     @Option(name: .long) var account: String?
-    @Option(name: .long, help: "Destination directory.") var dir: String
-    @Option(name: .long, help: "0-based attachment indices to save (comma-separated); default all.") var indices: String?
-    @Option(name: .long, help: "Save only the attachment with this name.") var name: String?
+    @Option(name: .long, help: "Destination directory for multiple attachments (mutually exclusive with --out).") var dir: String?
+    @Option(name: .long, help: "Exact destination file path — rename-on-save; requires exactly one selected attachment (mutually exclusive with --dir).") var out: String?
+    @Option(name: .long, help: "0-based attachment indices to save (comma-separated); default all. Mutually exclusive with --name.") var indices: String?
+    @Option(name: .long, help: "Save only the attachment with this name. Mutually exclusive with --indices.") var name: String?
 
-    struct Result: Encodable { let message_id: String; let directory: String; let attachments: [String]; let dry_run: Bool; let note: String? }
+    // `out_path` / `saved_paths` / `not_saved` (added MINOR). `directory`/`out_path` are the
+    // normalized destination(s) — IDENTICAL in the dry-run preview and the --execute envelope, so
+    // a consumer diffing the two never sees the path change shape. `saved_paths` is present
+    // (possibly []) on --execute only. `not_saved` lists requested attachment names that did NOT
+    // end up saved (a pre-existing-file skip in --dir mode, or an AppleScript-level export
+    // failure) so a short save is a visible, agent-detectable signal — never silent success.
+    struct Result: Encodable {
+        let message_id: String
+        let directory: String?
+        let out_path: String?
+        let attachments: [String]
+        let dry_run: Bool
+        let note: String?
+        let saved_paths: [String]?
+        let not_saved: [String]?
+    }
 
     func run() throws {
         try runGuarded(tool: "mail") {
+            // Validate args BEFORE opening the index, so usage errors are store-independent.
+            guard id != nil || subject != nil else {
+                throw AppleError.validation("provide a message id argument or --subject.")
+            }
+            try requireDirXorOut(dir: dir, out: out)
+            try requireNameXorIndices(name: name, indices: indices)
+
             let ctx = try MailContext()
-            var rowid = 0
+            let row: [String: String?]
             if let id {
-                guard let row = try resolveMessageRow(ctx: ctx, id: id) else { throw AppleError.notFound("no message for id '\(id)'.") }
-                rowid = intVal(row["rowid"]) ?? 0
-            } else if let subject {
+                guard let r = try resolveMessageRow(ctx: ctx, id: id) else { throw AppleError.notFound("no message for id '\(id)'.") }
+                row = r
+            } else {
+                // subject is guaranteed non-nil by the guard above.
                 var f = EnvelopeIndex.MessageFilters()
                 if let account { f.accountUUID = try ctx.requireAccountUUID(account) }
                 f.mailboxName = "All"; f.subjectContains = subject; f.hasAttachment = true; f.limit = 1
-                guard let row = try ctx.index.queryMessages(f).first else { throw AppleError.notFound("no message with attachments matching '\(subject)'.") }
-                rowid = intVal(row["rowid"]) ?? 0
-            } else {
-                throw AppleError.validation("provide a message id argument or --subject.")
+                guard let r = try ctx.index.queryMessages(f).first else { throw AppleError.notFound("no message with attachments matching '\(subject ?? "")'.") }
+                row = r
             }
-            var atts = try ctx.index.attachments(messageRowid: rowid).map(\.name)
-            if let name { atts = atts.filter { $0 == name } }
-            if let indices {
-                let want = Set(indices.split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) })
-                atts = atts.enumerated().filter { want.contains($0.offset) }.map(\.element)
+            let msg = ctx.decodeSummary(row)
+            let rowid = intVal(row["rowid"]) ?? 0
+
+            // Positional selection (never by name — see MailScript.saveAttachments's doc for the
+            // known ordering assumption). `master` is the message's attachment list in
+            // Envelope-Index order; `wanted` is the ascending 0-based positions --name/--indices/
+            // default-all resolves to.
+            let master = try ctx.index.attachments(messageRowid: rowid).map(\.name)
+            let wanted = resolveAttachmentIndices(names: master, name: name, indices: indices)
+            try requireSingleForOut(out: out, selectedCount: wanted.count)
+            let selectedNames = wanted.map { master[$0] }
+
+            // Normalize destination(s) ONCE, so preview + execute always agree byte-for-byte.
+            func normalize(_ p: String) -> String { URL(fileURLWithPath: (p as NSString).expandingTildeInPath).standardizedFileURL.path }
+            let absDir = dir.map(normalize)
+            let absOut = out.map(normalize)
+
+            guard global.willExecute else {
+                try Output.emit(tool: "mail", data: Result(message_id: String(rowid), directory: absDir, out_path: absOut,
+                    attachments: selectedNames, dry_run: true, note: nil, saved_paths: nil, not_saved: nil)); return
             }
-            try Output.emit(tool: "mail", data: Result(message_id: String(rowid), directory: dir, attachments: atts,
-                dry_run: !global.willExecute,
-                note: global.willExecute ? "live attachment save (AppleScript content fetch) is disabled in this build; this is the attachment list preview" : nil))
+
+            // Live export: extract existing attachment bytes to disk. This is a READ/EXPORT
+            // (nothing in Mail is mutated), so it gates on --execute ONLY — no --test-mode/label
+            // gate like the write commands.
+            var pairs: [(index: Int, destPath: String)] = []
+            var notSavedIdx: Set<Int> = []
+
+            if let absDir {
+                // --dir (multi-save, MCP A style): destination must be an EXISTING directory
+                // (matches the MCP oracle, which validates and never creates it).
+                var isDir: ObjCBool = false
+                guard FileManager.default.fileExists(atPath: absDir, isDirectory: &isDir) else {
+                    throw AppleError.validation("destination directory does not exist: \(absDir)")
+                }
+                guard isDir.boolValue else {
+                    throw AppleError.validation("destination path is not a directory: \(absDir)")
+                }
+                let basenames = deCollidedBasenames(wanted.map { safeAttachmentBasename(master[$0], fallbackIndex: $0) })
+                let fm = FileManager.default
+                // Phase 1, all-or-nothing on the dangerous case: a SYMLINK at any computed
+                // destination refuses the WHOLE export (a pre-planted symlink could redirect
+                // attachment bytes outside --dir). A plain pre-existing FILE just skips that one
+                // target — never clobbers an operator's file — recorded in not_saved, not refused.
+                for (offset, idx) in wanted.enumerated() {
+                    let destPath = (absDir as NSString).appendingPathComponent(basenames[offset])
+                    if (try? fm.destinationOfSymbolicLink(atPath: destPath)) != nil {
+                        throw AppleError.mailSafety("destination '\(destPath)' is a symlink; refusing to save an attachment through it.")
+                    }
+                    if fm.fileExists(atPath: destPath) {
+                        notSavedIdx.insert(idx); continue
+                    }
+                    pairs.append((index: idx, destPath: destPath))
+                }
+            } else if let absOut, let idx = wanted.first {
+                // --out (single exact path, MCP B style, rename-on-save): the operator-chosen path
+                // is TRUSTED — save verbatim, no de-collision, no pre-existence skip. Only refuse
+                // when it already resolves to a directory (can't save a file's bytes onto a dir).
+                var isDir: ObjCBool = false
+                if FileManager.default.fileExists(atPath: absOut, isDirectory: &isDir), isDir.boolValue {
+                    throw AppleError.validation("--out path is a directory, not a file: \(absOut)")
+                }
+                pairs.append((index: idx, destPath: absOut))
+            }
+
+            var savedIndices: Set<Int> = []
+            if !pairs.isEmpty {
+                // Locate the message in Mail.app by its RFC Message-ID: the Envelope-Index row's
+                // header, else a raw RFC Message-ID the user passed directly as `id` (a ROWID /
+                // `message://` form can't address Mail.app, so those rely on the row header only).
+                var rfcID = msg.internet_message_id
+                if rfcID == nil || rfcID!.isEmpty, let id {
+                    let t = id.trimmingCharacters(in: .whitespacesAndNewlines)
+                    if Int(t) == nil, !t.lowercased().hasPrefix("message://"), !t.isEmpty {
+                        rfcID = MailFormat.stripAngleBrackets(t) ?? t
+                    }
+                }
+                guard let messageID = rfcID, !messageID.isEmpty else {
+                    throw AppleError.upstream("message '\(rowid)' has no RFC Message-ID; cannot fetch its attachments via Mail.app.")
+                }
+                let acct = msg.account.isEmpty ? nil : msg.account
+                guard let saved = try MailScript().saveAttachments(internetMessageID: messageID, accountName: acct, pairs: pairs) else {
+                    throw AppleError.upstream("message '\(rowid)' could not be located in Mail.app to save its attachments; the Mail.app locator skips Gmail '[Gmail]/*' mailboxes (All Mail, Sent, …). Move it to INBOX, or save it from Mail.app.")
+                }
+                savedIndices = saved
+            }
+            for pair in pairs where !savedIndices.contains(pair.index) { notSavedIdx.insert(pair.index) }
+
+            // Reconcile requested vs actually-saved: a short save is a visible signal (not_saved +
+            // note), never a silent "ok" with fewer bytes on disk than the caller asked for.
+            let savedPaths = pairs.filter { savedIndices.contains($0.index) }.map(\.destPath)
+            let notSaved = wanted.filter { notSavedIdx.contains($0) }.map { master[$0] }
+            let note: String? = notSaved.isEmpty ? nil
+                : "saved \(savedPaths.count) of \(wanted.count); \(notSaved.count) could not be exported"
+
+            try Output.emit(tool: "mail", data: Result(message_id: String(rowid), directory: absDir, out_path: absOut,
+                attachments: selectedNames, dry_run: false, note: note, saved_paths: savedPaths,
+                not_saved: notSaved.isEmpty ? nil : notSaved))
         }
     }
 }

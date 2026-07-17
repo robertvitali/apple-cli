@@ -91,6 +91,33 @@ require_index() {
   [ "$status" -eq 64 ]
 }
 
+@test "mail attachments save with neither id nor --subject is a usage error (exit 64)" {
+  # Store-independent: arg-presence is validated before the Envelope Index is opened.
+  run "$BIN" mail attachments save --dir "$BATS_TEST_TMPDIR"
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q '"validation_error"'
+}
+
+@test "mail attachments save with both --dir and --out is a usage error (exit 64)" {
+  # Store-independent: --dir/--out mutual exclusion is validated before the Envelope Index opens.
+  run "$BIN" mail attachments save --subject x --dir "$BATS_TEST_TMPDIR" --out "$BATS_TEST_TMPDIR/f"
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q '"validation_error"'
+}
+
+@test "mail attachments save with neither --dir nor --out is a usage error (exit 64)" {
+  run "$BIN" mail attachments save --subject x
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q '"validation_error"'
+}
+
+@test "mail attachments save with both --name and --indices is a usage error (exit 64)" {
+  # Store-independent: --name/--indices mutual exclusion is validated before the Envelope Index opens.
+  run "$BIN" mail attachments save --subject x --dir "$BATS_TEST_TMPDIR" --name foo --indices 0
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q '"validation_error"'
+}
+
 @test "mail doctor emits a JSON envelope" {
   run "$BIN" mail doctor
   echo "$output" | grep -q '"schema_version" : 1'

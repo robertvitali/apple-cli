@@ -416,6 +416,90 @@ public struct MailScript {
         try mutateLocated(MailScript.trashScript, id: internetMessageID, account: accountName, extra: [])
     }
 
+    // MARK: Attachment export (READ/EXPORT — extracts existing bytes to disk; mutates nothing in Mail)
+
+    // Locate the message (shared bounded `findMsg`), then save POSITIONALLY: `pairBlob` is a
+    // caller-built list of (0-based index, exact destination path) pairs — the caller (Swift, see
+    // CommandHelpers.swift) has ALREADY resolved --name/--indices to indices and computed safe,
+    // de-collided destination paths. This script does NO name matching and NO path composition —
+    // matching by name would let a message with two identically-named attachments have BOTH match
+    // a single --indices/--name request (wrong bytes silently landing under the wrong/colliding
+    // path). Positional selection via `item (idx + 1) of (mail attachments of msg)` mirrors MCP
+    // A's own `items {i} of mail attachments of msg`. Pairs are pre-parsed OUTSIDE the `tell`
+    // block (mirrors createRuleScript's caution: list/delimiter manipulation stays outside `tell
+    // application "Mail"`). Each `save` is wrapped in `try` so one un-fetchable attachment doesn't
+    // abort the rest; the RS-joined list of successfully-saved indices is returned so the caller
+    // can reconcile requested vs actually-saved (a short save is signal, never silent success).
+    private static let saveAttachmentsScript = """
+    on run argv
+        set msg to my findMsg(item 1 of argv, item 2 of argv)
+        if msg is missing value then return "notfound"
+        set pairBlob to item 3 of argv
+        set RS to (ASCII character 30)
+        set US to (ASCII character 31)
+        set pairList to {}
+        set AppleScript's text item delimiters to RS
+        set pairRecs to text items of pairBlob
+        set AppleScript's text item delimiters to ""
+        repeat with pr in pairRecs
+            set prs to pr as string
+            if prs is not "" then
+                set AppleScript's text item delimiters to US
+                set fld to text items of prs
+                set AppleScript's text item delimiters to ""
+                set end of pairList to {idx:((item 1 of fld) as integer), dest:(item 2 of fld)}
+            end if
+        end repeat
+        set savedOut to ""
+        tell application "Mail"
+            set attList to mail attachments of msg
+            repeat with p in pairList
+                set i to idx of p
+                set d to dest of p
+                try
+                    set att to item (i + 1) of attList
+                    save att in (POSIX file d)
+                    set savedOut to savedOut & i & RS
+                end try
+            end repeat
+        end tell
+        return savedOut
+    end run
+    """
+    /// Save specific attachments of a located message, POSITIONALLY: `pairs` is
+    /// `[(index: 0-based position in the message's attachment list, destPath: exact absolute file
+    /// path)]`, fully resolved by the caller (index selection, basename safety, and de-collision
+    /// all happen in Swift — see CommandHelpers.swift). `index` is passed straight through to
+    /// AppleScript's `item (index + 1) of (mail attachments of msg)` — i.e. it addresses Mail.app's
+    /// OWN live attachment order, matching MCP A's `items {i} of mail attachments of msg`. KNOWN
+    /// ASSUMPTION: the caller's index space (Envelope-Index attachments, `ORDER BY name`) is
+    /// assumed to enumerate in the same order Mail.app reports live; this holds in practice but
+    /// isn't independently verified here — a mismatch would select the wrong attachment by
+    /// position, the same class of edge case MCP A's own index numbering has no defense against
+    /// either (self-consistent only within its own listing/save pair).
+    ///
+    /// Locates the message by RFC message-id via the shared `findMsg` (bracketed + bare form).
+    /// Returns the SET of indices actually saved — a per-item AppleScript failure (not-yet-
+    /// downloaded bytes, an unwritable path) is simply absent from the set, never thrown, so the
+    /// caller can report a short save instead of a false "ok". Returns `nil` when the message
+    /// could not be located in Mail.app on either id form. This is a read/export; it performs no
+    /// gating (caller gates on --execute) and mutates nothing in Mail.
+    public func saveAttachments(internetMessageID: String, accountName: String?,
+                                pairs: [(index: Int, destPath: String)]) throws -> Set<Int>? {
+        let script = MailScript.saveAttachmentsScript + "\n" + MailScript.locator
+        let bare = MailFormat.stripAngleBrackets(internetMessageID) ?? internetMessageID
+        let blob = pairs.map { "\($0.index)\(MailScript.US)\($0.destPath)" }.joined(separator: MailScript.RS)
+        for candidate in ["<\(bare)>", bare] {
+            let out = try runner.run(script, arguments: [candidate, accountName ?? "", blob])
+            if out == "notfound" { continue }
+            let saved = out.components(separatedBy: MailScript.RS)
+                .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+                .compactMap { Int($0) }
+            return Set(saved)
+        }
+        return nil   // not locatable on either candidate form
+    }
+
     // MARK: Mailbox + rule creation (caller gates: create only labeled `apple-cli-test…` items)
 
     private static let createMailboxScript = """

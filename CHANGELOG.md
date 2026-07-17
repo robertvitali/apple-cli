@@ -44,6 +44,17 @@ with the Apple MCP servers they replace.
   non-mark action set manually in Mail.app is not preserved. Both are surfaced in
   the command's JSON `note`; on a recreate failure the envelope includes the full
   rule spec needed to rebuild it by hand (the old rule is deleted first).
+- **Mail `attachments save`** (live export): saves a message's attachment bytes to
+  disk via AppleScript (a read/export — nothing in Mail is mutated; gates on
+  `--execute` only). Selection is POSITIONAL (`--indices` addresses
+  `item i of mail attachments`, matching MCP A — never a name-collapse that would
+  mis-save duplicate-named attachments); `--name` selects by exact name; both
+  default to all. `--dir` saves multiple (basename-safe, zip-slip-guarded, and
+  de-collided so same-named siblings never overwrite); `--out` renames a single
+  selected attachment to an exact path (MCP B `save_path`). A pre-existing file is
+  skipped (never clobbered) and a symlink at a destination refuses the export; the
+  `not_saved` field + `note` reconcile requested-vs-saved so a short save is never
+  a silent success. Byte-parity verified against the on-disk attachment.
 - Mail write-safety **tests**: logic-tier gate tests (`Tests/MailKitTests/WriteSafetyTests.swift`),
   CLI-tier refusal tests (`bats/mail.bats`), and a repeatable self-cleaning live
   e2e (`bats/live/mail-writes.sh`).
@@ -60,7 +71,6 @@ with the Apple MCP servers they replace.
 ### Known parity gaps (Mail — still preview-only vs the MCP union)
 These MCP-union write capabilities are intentionally NOT yet wired to live mutation
 (they emit a preview/note); they must land before Mail is a 100% strict superset:
-- `attachments save` (live AppleScript content fetch to disk)
 - HTML / attachment **send** (the `.eml` is generated but not delivered)
 - `send --mode draft|open`, `draft send|open` (routed to notes)
 - `move --gmail-mode` (Gmail copy+delete label semantics — rejected as unwired)
