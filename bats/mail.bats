@@ -168,6 +168,25 @@ require_index() {
   echo "$output" | grep -q '"type" : "safety_violation"'
 }
 
+@test "mail rules update --execute WITHOUT --test-mode is refused (exit 77, before any Mail access)" {
+  # requireLabeledRule fail-closes on the test-mode gate before it ever reads Mail's rules.
+  run "$BIN" mail rules update 1 --name "apple-cli-test-x" --execute
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q '"type" : "safety_violation"'
+}
+
+@test "mail rules update with an invalid --match is a validation_error (exit 64)" {
+  run "$BIN" mail rules update 1 --match sideways --execute
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q '"validation_error"'
+}
+
+@test "mail rules update dry-run (no --execute) previews the patch without touching Mail (exit 0)" {
+  run "$BIN" mail rules update 3 --name "apple-cli-test-renamed"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"dry_run" : true'
+}
+
 @test "mail draft create with an UNLABELED subject is refused under --execute --test-mode (exit 77)" {
   APPLE_TEST_MODE=1 \
     run "$BIN" mail draft create --subject "Quarterly report" --body y --to me@self.test --execute --test-mode

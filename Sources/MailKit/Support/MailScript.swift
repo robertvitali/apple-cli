@@ -536,6 +536,134 @@ public struct MailScript {
         guard out == "ok" else { throw AppleScriptRunner.RunError.scriptFailed(status: 1, stderr: "createRule returned '\(out)'") }
     }
 
+    // Patch metadata of an EXISTING rule (name/enabled/match/actions) IN PLACE. Deliberately does
+    // NOT touch rule CONDITIONS: Mail's `delete rule condition` crashes Mail (-609 "Connection is
+    // invalid", confirmed 2026-07-17 — every other rule op works). Condition replacement is done by
+    // the CALLER as a whole-rule delete-and-recreate (deleteRule + createRule, both reliable), never
+    // here. Each field carries a presence flag so "not provided" (leave as-is) is distinct from
+    // "provided empty". Caller MUST have label-checked the target (requireLabeledRule) + patch first.
+    private static let updateRuleMetaScript = """
+    on run argv
+        set idx to (item 1 of argv) as integer
+        set hasName to (item 2 of argv) is "1"
+        set newName to item 3 of argv
+        set hasEnabled to (item 4 of argv) is "1"
+        set enVal to (item 5 of argv) is "1"
+        set hasMatch to (item 6 of argv) is "1"
+        set matchAll to (item 7 of argv) is "1"
+        set hasActs to (item 8 of argv) is "1"
+        set actBlob to item 9 of argv
+        set RS to (ASCII character 30)
+        set actToks to {}
+        if hasActs then
+            set AppleScript's text item delimiters to RS
+            set actToks to text items of actBlob
+            set AppleScript's text item delimiters to ""
+        end if
+        tell application "Mail"
+            set r to rule idx
+            if hasName then set name of r to newName
+            if hasEnabled then set enabled of r to enVal
+            if hasMatch then
+                try
+                    set all conditions must be met of r to matchAll
+                end try
+            end if
+            if hasActs then
+                try
+                    set mark read of r to false
+                end try
+                try
+                    set mark flagged of r to false
+                end try
+                repeat with atk in actToks
+                    set tok to atk as string
+                    if tok is "mark_read" then
+                        try
+                            set mark read of r to true
+                        end try
+                    else if tok is "mark_flagged" then
+                        try
+                            set mark flagged of r to true
+                        end try
+                    end if
+                end repeat
+            end if
+        end tell
+        return "ok"
+    end run
+    """
+    /// In-place metadata patch (name/enabled/match/actions) of rule `index`. `nil` = leave as-is.
+    /// Reliable Mail ops only — never mutates conditions (see updateRuleMetaScript). Caller MUST
+    /// have label-checked the target + patch. `actions` (if non-nil) is the safe mark_* token set.
+    public func updateRuleMeta(index: Int, name: String?, enabled: Bool?, matchAll: Bool?,
+                               actions: [String]?) throws {
+        let actBlob = (actions ?? []).joined(separator: MailScript.RS)
+        let args = [
+            String(index),
+            name != nil ? "1" : "0", name ?? "",
+            enabled != nil ? "1" : "0", (enabled ?? false) ? "1" : "0",
+            matchAll != nil ? "1" : "0", (matchAll ?? false) ? "1" : "0",
+            actions != nil ? "1" : "0", actBlob,
+        ]
+        let out = try runner.run(MailScript.updateRuleMetaScript, arguments: args)
+        guard out == "ok" else { throw AppleScriptRunner.RunError.scriptFailed(status: 1, stderr: "updateRuleMeta returned '\(out)'") }
+    }
+
+    /// A rule's scalar properties, read back so a CONDITION-replacing update can delete-and-recreate
+    /// the rule while preserving the fields the caller didn't patch — without ever mutating a rule
+    /// condition (Mail's `delete rule condition` crasher).
+    public struct RuleScalars {
+        public let name: String; public let enabled: Bool
+        public let markRead: Bool; public let markFlagged: Bool
+    }
+
+    private static let readRuleScalarsScript = """
+    on run argv
+        set idx to (item 1 of argv) as integer
+        set US to (ASCII character 31)
+        tell application "Mail"
+            set r to rule idx
+            set en to enabled of r
+            set mr to mark read of r
+            set mf to mark flagged of r
+            set nm to name of r
+        end tell
+        -- Coerce each boolean to text: `boolean & text` in AppleScript builds a LIST (joined with
+        -- ", " on return), not concatenated text, when the boolean is the FIRST operand. Explicit
+        -- `as text` forces string concatenation regardless of order, so name-last stays US-safe.
+        return (en as text) & US & (mr as text) & US & (mf as text) & US & nm
+    end run
+    """
+    /// Read a rule's scalar props for the recreate path. NAME IS LAST so a name that itself contains
+    /// the US delimiter still round-trips (the trailing fields are rejoined). Match-logic is NOT read:
+    /// a live test rule is always recreated with match=all, so the old value would be unused. Only the
+    /// two mark_* action flags are read — the recreate resets a rule to the mark set (documented), so
+    /// any non-mark action set manually in Mail.app is intentionally not round-tripped.
+    public func readRuleScalars(index: Int) throws -> RuleScalars {
+        let raw = try runner.run(MailScript.readRuleScalarsScript, arguments: [String(index)])
+        let f = raw.trimmingCharacters(in: .whitespacesAndNewlines).components(separatedBy: MailScript.US)
+        guard f.count >= 4 else {
+            throw AppleScriptRunner.RunError.scriptFailed(status: 1, stderr: "readRuleScalars: unexpected output '\(raw)'")
+        }
+        func flag(_ s: String) -> Bool { s.trimmingCharacters(in: .whitespaces).lowercased() == "true" }
+        let name = f[3...].joined(separator: MailScript.US)
+        return RuleScalars(name: name, enabled: flag(f[0]), markRead: flag(f[1]), markFlagged: flag(f[2]))
+    }
+
+    private static let ruleCondCountScript = """
+    on run argv
+        tell application "Mail" to return (count of rule conditions of rule ((item 1 of argv) as integer)) as string
+    end run
+    """
+    /// Count a rule's conditions — the post-recreate SAFETY check. A rule with ZERO conditions
+    /// matches ALL mail, so a delete-and-recreate that silently dropped its conditions (e.g. via a
+    /// duplicate-name `make new rule`) MUST be caught before the rule is ever enabled.
+    public func ruleConditionCount(index: Int) throws -> Int {
+        let out = try runner.run(MailScript.ruleCondCountScript, arguments: [String(index)])
+        return Int(out.trimmingCharacters(in: .whitespacesAndNewlines)) ?? -1
+    }
+
     // MARK: Drafts (Mail's real Drafts mailbox — list is a read; create/delete caller-gated)
 
     public struct DraftInfo { public let subject: String; public let recipient: String; public let date_sent: String }

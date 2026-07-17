@@ -1,4 +1,5 @@
 import Testing
+import AppleKit
 @testable import MailKit
 
 @Suite("RuleSchema")
@@ -61,5 +62,51 @@ struct RuleSchemaTests {
         #expect(throws: Error.self) { _ = try RuleSchema.parseActions([]) }
         #expect(throws: Error.self) { _ = try RuleSchema.parseActions(["flag_color=chartreuse"]) }
         #expect(throws: Error.self) { _ = try RuleSchema.parseActions(["notakey=1"]) }
+    }
+}
+
+/// The live create/update safety invariant (`rules create` + `rules update` both route through it).
+/// Pure — no Mail.app. Locks that a live-authored rule can only ever be a self-scoped, non-destructive
+/// test rule, so the AppleScript path can never be handed a rule that would act on real mail.
+@Suite("RuleLiveGuards (live rule safety invariant)")
+struct RuleLiveGuardsTests {
+    let label = TestMode.sandboxPrefix
+
+    @Test func labeledNameGate() throws {
+        try RuleLiveGuards.requireLabeledName(label + "-rule")            // labeled → passes
+        #expect(throws: Error.self) { try RuleLiveGuards.requireLabeledName("real-inbox-rule") }
+    }
+
+    @Test func controlCharGate() throws {
+        #expect(throws: Error.self) { try RuleLiveGuards.requireNoControlChars(name: "x\u{1f}y", conditions: []) }
+        let clean = try RuleSchema.parseCondition("subject:contains:\(label)")
+        try RuleLiveGuards.requireNoControlChars(name: label, conditions: [clean])   // clean → passes
+    }
+
+    @Test func selfScopedRequiresMatchAllAndLabelCondition() throws {
+        let labeled = try RuleSchema.parseCondition("subject:contains:\(label)")
+        let unlabeled = try RuleSchema.parseCondition("from:contains:boss@x.io")
+        #expect(throws: Error.self) { try RuleLiveGuards.requireSelfScoped(conditions: [labeled], match: "any") }    // any → refused
+        #expect(throws: Error.self) { try RuleLiveGuards.requireSelfScoped(conditions: [unlabeled], match: "all") }  // no label cond → refused
+        try RuleLiveGuards.requireSelfScoped(conditions: [labeled, unlabeled], match: "all")                         // labeled+all → passes
+    }
+
+    @Test func selfScopedRejectsHeaderNameCondition() throws {
+        let labeled = try RuleSchema.parseCondition("subject:contains:\(label)")
+        let hdr = try RuleSchema.parseCondition("header_name:contains:x:X-Test")
+        #expect(throws: Error.self) { try RuleLiveGuards.requireSelfScoped(conditions: [labeled, hdr], match: "all") }
+    }
+
+    @Test func liveActionTokensAllowsOnlyMarkVerbs() throws {
+        #expect(try RuleLiveGuards.liveActionTokens(RuleSchema.parseActions(["mark_read=true"])) == ["mark_read"])
+        #expect(try RuleLiveGuards.liveActionTokens(RuleSchema.parseActions(["mark_flagged=true", "mark_read=true"])).sorted()
+                == ["mark_flagged", "mark_read"])
+    }
+
+    @Test func liveActionTokensRefusesDestructiveAndUnwired() throws {
+        #expect(throws: Error.self) { _ = try RuleLiveGuards.liveActionTokens(RuleSchema.parseActions(["forward_to=a@x.io"])) }
+        #expect(throws: Error.self) { _ = try RuleLiveGuards.liveActionTokens(RuleSchema.parseActions(["delete=true"])) }
+        #expect(throws: Error.self) { _ = try RuleLiveGuards.liveActionTokens(RuleSchema.parseActions(["move_to=Archive"])) }
+        #expect(throws: Error.self) { _ = try RuleLiveGuards.liveActionTokens(RuleSchema.parseActions(["flag_color=red"])) }
     }
 }

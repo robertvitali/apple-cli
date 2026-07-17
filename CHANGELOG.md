@@ -26,10 +26,24 @@ with the Apple MCP servers they replace.
   allowlist for outbound, and a subject-label check that lets a run mutate only
   `apple-cli-test…`-labeled data it created): `send`, `reply`, `forward`,
   `mark` read/unread, `flag`/unflag (+color), `move`, `delete`-to-Trash,
-  `mailboxes create`, `rules` create/enable/disable/delete, `draft`
+  `mailboxes create`, `rules` create/update/enable/disable/delete, `draft`
   create/list/delete. Permanent-delete and empty-trash are hard-refused.
   Live-created rules are self-scoped to the test label, non-destructive, and
   force-disabled so an enabled test rule can never act on real mail.
+- **Mail `rules update`** (live patch): metadata (name/enabled/match/actions) is
+  modified in place; a condition change is applied as a whole-rule
+  delete-and-recreate, because Mail's `delete rule condition` AppleScript crashes
+  Mail (`-609`) and `make new rule` with a duplicate name silently drops
+  conditions. The rebuilt rule is created disabled, its conditions are VERIFIED to
+  have attached (a 0-condition rule would match all mail), then re-enabled only if
+  it was enabled. The self-scoping + non-destructive-action invariant is shared
+  with `rules create` via `RuleLiveGuards`. **Two documented divergences from the
+  MCP's in-place `update_rule`** (unavoidable given the Mail bugs above): a
+  condition-only update (a) **moves the rule to the end of the rules list**, and
+  (b) **resets its actions** to the carried `mark_read`/`mark_flagged` set — a
+  non-mark action set manually in Mail.app is not preserved. Both are surfaced in
+  the command's JSON `note`; on a recreate failure the envelope includes the full
+  rule spec needed to rebuild it by hand (the old rule is deleted first).
 - Mail write-safety **tests**: logic-tier gate tests (`Tests/MailKitTests/WriteSafetyTests.swift`),
   CLI-tier refusal tests (`bats/mail.bats`), and a repeatable self-cleaning live
   e2e (`bats/live/mail-writes.sh`).
@@ -46,7 +60,6 @@ with the Apple MCP servers they replace.
 ### Known parity gaps (Mail — still preview-only vs the MCP union)
 These MCP-union write capabilities are intentionally NOT yet wired to live mutation
 (they emit a preview/note); they must land before Mail is a 100% strict superset:
-- `rules update` (in-place patch of an existing rule)
 - `attachments save` (live AppleScript content fetch to disk)
 - HTML / attachment **send** (the `.eml` is generated but not delivered)
 - `send --mode draft|open`, `draft send|open` (routed to notes)

@@ -53,54 +53,18 @@ struct RulesCreate: ParsableCommand {
             }
             // ---- Live create: SELF-SCOPED, non-destructive, force-disabled. ----
             // A test rule must be UNABLE to affect real mail even if later enabled by the same
-            // agent, so it must (a) be bound to the test label so it only ever matches test mail,
-            // and (b) carry no destructive/redirect action. Force-disabled is the third layer.
+            // agent: (a) bound to the test label so it only ever matches test mail, (b) no
+            // destructive/redirect action, (c) force-disabled. The (a)+(b) invariant lives in
+            // RuleLiveGuards so `rules create` and `rules update` enforce it identically.
             guard global.testMode && TestMode.isEnabled else {
                 throw AppleError.mailSafety("creating a rule requires --test-mode AND APPLE_TEST_MODE=1; refusing. The default dry-run previews instead.")
             }
-            guard name.hasPrefix(TestMode.sandboxPrefix) else {
-                throw AppleError.mailSafety("rule name '\(name)' is not a labeled test item (must start with \"\(TestMode.sandboxPrefix)\") — refusing.")
-            }
-            // Reject the argv field delimiters so a stray control char can't desync the blob parse.
-            let ctrl = CharacterSet(charactersIn: "\u{1e}\u{1f}")
-            if name.rangeOfCharacter(from: ctrl) != nil || conditions.contains(where: { $0.value.rangeOfCharacter(from: ctrl) != nil }) {
-                throw AppleError.validation("rule name/condition values must not contain RS/US (0x1E/0x1F) control characters.")
-            }
-            // (a) Self-scoping: --match all AND a subject condition bound to the test label, so the
-            // rule can only ever fire on `apple-cli-test…` mail — never real mail, even once enabled.
-            guard match == "all" else {
-                throw AppleError.mailSafety("a live-created test rule must use --match all so its test-label condition always constrains it — refusing (use the preview for --match any).")
-            }
-            let selfScoped = conditions.contains {
-                $0.field == "subject" && ["contains", "begins_with", "equals"].contains($0.operator) && $0.value.contains(TestMode.sandboxPrefix)
-            }
-            guard selfScoped else {
-                throw AppleError.mailSafety("a live-created test rule must include a subject condition bound to the test label (e.g. --condition \"subject:contains:\(TestMode.sandboxPrefix)\") so it only ever acts on test mail — refusing.")
-            }
-            // (b) No destructive / redirect / unresolved actions on a live-created rule.
-            if let fwd = actions.forward_to, !fwd.isEmpty {
-                throw AppleError.mailSafety("a live-created rule with forward_to can auto-send to others — refused; create such a rule in Mail.app.")
-            }
-            if actions.delete == true {
-                throw AppleError.mailSafety("a live-created rule with a delete action could auto-trash mail once enabled — refused; test delete-action rules in Mail.app.")
-            }
-            if actions.move_to != nil || actions.copy_to != nil {
-                throw AppleError.validation("live rule create supports mark_read/mark_flagged; move_to/copy_to need a resolved mailbox — set them in Mail.app or use the preview.")
-            }
-            if actions.flag_color != nil {
-                throw AppleError.validation("live rule create does not wire the flag_color action yet — set it in Mail.app or use the preview.")
-            }
-            if conditions.contains(where: { $0.field == "header_name" }) {
-                throw AppleError.validation("live rule create does not support header_name conditions yet — set them in Mail.app or use the preview.")
-            }
+            try RuleLiveGuards.requireLabeledName(name)
+            try RuleLiveGuards.requireNoControlChars(name: name, conditions: conditions)
+            try RuleLiveGuards.requireSelfScoped(conditions: conditions, match: match)   // enforces --match all
+            let actToks = try RuleLiveGuards.liveActionTokens(actions)
             let conds = conditions.map { (type: $0.field, op: $0.operator, value: $0.value) }
-            var actToks: [String] = []
-            if actions.mark_read == true { actToks.append("mark_read") }
-            if actions.mark_flagged == true { actToks.append("mark_flagged") }
-            guard !actToks.isEmpty else {
-                throw AppleError.validation("live rule create needs at least one of mark_read/mark_flagged (delete/forward/color/move are refused or preview-only).")
-            }
-            // match=all is enforced above, so the rule is an AND rule — thread it so execute matches preview.
+            // match=all is enforced by requireSelfScoped, so the rule is an AND rule — thread it.
             try MailScript().createRule(name: name, enabled: false, matchAll: true, conditions: conds, actions: actToks)
             try Output.emit(tool: "mail", data: [
                 "created_rule": AnyEncodableBox(name), "conditions": AnyEncodableBox(conditions),
@@ -130,9 +94,107 @@ struct RulesUpdate: ParsableCommand {
             // parseActions enforces the unsupported-action refusal (run-AppleScript/redirect/reply/sound/color).
             let acts = action.isEmpty ? nil : try RuleSchema.parseActions(action)
             let patch = Patch(index: index, name: name, conditions: conds, actions: acts, match_logic: match, enabled: enabled)
-            let note = global.willExecute ? "live rule mutation is disabled in this build (rules are pre-existing real data); this is a preview" : nil
-            if global.json { try Output.emit(tool: "mail", data: ["dry_run": AnyEncodableBox(!global.willExecute), "patch": AnyEncodableBox(patch), "note": AnyEncodableBox(note)]) }
-            else { print("Would update rule \(index) (dry-run: \(!global.willExecute))") }
+
+            // ---- Validation that needs no Mail — enforced for BOTH dry-run and execute so a preview
+            // faithfully predicts the execute outcome (a rename / --match any / action that --execute
+            // would refuse is refused in the preview too, not shown as if it would apply). ----
+            guard name != nil || enabled != nil || match != nil || conds != nil || acts != nil else {
+                throw AppleError.validation("nothing to update — pass at least one of --name/--enabled/--match/--condition/--action.")
+            }
+            if match == "any" {   // a live test rule must stay match=all so its label always constrains it
+                throw AppleError.mailSafety("a live test rule must stay --match all so its label condition always constrains it — refusing to set --match any.")
+            }
+            if let name { try RuleLiveGuards.requireLabeledName(name) }        // a rename must keep the label
+            try RuleLiveGuards.requireNoControlChars(name: name, conditions: conds ?? [])
+            if let conds { try RuleLiveGuards.requireSelfScoped(conditions: conds, match: "all") }
+            let actToks = try acts.map { try RuleLiveGuards.liveActionTokens($0) }
+
+            guard global.willExecute else {
+                let recreates = conds != nil
+                if global.json { try Output.emit(tool: "mail", data: ["dry_run": AnyEncodableBox(true), "patch": AnyEncodableBox(patch), "would_recreate": AnyEncodableBox(recreates), "note": AnyEncodableBox(Optional<String>.none)]) }
+                else { print("Would update rule \(index) (dry-run; \(recreates ? "condition change → delete-and-recreate" : "in-place"))") }
+                return
+            }
+            // ---- Live. Target MUST be a labeled test rule (requireLabeledRule fail-closes on real rules). ----
+            let target = try requireLabeledRule(index: index, testMode: global.testMode)
+
+            guard let conds else {
+                // ---- Metadata-only patch → modify IN PLACE (reliable; preserves rule position). ----
+                // LABEL-TRUST BOUNDARY: enabling here trusts the rule's NAME label only — its EXISTING
+                // conditions/actions are NOT re-verified (same boundary as `rules enable`). The tool's
+                // own create/recreate can't author a labeled rule that acts on real mail; a hand-made
+                // one (Mail.app UI) is the operator's responsibility.
+                try MailScript().updateRuleMeta(index: target.index, name: name, enabled: enabled,
+                                                matchAll: match == "all" ? true : nil, actions: actToks)
+                try Output.emit(tool: "mail", data: [
+                    "updated_rule_index": AnyEncodableBox(target.index),
+                    "rule_name": AnyEncodableBox(name ?? target.name),
+                    "patch": AnyEncodableBox(patch), "recreated": AnyEncodableBox(false),
+                    "dry_run": AnyEncodableBox(false), "executed": AnyEncodableBox(true),
+                    "note": AnyEncodableBox("patched in place")])
+                return
+            }
+            // ---- Condition replacement → whole-rule DELETE-AND-RECREATE. Two Mail bugs force this
+            // shape: (1) `delete rule condition` crashes Mail (-609), and (2) `make new rule` with a
+            // name that ALREADY EXISTS silently mangles the new rule's conditions. So delete the old
+            // rule FIRST (name becomes unique), create a fresh rule DISABLED, VERIFY its conditions
+            // attached, and only THEN re-enable it (a silently-condition-less rule would match ALL
+            // mail). Two documented divergences from the MCP's in-place update (see CHANGELOG): the
+            // rule MOVES TO THE END of the list, and its actions are RESET to the carried
+            // mark_read/mark_flagged set — a non-mark action set manually in Mail.app is NOT preserved
+            // (readRuleScalars reads only the mark flags). ----
+            let old = try MailScript().readRuleScalars(index: target.index)
+            let mergedName = name ?? old.name
+            try RuleLiveGuards.requireLabeledName(mergedName)          // a preserved/renamed name must be labeled
+            let mergedEnabled = enabled ?? old.enabled
+            var mergedTokens = actToks
+            if mergedTokens == nil {
+                var carried: [String] = []
+                if old.markRead { carried.append("mark_read") }
+                if old.markFlagged { carried.append("mark_flagged") }
+                mergedTokens = carried
+            }
+            guard let finalTokens = mergedTokens, !finalTokens.isEmpty else {
+                throw AppleError.validation("the rule has no mark_read/mark_flagged action and none was given — a live rule needs one; add --action mark_read=true or mark_flagged=true.")
+            }
+            let condTriples = conds.map { (type: $0.field, op: $0.operator, value: $0.value) }
+            // Refuse if a DIFFERENT rule already carries the target name (the recreate would trigger
+            // the duplicate-name condition-mangling). Checked BEFORE the old rule is deleted.
+            if try MailScript().listRules().contains(where: { $0.index != target.index && $0.name == mergedName }) {
+                throw AppleError.validation("another rule is already named '\(mergedName)' — recreate would collide; pick a different --name.")
+            }
+            // Delete-old-first is forced by the duplicate-name bug, so if the create then fails the old
+            // rule is GONE — surface the spec needed to rebuild it by hand in every failure path.
+            let recovery = "name='\(mergedName)' match=all enabled=\(mergedEnabled) conditions=[\(condTriples.map { "\($0.type):\($0.op):\($0.value)" }.joined(separator: ", "))] actions=[\(finalTokens.joined(separator: ", "))]"
+            try MailScript().deleteRule(index: target.index)                                // 1) old gone → name unique
+            do {
+                try MailScript().createRule(name: mergedName, enabled: false, matchAll: true,   // 2) create DISABLED
+                                            conditions: condTriples, actions: finalTokens)
+            } catch {
+                throw AppleError.upstream("rule recreate FAILED to create the replacement AFTER deleting the old rule — the rule is GONE. Recreate it in Mail.app: \(recovery). (underlying: \(error))")
+            }
+            guard let created = try MailScript().listRules().first(where: { $0.name == mergedName }) else {
+                throw AppleError.upstream("rule recreate failed — '\(mergedName)' is missing after create; the old rule was already deleted. Recreate in Mail.app: \(recovery)")
+            }
+            let attached = try MailScript().ruleConditionCount(index: created.index)         // 3) VERIFY conditions
+            guard attached == condTriples.count else {
+                try? MailScript().deleteRule(index: created.index)                           //    remove the malformed rule
+                throw AppleError.upstream("rule recreate dropped conditions (\(attached)/\(condTriples.count) attached) — removed the malformed rule and did NOT enable it (a 0-condition rule matches ALL mail). Recreate in Mail.app: \(recovery)")
+            }
+            if mergedEnabled {                                                              // 4) re-enable only once verified
+                try MailScript().updateRuleMeta(index: created.index, name: nil, enabled: true, matchAll: nil, actions: nil)
+            }
+            let newIndex = (try? MailScript().listRules())?.first(where: { $0.name == mergedName })?.index ?? created.index
+            try Output.emit(tool: "mail", data: [
+                "updated_rule_index": AnyEncodableBox(newIndex),
+                "previous_index": AnyEncodableBox(target.index),
+                "rule_name": AnyEncodableBox(mergedName),
+                "conditions_attached": AnyEncodableBox(attached),
+                "enabled": AnyEncodableBox(mergedEnabled),
+                "actions": AnyEncodableBox(finalTokens),
+                "patch": AnyEncodableBox(patch), "recreated": AnyEncodableBox(true),
+                "dry_run": AnyEncodableBox(false), "executed": AnyEncodableBox(true),
+                "note": AnyEncodableBox("condition change → delete-and-recreated (Mail can't delete a rule condition); created disabled, conditions verified, re-enabled if it was enabled. DIVERGES from the MCP in-place update: rule MOVED TO END of list, and actions RESET to [\(finalTokens.joined(separator: ", "))] (a non-mark action set in Mail.app is NOT preserved).")])
         }
     }
 }
@@ -196,9 +258,9 @@ private func setEnabled(index: Int, enabled: Bool, global: GlobalOptions) throws
     }
 }
 
-/// Emit exactly one envelope for a rule create/update preview. Live rule mutation is not
-/// wired in this build (rules are pre-existing real data), so `--execute` yields a preview
-/// with a `note`, never a second (error) envelope.
+/// Emit exactly one envelope for a rule create DRY-RUN preview (the non-execute path only —
+/// RulesCreate calls this with `willExecute: false`). Live create/update now apply real
+/// mutations behind the RuleLiveGuards safety invariant, each emitting their own executed envelope.
 func emitRulePreview(_ rule: RuleSchema.Rule, willExecute: Bool, json: Bool) throws {
     let note = willExecute ? "live rule mutation is disabled in this build (rules are pre-existing real data); this is a preview" : nil
     if json {

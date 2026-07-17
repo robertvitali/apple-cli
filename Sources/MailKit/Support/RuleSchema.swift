@@ -103,3 +103,74 @@ public enum RuleSchema {
         public let enabled: Bool
     }
 }
+
+/// The safety invariant a LIVE rule create/update must satisfy so an autonomous run can only ever
+/// author a rule that acts on `apple-cli-test…` mail — never real mail — even once enabled. Both
+/// `rules create` and `rules update` route their patch content through these, so the invariant has
+/// ONE source of truth (drift here = a real-mail-mutation surface). Exit-code contract, relied on by
+/// the bats gate tests: label/self-scope/destructive-action failures throw `mailSafety` (exit 77);
+/// unwired/malformed-action failures throw `validation` (exit 64).
+public enum RuleLiveGuards {
+    private static let ctrlChars = CharacterSet(charactersIn: "\u{1e}\u{1f}")
+
+    /// The rule name must carry the test label (so a real rule can never be authored/renamed live).
+    public static func requireLabeledName(_ name: String) throws {
+        guard name.hasPrefix(TestMode.sandboxPrefix) else {
+            throw AppleError.mailSafety("rule name '\(name)' is not a labeled test item (must start with \"\(TestMode.sandboxPrefix)\") — refusing.")
+        }
+    }
+
+    /// RS/US (0x1E/0x1F) in the name or a condition value would desync the argv blob the AppleScript
+    /// splits on — reject so a stray control char can't smuggle an extra condition/action field.
+    public static func requireNoControlChars(name: String?, conditions: [RuleSchema.Condition]) throws {
+        if let name, name.rangeOfCharacter(from: ctrlChars) != nil {
+            throw AppleError.validation("rule name must not contain RS/US (0x1E/0x1F) control characters.")
+        }
+        if conditions.contains(where: { $0.value.rangeOfCharacter(from: ctrlChars) != nil }) {
+            throw AppleError.validation("rule condition values must not contain RS/US (0x1E/0x1F) control characters.")
+        }
+    }
+
+    /// `conditions` is the FULL condition set the rule will carry. It must be an AND-rule
+    /// (`match == "all"`) bound to the test label via a subject condition, so the label always
+    /// constrains it. header_name conditions aren't wired for live mutation.
+    public static func requireSelfScoped(conditions: [RuleSchema.Condition], match: String) throws {
+        guard match == "all" else {
+            throw AppleError.mailSafety("a live test rule must use --match all so its test-label condition always constrains it — refusing (use the preview for --match any).")
+        }
+        let selfScoped = conditions.contains {
+            $0.field == "subject" && ["contains", "begins_with", "equals"].contains($0.operator) && $0.value.contains(TestMode.sandboxPrefix)
+        }
+        guard selfScoped else {
+            throw AppleError.mailSafety("a live test rule must include a subject condition bound to the test label (e.g. \"subject:contains:\(TestMode.sandboxPrefix)\") so it only ever acts on test mail — refusing.")
+        }
+        if conditions.contains(where: { $0.field == "header_name" }) {
+            throw AppleError.validation("live rule mutation does not support header_name conditions yet — set them in Mail.app or use the preview.")
+        }
+    }
+
+    /// Reduce an Action to the live-safe token set. A live rule may only mark_read/mark_flagged;
+    /// forward_to (auto-send) and delete (auto-trash) are refused, move_to/copy_to/flag_color are
+    /// unwired. Returns the non-empty `[mark_read?, mark_flagged?]` token list for the AppleScript.
+    public static func liveActionTokens(_ actions: RuleSchema.Action) throws -> [String] {
+        if let fwd = actions.forward_to, !fwd.isEmpty {
+            throw AppleError.mailSafety("a live rule with forward_to can auto-send to others — refused; edit such a rule in Mail.app.")
+        }
+        if actions.delete == true {
+            throw AppleError.mailSafety("a live rule with a delete action could auto-trash mail once enabled — refused; test delete-action rules in Mail.app.")
+        }
+        if actions.move_to != nil || actions.copy_to != nil {
+            throw AppleError.validation("live rule mutation supports mark_read/mark_flagged; move_to/copy_to need a resolved mailbox — set them in Mail.app or use the preview.")
+        }
+        if actions.flag_color != nil {
+            throw AppleError.validation("live rule mutation does not wire the flag_color action yet — set it in Mail.app or use the preview.")
+        }
+        var toks: [String] = []
+        if actions.mark_read == true { toks.append("mark_read") }
+        if actions.mark_flagged == true { toks.append("mark_flagged") }
+        guard !toks.isEmpty else {
+            throw AppleError.validation("live rule mutation needs at least one of mark_read/mark_flagged (delete/forward/color/move are refused or preview-only).")
+        }
+        return toks
+    }
+}
