@@ -213,6 +213,264 @@ public struct MailScript {
         ])
     }
 
+    // MARK: Send with attachments (outbound + file attachments)
+
+    /// Compose + send a message carrying one or more file attachments. Every user value —
+    /// subject, body, recipients, AND each attachment path — is US-delimited argv (never
+    /// interpolated into source; injection-safe). Attachments are placed `at after the last
+    /// paragraph of content` (the well-supported Mail form used by the parity oracle
+    /// patrickfreyer apple-mail-mcp); a `delay` after each lets Mail finish loading the file
+    /// before `send` fires. The CALLER MUST have passed the self-only `guardOutbound` first;
+    /// this method performs NO gating.
+    private static let sendWithAttachmentsScript = """
+    on run argv
+        set theSubject to item 1 of argv
+        set theBody to item 2 of argv
+        set toRaw to item 3 of argv
+        set ccRaw to item 4 of argv
+        set bccRaw to item 5 of argv
+        set attRaw to item 6 of argv
+        set US to (ASCII character 31)
+        tell application "Mail"
+            set newMsg to make new outgoing message with properties {subject:theSubject, content:theBody, visible:false}
+            my addRecipients(newMsg, toRaw, US, "to")
+            my addRecipients(newMsg, ccRaw, US, "cc")
+            my addRecipients(newMsg, bccRaw, US, "bcc")
+            my addAttachments(newMsg, attRaw, US)
+            send newMsg
+        end tell
+        return "sent"
+    end run
+
+    on addRecipients(msg, raw, US, kind)
+        if raw is "" then return
+        set AppleScript's text item delimiters to US
+        set parts to text items of raw
+        set AppleScript's text item delimiters to ""
+        tell application "Mail"
+            repeat with p in parts
+                set addr to (p as string)
+                if addr is not "" then
+                    if kind is "to" then
+                        make new to recipient at end of to recipients of msg with properties {address:addr}
+                    else if kind is "cc" then
+                        make new cc recipient at end of cc recipients of msg with properties {address:addr}
+                    else
+                        make new bcc recipient at end of bcc recipients of msg with properties {address:addr}
+                    end if
+                end if
+            end repeat
+        end tell
+    end addRecipients
+
+    on addAttachments(msg, raw, US)
+        if raw is "" then return
+        set AppleScript's text item delimiters to US
+        set parts to text items of raw
+        set AppleScript's text item delimiters to ""
+        tell application "Mail"
+            repeat with p in parts
+                set thePath to (p as string)
+                if thePath is not "" then
+                    tell msg
+                        make new attachment with properties {file name:(POSIX file thePath)} at after the last paragraph
+                    end tell
+                    delay 1
+                end if
+            end repeat
+        end tell
+    end addAttachments
+    """
+    /// Send `body` (plain content) with `attachmentPaths` (already resolved absolute paths).
+    /// Returns normally on success; throws if the script did not report "sent".
+    public func sendWithAttachments(subject: String, body: String, to: [String], cc: [String],
+                                    bcc: [String], attachmentPaths: [String]) throws {
+        let US = MailScript.US
+        let out = try runner.run(MailScript.sendWithAttachmentsScript, arguments: [
+            subject, body,
+            to.joined(separator: US), cc.joined(separator: US), bcc.joined(separator: US),
+            attachmentPaths.joined(separator: US),
+        ])
+        guard out == "sent" else {
+            throw AppleScriptRunner.RunError.scriptFailed(status: 1, stderr: "sendWithAttachments returned '\(out)'")
+        }
+    }
+
+    // MARK: HTML delivery — reliable open (default) + opt-in GUI keystroke auto-send
+
+    /// RELIABLE HTML path (Option A default). Open a generated multipart `.eml` (X-Unsent +
+    /// HTML alternative, from `EmlBuilder`) in Mail as a rendered, ready-to-send compose
+    /// window via LaunchServices (`/usr/bin/open -a Mail <path>`). Mail renders the HTML —
+    /// its AppleScript `content` is plain-text only, so an `.eml` opened by LaunchServices is
+    /// the only reliable render path (mirrors patrickfreyer `create_rich_email_draft`
+    /// `open_in_mail`). This does NOT auto-send: the operator reviews and clicks Send. An
+    /// earlier design tried to `open` the `.eml` via AppleScript and then programmatically
+    /// `send` the resulting window located by id-diff — but LaunchServices `open` does not
+    /// surface the compose window in Mail's `outgoing messages` collection, so no reference
+    /// (nor this code) can reliably auto-send an opened `.eml`; auto-send of rendered HTML is
+    /// the GUI-keystroke path below. Caller MUST have passed the self-only `guardOutbound`
+    /// first. Injection-safe: `path` is a Process argv element, never shell-interpolated. The
+    /// `.eml` must stay on disk until Mail reads it, so the caller keeps it (reported as
+    /// `eml_path`) rather than deleting immediately.
+    public func openEml(path: String) throws {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        p.arguments = ["-a", "Mail", path]
+        p.standardInput = FileHandle.nullDevice
+        let errPipe = Pipe()
+        p.standardError = errPipe
+        do {
+            try p.run()
+        } catch {
+            throw AppleScriptRunner.RunError.launchFailed("open -a Mail: \(error)")
+        }
+        let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        guard p.terminationStatus == 0 else {
+            throw AppleScriptRunner.RunError.scriptFailed(status: p.terminationStatus,
+                stderr: "open -a Mail failed: " + String(decoding: errData, as: UTF8.self))
+        }
+    }
+
+    /// OPT-IN HTML auto-send (Option A `--gui-send`). Faithful port of patrickfreyer
+    /// `_send_html_email`: place the HTML on the NSPasteboard, open a VISIBLE compose window
+    /// with recipients + attachments set programmatically, then drive Mail's UI via System
+    /// Events (Tab into the body, Cmd-A, Cmd-V to paste rich HTML, Cmd-Shift-D to Send). This
+    /// is the ONLY way to auto-send RENDERED HTML through Mail (its AppleScript `content` is
+    /// plain-text only) — but it is GUI automation: it requires Accessibility permission for
+    /// the controlling process, STEALS focus, and is timing-fragile. It is therefore gated
+    /// behind an explicit `--gui-send` opt-in and is NEVER the default.
+    ///
+    /// SAFETY: recipients are set PROGRAMMATICALLY on the outgoing message before the window is
+    /// shown, and the caller MUST have passed the self-only `guardOutbound` first — so even the
+    /// GUI Cmd-Shift-D send can only ever reach a self-allowlisted address. The prior clipboard
+    /// contents are saved and restored around the paste. Inputs are opaque argv (`on run argv`);
+    /// the HTML body is read from `htmlPath` via `cat` inside the script, so no body text is
+    /// interpolated into source. Uses `runViaStdin` because the AppleScriptObjC `use framework`
+    /// header requires the stdin form.
+    private static let sendHtmlGuiScript = """
+    use framework "Foundation"
+    use framework "AppKit"
+    use scripting additions
+    on run argv
+        set htmlPath to item 1 of argv
+        set theSubject to item 2 of argv
+        set toRaw to item 3 of argv
+        set ccRaw to item 4 of argv
+        set bccRaw to item 5 of argv
+        set attRaw to item 6 of argv
+        set US to (ASCII character 31)
+        set htmlString to (do shell script "cat " & quoted form of htmlPath)
+        set pb to current application's NSPasteboard's generalPasteboard()
+        set oldClip to pb's stringForType:(current application's NSPasteboardTypeString)
+        pb's clearContents()
+        set htmlData to (current application's NSString's stringWithString:htmlString)'s dataUsingEncoding:(current application's NSUTF8StringEncoding)
+        pb's setData:htmlData forType:(current application's NSPasteboardTypeHTML)
+        tell application "Mail"
+            set newMsg to make new outgoing message with properties {subject:theSubject, content:"", visible:true}
+            my addRecips(newMsg, toRaw, US, "to")
+            my addRecips(newMsg, ccRaw, US, "cc")
+            my addRecips(newMsg, bccRaw, US, "bcc")
+            my addAtts(newMsg, attRaw, US)
+            activate
+        end tell
+        delay 2.5
+        -- SAFETY (review M1): the blind Cmd-Shift-D must land ONLY on the compose window THIS
+        -- call created — never a stray compose window the operator left open (which could carry a
+        -- real, non-self recipient and would bypass guardOutbound). Assert the frontmost Mail
+        -- window is ours by matching its title to the unique subject, and refuse (fail-closed) if
+        -- it is not. Restore the clipboard on every exit path.
+        set sendOK to false
+        tell application "System Events"
+            set frontmost of process "Mail" to true
+            delay 0.5
+            tell process "Mail"
+                if (exists front window) and ((name of front window) contains theSubject) then
+                    repeat 7 times
+                        key code 48
+                        delay 0.1
+                    end repeat
+                    delay 0.3
+                    keystroke "a" using command down
+                    delay 0.2
+                    keystroke "v" using command down
+                    delay 0.5
+                    keystroke "d" using {command down, shift down}
+                    set sendOK to true
+                end if
+            end tell
+        end tell
+        delay 1
+        if oldClip is not missing value then
+            pb's clearContents()
+            pb's setString:oldClip forType:(current application's NSPasteboardTypeString)
+        end if
+        if sendOK then
+            return "sent"
+        else
+            return "wrong-window"
+        end if
+    end run
+
+    on addRecips(msg, raw, US, kind)
+        if raw is "" then return
+        set AppleScript's text item delimiters to US
+        set parts to text items of raw
+        set AppleScript's text item delimiters to ""
+        tell application "Mail"
+            repeat with p in parts
+                set addr to (p as string)
+                if addr is not "" then
+                    if kind is "to" then
+                        make new to recipient at end of to recipients of msg with properties {address:addr}
+                    else if kind is "cc" then
+                        make new cc recipient at end of cc recipients of msg with properties {address:addr}
+                    else
+                        make new bcc recipient at end of bcc recipients of msg with properties {address:addr}
+                    end if
+                end if
+            end repeat
+        end tell
+    end addRecips
+
+    on addAtts(msg, raw, US)
+        if raw is "" then return
+        set AppleScript's text item delimiters to US
+        set parts to text items of raw
+        set AppleScript's text item delimiters to ""
+        tell application "Mail"
+            repeat with p in parts
+                set thePath to (p as string)
+                if thePath is not "" then
+                    tell msg
+                        make new attachment with properties {file name:(POSIX file thePath)} at after the last paragraph
+                    end tell
+                    delay 1
+                end if
+            end repeat
+        end tell
+    end addAtts
+    """
+    /// Auto-send a rendered-HTML message via the GUI keystroke path (see `sendHtmlGuiScript`).
+    /// `htmlPath` points at a temp file holding the raw HTML body (the caller writes it and
+    /// deletes it after this returns). Returns normally on "sent"; throws otherwise. Caller
+    /// MUST have passed the self-only `guardOutbound` first; this method performs NO gating.
+    public func sendHtmlViaGui(htmlPath: String, subject: String, to: [String],
+                               cc: [String], bcc: [String], attachmentPaths: [String]) throws {
+        let US = MailScript.US
+        let out = try runner.runViaStdin(MailScript.sendHtmlGuiScript, arguments: [
+            htmlPath, subject,
+            to.joined(separator: US), cc.joined(separator: US), bcc.joined(separator: US),
+            attachmentPaths.joined(separator: US),
+        ])
+        guard out == "sent" else {
+            let reason = out == "wrong-window"
+                ? "the frontmost Mail window was not the compose window this send created (title did not match the subject) — refused the Send keystroke to avoid sending an unrelated window. Close any other open Mail compose window and retry, or use the reliable --html open path."
+                : "sendHtmlViaGui returned '\(out)'"
+            throw AppleScriptRunner.RunError.scriptFailed(status: 1, stderr: reason)
+        }
+    }
+
     // MARK: Unread counts (Mail.app live property — matches the MCP oracle)
 
     /// The Envelope Index `read` bit diverges from server-synced seen-state (observed: index

@@ -55,6 +55,23 @@ with the Apple MCP servers they replace.
   skipped (never clobbered) and a symlink at a destination refuses the export; the
   `not_saved` field + `note` reconcile requested-vs-saved so a short save is never
   a silent success. Byte-parity verified against the on-disk attachment.
+- **Mail HTML / attachment `send` + `reply`** (Option A). **Attachment send** (plain body +
+  file attachments) delivers via AppleScript `make new outgoing message` + `make new
+  attachment … at after the last paragraph` + `send` — matching s-morgan
+  `send_email_with_attachments` exactly; verified live self-only (delivered, attachment
+  received). **HTML** has two paths, because Mail's AppleScript `content` is plain-text only
+  (assigning HTML stores literal markup): the reliable DEFAULT (`--html` alone) builds a
+  multipart `.eml` (`X-Unsent: 1`, plain + HTML alternative) and OPENS it as a rendered,
+  ready-to-send compose window via `/usr/bin/open -a Mail` (matches patrickfreyer
+  `create_rich_email_draft` `open_in_mail`) — the operator clicks Send; and an explicit opt-in
+  `--gui-send` flag performs the GUI-keystroke AUTO-send (NSPasteboard HTML injection → visible
+  compose window → System Events Tab/Cmd-A/Cmd-V/Cmd-Shift-D), matching patrickfreyer
+  `compose_email` `body_html`. `--gui-send` is NEVER the default: it needs Accessibility
+  permission, steals focus, and is timing-fragile, so it is quarantined behind the flag. Every
+  path — plain, attachment, HTML open, HTML gui-send — passes the SAME self-only `guardOutbound`
+  before any Mail action; recipients are set programmatically before any window is shown, so even
+  the GUI Cmd-Shift-D send can only reach a self-allowlisted address. The `send`/`reply` preview
+  gains an additive `opened` field (true when the reliable HTML path opened a compose window).
 - Mail write-safety **tests**: logic-tier gate tests (`Tests/MailKitTests/WriteSafetyTests.swift`),
   CLI-tier refusal tests (`bats/mail.bats`), and a repeatable self-cleaning live
   e2e (`bats/live/mail-writes.sh`).
@@ -71,7 +88,35 @@ with the Apple MCP servers they replace.
 ### Known parity gaps (Mail — still preview-only vs the MCP union)
 These MCP-union write capabilities are intentionally NOT yet wired to live mutation
 (they emit a preview/note); they must land before Mail is a 100% strict superset:
-- HTML / attachment **send** (the `.eml` is generated but not delivered)
 - `send --mode draft|open`, `draft send|open` (routed to notes)
 - `move --gmail-mode` (Gmail copy+delete label semantics — rejected as unwired)
 - `reply`/`forward` quote the Envelope-Index snippet, not the full original body
+
+### Validation status (Mail HTML/attachment send)
+- Attachment send + HTML **open** path: verified live (self-only) — delivered attachment
+  confirmed; compose window opened + closed clean.
+- HTML `--gui-send` (GUI-keystroke auto-send): implemented, build-green, and self-only-guard
+  regression-locked in `bats`; its live keystroke-send is a **live-tier, operator-present**
+  check (needs Accessibility permission + steals focus), pending — like other TCC-gated live
+  paths, it is not CI-validatable. A review-hardening guard asserts the frontmost Mail window is
+  the compose window this call created (subject-title match) before the Send keystroke, and
+  refuses fail-closed otherwise, so the blind Cmd-Shift-D can never fire on a stray compose
+  window carrying a non-self recipient.
+
+### Deferred parity items (OMC review 2026-07-20 — tracked, not yet closed)
+Surfaced by the pre-commit OMC review; all are contained by the self-only send gate (none is a
+safety/data-loss risk in the shipped state), and each must close before Mail is a 100% strict
+superset:
+- **`--account` sender-selection** is honored only on the HTML-open path (the `.eml` `From:`
+  header); the plain / attachment / `--gui-send` AppleScript paths do not yet `set sender`, so a
+  send goes from the default account. Fix: set the sender on those paths, or reject `--account`
+  where it can't be honored.
+- **Attachment type / path validation** (s-morgan blocks `.exe/.sh/.app…`; patrickfreyer blocks
+  `~/.ssh`, `~/.aws`, Keychains, and enforces home-dir-only) is not folded in yet. The **25 MB
+  size cap IS enforced** as of this change.
+- **`--bcc` on the reliable HTML-open path**: `EmlBuilder` omits the `Bcc:` header (correct for a
+  wire send), so the opened compose window carries no bcc. The plain / attachment / `--gui-send`
+  paths DO add bcc programmatically. Fix: add a `Bcc:` header for the open (compose-window) path,
+  where Mail handles it correctly.
+- **`--mode draft|open` for `--html`**: today `--html` (without `--gui-send`) always OPENS a
+  compose window regardless of `--mode`; distinct HTML draft/open handling is folded into gap 4.

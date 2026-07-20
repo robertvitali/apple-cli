@@ -64,6 +64,24 @@ struct EmlBuilderTests {
         #expect(!EmlBuilder.stripHTML("<b>x</b>").contains("<"))
     }
 
+    @Test func emitsXUnsentHeaderSoMailOpensAsOutgoing() throws {
+        // X-Unsent:1 is what makes `open`-ing the .eml yield an editable OUTGOING message the
+        // send path can deliver, rather than a read-only received-message viewer. Present on
+        // every generated .eml (plain, html, and attachment forms).
+        let plain = try EmlBuilder(to: ["a@y.io"], subject: "s", textBody: "b").build()
+        #expect(plain.contains("X-Unsent: 1"))
+        let html = try EmlBuilder(to: ["a@y.io"], subject: "s", textBody: "b", htmlBody: "<b>x</b>").build()
+        #expect(html.contains("X-Unsent: 1"))
+    }
+
+    @Test func escapeHTMLNeutralizesMarkup() {
+        // A quoted original embedded into an HTML reply body must not inject markup.
+        #expect(EmlBuilder.escapeHTML("<script>alert('x')</script>")
+            == "&lt;script&gt;alert(&#39;x&#39;)&lt;/script&gt;")
+        #expect(EmlBuilder.escapeHTML("a & b \"c\"") == "a &amp; b &quot;c&quot;")
+        #expect(EmlBuilder.escapeHTML("plain text") == "plain text")
+    }
+
     @Test func bccNeverWrittenAsHeader() throws {
         // A Bcc: header would leak the blind-copy list to every recipient — it must not appear.
         let eml = try EmlBuilder(to: ["a@y.io"], bcc: ["secret@z.io"], subject: "s", textBody: "b").build()

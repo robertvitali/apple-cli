@@ -108,6 +108,11 @@ public struct EmlBuilder {
         headers.append("Date: \(EmlBuilder.rfc2822Date(date))")
         headers.append("Message-ID: \(messageID)")
         headers.append("MIME-Version: 1.0")
+        // X-Unsent:1 marks the message as an editable OUTGOING draft, so opening the .eml in
+        // Mail (`open`) yields a compose window / outgoing message the send path can then deliver,
+        // rather than a read-only received-message viewer. Matches the parity oracle
+        // (patrickfreyer apple-mail-mcp `create_rich_email_draft`, which always sets X-Unsent:1).
+        headers.append("X-Unsent: 1")
 
         let text = textBody ?? htmlBody.map { EmlBuilder.stripHTML($0) } ?? ""
         let boundaryAlt = "alt-\(UUID().uuidString)"
@@ -143,6 +148,24 @@ public struct EmlBuilder {
                 out += EmlBuilder.base64Lines(att.data)
             }
             out += "--\(boundaryMixed)--\r\n"
+        }
+        return out
+    }
+
+    /// Escape the HTML metacharacters so plain text (e.g. a quoted original in a reply) can be
+    /// embedded into an HTML body WITHOUT injecting markup. Pure — unit-tested.
+    public static func escapeHTML(_ s: String) -> String {
+        var out = ""
+        out.reserveCapacity(s.count)
+        for ch in s {
+            switch ch {
+            case "&": out += "&amp;"
+            case "<": out += "&lt;"
+            case ">": out += "&gt;"
+            case "\"": out += "&quot;"
+            case "'": out += "&#39;"
+            default: out.append(ch)
+            }
         }
         return out
     }

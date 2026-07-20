@@ -4,8 +4,11 @@ import AppleKit
 
 // P2 compose surface: send, reply, forward, draft, draft-rich. Destructive/outbound verbs
 // DEFAULT to a dry-run preview; a real send requires --execute AND APPLE_TEST_MODE AND a
-// self-only recipient (TestMode). Live sending is intentionally NOT wired in this build —
-// the preview + generated .eml are the safe, tested surface (see AGENTS.md Safety).
+// self-only recipient (TestMode). Live delivery is wired for ALL body types — plain text (Mail
+// `content`), file attachments (AppleScript `make new attachment`), and HTML (multipart `.eml`
+// opened as an X-Unsent outgoing message and sent, since Mail's AppleScript `content` is
+// plain-text only). EVERY path is gated by the same self-only `guardOutbound` before any send;
+// there is no path that reaches an AppleScript send without it (see AGENTS.md Safety).
 
 /// Split repeatable + comma-joined recipient options into a flat address list.
 func splitRecipients(_ raw: [String]) -> [String] {
@@ -30,6 +33,48 @@ func guardOutbound(recipients: [String], testMode: Bool) throws {
     }
 }
 
+/// Resolve + validate a single attachment path: expand `~`, require it to exist and be a REGULAR
+/// file (a directory / missing path is rejected). Returns the resolved absolute path for both the
+/// AppleScript attachment route and the `.eml` builder. Note: the self-only `guardOutbound` is the
+/// real containment for attachment CONTENT — a sent attachment can only ever reach the operator's
+/// own address, so this is existence/type validation, not a content sandbox. Missing/non-regular
+/// files are `not_found` (exit 65), matching the prior inline behavior.
+func resolveAttachmentPath(_ raw: String) throws -> String {
+    let path = (raw as NSString).expandingTildeInPath
+    var isDir: ObjCBool = false
+    guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir), !isDir.boolValue else {
+        throw AppleError.notFound("attachment not found or not a regular file: \(raw)")
+    }
+    // Reject oversized attachments before handing the file to Mail (a clean pre-send refusal vs an
+    // opaque Mail hang/failure) — matches s-morgan send_email_with_attachments' 25 MB default cap.
+    let maxBytes = 25 * 1024 * 1024
+    if let size = (try? FileManager.default.attributesOfItem(atPath: path))?[.size] as? NSNumber,
+       size.intValue > maxBytes {
+        throw AppleError.validation("attachment exceeds the 25 MB send limit (\(size.intValue) bytes): \(raw)")
+    }
+    return path
+}
+
+/// Read already-resolved attachment paths into `EmlBuilder.Attachment` parts (for the HTML/`.eml`
+/// route). A path that can't be read (e.g. a TOCTOU race after `resolveAttachmentPath`) is
+/// `not_found` rather than a silent drop.
+func attachmentsFromPaths(_ paths: [String]) throws -> [EmlBuilder.Attachment] {
+    try paths.map { path in
+        guard let data = try? Data(contentsOf: URL(fileURLWithPath: path)) else {
+            throw AppleError.notFound("attachment could not be read: \(path)")
+        }
+        let name = (path as NSString).lastPathComponent
+        return EmlBuilder.Attachment(filename: name, mimeType: EmlBuilder.mimeType(forFilename: name), data: data)
+    }
+}
+
+/// The `.eml` output path: an explicit `--out`, else a labeled temp file.
+func emlDestURL(out: String?) -> URL {
+    let p = out ?? FileManager.default.temporaryDirectory
+        .appendingPathComponent("apple-cli-\(TestMode.sandboxPrefix)-\(UUID().uuidString).eml").path
+    return URL(fileURLWithPath: (p as NSString).expandingTildeInPath)
+}
+
 struct SendCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "send", abstract: "Compose an email (dry-run preview by default; plain/HTML/attachments; mode send|draft|open).")
     @OptionGroup var global: GlobalOptions
@@ -39,8 +84,9 @@ struct SendCommand: ParsableCommand {
     @Option(name: .long, help: "CC recipient (repeatable).") var cc: [String] = []
     @Option(name: .long, help: "BCC recipient (repeatable).") var bcc: [String] = []
     @Option(name: .long, help: "Attachment file path (repeatable).") var attach: [String] = []
-    @Option(name: .long, help: "HTML body (sent via multipart .eml for reliable rendering).") var html: String?
+    @Option(name: .long, help: "HTML body. Default opens a rendered compose window for review (reliable); add --gui-send to auto-send.") var html: String?
     @Option(name: .long, help: "Delivery mode: send | draft | open.") var mode: String = "send"
+    @Flag(name: .long, help: "Auto-send an --html message via GUI keystroke automation (needs Accessibility, steals focus, fragile). Opt-in.") var guiSend = false
     @Option(name: .long, help: "Sending account (name or UUID).") var account: String?
     @Option(name: .long, help: "Write the generated .eml to this path (html/attachment sends).") var out: String?
 
@@ -48,7 +94,7 @@ struct SendCommand: ParsableCommand {
         let action: String; let mode: String; let account: String?
         let to: [String]; let cc: [String]; let bcc: [String]
         let subject: String; let has_html: Bool; let attachments: [String]
-        let eml_path: String?; let dry_run: Bool; let executed: Bool; let note: String?
+        let eml_path: String?; let dry_run: Bool; let executed: Bool; let opened: Bool; let note: String?
     }
 
     func run() throws {
@@ -56,47 +102,82 @@ struct SendCommand: ParsableCommand {
             let toL = splitRecipients(to), ccL = splitRecipients(cc), bccL = splitRecipients(bcc)
             guard !toL.isEmpty else { throw AppleError.validation("--to is required.") }
             guard ["send", "draft", "open"].contains(mode) else { throw AppleError.validation("--mode must be send, draft, or open.") }
+            // --gui-send is the explicit opt-in for GUI-keystroke HTML auto-send; it applies
+            // ONLY to an --html send.
+            if guiSend {
+                guard html != nil else { throw AppleError.validation("--gui-send only applies to an --html send.") }
+                guard mode == "send" else { throw AppleError.validation("--gui-send requires --mode send.") }
+            }
 
-            // Generate the .eml for HTML/attachment sends (proven-reliable path; MCP B #18).
-            var emlPath: String?
-            if html != nil || !attach.isEmpty {
-                let atts = try attach.map { path -> EmlBuilder.Attachment in
-                    let url = URL(fileURLWithPath: (path as NSString).expandingTildeInPath)
-                    guard let data = try? Data(contentsOf: url) else { throw AppleError.notFound("attachment not found: \(path)") }
-                    return EmlBuilder.Attachment(filename: url.lastPathComponent,
-                                                 mimeType: EmlBuilder.mimeType(forFilename: url.lastPathComponent), data: data)
+            // Three mutually-exclusive live outbound actions (Option A):
+            //  - plain / attachment AUTO-SEND: --mode send, no --html (reliable AppleScript).
+            //  - HTML GUI auto-send:            --gui-send (implies --html + --mode send; fragile).
+            //  - HTML reliable OPEN:            --html without --gui-send (renders a compose window).
+            let willAutoSend = global.willExecute && mode == "send" && html == nil
+            let willGuiSend = global.willExecute && guiSend
+            let willOpenHtml = global.willExecute && html != nil && !guiSend
+            let willLiveOutbound = willAutoSend || willGuiSend || willOpenHtml
+
+            // Self-only outbound gate FIRST — before any attachment read, .eml/.html build, or
+            // AppleScript/GUI action. No live path below reaches Mail without passing this gate.
+            if willLiveOutbound { try guardOutbound(recipients: toL + ccL + bccL, testMode: global.testMode) }
+            // A live HTML action (open or gui-send) needs a real subject — a compose window / sent
+            // message with an empty subject is a mistake; refuse before building anything.
+            if willGuiSend || willOpenHtml {
+                guard !subject.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    throw AppleError.validation("--subject is required for a live --html action; refusing an empty/whitespace subject.")
                 }
+            }
+
+            // Resolve attachment paths once (existence + regular-file), then generate the .eml
+            // whenever HTML or attachments are present: it is the preview artifact, the `--out`
+            // target, AND the delivery vehicle for the reliable HTML OPEN path.
+            let attPaths = try attach.map { try resolveAttachmentPath($0) }
+            var emlPath: String?
+            if html != nil || !attPaths.isEmpty {
+                let atts = try attachmentsFromPaths(attPaths)
                 let eml = try EmlBuilder(from: account, to: toL, cc: ccL, bcc: bccL, subject: subject,
                                      textBody: body.isEmpty ? nil : body, htmlBody: html, attachments: atts).build()
-                let dest = URL(fileURLWithPath: ((out ?? FileManager.default.temporaryDirectory
-                    .appendingPathComponent("apple-cli-\(TestMode.sandboxPrefix)-\(UUID().uuidString).eml").path) as NSString).expandingTildeInPath)
+                let dest = emlDestURL(out: out)
                 try eml.write(to: dest, atomically: true, encoding: .utf8)
                 emlPath = dest.path
             }
 
-            // Real send is guarded (self-only + test-mode) BEFORE any output — one envelope.
-            let willSend = global.willExecute && mode == "send"
             var executed = false
+            var opened = false
             var note: String?
-            if willSend {
-                try guardOutbound(recipients: toL + ccL + bccL, testMode: global.testMode)
-                if html == nil && attach.isEmpty {
-                    // Plain-text live send via Mail.app — already self-only + test-mode guarded.
-                    try MailScript().send(subject: subject, body: body, to: toL, cc: ccL, bcc: bccL)
-                    executed = true
+            if willGuiSend {
+                // Opt-in HTML auto-send via GUI keystrokes (fragile — see MailScript.sendHtmlViaGui).
+                // The raw HTML goes to a temp file the script reads via `cat` (never interpolated).
+                let htmlTmp = FileManager.default.temporaryDirectory
+                    .appendingPathComponent("apple-cli-\(TestMode.sandboxPrefix)-\(UUID().uuidString).html")
+                try (html ?? "").write(to: htmlTmp, atomically: true, encoding: .utf8)
+                defer { try? FileManager.default.removeItem(at: htmlTmp) }
+                try MailScript().sendHtmlViaGui(htmlPath: htmlTmp.path, subject: subject,
+                    to: toL, cc: ccL, bcc: bccL, attachmentPaths: attPaths)
+                executed = true
+                note = "sent via GUI keystroke automation (--gui-send); required Accessibility permission and stole window focus"
+            } else if willOpenHtml, let emlPath {
+                // Reliable HTML path: open the rendered .eml as a compose window for review.
+                try MailScript().openEml(path: emlPath)
+                opened = true
+                note = "HTML rendered in a Mail compose window for review — click Send, or re-run with --gui-send to auto-send (GUI automation; needs Accessibility). The .eml is kept at eml_path."
+            } else if willAutoSend {
+                if !attPaths.isEmpty {
+                    // Attachments, no HTML: direct AppleScript route (matches send_email_with_attachments).
+                    try MailScript().sendWithAttachments(subject: subject, body: body, to: toL, cc: ccL, bcc: bccL, attachmentPaths: attPaths)
                 } else {
-                    // HTML/attachment delivery goes via the generated .eml (reliable rendering);
-                    // live HTML/attachment SEND is not wired — open the .eml in Mail to send.
-                    note = "generated .eml for reliable HTML/attachment delivery — open it in Mail to send"
-                        + " (live HTML/attachment send is not wired; plain-text --mode send delivers directly)"
+                    // Plain text.
+                    try MailScript().send(subject: subject, body: body, to: toL, cc: ccL, bcc: bccL)
                 }
+                executed = true
             } else if global.willExecute {
-                note = "mode '\(mode)' is preview-only; use --mode send (plain text) to deliver"
+                note = "mode '\(mode)' is preview-only; use --mode send to deliver"
             }
 
             let preview = Preview(action: "send", mode: mode, account: account, to: toL, cc: ccL, bcc: bccL,
                                   subject: subject, has_html: html != nil, attachments: attach,
-                                  eml_path: emlPath, dry_run: !global.willExecute, executed: executed, note: note)
+                                  eml_path: emlPath, dry_run: !global.willExecute, executed: executed, opened: opened, note: note)
             try Output.emit(tool: "mail", data: preview)
         }
     }
@@ -112,15 +193,16 @@ struct ReplyCommand: ParsableCommand {
     @Flag(name: .long, help: "Reply to all recipients.") var all = false
     @Option(name: .long) var cc: [String] = []
     @Option(name: .long) var bcc: [String] = []
-    @Option(name: .long, help: "HTML reply body.") var html: String?
+    @Option(name: .long, help: "HTML reply body. Default opens a rendered compose window for review; add --gui-send to auto-send.") var html: String?
     @Option(name: .long, help: "Attachment file path (repeatable).") var attach: [String] = []
     @Option(name: .long, help: "Delivery mode: send | draft | open.") var mode: String = "send"
+    @Flag(name: .long, help: "Auto-send an --html reply via GUI keystroke automation (needs Accessibility, steals focus, fragile). Opt-in.") var guiSend = false
 
     struct Preview: Encodable {
         let action: String; let target: String; let matched_message_id: String?
         let reply_all: Bool; let mode: String; let has_html: Bool
         let to: [String]; let cc: [String]; let bcc: [String]; let attachments: [String]
-        let dry_run: Bool; let executed: Bool; let note: String?
+        let dry_run: Bool; let executed: Bool; let opened: Bool; let note: String?
     }
 
     func run() throws {
@@ -159,30 +241,78 @@ struct ReplyCommand: ParsableCommand {
             if all { recipients += (target.to ?? []) + (target.cc ?? []) }
             let ccL = splitRecipients(cc), bccL = splitRecipients(bcc)
 
-            let willSend = global.willExecute && mode == "send"
+            let replySubject = target.subject.lowercased().hasPrefix("re:") ? target.subject : "Re: \(target.subject)"
+            // Quote from the index snippet/content already in hand — avoids a slow full-body
+            // AppleScript scan (message-id has no Mail index; a body fetch can hang on Gmail).
+            let original = target.content ?? target.snippet
+            let quotedPlain = original.map { "\n\n> " + $0.replacingOccurrences(of: "\n", with: "\n> ") } ?? ""
+
+            // --gui-send opt-in validity (mirrors SendCommand).
+            if guiSend {
+                guard html != nil else { throw AppleError.validation("--gui-send only applies to an --html reply.") }
+                guard mode == "send" else { throw AppleError.validation("--gui-send requires --mode send.") }
+            }
+            // Three mutually-exclusive live outbound actions (mirrors SendCommand / Option A).
+            let willAutoSend = global.willExecute && mode == "send" && html == nil
+            let willGuiSend = global.willExecute && guiSend
+            let willOpenHtml = global.willExecute && html != nil && !guiSend
+            let willLiveOutbound = willAutoSend || willGuiSend || willOpenHtml
+
             var executed = false
+            var opened = false
             var note: String?
-            if willSend {
-                if html != nil || !attach.isEmpty {
-                    note = "HTML/attachment reply is not wired for live send; use plain --body (live) or draft-rich (.eml)."
-                } else {
-                    try guardOutbound(recipients: recipients + ccL + bccL, testMode: global.testMode)
-                    let replySubject = target.subject.lowercased().hasPrefix("re:") ? target.subject : "Re: \(target.subject)"
-                    // Quote from the index snippet/content already in hand — avoids a slow full-body
-                    // AppleScript scan (message-id has no Mail index; a body fetch can hang on Gmail).
-                    let original = target.content ?? target.snippet
-                    let quoted = original.map { "\n\n> " + $0.replacingOccurrences(of: "\n", with: "\n> ") } ?? ""
-                    try MailScript().send(subject: replySubject, body: body + quoted, to: recipients, cc: ccL, bcc: bccL)
+            if willLiveOutbound {
+                // Self-only gate FIRST — before any attachment read, .eml/.html build, or send.
+                try guardOutbound(recipients: recipients + ccL + bccL, testMode: global.testMode)
+                // A live reply needs a real subject (replySubject always carries "Re:" today, so
+                // this is belt-and-suspenders).
+                guard !replySubject.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    throw AppleError.validation("--subject is required for a live reply; refusing an empty/whitespace subject.")
+                }
+                // Quoted original, escaped into the HTML part (shared by the gui-send + open paths).
+                let quotedHTML = original.map {
+                    "<br><br><blockquote>" + EmlBuilder.escapeHTML($0).replacingOccurrences(of: "\n", with: "<br>") + "</blockquote>"
+                } ?? ""
+                if willGuiSend {
+                    // Opt-in HTML auto-send via GUI keystrokes (fragile — see MailScript.sendHtmlViaGui).
+                    let paths = try attach.map { try resolveAttachmentPath($0) }
+                    let htmlTmp = FileManager.default.temporaryDirectory
+                        .appendingPathComponent("apple-cli-\(TestMode.sandboxPrefix)-\(UUID().uuidString).html")
+                    try ((html ?? "") + quotedHTML).write(to: htmlTmp, atomically: true, encoding: .utf8)
+                    defer { try? FileManager.default.removeItem(at: htmlTmp) }
+                    try MailScript().sendHtmlViaGui(htmlPath: htmlTmp.path, subject: replySubject,
+                        to: recipients, cc: ccL, bcc: bccL, attachmentPaths: paths)
+                    executed = true
+                    note = "sent via GUI keystroke automation (--gui-send); required Accessibility and stole focus"
+                } else if willOpenHtml {
+                    // Reliable HTML reply: build a multipart .eml (quote embedded) and open a
+                    // rendered compose window for review.
+                    let atts = try attachmentsFromPaths(try attach.map { try resolveAttachmentPath($0) })
+                    let eml = try EmlBuilder(to: recipients, cc: ccL, bcc: bccL, subject: replySubject,
+                                             textBody: body + quotedPlain, htmlBody: (html ?? "") + quotedHTML, attachments: atts).build()
+                    let dest = emlDestURL(out: nil)
+                    try eml.write(to: dest, atomically: true, encoding: .utf8)
+                    try MailScript().openEml(path: dest.path)
+                    opened = true
+                    note = "HTML reply rendered in a compose window for review — click Send, or re-run with --gui-send to auto-send."
+                } else { // willAutoSend — plain or attachment reply (quoted plain body)
+                    if !attach.isEmpty {
+                        let paths = try attach.map { try resolveAttachmentPath($0) }
+                        try MailScript().sendWithAttachments(subject: replySubject, body: body + quotedPlain,
+                                                             to: recipients, cc: ccL, bcc: bccL, attachmentPaths: paths)
+                    } else {
+                        try MailScript().send(subject: replySubject, body: body + quotedPlain, to: recipients, cc: ccL, bcc: bccL)
+                    }
                     executed = true
                 }
             } else if global.willExecute {
-                note = "mode '\(mode)' is preview-only; use --mode send (plain text) to deliver"
+                note = "mode '\(mode)' is preview-only; use --mode send to deliver"
             }
 
             try Output.emit(tool: "mail", data: Preview(action: "reply", target: id ?? "subject:\(subject ?? "")",
                 matched_message_id: target.id, reply_all: all, mode: mode, has_html: html != nil,
                 to: recipients, cc: ccL, bcc: bccL, attachments: attach,
-                dry_run: !global.willExecute, executed: executed, note: note))
+                dry_run: !global.willExecute, executed: executed, opened: opened, note: note))
         }
     }
 }

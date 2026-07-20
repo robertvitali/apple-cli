@@ -188,6 +188,122 @@ require_index() {
   echo "$output" | grep -q '"executed" : false'
 }
 
+# ── HTML / attachment send: the self-only gate fires IDENTICALLY (regression-lock) ──────────────
+# HTML + attachment live send is wired (via the multipart .eml / make-new-attachment routes), so
+# these prove the NEW paths route through the SAME guardOutbound before any AppleScript send — no
+# HTML/attachment path bypasses the self-only + two-factor gate. All fire before any Mail access.
+
+@test "mail send --html to a NON-self recipient is refused (safety_violation, exit 77)" {
+  APPLE_TEST_MODE=1 APPLE_TEST_RECIPIENTS="me@self.test" \
+    run "$BIN" mail send --to someone-else@example.com --subject "apple-cli-test x" --body y \
+      --html "<b>hi</b>" --mode send --execute --test-mode
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q '"type" : "safety_violation"'
+}
+
+@test "mail send --attach to a NON-self recipient is refused (safety_violation, exit 77)" {
+  APPLE_TEST_MODE=1 APPLE_TEST_RECIPIENTS="me@self.test" \
+    run "$BIN" mail send --to someone-else@example.com --subject "apple-cli-test x" --body y \
+      --attach /tmp/apple-cli-test-nonexistent --mode send --execute --test-mode
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q '"type" : "safety_violation"'
+}
+
+@test "mail send --html with --execute but WITHOUT --test-mode is refused (exit 77)" {
+  run "$BIN" mail send --to me@self.test --subject "apple-cli-test x" --body y \
+    --html "<b>hi</b>" --mode send --execute
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q '"type" : "safety_violation"'
+}
+
+@test "mail send --attach with --execute but WITHOUT --test-mode is refused (exit 77)" {
+  run "$BIN" mail send --to me@self.test --subject "apple-cli-test x" --body y \
+    --attach /tmp/apple-cli-test-nonexistent --mode send --execute
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q '"type" : "safety_violation"'
+}
+
+@test "mail send --html default (no --execute) previews without sending (has_html true, dry_run)" {
+  run "$BIN" mail send --to me@self.test --subject "apple-cli-test x" --body y --html "<b>hi</b>"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"has_html" : true'
+  echo "$output" | grep -q '"dry_run" : true'
+  echo "$output" | grep -q '"executed" : false'
+}
+
+@test "mail send --attach with a missing file is not_found before any send (exit 65)" {
+  # Store-independent: attachment existence is validated before any Mail/AppleScript access.
+  run "$BIN" mail send --to me@self.test --subject "apple-cli-test x" --body y \
+    --attach /tmp/apple-cli-test-definitely-missing-zzz
+  [ "$status" -eq 65 ]
+  echo "$output" | grep -q '"type" : "not_found"'
+}
+
+@test "mail send --attach exceeding the 25 MB cap is refused before any send (validation_error, exit 64)" {
+  # 26 MB sparse file — instant, no real bytes written; matches s-morgan's 25 MB send limit.
+  BIG="$BATS_TEST_TMPDIR/apple-cli-test-big.bin"
+  dd if=/dev/zero of="$BIG" bs=1 count=0 seek=27262976 2>/dev/null
+  run "$BIN" mail send --to me@self.test --subject "apple-cli-test x" --body y --attach "$BIG"
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q '"type" : "validation_error"'
+}
+
+@test "mail send --html with an empty --subject is refused before any send (validation_error, exit 64)" {
+  # --subject defaults to "" when omitted; a live --html send must refuse it (empty subject is
+  # never a sensible delivered message) — fires AFTER the self-only gate (recipient is self,
+  # test-mode is on) but BEFORE any .eml write or AppleScript send.
+  APPLE_TEST_MODE=1 APPLE_TEST_RECIPIENTS="me@self.test" \
+    run "$BIN" mail send --to me@self.test --body y --html "<b>hi</b>" --mode send --execute --test-mode
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q '"type" : "validation_error"'
+}
+
+@test "mail send --html with a whitespace-only --subject is refused (validation_error, exit 64)" {
+  APPLE_TEST_MODE=1 APPLE_TEST_RECIPIENTS="me@self.test" \
+    run "$BIN" mail send --to me@self.test --subject "   " --body y --html "<b>hi</b>" --mode send --execute --test-mode
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q '"type" : "validation_error"'
+}
+
+# ── HTML auto-send is opt-in (--gui-send); the flag is validated before any Mail access ──────────
+# Option A: --html without --gui-send OPENS a rendered compose window (reliable); --gui-send is the
+# explicit opt-in for the GUI-keystroke auto-send. These lock the flag's validity + self-only gate.
+
+@test "mail send --gui-send WITHOUT --html is a usage error (exit 64)" {
+  run "$BIN" mail send --to me@self.test --subject "apple-cli-test x" --body y --gui-send --mode send
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q '"type" : "validation_error"'
+}
+
+@test "mail send --html --gui-send with --mode draft is a usage error (exit 64, send-only)" {
+  run "$BIN" mail send --to me@self.test --subject "apple-cli-test x" --body y --html "<b>hi</b>" --gui-send --mode draft
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q '"type" : "validation_error"'
+}
+
+@test "mail send --html --gui-send to a NON-self recipient is refused (safety_violation, exit 77)" {
+  # The GUI-keystroke auto-send routes through the SAME self-only guardOutbound before any window opens.
+  APPLE_TEST_MODE=1 APPLE_TEST_RECIPIENTS="me@self.test" \
+    run "$BIN" mail send --to someone-else@example.com --subject "apple-cli-test x" --body y \
+      --html "<b>hi</b>" --gui-send --mode send --execute --test-mode
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q '"type" : "safety_violation"'
+}
+
+@test "mail send --html --gui-send with --execute but WITHOUT --test-mode is refused (exit 77)" {
+  run "$BIN" mail send --to me@self.test --subject "apple-cli-test x" --body y \
+    --html "<b>hi</b>" --gui-send --mode send --execute
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q '"type" : "safety_violation"'
+}
+
+@test "mail send --html default (no --gui-send) reports opened field in preview (dry_run)" {
+  run "$BIN" mail send --to me@self.test --subject "apple-cli-test x" --body y --html "<b>hi</b>"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"opened" : false'
+  echo "$output" | grep -q '"dry_run" : true'
+}
+
 @test "mail rules create with an UNLABELED name is refused under --execute --test-mode (exit 77)" {
   APPLE_TEST_MODE=1 \
     run "$BIN" mail rules create --name "real-inbox-rule" --condition "from:contains:boss@x.io" --action "mark_read=true" --execute --test-mode

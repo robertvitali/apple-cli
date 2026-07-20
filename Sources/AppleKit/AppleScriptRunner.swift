@@ -60,6 +60,46 @@ public struct AppleScriptRunner {
             .trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
+    /// Execute an AppleScript passed via STDIN (`osascript -`) instead of `-e`. Required
+    /// ONLY for scripts with a top-level `use framework` (AppleScriptObjC) header, which the
+    /// `-e` form does not reliably compile. `arguments` are still opaque argv (`on run argv`)
+    /// — the safe path for user data. Empirically (macOS `osascript`), the `-` file operand
+    /// ends option parsing, so every trailing arg is delivered as argv even if it begins with
+    /// `-` (no `--` terminator needed, and `--` would itself become argv item 1). Prefer
+    /// `run(_:arguments:)`; reach for this only for the rare AppleScriptObjC case.
+    public func runViaStdin(_ script: String, arguments: [String] = []) throws -> String {
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = ["-"] + arguments
+
+        let stdinPipe = Pipe()
+        let stdoutPipe = Pipe()
+        let stderrPipe = Pipe()
+        process.standardInput = stdinPipe
+        process.standardOutput = stdoutPipe
+        process.standardError = stderrPipe
+
+        do {
+            try process.run()
+        } catch {
+            throw RunError.launchFailed(String(describing: error))
+        }
+        // Hand osascript the script on stdin, then close it (EOF) so compilation begins.
+        stdinPipe.fileHandleForWriting.write(Data(script.utf8))
+        stdinPipe.fileHandleForWriting.closeFile()
+        // Read stdout to EOF before waiting so a large result can't deadlock the child.
+        let outData = stdoutPipe.fileHandleForReading.readDataToEndOfFile()
+        process.waitUntilExit()
+        let errData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
+
+        if process.terminationStatus != 0 {
+            throw RunError.scriptFailed(status: process.terminationStatus,
+                                        stderr: String(decoding: errData, as: UTF8.self))
+        }
+        return String(decoding: outData, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
     /// Escape a string literal for the RARE case a value must be embedded directly in
     /// script source. Prefer `run(_:arguments:)` over this.
     public static func quote(_ s: String) -> String {
