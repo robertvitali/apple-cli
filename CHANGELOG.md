@@ -72,6 +72,26 @@ with the Apple MCP servers they replace.
   before any Mail action; recipients are set programmatically before any window is shown, so even
   the GUI Cmd-Shift-D send can only reach a self-allowlisted address. The `send`/`reply` preview
   gains an additive `opened` field (true when the reliable HTML path opened a compose window).
+- **Mail draft / compose-mode surface** (gap 4, parity with patrickfreyer `manage_drafts` +
+  `compose_email(mode)` + `create_rich_email_draft`): `send --mode open` (build the `.eml` and open
+  a rendered compose window for review — any body type, no send); `send --mode draft` (plain /
+  attachment bodies save DIRECTLY to Drafts via AppleScript `save`; **HTML** writes the rendered
+  `.eml` + a note on how to file it, because Mail can't save an HTML draft headlessly — see below);
+  `draft open` (open an EXISTING labeled draft, located by subject with stable indexed refs, no
+  send); `draft-rich --open` / `--save-as-draft` (open the generated `.eml` in a review window).
+  Every compose-window open is self-only `guardOutbound`-gated (test-mode + allowlist), matching
+  `send --mode open`; draft saves require test-mode + a labeled subject. No draft/open path reaches
+  an AppleScript `send`. `send` gains an additive `drafted` field.
+  - **HTML-draft limitation (matches the reference):** Mail's AppleScript `content` is plain-text
+    only, and a LaunchServices-opened `.eml` window never surfaces in `outgoing messages` to be
+    saved — so an HTML draft can't be filed to Drafts headlessly. `send --mode draft --html` and
+    `draft-rich --save-as-draft` therefore write the rendered `.eml` and tell the operator to open
+    it + Cmd-S (rather than force-open a window that can't auto-save and can't be closed
+    programmatically). Plain/attachment `--mode draft` files a real Drafts entry.
+  - **Deliberate over-restriction vs the oracle (tracked for 1.0):** the reference opens a compose
+    window to any recipient; the CLI's opens are self-only-gated in the pre-1.0 fail-closed posture.
+    Relaxing non-sending opens to any recipient (they're draft-equivalent per the Safety model) is a
+    tracked 1.0 decision.
 - Mail write-safety **tests**: logic-tier gate tests (`Tests/MailKitTests/WriteSafetyTests.swift`),
   CLI-tier refusal tests (`bats/mail.bats`), and a repeatable self-cleaning live
   e2e (`bats/live/mail-writes.sh`).
@@ -88,7 +108,8 @@ with the Apple MCP servers they replace.
 ### Known parity gaps (Mail — still preview-only vs the MCP union)
 These MCP-union write capabilities are intentionally NOT yet wired to live mutation
 (they emit a preview/note); they must land before Mail is a 100% strict superset:
-- `send --mode draft|open`, `draft send|open` (routed to notes)
+- `draft send` (deliver an EXISTING Drafts item — `manage_drafts action=send`) is not yet wired
+  (deferred; needs recipient-verification since a draft's recipients are pre-set)
 - `move --gmail-mode` (Gmail copy+delete label semantics — rejected as unwired)
 - `reply`/`forward` quote the Envelope-Index snippet, not the full original body
 
@@ -130,4 +151,4 @@ Still open (contained by the self-only gate; not safety-critical) — tracked fo
   address.
 - `forward` re-composes a plain-text quote via `send()` instead of Mail's native `forward` verb
   (loses original formatting/attachments).
-- `--mode draft|open` for `--html` (distinct HTML draft/open) is folded into gap 4.
+- `draft send` (send an existing Drafts item) — deferred (see Known gaps above).

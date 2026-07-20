@@ -1128,4 +1128,140 @@ public struct MailScript {
         let out = try runner.run(MailScript.deleteDraftScript, arguments: [subject, prefix])
         return Int(out.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
     }
+
+    // MARK: Draft save / open (NON-SENDING — never call AppleScript `send`)
+    //
+    // These back `send --mode draft`, `send --mode open`'s draft sibling, `draft open`, and
+    // `draft-rich --open/--save-as-draft`. Every user value is US-delimited argv (never
+    // interpolated; injection-safe). Each osascript string is INDEPENDENT, so a script that calls
+    // a handler carries its OWN copy of it. NONE of these emit a `send` — a draft/open is not a
+    // send. Callers gate: `saveDraft`/`saveOpenAsDraft` behind label + test-mode; `openDraft`
+    // behind a labeled subject; `openEml` (above) opens a review window the operator sends manually.
+
+    /// Make a `{visible:false}` outgoing message (subject/body/recipients/attachments + optional
+    /// `sender`) and `save` it to Mail's Drafts — no send. Recipients + attachment paths are
+    /// US-delimited argv. Caller MUST have label-checked the subject + passed the test-mode gate.
+    private static let saveDraftScript = """
+    on run argv
+        set theSubject to item 1 of argv
+        set theBody to item 2 of argv
+        set toRaw to item 3 of argv
+        set ccRaw to item 4 of argv
+        set bccRaw to item 5 of argv
+        set attRaw to item 6 of argv
+        set senderAddr to item 7 of argv
+        set US to (ASCII character 31)
+        tell application "Mail"
+            set newMsg to make new outgoing message with properties {subject:theSubject, content:theBody, visible:false}
+            if senderAddr is not "" then set sender of newMsg to senderAddr
+            my addRecipients(newMsg, toRaw, US, "to")
+            my addRecipients(newMsg, ccRaw, US, "cc")
+            my addRecipients(newMsg, bccRaw, US, "bcc")
+            my addAttachments(newMsg, attRaw, US)
+            save newMsg
+        end tell
+        return "saved"
+    end run
+
+    on addRecipients(msg, raw, US, kind)
+        if raw is "" then return
+        set AppleScript's text item delimiters to US
+        set parts to text items of raw
+        set AppleScript's text item delimiters to ""
+        tell application "Mail"
+            repeat with p in parts
+                set addr to (p as string)
+                if addr is not "" then
+                    if kind is "to" then
+                        make new to recipient at end of to recipients of msg with properties {address:addr}
+                    else if kind is "cc" then
+                        make new cc recipient at end of cc recipients of msg with properties {address:addr}
+                    else
+                        make new bcc recipient at end of bcc recipients of msg with properties {address:addr}
+                    end if
+                end if
+            end repeat
+        end tell
+    end addRecipients
+
+    on addAttachments(msg, raw, US)
+        if raw is "" then return
+        set AppleScript's text item delimiters to US
+        set parts to text items of raw
+        set AppleScript's text item delimiters to ""
+        tell application "Mail"
+            repeat with p in parts
+                set thePath to (p as string)
+                if thePath is not "" then
+                    tell msg
+                        make new attachment with properties {file name:(POSIX file thePath)} at after the last paragraph
+                    end tell
+                    delay 1
+                end if
+            end repeat
+        end tell
+    end addAttachments
+    """
+    /// Save a message to Mail's Drafts with recipients + attachments + optional `sender` (no send).
+    /// `sender`, when non-nil, sets the outgoing message's From identity (a bare account address).
+    /// Caller MUST have label-checked the subject + passed the test-mode gate. Throws on non-"saved".
+    public func saveDraft(subject: String, body: String, to: [String], cc: [String], bcc: [String],
+                          attachmentPaths: [String], sender: String? = nil) throws {
+        let US = MailScript.US
+        let out = try runner.run(MailScript.saveDraftScript, arguments: [
+            subject, body,
+            to.joined(separator: US), cc.joined(separator: US), bcc.joined(separator: US),
+            attachmentPaths.joined(separator: US), sender ?? "",
+        ])
+        guard out == "saved" else {
+            throw AppleScriptRunner.RunError.scriptFailed(status: 1, stderr: "saveDraft returned '\(out)'")
+        }
+    }
+
+    /// Open an EXISTING draft (located by exact subject) in a Mail compose window — no send. Scans
+    /// any "Drafts"-named mailbox (Gmail keeps drafts in "[Gmail]/Drafts"), optionally restricted to
+    /// `acctName`. STABLE indexed references (`account ai` / `mailbox mi` / `message j`) + subject
+    /// matched in code, mirroring `deleteDraftScript` — a `whose subject is` filter doesn't match
+    /// draft (outgoing-message) objects reliably. Returns "opened" on the first match, else "notfound".
+    private static let openDraftScript = """
+    on run argv
+        set wantSubject to item 1 of argv
+        set acctFilter to item 2 of argv
+        tell application "Mail"
+            repeat with ai from 1 to (count of accounts)
+                set a to account ai
+                if acctFilter is "" or (name of a) is acctFilter then
+                    repeat with mi from 1 to (count of mailboxes of a)
+                        set dmbx to mailbox mi of a
+                        if (name of dmbx) contains "Drafts" then
+                            try
+                                set k to (count of messages of dmbx)
+                                repeat with j from 1 to k
+                                    set m to message j of dmbx
+                                    set sj to ""
+                                    try
+                                        set sj to subject of m
+                                    end try
+                                    if sj is wantSubject then
+                                        open m
+                                        return "opened"
+                                    end if
+                                end repeat
+                            end try
+                        end if
+                    end repeat
+                end if
+            end repeat
+        end tell
+        return "notfound"
+    end run
+    """
+    /// Open an existing draft by exact subject (optionally within `account`). Returns true when a
+    /// matching draft was found + opened. Caller MUST have verified the subject is labeled.
+    @discardableResult
+    public func openDraft(subject: String, account: String?) throws -> Bool {
+        let out = try runner.run(MailScript.openDraftScript, arguments: [subject, account ?? ""])
+        return out == "opened"
+    }
+
 }

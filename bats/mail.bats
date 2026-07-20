@@ -375,3 +375,64 @@ require_index() {
   [ "$status" -eq 64 ]
   echo "$output" | grep -q '"validation_error"'
 }
+
+# ── Non-sending draft/open modes (gap 4) — all CI-safe: dry-run previews + gate refusals ─────────
+# send --mode open / --mode draft, draft open, and draft-rich --open/--save-as-draft are NON-sending
+# (they never reach an AppleScript `send`). These lock the dry-run + safety-gate surface WITHOUT any
+# real Mail access: every assertion is a dry-run preview or a refusal that fires before Mail is touched.
+
+@test "mail send --mode open without --execute is a dry-run preview (exit 0, opened/drafted false)" {
+  run "$BIN" mail send --to me@self.test --subject "apple-cli-test open" --body hi --mode open
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"dry_run" : true'
+  echo "$output" | grep -q '"opened" : false'
+  echo "$output" | grep -q '"drafted" : false'
+}
+
+@test "mail send --mode draft with --execute but WITHOUT --test-mode is refused (exit 77)" {
+  # A draft is non-sending, but persists a Drafts item → same test-mode gate as `draft create`.
+  run "$BIN" mail send --to me@self.test --subject "apple-cli-test draft" --body y --mode draft --execute
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q '"type" : "safety_violation"'
+}
+
+@test "mail send --mode draft with an UNLABELED subject is refused under --execute --test-mode (exit 77)" {
+  # The label half of the draft gate fires before any Mail access.
+  APPLE_TEST_MODE=1 \
+    run "$BIN" mail send --to me@self.test --subject "Quarterly report" --body y --mode draft --execute --test-mode
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q '"type" : "safety_violation"'
+}
+
+@test "mail draft open without a labeled subject is refused (exit 77, before any Mail access)" {
+  # openDraft requires a labeled subject; the label check fires before Mail is opened.
+  run "$BIN" mail draft open --draft-subject "not-a-test-draft" --execute
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q '"type" : "safety_violation"'
+}
+
+@test "mail draft-rich --save-as-draft WITHOUT --test-mode is refused before any Mail access (exit 77)" {
+  # Opening the compose window is self-only guardOutbound-gated (test-mode + allowlist), same as
+  # `send --mode open`; the gate fires before the .eml write.
+  OUT="$BATS_TEST_TMPDIR/apple-cli-test-dr.eml"
+  run "$BIN" mail draft-rich --to me@self.test --subject "apple-cli-test dr" --html "<b>x</b>" --save-as-draft --out "$OUT"
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q '"type" : "safety_violation"'
+}
+
+@test "mail draft-rich --open WITHOUT --test-mode is refused before any Mail access (exit 77)" {
+  # --open opens a live compose window → same self-only guardOutbound as `send --mode open`.
+  OUT="$BATS_TEST_TMPDIR/apple-cli-test-dr.eml"
+  run "$BIN" mail draft-rich --to me@self.test --subject "apple-cli-test dr" --html "<b>x</b>" --open --out "$OUT"
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q '"type" : "safety_violation"'
+}
+
+@test "mail draft-rich (no open/save flags) writes the .eml and reports opened false (exit 0)" {
+  # Default path — no Mail access, ungated; asserts the opened field + the written artifact.
+  OUT="$BATS_TEST_TMPDIR/apple-cli-test-dr.eml"
+  run "$BIN" mail draft-rich --to me@self.test --subject "apple-cli-test dr" --html "<b>x</b>" --out "$OUT"
+  [ "$status" -eq 0 ]
+  [ -f "$OUT" ]
+  echo "$output" | grep -q '"opened" : false'
+}

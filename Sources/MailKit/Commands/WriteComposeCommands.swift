@@ -130,7 +130,7 @@ struct SendCommand: ParsableCommand {
         let action: String; let mode: String; let account: String?; let sender_address: String?
         let to: [String]; let cc: [String]; let bcc: [String]
         let subject: String; let has_html: Bool; let attachments: [String]
-        let eml_path: String?; let dry_run: Bool; let executed: Bool; let opened: Bool; let note: String?
+        let eml_path: String?; let dry_run: Bool; let executed: Bool; let opened: Bool; let drafted: Bool; let note: String?
     }
 
     func run() throws {
@@ -145,23 +145,39 @@ struct SendCommand: ParsableCommand {
                 guard mode == "send" else { throw AppleError.validation("--gui-send requires --mode send.") }
             }
 
-            // Three mutually-exclusive live outbound actions (Option A):
-            //  - plain / attachment AUTO-SEND: --mode send, no --html (reliable AppleScript).
-            //  - HTML GUI auto-send:            --gui-send (implies --html + --mode send; fragile).
-            //  - HTML reliable OPEN:            --html without --gui-send (renders a compose window).
+            // Live actions across the three delivery modes:
+            //  send  — plain/attachment AUTO-SEND (reliable AppleScript), HTML GUI auto-send
+            //          (--gui-send; fragile), or HTML reliable OPEN (--html without --gui-send).
+            //  open  — render a compose window for review (ANY body type), no send.
+            //  draft — save to Drafts (ANY body type), no send.
             let willAutoSend = global.willExecute && mode == "send" && html == nil
             let willGuiSend = global.willExecute && guiSend
-            let willOpenHtml = global.willExecute && html != nil && !guiSend
-            let willLiveOutbound = willAutoSend || willGuiSend || willOpenHtml
+            let willOpenHtml = global.willExecute && mode == "send" && html != nil && !guiSend
+            let willOpen = global.willExecute && mode == "open"
+            let willDraft = global.willExecute && mode == "draft"
+            let willLiveOutbound = willAutoSend || willGuiSend || willOpenHtml || willOpen || willDraft
+            // Paths that render a compose window or send need the self-only recipient gate; a
+            // (non-sending) draft does not — it gets the label + test-mode gate below instead.
+            let willSelfGuarded = willAutoSend || willGuiSend || willOpenHtml || willOpen
 
             // Self-only outbound gate FIRST — before any attachment read, .eml/.html build, or
-            // AppleScript/GUI action. No live path below reaches Mail without passing this gate.
-            if willLiveOutbound { try guardOutbound(recipients: toL + ccL + bccL, testMode: global.testMode) }
-            // A live HTML action (open or gui-send) needs a real subject — a compose window / sent
-            // message with an empty subject is a mistake; refuse before building anything.
-            if willGuiSend || willOpenHtml {
+            // AppleScript/GUI action. No self-guarded path below reaches Mail without passing this.
+            if willSelfGuarded { try guardOutbound(recipients: toL + ccL + bccL, testMode: global.testMode) }
+            // A live open / HTML action needs a real subject — a compose window / sent message with
+            // an empty subject is a mistake; refuse before building anything.
+            if willGuiSend || willOpenHtml || willOpen {
                 guard !subject.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                    throw AppleError.validation("--subject is required for a live --html action; refusing an empty/whitespace subject.")
+                    throw AppleError.validation("--subject is required for a live --mode open / --html action; refusing an empty/whitespace subject.")
+                }
+            }
+            // --mode draft saves a PERSISTENT Drafts item, so it takes the same label + test-mode
+            // gate as `draft create` (NOT the self-only recipient guard — a draft is not a send).
+            if willDraft {
+                guard global.testMode && TestMode.isEnabled else {
+                    throw AppleError.mailSafety("saving a draft requires --test-mode AND APPLE_TEST_MODE=1; refusing. Use the default dry-run to preview.")
+                }
+                guard subject.hasPrefix(TestMode.sandboxPrefix) else {
+                    throw AppleError.mailSafety("draft --subject must be a labeled test item (start with \"\(TestMode.sandboxPrefix)\") — refusing.")
                 }
             }
 
@@ -180,12 +196,13 @@ struct SendCommand: ParsableCommand {
             }
 
             // Resolve attachment paths once (existence + regular-file), then generate the .eml
-            // whenever HTML or attachments are present: it is the preview artifact, the `--out`
-            // target, AND the delivery vehicle for the reliable HTML OPEN path. From: uses the
-            // resolved address on a live path, else the raw --account string (headless preview).
+            // whenever HTML or attachments are present, OR --mode open (which opens a rendered
+            // compose window for ANY body type): it is the preview artifact, the `--out` target,
+            // AND the delivery vehicle for the reliable HTML OPEN / --mode open / draft-HTML paths.
+            // From: uses the resolved address on a live path, else the raw --account (headless preview).
             let attPaths = try attach.map { try resolveAttachmentPath($0) }
             var emlPath: String?
-            if html != nil || !attPaths.isEmpty {
+            if html != nil || !attPaths.isEmpty || willOpen {
                 let atts = try attachmentsFromPaths(attPaths)
                 // emitBcc: this .eml is only ever OPENED in a compose window (Mail moves Bcc to the
                 // bcc field + strips the header on send) or written to --out — never wire-sent — so
@@ -200,6 +217,7 @@ struct SendCommand: ParsableCommand {
 
             var executed = false
             var opened = false
+            var drafted = false
             var note: String?
             if willGuiSend {
                 // Opt-in HTML auto-send via GUI keystrokes (fragile — see MailScript.sendHtmlViaGui).
@@ -226,6 +244,27 @@ struct SendCommand: ParsableCommand {
                     try MailScript().send(subject: subject, body: body, to: toL, cc: ccL, bcc: bccL, sender: senderAddress)
                 }
                 executed = true
+            } else if willOpen, let emlPath {
+                // --mode open: render the .eml as a compose window for review (ANY body type). No send.
+                try MailScript().openEml(path: emlPath)
+                opened = true
+                note = "compose window opened for review (--mode open) — not sent; click Send in Mail if desired. The .eml is kept at eml_path."
+            } else if willDraft {
+                // --mode draft: save to Drafts (no send). Plain/attachment bodies save DIRECTLY via
+                // AppleScript (`save` an outgoing message) — reliable. HTML cannot be saved to Drafts
+                // headlessly (Mail's AppleScript `content` is plain-text only, and a
+                // LaunchServices-opened `.eml` window never surfaces in `outgoing messages` to be
+                // saved). Rather than force-open a compose window that can't auto-save AND can't be
+                // closed programmatically (leaving a stuck window), we WRITE the rendered `.eml` and
+                // tell the operator how to file it. drafted:false is honest — it is NOT yet in Drafts.
+                if html != nil {
+                    drafted = false
+                    note = "HTML can't be saved to Drafts headlessly (Mail limitation) — the rendered .eml is at eml_path; open it (`apple mail draft-rich --open`, or `open <eml_path>`) and press Cmd-S to file it in Drafts."
+                } else {
+                    try MailScript().saveDraft(subject: subject, body: body, to: toL, cc: ccL, bcc: bccL,
+                                               attachmentPaths: attPaths, sender: senderAddress)
+                    drafted = true
+                }
             } else if global.willExecute {
                 note = "mode '\(mode)' is preview-only; use --mode send to deliver"
             }
@@ -233,7 +272,7 @@ struct SendCommand: ParsableCommand {
             let preview = Preview(action: "send", mode: mode, account: account, sender_address: senderAddress,
                                   to: toL, cc: ccL, bcc: bccL,
                                   subject: subject, has_html: html != nil, attachments: attach,
-                                  eml_path: emlPath, dry_run: !global.willExecute, executed: executed, opened: opened, note: note)
+                                  eml_path: emlPath, dry_run: !global.willExecute, executed: executed, opened: opened, drafted: drafted, note: note)
             try Output.emit(tool: "mail", data: preview)
         }
     }
@@ -431,7 +470,7 @@ struct ForwardCommand: ParsableCommand {
 }
 
 struct DraftRichCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "draft-rich", abstract: "Generate a multipart .eml draft (reliable HTML) and optionally open it.")
+    static let configuration = CommandConfiguration(commandName: "draft-rich", abstract: "Generate a multipart .eml draft (reliable HTML); optionally open it or save it to Drafts.")
     @OptionGroup var global: GlobalOptions
     @Option(name: .long) var account: String?
     @Option(name: .long) var subject: String = ""
@@ -441,12 +480,27 @@ struct DraftRichCommand: ParsableCommand {
     @Option(name: .long) var cc: [String] = []
     @Option(name: .long) var bcc: [String] = []
     @Option(name: .long, help: "Output .eml path (default: temp dir).") var out: String?
+    @Flag(name: .customLong("open"), help: "Open the generated .eml in a Mail compose window for review (no send).") var openInMail = false
+    @Flag(name: .long, help: "Open the .eml and save it to Drafts (no send; requires --test-mode + a labeled subject).") var saveAsDraft = false
 
-    struct Result: Encodable { let eml_path: String; let subject: String; let to: [String]; let has_html: Bool }
+    struct Result: Encodable { let eml_path: String; let subject: String; let to: [String]; let has_html: Bool; let opened: Bool; let note: String? }
 
     func run() throws {
         try runGuarded(tool: "mail") {
             let toL = splitRecipients(to)
+            // Opening the .eml in Mail (either flag) is a live compose-window action, so gate it
+            // consistently with `send --mode open`: the self-only guardOutbound (test-mode +
+            // allowlist) + a real subject, BEFORE any Mail access or .eml write. This is deliberately
+            // stricter than the create_rich_email_draft oracle (which opens to any recipient) — the
+            // fail-closed self-only posture is the pre-1.0 CLI default; relaxing non-sending opens to
+            // any recipient is a tracked 1.0 decision. The DEFAULT (neither flag) just writes the
+            // .eml headlessly and is ungated.
+            if openInMail || saveAsDraft {
+                try guardOutbound(recipients: toL + splitRecipients(cc) + splitRecipients(bcc), testMode: global.testMode)
+                guard !subject.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    throw AppleError.validation("--subject is required to open a draft-rich compose window.")
+                }
+            }
             // emitBcc: a draft-rich .eml is only opened / written to disk, never wire-sent, so
             // carrying --bcc into it is safe and required for create_rich_email_draft parity.
             let eml = try EmlBuilder(from: account, to: toL, cc: splitRecipients(cc), bcc: splitRecipients(bcc),
@@ -454,7 +508,21 @@ struct DraftRichCommand: ParsableCommand {
             let dest = URL(fileURLWithPath: ((out ?? FileManager.default.temporaryDirectory
                 .appendingPathComponent("apple-cli-\(TestMode.sandboxPrefix)-\(UUID().uuidString).eml").path) as NSString).expandingTildeInPath)
             try eml.write(to: dest, atomically: true, encoding: .utf8)
-            try Output.emit(tool: "mail", data: Result(eml_path: dest.path, subject: subject, to: toL, has_html: html != nil))
+            // Optional review window (parity with create_rich_email_draft open_in_mail). Mail cannot
+            // auto-save an HTML draft (a LaunchServices-opened .eml window doesn't surface in
+            // `outgoing messages`), so --save-as-draft opens the SAME review window and instructs the
+            // operator to Cmd-S — it never auto-files, so there is no `saved` claim.
+            var opened = false
+            var note: String?
+            if openInMail || saveAsDraft {
+                try MailScript().openEml(path: dest.path)
+                opened = true
+                note = saveAsDraft
+                    ? "compose window opened — press Cmd-S to file it in Drafts (Mail can't auto-save an HTML draft)."
+                    : "compose window opened for review (not sent)."
+            }
+            try Output.emit(tool: "mail", data: Result(eml_path: dest.path, subject: subject, to: toL,
+                has_html: html != nil, opened: opened, note: note))
         }
     }
 }
@@ -515,9 +583,14 @@ struct DraftCommand: ParsableCommand {
                     executed = n > 0
                     note = "deleted \(n) draft(s) matching \"\(s)\""
                 case "send":
-                    note = "draft send is routed through `mail send` — compose + send there (self-only gated)"
-                default: // open
-                    note = "draft open is a Mail-UI action; use `mail draft-rich` to generate an .eml and open it"
+                    note = "draft send (deliver an EXISTING Drafts item) is not yet wired — deferred; `mail send` composes + sends a NEW message and cannot send an existing draft."
+                default: // open — open an EXISTING labeled draft in a compose window (no send).
+                    guard let s = subj, s.hasPrefix(TestMode.sandboxPrefix) else {
+                        throw AppleError.mailSafety("draft --subject (or --draft-subject) must be a labeled test item to open — refusing.")
+                    }
+                    let ok = try script.openDraft(subject: s, account: account)
+                    executed = ok
+                    note = ok ? "opened draft \"\(s)\" in a compose window (not sent)" : "no draft matching \"\(s)\" found"
                 }
             }
             let payload: [String: AnyEncodableBox] = [
