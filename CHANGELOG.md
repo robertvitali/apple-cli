@@ -103,20 +103,31 @@ These MCP-union write capabilities are intentionally NOT yet wired to live mutat
   refuses fail-closed otherwise, so the blind Cmd-Shift-D can never fire on a stray compose
   window carrying a non-self recipient.
 
-### Deferred parity items (OMC review 2026-07-20 — tracked, not yet closed)
-Surfaced by the pre-commit OMC review; all are contained by the self-only send gate (none is a
-safety/data-loss risk in the shipped state), and each must close before Mail is a 100% strict
-superset:
-- **`--account` sender-selection** is honored only on the HTML-open path (the `.eml` `From:`
-  header); the plain / attachment / `--gui-send` AppleScript paths do not yet `set sender`, so a
-  send goes from the default account. Fix: set the sender on those paths, or reject `--account`
-  where it can't be honored.
-- **Attachment type / path validation** (s-morgan blocks `.exe/.sh/.app…`; patrickfreyer blocks
-  `~/.ssh`, `~/.aws`, Keychains, and enforces home-dir-only) is not folded in yet. The **25 MB
-  size cap IS enforced** as of this change.
-- **`--bcc` on the reliable HTML-open path**: `EmlBuilder` omits the `Bcc:` header (correct for a
-  wire send), so the opened compose window carries no bcc. The plain / attachment / `--gui-send`
-  paths DO add bcc programmatically. Fix: add a `Bcc:` header for the open (compose-window) path,
-  where Mail handles it correctly.
-- **`--mode draft|open` for `--html`**: today `--html` (without `--gui-send`) always OPENS a
-  compose window regardless of `--mode`; distinct HTML draft/open handling is folded into gap 4.
+### Parity items from the OMC review (2026-07-20)
+CLOSED in the follow-up batch (each verified):
+- **`--account` sender-selection** now honored on the plain / attachment / `--gui-send` paths
+  (resolves `--account` → the account's address and `set sender`; the open path uses it as the
+  `.eml` `From:`). Live-validated: a send with `--account` set delivered with that account's
+  address as `From`, not the default account. New `sender_address` preview field; an unknown
+  account is `not_found` before any send.
+- **Attachment type + sensitive-dir validation** folded into `resolveAttachmentPath`: dangerous
+  executable/script extensions blocked (s-morgan `validate_attachment_type`), sensitive dirs
+  (`~/.ssh`, `~/.gnupg`, `~/.aws`, `~/.claude`, `~/.config`, `Library/{Keychains,LaunchAgents,
+  LaunchDaemons}`) refused, with symlink resolution first so a link can't bypass the check
+  (patrickfreyer). The 25 MB size cap already landed.
+- **`--bcc` on the reliable HTML-open path**: `EmlBuilder` gains an opt-in `emitBcc` (default
+  false — safe for a wire send); the open paths (`send`, `reply`, and `draft-rich`) pass it true so
+  the compose-window `.eml` carries a `Bcc:` header (Mail moves it to the bcc field and strips it on
+  send). The `.eml` is never wire-sent, so no leak.
+
+Review hardening (second OMC pass): the dangerous-extension match uses filename `endswith` (so a
+file named literally `.sh` is blocked, matching s-morgan); the sensitive-dir check runs against
+both the resolved and the tilde-expanded path (so a symlinked sensitive dir can't bypass it).
+
+Still open (contained by the self-only gate; not safety-critical) — tracked follow-ups:
+- `reply` / `forward` do not honor `--account` as the send-from identity (their `--account`
+  selects the lookup mailbox); `draft-rich`'s `From:` uses the raw account name, not a resolved
+  address.
+- `forward` re-composes a plain-text quote via `send()` instead of Mail's native `forward` verb
+  (loses original formatting/attachments).
+- `--mode draft|open` for `--html` (distinct HTML draft/open) is folded into gap 4.

@@ -83,10 +83,22 @@ struct EmlBuilderTests {
     }
 
     @Test func bccNeverWrittenAsHeader() throws {
-        // A Bcc: header would leak the blind-copy list to every recipient — it must not appear.
+        // DEFAULT (emitBcc: false): a Bcc: header would leak the blind-copy list to every recipient
+        // on a wire-sent .eml — it must not appear.
         let eml = try EmlBuilder(to: ["a@y.io"], bcc: ["secret@z.io"], subject: "s", textBody: "b").build()
         #expect(!eml.contains("Bcc:"))
         #expect(!eml.contains("secret@z.io"))
+    }
+
+    @Test func bccEmittedOnlyWhenEmitBccSet() throws {
+        // emitBcc:true — used ONLY for a compose-window .eml (Mail moves Bcc to the bcc field and
+        // strips the header on send) — DOES emit the Bcc: header so the opened window carries bcc.
+        let opened = try EmlBuilder(to: ["a@y.io"], bcc: ["secret@z.io"], subject: "s", textBody: "b", emitBcc: true).build()
+        #expect(opened.contains("Bcc: secret@z.io"))
+        // CRLF injection through bcc is still rejected even when emitting.
+        #expect(throws: Error.self) {
+            _ = try EmlBuilder(to: ["a@y.io"], bcc: ["x@z.io\r\nX-Evil: 1"], subject: "s", textBody: "b", emitBcc: true).build()
+        }
     }
 
     @Test func mimeTypeInference() {

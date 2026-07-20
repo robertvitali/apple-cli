@@ -20,13 +20,20 @@ public struct EmlBuilder {
     public var attachments: [Attachment]
     public var date: Date
     public var messageID: String
+    /// Emit a `Bcc:` header. SAFE ONLY for an `.eml` that will be OPENED in a Mail compose window
+    /// (Mail populates the bcc field from it and strips the header on send) — NEVER for an `.eml`
+    /// delivered on the wire, where a `Bcc:` header leaks the blind-copy list to every recipient.
+    /// Defaults false (safe); the open paths set it true so `--bcc` reaches the compose window.
+    public var emitBcc: Bool
 
     public init(from: String? = nil, to: [String] = [], cc: [String] = [], bcc: [String] = [],
                 subject: String = "", textBody: String? = nil, htmlBody: String? = nil,
-                attachments: [Attachment] = [], date: Date = Date(), messageID: String? = nil) {
+                attachments: [Attachment] = [], date: Date = Date(), messageID: String? = nil,
+                emitBcc: Bool = false) {
         self.from = from; self.to = to; self.cc = cc; self.bcc = bcc; self.subject = subject
         self.textBody = textBody; self.htmlBody = htmlBody; self.attachments = attachments; self.date = date
         self.messageID = messageID ?? "<\(UUID().uuidString)@apple-cli.local>"
+        self.emitBcc = emitBcc
     }
 
     /// RFC-2822 date, e.g. "Tue, 02 Jan 2026 16:00:45 +0000".
@@ -96,14 +103,16 @@ public struct EmlBuilder {
         let fromH = try from.map { try EmlBuilder.sanitizeHeader($0) }
         let toH = try to.map { try EmlBuilder.sanitizeHeader($0) }
         let ccH = try cc.map { try EmlBuilder.sanitizeHeader($0) }
-        // Validate bcc too (defense in depth), but DO NOT emit a Bcc: header — a Bcc header in
-        // the message would leak the blind-copy list to every recipient. Bcc is an envelope
-        // concern handled by the send API, never a message header.
-        _ = try bcc.map { try EmlBuilder.sanitizeHeader($0) }
+        // Always validate bcc (defense in depth). Emit a Bcc: header ONLY when emitBcc is set —
+        // safe solely for a compose-window `.eml` (Mail moves it to the bcc field + strips it on
+        // send). For a wire-sent `.eml` a Bcc header would leak the blind-copy list, so the default
+        // (emitBcc=false) omits it; bcc is then an envelope concern for the AppleScript send API.
+        let bccH = try bcc.map { try EmlBuilder.sanitizeHeader($0) }
         var headers: [String] = []
         if let fromH { headers.append("From: \(fromH)") }
         if !toH.isEmpty { headers.append("To: \(toH.joined(separator: ", "))") }
         if !ccH.isEmpty { headers.append("Cc: \(ccH.joined(separator: ", "))") }
+        if emitBcc && !bccH.isEmpty { headers.append("Bcc: \(bccH.joined(separator: ", "))") }
         headers.append("Subject: \(try EmlBuilder.encodeHeader(subject))")
         headers.append("Date: \(EmlBuilder.rfc2822Date(date))")
         headers.append("Message-ID: \(messageID)")

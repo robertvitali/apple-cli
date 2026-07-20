@@ -248,6 +248,33 @@ require_index() {
   echo "$output" | grep -q '"type" : "validation_error"'
 }
 
+@test "mail send --attach with a dangerous executable extension (.sh) is refused (validation_error, exit 64)" {
+  # Matches s-morgan validate_attachment_type — executables/scripts are blocked by default.
+  SH="$BATS_TEST_TMPDIR/apple-cli-test-payload.sh"
+  printf '#!/bin/sh\necho hi\n' > "$SH"
+  run "$BIN" mail send --to me@self.test --subject "apple-cli-test x" --body y --attach "$SH"
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q '"type" : "validation_error"'
+}
+
+@test "mail send --account with an unknown account is not_found before any send (exit 65)" {
+  # --account resolves to a From address before dispatch; an unknown account fails fast.
+  APPLE_TEST_MODE=1 APPLE_TEST_RECIPIENTS="me@self.test" \
+    run "$BIN" mail send --to me@self.test --account "apple-cli-test-nonexistent-acct" \
+      --subject "apple-cli-test x" --body y --mode send --execute --test-mode
+  [ "$status" -eq 65 ]
+  echo "$output" | grep -q '"type" : "not_found"'
+}
+
+@test "mail draft-rich --bcc writes a Bcc header into the generated .eml (compose-window safe)" {
+  # draft-rich .eml is only opened / saved, never wire-sent, so carrying --bcc is safe + parity.
+  OUT="$BATS_TEST_TMPDIR/apple-cli-test-draft.eml"
+  run "$BIN" mail draft-rich --to me@self.test --bcc secret@self.test \
+    --subject "apple-cli-test dr" --html "<b>x</b>" --out "$OUT"
+  [ "$status" -eq 0 ]
+  grep -q "^Bcc: secret@self.test" "$OUT"
+}
+
 @test "mail send --html with an empty --subject is refused before any send (validation_error, exit 64)" {
   # --subject defaults to "" when omitted; a live --html send must refuse it (empty subject is
   # never a sensible delivered message) — fires AFTER the self-only gate (recipient is self,

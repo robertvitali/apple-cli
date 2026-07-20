@@ -39,8 +39,20 @@ func guardOutbound(recipients: [String], testMode: Bool) throws {
 /// real containment for attachment CONTENT — a sent attachment can only ever reach the operator's
 /// own address, so this is existence/type validation, not a content sandbox. Missing/non-regular
 /// files are `not_found` (exit 65), matching the prior inline behavior.
+/// Executable / script extensions blocked from attachment sends by default (mirrors s-morgan
+/// `validate_attachment_type`'s `dangerous_extensions`). Blocking is the parity default; there is
+/// no allow-executables override yet.
+let dangerousAttachmentExtensions: Set<String> = [
+    "exe", "bat", "cmd", "com", "scr", "pif", "vbs", "vbe", "js", "jse", "wsf", "wsh",
+    "msi", "msp", "scf", "lnk", "inf", "reg", "ps1", "psm1", "app", "deb", "rpm", "sh",
+    "bash", "csh", "ksh", "zsh", "command",
+]
+
 func resolveAttachmentPath(_ raw: String) throws -> String {
-    let path = (raw as NSString).expandingTildeInPath
+    let expanded = (raw as NSString).expandingTildeInPath
+    // Resolve symlinks BEFORE the sensitive-dir check so a symlink into ~/.ssh (etc.) cannot
+    // bypass it (matches patrickfreyer's realpath). The real path is also what Mail attaches.
+    let path = URL(fileURLWithPath: expanded).resolvingSymlinksInPath().path
     var isDir: ObjCBool = false
     guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir), !isDir.boolValue else {
         throw AppleError.notFound("attachment not found or not a regular file: \(raw)")
@@ -52,7 +64,31 @@ func resolveAttachmentPath(_ raw: String) throws -> String {
        size.intValue > maxBytes {
         throw AppleError.validation("attachment exceeds the 25 MB send limit (\(size.intValue) bytes): \(raw)")
     }
+    // Refuse dangerous executable/script types by default (s-morgan validate_attachment_type,
+    // which matches on filename `endswith` — so a file literally named ".sh" is blocked too, which
+    // NSString.pathExtension would miss).
+    let base = (path as NSString).lastPathComponent.lowercased()
+    if let blockedExt = dangerousAttachmentExtensions.first(where: { base.hasSuffix(".\($0)") }) {
+        throw AppleError.validation("attachment type '.\(blockedExt)' is blocked (executable/script); refusing: \(raw)")
+    }
+    // Refuse reading from sensitive credential/config directories (patrickfreyer sensitive_dirs) —
+    // a safety refusal (don't exfiltrate keys/tokens as an attachment). Check BOTH the resolved
+    // path (defeats a symlink INTO a sensitive dir) AND the tilde-expanded literal (defeats a
+    // sensitive dir that is ITSELF a symlink, e.g. a stow-managed `~/.ssh` -> `~/dotfiles/ssh`).
+    let home = FileManager.default.homeDirectoryForCurrentUser.path
+    if let dir = sensitiveAttachmentDir(path, home: home) ?? sensitiveAttachmentDir(expanded, home: home) {
+        throw AppleError.mailSafety("cannot attach a file from a sensitive directory (\(dir)) — refusing.")
+    }
     return path
+}
+
+/// The sensitive credential/config directory a resolved path falls under, or nil (mirrors
+/// patrickfreyer `sensitive_dirs`). Pure — unit-testable with synthetic paths, no real files.
+func sensitiveAttachmentDir(_ resolvedPath: String, home: String) -> String? {
+    let dirs = [".ssh", ".gnupg", ".config", ".aws", ".claude",
+                "Library/Keychains", "Library/LaunchAgents", "Library/LaunchDaemons"]
+        .map { home + "/" + $0 }
+    return dirs.first(where: { resolvedPath == $0 || resolvedPath.hasPrefix($0 + "/") })
 }
 
 /// Read already-resolved attachment paths into `EmlBuilder.Attachment` parts (for the HTML/`.eml`
@@ -91,7 +127,7 @@ struct SendCommand: ParsableCommand {
     @Option(name: .long, help: "Write the generated .eml to this path (html/attachment sends).") var out: String?
 
     struct Preview: Encodable {
-        let action: String; let mode: String; let account: String?
+        let action: String; let mode: String; let account: String?; let sender_address: String?
         let to: [String]; let cc: [String]; let bcc: [String]
         let subject: String; let has_html: Bool; let attachments: [String]
         let eml_path: String?; let dry_run: Bool; let executed: Bool; let opened: Bool; let note: String?
@@ -129,15 +165,34 @@ struct SendCommand: ParsableCommand {
                 }
             }
 
+            // Resolve --account to a send (From) identity for EVERY live path: the send paths set
+            // the outgoing message `sender`; the open path uses it as the `.eml` `From:` so Mail
+            // selects the account. Resolved to the account's bare address (a name/UUID `From:`
+            // would be malformed and ignored). An unknown/addressless account is a not_found before
+            // any Mail action. Only resolved on a LIVE outbound path so a headless dry-run does not
+            // require Mail; the dry-run preview `.eml` falls back to the raw --account string below.
+            var senderAddress: String?
+            if let account, willLiveOutbound {
+                guard let addr = AccountDirectory().sendAddress(for: account) else {
+                    throw AppleError.notFound("account '\(account)' not found or has no send address.")
+                }
+                senderAddress = addr
+            }
+
             // Resolve attachment paths once (existence + regular-file), then generate the .eml
             // whenever HTML or attachments are present: it is the preview artifact, the `--out`
-            // target, AND the delivery vehicle for the reliable HTML OPEN path.
+            // target, AND the delivery vehicle for the reliable HTML OPEN path. From: uses the
+            // resolved address on a live path, else the raw --account string (headless preview).
             let attPaths = try attach.map { try resolveAttachmentPath($0) }
             var emlPath: String?
             if html != nil || !attPaths.isEmpty {
                 let atts = try attachmentsFromPaths(attPaths)
-                let eml = try EmlBuilder(from: account, to: toL, cc: ccL, bcc: bccL, subject: subject,
-                                     textBody: body.isEmpty ? nil : body, htmlBody: html, attachments: atts).build()
+                // emitBcc: this .eml is only ever OPENED in a compose window (Mail moves Bcc to the
+                // bcc field + strips the header on send) or written to --out — never wire-sent — so
+                // carrying --bcc into it is safe and lets the open path honor --bcc.
+                let eml = try EmlBuilder(from: senderAddress ?? account, to: toL, cc: ccL, bcc: bccL, subject: subject,
+                                     textBody: body.isEmpty ? nil : body, htmlBody: html, attachments: atts,
+                                     emitBcc: true).build()
                 let dest = emlDestURL(out: out)
                 try eml.write(to: dest, atomically: true, encoding: .utf8)
                 emlPath = dest.path
@@ -154,7 +209,7 @@ struct SendCommand: ParsableCommand {
                 try (html ?? "").write(to: htmlTmp, atomically: true, encoding: .utf8)
                 defer { try? FileManager.default.removeItem(at: htmlTmp) }
                 try MailScript().sendHtmlViaGui(htmlPath: htmlTmp.path, subject: subject,
-                    to: toL, cc: ccL, bcc: bccL, attachmentPaths: attPaths)
+                    to: toL, cc: ccL, bcc: bccL, attachmentPaths: attPaths, sender: senderAddress)
                 executed = true
                 note = "sent via GUI keystroke automation (--gui-send); required Accessibility permission and stole window focus"
             } else if willOpenHtml, let emlPath {
@@ -165,17 +220,18 @@ struct SendCommand: ParsableCommand {
             } else if willAutoSend {
                 if !attPaths.isEmpty {
                     // Attachments, no HTML: direct AppleScript route (matches send_email_with_attachments).
-                    try MailScript().sendWithAttachments(subject: subject, body: body, to: toL, cc: ccL, bcc: bccL, attachmentPaths: attPaths)
+                    try MailScript().sendWithAttachments(subject: subject, body: body, to: toL, cc: ccL, bcc: bccL, attachmentPaths: attPaths, sender: senderAddress)
                 } else {
                     // Plain text.
-                    try MailScript().send(subject: subject, body: body, to: toL, cc: ccL, bcc: bccL)
+                    try MailScript().send(subject: subject, body: body, to: toL, cc: ccL, bcc: bccL, sender: senderAddress)
                 }
                 executed = true
             } else if global.willExecute {
                 note = "mode '\(mode)' is preview-only; use --mode send to deliver"
             }
 
-            let preview = Preview(action: "send", mode: mode, account: account, to: toL, cc: ccL, bcc: bccL,
+            let preview = Preview(action: "send", mode: mode, account: account, sender_address: senderAddress,
+                                  to: toL, cc: ccL, bcc: bccL,
                                   subject: subject, has_html: html != nil, attachments: attach,
                                   eml_path: emlPath, dry_run: !global.willExecute, executed: executed, opened: opened, note: note)
             try Output.emit(tool: "mail", data: preview)
@@ -288,8 +344,10 @@ struct ReplyCommand: ParsableCommand {
                     // Reliable HTML reply: build a multipart .eml (quote embedded) and open a
                     // rendered compose window for review.
                     let atts = try attachmentsFromPaths(try attach.map { try resolveAttachmentPath($0) })
+                    // emitBcc: safe — this .eml is only opened in a compose window, never wire-sent.
                     let eml = try EmlBuilder(to: recipients, cc: ccL, bcc: bccL, subject: replySubject,
-                                             textBody: body + quotedPlain, htmlBody: (html ?? "") + quotedHTML, attachments: atts).build()
+                                             textBody: body + quotedPlain, htmlBody: (html ?? "") + quotedHTML, attachments: atts,
+                                             emitBcc: true).build()
                     let dest = emlDestURL(out: nil)
                     try eml.write(to: dest, atomically: true, encoding: .utf8)
                     try MailScript().openEml(path: dest.path)
@@ -389,8 +447,10 @@ struct DraftRichCommand: ParsableCommand {
     func run() throws {
         try runGuarded(tool: "mail") {
             let toL = splitRecipients(to)
+            // emitBcc: a draft-rich .eml is only opened / written to disk, never wire-sent, so
+            // carrying --bcc into it is safe and required for create_rich_email_draft parity.
             let eml = try EmlBuilder(from: account, to: toL, cc: splitRecipients(cc), bcc: splitRecipients(bcc),
-                                 subject: subject, textBody: textBody, htmlBody: html).build()
+                                 subject: subject, textBody: textBody, htmlBody: html, emitBcc: true).build()
             let dest = URL(fileURLWithPath: ((out ?? FileManager.default.temporaryDirectory
                 .appendingPathComponent("apple-cli-\(TestMode.sandboxPrefix)-\(UUID().uuidString).eml").path) as NSString).expandingTildeInPath)
             try eml.write(to: dest, atomically: true, encoding: .utf8)

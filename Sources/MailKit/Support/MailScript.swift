@@ -173,9 +173,11 @@ public struct MailScript {
         set toRaw to item 3 of argv
         set ccRaw to item 4 of argv
         set bccRaw to item 5 of argv
+        set senderAddr to item 6 of argv
         set US to (ASCII character 31)
         tell application "Mail"
             set newMsg to make new outgoing message with properties {subject:theSubject, content:theBody, visible:false}
+            if senderAddr is not "" then set sender of newMsg to senderAddr
             my addRecipients(newMsg, toRaw, US, "to")
             my addRecipients(newMsg, ccRaw, US, "cc")
             my addRecipients(newMsg, bccRaw, US, "bcc")
@@ -205,11 +207,15 @@ public struct MailScript {
         end tell
     end addRecipients
     """
-    public func send(subject: String, body: String, to: [String], cc: [String], bcc: [String]) throws {
+    /// `sender`, when non-nil, sets the outgoing message's From identity (a bare account address
+    /// resolved from `--account`); nil sends from Mail's default account. Injection-safe (argv).
+    public func send(subject: String, body: String, to: [String], cc: [String], bcc: [String],
+                     sender: String? = nil) throws {
         let US = MailScript.US
         _ = try runner.run(MailScript.sendScript, arguments: [
             subject, body,
             to.joined(separator: US), cc.joined(separator: US), bcc.joined(separator: US),
+            sender ?? "",
         ])
     }
 
@@ -230,9 +236,11 @@ public struct MailScript {
         set ccRaw to item 4 of argv
         set bccRaw to item 5 of argv
         set attRaw to item 6 of argv
+        set senderAddr to item 7 of argv
         set US to (ASCII character 31)
         tell application "Mail"
             set newMsg to make new outgoing message with properties {subject:theSubject, content:theBody, visible:false}
+            if senderAddr is not "" then set sender of newMsg to senderAddr
             my addRecipients(newMsg, toRaw, US, "to")
             my addRecipients(newMsg, ccRaw, US, "cc")
             my addRecipients(newMsg, bccRaw, US, "bcc")
@@ -284,12 +292,12 @@ public struct MailScript {
     /// Send `body` (plain content) with `attachmentPaths` (already resolved absolute paths).
     /// Returns normally on success; throws if the script did not report "sent".
     public func sendWithAttachments(subject: String, body: String, to: [String], cc: [String],
-                                    bcc: [String], attachmentPaths: [String]) throws {
+                                    bcc: [String], attachmentPaths: [String], sender: String? = nil) throws {
         let US = MailScript.US
         let out = try runner.run(MailScript.sendWithAttachmentsScript, arguments: [
             subject, body,
             to.joined(separator: US), cc.joined(separator: US), bcc.joined(separator: US),
-            attachmentPaths.joined(separator: US),
+            attachmentPaths.joined(separator: US), sender ?? "",
         ])
         guard out == "sent" else {
             throw AppleScriptRunner.RunError.scriptFailed(status: 1, stderr: "sendWithAttachments returned '\(out)'")
@@ -359,6 +367,7 @@ public struct MailScript {
         set ccRaw to item 4 of argv
         set bccRaw to item 5 of argv
         set attRaw to item 6 of argv
+        set senderAddr to item 7 of argv
         set US to (ASCII character 31)
         set htmlString to (do shell script "cat " & quoted form of htmlPath)
         set pb to current application's NSPasteboard's generalPasteboard()
@@ -368,6 +377,7 @@ public struct MailScript {
         pb's setData:htmlData forType:(current application's NSPasteboardTypeHTML)
         tell application "Mail"
             set newMsg to make new outgoing message with properties {subject:theSubject, content:"", visible:true}
+            if senderAddr is not "" then set sender of newMsg to senderAddr
             my addRecips(newMsg, toRaw, US, "to")
             my addRecips(newMsg, ccRaw, US, "cc")
             my addRecips(newMsg, bccRaw, US, "bcc")
@@ -456,12 +466,13 @@ public struct MailScript {
     /// deletes it after this returns). Returns normally on "sent"; throws otherwise. Caller
     /// MUST have passed the self-only `guardOutbound` first; this method performs NO gating.
     public func sendHtmlViaGui(htmlPath: String, subject: String, to: [String],
-                               cc: [String], bcc: [String], attachmentPaths: [String]) throws {
+                               cc: [String], bcc: [String], attachmentPaths: [String],
+                               sender: String? = nil) throws {
         let US = MailScript.US
         let out = try runner.runViaStdin(MailScript.sendHtmlGuiScript, arguments: [
             htmlPath, subject,
             to.joined(separator: US), cc.joined(separator: US), bcc.joined(separator: US),
-            attachmentPaths.joined(separator: US),
+            attachmentPaths.joined(separator: US), sender ?? "",
         ])
         guard out == "sent" else {
             let reason = out == "wrong-window"
