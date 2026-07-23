@@ -11,7 +11,7 @@ struct SearchCommand: ParsableCommand {
     @OptionGroup var global: GlobalOptions
     @Option(name: .long, help: "Account name or UUID; omit to search all accounts.") var account: String?
     @Option(name: .long, help: "Mailbox name (default INBOX; use 'All' for every mailbox).") var mailbox: String = "INBOX"
-    @Option(name: .long, help: "Substring match on subject.") var subject: String?
+    @Option(name: .long, help: "Substring match on subject (repeatable — matches ANY, MCP B subject_keywords).") var subject: [String] = []
     @Option(name: .long, help: "Substring match on sender name/email.") var sender: String?
     @Option(name: .long, help: "Substring match on the indexed body preview.") var body: String?
     @Option(name: .long, help: "Lower bound on date received (YYYY-MM-DD).") var fromDate: String?
@@ -37,7 +37,7 @@ struct SearchCommand: ParsableCommand {
             var f = EnvelopeIndex.MessageFilters()
             if let account { f.accountUUID = try ctx.requireAccountUUID(account) }
             f.mailboxName = mailbox
-            f.subjectContains = subject
+            f.subjectContainsAny = subject
             f.senderContains = sender
             f.bodyContains = body
             f.readStatus = try triState(read, unread, "read", "unread")

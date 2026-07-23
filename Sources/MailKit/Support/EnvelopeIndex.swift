@@ -136,6 +136,7 @@ public final class EnvelopeIndex {
         public var accountUUID: String?
         public var mailboxName: String = "INBOX"
         public var subjectContains: String?
+        public var subjectContainsAny: [String] = []   // OR-match list (MCP B subject_keywords); ANY matches
         public var senderContains: String?
         public var bodyContains: String?     // matches the Envelope Index summary/preview
         public var conversationID: Int?      // Apple thread id (for `thread <id>`)
@@ -160,7 +161,14 @@ public final class EnvelopeIndex {
         if !f.includeDeleted { where_.append("m.deleted = 0") }
         let resolved = resolveMailboxes(accountUUID: f.accountUUID, mailboxName: f.mailboxName)
         where_.append(EnvelopeIndex.mailboxPredicate(direct: resolved.direct, label: resolved.label))
-        if let s = f.subjectContains, !s.isEmpty {
+        // subject_keywords OR-match (MCP B): match ANY of the keywords. Non-empty list takes
+        // precedence over the single `subjectContains`; each keyword is a parameter-bound LIKE.
+        let subjKeywords = f.subjectContainsAny.filter { !$0.isEmpty }
+        if !subjKeywords.isEmpty {
+            let ors = subjKeywords.map { _ in "(COALESCE(m.subject_prefix,'') || COALESCE(s.subject,'')) LIKE ? ESCAPE '\\'" }
+            where_.append("(" + ors.joined(separator: " OR ") + ")")
+            for kw in subjKeywords { binds.append("%\(likeEscape(kw))%") }
+        } else if let s = f.subjectContains, !s.isEmpty {
             where_.append("(COALESCE(m.subject_prefix,'') || COALESCE(s.subject,'')) LIKE ? ESCAPE '\\'")
             binds.append("%\(likeEscape(s))%")
         }

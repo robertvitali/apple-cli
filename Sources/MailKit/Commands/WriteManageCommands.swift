@@ -20,12 +20,18 @@ func notLocatedNote(_ notFound: [String]) -> String? {
 
 /// Filter selector for bulk ops (MCP B move/update/trash filter model).
 struct MatchOptions: ParsableArguments {
-    @Option(name: .long, help: "Match subject keyword.") var matchSubject: String?
+    @Option(name: .long, help: "Match subject keyword (repeatable — matches ANY, MCP B subject_keywords).") var matchSubject: [String] = []
     @Option(name: .long, help: "Match sender substring.") var matchSender: String?
     @Option(name: .long, help: "Only messages older than N days.") var olderThanDays: Int?
     @Flag(name: .long, help: "Only already-read messages.") var onlyRead = false
-    @Option(name: .long, help: "Max messages to affect (safety cap).") var max: Int = 50
-    var isActive: Bool { matchSubject != nil || matchSender != nil || olderThanDays != nil || onlyRead }
+    @Flag(name: .long, help: "Operate on the WHOLE mailbox with no subject/sender filter required (MCP B apply_to_all); if a --match filter is also given, that filter still narrows the set. STILL per-message label-gated: a batch containing any unlabeled real message aborts before mutating anything, so on a real INBOX this refuses; it only affects a mailbox of labeled test data. Bounded by --max.") var all = false
+    @Option(name: .long, help: "Max messages to affect (safety cap; MCP B max_updates/max_deletes).") var max: Int = 50
+    // Count only NON-BLANK keywords: a lone `--match-subject ""` is not an active filter (buildFilter
+    // drops empty keywords), so it must not silently mean "whole mailbox" — that intent needs --all.
+    var isActive: Bool {
+        matchSubject.contains { !$0.trimmingCharacters(in: .whitespaces).isEmpty }
+            || matchSender != nil || olderThanDays != nil || onlyRead || all
+    }
 }
 
 /// Resolve targets: explicit ids (precise) OR --match filters (bulk). Returns decoded
@@ -39,11 +45,13 @@ func resolveTargets(ctx: MailContext, ids: [String], match: MatchOptions, accoun
         }
         return (out, false)
     }
-    guard match.isActive else { throw AppleError.validation("provide message ids or at least one --match filter.") }
+    guard match.isActive else { throw AppleError.validation("provide message ids, a --match filter, or --all.") }
     var f = EnvelopeIndex.MessageFilters()
     if let account { f.accountUUID = try ctx.requireAccountUUID(account) }
     f.mailboxName = mailbox
-    f.subjectContains = match.matchSubject
+    // --all leaves subject/sender unset → the query returns every message in the mailbox (bounded
+    // by --max). subject keywords match ANY (MCP B subject_keywords OR-semantics).
+    f.subjectContainsAny = match.matchSubject
     f.senderContains = match.matchSender
     if match.onlyRead { f.readStatus = true }
     if let days = match.olderThanDays { f.dateToUnix = Int(Date().timeIntervalSince1970) - days * 86400 }

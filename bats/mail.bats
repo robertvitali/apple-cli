@@ -78,6 +78,36 @@ require_index() {
   echo "$output" | grep -q '"dry_run" : true'
 }
 
+# ── subject_keywords OR-match (audit gap C) + apply_to_all (gap D) — CI-safe ─────────────────────
+@test "mail search accepts repeatable --subject (OR-match; MCP B subject_keywords) and previews (exit 0)" {
+  require_index
+  run "$BIN" mail search --account iCloud --mailbox All --subject apple-cli-nope-a --subject apple-cli-nope-b --limit 1 --no-content
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"tool" : "mail"'
+}
+
+@test "mail move accepts repeatable --match-subject (OR-match) and previews filter_based (exit 0)" {
+  require_index
+  run "$BIN" mail move --match-subject apple-cli-nope-a --match-subject apple-cli-nope-b --to Archive --account iCloud
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"filter_based" : true'
+}
+
+@test "mail mark --all (apply_to_all) is accepted and previews without ids/filter (dry-run, exit 0)" {
+  require_index
+  run "$BIN" mail mark --all --read --mailbox INBOX --account iCloud --max 3
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"dry_run" : true'
+  echo "$output" | grep -q '"filter_based" : true'
+}
+
+@test "mail mark with no ids, no --match, no --all is a usage error (exit 64)" {
+  require_index
+  run "$BIN" mail mark --read --account iCloud --execute --test-mode
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q '"validation_error"'
+}
+
 @test "mail search --limit 0 does not report has_more with next_offset 0 (no pagination loop)" {
   require_index
   run "$BIN" mail search --account iCloud --limit 0

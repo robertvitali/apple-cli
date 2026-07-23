@@ -146,4 +146,24 @@ struct EnvelopeIndexTests {
         f.flagged = true
         #expect(try idx.queryMessages(f).count == 1)      // only msg 10 is flagged
     }
+
+    // subject_keywords OR-match (MCP B): the union clause matches ANY keyword, ANDs with other
+    // filters, and drops empty keywords (never "match all"). Locks the OR semantics so an OR→AND
+    // regression or a dropped bind fails CI (the singular path above never exercised the OR clause).
+    @Test func subjectKeywordsOrMatch() throws {
+        let idx = try index()
+        var f = EnvelopeIndex.MessageFilters()
+        f.mailboxName = "All"; f.subjectContainsAny = ["hello", "gmail"]
+        // "Hello" (msgs 10 iCloud-INBOX, 12 iCloud-Sent) ∪ "Gmail msg" (msg 13 Gmail home store) = 3.
+        #expect(try idx.queryMessages(f).count == 3)
+        // AND-across-filters still holds: only msg 10 is flagged.
+        f.flagged = true
+        #expect(try idx.queryMessages(f).count == 1)
+        // an empty keyword is DROPPED (not treated as match-all): only "gmail" applies → msg 13.
+        f.flagged = nil; f.subjectContainsAny = ["", "gmail"]
+        #expect(try idx.queryMessages(f).count == 1)
+        // subjectContainsAny takes precedence over the legacy single subjectContains.
+        f.subjectContainsAny = ["gmail"]; f.subjectContains = "hello"
+        #expect(try idx.queryMessages(f).count == 1)      // "gmail" wins → msg 13, not "hello"
+    }
 }
