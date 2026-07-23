@@ -413,6 +413,41 @@ require_index() {
   echo "$output" | grep -q '"type" : "safety_violation"'
 }
 
+# ── rule live-actions move_to/copy_to/flag_color (audit gap B) — CI-safe (pure guards, no Mail) ───
+@test "mail rules create previews move_to + flag_color actions (dry-run, exit 0)" {
+  run "$BIN" mail rules create --name "apple-cli-test-b" --condition "subject:contains:apple-cli-test" --action "move_to=iCloud/Archive" --action "flag_color=red"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"move_to" : "iCloud/Archive"'
+  echo "$output" | grep -q '"flag_color" : "red"'
+}
+
+@test "mail rules create with move_to lacking an Account/Mailbox path is a validation error (exit 64)" {
+  APPLE_TEST_MODE=1 \
+    run "$BIN" mail rules create --name "apple-cli-test-b" --condition "subject:contains:apple-cli-test" --action "move_to=Archive" --execute --test-mode
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q '"validation_error"'
+}
+
+@test "mail rules create with forward_to remains refused at --execute (exit 77, latent auto-send)" {
+  APPLE_TEST_MODE=1 \
+    run "$BIN" mail rules create --name "apple-cli-test-b" --condition "subject:contains:apple-cli-test" --action "forward_to=a@x.io" --execute --test-mode
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q '"type" : "safety_violation"'
+}
+
+@test "mail rules create DRY-RUN move_to without slash is a validation error (exit 64, preview predicts execute)" {
+  # The dry-run now runs liveActionPlan so a bad action shape fails in preview, not only at --execute.
+  run "$BIN" mail rules create --name "apple-cli-test-b" --condition "subject:contains:apple-cli-test" --action "move_to=Archive"
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q '"validation_error"'
+}
+
+@test "mail rules create DRY-RUN forward_to is refused (exit 77, preview predicts execute)" {
+  run "$BIN" mail rules create --name "apple-cli-test-b" --condition "subject:contains:apple-cli-test" --action "forward_to=a@x.io"
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q '"type" : "safety_violation"'
+}
+
 @test "mail rules update --execute WITHOUT --test-mode is refused (exit 77, before any Mail access)" {
   # requireLabeledRule fail-closes on the test-mode gate before it ever reads Mail's rules.
   run "$BIN" mail rules update 1 --name "apple-cli-test-x" --execute

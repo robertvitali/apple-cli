@@ -44,6 +44,48 @@ with the Apple MCP servers they replace.
   non-mark action set manually in Mail.app is not preserved. Both are surfaced in
   the command's JSON `note`; on a recreate failure the envelope includes the full
   rule spec needed to rebuild it by hand (the old rule is deleted first).
+- **Mail rule live-actions `move_to` / `copy_to` / `flag_color`** (audit gap B):
+  `rules create` and in-place `rules update` now WIRE these actions (previously
+  refused), matching the MCP oracle's `create_rule`/`update_rule` action set.
+  Correctness details, each verified live against the oracle:
+  - **`should move/copy message` is the activate/clear primitive.** Setting the
+    `move/copy message` target alone leaves the action INACTIVE; the paired
+    `should move/copy message` boolean is what turns it on. To CLEAR a move/copy
+    action, `set should move message … to false` — Mail refuses
+    `set move message … to missing value` (`-1700`) and `delete move message …`
+    is a silent no-op. (The former mapping set targets that never fired and
+    "cleared" via a no-op; now fixed.)
+  - **In-place `--action` is a true wholesale replace** (matching op 28): the
+    modeled action set (`should move`/`should copy`/`mark read`/`mark flagged`/
+    `mark flag index`/`delete message`) is RESET, then the new plan reapplied — so
+    dropping an action by omitting it from `--action` clears it. Ordering mirrors
+    the oracle's Tahoe workarounds: `enabled` is set AFTER the action reset (an
+    earlier set is silently reverted) and a rename is applied LAST (renaming
+    invalidates the rule reference for later property writes).
+  - **`_check_supported_actions` parity + safety refusal:** an update to a rule
+    whose EXISTING actions include something the CLI can't model (run-script /
+    redirect / reply-text / play-sound / forward-text / highlight / color-message)
+    is REFUSED (`safety_violation`), never silently preserved-and-misrepresented
+    (in place) or dropped (recreate) — mirroring the oracle's refusal and closing a
+    run-script (RCE-on-incoming-mail) survival path on hand-made labeled rules. The
+    probe FAILS CLOSED (an unreadable property or script error refuses the update,
+    not proceeds blind). **Deliberate safety-stricter divergence:** the CLI ALSO
+    refuses a rule carrying a `forward message` (auto-forward-to-others — a named
+    dangerous action per AGENTS.md); the oracle instead clears it on an
+    action-update, but that would leave it live on an enable-only update, so the
+    CLI refuses any update to such a rule (edit it in Mail.app). A CLI-authored
+    rule never carries any of these, so normal flow is unaffected.
+  - **Flag-color index parity fix:** `MailFlagColor` now uses macOS Mail's ACTUAL
+    (non-obvious) `mark flag index` order — `orange=0, red=1, yellow=2, blue=3,
+    green=4, purple=5, gray=6` — matching the oracle's `get_flag_index`. The prior
+    enum used the intuitive-but-wrong `red=0` order, so `flag --color red|orange|
+    green|blue` (and rule `flag_color`) set the WRONG color and the read path named
+    flags wrong; corrected in one place (write + read share the table) and pinned
+    to the oracle's literal values by a parity test. **BREAKING (0.x):** the
+    `flag_color` integer for those four colors changes.
+  - **Safety:** wiring `move_to`/`copy_to` on an in-place update cannot also
+    `--enabled` the rule in the same command (its existing conditions aren't
+    re-verified self-scoped) — activation must be a separate `rules enable`.
 - **Mail `attachments save`** (live export): saves a message's attachment bytes to
   disk via AppleScript (a read/export — nothing in Mail is mutated; gates on
   `--execute` only). Selection is POSITIONAL (`--indices` addresses

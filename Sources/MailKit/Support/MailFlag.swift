@@ -3,15 +3,17 @@ import Foundation
 /// Mail flag colors — reconciles MCP A's 8-token palette (`none/orange/red/yellow/blue/
 /// green/purple/gray`) with MCP B's binary flag/unflag into one model.
 ///
-/// The Envelope Index `flag_color` integer and AppleScript's `set flag index` use the
-/// canonical macOS Mail mapping below (red=0 … gray=6). `none` maps to "unflag" (no color).
-///
-/// NOTE (write path, unverified live): the CLI's `flag --color <name>` sets `flag index`
-/// via AppleScript; this mapping is the documented macOS standard. The read path
-/// (`flag_color` int → name) uses the same table. If a future live test shows Mail's index
-/// order differs, adjust here only — both paths share this one source of truth.
+/// The Envelope Index `flag_color` integer and AppleScript's `set flag index` use macOS
+/// Mail's ACTUAL (non-obvious) index order: orange=0, red=1, yellow=2, blue=3, green=4,
+/// purple=5, gray=6 — NOT the intuitive rainbow order (the naive red=0 guess is wrong, and
+/// red↔orange / green↔blue are the two swaps people miss). This matches the MCP parity
+/// oracle's `get_flag_index` (apple-mail-mcp `utils.py`), the source of truth for the port:
+/// a drop-in replacement MUST set the SAME index the oracle would for a given color name.
+/// `none` maps to "unflag" (no color). Both the write path (`flag --color <name>` and rule
+/// `flag_color` → `set flag index`) and the read path (`flag_color` int → name) share this
+/// one table, so the two directions stay consistent with the oracle.
 public enum MailFlagColor: Int, CaseIterable, Sendable {
-    case red = 0, orange = 1, yellow = 2, green = 3, blue = 4, purple = 5, gray = 6
+    case orange = 0, red = 1, yellow = 2, blue = 3, green = 4, purple = 5, gray = 6
 
     public var name: String {
         switch self {

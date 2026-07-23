@@ -149,28 +149,56 @@ public enum RuleLiveGuards {
         }
     }
 
-    /// Reduce an Action to the live-safe token set. A live rule may only mark_read/mark_flagged;
-    /// forward_to (auto-send) and delete (auto-trash) are refused, move_to/copy_to/flag_color are
-    /// unwired. Returns the non-empty `[mark_read?, mark_flagged?]` token list for the AppleScript.
-    public static func liveActionTokens(_ actions: RuleSchema.Action) throws -> [String] {
+    /// The live-safe rule action plan resolved from an Action: move_to/copy_to (resolved-mailbox
+    /// move/copy), mark_read, mark_flagged, and flag_color are WIRED for live execution; forward_to
+    /// and delete stay refused (see `liveActionPlan`). `tokens` is the human/JSON-facing summary.
+    public struct LiveActionPlan: Encodable {
+        public var markRead: Bool
+        public var markFlagged: Bool
+        public var moveTo: String?          // "Account/Mailbox"
+        public var copyTo: String?          // "Account/Mailbox"
+        public var flagColorIndex: Int?     // 0..6 (MailFlagColor rawValue)
+        public var tokens: [String]
+    }
+
+    /// Reduce an Action to the live-safe plan. move_to/copy_to (a resolved-mailbox move/copy),
+    /// mark_read, mark_flagged, and flag_color are now WIRED for live execution; forward_to
+    /// (auto-send to others) and delete (auto-trash) remain refused — a live rule carrying either is
+    /// a latent exfil/destructive surface once enabled, so those stay Mail.app-only. At least one
+    /// supported action is required. move_to/copy_to must be `Account/Mailbox` so the AppleScript can
+    /// resolve a concrete target mailbox.
+    public static func liveActionPlan(_ actions: RuleSchema.Action) throws -> LiveActionPlan {
         if let fwd = actions.forward_to, !fwd.isEmpty {
             throw AppleError.mailSafety("a live rule with forward_to can auto-send to others — refused; edit such a rule in Mail.app.")
         }
         if actions.delete == true {
             throw AppleError.mailSafety("a live rule with a delete action could auto-trash mail once enabled — refused; test delete-action rules in Mail.app.")
         }
-        if actions.move_to != nil || actions.copy_to != nil {
-            throw AppleError.validation("live rule mutation supports mark_read/mark_flagged; move_to/copy_to need a resolved mailbox — set them in Mail.app or use the preview.")
-        }
-        if actions.flag_color != nil {
-            throw AppleError.validation("live rule mutation does not wire the flag_color action yet — set it in Mail.app or use the preview.")
-        }
+        var plan = LiveActionPlan(markRead: actions.mark_read == true, markFlagged: actions.mark_flagged == true,
+                                  moveTo: nil, copyTo: nil, flagColorIndex: nil, tokens: [])
         var toks: [String] = []
-        if actions.mark_read == true { toks.append("mark_read") }
-        if actions.mark_flagged == true { toks.append("mark_flagged") }
-        guard !toks.isEmpty else {
-            throw AppleError.validation("live rule mutation needs at least one of mark_read/mark_flagged (delete/forward/color/move are refused or preview-only).")
+        if let mv = actions.move_to, !mv.isEmpty {
+            guard mv.rangeOfCharacter(from: ctrlChars) == nil else { throw AppleError.validation("move_to must not contain RS/US (0x1E/0x1F) control characters.") }
+            guard mv.contains("/") else { throw AppleError.validation("move_to must be 'Account/Mailbox' (e.g. 'iCloud/Archive'); got '\(mv)'.") }
+            plan.moveTo = mv; toks.append("move_to=\(mv)")
         }
-        return toks
+        if let cp = actions.copy_to, !cp.isEmpty {
+            guard cp.rangeOfCharacter(from: ctrlChars) == nil else { throw AppleError.validation("copy_to must not contain RS/US (0x1E/0x1F) control characters.") }
+            guard cp.contains("/") else { throw AppleError.validation("copy_to must be 'Account/Mailbox' (e.g. 'iCloud/Archive'); got '\(cp)'.") }
+            plan.copyTo = cp; toks.append("copy_to=\(cp)")
+        }
+        if let fc = actions.flag_color, let idx = MailFlagColor.fromToken(fc)?.rawValue {
+            plan.flagColorIndex = idx; plan.markFlagged = true; toks.append("flag_color=\(fc)")
+        }
+        if plan.markRead { toks.append("mark_read") }
+        // Emit a bare mark_flagged only when NO color resolved — gate on the resolved index, not on
+        // token presence: `flag_color=none` (accepted but resolves to no index) must NOT suppress an
+        // accompanying mark_flagged, and `flag_color=<color>` already implies flagged via its token.
+        if plan.markFlagged && plan.flagColorIndex == nil { toks.append("mark_flagged") }
+        guard !toks.isEmpty else {
+            throw AppleError.validation("live rule mutation needs at least one of move_to/copy_to/mark_read/mark_flagged/flag_color (delete/forward remain refused).")
+        }
+        plan.tokens = toks
+        return plan
     }
 }

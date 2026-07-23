@@ -47,6 +47,11 @@ struct RulesCreate: ParsableCommand {
             guard match == "all" || match == "any" else { throw AppleError.validation("--match must be 'all' or 'any'.") }
             let conditions = try condition.map { try RuleSchema.parseCondition($0) }
             let actions = try RuleSchema.parseActions(action)
+            // Validate the live-action plan for BOTH preview and execute so a dry-run faithfully
+            // predicts the execute outcome (mirrors RulesUpdate). Without this, `--action
+            // move_to=Archive` (missing the Account/Mailbox slash) or `--action forward_to=…`
+            // previews exit 0 yet --execute fails 64/77 — a misleading create-vs-update divergence.
+            _ = try RuleLiveGuards.liveActionPlan(actions)
             let rule = RuleSchema.Rule(name: name, conditions: conditions, actions: actions, match_logic: match, enabled: !disabled)
             guard global.willExecute else {
                 try emitRulePreview(rule, willExecute: false, json: global.json); return
@@ -62,13 +67,13 @@ struct RulesCreate: ParsableCommand {
             try RuleLiveGuards.requireLabeledName(name)
             try RuleLiveGuards.requireNoControlChars(name: name, conditions: conditions)
             try RuleLiveGuards.requireSelfScoped(conditions: conditions, match: match)   // enforces --match all
-            let actToks = try RuleLiveGuards.liveActionTokens(actions)
+            let plan = try RuleLiveGuards.liveActionPlan(actions)
             let conds = conditions.map { (type: $0.field, op: $0.operator, value: $0.value) }
             // match=all is enforced by requireSelfScoped, so the rule is an AND rule — thread it.
-            try MailScript().createRule(name: name, enabled: false, matchAll: true, conditions: conds, actions: actToks)
+            try MailScript().createRule(name: name, enabled: false, matchAll: true, conditions: conds, plan: plan)
             try Output.emit(tool: "mail", data: [
                 "created_rule": AnyEncodableBox(name), "conditions": AnyEncodableBox(conditions),
-                "actions": AnyEncodableBox(actToks), "match_logic": AnyEncodableBox("all"),
+                "actions": AnyEncodableBox(plan.tokens), "match_logic": AnyEncodableBox("all"),
                 "enabled": AnyEncodableBox(false), "dry_run": AnyEncodableBox(false), "executed": AnyEncodableBox(true),
                 "note": AnyEncodableBox("created SELF-SCOPED to the test label + DISABLED — it can only ever act on apple-cli-test mail; `rules enable <index>` to activate")])
         }
@@ -107,7 +112,7 @@ struct RulesUpdate: ParsableCommand {
             if let name { try RuleLiveGuards.requireLabeledName(name) }        // a rename must keep the label
             try RuleLiveGuards.requireNoControlChars(name: name, conditions: conds ?? [])
             if let conds { try RuleLiveGuards.requireSelfScoped(conditions: conds, match: "all") }
-            let actToks = try acts.map { try RuleLiveGuards.liveActionTokens($0) }
+            let plan = try acts.map { try RuleLiveGuards.liveActionPlan($0) }
 
             guard global.willExecute else {
                 let recreates = conds != nil
@@ -117,21 +122,38 @@ struct RulesUpdate: ParsableCommand {
             }
             // ---- Live. Target MUST be a labeled test rule (requireLabeledRule fail-closes on real rules). ----
             let target = try requireLabeledRule(index: index, testMode: global.testMode)
+            // Mirror the oracle's `_check_supported_actions`: refuse to touch a rule whose EXISTING
+            // actions include something the CLI can't model (run-script/redirect/reply-text/etc.).
+            // In place we'd silently preserve+misrepresent them; on recreate we'd silently drop them.
+            // Gates BOTH update paths (matching the oracle's unconditional check in update_rule).
+            try MailScript().checkSupportedActions(index: target.index)
 
             guard let conds else {
                 // ---- Metadata-only patch → modify IN PLACE (reliable; preserves rule position). ----
                 // LABEL-TRUST BOUNDARY: enabling here trusts the rule's NAME label only — its EXISTING
-                // conditions/actions are NOT re-verified (same boundary as `rules enable`). The tool's
-                // own create/recreate can't author a labeled rule that acts on real mail; a hand-made
-                // one (Mail.app UI) is the operator's responsibility.
+                // conditions are NOT re-verified self-scoped (same boundary as `rules enable`). The
+                // tool's own create/recreate can't author a labeled rule that acts on real mail; a
+                // hand-made one (Mail.app UI) is the operator's responsibility. To keep that boundary
+                // from being widened by the newly-wired move/copy actions, refuse to ENABLE a rule in
+                // the SAME call that wires a move_to/copy_to: activation must be a separate, operator-
+                // visible `rules enable` (or pass --condition to route through the self-scoping
+                // recreate path). A CLI-authored rule is always created disabled + self-scoped, so this
+                // never blocks the normal flow.
+                if enabled == true, let p = plan, (p.moveTo != nil || p.copyTo != nil) {
+                    throw AppleError.mailSafety("wiring move_to/copy_to on an in-place update cannot also ENABLE the rule in the same command (its existing conditions are not re-verified self-scoped) — omit --enabled and enable separately after review, or pass --condition to route through the self-scoping recreate path.")
+                }
                 try MailScript().updateRuleMeta(index: target.index, name: name, enabled: enabled,
-                                                matchAll: match == "all" ? true : nil, actions: actToks)
+                                                matchAll: match == "all" ? true : nil, plan: plan)
                 try Output.emit(tool: "mail", data: [
                     "updated_rule_index": AnyEncodableBox(target.index),
                     "rule_name": AnyEncodableBox(name ?? target.name),
                     "patch": AnyEncodableBox(patch), "recreated": AnyEncodableBox(false),
                     "dry_run": AnyEncodableBox(false), "executed": AnyEncodableBox(true),
-                    "note": AnyEncodableBox("patched in place")])
+                    // When --action is given, the supported action set is RESET then reapplied
+                    // (wholesale replace, matching the oracle) — the `patch.actions` ARE the rule's
+                    // full modeled action set afterward; rules carrying unmodeled actions were refused
+                    // above, so nothing unmanaged survives.
+                    "note": AnyEncodableBox(plan != nil ? "patched in place; supported actions reset to the given set (wholesale replace)" : "patched in place")])
                 return
             }
             // ---- Condition replacement → whole-rule DELETE-AND-RECREATE. Two Mail bugs force this
@@ -147,15 +169,22 @@ struct RulesUpdate: ParsableCommand {
             let mergedName = name ?? old.name
             try RuleLiveGuards.requireLabeledName(mergedName)          // a preserved/renamed name must be labeled
             let mergedEnabled = enabled ?? old.enabled
-            var mergedTokens = actToks
-            if mergedTokens == nil {
+            let mergedPlan: RuleLiveGuards.LiveActionPlan
+            if let plan {
+                mergedPlan = plan
+            } else {
+                // No --action given: carry the old rule's actions. readRuleScalars reads only the mark
+                // flags (Mail exposes no easy readback of a rule's move/copy/flag-color target), so a
+                // condition-replace recreate WITHOUT an explicit --action loses any prior move/copy/
+                // flag-color action — a documented divergence (CHANGELOG); pass --action to preserve it.
                 var carried: [String] = []
                 if old.markRead { carried.append("mark_read") }
                 if old.markFlagged { carried.append("mark_flagged") }
-                mergedTokens = carried
+                mergedPlan = RuleLiveGuards.LiveActionPlan(markRead: old.markRead, markFlagged: old.markFlagged,
+                                                           moveTo: nil, copyTo: nil, flagColorIndex: nil, tokens: carried)
             }
-            guard let finalTokens = mergedTokens, !finalTokens.isEmpty else {
-                throw AppleError.validation("the rule has no mark_read/mark_flagged action and none was given — a live rule needs one; add --action mark_read=true or mark_flagged=true.")
+            guard !mergedPlan.tokens.isEmpty else {
+                throw AppleError.validation("the rule has no action and none was given — a live rule needs one; add --action move_to=… / mark_read=true / mark_flagged=true / flag_color=… .")
             }
             let condTriples = conds.map { (type: $0.field, op: $0.operator, value: $0.value) }
             // Refuse if a DIFFERENT rule already carries the target name (the recreate would trigger
@@ -165,11 +194,11 @@ struct RulesUpdate: ParsableCommand {
             }
             // Delete-old-first is forced by the duplicate-name bug, so if the create then fails the old
             // rule is GONE — surface the spec needed to rebuild it by hand in every failure path.
-            let recovery = "name='\(mergedName)' match=all enabled=\(mergedEnabled) conditions=[\(condTriples.map { "\($0.type):\($0.op):\($0.value)" }.joined(separator: ", "))] actions=[\(finalTokens.joined(separator: ", "))]"
+            let recovery = "name='\(mergedName)' match=all enabled=\(mergedEnabled) conditions=[\(condTriples.map { "\($0.type):\($0.op):\($0.value)" }.joined(separator: ", "))] actions=[\(mergedPlan.tokens.joined(separator: ", "))]"
             try MailScript().deleteRule(index: target.index)                                // 1) old gone → name unique
             do {
                 try MailScript().createRule(name: mergedName, enabled: false, matchAll: true,   // 2) create DISABLED
-                                            conditions: condTriples, actions: finalTokens)
+                                            conditions: condTriples, plan: mergedPlan)
             } catch {
                 throw AppleError.upstream("rule recreate FAILED to create the replacement AFTER deleting the old rule — the rule is GONE. Recreate it in Mail.app: \(recovery). (underlying: \(error))")
             }
@@ -182,7 +211,7 @@ struct RulesUpdate: ParsableCommand {
                 throw AppleError.upstream("rule recreate dropped conditions (\(attached)/\(condTriples.count) attached) — removed the malformed rule and did NOT enable it (a 0-condition rule matches ALL mail). Recreate in Mail.app: \(recovery)")
             }
             if mergedEnabled {                                                              // 4) re-enable only once verified
-                try MailScript().updateRuleMeta(index: created.index, name: nil, enabled: true, matchAll: nil, actions: nil)
+                try MailScript().updateRuleMeta(index: created.index, name: nil, enabled: true, matchAll: nil, plan: nil)
             }
             let newIndex = (try? MailScript().listRules())?.first(where: { $0.name == mergedName })?.index ?? created.index
             try Output.emit(tool: "mail", data: [
@@ -191,10 +220,10 @@ struct RulesUpdate: ParsableCommand {
                 "rule_name": AnyEncodableBox(mergedName),
                 "conditions_attached": AnyEncodableBox(attached),
                 "enabled": AnyEncodableBox(mergedEnabled),
-                "actions": AnyEncodableBox(finalTokens),
+                "actions": AnyEncodableBox(mergedPlan.tokens),
                 "patch": AnyEncodableBox(patch), "recreated": AnyEncodableBox(true),
                 "dry_run": AnyEncodableBox(false), "executed": AnyEncodableBox(true),
-                "note": AnyEncodableBox("condition change → delete-and-recreated (Mail can't delete a rule condition); created disabled, conditions verified, re-enabled if it was enabled. DIVERGES from the MCP in-place update: rule MOVED TO END of list, and actions RESET to [\(finalTokens.joined(separator: ", "))] (a non-mark action set in Mail.app is NOT preserved).")])
+                "note": AnyEncodableBox("condition change → delete-and-recreated (Mail can't delete a rule condition); created disabled, conditions verified, re-enabled if it was enabled. DIVERGES from the MCP in-place update: rule MOVED TO END of list, and actions RESET to [\(mergedPlan.tokens.joined(separator: ", "))] — pass --action (move_to/copy_to/mark_read/mark_flagged/flag_color) to set them explicitly, since a prior action NOT re-passed is not read back off the old rule.")])
         }
     }
 }

@@ -97,16 +97,37 @@ struct RuleLiveGuardsTests {
         #expect(throws: Error.self) { try RuleLiveGuards.requireSelfScoped(conditions: [labeled, hdr], match: "all") }
     }
 
-    @Test func liveActionTokensAllowsOnlyMarkVerbs() throws {
-        #expect(try RuleLiveGuards.liveActionTokens(RuleSchema.parseActions(["mark_read=true"])) == ["mark_read"])
-        #expect(try RuleLiveGuards.liveActionTokens(RuleSchema.parseActions(["mark_flagged=true", "mark_read=true"])).sorted()
-                == ["mark_flagged", "mark_read"])
+    @Test func liveActionPlanCapturesMarkVerbs() throws {
+        let p1 = try RuleLiveGuards.liveActionPlan(RuleSchema.parseActions(["mark_read=true"]))
+        #expect(p1.markRead == true && p1.markFlagged == false && p1.moveTo == nil)
+        let p2 = try RuleLiveGuards.liveActionPlan(RuleSchema.parseActions(["mark_flagged=true", "mark_read=true"]))
+        #expect(p2.markRead == true && p2.markFlagged == true)
     }
 
-    @Test func liveActionTokensRefusesDestructiveAndUnwired() throws {
-        #expect(throws: Error.self) { _ = try RuleLiveGuards.liveActionTokens(RuleSchema.parseActions(["forward_to=a@x.io"])) }
-        #expect(throws: Error.self) { _ = try RuleLiveGuards.liveActionTokens(RuleSchema.parseActions(["delete=true"])) }
-        #expect(throws: Error.self) { _ = try RuleLiveGuards.liveActionTokens(RuleSchema.parseActions(["move_to=Archive"])) }
-        #expect(throws: Error.self) { _ = try RuleLiveGuards.liveActionTokens(RuleSchema.parseActions(["flag_color=red"])) }
+    @Test func liveActionPlanWiresMoveCopyFlagColor() throws {
+        // move_to/copy_to/flag_color are NOW live-wired (were previously refused).
+        let mv = try RuleLiveGuards.liveActionPlan(RuleSchema.parseActions(["move_to=iCloud/Archive"]))
+        #expect(mv.moveTo == "iCloud/Archive")
+        let cp = try RuleLiveGuards.liveActionPlan(RuleSchema.parseActions(["copy_to=iCloud/Saved"]))
+        #expect(cp.copyTo == "iCloud/Saved")
+        let fc = try RuleLiveGuards.liveActionPlan(RuleSchema.parseActions(["flag_color=red"]))
+        #expect(fc.flagColorIndex == MailFlagColor.red.rawValue && fc.markFlagged == true)
+        // move_to/copy_to must carry an Account/Mailbox path (need a resolvable target).
+        #expect(throws: Error.self) { _ = try RuleLiveGuards.liveActionPlan(RuleSchema.parseActions(["move_to=Archive"])) }
+    }
+
+    @Test func liveActionPlanFlagColorNoneHandling() throws {
+        // flag_color=none resolves to NO index; a paired mark_flagged must still yield a valid plan
+        // (the token is gated on the resolved index, not on flag_color-token presence).
+        let p = try RuleLiveGuards.liveActionPlan(RuleSchema.parseActions(["mark_flagged=true", "flag_color=none"]))
+        #expect(p.markFlagged == true && p.flagColorIndex == nil && p.tokens.contains("mark_flagged"))
+        // flag_color=none as the SOLE action is not a real action → refused.
+        #expect(throws: Error.self) { _ = try RuleLiveGuards.liveActionPlan(RuleSchema.parseActions(["flag_color=none"])) }
+    }
+
+    @Test func liveActionPlanRefusesForwardAndDelete() throws {
+        // forward_to (auto-send) + delete (auto-trash) remain refused — latent exfil/destructive.
+        #expect(throws: Error.self) { _ = try RuleLiveGuards.liveActionPlan(RuleSchema.parseActions(["forward_to=a@x.io"])) }
+        #expect(throws: Error.self) { _ = try RuleLiveGuards.liveActionPlan(RuleSchema.parseActions(["delete=true"])) }
     }
 }

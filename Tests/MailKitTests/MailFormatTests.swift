@@ -63,10 +63,28 @@ struct MailFlagColorTests {
     }
 
     @Test func readNameOnlyWhenFlagged() {
-        #expect(MailFlagColor.readName(flagged: true, flagColor: 0) == "red")
+        #expect(MailFlagColor.readName(flagged: true, flagColor: 0) == "orange") // index 0 = orange (oracle map)
         #expect(MailFlagColor.readName(flagged: true, flagColor: 5) == "purple")
         #expect(MailFlagColor.readName(flagged: false, flagColor: 5) == nil) // not flagged → no color
         #expect(MailFlagColor.readName(flagged: true, flagColor: nil) == nil)
+    }
+
+    /// STRICT-SUPERSET PARITY: each color token must map to the SAME `mark flag index` the MCP oracle
+    /// (`apple-mail-mcp` `utils.py` `get_flag_index`) writes, so `flag --color X` and rule `flag_color=X`
+    /// set the color the oracle would (and the read path names it back the same). Pinned to LITERAL
+    /// oracle values — NOT `MailFlagColor.X.rawValue`, which is self-referential and can't catch enum
+    /// drift. macOS Mail's real order is non-obvious (orange=0, red=1, and green/blue swapped). If this
+    /// fails, the enum drifted from the oracle: fix `MailFlagColor`, not this test.
+    @Test func oracleFlagIndexParity() {
+        let oracle: [(String, Int)] = [
+            ("orange", 0), ("red", 1), ("yellow", 2), ("blue", 3),
+            ("green", 4), ("purple", 5), ("gray", 6),
+        ]
+        for (token, idx) in oracle {
+            #expect(MailFlagColor.fromToken(token)?.rawValue == idx, "flag_color=\(token) must map to oracle index \(idx)")
+            #expect(MailFlagColor.readName(flagged: true, flagColor: idx) == token, "index \(idx) must read back as \(token)")
+        }
+        #expect(MailFlagColor.fromToken("none") == nil) // none == unflag, no index
     }
 
     @Test func tokenParsing() {

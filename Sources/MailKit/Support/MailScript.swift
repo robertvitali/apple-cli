@@ -846,7 +846,47 @@ public struct MailScript {
         set AppleScript's text item delimiters to RS
         set actToks to text items of actBlob
         set AppleScript's text item delimiters to ""
+        -- Precompute move/copy targets ("Account/Mailbox/Path" → account + mailbox-path) OUTSIDE the
+        -- tell block (delimiter/list ops misparse inside `tell application "Mail"`), like conditions.
+        set moveTo to item 6 of argv
+        set copyTo to item 7 of argv
+        set flagIdx to item 8 of argv
+        set mvAcct to ""
+        set mvMbx to ""
+        set cpAcct to ""
+        set cpMbx to ""
+        if moveTo is not "" then
+            set AppleScript's text item delimiters to "/"
+            set mvParts to text items of moveTo
+            set mvAcct to item 1 of mvParts
+            set mvMbx to (items 2 thru -1 of mvParts) as string
+            set AppleScript's text item delimiters to ""
+        end if
+        if copyTo is not "" then
+            set AppleScript's text item delimiters to "/"
+            set cpParts to text items of copyTo
+            set cpAcct to item 1 of cpParts
+            set cpMbx to (items 2 thru -1 of cpParts) as string
+            set AppleScript's text item delimiters to ""
+        end if
         tell application "Mail"
+            -- Pre-resolve move/copy targets BEFORE creating the rule, so an unresolvable target (bad
+            -- account/mailbox, or a nested path Mail's `name` doesn't match) fails cleanly with NO
+            -- partial rule left behind — and the CLI never reports an action that didn't attach.
+            set mvMailbox to missing value
+            set cpMailbox to missing value
+            if moveTo is not "" then
+                try
+                    set mvMailbox to (first mailbox of account mvAcct whose name is mvMbx)
+                end try
+                if mvMailbox is missing value then return "unresolved:move_to=" & moveTo
+            end if
+            if copyTo is not "" then
+                try
+                    set cpMailbox to (first mailbox of account cpAcct whose name is cpMbx)
+                end try
+                if cpMailbox is missing value then return "unresolved:copy_to=" & copyTo
+            end if
             set r to make new rule with properties {name:ruleName, enabled:isEnabled}
             try
                 set all conditions must be met of r to ((item 5 of argv) is "1")
@@ -869,12 +909,24 @@ public struct MailScript {
                     try
                         set mark flagged of r to true
                     end try
-                else if tok is "delete" then
-                    try
-                        set delete message of r to true
-                    end try
                 end if
             end repeat
+            -- Apply the pre-resolved move/copy targets + flag color. `should move/copy message` is the
+            -- boolean that ACTIVATES the action; `move/copy message` only names the target mailbox
+            -- (setting the target ALONE leaves the action inactive). Mirrors the MCP oracle's
+            -- _build_action_lines, which pairs `set should move message … to true` with the target.
+            if mvMailbox is not missing value then
+                set should move message of r to true
+                set move message of r to mvMailbox
+            end if
+            if cpMailbox is not missing value then
+                set should copy message of r to true
+                set copy message of r to cpMailbox
+            end if
+            if flagIdx is not "" then
+                set mark flagged of r to true
+                set mark flag index of r to (flagIdx as integer)
+            end if
         end tell
         return "ok"
     end run
@@ -901,17 +953,26 @@ public struct MailScript {
         end tell
     end qualifier
     """
-    /// Create a Mail rule with the safe action subset (mark_read / mark_flagged / delete;
-    /// move_to/copy_to/forward_to are refused on live create by the caller — a forwarding rule
-    /// is a latent auto-send-to-others surface). Caller MUST have label-checked the rule name.
+    /// Create a Mail rule with the live-safe action plan (mark_read / mark_flagged / flag_color /
+    /// move_to / copy_to). forward_to (auto-send) and delete (auto-trash) are refused upstream by
+    /// `RuleSchema.liveActionPlan`. move_to/copy_to resolve `Account/Mailbox` to a concrete target
+    /// mailbox in the script. Caller MUST have label-checked the rule name + self-scoped it.
     public func createRule(name: String, enabled: Bool, matchAll: Bool,
                            conditions: [(type: String, op: String, value: String)],
-                           actions: [String]) throws {
+                           plan: RuleLiveGuards.LiveActionPlan) throws {
         let condBlob = conditions.map { [$0.type, $0.op, $0.value].joined(separator: MailScript.US) }
             .joined(separator: MailScript.RS)
-        let actBlob = actions.joined(separator: MailScript.RS)
+        var toks: [String] = []
+        if plan.markRead { toks.append("mark_read") }
+        if plan.markFlagged { toks.append("mark_flagged") }
+        let actBlob = toks.joined(separator: MailScript.RS)
         let out = try runner.run(MailScript.createRuleScript,
-                                 arguments: [name, enabled ? "1" : "0", condBlob, actBlob, matchAll ? "1" : "0"])
+                                 arguments: [name, enabled ? "1" : "0", condBlob, actBlob, matchAll ? "1" : "0",
+                                             plan.moveTo ?? "", plan.copyTo ?? "",
+                                             plan.flagColorIndex.map { String($0) } ?? ""])
+        if out.hasPrefix("unresolved:") {
+            throw AppleError.notFound("rule action target could not be resolved: \(out.dropFirst("unresolved:".count)). Use 'Account/Mailbox' and check the mailbox exists (nested names may need the leaf). No rule was created.")
+        }
         guard out == "ok" else { throw AppleScriptRunner.RunError.scriptFailed(status: 1, stderr: "createRule returned '\(out)'") }
     }
 
@@ -939,53 +1000,123 @@ public struct MailScript {
             set actToks to text items of actBlob
             set AppleScript's text item delimiters to ""
         end if
+        -- move/copy target splits precomputed OUTSIDE the tell (delimiter ops misparse inside it).
+        set moveTo to item 10 of argv
+        set copyTo to item 11 of argv
+        set flagIdx to item 12 of argv
+        set mvAcct to ""
+        set mvMbx to ""
+        set cpAcct to ""
+        set cpMbx to ""
+        if moveTo is not "" then
+            set AppleScript's text item delimiters to "/"
+            set mvParts to text items of moveTo
+            set mvAcct to item 1 of mvParts
+            set mvMbx to (items 2 thru -1 of mvParts) as string
+            set AppleScript's text item delimiters to ""
+        end if
+        if copyTo is not "" then
+            set AppleScript's text item delimiters to "/"
+            set cpParts to text items of copyTo
+            set cpAcct to item 1 of cpParts
+            set cpMbx to (items 2 thru -1 of cpParts) as string
+            set AppleScript's text item delimiters to ""
+        end if
         tell application "Mail"
             set r to rule idx
-            if hasName then set name of r to newName
-            if hasEnabled then set enabled of r to enVal
+            -- Pre-resolve move/copy targets first, so an unresolvable target fails cleanly before
+            -- any patch is applied (and the CLI never claims an action that didn't attach).
+            set mvMailbox to missing value
+            set cpMailbox to missing value
+            if moveTo is not "" then
+                try
+                    set mvMailbox to (first mailbox of account mvAcct whose name is mvMbx)
+                end try
+                if mvMailbox is missing value then return "unresolved:move_to=" & moveTo
+            end if
+            if copyTo is not "" then
+                try
+                    set cpMailbox to (first mailbox of account cpAcct whose name is cpMbx)
+                end try
+                if cpMailbox is missing value then return "unresolved:copy_to=" & copyTo
+            end if
             if hasMatch then
                 try
                     set all conditions must be met of r to matchAll
                 end try
             end if
             if hasActs then
-                try
-                    set mark read of r to false
-                end try
-                try
-                    set mark flagged of r to false
-                end try
+                -- actions REPLACE wholesale (mirror the MCP oracle's update_rule reset): the
+                -- `should move/copy message` booleans are what CLEAR the move/copy actions — Mail
+                -- REFUSES `set move message … to missing value` (-1700 "can't make missing value into
+                -- type mailbox") and `delete move message …` is a silent no-op, so the boolean is the
+                -- only real toggle. Reset every supported action flag, then reapply the new plan. No
+                -- `try` masking: the old `try`-wrapped `missing value` clears failed SILENTLY, leaving
+                -- stale move/copy actions behind — a bare set surfaces any real failure instead.
+                set should move message of r to false
+                set should copy message of r to false
+                set mark read of r to false
+                set mark flagged of r to false
+                set mark flag index of r to -1
+                set delete message of r to false
+                -- (No forward-message clear here: a rule carrying a `forward message` is REFUSED up
+                -- front by checkSupportedActions, so it never reaches this reset — forward is a named
+                -- dangerous action handled by refusal, not by clear-and-proceed.)
                 repeat with atk in actToks
                     set tok to atk as string
                     if tok is "mark_read" then
-                        try
-                            set mark read of r to true
-                        end try
+                        set mark read of r to true
                     else if tok is "mark_flagged" then
-                        try
-                            set mark flagged of r to true
-                        end try
+                        set mark flagged of r to true
                     end if
                 end repeat
+                if mvMailbox is not missing value then
+                    set should move message of r to true
+                    set move message of r to mvMailbox
+                end if
+                if cpMailbox is not missing value then
+                    set should copy message of r to true
+                    set copy message of r to cpMailbox
+                end if
+                if flagIdx is not "" then
+                    set mark flagged of r to true
+                    set mark flag index of r to (flagIdx as integer)
+                end if
             end if
+            -- `enabled` AFTER the action reset: Mail (Tahoe) silently reverts an enabled set that
+            -- PRECEDES the reset block, so apply it here (mirrors the oracle's documented ordering).
+            if hasEnabled then set enabled of r to enVal
+            -- Rename LAST: renaming invalidates the rule reference for subsequent property accesses
+            -- (Tahoe), so every other patch runs against the still-stably-named rule first.
+            if hasName then set name of r to newName
         end tell
         return "ok"
     end run
     """
     /// In-place metadata patch (name/enabled/match/actions) of rule `index`. `nil` = leave as-is.
     /// Reliable Mail ops only — never mutates conditions (see updateRuleMetaScript). Caller MUST
-    /// have label-checked the target + patch. `actions` (if non-nil) is the safe mark_* token set.
+    /// have label-checked the target + patch. `plan` (if non-nil) is the live-safe action set,
+    /// applied in place (mark flags reset+reapplied; move/copy/flag applied if present).
     public func updateRuleMeta(index: Int, name: String?, enabled: Bool?, matchAll: Bool?,
-                               actions: [String]?) throws {
-        let actBlob = (actions ?? []).joined(separator: MailScript.RS)
+                               plan: RuleLiveGuards.LiveActionPlan?) throws {
+        var toks: [String] = []
+        if let plan {
+            if plan.markRead { toks.append("mark_read") }
+            if plan.markFlagged { toks.append("mark_flagged") }
+        }
+        let actBlob = toks.joined(separator: MailScript.RS)
         let args = [
             String(index),
             name != nil ? "1" : "0", name ?? "",
             enabled != nil ? "1" : "0", (enabled ?? false) ? "1" : "0",
             matchAll != nil ? "1" : "0", (matchAll ?? false) ? "1" : "0",
-            actions != nil ? "1" : "0", actBlob,
+            plan != nil ? "1" : "0", actBlob,
+            plan?.moveTo ?? "", plan?.copyTo ?? "", plan?.flagColorIndex.map { String($0) } ?? "",
         ]
         let out = try runner.run(MailScript.updateRuleMetaScript, arguments: args)
+        if out.hasPrefix("unresolved:") {
+            throw AppleError.notFound("rule action target could not be resolved: \(out.dropFirst("unresolved:".count)). Use 'Account/Mailbox' and check the mailbox exists (nested names may need the leaf). The rule was not modified.")
+        }
         guard out == "ok" else { throw AppleScriptRunner.RunError.scriptFailed(status: 1, stderr: "updateRuleMeta returned '\(out)'") }
     }
 
@@ -1028,6 +1159,93 @@ public struct MailScript {
         func flag(_ s: String) -> Bool { s.trimmingCharacters(in: .whitespaces).lowercased() == "true" }
         let name = f[3...].joined(separator: MailScript.US)
         return RuleScalars(name: name, enabled: flag(f[0]), markRead: flag(f[1]), markFlagged: flag(f[2]))
+    }
+
+    private static let checkSupportedActionsScript = """
+    on run argv
+        set idx to (item 1 of argv) as integer
+        set US to (ASCII character 31)
+        set bad to {}
+        tell application "Mail"
+            set r to rule idx
+            -- Probe the rule-action properties the CLI does NOT model (mirrors the MCP oracle's
+            -- `_check_supported_actions`, mail_connector.py) PLUS `forward message` (the auto-forward
+            -- recipients — a named dangerous action; the oracle only checks its sibling `forward text`
+            -- and clears `forward message` on action-update, but an enable-only update would leave it
+            -- live, so the CLI REFUSES any rule carrying it — a deliberate, safety-stricter divergence).
+            -- Each probe FAILS CLOSED: an `on error` (property renamed/absent in a future Mail) records
+            -- the property as unverifiable so the rule is REFUSED, never silently treated as clean — a
+            -- swallowed probe error on a run-script (RCE) / auto-forward gate is the wrong direction.
+            try
+                if (run script of r) is not missing value then set end of bad to "run script"
+            on error
+                set end of bad to "run script (unreadable)"
+            end try
+            try
+                if (play sound of r) is not missing value then set end of bad to "play sound"
+            on error
+                set end of bad to "play sound (unreadable)"
+            end try
+            try
+                if (redirect message of r) is not "" then set end of bad to "redirect message"
+            on error
+                set end of bad to "redirect message (unreadable)"
+            end try
+            try
+                if (forward message of r) is not "" then set end of bad to "forward message"
+            on error
+                set end of bad to "forward message (unreadable)"
+            end try
+            try
+                if (forward text of r) is not "" then set end of bad to "forward text"
+            on error
+                set end of bad to "forward text (unreadable)"
+            end try
+            try
+                if (reply text of r) is not "" then set end of bad to "reply text"
+            on error
+                set end of bad to "reply text (unreadable)"
+            end try
+            try
+                if (highlight text using color of r) then set end of bad to "highlight text using color"
+            on error
+                set end of bad to "highlight text using color (unreadable)"
+            end try
+            try
+                if ((color message of r) as text) is not "none" then set end of bad to "color message"
+            on error
+                set end of bad to "color message (unreadable)"
+            end try
+        end tell
+        set AppleScript's text item delimiters to US
+        set s to bad as string
+        set AppleScript's text item delimiters to ""
+        return s
+    end run
+    """
+    /// Refuse to update a rule whose EXISTING actions include something the CLI can't model
+    /// (run-script / play-sound / redirect / forward-message / forward-text / reply-text / highlight /
+    /// color-message) — mirrors the oracle's `_check_supported_actions` (plus `forward message`, which
+    /// the oracle clears-on-action-update but we refuse, so an enable-only update can never leave a
+    /// live auto-forwarder). Without this, an in-place update would silently PRESERVE+misrepresent
+    /// such an action (the JSON would claim a clean action set) and a recreate would silently DROP it.
+    /// A CLI-authored rule never carries these (create/liveActionPlan only ever set move/copy/mark/
+    /// flag); a hand-made labeled rule might. Worst cases guarded: a run-AppleScript action
+    /// (RCE-on-incoming-mail) and a forward-to-others action (auto-send). FAILS CLOSED — an
+    /// unreadable probe or a script-level error REFUSES the update rather than risk a silent bypass.
+    public func checkSupportedActions(index: Int) throws {
+        let raw: String
+        do {
+            raw = try runner.run(MailScript.checkSupportedActionsScript, arguments: [String(index)])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        } catch {
+            // Fail CLOSED: if the probe script itself errors (e.g. the rule vanished, or a Mail-version
+            // change broke the tell block), REFUSE rather than proceed blind past an unmodeled action.
+            throw AppleError.mailSafety("could not verify rule \(index)'s existing actions are within the supported schema (\(error)) — refusing to update; edit this rule in Mail.app's Rules pane.")
+        }
+        guard !raw.isEmpty else { return }
+        let names = raw.components(separatedBy: MailScript.US).joined(separator: ", ")
+        throw AppleError.mailSafety("rule \(index) uses actions outside the supported schema: \(names). The CLI can't safely update a rule whose existing actions it doesn't model (they'd be silently preserved or dropped) — edit this rule in Mail.app's Rules pane instead.")
     }
 
     private static let ruleCondCountScript = """
