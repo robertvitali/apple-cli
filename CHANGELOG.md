@@ -145,10 +145,16 @@ Review hardening (second OMC pass): the dangerous-extension match uses filename 
 file named literally `.sh` is blocked, matching s-morgan); the sensitive-dir check runs against
 both the resolved and the tilde-expanded path (so a symlinked sensitive dir can't bypass it).
 
+CLOSED in a later batch: `reply` / `forward` now honor `--account` as the send-from identity
+(resolved to the account's address on the live path, mirroring `send`; new `sender_address`
+preview field on both), and `draft-rich`'s live-open path resolves `--account` to a real From
+ADDRESS (a raw account name is a malformed `From:` Mail ignores; the headless default keeps the
+raw fallback so it never launches Mail).
+
 Still open (contained by the self-only gate; not safety-critical) — tracked follow-ups:
-- `reply` / `forward` do not honor `--account` as the send-from identity (their `--account`
-  selects the lookup mailbox); `draft-rich`'s `From:` uses the raw account name, not a resolved
-  address.
 - `forward` re-composes a plain-text quote via `send()` instead of Mail's native `forward` verb
   (loses original formatting/attachments).
 - `draft send` (send an existing Drafts item) — deferred (see Known gaps above).
+- `draft create` ignores `--account` as the draft's sender identity (the oracle's
+  `manage_drafts` create sets it) and drops `--cc`/`--bcc` (declared but not passed to
+  `createDraft`).

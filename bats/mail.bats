@@ -428,6 +428,27 @@ require_index() {
   echo "$output" | grep -q '"type" : "safety_violation"'
 }
 
+@test "mail forward --account with an unknown account is not_found before the index opens (exit 65)" {
+  # --account resolves to a send-from address on the live path, BEFORE MailContext — so an unknown
+  # account fails fast with not_found even where the Envelope Index is unreadable (CI-safe).
+  APPLE_TEST_MODE=1 APPLE_TEST_RECIPIENTS="me@self.test" \
+    run "$BIN" mail forward 12345 --to me@self.test --account "apple-cli-test-nonexistent-acct" --execute --test-mode
+  [ "$status" -eq 65 ]
+  echo "$output" | grep -q '"type" : "not_found"'
+}
+
+@test "mail draft-rich --open with an unknown --account is not_found before any window opens (exit 65)" {
+  # The live-open path resolves --account to a real From address (a raw name would be a malformed
+  # From: Mail ignores); unknown account → 65 before the .eml write or any Mail access.
+  OUT="$BATS_TEST_TMPDIR/apple-cli-test-dr.eml"
+  APPLE_TEST_MODE=1 APPLE_TEST_RECIPIENTS="me@self.test" \
+    run "$BIN" mail draft-rich --to me@self.test --subject "apple-cli-test dr" --html "<b>x</b>" \
+      --account "apple-cli-test-nonexistent-acct" --open --out "$OUT" --test-mode
+  [ "$status" -eq 65 ]
+  echo "$output" | grep -q '"type" : "not_found"'
+  [ ! -f "$OUT" ]
+}
+
 @test "mail draft-rich (no open/save flags) writes the .eml and reports opened false (exit 0)" {
   # Default path — no Mail access, ungated; asserts the opened field + the written artifact.
   OUT="$BATS_TEST_TMPDIR/apple-cli-test-dr.eml"

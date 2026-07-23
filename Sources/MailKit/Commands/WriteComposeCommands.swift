@@ -283,7 +283,7 @@ struct ReplyCommand: ParsableCommand {
     @OptionGroup var global: GlobalOptions
     @Argument(help: "Message id to reply to (ROWID / RFC Message-ID); or use --subject.") var id: String?
     @Option(name: .long, help: "Reply to the newest message matching this subject keyword.") var subject: String?
-    @Option(name: .long, help: "Account (name or UUID) for --subject lookup.") var account: String?
+    @Option(name: .long, help: "Account (name or UUID) — used for --subject lookup AND as the send-from identity.") var account: String?
     @Option(name: .long) var body: String
     @Flag(name: .long, help: "Reply to all recipients.") var all = false
     @Option(name: .long) var cc: [String] = []
@@ -295,7 +295,7 @@ struct ReplyCommand: ParsableCommand {
 
     struct Preview: Encodable {
         let action: String; let target: String; let matched_message_id: String?
-        let reply_all: Bool; let mode: String; let has_html: Bool
+        let reply_all: Bool; let mode: String; let has_html: Bool; let sender_address: String?
         let to: [String]; let cc: [String]; let bcc: [String]; let attachments: [String]
         let dry_run: Bool; let executed: Bool; let opened: Bool; let note: String?
     }
@@ -355,6 +355,7 @@ struct ReplyCommand: ParsableCommand {
 
             var executed = false
             var opened = false
+            var senderAddress: String?
             var note: String?
             if willLiveOutbound {
                 // Self-only gate FIRST — before any attachment read, .eml/.html build, or send.
@@ -363,6 +364,15 @@ struct ReplyCommand: ParsableCommand {
                 // this is belt-and-suspenders).
                 guard !replySubject.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                     throw AppleError.validation("--subject is required for a live reply; refusing an empty/whitespace subject.")
+                }
+                // Resolve --account to the send-from identity (mirrors SendCommand): the reply goes
+                // out FROM this account's address, not Mail's default. Live-path only, so headless
+                // dry-runs never touch Mail; unknown/addressless account is a not_found up front.
+                if let account {
+                    guard let addr = AccountDirectory().sendAddress(for: account) else {
+                        throw AppleError.notFound("account '\(account)' not found or has no send address.")
+                    }
+                    senderAddress = addr
                 }
                 // Quoted original, escaped into the HTML part (shared by the gui-send + open paths).
                 let quotedHTML = original.map {
@@ -376,7 +386,7 @@ struct ReplyCommand: ParsableCommand {
                     try ((html ?? "") + quotedHTML).write(to: htmlTmp, atomically: true, encoding: .utf8)
                     defer { try? FileManager.default.removeItem(at: htmlTmp) }
                     try MailScript().sendHtmlViaGui(htmlPath: htmlTmp.path, subject: replySubject,
-                        to: recipients, cc: ccL, bcc: bccL, attachmentPaths: paths)
+                        to: recipients, cc: ccL, bcc: bccL, attachmentPaths: paths, sender: senderAddress)
                     executed = true
                     note = "sent via GUI keystroke automation (--gui-send); required Accessibility and stole focus"
                 } else if willOpenHtml {
@@ -384,7 +394,7 @@ struct ReplyCommand: ParsableCommand {
                     // rendered compose window for review.
                     let atts = try attachmentsFromPaths(try attach.map { try resolveAttachmentPath($0) })
                     // emitBcc: safe — this .eml is only opened in a compose window, never wire-sent.
-                    let eml = try EmlBuilder(to: recipients, cc: ccL, bcc: bccL, subject: replySubject,
+                    let eml = try EmlBuilder(from: senderAddress, to: recipients, cc: ccL, bcc: bccL, subject: replySubject,
                                              textBody: body + quotedPlain, htmlBody: (html ?? "") + quotedHTML, attachments: atts,
                                              emitBcc: true).build()
                     let dest = emlDestURL(out: nil)
@@ -396,9 +406,9 @@ struct ReplyCommand: ParsableCommand {
                     if !attach.isEmpty {
                         let paths = try attach.map { try resolveAttachmentPath($0) }
                         try MailScript().sendWithAttachments(subject: replySubject, body: body + quotedPlain,
-                                                             to: recipients, cc: ccL, bcc: bccL, attachmentPaths: paths)
+                                                             to: recipients, cc: ccL, bcc: bccL, attachmentPaths: paths, sender: senderAddress)
                     } else {
-                        try MailScript().send(subject: replySubject, body: body + quotedPlain, to: recipients, cc: ccL, bcc: bccL)
+                        try MailScript().send(subject: replySubject, body: body + quotedPlain, to: recipients, cc: ccL, bcc: bccL, sender: senderAddress)
                     }
                     executed = true
                 }
@@ -407,7 +417,7 @@ struct ReplyCommand: ParsableCommand {
             }
 
             try Output.emit(tool: "mail", data: Preview(action: "reply", target: id ?? "subject:\(subject ?? "")",
-                matched_message_id: target.id, reply_all: all, mode: mode, has_html: html != nil,
+                matched_message_id: target.id, reply_all: all, mode: mode, has_html: html != nil, sender_address: senderAddress,
                 to: recipients, cc: ccL, bcc: bccL, attachments: attach,
                 dry_run: !global.willExecute, executed: executed, opened: opened, note: note))
         }
@@ -419,14 +429,14 @@ struct ForwardCommand: ParsableCommand {
     @OptionGroup var global: GlobalOptions
     @Argument(help: "Message id to forward; or use --subject.") var id: String?
     @Option(name: .long, help: "Forward the newest message matching this subject keyword.") var subject: String?
-    @Option(name: .long, help: "Account for --subject lookup.") var account: String?
+    @Option(name: .long, help: "Account (name or UUID) — used for --subject lookup AND as the send-from identity.") var account: String?
     @Option(name: .long, help: "Recipient (repeatable).") var to: [String] = []
     @Option(name: .long) var cc: [String] = []
     @Option(name: .long) var bcc: [String] = []
     @Option(name: .long, help: "Text to prepend before the forwarded content.") var body: String?
 
     struct Preview: Encodable {
-        let action: String; let matched_message_id: String?; let to: [String]
+        let action: String; let matched_message_id: String?; let sender_address: String?; let to: [String]
         let cc: [String]; let bcc: [String]; let dry_run: Bool; let executed: Bool; let note: String?
     }
 
@@ -436,6 +446,17 @@ struct ForwardCommand: ParsableCommand {
             guard !toL.isEmpty else { throw AppleError.validation("--to is required.") }
             // Outbound guard (self-only) fires BEFORE any resolve/emit → one envelope.
             if global.willExecute { try guardOutbound(recipients: toL + ccL + bccL, testMode: global.testMode) }
+            // Resolve --account to the send-from identity (mirrors SendCommand/ReplyCommand): the
+            // forward goes out FROM this account's address. Live-path only (headless dry-runs never
+            // touch Mail); fires before the Envelope Index opens, so an unknown account is a clean
+            // not_found even where the index is unreadable.
+            var senderAddress: String?
+            if global.willExecute, let account {
+                guard let addr = AccountDirectory().sendAddress(for: account) else {
+                    throw AppleError.notFound("account '\(account)' not found or has no send address.")
+                }
+                senderAddress = addr
+            }
             let ctx = try MailContext()
             let target: MailMessage
             if let id {
@@ -460,11 +481,11 @@ struct ForwardCommand: ParsableCommand {
                 let original = target.content ?? target.snippet
                 let intro = body.map { $0 + "\n\n" } ?? ""
                 let fwdBody = intro + "---------- Forwarded message ----------\nFrom: \(target.sender)\nSubject: \(target.subject)\n\n" + (original ?? "")
-                try MailScript().send(subject: fwdSubject, body: fwdBody, to: toL, cc: ccL, bcc: bccL)
+                try MailScript().send(subject: fwdSubject, body: fwdBody, to: toL, cc: ccL, bcc: bccL, sender: senderAddress)
                 executed = true
             }
-            try Output.emit(tool: "mail", data: Preview(action: "forward", matched_message_id: target.id, to: toL,
-                cc: ccL, bcc: bccL, dry_run: !global.willExecute, executed: executed, note: note))
+            try Output.emit(tool: "mail", data: Preview(action: "forward", matched_message_id: target.id, sender_address: senderAddress,
+                to: toL, cc: ccL, bcc: bccL, dry_run: !global.willExecute, executed: executed, note: note))
         }
     }
 }
@@ -483,7 +504,7 @@ struct DraftRichCommand: ParsableCommand {
     @Flag(name: .customLong("open"), help: "Open the generated .eml in a Mail compose window for review (no send).") var openInMail = false
     @Flag(name: .long, help: "Open the .eml and save it to Drafts (no send; requires --test-mode + a labeled subject).") var saveAsDraft = false
 
-    struct Result: Encodable { let eml_path: String; let subject: String; let to: [String]; let has_html: Bool; let opened: Bool; let note: String? }
+    struct Result: Encodable { let eml_path: String; let subject: String; let to: [String]; let has_html: Bool; let sender_address: String?; let opened: Bool; let note: String? }
 
     func run() throws {
         try runGuarded(tool: "mail") {
@@ -495,15 +516,26 @@ struct DraftRichCommand: ParsableCommand {
             // fail-closed self-only posture is the pre-1.0 CLI default; relaxing non-sending opens to
             // any recipient is a tracked 1.0 decision. The DEFAULT (neither flag) just writes the
             // .eml headlessly and is ungated.
+            var senderAddress: String?
             if openInMail || saveAsDraft {
                 try guardOutbound(recipients: toL + splitRecipients(cc) + splitRecipients(bcc), testMode: global.testMode)
                 guard !subject.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                     throw AppleError.validation("--subject is required to open a draft-rich compose window.")
                 }
+                // Resolve --account to a real From ADDRESS on the live-open path (mirrors
+                // create_rich_email_draft's _resolve_sender_address): a raw account NAME in `From:`
+                // is malformed and Mail ignores it. Headless default keeps the raw fallback so it
+                // never touches Mail (and never launches it).
+                if let account {
+                    guard let addr = AccountDirectory().sendAddress(for: account) else {
+                        throw AppleError.notFound("account '\(account)' not found or has no send address.")
+                    }
+                    senderAddress = addr
+                }
             }
             // emitBcc: a draft-rich .eml is only opened / written to disk, never wire-sent, so
             // carrying --bcc into it is safe and required for create_rich_email_draft parity.
-            let eml = try EmlBuilder(from: account, to: toL, cc: splitRecipients(cc), bcc: splitRecipients(bcc),
+            let eml = try EmlBuilder(from: senderAddress ?? account, to: toL, cc: splitRecipients(cc), bcc: splitRecipients(bcc),
                                  subject: subject, textBody: textBody, htmlBody: html, emitBcc: true).build()
             let dest = URL(fileURLWithPath: ((out ?? FileManager.default.temporaryDirectory
                 .appendingPathComponent("apple-cli-\(TestMode.sandboxPrefix)-\(UUID().uuidString).eml").path) as NSString).expandingTildeInPath)
@@ -522,7 +554,7 @@ struct DraftRichCommand: ParsableCommand {
                     : "compose window opened for review (not sent)."
             }
             try Output.emit(tool: "mail", data: Result(eml_path: dest.path, subject: subject, to: toL,
-                has_html: html != nil, opened: opened, note: note))
+                has_html: html != nil, sender_address: senderAddress, opened: opened, note: note))
         }
     }
 }
