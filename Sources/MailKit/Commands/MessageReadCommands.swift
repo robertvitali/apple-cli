@@ -26,9 +26,13 @@ struct SearchCommand: ParsableCommand {
     @Option(name: .long, help: "Results to skip (pagination).") var offset: Int = 0
     @Option(name: .long, help: "Sort order: date_desc (default) or date_asc.") var sort: String = "date_desc"
     @Flag(name: .long, inversion: .prefixedNo, help: "Include the indexed body preview (default on).") var content = true
+    @Option(name: .long, help: "Truncate each included body preview to N chars (0 = unlimited; MCP B max_content_length).") var maxContentLength: Int?
 
     func run() throws {
         try runGuarded(tool: "mail") {
+            if let maxContentLength, maxContentLength < 0 {
+                throw AppleError.validation("--max-content-length must be >= 0 (0 = unlimited).")
+            }
             let ctx = try MailContext()
             var f = EnvelopeIndex.MessageFilters()
             if let account { f.accountUUID = try ctx.requireAccountUUID(account) }
@@ -48,6 +52,12 @@ struct SearchCommand: ParsableCommand {
             let rows = try ctx.index.queryMessages(f)
             var messages = rows.map { ctx.decodeSummary($0) }
             if !content { for i in messages.indices { messages[i].snippet = nil } }
+            // MCP B max_content_length: cap each included preview (0 = unlimited → no cap).
+            else if let cap = maxContentLength, cap > 0 {
+                for i in messages.indices where (messages[i].snippet?.count ?? 0) > cap {
+                    messages[i].snippet = String(messages[i].snippet!.prefix(cap))
+                }
+            }
             let total = try ctx.index.countMessages(f)
             // Empty page must NOT report has_more (else a paginating client loops on the same offset).
             let hasMore = !messages.isEmpty && (offset + messages.count < total)
@@ -95,6 +105,8 @@ struct GetCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "get", abstract: "Get one message by ROWID, RFC Message-ID, or message:// link.")
     @OptionGroup var global: GlobalOptions
     @Argument(help: "Message id (Envelope Index ROWID, RFC-5322 Message-ID, or message:// link).") var id: String
+    @Option(name: .long, help: "Scope the lookup to this account (name or UUID; MCP A account param). Rejects if the message is elsewhere.") var account: String?
+    @Option(name: .long, help: "Scope the lookup to this mailbox (MCP A mailbox param). Rejects if the message is elsewhere.") var mailbox: String?
     @Flag(name: .long, help: "Return headers/metadata only (skip recipients + preview).") var headersOnly = false
     @Flag(name: .long, help: "Fetch the full body via Mail.app (slow AppleScript scan; default returns the indexed preview).") var content = false
     @Flag(name: .long, help: "Alias/compat: never fetch the full body (default behavior).") var noContent = false
@@ -106,6 +118,25 @@ struct GetCommand: ParsableCommand {
                 throw AppleError.notFound("no message for id '\(id)'.")
             }
             var msg = ctx.decodeSummary(row)
+            // MCP A get_message account/mailbox: the CLI resolves by globally-unique id, so these
+            // are SCOPING assertions — the returned message must be in that account/mailbox, else
+            // not_found. Account compares canonically (name-or-UUID → UUID both sides); mailbox
+            // matches the full path or its leaf component, case-insensitively.
+            if let account {
+                let wantUUID = try ctx.requireAccountUUID(account)
+                let msgUUID = (try? ctx.requireAccountUUID(msg.account)) ?? ""
+                guard wantUUID == msgUUID else {
+                    throw AppleError.notFound("message '\(id)' is not in account '\(account)'.")
+                }
+            }
+            if let mailbox {
+                let want = mailbox.lowercased()
+                let path = msg.mailbox.lowercased()
+                let leaf = path.split(separator: "/").last.map(String.init) ?? path
+                guard path == want || leaf == want else {
+                    throw AppleError.notFound("message '\(id)' is not in mailbox '\(mailbox)' (it is in '\(msg.mailbox)').")
+                }
+            }
             if !headersOnly {
                 let rowid = intVal(row["rowid"]) ?? 0
                 let recips = try ctx.index.recipients(messageRowid: rowid)

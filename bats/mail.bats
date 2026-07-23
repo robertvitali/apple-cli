@@ -154,6 +154,34 @@ require_index() {
   echo "$output" | grep -q '"type" : "not_found"'
 }
 
+# ── Missing MCP read/scoping params (audit gaps E/F/G) — CI-safe ─────────────────────────────────
+@test "mail search --max-content-length rejects a negative value (exit 64)" {
+  require_index
+  run "$BIN" mail search --max-content-length -1
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q '"validation_error"'
+}
+
+@test "mail search accepts --max-content-length (MCP B max_content_length) and previews (exit 0)" {
+  require_index
+  run "$BIN" mail search --account iCloud --limit 1 --max-content-length 20
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"tool" : "mail"'
+}
+
+@test "mail get exposes --account/--mailbox scoping params (MCP A get_message params)" {
+  run "$BIN" mail get --help
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q -- '--account'
+  echo "$output" | grep -q -- '--mailbox'
+}
+
+@test "mail forward exposes --mailbox subject-scope param (MCP B forward_email mailbox)" {
+  run "$BIN" mail forward --help
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q -- '--mailbox'
+}
+
 @test "mail search emits a well-formed envelope with union fields" {
   require_index
   run "$BIN" mail search --limit 1

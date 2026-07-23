@@ -430,6 +430,7 @@ struct ForwardCommand: ParsableCommand {
     @Argument(help: "Message id to forward; or use --subject.") var id: String?
     @Option(name: .long, help: "Forward the newest message matching this subject keyword.") var subject: String?
     @Option(name: .long, help: "Account (name or UUID) — used for --subject lookup AND as the send-from identity.") var account: String?
+    @Option(name: .long, help: "Mailbox to scope the --subject lookup (default All; MCP B forward_email mailbox).") var mailbox: String = "All"
     @Option(name: .long, help: "Recipient (repeatable).") var to: [String] = []
     @Option(name: .long) var cc: [String] = []
     @Option(name: .long) var bcc: [String] = []
@@ -465,8 +466,8 @@ struct ForwardCommand: ParsableCommand {
             } else if let subject {
                 var f = EnvelopeIndex.MessageFilters()
                 if let account { f.accountUUID = try ctx.requireAccountUUID(account) }
-                f.mailboxName = "All"; f.subjectContains = subject; f.limit = 1
-                guard let row = try ctx.index.queryMessages(f).first else { throw AppleError.notFound("no message matching subject '\(subject)'.") }
+                f.mailboxName = mailbox; f.subjectContains = subject; f.limit = 1
+                guard let row = try ctx.index.queryMessages(f).first else { throw AppleError.notFound("no message matching subject '\(subject)' in mailbox '\(mailbox)'.") }
                 target = ctx.decodeSummary(row)
             } else {
                 throw AppleError.validation("provide a message id argument or --subject.")
