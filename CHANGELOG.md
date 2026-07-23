@@ -92,6 +92,20 @@ with the Apple MCP servers they replace.
     window to any recipient; the CLI's opens are self-only-gated in the pre-1.0 fail-closed posture.
     Relaxing non-sending opens to any recipient (they're draft-equivalent per the Safety model) is a
     tracked 1.0 decision.
+- **Mail `move --gmail-mode`** (gap 5, parity with s-morgan `move_messages(gmail_mode=True)`):
+  routes the live move through the Gmail copy+delete dance — `duplicate` the located message into
+  the destination mailbox, then `delete` the ORIGINAL to Trash (recoverable; verb-for-verb the
+  oracle's action list). Runs inside the SAME gated mutation closure as a plain move (two-factor
+  test gate + per-message `apple-cli-test` subject-label check, all-or-nothing) — no gate weakened;
+  dry-run previews carry `gmail_mode` in the detail. Documented semantics (both oracle-identical):
+  the two verbs are NOT atomic — a failure between them can leave the copy in place with the
+  original untouched, and a retry re-duplicates (surfaced via the `applied`/`not_found` lists,
+  which are richer than the oracle's bare count); the destination is resolved WITHIN the message's
+  own account (same model as plain `move`; the oracle resolves against a caller-given account —
+  observable only for cross-account moves, which the per-message locator scopes away). Live
+  observation on a real label-backed account: the server can COLLAPSE the same-Message-ID copy (Trash
+  wins), so the end state may be "in Trash only" — inherent to the verb sequence and identical
+  under the oracle; validated on a non-label-backed account (no dedup) that the duplicate genuinely lands.
 - Mail write-safety **tests**: logic-tier gate tests (`Tests/MailKitTests/WriteSafetyTests.swift`),
   CLI-tier refusal tests (`bats/mail.bats`), and a repeatable self-cleaning live
   e2e (`bats/live/mail-writes.sh`).
@@ -110,7 +124,6 @@ These MCP-union write capabilities are intentionally NOT yet wired to live mutat
 (they emit a preview/note); they must land before Mail is a 100% strict superset:
 - `draft send` (deliver an EXISTING Drafts item — `manage_drafts action=send`) is not yet wired
   (deferred; needs recipient-verification since a draft's recipients are pre-set)
-- `move --gmail-mode` (Gmail copy+delete label semantics — rejected as unwired)
 - `reply`/`forward` quote the Envelope-Index snippet, not the full original body
 
 ### Validation status (Mail HTML/attachment send)

@@ -84,14 +84,17 @@ struct MoveCommand: ParsableCommand {
                 try Output.emit(tool: "mail", data: BulkPreview(action: "move", matched: msgs.count, filter_based: filterBased,
                     dry_run: true, executed: false, messages: msgs, detail: detail, note: nil)); return
             }
-            // --gmail-mode (Gmail copy+delete label semantics) is NOT wired for live move — reject
-            // rather than silently doing a plain move that ignores the flag.
-            if gmailMode {
-                throw AppleError.validation("--gmail-mode (Gmail copy+delete label semantics) is not yet wired for live move; omit it, or move the message in Mail.app.")
-            }
+            // --gmail-mode routes to gmailMove (Gmail copy+delete label semantics: duplicate to the
+            // destination, then delete the original to Trash); plain move otherwise. BOTH go through
+            // the SAME executeMessageMutation gate (two-factor test gate + per-message subject-label
+            // check, all-or-nothing) — gmail-mode weakens no safety gate, and its `delete` is a
+            // recoverable move-to-Trash, the same reversible class as the plain `delete` command.
             let script = MailScript()
             let (applied, notFound) = try executeMessageMutation(msgs, testMode: global.testMode) { imid, acct in
-                try script.move(internetMessageID: imid, accountName: acct, toMailbox: to)
+                if gmailMode {
+                    return try script.gmailMove(internetMessageID: imid, accountName: acct, toMailbox: to)
+                }
+                return try script.move(internetMessageID: imid, accountName: acct, toMailbox: to)
             }
             try Output.emit(tool: "mail", data: BulkPreview(action: "move", matched: msgs.count, filter_based: filterBased,
                 dry_run: false, executed: true, messages: msgs, detail: detail, note: notLocatedNote(notFound), applied: applied, not_found: notFound))

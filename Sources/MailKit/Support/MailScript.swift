@@ -670,6 +670,32 @@ public struct MailScript {
         try mutateLocated(MailScript.moveScript, id: internetMessageID, account: accountName, extra: [toMailbox])
     }
 
+    private static let gmailMoveScript = """
+    on run argv
+        set msg to my findMsg(item 1 of argv, item 2 of argv)
+        if msg is missing value then return "notfound"
+        set mbxName to item 3 of argv
+        tell application "Mail"
+            set acctOfMsg to account of (mailbox of msg)
+            set destMbx to (first mailbox of acctOfMsg whose name is mbxName)
+            duplicate msg to destMbx
+            delete msg
+        end tell
+        return "ok"
+    end run
+    """
+    /// Gmail label-move semantics (parity oracle `move_messages(gmail_mode=True)`): DUPLICATE the
+    /// located message into the destination mailbox, then DELETE the ORIGINAL. On Gmail's
+    /// label-backed mailboxes a direct `set mailbox` can misbehave, so the copy+delete dance is used
+    /// instead. `delete msg` targets the ORIGINAL reference (which, after `duplicate`, still points
+    /// at the SOURCE message) and moves it to Trash — the SAME recoverable move-to-Trash as
+    /// `deleteToTrash`, never a permanent delete. Destination is resolved WITHIN the message's own
+    /// account, exactly like `move`. Reuses the shared `findMsg` locator via `mutateLocated`.
+    @discardableResult
+    public func gmailMove(internetMessageID: String, accountName: String?, toMailbox: String) throws -> Bool {
+        try mutateLocated(MailScript.gmailMoveScript, id: internetMessageID, account: accountName, extra: [toMailbox])
+    }
+
     private static let trashScript = """
     on run argv
         set msg to my findMsg(item 1 of argv, item 2 of argv)
