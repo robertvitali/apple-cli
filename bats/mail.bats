@@ -163,6 +163,23 @@ require_index() {
   echo "$output" | grep -q '"ok" : false'
 }
 
+# ── get_thread References-mode (audit gap A) — CI-safe ───────────────────────────────────────────
+@test "mail thread exposes --references (MCP A header-threading) mode" {
+  run "$BIN" mail thread --help
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q -- '--references'
+}
+
+@test "mail thread <id> --references reports matched_by references (exit 0)" {
+  require_index
+  # grab any real message id, then thread it by References
+  rid="$("$BIN" mail search --account iCloud --mailbox INBOX --limit 1 --no-content 2>/dev/null | grep -o '"id" : "[0-9]*"' | head -1 | grep -o '[0-9]*')"
+  [ -n "$rid" ] || skip "no iCloud INBOX message to thread"
+  run "$BIN" mail thread "$rid" --references --limit 5
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"matched_by" : "references"'
+}
+
 @test "mail search rejects mutually-exclusive --read --unread (exit 64)" {
   require_index
   run "$BIN" mail search --read --unread

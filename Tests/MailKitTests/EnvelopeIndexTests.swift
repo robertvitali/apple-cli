@@ -51,6 +51,11 @@ struct EnvelopeIndexTests {
         INSERT INTO recipients VALUES (1,10,1001,0,0),(2,10,1002,1,0);
         CREATE TABLE labels (message_id INT, mailbox_id INT);
         INSERT INTO labels VALUES (13,4);
+        CREATE TABLE message_references (ROWID INTEGER PRIMARY KEY, message INT, reference INT, is_originator INT);
+        INSERT INTO message_references VALUES
+          (1,10,7010,1),(2,10,9000,0),
+          (3,12,7012,1),(4,12,9000,0),
+          (5,13,7013,1);
         """
         _ = sqlite3_exec(db, sql, nil, nil, nil)
         sqlite3_close(db)
@@ -145,6 +150,20 @@ struct EnvelopeIndexTests {
         #expect(try idx.queryMessages(f).count == 2)
         f.flagged = true
         #expect(try idx.queryMessages(f).count == 1)      // only msg 10 is flagged
+    }
+
+    // References/In-Reply-To threading (MCP A get_thread): msgs 10 & 12 share reference 9000, msg 13
+    // is on its own chain. referencesThread groups by the shared message_references chain, distinct
+    // from conversation_id grouping.
+    @Test func referencesThreadGroupsBySharedChain() throws {
+        let idx = try index()
+        let thread10 = try idx.referencesThread(rowid: 10, limit: 50)
+        let ids10 = Set(thread10.compactMap { $0["rowid"].flatMap { $0 }.flatMap { Int($0) } })
+        #expect(ids10 == [10, 12])                        // both share reference 9000
+        let thread13 = try idx.referencesThread(rowid: 13, limit: 50)
+        #expect(thread13.count == 1)                      // msg 13's chain (7013) is its own
+        let noRefs = try idx.referencesThread(rowid: 11, limit: 50)
+        #expect(noRefs.isEmpty)                           // msg 11 has no message_references rows
     }
 
     // subject_keywords OR-match (MCP B): the union clause matches ANY keyword, ANDs with other

@@ -202,6 +202,7 @@ struct ThreadCommand: ParsableCommand {
     @Option(name: .long, help: "Account name or UUID (for subject-based lookup).") var account: String?
     @Option(name: .long, help: "Mailbox for subject-based lookup (default All).") var mailbox: String = "All"
     @Option(name: .long, help: "Max messages (default 50).") var limit: Int = 50
+    @Flag(name: .long, help: "Thread by RFC References/In-Reply-To headers (MCP A get_thread) instead of Apple's conversation grouping.") var references = false
 
     func run() throws {
         try runGuarded(tool: "mail") {
@@ -212,13 +213,21 @@ struct ThreadCommand: ParsableCommand {
                 guard let row = try resolveMessageRow(ctx: ctx, id: id) else {
                     throw AppleError.notFound("no message for id '\(id)'.")
                 }
-                matchedBy = "message_id"
-                let convID = intVal(row["conversation_id"]) ?? 0
-                if convID != 0 {
-                    // Query the whole conversation directly (Apple's own thread id), chronologically.
-                    var f = EnvelopeIndex.MessageFilters()
-                    f.mailboxName = "All"; f.conversationID = convID; f.sortAscending = true; f.limit = limit
-                    messages = try ctx.index.queryMessages(f).map { ctx.decodeSummary($0) }
+                let rowid = intVal(row["rowid"]) ?? 0
+                if references {
+                    // MCP A header-threading: messages sharing this one's References/In-Reply-To
+                    // chain (via the Envelope Index message_references table), chronologically.
+                    matchedBy = "references"
+                    messages = try ctx.index.referencesThread(rowid: rowid, limit: limit).map { ctx.decodeSummary($0) }
+                } else {
+                    matchedBy = "message_id"
+                    let convID = intVal(row["conversation_id"]) ?? 0
+                    if convID != 0 {
+                        // Query the whole conversation directly (Apple's own thread id), chronologically.
+                        var f = EnvelopeIndex.MessageFilters()
+                        f.mailboxName = "All"; f.conversationID = convID; f.sortAscending = true; f.limit = limit
+                        messages = try ctx.index.queryMessages(f).map { ctx.decodeSummary($0) }
+                    }
                 }
                 if messages.isEmpty { messages = [ctx.decodeSummary(row)] } // singleton thread
             } else if let subject {

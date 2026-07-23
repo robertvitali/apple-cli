@@ -232,6 +232,29 @@ public final class EnvelopeIndex {
         return try reader.query(sql, filter.binds)
     }
 
+    /// Messages sharing a References/In-Reply-To chain with `rowid` (MCP A get_thread's
+    /// header-threading), via the Envelope Index `message_references` table: gather the message's
+    /// own reference set (its originator global-id + referenced ancestors), then every message whose
+    /// reference set intersects it. Chronological. This differs from `conversationID` grouping (Apple
+    /// also folds in subject/participants) — it is the RFC References-chain membership MCP A returns.
+    /// Empty if the message has no `message_references` rows (caller falls back to the singleton).
+    /// `rowid`/`limit` are validated Ints, inlined — no user text reaches the SQL.
+    public func referencesThread(rowid: Int, limit: Int) throws -> [[String: String?]] {
+        let lim = max(1, limit)
+        let sql = """
+        \(EnvelopeIndex.baseSelect)
+        WHERE m.deleted = 0 AND m.ROWID IN (
+            SELECT DISTINCT mr2.message FROM message_references mr2
+            WHERE mr2.reference IN (
+                SELECT mr1.reference FROM message_references mr1 WHERE mr1.message = \(rowid)
+            )
+        )
+        ORDER BY m.date_received ASC, m.ROWID ASC
+        LIMIT \(lim)
+        """
+        return try reader.query(sql, [])
+    }
+
     /// Total count matching the same filters (for pagination `has_more`) — cheap COUNT(*).
     public func countMessages(_ f: EnvelopeIndex.MessageFilters) throws -> Int {
         let filter = buildFilter(f)
