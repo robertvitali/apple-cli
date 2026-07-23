@@ -122,8 +122,6 @@ with the Apple MCP servers they replace.
 ### Known parity gaps (Mail — still preview-only vs the MCP union)
 These MCP-union write capabilities are intentionally NOT yet wired to live mutation
 (they emit a preview/note); they must land before Mail is a 100% strict superset:
-- `draft send` (deliver an EXISTING Drafts item — `manage_drafts action=send`) is not yet wired
-  (deferred; needs recipient-verification since a draft's recipients are pre-set)
 - `reply`/`forward` quote the Envelope-Index snippet, not the full original body
 
 ### Validation status (Mail HTML/attachment send)
@@ -164,10 +162,52 @@ preview field on both), and `draft-rich`'s live-open path resolves `--account` t
 ADDRESS (a raw account name is a malformed `From:` Mail ignores; the headless default keeps the
 raw fallback so it never launches Mail).
 
+CLOSED (`draft send` + `draft create` sender/cc/bcc — 2026-07-22): `draft send` now delivers an
+existing Drafts item (`manage_drafts action=send`), and `draft create` honors `--account` (the
+draft's sender identity) + `--cc` / `--bcc`.
+- **The -1708 mechanism (a CLI-exceeds-oracle win):** Mail throws `-1708` ("doesn't understand the
+  send message") on `send <stored Drafts message>`; the patrickfreyer oracle's `manage_drafts
+  action=send` hits the SAME bug and returns the error string. The working path: `open` the draft
+  (which registers a sendable `outgoing message`), locate that outgoing message by its UNIQUE
+  labeled subject (an id-diff snapshot FAILS — re-opening an already-open draft reuses its outgoing
+  message with no new id, and Mail can populate the outgoing subject lazily), re-verify recipients,
+  `send` it, then best-effort delete the draft (action=send consumes a draft).
+- **Recipient safety:** a draft's recipients are PRE-SET, so `draft send` reads the stored draft's
+  own to/cc/bcc and verifies EVERY address against the self-only allowlist BEFORE opening anything —
+  a draft addressed to any non-self recipient is refused fail-closed (`exit 77`), never opened or
+  sent. Mail's outgoing store is SHARED with the operator's live compose windows, so the send only
+  targets an outgoing message carrying the unique test subject AND re-verifies its recipients before
+  dispatch (defense in depth).
+- Live-validated self-only: a draft created with `an explicit non-default --account` (≠ the default
+  send account) + a `--cc` to a second self address was sent, and delivery confirmed `From` the
+  --account address to BOTH the `to` and the `cc` mailbox; the draft was consumed. Negative case: a
+  draft to a non-self address refused fail-closed before any open.
+- Review hardening (OMC code/security/critic fan-out + an adversarial verification workflow): the
+  in-script allowlist helper fails CLOSED on empty/`missing value` recipient addresses (an empty
+  address can no longer masquerade as the all-clear return); its comparison uses `considering
+  diacriticals but ignoring case` to match Swift `guardOutbound`'s `.lowercased()` exact semantics
+  (previously AppleScript `is` folded diacritics too, making this self-only gate strictly more
+  permissive than every other outbound path); `open`/`send` throws now surface as a distinct
+  `senderror:` result instead of being swallowed into a misleading `not_found`; the recipient-report
+  is built BEFORE `send` so nothing that can throw runs after dispatch (no misleading "retry" →
+  duplicate-send); the safety-critical stdout→result mapping is extracted to a pure
+  `DraftSendResult.parse` with a logic-tier regression lock (`WriteSafetyTests`); and a successful
+  `draft send` reports the verified recipients in the envelope's `to`.
+- Test-coverage note (tracked as a live-tier check): the recipient allowlist verification itself
+  (`firstDisallowed`) lives in AppleScript and CANNOT run in CI — only its string→enum plumbing is
+  logic-locked. It is exercised by the on-device positive+negative live runs; a future edit to the
+  in-script allowlist logic must be re-validated live. The envelope `to` on `draft send` lists ALL
+  verified dispatched recipients (to + cc + bcc merged), not only the `to`-class — every one is
+  allowlist-verified self, so no leak, but the field's meaning is "verified recipients", not "--to".
+- Behaviour notes / known divergences (contained by the self-only gate): `--draft-subject` matches the
+  EXACT (case-insensitive) subject for send/open/delete, NOT a keyword like the oracle's
+  `manage_drafts` — deliberate (timestamp-unique test subjects make keyword-find moot, and exact is
+  safer for a send); `draft send --account` filters by account NAME (vs `draft create --account`,
+  which resolves to the send ADDRESS), so a name works but a UUID does not; the best-effort
+  post-send draft delete removes ALL exact-subject labeled matches (one, in the unique-subject test
+  flow); and attachment preservation across the open-then-send of an attachment-bearing draft is
+  untested (CLI-created drafts have no attachments).
+
 Still open (contained by the self-only gate; not safety-critical) — tracked follow-ups:
 - `forward` re-composes a plain-text quote via `send()` instead of Mail's native `forward` verb
   (loses original formatting/attachments).
-- `draft send` (send an existing Drafts item) — deferred (see Known gaps above).
-- `draft create` ignores `--account` as the draft's sender identity (the oracle's
-  `manage_drafts` create sets it) and drops `--cc`/`--bcc` (declared but not passed to
-  `createDraft`).

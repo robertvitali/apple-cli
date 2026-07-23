@@ -569,7 +569,7 @@ struct DraftCommand: ParsableCommand {
     @Option(name: .long) var body: String?
     @Option(name: .long) var cc: [String] = []
     @Option(name: .long) var bcc: [String] = []
-    @Option(name: .long, help: "Subject keyword to find a draft (send/open/delete).") var draftSubject: String?
+    @Option(name: .long, help: "EXACT (case-insensitive) subject of the draft to send/open/delete — not a keyword/substring.") var draftSubject: String?
 
     func run() throws {
         try runGuarded(tool: "mail") {
@@ -592,6 +592,10 @@ struct DraftCommand: ParsableCommand {
             // send — routed to `mail send` (note); open — Mail-UI only (note).
             var executed = false
             var note: String?
+            // On a successful `draft send`, the verified recipients the mail was dispatched to (the
+            // draft's OWN pre-set to/cc/bcc, which this command never supplied) — surfaced in the
+            // envelope's `to` so the machine contract reflects who it actually went to.
+            var draftSentTo: [String]?
             let subj = subject ?? draftSubject
             if global.willExecute {
                 switch action {
@@ -602,7 +606,17 @@ struct DraftCommand: ParsableCommand {
                     guard let s = subj, s.hasPrefix(TestMode.sandboxPrefix) else {
                         throw AppleError.mailSafety("draft --subject must be a labeled test item (start with \"\(TestMode.sandboxPrefix)\") — refusing.")
                     }
-                    try script.createDraft(subject: s, body: body ?? "", to: splitRecipients(to))
+                    // Resolve --account to the draft's sender identity (manage_drafts create
+                    // parity); live path only, strict not_found on an unknown account.
+                    var senderAddress: String?
+                    if let account {
+                        guard let addr = AccountDirectory().sendAddress(for: account) else {
+                            throw AppleError.notFound("account '\(account)' not found or has no send address.")
+                        }
+                        senderAddress = addr
+                    }
+                    try script.createDraft(subject: s, body: body ?? "", to: splitRecipients(to),
+                                           cc: splitRecipients(cc), bcc: splitRecipients(bcc), sender: senderAddress)
                     executed = true
                 case "delete":
                     guard global.testMode && TestMode.isEnabled else {
@@ -615,7 +629,37 @@ struct DraftCommand: ParsableCommand {
                     executed = n > 0
                     note = "deleted \(n) draft(s) matching \"\(s)\""
                 case "send":
-                    note = "draft send (deliver an EXISTING Drafts item) is not yet wired — deferred; `mail send` composes + sends a NEW message and cannot send an existing draft."
+                    // Deliver an EXISTING Drafts item (manage_drafts action=send). A draft's
+                    // recipients are PRE-SET, so the two-factor gate + label check fire here AND
+                    // the draft's own stored to/cc/bcc are verified against the self-only
+                    // allowlist INSIDE the single AppleScript call (find→verify→send, no TOCTOU) —
+                    // a draft addressed to any non-self recipient is refused fail-closed.
+                    guard global.testMode && TestMode.isEnabled else {
+                        throw AppleError.mailSafety("sending a draft requires --test-mode AND APPLE_TEST_MODE=1; refusing.")
+                    }
+                    guard let s = subj, s.hasPrefix(TestMode.sandboxPrefix) else {
+                        throw AppleError.mailSafety("draft --subject (or --draft-subject) must be a labeled test item to send — refusing.")
+                    }
+                    switch try script.sendDraft(subject: s, prefix: TestMode.sandboxPrefix,
+                                                account: account, allowlist: TestMode.allowedRecipients) {
+                    case .sent(let recipients):
+                        executed = true
+                        draftSentTo = recipients
+                        let who = recipients.isEmpty ? "its stored recipients" : recipients.joined(separator: ", ")
+                        note = "sent existing draft \"\(s)\" to \(who) (recipients verified self-only)"
+                    case .notFound:
+                        let inAcct = account.map { " in account '\($0)'" } ?? ""
+                        throw AppleError.notFound("no labeled draft with the exact subject \"\(s)\"\(inAcct) found.")
+                    case .noRecipients:
+                        throw AppleError.validation("draft \"\(s)\" has no valid recipients; add a recipient in Mail or recreate it.")
+                    case .blocked(let addr):
+                        let which = addr == "<empty-address>" ? "an empty/blank recipient address" : "'\(addr)'"
+                        throw AppleError.mailSafety("draft \"\(s)\" is addressed to \(which), which is not in the self-only test allowlist — refusing to send it. Set APPLE_TEST_RECIPIENTS to your own address(es) or fix the draft's recipients.")
+                    case .openFailed:
+                        throw AppleError.upstream("draft \"\(s)\" was opened but Mail never surfaced its outgoing message within 30s; nothing was sent (a compose window may be open — close it or send manually), and the draft is unchanged — retry.")
+                    case .sendError(let detail):
+                        throw AppleError.upstream("draft \"\(s)\" opened and passed recipient verification, but Mail failed to dispatch it (error \(detail)); a compose window may be open — send it manually, or retry.")
+                    }
                 default: // open — open an EXISTING labeled draft in a compose window (no send).
                     guard let s = subj, s.hasPrefix(TestMode.sandboxPrefix) else {
                         throw AppleError.mailSafety("draft --subject (or --draft-subject) must be a labeled test item to open — refusing.")
@@ -627,7 +671,7 @@ struct DraftCommand: ParsableCommand {
             }
             let payload: [String: AnyEncodableBox] = [
                 "action": AnyEncodableBox(action), "account": AnyEncodableBox(account),
-                "subject": AnyEncodableBox(subj), "to": AnyEncodableBox(splitRecipients(to)),
+                "subject": AnyEncodableBox(subj), "to": AnyEncodableBox(draftSentTo ?? splitRecipients(to)),
                 "dry_run": AnyEncodableBox(!global.willExecute), "executed": AnyEncodableBox(executed),
                 "note": AnyEncodableBox(note),
             ]

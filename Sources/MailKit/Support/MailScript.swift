@@ -1089,24 +1089,53 @@ public struct MailScript {
         set theSubject to item 1 of argv
         set theBody to item 2 of argv
         set toRaw to item 3 of argv
+        set ccRaw to item 4 of argv
+        set bccRaw to item 5 of argv
+        set senderAddr to item 6 of argv
         set US to (ASCII character 31)
         tell application "Mail"
             set m to make new outgoing message with properties {subject:theSubject, content:theBody, visible:false}
-            set AppleScript's text item delimiters to US
-            set parts to text items of toRaw
-            set AppleScript's text item delimiters to ""
-            repeat with p in parts
-                set addr to (p as string)
-                if addr is not "" then make new to recipient at end of to recipients of m with properties {address:addr}
-            end repeat
+            if senderAddr is not "" then set sender of m to senderAddr
+            my addDraftRecips(m, toRaw, US, "to")
+            my addDraftRecips(m, ccRaw, US, "cc")
+            my addDraftRecips(m, bccRaw, US, "bcc")
             save m
         end tell
         return "ok"
     end run
+
+    on addDraftRecips(msg, raw, US, kind)
+        if raw is "" then return
+        set AppleScript's text item delimiters to US
+        set parts to text items of raw
+        set AppleScript's text item delimiters to ""
+        tell application "Mail"
+            repeat with p in parts
+                set addr to (p as string)
+                if addr is not "" then
+                    if kind is "to" then
+                        make new to recipient at end of to recipients of msg with properties {address:addr}
+                    else if kind is "cc" then
+                        make new cc recipient at end of cc recipients of msg with properties {address:addr}
+                    else
+                        make new bcc recipient at end of bcc recipients of msg with properties {address:addr}
+                    end if
+                end if
+            end repeat
+        end tell
+    end addDraftRecips
     """
-    /// Save a message to Mail's Drafts (no send). Caller MUST have label-checked the subject.
-    public func createDraft(subject: String, body: String, to: [String]) throws {
-        let out = try runner.run(MailScript.createDraftScript, arguments: [subject, body, to.joined(separator: MailScript.US)])
+    /// Save a message to Mail's Drafts (no send), with cc/bcc and an optional `sender` From
+    /// identity (a bare account address — manage_drafts create parity). Caller MUST have
+    /// label-checked the subject. All values argv-passed (injection-safe).
+    public func createDraft(subject: String, body: String, to: [String],
+                            cc: [String] = [], bcc: [String] = [], sender: String? = nil) throws {
+        let US = MailScript.US
+        let out = try runner.run(MailScript.createDraftScript, arguments: [
+            subject, body,
+            to.joined(separator: US), cc.joined(separator: US), bcc.joined(separator: US),
+            sender ?? "",
+        ])
         guard out == "ok" else { throw AppleScriptRunner.RunError.scriptFailed(status: 1, stderr: "createDraft returned '\(out)'") }
     }
 
@@ -1153,6 +1182,257 @@ public struct MailScript {
     public func deleteDrafts(subject: String, prefix: String) throws -> Int {
         let out = try runner.run(MailScript.deleteDraftScript, arguments: [subject, prefix])
         return Int(out.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
+    }
+
+    /// Send an EXISTING Drafts item (manage_drafts action=send). SAFETY-CRITICAL on two axes:
+    ///
+    /// 1. Recipients are PRE-SET (baked into the stored draft, not passed by this call), so the
+    ///    draft's OWN to/cc/bcc are read and EVERY address is verified against the self-only
+    ///    allowlist BEFORE anything is opened or sent — fail-closed. Any non-allowlisted address
+    ///    refuses (`blocked:<addr>`); an empty allowlist blocks everything; a recipient-less draft
+    ///    refuses (`norecipients`). AppleScript string `is` is case-insensitive by default, matching
+    ///    `guardOutbound`. Then the OPENED message's recipients are re-verified (defense in depth).
+    ///
+    /// 2. THE MECHANISM — open-then-send, NOT `send <stored draft>`. Mail throws -1708 ("doesn't
+    ///    understand the send message") when you `send` a stored Drafts `message` object; the
+    ///    reference oracle (patrickfreyer manage_drafts action=send) has this SAME bug and returns
+    ///    the error string. The working path — a CLI-exceeds-oracle win — is: `open` the stored
+    ///    draft (which registers a sendable `outgoing message`), locate that outgoing message, then
+    ///    `send` it. `send` (unlike `delete`, which is a no-op on outgoing messages) DISPATCHES it —
+    ///    the mail actually leaves for the recipients and lands in Sent. Mail normally drops the
+    ///    outgoing-message object from the outbox once sent; that removal can lag if the outbox is
+    ///    in a stuck state, but the send itself has completed. The original Drafts item is then
+    ///    best-effort deleted (action=send consumes a draft).
+    ///
+    ///    The outgoing message is located by its UNIQUE labeled subject (label prefix + timestamp),
+    ///    NOT by an id-diff snapshot: re-opening an already-open draft REUSES its outgoing message
+    ///    (no new id to diff), and Mail can populate the outgoing subject lazily after `open` — an
+    ///    id-diff poll misses both. Subject-match is safe because that unique subject can only ever
+    ///    belong to THIS draft's own outgoing copy — Mail's outgoing store is SHARED with the
+    ///    operator's live compose windows, but those never carry a test subject, and step (4)
+    ///    re-verifies every recipient against the allowlist before `send` regardless. The draft
+    ///    itself is located by EXACT subject + the label-prefix double guard (STABLE indexed
+    ///    references; subject matched in code — `whose subject is` doesn't filter outgoing-message
+    ///    objects reliably). All values argv-passed (injection-safe).
+    private static let sendDraftScript = """
+    on run argv
+        set wantSubject to item 1 of argv
+        set thePrefix to item 2 of argv
+        set acctFilter to item 3 of argv
+        set allowRaw to item 4 of argv
+        set US to (ASCII character 31)
+        set AppleScript's text item delimiters to US
+        set allowList to text items of allowRaw
+        set AppleScript's text item delimiters to ""
+        tell application "Mail"
+            repeat with ai from 1 to (count of accounts)
+                set a to account ai
+                if acctFilter is "" or (name of a) is acctFilter then
+                    repeat with mi from 1 to (count of mailboxes of a)
+                        set dmbx to mailbox mi of a
+                        if (name of dmbx) contains "Drafts" then
+                            try
+                                set k to (count of messages of dmbx)
+                                repeat with j from 1 to k
+                                    set m to message j of dmbx
+                                    set sj to ""
+                                    try
+                                        set sj to subject of m
+                                    end try
+                                    if sj is wantSubject and sj starts with thePrefix then
+                                        -- (1) verify the STORED draft's recipients BEFORE any open.
+                                        -- Outside the open/send `try` below so a genuine block/no-recip
+                                        -- returns its own sentinel (never masked as a send error).
+                                        set addrs to my collectAddrs(m)
+                                        if (count of addrs) is 0 then return "norecipients"
+                                        set bad to my firstDisallowed(addrs, allowList)
+                                        if bad is not "" then return "blocked:" & bad
+                                        -- (2)–(6) open-then-send CRITICAL SECTION, wrapped in its OWN
+                                        -- `try` with an `on error`: a throw here (open, `send`, SMTP /
+                                        -- network, Mail-internal) must surface as a DISTINCT "senderror:"
+                                        -- sentinel, NOT be swallowed by the enclosing mailbox-scan `try`
+                                        -- into a misleading "notfound". The clean `return` sentinels
+                                        -- inside (openfailed/norecipients/blocked/sent) still exit
+                                        -- normally — only actual thrown errors reach `on error`.
+                                        try
+                                            -- (2) open the stored draft => Mail registers (or REUSES, if
+                                            -- it was opened before) an outgoing message with this subject
+                                            open m
+                                            -- (3) locate the outgoing message by this UNIQUE labeled
+                                            -- subject. Match by SUBJECT, not an id-diff snapshot: an
+                                            -- already-open draft reuses its outgoing message (NO new id),
+                                            -- and Mail can populate the subject lazily after open — an
+                                            -- id-diff poll misses both. The subject carries the label
+                                            -- prefix + a unique timestamp, so only THIS draft's own
+                                            -- outgoing copy can match (the operator's real compose windows
+                                            -- never share it); step (4) re-verifies recipients regardless.
+                                            -- Patient (up to 30s): Mail can lag surfacing the message.
+                                            set target to missing value
+                                            repeat 60 times
+                                                repeat with om in (every outgoing message)
+                                                    set osj to ""
+                                                    try
+                                                        set osj to subject of om
+                                                    end try
+                                                    if osj is wantSubject then
+                                                        set target to om
+                                                        exit repeat
+                                                    end if
+                                                end repeat
+                                                if target is not missing value then exit repeat
+                                                delay 0.5
+                                            end repeat
+                                            if target is missing value then return "openfailed"
+                                            -- (4) re-verify the OPENED message's recipients (defense in
+                                            -- depth — this is the object actually about to be sent)
+                                            set addrs2 to my collectAddrs(target)
+                                            if (count of addrs2) is 0 then return "norecipients"
+                                            set bad2 to my firstDisallowed(addrs2, allowList)
+                                            if bad2 is not "" then return "blocked:" & bad2
+                                            -- Build the sent-recipient report BEFORE dispatch. Any error in
+                                            -- this coercion then throws BEFORE `send` (=> senderror, nothing
+                                            -- sent), and — critically — NOTHING that can throw runs AFTER
+                                            -- `send target`. A post-send throw would return `senderror` and
+                                            -- wrongly advise the operator to "retry", risking a DUPLICATE
+                                            -- send of a message that already left.
+                                            set AppleScript's text item delimiters to US
+                                            set sentList to (addrs2 as text)
+                                            set AppleScript's text item delimiters to ""
+                                            -- (5) send the opened outgoing message (dispatches it => Sent)
+                                            send target
+                                            -- (6) manage_drafts action=send semantics: a sent draft is
+                                            -- consumed. Best-effort delete of the ORIGINAL draft(s),
+                                            -- re-located by the SAME subject+prefix double guard (never a
+                                            -- blind index delete — that could hit the wrong message);
+                                            -- end-to-start so removals don't reindex the rest. Its OWN inner
+                                            -- try makes a delete failure a no-op (never re-raising post-send),
+                                            -- so the send already succeeded => a lingering draft is cosmetic.
+                                            -- (Deletes ALL exact-subject labeled matches; in the
+                                            -- unique-timestamped test flow there is exactly one.)
+                                            try
+                                                set kk to (count of messages of dmbx)
+                                                repeat with jj from kk to 1 by -1
+                                                    set dm to message jj of dmbx
+                                                    set dsj to ""
+                                                    try
+                                                        set dsj to subject of dm
+                                                    end try
+                                                    if dsj is wantSubject and dsj starts with thePrefix then delete dm
+                                                end repeat
+                                            end try
+                                            return "sent" & US & sentList
+                                        on error errMsg number errNum
+                                            return "senderror:" & (errNum as string)
+                                        end try
+                                    end if
+                                end repeat
+                            end try
+                        end if
+                    end repeat
+                end if
+            end repeat
+        end tell
+        return "notfound"
+    end run
+
+    on collectAddrs(theMsg)
+        set out to {}
+        tell application "Mail"
+            repeat with r in (to recipients of theMsg)
+                set end of out to (address of r)
+            end repeat
+            repeat with r in (cc recipients of theMsg)
+                set end of out to (address of r)
+            end repeat
+            repeat with r in (bcc recipients of theMsg)
+                set end of out to (address of r)
+            end repeat
+        end tell
+        return out
+    end collectAddrs
+
+    on firstDisallowed(addrs, allowList)
+        -- Returns the FIRST address not in allowList, or "" ONLY when every address is allowlisted
+        -- (the all-clear sentinel). SAFETY: empty / missing (`missing value`) addresses fail CLOSED —
+        -- they return the non-empty token "<empty-address>" (a block), NEVER "". This closes the
+        -- sentinel-collision fail-open where an empty-address recipient ordered before a real one
+        -- (`{"", "victim@x"}`) would hit `return ""` early and be read as all-clear. Because a real
+        -- address is compared only after the empty guard, no real address can ever be "", so "" is
+        -- unambiguously all-clear. The `try` also blocks (rather than crashes on) a recipient whose
+        -- `address` coerces with an error (e.g. `missing value`).
+        repeat with adr in addrs
+            set a to ""
+            try
+                set a to (adr as string)
+            end try
+            if a is "" then return "<empty-address>"
+            set okFlag to false
+            repeat with al in allowList
+                -- `considering diacriticals but ignoring case` = case-insensitive + diacritic-SENSITIVE,
+                -- matching Swift `guardOutbound`'s `.lowercased()` exact compare. Without it, AppleScript
+                -- `is` folds diacritics too, so this self-only gate would be strictly MORE permissive than
+                -- every other outbound path (e.g. allowlist `me@sélf.test` would match a draft to
+                -- `me@self.test`). Keeping the two comparators identical closes that divergence.
+                considering diacriticals but ignoring case
+                    if a is (al as string) then set okFlag to true
+                end considering
+            end repeat
+            if not okFlag then return a
+        end repeat
+        return ""
+    end firstDisallowed
+    """
+    /// Outcome of `sendDraft`. `.sent` carries the verified recipients the mail was dispatched to
+    /// (the draft's OWN pre-set to/cc/bcc — the command never supplied them). `.sendError` carries
+    /// the Mail/AppleScript error number when `open`/`send` itself threw; it is DISTINCT from
+    /// `.notFound`, which now means only "no such labeled draft" and never a swallowed send failure.
+    public enum DraftSendResult: Equatable {
+        case sent([String])
+        case notFound
+        case noRecipients
+        case blocked(String)
+        case openFailed
+        case sendError(String)
+
+        /// Pure parser for `sendDraftScript`'s raw stdout → result. Extracted so the safety-critical
+        /// string→enum mapping (esp. the `blocked:<addr>` verdict and the recipient split) is
+        /// unit-testable WITHOUT a live Mac / Mail: the AppleScript can't run in CI, but this mapping
+        /// is exactly where a future edit could silently mishandle a `blocked` verdict, so it earns a
+        /// logic-tier regression lock. Returns nil for an unrecognized string (caller then throws).
+        /// `us` is the field separator the script uses (`MailScript.US`).
+        public static func parse(_ raw: String, us: String) -> DraftSendResult? {
+            if raw == "notfound" { return .notFound }
+            if raw == "norecipients" { return .noRecipients }
+            if raw == "openfailed" { return .openFailed }
+            if raw.hasPrefix("blocked:") { return .blocked(String(raw.dropFirst("blocked:".count))) }
+            if raw.hasPrefix("senderror:") { return .sendError(String(raw.dropFirst("senderror:".count))) }
+            if raw == "sent" { return .sent([]) }
+            if raw.hasPrefix("sent" + us) {
+                let rest = String(raw.dropFirst(("sent" + us).count))
+                return .sent(rest.components(separatedBy: us).filter { !$0.isEmpty })
+            }
+            return nil
+        }
+    }
+    /// Send the existing labeled draft matching `subject` (optionally within `account`), after
+    /// in-script verification that every stored recipient is in `allowlist`. Caller MUST have
+    /// passed the test-mode gate + label check; this method re-enforces the label prefix and the
+    /// allowlist inside the script (defense in depth) but performs no flag gating itself. Uses the
+    /// open-then-send mechanism (see `sendDraftScript` doc); a successful `.sent([recipients])`
+    /// carries the verified recipients dispatched to and also consumes the original Drafts item
+    /// (best-effort delete). `.openFailed` means the draft opened but its outgoing message never
+    /// materialized within the 30s poll window (an upstream Mail hiccup) — the draft is left
+    /// untouched so the caller can retry or send it manually. `.sendError(detail)` means `open`/`send`
+    /// itself threw (Mail/network) AFTER recipient verification — reported honestly, never masked as
+    /// `.notFound`.
+    public func sendDraft(subject: String, prefix: String, account: String?, allowlist: [String]) throws -> DraftSendResult {
+        let out = try runner.run(MailScript.sendDraftScript, arguments: [
+            subject, prefix, account ?? "", allowlist.joined(separator: MailScript.US),
+        ])
+        guard let result = DraftSendResult.parse(out, us: MailScript.US) else {
+            throw AppleScriptRunner.RunError.scriptFailed(status: 1, stderr: "sendDraft returned '\(out)'")
+        }
+        return result
     }
 
     // MARK: Draft save / open (NON-SENDING — never call AppleScript `send`)

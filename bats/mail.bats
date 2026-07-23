@@ -364,6 +364,19 @@ require_index() {
   echo "$output" | grep -q '"type" : "safety_violation"'
 }
 
+@test "mail draft create --cc/--bcc/--account are accepted and preview as a dry-run (exit 0, account echoed)" {
+  # CI-safe (no --execute → dry-run preview, no Mail access). Locks that `draft create` ACCEPTS the
+  # sender-identity + cc/bcc flags: a regression dropping --cc/--bcc from the parser, or --account,
+  # would fail here. The live create→send behaviour (draft stored with the --account sender + cc, then
+  # delivered From that address to the cc) is validated on-device per CHANGELOG.
+  run "$BIN" mail draft create --subject "apple-cli-test draftsend-cc" --body hi \
+    --to me@self.test --cc alias@self.test --bcc hidden@self.test --account "Some Account"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"dry_run" : true'
+  echo "$output" | grep -q '"executed" : false'
+  echo "$output" | grep -q '"account" : "Some Account"'
+}
+
 @test "mail delete --permanent --execute is a hard-refused dangerous action (exit 64)" {
   run "$BIN" mail delete 1 --permanent --execute
   [ "$status" -eq 64 ]
@@ -407,6 +420,23 @@ require_index() {
 @test "mail draft open without a labeled subject is refused (exit 77, before any Mail access)" {
   # openDraft requires a labeled subject; the label check fires before Mail is opened.
   run "$BIN" mail draft open --draft-subject "not-a-test-draft" --execute
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q '"type" : "safety_violation"'
+}
+
+@test "mail draft send with --execute but WITHOUT --test-mode is refused (exit 77)" {
+  # Sending an EXISTING draft fires the same two-factor gate as every outbound op; fires before
+  # any Mail access.
+  run "$BIN" mail draft send --draft-subject "apple-cli-test x" --execute
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q '"type" : "safety_violation"'
+}
+
+@test "mail draft send with an UNLABELED subject is refused under the test gate (exit 77)" {
+  # The label half fires before the draft is even looked up; the draft's own stored recipients
+  # are additionally verified against the self-only allowlist inside the send script itself.
+  APPLE_TEST_MODE=1 \
+    run "$BIN" mail draft send --draft-subject "Quarterly report" --execute --test-mode
   [ "$status" -eq 77 ]
   echo "$output" | grep -q '"type" : "safety_violation"'
 }

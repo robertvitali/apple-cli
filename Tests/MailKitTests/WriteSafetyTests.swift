@@ -174,3 +174,52 @@ struct MailWriteSafetyTests {
         }
     }
 }
+
+// Logic-tier regression lock for `DraftSendResult.parse` — the safety-critical string→enum mapping
+// of `sendDraftScript`'s raw stdout. The AppleScript itself needs a live Mac, but THIS mapping is
+// where a future edit could silently mishandle a `blocked` verdict (→ send to a non-self recipient)
+// or misparse the sent-recipient list; it is pure, so it's CI-lockable without Mail. `us` is the
+// unit separator the script emits between the "sent" tag and each verified recipient.
+@Suite("DraftSendResult.parse (pure)")
+struct DraftSendResultParseTests {
+    private let US = MailScript.US
+
+    @Test("a bare `sent` (no recipients appended) parses to .sent([])")
+    func sentNoRecipients() {
+        #expect(MailScript.DraftSendResult.parse("sent", us: US) == .sent([]))
+    }
+
+    @Test("`sent<US>addr…` parses to .sent with the verified recipient list, dropping empties")
+    func sentWithRecipients() {
+        #expect(MailScript.DraftSendResult.parse("sent\(US)me@self.test", us: US) == .sent(["me@self.test"]))
+        #expect(MailScript.DraftSendResult.parse("sent\(US)a@self.test\(US)b@self.test", us: US)
+                == .sent(["a@self.test", "b@self.test"]))
+        // a stray trailing separator must not yield a phantom empty recipient
+        #expect(MailScript.DraftSendResult.parse("sent\(US)a@self.test\(US)", us: US) == .sent(["a@self.test"]))
+    }
+
+    @Test("a `blocked:<addr>` verdict maps to .blocked carrying the EXACT address (the refuse signal)")
+    func blockedCarriesAddress() {
+        #expect(MailScript.DraftSendResult.parse("blocked:someone-else@example.com", us: US)
+                == .blocked("someone-else@example.com"))
+        // the fail-closed empty-address sentinel round-trips as a block, never as success
+        #expect(MailScript.DraftSendResult.parse("blocked:<empty-address>", us: US) == .blocked("<empty-address>"))
+    }
+
+    @Test("the status sentinels each map to their case")
+    func statusSentinels() {
+        #expect(MailScript.DraftSendResult.parse("notfound", us: US) == .notFound)
+        #expect(MailScript.DraftSendResult.parse("norecipients", us: US) == .noRecipients)
+        #expect(MailScript.DraftSendResult.parse("openfailed", us: US) == .openFailed)
+        #expect(MailScript.DraftSendResult.parse("senderror:-1708", us: US) == .sendError("-1708"))
+    }
+
+    @Test("an UNRECOGNIZED string parses to nil so the caller throws — never a silent .sent")
+    func unrecognizedIsNil() {
+        #expect(MailScript.DraftSendResult.parse("", us: US) == nil)
+        #expect(MailScript.DraftSendResult.parse("garbage", us: US) == nil)
+        // critically: a near-miss that is NOT exactly a known sentinel must not read as success
+        #expect(MailScript.DraftSendResult.parse("sentinel", us: US) == nil)
+        #expect(MailScript.DraftSendResult.parse("SENT", us: US) == nil)
+    }
+}
