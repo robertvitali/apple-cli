@@ -86,6 +86,41 @@ with the Apple MCP servers they replace.
   - **Safety:** wiring `move_to`/`copy_to` on an in-place update cannot also
     `--enabled` the rule in the same command (its existing conditions aren't
     re-verified self-scoped) — activation must be a separate `rules enable`.
+- **Mail templates: on-disk format + dropped MCP fields** (audit gap H). The CLI and
+  MCP A share `~/.apple_mail_mcp/templates/<name>.md`, so the format is an interop
+  contract. `TemplateStore` is now byte-matched to MCP A's `save_template`
+  **operation** (not merely its `serialize_template` helper): identical inputs to
+  either tool now produce a **byte-identical file**, verified live on the shared store.
+  - **Format fixes:** the header line is the lowercase `subject:` MCP A writes (was
+    `Subject:`); a body-only template carries the LEADING blank line MCP A's parser
+    requires (the prior file was rejected as "no blank line separating headers from
+    body"); the body is normalized to end with a newline, as `save_template` does;
+    and `nil` vs `""` is now the real subject distinction (an empty subject writes
+    the header, matching the oracle's `subject is not None` branch).
+  - **Write validation, mirroring the oracle:** an empty/whitespace-only body is
+    refused, and a CR/LF/NUL in the subject is refused — both would otherwise write a
+    file MCP A permanently refuses to parse, silently poisoning the shared store.
+    `save` now reports what was STORED (re-read) rather than the caller's raw input,
+    and returns the oracle's `created` flag (true = new, false = overwrote).
+  - **Dropped MCP fields restored:** `templates get` now returns `placeholders` (the
+    oracle's sorted, deduped, escape-aware placeholder list) and `templates render`
+    returns `used_vars` alongside the CLI's original `variables` key.
+  - **`parse` is a deliberate superset that never loses content:** where the oracle
+    REJECTS a file, the CLI reads it as all-body rather than failing — this covers a
+    file with no blank line, and a header block that isn't entirely known `key: value`
+    pairs. That second rule is what keeps a body whose first line reads `Note: see
+    below` from losing that line, and stops an unknown future header key from being
+    parsed-and-discarded. CRLF input is normalized first (the oracle handles CR
+    deliberately; without this a CRLF file lost its entire body).
+  - **`render` placeholder substitution is now single-pass**, so a substituted value is
+    never re-scanned — the previous repeated-replacement version could produce
+    different output run-to-run depending on dictionary iteration order. `{{`/`}}` are
+    now literal braces, matching Python `str.format`.
+  - **Known open gap (tracked, not closed here):** render-time *error* behavior still
+    diverges — the oracle raises `missing_template_variable` naming every unresolved
+    placeholder, while the CLI leaves an unknown `{token}` verbatim. That is an
+    error-contract change with its own exit code and test matrix, deliberately out of
+    scope for this format commit.
 - **Mail `attachments save`** (live export): saves a message's attachment bytes to
   disk via AppleScript (a read/export — nothing in Mail is mutated; gates on
   `--execute` only). Selection is POSITIONAL (`--indices` addresses

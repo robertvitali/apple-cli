@@ -351,7 +351,9 @@ struct TemplatesDelete: ParsableCommand {
             _ = try store.get(name)   // 404 if missing
             if global.willExecute {
                 try store.delete(name)
-                try Output.emit(tool: "mail", data: ["deleted_template": AnyEncodableBox(name), "executed": AnyEncodableBox(true)])
+                // `name` mirrors the oracle's delete_template wire key; `deleted_template` is the
+                // CLI's original name, kept so existing consumers don't break.
+                try Output.emit(tool: "mail", data: ["deleted_template": AnyEncodableBox(name), "name": AnyEncodableBox(name), "executed": AnyEncodableBox(true)])
             } else {
                 try Output.emit(tool: "mail", data: ["would_delete_template": AnyEncodableBox(name), "dry_run": AnyEncodableBox(true)])
             }
