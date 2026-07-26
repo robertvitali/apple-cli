@@ -35,6 +35,16 @@ func requireLiveMessageMutation(_ m: MailMessage, testMode: Bool) throws -> Stri
     return imid
 }
 
+/// Every target must carry the CANONICAL test-label prefix, checked against
+/// `TestMode.canonicalSandboxPrefix` rather than the caller-redefinable `TestMode.sandboxPrefix`.
+/// Used ONLY by irreversible operations: widening `APPLE_TEST_SANDBOX` must not be able to widen
+/// what an erase is allowed to destroy. Pure (no Mail, no I/O) so it is unit-testable.
+func requireCanonicalLabels(_ msgs: [MailMessage]) throws {
+    if let bad = msgs.first(where: { !$0.subject.hasPrefix(TestMode.canonicalSandboxPrefix) }) {
+        throw AppleError.mailSafety("target '\(bad.id)' (subject: \"\(bad.subject)\") is not a canonically-labeled test item (must start with \"\(TestMode.canonicalSandboxPrefix)\") — refusing to permanently erase it.")
+    }
+}
+
 /// Execute a per-message mutation over resolved targets, ALL-OR-NOTHING on the label gate.
 /// Phase 1 validates EVERY target's gate (`requireLiveMessageMutation`) before ANY mutation runs,
 /// so a mixed batch containing one unlabeled/real message mutates nothing AND the throw can't

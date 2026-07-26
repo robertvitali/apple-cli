@@ -63,11 +63,13 @@ require_index() {
   echo "$output" | grep -q "Hi World"
 }
 
-@test "mail delete --permanent --execute is refused (dangerous)" {
+@test "mail delete --permanent --execute WITHOUT --test-mode is refused (exit 77)" {
+  # --permanent is now wired, but routes through the same all-or-nothing label gate as every
+  # other mutation, so it cannot run outside test-mode.
   require_index
   run "$BIN" mail delete --match-subject apple-cli-nonexistent-zzz --permanent --execute --account iCloud
-  [ "$status" -eq 64 ]
-  echo "$output" | grep -q '"validation_error"'
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q '"safety_violation"'
 }
 
 @test "mail move with a filter previews (dry-run, filter_based)" {
@@ -487,16 +489,60 @@ require_index() {
   echo "$output" | grep -q '"account" : "Some Account"'
 }
 
-@test "mail delete --permanent --execute is a hard-refused dangerous action (exit 64)" {
+@test "mail delete --permanent --execute without --test-mode is refused before any erase (exit 77)" {
   run "$BIN" mail delete 1 --permanent --execute
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q '"safety_violation"'
+}
+
+@test "mail delete --permanent --execute --test-mode without the operator env var is refused (exit 77)" {
+  # The subject label is spoofable (anyone can mail the operator an "apple-cli-test ..." subject),
+  # so it must never be the SOLE gate on an irreversible erase — an operator-only env var is the
+  # required second factor, and an autonomous run never sets it.
+  require_index
+  run env -u APPLE_ALLOW_PERMANENT_DELETE APPLE_TEST_MODE=1 "$BIN" mail delete --match-subject apple-cli-nonexistent-zzz --permanent --execute --test-mode --account iCloud
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q '"safety_violation"'
+  echo "$output" | grep -q 'APPLE_ALLOW_PERMANENT_DELETE'
+}
+
+@test "mail delete --permanent dry-run previews and warns it only erases already-trashed mail" {
+  require_index
+  run "$BIN" mail delete 1 --permanent
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"action" : "delete_permanent"'
+  echo "$output" | grep -q '"dry_run" : true'
+  echo "$output" | grep -q 'ALREADY in Trash'
+}
+
+# ── empty-trash: wired, but operator-gated (audit gap I) ──────────────────────────────────────
+@test "mail trash empty --execute WITHOUT --confirm is a validation error (exit 64)" {
+  run "$BIN" mail trash empty --account "Any" --execute
   [ "$status" -eq 64 ]
   echo "$output" | grep -q '"validation_error"'
 }
 
-@test "mail trash empty --execute is a hard-refused dangerous action (exit 64)" {
-  run "$BIN" mail trash empty --account "Any" --execute
+@test "mail trash empty --execute --confirm without the operator env var is refused (exit 77)" {
+  # The env var is the ONLY gate that can guard empty-trash (it cannot be scoped to test data),
+  # so an autonomous run — which never sets it — can never reach the destructive path.
+  run env -u APPLE_ALLOW_EMPTY_TRASH "$BIN" mail trash empty --account "Any" --execute --confirm
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q '"safety_violation"'
+  echo "$output" | grep -q 'APPLE_ALLOW_EMPTY_TRASH'
+}
+
+@test "mail trash empty --max 0 is a validation error (exit 64)" {
+  run "$BIN" mail trash empty --account "Any" --execute --confirm --max 0
   [ "$status" -eq 64 ]
   echo "$output" | grep -q '"validation_error"'
+}
+
+@test "mail trash empty dry-run previews without touching Mail (exit 0)" {
+  run "$BIN" mail trash empty --account "Any"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"action" : "empty_trash"'
+  echo "$output" | grep -q '"dry_run" : true'
+  echo "$output" | grep -q '"executed" : false'
 }
 
 # ── Non-sending draft/open modes (gap 4) — all CI-safe: dry-run previews + gate refusals ─────────

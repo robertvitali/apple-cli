@@ -71,6 +71,10 @@ struct BulkPreview: Encodable {
     let note: String?
     var applied: [String]? = nil     // ids the live mutation applied to (executed path)
     var not_found: [String]? = nil   // ids Mail could not locate (executed path)
+    /// `delete --permanent` only: ids that WERE found in trash but survived the erase, because
+    /// Mail's AppleScript cannot expunge on this account type. Machine-readable so a caller can
+    /// distinguish "couldn't find it" from "found it and could not erase it" without parsing prose.
+    var expunge_unsupported: [String]? = nil
 }
 
 struct MoveCommand: ParsableCommand {
@@ -179,36 +183,132 @@ struct FlagCommand: ParsableCommand {
 }
 
 struct DeleteCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "delete", abstract: "Delete messages to Trash by id or --match (dry-run by default; --permanent is a DANGEROUS no-op guard).")
+    static let configuration = CommandConfiguration(commandName: "delete", abstract: "Delete messages to Trash by id or --match (dry-run by default; --permanent erases from Trash IRREVERSIBLY).")
     @OptionGroup var global: GlobalOptions
     @OptionGroup var match: MatchOptions
     @Argument var ids: [String] = []
     @Option(name: .long) var account: String?
-    @Option(name: .long) var mailbox: String = "INBOX"
-    @Flag(name: .long, help: "Permanent delete (DANGEROUS — never executed autonomously).") var permanent = false
+    /// Optional so an omitted value is distinguishable from an explicit "INBOX": `--permanent`
+    /// defaults the SEARCH scope to the trash it would erase from (see `run()`), because the
+    /// INBOX default can by definition never match a message that is eligible for erasure.
+    @Option(name: .long, help: "Mailbox to resolve targets in (default INBOX; --permanent defaults to the account's trash).") var mailbox: String?
+    @Flag(name: .long, help: "IRREVERSIBLE: permanently erase messages that are ALREADY in trash (needs --test-mode + APPLE_ALLOW_PERMANENT_DELETE=1).") var permanent = false
+
+    /// Operator-only second factor for the irreversible erase — see the gate in `run()`.
+    static let operatorEnvVar = "APPLE_ALLOW_PERMANENT_DELETE"
 
     func run() throws {
         try runGuarded(tool: "mail") {
-            // Dangerous refuse fires BEFORE any preview → exactly one (error) envelope.
-            if global.willExecute && permanent {
-                throw AppleError.validation("permanent delete is a DANGEROUS irreversible action and is never executed autonomously — refused.")
+            // Check the test-mode gate UP FRONT for the irreversible path, before resolving any
+            // targets. The per-target label gate below only fires when there IS a target, so a
+            // filter that happens to match nothing would otherwise let `--permanent --execute`
+            // exit 0 outside test-mode — a confusing near-miss on a destructive command.
+            if permanent && global.willExecute {
+                guard global.testMode && TestMode.isEnabled else {
+                    throw AppleError.mailSafety("permanent delete is IRREVERSIBLE and requires --test-mode AND APPLE_TEST_MODE=1; refused. The default dry-run previews instead.")
+                }
+                // The subject label must NEVER be the SOLE gate on an irreversible op (see the
+                // invariant on requireLiveMessageMutation): a subject is spoofable — anyone can
+                // mail the operator a message titled "apple-cli-test …" — so on its own it would
+                // let a third party nominate real mail for erasure. Require an operator-only env
+                // var as an independent second factor, exactly as `trash empty` does.
+                guard ProcessInfo.processInfo.environment[DeleteCommand.operatorEnvVar] == "1" else {
+                    throw AppleError.mailSafety("permanent delete is IRREVERSIBLE and its subject label is spoofable, so the label alone does not authorize it — refused. An operator must set \(DeleteCommand.operatorEnvVar)=1 to allow it.")
+                }
             }
+            let script = MailScript()
+            // Resolve the account's trash mailboxes BEFORE target resolution, because for
+            // `--permanent` they determine BOTH where we search and where we may erase. On the
+            // execute path this is a hard failure (see below); on a dry-run it is best-effort so
+            // the preview still renders without Mail.
+            var trashBoxes: [MailScript.TrashMailbox] = []
+            if permanent {
+                if global.willExecute {
+                    let all = try script.allMailboxes(accountName: account ?? "")
+                    // An unknown --account matches no mailbox. Fail loudly: silently proceeding
+                    // would report a clean "nothing was erased" for a command that never looked.
+                    guard !all.isEmpty else {
+                        throw AppleError.notFound("no mailboxes found\(account.map { " for account '\($0)'" } ?? "") — check --account.")
+                    }
+                    trashBoxes = all.filter { MailScript.isTrashMailboxName($0.name) }
+                    guard !trashBoxes.isEmpty else {
+                        throw AppleError.notFound("could not identify a trash mailbox\(account.map { " on account '\($0)'" } ?? "") — refusing to report an erase outcome without one.")
+                    }
+                } else {
+                    trashBoxes = ((try? script.trashMailboxes(accountName: account ?? "")) ?? [])
+                }
+            }
+            let trashNames = trashBoxes.map(\.name)
+            // Default the SEARCH scope for --permanent to the "All" wildcard rather than the
+            // inherited "INBOX", which by definition can never match an already-trashed (i.e.
+            // erasable) message and would make the command silently match nothing. Searching wide
+            // is safe here precisely because the ERASE itself is trash-scoped inside the
+            // AppleScript: a match that isn't in trash simply comes back not erased. Note this is
+            // deliberately NOT `resolveTrashMailbox` — that guard exists to refuse guessing which
+            // trash to DESTROY, and applying it to a read scope would reject the common
+            // multi-account case for no safety gain. An explicit --mailbox always wins.
+            let effectiveMailbox = mailbox ?? (permanent ? "All" : "INBOX")
             let ctx = try MailContext()
-            let (msgs, filterBased) = try resolveTargets(ctx: ctx, ids: ids, match: match, account: account, mailbox: mailbox)
+            let (msgs, filterBased) = try resolveTargets(ctx: ctx, ids: ids, match: match, account: account, mailbox: effectiveMailbox)
+            if permanent && global.willExecute {
+                // Re-check the label against the CANONICAL prefix (ignoring any APPLE_TEST_SANDBOX
+                // override) so widening that env var cannot widen what an erase may touch.
+                try requireCanonicalLabels(msgs)
+            }
             let action = permanent ? "delete_permanent" : "delete_to_trash"
             let detail = ["permanent": String(permanent)]
+            let previewNote = permanent
+                ? "IRREVERSIBLE: --permanent erases messages that are ALREADY in Trash; a message still in a normal mailbox is skipped (trash it first)."
+                : nil
             guard global.willExecute else {
                 try Output.emit(tool: "mail", data: BulkPreview(action: action, matched: msgs.count, filter_based: filterBased,
-                    dry_run: true, executed: false, messages: msgs, detail: detail, note: nil)); return
+                    dry_run: true, executed: false, messages: msgs, detail: detail, note: previewNote)); return
             }
-            // Only the recoverable move-to-Trash executes (permanent was refused above). Each
-            // target is label-gated, so an autonomous run can only trash its own test messages.
-            let script = MailScript()
+            // Both paths run through executeMessageMutation, whose all-or-nothing label gate
+            // (test-mode + `apple-cli-test` subject) validates EVERY target before mutating ANY —
+            // so a permanent delete can only ever erase this run's own labeled test messages. The
+            // permanent path is additionally scoped to Trash inside the AppleScript, so a message
+            // that has not been trashed yet is a no-op rather than an erase.
+            // Tracks targets that WERE in trash but survived the erase — Mail cannot expunge them
+            // from AppleScript on this account type. Reported separately so a no-op is never
+            // dressed up as a success.
+            var unsupportedIMIDs = Set<String>()
             let (applied, notFound) = try executeMessageMutation(msgs, testMode: global.testMode) { imid, acct in
-                try script.deleteToTrash(internetMessageID: imid, accountName: acct)
+                guard permanent else { return try script.deleteToTrash(internetMessageID: imid, accountName: acct) }
+                switch try script.deletePermanentlyFromTrash(internetMessageID: imid, accountName: acct,
+                                                             trashNames: trashNames) {
+                case .erased: return true
+                case .notInTrash: return false
+                case .unsupported:
+                    unsupportedIMIDs.insert(imid)
+                    return false
+                }
+            }
+            // Re-key the survivors from RFC Message-ID back to the caller-facing message id, so the
+            // envelope is addressable with the same ids the caller passed in.
+            let unsupported = msgs.filter { m in
+                guard let imid = m.internet_message_id else { return false }
+                return unsupportedIMIDs.contains(imid)
+            }.map(\.id)
+            var note: String?
+            if permanent {
+                var parts: [String] = []
+                if !unsupported.isEmpty {
+                    parts.append("\(unsupported.count) message(s) were found in trash but SURVIVED the erase: Mail's AppleScript cannot expunge an already-trashed message on this account type (IMAP/iCloud), so no permanent delete happened for them. Erase them from Mail.app (Mailbox ▸ Erase Deleted Items).")
+                }
+                if !notFound.isEmpty {
+                    parts.append(notLocatedNote(notFound) ?? "")
+                    parts.append("not_found here also covers targets that were NOT in trash — --permanent only erases already-trashed messages.")
+                }
+                let joined = parts.filter { !$0.isEmpty }.joined(separator: " ")
+                note = joined.isEmpty ? nil : joined
+            } else {
+                note = notLocatedNote(notFound)
             }
             try Output.emit(tool: "mail", data: BulkPreview(action: action, matched: msgs.count, filter_based: filterBased,
-                dry_run: false, executed: true, messages: msgs, detail: detail, note: notLocatedNote(notFound), applied: applied, not_found: notFound))
+                dry_run: false, executed: true, messages: msgs, detail: detail,
+                note: note, applied: applied, not_found: notFound,
+                expunge_unsupported: unsupported.isEmpty ? nil : unsupported))
         }
     }
 }
@@ -217,18 +317,89 @@ struct TrashCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "trash", abstract: "Trash operations.", subcommands: [TrashEmpty.self])
 }
 struct TrashEmpty: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "empty", abstract: "Empty the Trash (DANGEROUS — never executed autonomously).")
+    static let configuration = CommandConfiguration(commandName: "empty", abstract: "Empty an account's Trash (IRREVERSIBLE; operator-gated — see --confirm).")
     @OptionGroup var global: GlobalOptions
     @Option(name: .long) var account: String
-    @Flag(name: .long, help: "Required confirmation for the destructive empty.") var confirm = false
+    @Flag(name: .long, help: "Required confirmation for the destructive empty (oracle `confirm_empty`).") var confirm = false
+    @Option(name: .long, help: "Safety cap on how many messages to erase (oracle `max_deletes`).") var max: Int = 5
+    @Option(name: .long, help: "Which trash mailbox to empty (required when the account has more than one non-empty).") var trashMailbox: String?
+
+    /// The operator-only trigger. Unlike every other write in this tool, emptying the Trash CANNOT
+    /// be scoped to `apple-cli-test` data — it erases whatever real mail the user has trashed — so
+    /// the usual label gate has nothing to bite on. This env var is therefore the gate: an
+    /// autonomous run never sets it, which makes the destructive path unreachable without a
+    /// deliberate human act, while the code path itself stays fully wired and testable.
+    static let operatorEnvVar = "APPLE_ALLOW_EMPTY_TRASH"
+
     func run() throws {
         try runGuarded(tool: "mail") {
-            // Dangerous refuse before emit → one envelope.
+            guard max > 0 else { throw AppleError.validation("--max must be greater than 0.") }
+            let script = MailScript()
+            // Enumerating trash mailboxes is a pure READ. It is best-effort ONLY on the preview
+            // path (so a dry-run still renders, and stays CI-runnable, without Mail); on the
+            // execute path a failed read MUST propagate — otherwise an unreadable account would
+            // report `executed: true, erased: 0, "nothing to erase"` having never looked.
+            // ORDER MATTERS: the pure safety refusals (--confirm, operator env var) run BEFORE any
+            // Mail access, so a caller missing them is told exactly that rather than getting an
+            // unrelated account/read error first — and so refusing costs no I/O.
             if global.willExecute {
-                throw AppleError.validation("empty-trash is a DANGEROUS irreversible action and is never executed autonomously — refused.")
+                guard confirm else {
+                    throw AppleError.validation("empty-trash permanently erases messages from trash — pass --confirm to proceed.")
+                }
+                guard ProcessInfo.processInfo.environment[TrashEmpty.operatorEnvVar] == "1" else {
+                    throw AppleError.mailSafety("empty-trash is IRREVERSIBLE and cannot be scoped to \(TestMode.sandboxPrefix) data, so it is never executed autonomously — refused. An operator must set \(TrashEmpty.operatorEnvVar)=1 to allow it.")
+                }
             }
-            try Output.emit(tool: "mail", data: ["action": AnyEncodableBox("empty_trash"), "account": AnyEncodableBox(account),
-                                                 "dry_run": AnyEncodableBox(true), "note": AnyEncodableBox("empty-trash is irreversible and is never executed autonomously")])
+            var boxes: [MailScript.TrashMailbox] = []
+            if global.willExecute {
+                let all = try script.allMailboxes(accountName: account)
+                // An unknown account matches no mailbox — that must not read as "nothing to erase".
+                guard !all.isEmpty else {
+                    throw AppleError.notFound("no mailboxes found for account '\(account)' — check --account.")
+                }
+                boxes = all.filter { MailScript.isTrashMailboxName($0.name) }
+            } else {
+                boxes = (try? script.trashMailboxes(accountName: account)) ?? []
+            }
+            guard global.willExecute else {
+                // Resolution can legitimately throw here (ambiguous / unknown --trash-mailbox);
+                // surface that in the PREVIEW so a dry-run predicts what --execute would do.
+                let target = try MailScript.resolveTrashMailbox(boxes, explicit: trashMailbox)
+                try Output.emit(tool: "mail", data: [
+                    "action": AnyEncodableBox("empty_trash"), "account": AnyEncodableBox(account),
+                    "trash_mailbox": AnyEncodableBox(target?.name),
+                    "trash_mailboxes": AnyEncodableBox(boxes.map { ["name": AnyEncodableBox($0.name), "count": AnyEncodableBox($0.count)] }),
+                    "in_trash": AnyEncodableBox(target?.count),
+                    "would_erase": AnyEncodableBox(target.map { Swift.min($0.count, max) } ?? 0), "max": AnyEncodableBox(max),
+                    "dry_run": AnyEncodableBox(true), "executed": AnyEncodableBox(false),
+                    "note": AnyEncodableBox("IRREVERSIBLE. To execute: --execute --confirm with \(TrashEmpty.operatorEnvVar)=1 set. Emptying trash cannot be scoped to \(TestMode.sandboxPrefix) data, so it is never run autonomously.")])
+                return
+            }
+            guard let target = try MailScript.resolveTrashMailbox(boxes, explicit: trashMailbox) else {
+                try Output.emit(tool: "mail", data: [
+                    "action": AnyEncodableBox("empty_trash"), "account": AnyEncodableBox(account),
+                    "erased": AnyEncodableBox(0), "in_trash_before": AnyEncodableBox(0),
+                    "dry_run": AnyEncodableBox(false), "executed": AnyEncodableBox(true),
+                    "note": AnyEncodableBox("nothing to erase — no non-empty trash mailbox on this account")])
+                return
+            }
+            let (removed, total, stalled) = try script.emptyTrash(accountName: account, mailboxName: target.name, max: max)
+            let emptyNote: String?
+            if stalled {
+                emptyNote = "STOPPED after \(removed) erase(s): a delete had no effect, so Mail's AppleScript cannot expunge this account type (IMAP/iCloud). \(total - removed) message(s) remain in \(target.name) — erase them from Mail.app (Mailbox ▸ Erase Deleted Items)."
+            } else if removed < total {
+                emptyNote = "capped by --max \(max); \(total - removed) message(s) remain in \(target.name)"
+            } else {
+                emptyNote = nil
+            }
+            try Output.emit(tool: "mail", data: [
+                "action": AnyEncodableBox("empty_trash"), "account": AnyEncodableBox(account),
+                "trash_mailbox": AnyEncodableBox(target.name),
+                "erased": AnyEncodableBox(removed), "in_trash_before": AnyEncodableBox(total),
+                "max": AnyEncodableBox(max), "remaining": AnyEncodableBox(total - removed),
+                "expunge_unsupported": AnyEncodableBox(stalled),
+                "dry_run": AnyEncodableBox(false), "executed": AnyEncodableBox(true),
+                "note": AnyEncodableBox(emptyNote)])
         }
     }
 }

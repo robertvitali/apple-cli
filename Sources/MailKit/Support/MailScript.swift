@@ -704,11 +704,242 @@ public struct MailScript {
         return "ok"
     end run
     """
-    /// Move a located message to Trash (Mail's `delete` = move-to-Trash, recoverable). The
-    /// permanent form is never wired — see DeleteCommand's --permanent hard-refuse.
+    /// Move a located message to Trash (Mail's `delete` = move-to-Trash, recoverable).
     @discardableResult
     public func deleteToTrash(internetMessageID: String, accountName: String?) throws -> Bool {
         try mutateLocated(MailScript.trashScript, id: internetMessageID, account: accountName, extra: [])
+    }
+
+    // MARK: Permanent delete + empty trash (IRREVERSIBLE — see the gates in WriteManageCommands)
+
+    /// A mailbox counts as "trash" if its name looks like one. There is NO reliable per-account
+    /// trash property in Mail's AppleScript API (`trash mailbox` exists only on the application and
+    /// resolves to the unified "All Trash" smart mailbox; `trash mailbox of account` errors), and
+    /// the obvious hardcoded `mailbox "Trash" of account X` is WRONG on iCloud — that account
+    /// carries BOTH an empty "Trash" and the real "Deleted Messages". (The parity oracle hardcodes
+    /// "Trash" and so silently no-ops on iCloud; matching that bug would be worse than exceeding it.)
+    /// An EXACT-name allowlist, not a substring test: `contains("deleted")` would also match a
+    /// personal folder like "Deleted drafts to revisit", and auto-selecting that for an
+    /// irreversible erase is unacceptable. Names below are the real ones observed across the
+    /// account types on this fleet. Pure + case-insensitive so the rule is unit-testable, and it
+    /// is the SINGLE source of truth — the AppleScript never re-implements it; the resolved names
+    /// are passed in as argv.
+    public static let trashMailboxNames: Set<String> = [
+        "trash", "deleted messages", "deleted items", "bin",
+        "[gmail]trash", "[gmail]/trash",
+    ]
+    public static func isTrashMailboxName(_ name: String) -> Bool {
+        trashMailboxNames.contains(name.lowercased())
+    }
+
+    /// `name<US>count` for EVERY mailbox of the account, RS-separated. A READ. The script does no
+    /// trash classification — Swift filters the result through `isTrashMailboxName`, so the
+    /// allowlist lives in exactly one place.
+    private static let mailboxCountsScript = """
+    on run argv
+        set acctName to item 1 of argv
+        set RS to (ASCII character 30)
+        set US to (ASCII character 31)
+        set rows to {}
+        tell application "Mail"
+            repeat with ai from 1 to (count of accounts)
+                set a to account ai
+                if acctName is "" or (name of a) is acctName then
+                    repeat with mi from 1 to (count of mailboxes of a)
+                        try
+                            set mbx to mailbox mi of a
+                            set end of rows to (name of mbx) & US & ((count of (messages of mbx)) as string)
+                        end try
+                    end repeat
+                end if
+            end repeat
+        end tell
+        set AppleScript's text item delimiters to RS
+        set s to rows as string
+        set AppleScript's text item delimiters to ""
+        return s
+    end run
+    """
+    public struct TrashMailbox { public let name: String; public let count: Int }
+
+    /// Decide WHICH trash mailbox an empty-trash should act on. Pure (no Mail) so the rules are
+    /// unit-testable, and FAIL-CLOSED: an account can expose several trash-like mailboxes (iCloud
+    /// has "Trash" and "Deleted Messages"), and picking the wrong one for an IRREVERSIBLE erase is
+    /// unacceptable — so ambiguity throws and asks the operator to name it explicitly rather than
+    /// guessing. Returns nil when there is simply nothing to erase.
+    public static func resolveTrashMailbox(_ boxes: [TrashMailbox], explicit: String?) throws -> TrashMailbox? {
+        if let explicit {
+            guard let hit = boxes.first(where: { $0.name.lowercased() == explicit.lowercased() }) else {
+                let known = boxes.map(\.name).joined(separator: ", ")
+                throw AppleError.notFound("no trash mailbox named '\(explicit)' on this account\(known.isEmpty ? "" : " (found: \(known))").")
+            }
+            return hit
+        }
+        let nonEmpty = boxes.filter { $0.count > 0 }
+        switch nonEmpty.count {
+        case 0: return nil
+        case 1: return nonEmpty[0]
+        default:
+            let detail = nonEmpty.map { "\($0.name) (\($0.count))" }.joined(separator: ", ")
+            throw AppleError.validation("this account has more than one non-empty trash mailbox — \(detail). Refusing to guess which to erase; name it with --trash-mailbox.")
+        }
+    }
+    /// EVERY mailbox of an account with its message count (a READ), unfiltered. An empty result
+    /// means the account name matched nothing — callers must treat that as "unknown account"
+    /// rather than "nothing to do", or a typo'd `--account` reads as a successful no-op.
+    public func allMailboxes(accountName: String) throws -> [TrashMailbox] {
+        let out = try runner.run(MailScript.mailboxCountsScript, arguments: [accountName])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !out.isEmpty else { return [] }
+        return out.components(separatedBy: MailScript.RS).compactMap { row in
+            let f = row.components(separatedBy: MailScript.US)
+            guard f.count == 2, let c = Int(f[1]) else { return nil }
+            return TrashMailbox(name: f[0], count: c)
+        }
+    }
+
+    /// Every trash mailbox of an account, with its message count. Classification happens HERE, in
+    /// Swift, against `isTrashMailboxName` — the AppleScript never classifies.
+    public func trashMailboxes(accountName: String) throws -> [TrashMailbox] {
+        try allMailboxes(accountName: accountName).filter { MailScript.isTrashMailboxName($0.name) }
+    }
+
+    /// Deliberately does NOT use the shared `findMsg` locator: the search is scoped to TRASH-LIKE
+    /// mailboxes only. That mirrors the parity oracle's intent (`manage_trash` matches within the
+    /// account's trash) and is load-bearing safety — a message must ALREADY have been trashed, so a
+    /// permanent delete can never erase an inbox message in one step. Mail's `delete` on a message
+    /// that already lives in trash is what erases it for good.
+    private static let deletePermanentScript = """
+    on run argv
+        set targetID to item 1 of argv
+        set acctName to item 2 of argv
+        set RS to (ASCII character 30)
+        set AppleScript's text item delimiters to RS
+        set trashNames to text items of (item 3 of argv)
+        set AppleScript's text item delimiters to ""
+        set didDelete to false
+        tell application "Mail"
+            repeat with ai from 1 to (count of accounts)
+                set a to account ai
+                if acctName is "" or (name of a) is acctName then
+                    -- Pass 1: erase from any mailbox Swift classified as trash (exact names only).
+                    repeat with mi from 1 to (count of mailboxes of a)
+                        try
+                            set mbx to mailbox mi of a
+                            if trashNames contains (name of mbx) then
+                                set ms to (messages of mbx whose message id is targetID)
+                                if (count of ms) > 0 then
+                                    delete (item 1 of ms)
+                                    set didDelete to true
+                                end if
+                            end if
+                        end try
+                    end repeat
+                    if didDelete then
+                        -- Pass 2: VERIFY the erase actually took. Mail's `delete` on an
+                        -- already-trashed message is a SILENT NO-OP on IMAP (confirmed on iCloud:
+                        -- the message survives and `deleted status` stays false) because
+                        -- AppleScript cannot drive an expunge. The parity oracle reports success
+                        -- unconditionally; we re-query instead.
+                        -- Scoped to the SAME trash mailboxes we may erase from — deliberately NOT
+                        -- every mailbox, which would touch Gmail's `[Gmail]/All Mail` and hang
+                        -- (the shared locator skips those for the same reason).
+                        -- FAILS CLOSED: any error while verifying counts as "not proven erased",
+                        -- so a verification failure can never be reported as a successful erase.
+                        set stillThere to false
+                        set verifyFailed to false
+                        repeat with mi from 1 to (count of mailboxes of a)
+                            try
+                                set vbx to mailbox mi of a
+                                if trashNames contains (name of vbx) then
+                                    if (count of (messages of vbx whose message id is targetID)) > 0 then
+                                        set stillThere to true
+                                    end if
+                                end if
+                            on error
+                                set verifyFailed to true
+                            end try
+                        end repeat
+                        if stillThere or verifyFailed then return "noop"
+                        return "ok"
+                    end if
+                end if
+            end repeat
+        end tell
+        return "notfound"
+    end run
+    """
+    /// Outcome of a permanent-delete attempt — `unsupported` is its own case because a silent
+    /// no-op and a genuine miss are very different things to report to the caller.
+    public enum PermanentDeleteOutcome { case erased, notInTrash, unsupported }
+
+    /// PERMANENTLY erase a message that is already in trash, VERIFYING the erase took effect.
+    /// - `.erased` — the message is gone.
+    /// - `.notInTrash` — no message with that id in any trash-like mailbox (it may still be sitting
+    ///   in a normal mailbox; that is a deliberate no-op, not a failure — trash it first).
+    /// - `.unsupported` — the message WAS found in trash and `delete` was issued, but the message
+    ///   survived: Mail's AppleScript cannot expunge on this account type (IMAP/iCloud).
+    /// Caller MUST have label-gated the target.
+    public func deletePermanentlyFromTrash(internetMessageID: String, accountName: String?,
+                                           trashNames: [String]) throws -> PermanentDeleteOutcome {
+        guard !trashNames.isEmpty else { return .notInTrash }
+        let bare = MailFormat.stripAngleBrackets(internetMessageID) ?? internetMessageID
+        let blob = trashNames.joined(separator: MailScript.RS)
+        var sawNoop = false
+        for candidate in ["<\(bare)>", bare] {
+            let out = try runner.run(MailScript.deletePermanentScript, arguments: [candidate, accountName ?? "", blob])
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+            if out == "ok" { return .erased }
+            if out == "noop" { sawNoop = true }
+        }
+        return sawNoop ? .unsupported : .notInTrash
+    }
+
+    /// Repeatedly deletes the FIRST message rather than indexing a snapshot list: deleting while
+    /// walking an index range mutates the collection underneath the iterator (Mail raises -1728).
+    /// Takes an explicitly RESOLVED mailbox name — the choice of which trash to empty is made in
+    /// Swift (see `resolveTrashMailbox`) so it is unit-testable and fail-closed on ambiguity.
+    private static let emptyTrashScript = """
+    on run argv
+        set acctName to item 1 of argv
+        set mbxName to item 2 of argv
+        set maxN to (item 3 of argv) as integer
+        set removed to 0
+        set stalled to "0"
+        tell application "Mail"
+            set tmbx to (first mailbox of account acctName whose name is mbxName)
+            set total to count of (every message of tmbx)
+            repeat while removed < maxN
+                set before to count of (every message of tmbx)
+                if before is 0 then exit repeat
+                delete (item 1 of (every message of tmbx))
+                -- Count AFTER each delete and bail the moment one has no effect. On IMAP accounts
+                -- `delete` cannot expunge a message that is already in trash, so without this the
+                -- loop would spin maxN times and report maxN phantom erasures.
+                if (count of (every message of tmbx)) is greater than or equal to before then
+                    set stalled to "1"
+                    exit repeat
+                end if
+                set removed to removed + 1
+            end repeat
+        end tell
+        return (removed as string) & "/" & (total as string) & "/" & stalled
+    end run
+    """
+    /// IRREVERSIBLE: permanently erase up to `max` messages from one resolved trash mailbox.
+    /// Returns (removed, totalBefore). This is the one operation that cannot be scoped to test
+    /// data, so the command layer gates it on an operator-only env var and never runs it
+    /// autonomously.
+    /// `stalled` is true when a `delete` had no effect — i.e. this account type cannot be expunged
+    /// from AppleScript, so the erase silently did nothing and the caller must be told.
+    public func emptyTrash(accountName: String, mailboxName: String, max: Int) throws -> (removed: Int, total: Int, stalled: Bool) {
+        let out = try runner.run(MailScript.emptyTrashScript, arguments: [accountName, mailboxName, String(max)])
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        let parts = out.split(separator: "/").map(String.init)
+        guard parts.count == 3, let removed = Int(parts[0]), let total = Int(parts[1]) else {
+            throw AppleError.upstream("empty-trash returned an unexpected result '\(out)'.")
+        }
+        return (removed, total, parts[2] == "1")
     }
 
     // MARK: Attachment export (READ/EXPORT — extracts existing bytes to disk; mutates nothing in Mail)

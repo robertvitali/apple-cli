@@ -223,3 +223,100 @@ struct DraftSendResultParseTests {
         #expect(MailScript.DraftSendResult.parse("SENT", us: US) == nil)
     }
 }
+
+/// Trash-mailbox resolution for the IRREVERSIBLE erase paths (audit gap I). Pure — no Mail.
+/// These rules decide what an empty-trash actually erases, so getting them wrong is unrecoverable;
+/// they are deliberately Swift-side (rather than buried in AppleScript) so they can be locked here.
+@Suite("Trash mailbox resolution (gap I)")
+struct TrashResolutionTests {
+    typealias TB = MailScript.TrashMailbox
+
+    @Test func trashNameDetectionIsCaseInsensitiveAndCoversRealAccounts() {
+        // Real names observed on this fleet: iCloud exposes BOTH "Trash" and "Deleted Messages";
+        // Gmail exposes "[Gmail]Trash". A hardcoded "Trash" match would pick iCloud's empty decoy.
+        #expect(MailScript.isTrashMailboxName("Trash"))
+        #expect(MailScript.isTrashMailboxName("Deleted Messages"))
+        #expect(MailScript.isTrashMailboxName("[Gmail]Trash"))
+        #expect(MailScript.isTrashMailboxName("deleted items"))
+        #expect(MailScript.isTrashMailboxName("Bin"))
+        #expect(!MailScript.isTrashMailboxName("INBOX"))
+        #expect(!MailScript.isTrashMailboxName("Archive"))
+        #expect(!MailScript.isTrashMailboxName("Sent Messages"))
+        // EXACT names only. A substring rule would match these personal folders and could
+        // auto-select one as the erase target — never acceptable for an irreversible op.
+        #expect(!MailScript.isTrashMailboxName("Deleted drafts to revisit"))
+        #expect(!MailScript.isTrashMailboxName("Trash ideas"))
+        #expect(!MailScript.isTrashMailboxName("Recently Deleted Receipts"))
+    }
+
+    @Test func resolvesTheSingleNonEmptyTrash() throws {
+        // The real iCloud shape: an empty "Trash" decoy alongside the actual "Deleted Messages".
+        let boxes = [TB(name: "Trash", count: 0), TB(name: "Deleted Messages", count: 34)]
+        #expect(try MailScript.resolveTrashMailbox(boxes, explicit: nil)?.name == "Deleted Messages")
+    }
+
+    @Test func nothingToEraseResolvesToNil() throws {
+        #expect(try MailScript.resolveTrashMailbox([TB(name: "Trash", count: 0)], explicit: nil) == nil)
+        #expect(try MailScript.resolveTrashMailbox([], explicit: nil) == nil)
+    }
+
+    /// FAIL-CLOSED: with two plausible targets the tool must refuse rather than guess which mail
+    /// to destroy.
+    @Test func ambiguousTrashRefusesRatherThanGuessing() {
+        let boxes = [TB(name: "Trash", count: 3), TB(name: "Deleted Messages", count: 34)]
+        #expect(throws: Error.self) { _ = try MailScript.resolveTrashMailbox(boxes, explicit: nil) }
+    }
+
+    @Test func explicitTrashMailboxWinsAndIsValidated() throws {
+        let boxes = [TB(name: "Trash", count: 3), TB(name: "Deleted Messages", count: 34)]
+        // An explicit name disambiguates — including selecting the smaller one.
+        #expect(try MailScript.resolveTrashMailbox(boxes, explicit: "Trash")?.name == "Trash")
+        #expect(try MailScript.resolveTrashMailbox(boxes, explicit: "deleted messages")?.name == "Deleted Messages")
+        // An explicit name that isn't a trash mailbox on this account is a hard error, never a
+        // silent fallback to some other mailbox.
+        #expect(throws: Error.self) { _ = try MailScript.resolveTrashMailbox(boxes, explicit: "Archive") }
+    }
+
+    /// An explicit empty trash is still a valid target (erasing 0 is a no-op, not an error).
+    @Test func explicitEmptyTrashIsSelectable() throws {
+        let boxes = [TB(name: "Trash", count: 0), TB(name: "Deleted Messages", count: 5)]
+        #expect(try MailScript.resolveTrashMailbox(boxes, explicit: "Trash")?.count == 0)
+    }
+}
+
+/// The canonical-label control for IRREVERSIBLE erases (audit gap I). This is the check that stops
+/// an `APPLE_TEST_SANDBOX` override from widening what `delete --permanent` may destroy, so it is
+/// worth locking directly rather than only via a live run.
+@Suite("Canonical label gate (irreversible ops)")
+struct CanonicalLabelTests {
+    private func msg(_ subject: String) -> MailMessage {
+        MailMessage.fromSelection(.init(applescriptID: "1", internetMessageID: "x@y", subject: subject,
+                                        sender: "me@self.test", readStatus: false, flagged: false, content: nil))
+    }
+
+    @Test func acceptsOnlyCanonicallyLabeledTargets() throws {
+        try requireCanonicalLabels([msg("apple-cli-test permdel-1"), msg("apple-cli-test-2")])
+        try requireCanonicalLabels([])                       // nothing to erase → nothing to refuse
+    }
+
+    @Test func refusesAnyUnlabeledTargetInTheBatch() {
+        #expect(throws: Error.self) { try requireCanonicalLabels([msg("Re: 2025 Tax Returns")]) }
+        // ALL-OR-NOTHING: one real message anywhere in the batch refuses the whole erase.
+        #expect(throws: Error.self) {
+            try requireCanonicalLabels([msg("apple-cli-test ok"), msg("Quarterly invoice")])
+        }
+        // A label that merely CONTAINS the prefix isn't a prefix match.
+        #expect(throws: Error.self) { try requireCanonicalLabels([msg("Fwd: apple-cli-test leak")]) }
+    }
+
+    /// The whole point: the check must ignore a widened APPLE_TEST_SANDBOX. `sandboxPrefix` is
+    /// caller-redefinable; `canonicalSandboxPrefix` is a constant, so a widened override cannot
+    /// make real mail erasable.
+    @Test func canonicalPrefixIsNotRedefinableByEnv() {
+        // `canonicalSandboxPrefix` is a `let`, so no env value can move it — whereas
+        // `sandboxPrefix` reads APPLE_TEST_SANDBOX and can be pointed at real mail's subjects.
+        #expect(TestMode.canonicalSandboxPrefix == "apple-cli-test")
+        // A target labeled only under a widened override is still refused by the canonical check.
+        #expect(throws: Error.self) { try requireCanonicalLabels([msg("Re: real mail")]) }
+    }
+}

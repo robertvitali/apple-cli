@@ -39,7 +39,7 @@ Class legend: **CORE** = primitive Mail operation · **DERIVED** = computed on t
 | 20 | Mark read/unread | A `mark_as_read`, B `update_email_status(mark_read/unread)` | CORE | A: message_ids, read, source · B: filters or message_ids, action, max_updates, apply_to_all | **Conflict:** A ID-based; B filter OR ID, with safety caps. |
 | 21 | Flag messages | A `flag_message(flag_color)`, B `update_email_status(flag/unflag)` | CORE | A: message_ids + 8 colors (none/orange/red/yellow/blue/green/purple/gray) · B: flag/unflag (no color) | **Conflict:** A has color palette; B binary. Union = flag with optional color. |
 | 22 | Delete → Trash | A `delete_messages`, B `manage_trash(move_to_trash)` | CORE | A: message_ids (permanent = **no-op**, always Trash) · B: filters, max_deletes, dry_run, apply_to_all | **Conflict:** A ID-based, always-Trash; B filter-based + dry_run. |
-| 23 | Permanent delete + empty trash | B `manage_trash(delete_permanent / empty_trash)` | CORE | confirm_empty, action | **B-only** — A explicitly cannot bypass Trash (issue #111). |
+| 23 | Permanent delete + empty trash | B `manage_trash(delete_permanent / empty_trash)` | CORE | confirm_empty, action, max_deletes | **B-only** — A explicitly cannot bypass Trash (issue #111). **PORTED with gates + a documented platform limit — see "Op 23 notes" below.** |
 | 24 | List attachments | A `get_attachments(message_id)`, B `list_email_attachments(subject_keyword)` | CORE | A: message_id (+IMAP BODYSTRUCTURE fast path) · B: subject_keyword, max_results | **Conflict:** A by ID, B by subject. |
 | 25 | Save attachments | A `save_attachments(message_id, dir, indices)`, B `save_email_attachment(subject_keyword, name, path)` | CORE | A: 0-based indices or all → dir · B: single by name → path | **Conflict:** A index/all; B by-name. Union = both. |
 | 26 | List rules | A `list_rules` | CORE | — (read-only; name+enabled) | **A-only.** |
@@ -66,6 +66,33 @@ Class legend: **CORE** = primitive Mail operation · **DERIVED** = computed on t
 - **Targeting model:** A = stable `message_id` (precise, robust); B = `subject_keyword`/sender/date **filters** (convenient, fuzzy). → Port must support **both** (ID-first for safety + `--match` filter convenience with mandatory dry-run).
 - **Flag palette:** A = 8 named colors; B = flag/unflag only. → Union = flag `--color` (optional, default red/none) + `--unflag`.
 - **Delete depth:** A always-Trash (permanent is a documented no-op); B adds `delete_permanent` + `empty_trash`. → Union includes permanent + empty (from B).
+
+### Op 23 notes — permanent delete + empty trash (ported 2026-07-25)
+
+Both are wired in the CLI (`mail delete --permanent`, `mail trash empty`), with gates sized to
+their irreversibility and two deliberate divergences from oracle B, both in the safer direction:
+
+- **Gating.** `--permanent` requires `--test-mode` + `APPLE_TEST_MODE=1`, the all-or-nothing
+  `apple-cli-test` label gate, a re-check against the CANONICAL prefix (so an `APPLE_TEST_SANDBOX`
+  override cannot widen what may be erased), and the operator-only `APPLE_ALLOW_PERMANENT_DELETE=1`
+  — because a subject label is spoofable and must never be the sole gate on an irreversible op.
+  `trash empty` cannot be scoped to test data at all, so it requires `--confirm` plus the
+  operator-only `APPLE_ALLOW_EMPTY_TRASH=1`; it is never run autonomously. `--max` mirrors
+  `max_deletes` (default 5).
+- **Trash resolution DIVERGES (CLI is correct, oracle is buggy).** Oracle B hardcodes
+  `mailbox "Trash" of account X`. On iCloud that is an EMPTY decoy — the real trash is
+  "Deleted Messages" — so the oracle silently no-ops there. The CLI enumerates mailboxes, matches
+  an exact-name allowlist in Swift, and refuses to guess when more than one trash is non-empty
+  (`--trash-mailbox` disambiguates).
+- **PLATFORM LIMIT, honestly reported (accepted divergence).** Mail's AppleScript `delete` on a
+  message that is ALREADY in trash is a silent NO-OP on IMAP/iCloud accounts — AppleScript cannot
+  drive an IMAP expunge. Verified live: the message survives, `deleted status` stays false, the
+  trash count is unchanged. Oracle B issues that same `delete` and reports success regardless, so
+  it CLAIMS permanent deletes that never happened. The CLI re-queries after the delete and reports
+  `applied: []` + `expunge_unsupported: [<ids>]` instead, and `trash empty` returns
+  `expunge_unsupported: true` rather than counting phantom erasures. Actually erasing IMAP trash
+  requires Mail.app (Mailbox ▸ Erase Deleted Items) or GUI scripting, which is operator-present
+  only. **This row is therefore a behavior superset of B (truthful where B is not), not a gap.**
 - **Confirmation model:** A wraps send/forward/rule-delete/rule-update in **MCP elicitation** (interactive confirm); B uses `dry_run`/`confirm_empty`/`apply_to_all` **safety caps**. → Port must reproduce BOTH as `--confirm`/`--dry-run` gates.
 - **Search flags:** B's search is a superset EXCEPT A's `is_flagged` filter → fold in.
 

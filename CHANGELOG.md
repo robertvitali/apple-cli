@@ -86,6 +86,40 @@ with the Apple MCP servers they replace.
   - **Safety:** wiring `move_to`/`copy_to` on an in-place update cannot also
     `--enabled` the rule in the same command (its existing conditions aren't
     re-verified self-scoped) — activation must be a separate `rules enable`.
+- **Mail `delete --permanent` + `trash empty`** (audit gap I): both were previously hard-refused
+  stubs; they are now really wired, behind gates sized to how irreversible they are.
+  - **`delete --permanent`** erases messages that are ALREADY in trash. It is scoped inside the
+    AppleScript to trash mailboxes only, so it physically cannot erase a message that has not been
+    trashed first (verified live: a target in INBOX comes back `applied: []`). Gating is
+    deliberately layered, because a subject label is SPOOFABLE — anyone can mail you a message
+    titled `apple-cli-test …` — and the codebase's own invariant says that check must never be the
+    sole gate on an irreversible op: it needs the all-or-nothing label gate, an up-front
+    `--test-mode` + `APPLE_TEST_MODE=1` check (so a filter matching nothing can't exit 0 outside
+    test-mode), a re-check against the CANONICAL prefix that ignores any `APPLE_TEST_SANDBOX`
+    override (so widening that env var cannot widen what may be erased — verified live: with
+    `APPLE_TEST_SANDBOX="Re:"` set, a real email matched the filter and was refused), and the
+    operator-only `APPLE_ALLOW_PERMANENT_DELETE=1` as an independent second factor.
+  - **`trash empty`** is wired with the oracle's `confirm_empty`/`max_deletes` equivalents
+    (`--confirm`, `--max`, default 5). Because emptying trash CANNOT be scoped to test data, the
+    usual label gate has nothing to bite on, so it additionally requires the operator-only
+    `APPLE_ALLOW_EMPTY_TRASH=1`. An autonomous run never sets it, which keeps the destructive path
+    unreachable without a deliberate human act while leaving the code fully wired and testable.
+  - **Trash mailbox resolution is explicit and fail-closed.** There is no per-account trash
+    property in Mail's AppleScript API (`trash mailbox` exists only on the application and resolves
+    to the unified "All Trash"), and the obvious `mailbox "Trash" of account X` is WRONG on iCloud,
+    which carries both an empty "Trash" and the real "Deleted Messages". The CLI enumerates
+    trash-like mailboxes and refuses to guess when more than one is non-empty, asking for
+    `--trash-mailbox` instead. The parity oracle hardcodes `"Trash"` and therefore silently
+    no-ops on iCloud.
+  - **BEHAVIOR THE ORACLE GETS WRONG — the CLI now verifies its own erase.** Mail's `delete` on a
+    message that is already in trash is a SILENT NO-OP on IMAP/iCloud accounts (AppleScript cannot
+    drive an IMAP expunge). Verified live: the message survives, `deleted status` stays false, and
+    the trash count is unchanged. The oracle issues that same `delete` and reports success
+    unconditionally, so it claims permanent deletes that never happened. The CLI re-queries after
+    the delete and reports `applied: []` with an explanatory note instead; `trash empty` likewise
+    counts after each erase, stops the moment one has no effect, and returns
+    `expunge_unsupported: true` rather than reporting phantom deletions. Erasing IMAP trash for
+    real still requires Mail.app (Mailbox ▸ Erase Deleted Items).
 - **Mail templates: on-disk format + dropped MCP fields** (audit gap H). The CLI and
   MCP A share `~/.apple_mail_mcp/templates/<name>.md`, so the format is an interop
   contract. `TemplateStore` is now byte-matched to MCP A's `save_template`

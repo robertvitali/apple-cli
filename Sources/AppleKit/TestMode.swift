@@ -15,6 +15,13 @@ public enum TestMode {
         normalizedPrefix(from: ProcessInfo.processInfo.environment["APPLE_TEST_SANDBOX"])
     }
 
+    /// The built-in prefix, IGNORING `APPLE_TEST_SANDBOX`. `sandboxPrefix` is caller-redefinable
+    /// (a convenience for reversible test ops), which means a caller could point it at a prefix
+    /// real mail already carries — harmless when the op is reversible, unacceptable when it is not.
+    /// IRREVERSIBLE operations therefore label-check against THIS constant, so widening the
+    /// override cannot widen what an erase is allowed to touch.
+    public static let canonicalSandboxPrefix = "apple-cli-test"
+
     /// Pure normalization (unit-testable without mutating process env): an empty or
     /// whitespace-only `APPLE_TEST_SANDBOX` is treated as ABSENT and falls back to the
     /// default prefix — otherwise the override would vacate the label gate
