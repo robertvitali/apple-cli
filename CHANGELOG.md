@@ -81,6 +81,51 @@ was one item away from parity were understated.
   the AppleScript-hostile character set oracle B blocks (`\ " < > | ? * :` and
   control characters). `--name ""` previously returned `ok: true` with an empty path.
 
+### Fixed — Mail reads + analytics (confirmed gaps, batches 4-5)
+- **Regression fix.** Reply/forward locate through the bounded `findMsg`, which skips "[Gmail]"
+  mailboxes (scanning Gmail's All Mail archive by message-id hangs) — so the previous batch made
+  ARCHIVED messages unreachable, where both oracles reply to/forward any message. A new hinted
+  locator takes the mailbox the Envelope Index already resolved and looks THERE first, which is a
+  targeted lookup rather than a scan, so the archive is reachable without the hang.
+- `findMsg` now FAILS CLOSED on an unresolvable `--account`. It previously left the account list
+  as EVERY account, silently widening a scoped mutation into an unbounded cross-account scan —
+  and the native outbound verbs had made that an outbound concern.
+- `content_preview` (MCP B's name for the indexed preview) is emitted alongside `snippet`, per
+  this repo's own A/B dual-key rule. Both are one value, so `--no-content` and
+  `--max-content-length` now apply to both — clearing only `snippet` left the same text exposed
+  under the other name.
+- `thread --limit 0` returns the COMPLETE thread (oracle A's `get_thread` is uncapped). 0 used to
+  reach SQL literally, return no rows, and fall through to the singleton fallback — so asking for
+  the whole thread returned exactly one message.
+- `thread --subject` strips `Re:`/`RE:`/`Fwd:`/`FW:`/`Fw:` before matching, as oracle B does;
+  `--subject "Re: Budget"` previously missed the thread's original message. Stacked prefixes
+  (`"Re: Fwd: Re: X"`) reduce fully, and matching is case-insensitive (a superset of B's
+  fixed-case list).
+- `selected` reads `date received`; oracle A always returns it, and the CLI's non-index fallback
+  path emitted a null date.
+- `mailboxes create` emits `mailbox` + `parent` (oracle A keys). The joined `path` alone is lossy
+  when the name itself contains a `/`.
+- **Statistics now match the oracle exactly.** MCP B excludes `SKIP_FOLDERS`
+  (Trash/Junk/Junk Email/Deleted Items/Sent*/Drafts/Spam/Deleted Messages) from broad scans; the
+  CLI counted them, so every volume metric diverged. Verified live against the oracle on
+  2026-07-30 (7-day window): the CLI over-counted before the filter and matches exactly after — with unread, read,
+  flagged and with_attachments all matching too. `--include-system-folders` opts back in.
+- `analytics stats` validates `--scope` and requires `--sender` for `sender_stats`; it previously
+  accepted an unknown scope silently and reported whole-account numbers as though they were one
+  sender's. `export --scope` is validated too — an unknown scope used to fall through and export
+  the ENTIRE mailbox.
+- **needs-response** now matches oracle B: the four exact priority labels (`HIGH (flagged +
+  question)`, `HIGH (flagged)`, `MEDIUM (contains question)`, `NORMAL` — the MEDIUM bucket had no
+  CLI counterpart and unflagged questions were reported as HIGH), the full
+  `NEWSLETTER_PLATFORM_PATTERNS` + `NEWSLETTER_KEYWORD_PATTERNS` suppression lists, and the
+  already-replied cross-reference against recent Sent subjects. Without these the CLI surfaced
+  Substack/Mailchimp blasts and threads you had already answered as mail awaiting a reply.
+- **`export --dir` is confined.** Export writes message bodies to disk and previously accepted any
+  path; it now resolves symlinks first, then requires the destination to be under `$HOME` and
+  refuses oracle B's sensitive-directory list (`~/.ssh`, `~/.gnupg`, `~/.config`, `~/.aws`,
+  `~/.claude`, `~/Library/{Keychains,LaunchAgents,LaunchDaemons}`). The blocklist is the same
+  helper the attachment reader uses, so the two surfaces cannot drift.
+
 ### Fixed — outbound safety hardening (found in review of the above)
 - The self-only outbound guard is now ONE implementation shared by every script that
   dispatches a message. The native-compose path had grown a second, weaker

@@ -236,14 +236,18 @@ extension MailMessage {
             flagged: sel.flagged,
             flag_color: nil,
             flag_color_name: nil,
-            date_received: nil,
-            received_date: nil,
+            // Oracle A always returns date_received for a selected message; the selection
+            // AppleScript now reads it, so the non-index path no longer emits a null date.
+            // Both wire names (A `date_received` / B `received_date`) carry it.
+            date_received: sel.dateReceived,
+            received_date: sel.dateReceived,
             date_sent: nil,
             has_attachments: false,
             attachment_count: 0,
             size: nil,
             conversation_id: nil,
             snippet: nil,
+            content_preview: nil,
             content: sel.content,
             to: nil, cc: nil, bcc: nil)
     }

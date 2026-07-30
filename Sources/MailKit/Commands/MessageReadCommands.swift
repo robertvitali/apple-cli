@@ -58,11 +58,21 @@ struct SearchCommand: ParsableCommand {
 
             let rows = try ctx.index.queryMessages(f)
             var messages = rows.map { ctx.decodeSummary($0) }
-            if !content { for i in messages.indices { messages[i].snippet = nil } }
+            // `snippet` and `content_preview` are ONE value under two wire names (A/B dual-key
+            // rule), so every mutation below must touch both — otherwise --no-content would clear
+            // `snippet` and leave the same text exposed under `content_preview`.
+            if !content {
+                for i in messages.indices {
+                    messages[i].snippet = nil
+                    messages[i].content_preview = nil
+                }
+            }
             // MCP B max_content_length: cap each included preview (0 = unlimited → no cap).
             else if let cap = maxContentLength, cap > 0 {
                 for i in messages.indices where (messages[i].snippet?.count ?? 0) > cap {
-                    messages[i].snippet = String(messages[i].snippet!.prefix(cap))
+                    let capped = String(messages[i].snippet!.prefix(cap))
+                    messages[i].snippet = capped
+                    messages[i].content_preview = capped
                 }
             }
             let total = try ctx.index.countMessages(f)
@@ -97,7 +107,12 @@ struct ListCommand: ParsableCommand {
             f.limit = (limit == 0) ? Int.max : limit
             let rows = try ctx.index.queryMessages(f)
             var messages = rows.map { ctx.decodeSummary($0) }
-            if !content { for i in messages.indices { messages[i].snippet = nil } }
+            if !content {
+                for i in messages.indices {
+                    messages[i].snippet = nil
+                    messages[i].content_preview = nil   // same value, second wire name
+                }
+            }
             let result = MailMessagesResult(
                 account: account, mailbox: "INBOX", messages: messages, count: messages.count,
                 offset: 0, limit: limit, has_more: nil, next_offset: nil, sort: "date_desc")
@@ -149,6 +164,13 @@ struct GetCommand: ParsableCommand {
                 let recips = try ctx.index.recipients(messageRowid: rowid)
                 msg.to = recips.to; msg.cc = recips.cc; msg.bcc = recips.bcc.isEmpty ? nil : recips.bcc
                 msg.snippet = strVal(row["snippet"])
+                msg.content_preview = msg.snippet
+            } else {
+                // `--headers-only` documents "skip … preview", but decodeSummary has already
+                // populated both preview keys, and re-assigning `snippet` to itself above never
+                // cleared them. Clear BOTH (the dual keys are one value).
+                msg.snippet = nil
+                msg.content_preview = nil
             }
             // Full body is opt-in: the AppleScript scan is slow (Mail has no body index,
             // mirroring MCP A's own slow-path caveat). The indexed `snippet` covers the fast case.
@@ -208,7 +230,7 @@ struct ThreadCommand: ParsableCommand {
     @Option(name: .long, help: "Subject keyword identifying the thread.") var subject: String?
     @Option(name: .long, help: "Account name or UUID (for subject-based lookup).") var account: String?
     @Option(name: .long, help: "Mailbox for subject-based lookup (default All).") var mailbox: String = "All"
-    @Option(name: .long, help: "Max messages (default 50).") var limit: Int = 50
+    @Option(name: .long, help: "Max messages (default 50; 0 = the complete thread).") var limit: Int = 50
     @Flag(name: .long, help: "Thread by RFC References/In-Reply-To headers (MCP A get_thread) instead of Apple's conversation grouping.") var references = false
 
     func run() throws {
@@ -216,6 +238,11 @@ struct ThreadCommand: ParsableCommand {
             let ctx = try MailContext()
             var messages: [MailMessage] = []
             var matchedBy = ""
+            // `--limit 0` == the complete thread (oracle A's get_thread is uncapped), matching
+            // the `0 = all` convention search/list already use. Before, 0 reached the query as a
+            // literal 0, returned nothing, and fell through to the singleton fallback — so asking
+            // for the WHOLE thread returned exactly one message.
+            let effectiveLimit = (self.limit == 0) ? Int.max : self.limit
             if let id {
                 guard let row = try resolveMessageRow(ctx: ctx, id: id) else {
                     throw AppleError.notFound("no message for id '\(id)'.")
@@ -225,14 +252,14 @@ struct ThreadCommand: ParsableCommand {
                     // MCP A header-threading: messages sharing this one's References/In-Reply-To
                     // chain (via the Envelope Index message_references table), chronologically.
                     matchedBy = "references"
-                    messages = try ctx.index.referencesThread(rowid: rowid, limit: limit).map { ctx.decodeSummary($0) }
+                    messages = try ctx.index.referencesThread(rowid: rowid, limit: effectiveLimit).map { ctx.decodeSummary($0) }
                 } else {
                     matchedBy = "message_id"
                     let convID = intVal(row["conversation_id"]) ?? 0
                     if convID != 0 {
                         // Query the whole conversation directly (Apple's own thread id), chronologically.
                         var f = EnvelopeIndex.MessageFilters()
-                        f.mailboxName = "All"; f.conversationID = convID; f.sortAscending = true; f.limit = limit
+                        f.mailboxName = "All"; f.conversationID = convID; f.sortAscending = true; f.limit = effectiveLimit
                         messages = try ctx.index.queryMessages(f).map { ctx.decodeSummary($0) }
                     }
                 }
@@ -241,7 +268,18 @@ struct ThreadCommand: ParsableCommand {
                 matchedBy = "subject_keyword"
                 var f = EnvelopeIndex.MessageFilters()
                 if let account { f.accountUUID = try ctx.requireAccountUUID(account) }
-                f.mailboxName = mailbox; f.subjectContains = subject; f.sortAscending = true; f.limit = limit
+                // Oracle B strips Re:/RE:/Fwd:/FW:/Fw: from the keyword before matching, so
+                // `--subject "Re: Budget"` finds the whole thread rather than only the replies.
+                let cleaned = MailFormat.stripThreadPrefixes(subject)
+                // A keyword that is ONLY thread prefixes strips to "" — and an empty
+                // `subjectContains` makes EnvelopeIndex append no WHERE clause at all, turning a
+                // thread lookup into a full-store dump reported as ok:true.
+                // "Re: " is exactly what gets copy-pasted off a subject line, so refuse it.
+                guard !cleaned.isEmpty else {
+                    throw AppleError.validation("--subject '\(subject)' is only reply/forward prefixes; provide an actual subject keyword.")
+                }
+                f.mailboxName = mailbox; f.subjectContains = cleaned
+                f.sortAscending = true; f.limit = effectiveLimit
                 let rows = try ctx.index.queryMessages(f)
                 messages = rows.map { ctx.decodeSummary($0) }
             } else {

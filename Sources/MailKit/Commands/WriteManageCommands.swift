@@ -617,8 +617,13 @@ struct MailboxesCreate: ParsableCommand {
                 try MailScript().createMailbox(accountName: account, path: fullPath)
                 executed = true
             }
+            // `mailbox` + `parent` are oracle A create_mailbox's wire keys. `path` (the joined
+            // form) is the CLI's original key and is kept, but it alone is LOSSY: when `name`
+            // itself contains a '/', the name-vs-parent boundary cannot be recovered from it.
             try Output.emit(tool: "mail", data: ["action": AnyEncodableBox("create_mailbox"), "account": AnyEncodableBox(account),
-                "account_id": AnyEncodableBox(uuid), "path": AnyEncodableBox(fullPath), "dry_run": AnyEncodableBox(!global.willExecute),
+                "account_id": AnyEncodableBox(uuid), "path": AnyEncodableBox(fullPath),
+                "mailbox": AnyEncodableBox(name), "parent": AnyEncodableBox(parent),
+                "dry_run": AnyEncodableBox(!global.willExecute),
                 "executed": AnyEncodableBox(executed), "note": AnyEncodableBox(note)])
         }
     }

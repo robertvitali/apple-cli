@@ -30,7 +30,7 @@ struct MailWriteSafetyTests {
     /// Build a MailMessage with a controllable subject + Message-ID (no store needed).
     private func msg(subject: String, imid: String?) -> MailMessage {
         MailMessage.fromSelection(.init(applescriptID: "1", internetMessageID: imid, subject: subject,
-                                        sender: "me@self.test", readStatus: false, flagged: false, content: nil))
+                                        sender: "me@self.test", readStatus: false, flagged: false, dateReceived: nil, content: nil))
     }
 
     // MARK: guardOutbound (send / reply / forward)
@@ -291,7 +291,7 @@ struct TrashResolutionTests {
 struct CanonicalLabelTests {
     private func msg(_ subject: String) -> MailMessage {
         MailMessage.fromSelection(.init(applescriptID: "1", internetMessageID: "x@y", subject: subject,
-                                        sender: "me@self.test", readStatus: false, flagged: false, content: nil))
+                                        sender: "me@self.test", readStatus: false, flagged: false, dateReceived: nil, content: nil))
     }
 
     @Test func acceptsOnlyCanonicallyLabeledTargets() throws {

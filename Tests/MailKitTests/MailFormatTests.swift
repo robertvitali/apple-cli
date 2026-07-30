@@ -1,4 +1,5 @@
 import Testing
+import Foundation
 @testable import MailKit
 
 // Pure-function tests for the Mail domain — no TCC, no live data (synthetic rows only).
@@ -131,5 +132,74 @@ struct MailboxPredicateTests {
     }
     @Test func emptyMatchesNothing() {
         #expect(EnvelopeIndex.mailboxPredicate(direct: [], label: []) == "0")
+    }
+}
+
+/// Oracle B strips reply/forward prefixes from a thread keyword before matching
+/// (`tools/search.py` thread_keywords). Without it, `thread --subject "Re: Budget"` matches only
+/// the replies and misses the thread's original message — the opposite of what a thread lookup
+/// is for.
+@Suite("Thread subject prefix stripping")
+struct ThreadPrefixTests {
+    @Test func stripsTheOraclesPrefixList() {
+        #expect(MailFormat.stripThreadPrefixes("Re: Budget") == "Budget")
+        #expect(MailFormat.stripThreadPrefixes("RE: Budget") == "Budget")
+        #expect(MailFormat.stripThreadPrefixes("Fwd: Budget") == "Budget")
+        #expect(MailFormat.stripThreadPrefixes("FW: Budget") == "Budget")
+        #expect(MailFormat.stripThreadPrefixes("Fw: Budget") == "Budget")
+    }
+
+    /// Real threads stack prefixes; one pass would leave "Fwd: Re: Budget".
+    @Test func stripsStackedPrefixesToTheBareSubject() {
+        #expect(MailFormat.stripThreadPrefixes("Re: Fwd: Re: Budget") == "Budget")
+        #expect(MailFormat.stripThreadPrefixes("  RE:   Fw:  Q3 plan ") == "Q3 plan")
+    }
+
+    /// Superset of the oracle, which only matches its fixed-case list.
+    @Test func matchingIsCaseInsensitive() {
+        #expect(MailFormat.stripThreadPrefixes("re: budget") == "budget")
+        #expect(MailFormat.stripThreadPrefixes("fWd: budget") == "budget")
+    }
+
+    /// A subject that merely CONTAINS the letters must not be mangled — only a leading prefix
+    /// followed by a colon is a thread marker.
+    @Test func leavesNonPrefixSubjectsIntact() {
+        #expect(MailFormat.stripThreadPrefixes("Budget") == "Budget")
+        #expect(MailFormat.stripThreadPrefixes("Regarding: Budget") == "Regarding: Budget")
+        #expect(MailFormat.stripThreadPrefixes("Fwd budget") == "Fwd budget")
+        #expect(MailFormat.stripThreadPrefixes("Renewal: Q3") == "Renewal: Q3")
+        // Degenerate input must terminate, not loop.
+        #expect(MailFormat.stripThreadPrefixes("Re:") == "")
+        #expect(MailFormat.stripThreadPrefixes("Re: Re: Re:") == "")
+        #expect(MailFormat.stripThreadPrefixes("") == "")
+    }
+}
+
+/// The selection AppleScript emits LOCAL calendar components (numeric, so locale-independent);
+/// this converts them to the same UTC `…Z` form `MailFormat.iso` produces for the index path.
+/// Without it one `selected` response could carry two different time semantics in
+/// `date_received` — index rows in UTC, selection-only rows in naive local — silently off by the
+/// machine's UTC offset.
+@Suite("Selection date UTC normalization")
+struct SelectionDateTests {
+    private var ny: TimeZone { TimeZone(identifier: "America/New_York")! }
+
+    @Test func convertsLocalComponentsToUTC() {
+        // 2026-01-24 19:08:52 EST (UTC-5) == 2026-01-25T00:08:52Z
+        #expect(MailScript.utcFromLocalComponents("2026-01-24T19:08:52", timeZone: ny) == "2026-01-25T00:08:52Z")
+        // DST: 2026-07-04 23:30:00 EDT (UTC-4) == 2026-07-05T03:30:00Z
+        #expect(MailScript.utcFromLocalComponents("2026-07-04T23:30:00", timeZone: ny) == "2026-07-05T03:30:00Z")
+    }
+
+    @Test func aUTCMachineIsAPassThrough() {
+        let utc = TimeZone(identifier: "UTC")!
+        #expect(MailScript.utcFromLocalComponents("2026-03-01T12:00:00", timeZone: utc) == "2026-03-01T12:00:00Z")
+    }
+
+    /// A wrong timestamp is worse than an absent one, so unparseable input yields nil.
+    @Test func unparseableInputIsNilNotAGuess() {
+        #expect(MailScript.utcFromLocalComponents("", timeZone: ny) == nil)
+        #expect(MailScript.utcFromLocalComponents("not a date", timeZone: ny) == nil)
+        #expect(MailScript.utcFromLocalComponents("2026-01-24", timeZone: ny) == nil)
     }
 }

@@ -76,6 +76,10 @@ public struct MailMessage: Encodable {
 
     // Detail (get / selected / include_content)
     public var snippet: String?               // Envelope Index summary preview
+    /// MCP B's name for the same preview text. Carried alongside `snippet` per this file's
+    /// dual-key rule — a consumer ported from B looks for `content_preview` and previously
+    /// found nothing, which is exactly the drop the rule exists to prevent.
+    public var content_preview: String?
     public var content: String?               // full body (AppleScript)
     public var to: [String]?
     public var cc: [String]?

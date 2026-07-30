@@ -93,3 +93,29 @@ public enum MailFormat {
         return "message://%3C\(encoded)%3E"
     }
 }
+
+extension MailFormat {
+    /// Strip the reply/forward prefixes oracle B removes from a thread keyword before matching
+    /// (`tools/search.py`: `["Re:", "Fwd:", "FW:", "RE:", "Fw:"]`, removed anywhere in the
+    /// string, then trimmed). Without this, `thread --subject "Re: Budget"` matched only messages
+    /// whose subject still carried the prefix, i.e. it missed the thread's original message.
+    ///
+    /// Repeats to depth so a real-world `"Re: Fwd: Re: Budget"` reduces to `"Budget"`. Matching
+    /// is case-insensitive, which is a superset of the oracle's fixed-case list (it would miss
+    /// `re:` lowercase).
+    public static func stripThreadPrefixes(_ raw: String) -> String {
+        var s = raw
+        var changed = true
+        while changed {
+            changed = false
+            let t = s.trimmingCharacters(in: .whitespaces)
+            for p in ["re:", "fwd:", "fw:"] where t.lowercased().hasPrefix(p) {
+                s = String(t.dropFirst(p.count))
+                changed = true
+                break
+            }
+            if !changed { s = t }
+        }
+        return s.trimmingCharacters(in: .whitespaces)
+    }
+}

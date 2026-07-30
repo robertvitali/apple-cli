@@ -53,6 +53,24 @@ def check(label: str, body: str) -> bool:
 
 
 
+
+def check_handlers_defined(label: str, body: str) -> bool:
+    """Every `my <name>(` call in an assembled script must have an `on <name>(` definition.
+
+    osacompile does NOT resolve handler calls at compile time, so a script that calls a handler
+    nobody appended compiles clean, passes every test tier, and fails only against live Mail.
+    This is the check that actually catches an assembly-list drift.
+    """
+    called = set(re.findall(r"\bmy ([A-Za-z_]\w*)\s*\(", body))
+    defined = set(re.findall(r"^\s*on ([A-Za-z_]\w*)\s*\(", body, re.M))
+    missing = sorted(called - defined)
+    if missing:
+        print(f"FAIL - {label}: calls undefined handler(s) {missing}")
+        return False
+    print(f"ok - {label} handlers all defined")
+    return True
+
+
 def check_argv_arity(src: str, lit: dict) -> bool:
     """Assert each script's highest `item N of argv` matches its Swift wrapper's argument count.
 
@@ -67,8 +85,8 @@ def check_argv_arity(src: str, lit: dict) -> bool:
     ok = True
     # (script literal, wrapper func name, number of `extra` argv values it appends)
     expectations = [
-        ("nativeReplyScript", "nativeReply", 7),    # body, replyAll, sender, allow, att, cc, bcc
-        ("nativeForwardScript", "nativeForward", 7),  # body, to, cc, bcc, sender, allow, att
+        ("nativeReplyScript", "nativeReply", 8),    # body, replyAll, sender, allow, att, cc, bcc, mbxHint
+        ("nativeForwardScript", "nativeForward", 8),  # body, to, cc, bcc, sender, allow, att, mbxHint
     ]
     for name, func, extra_count in expectations:
         body = lit.get(name, "")
@@ -93,7 +111,7 @@ def main() -> int:
     src = open(SRC, encoding="utf-8").read()
     lit = literals(src)
     missing = [k for k in ("locator", "outboundGuardHelpers", "guardAndSendTail",
-                           "mailboxPathResolver", "addressGuardHelpers") if k not in lit]
+                           "mailboxPathResolver", "addressGuardHelpers", "hintedLocator") if k not in lit]
     if missing:
         print(f"FAIL - expected shared literals not found: {missing}")
         return 1
@@ -107,12 +125,21 @@ def main() -> int:
             print(f"FAIL - {name} not found in the expected concatenated form")
             ok = False
             continue
-        ok &= check(name, body + "\n" + locator + "\n" + lit["outboundGuardHelpers"]
-                          + "\n" + lit["addressGuardHelpers"])
+        # MUST mirror runLocated's runtime assembly exactly. osacompile resolves handler calls
+        # at RUNTIME, so a missing handler still compiles clean here and fails only on a live
+        # outbound send — the precise blind spot this harness exists to cover. When runLocated
+        # gained mailboxPathResolver (findMsgHinted calls it) this list had to gain it too.
+        assembled = (body + "\n" + locator + "\n" + lit["hintedLocator"]
+                     + "\n" + lit["outboundGuardHelpers"]
+                     + "\n" + lit["addressGuardHelpers"] + "\n" + lit["mailboxPathResolver"])
+        ok &= check(name, assembled)
+        ok &= check_handlers_defined(name, assembled)
 
     # Move scripts additionally append the nested-mailbox resolver.
     for name in ("moveScript", "gmailMoveScript"):
-        ok &= check(name, lit[name] + "\n" + locator + "\n" + lit["mailboxPathResolver"])
+        assembled = lit[name] + "\n" + locator + "\n" + lit["mailboxPathResolver"]
+        ok &= check(name, assembled)
+        ok &= check_handlers_defined(name, assembled)
 
     # Every other findMsg-based mutation script compiles with just the locator.
     for name, body in sorted(lit.items()):
@@ -126,6 +153,7 @@ def main() -> int:
         if "my firstDisallowed(" in body or "my collectAddrs(" in body:
             extra += "\n" + lit["addressGuardHelpers"]
         ok &= check(name, body + extra)
+        ok &= check_handlers_defined(name, body + extra)
 
     ok &= check_argv_arity(src, lit)
 

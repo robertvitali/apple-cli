@@ -786,3 +786,128 @@ require_index() {
   echo "$output" | grep -q "ok - emptyTrashScript"
   ! echo "$output" | grep -q "^FAIL"
 }
+
+# --- Oracle-parity: reads (batch 4) --------------------------------------------
+# MCP B names the indexed preview `content_preview`; this repo's own dual-key rule
+# (Sources/MailKit/Support/MailModels.swift header) requires carrying BOTH names, and it was
+# carrying only `snippet` — so a consumer ported from B found nothing.
+@test "mail search emits content_preview alongside snippet (MCP B dual key)" {
+  require_index
+  # Both keys are omitted when a message has no indexed preview, so assert on a message that
+  # actually has one, and assert the two carry the SAME text.
+  run python3 -c "
+import json,subprocess,sys
+out=subprocess.run(['$BIN','mail','search','--mailbox','All','--limit','60'],capture_output=True,text=True).stdout
+for m in json.loads(out)['data']['messages']:
+    if m.get('snippet'):
+        assert m.get('content_preview') == m['snippet'], 'dual keys disagree'
+        print('OK'); sys.exit(0)
+print('SKIP')
+"
+  [ "$status" -eq 0 ]
+  [ "$output" = "OK" ] || skip "no message with an indexed preview in this store"
+}
+
+# The two keys are ONE value; --no-content must clear BOTH or the text stays exposed under the
+# other name.
+@test "mail search --no-content clears both snippet and content_preview" {
+  require_index
+  run "$BIN" mail search --mailbox All --limit 20 --no-content
+  [ "$status" -eq 0 ]
+  ! echo "$output" | grep -q '"snippet"'
+  ! echo "$output" | grep -q '"content_preview"'
+}
+
+# Oracle A's get_thread is uncapped. `--limit 0` reached the query as a literal 0, returned no
+# rows, and fell through to the singleton fallback — so asking for the WHOLE thread returned one.
+@test "mail thread --limit 0 returns the complete thread, not a singleton" {
+  require_index
+  # A conversation with >1 member, else the assertion proves nothing.
+  id=$("$BIN" mail search --mailbox All --limit 400 2>/dev/null | python3 -c "
+import json,sys,collections
+d=json.load(sys.stdin)['data']['messages']
+c=collections.Counter(m.get('conversation_id') for m in d if m.get('conversation_id'))
+multi=[k for k,n in c.items() if n>1]
+print(next((m['id'] for m in d if m.get('conversation_id') in multi), ''))")
+  [ -n "$id" ] || skip "no multi-message conversation in this store"
+  n_all=$("$BIN" mail thread "$id" --limit 0 | python3 -c "import json,sys;print(json.load(sys.stdin)['data']['count'])")
+  n_one=$("$BIN" mail thread "$id" --limit 1 | python3 -c "import json,sys;print(json.load(sys.stdin)['data']['count'])")
+  [ "$n_one" -eq 1 ]
+  [ "$n_all" -gt 1 ]
+}
+
+# Oracle A create_mailbox returns `mailbox` + `parent`; the joined `path` alone cannot recover the
+# name-vs-parent boundary when the name itself contains a '/'.
+@test "mail mailboxes create emits mailbox and parent alongside path" {
+  require_index
+  run "$BIN" mail mailboxes create --account iCloud --name apple-cli-test-box --parent Projects
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"mailbox" *: *"apple-cli-test-box"'
+  echo "$output" | grep -q '"parent" *: *"Projects"'
+  echo "$output" | grep -q '"path" *: *"Projects/apple-cli-test-box"'
+}
+
+# --- Oracle-parity: analytics stats --------------------------------------------
+# Oracle B returns "Error: Invalid scope '<s>'. Use: …" and "Error: 'sender' parameter required
+# for sender_stats scope" (tools/analytics.py). The CLI silently accepted both: an unknown scope
+# returned an account_overview-shaped payload, and sender_stats with no --sender reported
+# whole-account numbers as though they were that sender's.
+@test "mail analytics stats rejects an invalid --scope (exit 64)" {
+  require_index
+  run "$BIN" mail analytics stats --account iCloud --scope bogus
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q 'account_overview, sender_stats, mailbox_breakdown'
+}
+
+@test "mail analytics stats requires --sender for sender_stats (exit 64)" {
+  require_index
+  run "$BIN" mail analytics stats --account iCloud --scope sender_stats
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q 'sender_stats'
+}
+
+# SKIP_FOLDERS exclusion: verified against the LIVE oracle on 2026-07-30 — over a 7-day window
+# the oracle and the CLI disagreed counting Trash/Sent/etc, and 17 with the
+# exclusion. This asserts the exclusion is actually applied (totals must differ once the account
+# has any system-folder mail in the window).
+@test "mail analytics stats excludes SKIP_FOLDERS unless --include-system-folders" {
+  require_index
+  a=$("$BIN" mail analytics stats --account iCloud --scope account_overview --days 0 | python3 -c "import json,sys;print(json.load(sys.stdin)['data']['total'])")
+  b=$("$BIN" mail analytics stats --account iCloud --scope account_overview --days 0 --include-system-folders | python3 -c "import json,sys;print(json.load(sys.stdin)['data']['total'])")
+  [ "$b" -ge "$a" ]
+  [ "$b" -gt "$a" ] || skip "account has no mail in system folders to exclude"
+}
+
+# --- Regression: prefix-only thread keyword must not become a full-store dump ----
+# `stripThreadPrefixes("Re:")` is "", and an empty subjectContains makes EnvelopeIndex append NO
+# WHERE clause — so `thread --subject "Re:"` returned arbitrary unrelated messages, and with
+# `--limit 0` the ENTIRE live store reported as ok:true. "Re: " is
+# exactly what gets copy-pasted off a subject line. Caught in review; locked here at the CALLER
+# level, because the pure-function tests actually ASSERT the degenerate "" return value.
+@test "mail thread --subject with only reply/forward prefixes is refused (exit 64)" {
+  require_index
+  for k in "Re:" "RE:" "Fwd:" "FW:" "Fw:" "Re: Fwd:"; do
+    run "$BIN" mail thread --subject "$k" --limit 5
+    [ "$status" -eq 64 ] || { echo "keyword '$k' was not refused (status $status)"; return 1; }
+  done
+}
+
+@test "mail thread --subject 'Re: <real keyword>' still matches the whole thread" {
+  require_index
+  subj=$("$BIN" mail search --mailbox All --limit 1 | python3 -c "
+import json,sys; print(json.load(sys.stdin)['data']['messages'][0]['subject'][:20])")
+  [ -n "$subj" ] || skip "no messages in store"
+  run "$BIN" mail thread --subject "Re: $subj" --limit 5
+  [ "$status" -eq 0 ]
+}
+
+# --headers-only documents "skip … preview"; decodeSummary populates BOTH preview keys, and the
+# old code only re-assigned `snippet` to itself, so neither was ever cleared.
+@test "mail get --headers-only emits neither snippet nor content_preview" {
+  require_index
+  id=$("$BIN" mail search --mailbox All --limit 1 | python3 -c "import json,sys;print(json.load(sys.stdin)['data']['messages'][0]['id'])")
+  run "$BIN" mail get "$id" --headers-only
+  [ "$status" -eq 0 ]
+  ! echo "$output" | grep -q '"snippet"'
+  ! echo "$output" | grep -q '"content_preview"'
+}

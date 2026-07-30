@@ -98,3 +98,41 @@ struct ComposeAttachmentTests {
         #expect(sensitiveAttachmentDir("\(home)/.sshfoo/x", home: home) == nil)             // prefix, not a path boundary
     }
 }
+
+/// Export writes MESSAGE BODIES to disk, so its destination gets the same guard the attachment
+/// reader has — oracle B validates `save_dir` with realpath + home-confinement + a
+/// sensitive-directory blocklist (`tools/analytics.py`). The CLI previously accepted any path.
+@Suite("Export directory confinement")
+struct ExportDirectoryTests {
+    private var home: String { FileManager.default.homeDirectoryForCurrentUser.resolvingSymlinksInPath().path }
+
+    @Test func acceptsAPlainDirectoryUnderHome() throws {
+        let url = try resolveExportDirectory("~/Desktop")
+        #expect(url.path.hasPrefix(home))
+    }
+
+    @Test func refusesAnythingOutsideHome() {
+        for p in ["/tmp/exports", "/", "/var/root", "/Users/someone-else/Desktop"] {
+            #expect(throws: Error.self, "expected \(p) to be refused") {
+                _ = try resolveExportDirectory(p)
+            }
+        }
+    }
+
+    /// Every directory on oracle B's list, plus the extras this CLI already blocks for attachments.
+    @Test func refusesTheSensitiveDirectories() {
+        for p in ["~/.ssh", "~/.gnupg", "~/.config", "~/.aws", "~/.claude",
+                  "~/Library/Keychains", "~/Library/LaunchAgents", "~/Library/LaunchDaemons"] {
+            #expect(throws: Error.self, "expected \(p) to be refused") {
+                _ = try resolveExportDirectory(p)
+            }
+        }
+        // A nested path INSIDE a blocked directory is refused too, not just the directory itself.
+        #expect(throws: Error.self) { _ = try resolveExportDirectory("~/.ssh/backup/mail") }
+    }
+
+    /// `..` traversal must be resolved BEFORE the home check, else it escapes.
+    @Test func resolvesTraversalBeforeChecking() {
+        #expect(throws: Error.self) { _ = try resolveExportDirectory("~/Desktop/../../../tmp") }
+    }
+}

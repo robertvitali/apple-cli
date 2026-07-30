@@ -24,7 +24,8 @@ func analyticsRow(_ row: [String: String?]) -> Analytics.Row {
         read: (intVal(row["read"]) ?? 0) != 0,
         flagged: (intVal(row["flagged"]) ?? 0) != 0,
         hasAttachment: (intVal(row["attachment_count"]) ?? 0) > 0,
-        mailboxRowid: intVal(row["mailbox_rowid"]) ?? 0)
+        mailboxRowid: intVal(row["mailbox_rowid"]) ?? 0,
+        snippet: strVal(row["snippet"]))
 }
 
 func sinceUnix(daysBack: Int) -> Int? {
@@ -64,14 +65,36 @@ struct AnalyticsStats: ParsableCommand {
     @Option(name: .long, help: "Sender filter (for sender_stats).") var sender: String?
     @Option(name: .long, help: "Mailbox (default INBOX; 'All' for every mailbox).") var mailbox: String = "INBOX"
     @Option(name: .long, help: "Look back this many days (0 = all time).") var days: Int = 30
+    @Flag(name: .long, help: "Include Trash/Junk/Sent/Drafts/Spam in the totals (MCP B excludes them; CLI extra).") var includeSystemFolders = false
 
     func run() throws {
         try runGuarded(tool: "mail") {
+            // Oracle B validates both, returning "Error: Invalid scope '<s>'. Use: …" and
+            // "Error: 'sender' parameter required for sender_stats scope" (tools/analytics.py).
+            // The CLI accepted an unknown scope silently and returned an account_overview-shaped
+            // payload, and accepted sender_stats with no --sender (reporting whole-account
+            // numbers as if they were that sender's).
+            let scopes = ["account_overview", "sender_stats", "mailbox_breakdown"]
+            guard scopes.contains(scope) else {
+                throw AppleError.validation("invalid --scope '\(scope)'. Use: \(scopes.joined(separator: ", ")).")
+            }
+            if scope == "sender_stats", sender?.trimmingCharacters(in: .whitespaces).isEmpty ?? true {
+                throw AppleError.validation("--sender is required for --scope sender_stats.")
+            }
             let ctx = try MailContext()
             let uuid = try ctx.requireAccountUUID(account)
             // account_overview + mailbox_breakdown span every mailbox; sender_stats honors --mailbox.
             let mbx = (scope == "sender_stats") ? mailbox : "All"
             var rows = try ctx.index.analyticsRows(accountUUID: uuid, mailboxName: mbx, sinceUnix: sinceUnix(daysBack: days)).map(analyticsRow)
+            // Oracle B excludes SKIP_FOLDERS (Trash/Junk/Sent*/Drafts/Spam/Deleted*) from its
+            // broad scans, so every volume metric here diverged from the oracle's by counting
+            // them. `--include-system-folders` opts back in (the CLI's own addition).
+            if !includeSystemFolders {
+                rows = rows.filter { row in
+                    let path = ctx.index.mailbox(forRowid: row.mailboxRowid)?.url.path ?? ""
+                    return !Analytics.isSkippedSystemFolder(path)
+                }
+            }
             if scope == "sender_stats", let sender {
                 let needle = sender.lowercased()
                 rows = rows.filter { ($0.senderAddress?.lowercased().contains(needle) ?? false)
@@ -102,7 +125,18 @@ struct AnalyticsNeedsResponse: ParsableCommand {
             let ctx = try MailContext()
             let uuid = try ctx.requireAccountUUID(account)
             let rows = try ctx.index.analyticsRows(accountUUID: uuid, mailboxName: mailbox, sinceUnix: sinceUnix(daysBack: days)).map(analyticsRow)
-            let items = Analytics.needsResponse(rows, maxResults: max)
+            // Oracle B drops any candidate whose thread already appears in Sent — a message you
+            // have answered is not awaiting your response. B reads the first 200 Sent subjects;
+            // we take the same bound from the index. A missing Sent mailbox just means no
+            // suppression, never a failure.
+            var sentSubjects: [String] = []
+            if let sentPath = ctx.index.mailboxes.first(where: {
+                Analytics.isSentMailbox($0.url.path)
+            })?.url.path {
+                sentSubjects = (try? ctx.index.analyticsRows(accountUUID: uuid, mailboxName: sentPath, sinceUnix: nil))?
+                    .prefix(200).map { MailFormat.stripThreadPrefixes(strVal($0["subject"]) ?? "") } ?? []
+            }
+            let items = Analytics.needsResponse(rows, maxResults: max, sentSubjects: sentSubjects)
             try Output.emit(tool: "mail", data: Result(account: account, mailbox: mailbox, days_back: days, items: items, count: items.count))
         }
     }

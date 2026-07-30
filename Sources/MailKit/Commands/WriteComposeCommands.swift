@@ -452,7 +452,13 @@ struct ReplyCommand: ParsableCommand {
                                                         accountName: target.account.isEmpty ? nil : target.account,
                                                         body: body, replyAll: all, sender: senderAddress,
                                                         selfAllowlist: TestMode.allowedRecipients,
-                                                        cc: ccL, bcc: bccL, attachmentPaths: paths) {
+                                                        cc: ccL, bcc: bccL, attachmentPaths: paths,
+                                                        // Hand the locator the mailbox the Envelope
+                                                        // Index already resolved, so an ARCHIVED
+                                                        // message (incl. [Gmail]/All Mail, which the
+                                                        // blind scan skips to avoid hanging) is a
+                                                        // targeted lookup rather than unreachable.
+                                                        mailboxHint: target.mailbox) {
                     case .sent(let newID, let actual):
                         executed = true
                         replyID = newID
@@ -552,7 +558,8 @@ struct ForwardCommand: ParsableCommand {
                                                       accountName: target.account.isEmpty ? nil : target.account,
                                                       body: body ?? "", to: toL, cc: ccL, bcc: bccL,
                                                       sender: senderAddress,
-                                                      selfAllowlist: TestMode.allowedRecipients) {
+                                                      selfAllowlist: TestMode.allowedRecipients,
+                                                      mailboxHint: target.mailbox) {
                 case .sent(let newID, _):
                     executed = true
                     forwardID = newID

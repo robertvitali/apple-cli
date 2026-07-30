@@ -49,6 +49,7 @@ public enum MailDecode {
             size: intVal(row["size"]),
             conversation_id: intVal(row["conversation_id"]),
             snippet: strVal(row["snippet"]),   // Envelope Index preview — fetched by baseSelect, surfaced here
+            content_preview: strVal(row["snippet"]),   // MCP B wire name for the same value
             content: nil,
             to: nil, cc: nil, bcc: nil)
     }

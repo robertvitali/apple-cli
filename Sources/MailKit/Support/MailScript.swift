@@ -72,6 +72,8 @@ public struct MailScript {
         public let sender: String
         public let readStatus: Bool
         public let flagged: Bool
+        /// Local-time ISO-8601 (no zone suffix) as Mail reports it; nil when unreadable.
+        public let dateReceived: String?
         public let content: String?
     }
 
@@ -94,11 +96,42 @@ public struct MailScript {
                 try
                     set mid to message id of m
                 end try
-                set out to out & (id of m) & US & mid & US & (subject of m) & US & (sender of m) & US & (read status of m) & US & (flagged status of m) & US & c & RS
+                -- Oracle A's get_selected_messages always returns date_received; omitting it
+                -- meant the non-index fallback path emitted a null date. ISO-8601 is assembled
+                -- from components so the value does not depend on the machine's locale format.
+                set dr to ""
+                try
+                    set d to date received of m
+                    set dr to my isoDate(d)
+                end try
+                set out to out & (id of m) & US & mid & US & (subject of m) & US & (sender of m) & US & (read status of m) & US & (flagged status of m) & US & dr & US & c & RS
             end repeat
             return out
         end tell
     end run
+
+    on isoDate(d)
+        set y to year of d
+        set mo to (month of d as integer)
+        set dy to day of d
+        set hh to hours of d
+        set mm to minutes of d
+        set ss to seconds of d
+        return (my pad4(y)) & "-" & (my pad2(mo)) & "-" & (my pad2(dy)) & "T" & (my pad2(hh)) & ":" & (my pad2(mm)) & ":" & (my pad2(ss))
+    end isoDate
+
+    on pad2(n)
+        if n < 10 then return "0" & (n as string)
+        return n as string
+    end pad2
+
+    on pad4(n)
+        set t to n as string
+        repeat while (length of t) < 4
+            set t to "0" & t
+        end repeat
+        return t
+    end pad4
     """
 
     // MARK: Rules (list is a live read; mutations are gated behind --execute)
@@ -523,9 +556,10 @@ public struct MailScript {
         set attRaw to item 7 of argv
         set ccRaw to item 8 of argv
         set bccRaw to item 9 of argv
+        set mbxHint to item 10 of argv
         set US to (ASCII character 31)
         set RS to (ASCII character 30)
-        set msg to my findMsg(item 1 of argv, item 2 of argv)
+        set msg to my findMsgHinted(item 1 of argv, item 2 of argv, mbxHint)
         if msg is missing value then return "notfound"
         set m to missing value
         try
@@ -574,9 +608,10 @@ public struct MailScript {
         set senderAddr to item 7 of argv
         set allowRaw to item 8 of argv
         set attRaw to item 9 of argv
+        set mbxHint to item 10 of argv
         set US to (ASCII character 31)
         set RS to (ASCII character 30)
-        set msg to my findMsg(item 1 of argv, item 2 of argv)
+        set msg to my findMsgHinted(item 1 of argv, item 2 of argv, mbxHint)
         if msg is missing value then return "notfound"
         set m to missing value
         try
@@ -621,8 +656,9 @@ public struct MailScript {
     /// Like `mutateLocated`, but returns the script's raw output (for scripts that report a
     /// value, e.g. the new message id) instead of a Bool. nil == "notfound" on BOTH id forms.
     private func runLocated(_ body: String, id: String, account: String?, extra: [String]) throws -> String? {
-        let script = body + "\n" + MailScript.locator + "\n" + MailScript.outboundGuardHelpers
-            + "\n" + MailScript.addressGuardHelpers
+        let script = body + "\n" + MailScript.locator + "\n" + MailScript.hintedLocator
+            + "\n" + MailScript.outboundGuardHelpers
+            + "\n" + MailScript.addressGuardHelpers + "\n" + MailScript.mailboxPathResolver
         let bare = MailFormat.stripAngleBrackets(id) ?? id
         for candidate in ["<\(bare)>", bare] {
             let out = try runner.run(script, arguments: [candidate, account ?? ""] + extra)
@@ -674,13 +710,14 @@ public struct MailScript {
     public func nativeReply(internetMessageID: String, accountName: String?, body: String,
                             replyAll: Bool, sender: String?, selfAllowlist: [String],
                             cc: [String] = [], bcc: [String] = [],
-                            attachmentPaths: [String] = []) throws -> NativeComposeOutcome {
+                            attachmentPaths: [String] = [], mailboxHint: String = "") throws -> NativeComposeOutcome {
         let US = MailScript.US
         return MailScript.parseNativeCompose(try runLocated(MailScript.nativeReplyScript, id: internetMessageID, account: accountName,
                                                             extra: [body, replyAll ? "1" : "0", sender ?? "",
                                                                     selfAllowlist.joined(separator: US),
                                                                     attachmentPaths.joined(separator: US),
-                                                                    cc.joined(separator: US), bcc.joined(separator: US)]))
+                                                                    cc.joined(separator: US), bcc.joined(separator: US),
+                                                                    mailboxHint]))
     }
 
     /// Forward a located message with Mail's native `forward` verb (carries the original's
@@ -688,13 +725,15 @@ public struct MailScript {
     /// are still re-read and allowlist-checked before send (defense in depth).
     public func nativeForward(internetMessageID: String, accountName: String?, body: String,
                               to: [String], cc: [String], bcc: [String], sender: String?,
-                              selfAllowlist: [String], attachmentPaths: [String] = []) throws -> NativeComposeOutcome {
+                              selfAllowlist: [String], attachmentPaths: [String] = [],
+                              mailboxHint: String = "") throws -> NativeComposeOutcome {
         let US = MailScript.US
         return MailScript.parseNativeCompose(try runLocated(MailScript.nativeForwardScript, id: internetMessageID, account: accountName,
                                                              extra: [body, to.joined(separator: US), cc.joined(separator: US),
                                                                      bcc.joined(separator: US), sender ?? "",
                                                                      selfAllowlist.joined(separator: US),
-                                                                     attachmentPaths.joined(separator: US)]))
+                                                                     attachmentPaths.joined(separator: US),
+                                                                     mailboxHint]))
     }
 
     // MARK: HTML delivery — reliable open (default) + opt-in GUI keystroke auto-send
@@ -936,7 +975,12 @@ public struct MailScript {
         for record in raw.components(separatedBy: MailScript.RS)
         where !record.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
             let f = record.components(separatedBy: MailScript.US)
-            guard f.count >= 7 else { continue }
+            guard f.count >= 8 else { continue }
+            // The script emits LOCAL calendar components; convert to the same UTC `…Z` form
+            // `MailFormat.iso` produces for the index path. Without this one response could carry
+            // two different time semantics in `date_received` — index rows in UTC, selection-only
+            // rows in naive local — silently off by the machine's UTC offset.
+            let dr = MailScript.utcFromLocalComponents(f[6].trimmingCharacters(in: .whitespacesAndNewlines))
             result.append(ScriptSelection(
                 applescriptID: f[0].trimmingCharacters(in: .whitespacesAndNewlines),
                 internetMessageID: MailFormat.stripAngleBrackets(f[1]),
@@ -944,7 +988,8 @@ public struct MailScript {
                 sender: f[3].trimmingCharacters(in: .whitespacesAndNewlines),
                 readStatus: f[4].trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "true",
                 flagged: f[5].trimmingCharacters(in: .whitespacesAndNewlines).lowercased() == "true",
-                content: includeContent ? f[6] : nil))
+                dateReceived: dr,
+                content: includeContent ? f[7] : nil))
         }
         return result
     }
@@ -971,9 +1016,26 @@ public struct MailScript {
         tell application "Mail"
             set accts to accounts
             if acctName is not "" then
-                try
-                    set accts to {first account whose name is acctName}
-                end try
+                -- FAIL-CLOSED on an unresolvable account. The old form left `accts` as EVERY
+                -- account when the named one did not exist, silently widening a scoped mutation
+                -- into an unbounded cross-account scan — and the native reply/forward verbs made
+                -- that an OUTBOUND concern (the message whose body gets forwarded would be
+                -- chosen by that widened scan). A named account that does not resolve is now a
+                -- clean no-match instead.
+                --
+                -- Match by NAME **or** by account id: `MailMessage.account` is
+                -- `nameByUUID[uuid] ?? uuid`, so a message whose account has no directory entry
+                -- carries a RAW UUID (this store has several, e.g. "Recovered Messages"). Matching
+                -- on name alone would make every mutation on those messages fail-closed with a
+                -- misleading "not reachable in Mail.app".
+                set hitsA to (accounts whose name is acctName)
+                if (count of hitsA) is 0 then
+                    try
+                        set hitsA to (accounts whose id is acctName)
+                    end try
+                end if
+                if (count of hitsA) is 0 then return missing value
+                set accts to hitsA
             end if
             repeat with a in accts
                 try
@@ -995,6 +1057,57 @@ public struct MailScript {
         end tell
         return missing value
     end findMsg
+
+    """
+
+    /// Appended ONLY to the native reply/forward assembly (its sole caller). It lives here rather
+    /// than in the shared `locator` because it calls `resolveMailboxPath`: putting it in the
+    /// locator made every mutation script reference a handler it was never given — inert, since
+    /// nothing called it, but exactly the kind of latent assembly drift the syntax harness's
+    /// handler-definition check exists to catch.
+    private static let hintedLocator = """
+
+    -- Locate with a MAILBOX HINT first, then fall back to the bounded scan above.
+    --
+    -- WHY: `findMsg` deliberately skips "[Gmail]" mailboxes because scanning EVERY mailbox by
+    -- message-id hangs. That bound is correct for a blind scan, but it also made an ARCHIVED
+    -- message unreachable — a capability regression for reply/forward, which both oracles perform
+    -- on any message. The caller already knows the mailbox from the Envelope Index row it
+    -- resolved, so hand it over and search only there.
+    --
+    -- HONEST COST: this is still a linear scan (Mail has no message-id index), just of ONE
+    -- mailbox instead of all of them. When that mailbox IS "[Gmail]/All Mail" the scan is large —
+    -- on this live store the overwhelming majority of messages live there — so an archived-message reply is
+    -- SLOW, not free. It is bounded by osascript's Apple-event timeout rather than unbounded, and
+    -- the fallback below still applies. The trade is deliberate: a slow reply beats "cannot reply
+    -- to archived mail at all", which is what the oracles can do and the CLI could not.
+    on findMsgHinted(targetID, acctName, mbxName)
+        if mbxName is not "" then
+            tell application "Mail"
+                set accts to accounts
+                if acctName is not "" then
+                    set hitsA to (accounts whose name is acctName)
+                    if (count of hitsA) is 0 then
+                        try
+                            set hitsA to (accounts whose id is acctName)
+                        end try
+                    end if
+                    if (count of hitsA) is 0 then return missing value
+                    set accts to hitsA
+                end if
+                repeat with a in accts
+                    try
+                        set mb to my resolveMailboxPath(a, mbxName)
+                        if mb is not missing value then
+                            set ms to (messages of mb whose message id is targetID)
+                            if (count of ms) > 0 then return item 1 of ms
+                        end if
+                    end try
+                end repeat
+            end tell
+        end if
+        return my findMsg(targetID, acctName)
+    end findMsgHinted
     """
 
     /// Run a mutation script (defines `on run argv`, calls `my findMsg`) trying the bracketed
@@ -2447,4 +2560,27 @@ public struct MailScript {
         return out == "opened"
     }
 
+}
+
+extension MailScript {
+    /// Convert the selection script's `yyyy-MM-ddTHH:mm:ss` LOCAL components into the UTC
+    /// `yyyy-MM-dd'T'HH:mm:ss'Z'` form every other date in the Mail envelope uses.
+    ///
+    /// The AppleScript emits numeric components rather than a formatted date string precisely so
+    /// the value does not depend on the machine's locale; this is where the timezone is applied.
+    /// Returns nil for empty/unparseable input rather than guessing — a wrong timestamp is worse
+    /// than an absent one.
+    static func utcFromLocalComponents(_ raw: String, timeZone: TimeZone = .current) -> String? {
+        guard !raw.isEmpty else { return nil }
+        let parser = DateFormatter()
+        parser.locale = Locale(identifier: "en_US_POSIX")
+        parser.timeZone = timeZone
+        parser.dateFormat = "yyyy-MM-dd'T'HH:mm:ss"
+        guard let date = parser.date(from: raw) else { return nil }
+        let out = DateFormatter()
+        out.locale = Locale(identifier: "en_US_POSIX")
+        out.timeZone = TimeZone(identifier: "UTC")
+        out.dateFormat = "yyyy-MM-dd'T'HH:mm:ss'Z'"
+        return out.string(from: date)
+    }
 }

@@ -20,11 +20,16 @@ public enum Analytics {
         public let flagged: Bool
         public let hasAttachment: Bool
         public let mailboxRowid: Int
+        /// Indexed body preview — stands in for oracle B's first-500-chars-of-content question
+        /// scan without a per-message AppleScript body fetch.
+        public let snippet: String?
         public init(rowid: Int, senderAddress: String?, senderName: String?, subject: String,
-                    dateReceived: Int?, read: Bool, flagged: Bool, hasAttachment: Bool, mailboxRowid: Int) {
+                    dateReceived: Int?, read: Bool, flagged: Bool, hasAttachment: Bool, mailboxRowid: Int,
+                    snippet: String? = nil) {
             self.rowid = rowid; self.senderAddress = senderAddress; self.senderName = senderName
             self.subject = subject; self.dateReceived = dateReceived; self.read = read
             self.flagged = flagged; self.hasAttachment = hasAttachment; self.mailboxRowid = mailboxRowid
+            self.snippet = snippet
         }
     }
 
@@ -65,7 +70,10 @@ public enum Analytics {
 
     public struct NeedsResponseItem: Encodable {
         public let rank: Int
-        public let priority: String        // HIGH | NORMAL
+        /// Oracle B's four label strings verbatim: "HIGH (flagged + question)",
+        /// "HIGH (flagged)", "MEDIUM (contains question)", "NORMAL". The label text IS
+        /// part of B's surface, and the MEDIUM bucket had no CLI counterpart at all.
+        public let priority: String
         public let subject: String
         public let sender: String
         public let sender_address: String?
@@ -179,8 +187,64 @@ public enum Analytics {
     /// so a few items here may already be read in Mail; (2) MCP B's "direct-To-you" boost is not
     /// yet applied — it needs a per-message recipient join (the account's own address in `To`),
     /// deferred as a follow-up. The `?`/urgent/flagged ranking is applied.
-    public static func needsResponse(_ rows: [Row], maxResults: Int) -> [NeedsResponseItem] {
-        let candidates = rows.filter { !$0.read && !isAutomatedSender(address: $0.senderAddress, name: $0.senderName) }
+    /// Sender patterns MCP B treats as newsletters (`constants.py`). A sender matching any of
+    /// these is dropped from needs-response entirely — without them the CLI surfaced Substack /
+    /// Mailchimp / "weekly digest" blasts as mail awaiting a personal reply.
+    public static let newsletterPlatformPatterns = [
+        "substack.com", "beehiiv.com", "mailchimp", "sendgrid",
+        "convertkit", "buttondown", "ghost.io", "revue.co", "mailgun",
+    ]
+    public static let newsletterKeywordPatterns = [
+        "newsletter", "digest", "weekly", "daily",
+        "bulletin", "briefing", "news@", "updates@",
+    ]
+
+    /// Matches against the full sender string (address + display name), as B matches its
+    /// `lowerSender`.
+    public static func isNewsletterSender(address: String?, name: String?) -> Bool {
+        let s = ((address ?? "") + " " + (name ?? "")).lowercased()
+        guard !s.trimmingCharacters(in: .whitespaces).isEmpty else { return false }
+        return newsletterPlatformPatterns.contains(where: { s.contains($0) })
+            || newsletterKeywordPatterns.contains(where: { s.contains($0) })
+    }
+
+    /// Oracle B's exact priority label. B decides on flagged-ness and whether a question mark
+    /// appears; it reads the first 500 chars of CONTENT, we use subject + indexed preview, which
+    /// covers the same signal without a per-message AppleScript body fetch.
+    public static func priorityLabel(flagged: Bool, hasQuestion: Bool) -> String {
+        if flagged && hasQuestion { return "HIGH (flagged + question)" }
+        if flagged { return "HIGH (flagged)" }
+        if hasQuestion { return "MEDIUM (contains question)" }
+        return "NORMAL"
+    }
+
+    /// True when `subject` matches one of `sentSubjects` under B's bidirectional-containment
+    /// rule, i.e. the thread has already been answered. Both sides are prefix-stripped and
+    /// lowercased first, exactly as B does over the first 200 Sent subjects.
+    public static func alreadyReplied(subject: String, sentSubjects: [String]) -> Bool {
+        let base = MailFormat.stripThreadPrefixes(subject)
+            .trimmingCharacters(in: .whitespaces).lowercased()
+        guard !base.isEmpty else { return false }
+        return sentSubjects.contains { sent in
+            let s = sent.trimmingCharacters(in: .whitespaces).lowercased()
+            guard !s.isEmpty else { return false }
+            return s.contains(base) || base.contains(s)
+        }
+    }
+
+    /// Unread mail plausibly awaiting a personal reply (MCP B `get_needs_response`).
+    ///
+    /// `sentSubjects` are the account's recent Sent subjects (B reads the first 200); a candidate
+    /// whose thread already appears there is dropped as answered. Pass an empty array to skip
+    /// that cross-reference.
+    public static func needsResponse(_ rows: [Row], maxResults: Int,
+                                     sentSubjects: [String] = []) -> [NeedsResponseItem] {
+        let candidates = rows.filter {
+            !$0.read
+                && !isAutomatedSender(address: $0.senderAddress, name: $0.senderName)
+                && !isNewsletterSender(address: $0.senderAddress, name: $0.senderName)
+                && !alreadyReplied(subject: $0.subject, sentSubjects: sentSubjects)
+        }
         let ranked = candidates.sorted { a, b in
             let ap = priorityScore(a), bp = priorityScore(b)
             if ap != bp { return ap > bp }
@@ -189,7 +253,7 @@ public enum Analytics {
         return ranked.enumerated().map { i, r in
             NeedsResponseItem(
                 rank: i + 1,
-                priority: priorityScore(r) >= 2 ? "HIGH" : "NORMAL",
+                priority: priorityLabel(flagged: r.flagged, hasQuestion: hasQuestion(r)),
                 subject: r.subject,
                 sender: MailFormat.person(name: r.senderName, address: r.senderAddress),
                 sender_address: r.senderAddress,
@@ -198,9 +262,16 @@ public enum Analytics {
         }
     }
 
+    /// B looks for "?" in the message body's first 500 chars; the index gives us the subject and
+    /// the same preview text, so check both.
+    static func hasQuestion(_ r: Row) -> Bool {
+        if r.subject.contains("?") { return true }
+        return (r.snippet ?? "").prefix(500).contains("?")
+    }
+
     private static func priorityScore(_ r: Row) -> Int {
         var score = 0
-        if r.subject.contains("?") { score += 2 }
+        if hasQuestion(r) { score += 2 }
         let urgent = ["urgent", "asap", "action required", "action needed", "deadline", "please respond", "reply"]
         let lower = r.subject.lowercased()
         if urgent.contains(where: { lower.contains($0) }) { score += 1 }
@@ -245,5 +316,34 @@ extension Double {
     func rounded(toPlaces places: Int) -> Double {
         let d = pow(10.0, Double(places))
         return (self * d).rounded() / d
+    }
+}
+
+extension Analytics {
+    /// The system folders MCP B excludes from broad scans (`constants.py` `SKIP_FOLDERS`).
+    /// Counting them made every CLI volume metric — totals, read ratios, sender counts —
+    /// disagree with the oracle's for the same account.
+    ///
+    /// Matching is on the mailbox path's LAST component, case-insensitively, so
+    /// "…/[Gmail]/Trash" and "…/Deleted Messages" both match while a user folder merely
+    /// containing the word ("Sent to accountant") does not.
+    public static let skippedSystemFolders: Set<String> = [
+        "trash", "junk", "junk email", "deleted items",
+        "sent", "sent items", "sent messages", "drafts",
+        "spam", "deleted messages",
+    ]
+
+    public static func isSkippedSystemFolder(_ mailboxPath: String) -> Bool {
+        guard let leaf = mailboxPath.split(separator: "/").last else { return false }
+        return skippedSystemFolders.contains(leaf.lowercased())
+    }
+}
+
+extension Analytics {
+    /// The Sent-mailbox leaf names oracle B probes in order (`Sent Messages` → `Sent` →
+    /// `Sent Items`) when collecting subjects for its already-replied cross-reference.
+    public static func isSentMailbox(_ mailboxPath: String) -> Bool {
+        guard let leaf = mailboxPath.split(separator: "/").last?.lowercased() else { return false }
+        return leaf == "sent messages" || leaf == "sent" || leaf == "sent items"
     }
 }

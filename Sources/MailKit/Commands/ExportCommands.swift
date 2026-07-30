@@ -50,6 +50,12 @@ struct ExportCommand: ParsableCommand {
             let uuid = try ctx.requireAccountUUID(account)
             var f = EnvelopeIndex.MessageFilters()
             f.accountUUID = uuid; f.mailboxName = mailbox
+            // Oracle B: "Error: Invalid scope '<s>'. Use: single_email, entire_mailbox"
+            // (tools/analytics.py). An unknown scope previously fell through to the
+            // entire_mailbox branch and exported the whole mailbox — the opposite of narrowing.
+            guard ["single_email", "entire_mailbox"].contains(scope) else {
+                throw AppleError.validation("invalid --scope '\(scope)'. Use: single_email, entire_mailbox.")
+            }
             if scope == "single_email" {
                 guard let subject, !subject.isEmpty else { throw AppleError.validation("single_email scope requires --subject.") }
                 f.subjectContains = subject; f.limit = 1
@@ -68,7 +74,7 @@ struct ExportCommand: ParsableCommand {
                 bodySource = "full_body"
             }
 
-            let outDir = URL(fileURLWithPath: (dir as NSString).expandingTildeInPath)
+            let outDir = try resolveExportDirectory(dir)
             try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
             var files: [String] = []
             for m in messages {
@@ -146,4 +152,29 @@ enum MailDashboard {
         </body>
         """
     }
+}
+
+/// Resolve + guard an export destination, matching oracle B's `export_emails` path validation
+/// (`tools/analytics.py`): realpath first, then require the result to be under `$HOME`, then
+/// refuse the sensitive-directory list.
+///
+/// Export WRITES MESSAGE BODIES to disk, so an unguarded `--dir` could scatter mail content into
+/// `~/.ssh` or outside the home entirely — the CLI previously accepted any path. Resolving
+/// symlinks BEFORE the checks is what stops a symlink into a blocked directory from bypassing
+/// them (the same ordering `resolveAttachmentPath` uses), and the blocklist itself is the shared
+/// `sensitiveAttachmentDir` so the two surfaces cannot drift apart.
+func resolveExportDirectory(_ raw: String) throws -> URL {
+    let expanded = (raw as NSString).expandingTildeInPath
+    let resolved = URL(fileURLWithPath: expanded).resolvingSymlinksInPath()
+    let home = FileManager.default.homeDirectoryForCurrentUser.resolvingSymlinksInPath().path
+    let path = resolved.path
+    guard path == home || path.hasPrefix(home + "/") else {
+        throw AppleError.mailSafety("export directory must be under your home directory (\(home)); got: \(path)")
+    }
+    // Check the resolved path AND the pre-resolution literal, so a sensitive dir that is itself a
+    // symlink is caught too.
+    if let dir = sensitiveAttachmentDir(path, home: home) ?? sensitiveAttachmentDir(expanded, home: home) {
+        throw AppleError.mailSafety("cannot export messages into a sensitive directory (\(dir)) — refusing.")
+    }
+    return resolved
 }
