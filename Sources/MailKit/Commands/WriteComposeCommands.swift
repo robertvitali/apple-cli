@@ -33,6 +33,20 @@ func guardOutbound(recipients: [String], testMode: Bool) throws {
     }
 }
 
+/// Build the refusal message for a native reply/forward the self-only guard rejected.
+///
+/// The `discarded` half is deliberately loud. Nothing was sent either way — the guard held — but
+/// if the composed draft could NOT be closed, a message addressed to a non-self recipient is
+/// sitting in Mail's outgoing store one click from being sent, which is a named dangerous action.
+/// Asserting "the draft was discarded" without knowing it is how an orphan compose survives, so
+/// the failure case tells the operator to remove it by hand instead.
+func refusalMessage(kind: String, bad: String, discarded: Bool) -> String {
+    let head = "refusing the \(kind): Mail addressed it to non-self recipient(s) (\(bad)). Nothing was sent."
+    return discarded
+        ? "\(head) The composed draft was discarded."
+        : "\(head) WARNING: the composed draft could NOT be discarded and may still be in Mail's outgoing messages — open Mail and delete it manually."
+}
+
 /// Resolve + validate a single attachment path: expand `~`, require it to exist and be a REGULAR
 /// file (a directory / missing path is rejected). Returns the resolved absolute path for both the
 /// AppleScript attachment route and the `.eml` builder. Note: the self-only `guardOutbound` is the
@@ -298,6 +312,12 @@ struct ReplyCommand: ParsableCommand {
         let reply_all: Bool; let mode: String; let has_html: Bool; let sender_address: String?
         let to: [String]; let cc: [String]; let bcc: [String]; let attachments: [String]
         let dry_run: Bool; let executed: Bool; let opened: Bool; let note: String?
+        /// Id of the newly-created reply (oracle A `reply_to_message` → `reply_id`). Present only
+        /// on the native-reply path; nil on dry-run and on the HTML open/gui-send paths.
+        var reply_id: String? = nil
+        /// Oracle A returns the ORIGINAL message's id as `original_message_id`; `matched_message_id`
+        /// is the CLI's original key for the same value. Both are emitted (additive).
+        var original_message_id: String? = nil
     }
 
     func run() throws {
@@ -342,21 +362,38 @@ struct ReplyCommand: ParsableCommand {
             let original = target.content ?? target.snippet
             let quotedPlain = original.map { "\n\n> " + $0.replacingOccurrences(of: "\n", with: "\n> ") } ?? ""
 
+            // Validate `mode` up front, exactly as SendCommand does — an unrecognized value used
+            // to fall through to a success-shaped envelope that did nothing.
+            guard ["send", "draft", "open"].contains(mode) else {
+                throw AppleError.validation("--mode must be send, draft, or open.")
+            }
+            // `--mode draft` / `--mode open` are oracle B `reply_to_email(mode=…, send=False)`
+            // capabilities that are NOT implemented for reply yet (tracked as a parity gap).
+            // Refuse explicitly rather than emitting exit 0 with a "preview-only" note: a
+            // success envelope for a delivery that never happened is worse than a clean refusal,
+            // because a caller cannot tell the difference.
+            if global.willExecute, mode != "send" {
+                throw AppleError.notImplemented("`reply --mode \(mode)` is not implemented yet (oracle B reply_to_email mode=\(mode)); use --mode send, or drop --execute to preview.")
+            }
             // --gui-send opt-in validity (mirrors SendCommand).
             if guiSend {
                 guard html != nil else { throw AppleError.validation("--gui-send only applies to an --html reply.") }
                 guard mode == "send" else { throw AppleError.validation("--gui-send requires --mode send.") }
             }
             // Three mutually-exclusive live outbound actions (mirrors SendCommand / Option A).
+            // NOTE the `mode == "send"` clause on willOpenHtml: without it (as before), a
+            // `reply --mode draft --html …` took the HTML-open path and OPENED a compose window
+            // for a caller who asked for a draft. SendCommand's twin already had the clause.
             let willAutoSend = global.willExecute && mode == "send" && html == nil
             let willGuiSend = global.willExecute && guiSend
-            let willOpenHtml = global.willExecute && html != nil && !guiSend
+            let willOpenHtml = global.willExecute && mode == "send" && html != nil && !guiSend
             let willLiveOutbound = willAutoSend || willGuiSend || willOpenHtml
 
             var executed = false
             var opened = false
             var senderAddress: String?
             var note: String?
+            var replyID: String?
             if willLiveOutbound {
                 // Self-only gate FIRST — before any attachment read, .eml/.html build, or send.
                 try guardOutbound(recipients: recipients + ccL + bccL, testMode: global.testMode)
@@ -402,15 +439,34 @@ struct ReplyCommand: ParsableCommand {
                     try MailScript().openEml(path: dest.path)
                     opened = true
                     note = "HTML reply rendered in a compose window for review — click Send, or re-run with --gui-send to auto-send."
-                } else { // willAutoSend — plain or attachment reply (quoted plain body)
-                    if !attach.isEmpty {
-                        let paths = try attach.map { try resolveAttachmentPath($0) }
-                        try MailScript().sendWithAttachments(subject: replySubject, body: body + quotedPlain,
-                                                             to: recipients, cc: ccL, bcc: bccL, attachmentPaths: paths, sender: senderAddress)
-                    } else {
-                        try MailScript().send(subject: replySubject, body: body + quotedPlain, to: recipients, cc: ccL, bcc: bccL, sender: senderAddress)
+                } else { // willAutoSend — plain reply via Mail's NATIVE `reply` verb
+                    // Parity: a re-composed "Re:" message is NOT a reply — only Mail's `reply`
+                    // verb sets In-Reply-To/References and the original's replied-to state, and
+                    // returns the new message's id (oracle A `reply_id`). See MailScript's
+                    // "Native reply / forward" note for the safety readback.
+                    guard let imid = target.internet_message_id, !imid.isEmpty else {
+                        throw AppleError.upstream("message '\(target.id)' has no RFC Message-ID; cannot reply to it via Mail.app.")
                     }
-                    executed = true
+                    let paths = try attach.map { try resolveAttachmentPath($0) }
+                    switch try MailScript().nativeReply(internetMessageID: imid,
+                                                        accountName: target.account.isEmpty ? nil : target.account,
+                                                        body: body, replyAll: all, sender: senderAddress,
+                                                        selfAllowlist: TestMode.allowedRecipients,
+                                                        cc: ccL, bcc: bccL, attachmentPaths: paths) {
+                    case .sent(let newID, let actual):
+                        executed = true
+                        replyID = newID
+                        // Report what MAIL actually addressed, not our pre-send prediction — on
+                        // this one command the CLI does not choose the recipients.
+                        if !actual.isEmpty { recipients = actual }
+                        note = "replied via Mail's native reply verb — threading headers and the original's replied-to state are preserved"
+                    case .notFound:
+                        throw AppleError.notFound("message '\(imid)' is not reachable in Mail.app to reply to.")
+                    case .sendFailed(let newID):
+                        throw AppleError.upstream("Mail reported the reply was NOT sent (send returned false — account offline or the server refused). Draft id \(newID) may still be in Mail.")
+                    case .refused(let bad, let discarded):
+                        throw AppleError.mailSafety(refusalMessage(kind: "reply", bad: bad, discarded: discarded))
+                    }
                 }
             } else if global.willExecute {
                 note = "mode '\(mode)' is preview-only; use --mode send to deliver"
@@ -419,7 +475,8 @@ struct ReplyCommand: ParsableCommand {
             try Output.emit(tool: "mail", data: Preview(action: "reply", target: id ?? "subject:\(subject ?? "")",
                 matched_message_id: target.id, reply_all: all, mode: mode, has_html: html != nil, sender_address: senderAddress,
                 to: recipients, cc: ccL, bcc: bccL, attachments: attach,
-                dry_run: !global.willExecute, executed: executed, opened: opened, note: note))
+                dry_run: !global.willExecute, executed: executed, opened: opened, note: note,
+                reply_id: replyID, original_message_id: target.id))
         }
     }
 }
@@ -439,6 +496,11 @@ struct ForwardCommand: ParsableCommand {
     struct Preview: Encodable {
         let action: String; let matched_message_id: String?; let sender_address: String?; let to: [String]
         let cc: [String]; let bcc: [String]; let dry_run: Bool; let executed: Bool; let note: String?
+        /// Id of the newly-created forward (oracle A `forward_message` → `forward_id`). Present
+        /// only on an executed native forward; nil on dry-run.
+        var forward_id: String? = nil
+        /// Oracle A `forward_message` → `original_message_id`; mirrors `matched_message_id`.
+        var original_message_id: String? = nil
     }
 
     func run() throws {
@@ -475,18 +537,37 @@ struct ForwardCommand: ParsableCommand {
             // Forward composes a NEW message to the self-only --to (guardOutbound above), carrying
             // the original body — so forwarding real mail to yourself is fine (recipient is self).
             var executed = false
-            let note: String? = nil
+            var note: String?
+            var forwardID: String?
             if global.willExecute {
-                let fwdSubject = target.subject.lowercased().hasPrefix("fwd:") ? target.subject : "Fwd: \(target.subject)"
-                // Quote from the index snippet/content already in hand (avoids a slow body scan).
-                let original = target.content ?? target.snippet
-                let intro = body.map { $0 + "\n\n" } ?? ""
-                let fwdBody = intro + "---------- Forwarded message ----------\nFrom: \(target.sender)\nSubject: \(target.subject)\n\n" + (original ?? "")
-                try MailScript().send(subject: fwdSubject, body: fwdBody, to: toL, cc: ccL, bcc: bccL, sender: senderAddress)
-                executed = true
+                // Parity: use Mail's NATIVE `forward` verb. A re-composed plain-text quote drops
+                // the original's ATTACHMENTS and flattens its rich formatting — both oracles
+                // forward natively (oracle A returns the new id as `forward_id`, and its
+                // `include_attachments` default is True). See MailScript's "Native reply /
+                // forward" note for the fail-closed recipient readback.
+                guard let imid = target.internet_message_id, !imid.isEmpty else {
+                    throw AppleError.upstream("message '\(target.id)' has no RFC Message-ID; cannot forward it via Mail.app.")
+                }
+                switch try MailScript().nativeForward(internetMessageID: imid,
+                                                      accountName: target.account.isEmpty ? nil : target.account,
+                                                      body: body ?? "", to: toL, cc: ccL, bcc: bccL,
+                                                      sender: senderAddress,
+                                                      selfAllowlist: TestMode.allowedRecipients) {
+                case .sent(let newID, _):
+                    executed = true
+                    forwardID = newID
+                    note = "forwarded via Mail's native forward verb — the original's attachments and formatting are carried"
+                case .notFound:
+                    throw AppleError.notFound("message '\(imid)' is not reachable in Mail.app to forward.")
+                case .sendFailed(let newID):
+                    throw AppleError.upstream("Mail reported the forward was NOT sent (send returned false — account offline or the server refused). Draft id \(newID) may still be in Mail.")
+                case .refused(let bad, let discarded):
+                    throw AppleError.mailSafety(refusalMessage(kind: "forward", bad: bad, discarded: discarded))
+                }
             }
             try Output.emit(tool: "mail", data: Preview(action: "forward", matched_message_id: target.id, sender_address: senderAddress,
-                to: toL, cc: ccL, bcc: bccL, dry_run: !global.willExecute, executed: executed, note: note))
+                to: toL, cc: ccL, bcc: bccL, dry_run: !global.willExecute, executed: executed, note: note,
+                forward_id: forwardID, original_message_id: target.id))
         }
     }
 }

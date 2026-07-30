@@ -1,6 +1,7 @@
 import Testing
 import Foundation
 @testable import MailKit
+import AppleKit
 
 @Suite("TemplateStore")
 struct TemplateStoreTests {
@@ -199,14 +200,58 @@ struct TemplateStoreTests {
         // `original_subject`'s value is itself a token; a re-scanning fill would sometimes expand it.
         let vars = ["original_subject": "{recipient_email}", "recipient_email": "me@example.com"]
         for _ in 0..<50 {
-            #expect(TemplateStore.fill("Re: {original_subject}", vars: vars) == "Re: {recipient_email}")
+            var miss = Set<String>()
+            #expect(TemplateStore.fill("Re: {original_subject}", vars: vars, missing: &miss) == "Re: {recipient_email}")
+            // The re-emitted `{recipient_email}` is a VALUE, not a placeholder that was scanned —
+            // so it must NOT be reported missing (it was never a token in the template text).
+            #expect(miss.isEmpty)
         }
         // `{{`/`}}` are literal braces (Python str.format semantics), not a corrupted third thing.
-        #expect(TemplateStore.fill("{{name}} literal", vars: ["name": "X"]) == "{name} literal")
-        // An unknown token is left VERBATIM (documented CLI divergence: the oracle raises).
-        #expect(TemplateStore.fill("Hi {unknown}", vars: [:]) == "Hi {unknown}")
-        // A lone brace passes through untouched.
-        #expect(TemplateStore.fill("100% { of it", vars: [:]) == "100% { of it")
+        var m1 = Set<String>()
+        #expect(TemplateStore.fill("{{name}} literal", vars: ["name": "X"], missing: &m1) == "{name} literal")
+        #expect(m1.isEmpty)   // an escaped brace pair is not a placeholder
+        // An unknown token is left verbatim in the string but IS reported, so `render` can raise
+        // oracle A's `missing_template_variable` instead of shipping `{unknown}` in real mail.
+        var m2 = Set<String>()
+        #expect(TemplateStore.fill("Hi {unknown}", vars: [:], missing: &m2) == "Hi {unknown}")
+        #expect(m2 == ["unknown"])
+        // A lone brace passes through untouched and is not a placeholder.
+        var m3 = Set<String>()
+        #expect(TemplateStore.fill("100% { of it", vars: [:], missing: &m3) == "100% { of it")
+        #expect(m3.isEmpty)
+    }
+
+    /// Oracle A's `_substitute` collects EVERY unresolved placeholder and raises with them
+    /// sorted; the CLI must do the same rather than shipping a literal `{token}` in outbound mail.
+    @Test func renderRaisesMissingTemplateVariableNamingAllUnresolvedSorted() throws {
+        let store = tempStore()
+        _ = try store.save(name: "greet", body: "Hi {zeta}, re {alpha} and {alpha}.", subject: "{mid}")
+        do {
+            _ = try store.render(name: "greet", autoVars: [:], userVars: [:])
+            Issue.record("render should have thrown on unresolved placeholders")
+        } catch let e as AppleError {
+            #expect(e.type == "missing_template_variable")
+            // Sorted, de-duplicated, and spanning BOTH subject and body.
+            #expect(e.message.contains("alpha, mid, zeta"))
+        }
+        // Fully-supplied vars render clean.
+        let ok = try store.render(name: "greet", autoVars: ["mid": "M"],
+                                  userVars: ["zeta": "Z", "alpha": "A"])
+        #expect(ok.body == "Hi Z, re A and A.\n")   // save normalizes the body to end with \n
+        #expect(ok.subject == "M")
+    }
+
+    /// `today` must be the LOCAL calendar date (Python `date.today()`), not UTC — a UTC `today`
+    /// substitutes TOMORROW's date for any render made in the local-evening offset window.
+    @Test func todayIsTheLocalCalendarDate() {
+        // 2026-03-01T04:30Z is still 2026-02-28 in America/New_York (UTC-5).
+        let instant = Date(timeIntervalSince1970: 1772339400)   // 2026-03-01T04:30:00Z
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone(identifier: "America/New_York")!
+        #expect(TemplateStore.todayString(now: instant, calendar: cal) == "2026-02-28")
+        var utc = Calendar(identifier: .gregorian)
+        utc.timeZone = TimeZone(identifier: "UTC")!
+        #expect(TemplateStore.todayString(now: instant, calendar: utc) == "2026-03-01")
     }
 
     // MARK: names

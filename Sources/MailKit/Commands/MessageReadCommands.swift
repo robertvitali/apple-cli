@@ -45,6 +45,13 @@ struct SearchCommand: ParsableCommand {
             f.hasAttachment = try triState(hasAttachment, noAttachment, "has-attachment", "no-attachment")
             if let fromDate { f.dateFromUnix = try requireISODate(fromDate, name: "from-date") }
             if let toDate { f.dateToUnix = try requireISODate(toDate, name: "to-date", endOfDay: true) }
+            // Oracle B validates `sort` against {date_desc, date_asc} and raises
+            // "Invalid sort. Use: date_desc, date_asc" (tools/search.py). Accepting anything and
+            // silently falling back to date_desc — while echoing the bogus token back in the
+            // envelope's `sort` field — told the caller their sort was honoured when it wasn't.
+            guard sort == "date_desc" || sort == "date_asc" else {
+                throw AppleError.validation("invalid --sort '\(sort)'. Use: date_desc, date_asc.")
+            }
             f.sortAscending = (sort == "date_asc")
             f.limit = (limit == 0) ? Int.max : limit
             f.offset = offset

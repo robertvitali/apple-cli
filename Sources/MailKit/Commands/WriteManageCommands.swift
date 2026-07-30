@@ -162,15 +162,30 @@ struct FlagCommand: ParsableCommand {
             }
             let ctx = try MailContext()
             let (msgs, filterBased) = try resolveTargets(ctx: ctx, ids: ids, match: match, account: account, mailbox: mailbox)
-            let act = unflag ? "unflag" : "flag"
+            // Oracle parity: `flag_color="none"` IS the unflag spelling — oracle A's
+            // `flag_message` derives `flagged_status = flag_color != "none"` (mail_connector.py)
+            // and maps "none" to flag index -1. So `--color none` unflags exactly like `--unflag`;
+            // treating it as a colorless FLAG (the prior behavior) inverted the caller's intent.
+            let wantsNone = color?.lowercased() == "none"
+            // `--unflag` with a real colour is self-contradictory. It used to be accepted and
+            // silently resolved to unflag while echoing `color: red`, i.e. output that disagreed
+            // with the action taken (MarkCommand refuses the analogous conflict via `triState`).
+            if unflag, let color, !wantsNone {
+                throw AppleError.validation("--unflag conflicts with --color \(color); pass --unflag (or --color none) to clear, or --color \(color) alone to set.")
+            }
+            let clearing = unflag || wantsNone
+            let act = clearing ? "unflag" : "flag"
             let colorName = color ?? (unflag ? "none" : "red")
-            let detail = ["color": colorName]
+            // `color` is this CLI's original key; `flag_color` mirrors oracle A's wire name
+            // (additive — both are emitted).
+            let detail = ["color": colorName, "flag_color": colorName]
             guard global.willExecute else {
                 try Output.emit(tool: "mail", data: BulkPreview(action: act, matched: msgs.count, filter_based: filterBased,
                     dry_run: true, executed: false, messages: msgs, detail: detail, note: nil)); return
             }
-            // unflag → flagged:false; flag → flagged:true with the resolved color index (red default).
-            let flagged = !unflag
+            // clearing (--unflag or --color none) → flagged:false; otherwise flagged:true with the
+            // resolved color index (red default).
+            let flagged = !clearing
             let colorIndex = flagged ? (MailFlagColor.fromToken(colorName)?.rawValue) : nil
             let script = MailScript()
             let (applied, notFound) = try executeMessageMutation(msgs, testMode: global.testMode) { imid, acct in
@@ -566,6 +581,25 @@ struct MailboxesCreate: ParsableCommand {
 
     func run() throws {
         try runGuarded(tool: "mail") {
+            // Oracle-parity input validation, BEFORE any Mail/index access so it holds on the
+            // dry-run path too (a preview that accepts a name --execute would reject is a lie).
+            // Oracle A: "Mailbox name cannot be empty" (validation_error) for empty/whitespace.
+            // Oracle B: rejects the `_INVALID_MAILBOX_CHARS` set — characters that break
+            // AppleScript strings or mailbox names. Previously `--name ""` returned ok:true with
+            // an empty `path`.
+            guard !name.trimmingCharacters(in: .whitespaces).isEmpty else {
+                throw AppleError.validation("mailbox name cannot be empty.")
+            }
+            // Applied per '/'-separated SEGMENT: '/' itself is the documented nesting separator,
+            // so it is legal in `name` but must not appear inside a segment.
+            let segments = name.components(separatedBy: "/")
+            guard !segments.contains(where: { $0.trimmingCharacters(in: .whitespaces).isEmpty }) else {
+                throw AppleError.validation("mailbox path '\(name)' has an empty path segment.")
+            }
+            let invalid = CharacterSet(charactersIn: "\\\"<>|?*:").union(.controlCharacters)
+            for seg in segments where seg.rangeOfCharacter(from: invalid) != nil {
+                throw AppleError.validation("mailbox segment '\(seg)' contains a character that is invalid in a Mail mailbox name (any of \\ \" < > | ? * : or a control character).")
+            }
             let ctx = try MailContext()
             let uuid = try ctx.requireAccountUUID(account)
             let fullPath = parent.map { "\($0)/\(name)" } ?? name

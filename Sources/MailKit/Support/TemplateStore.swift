@@ -246,7 +246,10 @@ public struct TemplateStore {
     /// processes when a value happened to contain another token's text). `{{`/`}}` are literal
     /// `{`/`}`, matching Python `str.format`. A token with no matching var is left VERBATIM
     /// (a documented CLI-vs-oracle divergence: the oracle raises instead — see docs/port-specs).
-    static func fill(_ text: String, vars: [String: String]) -> String {
+    /// Substitute `{token}`s in `text`. `{{` / `}}` collapse to one literal brace. Every token
+    /// with no entry in `vars` is inserted into `missing` (and left verbatim in the returned
+    /// string, which callers that raise on `missing` never use).
+    static func fill(_ text: String, vars: [String: String], missing: inout Set<String>) -> String {
         var out = ""
         var i = text.startIndex
         while i < text.endIndex {
@@ -257,7 +260,16 @@ public struct TemplateStore {
                     out.append(c); i = text.index(after: next); continue
                 }
                 if c == "{", let (name, after) = scanToken(text, from: i) {
-                    out.append(vars[name] ?? "{\(name)}")      // unknown token stays verbatim
+                    if let v = vars[name] {
+                        out.append(v)
+                    } else {
+                        // RECORD the unresolved token. Oracle A's `_substitute` raises
+                        // MailTemplateMissingVariableError naming every missing placeholder —
+                        // leaving `{token}` verbatim would let an un-substituted
+                        // `{recipient_name}` flow into outbound subject/body text.
+                        missing.insert(name)
+                        out.append("{\(name)}")
+                    }
                     i = after; continue
                 }
             }
@@ -273,16 +285,28 @@ public struct TemplateStore {
         let tpl = try get(name)
         var vars = autoVars
         for (k, v) in userVars { vars[k] = v }               // user overrides auto
-        let subject = tpl.subject.map { TemplateStore.fill($0, vars: vars) }
-        let body = TemplateStore.fill(tpl.body, vars: vars)
+        var missing = Set<String>()
+        let subject = tpl.subject.map { TemplateStore.fill($0, vars: vars, missing: &missing) }
+        let body = TemplateStore.fill(tpl.body, vars: vars, missing: &missing)
+        // Oracle parity: an unresolved placeholder is an ERROR, not a silent literal. Oracle A's
+        // `_substitute` collects ALL missing names and raises MailTemplateMissingVariableError
+        // with them sorted; `error_type` on the wire is `missing_template_variable`.
+        guard missing.isEmpty else {
+            throw AppleError(type: "missing_template_variable",
+                             message: "missing placeholder(s): \(missing.sorted().joined(separator: ", "))",
+                             exitCode: AppleExit.usage)
+        }
         return RenderResult(name: name, subject: subject, body: body, variables: vars, used_vars: vars)
     }
 
-    /// Today's date (YYYY-MM-DD, UTC) — MCP A auto-fills `{today}`.
-    public static func todayString() -> String {
-        let f = DateFormatter()
-        f.dateFormat = "yyyy-MM-dd"
-        f.timeZone = TimeZone(identifier: "UTC")
-        return f.string(from: Date())
+    /// Today's date (YYYY-MM-DD) in the machine's LOCAL calendar — MCP A auto-fills `{today}`
+    /// from Python's `date.today()`, which is local, not UTC. This was UTC before, so every
+    /// render made during the local-evening UTC-offset window substituted TOMORROW's date into
+    /// outbound subject/body text (e.g. 20:00 in America/New_York is already the next UTC day).
+    /// `Calendar.current` is deliberate: it follows the operator's locale/timezone the way
+    /// `date.today()` follows the process timezone.
+    public static func todayString(now: Date = Date(), calendar: Calendar = .current) -> String {
+        let c = calendar.dateComponents([.year, .month, .day], from: now)
+        return String(format: "%04d-%02d-%02d", c.year ?? 0, c.month ?? 0, c.day ?? 0)
     }
 }

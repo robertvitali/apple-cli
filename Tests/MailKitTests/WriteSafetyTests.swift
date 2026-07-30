@@ -320,3 +320,105 @@ struct CanonicalLabelTests {
         #expect(throws: Error.self) { try requireCanonicalLabels([msg("Re: real mail")]) }
     }
 }
+
+/// Native reply/forward outcome parsing. This is the safety-critical half of the native-compose
+/// path. The AppleScript reports `ok<US><id><US><recipients>` / `sendfail<US><id>` /
+/// `refused<US><addrs><US><discardedFlag>` / `notfound`, and ANY other output (a Mail error
+/// string, a truncated read, a future script revision) must map to a REFUSAL — never to a silent
+/// success, which would report `executed: true` for a send that never happened, or treat an
+/// unverified recipient set as allowlisted.
+@Suite("Native reply/forward outcome parsing")
+struct NativeComposeOutcomeTests {
+    static let US = "\u{1F}"
+    static let RS = "\u{1E}"
+
+    @Test func okCarriesTheNewMessageIDAndMailsActualRecipients() {
+        #expect(MailScript.parseNativeCompose("ok\(Self.US)78321\(Self.US)me@self.test")
+                == .sent(newMessageID: "78321", recipients: ["me@self.test"]))
+        // Reply-to-all: the RS-joined list is what MAIL populated, not the caller's prediction.
+        #expect(MailScript.parseNativeCompose("ok\(Self.US)9\(Self.US)a@x.test\(Self.RS)b@x.test")
+                == .sent(newMessageID: "9", recipients: ["a@x.test", "b@x.test"]))
+        // A missing recipient field is tolerated (empty list), still a success.
+        #expect(MailScript.parseNativeCompose("ok\(Self.US)5") == .sent(newMessageID: "5", recipients: []))
+    }
+
+    @Test func notFoundIsNilOutput() {
+        // runLocated collapses "notfound" on BOTH id forms to nil.
+        #expect(MailScript.parseNativeCompose(nil) == .notFound)
+    }
+
+    /// `send` returns a BOOLEAN in Mail.sdef. A false result must NOT be reported as sent.
+    @Test func sendFailIsNotASuccess() {
+        #expect(MailScript.parseNativeCompose("sendfail\(Self.US)4242") == .sendFailed(newMessageID: "4242"))
+    }
+
+    @Test func refusedCarriesTheOffendingAddressesAndDiscardFlag() {
+        #expect(MailScript.parseNativeCompose("refused\(Self.US)outsider@x.test\(Self.US)1")
+                == .refused(nonSelfRecipients: "outsider@x.test", discarded: true))
+        // Multiple offenders arrive RS-joined and are rendered as a readable list.
+        #expect(MailScript.parseNativeCompose("refused\(Self.US)a@x.test\(Self.RS)b@x.test\(Self.US)1")
+                == .refused(nonSelfRecipients: "a@x.test, b@x.test", discarded: true))
+    }
+
+    /// `outgoing message` responds-to is save/close/send — NOT delete. If `close … saving no`
+    /// fails, a message addressed to a non-self recipient is still sitting in Mail, so the
+    /// discard flag MUST surface as false rather than being assumed true.
+    @Test func undiscardedDraftIsReportedNotAssumedGone() {
+        #expect(MailScript.parseNativeCompose("refused\(Self.US)boss@corp.test\(Self.US)0")
+                == .refused(nonSelfRecipients: "boss@corp.test", discarded: false))
+        // A refusal with NO discard field is read pessimistically as not-discarded.
+        #expect(MailScript.parseNativeCompose("refused\(Self.US)boss@corp.test")
+                == .refused(nonSelfRecipients: "boss@corp.test", discarded: false))
+        // ...and the operator-facing message says so, loudly.
+        let warn = refusalMessage(kind: "reply", bad: "boss@corp.test", discarded: false)
+        #expect(warn.contains("could NOT be discarded"))
+        #expect(warn.contains("delete it manually"))
+        #expect(refusalMessage(kind: "reply", bad: "x@y.test", discarded: true).contains("was discarded"))
+    }
+
+    /// The unreadable-recipient-list sentinel the script seeds the readback with — an AppleScript
+    /// error while reading recipients must refuse, not send.
+    @Test func unreadableRecipientListRefuses() {
+        #expect(MailScript.parseNativeCompose("refused\(Self.US)(unreadable)\(Self.US)1")
+                == .refused(nonSelfRecipients: "(unreadable)", discarded: true))
+    }
+
+    /// A ZERO-recipient message must refuse: "every recipient is allowlisted" is vacuously true
+    /// of the empty set, and an empty read can also mean the property access half-failed.
+    @Test func zeroRecipientsRefuses() {
+        #expect(MailScript.parseNativeCompose("refused\(Self.US)(no recipients populated)\(Self.US)1")
+                == .refused(nonSelfRecipients: "(no recipients populated)", discarded: true))
+    }
+
+    /// A throw from the native verb itself: no draft was ever created, so there is nothing to
+    /// discard — but it is still a refusal, never a success.
+    @Test func createFailIsARefusalWithNothingToDiscard() {
+        let o = MailScript.parseNativeCompose("createfail\(Self.US)Mail got an error: -1728")
+        #expect(o == .refused(nonSelfRecipients: "(Mail could not create the message: Mail got an error: -1728)",
+                              discarded: true))
+    }
+
+    /// A throw AFTER the draft exists is the dangerous shape: the draft may be addressed to a
+    /// real third party. The discard result must be reported, not assumed.
+    @Test func setupFailReportsWhetherTheDraftSurvived() {
+        #expect(MailScript.parseNativeCompose("setupfail\(Self.US)bad sender\(Self.US)1")
+                == .refused(nonSelfRecipients: "(composing the message failed: bad sender)", discarded: true))
+        #expect(MailScript.parseNativeCompose("setupfail\(Self.US)bad sender\(Self.US)0")
+                == .refused(nonSelfRecipients: "(composing the message failed: bad sender)", discarded: false))
+        // No flag at all → pessimistic.
+        #expect(MailScript.parseNativeCompose("setupfail\(Self.US)x")
+                == .refused(nonSelfRecipients: "(composing the message failed: x)", discarded: false))
+    }
+
+    /// FAIL-CLOSED: anything unrecognized is a refusal, and never claims the draft was cleaned up.
+    @Test func unrecognizedOutputIsARefusalNotASuccess() {
+        for junk in ["", "ok", "sent", "Mail got an error: -1728", "OK\(Self.US)1", "true", "sendfail"] {
+            let outcome = MailScript.parseNativeCompose(junk)
+            guard case .refused(_, let discarded) = outcome else {
+                Issue.record("output '\(junk)' mapped to \(outcome) — must be .refused")
+                return
+            }
+            #expect(discarded == false)
+        }
+    }
+}

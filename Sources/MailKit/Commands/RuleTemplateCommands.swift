@@ -70,9 +70,18 @@ struct RulesCreate: ParsableCommand {
             let plan = try RuleLiveGuards.liveActionPlan(actions)
             let conds = conditions.map { (type: $0.field, op: $0.operator, value: $0.value) }
             // match=all is enforced by requireSelfScoped, so the rule is an AND rule — thread it.
-            try MailScript().createRule(name: name, enabled: false, matchAll: true, conditions: conds, plan: plan)
+            let script = MailScript()
+            try script.createRule(name: name, enabled: false, matchAll: true, conditions: conds, plan: plan)
+            // Oracle A `create_rule` returns `rule_index` (the new total rule count) and `name`.
+            // Mail exposes no "index of this rule" property, so re-read the list and take the
+            // count — same definition the oracle uses. Best-effort: a read failure must not fail
+            // an already-successful create, so the key is simply omitted then.
+            let newIndex = (try? script.listRules().count).map(AnyEncodableBox.init)
             try Output.emit(tool: "mail", data: [
                 "created_rule": AnyEncodableBox(name), "conditions": AnyEncodableBox(conditions),
+                // `name` + `rule_index` are oracle A's wire names; `created_rule` is the CLI's
+                // original key, kept so existing consumers don't break (additive → MINOR).
+                "name": AnyEncodableBox(name), "rule_index": AnyEncodableBox(newIndex),
                 "actions": AnyEncodableBox(plan.tokens), "match_logic": AnyEncodableBox("all"),
                 "enabled": AnyEncodableBox(false), "dry_run": AnyEncodableBox(false), "executed": AnyEncodableBox(true),
                 "note": AnyEncodableBox("created SELF-SCOPED to the test label + DISABLED — it can only ever act on apple-cli-test mail; `rules enable <index>` to activate")])
@@ -146,7 +155,11 @@ struct RulesUpdate: ParsableCommand {
                                                 matchAll: match == "all" ? true : nil, plan: plan)
                 try Output.emit(tool: "mail", data: [
                     "updated_rule_index": AnyEncodableBox(target.index),
+                    // `rule_index` is oracle A update_rule's wire name; `updated_rule_index` is
+                    // the CLI's original key, kept for existing consumers (additive → MINOR).
+                    "rule_index": AnyEncodableBox(target.index),
                     "rule_name": AnyEncodableBox(name ?? target.name),
+                    "name": AnyEncodableBox(name ?? target.name),
                     "patch": AnyEncodableBox(patch), "recreated": AnyEncodableBox(false),
                     "dry_run": AnyEncodableBox(false), "executed": AnyEncodableBox(true),
                     // When --action is given, the supported action set is RESET then reapplied
@@ -216,8 +229,11 @@ struct RulesUpdate: ParsableCommand {
             let newIndex = (try? MailScript().listRules())?.first(where: { $0.name == mergedName })?.index ?? created.index
             try Output.emit(tool: "mail", data: [
                 "updated_rule_index": AnyEncodableBox(newIndex),
+                // Oracle A wire names (`rule_index` / `name`) alongside the CLI's originals.
+                "rule_index": AnyEncodableBox(newIndex),
                 "previous_index": AnyEncodableBox(target.index),
                 "rule_name": AnyEncodableBox(mergedName),
+                "name": AnyEncodableBox(mergedName),
                 "conditions_attached": AnyEncodableBox(attached),
                 "enabled": AnyEncodableBox(mergedEnabled),
                 "actions": AnyEncodableBox(mergedPlan.tokens),
@@ -240,7 +256,10 @@ struct RulesDelete: ParsableCommand {
             }
             let r = try requireLabeledRule(index: index, testMode: global.testMode)
             try MailScript().deleteRule(index: r.index)
-            try Output.emit(tool: "mail", data: ["deleted_rule_index": AnyEncodableBox(index), "rule_name": AnyEncodableBox(r.name), "dry_run": AnyEncodableBox(false), "executed": AnyEncodableBox(true)])
+            try Output.emit(tool: "mail", data: ["deleted_rule_index": AnyEncodableBox(index), "rule_name": AnyEncodableBox(r.name),
+             // `rule_index` + `deleted_name` are oracle A delete_rule's wire names.
+             "rule_index": AnyEncodableBox(index), "deleted_name": AnyEncodableBox(r.name),
+             "dry_run": AnyEncodableBox(false), "executed": AnyEncodableBox(true)])
         }
     }
 }
@@ -267,7 +286,13 @@ func requireLabeledRule(index: Int, testMode: Bool) throws -> MailScript.ScriptR
     }
     let rules = try MailScript().listRules()
     guard let r = rules.first(where: { $0.index == index }) else {
-        throw AppleError.notFound("no rule at index \(index) (see `rules list`).")
+        // Oracle A raises MailRuleNotFoundError → `error_type: "rule_not_found"` on every rule op.
+        // Emitting the generic `not_found` left a consumer unable to tell "no such rule index"
+        // from "no such message/mailbox". The exit code stays 65 (this CLI's not-found code) —
+        // only the type string becomes oracle-exact.
+        throw AppleError(type: "rule_not_found",
+                         message: "no rule at index \(index) (see `rules list`).",
+                         exitCode: AppleExit.notFound)
     }
     guard r.name.hasPrefix(TestMode.sandboxPrefix) else {
         throw AppleError.mailSafety("rule \(index) ('\(r.name)') is not a labeled test item (must start with \"\(TestMode.sandboxPrefix)\") — refusing to mutate a real rule.")
@@ -283,7 +308,11 @@ private func setEnabled(index: Int, enabled: Bool, global: GlobalOptions) throws
         }
         let r = try requireLabeledRule(index: index, testMode: global.testMode)
         try MailScript().setRuleEnabled(index: r.index, enabled: enabled)
-        try Output.emit(tool: "mail", data: ["rule_index": AnyEncodableBox(index), "rule_name": AnyEncodableBox(r.name), "set_enabled": AnyEncodableBox(enabled), "executed": AnyEncodableBox(true), "dry_run": AnyEncodableBox(false)])
+        try Output.emit(tool: "mail", data: ["rule_index": AnyEncodableBox(index), "rule_name": AnyEncodableBox(r.name), "set_enabled": AnyEncodableBox(enabled),
+         // `name` + `enabled` are oracle A set_rule_enabled's wire names; `rule_name` +
+         // `set_enabled` are the CLI's original keys, kept for existing consumers.
+         "name": AnyEncodableBox(r.name), "enabled": AnyEncodableBox(enabled),
+         "executed": AnyEncodableBox(true), "dry_run": AnyEncodableBox(false)])
     }
 }
 
@@ -373,12 +402,25 @@ struct TemplatesRender: ParsableCommand {
             var autoVars = ["today": TemplateStore.todayString()]
             if let messageId {
                 let ctx = try MailContext()
-                if let row = try resolveMessageRow(ctx: ctx, id: messageId) {
-                    let m = ctx.decodeSummary(row)
-                    if let n = m.sender_name { autoVars["recipient_name"] = n }
-                    if let a = m.sender_address { autoVars["recipient_email"] = a }
-                    autoVars["original_subject"] = m.subject
+                // Oracle parity: an unresolvable message_id is an ERROR (oracle A's
+                // `auto_template_vars` calls get_message, which raises MailMessageNotFoundError →
+                // error_type `message_not_found`). Silently rendering with only `today` used to
+                // drop recipient_name/email/original_subject AND — now that unresolved
+                // placeholders raise — would surface as a confusing missing-variable error.
+                guard let row = try resolveMessageRow(ctx: ctx, id: messageId) else {
+                    throw AppleError(type: "message_not_found",
+                                     message: "no message for id '\(messageId)'.",
+                                     exitCode: AppleExit.notFound)
                 }
+                let m = ctx.decodeSummary(row)
+                // Oracle fallback chain (`auto_template_vars`): recipient_email is the PARSED
+                // address or, failing that, the raw sender field; recipient_name is the display
+                // name or, failing that, recipient_email. So all three keys are ALWAYS present
+                // once a message resolved — never omitted because a column was empty.
+                let email = m.sender_address?.isEmpty == false ? m.sender_address! : m.sender
+                autoVars["recipient_email"] = email
+                autoVars["recipient_name"] = m.sender_name?.isEmpty == false ? m.sender_name! : email
+                autoVars["original_subject"] = m.subject
             }
             var userVars: [String: String] = [:]
             for kv in `var` {

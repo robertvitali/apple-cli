@@ -643,3 +643,146 @@ require_index() {
   [ -f "$OUT" ]
   echo "$output" | grep -q '"opened" : false'
 }
+
+# --- Oracle-parity: flag_color="none" IS the unflag spelling -------------------
+# Oracle A's flag_message derives `flagged_status = flag_color != "none"` and maps "none" to
+# flag index -1, so a caller porting `flag_message(ids, flag_color="none")` expects an UNFLAG.
+# The CLI previously treated `--color none` as a colorless FLAG, inverting that intent.
+@test "mail flag --color none previews as unflag (oracle flag_color=none parity)" {
+  require_index
+  run "$BIN" mail flag 12345 --color none
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"action" *: *"unflag"'
+}
+
+# `flag_color` is oracle A's wire name for the color; `color` is this CLI's original key. Both
+# are emitted (additive), so an oracle-shaped consumer finds the key it expects.
+@test "mail flag emits both color and flag_color in detail" {
+  require_index
+  run "$BIN" mail flag 12345 --color red
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"flag_color" *: *"red"'
+  echo "$output" | grep -q '"color" *: *"red"'
+  echo "$output" | grep -q '"action" *: *"flag"'
+}
+
+# `--unflag` keeps working unchanged (it is the same clearing path as --color none).
+@test "mail flag --unflag still previews as unflag" {
+  require_index
+  run "$BIN" mail flag 12345 --unflag
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"action" *: *"unflag"'
+}
+
+# --- Oracle-parity: templates render error surface -----------------------------
+# Oracle A's `_substitute` raises MailTemplateMissingVariableError naming every unresolved
+# placeholder (sorted); the CLI used to leave `{token}` literal, so an un-substituted
+# `{recipient_name}` could flow straight into outbound subject/body text.
+@test "mail templates render raises missing_template_variable naming all unresolved (exit 64)" {
+  export APPLE_MAIL_MCP_HOME="$BATS_TEST_TMPDIR/tpl-missing"
+  run "$BIN" mail templates save apple-cli-test-miss --body 'Hi {zeta}, re {alpha}.'
+  [ "$status" -eq 0 ]
+  run "$BIN" mail templates render apple-cli-test-miss
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q '"type" *: *"missing_template_variable"'
+  # sorted + de-duplicated
+  echo "$output" | grep -q 'missing placeholder(s): alpha, zeta'
+}
+
+@test "mail templates render succeeds once every placeholder is supplied" {
+  export APPLE_MAIL_MCP_HOME="$BATS_TEST_TMPDIR/tpl-ok"
+  run "$BIN" mail templates save apple-cli-test-ok --body 'Hi {who}.' --subject 'S {who}'
+  [ "$status" -eq 0 ]
+  run "$BIN" mail templates render apple-cli-test-ok --var who=Ada
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"subject" *: *"S Ada"'
+  echo "$output" | grep -q '"used_vars"'
+}
+
+# `{today}` is auto-filled, so it must NOT be reported missing — and it must be the LOCAL
+# calendar date (oracle A uses Python's local `date.today()`, not UTC).
+@test "mail templates render auto-fills today without reporting it missing" {
+  export APPLE_MAIL_MCP_HOME="$BATS_TEST_TMPDIR/tpl-today"
+  run "$BIN" mail templates save apple-cli-test-today --body 'Sent {today}.'
+  [ "$status" -eq 0 ]
+  run "$BIN" mail templates render apple-cli-test-today
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qE '"body" *: *"Sent [0-9]{4}-[0-9]{2}-[0-9]{2}'
+  echo "$output" | grep -q "$(date +%Y-%m-%d)"
+}
+
+# An unresolvable --message-id is an ERROR (oracle A's auto_template_vars calls get_message,
+# which raises MailMessageNotFoundError → error_type message_not_found), not a silent
+# render-with-only-today.
+@test "mail templates render with an unresolvable --message-id is message_not_found (exit 65)" {
+  require_index
+  export APPLE_MAIL_MCP_HOME="$BATS_TEST_TMPDIR/tpl-mnf"
+  run "$BIN" mail templates save apple-cli-test-mnf --body 'Body {today}.'
+  [ "$status" -eq 0 ]
+  run "$BIN" mail templates render apple-cli-test-mnf --message-id 999999999
+  [ "$status" -eq 65 ]
+  echo "$output" | grep -q '"type" *: *"message_not_found"'
+}
+
+# --- Oracle-parity: input validation the CLI used to accept silently ------------
+# Oracle B raises "Invalid sort. Use: date_desc, date_asc" (tools/search.py). The CLI used to
+# accept any token, silently sort date_desc, AND echo the bogus token back as `sort` — telling
+# the caller their sort was honoured when it was not.
+@test "mail search rejects an invalid --sort (exit 64)" {
+  require_index
+  run "$BIN" mail search --subject test --sort bogus --limit 1
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q 'date_desc, date_asc'
+}
+
+@test "mail search still accepts both valid --sort values" {
+  require_index
+  run "$BIN" mail search --subject test --sort date_desc --limit 1
+  [ "$status" -eq 0 ]
+  run "$BIN" mail search --subject test --sort date_asc --limit 1
+  [ "$status" -eq 0 ]
+}
+
+# Oracle A returns validation_error "Mailbox name cannot be empty"; oracle B rejects its
+# _INVALID_MAILBOX_CHARS set. `--name ""` used to return ok:true with an empty `path`.
+@test "mail mailboxes create rejects an empty --name (exit 64)" {
+  require_index
+  run "$BIN" mail mailboxes create --account iCloud --name ""
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q 'cannot be empty'
+}
+
+@test "mail mailboxes create rejects a name with an AppleScript-hostile character (exit 64)" {
+  require_index
+  run "$BIN" mail mailboxes create --account iCloud --name 'bad:name'
+  [ "$status" -eq 64 ]
+}
+
+# '/' is the documented nesting separator, so it must stay legal in --name.
+@test "mail mailboxes create still accepts a nested '/' path" {
+  require_index
+  run "$BIN" mail mailboxes create --account iCloud --name 'Projects/2024'
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"path" *: *"Projects/2024"'
+}
+
+@test "mail mailboxes create rejects an empty path segment (exit 64)" {
+  require_index
+  run "$BIN" mail mailboxes create --account iCloud --name 'Projects//2024'
+  [ "$status" -eq 64 ]
+}
+
+# --- AppleScript compile coverage ----------------------------------------------
+# The AppleScript bodies in MailScript.swift are Swift string literals, so neither `swift build`
+# nor the logic tier can see them — a syntax error surfaces only at runtime, on a LIVE Mail
+# mutation, i.e. the one path CI cannot exercise. `osacompile` parses without executing, so this
+# is the only automated coverage that tier has. It found two real defects on introduction:
+# `repeat with it in …` (`it` is reserved) and `set before to …` in the already-committed
+# emptyTrashScript (`before` is reserved — that script could never have run).
+@test "every AppleScript embedded in MailScript.swift compiles (osacompile)" {
+  run python3 "$BATS_TEST_DIRNAME/helpers/applescript_syntax_check.py"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "ok - nativeReplyScript"
+  echo "$output" | grep -q "ok - emptyTrashScript"
+  ! echo "$output" | grep -q "^FAIL"
+}

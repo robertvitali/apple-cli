@@ -32,3 +32,6 @@ live-dumps/
 
 # Note: Package.resolved IS committed (this is an executable, so we pin deps).
 PARITY-TEST-MATRIX.md
+MAIL-PARITY-AUDIT-*.json
+__pycache__/
+*.pyc

@@ -12,6 +12,115 @@ with the Apple MCP servers they replace.
 
 ## [Unreleased]
 
+### Parity audit (2026-07-30) — Mail is NOT yet a strict superset
+A full re-audit of Mail against BOTH oracles (27 tools in s-morgan-jeffries@0.6.0 +
+24 in patrickfreyer@3.1.3, 101 capability rows, every claimed gap put through an
+adversarial refutation pass that defaulted to "refuted") returned **45 confirmed
+gaps**, 16 refuted. Mail therefore does NOT meet this repo's one rule yet, and the
+1.0.0 tag stays blocked. The confirmed list is tracked in the Asana Mail parent;
+the batches landed so far are below. Earlier notes in this section that implied Mail
+was one item away from parity were understated.
+
+### Fixed — Mail compose is now a real reply/forward (confirmed gaps)
+- **BREAKING (behavior):** `mail reply` now uses Mail's native `reply` / `reply to
+  all` verb instead of composing a new "Re: " message, and `mail forward` uses the
+  native `forward` verb. Only the native verbs set the `In-Reply-To` / `References`
+  threading headers, mark the original's replied-to / forwarded-to state, and (for
+  forward) carry the original's **attachments** and rich formatting — a re-composed
+  plain-text quote silently dropped all of that. Both oracles use the native verbs.
+  The reply body is PREPENDED to Mail's own quoted original (the s-morgan oracle
+  overwrites `content`, losing its quote, so the CLI keeps more than the oracle).
+- `mail reply` / `mail forward` now return `reply_id` / `forward_id` — the id of the
+  newly-created message (oracle A wire keys). Additive.
+- `mail reply`'s emitted `to`/`cc`/`bcc` now report what MAIL actually addressed,
+  not the CLI's pre-send prediction. On this one command the CLI does not choose the
+  recipients, so the prediction could differ (Reply-To, reply-all expansion,
+  self-dedupe) from where the mail really went.
+- **BREAKING (behavior):** `mail flag --color none` now UNFLAGS. Oracle A derives
+  `flagged_status = flag_color != "none"` and maps `none` to flag index -1, so a
+  caller porting `flag_message(ids, flag_color="none")` expected an unflag; the CLI
+  previously set a colourless flag — the opposite of the caller's intent. Unflagging
+  now also resets `flag index` to -1, so a stale colour cannot be resurrected by a
+  later re-flag in the Mail UI. `flag_color` is emitted alongside the pre-existing
+  `color` key.
+- `mail move` / `mail move --gmail-mode` accept a nested `"Parent/Child"`
+  destination (oracle B `to_mailbox`). The exact flat name is resolved FIRST, so a
+  mailbox whose own name contains a slash — Gmail's `[Gmail]/All Mail` — is still
+  addressable; oracle B splits unconditionally and cannot reach those. An
+  unresolvable destination is now a precise `not_found` instead of an opaque
+  AppleScript error.
+
+### Fixed — Mail templates render (confirmed gaps)
+- **BREAKING (behavior):** `mail templates render` now FAILS on an unresolved
+  placeholder with `error.type = "missing_template_variable"` (oracle A's wire
+  string), naming every missing name sorted and de-duplicated across subject and
+  body. It previously left `{token}` literal, so an un-substituted
+  `{recipient_name}` could flow into outbound mail.
+- `mail templates render --message-id` with an unresolvable id is now
+  `error.type = "message_not_found"` (oracle A raises `MailMessageNotFoundError`)
+  instead of silently rendering with only `today`.
+- `recipient_email` / `recipient_name` / `original_subject` now follow the oracle's
+  fallback chain (parsed address → raw sender field; display name → email) and are
+  always present once a message resolves, instead of being omitted for an empty
+  column.
+- **BREAKING (behavior):** `{today}` is now the LOCAL calendar date, matching
+  Python's `date.today()`. It was UTC, so every render made in the local-evening
+  UTC-offset window substituted TOMORROW's date into outbound text.
+
+### Fixed — Mail rules + input validation (confirmed gaps)
+- `rules create` / `update` / `enable` / `disable` / `delete` now emit the oracle's
+  wire names alongside the CLI's originals: `rule_index`, `name`, `enabled`,
+  `deleted_name`. `rules create` reports the new rule's index (previously absent).
+- A missing rule index is now `error.type = "rule_not_found"` (oracle A's typed
+  error) rather than the generic `not_found`, so a consumer can tell a bad rule
+  index from a missing message or mailbox. Exit code is unchanged (65).
+- `mail search --sort` now rejects anything but `date_desc` / `date_asc` (oracle B
+  raises here). It previously accepted any token, silently sorted `date_desc`, and
+  echoed the bogus token back as `sort` — reporting a sort it had not applied.
+- `mail mailboxes create` now rejects an empty `--name`, an empty path segment, and
+  the AppleScript-hostile character set oracle B blocks (`\ " < > | ? * :` and
+  control characters). `--name ""` previously returned `ok: true` with an empty path.
+
+### Fixed — outbound safety hardening (found in review of the above)
+- The self-only outbound guard is now ONE implementation shared by every script that
+  dispatches a message. The native-compose path had grown a second, weaker
+  comparator that folded diacritics (so an allowlisted `me@sélf.test` would match a
+  real `me@self.test`) and treated an unreadable recipient address as all-clear.
+  Both are fail-OPEN bugs the existing `collectAddrs` / `firstDisallowed` pair
+  already closed; that pair is now the only comparator.
+- A native reply's recipients are chosen by MAIL, not the caller, so the guard
+  re-reads the created message's real to/cc/bcc. That readback now: polls (Mail can
+  populate recipient collections lazily, and an empty read must never read as "no
+  disallowed recipients"), refuses a ZERO-recipient message ("all allowlisted" is
+  vacuously true of the empty set), and re-verifies immediately before `send`,
+  after attachments are added (attaching delays ~1s per file, so the earlier check
+  is stale by dispatch time).
+- A refused draft is discarded with `close … saving no`. `outgoing message`
+  responds-to is exactly `save`/`close`/`send` in `Mail.sdef` — `delete` is NOT
+  declared for it, so the previous `delete` either no-opped or threw into a
+  swallowing `try`, leaving a fully-composed message addressed to a non-self
+  recipient in Mail's outgoing store while the CLI reported it discarded. Whether
+  the discard succeeded is now REPORTED: on failure the error tells the operator to
+  delete it manually rather than claiming cleanup that did not happen.
+- Any throw between creating the draft and the guard now closes the draft and
+  returns a distinct outcome, instead of orphaning a real-recipient message.
+- `send`'s boolean result is no longer discarded. `Mail.sdef` declares
+  `send -> boolean`; a false result previously still reported `executed: true` with
+  a `reply_id` for mail that was never sent.
+- `emptyTrashScript` used `set before to …`; `before` is an AppleScript reserved
+  word, so that script could never compile — the empty-trash path would have failed
+  at runtime on first use. Found by the new compile harness below, not by a live
+  fire (it is operator-gated and had never been run).
+
+### Added
+- `bats/helpers/applescript_syntax_check.py` — compiles every AppleScript embedded
+  in `MailScript.swift` with `osacompile` (parse, no execute). These bodies are
+  Swift string literals, so `swift build` and the logic tier cannot see them at all
+  and a syntax error only surfaces at runtime on a live Mail mutation — the one tier
+  CI cannot exercise. It found two real defects on introduction (`repeat with it in
+  …`, `it` being reserved; and the `emptyTrashScript` bug above) and is wired into
+  `bats` so neither can regress.
+
 ### Added
 - Project scaffold: Swift package with the `apple` executable and six domain
   command stubs (Messages, Mail, Contacts, Notes, Calendar, Reminders); shared
@@ -230,10 +339,28 @@ with the Apple MCP servers they replace.
   `exit 77` (`safety_violation`) instead of a `exit 0` preview envelope. Executed
   envelopes add `applied` / `not_found` / `executed` fields (additive → MINOR).
 
-### Known parity gaps (Mail — still preview-only vs the MCP union)
-These MCP-union write capabilities are intentionally NOT yet wired to live mutation
-(they emit a preview/note); they must land before Mail is a 100% strict superset:
-- `reply`/`forward` quote the Envelope-Index snippet, not the full original body
+### Known parity gaps (Mail) — superseded by the 2026-07-30 audit
+This section previously listed a single item (`reply`/`forward` quoting the
+Envelope-Index snippet instead of the original body). That item is now FIXED — both
+commands use Mail's native verbs, see "Mail compose is now a real reply/forward"
+above — but the section as a whole was badly understated: the 2026-07-30 re-audit
+found **45 confirmed strict-superset gaps** across compose, rules, templates, reads,
+analytics, and bulk mutation, of which the batches above close 14. The authoritative
+open list lives on the Asana Mail parent (`GID-REDACTED`); it is deliberately not
+duplicated here, so that one source cannot drift from the other.
+
+Mail is therefore NOT a strict superset yet, and per this repo's one rule
+("Missing *any* MCP capability = not done") neither the Mail Asana parent nor the
+1.0.0 tag can close until the remaining gaps land or are explicitly accepted as
+documented divergences.
+
+Accepted divergences so far (capability NOT lost — the CLI is stricter or more
+correct): the `--execute` + `--test-mode` + `APPLE_TEST_MODE=1` + subject-label gate
+on every mutation, which by design prevents acting on real unlabeled data the run did
+not create; operator-env gating on permanent-delete / empty-trash; refusing live rule
+actions that auto-delete or auto-forward; and `update_rule` with no fields returning
+exit 64 where the oracle returns a no-op success (turning a likely caller mistake
+into a silent success would be a regression, so the stricter behavior is kept).
 
 ### Validation status (Mail HTML/attachment send)
 - Attachment send + HTML **open** path: verified live (self-only) — delivered attachment

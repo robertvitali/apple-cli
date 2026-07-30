@@ -304,6 +304,399 @@ public struct MailScript {
         }
     }
 
+    /// SHARED outbound address guard, appended to EVERY script that dispatches an outgoing
+    /// message (the send-draft path and the native reply/forward path). Deliberately ONE
+    /// implementation: an earlier revision of the native path grew a second, weaker comparator
+    /// that folded diacritics and let an unreadable address pass as all-clear — both fail-open
+    /// bugs this pair already closes. Do not reintroduce a per-script variant.
+    private static let addressGuardHelpers = """
+
+    on collectAddrs(theMsg)
+        set out to {}
+        tell application "Mail"
+            repeat with r in (to recipients of theMsg)
+                set end of out to (address of r)
+            end repeat
+            repeat with r in (cc recipients of theMsg)
+                set end of out to (address of r)
+            end repeat
+            repeat with r in (bcc recipients of theMsg)
+                set end of out to (address of r)
+            end repeat
+        end tell
+        return out
+    end collectAddrs
+
+    on firstDisallowed(addrs, allowList)
+        -- Returns the FIRST address not in allowList, or "" ONLY when every address is allowlisted
+        -- (the all-clear sentinel). SAFETY: empty / missing (`missing value`) addresses fail CLOSED —
+        -- they return the non-empty token "<empty-address>" (a block), NEVER "". This closes the
+        -- sentinel-collision fail-open where an empty-address recipient ordered before a real one
+        -- (`{"", "victim@x"}`) would hit `return ""` early and be read as all-clear. Because a real
+        -- address is compared only after the empty guard, no real address can ever be "", so "" is
+        -- unambiguously all-clear. The `try` also blocks (rather than crashes on) a recipient whose
+        -- `address` coerces with an error (e.g. `missing value`).
+        repeat with adr in addrs
+            set a to ""
+            try
+                set a to (adr as string)
+            end try
+            if a is "" then return "<empty-address>"
+            set okFlag to false
+            repeat with al in allowList
+                -- `considering diacriticals but ignoring case` = case-insensitive + diacritic-SENSITIVE,
+                -- matching Swift `guardOutbound`'s `.lowercased()` exact compare. Without it, AppleScript
+                -- `is` folds diacritics too, so this self-only gate would be strictly MORE permissive than
+                -- every other outbound path (e.g. allowlist `me@sélf.test` would match a draft to
+                -- `me@self.test`). Keeping the two comparators identical closes that divergence.
+                considering diacriticals but ignoring case
+                    if a is (al as string) then set okFlag to true
+                end considering
+            end repeat
+            if not okFlag then return a
+        end repeat
+        return ""
+    end firstDisallowed
+    """
+
+    // MARK: Native reply / forward (Mail's own `reply` + `forward` verbs)
+    //
+    // WHY THESE EXIST (parity): composing a brand-new outgoing message with a string-built
+    // "Re: " subject is NOT equivalent to Mail's `reply`/`forward`. Only the native verbs set
+    // the In-Reply-To / References threading headers, mark the original message's replied-to /
+    // forwarded-to state, and (for forward) carry the original's ATTACHMENTS and rich
+    // formatting. Both parity oracles use the native verbs (s-morgan `mail_connector.py`
+    // `reply_to_message` / `forward_message`; each returns `id of` the new outgoing message as
+    // `reply_id` / `forward_id`), so a re-composed plain-text quote drops real capability.
+    //
+    // Signatures are the authoritative ones from `Mail.sdef`:
+    //   reply   <message> [opening window <bool>] [reply to all <bool>] -> outgoing message
+    //   forward <message> [opening window <bool>]                       -> outgoing message
+    //   send    <outgoing message> -> BOOLEAN (true iff sending succeeded)
+    // and `outgoing message` responds-to exactly `save` / `close` / `send` — NOT `delete`. So a
+    // draft is discarded with `close … saving no`; `delete` would raise and silently leave a
+    // fully-composed message in Mail's outgoing store.
+    // (Note the s-morgan oracle writes `reply to all origMsg`, which is not valid dictionary
+    // syntax — its reply_all=True path cannot have worked. We implement the correct form.)
+    //
+    // SAFETY — this is the one outbound path where recipients are chosen by MAIL, not by the
+    // caller: `reply` auto-populates the original sender (plus every to/cc under reply-to-all),
+    // so a caller-side `guardOutbound` on a *predicted* recipient list is not sufficient. These
+    // methods therefore RE-READ the created message's actual to/cc/bcc and refuse unless EVERY
+    // address is in the operator's self-only allowlist, closing the draft rather than sending.
+    // Three fail-closed properties, each of which a reviewer caught missing in an earlier draft:
+    //   1. an unreadable recipient list refuses (the readback is seeded non-empty);
+    //   2. a ZERO-recipient message refuses — "every recipient is allowlisted" is vacuously true
+    //      of the empty set, and an empty read can also mean the property access half-failed;
+    //   3. whether the refused draft was actually discarded is REPORTED, never assumed, so the
+    //      caller can tell the operator to remove it by hand instead of being told it is gone.
+    // Callers MUST still have passed the 3-flag gate + `guardOutbound` before calling.
+
+    // Script results use the pre-existing `US` as the FIELD separator and `RS` (already defined
+    // above) to separate items within one field (recipient lists).
+
+    /// Shared recipient/attachment/allowlist handlers appended to the native reply/forward
+    /// scripts. AppleScript string comparison is case-insensitive by default, which is exactly
+    /// the semantics wanted for email-address matching.
+    private static let outboundGuardHelpers = """
+
+    on addRecipients(msg, raw, US, kind)
+        if raw is "" then return
+        set AppleScript's text item delimiters to US
+        set parts to text items of raw
+        set AppleScript's text item delimiters to ""
+        tell application "Mail"
+            repeat with p in parts
+                set addr to (p as string)
+                if addr is not "" then
+                    if kind is "to" then
+                        make new to recipient at end of to recipients of msg with properties {address:addr}
+                    else if kind is "cc" then
+                        make new cc recipient at end of cc recipients of msg with properties {address:addr}
+                    else
+                        make new bcc recipient at end of bcc recipients of msg with properties {address:addr}
+                    end if
+                end if
+            end repeat
+        end tell
+    end addRecipients
+
+    on addAttachments(msg, raw, US)
+        if raw is "" then return
+        set AppleScript's text item delimiters to US
+        set parts to text items of raw
+        set AppleScript's text item delimiters to ""
+        tell application "Mail"
+            repeat with p in parts
+                set thePath to (p as string)
+                if thePath is not "" then
+                    tell msg
+                        make new attachment with properties {file name:(POSIX file thePath)} at after the last paragraph
+                    end tell
+                    delay 1
+                end if
+            end repeat
+        end tell
+    end addAttachments
+
+    -- Discard a composed outgoing message. `close … saving no` is the DECLARED handler for an
+    -- outgoing message (Mail.sdef responds-to: save/close/send); `delete` is NOT declared for it
+    -- and would raise, silently leaving the draft behind. Returns "1" only when the draft is
+    -- definitely gone, "0" when it may still be in Mail's outgoing store.
+    on discardDraft(msg)
+        try
+            tell application "Mail" to close msg saving no
+            return "1"
+        on error
+            return "0"
+        end try
+    end discardDraft
+
+    -- Collect + audit with a bounded poll, because Mail can populate an outgoing message's
+    -- recipient collections LAZILY. An empty read must never be mistaken for "no disallowed
+    -- recipients" — the same hazard sendDraftScript already polls for.
+    on auditedAddrs(msg, allowList)
+        set addrs to {}
+        repeat 30 times
+            try
+                set addrs to my collectAddrs(msg)
+            end try
+            if (count of addrs) > 0 then exit repeat
+            delay 0.5
+        end repeat
+        return addrs
+    end auditedAddrs
+    """
+
+    /// Body shared by the reply and forward scripts: audit the created message's real recipients,
+    /// refuse fail-closed (discarding the draft and reporting whether that worked), otherwise
+    /// attach, send, and report the send's own boolean result.
+    private static let guardAndSendTail = """
+                set AppleScript's text item delimiters to US
+                set allowList to text items of allowRaw
+                set AppleScript's text item delimiters to ""
+                set addrs to my auditedAddrs(m, allowList)
+                if (count of addrs) is 0 then
+                    return "refused" & US & "(no recipients populated)" & US & my discardDraft(m)
+                end if
+                set bad to my firstDisallowed(addrs, allowList)
+                if bad is not "" then
+                    return "refused" & US & bad & US & my discardDraft(m)
+                end if
+                -- Attach only AFTER the guard passes, so a refused send never loads files.
+                my addAttachments(m, attRaw, US)
+                -- RE-VERIFY immediately before dispatch. addAttachments delays ~1s PER FILE, so
+                -- the set verified above is stale by send time; the send-draft path re-checks for
+                -- exactly this reason. Any delta (or a now-empty read) refuses.
+                set addrs2 to {}
+                try
+                    set addrs2 to my collectAddrs(m)
+                end try
+                if (count of addrs2) is 0 then
+                    return "refused" & US & "(recipients vanished before send)" & US & my discardDraft(m)
+                end if
+                set bad2 to my firstDisallowed(addrs2, allowList)
+                if bad2 is not "" then
+                    return "refused" & US & bad2 & US & my discardDraft(m)
+                end if
+                set newID to ""
+                try
+                    tell application "Mail" to set newID to (id of m) as string
+                end try
+                set AppleScript's text item delimiters to RS
+                set verified to addrs2 as string
+                set AppleScript's text item delimiters to ""
+                -- Mail.sdef: `send` returns a BOOLEAN (true iff sending succeeded). Ignoring it
+                -- reported executed:true for a send Mail said had failed.
+                set sentOK to false
+                tell application "Mail" to set sentOK to (send m)
+                if sentOK is false then return "sendfail" & US & newID & US & verified
+                return "ok" & US & newID & US & verified
+    """
+
+    private static let nativeReplyScript = """
+    on run argv
+        set theBody to item 3 of argv
+        set doAll to (item 4 of argv) is "1"
+        set senderAddr to item 5 of argv
+        set allowRaw to item 6 of argv
+        set attRaw to item 7 of argv
+        set ccRaw to item 8 of argv
+        set bccRaw to item 9 of argv
+        set US to (ASCII character 31)
+        set RS to (ASCII character 30)
+        set msg to my findMsg(item 1 of argv, item 2 of argv)
+        if msg is missing value then return "notfound"
+        set m to missing value
+        try
+            tell application "Mail"
+                if doAll then
+                    set m to reply msg opening window false reply to all true
+                else
+                    set m to reply msg opening window false reply to all false
+                end if
+            end tell
+        on error errMsg
+            return "createfail" & US & errMsg
+        end try
+        -- EVERY step between creating the draft and the guard is wrapped: the draft already
+        -- exists and is addressed by MAIL to whoever it chose, so bailing out uncaught would
+        -- orphan a possibly-real-recipient message in Mail's outgoing store.
+        try
+            tell application "Mail"
+                -- Mail pre-fills the native quoted original; PREPEND the body so the quote
+                -- survives (the s-morgan oracle clobbers `content`, losing its own quote).
+                try
+                    set content of m to theBody & return & return & (content of m)
+                on error
+                    set content of m to theBody
+                end try
+                if senderAddr is not "" then set sender of m to senderAddr
+            end tell
+            -- Mail addresses the reply itself; --cc/--bcc are ADDITIONS on top, and the audit
+            -- below validates the union, so a caller-supplied Cc cannot escape the allowlist.
+            my addRecipients(m, ccRaw, US, "cc")
+            my addRecipients(m, bccRaw, US, "bcc")
+        on error errMsg
+            return "setupfail" & US & errMsg & US & my discardDraft(m)
+        end try
+    """ + guardAndSendTail + """
+
+    end run
+    """
+
+    private static let nativeForwardScript = """
+    on run argv
+        set theBody to item 3 of argv
+        set toRaw to item 4 of argv
+        set ccRaw to item 5 of argv
+        set bccRaw to item 6 of argv
+        set senderAddr to item 7 of argv
+        set allowRaw to item 8 of argv
+        set attRaw to item 9 of argv
+        set US to (ASCII character 31)
+        set RS to (ASCII character 30)
+        set msg to my findMsg(item 1 of argv, item 2 of argv)
+        if msg is missing value then return "notfound"
+        set m to missing value
+        try
+            tell application "Mail" to set m to forward msg opening window false
+        on error errMsg
+            return "createfail" & US & errMsg
+        end try
+        try
+            tell application "Mail"
+                if theBody is not "" then
+                    try
+                        set content of m to theBody & return & return & (content of m)
+                    on error
+                        set content of m to theBody
+                    end try
+                end if
+                if senderAddr is not "" then set sender of m to senderAddr
+            end tell
+            my addRecipients(m, toRaw, US, "to")
+            my addRecipients(m, ccRaw, US, "cc")
+            my addRecipients(m, bccRaw, US, "bcc")
+        on error errMsg
+            return "setupfail" & US & errMsg & US & my discardDraft(m)
+        end try
+    """ + guardAndSendTail + """
+
+    end run
+    """
+
+    /// Result of a native reply/forward.
+    public enum NativeComposeOutcome: Sendable, Equatable {
+        /// Sent. `recipients` is what MAIL actually populated (not the caller's prediction).
+        case sent(newMessageID: String, recipients: [String])
+        case notFound
+        /// NOTHING was sent. `discarded == false` means the composed draft could NOT be removed
+        /// and is still in Mail's outgoing store — the operator must delete it by hand.
+        case refused(nonSelfRecipients: String, discarded: Bool)
+        /// `send` returned false (offline / SMTP refused). The draft may still exist.
+        case sendFailed(newMessageID: String)
+    }
+
+    /// Like `mutateLocated`, but returns the script's raw output (for scripts that report a
+    /// value, e.g. the new message id) instead of a Bool. nil == "notfound" on BOTH id forms.
+    private func runLocated(_ body: String, id: String, account: String?, extra: [String]) throws -> String? {
+        let script = body + "\n" + MailScript.locator + "\n" + MailScript.outboundGuardHelpers
+            + "\n" + MailScript.addressGuardHelpers
+        let bare = MailFormat.stripAngleBrackets(id) ?? id
+        for candidate in ["<\(bare)>", bare] {
+            let out = try runner.run(script, arguments: [candidate, account ?? ""] + extra)
+            if out != "notfound" { return out }
+        }
+        return nil
+    }
+
+    /// Internal (not private) so the logic tier can regression-lock the fail-closed mapping
+    /// without a live Mail — the "unrecognized output is a refusal, never a success" rule is the
+    /// safety-critical half of this parser.
+    static func parseNativeCompose(_ out: String?) -> NativeComposeOutcome {
+        guard let out else { return .notFound }
+        let f = out.components(separatedBy: US)
+        func list(_ i: Int) -> [String] {
+            guard f.count > i else { return [] }
+            return f[i].components(separatedBy: RS).filter { !$0.isEmpty }
+        }
+        switch f.first {
+        case "ok" where f.count > 1:
+            return .sent(newMessageID: f[1], recipients: list(2))
+        case "sendfail" where f.count > 1:
+            return .sendFailed(newMessageID: f[1])
+        case "refused" where f.count > 1:
+            // A missing discard flag is read as NOT discarded — the pessimistic reading.
+            return .refused(nonSelfRecipients: list(1).joined(separator: ", "),
+                            discarded: f.count > 2 && f[2] == "1")
+        case "createfail":
+            // The native verb itself threw, so no draft was ever created — nothing to discard.
+            let why = f.count > 1 ? f[1] : "(no detail)"
+            return .refused(nonSelfRecipients: "(Mail could not create the message: \(why))", discarded: true)
+        case "setupfail":
+            // A throw AFTER the draft existed. The script attempted to close it; report whether
+            // that actually worked rather than assuming it did.
+            let why = f.count > 1 ? f[1] : "(no detail)"
+            return .refused(nonSelfRecipients: "(composing the message failed: \(why))",
+                            discarded: f.count > 2 && f[2] == "1")
+        default:
+            // Anything unrecognized is a refusal, never a success — and we cannot claim the
+            // draft was cleaned up, so report it as possibly-present.
+            return .refused(nonSelfRecipients: "(unrecognized script result '\(out)')", discarded: false)
+        }
+    }
+
+    /// Reply to a located message with Mail's native `reply` verb (threading headers +
+    /// replied-to state + native quoted original), prepending `body`. `cc`/`bcc` are ADDED on
+    /// top of Mail's own addressing. `selfAllowlist` is the operator's self-only address set;
+    /// every recipient Mail ends up with must match it or the reply is discarded unsent.
+    public func nativeReply(internetMessageID: String, accountName: String?, body: String,
+                            replyAll: Bool, sender: String?, selfAllowlist: [String],
+                            cc: [String] = [], bcc: [String] = [],
+                            attachmentPaths: [String] = []) throws -> NativeComposeOutcome {
+        let US = MailScript.US
+        return MailScript.parseNativeCompose(try runLocated(MailScript.nativeReplyScript, id: internetMessageID, account: accountName,
+                                                            extra: [body, replyAll ? "1" : "0", sender ?? "",
+                                                                    selfAllowlist.joined(separator: US),
+                                                                    attachmentPaths.joined(separator: US),
+                                                                    cc.joined(separator: US), bcc.joined(separator: US)]))
+    }
+
+    /// Forward a located message with Mail's native `forward` verb (carries the original's
+    /// attachments + rich formatting), prepending `body`. Recipients come from the caller, but
+    /// are still re-read and allowlist-checked before send (defense in depth).
+    public func nativeForward(internetMessageID: String, accountName: String?, body: String,
+                              to: [String], cc: [String], bcc: [String], sender: String?,
+                              selfAllowlist: [String], attachmentPaths: [String] = []) throws -> NativeComposeOutcome {
+        let US = MailScript.US
+        return MailScript.parseNativeCompose(try runLocated(MailScript.nativeForwardScript, id: internetMessageID, account: accountName,
+                                                             extra: [body, to.joined(separator: US), cc.joined(separator: US),
+                                                                     bcc.joined(separator: US), sender ?? "",
+                                                                     selfAllowlist.joined(separator: US),
+                                                                     attachmentPaths.joined(separator: US)]))
+    }
+
     // MARK: HTML delivery — reliable open (default) + opt-in GUI keystroke auto-send
 
     /// RELIABLE HTML path (Option A default). Open a generated multipart `.eml` (X-Unsent +
@@ -639,7 +1032,17 @@ public struct MailScript {
         set idx to (item 4 of argv) as integer
         tell application "Mail"
             set flagged status of msg to doFlag
-            if doFlag and idx is greater than or equal to 0 then set flag index of msg to idx
+            if doFlag then
+                if idx is greater than or equal to 0 then set flag index of msg to idx
+            else
+                -- Oracle A emits BOTH the flagged-status and the flag-index write on every call,
+                -- mapping flag_color "none" to index -1 (utils.py get_flag_index). Clearing only
+                -- `flagged status` left the old colour behind, so a later re-flag in the Mail UI
+                -- resurrected it. `try` because some stores reject an index write while unflagged.
+                try
+                    set flag index of msg to -1
+                end try
+            end if
         end tell
         return "ok"
     end run
@@ -651,6 +1054,68 @@ public struct MailScript {
                           extra: [flagged ? "1" : "0", String(colorIndex ?? -1)])
     }
 
+    /// Resolve a destination mailbox name that MAY be a "/"-separated nested path
+    /// ("Projects/2024" → `mailbox "2024" of mailbox "Projects" of acct`), matching oracle B's
+    /// documented `to_mailbox` nesting (`core.py` `build_mailbox_ref`).
+    ///
+    /// DIVERGENCE (deliberate, and a correctness superset): the exact flat name is tried FIRST.
+    /// Mail really does have mailboxes whose own name contains a slash — Gmail's
+    /// "[Gmail]/All Mail" is exactly that — and oracle B splits unconditionally, so it can never
+    /// address them. Exact-first addresses both shapes; only a name that does NOT exist flat is
+    /// re-read as a nesting. Returns `missing value` when nothing resolves (caller → "nodest").
+    /// Move variant of `mutateLocated`: also appends the nested-mailbox resolver, and maps the
+    /// script's "nodest" token to a precise `not_found` instead of the opaque AppleScript error a
+    /// bare `first mailbox … whose name is` raised before.
+    private func moveLocated(_ body: String, id: String, account: String?, toMailbox: String) throws -> Bool {
+        let script = body + "\n" + MailScript.locator + "\n" + MailScript.mailboxPathResolver
+        let bare = MailFormat.stripAngleBrackets(id) ?? id
+        for candidate in ["<\(bare)>", bare] {
+            let out = try runner.run(script, arguments: [candidate, account ?? "", toMailbox])
+            if out == "ok" { return true }
+            if out == "nodest" {
+                throw AppleError.notFound("destination mailbox '\(toMailbox)' not found in the message's account (for a nested mailbox use \"Parent/Child\").")
+            }
+        }
+        return false
+    }
+
+    private static let mailboxPathResolver = """
+
+    on resolveMailboxPath(acct, pathRaw)
+        tell application "Mail"
+            -- Use a PLURAL `whose` filter + count instead of `first mailbox … whose`. A `first …
+            -- whose` specifier for a non-matching name can evaluate lazily and hand back an
+            -- unresolved reference rather than raising, which would make an enclosing `try` a
+            -- no-op: exact-first would then "succeed" for every input, the nesting loop below
+            -- would be dead code, and the caller would get the opaque Mail error this resolver
+            -- exists to replace. `count of` forces resolution now, so the branch is real.
+            set hits to (mailboxes of acct whose name is pathRaw)
+            if (count of hits) > 0 then return (item 1 of hits)
+            set AppleScript's text item delimiters to "/"
+            set parts to text items of pathRaw
+            set AppleScript's text item delimiters to ""
+            set mbx to missing value
+            repeat with i from 1 to (count of parts)
+                set seg to (item i of parts) as string
+                if seg is not "" then
+                    try
+                        if mbx is missing value then
+                            set segHits to (mailboxes of acct whose name is seg)
+                        else
+                            set segHits to (mailboxes of mbx whose name is seg)
+                        end if
+                        if (count of segHits) is 0 then return missing value
+                        set mbx to (item 1 of segHits)
+                    on error
+                        return missing value
+                    end try
+                end if
+            end repeat
+            return mbx
+        end tell
+    end resolveMailboxPath
+    """
+
     private static let moveScript = """
     on run argv
         set msg to my findMsg(item 1 of argv, item 2 of argv)
@@ -658,7 +1123,8 @@ public struct MailScript {
         set mbxName to item 3 of argv
         tell application "Mail"
             set acctOfMsg to account of (mailbox of msg)
-            set destMbx to (first mailbox of acctOfMsg whose name is mbxName)
+            set destMbx to my resolveMailboxPath(acctOfMsg, mbxName)
+            if destMbx is missing value then return "nodest"
             set mailbox of msg to destMbx
         end tell
         return "ok"
@@ -667,7 +1133,7 @@ public struct MailScript {
     /// Move a located message to another mailbox WITHIN its own account. Reversible.
     @discardableResult
     public func move(internetMessageID: String, accountName: String?, toMailbox: String) throws -> Bool {
-        try mutateLocated(MailScript.moveScript, id: internetMessageID, account: accountName, extra: [toMailbox])
+        try moveLocated(MailScript.moveScript, id: internetMessageID, account: accountName, toMailbox: toMailbox)
     }
 
     private static let gmailMoveScript = """
@@ -677,7 +1143,8 @@ public struct MailScript {
         set mbxName to item 3 of argv
         tell application "Mail"
             set acctOfMsg to account of (mailbox of msg)
-            set destMbx to (first mailbox of acctOfMsg whose name is mbxName)
+            set destMbx to my resolveMailboxPath(acctOfMsg, mbxName)
+            if destMbx is missing value then return "nodest"
             duplicate msg to destMbx
             delete msg
         end tell
@@ -693,7 +1160,7 @@ public struct MailScript {
     /// account, exactly like `move`. Reuses the shared `findMsg` locator via `mutateLocated`.
     @discardableResult
     public func gmailMove(internetMessageID: String, accountName: String?, toMailbox: String) throws -> Bool {
-        try mutateLocated(MailScript.gmailMoveScript, id: internetMessageID, account: accountName, extra: [toMailbox])
+        try moveLocated(MailScript.gmailMoveScript, id: internetMessageID, account: accountName, toMailbox: toMailbox)
     }
 
     private static let trashScript = """
@@ -910,13 +1377,18 @@ public struct MailScript {
             set tmbx to (first mailbox of account acctName whose name is mbxName)
             set total to count of (every message of tmbx)
             repeat while removed < maxN
-                set before to count of (every message of tmbx)
-                if before is 0 then exit repeat
+                -- NB: `beforeCount`, not `before` — `before` is an AppleScript reserved word
+                -- (relative-position keyword), so `set before to …` is a SYNTAX error and the
+                -- whole script fails to compile at runtime. Caught by the osacompile harness in
+                -- bats/helpers/applescript_syntax_check.py, which exists because these bodies are
+                -- Swift string literals no Swift-side test can see.
+                set beforeCount to count of (every message of tmbx)
+                if beforeCount is 0 then exit repeat
                 delete (item 1 of (every message of tmbx))
                 -- Count AFTER each delete and bail the moment one has no effect. On IMAP accounts
                 -- `delete` cannot expunge a message that is already in trash, so without this the
                 -- loop would spin maxN times and report maxN phantom erasures.
-                if (count of (every message of tmbx)) is greater than or equal to before then
+                if (count of (every message of tmbx)) is greater than or equal to beforeCount then
                     set stalled to "1"
                     exit repeat
                 end if
@@ -1784,52 +2256,6 @@ public struct MailScript {
         return "notfound"
     end run
 
-    on collectAddrs(theMsg)
-        set out to {}
-        tell application "Mail"
-            repeat with r in (to recipients of theMsg)
-                set end of out to (address of r)
-            end repeat
-            repeat with r in (cc recipients of theMsg)
-                set end of out to (address of r)
-            end repeat
-            repeat with r in (bcc recipients of theMsg)
-                set end of out to (address of r)
-            end repeat
-        end tell
-        return out
-    end collectAddrs
-
-    on firstDisallowed(addrs, allowList)
-        -- Returns the FIRST address not in allowList, or "" ONLY when every address is allowlisted
-        -- (the all-clear sentinel). SAFETY: empty / missing (`missing value`) addresses fail CLOSED —
-        -- they return the non-empty token "<empty-address>" (a block), NEVER "". This closes the
-        -- sentinel-collision fail-open where an empty-address recipient ordered before a real one
-        -- (`{"", "victim@x"}`) would hit `return ""` early and be read as all-clear. Because a real
-        -- address is compared only after the empty guard, no real address can ever be "", so "" is
-        -- unambiguously all-clear. The `try` also blocks (rather than crashes on) a recipient whose
-        -- `address` coerces with an error (e.g. `missing value`).
-        repeat with adr in addrs
-            set a to ""
-            try
-                set a to (adr as string)
-            end try
-            if a is "" then return "<empty-address>"
-            set okFlag to false
-            repeat with al in allowList
-                -- `considering diacriticals but ignoring case` = case-insensitive + diacritic-SENSITIVE,
-                -- matching Swift `guardOutbound`'s `.lowercased()` exact compare. Without it, AppleScript
-                -- `is` folds diacritics too, so this self-only gate would be strictly MORE permissive than
-                -- every other outbound path (e.g. allowlist `me@sélf.test` would match a draft to
-                -- `me@self.test`). Keeping the two comparators identical closes that divergence.
-                considering diacriticals but ignoring case
-                    if a is (al as string) then set okFlag to true
-                end considering
-            end repeat
-            if not okFlag then return a
-        end repeat
-        return ""
-    end firstDisallowed
     """
     /// Outcome of `sendDraft`. `.sent` carries the verified recipients the mail was dispatched to
     /// (the draft's OWN pre-set to/cc/bcc — the command never supplied them). `.sendError` carries
@@ -1875,7 +2301,9 @@ public struct MailScript {
     /// itself threw (Mail/network) AFTER recipient verification — reported honestly, never masked as
     /// `.notFound`.
     public func sendDraft(subject: String, prefix: String, account: String?, allowlist: [String]) throws -> DraftSendResult {
-        let out = try runner.run(MailScript.sendDraftScript, arguments: [
+        // `addressGuardHelpers` (collectAddrs + firstDisallowed) used to live inside this
+        // script's own literal; it is now the SHARED block appended to every dispatching script.
+        let out = try runner.run(MailScript.sendDraftScript + "\n" + MailScript.addressGuardHelpers, arguments: [
             subject, prefix, account ?? "", allowlist.joined(separator: MailScript.US),
         ])
         guard let result = DraftSendResult.parse(out, us: MailScript.US) else {
