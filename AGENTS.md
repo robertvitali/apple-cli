@@ -93,10 +93,17 @@ Swift 6. On a Command-Line-Tools-only Mac, use the swiftly toolchain (it bundles
 
 ```sh
 export PATH="$HOME/.swiftly/bin:$PATH"
-swift build
-swift test            # logic tier — swift-testing (import Testing), no TCC
-bats -r bats/         # CLI smoke tier — runs the built binary
+swift build --scratch-path .build-swiftly
+swift test  --scratch-path .build-swiftly   # logic tier — swift-testing (import Testing), no TCC
+bats -r bats/                               # CLI smoke tier — runs the built binary
 ```
+
+**Why `--scratch-path`:** `/usr/bin/swift` (Command Line Tools) and the swiftly toolchain are
+different Swift versions, and they cannot share a build cache — mixing them fails with
+`module compiled with Swift <a> cannot be imported by the Swift <b> compiler`, which looks like
+a broken diff but is only a stale cache. Keep the two out of each other's way: swiftly builds go
+to `.build-swiftly/` (gitignored), the CLT `swift build` keeps the default `.build/`. `bats` runs
+whichever binary was built last, so build before you run it.
 
 Three test tiers: **logic** (swift-testing, pure — CI), **CLI smoke** (bats,
 invokes the binary — CI + local), **live** (drives the real Apple frameworks

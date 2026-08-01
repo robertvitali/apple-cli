@@ -95,6 +95,15 @@ public final class EnvelopeIndex {
 
     // MARK: Mailbox resolution → message predicate
 
+    /// The ONE spelling of the "every mailbox" wildcard. `resolveMailboxes` is the authority on
+    /// what "All" selects, and the two disclosure fields that describe that selection
+    /// (`search`'s `system_folders_excluded`, bulk's `scope_note`) are only trustworthy while
+    /// they agree with it — so all three ask this function rather than re-testing the string.
+    /// A second accepted spelling added here can no longer desync them.
+    public static func isAllWildcard(_ mailboxName: String) -> Bool {
+        mailboxName.caseInsensitiveCompare("All") == .orderedSame
+    }
+
     /// Resolve an (account, mailbox-name) selector into direct + label ROWID sets.
     /// `mailboxName == "All"` (case-insensitive) → every real (source-NULL) mailbox of the
     /// account(s), so each message is counted exactly once. A specific name matches on the
@@ -106,7 +115,7 @@ public final class EnvelopeIndex {
     /// means, not about making those mailboxes unsearchable.
     public func resolveMailboxes(accountUUID: String?, mailboxName: String,
                                  includeSystemFolders: Bool = true) -> (direct: [Int], label: [Int]) {
-        let wantAll = mailboxName.caseInsensitiveCompare("All") == .orderedSame
+        let wantAll = EnvelopeIndex.isAllWildcard(mailboxName)
         var direct: [Int] = [], label: [Int] = []
         for m in mailboxes {
             if let uuid = accountUUID, m.url.accountID != uuid { continue }

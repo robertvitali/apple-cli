@@ -96,6 +96,11 @@ public struct MailMessagesResult: Encodable {
     public let has_more: Bool?
     public let next_offset: Int?
     public let sort: String?
+    /// True when a `mailbox: "All"` query dropped the MCP B `SKIP_FOLDERS` system mailboxes.
+    /// Without this the narrowing is INVISIBLE to a machine consumer: pagination stays internally
+    /// consistent (count and has_more share one filter), so nothing else in the envelope reveals
+    /// that ~2k messages were excluded from "All". nil when the query was not an "All" sweep.
+    public var system_folders_excluded: Bool? = nil
 }
 
 public struct MailMessageResult: Encodable {

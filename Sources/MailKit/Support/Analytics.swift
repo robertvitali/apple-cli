@@ -66,6 +66,11 @@ public enum Analytics {
         public let read_pct: Double
         public let top_senders: [TopSender]?
         public let mailbox_breakdown: [MailboxBreakdown]?
+        /// Whether MCP B's SKIP_FOLDERS were excluded from these counts. Analytics is a
+        /// counts-only payload, so silent filtering here is indistinguishable from a sparse
+        /// store — worse than on `search`, where the caller at least sees the rows. Mirrors
+        /// `MailMessagesResult.system_folders_excluded`; `--include-system-folders` flips it.
+        public var system_folders_excluded: Bool? = nil
     }
 
     public struct NeedsResponseItem: Encodable {
@@ -149,6 +154,7 @@ public enum Analytics {
     // MARK: Statistics
 
     public static func statistics(_ rows: [Row], scope: String, account: String, daysBack: Int,
+                                  systemFoldersExcluded: Bool? = nil,
                                   mailboxPath: (Int) -> String) -> StatisticsResult {
         let total = rows.count
         let unread = rows.filter { !$0.read }.count
@@ -174,7 +180,8 @@ public enum Analytics {
         }
         return StatisticsResult(account: account, scope: scope, days_back: daysBack, total: total,
                                 unread: unread, read: read, flagged: flagged, with_attachments: withAtt,
-                                unread_pct: unreadPct, read_pct: readPct, top_senders: top, mailbox_breakdown: breakdown)
+                                unread_pct: unreadPct, read_pct: readPct, top_senders: top, mailbox_breakdown: breakdown,
+                                system_folders_excluded: systemFoldersExcluded)
     }
 
     // MARK: Needs response
@@ -334,8 +341,21 @@ extension Analytics {
     ]
 
     public static func isSkippedSystemFolder(_ mailboxPath: String) -> Bool {
-        guard let leaf = mailboxPath.split(separator: "/").last else { return false }
-        return skippedSystemFolders.contains(leaf.lowercased())
+        guard let leaf = systemFolderLeaf(mailboxPath) else { return false }
+        return skippedSystemFolders.contains(leaf)
+    }
+
+    /// The lowercased final path component — the ONE leaf rule. `isSkippedSystemFolder` and the
+    /// Drafts check in `mailboxScopeNote` both go through this rather than re-deriving it, so a
+    /// change to how a leaf is extracted cannot make the two disagree.
+    public static func systemFolderLeaf(_ mailboxPath: String) -> String? {
+        mailboxPath.split(separator: "/").last.map { $0.lowercased() }
+    }
+
+    /// Drafts holds UNSENT composes, so a mutation targeting it is qualitatively different from
+    /// re-filing received mail — `mailboxScopeNote` calls this out specifically.
+    public static func isDraftsMailbox(_ mailboxPath: String) -> Bool {
+        systemFolderLeaf(mailboxPath) == "drafts"
     }
 }
 

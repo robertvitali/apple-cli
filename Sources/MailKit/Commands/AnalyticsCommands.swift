@@ -100,7 +100,8 @@ struct AnalyticsStats: ParsableCommand {
                 rows = rows.filter { ($0.senderAddress?.lowercased().contains(needle) ?? false)
                                    || ($0.senderName?.lowercased().contains(needle) ?? false) }
             }
-            let result = Analytics.statistics(rows, scope: scope, account: account, daysBack: days) {
+            let result = Analytics.statistics(rows, scope: scope, account: account, daysBack: days,
+                                              systemFoldersExcluded: !includeSystemFolders) {
                 ctx.index.mailbox(forRowid: $0)?.url.path ?? "?"
             }
             try Output.emit(tool: "mail", data: result)

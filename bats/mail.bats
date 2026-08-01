@@ -965,15 +965,138 @@ import json,sys; print(json.load(sys.stdin)['data']['messages'][0]['subject'][:2
   echo "$output" | grep -q 'control characters'
 }
 
-# MCP B excludes SKIP_FOLDERS from a broad "All" sweep (tools/search.py + constants.py), so an
+# Count result rows whose mailbox LEAF is one of MCP B's SKIP_FOLDERS. Reads a JSON envelope on
+# stdin. File-scope so every exclusion test asserts against the same definition of "system
+# folder" instead of hand-copying the list per test.
+count_sys_folder_rows() {
+  python3 -c "
+import json,sys
+SKIP={'trash','junk','junk email','deleted items','sent','sent items','sent messages',
+      'drafts','spam','deleted messages'}
+msgs=json.load(sys.stdin)['data']['messages']
+print(sum(1 for m in msgs if (m.get('mailbox') or '').split('/')[-1].lower() in SKIP))"
+}
+
+# Guard against a malformed probe silently becoming a skip: `[ "$x" -gt 0 ]` on non-numeric
+# input exits 2, and on the left of `||` that takes the skip branch instead of failing.
+assert_numeric() {
+  [[ "$1" =~ ^[0-9]+$ ]] || {
+    echo "probe returned non-numeric: '$1'" >&2
+    return 1
+  }
+}
+
+# MCP B excludes SKIP_FOLDERS from a broad "All" sweep (search.py:236, All-branch only), so an
 # All-search used to return Trash/Sent/Junk hits the oracle never would. The exclusion changes
 # only what "All" MEANS — naming a system mailbox explicitly must still search it.
+#
+# Assert from DATA, not from counts. A count comparison (`b > a`) degrades to a skip when the
+# store has no system mail, and `system_folders_excluded` is computed from the CLI FLAG rather
+# than from the query, so a flag-echo assertion cannot detect the exclusion silently ceasing to
+# apply. Counting actual system-folder rows in the payload can.
 @test "mail search --mailbox All excludes SKIP_FOLDERS unless --include-system-folders" {
   require_index
-  a=$("$BIN" mail search --mailbox All --limit 0 | python3 -c "import json,sys;print(json.load(sys.stdin)['data']['count'])")
-  b=$("$BIN" mail search --mailbox All --limit 0 --include-system-folders | python3 -c "import json,sys;print(json.load(sys.stdin)['data']['count'])")
-  [ "$b" -ge "$a" ]
-  [ "$b" -gt "$a" ] || skip "store has no mail in system folders"
+  # Store-capability probe: are there any system-folder rows to exclude in the first place?
+  with_sys=$("$BIN" mail search --mailbox All --limit 0 --include-system-folders | count_sys_folder_rows)
+  assert_numeric "$with_sys"
+  [ "$with_sys" -gt 0 ] || skip "store has no mail in system folders"
+  # With the exclusion ON, none of them may survive.
+  without_sys=$("$BIN" mail search --mailbox All --limit 0 | count_sys_folder_rows)
+  assert_numeric "$without_sys"
+  [ "$without_sys" -eq 0 ]
+}
+
+# The exclusion redefines what "All" means; it must NOT make a system mailbox unsearchable.
+@test "mail search --mailbox Drafts still returns Drafts despite the All-sweep exclusion" {
+  require_index
+  n=$("$BIN" mail search --mailbox Drafts --limit 0 | python3 -c "import json,sys;print(json.load(sys.stdin)['data']['count'])")
+  assert_numeric "$n"
+  [ "$n" -gt 0 ] || skip "store has no Drafts"
+}
+
+# The exclusion is invisible in the payload unless it is stated. A caller that sees N results
+# for `--mailbox All` has no way to know N was filtered; `system_folders_excluded` puts it in
+# the machine contract. Only meaningful for an "All" sweep — null for a named mailbox.
+@test "mail search discloses system_folders_excluded on an All sweep only" {
+  require_index
+  a=$("$BIN" mail search --mailbox All --limit 1 | python3 -c "import json,sys;print(json.load(sys.stdin)['data'].get('system_folders_excluded'))")
+  [ "$a" = "True" ]
+  b=$("$BIN" mail search --mailbox All --limit 1 --include-system-folders | python3 -c "import json,sys;print(json.load(sys.stdin)['data'].get('system_folders_excluded'))")
+  [ "$b" = "False" ]
+  c=$("$BIN" mail search --mailbox INBOX --limit 1 | python3 -c "import json,sys;print(json.load(sys.stdin)['data'].get('system_folders_excluded'))")
+  [ "$c" = "None" ]
+}
+
+# MCP B applies SKIP_FOLDERS in `_search_mail_records` (tools/search.py:167, skip literal at
+# :236, All-only) and in tools/analytics.py:139 — NOT in get_email_thread, which lives in the
+# SAME module at tools/search.py:595 and builds its own mailbox script with no skip. Excluding
+# there dropped the account's own Sent replies out of their own conversation: a silent
+# correctness loss, not parity.
+#
+# Assert the BEHAVIOR, not a --help proxy, and establish a CONTROL first.
+#
+# Two earlier versions of this test both passed while the bug was live:
+#   1. `status -eq 0` + "--help lacks the flag" — vacuous, since a nonexistent subject also
+#      exits 0 with count 0.
+#   2. "require >=1 system-folder member, else skip" — the filter being ON produces zero such
+#      members, which is indistinguishable from a store that genuinely has none, so it SKIPPED
+#      instead of failing. Verified by reintroducing `f.includeSystemFolders = false`.
+#
+# The fix is a control: ask `search --include-system-folders` (a DIFFERENT code path) whether
+# the store contains system-folder messages for this subject. Only skip when the control says
+# there are none; otherwise `thread` MUST surface them too.
+@test "mail thread does NOT exclude system folders (oracle B applies SKIP_FOLDERS only to search)" {
+  require_index
+  # CONTROL: does this store have system-folder mail for the subject at all?
+  control=$("$BIN" mail search --mailbox All --subject "Congratulations" --limit 0 \
+              --include-system-folders | count_sys_folder_rows)
+  assert_numeric "$control"
+  [ "$control" -gt 0 ] || skip "store has no 'Congratulations' mail in system folders"
+
+  run "$BIN" mail thread --subject "Congratulations" --limit 0
+  [ "$status" -eq 0 ]
+  actual=$(echo "$output" | count_sys_folder_rows)
+  assert_numeric "$actual"
+  # The control proved they exist; thread excluding them is the regression.
+  [ "$actual" -gt 0 ]
+}
+
+# scope_note describes a MAILBOX SWEEP. The explicit-ids path never consults the mailbox
+# (resolveTargets returns before f.mailboxName is set), so a note there would contradict
+# `filter_based: false` in the same envelope. Nothing else in the suite covers the gating —
+# the swift-testing cases exercise mailboxScopeNote(_:) in isolation, which knows nothing
+# about filterBased.
+@test "mail bulk scope_note is suppressed on the explicit-ids path" {
+  require_index
+  id=$("$BIN" mail search --mailbox INBOX --limit 1 \
+        | python3 -c "import json,sys;m=json.load(sys.stdin)['data']['messages'];print(m[0]['id'] if m else '')")
+  [ -n "$id" ] || skip "store has no INBOX mail to address by id"
+  # --source All would produce a note on the filter-based path; by id it must not.
+  run "$BIN" mail move "$id" --source All --to Archive
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"filter_based" *: *false'
+  ! echo "$output" | grep -q '"scope_note"'
+}
+
+# Reads and mutations disagree about what "All" means: search excludes system folders by default,
+# a bulk mutation deliberately does not (a `delete --permanent` target is in Trash by definition).
+# The divergence is real and load-bearing, so every bulk envelope states it rather than leaving
+# the operator to infer scope from a preview that showed fewer messages.
+@test "mail bulk previews disclose the All-scope divergence via scope_note" {
+  require_index
+  for sub in "move --match-subject apple-cli-test-zzz --source All --to Archive" \
+             "mark --read --match-subject apple-cli-test-zzz --mailbox All" \
+             "flag --match-subject apple-cli-test-zzz --mailbox All" \
+             "delete --match-subject apple-cli-test-zzz --mailbox All"; do
+    run "$BIN" mail $sub
+    [ "$status" -eq 0 ]
+    echo "$output" | grep -q '"scope_note"'
+    echo "$output" | grep -q 'INCLUDES Trash/Junk/Sent/Drafts/Spam'
+  done
+  # A named mailbox has no divergence to report.
+  run "$BIN" mail move --match-subject apple-cli-test-zzz --source INBOX --to Archive
+  [ "$status" -eq 0 ]
+  ! echo "$output" | grep -q '"scope_note"'
 }
 
 @test "mail search --mailbox Trash still searches Trash explicitly" {

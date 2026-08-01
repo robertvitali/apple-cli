@@ -27,7 +27,7 @@ struct SearchCommand: ParsableCommand {
     @Option(name: .long, help: "Sort order: date_desc (default) or date_asc.") var sort: String = "date_desc"
     @Flag(name: .long, inversion: .prefixedNo, help: "Include the indexed body preview (default on).") var content = true
     @Option(name: .long, help: "Truncate each included body preview to N chars (0 = unlimited; MCP B max_content_length).") var maxContentLength: Int?
-    @Flag(name: .long, help: "With --mailbox All, also sweep Trash/Junk/Sent/Drafts/Spam (MCP B excludes them; CLI extra).") var includeSystemFolders = false
+    @Flag(name: .long, help: "With --mailbox All, also sweep the system mailboxes MCP B skips. Excluded by leaf name: Trash, Junk, Junk Email, Deleted Items, Deleted Messages, Sent, Sent Items, Sent Messages, Drafts, Spam. Provider-specific names outside that list (notably Gmail's '[Gmail]/Sent Mail' and '[Gmail]/All Mail') are NOT excluded.") var includeSystemFolders = false
 
     func run() throws {
         try runGuarded(tool: "mail") {
@@ -83,10 +83,15 @@ struct SearchCommand: ParsableCommand {
             let total = try ctx.index.countMessages(f)
             // Empty page must NOT report has_more (else a paginating client loops on the same offset).
             let hasMore = !messages.isEmpty && (offset + messages.count < total)
+            let isAllSweep = EnvelopeIndex.isAllWildcard(mailbox)
             let result = MailMessagesResult(
                 account: account, mailbox: mailbox, messages: messages, count: messages.count,
                 offset: offset, limit: limit, has_more: hasMore,
-                next_offset: hasMore ? offset + messages.count : nil, sort: sort)
+                next_offset: hasMore ? offset + messages.count : nil, sort: sort,
+                // Disclose the narrowing: it is otherwise undetectable from the envelope, and this
+                // is the surface an operator previews a bulk mutation with — see the scope note
+                // BulkPreview emits for "All".
+                system_folders_excluded: isAllSweep ? !includeSystemFolders : nil)
             try emitMessages(result, json: global.json)
         }
     }
@@ -236,7 +241,13 @@ struct ThreadCommand: ParsableCommand {
     @Option(name: .long, help: "Account name or UUID (for subject-based lookup).") var account: String?
     @Option(name: .long, help: "Mailbox for subject-based lookup (default All).") var mailbox: String = "All"
     @Option(name: .long, help: "Max messages (default 50; 0 = the complete thread).") var limit: Int = 50
-    @Flag(name: .long, help: "With --mailbox All, also sweep Trash/Junk/Sent/Drafts/Spam (MCP B excludes them; CLI extra).") var includeSystemFolders = false
+    // NO --include-system-folders here, deliberately. MCP B applies SKIP_FOLDERS only in
+    // `search_emails` and analytics (tools/search.py `_search_mail_records`); its
+    // `get_email_thread` has NO skip script and iterates every mailbox. Excluding here was both a
+    // parity DROP and wrong on its own terms: Sent/Sent Messages/Drafts hold the operator's OWN
+    // half of the conversation, so a "thread" missing your replies is not the thread. It also made
+    // the two addressing modes disagree — the by-id conversation branch never applied the flag, so
+    // the same thread returned 10 by id and 9 by subject.
     @Flag(name: .long, help: "Thread by RFC References/In-Reply-To headers (MCP A get_thread) instead of Apple's conversation grouping.") var references = false
 
     func run() throws {
@@ -285,7 +296,14 @@ struct ThreadCommand: ParsableCommand {
                     throw AppleError.validation("--subject '\(subject)' is only reply/forward prefixes; provide an actual subject keyword.")
                 }
                 f.mailboxName = mailbox; f.subjectContains = cleaned
-                f.includeSystemFolders = includeSystemFolders
+                // EXPLICIT, same reasoning as resolveTargets: a thread must span EVERY mailbox.
+                // Oracle B applies SKIP_FOLDERS in `_search_mail_records` (tools/search.py:236,
+                // All-only) and analytics, but `get_email_thread` (tools/search.py:595) builds
+                // its own script with no skip. Excluding here dropped the account's own Sent
+                // replies out of their own conversation (measured 34 → 24 on this store). The
+                // struct already defaults true, but leaving that implicit is what let the
+                // regression land silently once — a future default flip must not re-break it.
+                f.includeSystemFolders = true
                 f.sortAscending = true; f.limit = effectiveLimit
                 let rows = try ctx.index.queryMessages(f)
                 messages = rows.map { ctx.decodeSummary($0) }

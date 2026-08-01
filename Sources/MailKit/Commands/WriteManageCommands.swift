@@ -49,6 +49,14 @@ func resolveTargets(ctx: MailContext, ids: [String], match: MatchOptions, accoun
     var f = EnvelopeIndex.MessageFilters()
     if let account { f.accountUUID = try ctx.requireAccountUUID(account) }
     f.mailboxName = mailbox
+    // EXPLICIT, and load-bearing: bulk mutation scope keeps the INCLUSIVE meaning of "All".
+    // `delete --permanent` resolves its mailbox to "All" and its targets are BY DEFINITION in
+    // Trash, so excluding system folders here would silently make it match nothing. `search`
+    // defaults to EXCLUDING them for MCP B parity, so the two surfaces genuinely differ — the
+    // BulkPreview note below discloses that, because `search` is what an operator previews a
+    // mutation with. Relying on the struct's default here would make a future default flip
+    // silently break the irreversible path.
+    f.includeSystemFolders = true
     // --all leaves subject/sender unset → the query returns every message in the mailbox (bounded
     // by --max). subject keywords match ANY (MCP B subject_keywords OR-semantics).
     f.subjectContainsAny = match.matchSubject
@@ -58,6 +66,34 @@ func resolveTargets(ctx: MailContext, ids: [String], match: MatchOptions, accoun
     f.limit = match.max
     let rows = try ctx.index.queryMessages(f)
     return (rows.map { ctx.decodeSummary($0) }, true)
+}
+
+/// Scope warning for a FILTER-BASED bulk mutation. Two cases warrant one:
+///
+/// 1. Scope "All" means something WIDER here than what `search --mailbox All` shows. `search`
+///    excludes MCP B's SKIP_FOLDERS by default; bulk mutation deliberately does not
+///    (`delete --permanent` must reach Trash). An operator who previews with `search` and then
+///    runs the mutation would otherwise be surprised by the extra targets — on this store the
+///    two differ by ~1.6k messages.
+/// 2. The scope IS a system mailbox. Drafts is the sharp edge: its entries are UNSENT composes,
+///    so moving one out of Drafts removes it from Mail's compose surface. That is a different
+///    kind of operation from re-filing a received message and deserves saying out loud, even
+///    though it is not a divergence from `search`.
+///
+/// Returns nil for an ordinary named mailbox — and callers MUST pass nil on the explicit-ids
+/// path, where `resolveTargets` never consults the mailbox at all (see the call sites): a note
+/// describing a sweep that did not happen contradicts `filter_based: false` in the same envelope.
+func mailboxScopeNote(_ mailbox: String) -> String? {
+    if EnvelopeIndex.isAllWildcard(mailbox) {
+        return "scope note: \"All\" here INCLUDES Trash/Junk/Sent/Drafts/Spam, unlike `search --mailbox All`, which excludes them by default. Preview with the same --account/--match filters plus `--mailbox All --include-system-folders` to see the set this covers."
+    }
+    if Analytics.isSkippedSystemFolder(mailbox) {
+        let extra = Analytics.isDraftsMailbox(mailbox)
+            ? " Drafts entries are UNSENT composes — moving one out of Drafts removes it from Mail's compose surface."
+            : ""
+        return "scope note: this targets the system mailbox '\(mailbox)', which `search --mailbox All` excludes by default, so an All-scoped preview would not have shown these.\(extra)"
+    }
+    return nil
 }
 
 struct BulkPreview: Encodable {
@@ -71,6 +107,10 @@ struct BulkPreview: Encodable {
     let note: String?
     var applied: [String]? = nil     // ids the live mutation applied to (executed path)
     var not_found: [String]? = nil   // ids Mail could not locate (executed path)
+    /// Set when the bulk scope is "All", stating that it is WIDER than `search --mailbox All`.
+    /// Emitted on every bulk envelope so the difference is visible in the machine contract, not
+    /// only in prose the operator may not read.
+    var scope_note: String? = nil
     /// `delete --permanent` only: ids that WERE found in trash but survived the erase, because
     /// Mail's AppleScript cannot expunge on this account type. Machine-readable so a caller can
     /// distinguish "couldn't find it" from "found it and could not erase it" without parsing prose.
@@ -91,10 +131,11 @@ struct MoveCommand: ParsableCommand {
         try runGuarded(tool: "mail") {
             let ctx = try MailContext()
             let (msgs, filterBased) = try resolveTargets(ctx: ctx, ids: ids, match: match, account: account, mailbox: source)
+            let scopeNote = filterBased ? mailboxScopeNote(source) : nil
             let detail = ["to": to, "gmail_mode": String(gmailMode)]
             guard global.willExecute else {
                 try Output.emit(tool: "mail", data: BulkPreview(action: "move", matched: msgs.count, filter_based: filterBased,
-                    dry_run: true, executed: false, messages: msgs, detail: detail, note: nil)); return
+                    dry_run: true, executed: false, messages: msgs, detail: detail, note: nil, applied: nil, not_found: nil, scope_note: scopeNote)); return
             }
             // --gmail-mode routes to gmailMove (Gmail copy+delete label semantics: duplicate to the
             // destination, then delete the original to Trash); plain move otherwise. BOTH go through
@@ -109,7 +150,7 @@ struct MoveCommand: ParsableCommand {
                 return try script.move(internetMessageID: imid, accountName: acct, toMailbox: to)
             }
             try Output.emit(tool: "mail", data: BulkPreview(action: "move", matched: msgs.count, filter_based: filterBased,
-                dry_run: false, executed: true, messages: msgs, detail: detail, note: notLocatedNote(notFound), applied: applied, not_found: notFound))
+                dry_run: false, executed: true, messages: msgs, detail: detail, note: notLocatedNote(notFound), applied: applied, not_found: notFound, scope_note: scopeNote))
         }
     }
 }
@@ -130,17 +171,19 @@ struct MarkCommand: ParsableCommand {
             guard let markRead = target else { throw AppleError.validation("specify --read or --unread.") }
             let ctx = try MailContext()
             let (msgs, filterBased) = try resolveTargets(ctx: ctx, ids: ids, match: match, account: account, mailbox: mailbox)
+            let scopeNote = filterBased ? mailboxScopeNote(mailbox) : nil
             let action = markRead ? "mark_read" : "mark_unread"
             guard global.willExecute else {
                 try Output.emit(tool: "mail", data: BulkPreview(action: action, matched: msgs.count, filter_based: filterBased,
-                    dry_run: true, executed: false, messages: msgs, detail: [:], note: nil)); return
+                    dry_run: true, executed: false, messages: msgs, detail: [:], note: nil,
+                    applied: nil, not_found: nil, scope_note: scopeNote)); return
             }
             let script = MailScript()
             let (applied, notFound) = try executeMessageMutation(msgs, testMode: global.testMode) { imid, acct in
                 try script.setRead(internetMessageID: imid, accountName: acct, read: markRead)
             }
             try Output.emit(tool: "mail", data: BulkPreview(action: action, matched: msgs.count, filter_based: filterBased,
-                dry_run: false, executed: true, messages: msgs, detail: [:], note: notLocatedNote(notFound), applied: applied, not_found: notFound))
+                dry_run: false, executed: true, messages: msgs, detail: [:], note: notLocatedNote(notFound), applied: applied, not_found: notFound, scope_note: scopeNote))
         }
     }
 }
@@ -162,6 +205,7 @@ struct FlagCommand: ParsableCommand {
             }
             let ctx = try MailContext()
             let (msgs, filterBased) = try resolveTargets(ctx: ctx, ids: ids, match: match, account: account, mailbox: mailbox)
+            let scopeNote = filterBased ? mailboxScopeNote(mailbox) : nil
             // Oracle parity: `flag_color="none"` IS the unflag spelling — oracle A's
             // `flag_message` derives `flagged_status = flag_color != "none"` (mail_connector.py)
             // and maps "none" to flag index -1. So `--color none` unflags exactly like `--unflag`;
@@ -181,7 +225,7 @@ struct FlagCommand: ParsableCommand {
             let detail = ["color": colorName, "flag_color": colorName]
             guard global.willExecute else {
                 try Output.emit(tool: "mail", data: BulkPreview(action: act, matched: msgs.count, filter_based: filterBased,
-                    dry_run: true, executed: false, messages: msgs, detail: detail, note: nil)); return
+                    dry_run: true, executed: false, messages: msgs, detail: detail, note: nil, applied: nil, not_found: nil, scope_note: scopeNote)); return
             }
             // clearing (--unflag or --color none) → flagged:false; otherwise flagged:true with the
             // resolved color index (red default).
@@ -192,7 +236,7 @@ struct FlagCommand: ParsableCommand {
                 try script.setFlag(internetMessageID: imid, accountName: acct, flagged: flagged, colorIndex: colorIndex)
             }
             try Output.emit(tool: "mail", data: BulkPreview(action: act, matched: msgs.count, filter_based: filterBased,
-                dry_run: false, executed: true, messages: msgs, detail: detail, note: notLocatedNote(notFound), applied: applied, not_found: notFound))
+                dry_run: false, executed: true, messages: msgs, detail: detail, note: notLocatedNote(notFound), applied: applied, not_found: notFound, scope_note: scopeNote))
         }
     }
 }
@@ -265,6 +309,7 @@ struct DeleteCommand: ParsableCommand {
             let effectiveMailbox = mailbox ?? (permanent ? "All" : "INBOX")
             let ctx = try MailContext()
             let (msgs, filterBased) = try resolveTargets(ctx: ctx, ids: ids, match: match, account: account, mailbox: effectiveMailbox)
+            let scopeNote = filterBased ? mailboxScopeNote(effectiveMailbox) : nil
             if permanent && global.willExecute {
                 // Re-check the label against the CANONICAL prefix (ignoring any APPLE_TEST_SANDBOX
                 // override) so widening that env var cannot widen what an erase may touch.
@@ -277,7 +322,7 @@ struct DeleteCommand: ParsableCommand {
                 : nil
             guard global.willExecute else {
                 try Output.emit(tool: "mail", data: BulkPreview(action: action, matched: msgs.count, filter_based: filterBased,
-                    dry_run: true, executed: false, messages: msgs, detail: detail, note: previewNote)); return
+                    dry_run: true, executed: false, messages: msgs, detail: detail, note: previewNote, applied: nil, not_found: nil, scope_note: scopeNote)); return
             }
             // Both paths run through executeMessageMutation, whose all-or-nothing label gate
             // (test-mode + `apple-cli-test` subject) validates EVERY target before mutating ANY —
@@ -322,7 +367,7 @@ struct DeleteCommand: ParsableCommand {
             }
             try Output.emit(tool: "mail", data: BulkPreview(action: action, matched: msgs.count, filter_based: filterBased,
                 dry_run: false, executed: true, messages: msgs, detail: detail,
-                note: note, applied: applied, not_found: notFound,
+                note: note, applied: applied, not_found: notFound, scope_note: scopeNote,
                 expunge_unsupported: unsupported.isEmpty ? nil : unsupported))
         }
     }

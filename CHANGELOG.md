@@ -110,6 +110,42 @@ was one item away from parity were understated.
   CLI counted them, so every volume metric diverged. Verified live against the oracle on
   2026-07-30 (7-day window): the CLI over-counted before the filter and matches exactly after — with unread, read,
   flagged and with_attachments all matching too. `--include-system-folders` opts back in.
+- **BREAKING (behavior):** `search --mailbox All` now EXCLUDES the same `SKIP_FOLDERS` set by
+  default, matching oracle B's `search_emails`. An `All` sweep that used to surface Trash, Junk,
+  Sent, Drafts and Spam hits now does not; pass `--include-system-folders` for the old set.
+  Naming a system mailbox explicitly (`--mailbox Trash`) is unaffected — the change is only to
+  what "All" MEANS. The filter matches on the mailbox LEAF name, so Gmail's `[Gmail]/Trash`,
+  `[Gmail]/Spam` and `[Gmail]/Drafts` are covered, but `[Gmail]/All Mail` is not a system folder
+  in either oracle's list and is still searched.
+- The exclusion is now disclosed in the payload: `search` emits `system_folders_excluded`
+  (`true`/`false` on an `All` sweep, absent otherwise), and `analytics stats` emits the same key
+  (always present — its exclusion is not `All`-scoped). Silent filtering is indistinguishable
+  from an empty store, so the count alone was not enough for a caller to trust; on `analytics`
+  the counts ARE the whole payload, so it mattered more there. Under `--text`, `search` prints
+  the same warning to stderr next to the pagination hint.
+- **`analytics stats --scope mailbox_breakdown` is a KNOWN DEFECT, not parity** (newly
+  documented, fix tracked separately). Oracle B applies the skip per-scope — `account_overview`
+  (analytics.py:170) and `sender_stats` (:314) yes, `mailbox_breakdown` (:351) **no** — and that
+  scope targets ONE named mailbox (`mailbox_param = escaped_mailbox if mailbox else "INBOX"`).
+  The CLI forces `All` for it and filters anyway, so `--mailbox` is silently discarded and
+  per-mailbox stats for a system folder are unreachable by any flag combination. Verified live:
+  `--scope mailbox_breakdown --mailbox Trash --days 0` returns every non-system mailbox with no
+  Trash row.
+- **`thread` deliberately does NOT apply the exclusion.** Oracle B applies `SKIP_FOLDERS` in
+  `search_emails` and the analytics tools only — `get_email_thread` has no such filter. Excluding
+  there drops the operator's own `Sent` replies out of their own conversation (measured: 34
+  thread lost a quarter of its messages), which is a correctness loss, not parity.
+- **Bulk mutations keep the WIDE meaning of `All`, and now say so.** `move`/`mark`/`flag`/`delete`
+  resolve `All` across every mailbox INCLUDING the system folders — `delete --permanent` targets
+  messages that are in Trash by definition, so narrowing the mutation scope would break it. That
+  makes reads and mutations disagree about what `All` means, so a bulk envelope now carries a
+  `scope_note` stating the divergence. It is emitted only on the FILTER-BASED path: an
+  explicit-ids mutation never consults the mailbox, so a sweep note there would contradict
+  `filter_based: false` in the same envelope.
+- `scope_note` also fires when the scope IS a system mailbox, even though that is not a
+  divergence from `search`. **Drafts is the reason**: its entries are UNSENT composes, so moving
+  one out of Drafts removes it from Mail's compose surface — a different kind of operation from
+  re-filing a received message, and worth saying out loud before an `--execute`.
 - `analytics stats` validates `--scope` and requires `--sender` for `sender_stats`; it previously
   accepted an unknown scope silently and reported whole-account numbers as though they were one
   sender's. `export --scope` is validated too — an unknown scope used to fall through and export

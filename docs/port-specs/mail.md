@@ -96,6 +96,64 @@ their irreversibility and two deliberate divergences from oracle B, both in the 
 - **Confirmation model:** A wraps send/forward/rule-delete/rule-update in **MCP elicitation** (interactive confirm); B uses `dry_run`/`confirm_empty`/`apply_to_all` **safety caps**. → Port must reproduce BOTH as `--confirm`/`--dry-run` gates.
 - **Search flags:** B's search is a superset EXCEPT A's `is_flagged` filter → fold in.
 
+### `SKIP_FOLDERS` scope — where the exclusion applies, and where it must NOT (ported 2026-07-31)
+
+Oracle B declares a `SKIP_FOLDERS` list in `constants.py` (Trash / Junk / Junk Email / Deleted
+Items / Sent / Sent Items / Sent Messages / Drafts / Spam / Deleted Messages), but **where it is
+applied is per-op, and the list has two independent copies**. Re-verify against BOTH sites:
+
+- `tools/search.py:_search_mail_records` (line 167) **inlines an identical literal** at line 236
+  and never imports the constant — and only inside the `if mailbox == "All":` branch.
+- `tools/analytics.py:139` is the *only* importer of `SKIP_FOLDERS`, and it interpolates the
+  condition into just two of the three `get_statistics` scopes (see the table).
+- `core.py:228 skip_folders_condition()` looks like the shared helper but has **zero callers** —
+  dead code. Pinning a parity check to it, or to `constants.py` alone, will mislead.
+
+Which surfaces filter is therefore a per-op fact to be copied, not a global policy to be
+generalized, and getting it wrong is a correctness loss in both directions:
+
+| Surface | Excludes `SKIP_FOLDERS`? | Why |
+|---|---|---|
+| `search --mailbox All` | **Yes**, by default (`--include-system-folders` opts back in) | Oracle-B parity (search.py:236, All-branch only). An `All` sweep that returned Trash/Junk/Sent hits was returning results the oracle never would. |
+| `search --mailbox <named>` | No | The exclusion redefines what `All` MEANS; naming a system mailbox explicitly must still search it. |
+| `analytics stats --scope account_overview` | **Yes**, by default | Oracle applies it at analytics.py:170. Verified live: 7-day window: over-counted before, exact match after. |
+| `analytics stats --scope sender_stats` | **Yes**, by default — but see the `--mailbox` defect | Oracle applies the skip at analytics.py:314. **Oracle IGNORES `mailbox` for this scope** — it sweeps `every mailbox of targetAccount` (analytics.py:303) and `escaped_mailbox` is referenced at only two places in the whole file (128 assignment, 352 `mailbox_breakdown`). The CLI instead scopes to `--mailbox` (default `INBOX`), so it reports INBOX-only sender stats where the oracle reports account-wide — a **known defect / parity DROP**, tracked with the `mailbox_breakdown` fix. |
+| `analytics stats --scope mailbox_breakdown` | **Oracle: NO.** CLI currently: yes — **known defect** | analytics.py:351-385 applies NO skip and targets ONE named mailbox (`mailbox_param = escaped_mailbox if mailbox else "INBOX"`). The CLI forces `mbx = "All"` for this scope and filters anyway, so `--mailbox` is silently discarded and per-mailbox stats for a system folder are unreachable by any flag combination. That is a DROPPED oracle capability. Tracked for its own fix; do not read this row as parity. |
+| `analytics top-senders` / `needs-response` / `awaiting-reply` / `overview` | **No** | No oracle counterpart applies the skip, and the CLI applies none either. |
+
+**Third known analytics defect — the exclusion is NOT `All`-scoped there.** `search` nests the
+check inside `if wantAll` (EnvelopeIndex.swift:122-123), so naming a system mailbox explicitly
+still searches it. `AnalyticsCommands.swift:92-97` has no `isAllWildcard` guard and filters by
+leaf name unconditionally on `!includeSystemFolders`. Measured live on iCloud:
+`analytics stats --scope sender_stats --mailbox Drafts` → `total=0` and `--mailbox Trash` → `0`,
+while `search --mailbox Drafts` → 16. So per-mailbox analytics for ANY system folder is
+unreachable without `--include-system-folders`, and the two read surfaces answer the same
+question differently. Grouped with the other two analytics defects for a single fix.
+| `thread` | **No — deliberately** | `get_email_thread` lives in the SAME module as the filtered path — `tools/search.py:595` (there is no `tools/thread.py`) — and builds its own mailbox script with no skip. Excluding drops the operator's own `Sent` replies out of their own conversation: measured 34 → 24 messages, all 6 `Sent Messages` hits lost. Copying the filter here is a regression wearing parity's clothes. |
+| `move` / `mark` / `flag` / `delete` (bulk `All`) | **No — deliberately** | A mutation's `All` must stay wide: `delete --permanent` only ever targets messages already in Trash, so a narrowed scope would make it a permanent no-op. |
+
+**Leaf-name matching is a SUPERSET, not alignment.** Oracle B's `All` branch enumerates only
+top-level mailboxes (`every mailbox of targetAccount`, search.py:232) and compares with exact
+equality (`if mailboxName is skipFolder`), where `mailboxName` is the leaf (`name of
+currentMailbox`) — confirmed live, the oracle reports `Important` / `All Mail` / `INBOX`, never
+`[Gmail]/All Mail`. It therefore never reaches Gmail's nested `[Gmail]/*` at all. The CLI reads
+the flat Envelope Index, so it both reaches those mailboxes AND excludes the system ones among
+them by leaf name (`[Gmail]/Trash`, `[Gmail]/Spam`). Wider coverage plus consistent exclusion —
+an extra, and recorded as such.
+
+The `thread` and bulk rows mean **reads and mutations disagree about what `All` means**. That
+divergence is intentional but not self-evident, so both sides disclose it in the machine contract
+rather than in prose the caller may never read: `search` emits `system_folders_excluded`
+(`true`/`false` on an `All` sweep, absent for a named mailbox), `analytics stats` emits the same
+key (always present — its exclusion is not All-scoped), and a bulk envelope emits `scope_note`
+when the scope is `All` **or a system mailbox** — the latter because Drafts holds UNSENT composes,
+so moving one out of Drafts removes it from Mail's compose surface. `scope_note` is emitted only
+on the FILTER-BASED path; an explicit-ids mutation never consults the mailbox, so claiming a sweep
+scope there would contradict `filter_based: false` in the same envelope.
+
+Locked by `bats/mail.bats` ("discloses system_folders_excluded on an All sweep only",
+"thread does NOT exclude system folders", "bulk previews disclose the All-scope divergence").
+
 ---
 
 ## 2. CLI capability manifest per candidate

@@ -35,3 +35,4 @@ PARITY-TEST-MATRIX.md
 MAIL-PARITY-AUDIT-*.json
 __pycache__/
 *.pyc
+.build-swiftly/
