@@ -14,8 +14,15 @@ public enum Output {
 
     // MARK: Encode (pure — unit-testable, no I/O)
 
-    public static func encodeSuccess<T: Encodable>(tool: String, data: T) throws -> Data {
-        try encode(SuccessEnvelope(schema_version: schemaVersion, tool: tool, ok: true, data: data))
+    /// `sandbox: true` marks a write envelope produced under the v2 opt-in sandbox
+    /// (docs/write-model-v2.md). The parameter is a plain Bool normalized INSIDE — false
+    /// omits the key entirely (never emits `"sandbox": false`), so read ops and unsandboxed
+    /// writes stay byte-identical to the pre-v2 envelope (ADDITIVE / MINOR) and the natural
+    /// call `sandboxActive: sandboxActive` is also the only expressible one; a Bool?
+    /// parameter would let a plain `false` auto-promote and silently emit a third state.
+    public static func encodeSuccess<T: Encodable>(tool: String, data: T, sandboxActive: Bool = false) throws -> Data {
+        try encode(SuccessEnvelope(schema_version: schemaVersion, tool: tool, ok: true,
+                                   sandbox: sandboxActive ? true : nil, data: data))
     }
 
     public static func encodeError(tool: String, type: String, message: String) throws -> Data {
@@ -25,8 +32,8 @@ public enum Output {
 
     // MARK: Emit (writes the encoded envelope to stdout)
 
-    public static func emit<T: Encodable>(tool: String, data: T) throws {
-        write(try encodeSuccess(tool: tool, data: data))
+    public static func emit<T: Encodable>(tool: String, data: T, sandboxActive: Bool = false) throws {
+        write(try encodeSuccess(tool: tool, data: data, sandboxActive: sandboxActive))
     }
 
     public static func emitError(tool: String, type: String, message: String) {
@@ -92,6 +99,7 @@ struct SuccessEnvelope<T: Encodable>: Encodable {
     let schema_version: Int
     let tool: String
     let ok: Bool
+    let sandbox: Bool? // synthesized Encodable omits the key when nil (encodeIfPresent)
     let data: T
 }
 

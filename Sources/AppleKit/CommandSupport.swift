@@ -30,7 +30,44 @@ public struct GlobalOptions: ParsableArguments {
     public var json: Bool { !text }
 
     /// Destructive verbs default to dry-run; a real mutation requires an explicit `--execute`.
+    /// V1 SEMANTICS — deprecated so every un-migrated (or MIS-migrated: `global.willExecute`
+    /// without the argument label binds THIS property, silently keeping v1 semantics) call
+    /// site carries a per-line compiler warning until its domain's write-model-v2 flip
+    /// commit migrates it to `willExecute(defaultDryRun:)`. The FINAL flip commit deletes
+    /// this property; "zero deprecation warnings" is the mechanical completion criterion.
+    @available(*, deprecated, message: "v1 write gate; migrate to willExecute(defaultDryRun:) per docs/write-model-v2.md")
     public var willExecute: Bool { execute && !dryRun }
+
+    /// Write-model v2 (docs/write-model-v2.md): whether this invocation EXECUTES, resolved
+    /// once from flag + env precedence. Call it ONCE at the top of `run()` and thread the
+    /// result — the spec's bind-once discipline exists because guards, previews, and the
+    /// envelope's `dry_run` key must all agree on a single answer per invocation.
+    ///
+    /// Precedence: `--dry-run` > `--execute` > `APPLE_DRY_RUN` (operator-level persistent
+    /// preview default; `--execute` beats it deliberately — explicit invocation-level
+    /// intent wins over an ambient default, and the agent-proof layer is the sandbox plus
+    /// the APPLE_ALLOW_* gates, not this variable) > the surface's own default. General
+    /// writes execute by default (`defaultDryRun: false` — the oracle executes on call);
+    /// the trash surface passes `defaultDryRun: true` (oracle B's `manage_trash` defaults
+    /// `dry_run=True`, and keeping that IS parity). `defaultDryRun` has NO default value
+    /// on purpose: every surface states its own.
+    /// THROWING: an unparseable APPLE_DRY_RUN refuses the command (validation_error, 64)
+    /// instead of silently resolving to execute — carried by the signature, not by a
+    /// promise that a preamble ran first.
+    public func willExecute(defaultDryRun: Bool) throws -> Bool {
+        Self.resolveExecute(dryRunFlag: dryRun, executeFlag: execute,
+                            envDryRun: try TestMode.truthyEnv(TestMode.dryRunVar),
+                            defaultDryRun: defaultDryRun)
+    }
+
+    /// Pure precedence core (unit-testable without env mutation).
+    static func resolveExecute(dryRunFlag: Bool, executeFlag: Bool,
+                               envDryRun: Bool, defaultDryRun: Bool) -> Bool {
+        if dryRunFlag { return false }
+        if executeFlag { return true }
+        if envDryRun { return false }
+        return !defaultDryRun
+    }
 }
 
 /// Run a command body so ANY thrown error becomes a JSON envelope on stdout + the bound

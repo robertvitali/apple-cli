@@ -97,12 +97,17 @@ accidental *unsandboxed* writes — each fails safe for its own model).
   Any OTHER non-empty value is a `validation_error` (exit 64) at the start of any write
   command — never silently "no sandbox". (`""`/unset = off, as today.)
 - **Visible engagement.** Every write envelope gains `"sandbox": true` when the sandbox is
-  active (key absent otherwise — additive, MINOR). Mechanism, so no one threads a flag through
-  94 emit sites: `SuccessEnvelope` (Output.swift:91-96) gains `let sandbox: Bool?`;
-  `Output.encodeSuccess(tool:data:sandbox:)` / `Output.emit(tool:data:sandbox:)` take
-  `sandbox: Bool? = nil` so every read path compiles unchanged; the five domain emit wrappers
-  gain the same defaulted pass-through; only write commands pass `sandboxActive ? true : nil`.
-  `Sources/AppleKit/Output.swift` + the five wrappers are part of the core change set.
+  active (key absent otherwise — additive, MINOR). Mechanism AS LANDED (core review tightened
+  the first sketch's `sandbox: Bool? = nil`, which let a plain `false` auto-promote and emit a
+  meaningless `"sandbox": false` tri-state): `SuccessEnvelope` gains `let sandbox: Bool?`, but
+  the public API takes a NON-optional — `Output.encodeSuccess(tool:data:sandboxActive: Bool =
+  false)` / `Output.emit(tool:data:sandboxActive: Bool = false)` — normalized INSIDE to
+  `active ? true : nil`, so the wrong envelope is inexpressible and every read path compiles
+  unchanged (byte-identical envelope, asserted). Write commands pass
+  `sandboxActive: sandboxActive` — never a ternary. KNOWN RESIDUAL (flip-commit checklist):
+  the parameter is defaulted, so a sandboxed write that FORGETS to pass it under-reports as
+  unsandboxed — each domain flip must pass it at every write-emit site; the per-domain
+  sandbox test (below) is what catches an omission.
 - **Writes only.** The sandbox affects write paths exclusively; read commands return identical
   output with it on or off (per-domain test required).
 - **`APPLE_DRY_RUN`** (new, additive, orthogonal): an operator-level persistent preview
@@ -112,32 +117,48 @@ accidental *unsandboxed* writes — each fails safe for its own model).
   `""`/unset = off; any OTHER non-empty value is a `validation_error` (exit 64) at the start of
   any write command — never silently "no dry-run". Both variables parse through ONE shared
   helper (`TestMode.truthyEnv(_ name: String) throws -> Bool`) so their contracts cannot
-  drift, with a swift-tier case asserting the rejection for each. `TestMode.isTruthyEnv` (used
-  by `sandboxActive` and the contacts-delete gate) is the non-throwing accessor over
-  `truthyEnv("APPLE_TEST_MODE")` — safe because the throwing validation for BOTH variables runs
-  in the write-command preamble before any gate reads it.
+  drift, with a swift-tier case asserting the rejection for each. AS LANDED (core review
+  rejected this section's first rationale, which leaned on preamble call-order):
+  `TestMode.isTruthyEnv` is the non-throwing accessor, used ONLY where `false` is the
+  REFUSING direction (`TestMode.isEnabled`; the contacts-delete hard gate, whose `false`
+  refuses the delete). Every v2 gate whose `false` would be PERMISSIVE uses the THROWING
+  readers (`truthyEnv`, `sandboxActive(flag:)`, `willExecute(defaultDryRun:)`) — the
+  fail-loud contract is carried by the type system. The preamble
+  (`validateWriteEnvironment()`, called INSIDE `runGuarded`) is belt-and-braces — it fails
+  before partial work — not the safety mechanism.
 - Precedence: `--dry-run` > `--execute` > `APPLE_DRY_RUN` > v2 default (execute, except the
   trash surface).
 
 ## Core implementation (AppleKit)
 
 - `GlobalOptions.willExecute` becomes a METHOD, not a property:
-  `willExecute(defaultDryRun: Bool = false)` — `dryRun` wins over everything; otherwise
+  `willExecute(defaultDryRun: Bool) throws -> Bool` — `dryRun` wins over everything; otherwise
   `execute` forces true; otherwise `APPLE_DRY_RUN` truthy makes it false; otherwise
-  `!defaultDryRun`. Trash-surface commands pass `defaultDryRun: true`. **Per-command
-  discipline, enforced at review**: every mutating command's `run()` binds the result ONCE at
-  the top (`let willExecute = global.willExecute(defaultDryRun: Self.defaultsToDryRun)`) and
+  `!defaultDryRun`. Trash-surface commands pass `defaultDryRun: true`. AS LANDED (core review,
+  round 1, three tightenings over this section's first sketch): `defaultDryRun` has NO default
+  value — every surface states its own; the method (and `sandboxActive(flag:)`) THROWS, reading
+  the fail-loud parser directly, so an unparseable `APPLE_DRY_RUN`/`APPLE_TEST_MODE` refuses the
+  command via the type system rather than via a promise that the preamble ran first (the
+  preamble stays as belt-and-braces, called INSIDE `runGuarded` so its error envelopes
+  correctly); and the v1 property is `@available(*, deprecated)` during the staged flips —
+  every un-migrated (or label-dropped `global.willExecute`) site carries a per-line compiler
+  warning, the FINAL flip deletes the property, and "zero deprecation warnings" is the
+  mechanical completion criterion. **Per-command discipline, enforced at review**: every
+  mutating command's `run()` binds the result ONCE at the top
+  (`let willExecute = try global.willExecute(defaultDryRun: Self.defaultsToDryRun)`) and
   uses only that local thereafter. This matters because DeleteCommand reads the old property at
   four sites (:265, :285, :313, :323) and TrashEmpty at three (:405, :414, :424) — seven
   independent reads each making its own decision; a partial conversion would either regress
-  `--permanent` to a hard refusal or silently trash real mail by default. Bind-once makes a
-  missed site a compile error, not a latent divergence.
+  `--permanent` to a hard refusal or silently trash real mail by default. Bind-once plus the
+  deprecation warning makes a missed site VISIBLE, not a latent divergence.
 - **Guards change signature — this is explicit, not "unchanged".** Sandbox state becomes a
   parameter and the internal `TestMode.isEnabled` re-checks are REMOVED (they would defeat the
   flag-only path): `requireLabeledTarget(_:sandboxActive:)`, recipient checks likewise.
-  `TestMode.sandboxActive(flag:) = flag || isTruthyEnv` is computed once per command and
-  threaded down. This also gives the swift logic tier both branches as pure calls — no env
-  mutation in tests.
+  `TestMode.sandboxActive(flag:)` — AS LANDED it THROWS and validates the env EAGERLY
+  (`let env = try truthyEnv(testModeVar); return flag || env`), so a malformed
+  `APPLE_TEST_MODE` refuses even when `--test-mode` is passed — is computed once per command
+  and threaded down. This also gives the swift logic tier both branches as pure calls — no
+  env mutation in tests.
 - Help strings land with the flip, specified here verbatim:
   - `--dry-run`: "Preview without performing the write (writes execute by default; --dry-run
     always wins)."
