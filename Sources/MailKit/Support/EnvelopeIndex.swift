@@ -99,12 +99,19 @@ public final class EnvelopeIndex {
     /// `mailboxName == "All"` (case-insensitive) → every real (source-NULL) mailbox of the
     /// account(s), so each message is counted exactly once. A specific name matches on the
     /// full path or the leaf (case-insensitive), across all accounts when `accountUUID` nil.
-    public func resolveMailboxes(accountUUID: String?, mailboxName: String) -> (direct: [Int], label: [Int]) {
+    /// `includeSystemFolders` applies ONLY to the "All" wildcard: MCP B excludes its
+    /// `SKIP_FOLDERS` (Trash/Junk/Sent*/Drafts/Spam/Deleted*) from broad scans, so an "All"
+    /// search that swept them returned hits the oracle never would. Naming a system mailbox
+    /// EXPLICITLY (`--mailbox Trash`) is unaffected — the exclusion is about what "everything"
+    /// means, not about making those mailboxes unsearchable.
+    public func resolveMailboxes(accountUUID: String?, mailboxName: String,
+                                 includeSystemFolders: Bool = true) -> (direct: [Int], label: [Int]) {
         let wantAll = mailboxName.caseInsensitiveCompare("All") == .orderedSame
         var direct: [Int] = [], label: [Int] = []
         for m in mailboxes {
             if let uuid = accountUUID, m.url.accountID != uuid { continue }
             if wantAll {
+                if !includeSystemFolders && Analytics.isSkippedSystemFolder(m.url.path) { continue }
                 if !m.isLabel { direct.append(m.rowid) }   // real stores only → no dup
             } else {
                 let matches = m.url.path.caseInsensitiveCompare(mailboxName) == .orderedSame
@@ -135,6 +142,9 @@ public final class EnvelopeIndex {
     public struct MessageFilters {
         public var accountUUID: String?
         public var mailboxName: String = "INBOX"
+        /// Applies only when `mailboxName == "All"`. Default true preserves every caller that
+        /// does not opt in; the search/thread commands set it from `--include-system-folders`.
+        public var includeSystemFolders: Bool = true
         public var subjectContains: String?
         public var subjectContainsAny: [String] = []   // OR-match list (MCP B subject_keywords); ANY matches
         public var senderContains: String?
@@ -159,7 +169,8 @@ public final class EnvelopeIndex {
         var where_: [String] = []
         var binds: [String] = []
         if !f.includeDeleted { where_.append("m.deleted = 0") }
-        let resolved = resolveMailboxes(accountUUID: f.accountUUID, mailboxName: f.mailboxName)
+        let resolved = resolveMailboxes(accountUUID: f.accountUUID, mailboxName: f.mailboxName,
+                                        includeSystemFolders: f.includeSystemFolders)
         where_.append(EnvelopeIndex.mailboxPredicate(direct: resolved.direct, label: resolved.label))
         // subject_keywords OR-match (MCP B): match ANY of the keywords. Non-empty list takes
         // precedence over the single `subjectContains`; each keyword is a parameter-bound LIKE.

@@ -47,14 +47,37 @@ struct RulesCreate: ParsableCommand {
             guard match == "all" || match == "any" else { throw AppleError.validation("--match must be 'all' or 'any'.") }
             let conditions = try condition.map { try RuleSchema.parseCondition($0) }
             let actions = try RuleSchema.parseActions(action)
-            // Validate the live-action plan for BOTH preview and execute so a dry-run faithfully
-            // predicts the execute outcome (mirrors RulesUpdate). Without this, `--action
-            // move_to=Archive` (missing the Account/Mailbox slash) or `--action forward_to=…`
-            // previews exit 0 yet --execute fails 64/77 — a misleading create-vs-update divergence.
-            _ = try RuleLiveGuards.liveActionPlan(actions)
             let rule = RuleSchema.Rule(name: name, conditions: conditions, actions: actions, match_logic: match, enabled: !disabled)
             guard global.willExecute else {
-                try emitRulePreview(rule, willExecute: false, json: global.json); return
+                // A dry-run must still faithfully PREDICT the execute outcome — a malformed
+                // `move_to=Archive` (missing the Account/Mailbox slash) previewing ok and then
+                // failing under --execute was the original create-vs-update divergence. But
+                // predicting is not the same as refusing: `delete`, `forward_to` and `--match any`
+                // are real oracle capabilities the live path declines for safety, and a preview
+                // that cannot even describe them loses the capability entirely. So: report every
+                // blocker, and only fail the preview on genuinely MALFORMED input.
+                // MALFORMED input still fails the preview. Control characters in a name/value/
+                // header would desynchronize the US/RS framing the condition blob uses, so they
+                // are rejected here too — not only on the live path, which a preview would
+                // otherwise misreport as fine.
+                try RuleLiveGuards.requireNoControlChars(name: name, conditions: conditions)
+                var blockers = RuleLiveGuards.liveActionBlockers(actions)
+                if match == "any" {
+                    blockers.append("--match any: a live test rule must stay --match all so its test-label condition always constrains it")
+                }
+                // EVERY live refusal must be reported, not just the three relaxations. A preview
+                // that omits one and prints `live_blockers: []` makes the affirmative claim that
+                // execute would accept the rule — the exact preview/execute divergence this whole
+                // block exists to prevent.
+                if !name.hasPrefix(TestMode.sandboxPrefix) {
+                    blockers.append("--name must start with \"\(TestMode.sandboxPrefix)\" for a live create")
+                }
+                if !RuleLiveGuards.isSelfScoped(conditions) {
+                    blockers.append("conditions: a live test rule must include a subject condition bound to \"\(TestMode.sandboxPrefix)\" so it only ever acts on test mail")
+                }
+                if blockers.isEmpty { _ = try RuleLiveGuards.liveActionPlan(actions) }
+                try emitRulePreview(rule, willExecute: false, json: global.json, liveBlockers: blockers)
+                return
             }
             // ---- Live create: SELF-SCOPED, non-destructive, force-disabled. ----
             // A test rule must be UNABLE to affect real mail even if later enabled by the same
@@ -68,10 +91,23 @@ struct RulesCreate: ParsableCommand {
             try RuleLiveGuards.requireNoControlChars(name: name, conditions: conditions)
             try RuleLiveGuards.requireSelfScoped(conditions: conditions, match: match)   // enforces --match all
             let plan = try RuleLiveGuards.liveActionPlan(actions)
-            let conds = conditions.map { (type: $0.field, op: $0.operator, value: $0.value) }
+            let conds = conditions.map { (type: $0.field, op: $0.operator, value: $0.value, header: $0.header_name ?? "") }
             // match=all is enforced by requireSelfScoped, so the rule is an AND rule — thread it.
             let script = MailScript()
             try script.createRule(name: name, enabled: false, matchAll: true, conditions: conds, plan: plan)
+            // VERIFY the conditions attached, exactly as the recreate path does. Mail's
+            // `make new rule condition` sits in a bare `try` that swallows every error and the
+            // script still returns "ok", so a silently-dropped condition would leave a labeled
+            // rule MISSING its test-label conjunct — and `rules enable` trusts the NAME alone
+            // (the documented LABEL-TRUST BOUNDARY), so force-disabling only defers the problem.
+            // A 0-condition rule matches ALL mail.
+            if let created = try? script.listRules().first(where: { $0.name == name }) {
+                let attached = (try? script.ruleConditionCount(index: created.index)) ?? -1
+                if attached != conds.count {
+                    try? script.deleteRule(index: created.index)
+                    throw AppleError.upstream("rule create attached \(attached)/\(conds.count) conditions — removed the malformed rule rather than leave one whose test-label condition may be missing (a 0-condition rule matches ALL mail).")
+                }
+            }
             // Oracle A `create_rule` returns `rule_index` (the new total rule count) and `name`.
             // Mail exposes no "index of this rule" property, so re-read the list and take the
             // count — same definition the oracle uses. Best-effort: a read failure must not fail
@@ -115,6 +151,44 @@ struct RulesUpdate: ParsableCommand {
             guard name != nil || enabled != nil || match != nil || conds != nil || acts != nil else {
                 throw AppleError.validation("nothing to update — pass at least one of --name/--enabled/--match/--condition/--action.")
             }
+            // Blockers the LIVE path enforces. In a dry-run these are REPORTED, not thrown: an
+            // OR-rule and a delete/forward_to action are real oracle capabilities, and a preview
+            // that refuses to describe them loses the capability from the surface entirely. Under
+            // --execute they are still hard refusals (below).
+            var blockers: [String] = []
+            if match == "any" {
+                blockers.append("--match any: a live test rule must stay --match all so its test-label condition always constrains it")
+            }
+            if let acts { blockers.append(contentsOf: RuleLiveGuards.liveActionBlockers(acts)) }
+            // requireSelfScoped used to run BEFORE the dry-run guard, so a condition set with no
+            // test-label conjunct exited 77 in preview. Moving the guard above it dropped that
+            // refusal from the preview entirely — reported as `live_blockers: []`, i.e. "execute
+            // would accept this", for a rule execute refuses. Report it instead.
+            if let conds, !RuleLiveGuards.isSelfScoped(conds) {
+                blockers.append("conditions: a live test rule must include a subject condition bound to \"\(TestMode.sandboxPrefix)\" so it only ever acts on test mail")
+            }
+            if let name, !name.hasPrefix(TestMode.sandboxPrefix) {
+                blockers.append("--name must keep the \"\(TestMode.sandboxPrefix)\" label for a live rename")
+            }
+
+            guard global.willExecute else {
+                // Still fail the preview on MALFORMED input, so a dry-run keeps predicting the
+                // execute outcome for everything that is not a deliberate safety refusal.
+                try RuleLiveGuards.requireNoControlChars(name: name, conditions: conds ?? [])
+                if blockers.isEmpty, let acts { _ = try RuleLiveGuards.liveActionPlan(acts) }
+                let recreates = conds != nil
+                let note = blockers.isEmpty ? nil
+                    : "preview only — `--execute` would refuse this update: " + blockers.joined(separator: "; ")
+                if global.json {
+                    try Output.emit(tool: "mail", data: ["dry_run": AnyEncodableBox(true), "patch": AnyEncodableBox(patch),
+                        "would_recreate": AnyEncodableBox(recreates), "live_blockers": AnyEncodableBox(blockers),
+                        "note": AnyEncodableBox(note)])
+                } else {
+                    print("Would update rule \(index) (dry-run; \(recreates ? "condition change → delete-and-recreate" : "in-place"))")
+                    for b in blockers { print("  would be refused live: \(b)") }
+                }
+                return
+            }
             if match == "any" {   // a live test rule must stay match=all so its label always constrains it
                 throw AppleError.mailSafety("a live test rule must stay --match all so its label condition always constrains it — refusing to set --match any.")
             }
@@ -122,13 +196,6 @@ struct RulesUpdate: ParsableCommand {
             try RuleLiveGuards.requireNoControlChars(name: name, conditions: conds ?? [])
             if let conds { try RuleLiveGuards.requireSelfScoped(conditions: conds, match: "all") }
             let plan = try acts.map { try RuleLiveGuards.liveActionPlan($0) }
-
-            guard global.willExecute else {
-                let recreates = conds != nil
-                if global.json { try Output.emit(tool: "mail", data: ["dry_run": AnyEncodableBox(true), "patch": AnyEncodableBox(patch), "would_recreate": AnyEncodableBox(recreates), "note": AnyEncodableBox(Optional<String>.none)]) }
-                else { print("Would update rule \(index) (dry-run; \(recreates ? "condition change → delete-and-recreate" : "in-place"))") }
-                return
-            }
             // ---- Live. Target MUST be a labeled test rule (requireLabeledRule fail-closes on real rules). ----
             let target = try requireLabeledRule(index: index, testMode: global.testMode)
             // Mirror the oracle's `_check_supported_actions`: refuse to touch a rule whose EXISTING
@@ -199,7 +266,7 @@ struct RulesUpdate: ParsableCommand {
             guard !mergedPlan.tokens.isEmpty else {
                 throw AppleError.validation("the rule has no action and none was given — a live rule needs one; add --action move_to=… / mark_read=true / mark_flagged=true / flag_color=… .")
             }
-            let condTriples = conds.map { (type: $0.field, op: $0.operator, value: $0.value) }
+            let condTriples = conds.map { (type: $0.field, op: $0.operator, value: $0.value, header: $0.header_name ?? "") }
             // Refuse if a DIFFERENT rule already carries the target name (the recreate would trigger
             // the duplicate-name condition-mangling). Checked BEFORE the old rule is deleted.
             if try MailScript().listRules().contains(where: { $0.index != target.index && $0.name == mergedName }) {
@@ -319,12 +386,22 @@ private func setEnabled(index: Int, enabled: Bool, global: GlobalOptions) throws
 /// Emit exactly one envelope for a rule create DRY-RUN preview (the non-execute path only —
 /// RulesCreate calls this with `willExecute: false`). Live create/update now apply real
 /// mutations behind the RuleLiveGuards safety invariant, each emitting their own executed envelope.
-func emitRulePreview(_ rule: RuleSchema.Rule, willExecute: Bool, json: Bool) throws {
-    let note = willExecute ? "live rule mutation is disabled in this build (rules are pre-existing real data); this is a preview" : nil
+/// Render a rule dry-run. `live_blockers` names every reason `--execute` would refuse THIS rule,
+/// so the preview describes the rule the caller asked for (including oracle capabilities the live
+/// path declines, such as `delete` / `forward_to` / `--match any`) instead of failing outright.
+/// A preview that cannot represent a capability is strictly less useful than one that represents
+/// it and says plainly what would be refused.
+func emitRulePreview(_ rule: RuleSchema.Rule, willExecute: Bool, json: Bool,
+                     liveBlockers: [String] = []) throws {
+    let note = liveBlockers.isEmpty ? nil
+        : "preview only — `--execute` would refuse this rule: " + liveBlockers.joined(separator: "; ")
     if json {
-        try Output.emit(tool: "mail", data: ["dry_run": AnyEncodableBox(!willExecute), "rule": AnyEncodableBox(rule), "note": AnyEncodableBox(note)])
+        try Output.emit(tool: "mail", data: [
+            "dry_run": AnyEncodableBox(!willExecute), "rule": AnyEncodableBox(rule),
+            "live_blockers": AnyEncodableBox(liveBlockers), "note": AnyEncodableBox(note)])
     } else {
         print("Rule '\(rule.name)' (\(rule.match_logic), \(rule.enabled ? "enabled" : "disabled")) — dry-run: \(!willExecute)")
+        for b in liveBlockers { print("  would be refused live: \(b)") }
     }
 }
 

@@ -444,8 +444,46 @@ require_index() {
   echo "$output" | grep -q '"validation_error"'
 }
 
-@test "mail rules create DRY-RUN forward_to is refused (exit 77, preview predicts execute)" {
+# CONTRACT CHANGE (2026-07-31): a dry-run now DESCRIBES a rule the live path would refuse,
+# reporting `live_blockers`, instead of failing with exit 77. `forward_to`, `delete` and
+# `--match any` are real oracle capabilities; a preview that cannot represent them drops the
+# capability from the CLI surface entirely, which is the very thing strict-superset parity
+# forbids. The live refusal itself is unchanged — see the --execute test below.
+@test "mail rules create DRY-RUN describes a forward_to rule and names the live blocker" {
   run "$BIN" mail rules create --name "apple-cli-test-b" --condition "subject:contains:apple-cli-test" --action "forward_to=a@x.io"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"live_blockers"'
+  echo "$output" | grep -q 'forward_to'
+  echo "$output" | grep -q 'would refuse'
+}
+
+@test "mail rules create DRY-RUN describes delete and --match any blockers too" {
+  run "$BIN" mail rules create --name "apple-cli-test-b" --condition "subject:contains:apple-cli-test" --action "delete=true"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q 'auto-trash'
+  run "$BIN" mail rules create --name "apple-cli-test-b" --condition "subject:contains:apple-cli-test" --action "mark_read=true" --match any
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q 'match any'
+}
+
+# header_name is now wired (Mail.sdef `header key` + the condition's `header` property), so it
+# previews with NO blocker where it used to be refused outright.
+@test "mail rules create DRY-RUN accepts a header_name condition with no live blocker" {
+  run "$BIN" mail rules create --name "apple-cli-test-b" --condition "header_name:contains:v:X-Spam" --condition "subject:contains:apple-cli-test" --action "mark_read=true"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"live_blockers" : \[' 
+  ! echo "$output" | grep -q 'would refuse'
+}
+
+# The LIVE refusal is unchanged: describing a rule in a preview must never soften execute.
+@test "mail rules create --execute with forward_to is still refused (exit 77)" {
+  APPLE_TEST_MODE=1 run "$BIN" mail rules create --name "apple-cli-test-b" --condition "subject:contains:apple-cli-test" --action "forward_to=a@x.io" --execute --test-mode
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q '"type" : "safety_violation"'
+}
+
+@test "mail rules update --execute with --match any is still refused (exit 77)" {
+  APPLE_TEST_MODE=1 run "$BIN" mail rules update 1 --match any --execute --test-mode
   [ "$status" -eq 77 ]
   echo "$output" | grep -q '"type" : "safety_violation"'
 }
@@ -910,4 +948,69 @@ import json,sys; print(json.load(sys.stdin)['data']['messages'][0]['subject'][:2
   [ "$status" -eq 0 ]
   ! echo "$output" | grep -q '"snippet"'
   ! echo "$output" | grep -q '"content_preview"'
+}
+
+# header_name is serialized as the 4th US-delimited field of each RS-delimited condition record,
+# so a header name carrying US/RS would shift every following field by one and build a
+# differently-typed condition on attacker-chosen text. parseCondition takes the header from the
+# FINAL colon-segment of user input, so this is reachable straight from the command line. The
+# unit test covers the guard; this covers the CALLER actually invoking it (the create preview
+# initially did not).
+@test "mail rules create refuses a header name containing a US/RS delimiter (exit 64)" {
+  ctl=$(printf '\037')
+  run "$BIN" mail rules create --name "apple-cli-test-b" \
+      --condition "header_name:contains:v:X-Bad${ctl}injected" \
+      --condition "subject:contains:apple-cli-test" --action "mark_read=true"
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q 'control characters'
+}
+
+# MCP B excludes SKIP_FOLDERS from a broad "All" sweep (tools/search.py + constants.py), so an
+# All-search used to return Trash/Sent/Junk hits the oracle never would. The exclusion changes
+# only what "All" MEANS — naming a system mailbox explicitly must still search it.
+@test "mail search --mailbox All excludes SKIP_FOLDERS unless --include-system-folders" {
+  require_index
+  a=$("$BIN" mail search --mailbox All --limit 0 | python3 -c "import json,sys;print(json.load(sys.stdin)['data']['count'])")
+  b=$("$BIN" mail search --mailbox All --limit 0 --include-system-folders | python3 -c "import json,sys;print(json.load(sys.stdin)['data']['count'])")
+  [ "$b" -ge "$a" ]
+  [ "$b" -gt "$a" ] || skip "store has no mail in system folders"
+}
+
+@test "mail search --mailbox Trash still searches Trash explicitly" {
+  require_index
+  run "$BIN" mail search --mailbox Trash --limit 3
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"mailbox" *: *"Trash"'
+}
+
+# A preview must report EVERY live refusal. The update preview once dropped self-scoping
+# entirely, printing `live_blockers: []` — an affirmative claim that --execute would accept a
+# rule it refuses with 77. Reproduced by review; locked here.
+@test "mail rules update DRY-RUN reports the self-scoping blocker instead of claiming clean" {
+  run "$BIN" mail rules update 1 --condition "from:contains:boss@example.com" --action "mark_read=true"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q 'subject condition bound to'
+}
+
+@test "mail rules create DRY-RUN reports unlabeled-name and self-scoping blockers" {
+  run "$BIN" mail rules create --name "quarterly-report-rule" --condition "from:contains:boss@x.io" --action "mark_read=true"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q 'must start with'
+  echo "$output" | grep -q 'subject condition bound to'
+}
+
+@test "mail rules create DRY-RUN reports no blockers for a properly labeled self-scoped rule" {
+  run "$BIN" mail rules create --name "apple-cli-test-ok" --condition "subject:contains:apple-cli-test" --action "mark_read=true"
+  [ "$status" -eq 0 ]
+  ! echo "$output" | grep -q 'would be refused live'
+}
+
+# Oracle A rejects an empty condition value; an empty `contains` matches EVERY message. The
+# header_name grammar only produces the empty value AFTER the header is split off.
+@test "mail rules create refuses an empty condition value (exit 64)" {
+  run "$BIN" mail rules create --name "apple-cli-test-b" --condition "subject:contains:" --action "mark_read=true"
+  [ "$status" -eq 64 ]
+  run "$BIN" mail rules create --name "apple-cli-test-b" --condition "header_name:contains::X-Foo" --action "mark_read=true"
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q 'must not be empty'
 }

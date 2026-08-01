@@ -27,6 +27,7 @@ struct SearchCommand: ParsableCommand {
     @Option(name: .long, help: "Sort order: date_desc (default) or date_asc.") var sort: String = "date_desc"
     @Flag(name: .long, inversion: .prefixedNo, help: "Include the indexed body preview (default on).") var content = true
     @Option(name: .long, help: "Truncate each included body preview to N chars (0 = unlimited; MCP B max_content_length).") var maxContentLength: Int?
+    @Flag(name: .long, help: "With --mailbox All, also sweep Trash/Junk/Sent/Drafts/Spam (MCP B excludes them; CLI extra).") var includeSystemFolders = false
 
     func run() throws {
         try runGuarded(tool: "mail") {
@@ -37,6 +38,10 @@ struct SearchCommand: ParsableCommand {
             var f = EnvelopeIndex.MessageFilters()
             if let account { f.accountUUID = try ctx.requireAccountUUID(account) }
             f.mailboxName = mailbox
+            // MCP B excludes SKIP_FOLDERS from a broad "All" sweep, so an All-search used to
+            // return Trash/Sent/Junk hits the oracle never would. Naming a system mailbox
+            // explicitly still searches it — the exclusion only changes what "All" means.
+            f.includeSystemFolders = includeSystemFolders
             f.subjectContainsAny = subject
             f.senderContains = sender
             f.bodyContains = body
@@ -231,6 +236,7 @@ struct ThreadCommand: ParsableCommand {
     @Option(name: .long, help: "Account name or UUID (for subject-based lookup).") var account: String?
     @Option(name: .long, help: "Mailbox for subject-based lookup (default All).") var mailbox: String = "All"
     @Option(name: .long, help: "Max messages (default 50; 0 = the complete thread).") var limit: Int = 50
+    @Flag(name: .long, help: "With --mailbox All, also sweep Trash/Junk/Sent/Drafts/Spam (MCP B excludes them; CLI extra).") var includeSystemFolders = false
     @Flag(name: .long, help: "Thread by RFC References/In-Reply-To headers (MCP A get_thread) instead of Apple's conversation grouping.") var references = false
 
     func run() throws {
@@ -279,6 +285,7 @@ struct ThreadCommand: ParsableCommand {
                     throw AppleError.validation("--subject '\(subject)' is only reply/forward prefixes; provide an actual subject keyword.")
                 }
                 f.mailboxName = mailbox; f.subjectContains = cleaned
+                f.includeSystemFolders = includeSystemFolders
                 f.sortAscending = true; f.limit = effectiveLimit
                 let rows = try ctx.index.queryMessages(f)
                 messages = rows.map { ctx.decodeSummary($0) }

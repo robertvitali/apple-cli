@@ -1656,7 +1656,9 @@ public struct MailScript {
                 set rtv to my ruleType(item 1 of fld)
                 set qfv to my qualifier(item 2 of fld)
                 set exv to (item 3 of fld)
-                set end of condList to {rtype:rtv, qual:qfv, expr:exv}
+                set hdv to ""
+                if (count of fld) > 3 then set hdv to (item 4 of fld)
+                set end of condList to {rtype:rtv, qual:qfv, expr:exv, hdr:hdv}
             end if
         end repeat
         set AppleScript's text item delimiters to RS
@@ -1711,8 +1713,15 @@ public struct MailScript {
                 set rt to rtype of c
                 set qf to qual of c
                 set ex to expr of c
+                set hd to hdr of c
                 try
-                    make new rule condition at end of rule conditions of r with properties {rule type:rt, qualifier:qf, expression:ex}
+                    if hd is not "" then
+                        -- `header` is the rule condition's "Rule header key" property; it is what
+                        -- makes a `header key` rule type actually name a header.
+                        make new rule condition at end of rule conditions of r with properties {rule type:rt, qualifier:qf, expression:ex, header:hd}
+                    else
+                        make new rule condition at end of rule conditions of r with properties {rule type:rt, qualifier:qf, expression:ex}
+                    end if
                 end try
             end repeat
             repeat with atk in actToks
@@ -1753,9 +1762,17 @@ public struct MailScript {
             if f is "to" then return to header
             if f is "subject" then return subject header
             if f is "body" then return message content
-            if f is "any_recipient" then return to or cc header
-            return from header
+            -- Mail.sdef's RuleType enum has BOTH `any recipient` and `to or cc header`, and they
+            -- are different rules: `any recipient` covers Bcc, `to or cc header` does not. Mapping
+            -- any_recipient onto to-or-cc built a rule that silently missed Bcc'd mail.
+            if f is "any_recipient" then return any recipient
+            -- `header key` pairs with the condition's `header` property (set at creation).
+            if f is "header_name" then return header key
         end tell
+        -- Never silently fall back to `from header`: that would build a DIFFERENT rule than the
+        -- caller asked for and quietly act on real mail. Upstream validation should make this
+        -- unreachable, so failing loudly is correct.
+        error "unknown rule condition field: " & f
     end ruleType
 
     on qualifier(op)
@@ -1774,9 +1791,9 @@ public struct MailScript {
     /// `RuleSchema.liveActionPlan`. move_to/copy_to resolve `Account/Mailbox` to a concrete target
     /// mailbox in the script. Caller MUST have label-checked the rule name + self-scoped it.
     public func createRule(name: String, enabled: Bool, matchAll: Bool,
-                           conditions: [(type: String, op: String, value: String)],
+                           conditions: [(type: String, op: String, value: String, header: String)],
                            plan: RuleLiveGuards.LiveActionPlan) throws {
-        let condBlob = conditions.map { [$0.type, $0.op, $0.value].joined(separator: MailScript.US) }
+        let condBlob = conditions.map { [$0.type, $0.op, $0.value, $0.header].joined(separator: MailScript.US) }
             .joined(separator: MailScript.RS)
         var toks: [String] = []
         if plan.markRead { toks.append("mark_read") }

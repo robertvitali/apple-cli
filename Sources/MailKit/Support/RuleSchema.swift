@@ -56,6 +56,14 @@ public enum RuleSchema {
                 throw AppleError.validation("field 'header_name' requires a non-empty header name after the final ':'.")
             }
         }
+        // Checked AFTER the header_name split, because that split is what produces the empty
+        // value: `header_name:contains::X-Foo` arrives as parts[2] == ":X-Foo" (non-empty), and
+        // only after the header is peeled off is the value "". Oracle A rejects an empty value
+        // ("condition.value must be a non-empty string", mail_connector.py) — an empty `contains`
+        // matches EVERY message, so accepting it builds a far broader rule than intended.
+        if value.trimmingCharacters(in: .whitespaces).isEmpty {
+            throw AppleError.validation("condition value must not be empty (an empty match would apply to every message).")
+        }
         return Condition(field: field, operator: op, value: value, header_name: header)
     }
 
@@ -129,24 +137,42 @@ public enum RuleLiveGuards {
         if conditions.contains(where: { $0.value.rangeOfCharacter(from: ctrlChars) != nil }) {
             throw AppleError.validation("rule condition values must not contain RS/US (0x1E/0x1F) control characters.")
         }
+        // header_name is now serialized as the 4th US-delimited field of each RS-delimited
+        // condition record, so it must be guarded exactly like `value`: a header name carrying
+        // US/RS would desynchronize the framing and shift every following field by one — turning
+        // a header condition into a differently-typed condition on attacker-chosen text.
+        // `parseCondition` takes the header from the FINAL colon-segment of user input, so this
+        // is reachable from the command line.
+        if conditions.contains(where: { ($0.header_name ?? "").rangeOfCharacter(from: ctrlChars) != nil }) {
+            throw AppleError.validation("rule condition header names must not contain RS/US (0x1E/0x1F) control characters.")
+        }
     }
 
     /// `conditions` is the FULL condition set the rule will carry. It must be an AND-rule
     /// (`match == "all"`) bound to the test label via a subject condition, so the label always
-    /// constrains it. header_name conditions aren't wired for live mutation.
+    /// constrains it.
+    /// The self-scoping predicate on its own, so a PREVIEW can report "execute would refuse this"
+    /// using the exact test the execute path throws on. Keeping two copies is how the update
+    /// preview came to silently omit this refusal while reporting `live_blockers: []`.
+    public static func isSelfScoped(_ conditions: [RuleSchema.Condition]) -> Bool {
+        conditions.contains {
+            $0.field == "subject"
+                && ["contains", "begins_with", "equals"].contains($0.operator)
+                && $0.value.contains(TestMode.sandboxPrefix)
+        }
+    }
+
     public static func requireSelfScoped(conditions: [RuleSchema.Condition], match: String) throws {
         guard match == "all" else {
             throw AppleError.mailSafety("a live test rule must use --match all so its test-label condition always constrains it — refusing (use the preview for --match any).")
         }
-        let selfScoped = conditions.contains {
-            $0.field == "subject" && ["contains", "begins_with", "equals"].contains($0.operator) && $0.value.contains(TestMode.sandboxPrefix)
-        }
-        guard selfScoped else {
+        guard isSelfScoped(conditions) else {
             throw AppleError.mailSafety("a live test rule must include a subject condition bound to the test label (e.g. \"subject:contains:\(TestMode.sandboxPrefix)\") so it only ever acts on test mail — refusing.")
         }
-        if conditions.contains(where: { $0.field == "header_name" }) {
-            throw AppleError.validation("live rule mutation does not support header_name conditions yet — set them in Mail.app or use the preview.")
-        }
+        // header_name IS now wired for live mutation (Mail.sdef RuleType `header key` + the rule
+        // condition's `header` property), so it is no longer refused. The self-scoping invariant
+        // above is what keeps such a rule safe: it is an AND-rule that still carries the
+        // test-label subject condition, so adding a header condition can only NARROW it further.
     }
 
     /// The live-safe rule action plan resolved from an Action: move_to/copy_to (resolved-mailbox
@@ -167,6 +193,25 @@ public enum RuleLiveGuards {
     /// a latent exfil/destructive surface once enabled, so those stay Mail.app-only. At least one
     /// supported action is required. move_to/copy_to must be `Account/Mailbox` so the AppleScript can
     /// resolve a concrete target mailbox.
+    /// The actions the LIVE path refuses, as caller-facing reasons. Empty means `liveActionPlan`
+    /// will succeed for these actions.
+    ///
+    /// WHY THIS EXISTS: `liveActionPlan` throws, and the create/update commands call it before the
+    /// dry-run branch so a preview faithfully predicts execute. The side effect was that a rule
+    /// with `delete` or `forward_to` — both real oracle capabilities — could not even be
+    /// PREVIEWED. A preview that refuses to describe a rule is strictly less useful than one that
+    /// describes it and says plainly which parts would be refused live, so previews now use this.
+    public static func liveActionBlockers(_ actions: RuleSchema.Action) -> [String] {
+        var out: [String] = []
+        if let fwd = actions.forward_to, !fwd.isEmpty {
+            out.append("forward_to: a live rule that auto-sends to others is refused (edit it in Mail.app)")
+        }
+        if actions.delete == true {
+            out.append("delete: a live rule that can auto-trash mail is refused (test it in Mail.app)")
+        }
+        return out
+    }
+
     public static func liveActionPlan(_ actions: RuleSchema.Action) throws -> LiveActionPlan {
         if let fwd = actions.forward_to, !fwd.isEmpty {
             throw AppleError.mailSafety("a live rule with forward_to can auto-send to others — refused; edit such a rule in Mail.app.")

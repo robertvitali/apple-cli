@@ -91,10 +91,36 @@ struct RuleLiveGuardsTests {
         try RuleLiveGuards.requireSelfScoped(conditions: [labeled, unlabeled], match: "all")                         // labeled+all → passes
     }
 
-    @Test func selfScopedRejectsHeaderNameCondition() throws {
+    /// header_name is now WIRED for live mutation (Mail.sdef RuleType `header key` + the rule
+    /// condition's `header` property), so it is no longer refused — it used to be blocked only
+    /// because the AppleScript could not express it. The self-scoping invariant is what keeps it
+    /// safe: the rule is still an AND-rule carrying the test-label subject condition, so a header
+    /// condition can only NARROW what it matches, never widen it.
+    @Test func selfScopedAllowsHeaderNameAlongsideTheLabelCondition() throws {
         let labeled = try RuleSchema.parseCondition("subject:contains:\(label)")
         let hdr = try RuleSchema.parseCondition("header_name:contains:x:X-Test")
-        #expect(throws: Error.self) { try RuleLiveGuards.requireSelfScoped(conditions: [labeled, hdr], match: "all") }
+        try RuleLiveGuards.requireSelfScoped(conditions: [labeled, hdr], match: "all")
+        // ...but a header condition does NOT substitute for the label condition.
+        #expect(throws: Error.self) { try RuleLiveGuards.requireSelfScoped(conditions: [hdr], match: "all") }
+        // ...and it does not unlock an OR-rule, where the label would stop constraining.
+        #expect(throws: Error.self) { try RuleLiveGuards.requireSelfScoped(conditions: [labeled, hdr], match: "any") }
+    }
+
+    /// Previews describe what the live path would refuse rather than refusing outright, so
+    /// `liveActionBlockers` must name exactly the actions `liveActionPlan` throws on.
+    @Test func liveActionBlockersMatchWhatLiveActionPlanRefuses() throws {
+        let fwd = try RuleSchema.parseActions(["forward_to=x@y.test"])
+        #expect(RuleLiveGuards.liveActionBlockers(fwd).count == 1)
+        #expect(throws: Error.self) { _ = try RuleLiveGuards.liveActionPlan(fwd) }
+
+        let del = try RuleSchema.parseActions(["delete=true"])
+        #expect(RuleLiveGuards.liveActionBlockers(del).count == 1)
+        #expect(throws: Error.self) { _ = try RuleLiveGuards.liveActionPlan(del) }
+
+        // A supported action has no blockers and plans cleanly — the two must not disagree.
+        let ok = try RuleSchema.parseActions(["mark_read=true"])
+        #expect(RuleLiveGuards.liveActionBlockers(ok).isEmpty)
+        _ = try RuleLiveGuards.liveActionPlan(ok)
     }
 
     @Test func liveActionPlanCapturesMarkVerbs() throws {
@@ -129,5 +155,87 @@ struct RuleLiveGuardsTests {
         // forward_to (auto-send) + delete (auto-trash) remain refused — latent exfil/destructive.
         #expect(throws: Error.self) { _ = try RuleLiveGuards.liveActionPlan(RuleSchema.parseActions(["forward_to=a@x.io"])) }
         #expect(throws: Error.self) { _ = try RuleLiveGuards.liveActionPlan(RuleSchema.parseActions(["delete=true"])) }
+    }
+}
+
+/// header_name became the 4th US-delimited field of each RS-delimited condition record, so it
+/// needs the same control-character guard `value` has. A header name carrying US/RS would shift
+/// every following field by one and build a differently-typed condition on attacker-chosen text.
+/// `parseCondition` takes the header from the FINAL colon-segment of user input, so this is
+/// reachable straight from the command line.
+@Suite("Rule condition delimiter integrity")
+struct RuleConditionDelimiterTests {
+    private let US = "\u{1F}"
+    private let RS = "\u{1E}"
+
+    @Test func headerNameWithDelimitersIsRejected() throws {
+        for ctl in [US, RS] {
+            let c = RuleSchema.Condition(field: "header_name", operator: "contains",
+                                         value: "v", header_name: "X-Bad\(ctl)injected")
+            #expect(throws: Error.self) {
+                try RuleLiveGuards.requireNoControlChars(name: nil, conditions: [c])
+            }
+        }
+    }
+
+    @Test func aCleanHeaderNamePasses() throws {
+        let c = RuleSchema.Condition(field: "header_name", operator: "contains",
+                                     value: "spam", header_name: "X-Spam-Flag")
+        try RuleLiveGuards.requireNoControlChars(name: nil, conditions: [c])
+    }
+
+    /// The pre-existing guards must not have regressed while adding the new one.
+    @Test func valueAndNameGuardsStillApply() throws {
+        let badValue = RuleSchema.Condition(field: "subject", operator: "contains",
+                                            value: "a\(US)b", header_name: nil)
+        #expect(throws: Error.self) { try RuleLiveGuards.requireNoControlChars(name: nil, conditions: [badValue]) }
+        #expect(throws: Error.self) { try RuleLiveGuards.requireNoControlChars(name: "r\(RS)x", conditions: []) }
+    }
+}
+
+/// A preview must report EVERY refusal the live path would raise. The update preview once
+/// dropped the self-scoping refusal entirely — printing `live_blockers: []`, an affirmative claim
+/// that execute would accept a rule execute actually refuses with exit 77. These lock the
+/// predicate the preview and the execute path now share.
+@Suite("Preview/execute refusal parity")
+struct PreviewRefusalParityTests {
+    private let label = TestMode.canonicalSandboxPrefix
+
+    @Test func isSelfScopedMatchesWhatRequireSelfScopedThrowsOn() throws {
+        let labeled = try RuleSchema.parseCondition("subject:contains:\(label)-x")
+        let unlabeled = try RuleSchema.parseCondition("from:contains:boss@example.com")
+
+        // Agreement in BOTH directions is the point: the preview predicate must be true exactly
+        // when the execute check passes.
+        #expect(RuleLiveGuards.isSelfScoped([labeled, unlabeled]))
+        try RuleLiveGuards.requireSelfScoped(conditions: [labeled, unlabeled], match: "all")
+
+        #expect(RuleLiveGuards.isSelfScoped([unlabeled]) == false)
+        #expect(throws: Error.self) { try RuleLiveGuards.requireSelfScoped(conditions: [unlabeled], match: "all") }
+
+        #expect(RuleLiveGuards.isSelfScoped([]) == false)
+    }
+
+    /// Only subject conditions with a containment-style operator bind the label; a label appearing
+    /// in some OTHER field must not count as self-scoping.
+    @Test func onlySubjectContainmentConditionsCountAsSelfScoping() throws {
+        let inSender = try RuleSchema.parseCondition("from:contains:\(label)@x.io")
+        #expect(RuleLiveGuards.isSelfScoped([inSender]) == false)
+        let wrongOp = try RuleSchema.parseCondition("subject:does_not_contain:\(label)")
+        #expect(RuleLiveGuards.isSelfScoped([wrongOp]) == false)
+    }
+
+    /// Oracle A rejects an empty condition value; an empty `contains` matches EVERY message.
+    /// The header_name grammar is the tricky case — the value only becomes empty AFTER the
+    /// header is peeled off the final colon-segment.
+    @Test func emptyConditionValueIsRejectedIncludingAfterTheHeaderSplit() {
+        #expect(throws: Error.self) { _ = try RuleSchema.parseCondition("subject:contains:") }
+        #expect(throws: Error.self) { _ = try RuleSchema.parseCondition("subject:contains:   ") }
+        #expect(throws: Error.self) { _ = try RuleSchema.parseCondition("header_name:contains::X-Foo") }
+        // A real value with a colon in it still survives verbatim.
+        let ok = try? RuleSchema.parseCondition("subject:contains:Re: Q3")
+        #expect(ok?.value == "Re: Q3")
+        let hdr = try? RuleSchema.parseCondition("header_name:contains:9:00:X-When")
+        #expect(hdr?.value == "9:00" && hdr?.header_name == "X-When")
     }
 }

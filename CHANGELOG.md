@@ -126,6 +126,51 @@ was one item away from parity were understated.
   `~/.claude`, `~/Library/{Keychains,LaunchAgents,LaunchDaemons}`). The blocklist is the same
   helper the attachment reader uses, so the two surfaces cannot drift.
 
+### Fixed — Mail rules conditions + preview honesty (confirmed gaps, batch 6)
+- **`any_recipient` built the wrong rule.** It mapped to Mail's `to or cc header`, but
+  `Mail.sdef`'s `RuleType` enum has a distinct `any recipient` — and they differ: `any recipient`
+  covers Bcc, `to or cc header` does not. A rule created from an oracle `any_recipient` condition
+  therefore silently missed Bcc'd mail. Now mapped correctly.
+- **`header_name` conditions are wired for live mutation.** `RuleType` has `header key` and the
+  rule-condition class has a `header` ("Rule header key") property; the CLI set neither, so these
+  conditions were refused outright. Both are now set, and the safety refusal is lifted — the
+  self-scoping invariant still holds, because the rule remains an AND-rule carrying the test-label
+  subject condition, so a header condition can only NARROW what it matches.
+- An unknown rule-condition field now **fails loudly** instead of silently becoming a
+  `from header` rule — building a different rule than the caller asked for, then acting on real
+  mail, is the worst available outcome.
+- **BREAKING (contract):** a rules dry-run now DESCRIBES a rule the live path would refuse and
+  reports `live_blockers`, instead of exiting 77. `delete`, `forward_to` and `--match any` are
+  real oracle capabilities; a preview that cannot represent them drops the capability from the CLI
+  surface entirely, which is exactly what strict-superset parity forbids. Previews still fail on
+  genuinely MALFORMED input (e.g. `move_to` without its `Account/Mailbox` slash), so a dry-run
+  keeps predicting the execute outcome. **The live refusals are unchanged** — `--execute` still
+  returns `safety_violation` for all three, and that is regression-locked separately.
+
+### Fixed — rules preview/execute honesty + create verification (review findings)
+- A rules dry-run now reports EVERY refusal the live path would raise, not just the three
+  relaxations. Moving the dry-run guard above the live chain had dropped the self-scoping refusal
+  from the preview entirely: `rules update 1 --condition "from:contains:boss@example.com"` printed
+  `live_blockers: []` and `note: null` — an affirmative claim that `--execute` would accept a rule
+  it refuses with exit 77. The self-scoping test is now a shared predicate (`isSelfScoped`) used
+  by BOTH the preview and the execute path, so the two cannot drift; unlabeled `--name` is
+  reported the same way, and create/update previews no longer disagree about which refusals they
+  surface.
+- A live `rules create` now VERIFIES its conditions attached, as the recreate path already did.
+  Mail's `make new rule condition` sits in a bare `try` that swallows every error while the script
+  still returns "ok", so a silently-dropped condition left a labeled rule MISSING its test-label
+  conjunct — and `rules enable` trusts the NAME alone, so force-disabling only deferred it. A
+  0-condition rule matches ALL mail. On a count mismatch the malformed rule is deleted.
+- Condition **header names** are now covered by the RS/US control-character guard. `header_name`
+  became the 4th US-delimited field of each RS-delimited condition record and is taken verbatim
+  from the final colon-segment of user input, so a delimiter in it shifted every following field —
+  appending an attacker-shaped condition, or (with a 2-field remainder) aborting the script
+  mid-recreate AFTER the old rule was deleted.
+- An **empty condition value** is rejected (oracle A: "condition.value must be a non-empty
+  string"). An empty `contains` matches every message. The check runs after the `header_name`
+  split, which is what produces the empty value: `header_name:contains::X-Foo` arrives with a
+  non-empty raw segment and only becomes empty once the header is peeled off.
+
 ### Fixed — outbound safety hardening (found in review of the above)
 - The self-only outbound guard is now ONE implementation shared by every script that
   dispatches a message. The native-compose path had grown a second, weaker
