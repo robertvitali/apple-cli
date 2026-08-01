@@ -93,10 +93,22 @@ struct NotesScript {
             var c = DateComponents()
             c.year = parts[0]; c.month = parts[1]; c.day = parts[2]
             c.hour = parts[3]; c.minute = parts[4]; c.second = parts[5]
-            if let d = Calendar.current.date(from: c) { return d }
+            if let d = Self.gregorian.date(from: c) { return d }
         }
         return Date()
     }
+
+    /// AppleScript dates are ALWAYS Gregorian (as is the oracle's JS `Date`), so both directions
+    /// of the bridge pin the CALENDAR SYSTEM — under a non-Gregorian system locale (e.g.
+    /// Buddhist, year 2569), `Calendar.current` would emit/interpret a wrong-era year.
+    ///
+    /// The TIME ZONE is deliberately left at its default (`TimeZone.current`) and MUST NOT be
+    /// pinned: AppleScript's `current date` is local and the oracle's `new Date(y, mo-1, d, …)`
+    /// / `getFullYear()` are local, so a UTC pin would shift every emitted and parsed Notes
+    /// date by the local offset. This is why the shape differs from MailFormat.swift (pins UTC)
+    /// and EventKitCore/DateParsing.swift (pins a caller-supplied zone) — those bridge
+    /// zone-explicit formats; this one bridges a local-time API.
+    static let gregorian = Calendar(identifier: .gregorian)
 
     /// AppleScript expression producing `y-mo-d-h-mi-s` for a variable (port of `asDatePartsExpr`).
     static func dateParts(_ v: String) -> String {
@@ -226,8 +238,43 @@ struct NotesScript {
             args.append(contentsOf: fargs)
         }
         let limitCheck = (limit.map { "\n          if (count of resultList) >= \($0) then exit repeat" }) ?? ""
-        let body = """
-        \(dateSetup)set matchingNotes to \(notesSource) where \(whereParts.joined(separator: " and "))
+        let body = Self.searchBody(dateSetup: dateSetup, notesSource: notesSource,
+                                   whereClause: whereParts.joined(separator: " and "),
+                                   limitCheck: limitCheck)
+        // Index computed on its own line: Swift evaluates the `args:` argument BEFORE the
+        // inout `accountArgIndex(&args,…)` append, so an inline call would pass the pre-append
+        // array while tellAccount points one past its end (an off-by-one that breaks every
+        // account-scoped script). Splitting the two guarantees args includes the account.
+        let acctIndex = accountArgIndex(&args, account)
+        let resolvedAccount = args[acctIndex - 1] // the account we just appended (1-based index)
+        let out = try run(body, args: args, tellAccount: acctIndex)
+        return Self.parseSummaries(out, account: resolvedAccount)
+    }
+
+    /// The search-loop script body — the SINGLE source of the search script. `searchNotes` must
+    /// never build this body inline: the regression tests in ScriptGenTests assert on THIS
+    /// function's output, so an inlined second copy would drift outside their reach.
+    ///
+    /// TRUST CONTRACT: all four parameters are MODEL-DERIVED AppleScript fragments — numeric
+    /// interpolations (`dateVarSetup`, limit counts) and argv references (`folderRefExpr`,
+    /// fixed `item N of argv` where-clauses). User text must NEVER be passed in any of them;
+    /// it reaches the script only as osascript argv (see the type-level SECURITY note above).
+    ///
+    /// Container binding is TWO-STEP, and load-bearing: the chained
+    /// `set noteFolder to name of container of n` ALWAYS errors at runtime ("Can't make name of
+    /// «class cntr» of «class note» ... into type Unicode text"), so the on-error fallback fired
+    /// for every hit and every result was reported as folder "Notes" regardless of where it
+    /// lived — including notes in Recently Deleted, which the oracle explicitly flags. Binding
+    /// the container to its own variable first is what the oracle does and it resolves
+    /// correctly.
+    ///
+    /// The per-note `created`/`modified` reads mirror the oracle's search loop exactly (three
+    /// independent try-blocks, `""` on a failed date read): the oracle returns the note's REAL
+    /// dates on every search hit, so a 3-field row would drop two fields the MCP emits.
+    static func searchBody(dateSetup: String, notesSource: String,
+                           whereClause: String, limitCheck: String) -> String {
+        """
+        \(dateSetup)set matchingNotes to \(notesSource) where \(whereClause)
         set resultList to {}
         set seenIds to {}
         repeat with n in matchingNotes
@@ -237,25 +284,30 @@ struct NotesScript {
             if seenIds does not contain noteId then
               set end of seenIds to noteId
               try
-                set noteFolder to name of container of n
+                set noteCreated to creation date of n
+                set createdParts to \(Self.dateParts("noteCreated"))
+              on error
+                set createdParts to ""
+              end try
+              try
+                set noteModified to modification date of n
+                set modifiedParts to \(Self.dateParts("noteModified"))
+              on error
+                set modifiedParts to ""
+              end try
+              try
+                set noteContainer to container of n
+                set noteFolder to name of noteContainer
               on error
                 set noteFolder to "Notes"
               end try
-              set end of resultList to noteName & \(Self.asUS) & noteId & \(Self.asUS) & noteFolder\(limitCheck)
+              set end of resultList to noteName & \(Self.asUS) & noteId & \(Self.asUS) & noteFolder & \(Self.asUS) & createdParts & \(Self.asUS) & modifiedParts\(limitCheck)
             end if
           end try
         end repeat
         set AppleScript's text item delimiters to \(Self.asRS)
         return resultList as text
         """
-        // Index computed on its own line: Swift evaluates the `args:` argument BEFORE the
-        // inout `accountArgIndex(&args,…)` append, so an inline call would pass the pre-append
-        // array while tellAccount points one past its end (an off-by-one that breaks every
-        // account-scoped script). Splitting the two guarantees args includes the account.
-        let acctIndex = accountArgIndex(&args, account)
-        let resolvedAccount = args[acctIndex - 1] // the account we just appended (1-based index)
-        let out = try run(body, args: args, tellAccount: acctIndex)
-        return Self.parseSummaries(out, account: resolvedAccount)
     }
 
     static func parseSummaries(_ out: String, account: String) -> [NoteSummary] {
@@ -268,8 +320,13 @@ struct NotesScript {
             if !id.isEmpty && seen.contains(id) { continue }
             if !id.isEmpty { seen.insert(id) }
             let folder = f.count > 2 ? f[2].trimmingCharacters(in: .whitespaces) : nil
+            // Fields 3/4 are the note's REAL creation/modification dates (numeric y-mo-d-h-mi-s).
+            // An empty field (the script's on-error branch) falls back to `Date()` inside
+            // parseDate — the same now-fallback the oracle applies to an unreadable date.
+            let created = parseDate(f.count > 3 ? f[3] : "")
+            let modified = parseDate(f.count > 4 ? f[4] : "")
             result.append(NoteSummary(id: id, title: title, folder: folder?.isEmpty == true ? nil : folder,
-                                      account: account))
+                                      account: account, created: created, modified: modified))
         }
         return result
     }
@@ -333,10 +390,18 @@ struct NotesScript {
 
     /// AppleScript to set a date variable from a Swift `Date` (numeric parts only — safe to embed).
     static func dateVarSetup(_ date: Date, name: String) -> String {
-        let c = Calendar.current.dateComponents([.year, .month, .day, .hour, .minute, .second], from: date)
+        let c = Self.gregorian.dateComponents([.year, .month, .day, .hour, .minute, .second], from: date)
         let timeSeconds = (c.hour ?? 0) * 3600 + (c.minute ?? 0) * 60 + (c.second ?? 0)
+        // `set day of X to 1` FIRST is a rollover guard, not redundancy — it is the oracle's own
+        // fix for its issue #86 and the CLI was missing it. `current date` carries TODAY's day, so
+        // setting the month before clamping the day overflows whenever today's day exceeds the
+        // target month's length: on 2026-07-31, `set month to 6` yields JULY 1 (June has 30 days),
+        // and the later `set day to 1` cannot undo the month that already advanced. Verified live —
+        // the unguarded sequence returns "July 1, 2026", the guarded one "June 1, 2026". The effect
+        // was a silently short result set for `--modified-since` (list 3 vs oracle 5).
         return """
         set \(name) to current date
+        set day of \(name) to 1
         set year of \(name) to \(c.year ?? 2000)
         set month of \(name) to \(c.month ?? 1)
         set day of \(name) to \(c.day ?? 1)

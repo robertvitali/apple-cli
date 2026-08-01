@@ -20,16 +20,21 @@ struct CreatedNote: Encodable {
     let account: String?
 }
 
-/// A search hit. The MCP emits `{id, title, content:"", tags:[], created:now, modified:now,
-/// folder, account}`. apple-cli emits `id, title, folder, account` — every field carrying real
-/// information. It deliberately drops content/tags (always the empty placeholders `""`/`[]`) and
-/// created/modified (fabricated `now` values the MCP never actually fetches for search); see
-/// docs/port-specs/notes.md §"Output-field deviations" for the documented rationale.
+/// A search hit. The MCP emits `{id, title, content:"", tags:[], created, modified, folder,
+/// account}` — where `created`/`modified` are the note's REAL dates, read per-hit in the search
+/// loop (`new Date()` is only its unreadable-date fallback). apple-cli emits
+/// `id, title, folder, account, created, modified` and deliberately drops ONLY content/tags,
+/// which genuinely are empty placeholders (`""`/`[]`) on search; see docs/port-specs/notes.md
+/// §"Output-field deviations". (An earlier revision dropped created/modified too, on the
+/// mistaken belief the MCP fabricated them at response time — review disproved that against
+/// the oracle source, so they were ported.)
 struct NoteSummary: Encodable {
     let id: String
     let title: String
     let folder: String?
     let account: String?
+    let created: Date
+    let modified: Date
 }
 
 /// `sync_warning` is apple-cli's structured equivalent of the MCP's `withSyncAwareness` text
