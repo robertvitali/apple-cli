@@ -34,21 +34,54 @@ returned (superset — may add more, must not drop any).
 - **Write ops** — only as clearly-labeled, tracked, cleaned-up test data on the real
   store (see Safety). Never a dangerous action; never diff a real send/mutation.
 
-## Safety — track-and-cleanup, and never a dangerous action
+## Safety — product capability vs agent conduct
 
-There is no separate sandbox. Test writes go to the real stores, under strict rules:
+**Product capability (write-model v2, operator decision 2026-08-01 — see
+[`docs/write-model-v2.md`](./docs/write-model-v2.md)):** the CLI behaves exactly like the MCP
+servers it replaces. Write ops EXECUTE when invoked — real data, no label gate, no sandbox
+requirement — because calling the equivalent MCP tool does exactly that. `--dry-run` previews;
+`APPLE_DRY_RUN=1` restores dry-run-by-default globally. `APPLE_TEST_MODE` truthy (`1`/`true`/
+`yes`) or `--test-mode` engages the opt-in sandbox. **The sandbox is a POLICY MODE, not an
+isolated store** — every write still lands in the real Apple databases; it restricts which
+items may be touched (`apple-cli-test`-labeled) and who can be reached (the operator's own
+addresses), and sends inside it are REAL, deliverable mail/iMessages. Gates the ORACLES
+themselves perform are exempt from the lift and always apply: path confinement, sensitive-dir
+blocklists, `--max` caps, `--confirm` for empty-trash, the trash surface's dry-run default
+(oracle B `manage_trash dry_run=True`), the hard test-mode gate on `contacts delete` /
+`contacts groups delete` (oracle `require_test_mode_for`), and the unconditional
+`APPLE_ALLOW_PERMANENT_DELETE` / `APPLE_ALLOW_EMPTY_TRASH` env vars on the two irreversible
+Mail ops (no oracle counterpart exists to defer to — oracle A's `permanent=True` is a
+documented no-op).
 
-1. **Create only clearly-labeled test data**, name-prefixed `apple-cli-test` (reminders,
+**Wiring a NEW write command:** execute by default, honor `--dry-run` with a `willExecute`
+branch bound ONCE at the top of `run()` (emit `dry_run: false` explicitly on the execute
+path), and consult `TestMode.sandboxActive` for any label/recipient restriction — never
+re-check the env inside a guard. THE ONE EXCEPTION: a gate that mirrors an oracle
+ENV-VAR-keyed gate (today: the two Contacts deletes mirroring `CONTACTS_TEST_MODE`) reads
+`TestMode.isTruthyEnv` directly, never `sandboxActive` — a `--test-mode` flag must not be able
+to satisfy a gate the oracle reserves to the operator's environment.
+
+**Agent conduct (binding on every agent working this repo — the product no longer enforces
+these, so YOUR discipline carries them):**
+
+1. **Default posture: every write you run is sandboxed** (`APPLE_TEST_MODE=1`). ONE sanctioned
+   exception, narrow, auditable, and in exactly two shapes: **(a) item surfaces** — the
+   per-domain-flip verification that a LABELED `apple-cli-test` item writes successfully
+   WITHOUT the sandbox engaged, once per domain flip, against an item this run created, logged
+   to `TEST-CLEANUP.md` before the write, cleaned up immediately after; **(b) send surfaces**
+   (Mail send, Messages send) — a single SELF-ADDRESSED send to the operator's own
+   address/number only, logged to `TEST-CLEANUP.md` (a delivered send cannot be cleaned up; the
+   log notes the received item to delete). Group-chat send has no self-addressed shape and is
+   operator-verify-only. Nothing else ever runs unsandboxed by an agent.
+2. **Create only clearly-labeled test data**, name-prefixed `apple-cli-test` (reminders,
    events, notes, contacts, lists/calendars, mail drafts).
-2. **Log every created item immediately** to `TEST-CLEANUP.md` (gitignored) with enough to
+3. **Log every created item immediately** to `TEST-CLEANUP.md` (gitignored) with enough to
    delete it later: kind, id, name, list/folder/account.
-3. **Clean up via the MCP** (the known-good oracle) at the end of each run — delete ONLY the
+4. **Clean up via the MCP** (the known-good oracle) at the end of each run — delete ONLY the
    tracked ids from `TEST-CLEANUP.md`. Never a bulk or fuzzy delete.
-4. **Messages:** send ONLY to the operator's own number (given in the kickoff brief) — never
+5. **Messages:** send ONLY to the operator's own number (given in the kickoff brief) — never
    anyone else.
-5. **Mail:** drafts only, or send only to the operator's own address — never a real recipient.
-
-Gate writes behind `APPLE_TEST_MODE=1` + `--test-mode`; default destructive commands to `--dry-run`.
+6. **Mail:** drafts only, or send only to the operator's own address — never a real recipient.
 
 **DANGEROUS ACTIONS — never do autonomously; stop, log, and leave for the operator:** sending
 Mail to any non-self recipient; iMessage to anyone but the operator's own number; deleting or
