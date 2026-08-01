@@ -22,7 +22,7 @@ require_index() {
   require_index
   # The flag is accepted now (the old 'not yet wired' exit-64 rejection is GONE): a dry-run with
   # --gmail-mode previews like any move and carries gmail_mode in the detail. No Mail mutation.
-  run "$BIN" mail move --match-subject apple-cli-nonexistent-zzz --to Archive --gmail-mode
+  run "$BIN" mail move --dry-run --match-subject apple-cli-nonexistent-zzz --to Archive --gmail-mode
   [ "$status" -eq 0 ]
   echo "$output" | grep -q '"gmail_mode" : "true"'
   echo "$output" | grep -q '"dry_run" : true'

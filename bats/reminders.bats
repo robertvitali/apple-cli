@@ -39,7 +39,7 @@ setup() {
 # --- Dry-run write previews (no store, no TCC) -----------------------------------------------
 
 @test "tasks create dry-run emits a preview envelope (ok, dry_run, no store access)" {
-  run "$BIN" reminders tasks create --title apple-cli-test-x --priority high
+  run "$BIN" reminders tasks create --dry-run --title apple-cli-test-x --priority high
   [ "$status" -eq 0 ]
   echo "$output" | grep -q '"schema_version" : 1'
   echo "$output" | grep -q '"tool" : "reminders"'
@@ -50,38 +50,38 @@ setup() {
 }
 
 @test "tasks update dry-run echoes the parsed intent" {
-  run "$BIN" reminders tasks update --id ABC --title apple-cli-test-y --add-tag work --clear-alarms
+  run "$BIN" reminders tasks update --dry-run --id ABC --title apple-cli-test-y --add-tag work --clear-alarms
   [ "$status" -eq 0 ]
   echo "$output" | grep -q '"action" : "update"'
   echo "$output" | grep -q '"clear_alarms" : true'
 }
 
 @test "tasks delete dry-run previews without deleting" {
-  run "$BIN" reminders tasks delete --id ABC
+  run "$BIN" reminders tasks delete --dry-run --id ABC
   [ "$status" -eq 0 ]
   echo "$output" | grep -q '"action" : "delete"'
   echo "$output" | grep -q '"dry_run" : true'
 }
 
 @test "lists create/update/delete dry-run previews" {
-  run "$BIN" reminders lists create --name apple-cli-test-list --color '#FF5733'
+  run "$BIN" reminders lists create --dry-run --name apple-cli-test-list --color '#FF5733'
   [ "$status" -eq 0 ]; echo "$output" | grep -q '"action" : "create"'
-  run "$BIN" reminders lists update --name apple-cli-test-list --new-name apple-cli-test-list2
+  run "$BIN" reminders lists update --dry-run --name apple-cli-test-list --new-name apple-cli-test-list2
   [ "$status" -eq 0 ]; echo "$output" | grep -q '"action" : "update"'
-  run "$BIN" reminders lists delete --name apple-cli-test-list
+  run "$BIN" reminders lists delete --dry-run --name apple-cli-test-list
   [ "$status" -eq 0 ]; echo "$output" | grep -q '"action" : "delete"'
 }
 
 @test "subtasks create/update/delete/toggle/reorder dry-run previews" {
-  run "$BIN" reminders subtasks create --reminder-id R1 --title apple-cli-test-sub
+  run "$BIN" reminders subtasks create --dry-run --reminder-id R1 --title apple-cli-test-sub
   [ "$status" -eq 0 ]; echo "$output" | grep -q '"action" : "create"'
-  run "$BIN" reminders subtasks update --reminder-id R1 --subtask-id aaaa1111 --completed
+  run "$BIN" reminders subtasks update --dry-run --reminder-id R1 --subtask-id aaaa1111 --completed
   [ "$status" -eq 0 ]; echo "$output" | grep -q '"action" : "update"'
-  run "$BIN" reminders subtasks delete --reminder-id R1 --subtask-id aaaa1111
+  run "$BIN" reminders subtasks delete --dry-run --reminder-id R1 --subtask-id aaaa1111
   [ "$status" -eq 0 ]; echo "$output" | grep -q '"action" : "delete"'
-  run "$BIN" reminders subtasks toggle --reminder-id R1 --subtask-id aaaa1111
+  run "$BIN" reminders subtasks toggle --dry-run --reminder-id R1 --subtask-id aaaa1111
   [ "$status" -eq 0 ]; echo "$output" | grep -q '"action" : "toggle"'
-  run "$BIN" reminders subtasks reorder --reminder-id R1 --order bbbb2222 --order aaaa1111
+  run "$BIN" reminders subtasks reorder --dry-run --reminder-id R1 --order bbbb2222 --order aaaa1111
   [ "$status" -eq 0 ]; echo "$output" | grep -q '"action" : "reorder"'
 }
 
@@ -101,61 +101,61 @@ setup() {
 }
 
 @test "bad --priority is a validation_error (exit 64)" {
-  run "$BIN" reminders tasks create --title apple-cli-test-x --priority 11
+  run "$BIN" reminders tasks create --dry-run --title apple-cli-test-x --priority 11
   [ "$status" -eq 64 ]
   echo "$output" | grep -q '"type" : "validation_error"'
 }
 
 @test "bad --color is a validation_error (exit 64)" {
-  run "$BIN" reminders lists create --name apple-cli-test-list --color notacolor
+  run "$BIN" reminders lists create --dry-run --name apple-cli-test-list --color notacolor
   [ "$status" -eq 64 ]
   echo "$output" | grep -q '"type" : "validation_error"'
 }
 
 @test "bad recurrence (missing freq) is a validation_error (exit 64)" {
-  run "$BIN" reminders tasks create --title apple-cli-test-x --recurrence "interval=2"
+  run "$BIN" reminders tasks create --dry-run --title apple-cli-test-x --recurrence "interval=2"
   [ "$status" -eq 64 ]
   echo "$output" | grep -q '"type" : "validation_error"'
 }
 
 @test "non-hex subtask id is a validation_error (exit 64)" {
-  run "$BIN" reminders subtasks update --reminder-id R1 --subtask-id NOTHEX --completed
+  run "$BIN" reminders subtasks update --dry-run --reminder-id R1 --subtask-id NOTHEX --completed
   [ "$status" -eq 64 ]
   echo "$output" | grep -q '"type" : "validation_error"'
 }
 
 @test "reorder with no --order is a validation_error (exit 64)" {
-  run "$BIN" reminders subtasks reorder --reminder-id R1
+  run "$BIN" reminders subtasks reorder --dry-run --reminder-id R1
   [ "$status" -eq 64 ]
   echo "$output" | grep -q '"type" : "validation_error"'
 }
 
 @test "geo location trigger needs both lat and lon (exit 64)" {
-  run "$BIN" reminders tasks create --title apple-cli-test-x --geo-lat 37.3
+  run "$BIN" reminders tasks create --dry-run --title apple-cli-test-x --geo-lat 37.3
   [ "$status" -eq 64 ]
   echo "$output" | grep -q '"type" : "validation_error"'
 }
 
 @test "empty reminder title is rejected (exit 64)" {
-  run "$BIN" reminders tasks create --title ""
+  run "$BIN" reminders tasks create --dry-run --title ""
   [ "$status" -eq 64 ]
   echo "$output" | grep -q '"type" : "validation_error"'
 }
 
 @test "empty subtask title in create is rejected (exit 64)" {
-  run "$BIN" reminders tasks create --title apple-cli-test-x --subtask ""
+  run "$BIN" reminders tasks create --dry-run --title apple-cli-test-x --subtask ""
   [ "$status" -eq 64 ]
   echo "$output" | grep -q '"type" : "validation_error"'
 }
 
 @test "--clear-tags conflicts with --tag (exit 64)" {
-  run "$BIN" reminders tasks update --id ABC --clear-tags --tag work
+  run "$BIN" reminders tasks update --dry-run --id ABC --clear-tags --tag work
   [ "$status" -eq 64 ]
   echo "$output" | grep -q '"type" : "validation_error"'
 }
 
 @test "--clear-tags alone dry-run previews with empty tags (exit 0)" {
-  run "$BIN" reminders tasks update --id ABC --clear-tags
+  run "$BIN" reminders tasks update --dry-run --id ABC --clear-tags
   [ "$status" -eq 0 ]
   echo "$output" | grep -q '"action" : "update"'
   # present-but-empty tags array signals "clear all"; assert whitespace-insensitively
@@ -175,7 +175,7 @@ setup() {
 # --- Golden JSON snapshot (synthetic, deterministic — no dates, no PII, no store) -------------
 
 @test "golden: deterministic dry-run create matches the canonical envelope" {
-  run "$BIN" reminders tasks create \
+  run "$BIN" reminders tasks create --dry-run \
     --title apple-cli-test-golden --priority high --note hello \
     --tag work --tag urgent --subtask a --subtask b
   [ "$status" -eq 0 ]

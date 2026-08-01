@@ -71,3 +71,136 @@ setup() {
   grep -q "SENTINEL_SECRET_XYZ" "/tmp/apple_perr.$$"   # detail on stderr
   rm -f "/tmp/apple_perr.$$"
 }
+
+# ── Write-model v2 sweep invariant (docs/write-model-v2.md, rollout step 2) ─────────────────────
+# v2 flips writes to execute-by-default, so a flagless write invocation in this suite — a safe
+# preview under v1 — would become a LIVE MUTATION of the operator's real data at the core flip.
+# The sandbox does not save it: fixtures are apple-cli-test-labeled and pass the label gate.
+# Every write-verb invocation must carry an explicit --dry-run or --execute (or a
+# `# flagless-on-purpose` marker on the few tests that PIN the v1 flagless default — the core
+# flip removes every marker as part of its test migration). Enforced here so a flagless write is
+# a suite FAILURE from the sweep commit onward.
+#
+# The fixture lines below assemble the `$BIN` token at runtime ('$BI' + 'N') so this file never
+# contains a literal write invocation — otherwise the lint would count these fixtures as suite
+# invocations and diff-mode would flag this very file's addition.
+
+@test "lint: every bats write invocation carries an explicit flag (fail-closed floors)" {
+  run python3 "$BATS_TEST_DIRNAME/helpers/no_flagless_writes.py" "$BATS_TEST_DIRNAME"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "^OK: 0 flagless"
+  # The lint self-checks logical-vs-physical coverage (a joiner regression fails closed);
+  # here we additionally require a sane absolute volume so "scanned nothing" can't pass.
+  local checked
+  checked="$(echo "$output" | sed -n 's/.* checked \([0-9]*\) write invocation(s).*/\1/p')"
+  [ -n "$checked" ] && [ "$checked" -ge 100 ]
+  # PIN the marker count. flagless-on-purpose is the one sanctioned path to a flagless write,
+  # so its population is CAPPED here: adding a marker requires editing this assertion — a
+  # reviewable event. (A net-neutral marker SWAP holds the count without touching this line,
+  # but both halves of a swap are visible line edits in the same diff; the cap's job is to
+  # stop growth.) The count reaches 0 at the v2 core flip, which removes every marker.
+  local markers
+  markers="$(echo "$output" | sed -n 's/.*, \([0-9]*\) marker(s)$/\1/p')"
+  [ "$markers" -eq 8 ]
+}
+
+@test "lint: a dynamic-verb write invocation without an explicit flag is a violation" {
+  # `"$BIN" mail $sub` builds its verb at runtime — unclassifiable statically, so the lint
+  # demands an explicit flag on the logical line. This shape hid four flagless bulk writes
+  # from an earlier lint revision whose regex required a literal verb.
+  local T='$BI'; T="${T}N"
+  mkdir -p "$BATS_TEST_TMPDIR/lintcase"
+  printf '%s\n' "run \"$T\" mail \$sub" > "$BATS_TEST_TMPDIR/lintcase/dyn.bats"
+  run python3 "$BATS_TEST_DIRNAME/helpers/no_flagless_writes.py" "$BATS_TEST_TMPDIR/lintcase"
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q "dynamic verb"
+  # Flagged form passes.
+  printf '%s\n' "run \"$T\" mail \$sub --dry-run" > "$BATS_TEST_TMPDIR/lintcase/dyn.bats"
+  run python3 "$BATS_TEST_DIRNAME/helpers/no_flagless_writes.py" "$BATS_TEST_TMPDIR/lintcase"
+  [ "$status" -eq 0 ]
+}
+
+@test "lint --diff-mode catches an added --execute on a continuation line" {
+  local T='$BI'; T="${T}N"
+  run bash -c 'printf "%s\n" \
+    "+++ b/bats/mail.bats" \
+    "+  run \"$1\" mail send --to victim@example.com --subject x --body y \\" \
+    "+    --mode send --execute --test-mode" \
+    | python3 "$0/helpers/no_flagless_writes.py" --diff-mode' "$BATS_TEST_DIRNAME" "$T"
+  [ "$status" -eq 1 ]
+}
+
+@test "lint --diff-mode catches --execute added on a continuation under an UNCHANGED head line" {
+  local T='$BI'; T="${T}N"
+  run bash -c 'printf "%s\n" \
+    "+++ b/bats/mail.bats" \
+    "@@ -1,2 +1,3 @@" \
+    "   run \"$1\" mail send --to victim@example.com --subject x --body y \\" \
+    "+    --mode send --execute --test-mode" \
+    | python3 "$0/helpers/no_flagless_writes.py" --diff-mode' "$BATS_TEST_DIRNAME" "$T"
+  [ "$status" -eq 1 ]
+}
+
+@test "lint --diff-mode catches an added --execute with unquoted \$BIN" {
+  local T='$BI'; T="${T}N"
+  run bash -c 'printf "%s\n" \
+    "+++ b/bats/calendar.bats" \
+    "+  run $1 calendar events create --title x --start 2026-07-20 --end 2026-07-20 --execute" \
+    | python3 "$0/helpers/no_flagless_writes.py" --diff-mode' "$BATS_TEST_DIRNAME" "$T"
+  [ "$status" -eq 1 ]
+}
+
+@test "lint --diff-mode catches an added --execute on contacts vcard import" {
+  local T='$BI'; T="${T}N"
+  run bash -c 'printf "%s\n" \
+    "+++ b/bats/contacts.bats" \
+    "+  run \"$1\" contacts vcard import --vcard \"BEGIN:VCARD\" --execute" \
+    | python3 "$0/helpers/no_flagless_writes.py" --diff-mode' "$BATS_TEST_DIRNAME" "$T"
+  [ "$status" -eq 1 ]
+}
+
+@test "lint --diff-mode is not masked by a preceding unbalanced-quote line" {
+  local T='$BI'; T="${T}N"
+  run bash -c 'printf "%s\n" \
+    "+++ b/bats/mail.bats" \
+    "+  run \"$1\" mail search --subject \"unbalanced" \
+    "+  run \"$1\" mail mailboxes create --account iCloud --name X --execute" \
+    | python3 "$0/helpers/no_flagless_writes.py" --diff-mode' "$BATS_TEST_DIRNAME" "$T"
+  [ "$status" -eq 1 ]
+}
+
+@test "lint: a pre-verb-option write invocation without an explicit flag is a violation" {
+  # `"$BIN" mail --text send …` is a WORKING ArgumentParser form whose verb hides from the
+  # literal-verb matcher — an earlier revision skipped it entirely (round-4 review HIGH).
+  # It is treated as dynamic: flag required.
+  local T='$BI'; T="${T}N"
+  mkdir -p "$BATS_TEST_TMPDIR/lintcase2"
+  printf '%s\n' "run \"$T\" mail --text send --to victim@example.com --subject x --body y" \
+    > "$BATS_TEST_TMPDIR/lintcase2/opt.bats"
+  run python3 "$BATS_TEST_DIRNAME/helpers/no_flagless_writes.py" "$BATS_TEST_TMPDIR/lintcase2"
+  [ "$status" -eq 1 ]
+  echo "$output" | grep -q "dynamic verb"
+  # Flagged form passes.
+  printf '%s\n' "run \"$T\" mail --text --dry-run send --to me@self.test --subject x --body y" \
+    > "$BATS_TEST_TMPDIR/lintcase2/opt.bats"
+  run python3 "$BATS_TEST_DIRNAME/helpers/no_flagless_writes.py" "$BATS_TEST_TMPDIR/lintcase2"
+  [ "$status" -eq 0 ]
+}
+
+@test "lint --diff-mode catches --execute smuggled as a pre-verb option" {
+  local T='$BI'; T="${T}N"
+  run bash -c 'printf "%s\n" \
+    "+++ b/bats/mail.bats" \
+    "+  run \"$1\" mail --execute send --to victim@example.com --subject x --body y" \
+    | python3 "$0/helpers/no_flagless_writes.py" --diff-mode' "$BATS_TEST_DIRNAME" "$T"
+  [ "$status" -eq 1 ]
+}
+
+@test "lint --diff-mode passes a clean --dry-run addition (control)" {
+  local T='$BI'; T="${T}N"
+  run bash -c 'printf "%s\n" \
+    "+++ b/bats/mail.bats" \
+    "+  run \"$1\" mail send --dry-run --to me@self.test --subject x --body y" \
+    | python3 "$0/helpers/no_flagless_writes.py" --diff-mode' "$BATS_TEST_DIRNAME" "$T"
+  [ "$status" -eq 0 ]
+}

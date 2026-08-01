@@ -73,7 +73,7 @@ setup() {
 # Golden-ish snapshot — synthetic labeled data only, no real PII. The default
 # (no --execute) create is a dry-run preview that mutates nothing.
 @test "create dry-run (default) previews planned fields, mutates nothing" {
-  run "$BIN" contacts create --first "apple-cli-test Ada" --org "Acme"
+  run "$BIN" contacts create --first "apple-cli-test Ada" --org "Acme"  # flagless-on-purpose
   [ "$status" -eq 0 ]
   echo "$output" | grep -q '"ok" : true'
   echo "$output" | grep -q '"dry_run" : true'
@@ -83,20 +83,20 @@ setup() {
 }
 
 @test "update dry-run (default) previews, requires a field" {
-  run "$BIN" contacts update "SOME-ID" --set given_name=apple-cli-test
+  run "$BIN" contacts update "SOME-ID" --set given_name=apple-cli-test  # flagless-on-purpose
   [ "$status" -eq 0 ]
   echo "$output" | grep -q '"dry_run" : true'
   echo "$output" | grep -q '"operation" : "update_contact"'
 }
 
 @test "update with no fields → validation_error (exit 64)" {
-  run "$BIN" contacts update "SOME-ID"
+  run "$BIN" contacts update --dry-run "SOME-ID"
   [ "$status" -eq 64 ]
   echo "$output" | grep -q '"type" : "validation_error"'
 }
 
 @test "photo set with two sources → validation_error (exit 64)" {
-  run "$BIN" contacts photo set "SOME-ID" --clear --base64 "AAAA"
+  run "$BIN" contacts photo set --dry-run "SOME-ID" --clear --base64 "AAAA"
   [ "$status" -eq 64 ]
   echo "$output" | grep -q '"type" : "validation_error"'
 }
@@ -183,14 +183,14 @@ END:VCARD" --execute
 
 # note set / vcard import were the two dead commands — assert they run (dry-run) now.
 @test "note set dry-run previews (was dead before the --text-collision fix)" {
-  run "$BIN" contacts note set "SOME-ID" --note "apple-cli-test note"
+  run "$BIN" contacts note set --dry-run "SOME-ID" --note "apple-cli-test note"
   [ "$status" -eq 0 ]
   echo "$output" | grep -q '"operation" : "write_note"'
   echo "$output" | grep -q '"dry_run" : true'
 }
 
 @test "vcard import dry-run validates the payload (was dead before the fix)" {
-  run "$BIN" contacts vcard import --vcard "BEGIN:VCARD
+  run "$BIN" contacts vcard import --dry-run --vcard "BEGIN:VCARD
 VERSION:3.0
 N:Test;A;;;
 FN:A Test
@@ -201,13 +201,13 @@ END:VCARD"
 }
 
 @test "vcard import dry-run rejects malformed vCard (exit 64)" {
-  run "$BIN" contacts vcard import --vcard "definitely not a vcard"
+  run "$BIN" contacts vcard import --dry-run --vcard "definitely not a vcard"
   [ "$status" -eq 64 ]
   echo "$output" | grep -q '"type" : "validation_error"'
 }
 
 @test "note set with no source → validation_error (exit 64)" {
-  run "$BIN" contacts note set "SOME-ID"
+  run "$BIN" contacts note set --dry-run "SOME-ID"
   [ "$status" -eq 64 ]
   echo "$output" | grep -q '"message" : "exactly one of --note, --file, or --clear is required"'
 }
@@ -219,7 +219,7 @@ END:VCARD"
 }
 
 @test "groups add dry-run previews membership" {
-  run "$BIN" contacts groups add "CID" "GID"
+  run "$BIN" contacts groups add --dry-run "CID" "GID"
   [ "$status" -eq 0 ]
   echo "$output" | grep -q '"operation" : "add_contact_to_group"'
   echo "$output" | grep -q '"dry_run" : true'

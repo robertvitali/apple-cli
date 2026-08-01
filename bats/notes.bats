@@ -39,7 +39,7 @@ setup() {
 }
 
 @test "notes create defaults to a safe dry-run preview (no --execute)" {
-  run "$BIN" notes create "apple-cli-test smoke" --content "body"
+  run "$BIN" notes create "apple-cli-test smoke" --content "body"  # flagless-on-purpose
   [ "$status" -eq 0 ]
   echo "$output" | grep -q '"dry_run" : true'
   echo "$output" | grep -q '"operation" : "create-note"'
@@ -52,7 +52,7 @@ setup() {
 }
 
 @test "notes delete defaults to dry-run (destructive op is never automatic)" {
-  run "$BIN" notes delete --id "x-coredata://ABC/ICNote/p1"
+  run "$BIN" notes delete --id "x-coredata://ABC/ICNote/p1"  # flagless-on-purpose
   [ "$status" -eq 0 ]
   echo "$output" | grep -q '"dry_run" : true'
 }
@@ -74,14 +74,14 @@ setup() {
 }
 
 @test "notes batch-delete with no ids → validation error, exit 64" {
-  run "$BIN" notes batch-delete --ids
+  run "$BIN" notes batch-delete --dry-run --ids
   [ "$status" -eq 64 ]
 }
 
 @test "notes create with an over-length title → validation error, exit 64 (input-bounds parity)" {
   # Bounds are checked before the dry-run/execute gate, mirroring the MCP's zod input validation.
   local long_title="apple-cli-test $(printf 'x%.0s' {1..2001})"
-  run "$BIN" notes create "$long_title" --content "b"
+  run "$BIN" notes create --dry-run "$long_title" --content "b"
   [ "$status" -eq 64 ]
   echo "$output" | grep -q '"type" : "validation_error"'
 }
@@ -89,7 +89,7 @@ setup() {
 @test "exit-code matrix: usage=64 for bad flags, well-formed envelope on the error path" {
   run "$BIN" notes get-checklist   # missing required --id
   [ "$status" -eq 64 ]
-  run "$BIN" notes move --id "x-coredata://A/ICNote/p1"   # missing required --folder
+  run "$BIN" notes move --dry-run --id "x-coredata://A/ICNote/p1"   # missing required --folder
   [ "$status" -eq 64 ]
 }
 

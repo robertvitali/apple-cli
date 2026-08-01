@@ -52,7 +52,7 @@ setup() {
 # --- send safety (no TCC, NOTHING is ever sent here) ---
 
 @test "send defaults to dry-run: executed=false, ok=true, exit 0, no send" {
-  run "$BIN" messages send 2125550100 --message "smoke test"
+  run "$BIN" messages send 2125550100 --message "smoke test"  # flagless-on-purpose
   [ "$status" -eq 0 ]
   echo "$output" | grep -q '"executed" : false'
   echo "$output" | grep -q '"dry_run" : true'
