@@ -474,6 +474,7 @@ struct AttachmentsSave: ParsableCommand {
     @Option(name: .long, help: "Exact destination file path — rename-on-save; requires exactly one selected attachment (mutually exclusive with --dir).") var out: String?
     @Option(name: .long, help: "0-based attachment indices to save (comma-separated); default all. Mutually exclusive with --name.") var indices: String?
     @Option(name: .long, help: "Save only the attachment with this name. Mutually exclusive with --indices.") var name: String?
+    @Flag(name: .long, help: "Allow a destination outside $HOME (e.g. /tmp, /Volumes/...). Oracle A's save_attachments has no confinement, so this restores that reach. Credential directories (~/.ssh, ~/.aws, ...) stay blocked either way.") var allowOutsideHome = false
 
     // `out_path` / `saved_paths` / `not_saved` (added MINOR). `directory`/`out_path` are the
     // normalized destination(s) — IDENTICAL in the dry-run preview and the --execute envelope, so
@@ -488,6 +489,9 @@ struct AttachmentsSave: ParsableCommand {
         let attachments: [String]
         let dry_run: Bool
         let note: String?
+        /// Oracle A `save_attachments` returns a `saved` COUNT (server.py:1379-1383); the CLI
+        /// carried only the path list. Additive, --execute only (null on dry-run).
+        let saved: Int?
         let saved_paths: [String]?
         let not_saved: [String]?
     }
@@ -528,12 +532,36 @@ struct AttachmentsSave: ParsableCommand {
 
             // Normalize destination(s) ONCE, so preview + execute always agree byte-for-byte.
             func normalize(_ p: String) -> String { URL(fileURLWithPath: (p as NSString).expandingTildeInPath).standardizedFileURL.path }
-            let absDir = dir.map(normalize)
-            let absOut = out.map(normalize)
+            // CONFINE FIRST. Both oracles refuse an out-of-home or credential-directory
+            // destination before touching Mail (patrickfreyer manage.py:197-220); this command
+            // `--out ~/.ssh/authorized_keys --execute` would have overwritten an SSH key with
+            // attachment bytes. Exit 77, not 64: a refused write is a safety violation.
+            let absDir = try dir.map { normalize(try confineWriteDestination($0, action: "save attachments into", allowOutsideHome: allowOutsideHome).path) }
+            let absOut = try out.map { normalize(try confineWriteDestination($0, action: "save an attachment to", allowOutsideHome: allowOutsideHome).path) }
+
+            // VALIDATE BEFORE PREVIEWING. These checks used to sit after the dry-run guard, so a
+            // preview happily reported a destination that --execute would reject — the same
+            // preview-honesty rule `trash empty` already follows by re-throwing resolution errors
+            // on its dry-run path.
+            if let absDir {
+                var isDir: ObjCBool = false
+                guard FileManager.default.fileExists(atPath: absDir, isDirectory: &isDir) else {
+                    throw AppleError.validation("destination directory does not exist: \(absDir)")
+                }
+                guard isDir.boolValue else {
+                    throw AppleError.validation("destination path is not a directory: \(absDir)")
+                }
+            }
+            if let absOut {
+                var isDir: ObjCBool = false
+                if FileManager.default.fileExists(atPath: absOut, isDirectory: &isDir), isDir.boolValue {
+                    throw AppleError.validation("--out path is a directory, not a file: \(absOut)")
+                }
+            }
 
             guard global.willExecute else {
                 try Output.emit(tool: "mail", data: Result(message_id: String(rowid), directory: absDir, out_path: absOut,
-                    attachments: selectedNames, dry_run: true, note: nil, saved_paths: nil, not_saved: nil)); return
+                    attachments: selectedNames, dry_run: true, note: nil, saved: nil, saved_paths: nil, not_saved: nil)); return
             }
 
             // Live export: extract existing attachment bytes to disk. This is a READ/EXPORT
@@ -543,15 +571,8 @@ struct AttachmentsSave: ParsableCommand {
             var notSavedIdx: Set<Int> = []
 
             if let absDir {
-                // --dir (multi-save, MCP A style): destination must be an EXISTING directory
-                // (matches the MCP oracle, which validates and never creates it).
-                var isDir: ObjCBool = false
-                guard FileManager.default.fileExists(atPath: absDir, isDirectory: &isDir) else {
-                    throw AppleError.validation("destination directory does not exist: \(absDir)")
-                }
-                guard isDir.boolValue else {
-                    throw AppleError.validation("destination path is not a directory: \(absDir)")
-                }
+                // Existence / is-a-directory already validated above the dry-run guard so the
+                // preview and --execute refuse identically.
                 let basenames = deCollidedBasenames(wanted.map { safeAttachmentBasename(master[$0], fallbackIndex: $0) })
                 let fm = FileManager.default
                 // Phase 1, all-or-nothing on the dangerous case: a SYMLINK at any computed
@@ -570,12 +591,8 @@ struct AttachmentsSave: ParsableCommand {
                 }
             } else if let absOut, let idx = wanted.first {
                 // --out (single exact path, MCP B style, rename-on-save): the operator-chosen path
-                // is TRUSTED — save verbatim, no de-collision, no pre-existence skip. Only refuse
                 // when it already resolves to a directory (can't save a file's bytes onto a dir).
-                var isDir: ObjCBool = false
-                if FileManager.default.fileExists(atPath: absOut, isDirectory: &isDir), isDir.boolValue {
-                    throw AppleError.validation("--out path is a directory, not a file: \(absOut)")
-                }
+                // is-a-directory already validated above the dry-run guard.
                 pairs.append((index: idx, destPath: absOut))
             }
 
@@ -610,7 +627,7 @@ struct AttachmentsSave: ParsableCommand {
                 : "saved \(savedPaths.count) of \(wanted.count); \(notSaved.count) could not be exported"
 
             try Output.emit(tool: "mail", data: Result(message_id: String(rowid), directory: absDir, out_path: absOut,
-                attachments: selectedNames, dry_run: false, note: note, saved_paths: savedPaths,
+                attachments: selectedNames, dry_run: false, note: note, saved: savedPaths.count, saved_paths: savedPaths,
                 not_saved: notSaved.isEmpty ? nil : notSaved))
         }
     }

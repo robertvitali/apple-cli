@@ -41,7 +41,19 @@ struct ExportCommand: ParsableCommand {
     @Option(name: .long, help: "Format: txt or html.") var format: String = "txt"
     @Option(name: .long, help: "Max messages for entire_mailbox (safety cap).") var max: Int = 1000
 
-    struct Result: Encodable { let exported: Int; let directory: String; let files: [String]; let format: String; let body_source: String }
+    struct Result: Encodable {
+        let exported: Int
+        let directory: String
+        let files: [String]
+        let format: String
+        let body_source: String
+        let dry_run: Bool
+        /// Oracle B reports BOTH numbers (analytics.py:627-628 emits "Total emails in mailbox"
+        /// and "Exported"), so a caller can tell a capped export from a complete one. A single
+        /// count cannot distinguish "the mailbox held 800" from "capped at 1000 of 40,000".
+        let total_in_mailbox: Int
+        let capped: Bool
+    }
 
     func run() throws {
         try runGuarded(tool: "mail") {
@@ -75,6 +87,33 @@ struct ExportCommand: ParsableCommand {
             }
 
             let outDir = try resolveExportDirectory(dir)
+            // Oracle B reports the mailbox total alongside the exported count so a capped run is
+            // visible — but ONLY for entire_mailbox, which is the only scope `--max` applies to
+            // (analytics.py:627-628 lives in the mailbox branch; the single_email branch emits
+            // neither number). Reporting a mailbox-wide total for a one-message subject export
+            // produced a bogus `capped: true` retry signal, so single_email reports itself.
+            let totalInMailbox: Int
+            if scope == "single_email" {
+                totalInMailbox = messages.count
+            } else {
+                var countFilters = f; countFilters.limit = Int.max; countFilters.offset = 0
+                totalInMailbox = (try? ctx.index.countMessages(countFilters)) ?? messages.count
+            }
+            let planned = messages.map { m -> String in
+                let safe = m.subject.replacingOccurrences(of: "/", with: "-").prefix(60)
+                return outDir.appendingPathComponent("\(m.id)-\(safe).\(format)").path
+            }
+            // `--dry-run` was ADVERTISED in --help and silently ignored: the command mkdir -p'd
+            // and wrote one file per message regardless. On a command that writes message bodies
+            // to disk that is the worst kind of ignored parameter, so the preview now returns
+            // before any filesystem mutation — no directory creation, no writes.
+            guard global.willExecute else {
+                try Output.emit(tool: "mail", data: Result(
+                    exported: 0, directory: outDir.path, files: planned, format: format,
+                    body_source: bodySource, dry_run: true,
+                    total_in_mailbox: totalInMailbox, capped: totalInMailbox > messages.count))
+                return
+            }
             try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
             var files: [String] = []
             for m in messages {
@@ -85,7 +124,10 @@ struct ExportCommand: ParsableCommand {
                 try content.write(to: url, atomically: true, encoding: .utf8)
                 files.append(url.path)
             }
-            try Output.emit(tool: "mail", data: Result(exported: files.count, directory: outDir.path, files: files, format: format, body_source: bodySource))
+            try Output.emit(tool: "mail", data: Result(
+                exported: files.count, directory: outDir.path, files: files, format: format,
+                body_source: bodySource, dry_run: false,
+                total_in_mailbox: totalInMailbox, capped: totalInMailbox > files.count))
         }
     }
 }
@@ -164,17 +206,7 @@ enum MailDashboard {
 /// them (the same ordering `resolveAttachmentPath` uses), and the blocklist itself is the shared
 /// `sensitiveAttachmentDir` so the two surfaces cannot drift apart.
 func resolveExportDirectory(_ raw: String) throws -> URL {
-    let expanded = (raw as NSString).expandingTildeInPath
-    let resolved = URL(fileURLWithPath: expanded).resolvingSymlinksInPath()
-    let home = FileManager.default.homeDirectoryForCurrentUser.resolvingSymlinksInPath().path
-    let path = resolved.path
-    guard path == home || path.hasPrefix(home + "/") else {
-        throw AppleError.mailSafety("export directory must be under your home directory (\(home)); got: \(path)")
-    }
-    // Check the resolved path AND the pre-resolution literal, so a sensitive dir that is itself a
-    // symlink is caught too.
-    if let dir = sensitiveAttachmentDir(path, home: home) ?? sensitiveAttachmentDir(expanded, home: home) {
-        throw AppleError.mailSafety("cannot export messages into a sensitive directory (\(dir)) — refusing.")
-    }
-    return resolved
+    // Delegates to the shared guard so export and `attachments save` cannot drift apart —
+    // they refuse exactly the same path set.
+    try confineWriteDestination(raw, action: "export messages into")
 }

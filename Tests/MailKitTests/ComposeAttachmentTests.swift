@@ -136,3 +136,110 @@ struct ExportDirectoryTests {
         #expect(throws: Error.self) { _ = try resolveExportDirectory("~/Desktop/../../../tmp") }
     }
 }
+
+/// The guard `export` and `attachments save` now share. `attachments save` previously applied
+/// NEITHER check and documented its destination as "TRUSTED", so
+/// `--out ~/.ssh/authorized_keys --execute` would have overwritten an SSH key with attachment
+/// bytes — a divergence in the less-safe direction from both oracles.
+@Suite("Shared write-destination confinement")
+struct WriteDestinationConfinementTests {
+    private var home: String { FileManager.default.homeDirectoryForCurrentUser.resolvingSymlinksInPath().path }
+
+    @Test func acceptsOrdinaryPathsUnderHome() throws {
+        #expect(try confineWriteDestination("~/Desktop", action: "save attachments into").path.hasPrefix(home))
+        // $HOME itself is allowed, matching the oracle (manage.py:201).
+        #expect(try confineWriteDestination("~", action: "save attachments into").path == home)
+    }
+
+    @Test func refusesOutsideHome() {
+        for p in ["/tmp/x", "/etc", "/private/etc", "/", "/Users/someone-else/Desktop"] {
+            #expect(throws: Error.self, "expected \(p) to be refused") {
+                _ = try confineWriteDestination(p, action: "save attachments into")
+            }
+        }
+    }
+
+    @Test func refusesSensitiveDirectoriesAndTheirContents() {
+        for p in ["~/.ssh", "~/.gnupg", "~/.config", "~/.aws", "~/.claude",
+                  "~/Library/Keychains", "~/Library/LaunchAgents", "~/Library/LaunchDaemons",
+                  "~/.ssh/authorized_keys", "~/.aws/credentials"] {
+            #expect(throws: Error.self, "expected \(p) to be refused") {
+                _ = try confineWriteDestination(p, action: "save attachments into")
+            }
+        }
+    }
+
+    @Test func resolvesTraversalBeforeChecking() {
+        #expect(throws: Error.self) {
+            _ = try confineWriteDestination("~/Desktop/../../../tmp", action: "save attachments into")
+        }
+    }
+
+    /// A near-miss must NOT be refused — the blocklist matches on a path boundary, not a prefix.
+    @Test func doesNotOverBlockLookalikeNames() throws {
+        #expect(try confineWriteDestination("~/.sshfoo", action: "x").path.hasPrefix(home))
+        #expect(try confineWriteDestination("~/Documents/aws", action: "x").path.hasPrefix(home))
+    }
+
+    /// The refusal message must name the action, so the same guard reads correctly on every
+    /// surface that calls it.
+    @Test func refusalNamesTheAction() {
+        do {
+            _ = try confineWriteDestination("/etc", action: "export messages into")
+            Issue.record("expected a refusal")
+        } catch {
+            #expect("\(error)".contains("export messages into"))
+        }
+    }
+
+    // MARK: bypasses found by review — each of these was live-confirmed ACCEPTED before the fix
+
+    /// The default macOS volume is case-insensitive APFS, and `resolvingSymlinksInPath()` only
+    /// canonicalizes case for components that ALREADY EXIST — so a case-sensitive comparison fails
+    /// OPEN for a file that does not exist yet. That is precisely the "plant a new
+    /// ~/.ssh/authorized_keys" case: `--out ~/.SSH/authorized_keys` returned ok:true while the
+    /// lowercase spelling was refused.
+    @Test func refusesCaseVariantsOfSensitiveDirectories() {
+        for p in ["~/.SSH/authorized_keys", "~/.SsH/newkeyfile", "~/.SSH", "~/.AWS/credentials",
+                  "~/Library/KEYCHAINS/login.keychain-db", "~/.Config/x"] {
+            #expect(throws: Error.self, "expected \(p) to be refused") {
+                _ = try confineWriteDestination(p, action: "save attachments into")
+            }
+        }
+    }
+
+    /// The confined path is later serialized into an ASCII-delimited blob for AppleScript (RS
+    /// 0x1E between records, US 0x1F between fields). A path carrying those bytes passes every
+    /// path check as ONE string and is re-parsed downstream as TWO records — the second targeting
+    /// a destination that never passed confinement. Live-confirmed as ok:true before the fix.
+    @Test func refusesControlCharactersInThePath() {
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let forged = "\(home)/ok\u{1E}0\u{1F}\(home)/.ssh/authorized_keys"
+        #expect(throws: Error.self, "RS/US forged record must be refused") {
+            _ = try confineWriteDestination(forged, action: "save an attachment to")
+        }
+        for scalar in ["\u{00}", "\n", "\r", "\t", "\u{1E}", "\u{1F}", "\u{7F}"] {
+            #expect(throws: Error.self, "control char must be refused") {
+                _ = try confineWriteDestination("\(home)/ok\(scalar)evil", action: "x")
+            }
+        }
+    }
+
+    /// Oracle A's `save_attachments` has NO confinement, so /tmp and /Volumes/* are legitimate
+    /// destinations; refusing them unconditionally would DROP that capability. The opt-out
+    /// restores oracle-A reach — but the credential blocklist is ABSOLUTE and must survive it.
+    @Test func allowOutsideHomeRelaxesOnlyTheHomeRule() throws {
+        #expect(throws: Error.self) { _ = try confineWriteDestination("/tmp/x", action: "x") }
+        #expect(try confineWriteDestination("/tmp/x", action: "x", allowOutsideHome: true).path.hasSuffix("/x"))
+        // Blocklist still wins, opt-out or not.
+        for p in ["~/.ssh", "~/.SSH/authorized_keys", "~/.aws/credentials"] {
+            #expect(throws: Error.self, "blocklist must survive the opt-out: \(p)") {
+                _ = try confineWriteDestination(p, action: "x", allowOutsideHome: true)
+            }
+        }
+        // Control-character rejection also survives the opt-out.
+        #expect(throws: Error.self) {
+            _ = try confineWriteDestination("/tmp/a\u{1F}b", action: "x", allowOutsideHome: true)
+        }
+    }
+}

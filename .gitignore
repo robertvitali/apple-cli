@@ -36,3 +36,5 @@ MAIL-PARITY-AUDIT-*.json
 __pycache__/
 *.pyc
 .build-swiftly/
+NONMAIL-PARITY-AUDIT-*.json
+MAIL-PARITY-WORKLIST-*.json

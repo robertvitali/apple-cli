@@ -130,6 +130,75 @@ require_index() {
   echo "$output" | grep -q '"validation_error"'
 }
 
+# Both oracles refuse an out-of-home or credential-directory destination BEFORE touching Mail
+# (patrickfreyer manage.py:197-220). This command previously documented the operator path as
+# "TRUSTED" and did neither check, so `--out ~/.ssh/authorized_keys --execute` would have
+# overwritten an SSH key with attachment bytes. Refusal is exit 77 (safety), not 64 (usage),
+# and it MUST fire on the default dry-run path too — a preview that promises a write --execute
+# would refuse is the dishonest-preview failure mode.
+@test "mail attachments save refuses a destination outside \$HOME (exit 77, on dry-run)" {
+  require_index
+  id=$("$BIN" mail search --mailbox All --has-attachment --limit 1 \
+        | python3 -c "import json,sys;m=json.load(sys.stdin)['data']['messages'];print(m[0]['id'] if m else '')")
+  [ -n "$id" ] || skip "store has no message with attachments"
+  run "$BIN" mail attachments save "$id" --dir /private/etc
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q '"safety_violation"'
+}
+
+@test "mail attachments save refuses a sensitive directory (exit 77, on dry-run)" {
+  require_index
+  id=$("$BIN" mail search --mailbox All --has-attachment --limit 1 \
+        | python3 -c "import json,sys;m=json.load(sys.stdin)['data']['messages'];print(m[0]['id'] if m else '')")
+  [ -n "$id" ] || skip "store has no message with attachments"
+  run "$BIN" mail attachments save "$id" --dir "$HOME/.ssh"
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q '"safety_violation"'
+  # --out is the sharper edge: it names a FILE, so an unguarded run would clobber a key.
+  run "$BIN" mail attachments save "$id" --indices 0 --out "$HOME/.ssh/authorized_keys"
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q '"safety_violation"'
+}
+
+# The existence / is-a-directory checks used to sit AFTER the dry-run guard, so a preview
+# reported success for a destination --execute would reject.
+@test "mail attachments save dry-run rejects a nonexistent directory (preview honesty)" {
+  require_index
+  id=$("$BIN" mail search --mailbox All --has-attachment --limit 1 \
+        | python3 -c "import json,sys;m=json.load(sys.stdin)['data']['messages'];print(m[0]['id'] if m else '')")
+  [ -n "$id" ] || skip "store has no message with attachments"
+  run "$BIN" mail attachments save "$id" --dir "$HOME/apple-cli-test-definitely-absent-12345"
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q '"validation_error"'
+}
+
+# `--dry-run` was advertised in --help and silently ignored: export mkdir -p'd and wrote one file
+# per message regardless. On a command that writes message BODIES to disk that is the worst kind
+# of ignored parameter.
+@test "mail export --dry-run writes nothing and reports the cap" {
+  require_index
+  target="$HOME/apple-cli-test-export-drynothing"
+  rm -rf "$target"
+  run "$BIN" mail export --account iCloud --scope entire_mailbox --mailbox INBOX --dir "$target" --max 2
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"dry_run" *: *true'
+  echo "$output" | grep -q '"exported" *: *0'
+  # Oracle B reports the mailbox total alongside the exported count (analytics.py:627-628).
+  echo "$output" | grep -q '"total_in_mailbox"'
+  echo "$output" | grep -q '"capped"'
+  [ ! -d "$target" ]
+}
+
+@test "mail export refuses a sensitive directory and one outside \$HOME (exit 77)" {
+  require_index
+  run "$BIN" mail export --account iCloud --scope entire_mailbox --dir "$HOME/.ssh/mail" --max 1
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q '"safety_violation"'
+  run "$BIN" mail export --account iCloud --scope entire_mailbox --dir /private/etc/apple-cli --max 1
+  [ "$status" -eq 77 ]
+  [ ! -d /private/etc/apple-cli ]
+}
+
 @test "mail attachments save with both --dir and --out is a usage error (exit 64)" {
   # Store-independent: --dir/--out mutual exclusion is validated before the Envelope Index opens.
   run "$BIN" mail attachments save --subject x --dir "$BATS_TEST_TMPDIR" --out "$BATS_TEST_TMPDIR/f"

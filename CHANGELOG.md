@@ -12,6 +12,37 @@ with the Apple MCP servers they replace.
 
 ## [Unreleased]
 
+### Security — operator-supplied write destinations are now confined
+- **`mail attachments save` had NO path confinement.** Its source documented the operator-chosen
+  path as "TRUSTED — save verbatim". Live before the fix: `--dir ~/.ssh` and `--dir /private/etc`
+  both returned `ok:true`, and `--out ~/.ssh/authorized_keys --execute` would have overwritten an
+  SSH key with attachment bytes. Both oracles refuse these path classes before touching Mail
+  (patrickfreyer `manage.py:197-220`, `analytics.py:428-443`). A shared
+  `confineWriteDestination()` now guards `attachments save`, `export`, `send --out`,
+  `reply`/`forward` HTML `.eml`, and `draft-rich --out`; refusals are exit 77.
+  Three properties the first attempt got wrong, each live-confirmed as an accepted bypass and now
+  regression-tested:
+  - the blocklist is **case-insensitive** — on case-insensitive APFS,
+    `resolvingSymlinksInPath()` only canonicalizes case for components that already exist, so
+    `~/.SSH/authorized_keys` was accepted while `~/.ssh/authorized_keys` was refused. It failed
+    open exactly for files that do not exist yet.
+  - **control characters are rejected** — the confined path is later serialized into an
+    ASCII-delimited AppleScript blob (RS `0x1E` / US `0x1F`), so a path carrying those bytes
+    passed as one string and was re-parsed downstream as TWO save records, the second never
+    confined.
+  - the guard is applied to **every** operator write sink, not just the two first found;
+    `send --out` writes on the DEFAULT dry-run path with no `--execute`.
+- **BREAKING (behavior):** `mail export` now honours `--dry-run`, which was advertised in `--help`
+  and silently ignored — it unconditionally created the directory and wrote one file per message.
+  A non-`--execute` export no longer writes anything. Pass `--execute` for the previous behavior.
+- `attachments save --allow-outside-home` (new) restores oracle A's reach: its `save_attachments`
+  has no confinement, so `/tmp` and `/Volumes/*` are legitimate destinations and refusing them
+  unconditionally would DROP a capability. The credential blocklist and the control-character
+  rejection are absolute and survive the opt-out.
+- `export` reports `total_in_mailbox` + `capped` (oracle B emits both, `analytics.py:627-628`) so a
+  capped run is distinguishable from a complete one — `entire_mailbox` only, since that is the
+  only scope `--max` applies to. `attachments save` reports oracle A's `saved` count.
+
 ### Parity audit (2026-07-30) — Mail is NOT yet a strict superset
 A full re-audit of Mail against BOTH oracles (27 tools in s-morgan-jeffries@0.6.0 +
 24 in patrickfreyer@3.1.3, 101 capability rows, every claimed gap put through an

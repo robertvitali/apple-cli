@@ -98,11 +98,74 @@ func resolveAttachmentPath(_ raw: String) throws -> String {
 
 /// The sensitive credential/config directory a resolved path falls under, or nil (mirrors
 /// patrickfreyer `sensitive_dirs`). Pure — unit-testable with synthetic paths, no real files.
+/// CASE-INSENSITIVE by design. The default macOS volume is case-insensitive APFS, and
+/// `resolvingSymlinksInPath()` only canonicalizes the case of components that ALREADY EXIST — so a
+/// case-sensitive comparison fails OPEN for a file that does not exist yet, which is exactly the
+/// "plant a new ~/.ssh/authorized_keys" case. Verified: `--out ~/.SSH/authorized_keys` was accepted
+/// while the identical lowercase path was refused. Over-blocking a genuinely distinct `.SSH`
+/// directory on a case-SENSITIVE volume is the fail-closed direction and is the correct trade.
 func sensitiveAttachmentDir(_ resolvedPath: String, home: String) -> String? {
     let dirs = [".ssh", ".gnupg", ".config", ".aws", ".claude",
                 "Library/Keychains", "Library/LaunchAgents", "Library/LaunchDaemons"]
         .map { home + "/" + $0 }
-    return dirs.first(where: { resolvedPath == $0 || resolvedPath.hasPrefix($0 + "/") })
+    let lowered = resolvedPath.lowercased()
+    return dirs.first(where: {
+        let d = $0.lowercased()
+        return lowered == d || lowered.hasPrefix(d + "/")
+    })
+}
+
+/// THE shared write-destination guard: every command that writes bytes to an operator-supplied
+/// path resolves it through here first.
+///
+/// Both oracles refuse two path classes before touching Mail (patrickfreyer manage.py:197-220 for
+/// `save_email_attachment`, analytics.py:428-443 for `export_emails`): a destination outside
+/// `$HOME`, and anything at or under a credential/config directory. `attachments save` had
+/// NEITHER check and documented its path as "TRUSTED" — so `--out ~/.ssh/authorized_keys
+/// --execute` would have overwritten an SSH key with attachment bytes. That is a divergence in
+/// the less-safe direction, which strict-superset does not license.
+///
+/// Symlinks are resolved BEFORE comparing (the oracles use `realpath`), and the blocklist is
+/// tested against the resolved path AND the pre-resolution literal so a sensitive directory that
+/// is itself a symlink cannot slip past. `$HOME` itself is allowed, matching manage.py:201.
+///
+/// - Parameter action: verb for the refusal message, e.g. "save attachments into".
+/// - Parameter allowOutsideHome: opt out of the `$HOME` rule ONLY. The credential blocklist and
+///   the control-character rejection are absolute and cannot be disabled. Oracle A's
+///   `save_attachments` has no confinement at all (server.py), so `/tmp` and `/Volumes/*` are
+///   legitimate destinations there; confining unconditionally would DROP that capability. Default
+///   safe, explicit opt-out restores oracle-A parity.
+/// - Throws: `AppleError.mailSafety` (exit 77) — a refused write is a safety violation, not a
+///   usage error, and callers must apply this on the DRY-RUN path too so a preview never promises
+///   a write that `--execute` would refuse.
+func confineWriteDestination(_ raw: String, action: String, allowOutsideHome: Bool = false) throws -> URL {
+    // CONTROL CHARACTERS FIRST, and unconditionally. The confined path is later serialized into an
+    // ASCII-delimited blob for AppleScript using RS (0x1E) between records and US (0x1F) between
+    // fields. A path containing those bytes passes every path check as one string and is then
+    // re-parsed downstream as TWO records — the second targeting a destination that never passed
+    // confinement, anywhere on disk. Verified as a live bypass before this guard existed.
+    // Rejecting the whole C0 range + DEL also covers NUL and newline injection.
+    if let bad = raw.unicodeScalars.first(where: { $0.value < 0x20 || $0.value == 0x7F }) {
+        throw AppleError.mailSafety(
+            "cannot \(action) a path containing a control character (U+\(String(format: "%04X", bad.value))) — refusing.")
+    }
+    let expanded = (raw as NSString).expandingTildeInPath
+    let resolved = URL(fileURLWithPath: expanded).resolvingSymlinksInPath()
+    let home = FileManager.default.homeDirectoryForCurrentUser.resolvingSymlinksInPath().path
+    let path = resolved.path
+    if !allowOutsideHome {
+        // Case-insensitive for the same reason the blocklist is — see sensitiveAttachmentDir.
+        let l = path.lowercased(), h = home.lowercased()
+        guard l == h || l.hasPrefix(h + "/") else {
+            throw AppleError.mailSafety("cannot \(action) a path outside your home directory (\(home)); got: \(path)")
+        }
+    }
+    // ABSOLUTE — never opt-out-able. Checked against the resolved path AND the pre-resolution
+    // literal, so a sensitive dir that is itself a symlink is caught too.
+    if let dir = sensitiveAttachmentDir(path, home: home) ?? sensitiveAttachmentDir(expanded, home: home) {
+        throw AppleError.mailSafety("cannot \(action) a sensitive directory (\(dir)) — refusing.")
+    }
+    return resolved
 }
 
 /// Read already-resolved attachment paths into `EmlBuilder.Attachment` parts (for the HTML/`.eml`
@@ -119,10 +182,23 @@ func attachmentsFromPaths(_ paths: [String]) throws -> [EmlBuilder.Attachment] {
 }
 
 /// The `.eml` output path: an explicit `--out`, else a labeled temp file.
-func emlDestURL(out: String?) -> URL {
-    let p = out ?? FileManager.default.temporaryDirectory
-        .appendingPathComponent("apple-cli-\(TestMode.sandboxPrefix)-\(UUID().uuidString).eml").path
-    return URL(fileURLWithPath: (p as NSString).expandingTildeInPath)
+/// An operator-supplied `--out` is CONFINED; the generated temp default is not (we chose it).
+///
+/// `send --out` and the HTML reply/forward route write a `.eml` on the DEFAULT dry-run path — no
+/// `--execute` required — so an unconfined path here writes bytes to an arbitrary location during
+/// what the envelope calls a preview. The guard's own docstring claimed every operator write path
+/// went through it; these were the sinks that did not.
+func emlDestURL(out: String?, action: String = "write the generated .eml to") throws -> URL {
+    guard let out else {
+        return FileManager.default.temporaryDirectory
+            .appendingPathComponent("apple-cli-\(TestMode.sandboxPrefix)-\(UUID().uuidString).eml")
+    }
+    // NOT $HOME-confined, deliberately: oracle B's `create_rich_email_draft` only
+    // `expanduser()`s `output_path` (tools/compose.py:204) — the home/sensitive checks at
+    // compose.py:410+ belong to the ATTACHMENT helper, not this one — so `/tmp/x.eml` is a
+    // legitimate destination and refusing it would DROP a capability. The credential blocklist
+    // and the control-character rejection still apply, which is what actually protects keys.
+    return try confineWriteDestination(out, action: action, allowOutsideHome: true)
 }
 
 struct SendCommand: ParsableCommand {
@@ -224,7 +300,7 @@ struct SendCommand: ParsableCommand {
                 let eml = try EmlBuilder(from: senderAddress ?? account, to: toL, cc: ccL, bcc: bccL, subject: subject,
                                      textBody: body.isEmpty ? nil : body, htmlBody: html, attachments: atts,
                                      emitBcc: true).build()
-                let dest = emlDestURL(out: out)
+                let dest = try emlDestURL(out: out)
                 try eml.write(to: dest, atomically: true, encoding: .utf8)
                 emlPath = dest.path
             }
@@ -434,7 +510,7 @@ struct ReplyCommand: ParsableCommand {
                     let eml = try EmlBuilder(from: senderAddress, to: recipients, cc: ccL, bcc: bccL, subject: replySubject,
                                              textBody: body + quotedPlain, htmlBody: (html ?? "") + quotedHTML, attachments: atts,
                                              emitBcc: true).build()
-                    let dest = emlDestURL(out: nil)
+                    let dest = try emlDestURL(out: nil)
                     try eml.write(to: dest, atomically: true, encoding: .utf8)
                     try MailScript().openEml(path: dest.path)
                     opened = true
@@ -626,8 +702,7 @@ struct DraftRichCommand: ParsableCommand {
             // carrying --bcc into it is safe and required for create_rich_email_draft parity.
             let eml = try EmlBuilder(from: senderAddress ?? account, to: toL, cc: splitRecipients(cc), bcc: splitRecipients(bcc),
                                  subject: subject, textBody: textBody, htmlBody: html, emitBcc: true).build()
-            let dest = URL(fileURLWithPath: ((out ?? FileManager.default.temporaryDirectory
-                .appendingPathComponent("apple-cli-\(TestMode.sandboxPrefix)-\(UUID().uuidString).eml").path) as NSString).expandingTildeInPath)
+            let dest = try emlDestURL(out: out, action: "write the rich draft .eml to")
             try eml.write(to: dest, atomically: true, encoding: .utf8)
             // Optional review window (parity with create_rich_email_draft open_in_mail). Mail cannot
             // auto-save an HTML draft (a LaunchServices-opened .eml window doesn't surface in
