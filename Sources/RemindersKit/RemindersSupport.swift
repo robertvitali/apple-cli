@@ -508,25 +508,95 @@ public enum ReminderRecurrenceSpec {
     }
 }
 
-// MARK: - Write guard (phase safety) — the command-layer half of EventKitCore's write-guard contract
+// MARK: - Write-model v2 gate (docs/write-model-v2.md) — the command-layer half of EventKitCore's
+// write-guard contract. The EventKitCore engine never self-gates; this is the only gate there is.
+
+/// Emit a reminders write result, tagging the envelope when the sandbox is engaged so a caller can
+/// tell a restricted write from a normal one without re-reading the environment.
+func emitRemindersWrite<T: Encodable>(_ data: T, sandboxActive: Bool) throws {
+    try Output.emit(tool: "reminders", data: data, sandboxActive: sandboxActive)
+}
 
 public enum ReminderWriteGuard {
-    /// Returns `false` (⇒ caller emits a dry-run preview) unless `--execute` is set. When
-    /// `--execute` IS set, enforce the build-phase safety gate: `--test-mode` + `APPLE_TEST_MODE=1`,
-    /// and (when a name is given) a labeled test target. Throws `AppleError.validation` when unmet.
-    /// The EventKitCore engine never self-gates — this is the required command-layer gate.
-    public static func shouldExecute(global: GlobalOptions, labeledName: String?) throws -> Bool {
-        guard global.willExecute else { return false }
-        guard global.testMode, TestMode.isEnabled else {
+    /// The resolved write posture for one reminders command. Bound ONCE at the top of every write
+    /// `run()` and threaded from there — never re-derived mid-command.
+    public struct Gate {
+        public let willExecute: Bool
+        public let sandboxActive: Bool
+    }
+
+    /// Resolve a reminders write under write-model v2: **it executes by default**, exactly as
+    /// calling the equivalent `mcp-server-apple-events` `reminders_*` action does. `--dry-run`
+    /// previews; `APPLE_DRY_RUN` truthy restores dry-run-by-default; `--test-mode` or
+    /// `APPLE_TEST_MODE` truthy engages the opt-in sandbox.
+    ///
+    /// ORACLE EVIDENCE (`mcp-server-apple-events@1.4.0` — the same bundle Calendar cites; see
+    /// `CalendarWriteGuard.resolve` for the full derivation): no runtime env gate exists to mirror,
+    /// `tools/index.ts` is pure routing, and `reminderRepository.deleteReminder` /
+    /// `deleteReminderList` shell straight to the Swift CLI with no confirmation step. All eleven
+    /// reminders writes are therefore bucket 3 — the v1 gate was CLI-only and becomes sandbox-only.
+    /// NO `defaultDryRun` parameter, deliberately — see `CalendarWriteGuard.resolve`. All eleven
+    /// Reminders writes execute by default with no per-surface exception, so the signature
+    /// offers no choice to get wrong.
+    public static func resolve(_ global: GlobalOptions) throws -> Gate {
+        try TestMode.validateWriteEnvironment()
+        let sandboxActive = try TestMode.sandboxActive(flag: global.testMode)
+        let willExecute = try global.willExecute(defaultDryRun: false)
+        return Gate(willExecute: willExecute, sandboxActive: sandboxActive)
+    }
+
+    /// SANDBOX-ONLY label check for an argv-supplied name — a new reminder/list title, a rename
+    /// target, or a DESTINATION list. Runs on the preview path too: the value comes from argv, so a
+    /// preview that skipped it would be withholding a check it can perfectly well perform.
+    /// `nil` means "the caller had no such name to check" and is a no-op.
+    ///
+    /// Checking the DESTINATION (`--target-list`, `--new-name`) and not just the subject is the
+    /// same fix the Notes flip needed: a sandboxed write that lands a labeled item inside a REAL
+    /// list still modifies real user data, which is exactly what the sandbox promises not to do.
+    ///
+    /// `prefix:` is a test seam — see `CalendarWriteGuard.requireLabeled` for why a logic-tier test
+    /// must not inherit the env-backed `TestMode.sandboxPrefix` it hard-codes expectations about.
+    public static func requireLabeled(_ name: String?, what: String, sandboxActive: Bool,
+                                      prefix: String? = nil) throws {
+        guard sandboxActive, let name else { return }
+        let required = prefix ?? TestMode.sandboxPrefix
+        guard name.hasPrefix(required) else {
             throw AppleError.validation(
-                "live reminders write requires --test-mode and APPLE_TEST_MODE=1 (safety gate); "
-                + "omit --execute for a dry-run preview")
+                "Sandbox is engaged: refusing to write to \(what) \"\(name)\" — it must be a "
+                + "labeled '\(required)…' test item.")
         }
-        if let name = labeledName {
-            do { try TestMode.requireLabeledTarget(name) }
-            catch { throw AppleError.validation(String(describing: error)) }
-        }
-        return true
+    }
+
+    /// SANDBOX-ONLY check for a DESTINATION LIST, which `--target-list` documents as "name **or
+    /// id**" and which `EventStore.calendar(matching:)` resolves id-first. A plain argv label test
+    /// is WRONG here: a labeled list's opaque EventKit identifier does not begin with the sandbox
+    /// prefix, so checking the raw string would refuse the very flow the repo's own conduct rules
+    /// prescribe (`lists create` returns the list DTO including its id; `TEST-CLEANUP.md` tracks
+    /// items BY id, so passing that id back is the natural next call).
+    ///
+    /// So: a value that IS labeled by name is accepted outright, on both paths. Anything else may
+    /// still be the id of a perfectly labeled list, so the decision is DEFERRED to the execute
+    /// path, where `requireLabeledDestinationList` re-checks the RESOLVED list's title.
+    /// Returns `true` when the check was deferred, so the caller can disclose it via
+    /// `sandbox_target_unchecked` instead of letting a silent non-refusal read as approval.
+    public static func destinationCheckDeferred(_ nameOrId: String?, sandboxActive: Bool,
+                                                prefix: String? = nil) -> Bool {
+        guard sandboxActive, let nameOrId else { return false }
+        return !nameOrId.hasPrefix(prefix ?? TestMode.sandboxPrefix)
+    }
+}
+
+/// SANDBOX-ONLY post-resolution check for a destination list reached by name-or-id. Pairs with
+/// `ReminderWriteGuard.destinationCheckDeferred`: call this on the execute path once the
+/// `EKCalendar` is in hand, so an id-addressed destination is vetted by its real title.
+func requireLabeledDestinationList(_ list: EKCalendar, sandboxActive: Bool,
+                                   prefix: String? = nil) throws {
+    guard sandboxActive else { return }
+    let required = prefix ?? TestMode.sandboxPrefix
+    guard list.title.hasPrefix(required) else {
+        throw AppleError.validation(
+            "Sandbox is engaged: refusing to write into destination list \"\(list.title)\" — it "
+            + "must be a labeled '\(required)…' test list.")
     }
 }
 
@@ -572,17 +642,23 @@ func fetchReminder(_ store: EventStore, _ id: String) throws -> EKReminder {
     return r
 }
 
-/// Post-fetch write-safety gate for a mutation that targets an EXISTING reminder by opaque id.
-/// `ReminderWriteGuard.shouldExecute` (run upstream) already verified `--execute` + `--test-mode` +
-/// `APPLE_TEST_MODE`, but its `labeledName` argument can only vet a string the caller passes — it
-/// CANNOT vet a by-id target. So every by-id mutation (tasks update/delete, all subtask ops) MUST
-/// call this AFTER fetching, BEFORE any `store.save`/`store.remove`, so an autonomous run can never
-/// mutate a real (non-`apple-cli-test`) reminder. Fail-closed.
-func requireLabeledReminder(_ reminder: EKReminder) throws {
-    guard LabelGuard.isLabeled(reminder.title) else {
+/// SANDBOX-ONLY post-fetch write-safety gate for a mutation that targets an EXISTING reminder by
+/// opaque id. `ReminderWriteGuard.requireLabeled` can only vet a string the CALLER passes — it
+/// cannot vet a by-id target, whose title lives in EventKit. So every by-id mutation (tasks
+/// update/delete, all subtask ops) calls this AFTER fetching and BEFORE any
+/// `store.save`/`store.remove`.
+///
+/// Outside the sandbox this is a no-op: the oracle's `reminders_tasks action=delete` deletes any
+/// reminder by id on call, and write-model v2 says the CLI behaves the same. Inside the sandbox it
+/// is fail-closed.
+func requireLabeledReminder(_ reminder: EKReminder, sandboxActive: Bool,
+                            prefix: String? = nil) throws {
+    guard sandboxActive else { return }
+    let required = prefix ?? TestMode.sandboxPrefix
+    guard (reminder.title ?? "").hasPrefix(required) else {
         throw AppleError.validation(
-            "refusing to mutate '\(reminder.title ?? "")' — it is not a labeled test item "
-            + "(must start with '\(TestMode.sandboxPrefix)'); this run only touches items it created")
+            "Sandbox is engaged: refusing to mutate '\(reminder.title ?? "")' — it is not a labeled "
+            + "test item (must start with '\(required)').")
     }
 }
 
@@ -606,16 +682,23 @@ public struct ListsData: Encodable {
 
 /// `tasks delete` result.
 public struct ReminderDeleteData: Encodable {
+    /// Always `false` — see `ListDeleteData.dry_run`.
+    public let dry_run: Bool
     public let id: String
     public let deleted: Bool
-    public init(id: String, deleted: Bool) { self.id = id; self.deleted = deleted }
+    public init(id: String, deleted: Bool) { self.dry_run = false; self.id = id; self.deleted = deleted }
 }
 
 /// `lists delete` result.
 public struct ListDeleteData: Encodable {
+    /// Always `false`: this DTO is only emitted from the EXECUTE path, so the flag states outright
+    /// that the delete happened rather than leaving the caller to infer it from the ABSENCE of the
+    /// preview's `dry_run: true`. Write-model v2 makes execute the default, so "no dry_run key"
+    /// would be the common case and silence is the wrong signal for a destructive op.
+    public let dry_run: Bool
     public let name: String
     public let deleted: Bool
-    public init(name: String, deleted: Bool) { self.name = name; self.deleted = deleted }
+    public init(name: String, deleted: Bool) { self.dry_run = false; self.name = name; self.deleted = deleted }
 }
 
 /// `subtasks read` + subtask mutation result: the parent + the full ordered subtask list + progress.
@@ -660,6 +743,11 @@ public struct ReminderWritePreview: Encodable {
     public let clear_alarms: Bool?
     public let clear_recurrence: Bool?
     public let clear_location_trigger: Bool?
+    /// `true` when the sandbox is engaged AND this write is addressed by opaque id (update/delete),
+    /// so the label check on the EXISTING reminder's title could not run at preview time — only the
+    /// execute path fetches it. Absent whenever every applicable check DID run, which for `create`
+    /// is always: its title and `--target-list` are both argv-computable and both are checked here.
+    public let sandbox_target_unchecked: Bool?
 
     public init(
         action: String, id: String? = nil, title: String? = nil, start_date: Date? = nil,
@@ -667,9 +755,11 @@ public struct ReminderWritePreview: Encodable {
         note: String? = nil, location: String? = nil, url: String? = nil, target_list: String? = nil,
         tags: [String]? = nil, add_tags: [String]? = nil, remove_tags: [String]? = nil, subtasks: [String]? = nil,
         alarms: [Alarm]? = nil, recurrence_rules: [RecurrenceRule]? = nil, location_trigger: LocationTrigger? = nil,
-        clear_alarms: Bool? = nil, clear_recurrence: Bool? = nil, clear_location_trigger: Bool? = nil
+        clear_alarms: Bool? = nil, clear_recurrence: Bool? = nil, clear_location_trigger: Bool? = nil,
+        sandbox_target_unchecked: Bool? = nil
     ) {
         self.dry_run = true
+        self.sandbox_target_unchecked = sandbox_target_unchecked
         self.action = action
         self.id = id
         self.title = title
@@ -720,7 +810,13 @@ public struct SubtaskWritePreview: Encodable {
     public let title: String?
     public let completed: Bool?
     public let order: [String]?
-    public init(action: String, reminder_id: String, subtask_id: String? = nil, title: String? = nil, completed: Bool? = nil, order: [String]? = nil) {
+    /// `true` when the sandbox is engaged: EVERY subtask op is addressed by parent reminder id, so
+    /// the label check runs on the fetched parent and only the execute path fetches it. Disclosed
+    /// rather than silently skipped — a preview that omits a check it cannot perform must say so.
+    public let sandbox_target_unchecked: Bool?
+    public init(action: String, reminder_id: String, subtask_id: String? = nil, title: String? = nil,
+                completed: Bool? = nil, order: [String]? = nil,
+                sandbox_target_unchecked: Bool? = nil) {
         self.dry_run = true
         self.action = action
         self.reminder_id = reminder_id
@@ -728,5 +824,6 @@ public struct SubtaskWritePreview: Encodable {
         self.title = title
         self.completed = completed
         self.order = order
+        self.sandbox_target_unchecked = sandbox_target_unchecked
     }
 }

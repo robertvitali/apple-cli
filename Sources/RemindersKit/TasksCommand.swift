@@ -88,7 +88,7 @@ public struct TasksRead: ParsableCommand {
 public struct TasksCreate: ParsableCommand {
     public static let configuration = CommandConfiguration(
         commandName: "create",
-        abstract: "Create a reminder (dry-run by default; --execute writes under the test-mode gate).")
+        abstract: "Create a reminder (executes on call, like the MCP; --dry-run previews).")
 
     @OptionGroup public var global: GlobalOptions
     @Option(name: .long, help: "Reminder title (required).") public var title: String
@@ -130,13 +130,25 @@ public struct TasksCreate: ParsableCommand {
             _ = try rules.map { try RecurrenceMapping.ekRule(from: $0) }
             if let locTrigger { _ = try AlarmMapping.ekAlarm(from: Alarm(location_trigger: locTrigger)) }
 
-            guard try ReminderWriteGuard.shouldExecute(global: global, labeledName: title) else {
-                try Output.emit(tool: "reminders", data: ReminderWritePreview(
+            let gate = try ReminderWriteGuard.resolve(global)
+            // The title is argv-computable, so it is checked on both paths. The destination
+            // matters too — creating a labeled item inside a REAL list still modifies real user
+            // data — but `--target-list` takes a name OR an opaque id, so a raw argv label test
+            // would refuse every id. A labeled NAME passes here; anything else defers to the
+            // resolved list's title on the execute path (and is disclosed in the preview).
+            try ReminderWriteGuard.requireLabeled(title, what: "reminder", sandboxActive: gate.sandboxActive)
+            let destinationDeferred = ReminderWriteGuard.destinationCheckDeferred(
+                targetList, sandboxActive: gate.sandboxActive)
+
+            guard gate.willExecute else {
+                try emitRemindersWrite(ReminderWritePreview(
                     action: "create", title: title, start_date: startParsed?.date, due_date: dueParsed?.date,
                     completed: completed ? true : nil, priority: priorityValue, note: note, location: location,
                     url: url, target_list: targetList, tags: tag.isEmpty ? nil : tag, subtasks: subtask.isEmpty ? nil : subtask,
                     alarms: alarms.isEmpty ? nil : alarms, recurrence_rules: rules.isEmpty ? nil : rules,
-                    location_trigger: locTrigger))
+                    location_trigger: locTrigger,
+                    sandbox_target_unchecked: destinationDeferred ? true : nil),
+                    sandboxActive: gate.sandboxActive)
                 return
             }
 
@@ -144,6 +156,18 @@ public struct TasksCreate: ParsableCommand {
             try store.requestAccess(to: .reminder, mode: .write)
             guard let list = resolveList(store: store, name: targetList) else {
                 throw AppleError.notFound("no list named or id '\(targetList ?? "")' and no default reminders list")
+            }
+            // Post-resolution destination check — ONLY when a destination was explicitly named.
+            // This is what catches the id-addressed case the argv test had to defer.
+            //
+            // The DEFAULT list (no --target-list) is deliberately exempt, for the same reason
+            // Calendar's `--target-calendar` is: requiring a labeled default would make plain
+            // sandboxed creation impossible until the agent first creates a list, and AGENTS.md's
+            // conduct rule is "create clearly-LABELED test data", not "into labeled containers
+            // only". Naming a real list explicitly is a deliberate act and is refused; falling
+            // back to the operator's default list is not.
+            if targetList != nil {
+                try requireLabeledDestinationList(list, sandboxActive: gate.sandboxActive)
             }
             let reminder = store.newReminder(in: list)
             reminder.title = title
@@ -172,7 +196,8 @@ public struct TasksCreate: ParsableCommand {
             for rule in rules { reminder.addRecurrenceRule(try RecurrenceMapping.ekRule(from: rule)) }
 
             try store.save(reminder)
-            try Output.emit(tool: "reminders", data: ReminderRead.enrich(ReminderMapping.reminder(from: reminder)))
+            try emitRemindersWrite(ReminderRead.enrich(ReminderMapping.reminder(from: reminder)),
+                                   sandboxActive: gate.sandboxActive)
         }
     }
 
@@ -199,7 +224,7 @@ public struct TasksCreate: ParsableCommand {
 public struct TasksUpdate: ParsableCommand {
     public static let configuration = CommandConfiguration(
         commandName: "update",
-        abstract: "Update a reminder (dry-run by default; --execute writes under the test-mode gate).")
+        abstract: "Update a reminder (executes on call, like the MCP; --dry-run previews).")
 
     @OptionGroup public var global: GlobalOptions
     @Option(name: .long, help: "Reminder identifier (required).") public var id: String
@@ -255,22 +280,37 @@ public struct TasksUpdate: ParsableCommand {
             _ = try rules.map { try RecurrenceMapping.ekRule(from: $0) }
             if let locTrigger { _ = try AlarmMapping.ekAlarm(from: Alarm(location_trigger: locTrigger)) }
 
-            guard try ReminderWriteGuard.shouldExecute(global: global, labeledName: title) else {
-                try Output.emit(tool: "reminders", data: ReminderWritePreview(
+            let gate = try ReminderWriteGuard.resolve(global)
+            // The RENAME target and the destination list are argv-computable — check both on both
+            // paths so a sandboxed update cannot rename a test item to a real-looking name or move
+            // it into a real list. The EXISTING title is not argv-computable; it is checked
+            // post-fetch below, and the preview discloses that deferral.
+            try ReminderWriteGuard.requireLabeled(title, what: "new reminder title",
+                                                  sandboxActive: gate.sandboxActive)
+            // `--target-list` is name-OR-id, so it is vetted post-resolution on the execute path
+            // (see TasksCreate). No separate disclosure flag is needed here: update is addressed
+            // by opaque id, so its preview already reports `sandbox_target_unchecked`
+            // unconditionally whenever the sandbox is engaged.
+
+            guard gate.willExecute else {
+                try emitRemindersWrite(ReminderWritePreview(
                     action: "update", id: id, title: title, start_date: startParsed?.date, due_date: dueParsed?.date,
                     completion_date: completionParsed?.date, completed: completed, priority: priorityValue, note: note,
                     location: location, url: url, target_list: targetList, tags: tagsArg,
                     add_tags: addTag.isEmpty ? nil : addTag, remove_tags: removeTag.isEmpty ? nil : removeTag,
                     alarms: alarms.isEmpty ? nil : alarms, recurrence_rules: rules.isEmpty ? nil : rules,
                     location_trigger: locTrigger, clear_alarms: clearAlarms ? true : nil,
-                    clear_recurrence: clearRecurrence ? true : nil, clear_location_trigger: clearLocationTrigger ? true : nil))
+                    clear_recurrence: clearRecurrence ? true : nil, clear_location_trigger: clearLocationTrigger ? true : nil,
+                    sandbox_target_unchecked: gate.sandboxActive ? true : nil),
+                    sandboxActive: gate.sandboxActive)
                 return
             }
 
             let store = EventStore()
             try store.requestAccess(to: .reminder, mode: .write)
             let reminder = try fetchReminder(store, id)
-            try requireLabeledReminder(reminder) // post-fetch write-safety: only mutate a labeled test item
+            // Sandbox-only post-fetch check on the EXISTING title (the by-id target).
+            try requireLabeledReminder(reminder, sandboxActive: gate.sandboxActive)
             if let title { reminder.title = title }
             if let location { reminder.location = location.isEmpty ? nil : location }
             if let url { reminder.url = url.isEmpty ? nil : URL(string: url) }
@@ -317,11 +357,16 @@ public struct TasksUpdate: ParsableCommand {
                 guard let list = store.calendar(matching: targetList, entity: .reminder) else {
                     throw AppleError.notFound("no list named or id '\(targetList)'")
                 }
+                // Post-resolution destination check — the cross-list move is the one way a
+                // sandboxed update can put a labeled item into a REAL list, and `--target-list`
+                // takes a name or an id so only the resolved title can settle it.
+                try requireLabeledDestinationList(list, sandboxActive: gate.sandboxActive)
                 reminder.calendar = list
             }
 
             try store.save(reminder)
-            try Output.emit(tool: "reminders", data: ReminderRead.enrich(ReminderMapping.reminder(from: reminder)))
+            try emitRemindersWrite(ReminderRead.enrich(ReminderMapping.reminder(from: reminder)),
+                                   sandboxActive: gate.sandboxActive)
         }
     }
 
@@ -343,7 +388,7 @@ public struct TasksUpdate: ParsableCommand {
 public struct TasksDelete: ParsableCommand {
     public static let configuration = CommandConfiguration(
         commandName: "delete",
-        abstract: "Delete a reminder (dry-run by default; --execute deletes under the test-mode gate).")
+        abstract: "Delete a reminder (executes on call, like the MCP; --dry-run previews).")
 
     @OptionGroup public var global: GlobalOptions
     @Option(name: .long, help: "Reminder identifier (required).") public var id: String
@@ -352,16 +397,23 @@ public struct TasksDelete: ParsableCommand {
 
     public func run() throws {
         try runGuarded(tool: "reminders") {
-            guard try ReminderWriteGuard.shouldExecute(global: global, labeledName: nil) else {
-                try Output.emit(tool: "reminders", data: ReminderWritePreview(action: "delete", id: id))
+            let gate = try ReminderWriteGuard.resolve(global)
+
+            guard gate.willExecute else {
+                try emitRemindersWrite(ReminderWritePreview(
+                    action: "delete", id: id,
+                    sandbox_target_unchecked: gate.sandboxActive ? true : nil),
+                    sandboxActive: gate.sandboxActive)
                 return
             }
             let store = EventStore()
             try store.requestAccess(to: .reminder, mode: .write)
             let reminder = try fetchReminder(store, id)
-            try requireLabeledReminder(reminder) // post-fetch write-safety: only delete a labeled test item
+            // Sandbox-only post-fetch check: only delete a labeled test item inside the sandbox.
+            try requireLabeledReminder(reminder, sandboxActive: gate.sandboxActive)
             try store.remove(reminder)
-            try Output.emit(tool: "reminders", data: ReminderDeleteData(id: id, deleted: true))
+            try emitRemindersWrite(ReminderDeleteData(id: id, deleted: true),
+                                   sandboxActive: gate.sandboxActive)
         }
     }
 }

@@ -167,36 +167,75 @@ struct ReadWindowTests {
 
 // MARK: - Write guard
 
-@Suite("CalendarWriteGuard")
-struct WriteGuardTests {
-    @Test("no execute → dry-run gate closed (false), never throws")
-    func dryRun() throws {
-        #expect(try CalendarWriteGuard.gateOpen(willExecute: false, testMode: false) == false)
-        #expect(try CalendarWriteGuard.gateOpen(willExecute: false, testMode: true) == false)
+/// Pins the write-model v2 DECISION `CalendarWriteGuard.resolve` makes, which nothing else can
+/// catch: the bats tier cannot assert "a flagless `calendar events create` executes" without
+/// actually writing to the operator's calendar, and the AppleKit core tier only proves the
+/// precedence chain, not that THIS domain opted into it. A silent revert to dry-run-by-default (or
+/// a re-tightening of the lifted label gate) fails here and only here.
+///
+/// These read the real process environment and assume `APPLE_TEST_MODE` / `APPLE_DRY_RUN` are
+/// unset — asserted below so a polluted env fails legibly instead of mysteriously.
+@Suite("Calendar write-model v2 posture")
+struct CalendarWriteModelV2Tests {
+    func opts(_ args: [String]) throws -> GlobalOptions { try GlobalOptions.parse(args) }
+
+    @Test("the test environment is clean (precondition for every pin below)")
+    func cleanEnvironment() {
+        let env = ProcessInfo.processInfo.environment
+        #expect(env["APPLE_TEST_MODE"] == nil || env["APPLE_TEST_MODE"]!.isEmpty)
+        #expect(env["APPLE_DRY_RUN"] == nil || env["APPLE_DRY_RUN"]!.isEmpty)
     }
 
-    @Test("execute without test-mode is rejected")
-    func executeNeedsTestMode() {
+    @Test("DEFAULT PIN: a flagless calendar write EXECUTES and is unsandboxed")
+    func defaultsToExecute() throws {
+        let gate = try CalendarWriteGuard.resolve(opts([]))
+        #expect(gate.willExecute == true)
+        #expect(gate.sandboxActive == false)
+    }
+
+    @Test("--dry-run previews; --execute is redundant; --dry-run wins over --execute")
+    func dryRunPrecedence() throws {
+        #expect(try CalendarWriteGuard.resolve(opts(["--dry-run"])).willExecute == false)
+        #expect(try CalendarWriteGuard.resolve(opts(["--execute"])).willExecute == true)
+        #expect(try CalendarWriteGuard.resolve(opts(["--dry-run", "--execute"])).willExecute == false)
+    }
+
+    @Test("--test-mode alone engages the sandbox without forcing a preview")
+    func flagEngagesSandbox() throws {
+        let gate = try CalendarWriteGuard.resolve(opts(["--test-mode"]))
+        #expect(gate.sandboxActive == true)
+        #expect(gate.willExecute == true)
+    }
+
+    /// Pinned via the `prefix:` seam — `TestMode.sandboxPrefix` is env-backed and MailKitTests
+    /// setenv()s `APPLE_TEST_SANDBOX=qa-fixture` in parallel, which flaked the Contacts and Notes
+    /// posture suites 1-in-6 before the seam existed.
+    @Test("LIFT PIN: the label gate applies ONLY inside the sandbox")
+    func labelGateIsSandboxOnly() throws {
+        let p = TestMode.canonicalSandboxPrefix
+        // Unsandboxed, an unlabeled title is allowed — that IS the v2 flip (the oracle creates and
+        // deletes real events on call). A throw here means the gate was re-tightened.
+        #expect(throws: Never.self) {
+            try CalendarWriteGuard.requireLabeled("Real Meeting", sandboxActive: false, prefix: p)
+        }
+        #expect(throws: Never.self) {
+            try CalendarWriteGuard.requireLabeled("", sandboxActive: false, prefix: p)
+        }
+        // Sandboxed, the same names are refused...
         #expect(throws: AppleError.self) {
-            _ = try CalendarWriteGuard.gateOpen(willExecute: true, testMode: false)
+            try CalendarWriteGuard.requireLabeled("Real Meeting", sandboxActive: true, prefix: p)
         }
-    }
-
-    @Test("execute + test-mode without APPLE_TEST_MODE is rejected (fail-closed)")
-    func executeNeedsEnv() {
-        // APPLE_TEST_MODE is not set in the test environment ⇒ TestMode.isEnabled == false.
-        if !TestMode.isEnabled {
-            #expect(throws: AppleError.self) {
-                _ = try CalendarWriteGuard.gateOpen(willExecute: true, testMode: true)
-            }
+        #expect(throws: AppleError.self) {
+            try CalendarWriteGuard.requireLabeled("", sandboxActive: true, prefix: p)
         }
-    }
-
-    @Test("requireLabeled rejects an unlabeled target (guards existing-event mutation)")
-    func requireLabeledFailClosed() {
-        // requireLabeled fails closed when APPLE_TEST_MODE is off OR the name lacks the prefix.
-        #expect(throws: AppleError.self) { try CalendarWriteGuard.requireLabeled("Real Meeting") }
-        #expect(throws: AppleError.self) { try CalendarWriteGuard.requireLabeled("") }
+        // ...a near-miss is refused (prefix, not substring)...
+        #expect(throws: AppleError.self) {
+            try CalendarWriteGuard.requireLabeled("almost-\(p) thing", sandboxActive: true, prefix: p)
+        }
+        // ...and a labeled one passes.
+        #expect(throws: Never.self) {
+            try CalendarWriteGuard.requireLabeled("\(p) standup", sandboxActive: true, prefix: p)
+        }
     }
 }
 

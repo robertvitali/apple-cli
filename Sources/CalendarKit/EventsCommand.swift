@@ -96,7 +96,7 @@ public struct EventsRead: ParsableCommand {
 public struct EventsCreate: ParsableCommand {
     public static let configuration = CommandConfiguration(
         commandName: "create",
-        abstract: "Create an event (dry-run by default; --execute writes under the test-mode gate).")
+        abstract: "Create an event (executes on call, like the MCP; --dry-run previews).")
 
     @OptionGroup public var global: GlobalOptions
     @Option(name: .long, help: "Event title (required).") public var title: String
@@ -137,16 +137,20 @@ public struct EventsCreate: ParsableCommand {
             _ = try alarms.map { try AlarmMapping.ekAlarm(from: $0) }
             _ = try rules.map { try RecurrenceMapping.ekRule(from: $0) }
 
-            guard try CalendarWriteGuard.gateOpen(willExecute: global.willExecute, testMode: global.testMode) else {
-                try Output.emit(tool: "calendar", data: EventWritePreview(
+            let gate = try CalendarWriteGuard.resolve(global)
+            // The title is argv-computable, so the sandbox label check runs on BOTH paths — a
+            // preview must not silently skip a check it is perfectly able to perform.
+            try CalendarWriteGuard.requireLabeled(title, sandboxActive: gate.sandboxActive)
+
+            guard gate.willExecute else {
+                try emitCalendarWrite(EventWritePreview(
                     action: "create", title: title, start_date: startParsed.date, end_date: endParsed.date,
                     is_all_day: isAllDay, availability: availability, location: location, url: url, note: note,
                     target_calendar: targetCalendar, structured_location: structured,
-                    alarms: alarms.isEmpty ? nil : alarms, recurrence_rules: rules.isEmpty ? nil : rules))
+                    alarms: alarms.isEmpty ? nil : alarms, recurrence_rules: rules.isEmpty ? nil : rules),
+                    sandboxActive: gate.sandboxActive)
                 return
             }
-            // Live write: the created item MUST be labeled test data.
-            try CalendarWriteGuard.requireLabeled(title)
 
             let store = EventStore()
             try store.requestAccess(to: .event, mode: .write)
@@ -169,7 +173,7 @@ public struct EventsCreate: ParsableCommand {
             if !rules.isEmpty { event.recurrenceRules = try rules.map { try RecurrenceMapping.ekRule(from: $0) } }
 
             try store.save(event, span: .thisEvent)
-            try Output.emit(tool: "calendar", data: EventMapping.event(from: event))
+            try emitCalendarWrite(EventMapping.event(from: event), sandboxActive: gate.sandboxActive)
         }
     }
 
@@ -184,7 +188,7 @@ public struct EventsCreate: ParsableCommand {
 public struct EventsUpdate: ParsableCommand {
     public static let configuration = CommandConfiguration(
         commandName: "update",
-        abstract: "Update an event (dry-run by default; --execute writes under the test-mode gate).")
+        abstract: "Update an event (executes on call, like the MCP; --dry-run previews).")
 
     @OptionGroup public var global: GlobalOptions
     @Option(name: .long, help: "Event identifier (required).") public var id: String
@@ -231,14 +235,34 @@ public struct EventsUpdate: ParsableCommand {
             _ = try rules.map { try RecurrenceMapping.ekRule(from: $0) }
             let ekSpan = try resolveSpan()
 
-            guard try CalendarWriteGuard.gateOpen(willExecute: global.willExecute, testMode: global.testMode) else {
-                try Output.emit(tool: "calendar", data: EventWritePreview(
+            let gate = try CalendarWriteGuard.resolve(global)
+            // The RENAME target is argv-computable, so check it on both paths: renaming a labeled
+            // test event to a real-looking name would otherwise walk it out of the sandbox in one
+            // call. (Mirrors Reminders' "new reminder title" / "new list name" checks.)
+            //
+            // `--target-calendar` is DELIBERATELY NOT checked, and that asymmetry with Reminders'
+            // `--target-list` is principled rather than an oversight: the CLI exposes `calendars
+            // list` ONLY — there is no calendar create/update/delete anywhere — so no
+            // `apple-cli-test…` calendar can ever exist to name, and a label check here would
+            // permanently refuse EVERY explicit destination, including the operator's own. The
+            // Reminders analogue is checkable precisely because `reminders lists create` can make
+            // a labeled list. Revisit if a calendar-creation surface is ever added.
+            if let title {
+                try CalendarWriteGuard.requireLabeled(title, sandboxActive: gate.sandboxActive)
+            }
+
+            guard gate.willExecute else {
+                try emitCalendarWrite(EventWritePreview(
                     action: "update", id: id, title: title, start_date: startParsed?.date, end_date: endParsed?.date,
                     is_all_day: allDay, availability: availability, location: location, url: url, note: note,
                     target_calendar: targetCalendar, structured_location: structured,
                     alarms: alarms.isEmpty ? nil : alarms, recurrence_rules: rules.isEmpty ? nil : rules,
                     clear_alarms: clearAlarms ? true : nil, clear_recurrence: clearRecurrence ? true : nil,
-                    clear_structured_location: clearStructuredLocation ? true : nil, span: span))
+                    clear_structured_location: clearStructuredLocation ? true : nil, span: span,
+                    // Addressed by opaque id: the EXISTING event's title is what the sandbox vets,
+                    // and only the execute path fetches it. Disclose the deferral.
+                    sandbox_target_unchecked: gate.sandboxActive ? true : nil),
+                    sandboxActive: gate.sandboxActive)
                 return
             }
 
@@ -247,9 +271,10 @@ public struct EventsUpdate: ParsableCommand {
             guard let event = store.event(withIdentifier: id) else {
                 throw AppleError.notFound("no event with id '\(id)'")
             }
-            // Fail-closed: only mutate an EXISTING event that is labeled test data (guards against
-            // modifying an arbitrary real event by id — a DANGEROUS ACTION).
-            try CalendarWriteGuard.requireLabeled(event.title ?? "")
+            // Sandbox-only: inside the sandbox, only mutate an EXISTING event that is labeled test
+            // data. Unsandboxed this is a no-op — the oracle's `calendar_events action=update`
+            // mutates any event by id on call, and write-model v2 says we behave the same.
+            try CalendarWriteGuard.requireLabeled(event.title ?? "", sandboxActive: gate.sandboxActive)
 
             if let title { event.title = title }
             if let startParsed { event.startDate = startParsed.date }
@@ -274,7 +299,7 @@ public struct EventsUpdate: ParsableCommand {
             else if !rules.isEmpty { event.recurrenceRules = try rules.map { try RecurrenceMapping.ekRule(from: $0) } }
 
             try store.save(event, span: ekSpan)
-            try Output.emit(tool: "calendar", data: EventMapping.event(from: event))
+            try emitCalendarWrite(EventMapping.event(from: event), sandboxActive: gate.sandboxActive)
         }
     }
 
@@ -295,7 +320,7 @@ public struct EventsUpdate: ParsableCommand {
 public struct EventsDelete: ParsableCommand {
     public static let configuration = CommandConfiguration(
         commandName: "delete",
-        abstract: "Delete an event (dry-run by default; --execute deletes under the test-mode gate).")
+        abstract: "Delete an event (executes on call, like the MCP; --dry-run previews).")
 
     @OptionGroup public var global: GlobalOptions
     @Option(name: .long, help: "Event identifier (required).") public var id: String
@@ -307,8 +332,13 @@ public struct EventsDelete: ParsableCommand {
         try runGuarded(tool: "calendar") {
             let (ekSpan, spanLabel) = try resolveSpan()
 
-            guard try CalendarWriteGuard.gateOpen(willExecute: global.willExecute, testMode: global.testMode) else {
-                try Output.emit(tool: "calendar", data: EventWritePreview(action: "delete", id: id, span: spanLabel))
+            let gate = try CalendarWriteGuard.resolve(global)
+
+            guard gate.willExecute else {
+                try emitCalendarWrite(EventWritePreview(
+                    action: "delete", id: id, span: spanLabel,
+                    sandbox_target_unchecked: gate.sandboxActive ? true : nil),
+                    sandboxActive: gate.sandboxActive)
                 return
             }
 
@@ -317,12 +347,14 @@ public struct EventsDelete: ParsableCommand {
             guard let event = store.event(withIdentifier: id) else {
                 throw AppleError.notFound("no event with id '\(id)'")
             }
-            // Fail-closed: only delete an EXISTING event that is labeled test data (never an
-            // arbitrary real event / series by id — an irreversible DANGEROUS ACTION).
-            try CalendarWriteGuard.requireLabeled(event.title ?? "")
+            // Sandbox-only: inside the sandbox, only delete an EXISTING event that is labeled test
+            // data. Unsandboxed this is a no-op — the oracle's `calendar_events action=delete` goes
+            // straight to `deleteEvent(id)` with no gate, and v2 says we match it.
+            try CalendarWriteGuard.requireLabeled(event.title ?? "", sandboxActive: gate.sandboxActive)
 
             try store.remove(event, span: ekSpan)
-            try Output.emit(tool: "calendar", data: DeleteData(id: id, deleted: true, span: spanLabel))
+            try emitCalendarWrite(DeleteData(id: id, deleted: true, span: spanLabel),
+                                  sandboxActive: gate.sandboxActive)
         }
     }
 

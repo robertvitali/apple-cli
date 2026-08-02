@@ -223,3 +223,42 @@ No CLI is a strict superset. `event` is closest (native tags/geofence/url/list-C
 - icalBuddy (ali-rantakari + icalBuddy64 forks), zigotica/macos-calendar-events — read-only.
 
 > **Verdict robustness:** both = **BUILD**, single binary, **fork-base `FradSer/event`**. No candidate is a verified 100% superset today (`event` is closest — a near-adopt with a scoped write-flag delta; ekctl/keith/AungMyoKyaw are further; read-only tools auto-disqualified). If `event` lands the missing write flags, re-evaluate as **ADOPT**.
+
+### Write model (v2 — behaves like the MCP; see `docs/write-model-v2.md`)
+
+All 14 writes across both halves — Calendar's `events create/update/delete` and Reminders'
+`lists`/`tasks`/`subtasks` ops — **EXECUTE when invoked**, exactly as calling the equivalent
+`calendar_events` / `reminders_*` action does. `--dry-run` previews; `APPLE_DRY_RUN=1` restores
+dry-run-by-default globally. This replaced the v1 posture (dry-run default plus an `--execute` +
+`APPLE_TEST_MODE=1` two-factor gate), which had no oracle counterpart on ANY op.
+
+**Oracle evidence.** Unlike the Notes package, this one ships both `src/` (58 `.ts` files) and
+`dist/`; both were confirmed non-empty before any negative was believed. The only runtime
+`process.env` reads in non-test sources are `NODE_ENV`, `DEBUG` and `SWIFT_BINARY_HASH`
+(`utils/errorHandling.ts`, `utils/projectUtils.ts`, `utils/binaryValidator.ts`) — none of them a
+write gate. `tools/index.ts` is a pure action→handler router; the repositories shell straight to
+the Swift binary (`deleteEvent` → `executeCli(['--action','delete-event','--id',id])`); and
+`src/swift/EventKitCLI.swift` (1619 lines) reads no environment and self-gates nothing.
+
+- **The sandbox is opt-in**: `APPLE_TEST_MODE` truthy **or** `--test-mode`, either alone. Inside
+  it, writes stay confined to `apple-cli-test…`-labeled events, reminders and lists; refusals are
+  `validation_error` / exit 64 (the Calendar/Reminders refusal type, not Mail/Contacts' 77).
+  Outside the sandbox none of it applies, per oracle parity. Sandboxed success envelopes carry
+  `"sandbox": true`.
+- **Destinations are checked, not just subjects**: `--target-list` (tasks create/update) and
+  `--new-name` (lists update) must also be labeled inside the sandbox — creating a labeled item
+  inside a REAL list still modifies real user data.
+- **Deferred checks are disclosed**: an item's EXISTING title is not argv-computable, so on any
+  by-id update/delete — and on all five subtask ops, which are addressed by parent reminder id —
+  the sandbox label check can only run after the fetch, i.e. on the execute path. Those previews
+  emit `sandbox_target_unchecked: true` rather than letting a silent non-refusal read as approval.
+
+**The oracle's input-validation layer is deliberately NOT mirrored** (`src/validation/schemas.ts`:
+`SafeIdSchema.min(1)`, `RequiredListNameSchema.min(1)`, title/note/location length caps, a
+printable-Unicode charset, an SSRF URL blocklist). A strict superset must ACCEPT everything the
+oracle accepts; accepting more is valid. There is no injection or SSRF sink on this path — writes
+go to EventKit, never AppleScript/shell/SQL, and a stored URL is never dereferenced. Crucially,
+this is not the class of bug the Notes flip hit: EventKit is id-based, so `event(withIdentifier:
+"")` / `reminder(withIdentifier: "")` return nil → `not_found` and `calendar(matching: "")` matches
+only a literally-empty title. There is no analogue of Notes' empty folder specifier collapsing to
+a bare `delete` bound to the account container. See `RemindersSupport.swift:35-42`.

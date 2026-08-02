@@ -2,10 +2,16 @@
 # CLI smoke tests for the Reminders domain — logic tier, NO Apple permissions required.
 #
 # SAFETY: every test here either (a) invokes `--help` (never runs the body), (b) exercises a
-# dry-run write preview (default when --execute is absent — never touches the store), (c) runs
-# `doctor` (non-prompting status only), or (d) triggers a validation error that fires BEFORE the
-# command reaches `store.requestAccess`. NONE of these prompt for TCC or read the live store, so
-# the suite is safe on CI and on an unattended machine. Live reads/writes are the live tier.
+# write preview via an EXPLICIT `--dry-run` (or an `APPLE_DRY_RUN=1` prefix — verified to
+# propagate through bats' `run`), (c) runs `doctor` (non-prompting status only), or (d) triggers a
+# validation error that fires BEFORE the command reaches `store.requestAccess` — including every
+# sandbox refusal, since the write gate runs before `EventStore()`. NONE of these prompt for TCC
+# or touch the live store, so the suite is safe on CI and on an unattended machine.
+#
+# UNDER WRITE-MODEL v2 THE `--dry-run` IS LOAD-BEARING, not decorative: writes EXECUTE by default,
+# so a flagless write invocation added to this file would mutate the operator's real Reminders
+# store. That is what `bats/smoke.bats`'s flagless-write lint exists to prevent — do not add one.
+# Live reads/writes are the live tier.
 
 setup() {
   BIN="$(swift build --show-bin-path)/apple"
@@ -184,4 +190,77 @@ setup() {
   got="$(echo "$output" | tr -d ' \n')"
   expected='{"data":{"action":"create","dry_run":true,"note":"hello","priority":1,"subtasks":["a","b"],"tags":["work","urgent"],"title":"apple-cli-test-golden"},"ok":true,"schema_version":1,"tool":"reminders"}'
   [ "$got" = "$expected" ] || { echo "GOT:      $got"; echo "EXPECTED: $expected"; return 1; }
+}
+
+# --- write-model v2 posture (docs/write-model-v2.md) -----------------------------------------
+# Every pin below refuses inside the write gate, which runs BEFORE `EventStore()` /
+# `requestAccess` — so none of them touches the live store or prompts for TCC, keeping this
+# suite's header safety contract intact under execute-by-default.
+
+@test "sandbox refuses an unlabeled reminder title before touching the store" {
+  run "$BIN" reminders tasks create --test-mode --execute --title "Real Reminder"
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q '"type" : "validation_error"'
+  echo "$output" | grep -qi 'sandbox'
+}
+
+# `--target-list` takes a name OR an opaque id, so an unlabeled-LOOKING value cannot be refused
+# from argv (a labeled list's id carries no prefix). It DEFERS to the resolved list's title on the
+# execute path, which means the refusal is post-store and therefore cannot be asserted from this
+# tier without touching the operator's Reminders. What this tier CAN pin is the honesty half: the
+# preview must disclose that the check was deferred rather than implying approval. The refusal
+# itself is pinned in the logic tier — "the post-resolution destination check refuses an unlabeled
+# resolved list" in Tests/RemindersKitTests/WriteSafetyTests.swift.
+@test "an unlabeled-looking destination defers rather than silently passing (preview discloses)" {
+  run "$BIN" reminders tasks create --test-mode --dry-run \
+    --title apple-cli-test-x --target-list "Real List"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"sandbox_target_unchecked" : true'
+  echo "$output" | grep -q '"sandbox" : true'
+}
+
+@test "a LABELED destination name is settled from argv — no deferral claimed" {
+  run "$BIN" reminders tasks create --test-mode --dry-run \
+    --title apple-cli-test-x --target-list apple-cli-test-list
+  [ "$status" -eq 0 ]
+  run bash -c "echo '$output' | grep -c sandbox_target_unchecked || true"
+  [ "$output" -eq 0 ]
+}
+
+@test "sandbox refuses renaming a labeled list to an unlabeled name" {
+  run "$BIN" reminders lists update --test-mode --execute \
+    --name apple-cli-test-list --new-name "Real List"
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q 'new list name'
+}
+
+@test "sandbox label check also runs on the PREVIEW path (no dishonest dry-run)" {
+  run "$BIN" reminders tasks create --test-mode --dry-run --title "Real Reminder"
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q '"type" : "validation_error"'
+}
+
+@test "a labeled create previews cleanly and is tagged as sandboxed" {
+  run "$BIN" reminders tasks create --test-mode --dry-run --title apple-cli-test-x
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"dry_run" : true'
+  echo "$output" | grep -q '"sandbox" : true'
+}
+
+@test "APPLE_DRY_RUN=1 restores dry-run-by-default for a flagless write" {
+  APPLE_DRY_RUN=1 run "$BIN" reminders tasks create --title apple-cli-test-x
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"dry_run" : true'
+}
+
+@test "an id-addressed preview discloses that the sandbox check was deferred" {
+  run "$BIN" reminders tasks delete --test-mode --dry-run --id ABC
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"sandbox_target_unchecked" : true'
+}
+
+@test "every subtask preview discloses the deferred parent check inside the sandbox" {
+  run "$BIN" reminders subtasks create --test-mode --dry-run --reminder-id R1 --title apple-cli-test-sub
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"sandbox_target_unchecked" : true'
 }

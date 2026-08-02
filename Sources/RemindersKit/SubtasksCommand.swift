@@ -22,9 +22,13 @@ public struct SubtasksCommand: ParsableCommand {
     public init() {}
 }
 
-// A subtask op mutates an EXISTING reminder's notes, so beyond the standard write gate every
-// mutating op ALSO calls the shared `requireLabeledReminder(_:)` post-fetch (see RemindersSupport)
-// so an autonomous run can never touch a real reminder's notes.
+// Every subtask op mutates an EXISTING reminder's notes and is addressed by PARENT reminder id,
+// so each mutating op calls the shared `requireLabeledReminder(_:sandboxActive:)` post-fetch (see
+// RemindersSupport). Under write-model v2 that check is SANDBOX-ONLY: unsandboxed, these ops touch
+// any reminder by id exactly as the oracle's `reminders_subtasks` actions do. Because the parent's
+// title is never argv-computable, the check can only ever run on the execute path — so every
+// subtask preview sets `sandbox_target_unchecked` when the sandbox is engaged rather than letting
+// a silent non-refusal read as approval.
 
 // MARK: - read
 
@@ -54,7 +58,7 @@ public struct SubtasksRead: ParsableCommand {
 
 public struct SubtasksCreate: ParsableCommand {
     public static let configuration = CommandConfiguration(
-        commandName: "create", abstract: "Add a subtask (dry-run by default; --execute under the test-mode gate).")
+        commandName: "create", abstract: "Add a subtask (executes on call, like the MCP; --dry-run previews).")
 
     @OptionGroup public var global: GlobalOptions
     @Option(name: .customLong("reminder-id"), help: "Parent reminder identifier (required).") public var reminderId: String
@@ -64,21 +68,27 @@ public struct SubtasksCreate: ParsableCommand {
 
     public func run() throws {
         try runGuarded(tool: "reminders") {
-            guard try ReminderWriteGuard.shouldExecute(global: global, labeledName: nil) else {
-                try Output.emit(tool: "reminders", data: SubtaskWritePreview(action: "create", reminder_id: reminderId, title: title))
+            let gate = try ReminderWriteGuard.resolve(global)
+
+            guard gate.willExecute else {
+                try emitRemindersWrite(SubtaskWritePreview(
+                    action: "create", reminder_id: reminderId, title: title,
+                    sandbox_target_unchecked: gate.sandboxActive ? true : nil),
+                    sandboxActive: gate.sandboxActive)
                 return
             }
             let store = EventStore()
             try store.requestAccess(to: .reminder, mode: .write)
             let reminder = try fetchReminder(store, reminderId)
-            try requireLabeledReminder(reminder)
+            try requireLabeledReminder(reminder, sandboxActive: gate.sandboxActive)
             let (newNotes, created) = try ReminderSubtasks.add(title: title, notes: reminder.notes)
             reminder.notes = newNotes
             try store.save(reminder)
             let subs = ReminderSubtasks.parse(newNotes)
-            try Output.emit(tool: "reminders", data: SubtasksData(
+            try emitRemindersWrite(SubtasksData(
                 reminder_id: reminderId, reminder_title: reminder.title,
-                progress: ReminderSubtasks.progress(subs), subtasks: subs, subtask: created))
+                progress: ReminderSubtasks.progress(subs), subtasks: subs, subtask: created),
+                                   sandboxActive: gate.sandboxActive)
         }
     }
 }
@@ -87,7 +97,7 @@ public struct SubtasksCreate: ParsableCommand {
 
 public struct SubtasksUpdate: ParsableCommand {
     public static let configuration = CommandConfiguration(
-        commandName: "update", abstract: "Update a subtask's title/completion (dry-run by default; --execute gated).")
+        commandName: "update", abstract: "Update a subtask's title/completion (executes on call, like the MCP; --dry-run previews).")
 
     @OptionGroup public var global: GlobalOptions
     @Option(name: .customLong("reminder-id"), help: "Parent reminder identifier (required).") public var reminderId: String
@@ -100,22 +110,28 @@ public struct SubtasksUpdate: ParsableCommand {
     public func run() throws {
         try runGuarded(tool: "reminders") {
             try ReminderSubtasks.validateId(subtaskId)
-            guard try ReminderWriteGuard.shouldExecute(global: global, labeledName: nil) else {
-                try Output.emit(tool: "reminders", data: SubtaskWritePreview(
-                    action: "update", reminder_id: reminderId, subtask_id: subtaskId, title: title, completed: completed))
+            let gate = try ReminderWriteGuard.resolve(global)
+
+            guard gate.willExecute else {
+                try emitRemindersWrite(SubtaskWritePreview(
+                    action: "update", reminder_id: reminderId, subtask_id: subtaskId, title: title,
+                    completed: completed,
+                    sandbox_target_unchecked: gate.sandboxActive ? true : nil),
+                    sandboxActive: gate.sandboxActive)
                 return
             }
             let store = EventStore()
             try store.requestAccess(to: .reminder, mode: .write)
             let reminder = try fetchReminder(store, reminderId)
-            try requireLabeledReminder(reminder)
+            try requireLabeledReminder(reminder, sandboxActive: gate.sandboxActive)
             let (newNotes, updated) = try ReminderSubtasks.update(id: subtaskId, title: title, completed: completed, notes: reminder.notes)
             reminder.notes = newNotes
             try store.save(reminder)
             let subs = ReminderSubtasks.parse(newNotes)
-            try Output.emit(tool: "reminders", data: SubtasksData(
+            try emitRemindersWrite(SubtasksData(
                 reminder_id: reminderId, reminder_title: reminder.title,
-                progress: ReminderSubtasks.progress(subs), subtasks: subs, subtask: updated))
+                progress: ReminderSubtasks.progress(subs), subtasks: subs, subtask: updated),
+                                   sandboxActive: gate.sandboxActive)
         }
     }
 }
@@ -124,7 +140,7 @@ public struct SubtasksUpdate: ParsableCommand {
 
 public struct SubtasksDelete: ParsableCommand {
     public static let configuration = CommandConfiguration(
-        commandName: "delete", abstract: "Remove a subtask (dry-run by default; --execute gated).")
+        commandName: "delete", abstract: "Remove a subtask (executes on call, like the MCP; --dry-run previews).")
 
     @OptionGroup public var global: GlobalOptions
     @Option(name: .customLong("reminder-id"), help: "Parent reminder identifier (required).") public var reminderId: String
@@ -135,21 +151,27 @@ public struct SubtasksDelete: ParsableCommand {
     public func run() throws {
         try runGuarded(tool: "reminders") {
             try ReminderSubtasks.validateId(subtaskId)
-            guard try ReminderWriteGuard.shouldExecute(global: global, labeledName: nil) else {
-                try Output.emit(tool: "reminders", data: SubtaskWritePreview(action: "delete", reminder_id: reminderId, subtask_id: subtaskId))
+            let gate = try ReminderWriteGuard.resolve(global)
+
+            guard gate.willExecute else {
+                try emitRemindersWrite(SubtaskWritePreview(
+                    action: "delete", reminder_id: reminderId, subtask_id: subtaskId,
+                    sandbox_target_unchecked: gate.sandboxActive ? true : nil),
+                    sandboxActive: gate.sandboxActive)
                 return
             }
             let store = EventStore()
             try store.requestAccess(to: .reminder, mode: .write)
             let reminder = try fetchReminder(store, reminderId)
-            try requireLabeledReminder(reminder)
+            try requireLabeledReminder(reminder, sandboxActive: gate.sandboxActive)
             let newNotes = try ReminderSubtasks.remove(id: subtaskId, notes: reminder.notes)
             reminder.notes = newNotes
             try store.save(reminder)
             let subs = ReminderSubtasks.parse(newNotes)
-            try Output.emit(tool: "reminders", data: SubtasksData(
+            try emitRemindersWrite(SubtasksData(
                 reminder_id: reminderId, reminder_title: reminder.title,
-                progress: ReminderSubtasks.progress(subs), subtasks: subs))
+                progress: ReminderSubtasks.progress(subs), subtasks: subs),
+                                   sandboxActive: gate.sandboxActive)
         }
     }
 }
@@ -158,7 +180,7 @@ public struct SubtasksDelete: ParsableCommand {
 
 public struct SubtasksToggle: ParsableCommand {
     public static let configuration = CommandConfiguration(
-        commandName: "toggle", abstract: "Flip a subtask's completion (dry-run by default; --execute gated).")
+        commandName: "toggle", abstract: "Flip a subtask's completion (executes on call, like the MCP; --dry-run previews).")
 
     @OptionGroup public var global: GlobalOptions
     @Option(name: .customLong("reminder-id"), help: "Parent reminder identifier (required).") public var reminderId: String
@@ -169,21 +191,27 @@ public struct SubtasksToggle: ParsableCommand {
     public func run() throws {
         try runGuarded(tool: "reminders") {
             try ReminderSubtasks.validateId(subtaskId)
-            guard try ReminderWriteGuard.shouldExecute(global: global, labeledName: nil) else {
-                try Output.emit(tool: "reminders", data: SubtaskWritePreview(action: "toggle", reminder_id: reminderId, subtask_id: subtaskId))
+            let gate = try ReminderWriteGuard.resolve(global)
+
+            guard gate.willExecute else {
+                try emitRemindersWrite(SubtaskWritePreview(
+                    action: "toggle", reminder_id: reminderId, subtask_id: subtaskId,
+                    sandbox_target_unchecked: gate.sandboxActive ? true : nil),
+                    sandboxActive: gate.sandboxActive)
                 return
             }
             let store = EventStore()
             try store.requestAccess(to: .reminder, mode: .write)
             let reminder = try fetchReminder(store, reminderId)
-            try requireLabeledReminder(reminder)
+            try requireLabeledReminder(reminder, sandboxActive: gate.sandboxActive)
             let (newNotes, toggled) = try ReminderSubtasks.toggle(id: subtaskId, notes: reminder.notes)
             reminder.notes = newNotes
             try store.save(reminder)
             let subs = ReminderSubtasks.parse(newNotes)
-            try Output.emit(tool: "reminders", data: SubtasksData(
+            try emitRemindersWrite(SubtasksData(
                 reminder_id: reminderId, reminder_title: reminder.title,
-                progress: ReminderSubtasks.progress(subs), subtasks: subs, subtask: toggled))
+                progress: ReminderSubtasks.progress(subs), subtasks: subs, subtask: toggled),
+                                   sandboxActive: gate.sandboxActive)
         }
     }
 }
@@ -192,7 +220,7 @@ public struct SubtasksToggle: ParsableCommand {
 
 public struct SubtasksReorder: ParsableCommand {
     public static let configuration = CommandConfiguration(
-        commandName: "reorder", abstract: "Reorder subtasks (dry-run by default; --execute gated).")
+        commandName: "reorder", abstract: "Reorder subtasks (executes on call, like the MCP; --dry-run previews).")
 
     @OptionGroup public var global: GlobalOptions
     @Option(name: .customLong("reminder-id"), help: "Parent reminder identifier (required).") public var reminderId: String
@@ -204,20 +232,26 @@ public struct SubtasksReorder: ParsableCommand {
         try runGuarded(tool: "reminders") {
             guard !order.isEmpty else { throw AppleError.validation("reorder needs at least one --order <subtask-id>") }
             for oid in order { try ReminderSubtasks.validateId(oid) }
-            guard try ReminderWriteGuard.shouldExecute(global: global, labeledName: nil) else {
-                try Output.emit(tool: "reminders", data: SubtaskWritePreview(action: "reorder", reminder_id: reminderId, order: order))
+            let gate = try ReminderWriteGuard.resolve(global)
+
+            guard gate.willExecute else {
+                try emitRemindersWrite(SubtaskWritePreview(
+                    action: "reorder", reminder_id: reminderId, order: order,
+                    sandbox_target_unchecked: gate.sandboxActive ? true : nil),
+                    sandboxActive: gate.sandboxActive)
                 return
             }
             let store = EventStore()
             try store.requestAccess(to: .reminder, mode: .write)
             let reminder = try fetchReminder(store, reminderId)
-            try requireLabeledReminder(reminder)
+            try requireLabeledReminder(reminder, sandboxActive: gate.sandboxActive)
             let (newNotes, reordered) = try ReminderSubtasks.reorder(order: order, notes: reminder.notes)
             reminder.notes = newNotes
             try store.save(reminder)
-            try Output.emit(tool: "reminders", data: SubtasksData(
+            try emitRemindersWrite(SubtasksData(
                 reminder_id: reminderId, reminder_title: reminder.title,
-                progress: ReminderSubtasks.progress(reordered), subtasks: reordered))
+                progress: ReminderSubtasks.progress(reordered), subtasks: reordered),
+                                   sandboxActive: gate.sandboxActive)
         }
     }
 }

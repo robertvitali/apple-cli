@@ -1,8 +1,14 @@
 #!/usr/bin/env bats
 # Calendar CLI smoke tests — logic tier, NO TCC. Only exercises paths that never touch the
-# EventKit store: --help, arg-validation error envelopes, and DRY-RUN writes (which build the
-# preview without an EKEventStore). Live read/create-execute paths need granted Calendar TCC
-# and run in the live tier, not here.
+# EventKit store: --help, arg-validation error envelopes, DRY-RUN writes (which build the preview
+# without an EKEventStore), and sandbox refusals (the write gate runs before `EventStore()`, so a
+# refusal never reaches the store either). Live read/create-execute paths need granted Calendar
+# TCC and run in the live tier, not here.
+#
+# UNDER WRITE-MODEL v2 THE `--dry-run` IS LOAD-BEARING, not decorative: writes EXECUTE by default,
+# so a flagless write invocation added to this file would create a real event in the operator's
+# calendar. The v1 test that ran `... --execute` expecting a refusal was DELETED for exactly this
+# reason, not migrated. `bats/smoke.bats`'s flagless-write lint enforces it — do not add one.
 
 setup() {
   BIN="$(swift build --show-bin-path)/apple"
@@ -118,8 +124,46 @@ setup() {
   [ "$status" -eq 64 ]
 }
 
-@test "--execute without the test-mode gate is refused (validation_error)" {
-  run $BIN calendar events create --title "apple-cli-test x" --start 2026-07-20 --end 2026-07-20 --execute
+# --- write-model v2 posture (docs/write-model-v2.md) -----------------------------------------
+# The v1 test that lived here ran `... --execute` and asserted a refusal. Post-flip that command
+# CREATES A REAL EVENT in the operator's default calendar, which would break this suite's own
+# safety contract (see the header: nothing here may touch the live store). It is replaced by pins
+# that exercise the sandbox refusal instead — every one of them throws inside the write gate,
+# which runs BEFORE `EventStore()` / `requestAccess`, so no TCC prompt and no store access.
+
+@test "sandbox refuses an unlabeled create before touching the store (validation_error)" {
+  run $BIN calendar events create --test-mode --execute \
+    --title "Real Meeting" --start 2026-07-20 --end 2026-07-20
   [ "$status" -eq 64 ]
   echo "$output" | grep -q '"type" : "validation_error"'
+  # The refusal must name the sandbox, not the old test-mode gate.
+  echo "$output" | grep -qi 'sandbox'
+}
+
+@test "sandbox label check also runs on the PREVIEW path (no dishonest dry-run)" {
+  run $BIN calendar events create --test-mode --dry-run \
+    --title "Real Meeting" --start 2026-07-20 --end 2026-07-20
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q '"type" : "validation_error"'
+}
+
+@test "a labeled create is accepted by the sandbox gate (previews, does not write)" {
+  run $BIN calendar events create --test-mode --dry-run \
+    --title "apple-cli-test x" --start 2026-07-20 --end 2026-07-20
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"dry_run" : true'
+  echo "$output" | grep -q '"sandbox" : true'
+}
+
+@test "APPLE_DRY_RUN=1 restores dry-run-by-default for a flagless write" {
+  APPLE_DRY_RUN=1 run $BIN calendar events create \
+    --title "apple-cli-test x" --start 2026-07-20 --end 2026-07-20
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"dry_run" : true'
+}
+
+@test "an id-addressed preview discloses that the sandbox check was deferred" {
+  run $BIN calendar events delete --test-mode --dry-run --id SOME-ID
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"sandbox_target_unchecked" : true'
 }

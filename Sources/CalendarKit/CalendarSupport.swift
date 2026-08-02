@@ -285,10 +285,16 @@ public struct CalendarsData: Encodable {
 
 /// `events delete` result.
 public struct DeleteData: Encodable {
+    /// Always `false`: this DTO is only emitted from the EXECUTE path, so the flag states outright
+    /// that the delete happened rather than leaving the caller to infer it from the ABSENCE of the
+    /// preview's `dry_run: true`. Write-model v2 makes execute the default, so "no dry_run key"
+    /// would be the common case and silence is the wrong signal for a destructive op.
+    public let dry_run: Bool
     public let id: String
     public let deleted: Bool
     public let span: String?
     public init(id: String, deleted: Bool, span: String?) {
+        self.dry_run = false
         self.id = id
         self.deleted = deleted
         self.span = span
@@ -318,6 +324,13 @@ public struct EventWritePreview: Encodable {
     public let clear_recurrence: Bool?
     public let clear_structured_location: Bool?
     public let span: String?
+    /// `true` when the sandbox is engaged AND this write is addressed by opaque id, so the label
+    /// check could NOT run at preview time: the target's title lives in EventKit and only the
+    /// execute path fetches it. Disclosed rather than silently skipped — a preview that omits a
+    /// check it cannot perform must say so, otherwise a caller reads "no refusal" as "allowed".
+    /// Absent (nil) whenever the check DID run, i.e. every title-addressed write and every
+    /// unsandboxed one.
+    public let sandbox_target_unchecked: Bool?
 
     public init(
         action: String, id: String? = nil, title: String? = nil, start_date: Date? = nil,
@@ -326,9 +339,11 @@ public struct EventWritePreview: Encodable {
         target_calendar: String? = nil, structured_location: StructuredLocation? = nil,
         alarms: [Alarm]? = nil, recurrence_rules: [RecurrenceRule]? = nil,
         clear_alarms: Bool? = nil, clear_recurrence: Bool? = nil,
-        clear_structured_location: Bool? = nil, span: String? = nil
+        clear_structured_location: Bool? = nil, span: String? = nil,
+        sandbox_target_unchecked: Bool? = nil
     ) {
         self.dry_run = true
+        self.sandbox_target_unchecked = sandbox_target_unchecked
         self.action = action
         self.id = id
         self.title = title
@@ -350,31 +365,68 @@ public struct EventWritePreview: Encodable {
     }
 }
 
-// MARK: - Write guard (phase safety)
+// MARK: - Write-model v2 gate (docs/write-model-v2.md)
+
+/// Emit a calendar write result, tagging the envelope when the sandbox is engaged so a caller
+/// can tell a restricted write from a normal one without re-reading the environment.
+func emitCalendarWrite<T: Encodable>(_ data: T, sandboxActive: Bool) throws {
+    try Output.emit(tool: "calendar", data: data, sandboxActive: sandboxActive)
+}
 
 public enum CalendarWriteGuard {
-    /// Env/flag gate. Returns `false` (⇒ caller emits a dry-run preview) unless `willExecute`
-    /// (`--execute` and not `--dry-run`). When executing, enforce the build-phase safety gate —
-    /// `--test-mode` + `APPLE_TEST_MODE=1` — else throw. Takes plain Bools (not GlobalOptions) so
-    /// it is unit-testable (an ArgumentParser property-wrapper struct can't be read outside a
-    /// parse). Does NOT check the target label — the caller does that with the RIGHT name via
-    /// `requireLabeled` (the new title for create; the EXISTING event's title for update/delete).
-    public static func gateOpen(willExecute: Bool, testMode: Bool) throws -> Bool {
-        guard willExecute else { return false } // dry-run preview
-        guard testMode, TestMode.isEnabled else {
-            throw AppleError.validation(
-                "live calendar write requires --test-mode and APPLE_TEST_MODE=1 (safety gate); "
-                + "omit --execute for a dry-run preview")
-        }
-        return true
+    /// The resolved write posture for one calendar command. Bound ONCE at the top of every write
+    /// `run()` and threaded from there — never re-derived mid-command.
+    public struct Gate {
+        public let willExecute: Bool
+        public let sandboxActive: Bool
     }
 
-    /// Fail-closed label check: the item being created/mutated MUST be a labeled test target.
-    /// For CREATE pass the new title; for UPDATE/DELETE pass the EXISTING event's title, so an
-    /// autonomous run can only touch data it labeled — never an arbitrary real event by id (the
-    /// AGENTS.md "never modify/delete existing real data" rule). Throws `AppleError.validation`.
-    public static func requireLabeled(_ name: String) throws {
-        do { try TestMode.requireLabeledTarget(name) }
-        catch { throw AppleError.validation(String(describing: error)) }
+    /// Resolve a calendar write under write-model v2: **it executes by default**, exactly as
+    /// calling the equivalent `mcp-server-apple-events` `calendar_events` action does. `--dry-run`
+    /// previews; `APPLE_DRY_RUN` truthy restores dry-run-by-default; `--test-mode` or
+    /// `APPLE_TEST_MODE` truthy engages the opt-in sandbox.
+    ///
+    /// ORACLE EVIDENCE (`mcp-server-apple-events@1.4.0`, re-derived from BOTH `src/` and `dist/`,
+    /// each verified non-empty first): the only runtime `process.env` reads in non-test sources are
+    /// `NODE_ENV`, `DEBUG` and `SWIFT_BINARY_HASH` (`utils/errorHandling.ts`, `utils/projectUtils.ts`,
+    /// `utils/binaryValidator.ts`) — none is a write gate, so there is NO env-keyed oracle gate to
+    /// mirror here (contrast Contacts' `CONTACTS_TEST_MODE`). `tools/index.ts` is pure routing with
+    /// no gate, and `handlers/*.ts` go straight to `calendarRepository.deleteEvent` →
+    /// `executeCli(['--action','delete-event','--id',id])`. The oracle's own Swift binary
+    /// (`src/swift/EventKitCLI.swift`, 1619 lines) reads no environment and self-gates nothing.
+    /// So all three calendar writes are bucket 3: the v1 gate was CLI-only and becomes sandbox-only.
+    /// NO `defaultDryRun` parameter, deliberately. `GlobalOptions.willExecute(defaultDryRun:)`
+    /// leaves it non-defaulted on purpose ("every surface states its own"), and a wrapper that
+    /// re-adds a default silently re-creates that footgun: a future preview-by-default surface
+    /// would inherit execute-by-default just by forgetting the argument. All three Calendar
+    /// writes execute by default and NONE has a per-surface exception (unlike Mail's trash or
+    /// Notes' delete-folder), so the honest signature is one that offers no choice. Adding the
+    /// parameter back when a real exception appears is then a deliberate, reviewable act.
+    public static func resolve(_ global: GlobalOptions) throws -> Gate {
+        try TestMode.validateWriteEnvironment()
+        let sandboxActive = try TestMode.sandboxActive(flag: global.testMode)
+        let willExecute = try global.willExecute(defaultDryRun: false)
+        return Gate(willExecute: willExecute, sandboxActive: sandboxActive)
+    }
+
+    /// SANDBOX-ONLY label check: inside the sandbox the item being created/mutated must be a
+    /// labeled test target. For CREATE pass the new title; for UPDATE/DELETE pass the EXISTING
+    /// event's title, so a sandboxed run can only touch data it labeled. Outside the sandbox this
+    /// is a no-op — the oracle creates and deletes real events on call, and so do we.
+    ///
+    /// `prefix:` is a test seam. `TestMode.sandboxPrefix` is env-backed (`APPLE_TEST_SANDBOX`), and
+    /// swift-testing runs every suite in ONE process in parallel — MailKitTests setenv()s it to
+    /// "qa-fixture" mid-run, which flaked the Contacts and Notes posture suites before the seam
+    /// existed. A logic-tier test passes the canonical constant explicitly rather than inheriting
+    /// a value it hard-codes expectations about.
+    public static func requireLabeled(_ name: String, sandboxActive: Bool,
+                                      prefix: String? = nil) throws {
+        guard sandboxActive else { return }
+        let required = prefix ?? TestMode.sandboxPrefix
+        guard name.hasPrefix(required) else {
+            throw AppleError.validation(
+                "Sandbox is engaged: refusing to write to \"\(name)\" — the target must be a "
+                + "labeled '\(required)…' test item.")
+        }
     }
 }

@@ -398,22 +398,10 @@ struct EnvelopeTests {
 }
 
 // MARK: - Write guard
-
-@Suite("ReminderWriteGuard")
-struct WriteGuardTests {
-    // Build GlobalOptions via the ArgumentParser parse path (a hand-constructed GlobalOptions()
-    // leaves the @Flag wrappers unparsed and fatals on read — the CLI always parses, so this
-    // mirrors real usage).
-    func opts(_ args: [String]) throws -> GlobalOptions { try GlobalOptions.parse(args) }
-
-    @Test func dryRunByDefault() throws {
-        #expect(try ReminderWriteGuard.shouldExecute(global: opts([]), labeledName: nil) == false)
-    }
-
-    @Test func executeWithoutTestModeThrows() throws {
-        let g = try opts(["--execute"])
-        #expect(throws: AppleError.self) {
-            _ = try ReminderWriteGuard.shouldExecute(global: g, labeledName: nil)
-        }
-    }
-}
+//
+// The v1 `ReminderWriteGuard.shouldExecute` suite that lived here asserted `dryRunByDefault` and
+// `executeWithoutTestModeThrows` — both of which write-model v2 deliberately INVERTS (writes now
+// execute on call, and `--execute` needs no test-mode companion). It is replaced, not deleted:
+// see "Reminders write-model v2 posture" in WriteSafetyTests.swift, which pins the new decision
+// (default-execute, --dry-run precedence, sandbox-only label gate) plus the destination-label
+// coverage the v1 suite never had.

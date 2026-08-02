@@ -500,3 +500,130 @@ reverting the model. The sandbox itself is the operator's per-invocation rollbac
   overclaim and now reads "every write SUCCESS envelope". Adding the key to the shared error
   envelope would change all six domains mid-rollout, so it is likewise deferred to its own
   commit. Both are tracked as follow-ups, not silently absorbed.
+
+- 2026-08-02 — **Calendar + Reminders flip landed** (step 4, fourth and fifth domains; the two
+  coordinated module edits). Fourteen write ops move to v2: Calendar's 3 (`events
+  create/update/delete`) via a new `CalendarWriteGuard.resolve` → `Gate {willExecute,
+  sandboxActive}`, and Reminders' 11 (`lists` ×3, `tasks` ×3, `subtasks` ×5) via
+  `ReminderWriteGuard.resolve` plus a sandbox-conditional `requireLabeledReminder`. **`EventKitCore`
+  holds no write guard of any kind** — its `EventStore.swift` documents that callers gate and
+  enforces nothing itself — so the AGENTS.md "never edit EventKitCore from both worktrees at once"
+  hazard did not apply and the two domains are genuinely independent edits. The one shared-file
+  change is **comment-only and behaviourally inert**: `EventStore.swift`'s WRITE-GUARD CONTRACT
+  block still described the v1 posture ("`willExecute` — real mutation vs the dry-run default" plus
+  an unconditional `TestMode.requireLabeledTarget`), which is exactly the contract v2 removes. Left
+  as-was it would have handed the Messages flip a confidently-worded, wrong specification of the
+  gate it is supposed to implement. Verified comment-only by filtering the diff for non-comment
+  changed lines (zero).
+
+  **Oracle evidence (`mcp-server-apple-events@1.4.0`).** Unlike the Notes package this one ships
+  BOTH `src/` (58 `.ts` files) and `dist/`, and both were confirmed non-empty before any negative
+  was believed. Findings: the only runtime `process.env` reads in non-test sources are `NODE_ENV`,
+  `DEBUG` and `SWIFT_BINARY_HASH` (`utils/errorHandling.ts`, `utils/projectUtils.ts`,
+  `utils/binaryValidator.ts`) — none a write gate, so unlike Contacts there is NO env-keyed oracle
+  gate to preserve. `tools/index.ts` is pure routing (an action→handler map, no gate);
+  `calendarRepository.deleteEvent` / `reminderRepository.deleteReminder` / `deleteReminderList`
+  shell straight to the Swift CLI; and the oracle's own `src/swift/EventKitCLI.swift` (1619 lines)
+  reads no environment and self-gates nothing. All 14 ops are bucket 3.
+
+  **No dropped oracle input-bound here — checked explicitly, because that is what the Notes
+  CRITICAL was.** The oracle DOES carry a real validation layer (`src/validation/schemas.ts`:
+  `SafeIdSchema.min(1)`, `RequiredListNameSchema.min(1)`, length caps, a printable-Unicode
+  charset, an SSRF URL blocklist). Two independent reasons this is not a repeat of the Notes bug.
+  (1) The empty-target hazard does not exist: EventKit is id-based and `store.event(withIdentifier:
+  "")` / `reminder(withIdentifier: "")` return nil → `not_found`, and `calendar(matching: "")`
+  matches only a literally-empty title — there is no analogue of Notes' `folderRefExpr([])`
+  collapsing to a bare `delete` bound to the ACCOUNT CONTAINER. (2) The relaxation of the oracle's
+  *rejections* is a pre-existing, documented, reasoned superset decision
+  (`RemindersSupport.swift:35-42`): a strict superset must accept everything the oracle accepts,
+  accepting more is valid, and there is no injection sink to protect (writes go to EventKit, not
+  AppleScript/shell/SQL, and a stored URL is never dereferenced). Left as-is deliberately.
+
+  **The Notes destination-check finding was applied forward — but the first attempt got it wrong
+  in two ways, and the review caught both.** Notes shipped a bug where `move --folder` never
+  label-checked its destination while `batch-move` did, so a sandboxed write could land in a REAL
+  folder. Applying that forward here needed more care than a copy:
+
+  - **`--new-name` (lists update) and the rename target (`tasks update --title`) are plain argv
+    strings** — checked on both paths, refusal names which field was rejected.
+  - **`--target-list` is name-OR-id** (the flag says so and `EventStore.calendar(matching:)`
+    resolves id-first), so the first version's raw argv label test was WRONG: a labeled list's
+    opaque identifier carries no prefix, so it refused the exact flow the repo's own conduct rules
+    prescribe — `lists create` hands back an id and `TEST-CLEANUP.md` tracks items BY id. Now a
+    labeled NAME is settled from argv and anything else DEFERS to the resolved list's title on the
+    execute path. **Acknowledged tradeoff:** that moves the refusal after store access, so it can
+    no longer be asserted from the bats tier (which must not touch the store); the refusal is
+    pinned in the logic tier instead, and the bats tier pins the honesty half — the preview
+    discloses the deferral rather than implying approval. The safety property that matters is
+    preserved: the check still precedes the WRITE.
+  - **Calendar's `--target-calendar` is DELIBERATELY not checked**, and the asymmetry is
+    principled rather than an oversight the review missed: the CLI exposes `calendars list` ONLY —
+    there is no calendar create/update/delete anywhere — so no `apple-cli-test…` calendar can ever
+    exist to name, and a label check would permanently refuse EVERY explicit destination including
+    the operator's own. The Reminders analogue is checkable precisely because `reminders lists
+    create` can make a labeled list. Revisit if a calendar-creation surface is ever added.
+  - For the same reason the **default list/calendar** (no destination flag) is exempt: requiring a
+    labeled default would make plain sandboxed creation impossible until an agent first creates a
+    list, and the conduct rule is "create clearly-LABELED test data", not "into labeled containers
+    only". Naming a real container explicitly is a deliberate act and is refused; falling back to
+    the operator's default is not.
+
+  **Preview honesty.** Argv-computable checks run on the preview path (Calendar create's title;
+  every Reminders name/destination). The genuinely deferred ones — the EXISTING item's title on
+  any by-id update/delete, and the parent reminder's title on all five subtask ops — cannot run
+  without a fetch, so those previews emit `sandbox_target_unchecked: true` instead of letting a
+  silent non-refusal read as approval.
+
+  **`dry_run: false` on the execute path** was added to the write-only DTOs (`DeleteData`,
+  `ReminderDeleteData`, `ListDeleteData`) but deliberately NOT to the shared read models an
+  execute path also returns (`EventMapping.event`, `SubtasksData`) — adding it there would put a
+  write-only key into `events read` / `subtasks read` output. Preview and result remain
+  distinguishable by shape. **Known inconsistency across already-landed flips, flagged not
+  hidden:** Contacts' result DTOs carry `dry_run: false`, Notes' do not. Normalising all six is a
+  follow-up commit, not a silent in-flight change.
+
+  **REVIEW ROUND (three OMC lenses, 15 agents, 0 errors — a real gate, unlike the Notes round's
+  session-limit collapse).** 21 findings filed, 12 adversarially verified (4 confirmed, 8 refuted),
+  9 below the per-lens verification cap and triaged by hand. What it caught, all fixed:
+  (a) TWO of the fourteen write ops — `tasks create` and `tasks update` — still emitted via plain
+  `Output.emit`, so their sandboxed success envelopes silently omitted `sandbox: true` while their
+  twelve siblings reported it. Found independently by the code AND security lenses. The spec had
+  PRE-REGISTERED this exact failure ("the parameter is defaulted, so a sandboxed write that FORGETS
+  to pass it under-reports as unsandboxed") and the mandated safeguard still did not catch it — the
+  defaulted parameter means the compiler cannot. (b) The `--target-list` id defect above.
+  (c) Calendar's `events update --title` rename target was unchecked while the Reminders analogue
+  was — fixed; `--target-calendar` examined and deliberately left, per the reasoning above.
+  (d) `resolve(_:defaultDryRun:)` re-introduced the footgun `GlobalOptions.willExecute` avoids by
+  leaving that parameter non-defaulted on purpose; since neither domain has a per-surface exception,
+  the parameter was REMOVED rather than defaulted, so there is no choice to get wrong.
+  (e) Both bats safety headers still described the v1 dry-run-by-default model they had just
+  deleted. One unverified finding was refuted by measurement rather than argument: bats' `run` DOES
+  propagate an `APPLE_DRY_RUN=1` prefix (probed directly), so those tests do not secretly write.
+
+  Verification: 544 swift-testing tests in 100 suites (+8), red-then-green proved by reverting
+  `defaultDryRun` in both domains — 4 pins fail, exactly the DEFAULT PIN and sandbox pins, in both
+  Calendar and Reminders; bats 302/302 (+13), lint clean, marker count unchanged at 4 (neither
+  domain had a flagless write to migrate — the step-3 sweep had already flagged every one).
+  **A v1 bats test had to be deleted, not migrated:** `calendar.bats`'s "--execute without the
+  test-mode gate is refused" would, post-flip, CREATE A REAL EVENT in the operator's default
+  calendar, violating that suite's own "nothing here touches the live store" header contract. Its
+  replacements all refuse inside the write gate, which runs before `EventStore()`/`requestAccess`.
+  The same applies to the deleted `ReminderWriteGuard` logic-tier suite, whose two assertions
+  (`dryRunByDefault`, `executeWithoutTestModeThrows`) are precisely what v2 inverts.
+
+  **Process lesson, extending the Notes vacuous-grep entry above: the failure mode is broader than
+  a missing directory, and it recurred three times in one session before being caught each time by
+  a deliberate non-vacuity check.** (1) `grep -rn "process\.env" "$O/src" | grep -v node_modules`
+  returned nothing — because the ORACLE'S OWN PATH contains `node_modules`, so the filter dropped
+  every line. A real negative and a filtered-away positive look identical. (2) Eight consecutive
+  zero-match greps over the CLI sources were caused by `\|` alternation passed to `grep -E`, which
+  searches for a literal pipe; the CLI had the code all along. (3) A `swift test --filter "write-
+  model v2 posture"` run reported "0 tests passed" and exit 0 — a filter that matches nothing is
+  a GREEN result that proves nothing, the same trap in the test runner rather than the grepper.
+  **Standing rule, generalised: before believing any negative — a zero-match grep, a zero-test
+  filter, an empty diff — show the same command producing a POSITIVE on the same target.** The
+  cheap form is one extra probe for a token that must exist.
+
+  Remaining flip: Messages (the last domain). Deprecation warnings left after this commit:
+  MessagesKit 3, AppleKit 2 — CalendarKit's 4 and RemindersKit's 2 are cleared here. The
+  mechanical completion criterion for the rollout is zero.

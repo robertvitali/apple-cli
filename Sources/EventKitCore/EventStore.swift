@@ -165,12 +165,23 @@ public final class EventStore {
     }
 
     // WRITE-GUARD CONTRACT (applies to every mutator below — save/remove/saveCalendar/
-    // removeCalendar/commit): this engine does NOT self-gate. The CALLER (the domain command)
-    // MUST have passed `GlobalOptions.willExecute` (real mutation vs the dry-run default) AND,
-    // for autonomous test runs, `TestMode.requireLabeledTarget(...)` before invoking these.
-    // `remove(_:span:.futureEvents)` and `removeCalendar` are DANGEROUS ACTIONS (irreversible
-    // on the user's live store — a whole recurring series / an entire calendar). Never wire a
-    // command path to these without the gate.
+    // removeCalendar/commit): this engine does NOT self-gate, and deliberately holds no gate of
+    // its own — the gates live entirely in the two command layers (`CalendarWriteGuard` in
+    // CalendarKit, `ReminderWriteGuard` in RemindersKit), which is what lets Calendar and
+    // Reminders be flipped as independent edits without contending on this shared file.
+    //
+    // Under write-model v2 (docs/write-model-v2.md) the CALLER must:
+    //   1. resolve the write posture ONCE at the top of `run()` via its domain
+    //      `…WriteGuard.resolve(global)` and branch on `gate.willExecute` — note that v2 EXECUTES
+    //      BY DEFAULT (mirroring the oracle), so the old "dry-run unless --execute" reading of
+    //      this contract no longer holds; `--dry-run` is what opts out; and
+    //   2. apply the label check ONLY when `gate.sandboxActive` — the sandbox is opt-in, and
+    //      outside it the CLI mutates real data on call exactly as the MCP does.
+    //
+    // `remove(_:span:.futureEvents)` and `removeCalendar` are DANGEROUS ACTIONS (irreversible on
+    // the user's live store — a whole recurring series / an entire calendar). They are reachable
+    // by default now, so the caller's `willExecute` branch is the ONLY thing standing between a
+    // flagless invocation and the deletion; never wire a new command path to them without it.
 
     public func save(_ event: EKEvent, span: EKSpan, commit: Bool = true) throws {
         do { try store.save(event, span: span, commit: commit) }
@@ -178,7 +189,8 @@ public final class EventStore {
     }
 
     /// DANGEROUS with `span: .futureEvents` — deletes the whole recurring series. See the
-    /// write-guard contract above; caller must have gated on willExecute + labeled target.
+    /// write-guard contract above; the caller must have branched on `gate.willExecute` and, when
+    /// `gate.sandboxActive`, checked the label.
     public func remove(_ event: EKEvent, span: EKSpan, commit: Bool = true) throws {
         do { try store.remove(event, span: span, commit: commit) }
         catch { throw Self.mapError(error) }
@@ -246,7 +258,8 @@ public final class EventStore {
     }
 
     /// DANGEROUS — deletes an entire calendar/list AND every item in it, irreversibly. See the
-    /// write-guard contract above; caller must have gated on willExecute + labeled target.
+    /// write-guard contract above; the caller must have branched on `gate.willExecute` and, when
+    /// `gate.sandboxActive`, checked the label.
     public func removeCalendar(_ calendar: EKCalendar, commit: Bool = true) throws {
         do { try store.removeCalendar(calendar, commit: commit) }
         catch { throw Self.mapError(error) }

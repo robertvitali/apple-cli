@@ -43,7 +43,7 @@ public struct ListsRead: ParsableCommand {
 public struct ListsCreate: ParsableCommand {
     public static let configuration = CommandConfiguration(
         commandName: "create",
-        abstract: "Create a reminder list (dry-run by default; --execute writes under the test-mode gate).")
+        abstract: "Create a reminder list (executes on call, like the MCP; --dry-run previews).")
 
     @OptionGroup public var global: GlobalOptions
     @Option(name: .long, help: "List name (required).") public var name: String
@@ -60,8 +60,13 @@ public struct ListsCreate: ParsableCommand {
                 return CGColorBox(c)
             }
 
-            guard try ReminderWriteGuard.shouldExecute(global: global, labeledName: name) else {
-                try Output.emit(tool: "reminders", data: ListWritePreview(action: "create", name: name, color: color))
+            let gate = try ReminderWriteGuard.resolve(global)
+            // The list name is argv-computable, so the sandbox check runs on BOTH paths.
+            try ReminderWriteGuard.requireLabeled(name, what: "list", sandboxActive: gate.sandboxActive)
+
+            guard gate.willExecute else {
+                try emitRemindersWrite(ListWritePreview(action: "create", name: name, color: color),
+                                       sandboxActive: gate.sandboxActive)
                 return
             }
 
@@ -73,7 +78,7 @@ public struct ListsCreate: ParsableCommand {
             list.title = name
             if let cg { list.cgColor = cg.value }
             try store.saveCalendar(list)
-            try Output.emit(tool: "reminders", data: ReadMapping.reminderList(from: list))
+            try emitRemindersWrite(ReadMapping.reminderList(from: list), sandboxActive: gate.sandboxActive)
         }
     }
 }
@@ -83,7 +88,7 @@ public struct ListsCreate: ParsableCommand {
 public struct ListsUpdate: ParsableCommand {
     public static let configuration = CommandConfiguration(
         commandName: "update",
-        abstract: "Rename/recolor a reminder list (dry-run by default; --execute writes under the test-mode gate).")
+        abstract: "Rename/recolor a reminder list (executes on call, like the MCP; --dry-run previews).")
 
     @OptionGroup public var global: GlobalOptions
     @Option(name: .long, help: "Current list name (required).") public var name: String
@@ -104,8 +109,17 @@ public struct ListsUpdate: ParsableCommand {
                 return CGColorBox(c)
             }
 
-            guard try ReminderWriteGuard.shouldExecute(global: global, labeledName: name) else {
-                try Output.emit(tool: "reminders", data: ListWritePreview(action: "update", name: name, new_name: newName, color: color))
+            let gate = try ReminderWriteGuard.resolve(global)
+            // BOTH the subject and the rename DESTINATION are argv-computable, so both are checked
+            // on both paths: renaming a labeled test list to an unlabeled name would otherwise
+            // smuggle it out of the sandbox in a single call.
+            try ReminderWriteGuard.requireLabeled(name, what: "list", sandboxActive: gate.sandboxActive)
+            try ReminderWriteGuard.requireLabeled(newName, what: "new list name",
+                                                  sandboxActive: gate.sandboxActive)
+
+            guard gate.willExecute else {
+                try emitRemindersWrite(ListWritePreview(action: "update", name: name, new_name: newName, color: color),
+                                       sandboxActive: gate.sandboxActive)
                 return
             }
 
@@ -117,7 +131,7 @@ public struct ListsUpdate: ParsableCommand {
             if let newName, !newName.isEmpty { list.title = newName }
             if let cg { list.cgColor = cg.value }
             try store.saveCalendar(list)
-            try Output.emit(tool: "reminders", data: ReadMapping.reminderList(from: list))
+            try emitRemindersWrite(ReadMapping.reminderList(from: list), sandboxActive: gate.sandboxActive)
         }
     }
 }
@@ -127,7 +141,7 @@ public struct ListsUpdate: ParsableCommand {
 public struct ListsDelete: ParsableCommand {
     public static let configuration = CommandConfiguration(
         commandName: "delete",
-        abstract: "Delete a reminder list AND its items (dry-run by default; --execute under the test-mode gate).")
+        abstract: "Delete a reminder list AND its items (executes on call, like the MCP; --dry-run previews).")
 
     @OptionGroup public var global: GlobalOptions
     @Option(name: .long, help: "List name (required).") public var name: String
@@ -136,8 +150,12 @@ public struct ListsDelete: ParsableCommand {
 
     public func run() throws {
         try runGuarded(tool: "reminders") {
-            guard try ReminderWriteGuard.shouldExecute(global: global, labeledName: name) else {
-                try Output.emit(tool: "reminders", data: ListWritePreview(action: "delete", name: name))
+            let gate = try ReminderWriteGuard.resolve(global)
+            try ReminderWriteGuard.requireLabeled(name, what: "list", sandboxActive: gate.sandboxActive)
+
+            guard gate.willExecute else {
+                try emitRemindersWrite(ListWritePreview(action: "delete", name: name),
+                                       sandboxActive: gate.sandboxActive)
                 return
             }
             let store = EventStore()
@@ -146,7 +164,7 @@ public struct ListsDelete: ParsableCommand {
                 throw AppleError.notFound("no reminder list named or id '\(name)'")
             }
             try store.removeCalendar(list)
-            try Output.emit(tool: "reminders", data: ListDeleteData(name: name, deleted: true))
+            try emitRemindersWrite(ListDeleteData(name: name, deleted: true), sandboxActive: gate.sandboxActive)
         }
     }
 }

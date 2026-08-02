@@ -12,6 +12,62 @@ with the Apple MCP servers they replace.
 
 ## [Unreleased]
 
+### BREAKING — Calendar + Reminders write-model v2: writes EXECUTE by default
+
+Fourth and fifth domains flipped to write-model v2 (`docs/write-model-v2.md`), in the two
+coordinated module edits the spec called for. **`EventKitCore` holds no write guard of any kind**
+— its `EventStore.swift` documents that callers gate and enforces nothing itself — so the two
+domains are genuinely independent edits, not a contended core change. Its WRITE-GUARD CONTRACT
+comment block is updated (comment-only, no behavior change) because it still specified the v1
+posture that v2 removes.
+
+**Evidence (`mcp-server-apple-events@1.4.0`).** Unlike the Notes package, this one ships BOTH
+`src/` (58 `.ts` files) and `dist/`, and both were confirmed non-empty before any negative was
+believed. The only runtime `process.env` reads in non-test sources are `NODE_ENV`, `DEBUG` and
+`SWIFT_BINARY_HASH` — none a write gate, so unlike Contacts there is no env-keyed oracle gate to
+preserve. `tools/index.ts` is a pure action→handler router; `calendarRepository.deleteEvent` /
+`reminderRepository.deleteReminder` / `deleteReminderList` shell straight to the Swift CLI; and
+the oracle's own `src/swift/EventKitCLI.swift` (1619 lines) reads no environment and self-gates
+nothing. All 14 write ops are CLI-only restrictions (bucket 3).
+
+- **BREAKING (behavior): all 14 Calendar + Reminders writes execute when invoked** — Calendar
+  `events create/update/delete`; Reminders `lists create/update/delete`, `tasks
+  create/update/delete`, `subtasks create/update/delete/toggle/reorder`. `--dry-run` previews;
+  `APPLE_DRY_RUN=1` restores dry-run-by-default. **Any script or shell-history invocation that
+  relied on the old dry-run default now mutates the real Calendar/Reminders store.** The v1 gate
+  (`--execute` plus `--test-mode` plus `APPLE_TEST_MODE=1`) is gone.
+- **The sandbox is opt-in and single-signal**: `APPLE_TEST_MODE` truthy or `--test-mode`, either
+  alone. Inside it, writes stay confined to `apple-cli-test…`-labeled events/reminders/lists;
+  refusals remain `validation_error` / exit 64 (the Calendar/Reminders refusal type, not
+  Mail/Contacts' 77). Sandboxed success envelopes carry `"sandbox": true`.
+- **NEW sandbox coverage — destinations, not just subjects.** `--new-name` (lists update) and the
+  rename targets (`tasks update --title`, `events update --title`) are now label-checked, so a
+  sandboxed run cannot walk a test item out of the sandbox by renaming it. `--target-list` is
+  vetted too, but post-resolution: the flag takes a name OR an opaque id, so a labeled NAME is
+  settled from argv while anything else defers to the resolved list's title (a labeled list's id
+  carries no prefix, and refusing it would break the id-based flow this repo's own conduct rules
+  prescribe). Calendar's `--target-calendar` is DELIBERATELY not checked: the CLI exposes
+  `calendars list` only — no calendar create/update/delete exists — so no `apple-cli-test…`
+  calendar can be named, and a check would permanently refuse every explicit destination. The
+  default list/calendar is exempt for the same reason. This applies forward the finding the Notes
+  flip's review surfaced on `move --folder`, with the per-surface differences it turns out to need.
+- **Preview honesty.** Argv-computable checks run on the preview path. The genuinely deferred ones
+  — the EXISTING item's title on any by-id update/delete, and the parent reminder's title on all
+  five subtask ops — now emit `sandbox_target_unchecked: true` in the preview instead of letting a
+  silent non-refusal read as approval.
+- **Contract:** `DeleteData`, `ReminderDeleteData` and `ListDeleteData` gain an explicit
+  `dry_run: false` on the execute path (MINOR — an added optional field). It was deliberately NOT
+  added to the shared read models an execute path also returns (`EventMapping.event`,
+  `SubtasksData`), which would have leaked a write-only key into `events read` / `subtasks read`.
+  Known inconsistency across landed flips: Contacts' result DTOs carry `dry_run: false`, Notes' do
+  not; normalising all six is a tracked follow-up, not a silent in-flight change.
+- **The oracle's input-validation layer stays deliberately un-mirrored** (`validation/schemas.ts`:
+  `.min(1)` id/name bounds, length caps, printable-Unicode charset, SSRF URL blocklist). A strict
+  superset must accept everything the oracle accepts. This was checked explicitly against the Notes
+  CRITICAL rather than assumed: EventKit is id-based, so an empty id yields `not_found` and an
+  empty list name matches only a literally-empty title — there is no analogue of Notes'
+  `folderRefExpr([])` collapsing to a bare `delete` bound to the account container.
+
 ### BREAKING — Notes write-model v2: writes EXECUTE by default
 
 Third domain flipped to write-model v2 (`docs/write-model-v2.md`). Notes is the simplest
