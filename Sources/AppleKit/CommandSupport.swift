@@ -17,13 +17,13 @@ public struct GlobalOptions: ParsableArguments {
     @Flag(name: .long, help: "Emit human-readable text instead of the default JSON output.")
     public var text = false
 
-    @Flag(name: .long, help: "Preview a write/destructive operation without performing it.")
+    @Flag(name: .long, help: "Preview a write/destructive operation without performing it (always wins — over --execute, APPLE_DRY_RUN, and any surface default).")
     public var dryRun = false
 
-    @Flag(name: .long, help: "Actually perform a write/destructive operation (overrides the dry-run default).")
+    @Flag(name: .long, help: "Explicitly perform the write (write-model-v2 domains execute by default; this also overrides APPLE_DRY_RUN and any remaining dry-run defaults).")
     public var execute = false
 
-    @Flag(name: .long, help: "Operate only on labeled test data (required for live writes); see TEST-CLEANUP.md.")
+    @Flag(name: .long, help: "Engage the opt-in SANDBOX: writes restricted to apple-cli-test-labeled items and self-only allowlisted recipients (APPLE_TEST_RECIPIENTS). Domains not yet on write-model v2 additionally require it (with APPLE_TEST_MODE=1) for live writes.")
     public var testMode = false
 
     /// Output is JSON by DEFAULT (stdout = machine JSON); `--text` opts into a human rendering.

@@ -46,31 +46,247 @@ require_index() {
   done
 }
 
-@test "mail send defaults to a dry-run preview (no live send)" {
-  run "$BIN" mail send --to nobody@example.invalid --subject "apple-cli-test" --body "hi"  # flagless-on-purpose
+@test "mail send under APPLE_DRY_RUN=1 is a dry-run preview (v2 env brake, no live send)" {
+  # v2 executes flagless writes by default; APPLE_DRY_RUN restores dry-run-by-default
+  # globally (precedence: --dry-run > --execute > APPLE_DRY_RUN > surface default).
+  APPLE_DRY_RUN=1 run "$BIN" mail send --to nobody@example.invalid --subject "apple-cli-test" --body "hi"
   [ "$status" -eq 0 ]
   echo "$output" | grep -q '"action" : "send"'
+  echo "$output" | grep -q '"dry_run" : true'
+  echo "$output" | grep -q '"executed" : false'
+  # Unsandboxed envelopes must NOT carry the sandbox key (byte-identical legacy shape).
+  ! echo "$output" | grep -q '"sandbox"'
+}
+
+# ── Write-model v2 env contract (docs/write-model-v2.md) — CI-safe, pre-Mail ───────────────────
+@test "mail: a junk APPLE_TEST_MODE value is a fail-loud validation_error (exit 64), even on dry-run" {
+  # `APPLE_TEST_MODE=ture` must refuse the command, not silently run it unsandboxed.
+  APPLE_TEST_MODE=ture run "$BIN" mail send --dry-run --to me@self.test --subject "apple-cli-test x" --body y
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q '"validation_error"'
+  echo "$output" | grep -q 'APPLE_TEST_MODE'
+}
+
+@test "mail: a junk APPLE_DRY_RUN value is a fail-loud validation_error (exit 64), even with --dry-run" {
+  # Validation is eager (validateWriteEnvironment) — `off` must not silently mean "not dry-run".
+  APPLE_DRY_RUN=off run "$BIN" mail templates save --dry-run apple-cli-test-junkenv --body y
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q '"validation_error"'
+  echo "$output" | grep -q 'APPLE_DRY_RUN'
+}
+
+@test "mail: a sandboxed envelope carries sandbox:true" {
+  # Allowlist the recipient: sandboxed previews now run guardOutbound too (preview honesty).
+  APPLE_TEST_MODE=1 APPLE_TEST_RECIPIENTS="me@self.test" \
+    run "$BIN" mail send --dry-run --to me@self.test --subject "apple-cli-test x" --body y
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"sandbox" : true'
+}
+
+@test "mail previews refuse exactly what execute would (sandboxed non-self send, unlabeled draft, empty subjects)" {
+  # Preview honesty (v2): these gates are mode-keyed, not execute-keyed — all pre-Mail.
+  # (require_index only for the --match-sender case below, which resolves via the index.)
+  require_index
+  APPLE_TEST_MODE=1 APPLE_TEST_RECIPIENTS="me@self.test" \
+    run "$BIN" mail send --dry-run --to someone-else@example.com --subject "apple-cli-test x" --body y --mode send
+  [ "$status" -eq 77 ]
+  APPLE_TEST_MODE=1 run "$BIN" mail send --dry-run --to me@self.test --subject "Quarterly report" --body y --mode draft --test-mode
+  [ "$status" -eq 77 ]
+  APPLE_TEST_MODE=1 run "$BIN" mail draft delete --dry-run --subject "Quarterly report" --test-mode
+  [ "$status" -eq 77 ]
+  run "$BIN" mail draft send --dry-run --draft-subject ""
+  [ "$status" -eq 64 ]
+  run "$BIN" mail reply --dry-run --subject "" --body x
+  [ "$status" -eq 64 ]
+  run "$BIN" mail forward --dry-run --subject "   " --to me@self.test
+  [ "$status" -eq 64 ]
+  run "$BIN" mail attachments save --dry-run --subject "" --dir "$BATS_TEST_TMPDIR"
+  [ "$status" -eq 64 ]
+  # Round-4 additions: the same principle on the surfaces the first hoist missed.
+  APPLE_TEST_MODE=1 run "$BIN" mail mailboxes create --dry-run --account iCloud --name "Quarterly Reports" --test-mode
+  [ "$status" -eq 77 ]
+  run "$BIN" mail reply 1 --body x --mode draft --dry-run
+  [ "$status" -eq 70 ]
+  echo "$output" | grep -q 'not_implemented'
+  run "$BIN" mail mark --dry-run --match-sender "" --read --account iCloud
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q 'match-sender'
+  # The subject twin (round 5): a blank keyword alongside another active filter used to
+  # contribute NO predicate — the mutation silently widened to the other filter's whole set.
+  run "$BIN" mail flag --dry-run --match-subject "" --only-read --account iCloud
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q 'match-subject'
+  run "$BIN" mail move --dry-run --match-subject "   " --only-read --to Archive --account iCloud
+  [ "$status" -eq 64 ]
+  # Blank --account widenings (round 5): "" must never silently mean "every account".
+  run "$BIN" mail draft delete --dry-run --subject "apple-cli-test x" --account ""
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q 'account'
+  run "$BIN" mail trash empty --dry-run --account ""
+  [ "$status" -eq 64 ]
+  run env -u APPLE_ALLOW_PERMANENT_DELETE "$BIN" mail delete 1 --permanent --dry-run --account " "
+  [ "$status" -eq 64 ]
+  # Sandboxed bulk preview refuses an unlabeled target exactly as execute would (round 5).
+  APPLE_TEST_MODE=1 run "$BIN" mail flag --dry-run 12345 --color red --test-mode
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q 'sandbox active'
+  # templates save: the preview runs the same pure validations the write does (round 7).
+  export APPLE_MAIL_MCP_HOME="$BATS_TEST_TMPDIR/preview-validate"
+  run "$BIN" mail templates save --dry-run "../evil" --body x
+  [ "$status" -eq 64 ]
+  run "$BIN" mail templates save --dry-run goodname --body "   "
+  [ "$status" -eq 64 ]
+  # reply --attach: path validation (existence/type/size/sensitive-dir) fires in preview AND
+  # before the store opens. Assert the MESSAGE, not just the code — a nonexistent --subject
+  # target is also 65, which made an earlier version of this line pass vacuously.
+  run "$BIN" mail reply --dry-run --subject "apple-cli-test x" --body y --attach /tmp/apple-cli-test-definitely-missing-zzz
+  [ "$status" -eq 65 ]
+  echo "$output" | grep -q 'attachment not found'
+  # A REGULAR FILE under a blocklisted credential dir → 77. Must not use the directory itself
+  # (~/.ssh): the existence/is-regular-file check fires first and returns 65, which would prove
+  # nothing about the sensitive-dir blocklist — under v2 that blocklist is the sole containment
+  # for unsandboxed attachment content.
+  sens=""
+  for c in "$HOME/.claude/settings.json" "$HOME/.ssh/config" "$HOME/.gnupg/gpg.conf" "$HOME/.aws/config"; do
+    [ -f "$c" ] && { sens="$c"; break; }
+  done
+  if [ -n "$sens" ]; then
+    run "$BIN" mail reply --dry-run --subject "apple-cli-test x" --body y --attach "$sens"
+    [ "$status" -eq 77 ]
+    echo "$output" | grep -q 'sensitive directory'
+  fi
+  # Control characters never reach the US-delimited AppleScript argv (round 6/7).
+  run "$BIN" mail send --dry-run --to "$(printf 'a@x.test\037evil@y.test')" --subject "apple-cli-test x" --body y
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q 'control character'
+  run "$BIN" mail send --dry-run --to me@self.test --subject "apple-cli-test x" --body y --attach "$(printf '/tmp/a\037/etc/passwd')"
+  [ "$status" -eq 77 ]
+  run "$BIN" mail export --dry-run --account iCloud --scope single_email --subject "   " --dir "$BATS_TEST_TMPDIR"
+  [ "$status" -eq 64 ]
+  run "$BIN" mail send --dry-run --to me@self.test --subject "apple-cli-test x" --body y --mode open --out "$HOME/.ssh/apple-cli-test-x.eml"
+  [ "$status" -eq 77 ]
+}
+
+@test "mail: sandbox:true is carried by rules-preview and trash-empty envelopes too (no forgotten emit site)" {
+  # Output.emit's sandboxActive parameter is DEFAULTED, so a forgotten call site silently
+  # under-reports as unsandboxed — review round 1 caught exactly that on these two surfaces.
+  APPLE_TEST_MODE=1 run "$BIN" mail rules create --dry-run --name "apple-cli-test-x" --condition "subject:contains:apple-cli-test" --action "mark_read=true" --test-mode
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"sandbox" : true'
+  # The sandboxed preview also predicts the force-disable execute performs (preview honesty).
+  echo "$output" | grep -q '"enabled" : false'
+  APPLE_TEST_MODE=1 run "$BIN" mail trash empty --dry-run --account "Any" --test-mode
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"sandbox" : true'
+}
+
+@test "mail: a junk operator env var value fails loud (exit 64, names the var)" {
+  # APPLE_ALLOW_PERMANENT_DELETE parses through the shared truthy helper: a typo'd value must
+  # refuse the command (validation), never silently read as denied-or-granted.
+  APPLE_ALLOW_PERMANENT_DELETE=maybe run "$BIN" mail delete 1 --permanent --execute
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q '"validation_error"'
+  echo "$output" | grep -q 'APPLE_ALLOW_PERMANENT_DELETE'
+}
+
+@test "mail draft create without a subject is a usage error (exit 64, not a safety refusal)" {
+  # v2 split "no subject supplied" out of the label gate: usage error 64, pre-Mail.
+  APPLE_TEST_MODE=1 run "$BIN" mail draft create --body y --to me@self.test --execute --test-mode
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q '"validation_error"'
+}
+
+@test "mail draft send/delete with an EMPTY --subject is a usage error (exit 64), unsandboxed too" {
+  # The v1 prefix gate rejected "" as a side effect; v2 must refuse it explicitly — unsandboxed,
+  # an empty subject would match every UNTITLED draft (send one / delete all). Pre-Mail.
+  run "$BIN" mail draft send --draft-subject "" --execute
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q '"validation_error"'
+  run "$BIN" mail draft delete --subject "   " --execute
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q '"validation_error"'
+}
+
+@test "mail reads are IDENTICAL with the sandbox on and off (spec: the sandbox affects writes only)" {
+  # Deterministic read over a fixture temp store (search results could change between runs).
+  export APPLE_MAIL_MCP_HOME="$BATS_TEST_TMPDIR/read-parity"
+  run "$BIN" mail templates save --execute apple-cli-test-readparity --body y
+  [ "$status" -eq 0 ]
+  a=$("$BIN" mail templates list)
+  b=$(APPLE_TEST_MODE=1 "$BIN" mail templates list)
+  [ "$a" = "$b" ]
+  ! echo "$b" | grep -q '"sandbox"'
+}
+
+@test "mail send --dry-run --html --out writes no .eml (fixed bucket-2 defect on the send surface)" {
+  OUT="$BATS_TEST_TMPDIR/apple-cli-test-send-preview.eml"
+  run "$BIN" mail send --dry-run --to me@self.test --subject "apple-cli-test x" --body y --html "<b>x</b>" --out "$OUT"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"dry_run" : true'
+  [ ! -f "$OUT" ]
+}
+
+@test "mail analytics dashboard --dry-run writes nothing; a credential-dir --out refuses even in preview (77)" {
+  require_index
+  OUT="$BATS_TEST_TMPDIR/apple-cli-test-dash.html"
+  run "$BIN" mail analytics dashboard --dry-run --out "$OUT"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"dry_run" : true'
+  [ ! -f "$OUT" ]
+  run "$BIN" mail analytics dashboard --dry-run --out "$HOME/.ssh/apple-cli-test-dash.html"
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q '"safety_violation"'
+}
+
+# The two per-surface DEFAULTS, pinned with deliberately flagless invocations (markers): the
+# general surface EXECUTES flagless (temp-store-confined here), the trash surface previews.
+# Nothing else in the suite locks the defaultDryRun arguments — every other invocation carries
+# an explicit flag or the env brake, so a flipped default would keep the whole suite green
+# while changing what flagless invocations do to real data (review-caught gap). The swift tier
+# additionally pins the two trash-surface statics.
+@test "v2 default: a flagless general write EXECUTES (templates save, temp store)" {
+  export APPLE_MAIL_MCP_HOME="$BATS_TEST_TMPDIR/pin-default"
+  run "$BIN" mail templates save apple-cli-test-pin --body y  # flagless-on-purpose
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"name" : "apple-cli-test-pin"'
+  ! echo "$output" | grep -q '"would_save_template"'
+}
+
+@test "v2 default: the flagless trash surface stays a dry-run preview (trash empty)" {
+  run "$BIN" mail trash empty --account "Any"  # flagless-on-purpose
+  [ "$status" -eq 0 ]
   echo "$output" | grep -q '"dry_run" : true'
   echo "$output" | grep -q '"executed" : false'
 }
 
 @test "mail templates render fills placeholders from a temp store" {
   export APPLE_MAIL_MCP_HOME="$BATS_TEST_TMPDIR/mcp-home"
-  # FIXTURE WRITE relying on a known bug: TemplatesSave has no willExecute branch and writes despite --dry-run (docs/write-model-v2.md bucket-2 obligation). The commit that adds the branch MUST flip this to --execute or the fixture vanishes and the next assertion fails.
-  run "$BIN" mail templates save --dry-run greet --body "Hi {name}" --subject "Hello"
+  run "$BIN" mail templates save --execute greet --body "Hi {name}" --subject "Hello"
   [ "$status" -eq 0 ]
   run "$BIN" mail templates render greet --var name=World
   [ "$status" -eq 0 ]
   echo "$output" | grep -q "Hi World"
 }
 
-@test "mail delete --permanent --execute WITHOUT --test-mode is refused (exit 77)" {
-  # --permanent is now wired, but routes through the same all-or-nothing label gate as every
-  # other mutation, so it cannot run outside test-mode.
-  require_index
-  run "$BIN" mail delete --match-subject apple-cli-nonexistent-zzz --permanent --execute --account iCloud
+@test "mail templates save --dry-run previews without writing (fixed bucket-2 defect)" {
+  # TemplatesSave used to write DESPITE --dry-run (no willExecute branch); pin the fix.
+  export APPLE_MAIL_MCP_HOME="$BATS_TEST_TMPDIR/mcp-home-drypreview"
+  run "$BIN" mail templates save --dry-run apple-cli-test-drypreview --body y
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"would_save_template"'
+  echo "$output" | grep -q '"dry_run" : true'
+  run "$BIN" mail templates list
+  [ "$status" -eq 0 ]
+  ! echo "$output" | grep -q 'apple-cli-test-drypreview'
+}
+
+@test "mail delete --permanent --execute without the operator env var is refused (exit 77, pre-Mail)" {
+  # v2: the operator-only APPLE_ALLOW_PERMANENT_DELETE gate is UNCONDITIONAL (sandboxed or
+  # not) and fires BEFORE any Mail/index access — an autonomous run never sets it.
+  run env -u APPLE_ALLOW_PERMANENT_DELETE "$BIN" mail delete --match-subject apple-cli-nonexistent-zzz --permanent --execute --account iCloud
   [ "$status" -eq 77 ]
   echo "$output" | grep -q '"safety_violation"'
+  echo "$output" | grep -q 'APPLE_ALLOW_PERMANENT_DELETE'
 }
 
 @test "mail move with a filter previews (dry-run, filter_based)" {
@@ -310,35 +526,46 @@ require_index() {
   echo "$output" | grep -q '"messages"'
 }
 
-# ── Write-safety gates ─────────────────────────────────────────────────────────
+# ── Sandbox write-safety gates (write-model v2) ────────────────────────────────
 # These fire BEFORE any Mail/Envelope-Index access, so they run anywhere (no FDA /
-# no Mail needed). They regression-lock the refusals verified in the live e2e run.
+# no Mail needed). v2: the sandbox is an opt-in RESTRICTION — APPLE_TEST_MODE truthy
+# OR --test-mode, EITHER signal alone engages it — and inside it every recipient must
+# be on the self-only APPLE_TEST_RECIPIENTS allowlist (empty allowlist = fail-closed).
 
-@test "mail send to a NON-self recipient is refused (safety_violation, exit 77)" {
+@test "mail send to a NON-self recipient is refused inside the sandbox (env signal alone, exit 77)" {
   APPLE_TEST_MODE=1 APPLE_TEST_RECIPIENTS="me@self.test" \
+    run "$BIN" mail send --to someone-else@example.com --subject "apple-cli-test x" --body y --mode send --execute
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q '"type" : "safety_violation"'
+  echo "$output" | grep -q 'sandbox active'
+}
+
+@test "mail send to a NON-self recipient is refused inside the sandbox (flag signal alone, exit 77)" {
+  # --test-mode with NO env — v2's single-signal contract: the flag alone engages the sandbox.
+  APPLE_TEST_RECIPIENTS="me@self.test" \
     run "$BIN" mail send --to someone-else@example.com --subject "apple-cli-test x" --body y --mode send --execute --test-mode
   [ "$status" -eq 77 ]
   echo "$output" | grep -q '"type" : "safety_violation"'
+  echo "$output" | grep -q 'sandbox active'
 }
 
-@test "mail send with --execute but WITHOUT --test-mode is refused (exit 77)" {
-  # No APPLE_TEST_MODE, no --test-mode → two-factor outbound gate refuses.
-  run "$BIN" mail send --to me@self.test --subject "apple-cli-test x" --body y --mode send --execute
+@test "mail send inside the sandbox with an EMPTY allowlist is refused (fail-closed, exit 77)" {
+  run env -u APPLE_TEST_RECIPIENTS APPLE_TEST_MODE=1 "$BIN" mail send --to me@self.test --subject "apple-cli-test x" --body y --mode send --execute --test-mode
   [ "$status" -eq 77 ]
   echo "$output" | grep -q '"type" : "safety_violation"'
 }
 
-@test "mail send default (no --execute) is a dry-run preview (exit 0, dry_run true)" {
-  run "$BIN" mail send --to me@self.test --subject "apple-cli-test x" --body y  # flagless-on-purpose
+@test "mail send under APPLE_DRY_RUN=1 previews the send surface (exit 0, dry_run true)" {
+  APPLE_DRY_RUN=1 run "$BIN" mail send --to me@self.test --subject "apple-cli-test x" --body y
   [ "$status" -eq 0 ]
   echo "$output" | grep -q '"dry_run" : true'
   echo "$output" | grep -q '"executed" : false'
 }
 
-# ── HTML / attachment send: the self-only gate fires IDENTICALLY (regression-lock) ──────────────
+# ── HTML / attachment send: the sandbox gate fires IDENTICALLY (regression-lock) ────────────────
 # HTML + attachment live send is wired (via the multipart .eml / make-new-attachment routes), so
 # these prove the NEW paths route through the SAME guardOutbound before any AppleScript send — no
-# HTML/attachment path bypasses the self-only + two-factor gate. All fire before any Mail access.
+# HTML/attachment path bypasses the sandbox's self-only restriction. All fire before any Mail access.
 
 @test "mail send --html to a NON-self recipient is refused (safety_violation, exit 77)" {
   APPLE_TEST_MODE=1 APPLE_TEST_RECIPIENTS="me@self.test" \
@@ -356,22 +583,24 @@ require_index() {
   echo "$output" | grep -q '"type" : "safety_violation"'
 }
 
-@test "mail send --html with --execute but WITHOUT --test-mode is refused (exit 77)" {
-  run "$BIN" mail send --to me@self.test --subject "apple-cli-test x" --body y \
-    --html "<b>hi</b>" --mode send --execute
+@test "mail send --html inside the sandbox with an EMPTY allowlist is refused (exit 77)" {
+  run env -u APPLE_TEST_RECIPIENTS APPLE_TEST_MODE=1 "$BIN" mail send --to me@self.test --subject "apple-cli-test x" --body y \
+    --html "<b>hi</b>" --mode send --execute --test-mode
   [ "$status" -eq 77 ]
   echo "$output" | grep -q '"type" : "safety_violation"'
 }
 
-@test "mail send --attach with --execute but WITHOUT --test-mode is refused (exit 77)" {
-  run "$BIN" mail send --to me@self.test --subject "apple-cli-test x" --body y \
-    --attach /tmp/apple-cli-test-nonexistent --mode send --execute
+@test "mail send --attach inside the sandbox with an EMPTY allowlist is refused before the attachment read (exit 77)" {
+  # guardOutbound fires BEFORE resolveAttachmentPath, so the missing file never turns this
+  # refusal into a not_found.
+  run env -u APPLE_TEST_RECIPIENTS APPLE_TEST_MODE=1 "$BIN" mail send --to me@self.test --subject "apple-cli-test x" --body y \
+    --attach /tmp/apple-cli-test-nonexistent --mode send --execute --test-mode
   [ "$status" -eq 77 ]
   echo "$output" | grep -q '"type" : "safety_violation"'
 }
 
-@test "mail send --html default (no --execute) previews without sending (has_html true, dry_run)" {
-  run "$BIN" mail send --to me@self.test --subject "apple-cli-test x" --body y --html "<b>hi</b>"  # flagless-on-purpose
+@test "mail send --html under APPLE_DRY_RUN=1 previews without sending (has_html true, dry_run)" {
+  APPLE_DRY_RUN=1 run "$BIN" mail send --to me@self.test --subject "apple-cli-test x" --body y --html "<b>hi</b>"
   [ "$status" -eq 0 ]
   echo "$output" | grep -q '"has_html" : true'
   echo "$output" | grep -q '"dry_run" : true'
@@ -415,12 +644,9 @@ require_index() {
 
 @test "mail draft-rich --bcc writes a Bcc header into the generated .eml (compose-window safe)" {
   # draft-rich .eml is only opened / saved, never wire-sent, so carrying --bcc is safe + parity.
+  # The default (no open/save flags) path is a headless local file write — tmpdir-confined here.
   OUT="$BATS_TEST_TMPDIR/apple-cli-test-draft.eml"
-  # FIXTURE WRITE relying on a known bug: DraftRichCommand writes the .eml despite --dry-run —
-  # no willExecute branch (WriteComposeCommands.swift:658; same bucket-2 defect as TemplatesSave,
-  # docs/write-model-v2.md). The commit adding the branch MUST flip this to --execute or the
-  # fixture vanishes and the Bcc-header assertion below silently loses its subject.
-  run "$BIN" mail draft-rich --dry-run --to me@self.test --bcc secret@self.test \
+  run "$BIN" mail draft-rich --execute --to me@self.test --bcc secret@self.test \
     --subject "apple-cli-test dr" --html "<b>x</b>" --out "$OUT"
   [ "$status" -eq 0 ]
   grep -q "^Bcc: secret@self.test" "$OUT"
@@ -468,9 +694,9 @@ require_index() {
   echo "$output" | grep -q '"type" : "safety_violation"'
 }
 
-@test "mail send --html --gui-send with --execute but WITHOUT --test-mode is refused (exit 77)" {
-  run "$BIN" mail send --to me@self.test --subject "apple-cli-test x" --body y \
-    --html "<b>hi</b>" --gui-send --mode send --execute
+@test "mail send --html --gui-send inside the sandbox with an EMPTY allowlist is refused (exit 77)" {
+  run env -u APPLE_TEST_RECIPIENTS APPLE_TEST_MODE=1 "$BIN" mail send --to me@self.test --subject "apple-cli-test x" --body y \
+    --html "<b>hi</b>" --gui-send --mode send --execute --test-mode
   [ "$status" -eq 77 ]
   echo "$output" | grep -q '"type" : "safety_violation"'
 }
@@ -531,13 +757,19 @@ require_index() {
   echo "$output" | grep -q 'would refuse'
 }
 
-@test "mail rules create DRY-RUN describes delete and --match any blockers too" {
+@test "mail rules create DRY-RUN describes delete and (sandboxed) --match any blockers too" {
+  # The delete blocker is an UNWIRED capability — reported in both modes; the --match any
+  # restriction is the SANDBOX's, so its blocker only appears in a sandboxed preview (v2).
   run "$BIN" mail rules create --dry-run --name "apple-cli-test-b" --condition "subject:contains:apple-cli-test" --action "delete=true"
   [ "$status" -eq 0 ]
   echo "$output" | grep -q 'auto-trash'
-  run "$BIN" mail rules create --dry-run --name "apple-cli-test-b" --condition "subject:contains:apple-cli-test" --action "mark_read=true" --match any
+  APPLE_TEST_MODE=1 run "$BIN" mail rules create --dry-run --name "apple-cli-test-b" --condition "subject:contains:apple-cli-test" --action "mark_read=true" --match any --test-mode
   [ "$status" -eq 0 ]
   echo "$output" | grep -q 'match any'
+  # Unsandboxed, --match any is a plain oracle capability: no blocker.
+  run "$BIN" mail rules create --dry-run --name "apple-cli-test-b" --condition "subject:contains:apple-cli-test" --action "mark_read=true" --match any
+  [ "$status" -eq 0 ]
+  ! echo "$output" | grep -q 'would refuse'
 }
 
 # header_name is now wired (Mail.sdef `header key` + the condition's `header` property), so it
@@ -562,9 +794,10 @@ require_index() {
   echo "$output" | grep -q '"type" : "safety_violation"'
 }
 
-@test "mail rules update --execute WITHOUT --test-mode is refused (exit 77, before any Mail access)" {
-  # requireLabeledRule fail-closes on the test-mode gate before it ever reads Mail's rules.
-  run "$BIN" mail rules update 1 --name "apple-cli-test-x" --execute
+@test "mail rules update: a sandboxed rename must keep the test label (exit 77, before any Mail access)" {
+  # v2: the label restriction is the sandbox's. requireLabeledName fires on the unlabeled
+  # rename BEFORE requireLabeledRule ever reads Mail's rules.
+  APPLE_TEST_MODE=1 run "$BIN" mail rules update 1 --name "real-inbox-rule" --execute --test-mode
   [ "$status" -eq 77 ]
   echo "$output" | grep -q '"type" : "safety_violation"'
 }
@@ -575,7 +808,7 @@ require_index() {
   echo "$output" | grep -q '"validation_error"'
 }
 
-@test "mail rules update dry-run (no --execute) previews the patch without touching Mail (exit 0)" {
+@test "mail rules update --dry-run previews the patch without touching Mail (exit 0)" {
   run "$BIN" mail rules update --dry-run 3 --name "apple-cli-test-renamed"
   [ "$status" -eq 0 ]
   echo "$output" | grep -q '"dry_run" : true'
@@ -589,7 +822,7 @@ require_index() {
 }
 
 @test "mail draft create --cc/--bcc/--account are accepted and preview as a dry-run (exit 0, account echoed)" {
-  # CI-safe (no --execute → dry-run preview, no Mail access). Locks that `draft create` ACCEPTS the
+  # CI-safe (--dry-run → preview, no Mail access; v2 executes flagless). Locks that `draft create` ACCEPTS the
   # sender-identity + cc/bcc flags: a regression dropping --cc/--bcc from the parser, or --account,
   # would fail here. The live create→send behaviour (draft stored with the --account sender + cc, then
   # delivered From that address to the cc) is validated on-device per CHANGELOG.
@@ -601,17 +834,19 @@ require_index() {
   echo "$output" | grep -q '"account" : "Some Account"'
 }
 
-@test "mail delete --permanent --execute without --test-mode is refused before any erase (exit 77)" {
-  run "$BIN" mail delete 1 --permanent --execute
+@test "mail delete <id> --permanent --execute without the operator env var is refused before any erase (exit 77)" {
+  # v2: unconditional operator gate, sandboxed or not — fires before the id is even resolved.
+  run env -u APPLE_ALLOW_PERMANENT_DELETE "$BIN" mail delete 1 --permanent --execute
   [ "$status" -eq 77 ]
   echo "$output" | grep -q '"safety_violation"'
+  echo "$output" | grep -q 'APPLE_ALLOW_PERMANENT_DELETE'
 }
 
 @test "mail delete --permanent --execute --test-mode without the operator env var is refused (exit 77)" {
   # The subject label is spoofable (anyone can mail the operator an "apple-cli-test ..." subject),
-  # so it must never be the SOLE gate on an irreversible erase — an operator-only env var is the
-  # required second factor, and an autonomous run never sets it.
-  require_index
+  # so it must never be the SOLE gate on an irreversible erase — the operator-only env var is the
+  # required second factor IN BOTH MODES, and an autonomous run never sets it. Fires before the
+  # Envelope Index opens (store-independent).
   run env -u APPLE_ALLOW_PERMANENT_DELETE APPLE_TEST_MODE=1 "$BIN" mail delete --match-subject apple-cli-nonexistent-zzz --permanent --execute --test-mode --account iCloud
   [ "$status" -eq 77 ]
   echo "$output" | grep -q '"safety_violation"'
@@ -662,7 +897,7 @@ require_index() {
 # (they never reach an AppleScript `send`). These lock the dry-run + safety-gate surface WITHOUT any
 # real Mail access: every assertion is a dry-run preview or a refusal that fires before Mail is touched.
 
-@test "mail send --mode open without --execute is a dry-run preview (exit 0, opened/drafted false)" {
+@test "mail send --mode open --dry-run is a preview (exit 0, opened/drafted false)" {
   run "$BIN" mail send --dry-run --to me@self.test --subject "apple-cli-test open" --body hi --mode open
   [ "$status" -eq 0 ]
   echo "$output" | grep -q '"dry_run" : true'
@@ -670,11 +905,13 @@ require_index() {
   echo "$output" | grep -q '"drafted" : false'
 }
 
-@test "mail send --mode draft with --execute but WITHOUT --test-mode is refused (exit 77)" {
-  # A draft is non-sending, but persists a Drafts item → same test-mode gate as `draft create`.
-  run "$BIN" mail send --to me@self.test --subject "apple-cli-test draft" --body y --mode draft --execute
-  [ "$status" -eq 77 ]
-  echo "$output" | grep -q '"type" : "safety_violation"'
+@test "mail send --mode draft under APPLE_DRY_RUN=1 previews without persisting (exit 0)" {
+  # v2: an unsandboxed `--mode draft` REALLY saves a Drafts item (oracle parity), so the
+  # CI-safe assertion is the env brake; the sandbox label gate is covered just below.
+  APPLE_DRY_RUN=1 run "$BIN" mail send --to me@self.test --subject "apple-cli-test draft" --body y --mode draft
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"dry_run" : true'
+  echo "$output" | grep -q '"drafted" : false'
 }
 
 @test "mail send --mode draft with an UNLABELED subject is refused under --execute --test-mode (exit 77)" {
@@ -685,19 +922,20 @@ require_index() {
   echo "$output" | grep -q '"type" : "safety_violation"'
 }
 
-@test "mail draft open without a labeled subject is refused (exit 77, before any Mail access)" {
-  # openDraft requires a labeled subject; the label check fires before Mail is opened.
-  run "$BIN" mail draft open --draft-subject "not-a-test-draft" --execute
+@test "mail draft open inside the sandbox without a labeled subject is refused (exit 77, before any Mail access)" {
+  # v2: the label restriction is the sandbox's; it fires before Mail is opened.
+  APPLE_TEST_MODE=1 run "$BIN" mail draft open --draft-subject "not-a-test-draft" --execute --test-mode
   [ "$status" -eq 77 ]
   echo "$output" | grep -q '"type" : "safety_violation"'
 }
 
-@test "mail draft send with --execute but WITHOUT --test-mode is refused (exit 77)" {
-  # Sending an EXISTING draft fires the same two-factor gate as every outbound op; fires before
-  # any Mail access.
-  run "$BIN" mail draft send --draft-subject "apple-cli-test x" --execute
-  [ "$status" -eq 77 ]
-  echo "$output" | grep -q '"type" : "safety_violation"'
+@test "mail draft send under APPLE_DRY_RUN=1 previews without touching Mail (exit 0)" {
+  # v2: an unsandboxed `draft send` REALLY delivers the named Drafts item (oracle parity), so
+  # the CI-safe assertion is the env brake; the sandbox label gate is covered just below.
+  APPLE_DRY_RUN=1 run "$BIN" mail draft send --draft-subject "apple-cli-test x"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"dry_run" : true'
+  echo "$output" | grep -q '"executed" : false'
 }
 
 @test "mail draft send with an UNLABELED subject is refused under the test gate (exit 77)" {
@@ -709,21 +947,23 @@ require_index() {
   echo "$output" | grep -q '"type" : "safety_violation"'
 }
 
-@test "mail draft-rich --save-as-draft WITHOUT --test-mode is refused before any Mail access (exit 77)" {
-  # Opening the compose window is self-only guardOutbound-gated (test-mode + allowlist), same as
-  # `send --mode open`; the gate fires before the .eml write.
+@test "mail draft-rich --save-as-draft inside the sandbox with an EMPTY allowlist is refused even in preview (exit 77)" {
+  # Opening the compose window is guardOutbound-gated UNCONDITIONALLY (dry-run included) —
+  # the sandbox's self-only restriction fires before any Mail access or .eml write.
   OUT="$BATS_TEST_TMPDIR/apple-cli-test-dr.eml"
-  run "$BIN" mail draft-rich --dry-run --to me@self.test --subject "apple-cli-test dr" --html "<b>x</b>" --save-as-draft --out "$OUT"
+  run env -u APPLE_TEST_RECIPIENTS APPLE_TEST_MODE=1 "$BIN" mail draft-rich --dry-run --to me@self.test --subject "apple-cli-test dr" --html "<b>x</b>" --save-as-draft --out "$OUT" --test-mode
   [ "$status" -eq 77 ]
   echo "$output" | grep -q '"type" : "safety_violation"'
+  [ ! -f "$OUT" ]
 }
 
-@test "mail draft-rich --open WITHOUT --test-mode is refused before any Mail access (exit 77)" {
-  # --open opens a live compose window → same self-only guardOutbound as `send --mode open`.
+@test "mail draft-rich --open inside the sandbox with an EMPTY allowlist is refused even in preview (exit 77)" {
+  # --open opens a live compose window → same sandbox self-only guardOutbound as `send --mode open`.
   OUT="$BATS_TEST_TMPDIR/apple-cli-test-dr.eml"
-  run "$BIN" mail draft-rich --dry-run --to me@self.test --subject "apple-cli-test dr" --html "<b>x</b>" --open --out "$OUT"
+  run env -u APPLE_TEST_RECIPIENTS APPLE_TEST_MODE=1 "$BIN" mail draft-rich --dry-run --to me@self.test --subject "apple-cli-test dr" --html "<b>x</b>" --open --out "$OUT" --test-mode
   [ "$status" -eq 77 ]
   echo "$output" | grep -q '"type" : "safety_violation"'
+  [ ! -f "$OUT" ]
 }
 
 @test "mail forward --account with an unknown account is not_found before the index opens (exit 65)" {
@@ -750,11 +990,20 @@ require_index() {
 @test "mail draft-rich (no open/save flags) writes the .eml and reports opened false (exit 0)" {
   # Default path — no Mail access, ungated; asserts the opened field + the written artifact.
   OUT="$BATS_TEST_TMPDIR/apple-cli-test-dr.eml"
-  # FIXTURE WRITE relying on a known bug: DraftRichCommand writes the .eml despite --dry-run — no willExecute branch (WriteComposeCommands.swift:658; same bucket-2 defect as TemplatesSave, docs/write-model-v2.md). The commit adding the branch MUST flip this to --execute or the fixture vanishes and the assertions below fail.
-  run "$BIN" mail draft-rich --dry-run --to me@self.test --subject "apple-cli-test dr" --html "<b>x</b>" --out "$OUT"
+  run "$BIN" mail draft-rich --execute --to me@self.test --subject "apple-cli-test dr" --html "<b>x</b>" --out "$OUT"
   [ "$status" -eq 0 ]
   [ -f "$OUT" ]
   echo "$output" | grep -q '"opened" : false'
+}
+
+@test "mail draft-rich --dry-run writes nothing (fixed bucket-2 defect)" {
+  # DraftRichCommand used to write the .eml DESPITE --dry-run (no willExecute branch); pin the fix.
+  OUT="$BATS_TEST_TMPDIR/apple-cli-test-dr-preview.eml"
+  run "$BIN" mail draft-rich --dry-run --to me@self.test --subject "apple-cli-test dr" --html "<b>x</b>" --out "$OUT"
+  [ "$status" -eq 0 ]
+  [ ! -f "$OUT" ]
+  echo "$output" | grep -q '"dry_run" : true'
+  echo "$output" | grep -q 'nothing written'
 }
 
 # --- Oracle-parity: flag_color="none" IS the unflag spelling -------------------
@@ -793,8 +1042,7 @@ require_index() {
 # `{recipient_name}` could flow straight into outbound subject/body text.
 @test "mail templates render raises missing_template_variable naming all unresolved (exit 64)" {
   export APPLE_MAIL_MCP_HOME="$BATS_TEST_TMPDIR/tpl-missing"
-  # FIXTURE WRITE relying on a known bug: TemplatesSave has no willExecute branch and writes despite --dry-run (docs/write-model-v2.md bucket-2 obligation). The commit that adds the branch MUST flip this to --execute or the fixture vanishes and the next assertion fails.
-  run "$BIN" mail templates save --dry-run apple-cli-test-miss --body 'Hi {zeta}, re {alpha}.'
+  run "$BIN" mail templates save --execute apple-cli-test-miss --body 'Hi {zeta}, re {alpha}.'
   [ "$status" -eq 0 ]
   run "$BIN" mail templates render apple-cli-test-miss
   [ "$status" -eq 64 ]
@@ -805,8 +1053,7 @@ require_index() {
 
 @test "mail templates render succeeds once every placeholder is supplied" {
   export APPLE_MAIL_MCP_HOME="$BATS_TEST_TMPDIR/tpl-ok"
-  # FIXTURE WRITE relying on a known bug: TemplatesSave has no willExecute branch and writes despite --dry-run (docs/write-model-v2.md bucket-2 obligation). The commit that adds the branch MUST flip this to --execute or the fixture vanishes and the next assertion fails.
-  run "$BIN" mail templates save --dry-run apple-cli-test-ok --body 'Hi {who}.' --subject 'S {who}'
+  run "$BIN" mail templates save --execute apple-cli-test-ok --body 'Hi {who}.' --subject 'S {who}'
   [ "$status" -eq 0 ]
   run "$BIN" mail templates render apple-cli-test-ok --var who=Ada
   [ "$status" -eq 0 ]
@@ -818,8 +1065,7 @@ require_index() {
 # calendar date (oracle A uses Python's local `date.today()`, not UTC).
 @test "mail templates render auto-fills today without reporting it missing" {
   export APPLE_MAIL_MCP_HOME="$BATS_TEST_TMPDIR/tpl-today"
-  # FIXTURE WRITE relying on a known bug: TemplatesSave has no willExecute branch and writes despite --dry-run (docs/write-model-v2.md bucket-2 obligation). The commit that adds the branch MUST flip this to --execute or the fixture vanishes and the next assertion fails.
-  run "$BIN" mail templates save --dry-run apple-cli-test-today --body 'Sent {today}.'
+  run "$BIN" mail templates save --execute apple-cli-test-today --body 'Sent {today}.'
   [ "$status" -eq 0 ]
   run "$BIN" mail templates render apple-cli-test-today
   [ "$status" -eq 0 ]
@@ -833,8 +1079,7 @@ require_index() {
 @test "mail templates render with an unresolvable --message-id is message_not_found (exit 65)" {
   require_index
   export APPLE_MAIL_MCP_HOME="$BATS_TEST_TMPDIR/tpl-mnf"
-  # FIXTURE WRITE relying on a known bug: TemplatesSave has no willExecute branch and writes despite --dry-run (docs/write-model-v2.md bucket-2 obligation). The commit that adds the branch MUST flip this to --execute or the fixture vanishes and the next assertion fails.
-  run "$BIN" mail templates save --dry-run apple-cli-test-mnf --body 'Body {today}.'
+  run "$BIN" mail templates save --execute apple-cli-test-mnf --body 'Body {today}.'
   [ "$status" -eq 0 ]
   run "$BIN" mail templates render apple-cli-test-mnf --message-id 999999999
   [ "$status" -eq 65 ]
@@ -1188,23 +1433,28 @@ assert_numeric() {
 # A preview must report EVERY live refusal. The update preview once dropped self-scoping
 # entirely, printing `live_blockers: []` — an affirmative claim that --execute would accept a
 # rule it refuses with 77. Reproduced by review; locked here.
-@test "mail rules update DRY-RUN reports the self-scoping blocker instead of claiming clean" {
-  run "$BIN" mail rules update --dry-run 1 --condition "from:contains:boss@example.com" --action "mark_read=true"
+@test "mail rules update sandboxed DRY-RUN reports the self-scoping blocker instead of claiming clean" {
+  # v2: self-scoping is the SANDBOX's restriction, so the blocker appears in a sandboxed preview.
+  APPLE_TEST_MODE=1 run "$BIN" mail rules update --dry-run 1 --condition "from:contains:boss@example.com" --action "mark_read=true" --test-mode
   [ "$status" -eq 0 ]
   echo "$output" | grep -q 'subject condition bound to'
 }
 
-@test "mail rules create DRY-RUN reports unlabeled-name and self-scoping blockers" {
-  run "$BIN" mail rules create --dry-run --name "quarterly-report-rule" --condition "from:contains:boss@x.io" --action "mark_read=true"
+@test "mail rules create sandboxed DRY-RUN reports unlabeled-name and self-scoping blockers" {
+  APPLE_TEST_MODE=1 run "$BIN" mail rules create --dry-run --name "quarterly-report-rule" --condition "from:contains:boss@x.io" --action "mark_read=true" --test-mode
   [ "$status" -eq 0 ]
   echo "$output" | grep -q 'must start with'
   echo "$output" | grep -q 'subject condition bound to'
 }
 
 @test "mail rules create DRY-RUN reports no blockers for a properly labeled self-scoped rule" {
-  run "$BIN" mail rules create --dry-run --name "apple-cli-test-ok" --condition "subject:contains:apple-cli-test" --action "mark_read=true"
+  # Sandboxed so the assertion is non-vacuous (the unsandboxed preview has no sandbox blockers
+  # to report anyway). 'would refuse' is the JSON note substring; the earlier 'would be refused
+  # live' only exists in --text mode, so that assertion could never fail (review-caught).
+  APPLE_TEST_MODE=1 run "$BIN" mail rules create --dry-run --name "apple-cli-test-ok" --condition "subject:contains:apple-cli-test" --action "mark_read=true" --test-mode
   [ "$status" -eq 0 ]
-  ! echo "$output" | grep -q 'would be refused live'
+  ! echo "$output" | grep -q 'would refuse'
+  echo "$output" | grep -q '"live_blockers" : \['
 }
 
 # Oracle A rejects an empty condition value; an empty `contains` matches EVERY message. The

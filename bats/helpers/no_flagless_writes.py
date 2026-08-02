@@ -38,11 +38,27 @@ guard the matcher (both sides share the regexes); the dynamic-invocation rule ab
 the verified-against-binary tables are the matcher's defenses. Zero files or zero matches
 also fails. checked > physical prints a warning (an over-count can offset a future miss).
 
-MARKER. A logical line whose test deliberately pins the v1 flagless default may carry
+MARKER. A logical line whose test deliberately pins a flagless DEFAULT may carry
 `# flagless-on-purpose` on its FIRST physical line. Tree mode reports and counts markers
 without failing; bats/smoke.bats pins the exact count as a CAP on the marked population
 (any new marker forces an edit there; a net-neutral marker swap keeps the count but both
-halves are visible line edits in the same diff). The v2 core flip MUST remove every marker.
+halves are visible line edits in the same diff). Two marker populations exist: PRE-FLIP
+markers pin a not-yet-flipped domain's v1 dry-run default (each domain's flip commit
+migrates its own to the ENV BRAKE shape below), and PERMANENT default-pin markers lock a
+flipped domain's v2 per-surface defaults (flagless-executes / trash-surface-previews) —
+those stay, because nothing else in the suite would catch a silently flipped default.
+
+ENV BRAKE. A flagless invocation whose own command carries a truthy `APPLE_DRY_RUN=`
+env-assignment prefix (`APPLE_DRY_RUN=1 run "$BIN" mail send …`) is SAFE by v2 semantics:
+the env brake forces dry-run for any invocation that does not pass --execute (precedence:
+--dry-run > --execute > APPLE_DRY_RUN > surface default), and a portion that DOES carry
+--execute already satisfies the explicit-flag rule on its own. This is how the v2
+brake-behavior tests stay flagless without markers. The assignment must sit on the SAME
+command (nothing but assignments/words between the last `;|&` separator and `$BIN`) —
+`VAR=1 cmd1 && cmd2` does not export to cmd2, so a brake prefix never exempts a later
+invocation on the line. Only the exact truthy spellings the binary accepts (1/true/yes,
+case-insensitive) exempt; `APPLE_DRY_RUN=off` is a runtime validation_error, not a brake,
+and stays a lint violation.
 
 Two modes:
 
@@ -66,7 +82,10 @@ from pathlib import Path
 # `mail export` writes .eml files; `notes export` emits to stdout (a read) and is absent.
 WRITE_VERBS = {
     "mail": {"send", "reply", "forward", "draft", "draft-rich", "move", "mark", "flag",
-             "delete", "trash", "rules", "templates", "mailboxes", "attachments", "export"},
+             "delete", "trash", "rules", "templates", "mailboxes", "attachments", "export",
+             # `analytics dashboard` writes an HTML file (review-caught as unlinted); the
+             # container's read leaves are excepted below.
+             "analytics"},
     "notes": {"create", "update", "append", "delete", "move", "batch-delete", "batch-move",
               "create-folder", "delete-folder", "save-attachment"},
     "contacts": {"create", "update", "delete", "groups", "note", "photo", "vcard"},
@@ -81,6 +100,9 @@ WRITE_VERBS = {
 # a read; it writes a LOCAL file only when --out is passed (never user data), and sweeping
 # it would flip its payload-emitting default.
 READ_EXCEPTIONS = {
+    ("mail", "analytics", "stats"), ("mail", "analytics", "top-senders"),
+    ("mail", "analytics", "overview"), ("mail", "analytics", "needs-response"),
+    ("mail", "analytics", "awaiting-reply"),
     ("mail", "rules", "list"),
     ("mail", "templates", "list"), ("mail", "templates", "get"),
     ("mail", "templates", "render"),
@@ -104,6 +126,22 @@ INVOKE = re.compile(rf'"?\$BIN"?\s+({DOMAINS})\s+([a-z][a-z-]*)(?:\s+([a-z][a-z-
 # Coarse shape: $BIN + domain + ANY next token. Where INVOKE does not also match, the verb
 # is dynamic (a $variable, quote, or substitution) — see DYNAMIC INVOCATIONS above.
 COARSE = re.compile(rf'"?\$BIN"?\s+({DOMAINS})\s+(\S+)')
+# Truthy APPLE_DRY_RUN env-assignment (the ONLY spellings the binary parses as true —
+# TestMode.truthyValues, case-insensitive). Anything else is a runtime validation_error,
+# so it must not exempt. See ENV BRAKE above.
+# Spelled-out case-insensitive alternation (not a scoped `(?i:…)` group, which needs
+# Python 3.11; a blanket re.IGNORECASE would wrongly match a lowercased VAR NAME too).
+ENV_BRAKE = re.compile(r'(?:^|\s)APPLE_DRY_RUN=(?:1|[Tt][Rr][Uu][Ee]|[Yy][Ee][Ss])(?=\s)')
+
+
+def brake_exempt(logical, invocation_start):
+    """True when THIS invocation's own command carries a truthy APPLE_DRY_RUN= prefix.
+    Scoped to the text after the last command separator before the invocation, because
+    `VAR=1 cmd1 && cmd2` does not export VAR to cmd2. Separator scan is quote-blind —
+    a quoted ;|& only ever SHRINKS the segment, which fails closed (not exempt)."""
+    pre = logical[:invocation_start]
+    seg_start = max(pre.rfind(c) for c in ";|&")
+    return ENV_BRAKE.search(pre[seg_start + 1:]) is not None
 
 
 def scan_quote_state(text, in_single=False, in_double=False):
@@ -249,6 +287,10 @@ def check_tree(root: Path):
                     checked_d += 1
                 if "--dry-run" in portion or "--execute" in portion:
                     continue
+                # v2 env brake: a flagless invocation under a truthy APPLE_DRY_RUN= prefix
+                # is a dry-run by precedence (no --execute in portion — checked above).
+                if brake_exempt(logical, m.start()):
+                    continue
                 if MARKER in first:
                     markers.append(f"{f}:{lineno}")
                     continue
@@ -319,7 +361,10 @@ if __name__ == "__main__":
     for v in violations:
         print(v)
     for m in markers:
-        print(f"marker: {m} (flagless-on-purpose — remove at the v2 core flip)")
+        # Neutral wording: markers are either pre-flip pins (removed by that domain's flip) or
+        # PERMANENT default-pins in flipped domains (see MARKER in the docstring) — the tool
+        # must not instruct anyone to delete the permanent ones.
+        print(f"marker: {m} (flagless-on-purpose — deliberate; bats/smoke.bats caps the count)")
     print(f"scanned {files} file(s), checked {cw} write invocation(s) (physical floor {pw}) "
           f"+ {cd} dynamic (physical floor {pd}), {len(markers)} marker(s)")
     if files == 0 or (cw + cd) == 0:

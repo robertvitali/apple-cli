@@ -123,6 +123,28 @@ struct AttachmentSelectionTests {
         #expect(safeAttachmentBasename("..", fallbackIndex: 3) == "attachment-3")
     }
 
+    /// The name is REMOTE data (the sender's MIME filename) and is composed into a destination
+    /// path that is later RS/US-joined into the `saveAttachments` argv blob. A US would TRUNCATE
+    /// the destination in-script (defeating the symlink + pre-existing-file checks, which ran
+    /// against the full path); an RS would inject an ENTIRE extra save record with an
+    /// attacker-chosen relative destination. Scrubbed (not refused) so a hostile sibling
+    /// attachment cannot kill a legitimate save.
+    @Test("control characters are scrubbed from the basename — they would desync the argv blob")
+    func basenameScrubsControlCharacters() {
+        for out in [safeAttachmentBasename("a\u{1E}1\u{1F}pwn", fallbackIndex: 0),
+                    safeAttachmentBasename("re\u{0A}port.pdf", fallbackIndex: 0),
+                    safeAttachmentBasename("x\u{7F}.txt", fallbackIndex: 0)] {
+            #expect(!out.unicodeScalars.contains { $0.value < 0x20 || $0.value == 0x7F },
+                    "\(String(reflecting: out)) still carries a control character")
+        }
+        #expect(safeAttachmentBasename("a\u{1F}b.pdf", fallbackIndex: 0) == "a_b.pdf")
+        // Scrubbing runs BEFORE lastPathComponent, so a control char cannot smuggle a separator
+        // past the traversal strip either.
+        #expect(safeAttachmentBasename("../../\u{1F}etc/passwd", fallbackIndex: 0) == "passwd")
+        // A name that is ONLY control characters still yields a usable placeholder-free name.
+        #expect(!safeAttachmentBasename("\u{1F}\u{1E}", fallbackIndex: 7).isEmpty)
+    }
+
     // MARK: deCollidedBasenames
 
     @Test("unique basenames pass through unchanged")

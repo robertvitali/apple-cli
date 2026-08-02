@@ -12,27 +12,40 @@ extension AppleError {
     }
 }
 
-/// Gate a live mutation on an EXISTING message. Requires the two-factor test gate AND that the
-/// target's subject is a labeled `apple-cli-test…` item — so an autonomous run can only mutate
-/// test data it created, never real mail (AGENTS.md: "modifying any EXISTING real data the run
-/// did not create" is a dangerous action). Returns the RFC Message-ID to operate on.
+/// Gate a live mutation on an EXISTING message (write-model v2): mutations EXECUTE when
+/// invoked — the oracle's move/mark/flag/delete mutate real mail on call, and the CLI
+/// replaces it. The label restriction is the SANDBOX's (bucket 3): inside the opt-in
+/// sandbox, only `apple-cli-test…`-labeled items may be touched, so an agent run can only
+/// mutate test data it created. Returns the RFC Message-ID to operate on.
 ///
-/// NOTE (defense-in-depth boundary): the label key is the message SUBJECT, which anyone can set
-/// by emailing the operator a message titled `apple-cli-test …`. That is acceptable ONLY because
-/// every op gated by this function is REVERSIBLE (mark/flag/move/trash-to-Trash) and the blast
-/// radius of a spoofed subject is that one attacker-authored message. This subject-prefix check
-/// must NEVER become the sole gate for an irreversible operation — those stay hard-refused.
-func requireLiveMessageMutation(_ m: MailMessage, testMode: Bool) throws -> String {
-    guard testMode && TestMode.isEnabled else {
-        throw AppleError.mailSafety("live mutation requires --test-mode AND APPLE_TEST_MODE=1; refusing. The default dry-run previews instead.")
-    }
-    guard m.subject.hasPrefix(TestMode.sandboxPrefix) else {
-        throw AppleError.mailSafety("target message '\(m.id)' (subject: \"\(m.subject)\") is not a labeled test item (must start with \"\(TestMode.sandboxPrefix)\") — refusing to mutate real mail.")
+/// NOTE (defense-in-depth boundary, unchanged): the sandbox label key is the message
+/// SUBJECT, which anyone can set by emailing the operator a message titled
+/// `apple-cli-test …`. Acceptable ONLY because every op gated here is REVERSIBLE
+/// (mark/flag/move/trash-to-Trash). This subject-prefix check must NEVER become the sole
+/// gate for an irreversible operation — those keep their UNCONDITIONAL canonical-label +
+/// APPLE_ALLOW_* gates regardless of sandbox state.
+func requireLiveMessageMutation(_ m: MailMessage, sandboxActive: Bool) throws -> String {
+    if sandboxActive {
+        guard m.subject.hasPrefix(TestMode.sandboxPrefix) else {
+            throw AppleError.mailSafety("sandbox active: target message '\(m.id)' (subject: \"\(m.subject)\") is not a labeled test item (must start with \"\(TestMode.sandboxPrefix)\") — refusing to mutate it. Disengage the sandbox to operate on real mail.")
+        }
     }
     guard let imid = m.internet_message_id, !imid.isEmpty else {
         throw AppleError.upstream("message '\(m.id)' has no RFC Message-ID; cannot mutate it via Mail.app.")
     }
     return imid
+}
+
+/// PREVIEW-HONESTY twin of `requireLiveMessageMutation`'s sandbox half: a sandboxed dry-run
+/// must refuse an unlabeled target exactly as `--execute` would (review-caught — the bulk
+/// previews emitted a clean plan over real mail while sandboxed). Label check ONLY: the
+/// imid-addressability check stays execute-side (it reflects Mail addressing reality, not a
+/// policy gate — a preview that lists an unaddressable target is informative, not misleading).
+func previewValidateSandboxTargets(_ msgs: [MailMessage], sandboxActive: Bool) throws {
+    guard sandboxActive else { return }
+    for m in msgs where !m.subject.hasPrefix(TestMode.sandboxPrefix) {
+        throw AppleError.mailSafety("sandbox active: target message '\(m.id)' (subject: \"\(m.subject)\") is not a labeled test item (must start with \"\(TestMode.sandboxPrefix)\") — refusing to mutate it. Disengage the sandbox to operate on real mail.")
+    }
 }
 
 /// Every target must carry the CANONICAL test-label prefix, checked against
@@ -51,12 +64,12 @@ func requireCanonicalLabels(_ msgs: [MailMessage]) throws {
 /// leave already-applied ids unreported. Phase 2 then mutates; a target Mail can't locate is
 /// collected into `not_found` (not a throw). `op` returns true when the change applied. Returns
 /// (applied ids, not-found ids).
-func executeMessageMutation(_ msgs: [MailMessage], testMode: Bool,
+func executeMessageMutation(_ msgs: [MailMessage], sandboxActive: Bool,
                             _ op: (_ internetMessageID: String, _ account: String?) throws -> Bool) throws
     -> (applied: [String], notFound: [String]) {
-    // Phase 1 — gate every target up front; the first unlabeled/ungated one throws before any op.
+    // Phase 1 — gate every target up front; the first sandbox-refused one throws before any op.
     let validated: [(id: String, imid: String, account: String?)] = try msgs.map { m in
-        (m.id, try requireLiveMessageMutation(m, testMode: testMode), m.account.isEmpty ? nil : m.account)
+        (m.id, try requireLiveMessageMutation(m, sandboxActive: sandboxActive), m.account.isEmpty ? nil : m.account)
     }
     // Phase 2 — mutate the fully-validated set; op failures mean "not locatable", not a gate breach.
     var applied: [String] = [], notFound: [String] = []
@@ -136,12 +149,31 @@ func resolveAttachmentIndices(names: [String], name: String?, indices: String?) 
     return Array(names.indices)
 }
 
+/// True when a string carries a C0 control character or DEL — the bytes that desynchronize the
+/// RS(0x1E)/US(0x1F)-delimited blobs every AppleScript call is argv-fed with. Any operator- or
+/// REMOTE-supplied value that lands in such a blob must be rejected or scrubbed first, or one
+/// vetted field silently becomes two (see `confineWriteDestination`, `resolveAttachmentPath`,
+/// `outboundAllowlist`, `safeAttachmentBasename`).
+func hasControlCharacters(_ s: String) -> Bool {
+    s.unicodeScalars.contains { $0.value < 0x20 || $0.value == 0x7F }
+}
+
 /// Reduce an attachment's Mail-reported name to a safe basename for path composition — strips any
 /// directory components (a crafted name like "../../etc/passwd" collapses to "passwd") and
 /// substitutes a safe placeholder for the degenerate empty/"."/".." cases, so a hostile attachment
 /// name can never compose a destination path outside the target directory (zip-slip class).
+///
+/// Control characters are SCRUBBED (not refused): unlike the operator-supplied path channels,
+/// this name is REMOTE data — the sender's MIME filename — so a hostile sibling attachment must
+/// not be able to kill a legitimate save. Scrubbing first is load-bearing: the basename is
+/// composed into a destination path that is later US/RS-joined into the `saveAttachments` blob,
+/// where an embedded US would TRUNCATE the destination (defeating the symlink + pre-existing-file
+/// checks, which ran against the full path) and an embedded RS would inject a whole extra save
+/// record with an attacker-chosen relative destination (review-caught).
 func safeAttachmentBasename(_ raw: String, fallbackIndex: Int) -> String {
-    let base = (raw as NSString).lastPathComponent
+    let scrubbed = String(String.UnicodeScalarView(
+        raw.unicodeScalars.map { $0.value < 0x20 || $0.value == 0x7F ? Unicode.Scalar(0x5F)! : $0 }))
+    let base = (scrubbed as NSString).lastPathComponent
     if base.isEmpty || base == "." || base == ".." {
         return "attachment-\(fallbackIndex)"
     }

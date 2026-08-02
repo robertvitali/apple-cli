@@ -2,34 +2,97 @@ import Foundation
 import ArgumentParser
 import AppleKit
 
-// P2 compose surface: send, reply, forward, draft, draft-rich. Destructive/outbound verbs
-// DEFAULT to a dry-run preview; a real send requires --execute AND APPLE_TEST_MODE AND a
-// self-only recipient (TestMode). Live delivery is wired for ALL body types — plain text (Mail
-// `content`), file attachments (AppleScript `make new attachment`), and HTML (multipart `.eml`
-// opened as an X-Unsent outgoing message and sent, since Mail's AppleScript `content` is
-// plain-text only). EVERY path is gated by the same self-only `guardOutbound` before any send;
-// there is no path that reaches an AppleScript send without it (see AGENTS.md Safety).
+// P2 compose surface: send, reply, forward, draft, draft-rich. Write-model v2
+// (docs/write-model-v2.md): outbound verbs EXECUTE when invoked — the CLI replaces the MCP
+// oracles, which send on call. `--dry-run` previews; `APPLE_DRY_RUN=1` restores
+// dry-run-by-default. The opt-in SANDBOX (APPLE_TEST_MODE truthy OR --test-mode) restricts
+// recipients to the self-only allowlist and drafts to labeled test items. Live delivery is
+// wired for ALL body types — plain text (Mail `content`), file attachments (AppleScript
+// `make new attachment`), and HTML (multipart `.eml` opened as an X-Unsent outgoing message
+// and sent, since Mail's AppleScript `content` is plain-text only). EVERY sending path still
+// routes through the same `guardOutbound` before any send — unsandboxed it validates
+// recipients exist; sandboxed it enforces the self-only allowlist (see AGENTS.md Safety:
+// agent runs stay sandboxed by conduct rule).
 
 /// Split repeatable + comma-joined recipient options into a flat address list.
-func splitRecipients(_ raw: [String]) -> [String] {
-    raw.flatMap { $0.split(separator: ",") }.map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+///
+/// REFUSES a control character in any resulting address (validation, exit 64): recipient lists
+/// are US(0x1F)-joined into the AppleScript argv for send/draft/save, so an embedded US would
+/// split ONE vetted address into two — the second never seen by `guardOutbound`'s allowlist
+/// comparison. A control character is never part of a legitimate address, so refusing costs
+/// nothing and closes the channel at its single chokepoint (review-caught; the same class as
+/// the attachment-path and allowlist guards).
+func splitRecipients(_ raw: [String]) throws -> [String] {
+    let out = raw.flatMap { $0.split(separator: ",") }
+        .map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+    if let bad = out.first(where: hasControlCharacters) {
+        throw AppleError.validation("recipient '\(bad.replacingOccurrences(of: "\u{1F}", with: "<US>"))' contains a control character — refusing.")
+    }
+    return out
 }
 
-/// Common outbound guard: refuse a live send unless test-mode is on and EVERY recipient is
-/// the operator's own allowlisted address. Never sends to a non-self recipient autonomously.
-/// Refusals are typed `safety_violation` (exit 77) so they read as deliberate, not as bugs.
-func guardOutbound(recipients: [String], testMode: Bool) throws {
-    // Two-factor, matching every sibling write domain: the --test-mode flag AND APPLE_TEST_MODE=1.
-    guard testMode && TestMode.isEnabled else {
-        throw AppleError.mailSafety("live send requires --test-mode AND APPLE_TEST_MODE=1; refusing. Use the default dry-run to preview.")
+/// Reduce an INDEX-supplied recipient rendering to a bare addr-spec for outbound use.
+///
+/// `EnvelopeIndex.recipients()` returns `MailFormat.person(...)` display form —
+/// `"Display Name <addr@host>"` — where the display name is RFC-2047-DECODED REMOTE data:
+/// arbitrary scalars chosen by whoever mailed the operator. `reply --all` folds those strings
+/// into the outbound recipient list, which is US-joined into the gui-send argv and re-split
+/// in-script into one `to recipient` per field — so a display name carrying a US byte would
+/// inject an ADDITIONAL auto-sent recipient that `guardOutbound` never saw (review-caught;
+/// unsandboxed-only, since the sandbox's exact-match allowlist fails such an entry closed).
+///
+/// Two defenses, both needed: take only the addr-spec (the display name — the attacker-chosen
+/// part — is discarded outright, and a bare address is what Mail's `address:` property wants
+/// anyway), then REFUSE a control character in what remains.
+func outboundAddressFromIndex(_ raw: String) throws -> String {
+    var s = raw.trimmingCharacters(in: .whitespaces)
+    if let open = s.lastIndex(of: "<"), let close = s.lastIndex(of: ">"), open < close {
+        s = String(s[s.index(after: open)..<close]).trimmingCharacters(in: .whitespaces)
     }
+    guard !hasControlCharacters(s) else {
+        throw AppleError.validation("a recipient address read from the message index contains a control character — refusing to compose to it.")
+    }
+    return s
+}
+
+/// Common outbound guard (write-model v2, docs/write-model-v2.md): a live send EXECUTES when
+/// invoked — the CLI is a replacement for the MCP servers, and the oracle's send_email sends
+/// on call. The self-only recipient allowlist is the SANDBOX's restriction (bucket 3): inside
+/// the opt-in sandbox every recipient must be the operator's own allowlisted address; outside
+/// it, recipients are unrestricted. Sandbox refusals stay `safety_violation` (exit 77) so
+/// they read as deliberate, not as bugs. NOTE FOR AGENTS (AGENTS.md conduct rules, which the
+/// product no longer enforces): your sends run sandboxed, self-addressed only — the narrow
+/// unsandboxed exception is the once-per-flip self-addressed verification send.
+func guardOutbound(recipients: [String], sandboxActive: Bool) throws {
     guard !recipients.isEmpty else { throw AppleError.validation("no recipients to send to.") }
-    // Fail-closed: EVERY recipient must be the operator's allowlisted self-address. Compare
-    // case-insensitively (email addresses are case-insensitive) so a legit self-reply whose
-    // stored sender_address differs in case from APPLE_TEST_RECIPIENTS isn't wrongly refused.
-    let allow = Set(TestMode.allowedRecipients.map { $0.lowercased() })
+    guard sandboxActive else { return }
+    // Fail-closed inside the sandbox: EVERY recipient must be an allowlisted self-address.
+    // Compare case-insensitively (email addresses are case-insensitive) so a legit self-reply
+    // whose stored sender_address differs in case from APPLE_TEST_RECIPIENTS isn't refused.
+    // A literal "*" entry is dropped (it is the script layer's out-of-sandbox sentinel, never a
+    // valid address — see outboundAllowlist) so operator data can't smuggle a match-anything.
+    let allow = Set(TestMode.allowedRecipients.filter { $0 != "*" }.map { $0.lowercased() })
     for r in recipients where !allow.contains(r.lowercased()) {
-        throw AppleError.mailSafety("recipient '\(r)' is not in the self-only test allowlist — refusing. Set APPLE_TEST_RECIPIENTS to your own address.")
+        throw AppleError.mailSafety("sandbox active: recipient '\(r)' is not in the self-only allowlist (APPLE_TEST_RECIPIENTS) — refusing. Disengage the sandbox to send beyond it.")
+    }
+}
+
+/// The recipient allowlist handed to the AppleScript dispatch layer (nativeReply/nativeForward/
+/// sendDraft). `"*"` is the OUT-OF-SANDBOX wildcard sentinel (`firstDisallowed` skips the
+/// allowlist comparison when it sees one), so it must NEVER be derivable from operator data:
+/// `TestMode.allowedRecipients` is a raw comma-split of APPLE_TEST_RECIPIENTS, and an operator
+/// habitually spelling "allow all" as `APPLE_TEST_RECIPIENTS="*"` would otherwise disable the
+/// ACTIVE sandbox's recipient check (review-caught). Sandboxed lists therefore DROP any literal
+/// `"*"` — AND any entry containing a control character: the list is US(0x1F)-joined into the
+/// script argv and re-split in-script, so an entry that merely CONTAINS a US byte would
+/// materialize extra entries after the split (`"a@x\u{1F}*"` → `a@x` + the sentinel —
+/// review-caught). Fail-closed both ways: dropped entries only SHRINK the allowlist; an
+/// allowlist of only bad entries becomes empty, which refuses every recipient.
+/// `allowed` is injectable for the logic tier; production callers use the default.
+func outboundAllowlist(sandboxActive: Bool, allowed: [String] = TestMode.allowedRecipients) -> [String] {
+    guard sandboxActive else { return ["*"] }
+    return allowed.filter { entry in
+        entry != "*" && !entry.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F })
     }
 }
 
@@ -40,8 +103,18 @@ func guardOutbound(recipients: [String], testMode: Bool) throws {
 /// sitting in Mail's outgoing store one click from being sent, which is a named dangerous action.
 /// Asserting "the draft was discarded" without knowing it is how an orphan compose survives, so
 /// the failure case tells the operator to remove it by hand instead.
-func refusalMessage(kind: String, bad: String, discarded: Bool) -> String {
-    let head = "refusing the \(kind): Mail addressed it to non-self recipient(s) (\(bad)). Nothing was sent."
+func refusalMessage(kind: String, bad: String, discarded: Bool, sandboxActive: Bool) -> String {
+    // Unsandboxed, the in-script allowlist comparison is skipped (wildcard), so the ONLY
+    // reachable `bad` is the `<empty-address>` sentinel — a malformed compose, not an
+    // allowlist miss; saying "non-self recipient(s)" there would be flatly wrong.
+    let head: String
+    if bad == "<empty-address>" {
+        head = "refusing the \(kind): Mail composed it with an empty/blank recipient address. Nothing was sent."
+    } else if sandboxActive {
+        head = "refusing the \(kind): Mail addressed it to recipient(s) outside the sandbox's self-only allowlist (\(bad)). Nothing was sent."
+    } else {
+        head = "refusing the \(kind): Mail addressed it to recipient(s) that failed verification (\(bad)). Nothing was sent."
+    }
     return discarded
         ? "\(head) The composed draft was discarded."
         : "\(head) WARNING: the composed draft could NOT be discarded and may still be in Mail's outgoing messages — open Mail and delete it manually."
@@ -49,10 +122,12 @@ func refusalMessage(kind: String, bad: String, discarded: Bool) -> String {
 
 /// Resolve + validate a single attachment path: expand `~`, require it to exist and be a REGULAR
 /// file (a directory / missing path is rejected). Returns the resolved absolute path for both the
-/// AppleScript attachment route and the `.eml` builder. Note: the self-only `guardOutbound` is the
-/// real containment for attachment CONTENT — a sent attachment can only ever reach the operator's
-/// own address, so this is existence/type validation, not a content sandbox. Missing/non-regular
-/// files are `not_found` (exit 65), matching the prior inline behavior.
+/// AppleScript attachment route and the `.eml` builder. CONTAINMENT NOTE (write-model v2): outside
+/// the sandbox recipients are unrestricted, so the sensitive-directory blocklist below and the
+/// executable-extension blocklist ARE the containment for attachment content — they are absolute
+/// and fire in both modes. Inside the sandbox, `guardOutbound`'s self-only allowlist additionally
+/// bounds where an attachment can go. Missing/non-regular files are `not_found` (exit 65),
+/// matching the prior inline behavior.
 /// Executable / script extensions blocked from attachment sends by default (mirrors s-morgan
 /// `validate_attachment_type`'s `dangerous_extensions`). Blocking is the parity default; there is
 /// no allow-executables override yet.
@@ -63,6 +138,15 @@ let dangerousAttachmentExtensions: Set<String> = [
 ]
 
 func resolveAttachmentPath(_ raw: String) throws -> String {
+    // CONTROL CHARACTERS FIRST, unconditionally — the exact rule (and rationale) of
+    // confineWriteDestination: resolved attachment paths are US-joined into the AppleScript
+    // argv blob and re-split in-script, so a path CONTAINING a US byte would smuggle a second,
+    // never-vetted path past the sensitive-dir blocklist below (review-caught; under v2 that
+    // blocklist is the sole containment for unsandboxed attachment content).
+    if let bad = raw.unicodeScalars.first(where: { $0.value < 0x20 || $0.value == 0x7F }) {
+        throw AppleError.mailSafety(
+            "cannot attach a path containing a control character (U+\(String(format: "%04X", bad.value))) — refusing.")
+    }
     let expanded = (raw as NSString).expandingTildeInPath
     // Resolve symlinks BEFORE the sensitive-dir check so a symlink into ~/.ssh (etc.) cannot
     // bypass it (matches patrickfreyer's realpath). The real path is also what Mail attaches.
@@ -184,10 +268,10 @@ func attachmentsFromPaths(_ paths: [String]) throws -> [EmlBuilder.Attachment] {
 /// The `.eml` output path: an explicit `--out`, else a labeled temp file.
 /// An operator-supplied `--out` is CONFINED; the generated temp default is not (we chose it).
 ///
-/// `send --out` and the HTML reply/forward route write a `.eml` on the DEFAULT dry-run path — no
-/// `--execute` required — so an unconfined path here writes bytes to an arbitrary location during
-/// what the envelope calls a preview. The guard's own docstring claimed every operator write path
-/// went through it; these were the sinks that did not.
+/// Confinement here is still load-bearing even though (write-model v2) `.eml` writes are gated
+/// on `willExecute`: `--execute` is the DEFAULT posture for the send surface, so an unconfined
+/// `--out` would still write bytes to an arbitrary operator-supplied location on an ordinary
+/// invocation. The guard's own docstring claims every operator write path goes through it.
 func emlDestURL(out: String?, action: String = "write the generated .eml to") throws -> URL {
     guard let out else {
         return FileManager.default.temporaryDirectory
@@ -202,7 +286,7 @@ func emlDestURL(out: String?, action: String = "write the generated .eml to") th
 }
 
 struct SendCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "send", abstract: "Compose an email (dry-run preview by default; plain/HTML/attachments; mode send|draft|open).")
+    static let configuration = CommandConfiguration(commandName: "send", abstract: "Compose an email (EXECUTES by default; --dry-run previews; plain/HTML/attachments; mode send|draft|open).")
     @OptionGroup var global: GlobalOptions
     @Option(name: .long, help: "Recipient (repeatable; comma-joined ok).") var to: [String] = []
     @Option(name: .long) var subject: String = ""
@@ -225,7 +309,13 @@ struct SendCommand: ParsableCommand {
 
     func run() throws {
         try runGuarded(tool: "mail") {
-            let toL = splitRecipients(to), ccL = splitRecipients(cc), bccL = splitRecipients(bcc)
+            // Write-model v2 preamble: fail-loud env validation, then bind the two decisions
+            // ONCE — every branch below reads these locals, never the env or flags again.
+            try TestMode.validateWriteEnvironment()
+            let sandboxActive = try TestMode.sandboxActive(flag: global.testMode)
+            let willExecute = try global.willExecute(defaultDryRun: false)
+
+            let toL = try splitRecipients(to), ccL = try splitRecipients(cc), bccL = try splitRecipients(bcc)
             guard !toL.isEmpty else { throw AppleError.validation("--to is required.") }
             guard ["send", "draft", "open"].contains(mode) else { throw AppleError.validation("--mode must be send, draft, or open.") }
             // --gui-send is the explicit opt-in for GUI-keystroke HTML auto-send; it applies
@@ -240,34 +330,38 @@ struct SendCommand: ParsableCommand {
             //          (--gui-send; fragile), or HTML reliable OPEN (--html without --gui-send).
             //  open  — render a compose window for review (ANY body type), no send.
             //  draft — save to Drafts (ANY body type), no send.
-            let willAutoSend = global.willExecute && mode == "send" && html == nil
-            let willGuiSend = global.willExecute && guiSend
-            let willOpenHtml = global.willExecute && mode == "send" && html != nil && !guiSend
-            let willOpen = global.willExecute && mode == "open"
-            let willDraft = global.willExecute && mode == "draft"
+            let willAutoSend = willExecute && mode == "send" && html == nil
+            let willGuiSend = willExecute && guiSend
+            let willOpenHtml = willExecute && mode == "send" && html != nil && !guiSend
+            let willOpen = willExecute && mode == "open"
+            let willDraft = willExecute && mode == "draft"
             let willLiveOutbound = willAutoSend || willGuiSend || willOpenHtml || willOpen || willDraft
-            // Paths that render a compose window or send need the self-only recipient gate; a
-            // (non-sending) draft does not — it gets the label + test-mode gate below instead.
-            let willSelfGuarded = willAutoSend || willGuiSend || willOpenHtml || willOpen
 
-            // Self-only outbound gate FIRST — before any attachment read, .eml/.html build, or
-            // AppleScript/GUI action. No self-guarded path below reaches Mail without passing this.
-            if willSelfGuarded { try guardOutbound(recipients: toL + ccL + bccL, testMode: global.testMode) }
-            // A live open / HTML action needs a real subject — a compose window / sent message with
+            // PREVIEW HONESTY: every gate below is keyed on the MODE, not on willExecute — a
+            // dry-run must refuse exactly what --execute would (review-caught: the will*-keyed
+            // versions previewed clean for a sandboxed non-self send / unlabeled draft / empty
+            // open-subject). None of these touch Mail, so they are safe on the preview path.
+            //
+            // Outbound gate FIRST — before any attachment read, .eml/.html build, or
+            // AppleScript/GUI action. Modes that render a compose window or send take it
+            // (self-only inside the sandbox); a (non-sending) --mode draft takes the sandbox
+            // label gate below instead.
+            if mode == "send" || mode == "open" {
+                try guardOutbound(recipients: toL + ccL + bccL, sandboxActive: sandboxActive)
+            }
+            // An open / HTML action needs a real subject — a compose window / sent message with
             // an empty subject is a mistake; refuse before building anything.
-            if willGuiSend || willOpenHtml || willOpen {
+            if guiSend || (mode == "send" && html != nil) || mode == "open" {
                 guard !subject.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                    throw AppleError.validation("--subject is required for a live --mode open / --html action; refusing an empty/whitespace subject.")
+                    throw AppleError.validation("--subject is required for a --mode open / --html action; refusing an empty/whitespace subject.")
                 }
             }
-            // --mode draft saves a PERSISTENT Drafts item, so it takes the same label + test-mode
-            // gate as `draft create` (NOT the self-only recipient guard — a draft is not a send).
-            if willDraft {
-                guard global.testMode && TestMode.isEnabled else {
-                    throw AppleError.mailSafety("saving a draft requires --test-mode AND APPLE_TEST_MODE=1; refusing. Use the default dry-run to preview.")
-                }
+            // --mode draft saves a PERSISTENT Drafts item; inside the sandbox it takes the
+            // same label restriction as `draft create` (NOT the recipient guard — a draft is
+            // not a send). Unsandboxed drafts are unrestricted (the oracle saves on call).
+            if mode == "draft" && sandboxActive {
                 guard subject.hasPrefix(TestMode.sandboxPrefix) else {
-                    throw AppleError.mailSafety("draft --subject must be a labeled test item (start with \"\(TestMode.sandboxPrefix)\") — refusing.")
+                    throw AppleError.mailSafety("sandbox active: draft --subject must be a labeled test item (start with \"\(TestMode.sandboxPrefix)\") — refusing.")
                 }
             }
 
@@ -292,7 +386,11 @@ struct SendCommand: ParsableCommand {
             // From: uses the resolved address on a live path, else the raw --account (headless preview).
             let attPaths = try attach.map { try resolveAttachmentPath($0) }
             var emlPath: String?
-            if html != nil || !attPaths.isEmpty || willOpen {
+            // MODE-keyed (not willOpen): a plain-body `--mode open --dry-run` must still build
+            // the .eml so `--out` runs through confineWriteDestination and the preview reports
+            // the planned eml_path — otherwise a preview accepts a destination --execute
+            // refuses (review-caught). The WRITE below stays willExecute-gated.
+            if html != nil || !attPaths.isEmpty || mode == "open" {
                 let atts = try attachmentsFromPaths(attPaths)
                 // emitBcc: this .eml is only ever OPENED in a compose window (Mail moves Bcc to the
                 // bcc field + strips the header on send) or written to --out — never wire-sent — so
@@ -301,7 +399,11 @@ struct SendCommand: ParsableCommand {
                                      textBody: body.isEmpty ? nil : body, htmlBody: html, attachments: atts,
                                      emitBcc: true).build()
                 let dest = try emlDestURL(out: out)
-                try eml.write(to: dest, atomically: true, encoding: .utf8)
+                // Write ONLY under willExecute (bucket 2, matching DraftRichCommand): a dry-run
+                // still BUILDS the .eml (same validation as execute) and reports the planned
+                // destination, but leaves no bytes on disk. The live open paths below all imply
+                // willExecute, so the file they open always exists.
+                if willExecute { try eml.write(to: dest, atomically: true, encoding: .utf8) }
                 emlPath = dest.path
             }
 
@@ -355,21 +457,26 @@ struct SendCommand: ParsableCommand {
                                                attachmentPaths: attPaths, sender: senderAddress)
                     drafted = true
                 }
-            } else if global.willExecute {
+            } else if willExecute {
                 note = "mode '\(mode)' is preview-only; use --mode send to deliver"
+            }
+            // A dry-run that reports an eml_path must say the file was NOT written (mirrors
+            // DraftRichCommand's preview note — review-caught: the planned path read as real).
+            if !willExecute, emlPath != nil {
+                note = "dry-run: nothing written or opened; eml_path is the planned destination."
             }
 
             let preview = Preview(action: "send", mode: mode, account: account, sender_address: senderAddress,
                                   to: toL, cc: ccL, bcc: bccL,
                                   subject: subject, has_html: html != nil, attachments: attach,
-                                  eml_path: emlPath, dry_run: !global.willExecute, executed: executed, opened: opened, drafted: drafted, note: note)
-            try Output.emit(tool: "mail", data: preview)
+                                  eml_path: emlPath, dry_run: !willExecute, executed: executed, opened: opened, drafted: drafted, note: note)
+            try Output.emit(tool: "mail", data: preview, sandboxActive: sandboxActive)
         }
     }
 }
 
 struct ReplyCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "reply", abstract: "Reply to a message by id or --subject (dry-run preview by default).")
+    static let configuration = CommandConfiguration(commandName: "reply", abstract: "Reply to a message by id or --subject (EXECUTES by default; --dry-run previews).")
     @OptionGroup var global: GlobalOptions
     @Argument(help: "Message id to reply to (ROWID / RFC Message-ID); or use --subject.") var id: String?
     @Option(name: .long, help: "Reply to the newest message matching this subject keyword.") var subject: String?
@@ -398,6 +505,45 @@ struct ReplyCommand: ParsableCommand {
 
     func run() throws {
         try runGuarded(tool: "mail") {
+            // Write-model v2 preamble (see SendCommand).
+            try TestMode.validateWriteEnvironment()
+            let sandboxActive = try TestMode.sandboxActive(flag: global.testMode)
+            let willExecute = try global.willExecute(defaultDryRun: false)
+
+            // EMPTY-SUBJECT guard, both modes, BEFORE the store opens. EnvelopeIndex skips an
+            // empty subjectContains, so `--subject ""` would resolve to the NEWEST message in
+            // the entire store — and under v2 an unsandboxed flagless reply then SENDS a real
+            // reply quoting it. `reply --subject "$UNSET_VAR"` must refuse, not fire
+            // (review-caught; same class as the draft empty-subject guard).
+            if let subject, subject.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                throw AppleError.validation("--subject must not be empty or whitespace; an empty keyword matches every message in the store.")
+            }
+            // Mode + --gui-send validity are pure flag checks — hoisted above the store open so
+            // they hold on BOTH paths, store-independently (preview honesty; review-caught: the
+            // notImplemented refusal was execute-only, so a dry-run previewed a mode --execute
+            // refuses with 70).
+            guard ["send", "draft", "open"].contains(mode) else {
+                throw AppleError.validation("--mode must be send, draft, or open.")
+            }
+            // `--mode draft` / `--mode open` are oracle B `reply_to_email(mode=…, send=False)`
+            // capabilities that are NOT implemented for reply yet (tracked as a parity gap).
+            // Refuse explicitly IN BOTH MODES rather than emitting a success-shaped envelope
+            // that did nothing — a preview of an unimplemented mode is as misleading as an
+            // execute of one.
+            guard mode == "send" else {
+                throw AppleError.notImplemented("`reply --mode \(mode)` is not implemented yet (oracle B reply_to_email mode=\(mode)); use --mode send, or pass --dry-run to preview.")
+            }
+            if guiSend {
+                guard html != nil else { throw AppleError.validation("--gui-send only applies to an --html reply.") }
+            }
+            // Attachment paths resolved ONCE, in BOTH modes, and BEFORE the store opens:
+            // existence, the 25 MB cap, the executable-extension blocklist, the sensitive-dir
+            // refusal and the control-char rejection are filesystem/string checks that depend
+            // only on `attach`. Hoisting them here makes a preview refuse exactly what execute
+            // would, store-independently, and matches SendCommand's precedence (review-caught
+            // twice: they first ran only inside the live block, then only after target
+            // resolution — where a not_found target masked them).
+            let attachPaths = try attach.map { try resolveAttachmentPath($0) }
             let ctx = try MailContext()
             // Resolve the target to a full summary (need original sender + subject to compose).
             let row: [String: String?]
@@ -428,9 +574,15 @@ struct ReplyCommand: ParsableCommand {
             guard let sender = target.sender_address, !sender.isEmpty else {
                 throw AppleError.upstream("cannot determine the original sender address to reply to.")
             }
-            var recipients = [sender]
-            if all { recipients += (target.to ?? []) + (target.cc ?? []) }
-            let ccL = splitRecipients(cc), bccL = splitRecipients(bcc)
+            // Every index-sourced recipient reduced to its bare addr-spec + control-char
+            // checked: the reply-all fold carries REMOTE display names, which must never reach
+            // the US-joined dispatch argv (see outboundAddressFromIndex).
+            var recipients = [try outboundAddressFromIndex(sender)]
+            if all {
+                recipients += try ((target.to ?? []) + (target.cc ?? [])).map(outboundAddressFromIndex)
+                    .filter { !$0.isEmpty }
+            }
+            let ccL = try splitRecipients(cc), bccL = try splitRecipients(bcc)
 
             let replySubject = target.subject.lowercased().hasPrefix("re:") ? target.subject : "Re: \(target.subject)"
             // Quote from the index snippet/content already in hand — avoids a slow full-body
@@ -438,41 +590,28 @@ struct ReplyCommand: ParsableCommand {
             let original = target.content ?? target.snippet
             let quotedPlain = original.map { "\n\n> " + $0.replacingOccurrences(of: "\n", with: "\n> ") } ?? ""
 
-            // Validate `mode` up front, exactly as SendCommand does — an unrecognized value used
-            // to fall through to a success-shaped envelope that did nothing.
-            guard ["send", "draft", "open"].contains(mode) else {
-                throw AppleError.validation("--mode must be send, draft, or open.")
-            }
-            // `--mode draft` / `--mode open` are oracle B `reply_to_email(mode=…, send=False)`
-            // capabilities that are NOT implemented for reply yet (tracked as a parity gap).
-            // Refuse explicitly rather than emitting exit 0 with a "preview-only" note: a
-            // success envelope for a delivery that never happened is worse than a clean refusal,
-            // because a caller cannot tell the difference.
-            if global.willExecute, mode != "send" {
-                throw AppleError.notImplemented("`reply --mode \(mode)` is not implemented yet (oracle B reply_to_email mode=\(mode)); use --mode send, or drop --execute to preview.")
-            }
-            // --gui-send opt-in validity (mirrors SendCommand).
-            if guiSend {
-                guard html != nil else { throw AppleError.validation("--gui-send only applies to an --html reply.") }
-                guard mode == "send" else { throw AppleError.validation("--gui-send requires --mode send.") }
-            }
+            // (mode + --gui-send validity were hoisted above the store open — see the
+            // preview-honesty block at the top of run(). Past this point mode == "send".)
             // Three mutually-exclusive live outbound actions (mirrors SendCommand / Option A).
             // NOTE the `mode == "send"` clause on willOpenHtml: without it (as before), a
             // `reply --mode draft --html …` took the HTML-open path and OPENED a compose window
             // for a caller who asked for a draft. SendCommand's twin already had the clause.
-            let willAutoSend = global.willExecute && mode == "send" && html == nil
-            let willGuiSend = global.willExecute && guiSend
-            let willOpenHtml = global.willExecute && mode == "send" && html != nil && !guiSend
+            let willAutoSend = willExecute && mode == "send" && html == nil
+            let willGuiSend = willExecute && guiSend
+            let willOpenHtml = willExecute && mode == "send" && html != nil && !guiSend
             let willLiveOutbound = willAutoSend || willGuiSend || willOpenHtml
 
+            // Outbound gate in BOTH modes (preview honesty): the recipient set is already
+            // resolved above on the dry-run path too, so a sandboxed preview refuses a
+            // non-allowlisted reply exactly as --execute would. Fires before any attachment
+            // read, .eml/.html build, or send.
+            try guardOutbound(recipients: recipients + ccL + bccL, sandboxActive: sandboxActive)
             var executed = false
             var opened = false
             var senderAddress: String?
             var note: String?
             var replyID: String?
             if willLiveOutbound {
-                // Self-only gate FIRST — before any attachment read, .eml/.html build, or send.
-                try guardOutbound(recipients: recipients + ccL + bccL, testMode: global.testMode)
                 // A live reply needs a real subject (replySubject always carries "Re:" today, so
                 // this is belt-and-suspenders).
                 guard !replySubject.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
@@ -493,19 +632,18 @@ struct ReplyCommand: ParsableCommand {
                 } ?? ""
                 if willGuiSend {
                     // Opt-in HTML auto-send via GUI keystrokes (fragile — see MailScript.sendHtmlViaGui).
-                    let paths = try attach.map { try resolveAttachmentPath($0) }
                     let htmlTmp = FileManager.default.temporaryDirectory
                         .appendingPathComponent("apple-cli-\(TestMode.sandboxPrefix)-\(UUID().uuidString).html")
                     try ((html ?? "") + quotedHTML).write(to: htmlTmp, atomically: true, encoding: .utf8)
                     defer { try? FileManager.default.removeItem(at: htmlTmp) }
                     try MailScript().sendHtmlViaGui(htmlPath: htmlTmp.path, subject: replySubject,
-                        to: recipients, cc: ccL, bcc: bccL, attachmentPaths: paths, sender: senderAddress)
+                        to: recipients, cc: ccL, bcc: bccL, attachmentPaths: attachPaths, sender: senderAddress)
                     executed = true
                     note = "sent via GUI keystroke automation (--gui-send); required Accessibility and stole focus"
                 } else if willOpenHtml {
                     // Reliable HTML reply: build a multipart .eml (quote embedded) and open a
                     // rendered compose window for review.
-                    let atts = try attachmentsFromPaths(try attach.map { try resolveAttachmentPath($0) })
+                    let atts = try attachmentsFromPaths(attachPaths)
                     // emitBcc: safe — this .eml is only opened in a compose window, never wire-sent.
                     let eml = try EmlBuilder(from: senderAddress, to: recipients, cc: ccL, bcc: bccL, subject: replySubject,
                                              textBody: body + quotedPlain, htmlBody: (html ?? "") + quotedHTML, attachments: atts,
@@ -523,12 +661,11 @@ struct ReplyCommand: ParsableCommand {
                     guard let imid = target.internet_message_id, !imid.isEmpty else {
                         throw AppleError.upstream("message '\(target.id)' has no RFC Message-ID; cannot reply to it via Mail.app.")
                     }
-                    let paths = try attach.map { try resolveAttachmentPath($0) }
                     switch try MailScript().nativeReply(internetMessageID: imid,
                                                         accountName: target.account.isEmpty ? nil : target.account,
                                                         body: body, replyAll: all, sender: senderAddress,
-                                                        selfAllowlist: TestMode.allowedRecipients,
-                                                        cc: ccL, bcc: bccL, attachmentPaths: paths,
+                                                        selfAllowlist: outboundAllowlist(sandboxActive: sandboxActive),
+                                                        cc: ccL, bcc: bccL, attachmentPaths: attachPaths,
                                                         // Hand the locator the mailbox the Envelope
                                                         // Index already resolved, so an ARCHIVED
                                                         // message (incl. [Gmail]/All Mail, which the
@@ -547,24 +684,24 @@ struct ReplyCommand: ParsableCommand {
                     case .sendFailed(let newID):
                         throw AppleError.upstream("Mail reported the reply was NOT sent (send returned false — account offline or the server refused). Draft id \(newID) may still be in Mail.")
                     case .refused(let bad, let discarded):
-                        throw AppleError.mailSafety(refusalMessage(kind: "reply", bad: bad, discarded: discarded))
+                        throw AppleError.mailSafety(refusalMessage(kind: "reply", bad: bad, discarded: discarded, sandboxActive: sandboxActive))
                     }
                 }
-            } else if global.willExecute {
-                note = "mode '\(mode)' is preview-only; use --mode send to deliver"
             }
+            // (No preview-only else-branch: mode is always "send" past the hoisted guard, so
+            // willLiveOutbound == willExecute — an unreachable note would just be dead code.)
 
             try Output.emit(tool: "mail", data: Preview(action: "reply", target: id ?? "subject:\(subject ?? "")",
                 matched_message_id: target.id, reply_all: all, mode: mode, has_html: html != nil, sender_address: senderAddress,
                 to: recipients, cc: ccL, bcc: bccL, attachments: attach,
-                dry_run: !global.willExecute, executed: executed, opened: opened, note: note,
-                reply_id: replyID, original_message_id: target.id))
+                dry_run: !willExecute, executed: executed, opened: opened, note: note,
+                reply_id: replyID, original_message_id: target.id), sandboxActive: sandboxActive)
         }
     }
 }
 
 struct ForwardCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "forward", abstract: "Forward a message by id or --subject (dry-run preview by default).")
+    static let configuration = CommandConfiguration(commandName: "forward", abstract: "Forward a message by id or --subject (EXECUTES by default; --dry-run previews).")
     @OptionGroup var global: GlobalOptions
     @Argument(help: "Message id to forward; or use --subject.") var id: String?
     @Option(name: .long, help: "Forward the newest message matching this subject keyword.") var subject: String?
@@ -587,16 +724,31 @@ struct ForwardCommand: ParsableCommand {
 
     func run() throws {
         try runGuarded(tool: "mail") {
-            let toL = splitRecipients(to), ccL = splitRecipients(cc), bccL = splitRecipients(bcc)
+            // Write-model v2 preamble (see SendCommand).
+            try TestMode.validateWriteEnvironment()
+            let sandboxActive = try TestMode.sandboxActive(flag: global.testMode)
+            let willExecute = try global.willExecute(defaultDryRun: false)
+
+            let toL = try splitRecipients(to), ccL = try splitRecipients(cc), bccL = try splitRecipients(bcc)
             guard !toL.isEmpty else { throw AppleError.validation("--to is required.") }
-            // Outbound guard (self-only) fires BEFORE any resolve/emit → one envelope.
-            if global.willExecute { try guardOutbound(recipients: toL + ccL + bccL, testMode: global.testMode) }
+            // EMPTY-SUBJECT guard, both modes, BEFORE the store opens: an empty keyword would
+            // resolve to the NEWEST message in the store, and an unsandboxed flagless forward
+            // then dispatches its body AND attachments to the given recipient —
+            // `forward --subject "$UNSET_VAR" --to boss@…` must refuse, not exfiltrate
+            // (review-caught; same class as the draft/reply empty-subject guards).
+            if let subject, subject.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
+                throw AppleError.validation("--subject must not be empty or whitespace; an empty keyword matches every message in the store.")
+            }
+            // Outbound guard fires BEFORE any resolve/emit → one envelope. BOTH modes (preview
+            // honesty): a sandboxed dry-run to a non-allowlisted recipient must refuse exactly
+            // as --execute would; recipients come from flags, so no Mail access is needed.
+            try guardOutbound(recipients: toL + ccL + bccL, sandboxActive: sandboxActive)
             // Resolve --account to the send-from identity (mirrors SendCommand/ReplyCommand): the
             // forward goes out FROM this account's address. Live-path only (headless dry-runs never
             // touch Mail); fires before the Envelope Index opens, so an unknown account is a clean
             // not_found even where the index is unreadable.
             var senderAddress: String?
-            if global.willExecute, let account {
+            if willExecute, let account {
                 guard let addr = AccountDirectory().sendAddress(for: account) else {
                     throw AppleError.notFound("account '\(account)' not found or has no send address.")
                 }
@@ -621,7 +773,7 @@ struct ForwardCommand: ParsableCommand {
             var executed = false
             var note: String?
             var forwardID: String?
-            if global.willExecute {
+            if willExecute {
                 // Parity: use Mail's NATIVE `forward` verb. A re-composed plain-text quote drops
                 // the original's ATTACHMENTS and flattens its rich formatting — both oracles
                 // forward natively (oracle A returns the new id as `forward_id`, and its
@@ -634,7 +786,7 @@ struct ForwardCommand: ParsableCommand {
                                                       accountName: target.account.isEmpty ? nil : target.account,
                                                       body: body ?? "", to: toL, cc: ccL, bcc: bccL,
                                                       sender: senderAddress,
-                                                      selfAllowlist: TestMode.allowedRecipients,
+                                                      selfAllowlist: outboundAllowlist(sandboxActive: sandboxActive),
                                                       mailboxHint: target.mailbox) {
                 case .sent(let newID, _):
                     executed = true
@@ -645,18 +797,18 @@ struct ForwardCommand: ParsableCommand {
                 case .sendFailed(let newID):
                     throw AppleError.upstream("Mail reported the forward was NOT sent (send returned false — account offline or the server refused). Draft id \(newID) may still be in Mail.")
                 case .refused(let bad, let discarded):
-                    throw AppleError.mailSafety(refusalMessage(kind: "forward", bad: bad, discarded: discarded))
+                    throw AppleError.mailSafety(refusalMessage(kind: "forward", bad: bad, discarded: discarded, sandboxActive: sandboxActive))
                 }
             }
             try Output.emit(tool: "mail", data: Preview(action: "forward", matched_message_id: target.id, sender_address: senderAddress,
-                to: toL, cc: ccL, bcc: bccL, dry_run: !global.willExecute, executed: executed, note: note,
-                forward_id: forwardID, original_message_id: target.id))
+                to: toL, cc: ccL, bcc: bccL, dry_run: !willExecute, executed: executed, note: note,
+                forward_id: forwardID, original_message_id: target.id), sandboxActive: sandboxActive)
         }
     }
 }
 
 struct DraftRichCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "draft-rich", abstract: "Generate a multipart .eml draft (reliable HTML); optionally open it or save it to Drafts.")
+    static let configuration = CommandConfiguration(commandName: "draft-rich", abstract: "Generate a multipart .eml draft (EXECUTES by default; --dry-run previews; reliable HTML); optionally open it or save it to Drafts.")
     @OptionGroup var global: GlobalOptions
     @Option(name: .long) var account: String?
     @Option(name: .long) var subject: String = ""
@@ -667,23 +819,29 @@ struct DraftRichCommand: ParsableCommand {
     @Option(name: .long) var bcc: [String] = []
     @Option(name: .long, help: "Output .eml path (default: temp dir).") var out: String?
     @Flag(name: .customLong("open"), help: "Open the generated .eml in a Mail compose window for review (no send).") var openInMail = false
-    @Flag(name: .long, help: "Open the .eml and save it to Drafts (no send; requires --test-mode + a labeled subject).") var saveAsDraft = false
+    @Flag(name: .long, help: "Open the .eml and save it to Drafts (no send; sandboxed runs restrict recipients to the self-only allowlist).") var saveAsDraft = false
 
-    struct Result: Encodable { let eml_path: String; let subject: String; let to: [String]; let has_html: Bool; let sender_address: String?; let opened: Bool; let note: String? }
+    struct Result: Encodable { let eml_path: String; let subject: String; let to: [String]; let has_html: Bool; let sender_address: String?; let opened: Bool; let note: String?; let dry_run: Bool }
 
     func run() throws {
         try runGuarded(tool: "mail") {
-            let toL = splitRecipients(to)
+            // Write-model v2 preamble (see SendCommand). DraftRich previously wrote the .eml
+            // UNCONDITIONALLY (no willExecute branch — the bucket-2 defect the spec names);
+            // it now honors the bound decision like every other write.
+            try TestMode.validateWriteEnvironment()
+            let sandboxActive = try TestMode.sandboxActive(flag: global.testMode)
+            let willExecute = try global.willExecute(defaultDryRun: false)
+
+            let toL = try splitRecipients(to)
             // Opening the .eml in Mail (either flag) is a live compose-window action, so gate it
-            // consistently with `send --mode open`: the self-only guardOutbound (test-mode +
-            // allowlist) + a real subject, BEFORE any Mail access or .eml write. This is deliberately
-            // stricter than the create_rich_email_draft oracle (which opens to any recipient) — the
-            // fail-closed self-only posture is the pre-1.0 CLI default; relaxing non-sending opens to
-            // any recipient is a tracked 1.0 decision. The DEFAULT (neither flag) just writes the
-            // .eml headlessly and is ungated.
+            // consistently with `send --mode open`: guardOutbound (self-only allowlist when the
+            // sandbox is active; write-model v2 matches the create_rich_email_draft oracle, which
+            // opens to any recipient) + a real subject, BEFORE any Mail access or .eml write. The
+            // guard runs on the dry-run path too — a preview must refuse exactly what execute
+            // would. The DEFAULT (neither flag) just writes the .eml headlessly and is ungated.
             var senderAddress: String?
             if openInMail || saveAsDraft {
-                try guardOutbound(recipients: toL + splitRecipients(cc) + splitRecipients(bcc), testMode: global.testMode)
+                try guardOutbound(recipients: toL + (try splitRecipients(cc)) + (try splitRecipients(bcc)), sandboxActive: sandboxActive)
                 guard !subject.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                     throw AppleError.validation("--subject is required to open a draft-rich compose window.")
                 }
@@ -700,31 +858,34 @@ struct DraftRichCommand: ParsableCommand {
             }
             // emitBcc: a draft-rich .eml is only opened / written to disk, never wire-sent, so
             // carrying --bcc into it is safe and required for create_rich_email_draft parity.
-            let eml = try EmlBuilder(from: senderAddress ?? account, to: toL, cc: splitRecipients(cc), bcc: splitRecipients(bcc),
+            let eml = try EmlBuilder(from: senderAddress ?? account, to: toL, cc: try splitRecipients(cc), bcc: try splitRecipients(bcc),
                                  subject: subject, textBody: textBody, htmlBody: html, emitBcc: true).build()
             let dest = try emlDestURL(out: out, action: "write the rich draft .eml to")
-            try eml.write(to: dest, atomically: true, encoding: .utf8)
+            if willExecute { try eml.write(to: dest, atomically: true, encoding: .utf8) }
             // Optional review window (parity with create_rich_email_draft open_in_mail). Mail cannot
             // auto-save an HTML draft (a LaunchServices-opened .eml window doesn't surface in
             // `outgoing messages`), so --save-as-draft opens the SAME review window and instructs the
             // operator to Cmd-S — it never auto-files, so there is no `saved` claim.
             var opened = false
             var note: String?
-            if openInMail || saveAsDraft {
+            if willExecute && (openInMail || saveAsDraft) {
                 try MailScript().openEml(path: dest.path)
                 opened = true
                 note = saveAsDraft
                     ? "compose window opened — press Cmd-S to file it in Drafts (Mail can't auto-save an HTML draft)."
                     : "compose window opened for review (not sent)."
+            } else if !willExecute {
+                note = "dry-run: nothing written or opened; eml_path is the planned destination."
             }
             try Output.emit(tool: "mail", data: Result(eml_path: dest.path, subject: subject, to: toL,
-                has_html: html != nil, sender_address: senderAddress, opened: opened, note: note))
+                has_html: html != nil, sender_address: senderAddress, opened: opened, note: note,
+                dry_run: !willExecute), sandboxActive: sandboxActive)
         }
     }
 }
 
 struct DraftCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "draft", abstract: "Manage drafts: list | create | send | open | delete (dry-run for outbound).")
+    static let configuration = CommandConfiguration(commandName: "draft", abstract: "Manage drafts: list | create | send | open | delete (EXECUTES by default; --dry-run previews).")
     @OptionGroup var global: GlobalOptions
     @Argument(help: "Action: list | create | send | open | delete.") var action: String
     @Option(name: .long) var account: String?
@@ -737,6 +898,11 @@ struct DraftCommand: ParsableCommand {
 
     func run() throws {
         try runGuarded(tool: "mail") {
+            // Write-model v2 preamble (see SendCommand).
+            try TestMode.validateWriteEnvironment()
+            let sandboxActive = try TestMode.sandboxActive(flag: global.testMode)
+            let willExecute = try global.willExecute(defaultDryRun: false)
+
             guard ["list", "create", "send", "open", "delete"].contains(action) else {
                 throw AppleError.validation("draft action must be list, create, send, open, or delete.")
             }
@@ -752,7 +918,7 @@ struct DraftCommand: ParsableCommand {
                 return
             }
 
-            // create / delete — live Mail Drafts mutations behind the 3-flag gate + subject label.
+            // create / delete — live Mail Drafts mutations (sandbox: subject must carry the label).
             // send — routed to `mail send` (note); open — Mail-UI only (note).
             var executed = false
             var note: String?
@@ -761,15 +927,44 @@ struct DraftCommand: ParsableCommand {
             // envelope's `to` so the machine contract reflects who it actually went to.
             var draftSentTo: [String]?
             let subj = subject ?? draftSubject
-            if global.willExecute {
+            // Sandbox restriction (bucket 3): inside the sandbox, every draft the command
+            // touches must carry the test label; outside it, drafts are unrestricted (the
+            // oracle's manage_drafts operates on any draft on call).
+            func sandboxLabeled(_ s: String, verb: String) throws {
+                // EMPTY-SUBJECT guard first, in BOTH modes. The v1 prefix gate rejected "" as a
+                // side effect; the v2 split lost that, and unsandboxed `--subject ""` would have
+                // matched every UNTITLED draft (the script's subject read defaults to "" when it
+                // throws) — `draft send --subject "$UNSET_VAR"` sending a half-written compose,
+                // or `draft delete` sweeping every untitled draft (review-caught).
+                guard !s.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    throw AppleError.validation("--subject (or --draft-subject) must not be empty or whitespace for draft \(verb).")
+                }
+                if sandboxActive, !s.hasPrefix(TestMode.sandboxPrefix) {
+                    throw AppleError.mailSafety("sandbox active: draft --subject must be a labeled test item (start with \"\(TestMode.sandboxPrefix)\") to \(verb) — refusing.")
+                }
+            }
+            // PREVIEW HONESTY: subject presence/emptiness and the sandbox label restriction are
+            // computable without Mail, so they fire on BOTH paths — a dry-run must never preview
+            // clean for input --execute refuses (review-caught: the guards used to sit inside
+            // `if willExecute`, so `draft delete --dry-run --subject "Quarterly report"` under
+            // the sandbox previewed ok:true while execute refused 77).
+            guard let s = subj else {
+                throw AppleError.validation("--subject (or --draft-subject) is required for draft \(action).")
+            }
+            try sandboxLabeled(s, verb: action)
+            // A blank --account reaches the send/open/delete scripts' account filter as "" =
+            // EVERY account — refuse the silent widening; omitting the flag is the documented
+            // all-accounts spelling (review-caught).
+            if let account, account.trimmingCharacters(in: .whitespaces).isEmpty {
+                throw AppleError.validation("--account must not be empty or whitespace (omit it to search every account).")
+            }
+            // Bound BEFORE the mutation switch: splitRecipients throws on a control character,
+            // and firing that after `draft send` dispatched would report "refusing" for mail
+            // that already left (review-caught). Every action validates its recipients up front.
+            let requestedTo = try splitRecipients(to)
+            if willExecute {
                 switch action {
                 case "create":
-                    guard global.testMode && TestMode.isEnabled else {
-                        throw AppleError.mailSafety("creating a draft requires --test-mode AND APPLE_TEST_MODE=1; refusing.")
-                    }
-                    guard let s = subj, s.hasPrefix(TestMode.sandboxPrefix) else {
-                        throw AppleError.mailSafety("draft --subject must be a labeled test item (start with \"\(TestMode.sandboxPrefix)\") — refusing.")
-                    }
                     // Resolve --account to the draft's sender identity (manage_drafts create
                     // parity); live path only, strict not_found on an unknown account.
                     var senderAddress: String?
@@ -779,55 +974,59 @@ struct DraftCommand: ParsableCommand {
                         }
                         senderAddress = addr
                     }
-                    try script.createDraft(subject: s, body: body ?? "", to: splitRecipients(to),
-                                           cc: splitRecipients(cc), bcc: splitRecipients(bcc), sender: senderAddress)
+                    try script.createDraft(subject: s, body: body ?? "", to: requestedTo,
+                                           cc: try splitRecipients(cc), bcc: try splitRecipients(bcc), sender: senderAddress)
                     executed = true
                 case "delete":
-                    guard global.testMode && TestMode.isEnabled else {
-                        throw AppleError.mailSafety("deleting a draft requires --test-mode AND APPLE_TEST_MODE=1; refusing.")
-                    }
-                    guard let s = subj, s.hasPrefix(TestMode.sandboxPrefix) else {
-                        throw AppleError.mailSafety("draft --subject (or --draft-subject) must be a labeled test item to delete — refusing.")
-                    }
-                    let n = try script.deleteDrafts(subject: s, prefix: TestMode.sandboxPrefix)
+                    // Sandboxed deletes stay prefix-scoped inside the script too (defense in
+                    // depth); unsandboxed passes the empty prefix = any draft (oracle parity).
+                    // --account scopes which account's Drafts are swept (review-caught: the
+                    // script used to ignore it and delete matches across EVERY account).
+                    let n = try script.deleteDrafts(subject: s, prefix: sandboxActive ? TestMode.sandboxPrefix : "",
+                                                    account: account)
                     executed = n > 0
                     note = "deleted \(n) draft(s) matching \"\(s)\""
                 case "send":
                     // Deliver an EXISTING Drafts item (manage_drafts action=send). A draft's
-                    // recipients are PRE-SET, so the two-factor gate + label check fire here AND
+                    // recipients are PRE-SET. Inside the sandbox, the label check fires here AND
                     // the draft's own stored to/cc/bcc are verified against the self-only
-                    // allowlist INSIDE the single AppleScript call (find→verify→send, no TOCTOU) —
-                    // a draft addressed to any non-self recipient is refused fail-closed.
-                    guard global.testMode && TestMode.isEnabled else {
-                        throw AppleError.mailSafety("sending a draft requires --test-mode AND APPLE_TEST_MODE=1; refusing.")
-                    }
-                    guard let s = subj, s.hasPrefix(TestMode.sandboxPrefix) else {
-                        throw AppleError.mailSafety("draft --subject (or --draft-subject) must be a labeled test item to send — refusing.")
-                    }
-                    switch try script.sendDraft(subject: s, prefix: TestMode.sandboxPrefix,
-                                                account: account, allowlist: TestMode.allowedRecipients) {
+                    // allowlist INSIDE the single AppleScript call (find→verify→send, no TOCTOU).
+                    // Unsandboxed, the wildcard allowlist skips recipient restriction (oracle
+                    // parity: manage_drafts sends the draft as addressed, on call).
+                    switch try script.sendDraft(subject: s, prefix: sandboxActive ? TestMode.sandboxPrefix : "",
+                                                account: account, allowlist: outboundAllowlist(sandboxActive: sandboxActive)) {
                     case .sent(let recipients):
                         executed = true
                         draftSentTo = recipients
                         let who = recipients.isEmpty ? "its stored recipients" : recipients.joined(separator: ", ")
-                        note = "sent existing draft \"\(s)\" to \(who) (recipients verified self-only)"
+                        // The self-only claim is only true when the sandbox's allowlist actually
+                        // ran; unsandboxed, the draft goes out exactly as addressed.
+                        note = sandboxActive
+                            ? "sent existing draft \"\(s)\" to \(who) (recipients verified self-only)"
+                            : "sent existing draft \"\(s)\" to \(who) (as addressed — no sandbox recipient restriction)"
                     case .notFound:
                         let inAcct = account.map { " in account '\($0)'" } ?? ""
-                        throw AppleError.notFound("no labeled draft with the exact subject \"\(s)\"\(inAcct) found.")
+                        let labeled = sandboxActive ? "labeled " : ""
+                        throw AppleError.notFound("no \(labeled)draft with the exact subject \"\(s)\"\(inAcct) found.")
                     case .noRecipients:
                         throw AppleError.validation("draft \"\(s)\" has no valid recipients; add a recipient in Mail or recreate it.")
                     case .blocked(let addr):
                         let which = addr == "<empty-address>" ? "an empty/blank recipient address" : "'\(addr)'"
-                        throw AppleError.mailSafety("draft \"\(s)\" is addressed to \(which), which is not in the self-only test allowlist — refusing to send it. Set APPLE_TEST_RECIPIENTS to your own address(es) or fix the draft's recipients.")
+                        // Unsandboxed, the only reachable block is <empty-address> (the allowlist
+                        // comparison is skipped) — allowlist advice would be misleading there.
+                        let advice = sandboxActive
+                            ? "Set APPLE_TEST_RECIPIENTS to your own address(es) or fix the draft's recipients."
+                            : "Fix the draft's recipients in Mail."
+                        let why = sandboxActive ? ", which is not in the self-only test allowlist" : ""
+                        throw AppleError.mailSafety("draft \"\(s)\" is addressed to \(which)\(why) — refusing to send it. \(advice)")
+                    case .wrongWindow:
+                        throw AppleError.mailSafety("the outgoing message Mail surfaced for subject \"\(s)\" does not carry the draft's own stored recipients — most likely an OPEN compose window sharing that subject. Nothing was sent. Close the compose window (or send it manually) and retry.")
                     case .openFailed:
                         throw AppleError.upstream("draft \"\(s)\" was opened but Mail never surfaced its outgoing message within 30s; nothing was sent (a compose window may be open — close it or send manually), and the draft is unchanged — retry.")
                     case .sendError(let detail):
                         throw AppleError.upstream("draft \"\(s)\" opened and passed recipient verification, but Mail failed to dispatch it (error \(detail)); a compose window may be open — send it manually, or retry.")
                     }
-                default: // open — open an EXISTING labeled draft in a compose window (no send).
-                    guard let s = subj, s.hasPrefix(TestMode.sandboxPrefix) else {
-                        throw AppleError.mailSafety("draft --subject (or --draft-subject) must be a labeled test item to open — refusing.")
-                    }
+                default: // open — open an EXISTING draft in a compose window (no send).
                     let ok = try script.openDraft(subject: s, account: account)
                     executed = ok
                     note = ok ? "opened draft \"\(s)\" in a compose window (not sent)" : "no draft matching \"\(s)\" found"
@@ -835,11 +1034,11 @@ struct DraftCommand: ParsableCommand {
             }
             let payload: [String: AnyEncodableBox] = [
                 "action": AnyEncodableBox(action), "account": AnyEncodableBox(account),
-                "subject": AnyEncodableBox(subj), "to": AnyEncodableBox(draftSentTo ?? splitRecipients(to)),
-                "dry_run": AnyEncodableBox(!global.willExecute), "executed": AnyEncodableBox(executed),
+                "subject": AnyEncodableBox(subj), "to": AnyEncodableBox(draftSentTo ?? requestedTo),
+                "dry_run": AnyEncodableBox(!willExecute), "executed": AnyEncodableBox(executed),
                 "note": AnyEncodableBox(note),
             ]
-            try Output.emit(tool: "mail", data: payload)
+            try Output.emit(tool: "mail", data: payload, sandboxActive: sandboxActive)
         }
     }
 }

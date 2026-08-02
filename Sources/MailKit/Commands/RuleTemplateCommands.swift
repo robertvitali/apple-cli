@@ -33,7 +33,7 @@ struct RulesList: ParsableCommand {
 }
 
 struct RulesCreate: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "create", abstract: "Create a rule (dry-run preview by default; --execute to apply).")
+    static let configuration = CommandConfiguration(commandName: "create", abstract: "Create a rule (EXECUTES by default; --dry-run previews).")
     @OptionGroup var global: GlobalOptions
     @Option(name: .long) var name: String
     @Option(name: .long, help: "Condition 'field:operator:value[:header]' (repeatable).") var condition: [String] = []
@@ -43,12 +43,22 @@ struct RulesCreate: ParsableCommand {
 
     func run() throws {
         try runGuarded(tool: "mail") {
+            // Write-model v2 preamble.
+            try TestMode.validateWriteEnvironment()
+            let sandboxActive = try TestMode.sandboxActive(flag: global.testMode)
+            let willExecute = try global.willExecute(defaultDryRun: false)
+
             guard !condition.isEmpty else { throw AppleError.validation("at least one --condition is required.") }
             guard match == "all" || match == "any" else { throw AppleError.validation("--match must be 'all' or 'any'.") }
             let conditions = try condition.map { try RuleSchema.parseCondition($0) }
             let actions = try RuleSchema.parseActions(action)
-            let rule = RuleSchema.Rule(name: name, conditions: conditions, actions: actions, match_logic: match, enabled: !disabled)
-            guard global.willExecute else {
+            // `enabled` mirrors what EXECUTE will actually produce: a sandboxed create is
+            // force-DISABLED, and the preview must predict that, not echo --disabled back
+            // (review-caught: the sandboxed preview said enabled:true for a rule execute
+            // creates disabled).
+            let rule = RuleSchema.Rule(name: name, conditions: conditions, actions: actions, match_logic: match,
+                                       enabled: sandboxActive ? false : !disabled)
+            guard willExecute else {
                 // A dry-run must still faithfully PREDICT the execute outcome — a malformed
                 // `move_to=Archive` (missing the Account/Mailbox slash) previewing ok and then
                 // failing under --execute was the original create-vs-update divergence. But
@@ -61,52 +71,82 @@ struct RulesCreate: ParsableCommand {
                 // are rejected here too — not only on the live path, which a preview would
                 // otherwise misreport as fine.
                 try RuleLiveGuards.requireNoControlChars(name: name, conditions: conditions)
+                // Blockers are computed under the SAME sandboxActive the execute path uses, or
+                // the preview lies (docs/write-model-v2.md). The delete/forward_to blockers are
+                // UNWIRED capabilities and apply in both modes; the label/self-scope/match-any
+                // restrictions are the sandbox's.
                 var blockers = RuleLiveGuards.liveActionBlockers(actions)
-                if match == "any" {
-                    blockers.append("--match any: a live test rule must stay --match all so its test-label condition always constrains it")
-                }
-                // EVERY live refusal must be reported, not just the three relaxations. A preview
-                // that omits one and prints `live_blockers: []` makes the affirmative claim that
-                // execute would accept the rule — the exact preview/execute divergence this whole
-                // block exists to prevent.
-                if !name.hasPrefix(TestMode.sandboxPrefix) {
-                    blockers.append("--name must start with \"\(TestMode.sandboxPrefix)\" for a live create")
-                }
-                if !RuleLiveGuards.isSelfScoped(conditions) {
-                    blockers.append("conditions: a live test rule must include a subject condition bound to \"\(TestMode.sandboxPrefix)\" so it only ever acts on test mail")
+                if sandboxActive {
+                    if match == "any" {
+                        blockers.append("--match any: a sandboxed rule must stay --match all so its test-label condition always constrains it")
+                    }
+                    // EVERY live refusal COMPUTABLE WITHOUT MAIL must be reported, not just the
+                    // three relaxations. A preview that omits one and prints `live_blockers: []`
+                    // makes the affirmative claim that execute would accept the rule — the exact
+                    // preview/execute divergence this whole block exists to prevent. DOCUMENTED
+                    // EXCEPTION: the duplicate-NAME refusal on the execute path requires reading
+                    // Mail's rule list, which this preview deliberately never does (dry-runs stay
+                    // Mail-free and CI-runnable) — a colliding name previews clean here and is
+                    // refused with a clear validation_error at --execute (fail-closed; CHANGELOG'd).
+                    if !name.hasPrefix(TestMode.sandboxPrefix) {
+                        blockers.append("--name must start with \"\(TestMode.sandboxPrefix)\" for a sandboxed create")
+                    }
+                    if !RuleLiveGuards.isSelfScoped(conditions) {
+                        blockers.append("conditions: a sandboxed rule must include a subject condition bound to \"\(TestMode.sandboxPrefix)\" so it only ever acts on test mail")
+                    }
                 }
                 if blockers.isEmpty { _ = try RuleLiveGuards.liveActionPlan(actions) }
-                try emitRulePreview(rule, willExecute: false, json: global.json, liveBlockers: blockers)
+                try emitRulePreview(rule, willExecute: false, json: global.json, liveBlockers: blockers,
+                                    sandboxActive: sandboxActive)
                 return
             }
-            // ---- Live create: SELF-SCOPED, non-destructive, force-disabled. ----
-            // A test rule must be UNABLE to affect real mail even if later enabled by the same
-            // agent: (a) bound to the test label so it only ever matches test mail, (b) no
-            // destructive/redirect action, (c) force-disabled. The (a)+(b) invariant lives in
-            // RuleLiveGuards so `rules create` and `rules update` enforce it identically.
-            guard global.testMode && TestMode.isEnabled else {
-                throw AppleError.mailSafety("creating a rule requires --test-mode AND APPLE_TEST_MODE=1; refusing. The default dry-run previews instead.")
-            }
-            try RuleLiveGuards.requireLabeledName(name)
+            // ---- Live create (write-model v2). Sandboxed: SELF-SCOPED, non-destructive,
+            // force-disabled — a sandboxed rule must be UNABLE to affect real mail even if later
+            // enabled: (a) bound to the test label, (b) no destructive/redirect action, (c)
+            // force-disabled. Unsandboxed: the rule is created AS SPECIFIED (the oracle's
+            // create_rule creates on call) — delete/forward_to remain refused in liveActionPlan
+            // because they are unwired in MailScript, a tracked capability gap, not a gate.
             try RuleLiveGuards.requireNoControlChars(name: name, conditions: conditions)
-            try RuleLiveGuards.requireSelfScoped(conditions: conditions, match: match)   // enforces --match all
+            if sandboxActive {
+                try RuleLiveGuards.requireLabeledName(name)
+                try RuleLiveGuards.requireSelfScoped(conditions: conditions, match: match)   // enforces --match all
+            }
             let plan = try RuleLiveGuards.liveActionPlan(actions)
             let conds = conditions.map { (type: $0.field, op: $0.operator, value: $0.value, header: $0.header_name ?? "") }
-            // match=all is enforced by requireSelfScoped, so the rule is an AND rule — thread it.
+            let createEnabled = sandboxActive ? false : !disabled
+            let createMatchAll = sandboxActive ? true : (match == "all")
             let script = MailScript()
-            try script.createRule(name: name, enabled: false, matchAll: true, conditions: conds, plan: plan)
-            // VERIFY the conditions attached, exactly as the recreate path does. Mail's
-            // `make new rule condition` sits in a bare `try` that swallows every error and the
-            // script still returns "ok", so a silently-dropped condition would leave a labeled
-            // rule MISSING its test-label conjunct — and `rules enable` trusts the NAME alone
-            // (the documented LABEL-TRUST BOUNDARY), so force-disabling only defers the problem.
-            // A 0-condition rule matches ALL mail.
-            if let created = try? script.listRules().first(where: { $0.name == name }) {
-                let attached = (try? script.ruleConditionCount(index: created.index)) ?? -1
-                if attached != conds.count {
-                    try? script.deleteRule(index: created.index)
-                    throw AppleError.upstream("rule create attached \(attached)/\(conds.count) conditions — removed the malformed rule rather than leave one whose test-label condition may be missing (a 0-condition rule matches ALL mail).")
-                }
+            // Refuse a DUPLICATE NAME up front, in both modes. Mail's `make new rule` with an
+            // already-taken name silently mangles the NEW rule's conditions (documented at the
+            // recreate path below) — and worse, the post-create verification resolves by name, so
+            // with a duplicate it would bind the PRE-EXISTING rule and the mismatch cleanup could
+            // delete the operator's REAL rule (review-caught). RulesUpdate's recreate already
+            // refuses collisions; create gets the same guard.
+            if try script.listRules().contains(where: { $0.name == name }) {
+                throw AppleError.validation("a rule named '\(name)' already exists — Mail silently mangles a duplicate-name create; pick a different --name or use `rules update`.")
+            }
+            // Create DISABLED regardless of mode, VERIFY the conditions attached, and only THEN
+            // enable (mirrors the recreate path's documented ordering). Mail's `make new rule
+            // condition` sits in a bare `try` that swallows every error and the script still
+            // returns "ok" — creating ENABLED first would let a silently-condition-less rule
+            // (which matches ALL mail) act on real messages in the window before verification,
+            // and a failed readback would leave it enabled permanently (review-caught). With
+            // create-disabled-first, every failure mode leaves the rule INERT.
+            try script.createRule(name: name, enabled: false, matchAll: createMatchAll, conditions: conds, plan: plan)
+            // `last(where:)` — Mail appends new rules, so the LAST name-match is the one just
+            // created (belt-and-braces on top of the duplicate-name refusal above). A readback
+            // failure is a HARD error here: the rule stays disabled (fail-safe), the operator is
+            // told what state it is in.
+            guard let created = try? script.listRules().last(where: { $0.name == name }) else {
+                throw AppleError.upstream("rule '\(name)' was created (disabled) but could not be read back to verify its conditions — it was NOT enabled. Inspect it in Mail.app, then `rules enable` it or delete it.")
+            }
+            let attached = (try? script.ruleConditionCount(index: created.index)) ?? -1
+            if attached != conds.count {
+                try? script.deleteRule(index: created.index)
+                throw AppleError.upstream("rule create attached \(attached)/\(conds.count) conditions — removed the malformed rule rather than leave one whose conditions may be missing (a 0-condition rule matches ALL mail).")
+            }
+            if createEnabled {
+                try script.updateRuleMeta(index: created.index, name: nil, enabled: true, matchAll: nil, plan: nil)
             }
             // Oracle A `create_rule` returns `rule_index` (the new total rule count) and `name`.
             // Mail exposes no "index of this rule" property, so re-read the list and take the
@@ -118,15 +158,17 @@ struct RulesCreate: ParsableCommand {
                 // `name` + `rule_index` are oracle A's wire names; `created_rule` is the CLI's
                 // original key, kept so existing consumers don't break (additive → MINOR).
                 "name": AnyEncodableBox(name), "rule_index": AnyEncodableBox(newIndex),
-                "actions": AnyEncodableBox(plan.tokens), "match_logic": AnyEncodableBox("all"),
-                "enabled": AnyEncodableBox(false), "dry_run": AnyEncodableBox(false), "executed": AnyEncodableBox(true),
-                "note": AnyEncodableBox("created SELF-SCOPED to the test label + DISABLED — it can only ever act on apple-cli-test mail; `rules enable <index>` to activate")])
+                "actions": AnyEncodableBox(plan.tokens), "match_logic": AnyEncodableBox(createMatchAll ? "all" : "any"),
+                "enabled": AnyEncodableBox(createEnabled), "dry_run": AnyEncodableBox(false), "executed": AnyEncodableBox(true),
+                "note": AnyEncodableBox(sandboxActive
+                    ? "sandbox: created SELF-SCOPED to the test label + DISABLED — it can only ever act on apple-cli-test mail; `rules enable <index>` to activate"
+                    : nil)], sandboxActive: sandboxActive)
         }
     }
 }
 
 struct RulesUpdate: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "update", abstract: "Update a rule by index (patch; dry-run by default).")
+    static let configuration = CommandConfiguration(commandName: "update", abstract: "Update a rule by index (patch; EXECUTES by default; --dry-run previews).")
     @OptionGroup var global: GlobalOptions
     @Argument(help: "1-based rule index (from `rules list`).") var index: Int
     @Option(name: .long) var name: String?
@@ -139,6 +181,11 @@ struct RulesUpdate: ParsableCommand {
 
     func run() throws {
         try runGuarded(tool: "mail") {
+            // Write-model v2 preamble.
+            try TestMode.validateWriteEnvironment()
+            let sandboxActive = try TestMode.sandboxActive(flag: global.testMode)
+            let willExecute = try global.willExecute(defaultDryRun: false)
+
             if let match, match != "all", match != "any" { throw AppleError.validation("--match must be 'all' or 'any'.") }
             let conds = condition.isEmpty ? nil : try condition.map { try RuleSchema.parseCondition($0) }
             // parseActions enforces the unsupported-action refusal (run-AppleScript/redirect/reply/sound/color).
@@ -155,23 +202,28 @@ struct RulesUpdate: ParsableCommand {
             // OR-rule and a delete/forward_to action are real oracle capabilities, and a preview
             // that refuses to describe them loses the capability from the surface entirely. Under
             // --execute they are still hard refusals (below).
+            // Blockers computed under the SAME sandboxActive the execute path uses, or the
+            // preview lies. delete/forward_to blockers are unwired capabilities (both modes);
+            // the label/self-scope/match-any restrictions are the sandbox's.
             var blockers: [String] = []
-            if match == "any" {
-                blockers.append("--match any: a live test rule must stay --match all so its test-label condition always constrains it")
-            }
             if let acts { blockers.append(contentsOf: RuleLiveGuards.liveActionBlockers(acts)) }
-            // requireSelfScoped used to run BEFORE the dry-run guard, so a condition set with no
-            // test-label conjunct exited 77 in preview. Moving the guard above it dropped that
-            // refusal from the preview entirely — reported as `live_blockers: []`, i.e. "execute
-            // would accept this", for a rule execute refuses. Report it instead.
-            if let conds, !RuleLiveGuards.isSelfScoped(conds) {
-                blockers.append("conditions: a live test rule must include a subject condition bound to \"\(TestMode.sandboxPrefix)\" so it only ever acts on test mail")
-            }
-            if let name, !name.hasPrefix(TestMode.sandboxPrefix) {
-                blockers.append("--name must keep the \"\(TestMode.sandboxPrefix)\" label for a live rename")
+            if sandboxActive {
+                if match == "any" {
+                    blockers.append("--match any: a sandboxed rule must stay --match all so its test-label condition always constrains it")
+                }
+                // requireSelfScoped used to run BEFORE the dry-run guard, so a condition set with no
+                // test-label conjunct exited 77 in preview. Moving the guard above it dropped that
+                // refusal from the preview entirely — reported as `live_blockers: []`, i.e. "execute
+                // would accept this", for a rule execute refuses. Report it instead.
+                if let conds, !RuleLiveGuards.isSelfScoped(conds) {
+                    blockers.append("conditions: a sandboxed rule must include a subject condition bound to \"\(TestMode.sandboxPrefix)\" so it only ever acts on test mail")
+                }
+                if let name, !name.hasPrefix(TestMode.sandboxPrefix) {
+                    blockers.append("--name must keep the \"\(TestMode.sandboxPrefix)\" label for a sandboxed rename")
+                }
             }
 
-            guard global.willExecute else {
+            guard willExecute else {
                 // Still fail the preview on MALFORMED input, so a dry-run keeps predicting the
                 // execute outcome for everything that is not a deliberate safety refusal.
                 try RuleLiveGuards.requireNoControlChars(name: name, conditions: conds ?? [])
@@ -182,22 +234,24 @@ struct RulesUpdate: ParsableCommand {
                 if global.json {
                     try Output.emit(tool: "mail", data: ["dry_run": AnyEncodableBox(true), "patch": AnyEncodableBox(patch),
                         "would_recreate": AnyEncodableBox(recreates), "live_blockers": AnyEncodableBox(blockers),
-                        "note": AnyEncodableBox(note)])
+                        "note": AnyEncodableBox(note)], sandboxActive: sandboxActive)
                 } else {
                     print("Would update rule \(index) (dry-run; \(recreates ? "condition change → delete-and-recreate" : "in-place"))")
                     for b in blockers { print("  would be refused live: \(b)") }
                 }
                 return
             }
-            if match == "any" {   // a live test rule must stay match=all so its label always constrains it
-                throw AppleError.mailSafety("a live test rule must stay --match all so its label condition always constrains it — refusing to set --match any.")
+            if sandboxActive {
+                if match == "any" {   // a sandboxed rule must stay match=all so its label always constrains it
+                    throw AppleError.mailSafety("sandbox active: a sandboxed rule must stay --match all so its label condition always constrains it — refusing to set --match any.")
+                }
+                if let name { try RuleLiveGuards.requireLabeledName(name) }    // a rename must keep the label
+                if let conds { try RuleLiveGuards.requireSelfScoped(conditions: conds, match: "all") }
             }
-            if let name { try RuleLiveGuards.requireLabeledName(name) }        // a rename must keep the label
             try RuleLiveGuards.requireNoControlChars(name: name, conditions: conds ?? [])
-            if let conds { try RuleLiveGuards.requireSelfScoped(conditions: conds, match: "all") }
             let plan = try acts.map { try RuleLiveGuards.liveActionPlan($0) }
-            // ---- Live. Target MUST be a labeled test rule (requireLabeledRule fail-closes on real rules). ----
-            let target = try requireLabeledRule(index: index, testMode: global.testMode)
+            // ---- Live. Inside the sandbox the target must be a labeled test rule. ----
+            let target = try requireLabeledRule(index: index, sandboxActive: sandboxActive)
             // Mirror the oracle's `_check_supported_actions`: refuse to touch a rule whose EXISTING
             // actions include something the CLI can't model (run-script/redirect/reply-text/etc.).
             // In place we'd silently preserve+misrepresent them; on recreate we'd silently drop them.
@@ -215,11 +269,15 @@ struct RulesUpdate: ParsableCommand {
                 // visible `rules enable` (or pass --condition to route through the self-scoping
                 // recreate path). A CLI-authored rule is always created disabled + self-scoped, so this
                 // never blocks the normal flow.
-                if enabled == true, let p = plan, (p.moveTo != nil || p.copyTo != nil) {
-                    throw AppleError.mailSafety("wiring move_to/copy_to on an in-place update cannot also ENABLE the rule in the same command (its existing conditions are not re-verified self-scoped) — omit --enabled and enable separately after review, or pass --condition to route through the self-scoping recreate path.")
+                if sandboxActive, enabled == true, let p = plan, (p.moveTo != nil || p.copyTo != nil) {
+                    throw AppleError.mailSafety("sandbox active: wiring move_to/copy_to on an in-place update cannot also ENABLE the rule in the same command (its existing conditions are not re-verified self-scoped) — omit --enabled and enable separately after review, or pass --condition to route through the self-scoping recreate path.")
                 }
+                // `map` so `--match any` actually applies (false = set OR). The old
+                // `match == "all" ? true : nil` collapsed "any" to nil = "don't change" — a
+                // silent no-op reported as executed:true once the sandbox-only refusal stopped
+                // covering the unsandboxed path (review-caught).
                 try MailScript().updateRuleMeta(index: target.index, name: name, enabled: enabled,
-                                                matchAll: match == "all" ? true : nil, plan: plan)
+                                                matchAll: match.map { $0 == "all" }, plan: plan)
                 try Output.emit(tool: "mail", data: [
                     "updated_rule_index": AnyEncodableBox(target.index),
                     // `rule_index` is oracle A update_rule's wire name; `updated_rule_index` is
@@ -233,7 +291,7 @@ struct RulesUpdate: ParsableCommand {
                     // (wholesale replace, matching the oracle) — the `patch.actions` ARE the rule's
                     // full modeled action set afterward; rules carrying unmodeled actions were refused
                     // above, so nothing unmanaged survives.
-                    "note": AnyEncodableBox(plan != nil ? "patched in place; supported actions reset to the given set (wholesale replace)" : "patched in place")])
+                    "note": AnyEncodableBox(plan != nil ? "patched in place; supported actions reset to the given set (wholesale replace)" : "patched in place")], sandboxActive: sandboxActive)
                 return
             }
             // ---- Condition replacement → whole-rule DELETE-AND-RECREATE. Two Mail bugs force this
@@ -247,8 +305,12 @@ struct RulesUpdate: ParsableCommand {
             // (readRuleScalars reads only the mark flags). ----
             let old = try MailScript().readRuleScalars(index: target.index)
             let mergedName = name ?? old.name
-            try RuleLiveGuards.requireLabeledName(mergedName)          // a preserved/renamed name must be labeled
+            if sandboxActive { try RuleLiveGuards.requireLabeledName(mergedName) }  // sandboxed: preserved/renamed name stays labeled
             let mergedEnabled = enabled ?? old.enabled
+            // Match logic: an explicit --match wins; else PRESERVE the rule's own OR/AND (the old
+            // hardcoded `matchAll: true` silently converted a real OR rule to AND — review-caught).
+            // Sandboxed recreates still force match=all so the label condition always constrains.
+            let mergedMatchAll = sandboxActive ? true : (match.map { $0 == "all" } ?? old.matchAll)
             let mergedPlan: RuleLiveGuards.LiveActionPlan
             if let plan {
                 mergedPlan = plan
@@ -274,10 +336,10 @@ struct RulesUpdate: ParsableCommand {
             }
             // Delete-old-first is forced by the duplicate-name bug, so if the create then fails the old
             // rule is GONE — surface the spec needed to rebuild it by hand in every failure path.
-            let recovery = "name='\(mergedName)' match=all enabled=\(mergedEnabled) conditions=[\(condTriples.map { "\($0.type):\($0.op):\($0.value)" }.joined(separator: ", "))] actions=[\(mergedPlan.tokens.joined(separator: ", "))]"
+            let recovery = "name='\(mergedName)' match=\(mergedMatchAll ? "all" : "any") enabled=\(mergedEnabled) conditions=[\(condTriples.map { "\($0.type):\($0.op):\($0.value)" }.joined(separator: ", "))] actions=[\(mergedPlan.tokens.joined(separator: ", "))]"
             try MailScript().deleteRule(index: target.index)                                // 1) old gone → name unique
             do {
-                try MailScript().createRule(name: mergedName, enabled: false, matchAll: true,   // 2) create DISABLED
+                try MailScript().createRule(name: mergedName, enabled: false, matchAll: mergedMatchAll,   // 2) create DISABLED
                                             conditions: condTriples, plan: mergedPlan)
             } catch {
                 throw AppleError.upstream("rule recreate FAILED to create the replacement AFTER deleting the old rule — the rule is GONE. Recreate it in Mail.app: \(recovery). (underlying: \(error))")
@@ -303,54 +365,58 @@ struct RulesUpdate: ParsableCommand {
                 "name": AnyEncodableBox(mergedName),
                 "conditions_attached": AnyEncodableBox(attached),
                 "enabled": AnyEncodableBox(mergedEnabled),
+                "match_logic": AnyEncodableBox(mergedMatchAll ? "all" : "any"),
                 "actions": AnyEncodableBox(mergedPlan.tokens),
                 "patch": AnyEncodableBox(patch), "recreated": AnyEncodableBox(true),
                 "dry_run": AnyEncodableBox(false), "executed": AnyEncodableBox(true),
-                "note": AnyEncodableBox("condition change → delete-and-recreated (Mail can't delete a rule condition); created disabled, conditions verified, re-enabled if it was enabled. DIVERGES from the MCP in-place update: rule MOVED TO END of list, and actions RESET to [\(mergedPlan.tokens.joined(separator: ", "))] — pass --action (move_to/copy_to/mark_read/mark_flagged/flag_color) to set them explicitly, since a prior action NOT re-passed is not read back off the old rule.")])
+                "note": AnyEncodableBox("condition change → delete-and-recreated (Mail can't delete a rule condition); created disabled, conditions verified, re-enabled if it was enabled. DIVERGES from the MCP in-place update: rule MOVED TO END of list, and actions RESET to [\(mergedPlan.tokens.joined(separator: ", "))] — pass --action (move_to/copy_to/mark_read/mark_flagged/flag_color) to set them explicitly, since a prior action NOT re-passed is not read back off the old rule.")], sandboxActive: sandboxActive)
         }
     }
 }
 
 struct RulesDelete: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "delete", abstract: "Delete a rule by index (irreversible; --execute to apply).")
+    static let configuration = CommandConfiguration(commandName: "delete", abstract: "Delete a rule by index (irreversible; EXECUTES by default; --dry-run previews).")
     @OptionGroup var global: GlobalOptions
     @Argument(help: "1-based rule index.") var index: Int
     func run() throws {
         try runGuarded(tool: "mail") {
-            guard global.willExecute else {
-                try Output.emit(tool: "mail", data: ["would_delete_rule_index": AnyEncodableBox(index), "dry_run": AnyEncodableBox(true), "note": AnyEncodableBox(Optional<String>.none)])
+            // Write-model v2 preamble.
+            try TestMode.validateWriteEnvironment()
+            let sandboxActive = try TestMode.sandboxActive(flag: global.testMode)
+            let willExecute = try global.willExecute(defaultDryRun: false)
+
+            guard willExecute else {
+                try Output.emit(tool: "mail", data: ["would_delete_rule_index": AnyEncodableBox(index), "dry_run": AnyEncodableBox(true), "note": AnyEncodableBox(Optional<String>.none)], sandboxActive: sandboxActive)
                 return
             }
-            let r = try requireLabeledRule(index: index, testMode: global.testMode)
+            let r = try requireLabeledRule(index: index, sandboxActive: sandboxActive)
             try MailScript().deleteRule(index: r.index)
             try Output.emit(tool: "mail", data: ["deleted_rule_index": AnyEncodableBox(index), "rule_name": AnyEncodableBox(r.name),
              // `rule_index` + `deleted_name` are oracle A delete_rule's wire names.
              "rule_index": AnyEncodableBox(index), "deleted_name": AnyEncodableBox(r.name),
-             "dry_run": AnyEncodableBox(false), "executed": AnyEncodableBox(true)])
+             "dry_run": AnyEncodableBox(false), "executed": AnyEncodableBox(true)], sandboxActive: sandboxActive)
         }
     }
 }
 
 struct RulesEnable: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "enable", abstract: "Enable a rule by index.")
+    static let configuration = CommandConfiguration(commandName: "enable", abstract: "Enable a rule by index (EXECUTES by default; --dry-run previews).")
     @OptionGroup var global: GlobalOptions
     @Argument var index: Int
     func run() throws { try setEnabled(index: index, enabled: true, global: global) }
 }
 struct RulesDisable: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "disable", abstract: "Disable a rule by index.")
+    static let configuration = CommandConfiguration(commandName: "disable", abstract: "Disable a rule by index (EXECUTES by default; --dry-run previews).")
     @OptionGroup var global: GlobalOptions
     @Argument var index: Int
     func run() throws { try setEnabled(index: index, enabled: false, global: global) }
 }
 
-/// Resolve a rule by 1-based index and FAIL-CLOSED unless test-mode is on AND the rule's name is
-/// a labeled `apple-cli-test…` item — so an autonomous run can only toggle/delete rules it
-/// created, never a pre-existing real rule (AGENTS.md dangerous-action rule).
-func requireLabeledRule(index: Int, testMode: Bool) throws -> MailScript.ScriptRule {
-    guard testMode && TestMode.isEnabled else {
-        throw AppleError.mailSafety("live rule mutation requires --test-mode AND APPLE_TEST_MODE=1; refusing. The default dry-run previews instead.")
-    }
+/// Resolve a rule by 1-based index (write-model v2). Inside the sandbox the rule's name must
+/// be a labeled `apple-cli-test…` item — an agent run can only toggle/delete rules it created,
+/// never a pre-existing real rule. Outside the sandbox, any rule resolves (the oracle's rule
+/// ops operate on any rule on call).
+func requireLabeledRule(index: Int, sandboxActive: Bool) throws -> MailScript.ScriptRule {
     let rules = try MailScript().listRules()
     guard let r = rules.first(where: { $0.index == index }) else {
         // Oracle A raises MailRuleNotFoundError → `error_type: "rule_not_found"` on every rule op.
@@ -361,25 +427,30 @@ func requireLabeledRule(index: Int, testMode: Bool) throws -> MailScript.ScriptR
                          message: "no rule at index \(index) (see `rules list`).",
                          exitCode: AppleExit.notFound)
     }
-    guard r.name.hasPrefix(TestMode.sandboxPrefix) else {
-        throw AppleError.mailSafety("rule \(index) ('\(r.name)') is not a labeled test item (must start with \"\(TestMode.sandboxPrefix)\") — refusing to mutate a real rule.")
+    if sandboxActive, !r.name.hasPrefix(TestMode.sandboxPrefix) {
+        throw AppleError.mailSafety("sandbox active: rule \(index) ('\(r.name)') is not a labeled test item (must start with \"\(TestMode.sandboxPrefix)\") — refusing to mutate it.")
     }
     return r
 }
 
 private func setEnabled(index: Int, enabled: Bool, global: GlobalOptions) throws {
     try runGuarded(tool: "mail") {
-        guard global.willExecute else {
-            try Output.emit(tool: "mail", data: ["rule_index": AnyEncodableBox(index), "would_set_enabled": AnyEncodableBox(enabled), "dry_run": AnyEncodableBox(true), "note": AnyEncodableBox(Optional<String>.none)])
+        // Write-model v2 preamble.
+        try TestMode.validateWriteEnvironment()
+        let sandboxActive = try TestMode.sandboxActive(flag: global.testMode)
+        let willExecute = try global.willExecute(defaultDryRun: false)
+
+        guard willExecute else {
+            try Output.emit(tool: "mail", data: ["rule_index": AnyEncodableBox(index), "would_set_enabled": AnyEncodableBox(enabled), "dry_run": AnyEncodableBox(true), "note": AnyEncodableBox(Optional<String>.none)], sandboxActive: sandboxActive)
             return
         }
-        let r = try requireLabeledRule(index: index, testMode: global.testMode)
+        let r = try requireLabeledRule(index: index, sandboxActive: sandboxActive)
         try MailScript().setRuleEnabled(index: r.index, enabled: enabled)
         try Output.emit(tool: "mail", data: ["rule_index": AnyEncodableBox(index), "rule_name": AnyEncodableBox(r.name), "set_enabled": AnyEncodableBox(enabled),
          // `name` + `enabled` are oracle A set_rule_enabled's wire names; `rule_name` +
          // `set_enabled` are the CLI's original keys, kept for existing consumers.
          "name": AnyEncodableBox(r.name), "enabled": AnyEncodableBox(enabled),
-         "executed": AnyEncodableBox(true), "dry_run": AnyEncodableBox(false)])
+         "executed": AnyEncodableBox(true), "dry_run": AnyEncodableBox(false)], sandboxActive: sandboxActive)
     }
 }
 
@@ -392,13 +463,14 @@ private func setEnabled(index: Int, enabled: Bool, global: GlobalOptions) throws
 /// A preview that cannot represent a capability is strictly less useful than one that represents
 /// it and says plainly what would be refused.
 func emitRulePreview(_ rule: RuleSchema.Rule, willExecute: Bool, json: Bool,
-                     liveBlockers: [String] = []) throws {
+                     liveBlockers: [String] = [], sandboxActive: Bool = false) throws {
     let note = liveBlockers.isEmpty ? nil
         : "preview only — `--execute` would refuse this rule: " + liveBlockers.joined(separator: "; ")
     if json {
         try Output.emit(tool: "mail", data: [
             "dry_run": AnyEncodableBox(!willExecute), "rule": AnyEncodableBox(rule),
-            "live_blockers": AnyEncodableBox(liveBlockers), "note": AnyEncodableBox(note)])
+            "live_blockers": AnyEncodableBox(liveBlockers), "note": AnyEncodableBox(note)],
+            sandboxActive: sandboxActive)
     } else {
         print("Rule '\(rule.name)' (\(rule.match_logic), \(rule.enabled ? "enabled" : "disabled")) — dry-run: \(!willExecute)")
         for b in liveBlockers { print("  would be refused live: \(b)") }
@@ -434,34 +506,58 @@ struct TemplatesGet: ParsableCommand {
 }
 
 struct TemplatesSave: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "save", abstract: "Create or overwrite a template.")
+    static let configuration = CommandConfiguration(commandName: "save", abstract: "Create or overwrite a template (EXECUTES by default; --dry-run previews).")
     @OptionGroup var global: GlobalOptions
     @Argument var name: String
     @Option(name: .long, help: "Template body (may contain {placeholder} tokens).") var body: String
     @Option(name: .long, help: "Optional subject template.") var subject: String?
     func run() throws {
         try runGuarded(tool: "mail") {
+            // Write-model v2 preamble. This command was the spec's named bucket-2 defect: it had
+            // NO willExecute branch and wrote despite --dry-run. It now previews faithfully; the
+            // execute-path envelope keeps its original shape (the template object) unchanged.
+            try TestMode.validateWriteEnvironment()
+            let sandboxActive = try TestMode.sandboxActive(flag: global.testMode)
+            let willExecute = try global.willExecute(defaultDryRun: false)
+
+            // Preview honesty: the same PURE validations the write performs, on both paths —
+            // adding the willExecute branch had made `--dry-run` skip them, so a preview could
+            // name a save execute refuses with 64 (review-caught).
+            try TemplateStore.validateSave(name: name, body: body, subject: subject)
+            guard willExecute else {
+                try Output.emit(tool: "mail", data: ["would_save_template": AnyEncodableBox(name),
+                    "has_subject": AnyEncodableBox(subject != nil), "dry_run": AnyEncodableBox(true)], sandboxActive: sandboxActive)
+                return
+            }
             let tpl = try TemplateStore().save(name: name, body: body, subject: subject)
-            try Output.emit(tool: "mail", data: tpl)
+            try Output.emit(tool: "mail", data: tpl, sandboxActive: sandboxActive)
         }
     }
 }
 
 struct TemplatesDelete: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "delete", abstract: "Delete a template (irreversible; --execute to apply).")
+    static let configuration = CommandConfiguration(commandName: "delete", abstract: "Delete a template (irreversible; EXECUTES by default; --dry-run previews).")
     @OptionGroup var global: GlobalOptions
     @Argument var name: String
     func run() throws {
         try runGuarded(tool: "mail") {
+            // Write-model v2 preamble. Oracle A wraps delete_template in MCP elicitation; a CLI
+            // has no elicitation channel — the explicit invocation is the accept (documented
+            // divergence, docs/write-model-v2.md bucket 4). Executes by default.
+            try TestMode.validateWriteEnvironment()
+            let sandboxActive = try TestMode.sandboxActive(flag: global.testMode)
+            let willExecute = try global.willExecute(defaultDryRun: false)
+
             let store = TemplateStore()
             _ = try store.get(name)   // 404 if missing
-            if global.willExecute {
+            if willExecute {
                 try store.delete(name)
                 // `name` mirrors the oracle's delete_template wire key; `deleted_template` is the
-                // CLI's original name, kept so existing consumers don't break.
-                try Output.emit(tool: "mail", data: ["deleted_template": AnyEncodableBox(name), "name": AnyEncodableBox(name), "executed": AnyEncodableBox(true)])
+                // CLI's original name, kept so existing consumers don't break. dry_run: false is
+                // EXPLICIT — under v2 it is how a caller distinguishes previewed from done.
+                try Output.emit(tool: "mail", data: ["deleted_template": AnyEncodableBox(name), "name": AnyEncodableBox(name), "executed": AnyEncodableBox(true), "dry_run": AnyEncodableBox(false)], sandboxActive: sandboxActive)
             } else {
-                try Output.emit(tool: "mail", data: ["would_delete_template": AnyEncodableBox(name), "dry_run": AnyEncodableBox(true)])
+                try Output.emit(tool: "mail", data: ["would_delete_template": AnyEncodableBox(name), "dry_run": AnyEncodableBox(true)], sandboxActive: sandboxActive)
             }
         }
     }

@@ -159,13 +159,18 @@ accidental *unsandboxed* writes — each fails safe for its own model).
   `APPLE_TEST_MODE` refuses even when `--test-mode` is passed — is computed once per command
   and threaded down. This also gives the swift logic tier both branches as pure calls — no
   env mutation in tests.
-- Help strings land with the flip, specified here verbatim:
-  - `--dry-run`: "Preview without performing the write (writes execute by default; --dry-run
-    always wins)."
-  - `--execute`: "Perform the write (the default; kept for explicitness and to override
-    APPLE_DRY_RUN=1)."
-  - `--test-mode`: "Engage the test sandbox: writes restricted to apple-cli-test-labeled items,
-    sends to APPLE_TEST_RECIPIENTS only. Equivalent to APPLE_TEST_MODE=1."
+- Help strings land with the flip. AS LANDED (Mail flip; wording adjusted from the draft below
+  to stay truthful during the STAGED rollout, where un-flipped domains still enforce v1 —
+  the shared GlobalOptions help must describe both):
+  - `--dry-run`: "Preview a write/destructive operation without performing it (always wins —
+    over --execute, APPLE_DRY_RUN, and any surface default)."
+  - `--execute`: "Explicitly perform the write (write-model-v2 domains execute by default;
+    this also overrides APPLE_DRY_RUN and any remaining dry-run defaults)."
+  - `--test-mode`: "Engage the opt-in SANDBOX: writes restricted to apple-cli-test-labeled
+    items and self-only allowlisted recipients (APPLE_TEST_RECIPIENTS). Domains not yet on
+    write-model v2 additionally require it (with APPLE_TEST_MODE=1) for live writes."
+  The final flip commit may tighten these to the shorter single-model wording once no v1
+  domain remains.
 
 ## Gate-site inventory (exhaustive, from a mechanical sweep — 109 references, 22 files)
 
@@ -296,3 +301,33 @@ reverting the model. The sandbox itself is the operator's per-invocation rollbac
 6. Documentation pass: DESIGN.md, port-specs, INTEGRATION-STATUS, parity-audit addendum.
 7. Re-run the 2026-07-31 audit — the write-gate HIGHs must flip to closed; 1.0.0 remains
    separately gated on explicit operator approval.
+
+## Rollout status
+
+- 2026-08-01 — steps 1–3 landed (spec 2dfbf53; AppleKit core 3188cc5; sweep + suite lint
+  b48322c). **Mail flip landed** (step 4, first domain): all Mail write commands on the v2
+  preamble, per-surface defaults per the table (trash surface keeps dry-run), help/doc sweep
+  included, `mail.bats` migrated (sandbox-refusal / env-brake / operator-gate shapes; two
+  permanent marker tests pin the per-surface defaults). Bucket-2 closed for Mail: TemplatesSave,
+  DraftRich, `send --out`, and `analytics dashboard` (which also gained `confineWriteDestination`
+  on `--out`) all honor `--dry-run`. ONE documented bucket-2 exception: `templates save
+  --execute` keeps its pre-v2 envelope (the bare template object, the shape `templates get`
+  shares) and so carries no explicit `dry_run: false` key — its preview's `would_save_template`
+  + `dry_run: true` is the discriminator (also noted in the CHANGELOG contract bullet).
+  The OMC review rounds (a three-reviewer fan-out per round, each round's fixes re-verified green)
+  additionally hardened the lifted-gate paths: duplicate-name `rules create` refusal, match-logic
+  preservation on rule recreate, `--match any` honored in-place, the `"*"` allowlist sentinel made
+  underivable from `APPLE_TEST_RECIPIENTS`, `draft send`'s recipient-set-equality locator,
+  empty/blank-keyword refusals on every subject/sender/account-matching write surface (an
+  empty value used to bind the newest message / whole mailbox / every account),
+  control-character rejection/scrubbing on all FOUR channels that feed the US/RS-delimited
+  AppleScript argv — attachment paths and sandboxed recipient allowlists (operator data), plus
+  the two REMOTE-data channels: the sender-supplied MIME filename (scrubbed) and `reply --all`'s
+  index-sourced recipients (reduced to the bare addr-spec, discarding the decoded display name)
+  — the `--gui-send` window locator re-bound to a per-call nonce instead of the subject, and
+  PREVIEW HONESTY
+  across the domain — dry-runs run every gate computable from flags + already-resolved data
+  (incl. the sandboxed bulk per-target label gate), with the disclosed divergences being the
+  two rules checks that need a fresh Mail read (duplicate-name; target-rule label) and
+  `delete --permanent`'s preview, which renders the plan but names each unmet operator gate
+  in its note. Remaining flips: Contacts → Notes → Calendar + Reminders → Messages.

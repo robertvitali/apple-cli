@@ -197,8 +197,9 @@ public struct MailScript {
     // MARK: Send (outbound)
 
     /// Compose + send a plain-text message via Mail.app. Recipients are US-delimited argv
-    /// (never interpolated — injection-safe). The CALLER MUST have passed the self-only
-    /// `guardOutbound` (test-mode + allowlist) first; this method performs NO gating.
+    /// (never interpolated — injection-safe). The CALLER MUST have passed `guardOutbound`
+    /// first (recipient validation; self-only allowlist when the sandbox is active — see
+    /// write-model v2); this method performs NO gating.
     private static let sendScript = """
     on run argv
         set theSubject to item 1 of argv
@@ -369,24 +370,37 @@ public struct MailScript {
         -- address is compared only after the empty guard, no real address can ever be "", so "" is
         -- unambiguously all-clear. The `try` also blocks (rather than crashes on) a recipient whose
         -- `address` coerces with an error (e.g. `missing value`).
+        --
+        -- WILDCARD (write-model v2): an allowList entry "*" means the SANDBOX IS OFF — the
+        -- allowlist comparison is skipped entirely (the CLI behaves like the MCP, which sends to
+        -- whatever Mail composed). The empty-address block above still applies: a blank recipient
+        -- is a broken compose, not a sandbox restriction. "*" is never a valid email address, so
+        -- the sentinel cannot collide with a real allowlist entry. Swift passes it ONLY when
+        -- sandboxActive is false (WriteComposeCommands call sites).
+        set wildcardAll to false
+        repeat with al in allowList
+            if (al as string) is "*" then set wildcardAll to true
+        end repeat
         repeat with adr in addrs
             set a to ""
             try
                 set a to (adr as string)
             end try
             if a is "" then return "<empty-address>"
-            set okFlag to false
-            repeat with al in allowList
-                -- `considering diacriticals but ignoring case` = case-insensitive + diacritic-SENSITIVE,
-                -- matching Swift `guardOutbound`'s `.lowercased()` exact compare. Without it, AppleScript
-                -- `is` folds diacritics too, so this self-only gate would be strictly MORE permissive than
-                -- every other outbound path (e.g. allowlist `me@sélf.test` would match a draft to
-                -- `me@self.test`). Keeping the two comparators identical closes that divergence.
-                considering diacriticals but ignoring case
-                    if a is (al as string) then set okFlag to true
-                end considering
-            end repeat
-            if not okFlag then return a
+            if not wildcardAll then
+                set okFlag to false
+                repeat with al in allowList
+                    -- `considering diacriticals but ignoring case` = case-insensitive + diacritic-SENSITIVE,
+                    -- matching Swift `guardOutbound`'s `.lowercased()` exact compare. Without it, AppleScript
+                    -- `is` folds diacritics too, so this self-only gate would be strictly MORE permissive than
+                    -- every other outbound path (e.g. allowlist `me@sélf.test` would match a draft to
+                    -- `me@self.test`). Keeping the two comparators identical closes that divergence.
+                    considering diacriticals but ignoring case
+                        if a is (al as string) then set okFlag to true
+                    end considering
+                end repeat
+                if not okFlag then return a
+            end if
         end repeat
         return ""
     end firstDisallowed
@@ -423,7 +437,8 @@ public struct MailScript {
     //      of the empty set, and an empty read can also mean the property access half-failed;
     //   3. whether the refused draft was actually discarded is REPORTED, never assumed, so the
     //      caller can tell the operator to remove it by hand instead of being told it is gone.
-    // Callers MUST still have passed the 3-flag gate + `guardOutbound` before calling.
+    // Callers MUST still have passed the v2 write preamble (bound willExecute) + `guardOutbound`
+    // before calling; the in-script allowlist verification is defense in depth, not the gate.
 
     // Script results use the pre-existing `US` as the FIELD separator and `RS` (already defined
     // above) to separate items within one field (recipient lists).
@@ -800,7 +815,12 @@ public struct MailScript {
         set bccRaw to item 5 of argv
         set attRaw to item 6 of argv
         set senderAddr to item 7 of argv
+        set nonce to item 8 of argv
         set US to (ASCII character 31)
+        -- The compose window is created under a PROVABLY UNIQUE title (subject + a per-call
+        -- nonce); the real subject is restored only after the window is bound. See the SAFETY
+        -- block below for why write-model v2 made this necessary.
+        set titleSubject to theSubject & " " & nonce
         set htmlString to (do shell script "cat " & quoted form of htmlPath)
         set pb to current application's NSPasteboard's generalPasteboard()
         set oldClip to pb's stringForType:(current application's NSPasteboardTypeString)
@@ -808,7 +828,7 @@ public struct MailScript {
         set htmlData to (current application's NSString's stringWithString:htmlString)'s dataUsingEncoding:(current application's NSUTF8StringEncoding)
         pb's setData:htmlData forType:(current application's NSPasteboardTypeHTML)
         tell application "Mail"
-            set newMsg to make new outgoing message with properties {subject:theSubject, content:"", visible:true}
+            set newMsg to make new outgoing message with properties {subject:titleSubject, content:"", visible:true}
             if senderAddr is not "" then set sender of newMsg to senderAddr
             my addRecips(newMsg, toRaw, US, "to")
             my addRecips(newMsg, ccRaw, US, "cc")
@@ -817,17 +837,31 @@ public struct MailScript {
             activate
         end tell
         delay 2.5
-        -- SAFETY (review M1): the blind Cmd-Shift-D must land ONLY on the compose window THIS
-        -- call created — never a stray compose window the operator left open (which could carry a
-        -- real, non-self recipient and would bypass guardOutbound). Assert the frontmost Mail
-        -- window is ours by matching its title to the unique subject, and refuse (fail-closed) if
-        -- it is not. Restore the clipboard on every exit path.
+        -- SAFETY (review M1, re-hardened for write-model v2): the blind Cmd-Shift-D must land
+        -- ONLY on the compose window THIS call created — never a stray compose window the
+        -- operator left open (which could carry a real, non-self recipient and would bypass
+        -- guardOutbound). The original guard matched the front window's title against the
+        -- SUBJECT, which was safe only while every gui-send subject was a unique
+        -- `apple-cli-test …` label. v2 removed that: `reply --html --gui-send` composes
+        -- "Re: <real subject>", the single most likely title for a window the operator already
+        -- has open on that same thread, so a subject match could bind THEIR window and Cmd-A +
+        -- Cmd-V + Cmd-Shift-D would overwrite and send it (review-caught, the twin of the
+        -- sendDraft locator fix).
+        --
+        -- So the window is created under `titleSubject` = subject + a per-call NONCE and matched
+        -- on the NONCE, which by construction cannot appear in any other window's title. The real
+        -- subject is restored only once the window is bound, and the restore is VERIFIED before
+        -- the send keystroke — a failed restore refuses rather than mailing the nonce out.
+        -- Restore the clipboard on every exit path.
         set sendOK to false
+        set subjectRestored to false
+        set windowMatched to false
         tell application "System Events"
             set frontmost of process "Mail" to true
             delay 0.5
             tell process "Mail"
-                if (exists front window) and ((name of front window) contains theSubject) then
+                if (exists front window) and ((name of front window) contains nonce) then
+                    set windowMatched to true
                     repeat 7 times
                         key code 48
                         delay 0.1
@@ -837,11 +871,33 @@ public struct MailScript {
                     delay 0.2
                     keystroke "v" using command down
                     delay 0.5
-                    keystroke "d" using {command down, shift down}
-                    set sendOK to true
+                    -- Drop the nonce from the subject NOW (the window is proven ours) and read
+                    -- it back: only an exact match may proceed to the send keystroke.
+                    tell application "Mail"
+                        try
+                            set subject of newMsg to theSubject
+                            if (subject of newMsg) is theSubject then set subjectRestored to true
+                        end try
+                    end tell
+                    if subjectRestored then
+                        delay 0.3
+                        keystroke "d" using {command down, shift down}
+                        set sendOK to true
+                    end if
                 end if
             end tell
         end tell
+        -- Not our window: the compose message we created is still open, addressed, and titled
+        -- with the nonce. Drop the nonce so the orphan reads as an ordinary unsent draft of the
+        -- message the operator asked for, rather than a marker-titled mystery they might send
+        -- as-is (review-caught: only the restore-failed branch used to clean up).
+        if not windowMatched then
+            tell application "Mail"
+                try
+                    set subject of newMsg to theSubject
+                end try
+            end tell
+        end if
         delay 1
         if oldClip is not missing value then
             pb's clearContents()
@@ -849,6 +905,10 @@ public struct MailScript {
         end if
         if sendOK then
             return "sent"
+        else if windowMatched then
+            -- Our window, but the subject restore failed — REFUSED rather than mail the nonce
+            -- out. A composed window is sitting there with the nonce still in its subject.
+            return "subject-restore-failed"
         else
             return "wrong-window"
         end if
@@ -901,15 +961,26 @@ public struct MailScript {
                                cc: [String], bcc: [String], attachmentPaths: [String],
                                sender: String? = nil) throws {
         let US = MailScript.US
+        // Per-call nonce: the compose window is created titled "<subject> <nonce>" so the
+        // front-window assertion matches on a token that CANNOT collide with an operator's own
+        // window (v2 subjects are real ones like "Re: Quarterly numbers"). Bracketed + UUID so
+        // it is unmistakable if a failure ever leaves it visible in Mail.
+        let nonce = "[apple-cli-\(UUID().uuidString.prefix(8))]"
         let out = try runner.runViaStdin(MailScript.sendHtmlGuiScript, arguments: [
             htmlPath, subject,
             to.joined(separator: US), cc.joined(separator: US), bcc.joined(separator: US),
-            attachmentPaths.joined(separator: US), sender ?? "",
+            attachmentPaths.joined(separator: US), sender ?? "", nonce,
         ])
         guard out == "sent" else {
-            let reason = out == "wrong-window"
-                ? "the frontmost Mail window was not the compose window this send created (title did not match the subject) — refused the Send keystroke to avoid sending an unrelated window. Close any other open Mail compose window and retry, or use the reliable --html open path."
-                : "sendHtmlViaGui returned '\(out)'"
+            let reason: String
+            switch out {
+            case "wrong-window":
+                reason = "the frontmost Mail window was not the compose window this send created (its title did not carry this call's unique marker) — refused the Send keystroke to avoid overwriting and sending an unrelated compose window. NOTE: this call left its OWN compose window open and unsent (subject \"\(subject)\", body empty, recipients+attachments set) — close it before retrying, along with whatever other compose window was in front, or use the reliable --html open path."
+            case "subject-restore-failed":
+                reason = "the compose window was located but its subject could not be restored from the internal marker \(nonce) — refused the Send keystroke rather than mail a marked subject. An unsent compose window carrying \(nonce) in its subject is open in Mail: fix its subject and send manually, or close it."
+            default:
+                reason = "sendHtmlViaGui returned '\(out)'"
+            }
             throw AppleScriptRunner.RunError.scriptFailed(status: 1, stderr: reason)
         }
     }
@@ -996,9 +1067,10 @@ public struct MailScript {
 
     // MARK: - Message mutations (P2). Located by RFC message-id (tries bracketed + bare form).
     //
-    // SAFETY: these methods perform NO gating. The CALLER MUST have passed the 3-flag gate
-    // (--execute + --test-mode + APPLE_TEST_MODE) AND a subject-label check (mutations on an
-    // existing message) or `guardOutbound` (outbound) BEFORE calling. Every user value is
+    // SAFETY: these methods perform NO gating. The CALLER MUST have run the write-model v2
+    // preamble (bound willExecute — these only run on the execute path) AND, when the sandbox
+    // is active, the subject-label check (mutations on an existing message) or `guardOutbound`'s
+    // self-only allowlist (outbound) BEFORE calling. Every user value is
     // argv-passed (never interpolated). The shared `findMsg` locator is appended to each
     // mutation script; a mutation returns "ok" (applied) / "notfound" (no matching message).
 
@@ -1597,6 +1669,18 @@ public struct MailScript {
     /// gating (caller gates on --execute) and mutates nothing in Mail.
     public func saveAttachments(internetMessageID: String, accountName: String?,
                                 pairs: [(index: Int, destPath: String)]) throws -> Set<Int>? {
+        // HARD BACKSTOP at the blob boundary: a destination carrying RS/US (or any other
+        // control byte) would re-split in-script into a different record set than the Swift
+        // side validated — truncating a vetted path, or injecting an extra save record with an
+        // attacker-chosen relative destination. Callers scrub the remote-supplied basename
+        // (`safeAttachmentBasename`) and confine the operator-supplied directory
+        // (`confineWriteDestination`); this refuses regardless, so no future caller can
+        // reintroduce the desync.
+        if let bad = pairs.lazy.flatMap({ $0.destPath.unicodeScalars })
+                .first(where: { $0.value < 0x20 || $0.value == 0x7F }) {
+            throw AppleError.mailSafety(
+                "refusing to save an attachment to a path containing a control character (U+\(String(format: "%04X", bad.value))).")
+        }
         let script = MailScript.saveAttachmentsScript + "\n" + MailScript.locator
         let bare = MailFormat.stripAngleBrackets(internetMessageID) ?? internetMessageID
         let blob = pairs.map { "\($0.index)\(MailScript.US)\($0.destPath)" }.joined(separator: MailScript.RS)
@@ -1959,6 +2043,9 @@ public struct MailScript {
     public struct RuleScalars {
         public let name: String; public let enabled: Bool
         public let markRead: Bool; public let markFlagged: Bool
+        /// `all conditions must be met` — carried so an unsandboxed condition-replacing recreate
+        /// preserves a real rule's OR/AND logic instead of silently forcing AND (review-caught).
+        public let matchAll: Bool
     }
 
     private static let readRuleScalarsScript = """
@@ -1970,28 +2057,31 @@ public struct MailScript {
             set en to enabled of r
             set mr to mark read of r
             set mf to mark flagged of r
+            set ml to all conditions must be met of r
             set nm to name of r
         end tell
         -- Coerce each boolean to text: `boolean & text` in AppleScript builds a LIST (joined with
         -- ", " on return), not concatenated text, when the boolean is the FIRST operand. Explicit
         -- `as text` forces string concatenation regardless of order, so name-last stays US-safe.
-        return (en as text) & US & (mr as text) & US & (mf as text) & US & nm
+        return (en as text) & US & (mr as text) & US & (mf as text) & US & (ml as text) & US & nm
     end run
     """
     /// Read a rule's scalar props for the recreate path. NAME IS LAST so a name that itself contains
-    /// the US delimiter still round-trips (the trailing fields are rejoined). Match-logic is NOT read:
-    /// a live test rule is always recreated with match=all, so the old value would be unused. Only the
-    /// two mark_* action flags are read — the recreate resets a rule to the mark set (documented), so
-    /// any non-mark action set manually in Mail.app is intentionally not round-tripped.
+    /// the US delimiter still round-trips (the trailing fields are rejoined). Match-logic IS read
+    /// (write-model v2): an unsandboxed recreate preserves the rule's OR/AND logic; only a SANDBOXED
+    /// recreate forces match=all (its label condition must always constrain it). Only the two mark_*
+    /// action flags are read — the recreate resets a rule to the mark set (documented), so any
+    /// non-mark action set manually in Mail.app is intentionally not round-tripped.
     public func readRuleScalars(index: Int) throws -> RuleScalars {
         let raw = try runner.run(MailScript.readRuleScalarsScript, arguments: [String(index)])
         let f = raw.trimmingCharacters(in: .whitespacesAndNewlines).components(separatedBy: MailScript.US)
-        guard f.count >= 4 else {
+        guard f.count >= 5 else {
             throw AppleScriptRunner.RunError.scriptFailed(status: 1, stderr: "readRuleScalars: unexpected output '\(raw)'")
         }
         func flag(_ s: String) -> Bool { s.trimmingCharacters(in: .whitespaces).lowercased() == "true" }
-        let name = f[3...].joined(separator: MailScript.US)
-        return RuleScalars(name: name, enabled: flag(f[0]), markRead: flag(f[1]), markFlagged: flag(f[2]))
+        let name = f[4...].joined(separator: MailScript.US)
+        return RuleScalars(name: name, enabled: flag(f[0]), markRead: flag(f[1]), markFlagged: flag(f[2]),
+                           matchAll: flag(f[3]))
     }
 
     private static let checkSupportedActionsScript = """
@@ -2194,6 +2284,7 @@ public struct MailScript {
     on run argv
         set wantSubject to item 1 of argv
         set thePrefix to item 2 of argv
+        set acctFilter to item 3 of argv
         set n to 0
         tell application "Mail"
             -- STABLE indexed references throughout (`account ai` / `mailbox mi of a` /
@@ -2201,9 +2292,12 @@ public struct MailScript {
             -- "item N of every message of every mailbox of every account" reference that fails on
             -- `delete`. Delete from the END (high index → low) so removals don't reindex the
             -- messages still to visit. Match subject in code — `whose subject is` doesn't filter
-            -- draft (outgoing-message) objects reliably.
+            -- draft (outgoing-message) objects reliably. `acctFilter` scopes the sweep to one
+            -- account ("" = all), matching the open/send siblings — it used to be ignored, so an
+            -- unsandboxed delete swept EVERY account's Drafts (review-caught).
             repeat with ai from 1 to (count of accounts)
                 set a to account ai
+                if acctFilter is "" or (name of a) is acctFilter then
                 repeat with mi from 1 to (count of mailboxes of a)
                     set dmbx to mailbox mi of a
                     if (name of dmbx) contains "Drafts" then
@@ -2223,6 +2317,7 @@ public struct MailScript {
                         end try
                     end if
                 end repeat
+                end if
             end repeat
         end tell
         return (n as string)
@@ -2230,8 +2325,8 @@ public struct MailScript {
     """
     /// Delete drafts whose subject EXACTLY matches AND starts with the test prefix (double guard).
     /// Returns the count deleted. Caller MUST have verified the subject is labeled.
-    public func deleteDrafts(subject: String, prefix: String) throws -> Int {
-        let out = try runner.run(MailScript.deleteDraftScript, arguments: [subject, prefix])
+    public func deleteDrafts(subject: String, prefix: String, account: String? = nil) throws -> Int {
+        let out = try runner.run(MailScript.deleteDraftScript, arguments: [subject, prefix, account ?? ""])
         return Int(out.trimmingCharacters(in: .whitespacesAndNewlines)) ?? 0
     }
 
@@ -2255,16 +2350,22 @@ public struct MailScript {
     ///    in a stuck state, but the send itself has completed. The original Drafts item is then
     ///    best-effort deleted (action=send consumes a draft).
     ///
-    ///    The outgoing message is located by its UNIQUE labeled subject (label prefix + timestamp),
-    ///    NOT by an id-diff snapshot: re-opening an already-open draft REUSES its outgoing message
-    ///    (no new id to diff), and Mail can populate the outgoing subject lazily after `open` — an
-    ///    id-diff poll misses both. Subject-match is safe because that unique subject can only ever
-    ///    belong to THIS draft's own outgoing copy — Mail's outgoing store is SHARED with the
-    ///    operator's live compose windows, but those never carry a test subject, and step (4)
-    ///    re-verifies every recipient against the allowlist before `send` regardless. The draft
-    ///    itself is located by EXACT subject + the label-prefix double guard (STABLE indexed
-    ///    references; subject matched in code — `whose subject is` doesn't filter outgoing-message
-    ///    objects reliably). All values argv-passed (injection-safe).
+    ///    The outgoing message is located by subject + RECIPIENT-SET EQUALITY, NOT by an id-diff
+    ///    snapshot: re-opening an already-open draft REUSES its outgoing message (no new id to
+    ///    diff), and Mail can populate the outgoing subject lazily after `open` — an id-diff poll
+    ///    misses both. Mail's outgoing store is SHARED with the operator's live compose windows,
+    ///    and under write-model v2 an unsandboxed subject carries no unique test label — so a
+    ///    subject match ALONE could bind an operator's open compose window that happens to share
+    ///    the subject. The locator therefore requires the candidate's recipient set to EQUAL the
+    ///    stored draft's (order-insensitive); a subject-match with different recipients is skipped,
+    ///    and if the poll times out having seen ONLY such mismatches the script returns
+    ///    `wrongwindow` (a refusal — never "send some window that happens to match"). Residual: a
+    ///    compose window sharing BOTH the subject and the exact recipient set is indistinguishable
+    ///    from the draft's own copy. Step (4) then re-verifies recipients against the allowlist
+    ///    before `send` regardless. The draft itself is located by EXACT subject + the
+    ///    label-prefix double guard (STABLE indexed references; subject matched in code —
+    ///    `whose subject is` doesn't filter outgoing-message objects reliably). All values
+    ///    argv-passed (injection-safe).
     private static let sendDraftScript = """
     on run argv
         set wantSubject to item 1 of argv
@@ -2291,6 +2392,11 @@ public struct MailScript {
                                         set sj to subject of m
                                     end try
                                     if sj is wantSubject and sj starts with thePrefix then
+                                        -- Capture the draft's STABLE id now: the post-send cleanup
+                                        -- deletes by THIS id, never by re-matching subject/prefix
+                                        -- (unsandboxed the prefix is "" — a subject re-scan would
+                                        -- delete EVERY same-subject draft when only one was sent).
+                                        set draftId to id of m
                                         -- (1) verify the STORED draft's recipients BEFORE any open.
                                         -- Outside the open/send `try` below so a genuine block/no-recip
                                         -- returns its own sentinel (never masked as a send error).
@@ -2309,16 +2415,20 @@ public struct MailScript {
                                             -- (2) open the stored draft => Mail registers (or REUSES, if
                                             -- it was opened before) an outgoing message with this subject
                                             open m
-                                            -- (3) locate the outgoing message by this UNIQUE labeled
-                                            -- subject. Match by SUBJECT, not an id-diff snapshot: an
+                                            -- (3) locate the outgoing message by subject AND recipient-set
+                                            -- equality with the stored draft. Not an id-diff snapshot: an
                                             -- already-open draft reuses its outgoing message (NO new id),
                                             -- and Mail can populate the subject lazily after open — an
-                                            -- id-diff poll misses both. The subject carries the label
-                                            -- prefix + a unique timestamp, so only THIS draft's own
-                                            -- outgoing copy can match (the operator's real compose windows
-                                            -- never share it); step (4) re-verifies recipients regardless.
+                                            -- id-diff poll misses both. The recipient-set check is what
+                                            -- keeps a subject-sharing OPERATOR compose window from being
+                                            -- bound (outside the sandbox the subject carries no unique
+                                            -- label); a mismatch is skipped, and a timeout that saw ONLY
+                                            -- mismatches refuses as wrongwindow rather than sending an
+                                            -- arbitrary window. Recipients can also populate lazily, so a
+                                            -- mismatch stays retriable inside the poll.
                                             -- Patient (up to 30s): Mail can lag surfacing the message.
                                             set target to missing value
+                                            set sawMismatch to false
                                             repeat 60 times
                                                 repeat with om in (every outgoing message)
                                                     set osj to ""
@@ -2326,14 +2436,22 @@ public struct MailScript {
                                                         set osj to subject of om
                                                     end try
                                                     if osj is wantSubject then
-                                                        set target to om
-                                                        exit repeat
+                                                        set cand to my collectAddrs(om)
+                                                        if my sameAddrSet(addrs, cand) then
+                                                            set target to om
+                                                            exit repeat
+                                                        else
+                                                            set sawMismatch to true
+                                                        end if
                                                     end if
                                                 end repeat
                                                 if target is not missing value then exit repeat
                                                 delay 0.5
                                             end repeat
-                                            if target is missing value then return "openfailed"
+                                            if target is missing value then
+                                                if sawMismatch then return "wrongwindow"
+                                                return "openfailed"
+                                            end if
                                             -- (4) re-verify the OPENED message's recipients (defense in
                                             -- depth — this is the object actually about to be sent)
                                             set addrs2 to my collectAddrs(target)
@@ -2352,23 +2470,23 @@ public struct MailScript {
                                             -- (5) send the opened outgoing message (dispatches it => Sent)
                                             send target
                                             -- (6) manage_drafts action=send semantics: a sent draft is
-                                            -- consumed. Best-effort delete of the ORIGINAL draft(s),
-                                            -- re-located by the SAME subject+prefix double guard (never a
-                                            -- blind index delete — that could hit the wrong message);
-                                            -- end-to-start so removals don't reindex the rest. Its OWN inner
-                                            -- try makes a delete failure a no-op (never re-raising post-send),
-                                            -- so the send already succeeded => a lingering draft is cosmetic.
-                                            -- (Deletes ALL exact-subject labeled matches; in the
-                                            -- unique-timestamped test flow there is exactly one.)
+                                            -- consumed. Best-effort delete of THE ONE sent draft,
+                                            -- re-located by the STABLE id captured before open (never a
+                                            -- subject re-scan: unsandboxed the prefix is "", so matching
+                                            -- by subject would delete EVERY same-subject draft when only
+                                            -- one was sent — review-caught; and never a blind index
+                                            -- delete: `message jj` references re-resolve by position).
+                                            -- End-to-start so the removal doesn't reindex the scan. Its
+                                            -- OWN inner try makes a delete failure a no-op (never
+                                            -- re-raising post-send) — the send already succeeded, so a
+                                            -- lingering draft is cosmetic.
                                             try
                                                 set kk to (count of messages of dmbx)
                                                 repeat with jj from kk to 1 by -1
                                                     set dm to message jj of dmbx
-                                                    set dsj to ""
                                                     try
-                                                        set dsj to subject of dm
+                                                        if (id of dm) is draftId then delete dm
                                                     end try
-                                                    if dsj is wantSubject and dsj starts with thePrefix then delete dm
                                                 end repeat
                                             end try
                                             return "sent" & US & sentList
@@ -2386,6 +2504,34 @@ public struct MailScript {
         return "notfound"
     end run
 
+    -- Order-insensitive MULTISET equality. Used by the outgoing-message locator above to require
+    -- the candidate window to carry exactly the stored draft's recipients. Per-element
+    -- OCCURRENCE COUNTS are compared, not mere membership: a one-way subset test passed
+    -- {a,a} vs {a,b} (counts equal, every element of the first found in the second), which
+    -- would have bound an operator window carrying a recipient the draft never had
+    -- (review-caught, empirically confirmed). With totals equal and every element of `a`
+    -- occurring equally often in both, no differing element can hide in `b`. Comparison is
+    -- `considering diacriticals but ignoring case` for EXACT parity with firstDisallowed's
+    -- allowlist comparator (a bare `is` also folds diacriticals, which would be more
+    -- permissive than the gate this check backs — review-caught).
+    on sameAddrSet(a, b)
+        if (count of a) is not (count of b) then return false
+        repeat with x in a
+            if (my occurrenceCount(x, a)) is not (my occurrenceCount(x, b)) then return false
+        end repeat
+        return true
+    end sameAddrSet
+
+    on occurrenceCount(x, lst)
+        set n to 0
+        repeat with y in lst
+            considering diacriticals but ignoring case
+                if (x as string) is (y as string) then set n to n + 1
+            end considering
+        end repeat
+        return n
+    end occurrenceCount
+
     """
     /// Outcome of `sendDraft`. `.sent` carries the verified recipients the mail was dispatched to
     /// (the draft's OWN pre-set to/cc/bcc — the command never supplied them). `.sendError` carries
@@ -2398,6 +2544,9 @@ public struct MailScript {
         case blocked(String)
         case openFailed
         case sendError(String)
+        /// The subject matched an outgoing message whose recipients are NOT the draft's own —
+        /// most likely an operator compose window sharing the subject. Nothing was sent.
+        case wrongWindow
 
         /// Pure parser for `sendDraftScript`'s raw stdout → result. Extracted so the safety-critical
         /// string→enum mapping (esp. the `blocked:<addr>` verdict and the recipient split) is
@@ -2409,6 +2558,7 @@ public struct MailScript {
             if raw == "notfound" { return .notFound }
             if raw == "norecipients" { return .noRecipients }
             if raw == "openfailed" { return .openFailed }
+            if raw == "wrongwindow" { return .wrongWindow }
             if raw.hasPrefix("blocked:") { return .blocked(String(raw.dropFirst("blocked:".count))) }
             if raw.hasPrefix("senderror:") { return .sendError(String(raw.dropFirst("senderror:".count))) }
             if raw == "sent" { return .sent([]) }
@@ -2419,10 +2569,11 @@ public struct MailScript {
             return nil
         }
     }
-    /// Send the existing labeled draft matching `subject` (optionally within `account`), after
-    /// in-script verification that every stored recipient is in `allowlist`. Caller MUST have
-    /// passed the test-mode gate + label check; this method re-enforces the label prefix and the
-    /// allowlist inside the script (defense in depth) but performs no flag gating itself. Uses the
+    /// Send the existing draft matching `subject` (optionally within `account`), after in-script
+    /// verification that every stored recipient is in `allowlist` (skipped when the caller passes
+    /// the out-of-sandbox wildcard). Caller MUST have run the v2 preamble and, when sandboxed,
+    /// the label check; `prefix` re-enforces the label inside the script (defense in depth, ""
+    /// unsandboxed) but this method performs no flag gating itself. Uses the
     /// open-then-send mechanism (see `sendDraftScript` doc); a successful `.sent([recipients])`
     /// carries the verified recipients dispatched to and also consumes the original Drafts item
     /// (best-effort delete). `.openFailed` means the draft opened but its outgoing message never
@@ -2448,12 +2599,15 @@ public struct MailScript {
     // `draft-rich --open/--save-as-draft`. Every user value is US-delimited argv (never
     // interpolated; injection-safe). Each osascript string is INDEPENDENT, so a script that calls
     // a handler carries its OWN copy of it. NONE of these emit a `send` — a draft/open is not a
-    // send. Callers gate: `saveDraft`/`saveOpenAsDraft` behind label + test-mode; `openDraft`
-    // behind a labeled subject; `openEml` (above) opens a review window the operator sends manually.
+    // send. Callers run the v2 write preamble and, when the SANDBOX is active, gate
+    // `saveDraft`/`saveOpenAsDraft`/`openDraft` behind the subject-label restriction
+    // (unsandboxed they operate as addressed — oracle parity); `openEml` (above) opens a
+    // review window the operator sends manually.
 
     /// Make a `{visible:false}` outgoing message (subject/body/recipients/attachments + optional
     /// `sender`) and `save` it to Mail's Drafts — no send. Recipients + attachment paths are
-    /// US-delimited argv. Caller MUST have label-checked the subject + passed the test-mode gate.
+    /// US-delimited argv. Caller MUST have run the v2 preamble and, when the sandbox is active,
+    /// label-checked the subject.
     private static let saveDraftScript = """
     on run argv
         set theSubject to item 1 of argv
@@ -2517,7 +2671,8 @@ public struct MailScript {
     """
     /// Save a message to Mail's Drafts with recipients + attachments + optional `sender` (no send).
     /// `sender`, when non-nil, sets the outgoing message's From identity (a bare account address).
-    /// Caller MUST have label-checked the subject + passed the test-mode gate. Throws on non-"saved".
+    /// Caller MUST have run the v2 preamble and, when the sandbox is active, label-checked the
+    /// subject. Throws on non-"saved".
     public func saveDraft(subject: String, body: String, to: [String], cc: [String], bcc: [String],
                           attachmentPaths: [String], sender: String? = nil) throws {
         let US = MailScript.US

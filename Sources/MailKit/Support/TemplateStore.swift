@@ -114,8 +114,11 @@ public struct TemplateStore {
                         placeholders: TemplateStore.placeholders(subject: subject, body: body))
     }
 
-    @discardableResult
-    public func save(name: String, body: String, subject: String?) throws -> SaveResult {
+    /// Every `save` validation, as a PURE check — no filesystem, no write. Split out so the
+    /// `--dry-run` path can run the identical rules (write-model v2 preview honesty: a preview
+    /// that names a save `--execute` refuses is a lie; review-caught after the willExecute
+    /// branch was added).
+    public static func validateSave(name: String, body: String, subject: String?) throws {
         try TemplateStore.validateName(name)
         // Mirror the oracle's `save_template` validation: an empty/whitespace-only body is
         // REFUSED, because the oracle's parser rejects such a file outright — writing one would
@@ -131,6 +134,11 @@ public struct TemplateStore {
         }) {
             throw AppleError.validation("template subject must not contain CR, LF or NUL characters.")
         }
+    }
+
+    @discardableResult
+    public func save(name: String, body: String, subject: String?) throws -> SaveResult {
+        try TemplateStore.validateSave(name: name, body: body, subject: subject)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
         let created = !FileManager.default.fileExists(atPath: fileURL(name).path)
         // Byte-identical to the oracle's save_template OPERATION (not just its serializer): the

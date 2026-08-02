@@ -12,6 +12,131 @@ with the Apple MCP servers they replace.
 
 ## [Unreleased]
 
+### BREAKING — Mail write-model v2: writes EXECUTE by default (operator decision 2026-08-01)
+
+The Mail domain is the first flipped to write-model v2 (`docs/write-model-v2.md`): the CLI
+replaces the MCP servers, and the oracles execute writes on call, so the CLI now does too.
+
+- **BREAKING (behavior): every general Mail write executes when invoked** — `send`, `reply`,
+  `forward`, `draft` (create/send/open/delete), `draft-rich`, `move`, `mark`, `flag`, `rules`
+  (create/update/delete/enable/disable), `templates` (save/delete), `mailboxes create`,
+  `attachments save`, `export`, `analytics dashboard`. `--dry-run` previews. **Migration:** any
+  script or shell-history invocation that relied on dry-run-by-default now executes; pass
+  `--dry-run`, or set `APPLE_DRY_RUN=1` to restore dry-run-by-default globally (precedence:
+  `--dry-run` > `--execute` > `APPLE_DRY_RUN` > surface default).
+- **The TRASH surface keeps dry-run as its default** (`mail delete`, `mail trash empty`) —
+  oracle B's `manage_trash` defaults `dry_run=True`, so keeping it IS parity. Pinned by tests.
+- **The v1 two-factor write gate is replaced by an opt-in SANDBOX**: `APPLE_TEST_MODE` truthy
+  (`1`/`true`/`yes`) OR `--test-mode` — either signal alone — restricts targets to
+  `apple-cli-test`-labeled items and recipients to the self-only `APPLE_TEST_RECIPIENTS`
+  allowlist (empty allowlist = refuse all; a literal `*` entry is ignored — it is the script
+  layer's out-of-sandbox sentinel, never operator data). Unsandboxed, writes operate on real
+  data as addressed (the oracle model).
+- **Unconditional gates that survive in BOTH modes:** `APPLE_ALLOW_PERMANENT_DELETE` +
+  canonical-label check on `delete --permanent`; `APPLE_ALLOW_EMPTY_TRASH` + `--confirm` on
+  `trash empty`; path confinement + sensitive-dir blocklists; attachment size/type limits.
+- **BREAKING (contract): envelope changes.** Sandboxed write envelopes carry `"sandbox": true`;
+  unsandboxed envelopes OMIT the key (the `sandbox` key itself is the only conditional — an
+  envelope with no other v2 additions is byte-identical to pre-v2). Executed writes emit
+  `dry_run: false` explicitly — exception: `templates save --execute` keeps its pre-v2 bare
+  template object (the shape it shares with `templates get`); its preview's
+  `would_save_template` + `dry_run: true` is the discriminator. Commands that gained a
+  `dry_run` field on ALL paths: `draft-rich`, `analytics dashboard`, `templates delete`.
+  `draft` actions missing a subject (or passing an empty/whitespace one) are now
+  `validation_error` exit 64 (was `safety_violation` 77 under the label gate). A junk value in
+  `APPLE_TEST_MODE` / `APPLE_DRY_RUN` / `APPLE_ALLOW_*` is a fail-loud `validation_error` 64 —
+  never a guess (the operator vars also now accept `true`/`yes` alongside `1`).
+- **BREAKING (behavior): `mail send --dry-run` no longer writes the generated `.eml`**
+  (`--out` included) — the preview reports the planned path; bytes land only on execute. Same
+  fix for `draft-rich --dry-run` and `templates save --dry-run`, which previously wrote
+  despite `--dry-run` (the spec's bucket-2 defects). `analytics dashboard` gains the same
+  `--dry-run` honesty plus `confineWriteDestination` on `--out` (a credential-dir destination
+  now refuses, 77 — previously it would write HTML anywhere, `~/.ssh/authorized_keys` included).
+- **`rules` correctness under the lifted gate** (review-caught): `rules create` refuses a
+  duplicate rule name at `--execute` in both modes (Mail silently mangles a duplicate-name
+  create, and the post-create verification could previously have deleted the PRE-EXISTING
+  rule) — the DRY-RUN cannot report this blocker (it would need a Mail read previews
+  deliberately avoid), so a colliding name previews clean and refuses at execute; `rules
+  create` now creates DISABLED, verifies the conditions attached, and only then enables (a
+  silently-condition-less rule matches ALL mail); a condition-replacing `rules update` now
+  PRESERVES the rule's OR/AND match logic (was hardcoded to AND) and honors `--match any` on
+  the in-place path (was a silent no-op reported as executed).
+- **BREAKING (behavior): empty/whitespace `--subject` keywords now refuse (exit 64) on
+  `reply`, `forward`, `attachments save`, and every `draft` action.** EnvelopeIndex skips an
+  empty subject filter, so `--subject ""` silently resolved to the NEWEST message in the
+  store — under v2 an unsandboxed `forward --subject "$UNSET_VAR" --to x` would have
+  dispatched an arbitrary real message, body and attachments included. Shell-substitution
+  accidents now fail loud.
+- **BREAKING (behavior): previews refuse exactly what execute would.** Dry-runs across the
+  Mail write surfaces now run the same Mail-free gates as execute (sandbox allowlist and
+  label checks — incl. `mailboxes create` — subject/mode validation, `reply --mode
+  draft|open`'s not_implemented, `--out` path confinement on the plain-body `send --mode
+  open` route) — e.g. a sandboxed `--dry-run` to a non-allowlisted recipient exits 77 where
+  it previously exited 0 with a clean preview, and the sandboxed `rules create` preview
+  reports `enabled: false` (the force-disable execute performs). Sandboxed bulk previews
+  (move/mark/flag/delete-to-trash) run the same per-target label gate execute runs. The
+  divergences that remain are of two disclosed CLASSES, both fail-closed (the preview is the
+  permissive side; execute refuses). **(a) Gates needing a fresh Mail/account read the preview
+  deliberately avoids**, so a dry-run stays store-independent and CI-runnable: the rules
+  duplicate-NAME refusal, the target-RULE label check and `checkSupportedActions` (all need
+  `rules list`); `--account` send-address resolution on send/reply/forward/draft-create (an
+  unknown account is `not_found` 65 only at execute — `draft-rich` resolves on both paths
+  because its `--open` route needs the address to build the `.eml`); and the RFC-Message-ID
+  addressability check on bulk targets. Also in this class by nature: `attachments save`'s
+  per-destination symlink refusal, which needs a filesystem read of paths the preview never
+  composes. **(b) The two IRREVERSIBLE trash-surface commands**,
+  whose previews still render the plan (oracle B's `manage_trash dry_run=True` previews
+  ungated) while NAMING the unmet gates in the envelope note — `delete --permanent` (the
+  operator env var; any unlabeled targets) and `trash empty` (`--confirm` + its operator var).
+- **BREAKING (behavior): blank/whitespace filter values now refuse (exit 64)** instead of
+  silently widening scope: `--match-sender` and `--match-subject` on move/mark/flag/delete
+  (a blank keyword satisfied the filter-presence gate while contributing NO predicate — the
+  mutation widened to whatever the other filters alone selected; a whitespace-only one bound
+  a near-universal `% %` LIKE); whitespace-only `--subject` on `export --scope single_email`;
+  and a blank `--account` on `draft send/delete/open`, `trash empty`, and `delete` (an empty
+  string reached the AppleScript account filter as "match every account").
+- **Injection hardening on the AppleScript argv boundary** (review-caught). Every AppleScript
+  call is argv-fed RS(0x1E)/US(0x1F)-delimited blobs that the script re-splits, so any value
+  carrying those bytes turns one vetted field into two. All four channels are now closed:
+  - **attachment paths** (`--attach`) refuse control characters exactly like
+    `confineWriteDestination` — a US byte would re-split into a second, never-vetted path, and
+    the sensitive-dir blocklist is the sole unsandboxed containment;
+  - **recipient lists** (`--to`/`--cc`/`--bcc`) refuse them too (`validation_error` 64): an
+    embedded US would split one vetted address into two, the second never seen by the
+    allowlist comparison. `reply --all` additionally reduces every index-sourced recipient to
+    its bare addr-spec, discarding the REMOTE display name (a hostile sender's decoded name
+    could otherwise inject an extra auto-sent recipient on the `--gui-send` route);
+  - **sandboxed recipient allowlists** DROP any entry containing a control character (a US
+    byte inside an `APPLE_TEST_RECIPIENTS` entry would materialize extra entries after the
+    in-script split — including the out-of-sandbox `*` sentinel);
+  - **the `--gui-send` window locator** no longer trusts the subject. It bound the frontmost
+    Mail window by title substring, safe only while every gui-send subject was a unique
+    `apple-cli-test` label; under v2 `reply --html --gui-send` composes "Re: &lt;real subject&gt;",
+    the likeliest title for a window the operator already has open on that thread — so the
+    blind Cmd-A/Cmd-V/Cmd-Shift-D could overwrite and send THEIR message. The compose window is
+    now created under a per-call nonce, matched on it, and its real subject restored (and
+    verified) before the send keystroke; a failed restore refuses rather than mailing a marked
+    subject. (The GUI keystroke route stays operator-verify-only — it needs Accessibility and
+    steals focus, so it is never exercised autonomously; this change is reviewed and
+    osacompile-checked, not live-run.)
+  - **attachment filenames from the sender's MIME headers** — remote data — are SCRUBBED
+    before path composition, with a hard refusal backstop in `saveAttachments`: an embedded US
+    would truncate the destination in-script (past the symlink and pre-existing-file checks,
+    which ran on the full path), and an RS would inject an entire extra save record with an
+    attacker-chosen relative destination.
+- **`draft delete` now honors `--account`** (it was accepted and ignored — an unsandboxed
+  delete swept matching drafts across EVERY account). The shared `--execute`/`--test-mode`
+  help strings now describe v2 semantics (`--test-mode` previously claimed it was "required
+  for live writes" — inverted under v2).
+- **`draft send` hardening:** the outgoing-message locator requires recipient-MULTISET
+  equality with the stored draft, so a compose window sharing the subject but carrying ANY
+  differing recipient set is never dispatched (`wrongwindow` refusal, exit 77 when only
+  mismatches were seen). Residual, by construction: a window sharing BOTH the exact subject
+  and the exact recipient multiset is indistinguishable from the draft's own outgoing copy.
+  Post-send cleanup now deletes only the one sent draft (by stable id), never other
+  same-subject drafts. The envelope note only claims "recipients verified self-only" when the
+  sandbox's allowlist actually ran.
+
 ### Security — operator-supplied write destinations are now confined
 - **`mail attachments save` had NO path confinement.** Its source documented the operator-chosen
   path as "TRUSTED — save verbatim". Live before the fix: `--dir ~/.ssh` and `--dir /private/etc`
@@ -31,10 +156,14 @@ with the Apple MCP servers they replace.
     passed as one string and was re-parsed downstream as TWO save records, the second never
     confined.
   - the guard is applied to **every** operator write sink, not just the two first found;
-    `send --out` writes on the DEFAULT dry-run path with no `--execute`.
+    at the time `send --out` wrote on the then-default dry-run path with no `--execute`
+    (superseded by write-model v2 above: `--dry-run` no longer writes the `.eml`, and the
+    default posture is execute).
 - **BREAKING (behavior):** `mail export` now honours `--dry-run`, which was advertised in `--help`
   and silently ignored — it unconditionally created the directory and wrote one file per message.
-  A non-`--execute` export no longer writes anything. Pass `--execute` for the previous behavior.
+  A `--dry-run` export writes nothing. (Superseded in part by write-model v2 above: the default
+  posture is now execute, so a FLAGLESS export writes — pass `--dry-run` or set `APPLE_DRY_RUN=1`
+  to preview.)
 - `attachments save --allow-outside-home` (new) restores oracle A's reach: its `save_attachments`
   has no confinement, so `/tmp` and `/Volumes/*` are legitimate destinations and refusing them
   unconditionally would DROP a capability. The credential blocklist and the control-character

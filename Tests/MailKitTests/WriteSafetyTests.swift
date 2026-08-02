@@ -3,27 +3,28 @@ import Foundation
 @testable import MailKit
 import AppleKit
 
-// Logic-tier coverage for the Mail WRITE-SAFETY gates — the decision logic proven by the live
-// e2e run (self-send refused to non-self, unlabeled real messages refused for mutation, etc.),
-// captured here so the gates are regression-locked WITHOUT needing a live Mac + TCC. These test
-// the real `guardOutbound` / `requireLiveMessageMutation` / `splitRecipients` used by every write
-// command; only the final AppleScript call (which these gates run BEFORE) needs the live tier.
+// Logic-tier coverage for the Mail WRITE-SAFETY gates under WRITE-MODEL V2
+// (docs/write-model-v2.md): the gates are SANDBOX-PARAMETERIZED pure functions — sandboxActive
+// is an argument, so both branches are exercised as pure calls with no APPLE_TEST_MODE env
+// mutation (the one thing the old suite had to serialize around). The env reads that remain
+// (APPLE_TEST_RECIPIENTS / APPLE_TEST_SANDBOX) are still set + restored per test, so the suite
+// stays `.serialized`.
 //
-// The suite is `.serialized` because the gates read process env (APPLE_TEST_MODE /
-// APPLE_TEST_RECIPIENTS / APPLE_TEST_SANDBOX); each test sets + restores it around its body.
+// The v2 CONTRACT under test: UNSANDBOXED, the gates impose no restriction (the CLI behaves
+// like the MCP — sends to any recipient, mutates any message); SANDBOXED, the self-only
+// allowlist and the label gate hold exactly as v1's did.
 
-@Suite("Mail write-safety gates", .serialized)
+@Suite("Mail write-safety gates (write-model v2)", .serialized)
 struct MailWriteSafetyTests {
 
-    /// Set the sandbox env for the duration of `body`, restoring the prior values after.
-    private func withEnv(testMode: Bool, recipients: String?, sandbox: String? = nil, _ body: () -> Void) {
+    /// Set the allowlist/sandbox-prefix env for the duration of `body`, restoring after.
+    private func withEnv(recipients: String?, sandbox: String? = nil, _ body: () -> Void) {
         func get(_ k: String) -> String? { getenv(k).map { String(cString: $0) } }
         func set(_ k: String, _ v: String?) { if let v { setenv(k, v, 1) } else { unsetenv(k) } }
-        let prev = (get("APPLE_TEST_MODE"), get("APPLE_TEST_RECIPIENTS"), get("APPLE_TEST_SANDBOX"))
-        set("APPLE_TEST_MODE", testMode ? "1" : nil)
+        let prev = (get("APPLE_TEST_RECIPIENTS"), get("APPLE_TEST_SANDBOX"))
         set("APPLE_TEST_RECIPIENTS", recipients)
         set("APPLE_TEST_SANDBOX", sandbox)
-        defer { set("APPLE_TEST_MODE", prev.0); set("APPLE_TEST_RECIPIENTS", prev.1); set("APPLE_TEST_SANDBOX", prev.2) }
+        defer { set("APPLE_TEST_RECIPIENTS", prev.0); set("APPLE_TEST_SANDBOX", prev.1) }
         body()
     }
 
@@ -35,91 +36,96 @@ struct MailWriteSafetyTests {
 
     // MARK: guardOutbound (send / reply / forward)
 
-    @Test("outbound refuses when the --test-mode FLAG is off, even with env set + self recipient")
-    func outboundRefusesFlagOff() {
-        withEnv(testMode: true, recipients: "me@self.test") {
-            #expect(throws: AppleError.self) { try guardOutbound(recipients: ["me@self.test"], testMode: false) }
+    @Test("UNSANDBOXED outbound is unrestricted — any recipient is allowed (MCP parity)")
+    func outboundUnsandboxedUnrestricted() {
+        withEnv(recipients: nil) {
+            #expect(throws: Never.self) {
+                try guardOutbound(recipients: ["someone-else@example.com"], sandboxActive: false)
+            }
         }
     }
 
-    @Test("outbound refuses when APPLE_TEST_MODE env is off, even with the flag + self recipient")
-    func outboundRefusesEnvOff() {
-        withEnv(testMode: false, recipients: "me@self.test") {
-            #expect(throws: AppleError.self) { try guardOutbound(recipients: ["me@self.test"], testMode: true) }
+    @Test("outbound refuses an EMPTY recipient list in both modes (validation, not sandbox)")
+    func outboundRefusesEmptyRecipients() {
+        withEnv(recipients: "me@self.test") {
+            #expect(throws: AppleError.self) { try guardOutbound(recipients: [], sandboxActive: false) }
+            #expect(throws: AppleError.self) { try guardOutbound(recipients: [], sandboxActive: true) }
         }
     }
 
-    @Test("outbound refuses a non-allowlisted (non-self) recipient — the core self-only guarantee")
-    func outboundRefusesNonSelf() {
-        withEnv(testMode: true, recipients: "me@self.test") {
+    @Test("SANDBOXED outbound refuses a non-allowlisted recipient — the self-only guarantee")
+    func outboundSandboxRefusesNonSelf() {
+        withEnv(recipients: "me@self.test") {
             let err = #expect(throws: AppleError.self) {
-                try guardOutbound(recipients: ["me@self.test", "someone-else@example.com"], testMode: true)
+                try guardOutbound(recipients: ["me@self.test", "someone-else@example.com"], sandboxActive: true)
             }
             #expect(err?.exitCode == 77)          // safety_violation, not a generic failure
         }
     }
 
-    @Test("outbound ALLOWS when test-mode on AND every recipient is an allowlisted self address")
-    func outboundAllowsSelfOnly() {
-        withEnv(testMode: true, recipients: "me@self.test,alias@self.test") {
+    @Test("SANDBOXED outbound allows when every recipient is an allowlisted self address")
+    func outboundSandboxAllowsSelfOnly() {
+        withEnv(recipients: "me@self.test,alias@self.test") {
             #expect(throws: Never.self) {
-                try guardOutbound(recipients: ["me@self.test", "alias@self.test"], testMode: true)
+                try guardOutbound(recipients: ["me@self.test", "alias@self.test"], sandboxActive: true)
             }
         }
     }
 
-    @Test("outbound refuses when the allowlist is empty (no APPLE_TEST_RECIPIENTS set)")
-    func outboundRefusesEmptyAllowlist() {
-        withEnv(testMode: true, recipients: nil) {
-            #expect(throws: AppleError.self) { try guardOutbound(recipients: ["me@self.test"], testMode: true) }
+    @Test("SANDBOXED outbound refuses when the allowlist is empty (fail-closed inside the sandbox)")
+    func outboundSandboxRefusesEmptyAllowlist() {
+        withEnv(recipients: nil) {
+            #expect(throws: AppleError.self) { try guardOutbound(recipients: ["me@self.test"], sandboxActive: true) }
         }
     }
 
     // MARK: requireLiveMessageMutation (mark / flag / move / delete-to-trash)
 
-    @Test("mutation gate refuses a REAL (unlabeled) message even with test-mode on — protects real mail")
-    func mutationRefusesUnlabeled() {
-        withEnv(testMode: true, recipients: nil) {
+    @Test("SANDBOXED mutation gate refuses a REAL (unlabeled) message — protects real mail")
+    func mutationSandboxRefusesUnlabeled() {
+        withEnv(recipients: nil) {
             let err = #expect(throws: AppleError.self) {
-                _ = try requireLiveMessageMutation(msg(subject: "Q3 planning notes", imid: "abc@id"), testMode: true)
+                _ = try requireLiveMessageMutation(msg(subject: "Q3 planning notes", imid: "abc@id"), sandboxActive: true)
             }
             #expect(err?.exitCode == 77)
         }
     }
 
-    @Test("mutation gate refuses when test-mode is off, even for a labeled message")
-    func mutationRefusesTestModeOff() {
-        withEnv(testMode: false, recipients: nil) {
-            #expect(throws: AppleError.self) {
-                _ = try requireLiveMessageMutation(msg(subject: "apple-cli-test hi", imid: "abc@id"), testMode: false)
-            }
+    @Test("UNSANDBOXED mutation gate resolves a REAL message — the oracle mutates real mail on call")
+    func mutationUnsandboxedAllowsReal() {
+        withEnv(recipients: nil) {
+            let imid = try? requireLiveMessageMutation(msg(subject: "Q3 planning notes", imid: "real@id"), sandboxActive: false)
+            #expect(imid == "real@id")
         }
     }
 
-    @Test("mutation gate refuses a labeled message that has no RFC Message-ID (cannot address it)")
+    @Test("mutation gate refuses a message with no RFC Message-ID in BOTH modes (cannot address it)")
     func mutationRefusesNoMessageID() {
-        withEnv(testMode: true, recipients: nil) {
+        withEnv(recipients: nil) {
             #expect(throws: AppleError.self) {
-                _ = try requireLiveMessageMutation(msg(subject: "apple-cli-test hi", imid: nil), testMode: true)
+                _ = try requireLiveMessageMutation(msg(subject: "apple-cli-test hi", imid: nil), sandboxActive: true)
+            }
+            #expect(throws: AppleError.self) {
+                _ = try requireLiveMessageMutation(msg(subject: "anything", imid: nil), sandboxActive: false)
             }
         }
     }
 
-    @Test("mutation gate RETURNS the Message-ID for a labeled message with test-mode on")
-    func mutationAllowsLabeled() {
-        withEnv(testMode: true, recipients: nil) {
-            let imid = try? requireLiveMessageMutation(msg(subject: "apple-cli-test hello", imid: "wanted@id"), testMode: true)
+    @Test("SANDBOXED mutation gate RETURNS the Message-ID for a labeled message")
+    func mutationSandboxAllowsLabeled() {
+        withEnv(recipients: nil) {
+            let imid = try? requireLiveMessageMutation(msg(subject: "apple-cli-test hello", imid: "wanted@id"), sandboxActive: true)
             #expect(imid == "wanted@id")
         }
     }
 
-    @Test("a custom APPLE_TEST_SANDBOX prefix is honored by the label gate")
+    @Test("a custom APPLE_TEST_SANDBOX prefix is honored by the sandboxed label gate")
     func mutationHonorsCustomPrefix() {
-        withEnv(testMode: true, recipients: nil, sandbox: "qa-fixture") {
+        withEnv(recipients: nil, sandbox: "qa-fixture") {
             // A message labeled with the custom prefix passes; the default prefix no longer does.
-            #expect((try? requireLiveMessageMutation(msg(subject: "qa-fixture x", imid: "i@d"), testMode: true)) == "i@d")
+            #expect((try? requireLiveMessageMutation(msg(subject: "qa-fixture x", imid: "i@d"), sandboxActive: true)) == "i@d")
             #expect(throws: AppleError.self) {
-                _ = try requireLiveMessageMutation(msg(subject: "apple-cli-test x", imid: "i@d"), testMode: true)
+                _ = try requireLiveMessageMutation(msg(subject: "apple-cli-test x", imid: "i@d"), sandboxActive: true)
             }
         }
     }
@@ -127,36 +133,48 @@ struct MailWriteSafetyTests {
     // MARK: splitRecipients (pure)
 
     @Test("splitRecipients flattens repeated + comma-joined options, trims, drops empties")
-    func splitRecipientsParsing() {
-        #expect(splitRecipients(["a@x.com,b@y.com", " c@z.com "]) == ["a@x.com", "b@y.com", "c@z.com"])
-        #expect(splitRecipients(["a@x.com, ,b@x.com"]) == ["a@x.com", "b@x.com"])
-        #expect(splitRecipients([]) == [])
+    func splitRecipientsParsing() throws {
+        #expect(try splitRecipients(["a@x.com,b@y.com", " c@z.com "]) == ["a@x.com", "b@y.com", "c@z.com"])
+        #expect(try splitRecipients(["a@x.com, ,b@x.com"]) == ["a@x.com", "b@x.com"])
+        #expect(try splitRecipients([]) == [])
     }
 
-    // MARK: executeMessageMutation — the all-or-nothing batch guarantee (the single most important
-    // behavioral property: a mixed batch containing one real/unlabeled message mutates NOTHING).
+    // MARK: executeMessageMutation — the all-or-nothing batch guarantee (sandboxed), and the
+    // unsandboxed pass-through.
 
-    @Test("a mixed batch aborts before ANY op runs — real mail is never partially mutated")
-    func batchAllOrNothing() {
-        withEnv(testMode: true, recipients: nil) {
+    @Test("SANDBOXED: a mixed batch aborts before ANY op runs — real mail is never partially mutated")
+    func batchAllOrNothingSandboxed() {
+        withEnv(recipients: nil) {
             var opCalls = 0
             let batch = [msg(subject: "apple-cli-test one", imid: "a@id"),
                          msg(subject: "Real inbox mail", imid: "b@id"),   // unlabeled → must abort the whole batch
                          msg(subject: "apple-cli-test three", imid: "c@id")]
             #expect(throws: AppleError.self) {
-                _ = try executeMessageMutation(batch, testMode: true) { _, _ in opCalls += 1; return true }
+                _ = try executeMessageMutation(batch, sandboxActive: true) { _, _ in opCalls += 1; return true }
             }
             #expect(opCalls == 0)   // phase-1 gate threw before any phase-2 mutation
         }
     }
 
+    @Test("UNSANDBOXED: a mixed batch applies to every addressable target (MCP parity)")
+    func batchUnsandboxedAppliesAll() {
+        withEnv(recipients: nil) {
+            var opCalls = 0
+            let batch = [msg(subject: "apple-cli-test one", imid: "a@id"),
+                         msg(subject: "Real inbox mail", imid: "b@id")]
+            let result = try? executeMessageMutation(batch, sandboxActive: false) { _, _ in opCalls += 1; return true }
+            #expect(opCalls == 2)
+            #expect(result?.applied.count == 2)
+        }
+    }
+
     @Test("an all-labeled batch applies to every target")
     func batchAllLabeled() {
-        withEnv(testMode: true, recipients: nil) {
+        withEnv(recipients: nil) {
             var opCalls = 0
             let batch = [msg(subject: "apple-cli-test one", imid: "a@id"),
                          msg(subject: "apple-cli-test two", imid: "b@id")]
-            let result = try? executeMessageMutation(batch, testMode: true) { _, _ in opCalls += 1; return true }
+            let result = try? executeMessageMutation(batch, sandboxActive: true) { _, _ in opCalls += 1; return true }
             #expect(opCalls == 2)
             #expect(result?.applied.count == 2)
             #expect(result?.notFound.isEmpty == true)
@@ -165,10 +183,10 @@ struct MailWriteSafetyTests {
 
     @Test("a located-but-unmutable target collects into not_found instead of throwing")
     func batchNotFound() {
-        withEnv(testMode: true, recipients: nil) {
+        withEnv(recipients: nil) {
             let batch = [msg(subject: "apple-cli-test x", imid: "a@id")]
             // op returns false → Mail couldn't locate it (e.g. archived); reported, not thrown.
-            let result = try? executeMessageMutation(batch, testMode: true) { _, _ in false }
+            let result = try? executeMessageMutation(batch, sandboxActive: true) { _, _ in false }
             #expect(result?.applied.isEmpty == true)
             #expect(result?.notFound == ["1"])   // fromSelection sets id = "1"
         }
@@ -211,6 +229,7 @@ struct DraftSendResultParseTests {
         #expect(MailScript.DraftSendResult.parse("notfound", us: US) == .notFound)
         #expect(MailScript.DraftSendResult.parse("norecipients", us: US) == .noRecipients)
         #expect(MailScript.DraftSendResult.parse("openfailed", us: US) == .openFailed)
+        #expect(MailScript.DraftSendResult.parse("wrongwindow", us: US) == .wrongWindow)
         #expect(MailScript.DraftSendResult.parse("senderror:-1708", us: US) == .sendError("-1708"))
     }
 
@@ -221,6 +240,85 @@ struct DraftSendResultParseTests {
         // critically: a near-miss that is NOT exactly a known sentinel must not read as success
         #expect(MailScript.DraftSendResult.parse("sentinel", us: US) == nil)
         #expect(MailScript.DraftSendResult.parse("SENT", us: US) == nil)
+    }
+}
+
+/// The allowlist handed to the AppleScript dispatch layer, and the per-surface execute defaults.
+/// Both are one-expression decisions a refactor could silently invert with every suite green —
+/// review round 1 demanded these pins.
+@Suite("Outbound allowlist selection + per-surface defaults (write-model v2)")
+struct OutboundAllowlistAndDefaultsTests {
+
+    @Test("unsandboxed: the out-of-sandbox wildcard, regardless of what the env list holds")
+    func unsandboxedIsWildcard() {
+        #expect(outboundAllowlist(sandboxActive: false, allowed: ["a@self.test"]) == ["*"])
+        #expect(outboundAllowlist(sandboxActive: false, allowed: []) == ["*"])
+    }
+
+    @Test("sandboxed: the operator's list passes through — minus any literal '*' (in-band sentinel)")
+    func sandboxedFiltersWildcard() {
+        #expect(outboundAllowlist(sandboxActive: true, allowed: ["a@self.test", "b@self.test"])
+                == ["a@self.test", "b@self.test"])
+        // APPLE_TEST_RECIPIENTS="*" must NOT disable the ACTIVE sandbox's recipient check:
+        // the wildcard is the script layer's own sentinel, never derivable from operator data.
+        #expect(outboundAllowlist(sandboxActive: true, allowed: ["*"]) == [])
+        #expect(outboundAllowlist(sandboxActive: true, allowed: ["a@self.test", "*"]) == ["a@self.test"])
+    }
+
+    @Test("sandboxed: an entry CONTAINING a control character is dropped — the US-joined argv would re-split it into extra entries (incl. the sentinel)")
+    func sandboxedFiltersControlCharEntries() {
+        // "a@x\u{1F}*" would materialize as TWO entries after the in-script split — the second
+        // being the wildcard sentinel, silently disabling the ACTIVE sandbox (review-caught).
+        #expect(outboundAllowlist(sandboxActive: true, allowed: ["a@x.test\u{1F}*"]) == [])
+        #expect(outboundAllowlist(sandboxActive: true, allowed: ["ok@self.test", "bad\u{1E}entry"]) == ["ok@self.test"])
+        #expect(outboundAllowlist(sandboxActive: true, allowed: ["nul\u{00}x"]) == [])
+    }
+
+    @Test("splitRecipients refuses a control character — US would split one vetted address into two")
+    func splitRecipientsRefusesControlCharacters() throws {
+        // The list is US-joined into the send/draft argv; an embedded US would produce a second
+        // address that guardOutbound's allowlist comparison never saw.
+        #expect(throws: AppleError.self) { _ = try splitRecipients(["a@self.test\u{1F}evil@x.test"]) }
+        #expect(throws: AppleError.self) { _ = try splitRecipients(["ok@self.test", "b\u{1E}d@x.test"]) }
+        // Legitimate splitting/trimming is unchanged.
+        #expect(try splitRecipients(["a@x.test, b@x.test", " c@x.test "]) == ["a@x.test", "b@x.test", "c@x.test"])
+    }
+
+    @Test("outboundAddressFromIndex takes the bare addr-spec and refuses a control character in it")
+    func outboundAddressFromIndexStripsAndRefuses() throws {
+        // The display name is REMOTE data (a hostile sender's decoded RFC-2047 name) and is
+        // discarded outright — including a US byte planted in it, which would otherwise inject
+        // an extra recipient after the in-script split on the --gui-send route.
+        #expect(try outboundAddressFromIndex("Ops\u{1F}Ops <attacker@evil.test>\u{1F}pad <ops@victim.test>")
+                == "ops@victim.test")
+        #expect(try outboundAddressFromIndex("Display Name <a@x.test>") == "a@x.test")
+        #expect(try outboundAddressFromIndex("  bare@x.test ") == "bare@x.test")
+        // A control character in the ADDRESS itself (not the name) still refuses.
+        #expect(throws: AppleError.self) { _ = try outboundAddressFromIndex("Name <a@x.test\u{1F}b@y.test>") }
+    }
+
+    @Test("resolveAttachmentPath refuses a control character in the path — US would split one vetted path into two")
+    func attachmentPathRefusesControlCharacters() {
+        for p in ["/tmp/a\u{1F}/Users/x/.ssh/id_rsa", "/tmp/a\u{1E}b", "/tmp/a\nb", "/tmp/a\u{7F}b"] {
+            do {
+                _ = try resolveAttachmentPath(p)
+                Issue.record("accepted \(String(reflecting: p))")
+            } catch let e as AppleError {
+                #expect(e.exitCode == AppleExit.permissionDenied)  // 77 — the mailSafety refusal
+            } catch {
+                Issue.record("wrong error type for \(String(reflecting: p)): \(error)")
+            }
+        }
+    }
+
+    @Test("the TRASH surface keeps dry-run as its default — the spec's most safety-critical carve-out")
+    func trashSurfaceDefaults() {
+        // Flipping either static to false makes a FLAGLESS delete/trash-empty touch real mail
+        // by default while the rest of the suite stays green (every other invocation carries an
+        // explicit flag or the env brake). The bats default-pin tests lock the behavior; these
+        // lock the source-level constants the run() paths read.
+        #expect(DeleteCommand.surfaceDefaultDryRun == true)
+        #expect(TrashEmpty.surfaceDefaultDryRun == true)
     }
 }
 
@@ -369,11 +467,19 @@ struct NativeComposeOutcomeTests {
         // A refusal with NO discard field is read pessimistically as not-discarded.
         #expect(MailScript.parseNativeCompose("refused\(Self.US)boss@corp.test")
                 == .refused(nonSelfRecipients: "boss@corp.test", discarded: false))
-        // ...and the operator-facing message says so, loudly.
-        let warn = refusalMessage(kind: "reply", bad: "boss@corp.test", discarded: false)
+        // ...and the operator-facing message says so, loudly — in both modes.
+        let warn = refusalMessage(kind: "reply", bad: "boss@corp.test", discarded: false, sandboxActive: true)
         #expect(warn.contains("could NOT be discarded"))
         #expect(warn.contains("delete it manually"))
-        #expect(refusalMessage(kind: "reply", bad: "x@y.test", discarded: true).contains("was discarded"))
+        #expect(warn.contains("self-only allowlist"))
+        #expect(refusalMessage(kind: "reply", bad: "x@y.test", discarded: true, sandboxActive: true)
+                    .contains("was discarded"))
+        // Unsandboxed, the allowlist claim would be false — the message must not make it. The
+        // only unsandboxed-reachable `bad` is the empty-address sentinel, named plainly.
+        let unsand = refusalMessage(kind: "reply", bad: "x@y.test", discarded: true, sandboxActive: false)
+        #expect(!unsand.contains("allowlist"))
+        #expect(refusalMessage(kind: "reply", bad: "<empty-address>", discarded: true, sandboxActive: false)
+                    .contains("empty/blank recipient address"))
     }
 
     /// The unreadable-recipient-list sentinel the script seeds the readback with — an AppleScript

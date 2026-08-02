@@ -76,10 +76,12 @@ setup() {
 # v2 flips writes to execute-by-default, so a flagless write invocation in this suite — a safe
 # preview under v1 — would become a LIVE MUTATION of the operator's real data at the core flip.
 # The sandbox does not save it: fixtures are apple-cli-test-labeled and pass the label gate.
-# Every write-verb invocation must carry an explicit --dry-run or --execute (or a
-# `# flagless-on-purpose` marker on the few tests that PIN the v1 flagless default — the core
-# flip removes every marker as part of its test migration). Enforced here so a flagless write is
-# a suite FAILURE from the sweep commit onward.
+# Every write-verb invocation must carry an explicit --dry-run or --execute (or a truthy
+# APPLE_DRY_RUN= env brake, or a `# flagless-on-purpose` marker). Two marker populations exist:
+# PRE-FLIP markers pin a not-yet-flipped domain's v1 dry-run default (its flip commit migrates
+# them), and PERMANENT default-pin markers lock a flipped domain's v2 per-surface defaults —
+# those STAY (deleting them would silently unpin the trash-surface dry-run default). Enforced
+# here so a flagless write is a suite FAILURE from the sweep commit onward.
 #
 # The fixture lines below assemble the `$BIN` token at runtime ('$BI' + 'N') so this file never
 # contains a literal write invocation — otherwise the lint would count these fixtures as suite
@@ -94,14 +96,40 @@ setup() {
   local checked
   checked="$(echo "$output" | sed -n 's/.* checked \([0-9]*\) write invocation(s).*/\1/p')"
   [ -n "$checked" ] && [ "$checked" -ge 100 ]
-  # PIN the marker count. flagless-on-purpose is the one sanctioned path to a flagless write,
-  # so its population is CAPPED here: adding a marker requires editing this assertion — a
-  # reviewable event. (A net-neutral marker SWAP holds the count without touching this line,
-  # but both halves of a swap are visible line edits in the same diff; the cap's job is to
-  # stop growth.) The count reaches 0 at the v2 core flip, which removes every marker.
+  # PIN the marker count. flagless-on-purpose is the one sanctioned path to a flagless write
+  # (besides the APPLE_DRY_RUN env-brake prefix, tested below), so its population is CAPPED
+  # here: adding a marker requires editing this assertion — a reviewable event. (A net-neutral
+  # marker SWAP holds the count without touching this line, but both halves of a swap are
+  # visible line edits in the same diff; the cap's job is to stop growth.) Composition today:
+  # 5 pre-flip markers in un-flipped domains (contacts×2, messages×1, notes×2 — each domain's
+  # flip migrates its own) + 2 PERMANENT default-pin markers in mail.bats (they lock the v2
+  # per-surface defaults with deliberately flagless invocations; the final-flip count is 2,
+  # not 0, unless other domains add default-pins of their own — edit deliberately).
   local markers
   markers="$(echo "$output" | sed -n 's/.*, \([0-9]*\) marker(s)$/\1/p')"
-  [ "$markers" -eq 8 ]
+  [ "$markers" -eq 7 ]
+}
+
+@test "lint: a truthy APPLE_DRY_RUN env-brake prefix exempts a flagless write; junk or a later command does not" {
+  # v2 brake-behavior tests are DELIBERATELY flagless under `APPLE_DRY_RUN=1 …` — precedence
+  # makes them dry-runs. The exemption must be exactly as narrow as the runtime semantics:
+  # only the binary's truthy spellings, and only for the invocation the assignment prefixes.
+  local T='$BI'; T="${T}N"
+  mkdir -p "$BATS_TEST_TMPDIR/lintcase3"
+  printf '%s\n' "APPLE_DRY_RUN=1 run \"$T\" mail send --to me@self.test --subject x --body y" \
+    > "$BATS_TEST_TMPDIR/lintcase3/brake.bats"
+  run python3 "$BATS_TEST_DIRNAME/helpers/no_flagless_writes.py" "$BATS_TEST_TMPDIR/lintcase3"
+  [ "$status" -eq 0 ]
+  # A junk value is a runtime validation_error, NOT a brake — still a violation.
+  printf '%s\n' "APPLE_DRY_RUN=off run \"$T\" mail send --to me@self.test --subject x --body y" \
+    > "$BATS_TEST_TMPDIR/lintcase3/brake.bats"
+  run python3 "$BATS_TEST_DIRNAME/helpers/no_flagless_writes.py" "$BATS_TEST_TMPDIR/lintcase3"
+  [ "$status" -eq 1 ]
+  # `VAR=1 cmd1 && cmd2` does not export to cmd2 — the brake never exempts a later command.
+  printf '%s\n' "APPLE_DRY_RUN=1 true && run \"$T\" mail send --to me@self.test --subject x --body y" \
+    > "$BATS_TEST_TMPDIR/lintcase3/brake.bats"
+  run python3 "$BATS_TEST_DIRNAME/helpers/no_flagless_writes.py" "$BATS_TEST_TMPDIR/lintcase3"
+  [ "$status" -eq 1 ]
 }
 
 @test "lint: a dynamic-verb write invocation without an explicit flag is a violation" {

@@ -1,5 +1,14 @@
 # apple-cli — integration status (overnight build, 2026-07-15/16)
 
+> **SUPERSEDED IN PART (2026-08-01, write-model v2 — docs/write-model-v2.md).** This file is a
+> dated snapshot of the 2026-07-15/16 overnight run; its safety-posture claims describe THAT
+> NIGHT, not the current tree. Since then: the live write paths were wired (2026-07-2x), and
+> the **Mail domain flipped to write-model v2** — Mail writes now EXECUTE when invoked
+> (`--dry-run` previews; `APPLE_TEST_MODE`/`--test-mode` is an opt-in sandbox restriction, not
+> a write prerequisite; the trash surface keeps dry-run as its default). Read the "v1
+> two-factor gate" statements below as historical. Remaining domains flip per the spec's
+> rollout order.
+
 **TL;DR.** All six domains are implemented to strict-superset MCP parity, each
 independently reviewed (3-pass OMC) and verified green, then aggregated onto the
 `integration` branch with a shared-core hardening pass. The combined tree builds

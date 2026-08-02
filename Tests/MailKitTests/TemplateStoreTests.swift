@@ -283,4 +283,21 @@ struct TemplateStoreTests {
         let store = tempStore()
         #expect(throws: Error.self) { _ = try store.get("nope") }
     }
+
+    /// `validateSave` is the PURE half `save` runs and the `--dry-run` path now runs too, so a
+    /// preview cannot name a save `--execute` would refuse (write-model v2 preview honesty;
+    /// review-caught after the willExecute branch landed). Pinning it here keeps the two paths
+    /// provably on the same rules.
+    @Test("validateSave enforces every save rule without touching the filesystem")
+    func validateSaveIsThePureSharedCheck() throws {
+        try TemplateStore.validateSave(name: "good-name_1", body: "hi", subject: "S")
+        try TemplateStore.validateSave(name: "n", body: "hi", subject: nil)
+        for bad in ["../evil", "has space", "", String(repeating: "a", count: 65), "unicodé"] {
+            #expect(throws: AppleError.self) {
+                try TemplateStore.validateSave(name: bad, body: "hi", subject: nil)
+            }
+        }
+        #expect(throws: AppleError.self) { try TemplateStore.validateSave(name: "n", body: "   ", subject: nil) }
+        #expect(throws: AppleError.self) { try TemplateStore.validateSave(name: "n", body: "b", subject: "a\nb") }
+    }
 }

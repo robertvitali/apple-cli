@@ -63,7 +63,7 @@ Class legend: **CORE** = primitive Mail operation · **DERIVED** = computed on t
 **Union = 42 capabilities.** CORE = 35, DERIVED = 6, plus the MCP-UI dashboard. **A-only:** #5,6,26–35 (rules, templates, ID-precise get/selected — 12). **B-only:** #7,9,11,13,15,17,18,23,36–42 (HTML/drafts/analytics/export/permanent-delete — 16). **Overlap:** ~14 CORE, of which 6 carry **targeting-model conflicts** (ID vs subject/filter) and 2 carry **feature conflicts** (flag color palette; permanent-delete availability).
 
 ### Key overlaps / conflicts to reconcile in the port
-- **Targeting model:** A = stable `message_id` (precise, robust); B = `subject_keyword`/sender/date **filters** (convenient, fuzzy). → Port must support **both** (ID-first for safety + `--match` filter convenience with mandatory dry-run).
+- **Targeting model:** A = stable `message_id` (precise, robust); B = `subject_keyword`/sender/date **filters** (convenient, fuzzy). → Port must support **both** (ID-first for safety + `--match` filter convenience; under write-model v2 filter-based mutations execute like any other — the envelope's `filter_based` + `scope_note` disclose the sweep, and `--dry-run`/`APPLE_DRY_RUN=1` preview it).
 - **Flag palette:** A = 8 named colors; B = flag/unflag only. → Union = flag `--color` (optional, default red/none) + `--unflag`.
 - **Delete depth:** A always-Trash (permanent is a documented no-op); B adds `delete_permanent` + `empty_trash`. → Union includes permanent + empty (from B).
 
@@ -72,12 +72,15 @@ Class legend: **CORE** = primitive Mail operation · **DERIVED** = computed on t
 Both are wired in the CLI (`mail delete --permanent`, `mail trash empty`), with gates sized to
 their irreversibility and two deliberate divergences from oracle B, both in the safer direction:
 
-- **Gating.** `--permanent` requires `--test-mode` + `APPLE_TEST_MODE=1`, the all-or-nothing
-  `apple-cli-test` label gate, a re-check against the CANONICAL prefix (so an `APPLE_TEST_SANDBOX`
-  override cannot widen what may be erased), and the operator-only `APPLE_ALLOW_PERMANENT_DELETE=1`
-  — because a subject label is spoofable and must never be the sole gate on an irreversible op.
-  `trash empty` cannot be scoped to test data at all, so it requires `--confirm` plus the
-  operator-only `APPLE_ALLOW_EMPTY_TRASH=1`; it is never run autonomously. `--max` mirrors
+- **Gating (write-model v2, 2026-08-01).** `--permanent` requires the operator-only
+  `APPLE_ALLOW_PERMANENT_DELETE` env var (truthy `1`/`true`/`yes`) plus a target-label re-check
+  against the CANONICAL `apple-cli-test` prefix (so an `APPLE_TEST_SANDBOX` override cannot widen
+  what may be erased) — because a subject label is spoofable and must never be the sole gate on an
+  irreversible op. Both gates are UNCONDITIONAL: sandbox state never scopes them, and the v1
+  `--test-mode` requirement is gone (the sandbox is now the opt-in restriction, not a write
+  prerequisite). `trash empty` cannot be scoped to test data at all, so it requires `--confirm`
+  plus the operator-only `APPLE_ALLOW_EMPTY_TRASH` (truthy); it is never run autonomously.
+  Both commands keep DRY-RUN as their default (the trash-surface carve-out). `--max` mirrors
   `max_deletes` (default 5).
 - **Trash resolution DIVERGES (CLI is correct, oracle is buggy).** Oracle B hardcodes
   `mailbox "Trash" of account X`. On iCloud that is an EMPTY decoy — the real trash is
@@ -323,7 +326,7 @@ applemail doctor                                                                
 Hard parts, roughly descending:
 - **Mail rules AppleScript** (create/update/delete/enable + the update-rule *unsupported-action refusal*, condition/action schema, 1-based index model) — Mail's rule dictionary is finicky and partly UI-scripted. **Highest risk;** vendor MCP A to de-risk. (M–L)
 - **Analytics / needs-response & awaiting-reply heuristics** — newsletter/noreply filtering, `?`-and-direct-To ranking, and the Sent↔Inbox cross-reference for awaiting-reply; must reproduce MCP B's judgment. Fast if computed over the SQLite index. (M)
-- **Dual targeting model** (ID-precise [A] + subject/sender/date `--match` filters [B]) across move/mark/flag/delete/attachments/thread — plus mandatory dry-run on every filter-based bulk op. (M)
+- **Dual targeting model** (ID-precise [A] + subject/sender/date `--match` filters [B]) across move/mark/flag/delete/attachments/thread — filter-based bulk envelopes carry `filter_based` + `scope_note` (the v1 mandatory dry-run was lifted by write-model v2). (M)
 - **HTML send via `.eml`** (multipart generation + Mail open/save) and **drafts** (list/create/send/open/delete). (M)
 - **Attachment handling** — IMAP BODYSTRUCTURE fast path + AppleScript fallback; save-by-index vs save-by-name. (M)
 - **Envelope-Index SQLite** — `V{9,10,11}` path + schema drift, copy-to-temp safe read, keeping search/analytics correct as the schema evolves. (M)

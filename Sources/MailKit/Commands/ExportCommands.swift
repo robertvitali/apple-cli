@@ -7,23 +7,34 @@ import AppleKit
 // MARK: dashboard (static HTML — MCP B's inbox_dashboard without the mcp-ui dependency)
 
 struct AnalyticsDashboard: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "dashboard", abstract: "Write a static HTML inbox dashboard (no server).")
+    static let configuration = CommandConfiguration(commandName: "dashboard", abstract: "Write a static HTML inbox dashboard (EXECUTES by default; --dry-run previews).")
     @OptionGroup var global: GlobalOptions
     @Option(name: .long, help: "Output HTML path (default ./inbox-dashboard.html).") var out: String = "inbox-dashboard.html"
 
-    struct Result: Encodable { let path: String; let total_unread: Int; let accounts: Int }
+    struct Result: Encodable { let path: String; let total_unread: Int; let accounts: Int; let dry_run: Bool }
 
     func run() throws {
         try runGuarded(tool: "mail") {
+            // Write-model v2 preamble. This command was review-caught with NO willExecute branch
+            // (wrote HTML despite --dry-run) and a bare unconfined `--out` — an operator-supplied
+            // write path that skipped confineWriteDestination, so `--out ~/.ssh/authorized_keys`
+            // would have clobbered a key with HTML. Confinement runs on the dry-run path too
+            // (preview honesty); allowOutsideHome keeps /tmp-style destinations legal while the
+            // credential blocklist + control-character rejection stay absolute.
+            try TestMode.validateWriteEnvironment()
+            let sandboxActive = try TestMode.sandboxActive(flag: global.testMode)
+            let willExecute = try global.willExecute(defaultDryRun: false)
+
+            let url = try confineWriteDestination(out, action: "write the dashboard HTML to", allowOutsideHome: true)
             let ctx = try MailContext()
             let unread = (try? MailScript().unreadCounts(summary: true, includeZero: true, accountFilter: nil)) ?? []
             let total = unread.reduce(0) { $0 + $1.unread }
             var f = EnvelopeIndex.MessageFilters(); f.mailboxName = "INBOX"; f.limit = 15
             let recent = try ctx.index.queryMessages(f).map { ctx.decodeSummary($0) }
             let html = MailDashboard.render(unread: unread, totalUnread: total, recent: recent)
-            let url = URL(fileURLWithPath: (out as NSString).expandingTildeInPath)
-            try html.write(to: url, atomically: true, encoding: .utf8)
-            try Output.emit(tool: "mail", data: Result(path: url.path, total_unread: total, accounts: unread.count))
+            if willExecute { try html.write(to: url, atomically: true, encoding: .utf8) }
+            try Output.emit(tool: "mail", data: Result(path: url.path, total_unread: total,
+                accounts: unread.count, dry_run: !willExecute), sandboxActive: sandboxActive)
         }
     }
 }
@@ -31,7 +42,7 @@ struct AnalyticsDashboard: ParsableCommand {
 // MARK: export
 
 struct ExportCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "export", abstract: "Export messages to files (txt/html) for backup or analysis.")
+    static let configuration = CommandConfiguration(commandName: "export", abstract: "Export messages to files (txt/html) for backup or analysis (EXECUTES by default; --dry-run previews).")
     @OptionGroup var global: GlobalOptions
     @Option(name: .long, help: "Account name or UUID.") var account: String
     @Option(name: .long, help: "Scope: single_email (needs --subject) or entire_mailbox.") var scope: String = "entire_mailbox"
@@ -57,19 +68,33 @@ struct ExportCommand: ParsableCommand {
 
     func run() throws {
         try runGuarded(tool: "mail") {
+            // Write-model v2 preamble. Export EXECUTES by default (oracle B export_emails
+            // writes on call); resolveExportDirectory path confinement is bucket 1, unchanged.
+            try TestMode.validateWriteEnvironment()
+            let sandboxActive = try TestMode.sandboxActive(flag: global.testMode)
+            let willExecute = try global.willExecute(defaultDryRun: false)
+
             guard format == "txt" || format == "html" else { throw AppleError.validation("--format must be txt or html.") }
-            let ctx = try MailContext()
-            let uuid = try ctx.requireAccountUUID(account)
-            var f = EnvelopeIndex.MessageFilters()
-            f.accountUUID = uuid; f.mailboxName = mailbox
             // Oracle B: "Error: Invalid scope '<s>'. Use: single_email, entire_mailbox"
             // (tools/analytics.py). An unknown scope previously fell through to the
             // entire_mailbox branch and exported the whole mailbox — the opposite of narrowing.
+            // Pure flag checks hoisted ABOVE the store open (store-independent usage errors).
             guard ["single_email", "entire_mailbox"].contains(scope) else {
                 throw AppleError.validation("invalid --scope '\(scope)'. Use: single_email, entire_mailbox.")
             }
             if scope == "single_email" {
-                guard let subject, !subject.isEmpty else { throw AppleError.validation("single_email scope requires --subject.") }
+                // TRIMMED emptiness, matching every other subject-keyword guard: a
+                // whitespace-only value survives a bare isEmpty test AND the index's empty-skip,
+                // binding a `% %` LIKE that nearly every real subject matches (review-caught).
+                guard let subject, !subject.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
+                    throw AppleError.validation("single_email scope requires a non-empty --subject.")
+                }
+            }
+            let ctx = try MailContext()
+            let uuid = try ctx.requireAccountUUID(account)
+            var f = EnvelopeIndex.MessageFilters()
+            f.accountUUID = uuid; f.mailboxName = mailbox
+            if scope == "single_email" {
                 f.subjectContains = subject; f.limit = 1
             } else {
                 f.limit = max
@@ -107,11 +132,11 @@ struct ExportCommand: ParsableCommand {
             // and wrote one file per message regardless. On a command that writes message bodies
             // to disk that is the worst kind of ignored parameter, so the preview now returns
             // before any filesystem mutation — no directory creation, no writes.
-            guard global.willExecute else {
+            guard willExecute else {
                 try Output.emit(tool: "mail", data: Result(
                     exported: 0, directory: outDir.path, files: planned, format: format,
                     body_source: bodySource, dry_run: true,
-                    total_in_mailbox: totalInMailbox, capped: totalInMailbox > messages.count))
+                    total_in_mailbox: totalInMailbox, capped: totalInMailbox > messages.count), sandboxActive: sandboxActive)
                 return
             }
             try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
@@ -127,7 +152,7 @@ struct ExportCommand: ParsableCommand {
             try Output.emit(tool: "mail", data: Result(
                 exported: files.count, directory: outDir.path, files: files, format: format,
                 body_source: bodySource, dry_run: false,
-                total_in_mailbox: totalInMailbox, capped: totalInMailbox > files.count))
+                total_in_mailbox: totalInMailbox, capped: totalInMailbox > files.count), sandboxActive: sandboxActive)
         }
     }
 }

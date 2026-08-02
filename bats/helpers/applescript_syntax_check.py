@@ -83,16 +83,22 @@ def check_argv_arity(src: str, lit: dict) -> bool:
     expected arity == 2 + len(extra).
     """
     ok = True
-    # (script literal, wrapper func name, number of `extra` argv values it appends)
+    # (script literal, wrapper func name, TOTAL argv count the Swift wrapper passes).
+    # The locator-based scripts pass [candidate, account] first and then their extras, so their
+    # total is 2 + extras; scripts that build their own argv list (sendHtmlGui) state it whole.
     expectations = [
-        ("nativeReplyScript", "nativeReply", 8),    # body, replyAll, sender, allow, att, cc, bcc, mbxHint
-        ("nativeForwardScript", "nativeForward", 8),  # body, to, cc, bcc, sender, allow, att, mbxHint
+        ("nativeReplyScript", "nativeReply", 2 + 8),    # +body, replyAll, sender, allow, att, cc, bcc, mbxHint
+        ("nativeForwardScript", "nativeForward", 2 + 8),  # +body, to, cc, bcc, sender, allow, att, mbxHint
+        # No locator prefix: htmlPath, subject, to, cc, bcc, att, sender, nonce. The nonce slot
+        # is the gui-send window-binding marker — an arity drift here would make the script read
+        # `item 8 of argv` off an empty list and fail only against live Mail, on the one path
+        # that cannot be exercised autonomously (Accessibility + focus theft).
+        ("sendHtmlGuiScript", "sendHtmlViaGui", 8),
     ]
-    for name, func, extra_count in expectations:
+    for name, func, want in expectations:
         body = lit.get(name, "")
         used = [int(m) for m in re.findall(r"item (\d+) of argv", body)]
         high = max(used) if used else 0
-        want = 2 + extra_count
         if high != want:
             print(f"FAIL - {name}: reads up to `item {high} of argv` but {func} passes {want}")
             ok = False
