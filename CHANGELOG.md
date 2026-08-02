@@ -12,6 +12,44 @@ with the Apple MCP servers they replace.
 
 ## [Unreleased]
 
+### Fixed — snapshot copies of the operator's mail and messages accumulated in `$TMPDIR`
+
+`SQLiteReader(copyToTemp:)` copies the Envelope Index / `chat.db` / `NoteStore.sqlite` so reads see
+a consistent, WAL-applied view, and deleted the copy in `deinit`. `deinit` essentially never ran:
+ArgumentParser ends a command with `exit()`, which tears the process down without releasing the
+reader. Measured before the fix: **>150 snapshot files totalling multiple GB, mode 0644** — real subjects,
+senders and recipients, left readable in `$TMPDIR` indefinitely and never collected.
+
+Cleanup is now keyed to **process liveness rather than to a clock**. Each process creates
+`$TMPDIR/apple-cli-snapshots/s-<pid>-<uuid>/` (0700, snapshots inside at 0600), holds
+`flock(LOCK_EX|LOCK_NB)` on a `.lock` in that directory for its whole life, and removes the
+directory wholesale from an `atexit` handler. Anything a crash strands is collected on the next run
+by asking the kernel, not a timer: the reaper tries the lock on each sibling directory — acquired
+means the owner is gone and the directory is removed; `EWOULDBLOCK` means a reader is alive and it
+is skipped. The snapshots root is re-validated on every call (must be a directory, must be owned by
+this uid, mode re-tightened to 0700), because `createDirectory(attributes:)` applies its mode only
+when it creates and every run after the first takes the existing-directory path.
+
+Three earlier designs were measured and rejected; `docs/COMPLETION-LOOP.md` Q4d records them so they
+are not re-derived. Two tried to delete the snapshot early and both fail because SQLite reads the
+file lazily — unlinking after `sqlite3_open_v2` dies on the copied `-wal` with `disk I/O error`, and
+checkpoint-then-unlink survives a warm read but fails once a later query faults in a page. The third
+collected orphans **by file age**: it shipped and was reverted, because `FileManager.copyItem`
+preserves the source's mtime, so a snapshot of a store idle for an hour is born already past the
+threshold and a concurrent `apple` deletes a live reader's files. Stamping each copy fresh repairs
+that specific case but not the predicate — age only ever estimates whether an owner is still there,
+so a laptop asleep mid-command reopens the same hole. Liveness answers the question age was guessing
+at, and the kernel releases an `flock` on any process death including `SIGKILL`.
+
+Not covered, and tracked: `atexit` does not run on `SIGINT`/`SIGTERM` (Q4i), the reaper only looks
+inside its own root so pre-fix leaks on other machines are not collected (Q4g), and the main DB and
+its sidecars are still copied at three separate instants, which SQLite does not guarantee to be
+coherent (Q4h).
+
+Also fixed: `EnvelopeIndexTests` leaked one fixture per test into `$TMPDIR` — 979 files, ~42 MB on
+the machine where it was found — the same class of defect as the bug above, in this repo's own
+tests. A full suite run now leaves nothing behind.
+
 ### Fixed — `needs-response` and `awaiting-reply` read the wrong Sent mailbox, in the wrong order
 
 Two analytics commands sourced their Sent data through the same two defects. Neither raised an

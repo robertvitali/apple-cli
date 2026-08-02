@@ -251,3 +251,54 @@ setup() {
     | python3 "$0/helpers/no_flagless_writes.py" --diff-mode' "$BATS_TEST_DIRNAME" "$T"
   [ "$status" -eq 0 ]
 }
+
+# --- snapshot lifetime: the process must leave nothing behind -----------------------------
+# THE regression gate for the temp-snapshot leak (COMPLETION-LOOP Q4d). Every other test of this
+# feature exercises components in-process; only a real invocation reaches the `atexit` handler that
+# replaces the never-running `deinit`, and only a real invocation reaches the reaper call site in
+# `SnapshotSession.directory()`. Both lines are red-proofed: delete either and this test fails.
+#
+# TWO RULES THIS TEST OBEYS, both learned the hard way inside this same change:
+#
+# 1. IT NEVER DELETES SHARED STATE. An earlier draft ran `rm -rf "$TMPDIR/apple-cli-snapshots"`,
+#    which would destroy the LIVE, LOCKED session directory of any concurrent `apple` — a developer
+#    in another terminal, a parallel agent lane, a live-tier run. The entire point of the flock
+#    design is that nothing can delete a live session; a test must not bypass it with a filesystem
+#    remove. So this test only PLANTS uniquely-named entries and removes its own.
+#    ($TMPDIR cannot be redirected to dodge this: `FileManager.temporaryDirectory` reads
+#    `confstr(_CS_DARWIN_USER_TEMP_DIR)` and IGNORES the environment variable — verified directly.)
+#
+# 2. ITS LEAK PREDICATE IS THE LOCK, NOT A COUNT. Counting `s-` directories races a concurrent
+#    `apple` in both directions. Instead: after a successful run, no session directory may exist
+#    whose `.lock` is ACQUIRABLE. An acquirable lock means the owner is dead, so the directory is an
+#    orphan — ours (atexit failed) or a stranger's (the reaper failed). A live process holds its
+#    lock and is correctly ignored.
+
+@test "a snapshot-backed run cleans up after itself and reaps dead sessions" {
+  BIN="$(swift build --show-bin-path)/apple"
+  ROOT="${TMPDIR%/}/apple-cli-snapshots"
+  TAG="batstest-$$-$RANDOM"
+
+  # Plant a DEAD session (a .lock nobody holds) and a foreign directory that must survive.
+  mkdir -p "$ROOT/s-999999-$TAG" "$ROOT/keepme-$TAG"
+  : > "$ROOT/s-999999-$TAG/.lock"
+  : > "$ROOT/s-999999-$TAG/payload.sqlite"
+
+  run "$BIN" messages chats
+  [ "$status" -eq 0 ]
+
+  # Positive control: the root exists, so the copy path really executed. Without it every assertion
+  # below passes vacuously on a machine where the command never got that far.
+  [ -d "$ROOT" ]
+
+  # The reaper call site ran: the dead session is gone, the foreign directory untouched.
+  [ ! -d "$ROOT/s-999999-$TAG" ]
+  [ -d "$ROOT/keepme-$TAG" ]
+  rmdir "$ROOT/keepme-$TAG"
+
+  # No orphans anywhere: every surviving session directory must still be LOCKED by a live process.
+  # This is what catches a deleted `atexit` — our own directory would outlive the exit with its lock
+  # released by the kernel, and so be acquirable here.
+  orphans="$(/usr/bin/python3 "$BATS_TEST_DIRNAME/helpers/unlocked_sessions.py" "$ROOT")"
+  [ -z "$orphans" ] || { echo "orphaned session directories left behind: $orphans"; false; }
+}

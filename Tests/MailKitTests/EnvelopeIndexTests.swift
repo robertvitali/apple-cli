@@ -62,7 +62,19 @@ struct EnvelopeIndexTests {
         return path
     }
 
-    private func index() throws -> EnvelopeIndex { try EnvelopeIndex(explicitPath: EnvelopeIndexTests.makeFixture()) }
+    /// `EnvelopeIndex` opens with `copyToTemp: true`, so the fixture is genuinely unneeded once
+    /// `init` returns — delete it. Without this the suite leaked one file per test invocation into
+    /// `$TMPDIR`: 979 files, ~42 MB, on the machine where this was found. Poor form in any suite,
+    /// and worse in the one repo whose current work is "we leak private data into `$TMPDIR`".
+    private func index() throws -> EnvelopeIndex {
+        let path = EnvelopeIndexTests.makeFixture()
+        defer {
+            for p in [path, path + "-wal", path + "-shm"] {
+                try? FileManager.default.removeItem(atPath: p)
+            }
+        }
+        return try EnvelopeIndex(explicitPath: path)
+    }
 
     @Test func loadsMailboxesAndLinkageTypes() throws {
         let idx = try index()
