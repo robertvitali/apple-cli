@@ -12,6 +12,58 @@ with the Apple MCP servers they replace.
 
 ## [Unreleased]
 
+### BREAKING — Contacts write-model v2: writes EXECUTE by default
+
+Second domain flipped to write-model v2 (`docs/write-model-v2.md`), same principle as the
+Mail flip below: `apple contacts <write>` behaves like calling the equivalent
+apple-contacts-mcp tool, which mutates the real address book on call.
+
+- **BREAKING (behavior): all 11 Contacts writes execute when invoked** — `create`, `update`,
+  `delete`, `note set`, `photo set`, `vcard import`, `groups create|rename|delete|add|remove`.
+  `--dry-run` previews; `APPLE_DRY_RUN=1` restores dry-run-by-default globally. **Any script
+  or shell-history invocation that relied on the old dry-run default now mutates real
+  contacts.** The v1 gate (`--execute --test-mode` AND `APPLE_TEST_MODE=1`) is gone from 9 of
+  the 11 ops: it was a CLI-only restriction the oracle does not have.
+- **The sandbox is now opt-in and single-signal**: `APPLE_TEST_MODE` truthy (`1`/`true`/`yes`)
+  **or** `--test-mode`, either alone. Inside it, writes stay confined to `apple-cli-test`-
+  labeled items — the CLI's analogue of the oracle's own test-mode `CONTACTS_TEST_GROUP`
+  confinement (`check_test_mode_safety`, security.py:56, which likewise ALLOWS everything when
+  test mode is off).
+- **KEPT unconditionally (oracle-mirrored): `delete` and `groups delete` still require
+  `APPLE_TEST_MODE=1` in the ENVIRONMENT** — mirroring `require_test_mode_for`
+  (security.py:161) at `delete_contact` (server.py:965) / `delete_group` (server.py:1715).
+  A `--test-mode` FLAG deliberately does NOT satisfy it. The reason is PARITY: the oracle keys
+  that gate to an environment variable, so the replacement does too. It is **not** a security
+  boundary — anything that can pass argv can equally set the environment of the process it
+  spawns — and an earlier draft of this note claiming otherwise was wrong. Refusal stays
+  `safety_violation` / exit 77.
+- **BREAKING (contract): envelope changes.** Sandboxed write envelopes carry `"sandbox": true`
+  (key absent otherwise). Every executed write result now states `"dry_run": false` explicitly
+  (`create`, `update`, `delete`, `note set`, `photo set`, `vcard import`, and all five group
+  ops) so a caller can tell "previewed" from "done" under execute-by-default. Previews gain an
+  optional `gate_note`.
+- **Preview honesty.** Dry-runs now run every gate computable from argv, so a preview refuses
+  exactly what execute refuses: `groups rename`'s new-name label check and `vcard import`'s
+  per-card label check were hoisted above the store (both are pure/static), and the create
+  label check already applied to both paths. The fetched-target label checks need a TCC-bearing
+  store read a preview does not take — a sandboxed preview names them in `gate_note` instead of
+  implying they passed. A `delete` preview likewise names the env gate that will refuse it.
+- **Fix (sandbox coherence): `create --group` now label-checks its group target inside the
+  sandbox**, as `vcard import --group` already did. Previously a sandboxed create could attach
+  a labeled test contact to a REAL group.
+- Fail-loud env parsing applies here as everywhere: `APPLE_TEST_MODE=ture` or
+  `APPLE_DRY_RUN=off` is a `validation_error` (exit 64), never a silently-guessed "off".
+- **`--text` write output now shows `sandbox: true`** when the sandbox is engaged. `--text` is
+  still not part of the versioned contract, but a human reading it has the same need to know
+  the write was confined as a machine reading the envelope.
+- **Test-infrastructure fix (AppleKit, additive):** `GlobalOptions.willExecute` gained an
+  `envVar:` parameter, defaulted to `APPLE_DRY_RUN`, matching the seam
+  `TestMode.sandboxActive(flag:envVar:)` already had. swift-testing runs suites in parallel in
+  ONE process, so a test that `setenv`s a real v2 variable races every domain that reads it.
+  That was harmless while all domains were pre-flip; making Contacts the first reader of
+  `APPLE_DRY_RUN` turned it into a **6-in-12 red rate** on the full suite. Each domain flip adds
+  another reader, so tests now own unique variables through the seams instead.
+
 ### BREAKING — Mail write-model v2: writes EXECUTE by default (operator decision 2026-08-01)
 
 The Mail domain is the first flipped to write-model v2 (`docs/write-model-v2.md`): the CLI

@@ -54,9 +54,19 @@ public struct GlobalOptions: ParsableArguments {
     /// THROWING: an unparseable APPLE_DRY_RUN refuses the command (validation_error, 64)
     /// instead of silently resolving to execute — carried by the signature, not by a
     /// promise that a preamble ran first.
-    public func willExecute(defaultDryRun: Bool) throws -> Bool {
+    ///
+    /// `envVar` is a seam for the logic tier, matching the one `TestMode.sandboxActive(flag:
+    /// envVar:)` already carries, and it exists for the same reason: a test that needs the
+    /// env-SET branch must own a UNIQUE variable rather than `setenv`-ing the real
+    /// `APPLE_DRY_RUN`, because swift-testing runs suites in PARALLEL and the process
+    /// environment is global. Once a domain flips to write-model v2 its own tests call this
+    /// method, so a test that mutates the real variable races them — observed at a 6-in-12
+    /// failure rate when the Contacts flip made `resolveWrite` the first domain reader of
+    /// `APPLE_DRY_RUN` while `WriteModelV2CoreTests` still owned it globally. Production
+    /// callers never pass this.
+    public func willExecute(defaultDryRun: Bool, envVar: String = TestMode.dryRunVar) throws -> Bool {
         Self.resolveExecute(dryRunFlag: dryRun, executeFlag: execute,
-                            envDryRun: try TestMode.truthyEnv(TestMode.dryRunVar),
+                            envDryRun: try TestMode.truthyEnv(envVar),
                             defaultDryRun: defaultDryRun)
     }
 

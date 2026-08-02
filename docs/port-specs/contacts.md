@@ -153,7 +153,7 @@ contacts get <id>    [--niche]                  # → get_contact (include_niche
 contacts search      (--name|--phone|--email|--org <v>) [--deep] [--all]   # search_contacts + Contactor --deep
 contacts create      [--first --last --org … | --json <blob>] [--group <id>] [--container <id>]
 contacts update <id> [--set field=v | --clear field | --json <blob>]       # None/""/value semantics
-contacts delete <id> [--group <id>] [--force]   # test-mode/safety gated
+contacts delete <id> [--group <id>]             # requires APPLE_TEST_MODE=1 (oracle-mirrored)
 
 contacts note get <id>                          # → read_note   (HARD: AppleScript)
 contacts note set <id> (--note <s> | --file <p> | --clear)   # → write_note (HARD); --note, NOT --text (--text is the global human-output flag)
@@ -206,21 +206,50 @@ Contacts.framework with the two AppleScript fallbacks (notes r/w, group remove-m
 All 21 MCP tools are mapped and live-parity-verified against the oracle. Deviations from
 a literal MCP transcription, and why:
 
-- **Write-safety gate (intentionally more conservative than the MCP).** Every destructive
-  command **defaults to a `--dry-run` preview that mutates nothing**. A real mutation
-  requires `--execute --test-mode` **and** `APPLE_TEST_MODE=1`; `create` / `groups create`
-  additionally require the new item's name to carry the `apple-cli-test` sandbox prefix.
-  The MCP writes real data outside test mode (gating only deletes) — the CLI is stricter per
-  the repo `AGENTS.md` safety mandate (no separate sandbox; real address book). **Every MCP
-  write capability remains reachable** via `--execute --test-mode` with `APPLE_TEST_MODE=1`;
-  nothing is dropped, only gated. The refusal preserves the MCP's `safety_violation`
-  `error.type` (mapped to exit 77).
+- **Write model (v2 — behaves like the MCP; see `docs/write-model-v2.md`).** Every write
+  command **EXECUTES when invoked**, exactly as calling the equivalent MCP tool does;
+  `--dry-run` previews and `APPLE_DRY_RUN=1` restores dry-run-by-default globally
+  (precedence: `--dry-run` > `--execute` > `APPLE_DRY_RUN` > execute). This replaced the v1
+  posture (dry-run default + a two-factor `--execute --test-mode` + `APPLE_TEST_MODE=1` gate),
+  which was a CLI-only restriction with no oracle counterpart on 9 of the 11 write ops.
+  - **The sandbox is opt-in.** `APPLE_TEST_MODE` truthy (`1`/`true`/`yes`) **or**
+    `--test-mode` — either signal alone — engages it, and the SUCCESS envelope then carries
+    `"sandbox": true` (refusal envelopes have no such field yet — see `docs/write-model-v2.md`).
+    This is the CLI's analogue of the oracle's own test-mode restriction — note
+    `check_test_mode_safety` (security.py:56) returns `None`, i.e. ALLOWS, when test mode is
+    off, and confines destructive ops to `CONTACTS_TEST_GROUP` when it is on. Same shape, label
+    instead of group. Exactly what the sandbox confines, per op:
+    - checked from argv alone, so BOTH the preview and the execute path refuse: `create` and
+      `groups create` names, `groups rename`'s NEW name, every `vcard import` card name.
+    - checked on the EXECUTE path only (needs a store read): the target contact of `update` /
+      `note set` / `photo set` / `delete`; the target group of `groups rename` / `groups delete`
+      / `groups add` / `groups remove`; the `--group` destination of `create` / `vcard import`.
+    - **NOT checked at all: the CONTACT side of `groups remove`.** Detaching an already-verified
+      test group from a real contact is a membership edit on the group, so only the group is
+      gated. Stated explicitly because "the fetched target of any id-addressed write" would be
+      an overclaim.
+  - **Two ops keep a hard gate, because the ORACLE has one.** `delete` and `groups delete`
+    require `APPLE_TEST_MODE=1` **in the environment**, mirroring `require_test_mode_for`
+    (security.py:161) at `delete_contact` (server.py:965) and `delete_group` (server.py:1715):
+    "only safe to expose in test mode until v0.4.0 ships the confirmation flow". The oracle
+    keys that gate to an environment variable, so the CLI does too, and a `--test-mode` FLAG
+    deliberately does NOT satisfy it. The reason is PARITY, not security: an earlier draft
+    justified it as "an agent can self-grant a flag but not an env var", which is FALSE for a
+    CLI — anything that can pass argv can set the environment of the process it spawns. Refusal
+    is `safety_violation` / exit 77, as before.
+  - **Preview honesty.** A `--dry-run` runs every gate computable from argv (the label checks
+    above, and the delete env gate, reported in `gate_note`). The fetched-target label checks
+    resolve the target out of the store, which needs TCC a preview deliberately does not take;
+    a sandboxed preview therefore names them in `gate_note` rather than implying they passed.
+  - Executed envelopes carry `dry_run: false` explicitly, so a caller can distinguish
+    "previewed" from "done" under execute-by-default.
 - **`CONTACTS_TEST_GROUP` / per-op `group_identifier` assertion parameter is inert by
   design.** The MCP's assertion-only `group_identifier` (on update / write_note / write_photo
   / rename_group / delete_group, used only to match `CONTACTS_TEST_GROUP` in its test mode) is
-  replaced by the CLI's equivalent gate (`APPLE_TEST_MODE` + labeled name). `create` and
-  `vcard import` keep `--group` as the **functional** group-add; `delete` keeps `--group` as a
-  parity echo.
+  replaced by the CLI's equivalent sandbox restriction (label prefix). `create` and
+  `vcard import` keep `--group` as the **functional** group-add — and inside the sandbox that
+  target must itself be a labeled test group, so neither can attach data to a real group.
+  `delete` keeps `--group` as a parity echo.
 - **`check_authorization` structured fields.** `contacts auth` returns `{status,
   remediation?}` structurally — full parity with the MCP diagnostic. On *data* commands, an
   `authorization_denied` failure folds `status` + `remediation` into `error.message` (the

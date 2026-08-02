@@ -127,19 +127,39 @@ struct WriteModelV2CoreTests {
 
     @Test("willExecute(defaultDryRun:) THROWS on an unparseable APPLE_DRY_RUN — never silent-execute")
     func willExecuteThrowsOnJunkEnv() throws {
-        // This test owns APPLE_DRY_RUN for its duration. Nothing else in the swift tier
-        // reads it (domains are pre-flip), and bats runs in separate processes.
-        defer { unsetenv(TestMode.dryRunVar) }
+        // Owns a UNIQUE variable via the `envVar:` seam, like `truthyEnvLive` above.
+        //
+        // This test used to setenv the REAL APPLE_DRY_RUN, justified by "nothing else in the
+        // swift tier reads it (domains are pre-flip)". The Contacts flip falsified that:
+        // `resolveWrite` calls `willExecute`, so ContactsKit's posture suite became a live
+        // reader and this test's global mutation raced it — a real 6-in-12 red rate on the
+        // full parallel run. Every future domain flip adds another reader, so the seam (not a
+        // comment asserting exclusivity) is what keeps this correct.
+        let name = "APPLE_CLI_TEST_DRYRUN_UNIQ"
+        defer { unsetenv(name) }
         let g = try GlobalOptions.parse([])
-        unsetenv(TestMode.dryRunVar)
-        #expect(try g.willExecute(defaultDryRun: false) == true)
-        setenv(TestMode.dryRunVar, "1", 1)
-        #expect(try g.willExecute(defaultDryRun: false) == false)
-        setenv(TestMode.dryRunVar, "ture", 1)
-        #expect(throws: AppleError.self) { _ = try g.willExecute(defaultDryRun: false) }
+        unsetenv(name)
+        #expect(try g.willExecute(defaultDryRun: false, envVar: name) == true)
+        setenv(name, "1", 1)
+        #expect(try g.willExecute(defaultDryRun: false, envVar: name) == false)
+        setenv(name, "ture", 1)
+        #expect(throws: AppleError.self) { _ = try g.willExecute(defaultDryRun: false, envVar: name) }
         // --execute with junk env still throws (validation precedes precedence).
         let e = try GlobalOptions.parse(["--execute"])
-        #expect(throws: AppleError.self) { _ = try e.willExecute(defaultDryRun: false) }
+        #expect(throws: AppleError.self) { _ = try e.willExecute(defaultDryRun: false, envVar: name) }
+    }
+
+    @Test("the default envVar IS the real APPLE_DRY_RUN (the seam cannot silently re-point production)")
+    func defaultEnvVarIsTheRealOne() throws {
+        // The seam above is only safe if the DEFAULT still reads the documented variable —
+        // otherwise every production caller would silently consult a test-only name. Asserted
+        // without mutating anything: with APPLE_DRY_RUN unset (the suite precondition), an
+        // explicit `envVar: TestMode.dryRunVar` and the defaulted call must agree, and
+        // TestMode.dryRunVar must be the documented spelling.
+        #expect(TestMode.dryRunVar == "APPLE_DRY_RUN")
+        let g = try GlobalOptions.parse([])
+        #expect(try g.willExecute(defaultDryRun: false)
+                == g.willExecute(defaultDryRun: false, envVar: TestMode.dryRunVar))
     }
 
     @Test("sandboxActive: flag OR truthy env; junk env throws on EVERY path, even with the flag")

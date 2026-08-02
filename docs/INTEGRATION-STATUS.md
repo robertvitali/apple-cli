@@ -1,13 +1,22 @@
 # apple-cli — integration status (overnight build, 2026-07-15/16)
 
-> **SUPERSEDED IN PART (2026-08-01, write-model v2 — docs/write-model-v2.md).** This file is a
-> dated snapshot of the 2026-07-15/16 overnight run; its safety-posture claims describe THAT
-> NIGHT, not the current tree. Since then: the live write paths were wired (2026-07-2x), and
-> the **Mail domain flipped to write-model v2** — Mail writes now EXECUTE when invoked
-> (`--dry-run` previews; `APPLE_TEST_MODE`/`--test-mode` is an opt-in sandbox restriction, not
-> a write prerequisite; the trash surface keeps dry-run as its default). Read the "v1
-> two-factor gate" statements below as historical. Remaining domains flip per the spec's
-> rollout order.
+> **SUPERSEDED IN PART (last updated 2026-08-02, write-model v2 — docs/write-model-v2.md).**
+> This file is a dated snapshot of the 2026-07-15/16 overnight run; its safety-posture claims
+> describe THAT NIGHT, not the current tree. Since then the live write paths were wired
+> (2026-07-2x) and two domains flipped to write-model v2, where writes EXECUTE when invoked,
+> `--dry-run` previews, `APPLE_DRY_RUN=1` restores dry-run-by-default, and
+> `APPLE_TEST_MODE`/`--test-mode` is an opt-in SANDBOX restriction rather than a write
+> prerequisite:
+>
+> - **Mail** (2026-08-01) — the trash surface keeps dry-run as its default (oracle parity).
+> - **Contacts** (2026-08-02) — all 11 writes execute; `delete` and `groups delete` keep a hard
+>   `APPLE_TEST_MODE=1` ENVIRONMENT requirement, mirroring the oracle's `require_test_mode_for`.
+>
+> Read every "v1 two-factor gate" statement below as historical **for those two domains**; it
+> still describes Notes, Calendar, Reminders and Messages, which flip next per the spec's
+> rollout order. The "**Zero live writes**" claim in the TL;DR is likewise historical — it was
+> true of that overnight run, and tracked, labeled, cleaned-up live writes have happened since
+> under the AGENTS.md conduct rules (logged in the gitignored `TEST-CLEANUP.md`).
 
 **TL;DR.** All six domains are implemented to strict-superset MCP parity, each
 independently reviewed (3-pass OMC) and verified green, then aggregated onto the

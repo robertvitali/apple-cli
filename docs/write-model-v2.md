@@ -96,8 +96,13 @@ accidental *unsandboxed* writes — each fails safe for its own model).
 - **Fail-loud activation.** `APPLE_TEST_MODE` accepts `1`/`true`/`yes` (case-insensitive).
   Any OTHER non-empty value is a `validation_error` (exit 64) at the start of any write
   command — never silently "no sandbox". (`""`/unset = off, as today.)
-- **Visible engagement.** Every write envelope gains `"sandbox": true` when the sandbox is
-  active (key absent otherwise — additive, MINOR). Mechanism AS LANDED (core review tightened
+- **Visible engagement.** Every write SUCCESS envelope gains `"sandbox": true` when the sandbox
+  is active (key absent otherwise — additive, MINOR). SUCCESS only: `Output.encodeError` has no
+  such field, so a sandboxed REFUSAL is today indistinguishable from an unsandboxed one to a
+  machine consumer — a real gap (a machine cannot tell which policy produced a 77), tracked as
+  its own commit because adding the key to the shared error envelope changes all six domains at
+  once. This bullet previously said "every write envelope", which was an overclaim.
+  Mechanism AS LANDED (core review tightened
   the first sketch's `sandbox: Bool? = nil`, which let a plain `false` auto-promote and emit a
   meaningless `"sandbox": false` tri-state): `SuccessEnvelope` gains `let sandbox: Bool?`, but
   the public API takes a NON-optional — `Output.encodeSuccess(tool:data:sandboxActive: Bool =
@@ -330,4 +335,90 @@ reverting the model. The sandbox itself is the operator's per-invocation rollbac
   (incl. the sandboxed bulk per-target label gate), with the disclosed divergences being the
   two rules checks that need a fresh Mail read (duplicate-name; target-rule label) and
   `delete --permanent`'s preview, which renders the plan but names each unmet operator gate
-  in its note. Remaining flips: Contacts → Notes → Calendar + Reminders → Messages.
+  in its note.
+- 2026-08-02 — **Contacts flip landed** (step 4, second domain). All 11 write ops on the v2
+  chokepoint (`resolveWrite` now returns a `WriteGate {willExecute, sandboxActive}` instead of
+  the v1 `.dryRun`/`.execute` enum, and validates the v2 env in one place). Re-verified against
+  oracle source on disk before implementing: `require_test_mode_for` (security.py:161) is
+  called at EXACTLY two sites — `delete_contact` server.py:965 and `delete_group` server.py:1715
+  — and `check_test_mode_safety` (security.py:56) returns `None` when test mode is off, which
+  confirms the spec's classification (the former is bucket 1 and stays unconditional +
+  ENV-keyed; the latter is a test-mode-only restriction, i.e. the oracle's own analogue of our
+  sandbox, so the CLI's label confinement maps onto it as bucket 3).
+  Beyond the mechanical flip: `groups rename`'s new-name check and `vcard import`'s per-card
+  check were hoisted above the store so previews refuse what execute refuses; the fetched-target
+  checks (which need TCC) are disclosed in a new `gate_note` preview field rather than silently
+  skipped; every executed envelope states `dry_run: false`; and a sandbox-coherence gap was
+  closed — `create --group` now label-checks its group target, as `import --group` already did.
+  `emitContactsWrite` takes a NON-defaulted `sandboxActive`, which closes this spec's "KNOWN
+  RESIDUAL" for this domain by making an omitted sandbox key a compile error rather than a test
+  responsibility. ContactsKit is at zero deprecation warnings (the mechanical per-domain
+  completion criterion).
+
+  **Test migration (exact accounting).** HEAD carried **11** v1 "`--execute` without test-mode
+  → 77" cases, one per write op. Reclassified per the spec's class (b): **2** survive as the
+  same refusal (`delete`, `groups delete` — the oracle-mirrored env gate; both were retitled and
+  gained an assertion on the `APPLE_TEST_MODE=1` message), **4** became sandbox label refusals
+  that still resolve before the store (`create`, `groups create`, `groups rename`,
+  `vcard import`), and **5** became positive `gate_note` preview-honesty assertions (`update`,
+  `note set`, `photo set`, `groups add`, `groups remove` — the gate they pinned no longer
+  exists, and their sandbox check now needs a store read a preview does not take). Two further
+  removals were the v1 dry-run-default previews, rewritten with an explicit `--dry-run`. The
+  domain's 2 pre-flip lint markers migrated (suite marker cap 7 → 5). Because a flagless
+  contacts write is a LIVE address-book mutation, the execute-by-default posture is pinned in
+  the LOGIC tier ("Contacts write-model v2 posture") rather than with a bats default-pin marker.
+
+  Live once-per-flip verification (conduct rule 1, shape (a)) done and logged: flagless
+  unsandboxed create executed, confirmed present by the MCP oracle, the flag-alone delete
+  refused 77 against the real id, `APPLE_TEST_MODE=1` delete removed it, oracle then reported
+  not_found. No residue.
+
+  **Review round 1 (3 lenses, 19 findings, 19 adversarial verifiers; 2 confirmed).** Both
+  confirmed findings were fixed: (i) HIGH — the new posture suite made `swift test`
+  intermittently red at a reproduced **6-in-12** rate, because `resolveWrite` made ContactsKit
+  the first domain reader of `APPLE_DRY_RUN` while `WriteModelV2CoreTests` still `setenv`'d the
+  real variable on a comment asserting "nothing else in the swift tier reads it (domains are
+  pre-flip)". Fixed at the source by giving `GlobalOptions.willExecute` the same `envVar:` seam
+  `TestMode.sandboxActive` already had, repointing that test at a unique variable, and adding a
+  pin that the DEFAULT still reads the real `APPLE_DRY_RUN`; 0-in-12 red after. A second race of
+  the same class (ContactsKit's older label suite read the live `APPLE_TEST_SANDBOX`, which
+  MailKit's suite sets to "qa-fixture") was found while fixing it and closed by reading the
+  canonical constant. **Every future domain flip adds another env reader — use the seams.**
+  (ii) LOW — this note's own migration accounting was wrong, now restated above from the diff.
+
+  Several unconfirmed-but-correct findings were fixed too, because being unfalsifiable is not
+  the same as being wrong: INTEGRATION-STATUS.md's stale safety posture; the port-spec's
+  overclaim that the sandbox checks "the fetched target of any id-addressed write" (the CONTACT
+  side of `groups remove` is not checked, and the spec now enumerates exactly what is);
+  `--text` write output silently dropping the sandbox indication; the inert `--group` option's
+  help text claiming enforcement; and two precedence tests whose only protection was the
+  behavior under test — a regression would have written a real contact before the assertion
+  failed, so they now use a nonexistent-id `update`, which dies on not_found instead. The
+  unlabeled-refusal cases likewise gained post-refusal absence assertions and synthetic
+  "Zz … Probe" names, so a regressed label gate fails loudly rather than leaving residue that
+  prefix-based recognition could never find.
+
+  **Rejected, three times over.** Three lenses independently proposed pinning the two deletes to
+  `canonicalSandboxPrefix` instead of the redefinable `sandboxPrefix`, by analogy with Mail's
+  `requireCanonicalLabels`. All three were refuted, and the full argument now lives beside the
+  code in `ContactsOutput.swift` so it is not re-litigated: it would buy zero confinement
+  (a contact's name is writable by the ungated `update`, unlike a message's subject), it would
+  drop a capability the oracle has, the oracle's own key is an env var of the same class, and
+  Contacts delete is single-id rather than filter-based like the Mail op the constant was built
+  for. A related correction landed with it: the "an agent can self-grant a flag but not an env
+  var" rationale that first justified the delete gate is FALSE for a CLI — anything that can
+  pass argv can set the environment too. The gate is keyed to the environment for PARITY, and
+  the docs now say so.
+
+  Remaining flips: Notes → Calendar + Reminders → Messages.
+
+  **Bucket-2 exceptions taken for Contacts (per this file's "fixed or explicitly excepted with
+  rationale" clause).** (a) `vcard export --out` and `photo get --out` write caller-named paths
+  with no confinement and no `--dry-run` branch. Real, but PRE-EXISTING and on READ commands,
+  and the shared `confineWriteDestination` helper currently lives in MailKit — using it here
+  means promoting it to AppleKit and updating its five MailKit call sites, a cross-domain
+  refactor that deserves its own commit. (b) Refusal envelopes carry no `sandbox` key, because
+  `Output.encodeError` has no such field; this file's "every write envelope" wording was an
+  overclaim and now reads "every write SUCCESS envelope". Adding the key to the shared error
+  envelope would change all six domains mid-rollout, so it is likewise deferred to its own
+  commit. Both are tracked as follow-ups, not silently absorbed.

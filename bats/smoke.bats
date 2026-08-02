@@ -101,13 +101,19 @@ setup() {
   # here: adding a marker requires editing this assertion — a reviewable event. (A net-neutral
   # marker SWAP holds the count without touching this line, but both halves of a swap are
   # visible line edits in the same diff; the cap's job is to stop growth.) Composition today:
-  # 5 pre-flip markers in un-flipped domains (contacts×2, messages×1, notes×2 — each domain's
-  # flip migrates its own) + 2 PERMANENT default-pin markers in mail.bats (they lock the v2
-  # per-surface defaults with deliberately flagless invocations; the final-flip count is 2,
-  # not 0, unless other domains add default-pins of their own — edit deliberately).
+  # 3 pre-flip markers in un-flipped domains (messages×1, notes×2 — each domain's flip migrates
+  # its own) + 2 PERMANENT default-pin markers in mail.bats (they lock the v2 per-surface
+  # defaults with deliberately flagless invocations; the final-flip count is 2, not 0, unless
+  # other domains add default-pins of their own — edit deliberately).
+  #
+  # Contacts' 2 pre-flip markers went at its flip. It adds no permanent default-pin here on
+  # purpose: a flagless contacts write is a LIVE address-book mutation under v2, so its
+  # execute-by-default posture is pinned in the logic tier instead — see the
+  # "Contacts write-model v2 posture" suite (Tests/ContactsKitTests/WriteSafetyTests.swift),
+  # which asserts the same property with no store access.
   local markers
   markers="$(echo "$output" | sed -n 's/.*, \([0-9]*\) marker(s)$/\1/p')"
-  [ "$markers" -eq 7 ]
+  [ "$markers" -eq 5 ]
 }
 
 @test "lint: a truthy APPLE_DRY_RUN env-brake prefix exempts a flagless write; junk or a later command does not" {

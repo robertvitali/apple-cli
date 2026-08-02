@@ -2,10 +2,20 @@ import Foundation
 import ArgumentParser
 import AppleKit
 
-// Write commands — every one is gated by `resolveWrite`: the default is a `--dry-run`
-// preview that mutates nothing; a live mutation requires `--execute --test-mode` AND
-// `APPLE_TEST_MODE=1` (create / create-group additionally require the sandbox-prefixed
-// name). Each maps 1:1 to an apple-contacts-mcp @ 1cd8789 (v0.3.0) write tool.
+// Write commands — each maps 1:1 to an apple-contacts-mcp @ 1cd8789 (v0.3.0) write tool, and
+// under write-model v2 (docs/write-model-v2.md) each BEHAVES like that tool: invoking it
+// mutates real data, because calling the MCP tool does. `--dry-run` previews; `APPLE_DRY_RUN`
+// truthy restores dry-run-by-default.
+//
+// `resolveWrite` is the single chokepoint: it validates the v2 environment, resolves
+// `willExecute`, and resolves `sandboxActive` (`APPLE_TEST_MODE` truthy OR `--test-mode`).
+// Inside the sandbox — and ONLY inside it — writes are confined to `apple-cli-test`-labeled
+// items, the CLI's analogue of the oracle's `CONTACTS_TEST_GROUP` confinement.
+//
+// TWO EXCEPTIONS survive outside the sandbox, both oracle-mirrored: `delete` and
+// `groups delete` require `APPLE_TEST_MODE=1` in the ENVIRONMENT (not the flag) because the
+// oracle's `require_test_mode_for` requires `CONTACTS_TEST_MODE=true` there — see
+// `contactsDeleteEnvGranted`.
 
 // MARK: - Flat-flag parsing helpers
 
@@ -53,7 +63,7 @@ private func primaryName(_ f: ContactFields) -> String {
 struct CreateCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "create",
-        abstract: "Create a contact (flat flags or --json full field set). → create_contact")
+        abstract: "Create a contact (EXECUTES by default; --dry-run previews). → create_contact")
     @OptionGroup var global: GlobalOptions
     @Option(name: [.customLong("first"), .customLong("given")], help: "Given name.") var first: String?
     @Option(name: [.customLong("last"), .customLong("family")], help: "Family name.") var last: String?
@@ -89,16 +99,23 @@ struct CreateCommand: ParsableCommand {
             }
             try validateCreateInput(fields)
 
-            switch try resolveWrite(global, labeledName: primaryName(fields)) {
-            case .dryRun:
-                try emitContacts(global, DryRunPreview(
-                    operation: "create_contact", group_id: group, container_id: container, fields: fields))
-            case .execute:
-                let store = ContactsStore()
-                try store.requireAuthorization()
-                let id = try store.createContact(fields: fields, groupIdentifier: group, containerIdentifier: container)
-                try emitContacts(global, CreateContactResult(identifier: id, group_id: group, container_id: container))
+            let gate = try resolveWrite(global, labeledName: primaryName(fields))
+            guard gate.willExecute else {
+                try emitContactsWrite(global, DryRunPreview(
+                    operation: "create_contact", group_id: group, container_id: container, fields: fields,
+                    // --group targets an EXISTING group, so the sandbox's label check on it needs
+                    // a store read the preview does not take.
+                    gate_note: gate.sandboxActive && group != nil
+                        ? sandboxTargetUncheckedNote("the --group target") : nil),
+                    sandboxActive: gate.sandboxActive)
+                return
             }
+            let store = ContactsStore()
+            try store.requireAuthorization()
+            if gate.sandboxActive, let group { try store.requireLabeledGroupTarget(group, prefix: TestMode.sandboxPrefix) }
+            let id = try store.createContact(fields: fields, groupIdentifier: group, containerIdentifier: container)
+            try emitContactsWrite(global, CreateContactResult(identifier: id, group_id: group, container_id: container),
+                                  sandboxActive: gate.sandboxActive)
         }
     }
 }
@@ -108,7 +125,7 @@ struct CreateCommand: ParsableCommand {
 struct UpdateCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "update",
-        abstract: "Update a contact (None=skip / \"\"=clear / value=set). → update_contact")
+        abstract: "Update a contact, None=skip/\"\"=clear/value=set (EXECUTES; --dry-run previews). → update_contact")
     @OptionGroup var global: GlobalOptions
     @Argument(help: "The contact's CN identifier.") var identifier: String
     @Option(name: .long, parsing: .upToNextOption, help: "Set a simple field: key=value (repeatable).") var set: [String] = []
@@ -120,16 +137,19 @@ struct UpdateCommand: ParsableCommand {
             let fields = try buildUpdateFields()
             try validateUpdateInput(identifier: identifier, fields)
 
-            switch try resolveWrite(global) {
-            case .dryRun:
-                try emitContacts(global, DryRunPreview(operation: "update_contact", identifier: identifier, fields: fields))
-            case .execute:
-                let store = ContactsStore()
-                try store.requireAuthorization()
-                try store.requireLabeledContactTarget(identifier, prefix: TestMode.sandboxPrefix)
-                let id = try store.updateContact(identifier: identifier, fields: fields)
-                try emitContacts(global, IdentifierResult(identifier: id))
+            let gate = try resolveWrite(global)
+            guard gate.willExecute else {
+                try emitContactsWrite(global, DryRunPreview(
+                    operation: "update_contact", identifier: identifier, fields: fields,
+                    gate_note: gate.sandboxActive ? sandboxTargetUncheckedNote("the target contact") : nil),
+                    sandboxActive: gate.sandboxActive)
+                return
             }
+            let store = ContactsStore()
+            try store.requireAuthorization()
+            if gate.sandboxActive { try store.requireLabeledContactTarget(identifier, prefix: TestMode.sandboxPrefix) }
+            let id = try store.updateContact(identifier: identifier, fields: fields)
+            try emitContactsWrite(global, IdentifierResult(identifier: id), sandboxActive: gate.sandboxActive)
         }
     }
 
@@ -165,30 +185,48 @@ struct UpdateCommand: ParsableCommand {
     }
 }
 
-// MARK: - delete → delete_contact (test-mode only, like the MCP)
+// MARK: - delete → delete_contact (env-gated, mirroring the MCP's require_test_mode_for)
 
 struct DeleteCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "delete",
-        abstract: "Delete a contact (test-mode gated). → delete_contact")
+        abstract: "Delete a contact (requires APPLE_TEST_MODE=1, like the MCP). → delete_contact")
     @OptionGroup var global: GlobalOptions
     @Argument(help: "The contact's CN identifier.") var identifier: String
-    @Option(name: .long, help: "Test-mode group assertion (parity with the MCP).") var group: String?
+    // Accepted and echoed, NOT enforced — a deliberate divergence, documented in
+    // docs/port-specs/contacts.md. The oracle's group_identifier is a shibboleth: it is
+    // compared to CONTACTS_TEST_GROUP and never checked against the target contact
+    // (check_test_mode_safety, security.py:83-101), so honoring it literally would add no
+    // target scoping. This CLI confines the TARGET itself instead, which the oracle never does.
+    @Option(name: .long, help: "Group assertion; accepted and echoed for MCP parity, not enforced.")
+    var group: String?
     func run() throws {
         try runGuarded(tool: "contacts") {
             if identifier.trimmingCharacters(in: .whitespaces).isEmpty {
                 throw AppleError.validation("identifier must be a non-empty string")
             }
-            switch try resolveWrite(global) {
-            case .dryRun:
-                try emitContacts(global, DryRunPreview(operation: "delete_contact", identifier: identifier, group_id: group))
-            case .execute:
-                let store = ContactsStore()
-                try store.requireAuthorization()
-                try store.requireLabeledContactTarget(identifier, prefix: TestMode.sandboxPrefix)
-                let id = try store.deleteContact(identifier: identifier)
-                try emitContacts(global, IdentifierResult(identifier: id))
+            let gate = try resolveWrite(global)
+            // Read the operator affordance BEFORE any store work, so the preview and the
+            // execute path decide from the same value.
+            let envGranted = contactsDeleteEnvGranted
+            guard gate.willExecute else {
+                try emitContactsWrite(global, DryRunPreview(
+                    operation: "delete_contact", identifier: identifier, group_id: group,
+                    gate_note: joinedGateNote([
+                        envGranted ? nil : contactsDeleteGateMessage("delete_contact"),
+                        gate.sandboxActive ? sandboxTargetUncheckedNote("the target contact") : nil,
+                    ])), sandboxActive: gate.sandboxActive)
+                return
             }
+            guard envGranted else { throw AppleError.safetyViolation(contactsDeleteGateMessage("delete_contact")) }
+            let store = ContactsStore()
+            try store.requireAuthorization()
+            // The env gate above implies the sandbox is engaged (sandboxActive = flag || env),
+            // so this label check always runs here; the condition documents the dependency
+            // rather than relying on it.
+            if gate.sandboxActive { try store.requireLabeledContactTarget(identifier, prefix: TestMode.sandboxPrefix) }
+            let id = try store.deleteContact(identifier: identifier)
+            try emitContactsWrite(global, IdentifierResult(identifier: id), sandboxActive: gate.sandboxActive)
         }
     }
 }
@@ -198,7 +236,7 @@ struct DeleteCommand: ParsableCommand {
 struct NoteSetCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "set",
-        abstract: "Write/replace a contact's note (--clear empties it). → write_note")
+        abstract: "Write/replace a contact's note, --clear empties it (EXECUTES; --dry-run previews). → write_note")
     @OptionGroup var global: GlobalOptions
     @Argument(help: "The contact's CN identifier.") var identifier: String
     // `--note`, not `--text`: `--text` is the repo-wide human-output global (GlobalOptions).
@@ -211,16 +249,19 @@ struct NoteSetCommand: ParsableCommand {
                 throw AppleError.validation("identifier must be a non-empty string")
             }
             let noteText = try resolveNoteText()
-            switch try resolveWrite(global) {
-            case .dryRun:
-                try emitContacts(global, DryRunPreview(operation: "write_note", identifier: identifier, note: noteText))
-            case .execute:
-                let store = ContactsStore()
-                try store.requireAuthorization()
-                try store.requireLabeledContactTarget(identifier, prefix: TestMode.sandboxPrefix)
-                try store.writeNote(identifier, note: noteText)
-                try emitContacts(global, IdentifierResult(identifier: identifier))
+            let gate = try resolveWrite(global)
+            guard gate.willExecute else {
+                try emitContactsWrite(global, DryRunPreview(
+                    operation: "write_note", identifier: identifier, note: noteText,
+                    gate_note: gate.sandboxActive ? sandboxTargetUncheckedNote("the target contact") : nil),
+                    sandboxActive: gate.sandboxActive)
+                return
             }
+            let store = ContactsStore()
+            try store.requireAuthorization()
+            if gate.sandboxActive { try store.requireLabeledContactTarget(identifier, prefix: TestMode.sandboxPrefix) }
+            try store.writeNote(identifier, note: noteText)
+            try emitContactsWrite(global, IdentifierResult(identifier: identifier), sandboxActive: gate.sandboxActive)
         }
     }
     private func resolveNoteText() throws -> String {
@@ -239,7 +280,7 @@ struct NoteSetCommand: ParsableCommand {
 struct PhotoSetCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "set",
-        abstract: "Set/clear a contact's photo (--file | --base64 | --clear). → write_photo")
+        abstract: "Set/clear a contact's photo, --file|--base64|--clear (EXECUTES; --dry-run previews). → write_photo")
     @OptionGroup var global: GlobalOptions
     @Argument(help: "The contact's CN identifier.") var identifier: String
     @Option(name: .long, help: "Read image bytes from this file.") var file: String?
@@ -251,17 +292,19 @@ struct PhotoSetCommand: ParsableCommand {
                 throw AppleError.validation("identifier must be a non-empty string")
             }
             let imageData = try resolveImageData()
-            switch try resolveWrite(global) {
-            case .dryRun:
-                try emitContacts(global, DryRunPreview(
-                    operation: "write_photo", identifier: identifier, clears_photo: imageData == nil))
-            case .execute:
-                let store = ContactsStore()
-                try store.requireAuthorization()
-                try store.requireLabeledContactTarget(identifier, prefix: TestMode.sandboxPrefix)
-                let id = try store.writePhoto(identifier: identifier, imageData: imageData)
-                try emitContacts(global, IdentifierResult(identifier: id))
+            let gate = try resolveWrite(global)
+            guard gate.willExecute else {
+                try emitContactsWrite(global, DryRunPreview(
+                    operation: "write_photo", identifier: identifier, clears_photo: imageData == nil,
+                    gate_note: gate.sandboxActive ? sandboxTargetUncheckedNote("the target contact") : nil),
+                    sandboxActive: gate.sandboxActive)
+                return
             }
+            let store = ContactsStore()
+            try store.requireAuthorization()
+            if gate.sandboxActive { try store.requireLabeledContactTarget(identifier, prefix: TestMode.sandboxPrefix) }
+            let id = try store.writePhoto(identifier: identifier, imageData: imageData)
+            try emitContactsWrite(global, IdentifierResult(identifier: id), sandboxActive: gate.sandboxActive)
         }
     }
     private func resolveImageData() throws -> Data? {
@@ -286,7 +329,7 @@ struct PhotoSetCommand: ParsableCommand {
 struct VCardImportCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "import",
-        abstract: "Import contacts from vCard 3.0/4.0 text (atomic). → import_vcard")
+        abstract: "Import contacts from vCard 3.0/4.0 text, atomic (EXECUTES; --dry-run previews). → import_vcard")
     @OptionGroup var global: GlobalOptions
     @Option(name: .long, help: "Read vCard text from this file.") var file: String?
     // `--vcard`, not `--text`: `--text` is the repo-wide human-output global (GlobalOptions).
@@ -298,32 +341,39 @@ struct VCardImportCommand: ParsableCommand {
             if vcardText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 throw AppleError.validation("vcard_text must be a non-empty string")
             }
-            switch try resolveWrite(global) {
-            case .dryRun:
-                // Validate the payload parses (TCC-free) so a dry-run catches malformed
-                // vCard exactly as --execute would — the MCP always parses.
-                let count = try ContactsStore.validateVCard(text: vcardText)
-                try emitContacts(global, DryRunPreview(
-                    operation: "import_vcard", group_id: group, parsed_count: count))
-            case .execute:
-                let store = ContactsStore()
-                try store.requireAuthorization()
-                // Fetched-target write-safety (import is create-class but the sole path that
-                // previously skipped it): every imported card must be labeled test data, and a
-                // --group target must itself be a labeled test group. Reject the WHOLE atomic
-                // import otherwise — never leave unlabeled real-looking contacts prefix-cleanup
-                // would miss, and never add to a real group.
+            let gate = try resolveWrite(global)
+            // Sandbox card-label check: every imported card must be labeled test data, or the
+            // WHOLE atomic import is refused — never leave unlabeled real-looking contacts that
+            // prefix-based cleanup would then miss. `vcardPrimaryNames` is a static parse that
+            // never touches the store, so this runs on BOTH paths: a sandboxed preview refuses
+            // exactly what the execute path refuses, at the same exit code.
+            if gate.sandboxActive {
                 for name in try ContactsStore.vcardPrimaryNames(text: vcardText) {
                     guard ContactsLabel.isLabeled(name, prefix: TestMode.sandboxPrefix) else {
                         throw AppleError.safetyViolation(
-                            "refusing to import an unlabeled contact '\(name)': in test mode every "
+                            "refusing to import the unlabeled contact '\(name)': in the sandbox every "
                             + "imported card's name must start with '\(TestMode.sandboxPrefix)'.")
                     }
                 }
-                if let group { try store.requireLabeledGroupTarget(group, prefix: TestMode.sandboxPrefix) }
-                let ids = try store.importVCard(text: vcardText, groupIdentifier: group)
-                try emitContacts(global, ImportVCardResult(identifiers: ids, count: ids.count, group_id: group))
             }
+            guard gate.willExecute else {
+                // Validate the payload parses (TCC-free) so a dry-run catches malformed
+                // vCard exactly as the execute path would — the MCP always parses.
+                let count = try ContactsStore.validateVCard(text: vcardText)
+                try emitContactsWrite(global, DryRunPreview(
+                    operation: "import_vcard", group_id: group, parsed_count: count,
+                    gate_note: gate.sandboxActive && group != nil
+                        ? sandboxTargetUncheckedNote("the --group target") : nil),
+                    sandboxActive: gate.sandboxActive)
+                return
+            }
+            let store = ContactsStore()
+            try store.requireAuthorization()
+            // A --group target must itself be a labeled test group: never add to a real one.
+            if gate.sandboxActive, let group { try store.requireLabeledGroupTarget(group, prefix: TestMode.sandboxPrefix) }
+            let ids = try store.importVCard(text: vcardText, groupIdentifier: group)
+            try emitContactsWrite(global, ImportVCardResult(identifiers: ids, count: ids.count, group_id: group),
+                                  sandboxActive: gate.sandboxActive)
         }
     }
     private func resolveVCardText() throws -> String {
@@ -341,7 +391,7 @@ struct VCardImportCommand: ParsableCommand {
 struct GroupsCreateCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "create",
-        abstract: "Create a contact group. → create_group")
+        abstract: "Create a contact group (EXECUTES by default; --dry-run previews). → create_group")
     @OptionGroup var global: GlobalOptions
     @Argument(help: "The new group's name.") var name: String
     @Option(name: .long, help: "Create in this container id (default: the default container).") var container: String?
@@ -350,15 +400,17 @@ struct GroupsCreateCommand: ParsableCommand {
             if name.trimmingCharacters(in: .whitespaces).isEmpty {
                 throw AppleError.validation("name must be a non-empty string")
             }
-            switch try resolveWrite(global, labeledName: name) {
-            case .dryRun:
-                try emitContacts(global, DryRunPreview(operation: "create_group", container_id: container, name: name))
-            case .execute:
-                let store = ContactsStore()
-                try store.requireAuthorization()
-                let g = try store.createGroup(name: name, containerIdentifier: container)
-                try emitContacts(global, GroupResult(group: g))
+            let gate = try resolveWrite(global, labeledName: name)
+            guard gate.willExecute else {
+                try emitContactsWrite(global, DryRunPreview(
+                    operation: "create_group", container_id: container, name: name),
+                    sandboxActive: gate.sandboxActive)
+                return
             }
+            let store = ContactsStore()
+            try store.requireAuthorization()
+            let g = try store.createGroup(name: name, containerIdentifier: container)
+            try emitContactsWrite(global, GroupResult(group: g), sandboxActive: gate.sandboxActive)
         }
     }
 }
@@ -368,7 +420,7 @@ struct GroupsCreateCommand: ParsableCommand {
 struct GroupsRenameCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "rename",
-        abstract: "Rename a contact group. → rename_group")
+        abstract: "Rename a contact group (EXECUTES by default; --dry-run previews). → rename_group")
     @OptionGroup var global: GlobalOptions
     @Argument(help: "The group's CN identifier.") var identifier: String
     @Argument(help: "The new name.") var newName: String
@@ -380,33 +432,39 @@ struct GroupsRenameCommand: ParsableCommand {
             if newName.trimmingCharacters(in: .whitespaces).isEmpty {
                 throw AppleError.validation("new_name must be a non-empty string")
             }
-            switch try resolveWrite(global) {
-            case .dryRun:
-                try emitContacts(global, DryRunPreview(operation: "rename_group", identifier: identifier, new_name: newName))
-            case .execute:
-                let store = ContactsStore()
-                try store.requireAuthorization()
-                try store.requireLabeledGroupTarget(identifier, prefix: TestMode.sandboxPrefix)
-                // Result must STAY labeled — a rename to an unlabeled name would create real-
-                // looking data that prefix-based cleanup then misses.
+            let gate = try resolveWrite(global)
+            // Result must STAY labeled — a sandbox rename to an unlabeled name would create
+            // real-looking data that prefix-based cleanup then misses. Pure string check, so it
+            // runs on BOTH paths: the preview refuses exactly what the execute path refuses.
+            if gate.sandboxActive {
                 guard ContactsLabel.isLabeled(newName, prefix: TestMode.sandboxPrefix) else {
                     throw AppleError.safetyViolation(
-                        "refusing to rename a test group to the unlabeled name '\(newName)': it must "
-                        + "stay prefixed with '\(TestMode.sandboxPrefix)'.")
+                        "refusing to rename a test group to the unlabeled name '\(newName)': in the "
+                        + "sandbox it must stay prefixed with '\(TestMode.sandboxPrefix)'.")
                 }
-                let g = try store.renameGroup(identifier: identifier, newName: newName)
-                try emitContacts(global, GroupResult(group: g))
             }
+            guard gate.willExecute else {
+                try emitContactsWrite(global, DryRunPreview(
+                    operation: "rename_group", identifier: identifier, new_name: newName,
+                    gate_note: gate.sandboxActive ? sandboxTargetUncheckedNote("the target group") : nil),
+                    sandboxActive: gate.sandboxActive)
+                return
+            }
+            let store = ContactsStore()
+            try store.requireAuthorization()
+            if gate.sandboxActive { try store.requireLabeledGroupTarget(identifier, prefix: TestMode.sandboxPrefix) }
+            let g = try store.renameGroup(identifier: identifier, newName: newName)
+            try emitContactsWrite(global, GroupResult(group: g), sandboxActive: gate.sandboxActive)
         }
     }
 }
 
-// MARK: - groups delete → delete_group (test-mode only, like the MCP)
+// MARK: - groups delete → delete_group (env-gated, mirroring the MCP's require_test_mode_for)
 
 struct GroupsDeleteCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "delete",
-        abstract: "Delete a contact group (test-mode gated; members persist). → delete_group")
+        abstract: "Delete a group, members persist (requires APPLE_TEST_MODE=1, like the MCP). → delete_group")
     @OptionGroup var global: GlobalOptions
     @Argument(help: "The group's CN identifier.") var identifier: String
     func run() throws {
@@ -414,16 +472,23 @@ struct GroupsDeleteCommand: ParsableCommand {
             if identifier.trimmingCharacters(in: .whitespaces).isEmpty {
                 throw AppleError.validation("identifier must be a non-empty string")
             }
-            switch try resolveWrite(global) {
-            case .dryRun:
-                try emitContacts(global, DryRunPreview(operation: "delete_group", identifier: identifier))
-            case .execute:
-                let store = ContactsStore()
-                try store.requireAuthorization()
-                try store.requireLabeledGroupTarget(identifier, prefix: TestMode.sandboxPrefix)
-                let id = try store.deleteGroup(identifier: identifier)
-                try emitContacts(global, IdentifierResult(identifier: id))
+            let gate = try resolveWrite(global)
+            let envGranted = contactsDeleteEnvGranted
+            guard gate.willExecute else {
+                try emitContactsWrite(global, DryRunPreview(
+                    operation: "delete_group", identifier: identifier,
+                    gate_note: joinedGateNote([
+                        envGranted ? nil : contactsDeleteGateMessage("delete_group"),
+                        gate.sandboxActive ? sandboxTargetUncheckedNote("the target group") : nil,
+                    ])), sandboxActive: gate.sandboxActive)
+                return
             }
+            guard envGranted else { throw AppleError.safetyViolation(contactsDeleteGateMessage("delete_group")) }
+            let store = ContactsStore()
+            try store.requireAuthorization()
+            if gate.sandboxActive { try store.requireLabeledGroupTarget(identifier, prefix: TestMode.sandboxPrefix) }
+            let id = try store.deleteGroup(identifier: identifier)
+            try emitContactsWrite(global, IdentifierResult(identifier: id), sandboxActive: gate.sandboxActive)
         }
     }
 }
@@ -433,27 +498,33 @@ struct GroupsDeleteCommand: ParsableCommand {
 struct GroupsAddCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "add",
-        abstract: "Add a contact to a group (additive). → add_contact_to_group")
+        abstract: "Add a contact to a group, additive (EXECUTES; --dry-run previews). → add_contact_to_group")
     @OptionGroup var global: GlobalOptions
     @Argument(help: "The contact's CN identifier.") var contactId: String
     @Argument(help: "The group's CN identifier.") var groupId: String
     func run() throws {
         try runGuarded(tool: "contacts") {
             try requireNonEmptyPair(contactId, groupId)
-            switch try resolveWrite(global) {
-            case .dryRun:
-                try emitContacts(global, DryRunPreview(
-                    operation: "add_contact_to_group", contact_identifier: contactId, group_identifier: groupId))
-            case .execute:
-                let store = ContactsStore()
-                try store.requireAuthorization()
+            let gate = try resolveWrite(global)
+            guard gate.willExecute else {
+                try emitContactsWrite(global, DryRunPreview(
+                    operation: "add_contact_to_group", contact_identifier: contactId, group_identifier: groupId,
+                    gate_note: gate.sandboxActive
+                        ? sandboxTargetUncheckedNote("both the target contact and the target group") : nil),
+                    sandboxActive: gate.sandboxActive)
+                return
+            }
+            let store = ContactsStore()
+            try store.requireAuthorization()
+            if gate.sandboxActive {
                 try store.requireLabeledGroupTarget(groupId, prefix: TestMode.sandboxPrefix)
                 // Both sides labeled: add only a test contact to a test group (remove needs only
                 // the group check — it just detaches from an already-verified test group).
                 try store.requireLabeledContactTarget(contactId, prefix: TestMode.sandboxPrefix)
-                try store.addContactToGroup(contactIdentifier: contactId, groupIdentifier: groupId)
-                try emitContacts(global, MembershipResult(contact_identifier: contactId, group_identifier: groupId))
             }
+            try store.addContactToGroup(contactIdentifier: contactId, groupIdentifier: groupId)
+            try emitContactsWrite(global, MembershipResult(contact_identifier: contactId, group_identifier: groupId),
+                                  sandboxActive: gate.sandboxActive)
         }
     }
 }
@@ -463,24 +534,27 @@ struct GroupsAddCommand: ParsableCommand {
 struct GroupsRemoveCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "remove",
-        abstract: "Remove a contact from a group (AppleScript fallback). → remove_contact_from_group")
+        abstract: "Remove a contact from a group (EXECUTES; --dry-run previews). → remove_contact_from_group")
     @OptionGroup var global: GlobalOptions
     @Argument(help: "The contact's CN identifier.") var contactId: String
     @Argument(help: "The group's CN identifier.") var groupId: String
     func run() throws {
         try runGuarded(tool: "contacts") {
             try requireNonEmptyPair(contactId, groupId)
-            switch try resolveWrite(global) {
-            case .dryRun:
-                try emitContacts(global, DryRunPreview(
-                    operation: "remove_contact_from_group", contact_identifier: contactId, group_identifier: groupId))
-            case .execute:
-                let store = ContactsStore()
-                try store.requireAuthorization()
-                try store.requireLabeledGroupTarget(groupId, prefix: TestMode.sandboxPrefix)
-                try store.removeContactFromGroup(contactIdentifier: contactId, groupIdentifier: groupId)
-                try emitContacts(global, MembershipResult(contact_identifier: contactId, group_identifier: groupId))
+            let gate = try resolveWrite(global)
+            guard gate.willExecute else {
+                try emitContactsWrite(global, DryRunPreview(
+                    operation: "remove_contact_from_group", contact_identifier: contactId, group_identifier: groupId,
+                    gate_note: gate.sandboxActive ? sandboxTargetUncheckedNote("the target group") : nil),
+                    sandboxActive: gate.sandboxActive)
+                return
             }
+            let store = ContactsStore()
+            try store.requireAuthorization()
+            if gate.sandboxActive { try store.requireLabeledGroupTarget(groupId, prefix: TestMode.sandboxPrefix) }
+            try store.removeContactFromGroup(contactIdentifier: contactId, groupIdentifier: groupId)
+            try emitContactsWrite(global, MembershipResult(contact_identifier: contactId, group_identifier: groupId),
+                                  sandboxActive: gate.sandboxActive)
         }
     }
 }

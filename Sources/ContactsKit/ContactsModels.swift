@@ -224,12 +224,16 @@ public struct ImportVCardResult: Encodable {
     public let identifiers: [String]
     public let count: Int
     public let group_id: String?  // id-echo: ALWAYS present (null when absent), per MCP.
-    enum CodingKeys: String, CodingKey { case identifiers, count, group_id }
+    /// Write-model v2: every execute-path envelope states `dry_run: false` explicitly, because
+    /// under execute-by-default that key is how a caller tells "previewed" from "done".
+    public let dry_run = false
+    enum CodingKeys: String, CodingKey { case identifiers, count, group_id, dry_run }
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(identifiers, forKey: .identifiers)
         try c.encode(count, forKey: .count)
         try encodeOrNull(&c, group_id, .group_id)
+        try c.encode(dry_run, forKey: .dry_run)
     }
 }
 
@@ -270,27 +274,36 @@ public struct CreateContactResult: Encodable {
     public let identifier: String
     public let group_id: String?      // id-echo: ALWAYS present (null when absent), per MCP.
     public let container_id: String?  // id-echo: ALWAYS present (null when absent), per MCP.
-    enum CodingKeys: String, CodingKey { case identifier, group_id, container_id }
+    /// See `ImportVCardResult.dry_run` — the v2 executed/previewed discriminator.
+    public let dry_run = false
+    enum CodingKeys: String, CodingKey { case identifier, group_id, container_id, dry_run }
     public func encode(to encoder: Encoder) throws {
         var c = encoder.container(keyedBy: CodingKeys.self)
         try c.encode(identifier, forKey: .identifier)
         try encodeOrNull(&c, group_id, .group_id)
         try encodeOrNull(&c, container_id, .container_id)
+        try c.encode(dry_run, forKey: .dry_run)
     }
 }
 
 /// Bare `{identifier}` echo (update / delete / write_note / write_photo / delete_group).
 public struct IdentifierResult: Encodable {
     public let identifier: String
+    /// See `ImportVCardResult.dry_run` — the v2 executed/previewed discriminator.
+    public let dry_run = false
 }
 
 /// Membership echo `{contact_identifier, group_identifier}` (add/remove member).
 public struct MembershipResult: Encodable {
     public let contact_identifier: String
     public let group_identifier: String
+    /// See `ImportVCardResult.dry_run` — the v2 executed/previewed discriminator.
+    public let dry_run = false
 }
 
 /// `{group: {...}}` (create_group / rename_group).
 public struct GroupResult: Encodable {
     public let group: Group
+    /// See `ImportVCardResult.dry_run` — the v2 executed/previewed discriminator.
+    public let dry_run = false
 }
