@@ -12,6 +12,54 @@ with the Apple MCP servers they replace.
 
 ## [Unreleased]
 
+### Fixed — `analytics stats` scanned the wrong mailboxes for two of its three scopes
+
+Oracle B scopes each `get_statistics` analysis differently (`tools/analytics.py`), and the CLI
+collapsed that into one inverted ternary, getting three things wrong at once:
+
+| scope | oracle | was | now |
+|---|---|---|---|
+| `account_overview` | whole account, skip-folders excluded, days applied | correct | unchanged |
+| `sender_stats` | whole account (`mailbox` ignored) | scoped to `--mailbox`, default INBOX | whole account |
+| `mailbox_breakdown` | the named mailbox, default INBOX | `--mailbox` discarded, spanned everything | honors `--mailbox` |
+
+Two filters were also applied where the oracle applies none. `mailbox_breakdown` counts
+`every message of targetMailbox` — no `whose date received` clause and no SKIP_FOLDERS check
+(interpolated only at :170 and :314, the two broad scans) — so the CLI was date-filtering it and
+could filter a named system folder down to nothing. Asking for a breakdown of Trash returned zeroes.
+
+Practical effect: `sender_stats` silently reported INBOX-only numbers as if they were account-wide,
+and `mailbox_breakdown` could not answer the question it exists to answer.
+
+`--days` is now reported as applied rather than as requested — `mailbox_breakdown` responses carry
+`days_back: 0`, because echoing `30` over an all-time count is a claim the caller cannot check.
+`--mailbox All` remains a CLI extra for the cross-mailbox breakdown, and `account_overview` still
+emits the same array, so honoring a named mailbox adds the oracle behavior without removing either.
+
+The semantics now live in one tested function (`Analytics.scopePlan`) instead of an inline ternary
+behind a live `MailContext`, which is why nothing caught this: the logic was unreachable from any
+test that did not have the operator's Mail store.
+
+Three further defects, all reachable only *because* `--mailbox` now works, were found in review and
+fixed in the same change:
+
+- **`--mailbox all` and `--mailbox All` returned different totals** (thousands of messages apart on the
+  measured account). `EnvelopeIndex.isAllWildcard` is case-insensitive and documents itself as the
+  single authority precisely so callers cannot desync; the new code re-tested the string with `==`,
+  so a lowercase spelling took the resolver's every-mailbox branch while the system-folder exclusion
+  silently switched off. Now asks `isAllWildcard`.
+- **A named breakdown reported the backing store's path.** Both named scopes could resolve to
+  a backing identifier that named neither request. A named breakdown is now one entry labelled with the
+  mailbox the caller asked for.
+- **An unknown mailbox returned `ok:true, total:0`** where the oracle raises `"Mailbox not found"`
+  (analytics.py:362-370). Now a `not_found` error. The check is on mailbox EXISTENCE, not row count,
+  so a real-but-empty mailbox still reports zero rather than erroring.
+
+`StatisticsResult` also gained an optional `mailbox` field echoing the scope actually scanned —
+additive, MINOR — because with `--mailbox` honored it is the only way a caller can distinguish an
+empty result for the mailbox they meant from one for a mailbox they mistyped.
+
+
 ### Added — oracle-A safety ports (rate limiter, recipient cap, bulk cap)
 
 Three limits oracle A (`apple-mail-mcp` s-morgan-jeffries@0.6.0) enforces are now carried by the

@@ -211,7 +211,8 @@ contacts 7→5, notes 18→14, calendar 11→9, reminders 14→12, mail 55→46.
 | Q1 | Write-model v2: **Messages flip** (last domain) | messages | **DONE** | — |
 | Q2 | Reminders `lists update`/`delete` reject a labeled list addressed BY ID | reminders | **DONE** | — |
 | Q3 | Oracle-A safety ports: rate limiter 3/60s, 100-msg bulk cap, 100-recipient cap | mail | **DONE** | reply/`draft send` left unbounded → D8 |
-| Q4 | `analytics stats` scope defects ×3 | mail | TODO | — |
+| Q4 | `analytics stats` scope defects ×3 | mail | **DONE** | was 4, not 3: days_back also mis-applied |
+| Q4b | `needs-response` sibling defects found during Q4 review: (a) the "already replied" suppression set takes the 200 **oldest** sent messages — `analyticsRows` has no `ORDER BY`, so `.prefix(200)` is rowid order, while the oracle walks Mail's newest-first enumeration (`smart_inbox.py:286-290`, window confirmed by `get_top_senders`' `exit repeat` at `:437`); past 200 sent messages the sets barely overlap and the filter silently stops working. (b) that Sent lookup has **no account filter** (`AnalyticsCommands.swift:150-155`) where the sibling `awaiting-reply` does (`:182`), so on a multi-account machine it can suppress against another account's Sent mail. Both verified in source; both need their own oracle pass. | mail | TODO | — |
 | Q5 | **MSG-1** fuzzy-search recall: implement rapidfuzz's 3-phase `partial_ratio` | messages | TODO | — |
 | Q6 | Messages OPEN gaps MSG-2/3/5 (empty `group_name`, WAL-aware AddressBook, 1024-char cap) | messages | TODO | — |
 | Q7 | Contacts 5 OPEN gaps (from the reconciliation JSON) | contacts | TODO | — |

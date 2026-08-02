@@ -66,6 +66,12 @@ public enum Analytics {
         public let read_pct: Double
         public let top_senders: [TopSender]?
         public let mailbox_breakdown: [MailboxBreakdown]?
+        /// The mailbox scope actually scanned — `"All"` for the two account-wide scopes, the
+        /// resolved name for `mailbox_breakdown`. Inert while `--mailbox` was discarded, but now
+        /// that the argument is honored it is the only way a caller can tell an empty result for
+        /// the mailbox they meant from an empty result for one they mistyped. `TopSendersResult`
+        /// already carries the same field. (Additive optional ⇒ MINOR, per versioning-policy.md.)
+        public var mailbox: String? = nil
         /// Whether MCP B's SKIP_FOLDERS were excluded from these counts. Analytics is a
         /// counts-only payload, so silent filtering here is indistinguishable from a sparse
         /// store — worse than on `search`, where the caller at least sees the rows. Mirrors
@@ -151,10 +157,63 @@ public enum Analytics {
                                 senders: senders, total_analyzed: total, unique_senders: counts.count)
     }
 
+    // MARK: Statistics scope planning
+
+    /// How a `stats` scope actually scans, per oracle B (`tools/analytics.py`).
+    ///
+    /// This exists as a named, unit-testable value rather than an inline ternary in the command
+    /// because the inline version was wrong in three ways at once and nothing could catch it: the
+    /// logic sat behind a live `MailContext`, so no logic-tier test could reach it. Extracting it
+    /// makes each rule assertable without Mail, Full Disk Access, or a configured account.
+    ///
+    /// | scope | mailbox | SKIP_FOLDERS | days_back |
+    /// |---|---|---|---|
+    /// | `account_overview`  (:142) | ignored — whole account | excluded (:170) | applied |
+    /// | `sender_stats`      (:283) | ignored — whole account | excluded (:314) | applied |
+    /// | `mailbox_breakdown` (:351) | the named one, default INBOX | NOT excluded | IGNORED |
+    ///
+    /// `mailbox_breakdown` differs on every axis, which is why getting one right proves nothing
+    /// about the others.
+    public struct ScopePlan: Equatable, Sendable {
+        /// Mailbox name handed to `analyticsRows`; `"All"` means every mailbox of the account.
+        public let mailbox: String
+        /// Days actually applied — NOT necessarily what the caller asked for.
+        public let daysBack: Int
+        /// Whether Trash/Junk/Sent*/Drafts/Spam are dropped from the scan.
+        public let excludeSystemFolders: Bool
+    }
+
+    public static func scopePlan(scope: String, requestedMailbox: String, requestedDays: Int,
+                                 includeSystemFolders: Bool) -> ScopePlan {
+        let isBreakdown = scope == "mailbox_breakdown"
+        // Only mailbox_breakdown reads `mailbox`; the other two always span the account.
+        // An empty/whitespace name falls back to INBOX rather than erroring or matching the
+        // account-root entries (whose path is ""), because the oracle does exactly that:
+        // `mailbox_param = escaped_mailbox if mailbox else "INBOX"` (analytics.py:352).
+        let named = requestedMailbox.trimmingCharacters(in: .whitespaces)
+        let mailbox = isBreakdown ? (named.isEmpty ? "INBOX" : named) : "All"
+        // The oracle's mailbox_breakdown counts `every message of targetMailbox` with no `whose`
+        // clause, so days_back is inert there. Reporting 0 keeps the payload honest.
+        let days = isBreakdown ? 0 : requestedDays
+        // Keyed on the resolved SCAN SCOPE, not on `scope`: never silently filter away a mailbox
+        // the caller named (a Trash breakdown must return Trash), while the CLI-extra
+        // `--mailbox All` breakdown still gets the sensible exclusion.
+        //
+        // Ask `isAllWildcard` — do NOT re-test the string. `EnvelopeIndex` documents itself as the
+        // single authority on what "All" selects precisely so this cannot desync, and the first cut
+        // wrote `mailbox == "All"`, which is case-SENSITIVE while the resolver is not. The result:
+        // `--mailbox all` took the resolver's wildcard branch (every mailbox) while this yielded
+        // `exclude == false`, so a lowercase spelling silently swept Trash/Junk/Drafts/Sent into
+        // the totals with no `--include-system-folders`. Review-caught, reproduced live.
+        let exclude = !includeSystemFolders && EnvelopeIndex.isAllWildcard(mailbox)
+        return ScopePlan(mailbox: mailbox, daysBack: days, excludeSystemFolders: exclude)
+    }
+
     // MARK: Statistics
 
     public static func statistics(_ rows: [Row], scope: String, account: String, daysBack: Int,
                                   systemFoldersExcluded: Bool? = nil,
+                                  namedMailbox: String? = nil,
                                   mailboxPath: (Int) -> String) -> StatisticsResult {
         let total = rows.count
         let unread = rows.filter { !$0.read }.count
@@ -171,16 +230,32 @@ public enum Analytics {
                              account: account, mailbox: "", daysBack: daysBack).senders
         }
         if scope == "account_overview" || scope == "mailbox_breakdown" {
-            var mb: [Int: Int] = [:]
-            for r in rows { mb[r.mailboxRowid, default: 0] += 1 }
-            breakdown = mb.sorted { $0.value > $1.value }.map {
-                MailboxBreakdown(path: mailboxPath($0.key), count: $0.value,
-                                 percentage: total > 0 ? (Double($0.value) / Double(total) * 100).rounded(toPlaces: 1) : 0)
+            if let named = namedMailbox {
+                // A NAMED breakdown is one mailbox's stats, so it is one entry labelled with the
+                // mailbox the caller asked for.
+                //
+                // Labelling by the backing store's path (what the rowid gives) is wrong here on
+                // label-backed accounts: Gmail's INBOX is a label over `[Gmail]/All Mail`, so
+                // `--mailbox INBOX` and `--mailbox Receipts` both reported
+                // `path: "[Gmail]/All Mail"` — correct counts under an identifier that names
+                // neither request and makes the two indistinguishable. Leaf-matching can also
+                // resolve one name to several rowids (`Archive` and `Work/Archive`), which split
+                // into duplicate rows under the same label. Both collapse correctly here.
+                // Unreachable before this change, because the scan was always the `All` sweep.
+                breakdown = [MailboxBreakdown(path: named, count: total, percentage: total > 0 ? 100 : 0)]
+            } else {
+                var mb: [Int: Int] = [:]
+                for r in rows { mb[r.mailboxRowid, default: 0] += 1 }
+                breakdown = mb.sorted { $0.value > $1.value }.map {
+                    MailboxBreakdown(path: mailboxPath($0.key), count: $0.value,
+                                     percentage: total > 0 ? (Double($0.value) / Double(total) * 100).rounded(toPlaces: 1) : 0)
+                }
             }
         }
         return StatisticsResult(account: account, scope: scope, days_back: daysBack, total: total,
                                 unread: unread, read: read, flagged: flagged, with_attachments: withAtt,
                                 unread_pct: unreadPct, read_pct: readPct, top_senders: top, mailbox_breakdown: breakdown,
+                                mailbox: namedMailbox ?? "All",
                                 system_folders_excluded: systemFoldersExcluded)
     }
 

@@ -120,18 +120,18 @@ generalized, and getting it wrong is a correctness loss in both directions:
 | `search --mailbox All` | **Yes**, by default (`--include-system-folders` opts back in) | Oracle-B parity (search.py:236, All-branch only). An `All` sweep that returned Trash/Junk/Sent hits was returning results the oracle never would. |
 | `search --mailbox <named>` | No | The exclusion redefines what `All` MEANS; naming a system mailbox explicitly must still search it. |
 | `analytics stats --scope account_overview` | **Yes**, by default | Oracle applies it at analytics.py:170. Verified live: 7-day window: over-counted before, exact match after. |
-| `analytics stats --scope sender_stats` | **Yes**, by default — but see the `--mailbox` defect | Oracle applies the skip at analytics.py:314. **Oracle IGNORES `mailbox` for this scope** — it sweeps `every mailbox of targetAccount` (analytics.py:303) and `escaped_mailbox` is referenced at only two places in the whole file (128 assignment, 352 `mailbox_breakdown`). The CLI instead scopes to `--mailbox` (default `INBOX`), so it reports INBOX-only sender stats where the oracle reports account-wide — a **known defect / parity DROP**, tracked with the `mailbox_breakdown` fix. |
-| `analytics stats --scope mailbox_breakdown` | **Oracle: NO.** CLI currently: yes — **known defect** | analytics.py:351-385 applies NO skip and targets ONE named mailbox (`mailbox_param = escaped_mailbox if mailbox else "INBOX"`). The CLI forces `mbx = "All"` for this scope and filters anyway, so `--mailbox` is silently discarded and per-mailbox stats for a system folder are unreachable by any flag combination. That is a DROPPED oracle capability. Tracked for its own fix; do not read this row as parity. |
+| `analytics stats --scope sender_stats` | **Yes**, by default | Oracle applies the skip at analytics.py:314 and IGNORES `mailbox` for this scope, sweeping `every mailbox of targetAccount` (analytics.py:303). **Fixed 2026-08-02** — the CLI previously scoped it to `--mailbox` (default `INBOX`) and reported INBOX-only numbers as account-wide. See the scope table below. |
+| `analytics stats --scope mailbox_breakdown` | **No** (matches the oracle) | analytics.py:351-385 applies NO skip and targets ONE named mailbox (`mailbox_param = escaped_mailbox if mailbox else "INBOX"`). **Fixed 2026-08-02** — the CLI previously forced `All` and filtered anyway, discarding `--mailbox` and making per-mailbox stats for a system folder unreachable. A named mailbox is now never skip-filtered, so a Trash breakdown returns Trash. |
 | `analytics top-senders` / `needs-response` / `awaiting-reply` / `overview` | **No** | No oracle counterpart applies the skip, and the CLI applies none either. |
 
-**Third known analytics defect — the exclusion is NOT `All`-scoped there.** `search` nests the
-check inside `if wantAll` (EnvelopeIndex.swift:122-123), so naming a system mailbox explicitly
-still searches it. `AnalyticsCommands.swift:92-97` has no `isAllWildcard` guard and filters by
-leaf name unconditionally on `!includeSystemFolders`. Measured live on iCloud:
-`analytics stats --scope sender_stats --mailbox Drafts` → `total=0` and `--mailbox Trash` → `0`,
-while `search --mailbox Drafts` → 16. So per-mailbox analytics for ANY system folder is
-unreachable without `--include-system-folders`, and the two read surfaces answer the same
-question differently. Grouped with the other two analytics defects for a single fix.
+**Resolved 2026-08-02 — the exclusion is now `All`-scoped.** `search` had always nested the check
+inside `if wantAll` (EnvelopeIndex.swift:122-123) so that naming a system mailbox explicitly still
+searched it; `analytics stats` filtered unconditionally, so `--scope sender_stats --mailbox Drafts`
+returned `total=0` while `search --mailbox Drafts` returned 16 — two read surfaces answering the
+same question differently. The exclusion is now keyed on the resolved scan scope
+(`Analytics.scopePlan`), via `EnvelopeIndex.isAllWildcard` rather than a re-tested string literal,
+so `all`/`All`/`ALL` behave identically. All three analytics defects in this section are closed.
+
 | `thread` | **No — deliberately** | `get_email_thread` lives in the SAME module as the filtered path — `tools/search.py:595` (there is no `tools/thread.py`) — and builds its own mailbox script with no skip. Excluding drops the operator's own `Sent` replies out of their own conversation: measured 34 → 24 messages, all 6 `Sent Messages` hits lost. Copying the filter here is a regression wearing parity's clothes. |
 | `move` / `mark` / `flag` / `delete` (bulk `All`) | **No — deliberately** | A mutation's `All` must stay wide: `delete --permanent` only ever targets messages already in Trash, so a narrowed scope would make it a permanent no-op. |
 
@@ -321,6 +321,23 @@ applemail open <message-id>          ·   applemail refresh                     
 applemail doctor                                                                  # fruitmail-style DB/path diagnostics
 # global: --json everywhere; --dry-run/--confirm gates mirror MCP-A elicitation + MCP-B safety caps
 ```
+
+### `analytics stats` scope semantics (corrected 2026-08-02)
+
+Oracle B's `get_statistics` scans differently per scope, on three independent axes. Getting one
+scope right proves nothing about the others.
+
+| scope | mailboxes scanned | SKIP_FOLDERS | days_back |
+|---|---|---|---|
+| `account_overview` (analytics.py:142) | all of the account; `mailbox` arg ignored | excluded (:170) | applied |
+| `sender_stats` (:283) | all of the account; `mailbox` arg ignored | excluded (:314) | applied |
+| `mailbox_breakdown` (:351) | the ONE named mailbox, default `INBOX` (falls back to `Inbox`) | **not** applied | **ignored** |
+
+CLI extras on top: `--mailbox All` fans a breakdown across every mailbox (no oracle counterpart),
+and `--include-system-folders` opts back into the excluded folders. The exclusion is keyed on the
+resolved scan scope, not on the scope name, so a mailbox the caller NAMES is never filtered away —
+a Trash breakdown must return Trash. Responses report `days_back` as actually applied (0 for
+`mailbox_breakdown`), not as requested.
 
 ### Oracle safety limits (ported 2026-08-02)
 

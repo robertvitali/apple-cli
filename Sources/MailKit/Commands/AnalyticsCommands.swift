@@ -63,8 +63,8 @@ struct AnalyticsStats: ParsableCommand {
     @Option(name: .long, help: "Account name or UUID.") var account: String
     @Option(name: .long, help: "Scope: account_overview | sender_stats | mailbox_breakdown.") var scope: String = "account_overview"
     @Option(name: .long, help: "Sender filter (for sender_stats).") var sender: String?
-    @Option(name: .long, help: "Mailbox (default INBOX; 'All' for every mailbox).") var mailbox: String = "INBOX"
-    @Option(name: .long, help: "Look back this many days (0 = all time).") var days: Int = 30
+    @Option(name: .long, help: "Mailbox — mailbox_breakdown only (default INBOX; 'All' is a CLI extra spanning every mailbox). Ignored by account_overview/sender_stats, which always span the account as the oracle does.") var mailbox: String = "INBOX"
+    @Option(name: .long, help: "Look back this many days (0 = all time). Ignored by mailbox_breakdown, which the oracle counts over all time; the response's days_back reports what was actually applied.") var days: Int = 30
     @Flag(name: .long, help: "Include Trash/Junk/Sent/Drafts/Spam in the totals (MCP B excludes them; CLI extra).") var includeSystemFolders = false
 
     func run() throws {
@@ -83,13 +83,29 @@ struct AnalyticsStats: ParsableCommand {
             }
             let ctx = try MailContext()
             let uuid = try ctx.requireAccountUUID(account)
-            // account_overview + mailbox_breakdown span every mailbox; sender_stats honors --mailbox.
-            let mbx = (scope == "sender_stats") ? mailbox : "All"
-            var rows = try ctx.index.analyticsRows(accountUUID: uuid, mailboxName: mbx, sinceUnix: sinceUnix(daysBack: days)).map(analyticsRow)
-            // Oracle B excludes SKIP_FOLDERS (Trash/Junk/Sent*/Drafts/Spam/Deleted*) from its
-            // broad scans, so every volume metric here diverged from the oracle's by counting
-            // them. `--include-system-folders` opts back in (the CLI's own addition).
-            if !includeSystemFolders {
+            // Oracle B scans differently for EVERY scope (mailbox / skip-folders / days_back all
+            // vary — see `Analytics.scopePlan` for the table and the analytics.py line refs). That
+            // logic lives there, not here, because the inline ternary this replaced was inverted on
+            // all three axes and sat behind a live `MailContext` where no test could reach it.
+            let plan = Analytics.scopePlan(scope: scope, requestedMailbox: mailbox,
+                                           requestedDays: days,
+                                           includeSystemFolders: includeSystemFolders)
+            // Oracle: an unresolvable mailbox raises `error "Mailbox not found"` after the
+            // INBOX→Inbox retry (analytics.py:362-370). Checked on EXISTENCE, not on row count —
+            // a real-but-empty mailbox (iCloud's Trash holds 0) must still report ok:true/total:0,
+            // exactly as the oracle does. Without this a typo returned a confident zero, which is
+            // the worst possible answer, and it contradicted this command's own invalid-scope
+            // throw a few lines up.
+            let named: String? = plan.mailbox == "All" ? nil : plan.mailbox
+            if let named {
+                let hit = ctx.index.resolveMailboxes(accountUUID: uuid, mailboxName: named)
+                guard !hit.direct.isEmpty || !hit.label.isEmpty else {
+                    throw AppleError.notFound("no mailbox named \"\(named)\" in account '\(account)'.")
+                }
+            }
+            var rows = try ctx.index.analyticsRows(accountUUID: uuid, mailboxName: plan.mailbox,
+                                                   sinceUnix: sinceUnix(daysBack: plan.daysBack)).map(analyticsRow)
+            if plan.excludeSystemFolders {
                 rows = rows.filter { row in
                     let path = ctx.index.mailbox(forRowid: row.mailboxRowid)?.url.path ?? ""
                     return !Analytics.isSkippedSystemFolder(path)
@@ -100,8 +116,9 @@ struct AnalyticsStats: ParsableCommand {
                 rows = rows.filter { ($0.senderAddress?.lowercased().contains(needle) ?? false)
                                    || ($0.senderName?.lowercased().contains(needle) ?? false) }
             }
-            let result = Analytics.statistics(rows, scope: scope, account: account, daysBack: days,
-                                              systemFoldersExcluded: !includeSystemFolders) {
+            let result = Analytics.statistics(rows, scope: scope, account: account, daysBack: plan.daysBack,
+                                              systemFoldersExcluded: plan.excludeSystemFolders,
+                                              namedMailbox: named) {
                 ctx.index.mailbox(forRowid: $0)?.url.path ?? "?"
             }
             try Output.emit(tool: "mail", data: result)

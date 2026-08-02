@@ -1240,6 +1240,91 @@ print(next((m['id'] for m in d if m.get('conversation_id') in multi), ''))")
   [ "$b" -gt "$a" ] || skip "account has no mail in system folders to exclude"
 }
 
+# The three scopes scan DIFFERENTLY (oracle tools/analytics.py) and the shipped code had a single
+# inverted ternary that got all three wrong at once. Logic-tier coverage is in AnalyticsScopeTests;
+# these pin the same rules end-to-end, through the real Envelope Index, where a wiring mistake
+# between the command and Analytics.scopePlan would still show up.
+@test "mail analytics stats: mailbox_breakdown honors --mailbox (oracle scopes to one mailbox)" {
+  require_index
+  # Two DIFFERENT named mailboxes. Under the fix each reports only its own; under the bug both
+  # resolved to "All" and returned identical payloads.
+  #
+  # An earlier version of this test asserted only that a single INBOX run contained no non-INBOX
+  # paths — and passed against the BUG, because on this account the all-mailbox scan happened to
+  # return just INBOX once the 30-day window and skip-filter were applied. Shape of the operator's
+  # mail must not decide whether a parity test can fail.
+  local a b
+  a=$("$BIN" mail analytics stats --account iCloud --scope mailbox_breakdown --mailbox INBOX)
+  b=$("$BIN" mail analytics stats --account iCloud --scope mailbox_breakdown --mailbox Archive)
+
+  local pa pb
+  pa=$(echo "$a" | python3 -c 'import json,sys; d=json.load(sys.stdin)["data"]; mb=d.get("mailbox_breakdown") or []; print(",".join(sorted(e["path"] for e in mb)))')
+  pb=$(echo "$b" | python3 -c 'import json,sys; d=json.load(sys.stdin)["data"]; mb=d.get("mailbox_breakdown") or []; print(",".join(sorted(e["path"] for e in mb)))')
+
+  # POSITIVE CONTROL ON BOTH SIDES. `pa != pb` is satisfied by an empty pb, so on a machine with
+  # no Archive mailbox this test would pass without ever exercising the scoping — the same
+  # account-shape vacuity that made its first version pass against the bug. Skip loudly instead.
+  [ -n "$pa" ]
+  echo "$pa" | grep -qi 'inbox'
+  [ -n "$pb" ] || skip "no Archive mailbox on this account — discriminator needs two real mailboxes"
+
+  # THE DISCRIMINATOR: scoping to different mailboxes must produce different answers.
+  [ "$pa" != "$pb" ]
+
+  # And neither may leak the other's mailbox.
+  ! echo "$pa" | grep -q 'Archive'
+}
+
+@test "mail analytics stats: mailbox_breakdown reports days_back 0 (oracle applies no date filter)" {
+  require_index
+  # --days 30 is requested; the oracle counts `every message of targetMailbox` with no whose
+  # clause, so the response must report what was ACTUALLY applied rather than echoing the request.
+  run "$BIN" mail analytics stats --account iCloud --scope mailbox_breakdown --mailbox INBOX --days 30
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"days_back" : 0'
+  # Control: a broad scope with the same flag DOES honor it, so the assertion above is about
+  # scope semantics and not about days_back being hardcoded everywhere.
+  run "$BIN" mail analytics stats --account iCloud --scope account_overview --days 30
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"days_back" : 30'
+}
+
+@test "mail analytics stats: a named system folder is not filtered to nothing" {
+  require_index
+  # Target a system folder that actually HAS mail. iCloud has both `Trash` (0 messages) and
+  # `Deleted Messages` (non-empty); the first version of this test used Trash and asserted only
+  # `system_folders_excluded: false` — a constant for every named breakdown — so it could not
+  # distinguish "rows survived the filter" from "the mailbox was empty anyway".
+  run "$BIN" mail analytics stats --account iCloud --scope mailbox_breakdown --mailbox "Deleted Messages"
+  [ "$status" -eq 0 ]
+  echo "$output" | python3 -c '
+import json,sys
+d = json.load(sys.stdin)["data"]
+assert d.get("system_folders_excluded") is False, "named scope must not filter"
+# THE discriminator: rows must actually have survived. Under the old unconditional filter this
+# was 0, because "Deleted Messages" matches SKIP_FOLDERS.
+assert d["total"] > 0, "expected surviving messages in Deleted Messages, got %r" % d["total"]
+mb = d.get("mailbox_breakdown") or []
+assert len(mb) == 1, "a named breakdown is one entry, got %d" % len(mb)
+assert mb[0]["path"] == "Deleted Messages", "entry must name the REQUESTED mailbox, got %r" % mb[0]["path"]
+assert d.get("mailbox") == "Deleted Messages"
+print("OK", d["total"])
+'
+}
+
+# The oracle raises `error "Mailbox not found"` (analytics.py:362-370). Returning ok:true/total:0
+# for a typo is the worst answer available: indistinguishable from a genuinely empty mailbox.
+@test "mail analytics stats: an unknown mailbox errors instead of reporting zero" {
+  require_index
+  run "$BIN" mail analytics stats --account iCloud --scope mailbox_breakdown --mailbox ZzzNotAMailbox
+  [ "$status" -ne 0 ]
+  echo "$output" | grep -q '"type" : "not_found"'
+  # CONTROL: a real-but-possibly-empty mailbox must still SUCCEED — the check is on existence,
+  # not on row count, so this must not have become "empty means error".
+  run "$BIN" mail analytics stats --account iCloud --scope mailbox_breakdown --mailbox Trash
+  [ "$status" -eq 0 ]
+}
+
 # --- Regression: prefix-only thread keyword must not become a full-store dump ----
 # `stripThreadPrefixes("Re:")` is "", and an empty subjectContains makes EnvelopeIndex append NO
 # WHERE clause — so `thread --subject "Re:"` returned arbitrary unrelated messages, and with
