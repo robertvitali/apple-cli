@@ -411,6 +411,84 @@ reverting the model. The sandbox itself is the operator's per-invocation rollbac
   the docs now say so.
 
   Remaining flips: Notes → Calendar + Reminders → Messages.
+- 2026-08-02 — **Notes flip landed** (step 4, third domain). The simplest mapping of the six:
+  the oracle ENFORCES no write gate of any kind. **Evidence (re-derived — the first
+  version of this note cited a grep of `dist/` and `src/`, directories the shipped package does
+  not contain, so it matched nothing *vacuously* and proved nothing; reviewers caught it):** the
+  package ships one bundle, `apple-notes-mcp/build/index.js`; the only `process.env` reads in it
+  are `DEBUG` and `VERBOSE`, so there is no test-mode variable to mirror; every `elicit*` hit is
+  bundled MCP-SDK protocol schema rather than server code; and `delete-note`'s handler runs
+  `getNoteById` → `deleteNoteById` with no gate. Its description does say "Safety: requires
+  explicit user confirmation before deleting", but that is advisory prose aimed at the calling
+  model, not server-side enforcement.
+  All 9 write ops are therefore bucket 3, with no bucket-1 gate to keep — unlike Contacts,
+  which keeps two. **Process lesson: an evidence grep must be shown to match a path that
+  EXISTS.** A `grep -r … dir/ 2>/dev/null` over a missing directory exits 0 with no output,
+  which is indistinguishable from a real negative. The conclusion here survived re-derivation,
+  but only by luck.
+
+  **PARALLEL-SUITE ENV RACES — the standing hazard for every remaining flip.** swift-testing
+  links all test targets into ONE process and runs suites in PARALLEL, so any test that
+  `setenv`s a real v2 variable races every domain that reads it, and each flip adds readers.
+  Two distinct instances have now bitten, both caught only by REPEATED full runs (one green run
+  proves nothing):
+  1. `APPLE_DRY_RUN` — `WriteModelV2CoreTests` owned it globally on the premise that "nothing
+     else in the swift tier reads it (domains are pre-flip)". The Contacts flip falsified that:
+     6-in-12 red. Fixed with an `envVar:` seam on `GlobalOptions.willExecute`.
+  2. `APPLE_TEST_SANDBOX` — `MailKitTests` setenv()s it to `qa-fixture`, and both new posture
+     suites called gate functions that read `TestMode.sandboxPrefix` internally: 1-in-6 red.
+     Fixed with a `prefix:` seam on Contacts' `resolveWrite` and Notes' `guardLiveWrite` /
+     `applyArgvSelectorGuard`; 0-in-14 after.
+
+  **Rule for the Calendar / Reminders / Messages flips:** a logic-tier test must never inherit an
+  env-backed value it has hard-coded expectations about — read the pinned constant
+  (`TestMode.canonicalSandboxPrefix`) or pass a seam, never `TestMode.sandboxPrefix`. Validate a
+  new posture suite with **>= 12 consecutive full runs**, not one.
+  The open question this file left for the Notes flip (whether the deletes warrant an
+  `APPLE_ALLOW_*`-style operator affordance) resolves NO: Notes.app's AppleScript `delete` moves
+  the note to Recently Deleted, where it stays recoverable, so none of these ops is the
+  irreversible erase that rule exists for; the previews were corrected to stop saying
+  "PERMANENTLY delete".
+  Mechanics: `resolveNotesWrite` is the new chokepoint (validates the v2 env, binds
+  willExecute + sandboxActive once); `guardLiveWrite` takes `sandboxActive` as a PARAMETER and
+  its internal `TestMode.isEnabled` re-check is gone — that re-check would have silently skipped
+  the confinement on the flag-only path; `emitNotesWrite` takes a NON-defaulted `sandboxActive`
+  (the Contacts precedent) and surfaces the sandbox in `--text` too. Preview honesty: every
+  argv-computable label check was hoisted to run on both paths (`create` title,
+  `update --new-title`, both folder names, `batch-move`'s destination), and the fetched-target
+  checks are disclosed rather than skipped silently. NotesKit is at zero deprecation warnings.
+  Test migration: notes.bats' 2 pre-flip markers migrated and its one genuinely dangerous case
+  was rewritten — `APPLE_TEST_MODE="" notes create … --execute` was a v1 REFUSAL that under v2
+  would CREATE A REAL NOTE. Suite marker cap 5 → 3 (only messages' 1 pre-flip marker plus
+  mail's 2 permanent default-pins remain).
+  **Review round (security lens, re-run after the first fan-out died on API limits — 12 of 14
+  agents errored, so that run's `confirmed: 0` was an artefact and the gate had NOT run).** It
+  returned one CRITICAL and three MEDIUMs, all real:
+  - CRITICAL — `notes delete-folder ""` (or any all-separator name) collapsed to ZERO path
+    components, so `folderRefExpr([])` produced an empty specifier and the script was a bare
+    `delete` inside `tell account …`, binding to the ACCOUNT CONTAINER. v1 refused it only
+    incidentally via the label gate; the lift removed that accident. The oracle is NOT vulnerable
+    (`folderNameSchema.min(1)`), so this was a **dropped oracle-mirrored input bound**, not
+    parity with a vulnerable oracle. Guarded at the command layer AND at the `deleteFolder` sink,
+    matching the guard `createFolder` already had.
+  - MEDIUM — `create --folder` was never label-checked, the same gap fixed for `move` one round
+    earlier; `save-attachment --dry-run` skipped its path confinement (the only check it has),
+    reporting clean for a destination execute refuses.
+  - MEDIUM — two load-bearing claims were asserted and never verified. **Both turned out false
+    for `delete-folder`.** Measured with labeled data: it does NOT refuse a non-empty folder, it
+    CASCADES, and the cascade is PERMANENT — the contained note did not reach Recently Deleted,
+    while the control note deleted via `notes delete` in the same run did. `delete-folder`
+    therefore takes a **per-surface dry-run default** (the Mail trash-surface shape), a knowing
+    deviation from strict parity under this file's own `APPLE_ALLOW_EMPTY_TRASH` rule.
+
+  **Process lesson, second of two this flip: do not generalise a measurement across an op class.**
+  "Notes deletes are recoverable" was verified once, for `delete`, and then written as though it
+  covered `delete-folder`, which is the one op where it is false — and that generalisation was
+  the entire stated reason for withholding an operator affordance.
+
+  Remaining flips: Calendar + Reminders (two coordinated edits on the shared EventKitCore) →
+  Messages. Deprecation warnings left: CalendarKit 4, MessagesKit 3, RemindersKit 2 — the
+  mechanical completion criterion for the rollout is zero.
 
   **Bucket-2 exceptions taken for Contacts (per this file's "fixed or explicitly excepted with
   rationale" clause).** (a) `vcard export --out` and `photo get --out` write caller-named paths

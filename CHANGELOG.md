@@ -12,6 +12,69 @@ with the Apple MCP servers they replace.
 
 ## [Unreleased]
 
+### BREAKING — Notes write-model v2: writes EXECUTE by default
+
+Third domain flipped to write-model v2 (`docs/write-model-v2.md`). Notes is the simplest
+mapping of the six: the oracle ENFORCES no write gate of any kind. **Evidence (re-derived — the first
+version of this note cited a grep of `dist/` and `src/`, directories the shipped package does
+not contain, so it matched nothing *vacuously* and proved nothing; reviewers caught it):** the
+package ships one bundle, `apple-notes-mcp/build/index.js`; the only `process.env` reads in it
+are `DEBUG` and `VERBOSE`, so there is no test-mode variable to mirror; every `elicit*` hit is
+bundled MCP-SDK protocol schema rather than server code; and `delete-note`'s handler runs
+`getNoteById` → `deleteNoteById` with no gate. Its description does say "Safety: requires
+explicit user confirmation before deleting", but that is advisory prose aimed at the calling
+model, not server-side enforcement.
+So every Notes write op is a CLI-only restriction (bucket 3) with no oracle-mirrored gate to
+keep — unlike Contacts, which keeps two.
+
+- **BREAKING (behavior): all 9 Notes writes execute when invoked** — `create`, `update`,
+  `append`, `delete`, `move`, `batch-delete`, `batch-move`, `create-folder`, `delete-folder`.
+  `--dry-run` previews; `APPLE_DRY_RUN=1` restores dry-run-by-default. **Any script or
+  shell-history invocation that relied on the old dry-run default now mutates real notes.**
+  The v1 gate (`--execute` plus `APPLE_TEST_MODE=1`) is gone.
+- **The sandbox is opt-in and single-signal**: `APPLE_TEST_MODE` truthy or `--test-mode`,
+  either alone. Inside it, writes stay confined to `apple-cli-test…`-labeled notes and folders;
+  refusals remain `validation_error` / exit 64 (the Notes refusal type, not Mail/Contacts' 77).
+- **Recoverability is per-op, and `delete-folder` is the exception.** `delete` and
+  `batch-delete` move the note to Recently Deleted, where it stays recoverable — no
+  operator-affordance env var warranted. **`notes delete-folder` CASCADES to every note in the
+  folder, and the cascade is PERMANENT** (measured: the contained note did not reach Recently
+  Deleted, while a control note deleted the other way did). It also does **not** refuse a
+  non-empty folder — this port's own help text and port-spec claimed it did, inheriting an
+  assertion the oracle's source only hedged as "may fail".
+- **BREAKING (behavior): `notes delete-folder` PREVIEWS by default** — a per-surface default,
+  the same shape Mail's trash surface uses; pass `--execute` to perform it. This is a knowing
+  deviation from strict oracle parity (the oracle cascades on call), taken under the spec's own
+  `APPLE_ALLOW_EMPTY_TRASH` rule: an op that irreversibly destroys an unbounded amount of
+  unlabeled real data in one flagless invocation warrants a control the caller must reach for.
+  One line (`DeleteFolderCmd.surfaceDefaultDryRun`) restores strict parity if preferred.
+- **Fix: an empty or separator-only folder name is now refused everywhere.**
+  `notes delete-folder ""` built an EMPTY AppleScript specifier, so the emitted script was a bare
+  `delete` inside `tell account …` — binding the direct object to the whole account container
+  rather than a folder. v1 refused it only incidentally (the label gate rejected `""`), and the
+  v2 lift removed that accident; the oracle is not vulnerable because its schema carries
+  `.min(1)`, so this was a dropped oracle-mirrored input bound. Guarded now at both the command
+  layer and the `NotesScript.deleteFolder` sink (`createFolder` already had the sink guard).
+- **BREAKING (contract): envelope change.** Sandboxed write envelopes carry `"sandbox": true`
+  (key absent otherwise); `--text` write output shows a `[sandbox]` prefix.
+- **Preview honesty.** Every argv-computable label check runs on BOTH paths — `create`'s title,
+  `update --new-title`, `create-folder`/`delete-folder`'s name, `batch-move`'s destination, and
+  (per review) `move`'s destination plus any `--title`-addressed target. Only `--id` addressing
+  genuinely needs Automation to learn the target's title, and only then does a sandboxed preview
+  disclose an unchecked gate — the first cut disclosed it for `--title` too, which was both a
+  missed check and a false explanation.
+- **Fix (found in review): `notes move` never label-checked its `--folder` destination** on
+  either path, while `batch-move` did — so a sandboxed move could drop a labeled test note into
+  a REAL folder.
+- **Fix (found in review): `save-attachment` ignored `--dry-run`** and wrote the file anyway. It
+  mutates the filesystem rather than Notes.app, and shipped with no `willExecute` branch at all;
+  it now previews, and inherits the fail-loud env contract. Its home/temp/Volumes path
+  confinement — the only safety check it has, and pure argv string math — was also hoisted to run
+  on BOTH paths, so a preview can no longer report clean for a destination the execute path
+  refuses; an out-of-roots path is now `validation_error` on both rather than `unknown`.
+- **Fix (found in review): `notes create --folder` never label-checked its destination**, so a
+  sandboxed create wrote into a REAL folder while the identical `move` was refused.
+
 ### BREAKING — Contacts write-model v2: writes EXECUTE by default
 
 Second domain flipped to write-model v2 (`docs/write-model-v2.md`), same principle as the

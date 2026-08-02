@@ -54,7 +54,7 @@ Class tags: **C**=CORE (read/write data), **D**=DERIVED (convenience/aggregate o
 | 14 | get-selected-notes | C | — | Reads Notes.app **UI selection** → `{title,id}[]`. |
 | 15 | list-folders | C | `account` | All folders with nested paths. Sync-warns. |
 | 16 | create-folder | C | `name`(nested `A/B/C`), `account` | Creates intermediate folders; skips existing. |
-| 17 | delete-folder | C | `name`, `account` | Fails if folder non-empty. |
+| 17 | delete-folder | C | `name`, `account` | **Cascades**: deletes the folder AND every note in it. The oracle source only ever HEDGED this ("may fail if the folder contains notes"); its tool description upgraded the hedge to an assertion and this port inherited the assertion. Measured 2026-08-02: a non-empty folder was deleted, and the contained note did NOT reach Recently Deleted — it was destroyed permanently. |
 | 18 | show-folder | X | `id`, `separately?` | Reveals folder in Notes UI. |
 | 19 | list-accounts | C | — | Accounts (iCloud/Gmail/Exchange…) + defaultFolder + upgraded flag. |
 | 20 | get-default-location | D | — | Default `{account,folder}` where new notes land (with ids). |
@@ -236,7 +236,35 @@ The MCP emits camelCase keys; apple-cli emits snake_case per `docs/DESIGN.md` ("
 ### Superset improvements (capabilities BEYOND the MCP)
 - **`get-checklist` / `get-metadata` are SQLite-only** — they do NOT require the MCP's AppleScript existence-guard, so they resolve notes AppleScript can't (trashed, or when Notes.app automation is slow/unavailable). Verified live: the MCP oracle failed `get-checklist-state` on a real note whose checklist apple-cli read correctly.
 - **`sync_warning`** — a structured field on `search`/`list`/`folders` (the MCP's `withSyncAwareness` warning was text-only).
-- **Safety**: every write defaults to `--dry-run` (preview, zero side effects); a real mutation needs `--execute` AND passes the `APPLE_TEST_MODE` + `apple-cli-test…`-labeled-target guard; `batch-*` verify EVERY target is a labeled test note before touching anything. Input bounds mirror the MCP's zod limits (title ≤2000, content ≤5 MiB, folder ≤1000, account ≤200).
+- **Write model (v2 — behaves like the MCP; see `docs/write-model-v2.md`)**: every write
+  **EXECUTES when invoked**, exactly as calling the equivalent apple-notes-mcp tool does.
+  `--dry-run` previews; `APPLE_DRY_RUN=1` restores dry-run-by-default globally. This replaced
+  the v1 posture (dry-run default plus an `--execute` + `APPLE_TEST_MODE=1` gate), which had no
+  oracle counterpart on ANY op: the shipped bundle `apple-notes-mcp/build/index.js` reads only
+  `DEBUG`/`VERBOSE` from the environment, issues no elicitation, and runs `delete-note` straight
+  through with no gate — its "requires explicit user confirmation" text is advisory prose to the
+  calling model, not enforcement. So all 9 writes are bucket 3.
+  - **The sandbox is opt-in**: `APPLE_TEST_MODE` truthy **or** `--test-mode`, either alone.
+    Inside it, writes are confined to `apple-cli-test…`-labeled targets and `batch-*` verify
+    EVERY id resolves to a labeled test note before touching anything. Refusals are
+    `validation_error` / exit 64 (the Notes refusal type). Outside the sandbox none of this
+    applies, per oracle parity. Sandboxed success envelopes carry `"sandbox": true`.
+  - **Recoverability is PER-OP, measured, not assumed.** `delete` and `batch-delete` use
+    `delete <noteRef>`; the note lands in Recently Deleted and stays findable there, so no
+    operator-affordance env var is warranted. **`delete-folder` is different**: it cascades to
+    every note in the folder and the cascade is PERMANENT (the notes do not reach Recently
+    Deleted). It therefore keeps a **per-surface dry-run default** — it previews unless
+    `--execute` is passed, the same shape Mail's trash surface uses. That is a knowing deviation
+    from strict oracle parity (the oracle cascades on call), justified by the spec's own
+    `APPLE_ALLOW_EMPTY_TRASH` rule: an op that irreversibly destroys an unbounded amount of
+    unlabeled real data in ONE flagless invocation warrants a control the caller reaches for.
+  - **Preview honesty**: the argv-computable label checks run on BOTH paths — `create` title,
+    `update --new-title`, `create-folder`/`delete-folder` name, `batch-move` AND `move`
+    destinations, and any `--title`-addressed target. Only `--id` addressing needs Automation to
+    learn the target's title, and only there does a sandboxed preview disclose an unchecked gate.
+  - `save-attachment` writes to the filesystem and honours `--dry-run` like any other write.
+  - Input bounds mirror the MCP's zod limits (title ≤2000, content ≤5 MiB, folder ≤1000,
+    account ≤200) and are checked BEFORE the write gate.
 - **Hardening** (from the OMC review pass): gzip inflate clamps the attacker-controllable ISIZE to a 64 MiB cap (decompression-bomb defense); the attachment path guard adds a symlink-aware post-mkdir re-check; the protobuf checklist line-mapping counts UTF-16 code units (correct for emoji/non-BMP text, matching Apple's run lengths); SQLite PKs are bound positionally.
 
 ### Security posture

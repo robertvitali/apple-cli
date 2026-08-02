@@ -2,8 +2,14 @@ import ArgumentParser
 import Foundation
 import AppleKit
 
-// Write commands. ALL default to dry-run (a preview, zero side effects); a real mutation
-// requires `--execute` AND passes `guardLiveWrite` (APPLE_TEST_MODE + labeled test target).
+// Write commands. Under write-model v2 (docs/write-model-v2.md) each behaves like the
+// equivalent apple-notes-mcp tool: invoking it MUTATES Notes.app. `--dry-run` previews;
+// `APPLE_DRY_RUN` truthy restores dry-run-by-default.
+//
+// `resolveNotesWrite` is the single chokepoint (validates the v2 environment, resolves
+// willExecute + sandboxActive, bound once per run()). `guardLiveWrite` confines the target to
+// `apple-cli-test…` items ONLY inside the opt-in sandbox — the oracle has no such gate, so it
+// is a CLI-only restriction, not part of the behavior being replicated.
 
 func validateFormat(_ format: String) throws -> Bool {
     switch format.lowercased() {
@@ -20,6 +26,17 @@ enum NotesLimits {
     static let content = 5 * 1024 * 1024
     static let folder = 1000
     static let account = 200
+}
+
+/// Mirror of the oracle's `folderNameSchema.min(1, "Folder name is required")`, which this port
+/// dropped while keeping its `.max()`. Under v1 an empty name was refused incidentally (the
+/// label gate rejected `""`); v2 removed that accident, so the bound has to be explicit. Applies
+/// to any name that becomes an AppleScript folder specifier — an all-separator string collapses
+/// to zero components and is therefore just as empty as `""`.
+func requireNonEmptyFolderName(_ name: String, _ what: String = "Folder name") throws {
+    if NotesScript.splitFolderPath(name).isEmpty {
+        throw AppleError.validation("\(what) must be a non-empty string.")
+    }
 }
 
 func validateBounds(title: String? = nil, content: String? = nil, folder: String? = nil, account: String? = nil) throws {
@@ -41,7 +58,7 @@ func validateBounds(title: String? = nil, content: String? = nil, folder: String
 
 struct CreateCmd: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "create",
-        abstract: "Create a note (title prepended as <h1>). Dry-run unless --execute.")
+        abstract: "Create a note, title prepended as <h1> (EXECUTES; --dry-run previews).")
     @OptionGroup var global: GlobalOptions
     @Argument(help: "Note title.") var title: String
     @Option(name: .long, help: "Note body.") var content: String
@@ -54,16 +71,27 @@ struct CreateCmd: ParsableCommand {
         try runGuarded(tool: notesTool) {
             let html = try validateFormat(format)
             try validateBounds(title: title, content: content, folder: folder, account: account)
-            guard global.willExecute else {
+            if let folder { try requireNonEmptyFolderName(folder) }
+            let gate = try resolveNotesWrite(global)
+            // The new note's title comes from argv, so the sandbox label check is computable
+            // here and runs on BOTH paths — a sandboxed preview refuses exactly what execute
+            // refuses, at the same exit code, without touching Notes.app.
+            try guardLiveWrite(labeledName: title, sandboxActive: gate.sandboxActive)
+            // ...and so does the DESTINATION. move/batch-move gained this check in the previous
+            // review round and create was missed, so a sandboxed create still wrote into a REAL
+            // folder while the identical move was refused.
+            if let folder { try guardLiveWrite(labeledName: folder, sandboxActive: gate.sandboxActive) }
+            guard gate.willExecute else {
                 let folderInfo = folder.map { " in \($0)" } ?? ""
-                try emitNotes(DryRunPreview("create-note", "Would create \"\(title)\"\(folderInfo) (format: \(format)). Re-run with --execute."),
-                              json: global.json, human: "[dry-run] would create \"\(title)\".")
+                try emitNotesWrite(DryRunPreview("create-note", "Would create \"\(title)\"\(folderInfo) (format: \(format)). Re-run without --dry-run."),
+                                   json: global.json, sandboxActive: gate.sandboxActive,
+                                   human: "[dry-run] would create \"\(title)\".")
                 return
             }
-            try guardLiveWrite(labeledName: title)
             let id = try NotesScript().createNote(title: title, content: content, folder: folder, account: account, html: html)
-            try emitNotes(CreatedNote(ok: true, id: id, title: title, folder: folder, account: account),
-                          json: global.json, human: "Created \"\(title)\" [\(id)].")
+            try emitNotesWrite(CreatedNote(ok: true, id: id, title: title, folder: folder, account: account),
+                               json: global.json, sandboxActive: gate.sandboxActive,
+                               human: "Created \"\(title)\" [\(id)].")
         }
     }
 }
@@ -72,7 +100,7 @@ struct CreateCmd: ParsableCommand {
 
 struct UpdateCmd: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "update",
-        abstract: "REPLACE a note's body (and optional title), by --id or --title. Dry-run unless --execute.")
+        abstract: "REPLACE a note's body (and optional title), by --id or --title (EXECUTES; --dry-run previews).")
     @OptionGroup var global: GlobalOptions
     @Option(name: .long, help: "Note id (preferred).") var id: String?
     @Option(name: .long, help: "Current note title.") var title: String?
@@ -86,9 +114,18 @@ struct UpdateCmd: ParsableCommand {
             let html = try validateFormat(format)
             try validateBounds(title: newTitle, content: newContent, account: account)
             let selector = try requireIdOrTitle(id: id, title: title)
-            guard global.willExecute else {
-                try emitNotes(DryRunPreview("update-note", "Would REPLACE the body of the target note (format: \(format)). Re-run with --execute."),
-                              json: global.json, human: "[dry-run] would replace body.")
+            let gate = try resolveNotesWrite(global)
+            // A rename must land on a labeled name too, and --new-title is argv-computable, so
+            // that half of the check runs on both paths.
+            if let newTitle, !newTitle.isEmpty {
+                try guardLiveWrite(labeledName: newTitle, sandboxActive: gate.sandboxActive)
+            }
+            let undisclosed = try applyArgvSelectorGuard(selector, sandboxActive: gate.sandboxActive)
+            guard gate.willExecute else {
+                let extra = undisclosed ? sandboxTargetUncheckedDetail() : ""
+                try emitNotesWrite(DryRunPreview("update-note", "Would REPLACE the body of the target note (format: \(format)). Re-run without --dry-run.\(extra)"),
+                                   json: global.json, sandboxActive: gate.sandboxActive,
+                                   human: "[dry-run] would replace body.")
                 return
             }
             let script = NotesScript()
@@ -96,19 +133,21 @@ struct UpdateCmd: ParsableCommand {
             case .id(let noteId):
                 guard let note = try script.getNoteById(id: noteId) else { throw AppleError.notFound("Note with id \"\(noteId)\" not found.") }
                 if note.passwordProtected { throw AppleError.validation("Note is password-protected. Unlock it in Notes.app first.") }
-                try guardLiveWrite(labeledName: note.title)
+                try guardLiveWrite(labeledName: note.title, sandboxActive: gate.sandboxActive)
                 try script.updateNoteById(id: noteId, newTitle: newTitle, newContent: newContent, html: html)
                 let displayTitle = (newTitle?.isEmpty == false) ? newTitle! : note.title
-                try emitNotes(UpdatedNote(ok: true, id: noteId, title: displayTitle, shared: note.shared),
-                              json: global.json, human: "Updated \"\(displayTitle)\".")
+                try emitNotesWrite(UpdatedNote(ok: true, id: noteId, title: displayTitle, shared: note.shared),
+                                   json: global.json, sandboxActive: gate.sandboxActive,
+                                   human: "Updated \"\(displayTitle)\".")
             case .title(let noteTitle):
                 guard let note = try script.getNoteDetails(title: noteTitle, account: account) else { throw AppleError.notFound("Note \"\(noteTitle)\" not found.") }
                 if note.passwordProtected { throw AppleError.validation("Note is password-protected. Unlock it in Notes.app first.") }
-                try guardLiveWrite(labeledName: noteTitle)
+                try guardLiveWrite(labeledName: noteTitle, sandboxActive: gate.sandboxActive)
                 try script.updateNote(title: noteTitle, newTitle: newTitle, newContent: newContent, account: account, html: html)
                 let finalTitle = (newTitle?.isEmpty == false) ? newTitle! : noteTitle
-                try emitNotes(UpdatedNote(ok: true, id: nil, title: finalTitle, shared: note.shared),
-                              json: global.json, human: "Updated \"\(finalTitle)\".")
+                try emitNotesWrite(UpdatedNote(ok: true, id: nil, title: finalTitle, shared: note.shared),
+                                   json: global.json, sandboxActive: gate.sandboxActive,
+                                   human: "Updated \"\(finalTitle)\".")
             }
         }
     }
@@ -118,7 +157,7 @@ struct UpdateCmd: ParsableCommand {
 
 struct AppendCmd: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "append",
-        abstract: "Append content to a note WITHOUT replacing its body (apple-cli extra). Dry-run unless --execute.")
+        abstract: "Append to a note WITHOUT replacing its body, apple-cli extra (EXECUTES; --dry-run previews).")
     @OptionGroup var global: GlobalOptions
     @Option(name: .long, help: "Note id (preferred).") var id: String?
     @Option(name: .long, help: "Note title.") var title: String?
@@ -131,9 +170,13 @@ struct AppendCmd: ParsableCommand {
             let html = try validateFormat(format)
             try validateBounds(content: content, account: account)
             let selector = try requireIdOrTitle(id: id, title: title)
-            guard global.willExecute else {
-                try emitNotes(DryRunPreview("append", "Would append content to the target note (existing body preserved). Re-run with --execute."),
-                              json: global.json, human: "[dry-run] would append.")
+            let gate = try resolveNotesWrite(global)
+            let undisclosed = try applyArgvSelectorGuard(selector, sandboxActive: gate.sandboxActive)
+            guard gate.willExecute else {
+                let extra = undisclosed ? sandboxTargetUncheckedDetail() : ""
+                try emitNotesWrite(DryRunPreview("append", "Would append content to the target note (existing body preserved). Re-run without --dry-run.\(extra)"),
+                                   json: global.json, sandboxActive: gate.sandboxActive,
+                                   human: "[dry-run] would append.")
                 return
             }
             let script = NotesScript()
@@ -143,19 +186,21 @@ struct AppendCmd: ParsableCommand {
             case .id(let noteId):
                 guard let note = try script.getNoteById(id: noteId) else { throw AppleError.notFound("Note with id \"\(noteId)\" not found.") }
                 if note.passwordProtected { throw AppleError.validation("Note is password-protected. Unlock it in Notes.app first.") }
-                try guardLiveWrite(labeledName: note.title)
+                try guardLiveWrite(labeledName: note.title, sandboxActive: gate.sandboxActive)
                 let current = try script.getNoteContentById(id: noteId)
                 try script.updateNoteById(id: noteId, newTitle: nil, newContent: current + appendFragment, html: true)
-                try emitNotes(UpdatedNote(ok: true, id: noteId, title: note.title, shared: note.shared),
-                              json: global.json, human: "Appended to \"\(note.title)\".")
+                try emitNotesWrite(UpdatedNote(ok: true, id: noteId, title: note.title, shared: note.shared),
+                              json: global.json, sandboxActive: gate.sandboxActive,
+                              human: "Appended to \"\(note.title)\".")
             case .title(let noteTitle):
                 guard let note = try script.getNoteDetails(title: noteTitle, account: account) else { throw AppleError.notFound("Note \"\(noteTitle)\" not found.") }
                 if note.passwordProtected { throw AppleError.validation("Note is password-protected. Unlock it in Notes.app first.") }
-                try guardLiveWrite(labeledName: noteTitle)
+                try guardLiveWrite(labeledName: noteTitle, sandboxActive: gate.sandboxActive)
                 let current = try script.getNoteContent(title: noteTitle, account: account)
                 try script.updateNote(title: noteTitle, newTitle: nil, newContent: current + appendFragment, account: account, html: true)
-                try emitNotes(UpdatedNote(ok: true, id: nil, title: noteTitle, shared: note.shared),
-                              json: global.json, human: "Appended to \"\(noteTitle)\".")
+                try emitNotesWrite(UpdatedNote(ok: true, id: nil, title: noteTitle, shared: note.shared),
+                              json: global.json, sandboxActive: gate.sandboxActive,
+                              human: "Appended to \"\(noteTitle)\".")
             }
         }
     }
@@ -165,7 +210,7 @@ struct AppendCmd: ParsableCommand {
 
 struct DeleteCmd: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "delete",
-        abstract: "Permanently delete ONE note, by --id or --title. Dry-run unless --execute.")
+        abstract: "Delete ONE note to Recently Deleted, by --id or --title (EXECUTES; --dry-run previews).")
     @OptionGroup var global: GlobalOptions
     @Option(name: .long, help: "Note id (preferred).") var id: String?
     @Option(name: .long, help: "Note title.") var title: String?
@@ -174,25 +219,31 @@ struct DeleteCmd: ParsableCommand {
     func run() throws {
         try runGuarded(tool: notesTool) {
             let selector = try requireIdOrTitle(id: id, title: title)
-            guard global.willExecute else {
-                try emitNotes(DryRunPreview("delete-note", "Would PERMANENTLY delete the target note. Re-run with --execute."),
-                              json: global.json, human: "[dry-run] would delete.")
+            let gate = try resolveNotesWrite(global)
+            let undisclosed = try applyArgvSelectorGuard(selector, sandboxActive: gate.sandboxActive)
+            guard gate.willExecute else {
+                let extra = undisclosed ? sandboxTargetUncheckedDetail() : ""
+                try emitNotesWrite(DryRunPreview("delete-note", "Would delete the target note (Notes.app moves it to Recently Deleted, where it stays recoverable). Re-run without --dry-run.\(extra)"),
+                                   json: global.json, sandboxActive: gate.sandboxActive,
+                                   human: "[dry-run] would delete.")
                 return
             }
             let script = NotesScript()
             switch selector {
             case .id(let noteId):
                 guard let note = try script.getNoteById(id: noteId) else { throw AppleError.notFound("Note with id \"\(noteId)\" not found.") }
-                try guardLiveWrite(labeledName: note.title)
+                try guardLiveWrite(labeledName: note.title, sandboxActive: gate.sandboxActive)
                 try script.deleteNoteById(id: noteId)
-                try emitNotes(DeletedNote(ok: true, id: noteId, title: note.title, was_shared: note.shared),
-                              json: global.json, human: "Deleted \"\(note.title)\".")
+                try emitNotesWrite(DeletedNote(ok: true, id: noteId, title: note.title, was_shared: note.shared),
+                              json: global.json, sandboxActive: gate.sandboxActive,
+                              human: "Deleted \"\(note.title)\".")
             case .title(let noteTitle):
                 guard let note = try script.getNoteDetails(title: noteTitle, account: account) else { throw AppleError.notFound("Note \"\(noteTitle)\" not found.") }
-                try guardLiveWrite(labeledName: noteTitle)
+                try guardLiveWrite(labeledName: noteTitle, sandboxActive: gate.sandboxActive)
                 try script.deleteNote(title: noteTitle, account: account)
-                try emitNotes(DeletedNote(ok: true, id: nil, title: noteTitle, was_shared: note.shared),
-                              json: global.json, human: "Deleted \"\(noteTitle)\".")
+                try emitNotesWrite(DeletedNote(ok: true, id: nil, title: noteTitle, was_shared: note.shared),
+                              json: global.json, sandboxActive: gate.sandboxActive,
+                              human: "Deleted \"\(noteTitle)\".")
             }
         }
     }
@@ -202,7 +253,7 @@ struct DeleteCmd: ParsableCommand {
 
 struct MoveCmd: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "move",
-        abstract: "Move ONE note to a folder, by --id or --title. Dry-run unless --execute.")
+        abstract: "Move ONE note to a folder, by --id or --title (EXECUTES; --dry-run previews).")
     @OptionGroup var global: GlobalOptions
     @Option(name: .long, help: "Note id (preferred).") var id: String?
     @Option(name: .long, help: "Note title.") var title: String?
@@ -212,25 +263,36 @@ struct MoveCmd: ParsableCommand {
     func run() throws {
         try runGuarded(tool: notesTool) {
             let selector = try requireIdOrTitle(id: id, title: title)
-            guard global.willExecute else {
-                try emitNotes(DryRunPreview("move-note", "Would move the target note to \"\(folder)\". Re-run with --execute."),
-                              json: global.json, human: "[dry-run] would move to \(folder).")
+            let gate = try resolveNotesWrite(global)
+            try requireNonEmptyFolderName(folder)
+            // The DESTINATION is argv-supplied, so it is checked on both paths — batch-move
+            // already did this and single move did not, which let a sandboxed move drop a
+            // labeled test note into a REAL folder.
+            try guardLiveWrite(labeledName: folder, sandboxActive: gate.sandboxActive)
+            let undisclosed = try applyArgvSelectorGuard(selector, sandboxActive: gate.sandboxActive)
+            guard gate.willExecute else {
+                let extra = undisclosed ? sandboxTargetUncheckedDetail() : ""
+                try emitNotesWrite(DryRunPreview("move-note", "Would move the target note to \"\(folder)\". Re-run without --dry-run.\(extra)"),
+                                   json: global.json, sandboxActive: gate.sandboxActive,
+                                   human: "[dry-run] would move to \(folder).")
                 return
             }
             let script = NotesScript()
             switch selector {
             case .id(let noteId):
                 guard let note = try script.getNoteById(id: noteId) else { throw AppleError.notFound("Note with id \"\(noteId)\" not found.") }
-                try guardLiveWrite(labeledName: note.title)
+                try guardLiveWrite(labeledName: note.title, sandboxActive: gate.sandboxActive)
                 try script.moveNoteById(id: noteId, folder: folder, account: account)
-                try emitNotes(MovedNote(ok: true, id: noteId, title: note.title, folder: folder),
-                              json: global.json, human: "Moved \"\(note.title)\" -> \(folder).")
+                try emitNotesWrite(MovedNote(ok: true, id: noteId, title: note.title, folder: folder),
+                              json: global.json, sandboxActive: gate.sandboxActive,
+                              human: "Moved \"\(note.title)\" -> \(folder).")
             case .title(let noteTitle):
                 guard let note = try script.getNoteDetails(title: noteTitle, account: account) else { throw AppleError.notFound("Note \"\(noteTitle)\" not found.") }
-                try guardLiveWrite(labeledName: noteTitle)
+                try guardLiveWrite(labeledName: noteTitle, sandboxActive: gate.sandboxActive)
                 try script.moveNoteById(id: note.id, folder: folder, account: account)
-                try emitNotes(MovedNote(ok: true, id: nil, title: noteTitle, folder: folder),
-                              json: global.json, human: "Moved \"\(noteTitle)\" -> \(folder).")
+                try emitNotesWrite(MovedNote(ok: true, id: nil, title: noteTitle, folder: folder),
+                              json: global.json, sandboxActive: gate.sandboxActive,
+                              human: "Moved \"\(noteTitle)\" -> \(folder).")
             }
         }
     }

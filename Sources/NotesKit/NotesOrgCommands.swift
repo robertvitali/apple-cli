@@ -26,7 +26,7 @@ struct FoldersCmd: ParsableCommand {
 
 struct CreateFolderCmd: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "create-folder",
-        abstract: "Create a folder (nested paths create intermediates; existing skipped). Dry-run unless --execute.")
+        abstract: "Create a folder, nested paths create intermediates (EXECUTES; --dry-run previews).")
     @OptionGroup var global: GlobalOptions
     @Argument(help: "Folder name or nested path (A/B/C).") var name: String
     @Option(name: .long, help: "Account (defaults to iCloud).") var account: String?
@@ -34,15 +34,21 @@ struct CreateFolderCmd: ParsableCommand {
     func run() throws {
         try runGuarded(tool: notesTool) {
             try validateBounds(folder: name, account: account)
-            guard global.willExecute else {
-                try emitNotes(DryRunPreview("create-folder", "Would create folder \"\(name)\". Re-run with --execute."),
-                              json: global.json, human: "[dry-run] would create folder \"\(name)\".")
+            try requireNonEmptyFolderName(name)
+            let gate = try resolveNotesWrite(global)
+            // The folder name is argv-supplied, so the sandbox label check is computable here
+            // and runs on BOTH paths — no store read, and the preview refuses what execute does.
+            try guardLiveWrite(labeledName: name, sandboxActive: gate.sandboxActive)
+            guard gate.willExecute else {
+                try emitNotesWrite(DryRunPreview("create-folder", "Would create folder \"\(name)\". Re-run without --dry-run."),
+                                   json: global.json, sandboxActive: gate.sandboxActive,
+                                   human: "[dry-run] would create folder \"\(name)\".")
                 return
             }
-            try guardLiveWrite(labeledName: name)
             let folder = try NotesScript().createFolder(name: name, account: account)
-            try emitNotes(CreatedFolder(ok: true, folder: folder.name), json: global.json,
-                          human: "Created folder \"\(folder.name)\".")
+            try emitNotesWrite(CreatedFolder(ok: true, folder: folder.name), json: global.json,
+                               sandboxActive: gate.sandboxActive,
+                               human: "Created folder \"\(folder.name)\".")
         }
     }
 }
@@ -51,22 +57,37 @@ struct CreateFolderCmd: ParsableCommand {
 
 struct DeleteFolderCmd: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "delete-folder",
-        abstract: "Delete a folder (fails if it still contains notes). Dry-run unless --execute.")
+        abstract: "Delete a folder AND EVERY NOTE IN IT, permanently (previews by default; --execute performs it).")
+    /// PER-SURFACE DEFAULT: this one surface previews unless `--execute` is passed, while every
+    /// other Notes write executes on invocation. Deliberate, and a knowing deviation from strict
+    /// oracle parity (the oracle cascades too, on call). The justification is the spec's own
+    /// rule for `APPLE_ALLOW_EMPTY_TRASH`: an op that destroys an unbounded amount of unlabeled
+    /// real data wholesale, irreversibly, in ONE flagless invocation warrants a control the
+    /// caller must reach for. Measured here: the cascaded notes do NOT reach Recently Deleted.
+    /// Pinned by a marker test; flipping it to `false` restores strict parity in one line if the
+    /// operator prefers that.
+    static let surfaceDefaultDryRun = true
+
     @OptionGroup var global: GlobalOptions
     @Argument(help: "Folder name or nested path.") var name: String
     @Option(name: .long, help: "Account (defaults to iCloud).") var account: String?
 
     func run() throws {
         try runGuarded(tool: notesTool) {
-            guard global.willExecute else {
-                try emitNotes(DryRunPreview("delete-folder", "Would delete folder \"\(name)\". Re-run with --execute."),
-                              json: global.json, human: "[dry-run] would delete folder \"\(name)\".")
+            try validateBounds(folder: name, account: account)
+            try requireNonEmptyFolderName(name)
+            let gate = try resolveNotesWrite(global, defaultDryRun: Self.surfaceDefaultDryRun)
+            try guardLiveWrite(labeledName: name, sandboxActive: gate.sandboxActive)
+            guard gate.willExecute else {
+                try emitNotesWrite(DryRunPreview("delete-folder", "Would delete folder \"\(name)\" AND EVERY NOTE IN IT. Measured: this cascades, and the cascaded notes do NOT go to Recently Deleted — they are destroyed permanently. Pass --execute to perform it."),
+                                   json: global.json, sandboxActive: gate.sandboxActive,
+                                   human: "[dry-run] would delete folder \"\(name)\".")
                 return
             }
-            try guardLiveWrite(labeledName: name)
             try NotesScript().deleteFolder(name: name, account: account)
-            try emitNotes(CreatedFolder(ok: true, folder: name), json: global.json,
-                          human: "Deleted folder \"\(name)\".")
+            try emitNotesWrite(CreatedFolder(ok: true, folder: name), json: global.json,
+                               sandboxActive: gate.sandboxActive,
+                               human: "Deleted folder \"\(name)\".")
         }
     }
 }

@@ -578,6 +578,13 @@ struct NotesScript {
         let acct = resolveAccount(account)
         var args: [String] = []
         let comps = Self.splitFolderPath(name)
+        // SINK GUARD — `createFolder` has had this since it was written; `deleteFolder` did not,
+        // and that asymmetry became exploitable the moment write-model v2 stopped refusing an
+        // unlabeled name up front. With `comps` empty, `folderRefExpr([])` returns an EMPTY
+        // specifier and the emitted script is a bare `delete` inside `tell account …`, whose
+        // direct object binds to the ACCOUNT CONTAINER rather than a folder. Guarding at the
+        // sink (not only at the command) so no future caller can re-open it.
+        guard !comps.isEmpty else { throw AppleError.validation("Invalid folder name: \"\(name)\"") }
         let (expr, fargs) = Self.folderRefExpr(comps, startIndex: args.count + 1)
         args.append(contentsOf: fargs)
         let acctIndex = accountArgIndex(&args, acct) // split before call (inout eval order)

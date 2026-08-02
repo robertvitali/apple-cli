@@ -127,15 +127,23 @@ struct WriteGate {
 ///
 /// `labeledName` (create / groups create) is checked on BOTH paths, so a sandboxed preview
 /// cannot report clean for a name the execute path would refuse.
-func resolveWrite(_ global: GlobalOptions, labeledName: String? = nil) throws -> WriteGate {
+/// `prefix` is a seam for the logic tier, for the same reason the `envVar:` seams exist:
+/// `TestMode.sandboxPrefix` reads `APPLE_TEST_SANDBOX` from the PROCESS environment, and
+/// swift-testing runs all suites in one process — `MailKitTests` setenv()s that variable to
+/// "qa-fixture" while these tests run. A test asserting a hard-coded "apple-cli-test…" name must
+/// therefore pin the prefix rather than inherit whatever another suite last wrote. Production
+/// callers never pass it.
+func resolveWrite(_ global: GlobalOptions, labeledName: String? = nil,
+                  prefix: String? = nil) throws -> WriteGate {
     try TestMode.validateWriteEnvironment()
     let sandboxActive = try TestMode.sandboxActive(flag: global.testMode)
     let willExecute = try global.willExecute(defaultDryRun: false)
     if sandboxActive, let name = labeledName {
-        guard name.hasPrefix(TestMode.sandboxPrefix) else {
+        let required = prefix ?? TestMode.sandboxPrefix
+        guard name.hasPrefix(required) else {
             throw AppleError.safetyViolation(
                 "refusing to create unlabeled data in the sandbox: the name must start with "
-                + "'\(TestMode.sandboxPrefix)'.")
+                + "'\(required)'.")
         }
     }
     return WriteGate(willExecute: willExecute, sandboxActive: sandboxActive)

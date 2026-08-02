@@ -38,7 +38,7 @@ struct AttachmentsCmd: ParsableCommand {
 
 struct SaveAttachmentCmd: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "save-attachment",
-        abstract: "Write one attachment to disk (path must be under home, temp, or /Volumes).")
+        abstract: "Write one attachment to disk, path must be under home/temp/Volumes (EXECUTES; --dry-run previews).")
     @OptionGroup var global: GlobalOptions
     @Option(name: .customLong("note-id"), help: "CoreData note id.") var noteId: String
     @Option(name: .customLong("attachment-id"), help: "Attachment id (from `attachments`).") var attachmentId: String
@@ -46,12 +46,40 @@ struct SaveAttachmentCmd: ParsableCommand {
 
     func run() throws {
         try runGuarded(tool: notesTool) {
+            // Bucket-2 obligation (docs/write-model-v2.md): `--dry-run` must actually work on
+            // every mutating subcommand. This one mutates the FILESYSTEM rather than Notes.app —
+            // it writes attachment bytes to an operator-named path — and it shipped with no
+            // willExecute branch at all, so `--dry-run` silently wrote the file anyway. Review
+            // of the Notes flip caught it. Routing through `resolveNotesWrite` also gives it the
+            // fail-loud env contract (a typo'd APPLE_TEST_MODE now refuses instead of being
+            // ignored). No sandbox LABEL check applies: the destination is a path, not a Notes
+            // item, and `saveAttachmentById` already confines it to home/temp/Volumes.
+            // The home/temp/Volumes confinement is pure string math over argv — no store read,
+            // no filesystem access — so it belongs on BOTH paths, and it is the ONLY safety check
+            // this command has. Leaving it behind the execute branch made `--dry-run` report
+            // clean for a destination the execute path refuses: the exact false-clean signal the
+            // rest of this flip works to eliminate.
+            // Converted to `validation_error`: an out-of-roots destination is bad INPUT, not an
+            // upstream failure, and `FSError` is not an `AppleError` so it would otherwise land
+            // as the catch-all `unknown`. Running it here also makes preview and execute agree
+            // on the class — the inner call in `saveAttachmentById` stays as defense in depth
+            // for the post-mkdir symlink re-check.
+            do { _ = try AttachmentFS.assertSafeSavePath(path) }
+            catch let e as AttachmentFS.FSError { throw AppleError.validation(e.description) }
+            let gate = try resolveNotesWrite(global)
+            guard gate.willExecute else {
+                try emitNotesWrite(DryRunPreview("save-attachment", "Would write attachment \"\(attachmentId)\" of note \"\(noteId)\" to \"\(path)\". Re-run without --dry-run."),
+                                   json: global.json, sandboxActive: gate.sandboxActive,
+                                   human: "[dry-run] would save attachment to \(path).")
+                return
+            }
             let r = try NotesScript().saveAttachmentById(noteId: noteId, attachmentId: attachmentId, savePath: path)
             guard r.ok, let savedPath = r.savedPath else {
                 throw AppleError.upstream("Failed to save attachment: \(r.error ?? "unknown error")")
             }
-            try emitNotes(SavedAttachment(saved_path: savedPath, name: r.name, content_type: r.contentType),
-                          json: global.json, human: "Saved \"\(r.name ?? "attachment")\" to \(savedPath).")
+            try emitNotesWrite(SavedAttachment(saved_path: savedPath, name: r.name, content_type: r.contentType),
+                               json: global.json, sandboxActive: gate.sandboxActive,
+                               human: "Saved \"\(r.name ?? "attachment")\" to \(savedPath).")
         }
     }
 }

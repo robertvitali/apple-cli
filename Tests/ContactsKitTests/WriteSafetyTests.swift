@@ -99,23 +99,29 @@ struct ContactsWriteModelV2Tests {
         #expect(gate.willExecute == true)
     }
 
+    /// Pinned via the `prefix:` seam — `TestMode.sandboxPrefix` is env-backed and MailKitTests
+    /// setenv()s `APPLE_TEST_SANDBOX=qa-fixture` in parallel, which flaked this test 1-in-6
+    /// before the seam existed.
     @Test("LIFT PIN: the create label gate applies ONLY inside the sandbox")
     func labelGateIsSandboxOnly() throws {
+        let p = TestMode.canonicalSandboxPrefix
         // Unsandboxed, an unlabeled create is allowed — that IS the v2 flip (the oracle
         // creates real contacts on call). A throw here means the gate was re-tightened.
-        #expect(try resolveWrite(opts([]), labeledName: "Ada Lovelace").willExecute == true)
+        #expect(try resolveWrite(opts([]), labeledName: "Ada Lovelace", prefix: p).willExecute == true)
         // Sandboxed, the same name is refused.
         #expect(throws: AppleError.self) {
-            _ = try resolveWrite(self.opts(["--test-mode"]), labeledName: "Ada Lovelace")
+            _ = try resolveWrite(self.opts(["--test-mode"]), labeledName: "Ada Lovelace",
+                                 prefix: TestMode.canonicalSandboxPrefix)
         }
         // ...and a labeled one passes.
-        #expect(try resolveWrite(opts(["--test-mode"]), labeledName: "apple-cli-test Ada").sandboxActive == true)
+        #expect(try resolveWrite(opts(["--test-mode"]), labeledName: p + " Ada", prefix: p).sandboxActive == true)
     }
 
     @Test("the label gate is checked on the PREVIEW path too (no dishonest dry-run)")
     func labelGateRunsOnPreview() {
         #expect(throws: AppleError.self) {
-            _ = try resolveWrite(self.opts(["--test-mode", "--dry-run"]), labeledName: "Ada Lovelace")
+            _ = try resolveWrite(self.opts(["--test-mode", "--dry-run"]), labeledName: "Ada Lovelace",
+                                 prefix: TestMode.canonicalSandboxPrefix)
         }
     }
 

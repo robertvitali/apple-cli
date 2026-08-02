@@ -101,19 +101,24 @@ setup() {
   # here: adding a marker requires editing this assertion — a reviewable event. (A net-neutral
   # marker SWAP holds the count without touching this line, but both halves of a swap are
   # visible line edits in the same diff; the cap's job is to stop growth.) Composition today:
-  # 3 pre-flip markers in un-flipped domains (messages×1, notes×2 — each domain's flip migrates
-  # its own) + 2 PERMANENT default-pin markers in mail.bats (they lock the v2 per-surface
-  # defaults with deliberately flagless invocations; the final-flip count is 2, not 0, unless
+  # 1 pre-flip marker in an un-flipped domain (messages×1 — that domain's flip migrates
+  # it) + 3 PERMANENT default-pin markers (mail.bats ×2, notes.bats ×1 — they lock the v2 per-surface
+  # defaults with deliberately flagless invocations; the final-flip count is 3, not 0, unless
   # other domains add default-pins of their own — edit deliberately).
   #
-  # Contacts' 2 pre-flip markers went at its flip. It adds no permanent default-pin here on
-  # purpose: a flagless contacts write is a LIVE address-book mutation under v2, so its
-  # execute-by-default posture is pinned in the logic tier instead — see the
-  # "Contacts write-model v2 posture" suite (Tests/ContactsKitTests/WriteSafetyTests.swift),
-  # which asserts the same property with no store access.
+  # Contacts (2) and Notes (2) shed their pre-flip markers at their own flips. Contacts added no
+  # permanent default-pin, on purpose: a flagless write in either domain is a LIVE
+  # mutation of the operator's real address book or notes under v2, so pinning the
+  # execute-by-default posture with a deliberately flagless invocation is not safe the way it
+  # is for Mail's trash surface (whose default IS dry-run). Contacts pins that posture in the
+  # LOGIC tier instead — see the "Contacts write-model v2 posture" suite in
+  # Tests/ContactsKitTests/WriteSafetyTests.swift, which asserts the same property with no
+  # store access at all. Notes DID add one, for `delete-folder` alone: it is the single Notes
+  # surface that previews by default (it destroys every note in the folder irreversibly), so the
+  # flagless invocation that pins it is safe precisely because that default holds.
   local markers
   markers="$(echo "$output" | sed -n 's/.*, \([0-9]*\) marker(s)$/\1/p')"
-  [ "$markers" -eq 5 ]
+  [ "$markers" -eq 4 ]
 }
 
 @test "lint: a truthy APPLE_DRY_RUN env-brake prefix exempts a flagless write; junk or a later command does not" {

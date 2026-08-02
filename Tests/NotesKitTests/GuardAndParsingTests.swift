@@ -155,3 +155,80 @@ struct ScriptParsingTests {
         #expect(NotesScript.mapBatchStatus("id", "fail", op: "move").error == "Move failed")
     }
 }
+
+// MARK: - Write-model v2 posture (docs/write-model-v2.md)
+
+/// Pins the v2 DECISION `resolveNotesWrite` makes, which nothing else can catch. The bats tier
+/// cannot assert "a flagless notes write executes" without actually mutating the operator's
+/// notes, and the AppleKit core tier only proves the precedence chain, not that THIS domain
+/// opted into it. Review of the flip found the whole change was pinned by no test in either
+/// tier — flipping `defaultDryRun` back to `true` left every suite green. This is that pin.
+///
+/// These read the real process environment and assume `APPLE_TEST_MODE` / `APPLE_DRY_RUN` are
+/// unset (asserted below, so a polluted env fails legibly). The env-SET branches belong to the
+/// AppleKit core tier, which owns the `envVar:` seams — mutating process env here would race the
+/// parallel suites, which is exactly the 6-in-12 flake the Contacts flip had to fix.
+@Suite("Notes write-model v2 posture")
+struct NotesWriteModelV2Tests {
+    func opts(_ args: [String]) throws -> GlobalOptions { try GlobalOptions.parse(args) }
+    /// Pinned, not read from the env: `TestMode.sandboxPrefix` is backed by APPLE_TEST_SANDBOX,
+    /// which MailKitTests setenv()s in parallel inside this same process.
+    let P = TestMode.canonicalSandboxPrefix
+
+    @Test("the test environment is clean (precondition for every pin below)")
+    func cleanEnvironment() {
+        let env = ProcessInfo.processInfo.environment
+        #expect(env["APPLE_TEST_MODE"] == nil || env["APPLE_TEST_MODE"]!.isEmpty)
+        #expect(env["APPLE_DRY_RUN"] == nil || env["APPLE_DRY_RUN"]!.isEmpty)
+    }
+
+    @Test("DEFAULT PIN: a flagless notes write EXECUTES and is unsandboxed")
+    func defaultsToExecute() throws {
+        let gate = try resolveNotesWrite(opts([]))
+        #expect(gate.willExecute == true)
+        #expect(gate.sandboxActive == false)
+    }
+
+    @Test("--dry-run previews; --execute is redundant; --dry-run wins over --execute")
+    func dryRunPrecedence() throws {
+        #expect(try resolveNotesWrite(opts(["--dry-run"])).willExecute == false)
+        #expect(try resolveNotesWrite(opts(["--execute"])).willExecute == true)
+        #expect(try resolveNotesWrite(opts(["--dry-run", "--execute"])).willExecute == false)
+    }
+
+    @Test("--test-mode alone engages the sandbox without forcing a preview")
+    func flagEngagesSandbox() throws {
+        let gate = try resolveNotesWrite(opts(["--test-mode"]))
+        #expect(gate.sandboxActive == true)
+        #expect(gate.willExecute == true)
+    }
+
+    @Test("LIFT PIN: guardLiveWrite confines ONLY inside the sandbox")
+    func guardIsSandboxOnly() throws {
+        // Unsandboxed, an unlabeled target is allowed — that IS the v2 flip (the oracle writes
+        // whatever it is handed). A throw here means the gate was re-tightened.
+        try guardLiveWrite(labeledName: "Zz A Real Note", sandboxActive: false, prefix: P)
+        // Sandboxed, the same name is refused...
+        #expect(throws: AppleError.self) {
+            try guardLiveWrite(labeledName: "Zz A Real Note", sandboxActive: true, prefix: P)
+        }
+        // ...and a labeled one passes.
+        try guardLiveWrite(labeledName: P + " note", sandboxActive: true, prefix: P)
+        // A nil name is a no-op in both modes (v1 used it to assert test mode; v2 does not).
+        try guardLiveWrite(labeledName: nil, sandboxActive: true, prefix: P)
+    }
+
+    @Test("--title addressing is checked from argv; --id addressing defers to the execute path")
+    func selectorGuardSplit() throws {
+        // A --title write is fully argv-checkable, so it refuses in the sandbox with nothing
+        // left to disclose — and must NOT claim it skipped a check.
+        #expect(throws: AppleError.self) {
+            _ = try applyArgvSelectorGuard(.title("Zz A Real Note"), sandboxActive: true, prefix: P)
+        }
+        #expect(try applyArgvSelectorGuard(.title(P + " n"), sandboxActive: true, prefix: P) == false)
+        // --id addressing genuinely cannot be checked without Notes.app, so the preview says so.
+        #expect(try applyArgvSelectorGuard(.id("x-coredata://A/ICNote/p1"), sandboxActive: true) == true)
+        // ...but only when the sandbox is engaged; otherwise there is no check to miss.
+        #expect(try applyArgvSelectorGuard(.id("x-coredata://A/ICNote/p1"), sandboxActive: false) == false)
+    }
+}
