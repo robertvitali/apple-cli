@@ -147,12 +147,32 @@ struct AnalyticsNeedsResponse: ParsableCommand {
             // have answered is not awaiting your response. B reads the first 200 Sent subjects;
             // we take the same bound from the index. A missing Sent mailbox just means no
             // suppression, never a failure.
+            // THIS ACCOUNT's Sent mailbox, in the oracle's fallback priority. Two defects lived
+            // here, both silent:
+            //
+            //  * WRONG MAILBOX (this is the one that actually bit). `first(where: isSentMailbox)`
+            //    took whichever candidate came first in ROWID order, ignoring the oracle's
+            //    fallback PRIORITY. Measured on this store, one account owned BOTH
+            //    `Sent` (near-empty) and `Sent Messages` (populated) — so the live suppression set was a single stale subject. The oracle tries
+            //    `Sent Messages` → `Sent` → `Sent Items` in that order (smart_inbox.py:274-283).
+            //  * WRONG 200, masked behind the above. `analyticsRows` had no ORDER BY, so
+            //    `.prefix(200)` kept insertion order. Once the priority fix lands and the real
+            //    populated mailbox is read, that becomes live: unordered-first-200 spans
+            //    a much wider window where the newest-200 is far narrower. The
+            //    oracle walks Mail's enumeration, measured newest-first (checked at both ends) and bounded by `if sentIdx > 200 then exit repeat`.
+            //  * no account filter — correctness hardening rather than the thing that broke this
+            //    store. It could NOT leak another account's mail (`resolveMailboxes` skips rows
+            //    whose `accountID` differs); it could only pick a name this account lacks, after
+            //    which the account-scoped query matches nothing. On this store it changes nothing.
+            //
+            // Each failure is silent: the command still returns plausible items and simply stops
+            // suppressing. A filter that quietly does nothing is worse than an absent one.
             var sentSubjects: [String] = []
-            if let sentPath = ctx.index.mailboxes.first(where: {
-                Analytics.isSentMailbox($0.url.path)
-            })?.url.path {
-                sentSubjects = (try? ctx.index.analyticsRows(accountUUID: uuid, mailboxName: sentPath, sinceUnix: nil))?
-                    .prefix(200).map { MailFormat.stripThreadPrefixes(strVal($0["subject"]) ?? "") } ?? []
+            let ownPaths = ctx.index.mailboxes.filter { $0.url.accountID == uuid }.map(\.url.path)
+            if let sentPath = Analytics.preferredSentMailbox(ownPaths) {
+                sentSubjects = (try? ctx.index.analyticsRows(accountUUID: uuid, mailboxName: sentPath,
+                                                             sinceUnix: nil, slice: .newest(200)))?
+                    .map { MailFormat.stripThreadPrefixes(strVal($0["subject"]) ?? "") } ?? []
             }
             let items = Analytics.needsResponse(rows, maxResults: max, sentSubjects: sentSubjects)
             try Output.emit(tool: "mail", data: Result(account: account, mailbox: mailbox, days_back: days, items: items, count: items.count))
@@ -178,14 +198,25 @@ struct AnalyticsAwaitingReply: ParsableCommand {
             let uuid = try ctx.requireAccountUUID(account)
             let since = sinceUnix(daysBack: days)
 
-            // Sent messages: find the account's Sent mailbox by leaf name.
-            let sentName = ctx.index.mailboxes.first(where: {
-                $0.url.accountID == uuid && $0.url.leaf.lowercased().contains("sent")
-            })?.url.path ?? "Sent"
+            // Sent messages: the account's Sent mailbox, in the ORACLE'S fallback priority.
+            //
+            // The previous `leaf.contains("sent")` had two faults. It ignored priority, so on this
+            // store it selected `Sent` (nearly nothing) over `Sent Messages` (populated) — awaiting-reply was
+            // analysing a single 2020 email. And substring matching also accepts any name containing "sent"
+            // . Same defect the sibling `needs-response` carried; same helper fixes it.
+            let ownPaths = ctx.index.mailboxes.filter { $0.url.accountID == uuid }.map(\.url.path)
+            let sentName = Analytics.preferredSentMailbox(ownPaths) ?? "Sent"
             // Fetch ALL sent rows (no SQL since-window): Sent messages' send time is date_sent,
             // and a naive `date_received >= since` filter would drop any account whose Sent rows
             // carry date_received=0. Window in Swift on the effective send date instead.
-            let sentRows = try ctx.index.analyticsRows(accountUUID: uuid, mailboxName: sentName, sinceUnix: nil)
+            // NEWEST-FIRST, and unbounded on purpose. `Analytics.awaitingReply` preserves input
+            // order and the command then takes `prefix(max)`, so ordering here is what makes that
+            // the newest `max` still-unanswered messages rather than an arbitrary `max` — the
+            // oracle walks newest-first and stops at `resultCount >= max_results`
+            // (smart_inbox.py:146-149). Bounding the READ would be wrong: a sent message that was
+            // already answered still consumes a slot, so the oracle scans past it.
+            let sentRows = try ctx.index.analyticsRows(accountUUID: uuid, mailboxName: sentName,
+                                                       sinceUnix: nil, slice: .newestFirst)
             var sent: [Analytics.SentItem] = []
             for row in sentRows {
                 let effDate = intVal(row["date_sent"]) ?? intVal(row["date_received"])

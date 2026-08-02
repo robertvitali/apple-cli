@@ -322,6 +322,30 @@ applemail doctor                                                                
 # global: --json everywhere; --dry-run/--confirm gates mirror MCP-A elicitation + MCP-B safety caps
 ```
 
+### Sent-mailbox sourcing for `needs-response` / `awaiting-reply` (corrected 2026-08-02)
+
+Both commands cross-reference the account's Sent mailbox. The oracle resolves it
+`of targetAccount` with an explicit fallback order and then walks Mail's enumeration newest-first,
+bounding by count (`smart_inbox.py:274-283` for the fallback; `:286-297` and `:146-149` for the
+bounds).
+
+| aspect | oracle | CLI |
+|---|---|---|
+| mailbox choice | `Sent Messages` → `Sent` → `Sent Items`, of the target account | same order, plus `Sent Mail` appended as a CLI EXTRA (Gmail-only name the oracle cannot resolve, so it skips suppression there entirely) |
+| order | Mail enumeration, measured newest-first | `ORDER BY COALESCE(NULLIF(date_sent,0), date_received) DESC, ROWID DESC` |
+| bound | `needs-response` 200 sent subjects; `awaiting-reply` stops at `max_results` RESULTS | `.newest(200)`; `.newestFirst` unbounded then `prefix(max)` after filtering |
+
+Measured on the live store before the fix: one account owned both `Sent` (nearly nothing)
+and `Sent Messages` (populated), and ROWID-order selection took the former — so `needs-response`
+suppressed against one stale subject and `awaiting-reply` analysed one email. Ordering was a second,
+masked defect: unordered-first-200 of `Sent Messages` spans a much wider window against a correct
+newest-200 of only recent months.
+
+**Known gap (Q4e):** `hasQuestion` cannot see message bodies. `analyticsRows` does not join
+`summaries`, so `Row.snippet` is always nil and the check degrades to subject-only, where the oracle
+scans the first 500 chars of content. `"MEDIUM (contains question)"` therefore never fires on a
+body-only question.
+
 ### `analytics stats` scope semantics (corrected 2026-08-02)
 
 Oracle B's `get_statistics` scans differently per scope, on three independent axes. Getting one

@@ -20,8 +20,9 @@ public enum Analytics {
         public let flagged: Bool
         public let hasAttachment: Bool
         public let mailboxRowid: Int
-        /// Indexed body preview — stands in for oracle B's first-500-chars-of-content question
-        /// scan without a per-message AppleScript body fetch.
+        /// Indexed body preview, INTENDED to stand in for oracle B's first-500-chars-of-content
+        /// question scan without a per-message AppleScript body fetch. Currently always nil on the
+        /// analytics path — `analyticsRows` does not join `summaries` — see `hasQuestion` and Q4e.
         public let snippet: String?
         public init(rowid: Int, senderAddress: String?, senderName: String?, subject: String,
                     dateReceived: Int?, read: Bool, flagged: Bool, hasAttachment: Bool, mailboxRowid: Int,
@@ -344,8 +345,15 @@ public enum Analytics {
         }
     }
 
-    /// B looks for "?" in the message body's first 500 chars; the index gives us the subject and
-    /// the same preview text, so check both.
+    /// B looks for "?" in the message body's first 500 chars.
+    ///
+    /// KNOWN GAP, do not read the `snippet` branch as coverage: `analyticsRows` never SELECTs a
+    /// snippet column (it has no `summaries` join), so `Row.snippet` is nil for every row reaching
+    /// this function and the body test below is dead code. In practice this is a subject-only `?`
+    /// check, which means `"MEDIUM (contains question)"` can never fire on a body-only question and
+    /// `priorityScore` permanently loses its body term. Tracked as Q4e in docs/COMPLETION-LOOP.md.
+    /// The branch is kept rather than deleted because the fix is to populate `snippet`, not to
+    /// abandon the signal — but the comment must not claim a parity the code does not deliver.
     static func hasQuestion(_ r: Row) -> Bool {
         if r.subject.contains("?") { return true }
         return (r.snippet ?? "").prefix(500).contains("?")
@@ -440,5 +448,36 @@ extension Analytics {
     public static func isSentMailbox(_ mailboxPath: String) -> Bool {
         guard let leaf = mailboxPath.split(separator: "/").last?.lowercased() else { return false }
         return leaf == "sent messages" || leaf == "sent" || leaf == "sent items"
+    }
+
+    /// The oracle's Sent-mailbox fallback, in its exact PRIORITY order.
+    ///
+    /// `smart_inbox.py:274-283` tries `mailbox "Sent Messages"`, then `"Sent"`, then `"Sent Items"`,
+    /// taking the first that exists. `first(where: isSentMailbox)` is NOT the same thing: it returns
+    /// whichever candidate happens to come first in the mailbox array, so an account owning both
+    /// `Sent` and `Sent Messages` could suppress against the one the oracle would have skipped.
+    /// Order is a behavior, not an implementation detail, so it is mirrored rather than approximated.
+    ///
+    /// Callers must pass paths already filtered to ONE account — the oracle resolves
+    /// `of targetAccount`, and cross-account suppression would silently hide messages using a
+    /// different mailbox's replies.
+    /// The oracle's three names come FIRST, in its order. `"sent mail"` is appended as a CLI EXTRA:
+/// Historical Mail provider/account measurement redacted.
+/// Public history must not preserve private store cardinality.
+/// See current docs for value-free behavior notes.
+    /// this change exists to stop a filter silently doing nothing, and leaving it broken on most
+    /// real accounts would fail that intent while technically passing the bar. Additive, so strict
+    /// superset holds.
+    ///
+    /// Matching is on the LEAF, so a nested `Work/Sent` matches. That is also a CLI extra —
+    /// `mailbox "Sent" of targetAccount` would not resolve a nested mailbox — and is kept because
+    /// `resolveMailboxes` already matches leaf-or-path everywhere else.
+    public static func preferredSentMailbox(_ paths: [String]) -> String? {
+        for wanted in ["sent messages", "sent", "sent items", "sent mail"] {
+            if let hit = paths.first(where: {
+                $0.split(separator: "/").last?.lowercased() == wanted
+            }) { return hit }
+        }
+        return nil
     }
 }

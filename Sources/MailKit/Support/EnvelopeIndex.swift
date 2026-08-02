@@ -347,7 +347,37 @@ public final class EnvelopeIndex {
 
     /// All non-deleted messages for cross-referencing analytics (sender/subject/date only,
     /// cheap columns) within a mailbox selector and time window.
-    public func analyticsRows(accountUUID: String?, mailboxName: String, sinceUnix: Int?) throws -> [[String: String?]] {
+    /// What subset of the matching rows to return, and in what order.
+    ///
+    /// These are ONE parameter on purpose. The first cut exposed `order:` and `limit:` separately,
+    /// which left `limit: 200, order: .unordered` — precisely the shipped bug — still compiling
+    /// silently. Bounding and ordering are not independent choices: the moment a caller keeps only
+    /// some of the rows it is choosing WHICH rows, so an unordered bound is an arbitrary sample
+    /// dressed as a selection. Folding them into one enum makes that combination unrepresentable
+    /// rather than merely discouraged. (Review-caught; a defaulted parameter had already produced
+    /// one real defect in this repo, so "discouraged" is not good enough here.)
+    public enum RowSlice {
+        /// Every matching row, in whatever order the query plan yields — in practice ROWID
+        /// (insertion) order. Correct for callers that only COUNT rows (`stats`, `top-senders`);
+        /// forcing a sort across a six-figure store would cost a sort for nothing.
+        case all
+        /// Newest first by effective send date, unbounded. For callers that must see every row in
+        /// order because their own bound is applied AFTER filtering — `awaiting-reply` keeps the
+        /// newest N messages still awaiting a reply, which is not the same as the newest N sent.
+        case newestFirst
+        /// The newest N by effective send date. The only way to bound the result.
+        case newest(Int)
+    }
+
+    /// All non-deleted messages matching the account/mailbox selector, decoded for the analytics
+    /// commands.
+    ///
+    /// - Parameter slice: see `RowSlice`. `needs-response` previously took `.prefix(200)` of an
+    ///   unordered scan, so it kept an arbitrary 200 rather than the newest 200 the oracle reads.
+    ///   Measured on the populated `Sent Messages` (populated): unordered-first-200 spans
+    ///   a much wider window, the correct newest-200 is far narrower.
+    public func analyticsRows(accountUUID: String?, mailboxName: String, sinceUnix: Int?,
+                              slice: RowSlice = .all) throws -> [[String: String?]] {
         let resolved = resolveMailboxes(accountUUID: accountUUID, mailboxName: mailboxName)
         var where_ = ["m.deleted = 0", EnvelopeIndex.mailboxPredicate(direct: resolved.direct, label: resolved.label)]
         var binds: [String] = []
@@ -363,7 +393,35 @@ public final class EnvelopeIndex {
         LEFT JOIN addresses sa ON sa.ROWID = m.sender
         WHERE \(where_.joined(separator: " AND "))
         """
-        return try reader.query(sql, binds)
+        var tail = ""
+        if case .newestFirst = slice {
+            tail += " ORDER BY COALESCE(NULLIF(m.date_sent, 0), m.date_received) DESC, m.ROWID DESC"
+        }
+        if case .newest(let raw) = slice {
+            // Clamp rather than fall through. An earlier shape used `if let limit, limit > 0`, so
+            // `limit: 0` silently meant UNLIMITED — the exact opposite of what a caller passing 0
+            // asks for, and the more dangerous direction to be wrong in.
+            let n = max(0, raw)
+            // Sent messages are the motivating case and their `date_received` can be 0 or the time
+            // the copy landed, so prefer `date_sent` when it is populated. ROWID breaks ties
+            // deterministically — without it, equal timestamps make the bound non-deterministic
+            // across runs, which would produce a flaky suppression set.
+            //
+            // NOTE, latent today: `sinceUnix` filters on `date_received` while this orders on the
+            // COALESCEd date. Every current `.newest` caller passes `sinceUnix: nil`, so the two
+            // never disagree — but a future caller combining a window with a bound would filter on
+            // one clock and rank on another. Window on the same expression if that day comes.
+            //
+            // Mail's own `every message of mailbox` enumeration order is not a documented
+            // guarantee. It is measured newest-first here (checked at both ends), and the ORACLE ITSELF depends on that — `if messageDate < cutoffDate
+            // then exit repeat` is only correct on a newest-first walk. So mirroring it mirrors the
+            // oracle's own assumption rather than inventing one.
+            tail += " ORDER BY COALESCE(NULLIF(m.date_sent, 0), m.date_received) DESC, m.ROWID DESC"
+            // Interpolated from an Int, never from user text: `String(Int)` can only emit
+            // `-?[0-9]+`, so no quote, semicolon or comment can appear here.
+            tail += " LIMIT \(n)"
+        }
+        return try reader.query(sql + tail, binds)
     }
 }
 

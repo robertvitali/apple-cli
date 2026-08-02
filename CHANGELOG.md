@@ -12,6 +12,39 @@ with the Apple MCP servers they replace.
 
 ## [Unreleased]
 
+### Fixed — `needs-response` and `awaiting-reply` read the wrong Sent mailbox, in the wrong order
+
+Two analytics commands sourced their Sent data through the same two defects. Neither raised an
+error; both commands returned plausible output and quietly stopped doing their filtering job.
+
+- **Wrong mailbox (the one that actually bit).** Sent selection used
+  `first(where: isSentMailbox)` — whichever candidate came first in ROWID order — ignoring the
+  oracle's fallback priority `Sent Messages` → `Sent` → `Sent Items` (smart_inbox.py:274-283).
+  Measured on the live store: one account owned BOTH `Sent` (near-empty) and `Sent Messages` (populated). So `needs-response` suppressed against
+  a single stale subject, and `awaiting-reply` analysed one sent email. `awaiting-reply`'s
+  `leaf.contains("sent")` additionally matched unrelated names merely containing "sent".
+- **Wrong order, masked behind it.** `analyticsRows` had no `ORDER BY`, so `.prefix(200)` and
+  `prefix(max)` kept insertion order. This goes live the moment the mailbox fix lands and the real
+  populated mailbox is read: unordered-first-200 spans a much wider window where the newest-200 the
+  oracle reads is far narrower. The oracle walks Mail's enumeration — measured
+  newest-first (checked at both ends) — bounded by
+  `if sentIdx > 200 then exit repeat` for needs-response and `resultCount >= max_results` for
+  awaiting-reply.
+
+Sent selection moved into a pure, unit-tested `Analytics.preferredSentMailbox` mirroring the
+oracle's priority, with `Sent Mail` appended as a documented CLI extra so Gmail-backed accounts
+(which expose only that name, and which the oracle therefore skips entirely) are not left with a
+filter that does nothing. `analyticsRows` gained a `slice:` parameter — `.all`, `.newestFirst`,
+`.newest(n)` — replacing separate `order:`/`limit:` arguments so that the dangerous combination
+(bounded but unordered, i.e. the shipped bug) is unrepresentable rather than merely discouraged. A
+non-positive bound now returns no rows instead of silently meaning unlimited.
+
+Also corrected: the account filter added here is correctness-hardening, not the thing that broke
+this store — `resolveMailboxes` already skipped foreign accounts, so a cross-account leak was never
+possible; the unfiltered lookup could only pick a name the account lacked and return nothing. And
+the doc comments claiming `hasQuestion` covers message bodies were false — `analyticsRows` never
+joins `summaries`, so that branch is dead. The comments now say so; the gap is tracked as Q4e.
+
 ### Fixed — `analytics stats` scanned the wrong mailboxes for two of its three scopes
 
 Oracle B scopes each `get_statistics` analysis differently (`tools/analytics.py`), and the CLI
