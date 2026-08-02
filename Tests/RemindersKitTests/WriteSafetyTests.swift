@@ -175,14 +175,14 @@ struct RemindersWriteModelV2Tests {
             return c
         }
         #expect(throws: AppleError.self) {
-            try requireLabeledDestinationList(list(titled: "Groceries"), sandboxActive: true, prefix: p)
+            try requireLabeledList(list(titled: "Groceries"), sandboxActive: true, prefix: p)
         }
         #expect(throws: Never.self) {
-            try requireLabeledDestinationList(list(titled: "\(p) list"), sandboxActive: true, prefix: p)
+            try requireLabeledList(list(titled: "\(p) list"), sandboxActive: true, prefix: p)
         }
         // Unsandboxed it is a no-op, per write-model v2.
         #expect(throws: Never.self) {
-            try requireLabeledDestinationList(list(titled: "Groceries"), sandboxActive: false, prefix: p)
+            try requireLabeledList(list(titled: "Groceries"), sandboxActive: false, prefix: p)
         }
     }
 }

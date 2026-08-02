@@ -46,6 +46,55 @@ private func emit<T: Encodable>(_ global: GlobalOptions, _ data: T, text: () -> 
     }
 }
 
+/// Emit a messages WRITE result, tagging the envelope when the sandbox is engaged so a caller can
+/// tell a restricted send from a normal one without re-reading the environment.
+private func emitWrite<T: Encodable>(_ global: GlobalOptions, _ data: T, sandboxActive: Bool,
+                                     text: () -> String) throws {
+    if global.json {
+        try Output.emit(tool: tool, data: data, sandboxActive: sandboxActive)
+    } else {
+        let line = (sandboxActive ? "[sandbox] " : "") + text()
+        FileHandle.standardOutput.write(Data((line + "\n").utf8))
+    }
+}
+
+// MARK: - Write-model v2 gate (docs/write-model-v2.md)
+
+enum MessagesWriteGuard {
+    /// The resolved write posture for one messages command. Bound ONCE at the top of the write
+    /// `run()` and threaded from there — never re-derived mid-command.
+    struct Gate {
+        let willExecute: Bool
+        let sandboxActive: Bool
+    }
+
+    /// Resolve a messages write under write-model v2: **it sends when invoked**, exactly as calling
+    /// `mac_messages_mcp`'s `tool_send_message` does. `--dry-run` previews; `APPLE_DRY_RUN` truthy
+    /// restores dry-run-by-default; `APPLE_TEST_MODE` truthy or `--test-mode` engages the opt-in
+    /// sandbox, which confines recipients to `APPLE_TEST_RECIPIENTS`.
+    ///
+    /// ORACLE EVIDENCE (`mac_messages_mcp` @ 99388d2, source read on disk at
+    /// ~/.cache/uv/git-v0/checkouts/08d6af4000976dfd/99388d2, both `mac_messages_mcp/` and
+    /// `main.py` confirmed non-empty before believing any negative): `tool_send_message`
+    /// (server.py:58-77) calls `send_message(recipient, message, group_chat)` and returns — no
+    /// gate, no confirmation, no elicitation. `send_message` (messages.py:602) does
+    /// `str(recipient).strip()` and dispatches; it imposes NO length cap, charset rule or
+    /// recipient allowlist, so unlike Notes there is no oracle input-bound being dropped here. The
+    /// ONLY `os.environ` read in the entire non-test source is `USE_TEST_DATA` (messages.py:375),
+    /// a test-fixture switch — there is no env-keyed gate to mirror (contrast Contacts'
+    /// `CONTACTS_TEST_MODE`, which IS mirrored and stays). Bucket 3.
+    ///
+    /// NO `defaultDryRun` PARAMETER, deliberately — `GlobalOptions.willExecute(defaultDryRun:)`
+    /// leaves it non-defaulted on purpose and `send` is the only write surface in this domain, so
+    /// the signature offers no choice to get wrong. (Same reasoning as CalendarWriteGuard.)
+    static func resolve(_ global: GlobalOptions) throws -> Gate {
+        try TestMode.validateWriteEnvironment()
+        let sandboxActive = try TestMode.sandboxActive(flag: global.testMode)
+        let willExecute = try global.willExecute(defaultDryRun: false)
+        return Gate(willExecute: willExecute, sandboxActive: sandboxActive)
+    }
+}
+
 private func candidateData(_ m: AddressBook.Match) -> ContactCandidateData {
     ContactCandidateData(name: m.name, phone: m.phone, score: m.score, matched_on: m.matchedOn)
 }
@@ -141,7 +190,7 @@ private func renderMessage(_ m: ChatDB.Message) -> String {
 struct Send_: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "send",
-        abstract: "Send an iMessage/SMS (dry-run by default; --execute + test-mode guard to send).")
+        abstract: "Send an iMessage/SMS (sends on call, like the MCP; --dry-run previews).")
     @OptionGroup var global: GlobalOptions
     @Argument(help: "Recipient: phone, email, contact name, or (with --group) a chat id.") var recipient: String
     @Option(name: [.short, .long], help: "Message body.") var message: String
@@ -149,6 +198,8 @@ struct Send_: ParsableCommand {
 
     func run() throws {
         try runGuarded(tool: tool) {
+            // Bound ONCE, before any resolution work, and threaded from here.
+            let gate = try MessagesWriteGuard.resolve(global)
             let book = AddressBook.load()
             switch Send.resolve(recipient: recipient, groupChat: group, book: book) {
             case .notFound(let r):
@@ -165,29 +216,26 @@ struct Send_: ParsableCommand {
                 }
             case .resolved(let handle, let displayName):
                 let plan = group ? "group chat" : "iMessage→SMS auto"
-                if !global.willExecute {
-                    // `--execute --dry-run` is not-executing (willExecute false); report it
-                    // as a dry run rather than dry_run:false.
-                    let preview = SendPreview(action: "send", executed: false, dry_run: !global.willExecute,
+                // The recipient is argv-derived and already resolved, so the sandbox allowlist is
+                // computable on BOTH paths — run it BEFORE the preview branch so a dry-run refuses
+                // exactly what an execute would. A preview that reported "would send" for a
+                // recipient the execute path will refuse is a lie, and on a SEND surface that lie
+                // is the one most likely to be acted on.
+                do {
+                    try Send.assertAllowedRecipient(handle, sandboxActive: gate.sandboxActive)
+                } catch {
+                    throw AppleError.validation("refusing send: \(String(describing: error))")
+                }
+
+                guard gate.willExecute else {
+                    let preview = SendPreview(action: "send", executed: false, dry_run: true,
                         group_chat: group, recipient: recipient, resolved_handle: handle,
                         display_name: displayName, service_plan: plan, message: message,
-                        note: "Dry run — nothing sent. Re-run with --execute (and APPLE_TEST_MODE=1 + an allowlisted recipient) to send.")
-                    try emit(global, preview) {
+                        note: "Dry run — nothing sent. Re-run without --dry-run to send.")
+                    try emitWrite(global, preview, sandboxActive: gate.sandboxActive) {
                         "[dry-run] would send to \(displayName ?? handle) (\(handle)) via \(plan): \(message)"
                     }
                     return
-                }
-                // Live send path — fail-closed guard. AGENTS.md gates writes behind
-                // BOTH `--test-mode` AND `APPLE_TEST_MODE=1` + an allowlisted recipient.
-                guard global.testMode else {
-                    throw AppleError.validation("refusing live send: --test-mode is required for a live send (together with APPLE_TEST_MODE=1 and an allowlisted recipient in APPLE_TEST_RECIPIENTS)")
-                }
-                do {
-                    // Normalized on BOTH sides so `+1 555…` allowlist entries match the
-                    // digit-normalized handle (fail-closed: needs APPLE_TEST_MODE + a match).
-                    try Send.assertAllowedRecipient(handle)
-                } catch {
-                    throw AppleError.validation("refusing live send: \(String(describing: error))")
                 }
                 let result = try Send.perform(handle: handle, message: message, groupChat: group)
                 guard result.ok else {
@@ -201,7 +249,7 @@ struct Send_: ParsableCommand {
                 let data = SendResult(action: "send", executed: true, ok: true, group_chat: group,
                     recipient: recipient, resolved_handle: handle, display_name: displayName,
                     service_used: result.service, message: message)
-                try emit(global, data) {
+                try emitWrite(global, data, sandboxActive: gate.sandboxActive) {
                     "Message sent successfully via \(result.service ?? "Messages") to \(displayName ?? handle)"
                 }
             }

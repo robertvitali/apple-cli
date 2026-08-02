@@ -49,29 +49,65 @@ setup() {
   [ "$status" -eq 64 ]
 }
 
-# --- send safety (no TCC, NOTHING is ever sent here) ---
+# --- send safety (NOTHING is ever sent here) -------------------------------------------------
+#
+# WRITE-MODEL v2 MADE THIS SECTION DANGEROUS TO GET WRONG. `messages send` now SENDS WHEN INVOKED,
+# exactly as the oracle's tool_send_message does. Two tests that lived here were DELETED rather
+# than migrated, because post-flip they would have attempted a REAL send to 555-0100:
+#   - "send defaults to dry-run" ran the command FLAGLESS (it carried a pre-flip
+#     `# flagless-on-purpose` marker, which is exactly the marker the flip is supposed to retire);
+#   - "send --execute WITHOUT --test-mode is refused" asserted a refusal that v2 removes.
+# Both are replaced below by shapes that cannot send: an explicit `--dry-run`, or a sandbox
+# refusal. The sandbox allowlist check runs BEFORE the willExecute branch and before
+# `Send.perform`, so a refusal never reaches Messages.app.
+#
+# NEVER add a flagless `messages send` to this file. It would message a real handle.
 
-@test "send defaults to dry-run: executed=false, ok=true, exit 0, no send" {
-  run "$BIN" messages send 2125550100 --message "smoke test"  # flagless-on-purpose
+@test "send --dry-run previews: executed=false, dry_run=true, ok=true, nothing sent" {
+  run "$BIN" messages send 2125550100 --message "smoke test" --dry-run
   [ "$status" -eq 0 ]
   echo "$output" | grep -q '"executed" : false'
   echo "$output" | grep -q '"dry_run" : true'
   echo "$output" | grep -q '"ok" : true'
 }
 
-@test "send --execute WITHOUT --test-mode is refused (fail-closed, exit 64, nothing sent)" {
-  unset APPLE_TEST_MODE
-  run "$BIN" messages send 2125550100 --message "must not send" --execute
-  [ "$status" -eq 64 ]
-  echo "$output" | grep -q '"ok" : false'
-  echo "$output" | grep -qi "refusing live send"
+@test "APPLE_DRY_RUN=1 restores dry-run-by-default for a flagless send" {
+  APPLE_DRY_RUN=1 run "$BIN" messages send 2125550100 --message "smoke test"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"dry_run" : true'
+  echo "$output" | grep -q '"executed" : false'
 }
 
-@test "send --execute --test-mode WITHOUT APPLE_TEST_MODE env is still refused (layered guard)" {
+# The sandbox engages on EITHER signal alone under v2. With APPLE_TEST_RECIPIENTS empty/unset (the
+# state here) the allowlist matches nothing, so every recipient is refused — fail-closed, and the
+# refusal happens before any send is attempted.
+@test "sandbox via --test-mode alone refuses a non-allowlisted recipient (exit 64, nothing sent)" {
   unset APPLE_TEST_MODE
-  run "$BIN" messages send 2125550100 --message "must not send" --execute --test-mode
+  run "$BIN" messages send 2125550100 --message "must not send" --test-mode --execute
   [ "$status" -eq 64 ]
-  echo "$output" | grep -qi "refusing live send"
+  echo "$output" | grep -q '"ok" : false'
+  echo "$output" | grep -qi "not in the test allowlist"
+}
+
+@test "sandbox via APPLE_TEST_MODE env alone refuses a non-allowlisted recipient (exit 64)" {
+  APPLE_TEST_MODE=1 run "$BIN" messages send 2125550100 --message "must not send" --execute
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -qi "not in the test allowlist"
+}
+
+# Preview honesty: the recipient is argv-derived, so a sandboxed --dry-run must refuse EXACTLY what
+# an execute would. A preview that said "would send" for a recipient the execute path refuses is
+# the most consequential possible lie on a send surface.
+@test "sandboxed --dry-run refuses the same recipient an execute would (no dishonest preview)" {
+  run "$BIN" messages send 2125550100 --message "must not send" --test-mode --dry-run
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -qi "not in the test allowlist"
+}
+
+@test "a sandboxed group-chat id can never match the allowlist (D4: unreachable in sandbox)" {
+  run "$BIN" messages send "iMessage;-;chat123456789" --message "must not send" --group --test-mode --dry-run
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -qi "not in the test allowlist"
 }
 
 # --- golden structural snapshot for a read (needs FDA; skips if absent) ---

@@ -101,10 +101,18 @@ setup() {
   # here: adding a marker requires editing this assertion — a reviewable event. (A net-neutral
   # marker SWAP holds the count without touching this line, but both halves of a swap are
   # visible line edits in the same diff; the cap's job is to stop growth.) Composition today:
-  # 1 pre-flip marker in an un-flipped domain (messages×1 — that domain's flip migrates
-  # it) + 3 PERMANENT default-pin markers (mail.bats ×2, notes.bats ×1 — they lock the v2 per-surface
-  # defaults with deliberately flagless invocations; the final-flip count is 3, not 0, unless
-  # other domains add default-pins of their own — edit deliberately).
+  # **ZERO pre-flip markers — all six domains are now flipped** — plus 3 PERMANENT default-pin
+  # markers (mail.bats ×2, notes.bats ×1) which lock the v2 per-surface defaults with deliberately
+  # flagless invocations. 3 is therefore the FINAL count, and it should not change again unless a
+  # domain adds a per-surface default-pin of its own.
+  #
+  # Messages shed the last pre-flip marker at its flip (2026-08-02), and did NOT replace it with a
+  # permanent one — deliberately. `messages send` has no dry-run-by-default surface to pin, so a
+  # flagless invocation there would attempt a REAL send to a real handle. Its posture is pinned in
+  # the LOGIC tier instead ("Messages write-model v2 posture" in
+  # Tests/MessagesKitTests/MessagesKitTests.swift), which needs no Messages.app access at all.
+  # Two v1 send tests were DELETED rather than migrated for the same reason — see the safety
+  # header in bats/messages.bats.
   #
   # Contacts (2) and Notes (2) shed their pre-flip markers at their own flips. Contacts added no
   # permanent default-pin, on purpose: a flagless write in either domain is a LIVE
@@ -118,7 +126,7 @@ setup() {
   # flagless invocation that pins it is safe precisely because that default holds.
   local markers
   markers="$(echo "$output" | sed -n 's/.*, \([0-9]*\) marker(s)$/\1/p')"
-  [ "$markers" -eq 4 ]
+  [ "$markers" -eq 3 ]
 }
 
 @test "lint: a truthy APPLE_DRY_RUN env-brake prefix exempts a flagless write; junk or a later command does not" {

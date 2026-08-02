@@ -586,16 +586,21 @@ public enum ReminderWriteGuard {
     }
 }
 
-/// SANDBOX-ONLY post-resolution check for a destination list reached by name-or-id. Pairs with
+/// SANDBOX-ONLY post-resolution check for a list reached by name-or-id. Pairs with
 /// `ReminderWriteGuard.destinationCheckDeferred`: call this on the execute path once the
-/// `EKCalendar` is in hand, so an id-addressed destination is vetted by its real title.
-func requireLabeledDestinationList(_ list: EKCalendar, sandboxActive: Bool,
-                                   prefix: String? = nil) throws {
+/// `EKCalendar` is in hand, so an id-addressed list is vetted by its real title.
+///
+/// Used for BOTH roles a list can play: the DESTINATION of a create/move (`--target-list`) and the
+/// SUBJECT of `lists update` / `lists delete` (`--name`). Every one of those flags is documented
+/// "name or id" and resolves through `EventStore.calendar(matching:)`, which tries the identifier
+/// FIRST — so none of them can be settled by a raw argv label test.
+func requireLabeledList(_ list: EKCalendar, what: String = "destination list",
+                        sandboxActive: Bool, prefix: String? = nil) throws {
     guard sandboxActive else { return }
     let required = prefix ?? TestMode.sandboxPrefix
     guard list.title.hasPrefix(required) else {
         throw AppleError.validation(
-            "Sandbox is engaged: refusing to write into destination list \"\(list.title)\" — it "
+            "Sandbox is engaged: refusing to write to \(what) \"\(list.title)\" — it "
             + "must be a labeled '\(required)…' test list.")
     }
 }
@@ -792,12 +797,19 @@ public struct ListWritePreview: Encodable {
     public let name: String
     public let new_name: String?
     public let color: String?
-    public init(action: String, name: String, new_name: String? = nil, color: String? = nil) {
+    /// `true` when the sandbox is engaged AND `--name` could not be settled from argv because it
+    /// is documented "name **or** id" and resolves id-first — so the label check runs on the
+    /// resolved list's title, which only the execute path fetches. Absent on `create`, whose
+    /// `--name` IS the new title and is therefore fully argv-checkable.
+    public let sandbox_target_unchecked: Bool?
+    public init(action: String, name: String, new_name: String? = nil, color: String? = nil,
+                sandbox_target_unchecked: Bool? = nil) {
         self.dry_run = true
         self.action = action
         self.name = name
         self.new_name = new_name
         self.color = color
+        self.sandbox_target_unchecked = sandbox_target_unchecked
     }
 }
 

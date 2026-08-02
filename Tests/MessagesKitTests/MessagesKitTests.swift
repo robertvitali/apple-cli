@@ -265,9 +265,72 @@ struct SendTests {
         #expect(Send.phonesEquivalent(allow, handle))
     }
 
-    @Test func assertAllowedRecipientFailsClosedWithoutTestMode() {
-        // APPLE_TEST_MODE is unset in the test process → must throw (fail-closed).
-        #expect(throws: (any Error).self) { try Send.assertAllowedRecipient("2125550142") }
+    /// v1 asserted "throws when APPLE_TEST_MODE is unset". Write-model v2 INVERTS that: the
+    /// allowlist is a sandbox-only restriction, and unsandboxed the CLI sends to anyone exactly as
+    /// `tool_send_message` does. The fail-closed property survives where it matters — INSIDE the
+    /// sandbox — and that is what is pinned here.
+    @Test func allowlistIsSandboxOnlyAndFailsClosedInsideIt() {
+        // Unsandboxed: a no-op. A throw here means the v1 gate was silently reinstated, which
+        // would make the domain non-parity again.
+        #expect(throws: Never.self) {
+            try Send.assertAllowedRecipient("2125550142", sandboxActive: false)
+        }
+        #expect(throws: Never.self) {
+            try Send.assertAllowedRecipient("+1 (212) 555-0150", sandboxActive: false)
+        }
+        // Sandboxed with an EMPTY/unset APPLE_TEST_RECIPIENTS (the state of this test process):
+        // every recipient is refused, not every recipient allowed. This is THE fail-closed
+        // property — an allowlist that defaults to "permit all" on a send surface would be the
+        // worst possible default.
+        #expect(throws: (any Error).self) {
+            try Send.assertAllowedRecipient("2125550142", sandboxActive: true)
+        }
+        // A group-chat id can never match a phone/email allowlist entry, so sandboxed group send
+        // stays unreachable by construction (HUMAN-DECISIONS.md D4).
+        #expect(throws: (any Error).self) {
+            try Send.assertAllowedRecipient("iMessage;-;chat123456789", sandboxActive: true)
+        }
+    }
+}
+
+// MARK: - Write-model v2 posture (docs/write-model-v2.md)
+
+/// Pins the v2 DECISION `MessagesWriteGuard.resolve` makes. Nothing else can catch a silent revert:
+/// the bats tier cannot assert "a flagless send actually sends" without messaging a real person,
+/// and the AppleKit core tier only proves the precedence chain, not that THIS domain opted in.
+///
+/// Messages is the highest-stakes flip in the rollout — after it, a flagless `apple messages send`
+/// reaches a real human — so the default is pinned explicitly rather than left implied.
+@Suite("Messages write-model v2 posture")
+struct MessagesWriteModelV2Tests {
+    func opts(_ args: [String]) throws -> GlobalOptions { try GlobalOptions.parse(args) }
+
+    @Test("the test environment is clean (precondition for every pin below)")
+    func cleanEnvironment() {
+        let env = ProcessInfo.processInfo.environment
+        #expect(env["APPLE_TEST_MODE"] == nil || env["APPLE_TEST_MODE"]!.isEmpty)
+        #expect(env["APPLE_DRY_RUN"] == nil || env["APPLE_DRY_RUN"]!.isEmpty)
+    }
+
+    @Test("DEFAULT PIN: a flagless send EXECUTES and is unsandboxed")
+    func defaultsToExecute() throws {
+        let gate = try MessagesWriteGuard.resolve(opts([]))
+        #expect(gate.willExecute == true)
+        #expect(gate.sandboxActive == false)
+    }
+
+    @Test("--dry-run previews; --execute is redundant; --dry-run wins over --execute")
+    func dryRunPrecedence() throws {
+        #expect(try MessagesWriteGuard.resolve(opts(["--dry-run"])).willExecute == false)
+        #expect(try MessagesWriteGuard.resolve(opts(["--execute"])).willExecute == true)
+        #expect(try MessagesWriteGuard.resolve(opts(["--dry-run", "--execute"])).willExecute == false)
+    }
+
+    @Test("--test-mode alone engages the sandbox without forcing a preview")
+    func flagEngagesSandbox() throws {
+        let gate = try MessagesWriteGuard.resolve(opts(["--test-mode"]))
+        #expect(gate.sandboxActive == true)
+        #expect(gate.willExecute == true)
     }
 }
 

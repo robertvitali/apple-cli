@@ -40,24 +40,40 @@ public enum Send {
     // MARK: - Fail-closed allowlist check (normalized on BOTH sides)
 
     public enum AllowError: Error, CustomStringConvertible {
-        case notTestMode
         case notAllowed(String)
         public var description: String {
             switch self {
-            case .notTestMode: return "APPLE_TEST_MODE is not set — refusing a live write"
-            case .notAllowed(let h): return "recipient '\(h)' is not in the test allowlist (APPLE_TEST_RECIPIENTS)"
+            case .notAllowed(let h):
+                return "Sandbox is engaged: recipient '\(h)' is not in the test allowlist "
+                    + "(APPLE_TEST_RECIPIENTS)"
             }
         }
     }
 
-    /// Fail-closed allowlist gate that normalizes BOTH the resolved handle AND the
-    /// operator's `APPLE_TEST_RECIPIENTS` entries before comparing — so a `+1 555…`
-    /// allowlist entry matches a digits-normalized handle. The shared
-    /// `TestMode.requireAllowedRecipient` does an EXACT string compare, which is a
-    /// footgun given `resolve()` digit-normalizes phones. Still fail-closed: requires
-    /// `APPLE_TEST_MODE=1` AND a normalized match (a group id / unknown handle → refused).
-    public static func assertAllowedRecipient(_ handle: String) throws {
-        guard TestMode.isEnabled else { throw AllowError.notTestMode }
+    /// SANDBOX-ONLY recipient allowlist. Normalizes BOTH the resolved handle AND the operator's
+    /// `APPLE_TEST_RECIPIENTS` entries before comparing, so a `+1 555…` allowlist entry matches a
+    /// digits-normalized handle. (The shared `TestMode.requireAllowedRecipient` does an EXACT
+    /// string compare, which is a footgun given `resolve()` digit-normalizes phones.)
+    ///
+    /// WRITE-MODEL v2: outside the sandbox this is a NO-OP, because
+    /// `mac_messages_mcp`'s `tool_send_message` sends to any recipient on call — it goes straight
+    /// to `send_message(recipient, message, group_chat)` (server.py:58-77) with no gate, no
+    /// confirmation and no environment check; the only `os.environ` read in the whole non-test
+    /// source is `USE_TEST_DATA` (messages.py:375), a fixture switch, not a write gate. So the
+    /// allowlist is a CLI-only restriction (bucket 3).
+    ///
+    /// The `APPLE_TEST_MODE` check that used to live HERE is gone deliberately: under v2 the
+    /// sandbox is a single signal (`APPLE_TEST_MODE` truthy OR `--test-mode`) resolved ONCE by
+    /// `MessagesWriteGuard.resolve`, and re-reading the env inside a guard would mean
+    /// `--test-mode` alone engaged the sandbox without engaging this allowlist — the one
+    /// restriction that matters most on a send surface.
+    ///
+    /// Still fail-closed inside the sandbox: an EMPTY or unset `APPLE_TEST_RECIPIENTS` matches
+    /// nothing, so every recipient is refused rather than every recipient being allowed. A group
+    /// chat id likewise never matches, which is why sandboxed group send is unreachable (see
+    /// HUMAN-DECISIONS.md D4).
+    public static func assertAllowedRecipient(_ handle: String, sandboxActive: Bool) throws {
+        guard sandboxActive else { return }
         let target = normalizeForAllowlist(handle)
         let allowed = TestMode.allowedRecipients.map(normalizeForAllowlist)
         guard allowed.contains(where: { phonesEquivalent($0, target) }) else {

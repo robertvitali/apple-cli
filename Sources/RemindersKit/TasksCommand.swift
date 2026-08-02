@@ -167,7 +167,7 @@ public struct TasksCreate: ParsableCommand {
             // only". Naming a real list explicitly is a deliberate act and is refused; falling
             // back to the operator's default list is not.
             if targetList != nil {
-                try requireLabeledDestinationList(list, sandboxActive: gate.sandboxActive)
+                try requireLabeledList(list, sandboxActive: gate.sandboxActive)
             }
             let reminder = store.newReminder(in: list)
             reminder.title = title
@@ -360,7 +360,7 @@ public struct TasksUpdate: ParsableCommand {
                 // Post-resolution destination check — the cross-list move is the one way a
                 // sandboxed update can put a labeled item into a REAL list, and `--target-list`
                 // takes a name or an id so only the resolved title can settle it.
-                try requireLabeledDestinationList(list, sandboxActive: gate.sandboxActive)
+                try requireLabeledList(list, sandboxActive: gate.sandboxActive)
                 reminder.calendar = list
             }
 

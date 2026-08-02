@@ -110,16 +110,22 @@ public struct ListsUpdate: ParsableCommand {
             }
 
             let gate = try ReminderWriteGuard.resolve(global)
-            // BOTH the subject and the rename DESTINATION are argv-computable, so both are checked
-            // on both paths: renaming a labeled test list to an unlabeled name would otherwise
-            // smuggle it out of the sandbox in a single call.
-            try ReminderWriteGuard.requireLabeled(name, what: "list", sandboxActive: gate.sandboxActive)
+            // `--new-name` is a NAME by definition, so it is argv-computable and checked on both
+            // paths: renaming a labeled test list to an unlabeled name would otherwise smuggle it
+            // out of the sandbox in one call.
             try ReminderWriteGuard.requireLabeled(newName, what: "new list name",
                                                   sandboxActive: gate.sandboxActive)
+            // `--name` is name-OR-id and resolves id-first, so it CANNOT be settled from argv —
+            // a correctly-labeled test list addressed by its identifier would be refused. Defer to
+            // the resolved title on the execute path and disclose the deferral in the preview.
+            let subjectDeferred = ReminderWriteGuard.destinationCheckDeferred(
+                name, sandboxActive: gate.sandboxActive)
 
             guard gate.willExecute else {
-                try emitRemindersWrite(ListWritePreview(action: "update", name: name, new_name: newName, color: color),
-                                       sandboxActive: gate.sandboxActive)
+                try emitRemindersWrite(ListWritePreview(
+                    action: "update", name: name, new_name: newName, color: color,
+                    sandbox_target_unchecked: subjectDeferred ? true : nil),
+                    sandboxActive: gate.sandboxActive)
                 return
             }
 
@@ -128,6 +134,7 @@ public struct ListsUpdate: ParsableCommand {
             guard let list = store.calendar(matching: name, entity: .reminder) else {
                 throw AppleError.notFound("no reminder list named or id '\(name)'")
             }
+            try requireLabeledList(list, what: "list", sandboxActive: gate.sandboxActive)
             if let newName, !newName.isEmpty { list.title = newName }
             if let cg { list.cgColor = cg.value }
             try store.saveCalendar(list)
@@ -151,11 +158,15 @@ public struct ListsDelete: ParsableCommand {
     public func run() throws {
         try runGuarded(tool: "reminders") {
             let gate = try ReminderWriteGuard.resolve(global)
-            try ReminderWriteGuard.requireLabeled(name, what: "list", sandboxActive: gate.sandboxActive)
+            // name-OR-id: deferred to the resolved title, exactly as `lists update` — see there.
+            let subjectDeferred = ReminderWriteGuard.destinationCheckDeferred(
+                name, sandboxActive: gate.sandboxActive)
 
             guard gate.willExecute else {
-                try emitRemindersWrite(ListWritePreview(action: "delete", name: name),
-                                       sandboxActive: gate.sandboxActive)
+                try emitRemindersWrite(ListWritePreview(
+                    action: "delete", name: name,
+                    sandbox_target_unchecked: subjectDeferred ? true : nil),
+                    sandboxActive: gate.sandboxActive)
                 return
             }
             let store = EventStore()
@@ -163,6 +174,9 @@ public struct ListsDelete: ParsableCommand {
             guard let list = store.calendar(matching: name, entity: .reminder) else {
                 throw AppleError.notFound("no reminder list named or id '\(name)'")
             }
+            // Post-resolution subject check — `removeCalendar` destroys the list AND every
+            // reminder in it, so this is the last line before an irreversible bulk delete.
+            try requireLabeledList(list, what: "list", sandboxActive: gate.sandboxActive)
             try store.removeCalendar(list)
             try emitRemindersWrite(ListDeleteData(name: name, deleted: true), sandboxActive: gate.sandboxActive)
         }
