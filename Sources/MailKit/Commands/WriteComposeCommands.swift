@@ -63,8 +63,32 @@ func outboundAddressFromIndex(_ raw: String) throws -> String {
 /// they read as deliberate, not as bugs. NOTE FOR AGENTS (AGENTS.md conduct rules, which the
 /// product no longer enforces): your sends run sandboxed, self-addressed only — the narrow
 /// unsandboxed exception is the once-per-flip self-addressed verification send.
-func guardOutbound(recipients: [String], sandboxActive: Bool) throws {
+/// The oracle's anti-spam recipient cap: `to + cc + bcc` may not exceed 100
+/// (oracle A `security.py:89-91`, `max_recipients = 100` → "Too many recipients (max: 100)").
+/// BUCKET 1 — an oracle-mirrored gate, so it applies UNCONDITIONALLY, sandbox or not. Write-model
+/// v2 lifts CLI-only restrictions; it does not lift limits the oracle itself enforces, and this is
+/// one the oracle applies on every send path.
+let outboundRecipientCap = 100
+
+/// `applyRecipientCap` is INTENTIONALLY NOT DEFAULTED. Oracle A applies the 100-recipient cap at
+/// exactly two call sites — `validate_send_operation(to, cc, bcc)` from `send_email`
+/// (server.py:898) and `send_email_with_attachments` (server.py:1085). `forward_message` checks
+/// only `if not to:`, `reply_to_message` validates nothing, and oracle B has no cap anywhere. So
+/// only `mail send` may cap: applying it to reply/forward/draft-rich would REFUSE INPUT BOTH
+/// ORACLES ACCEPT, i.e. drop capability — the same defect the bulk cap deliberately avoids for
+/// `move`/`flag`. A defaulted `= true` would silently re-introduce it at the next call site added,
+/// which is precisely how the sibling defect happened; requiring the argument makes the compiler
+/// ask the question every time. (Review-caught: the first cut capped all four call sites.)
+func guardOutbound(recipients: [String], sandboxActive: Bool, applyRecipientCap: Bool) throws {
     guard !recipients.isEmpty else { throw AppleError.validation("no recipients to send to.") }
+    // UNCONDITIONAL for the surfaces that DO cap — deliberately above the `sandboxActive`
+    // early-return, because the oracle caps regardless of any mode.
+    if applyRecipientCap {
+        guard recipients.count <= outboundRecipientCap else {
+            throw AppleError.validation(
+                "Too many recipients (max: \(outboundRecipientCap)) — \(recipients.count) given.")
+        }
+    }
     guard sandboxActive else { return }
     // Fail-closed inside the sandbox: EVERY recipient must be an allowlisted self-address.
     // Compare case-insensitively (email addresses are case-insensitive) so a legit self-reply
@@ -347,7 +371,8 @@ struct SendCommand: ParsableCommand {
             // (self-only inside the sandbox); a (non-sending) --mode draft takes the sandbox
             // label gate below instead.
             if mode == "send" || mode == "open" {
-                try guardOutbound(recipients: toL + ccL + bccL, sandboxActive: sandboxActive)
+                try guardOutbound(recipients: toL + ccL + bccL, sandboxActive: sandboxActive,
+                                  applyRecipientCap: true)
             }
             // An open / HTML action needs a real subject — a compose window / sent message with
             // an empty subject is a mistake; refuse before building anything.
@@ -411,6 +436,22 @@ struct SendCommand: ParsableCommand {
             var opened = false
             var drafted = false
             var note: String?
+            // ORACLE-MIRRORED SEND RATE LIMIT (bucket 1, unconditional). Applied to `send` and
+            // `forward` ONLY, because those are the two the oracle puts in the "sends" tier
+            // (OPERATION_TIERS: send_email, send_email_with_attachments, forward_message). It is
+            // deliberately NOT applied to `reply`, which the oracle tiers as "expensive_ops" — a
+            // tier this port does not carry (see SendRateLimiter). Only branches that actually put
+            // mail on the wire consume budget; every preview path is excluded because each `will*`
+            // predicate folds in `willExecute`.
+            if willGuiSend || willAutoSend {
+                let rl = SendRateLimiter.consume()
+                guard rl.allowed else { throw AppleError.validation(SendRateLimiter.refusal(rl)) }
+                if rl.degraded {
+                    FileHandle.standardError.write(Data(
+                        ("warning: send rate-limit state is unwritable — the oracle's 3-sends/60s cap "
+                         + "is NOT being enforced for this call (failing open).\n").utf8))
+                }
+            }
             if willGuiSend {
                 // Opt-in HTML auto-send via GUI keystrokes (fragile — see MailScript.sendHtmlViaGui).
                 // The raw HTML goes to a temp file the script reads via `cat` (never interpolated).
@@ -605,7 +646,8 @@ struct ReplyCommand: ParsableCommand {
             // resolved above on the dry-run path too, so a sandboxed preview refuses a
             // non-allowlisted reply exactly as --execute would. Fires before any attachment
             // read, .eml/.html build, or send.
-            try guardOutbound(recipients: recipients + ccL + bccL, sandboxActive: sandboxActive)
+            try guardOutbound(recipients: recipients + ccL + bccL, sandboxActive: sandboxActive,
+                                  applyRecipientCap: false)   // oracle reply_to_message: no cap
             var executed = false
             var opened = false
             var senderAddress: String?
@@ -742,7 +784,8 @@ struct ForwardCommand: ParsableCommand {
             // Outbound guard fires BEFORE any resolve/emit → one envelope. BOTH modes (preview
             // honesty): a sandboxed dry-run to a non-allowlisted recipient must refuse exactly
             // as --execute would; recipients come from flags, so no Mail access is needed.
-            try guardOutbound(recipients: toL + ccL + bccL, sandboxActive: sandboxActive)
+            try guardOutbound(recipients: toL + ccL + bccL, sandboxActive: sandboxActive,
+                                  applyRecipientCap: false)   // oracle forward_message: no cap
             // Resolve --account to the send-from identity (mirrors SendCommand/ReplyCommand): the
             // forward goes out FROM this account's address. Live-path only (headless dry-runs never
             // touch Mail); fires before the Envelope Index opens, so an unknown account is a clean
@@ -781,6 +824,16 @@ struct ForwardCommand: ParsableCommand {
                 // forward" note for the fail-closed recipient readback.
                 guard let imid = target.internet_message_id, !imid.isEmpty else {
                     throw AppleError.upstream("message '\(target.id)' has no RFC Message-ID; cannot forward it via Mail.app.")
+                }
+                // ORACLE-MIRRORED SEND RATE LIMIT — `forward_message` is in the oracle's "sends"
+                // tier alongside send_email (OPERATION_TIERS). This is the execute path; the
+                // preview returns before reaching here, so a dry-run consumes no budget.
+                let rl = SendRateLimiter.consume()
+                guard rl.allowed else { throw AppleError.validation(SendRateLimiter.refusal(rl)) }
+                if rl.degraded {
+                    FileHandle.standardError.write(Data(
+                        ("warning: send rate-limit state is unwritable — the oracle's 3-sends/60s cap "
+                         + "is NOT being enforced for this call (failing open).\n").utf8))
                 }
                 switch try MailScript().nativeForward(internetMessageID: imid,
                                                       accountName: target.account.isEmpty ? nil : target.account,
@@ -841,7 +894,9 @@ struct DraftRichCommand: ParsableCommand {
             // would. The DEFAULT (neither flag) just writes the .eml headlessly and is ungated.
             var senderAddress: String?
             if openInMail || saveAsDraft {
-                try guardOutbound(recipients: toL + (try splitRecipients(cc)) + (try splitRecipients(bcc)), sandboxActive: sandboxActive)
+                try guardOutbound(recipients: toL + (try splitRecipients(cc)) + (try splitRecipients(bcc)),
+                                  sandboxActive: sandboxActive,
+                                  applyRecipientCap: false)   // oracle-B-only surface: no cap
                 guard !subject.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                     throw AppleError.validation("--subject is required to open a draft-rich compose window.")
                 }

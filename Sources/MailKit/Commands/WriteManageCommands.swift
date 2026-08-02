@@ -44,7 +44,47 @@ struct MatchOptions: ParsableArguments {
 /// summaries for the preview + whether a filter was used (surfaced as `filter_based` and the
 /// scope_note in the envelope — under write-model v2 filter-based mutations execute like any
 /// other; there is no forced dry-run).
-func resolveTargets(ctx: MailContext, ids: [String], match: MatchOptions, account: String?, mailbox: String) throws -> (messages: [MailMessage], filterBased: Bool) {
+/// Oracle A's bulk cap: 100 items per call. BUCKET 1 (oracle-mirrored ⇒ applies UNCONDITIONALLY,
+/// sandbox or not), but scoped with two deliberate precisions a careless port gets wrong:
+///
+///  1. **Only two operations carry it.** `mark_as_read` (server.py:995, via
+///     `validate_bulk_operation(len(message_ids), max_items=100)`) and `delete_messages`
+///     (server.py:1719-1725, an inline `len(message_ids) > 100` check). `move_messages` and
+///     `flag_message` have NO cap in the oracle — grep of every `validate_bulk_operation` call
+///     site returns exactly one, plus the one inline check. Applying it to move/flag would narrow
+///     the CLI BELOW the oracle, which fails strict-superset in the opposite direction.
+///  2. **It bounds the INPUT ID COUNT, not the resolved match set.** The oracle's tools only ever
+///     take an explicit `message_ids` list; `--match` is a CLI superset with no oracle counterpart,
+///     so capping it would be a CLI-only restriction (bucket 3), not this mirrored gate. The
+///     `--match` path keeps its own `--all` whole-mailbox gate instead.
+let bulkOperationCap = 100
+
+/// Enforce the oracle's bulk cap. Called by `mark` and `delete` ONLY, and deliberately BEFORE
+/// `MailContext()` is constructed: `MailContext.init` opens the Envelope Index and throws
+/// `upstream` (exit 69) on a machine with no configured Mail account, so a cap check placed after
+/// it is unreachable in CI and untestable without Full Disk Access. Validating first also matches
+/// the oracle, which runs `validate_bulk_operation` before touching Mail, and avoids opening the
+/// index merely to refuse. (Review-caught: the first cut checked inside `resolveTargets`, one line
+/// after `MailContext()`, and shipped a bats test whose comment claimed the opposite.)
+///
+/// The per-verb wording is the oracle's own, and it differs by op: `mark_as_read` refuses through
+/// `validate_bulk_operation` ("Too many items (N), maximum is M", security.py:111) while
+/// `delete_messages` uses its own inline string (server.py:1722). MCP-diff parity compares error
+/// text, so the two are not unified here.
+func enforceBulkCap(_ ids: [String], verb: String) throws {
+    guard ids.count > bulkOperationCap else { return }
+    switch verb {
+    case "delete":
+        throw AppleError.validation(
+            "Cannot delete \(ids.count) messages at once (max: \(bulkOperationCap))")
+    default:
+        throw AppleError.validation(
+            "Too many items (\(ids.count)), maximum is \(bulkOperationCap)")
+    }
+}
+
+func resolveTargets(ctx: MailContext, ids: [String], match: MatchOptions, account: String?,
+                    mailbox: String) throws -> (messages: [MailMessage], filterBased: Bool) {
     // A blank --match-sender or --match-subject would slip past the filter machinery while
     // contributing NO WHERE predicate (EnvelopeIndex drops empty entries) — or, whitespace-only,
     // bind a `% %` LIKE that nearly every subject matches — silently widening a targeted
@@ -200,6 +240,7 @@ struct MarkCommand: ParsableCommand {
 
             let target = try triState(read, unread, "read", "unread")
             guard let markRead = target else { throw AppleError.validation("specify --read or --unread.") }
+            try enforceBulkCap(ids, verb: "mark")   // BEFORE MailContext() — see enforceBulkCap
             let ctx = try MailContext()
             let (msgs, filterBased) = try resolveTargets(ctx: ctx, ids: ids, match: match, account: account, mailbox: mailbox)
             let scopeNote = filterBased ? mailboxScopeNote(mailbox) : nil
@@ -370,6 +411,7 @@ struct DeleteCommand: ParsableCommand {
             // trash to DESTROY, and applying it to a read scope would reject the common
             // multi-account case for no safety gain. An explicit --mailbox always wins.
             let effectiveMailbox = mailbox ?? (permanent ? "All" : "INBOX")
+            try enforceBulkCap(ids, verb: "delete")   // BEFORE MailContext() — see enforceBulkCap
             let ctx = try MailContext()
             let (msgs, filterBased) = try resolveTargets(ctx: ctx, ids: ids, match: match, account: account, mailbox: effectiveMailbox)
             let scopeNote = filterBased ? mailboxScopeNote(effectiveMailbox) : nil

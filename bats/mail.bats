@@ -1466,3 +1466,100 @@ assert_numeric() {
   [ "$status" -eq 64 ]
   echo "$output" | grep -q 'must not be empty'
 }
+
+# --- Oracle A bulk cap ------------------------------------------------------------------------
+#
+# Scope is the whole game here. Oracle A caps exactly two ops — `mark_as_read` (via
+# `validate_bulk_operation`, server.py:995) and `delete_messages` (inline, server.py:1719) — and
+# caps NOTHING else. Capping `move`/`flag` too would refuse input the oracle accepts, i.e. drop
+# capability, which AGENTS.md calls a failure just as loudly as missing a gate. So this block pins
+# BOTH directions: the two capped verbs refuse 101, and an uncapped verb ACCEPTS 101.
+@test "mail bulk cap is wired to exactly the two ops oracle A caps (mark, delete)" {
+  local src="$BATS_TEST_DIRNAME/../Sources/MailKit/Commands/WriteManageCommands.swift"
+  [ -f "$src" ]
+
+  # Positive control: the symbol must exist, or every assertion below passes vacuously against a
+  # renamed function.
+  grep -q 'func enforceBulkCap' "$src"
+
+  # Exactly two CALL sites. Anchored on the function name alone (not on an argument list that a
+  # line-wrap would split across two lines, and not on the literal constant, so a hand-rolled
+  # `enforceBulkCap(ids, verb: "move")` still trips this).
+  local calls
+  calls="$(grep -c 'try enforceBulkCap(' "$src")"
+  [ "$calls" -eq 2 ]
+
+  grep -q 'try enforceBulkCap(ids, verb: "mark")' "$src"
+  grep -q 'try enforceBulkCap(ids, verb: "delete")' "$src"
+
+  # NEGATIVE: no third verb may be capped.
+  run bash -c "grep -o 'enforceBulkCap(ids, verb: \"[a-z]*\")' '$src' | sort -u | wc -l | tr -d ' '"
+  [ "$output" -eq 2 ]
+
+  # The cap must be enforced BEFORE MailContext() is built, or it is unreachable on a machine with
+  # no configured Mail account (EnvelopeIndex.init throws exit 69 first) — which is exactly the CI
+  # runner. Assert the ordering per command rather than trusting a comment.
+  run python3 - "$src" <<'PYEOF'
+import sys, re
+src = open(sys.argv[1]).read()
+ok = True
+for verb in ("mark", "delete"):
+    cap = src.index('try enforceBulkCap(ids, verb: "%s")' % verb)
+    # the MailContext() that belongs to this command is the first one after the cap check
+    ctx = src.index("try MailContext()", cap)
+    # ...and there must be no MailContext() between the start of the enclosing run() and the cap.
+    run_start = src.rindex("func run()", 0, cap)
+    if "try MailContext()" in src[run_start:cap]:
+        print("FAIL: %s builds MailContext before the cap check" % verb); ok = False
+print("OK" if ok else "BAD")
+PYEOF
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '^OK$'
+}
+
+# The cap bounds the INPUT id count and now runs before any Mail access, so it is assertable on a
+# runner with no Mail account at all. (It previously sat one line AFTER `MailContext()`, which made
+# this test pass locally and fail in CI — the reason the ordering is pinned above.)
+@test "mail mark refuses 101 ids with the oracle's validate_bulk_operation wording" {
+  local ids=()
+  for i in $(seq 1 101); do ids+=("$i"); done
+  run "$BIN" mail mark --dry-run --read "${ids[@]}"
+  echo "$output" | grep -q 'Too many items (101), maximum is 100'
+  [ "$status" -eq 64 ]
+}
+
+@test "mail delete refuses 101 ids with delete_messages' own wording" {
+  local ids=()
+  for i in $(seq 1 101); do ids+=("$i"); done
+  run "$BIN" mail delete --dry-run "${ids[@]}"
+  echo "$output" | grep -q 'Cannot delete 101 messages at once (max: 100)'
+  [ "$status" -eq 64 ]
+}
+
+# POSITIVE control, not just "no cap message": 100 must get PAST the cap and fail later, at message
+# resolution. Asserting only the absence of the cap string would pass if $BIN were unset, if the
+# binary crashed, or if the cap were deleted outright.
+@test "mail mark accepts 100 ids and fails later at resolution (boundary is inclusive)" {
+  require_index
+  local ids=()
+  for i in $(seq 1 100); do ids+=("$i"); done
+  run "$BIN" mail mark --dry-run --read "${ids[@]}"
+  ! echo "$output" | grep -q 'maximum is 100'
+  echo "$output" | grep -q '"type" : "not_found"'
+}
+
+# SUPERSET control: `move` is uncapped in the oracle, so 101 ids must clear the cap layer entirely
+# and fail at resolution like any other id list. If someone "helpfully" caps move, this fails.
+@test "mail move ACCEPTS 101 ids — the oracle does not cap it" {
+  require_index
+  local ids=()
+  for i in $(seq 1 101); do ids+=("$i"); done
+  run "$BIN" mail move --dry-run --to "Archive" "${ids[@]}"
+  # POSITIVE CONTROL FIRST. Without it this test is vacuous: the first draft passed `--to-mailbox`,
+  # which is not a real flag, so the binary exited at argument parsing and the two negative greps
+  # below "passed" against a usage error that never reached the cap. Asserting the command got as
+  # far as message RESOLUTION is what proves it cleared the cap layer rather than dying before it.
+  echo "$output" | grep -q '"type" : "not_found"'
+  ! echo "$output" | grep -qi 'too many items'
+  ! echo "$output" | grep -q 'at once (max: 100)'
+}

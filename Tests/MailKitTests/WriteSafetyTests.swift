@@ -40,7 +40,7 @@ struct MailWriteSafetyTests {
     func outboundUnsandboxedUnrestricted() {
         withEnv(recipients: nil) {
             #expect(throws: Never.self) {
-                try guardOutbound(recipients: ["someone-else@example.com"], sandboxActive: false)
+                try guardOutbound(recipients: ["someone-else@example.com"], sandboxActive: false, applyRecipientCap: true)
             }
         }
     }
@@ -48,8 +48,8 @@ struct MailWriteSafetyTests {
     @Test("outbound refuses an EMPTY recipient list in both modes (validation, not sandbox)")
     func outboundRefusesEmptyRecipients() {
         withEnv(recipients: "me@self.test") {
-            #expect(throws: AppleError.self) { try guardOutbound(recipients: [], sandboxActive: false) }
-            #expect(throws: AppleError.self) { try guardOutbound(recipients: [], sandboxActive: true) }
+            #expect(throws: AppleError.self) { try guardOutbound(recipients: [], sandboxActive: false, applyRecipientCap: true) }
+            #expect(throws: AppleError.self) { try guardOutbound(recipients: [], sandboxActive: true, applyRecipientCap: true) }
         }
     }
 
@@ -57,7 +57,7 @@ struct MailWriteSafetyTests {
     func outboundSandboxRefusesNonSelf() {
         withEnv(recipients: "me@self.test") {
             let err = #expect(throws: AppleError.self) {
-                try guardOutbound(recipients: ["me@self.test", "someone-else@example.com"], sandboxActive: true)
+                try guardOutbound(recipients: ["me@self.test", "someone-else@example.com"], sandboxActive: true, applyRecipientCap: true)
             }
             #expect(err?.exitCode == 77)          // safety_violation, not a generic failure
         }
@@ -67,7 +67,7 @@ struct MailWriteSafetyTests {
     func outboundSandboxAllowsSelfOnly() {
         withEnv(recipients: "me@self.test,alias@self.test") {
             #expect(throws: Never.self) {
-                try guardOutbound(recipients: ["me@self.test", "alias@self.test"], sandboxActive: true)
+                try guardOutbound(recipients: ["me@self.test", "alias@self.test"], sandboxActive: true, applyRecipientCap: true)
             }
         }
     }
@@ -75,7 +75,7 @@ struct MailWriteSafetyTests {
     @Test("SANDBOXED outbound refuses when the allowlist is empty (fail-closed inside the sandbox)")
     func outboundSandboxRefusesEmptyAllowlist() {
         withEnv(recipients: nil) {
-            #expect(throws: AppleError.self) { try guardOutbound(recipients: ["me@self.test"], sandboxActive: true) }
+            #expect(throws: AppleError.self) { try guardOutbound(recipients: ["me@self.test"], sandboxActive: true, applyRecipientCap: true) }
         }
     }
 

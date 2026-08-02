@@ -29,6 +29,10 @@ step() { # step "name" "expected-substring" <json-producing-cmd...>
 
 echo "== build =="; swift build >/dev/null 2>&1 || { echo "build failed"; exit 1; }
 
+# NOTE (2026-08-02): `mail send` now carries oracle A's 3-sends/60s rate limit. This script does
+# ONE send, so a single run is unaffected — but running it more than three times inside a minute
+# refuses with "Rate limit exceeded". Export APPLE_SEND_RATELIMIT_STATE to a temp path to give a
+# run its own window instead of sharing the operator's.
 echo "== outbound: send a labeled self test email =="
 step "send self" '"executed" : true' \
   timeout 40 "$BIN" mail send --to "$SELF" --subject "$SUBJ" --body "live e2e; safe to delete" --mode send --execute --test-mode

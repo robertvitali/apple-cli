@@ -124,6 +124,18 @@ An item is `DONE` when all of:
    `oh-my-claudecode:code-reviewer` + `security-reviewer` + `critic`. **Verify the dispatch actually
    completed** — an errored/empty agent means the gate did NOT run, so hold the commit. (On the
    Notes round 12 of 14 agents died on a session limit and the "0 findings" result was an artefact.)
+   - **State the output contract in every brief: "your final message IS the deliverable — it is the
+     only thing that reaches me; a file or intermediate output does not."** On Q3 the
+     `security-reviewer` and `critic` each burned ~240k tokens across 38 tool calls and then
+     returned literally `Done. Standing by` and `Idle.` — heavy real work, zero delivered findings.
+     Without that line in the brief this failure is invisible: it looks exactly like a clean review.
+     A resumed agent still has its context, so `SendMessage` recovers the report rather than
+     re-running it — but only if you NOTICE. Treat any final message that carries no finding, no
+     "no findings", and no verdict as a non-report, however confident its tone.
+   - Ask for an explicit **CHECKED-AND-CLEAN** list alongside the findings. "No findings" and "I
+     did not look at that" render identically as silence, and only one of them is a passed gate.
+   - Hand the agent any ground truth you have already established. It cannot see this session, so
+     without it two reviewers independently re-derive the same oracle facts at full token cost.
 8. **Address** material findings, or accept with written rationale.
 9. **Commit + push** to `integration` with `Reviewed-by:` + AI `Co-Authored-By:` trailers.
    **Never push to `main`.**
@@ -169,6 +181,14 @@ Product behavior changed under write-model v2; **the driver's own conduct did no
   draft of this file leaked a third party's email address and was caught in review before landing.
 - **Never** send to a non-self recipient, **never** iMessage anyone but the operator, **never**
   permanent-delete, empty a trash, or touch real data the run did not create.
+  - *This is deliberately STRICTER than the superseded `START-HERE.md` brief, which allowed a
+    named fallback recipient "if a non-self send is ever truly unavoidable". The driver does not
+    inherit that escape hatch: under this loop, "cornered" is not a reason to send — it is a reason
+    to file a `HUMAN-DECISIONS.md` entry and move on. Recorded so the omission is a decision, not
+    an accident; only Robert can reinstate it.*
+- **`empty-trash` is wired, gated and dry-run only.** Its real execution is un-scopable to test data
+  and destroys real trashed mail, so it is left to the operator permanently. `permanent-delete` may
+  be live-tested ONLY on a single `apple-cli-test` message the run itself created.
 - **There is private mail state (redacted). Never touch, send, or
   inspect it.** (Identify it by being the only unsent compose you did not create.)
 - **On encountering a DANGEROUS ACTION:** stop, log it, leave it for the operator, file a
@@ -190,7 +210,7 @@ contacts 7→5, notes 18→14, calendar 11→9, reminders 14→12, mail 55→46.
 |---|------|--------|--------|-----------|
 | Q1 | Write-model v2: **Messages flip** (last domain) | messages | **DONE** | — |
 | Q2 | Reminders `lists update`/`delete` reject a labeled list addressed BY ID | reminders | **DONE** | — |
-| Q3 | Oracle-A safety ports: rate limiter 3/60s, 100-msg bulk cap, 100-recipient cap | mail | TODO | — |
+| Q3 | Oracle-A safety ports: rate limiter 3/60s, 100-msg bulk cap, 100-recipient cap | mail | **DONE** | reply/`draft send` left unbounded → D8 |
 | Q4 | `analytics stats` scope defects ×3 | mail | TODO | — |
 | Q5 | **MSG-1** fuzzy-search recall: implement rapidfuzz's 3-phase `partial_ratio` | messages | TODO | — |
 | Q6 | Messages OPEN gaps MSG-2/3/5 (empty `group_name`, WAL-aware AddressBook, 1024-char cap) | messages | TODO | — |

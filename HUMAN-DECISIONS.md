@@ -228,3 +228,85 @@ one place I would rather fail the parity bar than ship the capability. Say "your
 apply exactly that.
 
 ---
+
+## D7 — Committed PII: a real phone number is in this PUBLIC repo's git history
+
+**Status:** OPEN · **Filed:** 2026-08-02 · **Blocks:** nothing (the queue routes around it)
+
+**What I found.** A real phone number is committed in a tracked port spec and in
+`Tests/MessagesKitTests/MessagesKitTests.swift`. It predates the completion loop — I did not
+introduce it — but it is in the repository's history, and this repository is public.
+
+**Why I am not just fixing it.** Deleting the number from HEAD does not remove it. Git retains
+every historical blob, so the value stays reachable via `git log -p`, any existing clone, and any
+fork or mirror. Genuinely removing it requires rewriting history (`git filter-repo` or
+equivalent), which force-pushes every branch, breaks every outstanding clone, and — if the repo
+has ever been forked or cached by a third party — still does not guarantee removal. That is a
+destructive, outward-facing operation on your published history. It is your call, not mine.
+
+**The options, honestly stated:**
+
+| Option | What it costs | What it actually achieves |
+|---|---|---|
+| **A. Scrub history** (`git filter-repo`, force-push all refs) | Rewrites every SHA; invalidates clones/forks; any commit SHA cited in Asana or docs goes stale | Removes it from *this* repo. Cannot remove it from forks, caches, or anything already scraped |
+| **B. Redact at HEAD only** | Cheap, one commit, no history rewrite | Stops it appearing in the current tree; the history remains readable. Honest half-measure |
+| **C. Accept and move on** | Nothing | Appropriate only if you consider the number non-sensitive (e.g. already public) |
+
+**My recommendation:** **B now, and decide on A separately.** Redacting HEAD is strictly an
+improvement, costs nothing, and does not foreclose A. Treat A as a deliberate, scheduled operation
+rather than something folded into a parity commit — force-pushing rewritten history during an
+active multi-worktree effort is how work gets lost.
+
+**What I need from you:** just "B", or "A and B", or "leave it". I will not rewrite history without
+you saying so explicitly.
+
+---
+
+## D8 — When the two Mail oracles disagree about a limit, which one wins?
+
+**Status:** OPEN · **Filed:** 2026-08-02 · **Blocks:** nothing (Q3 landed on the reading below)
+
+Mail is the one domain replacing TWO servers (`AGENTS.md`): oracle A
+(s-morgan-jeffries@0.6.0) and oracle B (patrickfreyer@3.1.3). I verified they disagree about
+safety limits, and the repo has no written rule for that case — so Q3 had to pick one, and I want
+the pick on the record rather than buried per-site.
+
+**Ground truth.** Oracle A has a rate limiter (`sends` 3/60s, `expensive_ops` 20/60s, `cheap_reads`
+60/60s), a 100-recipient cap, and 100-item bulk caps on `mark_as_read`/`delete_messages`. Oracle B
+has **none of these** — a grep for `max_recipients|rate_limit|TIER_LIMITS|max_items` across the
+whole package returns zero hits.
+
+**Why it is genuinely ambiguous.** `AGENTS.md` says added capability is welcome and dropped
+capability is a failure. Read strictly over the UNION of both oracles, *any* limit the CLI enforces
+drops a capability oracle B grants — which would make Q3's whole rate limiter a parity violation.
+Read as "match each oracle's own gates where that oracle owns the operation", Q3 is correct. Both
+readings are defensible from the text; they prescribe opposite code.
+
+**What I shipped, so you can veto it:** the second reading. A surface caps only if the oracle that
+owns that operation caps it. Concretely — `send` caps recipients (oracle A `send_email`);
+`reply`/`forward`/`draft-rich` do not (A's `forward_message` checks only `if not to:`,
+`reply_to_message` validates nothing, B caps nothing); `send`+`forward` consume send budget
+(A's `sends` tier); `mark`/`delete` cap at 100 items, `move`/`flag` do not.
+
+**Two live consequences of that choice:**
+
+| # | Consequence | Why it is uncomfortable |
+|---|---|---|
+| 1 | `reply` has NO rate limit (oracle A allows 20/60s via `expensive_ops`, which this port does not carry) | A runaway loop can just use `reply` instead of `send` and send without bound. The threat Q3 exists to bound is routed around. |
+| 2 | `draft send` delivers real mail with no recipient cap and no rate-limit consumption | It maps to oracle-B-only `manage_drafts`, so under the shipped reading adding a gate there would itself be a violation. Both reviewers flagged it; I left it, deliberately. |
+
+Neither is a *parity* defect under the shipped reading — both are **safety** gaps. That distinction
+is the whole reason this is your call: parity I can settle by reading the oracle, safety posture I
+cannot.
+
+**My recommendation:** port `expensive_ops` (20/60s) for `reply` only, and extend the send budget to
+`draft send`. Rationale: 20 replies/60s burdens no legitimate use, no test replies twice, and the
+runaway-loop hole in row 1 is real. I did NOT do it unilaterally because it knowingly makes the CLI
+stricter than oracle B, which is precisely the direction `AGENTS.md` calls a failure — I am not
+willing to spend your parity bar on my own safety preference without you saying so.
+
+**What I need from you:** either "safety wins — add the reply limit and cap draft send", or
+"parity wins — leave it, record the gaps", or a general rule for A-vs-B conflicts that I apply
+everywhere instead of asking again.
+
+---

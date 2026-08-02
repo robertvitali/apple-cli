@@ -322,6 +322,33 @@ applemail doctor                                                                
 # global: --json everywhere; --dry-run/--confirm gates mirror MCP-A elicitation + MCP-B safety caps
 ```
 
+### Oracle safety limits (ported 2026-08-02)
+
+The two Mail oracles DISAGREE here, and the CLI replaces both — so each limit is scoped to the
+oracle that owns the operation. Oracle A (s-morgan-jeffries@0.6.0) has all three limits below;
+oracle B (patrickfreyer@3.1.3) has **none** (grep for
+`max_recipients|rate_limit|TIER_LIMITS|max_items` = 0 hits). See `HUMAN-DECISIONS.md` D8 for the
+conflict rule this adopts and its open consequences.
+
+| Limit | Oracle A source | Applies to | Deliberately NOT applied to |
+|---|---|---|---|
+| Send rate limit 3/60s | `TIER_LIMITS["sends"]`, `OPERATION_TIERS` | `send`, `forward` | `reply` (A tiers it `expensive_ops` 20/60s — tier not ported), `draft send` (B-only op) |
+| 100 recipients (`to+cc+bcc`) | `validate_send_operation`, server.py:898 / :1085 | `send` | `reply`, `forward`, `draft-rich` — A validates no recipients on those, B caps nothing |
+| 100 items, by input id count | `validate_bulk_operation` (server.py:995); inline (server.py:1719) | `mark`, `delete` | `move`, `flag` — uncapped in A |
+
+Two behaviors that are easy to get wrong and are pinned by test:
+
+- **The refusal text differs per op.** `mark_as_read` returns `validate_bulk_operation`'s
+  "Too many items (N), maximum is M"; `delete_messages` returns "Cannot delete N messages at once
+  (max: 100)". MCP-diff parity compares the payload, so these are not unified.
+- **The bulk cap runs BEFORE `MailContext()`**, matching the oracle's validate-before-Mail order.
+  Placed after, it is unreachable on a machine with no configured Mail account (`EnvelopeIndex`
+  throws exit 69 first) — i.e. unreachable in CI.
+
+Divergence from A, stated: the window persists to `~/.apple-cli/send-rate-limit.json`
+(`APPLE_SEND_RATELIMIT_STATE` overrides) and uses wall clock, because A's in-memory
+`time.monotonic()` deque cannot survive a fresh process per invocation. Fails open, warns on stderr.
+
 ### Build cost: **L–XL**
 Hard parts, roughly descending:
 - **Mail rules AppleScript** (create/update/delete/enable + the update-rule *unsupported-action refusal*, condition/action schema, 1-based index model) — Mail's rule dictionary is finicky and partly UI-scripted. **Highest risk;** vendor MCP A to de-risk. (M–L)

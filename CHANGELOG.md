@@ -12,6 +12,38 @@ with the Apple MCP servers they replace.
 
 ## [Unreleased]
 
+### Added — oracle-A safety ports (rate limiter, recipient cap, bulk cap)
+
+Three limits oracle A (`apple-mail-mcp` s-morgan-jeffries@0.6.0) enforces are now carried by the
+CLI. Under write-model v2 these are BUCKET 1 (oracle-mirrored ⇒ they apply unconditionally, sandbox
+or not); v2 lifts CLI-only restrictions, not limits the oracle itself imposes.
+
+- **Send rate limit — 3 sends / 60s** (`TIER_LIMITS["sends"]`), on `mail send` and `mail forward`
+  only, matching `OPERATION_TIERS` exactly. Only real sends consume budget; `--dry-run` never does.
+  Because the CLI is a fresh process per invocation where the oracle is a long-lived server, the
+  window persists to `~/.apple-cli/send-rate-limit.json` (override with
+  `APPLE_SEND_RATELIMIT_STATE`) and uses wall clock rather than `time.monotonic()` — a documented
+  divergence, since a monotonic clock cannot be compared across processes. Fails OPEN and warns on
+  stderr if that state is unwritable.
+- **100-recipient cap** on `mail send` only, counting `to + cc + bcc` combined, mirroring
+  `validate_send_operation` (server.py:898, :1085). **Not** applied to reply/forward/draft-rich:
+  oracle A's `forward_message` checks only `if not to:`, `reply_to_message` validates nothing, and
+  oracle B caps nothing — capping them would refuse input both oracles accept.
+- **100-item bulk cap** on `mail mark` and `mail delete` only, bounding the input id count, with
+  each op's own oracle wording (`mark_as_read` via `validate_bulk_operation`; `delete_messages`
+  inline). `move` and `flag` stay uncapped because the oracle does not cap them.
+
+**BEHAVIOR CHANGE:** input previously accepted is now refused on the three capped surfaces, and
+three real sends inside 60s now refuse with `Rate limit exceeded` (this affects
+`bats/live/mail-writes.sh`, which performs a real send).
+
+**Known gaps, deliberately not closed — see `HUMAN-DECISIONS.md` D8.** `reply` carries no rate
+limit though oracle A allows 20/60s via the unported `expensive_ops` tier, and `draft send`
+delivers with neither cap. Both are oracle-faithful under the "each oracle owns its operations"
+reading this change adopts, and both are real safety gaps under any other reading; resolving that
+is an operator posture call, not a parity fact.
+
+
 ### BREAKING — Calendar + Reminders write-model v2: writes EXECUTE by default
 
 Fourth and fifth domains flipped to write-model v2 (`docs/write-model-v2.md`), in the two

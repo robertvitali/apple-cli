@@ -302,7 +302,11 @@ reverting the model. The sandbox itself is the operator's per-invocation rollbac
 4. Domain flips, each with its migrated tests + help/doc sweep in the same commit:
    Mail → Contacts → Notes → Calendar + Reminders (two coordinated edits) → Messages.
 5. Oracle-A safety ports that are now load-bearing: rate limiter, bulk-delete cap,
-   recipient cap.
+   recipient cap. **DONE 2026-08-02.** Scoped per oracle ownership (send-only recipient cap;
+   send+forward rate limit; mark+delete bulk cap) — the first cut over-applied the recipient cap
+   to reply/forward/draft-rich, which drops capability, and was corrected in review. The
+   `expensive_ops` tier is NOT ported, leaving `reply` and `draft send` unbounded: recorded as
+   `HUMAN-DECISIONS.md` D8 (a safety posture call, not a parity gap).
 6. Documentation pass: DESIGN.md, port-specs, INTEGRATION-STATUS, parity-audit addendum.
 7. Re-run the 2026-07-31 audit — the write-gate HIGHs must flip to closed; 1.0.0 remains
    separately gated on explicit operator approval.
