@@ -67,7 +67,7 @@ struct GetCommand: ParsableCommand {
             let store = ContactsStore()
             try store.requireAuthorization()
             guard let contact = store.unifiedContact(identifier, includeNiche: niche) else {
-                throw AppleError.notFound("No contact found with identifier \(identifier)")
+                throw AppleError.notFound("No contact found with identifier '\(identifier)'")
             }
             try emitContacts(global, GetContactResult(contact: contact))
         }
@@ -166,7 +166,7 @@ struct GroupsMembersCommand: ParsableCommand {
             let store = ContactsStore()
             try store.requireAuthorization()
             guard try store.fetchGroup(identifier) != nil else {
-                throw AppleError.notFound("No group found with identifier \(identifier)")
+                throw AppleError.notFound("No group found with identifier '\(identifier)'")
             }
             let contacts = try store.contactsInGroup(identifier, limit: contactsCap)
             try emitContacts(global, GroupMembersResult(
@@ -249,7 +249,7 @@ struct PhotoGetCommand: ParsableCommand {
             let store = ContactsStore()
             try store.requireAuthorization()
             guard let photo = store.readPhoto(identifier) else {
-                throw AppleError.notFound("Contact not found: \(identifier)")
+                throw AppleError.notFound("Contact not found: '\(identifier)'")
             }
             if !photo.available {
                 try emitContacts(global, ReadPhotoResult(

@@ -131,6 +131,16 @@ struct UpdateCommand: ParsableCommand {
     @Option(name: .long, parsing: .upToNextOption, help: "Set a simple field: key=value (repeatable).") var set: [String] = []
     @Option(name: .long, parsing: .upToNextOption, help: "Clear a field to empty (repeatable).") var clear: [String] = []
     @Option(name: .long, help: "Full field set as a JSON blob (presence = touch; \"\"/[] = clear).") var json: String?
+    // Accepted and echoed, NOT enforced — the divergence `contacts delete` states in full above;
+    // docs/port-specs/contacts.md §group_identifier is canonical, including the two-way
+    // asymmetry. Short form: the oracle compares group_identifier to CONTACTS_TEST_GROUP and
+    // never to the TARGET (check_test_mode_safety, security.py:83-101), so honoring it adds no
+    // TARGET scoping — this CLI confines the target itself instead, which the oracle never does.
+    // Not "inert": in test mode the oracle REFUSES when the parameter is absent (security.py:86-99)
+    // and we proceed. REJECTING it was the actual defect — the oracle takes this parameter on all
+    // eleven write tools, so exit-64'ing narrowed the parameter domain.
+    @Option(name: .long, help: "Group assertion; accepted and echoed for MCP parity, not enforced.")
+    var group: String?
 
     func run() throws {
         try runGuarded(tool: "contacts") {
@@ -140,7 +150,7 @@ struct UpdateCommand: ParsableCommand {
             let gate = try resolveWrite(global)
             guard gate.willExecute else {
                 try emitContactsWrite(global, DryRunPreview(
-                    operation: "update_contact", identifier: identifier, fields: fields,
+                    operation: "update_contact", identifier: identifier, group_id: group, fields: fields,
                     gate_note: gate.sandboxActive ? sandboxTargetUncheckedNote("the target contact") : nil),
                     sandboxActive: gate.sandboxActive)
                 return
@@ -243,6 +253,16 @@ struct NoteSetCommand: ParsableCommand {
     @Option(name: .long, help: "The note text.") var note: String?
     @Option(name: .long, help: "Read the note text from this file.") var file: String?
     @Flag(name: .long, help: "Clear the note (empty string).") var clear = false
+    // Accepted and echoed, NOT enforced — the divergence `contacts delete` states in full above;
+    // docs/port-specs/contacts.md §group_identifier is canonical, including the two-way
+    // asymmetry. Short form: the oracle compares group_identifier to CONTACTS_TEST_GROUP and
+    // never to the TARGET (check_test_mode_safety, security.py:83-101), so honoring it adds no
+    // TARGET scoping — this CLI confines the target itself instead, which the oracle never does.
+    // Not "inert": in test mode the oracle REFUSES when the parameter is absent (security.py:86-99)
+    // and we proceed. REJECTING it was the actual defect — the oracle takes this parameter on all
+    // eleven write tools, so exit-64'ing narrowed the parameter domain.
+    @Option(name: .long, help: "Group assertion; accepted and echoed for MCP parity, not enforced.")
+    var group: String?
     func run() throws {
         try runGuarded(tool: "contacts") {
             if identifier.trimmingCharacters(in: .whitespaces).isEmpty {
@@ -252,7 +272,7 @@ struct NoteSetCommand: ParsableCommand {
             let gate = try resolveWrite(global)
             guard gate.willExecute else {
                 try emitContactsWrite(global, DryRunPreview(
-                    operation: "write_note", identifier: identifier, note: noteText,
+                    operation: "write_note", identifier: identifier, group_id: group, note: noteText,
                     gate_note: gate.sandboxActive ? sandboxTargetUncheckedNote("the target contact") : nil),
                     sandboxActive: gate.sandboxActive)
                 return
@@ -286,6 +306,16 @@ struct PhotoSetCommand: ParsableCommand {
     @Option(name: .long, help: "Read image bytes from this file.") var file: String?
     @Option(name: .long, help: "Image bytes as a base64 string.") var base64: String?
     @Flag(name: .long, help: "Clear the existing photo.") var clear = false
+    // Accepted and echoed, NOT enforced — the divergence `contacts delete` states in full above;
+    // docs/port-specs/contacts.md §group_identifier is canonical, including the two-way
+    // asymmetry. Short form: the oracle compares group_identifier to CONTACTS_TEST_GROUP and
+    // never to the TARGET (check_test_mode_safety, security.py:83-101), so honoring it adds no
+    // TARGET scoping — this CLI confines the target itself instead, which the oracle never does.
+    // Not "inert": in test mode the oracle REFUSES when the parameter is absent (security.py:86-99)
+    // and we proceed. REJECTING it was the actual defect — the oracle takes this parameter on all
+    // eleven write tools, so exit-64'ing narrowed the parameter domain.
+    @Option(name: .long, help: "Group assertion; accepted and echoed for MCP parity, not enforced.")
+    var group: String?
     func run() throws {
         try runGuarded(tool: "contacts") {
             if identifier.trimmingCharacters(in: .whitespaces).isEmpty {
@@ -295,7 +325,7 @@ struct PhotoSetCommand: ParsableCommand {
             let gate = try resolveWrite(global)
             guard gate.willExecute else {
                 try emitContactsWrite(global, DryRunPreview(
-                    operation: "write_photo", identifier: identifier, clears_photo: imageData == nil,
+                    operation: "write_photo", identifier: identifier, group_id: group, clears_photo: imageData == nil,
                     gate_note: gate.sandboxActive ? sandboxTargetUncheckedNote("the target contact") : nil),
                     sandboxActive: gate.sandboxActive)
                 return
@@ -395,6 +425,16 @@ struct GroupsCreateCommand: ParsableCommand {
     @OptionGroup var global: GlobalOptions
     @Argument(help: "The new group's name.") var name: String
     @Option(name: .long, help: "Create in this container id (default: the default container).") var container: String?
+    // Accepted and echoed, NOT enforced — the divergence `contacts delete` states in full above;
+    // docs/port-specs/contacts.md §group_identifier is canonical, including the two-way
+    // asymmetry. Short form: the oracle compares group_identifier to CONTACTS_TEST_GROUP and
+    // never to the TARGET (check_test_mode_safety, security.py:83-101), so honoring it adds no
+    // TARGET scoping — this CLI confines the target itself instead, which the oracle never does.
+    // Not "inert": in test mode the oracle REFUSES when the parameter is absent (security.py:86-99)
+    // and we proceed. REJECTING it was the actual defect — the oracle takes this parameter on all
+    // eleven write tools, so exit-64'ing narrowed the parameter domain.
+    @Option(name: .long, help: "Group assertion; accepted and echoed for MCP parity, not enforced.")
+    var group: String?
     func run() throws {
         try runGuarded(tool: "contacts") {
             if name.trimmingCharacters(in: .whitespaces).isEmpty {
@@ -403,7 +443,7 @@ struct GroupsCreateCommand: ParsableCommand {
             let gate = try resolveWrite(global, labeledName: name)
             guard gate.willExecute else {
                 try emitContactsWrite(global, DryRunPreview(
-                    operation: "create_group", container_id: container, name: name),
+                    operation: "create_group", group_id: group, container_id: container, name: name),
                     sandboxActive: gate.sandboxActive)
                 return
             }
@@ -424,6 +464,16 @@ struct GroupsRenameCommand: ParsableCommand {
     @OptionGroup var global: GlobalOptions
     @Argument(help: "The group's CN identifier.") var identifier: String
     @Argument(help: "The new name.") var newName: String
+    // Accepted and echoed, NOT enforced — the divergence `contacts delete` states in full above;
+    // docs/port-specs/contacts.md §group_identifier is canonical, including the two-way
+    // asymmetry. Short form: the oracle compares group_identifier to CONTACTS_TEST_GROUP and
+    // never to the TARGET (check_test_mode_safety, security.py:83-101), so honoring it adds no
+    // TARGET scoping — this CLI confines the target itself instead, which the oracle never does.
+    // Not "inert": in test mode the oracle REFUSES when the parameter is absent (security.py:86-99)
+    // and we proceed. REJECTING it was the actual defect — the oracle takes this parameter on all
+    // eleven write tools, so exit-64'ing narrowed the parameter domain.
+    @Option(name: .long, help: "Group assertion; accepted and echoed for MCP parity, not enforced.")
+    var group: String?
     func run() throws {
         try runGuarded(tool: "contacts") {
             if identifier.trimmingCharacters(in: .whitespaces).isEmpty {
@@ -445,7 +495,7 @@ struct GroupsRenameCommand: ParsableCommand {
             }
             guard gate.willExecute else {
                 try emitContactsWrite(global, DryRunPreview(
-                    operation: "rename_group", identifier: identifier, new_name: newName,
+                    operation: "rename_group", identifier: identifier, group_id: group, new_name: newName,
                     gate_note: gate.sandboxActive ? sandboxTargetUncheckedNote("the target group") : nil),
                     sandboxActive: gate.sandboxActive)
                 return
@@ -467,6 +517,16 @@ struct GroupsDeleteCommand: ParsableCommand {
         abstract: "Delete a group, members persist (requires APPLE_TEST_MODE=1, like the MCP). → delete_group")
     @OptionGroup var global: GlobalOptions
     @Argument(help: "The group's CN identifier.") var identifier: String
+    // Accepted and echoed, NOT enforced — the divergence `contacts delete` states in full above;
+    // docs/port-specs/contacts.md §group_identifier is canonical, including the two-way
+    // asymmetry. Short form: the oracle compares group_identifier to CONTACTS_TEST_GROUP and
+    // never to the TARGET (check_test_mode_safety, security.py:83-101), so honoring it adds no
+    // TARGET scoping — this CLI confines the target itself instead, which the oracle never does.
+    // Not "inert": in test mode the oracle REFUSES when the parameter is absent (security.py:86-99)
+    // and we proceed. REJECTING it was the actual defect — the oracle takes this parameter on all
+    // eleven write tools, so exit-64'ing narrowed the parameter domain.
+    @Option(name: .long, help: "Group assertion; accepted and echoed for MCP parity, not enforced.")
+    var group: String?
     func run() throws {
         try runGuarded(tool: "contacts") {
             if identifier.trimmingCharacters(in: .whitespaces).isEmpty {
@@ -476,7 +536,7 @@ struct GroupsDeleteCommand: ParsableCommand {
             let envGranted = contactsDeleteEnvGranted
             guard gate.willExecute else {
                 try emitContactsWrite(global, DryRunPreview(
-                    operation: "delete_group", identifier: identifier,
+                    operation: "delete_group", identifier: identifier, group_id: group,
                     gate_note: joinedGateNote([
                         envGranted ? nil : contactsDeleteGateMessage("delete_group"),
                         gate.sandboxActive ? sandboxTargetUncheckedNote("the target group") : nil,

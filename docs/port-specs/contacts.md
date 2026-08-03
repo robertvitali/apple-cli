@@ -152,20 +152,20 @@ contacts list        [--offset N] [--limit N]   # → list_contacts
 contacts get <id>    [--niche]                  # → get_contact (include_niche)
 contacts search      (--name|--phone|--email|--org <v>) [--deep] [--all]   # search_contacts + Contactor --deep
 contacts create      [--first --last --org … | --json <blob>] [--group <id>] [--container <id>]
-contacts update <id> [--set field=v | --clear field | --json <blob>]       # None/""/value semantics
+contacts update <id> [--set field=v | --clear field | --json <blob>] [--group <id>]  # None/""/value semantics
 contacts delete <id> [--group <id>]             # requires APPLE_TEST_MODE=1 (oracle-mirrored)
 
 contacts note get <id>                          # → read_note   (HARD: AppleScript)
-contacts note set <id> (--note <s> | --file <p> | --clear)   # → write_note (HARD); --note, NOT --text (--text is the global human-output flag)
+contacts note set <id> (--note <s> | --file <p> | --clear) [--group <id>]  # → write_note (HARD); --note, NOT --text (--text is the global human-output flag)
 
 contacts photo get <id> [--out <file>|--base64]              # → read_photo (HARD)
-contacts photo set <id> (--file <p> | --base64 <s> | --clear)# → write_photo (HARD)
+contacts photo set <id> (--file <p> | --base64 <s> | --clear) [--group <id>]  # → write_photo (HARD)
 
 contacts groups list                            # → list_groups
 contacts groups members <id>                    # → get_contacts_in_group
-contacts groups create <name> [--container <id>]
-contacts groups rename <id> <new-name>
-contacts groups delete <id> [--force]
+contacts groups create <name> [--container <id>] [--group <id>]
+contacts groups rename <id> <new-name> [--group <id>]
+contacts groups delete <id> [--group <id>]                # requires APPLE_TEST_MODE=1 (oracle-mirrored)
 contacts groups add    <contact-id> <group-id>
 contacts groups remove <contact-id> <group-id>  # HARD: AppleScript fallback
 
@@ -243,13 +243,28 @@ a literal MCP transcription, and why:
     a sandboxed preview therefore names them in `gate_note` rather than implying they passed.
   - Executed envelopes carry `dry_run: false` explicitly, so a caller can distinguish
     "previewed" from "done" under execute-by-default.
-- **`CONTACTS_TEST_GROUP` / per-op `group_identifier` assertion parameter is inert by
-  design.** The MCP's assertion-only `group_identifier` (on update / write_note / write_photo
-  / rename_group / delete_group, used only to match `CONTACTS_TEST_GROUP` in its test mode) is
-  replaced by the CLI's equivalent sandbox restriction (label prefix). `create` and
-  `vcard import` keep `--group` as the **functional** group-add — and inside the sandbox that
-  target must itself be a labeled test group, so neither can attach data to a real group.
-  `delete` keeps `--group` as a parity echo.
+- **`CONTACTS_TEST_GROUP` / per-op `group_identifier`: accepted on all eleven write ops;
+  functional on two, an echo on nine.** The oracle takes `group_identifier` on exactly its
+  eleven `DESTRUCTIVE_OPERATIONS` (`security.py:33-47`). The CLI accepts `--group` on all
+  eleven: **functional** (a real group-add, echoed as `group_id` in the success payload) on
+  `create` and `vcard import`, matching `server.py:798, 1152`; **accepted and echoed in the
+  dry-run preview but not enforced** on `update`, `note set`, `photo set`, `delete`,
+  `groups create`, `groups rename`, `groups delete`, `groups add`, `groups remove`.
+  It is **not "inert"** — that word was wrong. `check_test_mode_safety` (`security.py:83-101`)
+  compares the value to the `CONTACTS_TEST_GROUP` env var and **never to the target**, so
+  honoring it literally would add no TARGET scoping; the CLI restricts the target itself
+  (`requireLabeledContactTarget` / `requireLabeledGroupTarget`), which the oracle never does.
+  **The two sides are therefore not a superset in either direction, recorded here deliberately:**
+  in test mode the oracle REFUSES a destructive op whose `group_identifier` is absent or
+  mismatched (`security.py:86-99`) where the CLI proceeds; conversely the CLI refuses an
+  unlabeled *target* where the oracle proceeds. The CLI's control is the stronger one on the
+  axis that matters (keeping sandboxed writes off real data), and rejecting the parameter
+  outright — the pre-2026-08-03 behavior, exit 64 — was a plain capability drop.
+- **`export_vcard` `notes[0]` text diverges from the oracle, deliberately.** The oracle says
+  *"Use read_note() and merge separately if needed."*; the CLI says *"Use `contacts note get
+  <id>`…"*. Restoring the oracle's string verbatim would instruct the operator to call a Python
+  function that does not exist in this CLI. The field is present and its meaning identical, so
+  this is a changed advisory value, not a dropped field. **Accepted, not a gap** (CONTACTS-L1).
 - **`check_authorization` structured fields.** `contacts auth` returns `{status,
   remediation?}` structurally — full parity with the MCP diagnostic. On *data* commands, an
   `authorization_denied` failure folds `status` + `remediation` into `error.message` (the
@@ -264,9 +279,15 @@ a literal MCP transcription, and why:
   `--file` (note/vcard/photo/base64 inputs), `--json` (full-fidelity create/update); `--text`
   human output. File / base64 / json inputs are size-bounded (25 MB) as a DoS guard.
 - **Parse-layer input** (e.g. space-form `--limit -1`, missing required args, wrong types)
-  surfaces as an ArgumentParser usage error on stderr (exit 64), not the JSON envelope — a
-  shared entry-point behavior uniform across all six domains, tracked for a central fix. The
-  `--limit=-1` equals-form and all domain-level validation return the JSON envelope.
+  emits the human-readable detail on stderr AND a JSON envelope on stdout (exit 64):
+  `{"error":{"message":"invalid arguments (see stderr for details)","type":"validation_error"},
+  "ok":false,"schema_version":1,"tool":"apple"}`. The detail stays on stderr because it echoes
+  operator argv; the stdout envelope carries a generic message. **`tool` is `"apple"`, not the
+  domain** — the parse fails before a subcommand resolves (`Sources/apple/Apple.swift:44-46`).
+  That is uniform across all six domains and is a known deviation from AGENTS.md's
+  `tool: "<domain>"` contract, tracked as CONTACTS-L3(a) for a central cross-domain fix; it is
+  NOT contacts-specific. The `--limit=-1` equals-form and all domain-level validation return
+  the envelope with the proper domain `tool` value.
 
 ---
 

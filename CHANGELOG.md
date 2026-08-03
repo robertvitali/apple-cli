@@ -12,6 +12,31 @@ with the Apple MCP servers they replace.
 
 ## [Unreleased]
 
+### Fixed — Contacts rejected a parameter the oracle accepts on every write op
+
+`apple-contacts-mcp` takes `group_identifier` on all eleven of its `DESTRUCTIVE_OPERATIONS`
+(`security.py:33-47`). This CLI accepted a group on only seven of the eleven and exited **64**
+on `update`, `note set`, `photo set`, `groups create`, `groups rename` and `groups delete` —
+a narrowed parameter domain, which the project treats as a capability drop regardless of
+whether the parameter does anything. All eleven now accept `--group`: functional (a real
+group-add, echoed as `group_id` on success) on `create` and `vcard import` as before, and
+accepted-and-echoed-in-preview on the other nine.
+
+It is deliberately **not enforced**, and deliberately not called "inert": `check_test_mode_safety`
+(`security.py:83-101`) compares the value to `CONTACTS_TEST_GROUP` and never to the target, so
+honoring it would add no *target* scoping — this CLI restricts the target itself instead, which
+the oracle does not. The two are consequently not a superset in either direction, and that
+asymmetry is now written down in `docs/port-specs/contacts.md` rather than left implicit.
+
+### Fixed — not-found messages dropped the oracle's quoting around the identifier
+
+The oracle formats identifiers with Python `!r` at fifteen not-found sites, so a caller sees
+`Contact not found: 'X'`. This CLI emitted them bare, and two sites additionally inverted the
+oracle's word order (`contact 'X' not found`). All eighteen sites now match the oracle's shape.
+Message text is not part of the versioned wire contract (`AGENTS.md` scopes that to property
+names, enums and exit codes), so this is a behavior-parity fix, not a breaking change.
+
+
 ### Fixed — a signalled run stranded a snapshot of the operator's mail on disk
 
 `atexit` does not run when a process dies of a signal, so Ctrl-C during a slow read — the most

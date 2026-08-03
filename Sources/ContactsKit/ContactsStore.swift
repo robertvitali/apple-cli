@@ -207,7 +207,7 @@ public final class ContactsStore {
     /// TARGET itself — matching the fetched-target guard Calendar/Reminders/Notes already apply.
     public func requireLabeledContactTarget(_ identifier: String, prefix: String) throws {
         guard let c = unifiedContact(identifier, includeNiche: false) else {
-            throw AppleError.notFound("contact '\(identifier)' not found")
+            throw AppleError.notFound("Contact not found: '\(identifier)'")
         }
         let name = ContactsLabel.primaryName(given: c.given_name, family: c.family_name, organization: c.organization)
         guard ContactsLabel.isLabeled(name, prefix: prefix) else {
@@ -220,7 +220,7 @@ public final class ContactsStore {
     /// Same fetched-target guard for a GROUP (rename/delete + membership add/remove).
     public func requireLabeledGroupTarget(_ identifier: String, prefix: String) throws {
         guard let g = try fetchGroup(identifier) else {
-            throw AppleError.notFound("group '\(identifier)' not found")
+            throw AppleError.notFound("Group not found: '\(identifier)'")
         }
         guard ContactsLabel.isLabeled(g.name, prefix: prefix) else {
             throw AppleError.safetyViolation(
@@ -299,7 +299,7 @@ public final class ContactsStore {
         var contacts: [CNContact] = []
         for ident in identifiers {
             guard let c = try? store.unifiedContact(withIdentifier: ident, keysToFetch: [descriptor]) else {
-                throw AppleError.notFound("Contact not found: \(ident)")
+                throw AppleError.notFound("Contact not found: '\(ident)'")
             }
             contacts.append(c)
         }
@@ -341,7 +341,7 @@ public final class ContactsStore {
         do {
             return try runner.run(script, arguments: [identifier])
         } catch let e as AppleScriptRunner.RunError {
-            throw Self.mapAppleScriptError(e, notFoundMessage: "Contact not found: \(identifier)",
+            throw Self.mapAppleScriptError(e, notFoundMessage: "Contact not found: '\(identifier)'",
                                            genericPrefix: "read_note failed")
         }
     }
@@ -361,7 +361,7 @@ public final class ContactsStore {
         do {
             _ = try runner.run(script, arguments: [identifier, note])
         } catch let e as AppleScriptRunner.RunError {
-            throw Self.mapAppleScriptError(e, notFoundMessage: "Contact not found: \(identifier)",
+            throw Self.mapAppleScriptError(e, notFoundMessage: "Contact not found: '\(identifier)'",
                                            genericPrefix: "write_note failed")
         }
     }
@@ -372,7 +372,7 @@ public final class ContactsStore {
         let mutable = buildMutableContact(from: fields)
         var group: CNGroup?
         if let gid = groupIdentifier {
-            guard let g = try fetchGroup(gid) else { throw AppleError.notFound("Group not found: \(gid)") }
+            guard let g = try fetchGroup(gid) else { throw AppleError.notFound("Group not found: '\(gid)'") }
             group = g
         }
         let save = CNSaveRequest()
@@ -391,7 +391,7 @@ public final class ContactsStore {
         keys += Self.nicheKeys
         guard let contact = try? store.unifiedContact(withIdentifier: identifier, keysToFetch: keys),
               let mutable = contact.mutableCopy() as? CNMutableContact else {
-            throw AppleError.notFound("Contact not found: \(identifier)")
+            throw AppleError.notFound("Contact not found: '\(identifier)'")
         }
         applyUpdateFields(to: mutable, from: fields)
         let save = CNSaveRequest()
@@ -408,7 +408,7 @@ public final class ContactsStore {
         let keys = [CNContactIdentifierKey] as [CNKeyDescriptor]
         guard let contact = try? store.unifiedContact(withIdentifier: identifier, keysToFetch: keys),
               let mutable = contact.mutableCopy() as? CNMutableContact else {
-            throw AppleError.notFound("Contact not found: \(identifier)")
+            throw AppleError.notFound("Contact not found: '\(identifier)'")
         }
         let save = CNSaveRequest()
         save.delete(mutable)
@@ -442,7 +442,7 @@ public final class ContactsStore {
 
         var group: CNGroup?
         if let gid = groupIdentifier {
-            guard let g = try fetchGroup(gid) else { throw AppleError.notFound("Group not found: \(gid)") }
+            guard let g = try fetchGroup(gid) else { throw AppleError.notFound("Group not found: '\(gid)'") }
             group = g
         }
         let save = CNSaveRequest()
@@ -493,7 +493,7 @@ public final class ContactsStore {
         } catch let e as AppleScriptRunner.RunError {
             throw Self.mapAppleScriptError(
                 e,
-                notFoundMessage: "Contact or group not found (contact=\(contactIdentifier), group=\(groupIdentifier))",
+                notFoundMessage: "Contact or group not found (contact='\(contactIdentifier)', group='\(groupIdentifier)')",
                 genericPrefix: "remove_contact_from_group failed")
         }
     }
@@ -502,10 +502,10 @@ public final class ContactsStore {
         let keys = [CNContactIdentifierKey] as [CNKeyDescriptor]
         guard let contact = try? store.unifiedContact(withIdentifier: contactIdentifier, keysToFetch: keys),
               let mutable = contact.mutableCopy() as? CNMutableContact else {
-            throw AppleError.notFound("Contact not found: \(contactIdentifier)")
+            throw AppleError.notFound("Contact not found: '\(contactIdentifier)'")
         }
         guard let group = try fetchGroup(groupIdentifier) else {
-            throw AppleError.notFound("Group not found: \(groupIdentifier)")
+            throw AppleError.notFound("Group not found: '\(groupIdentifier)'")
         }
         return (mutable, group)
     }
@@ -514,7 +514,7 @@ public final class ContactsStore {
         let keys = [CNContactImageDataKey] as [CNKeyDescriptor]
         guard let contact = try? store.unifiedContact(withIdentifier: identifier, keysToFetch: keys),
               let mutable = contact.mutableCopy() as? CNMutableContact else {
-            throw AppleError.notFound("Contact not found: \(identifier)")
+            throw AppleError.notFound("Contact not found: '\(identifier)'")
         }
         mutable.imageData = imageData
         let save = CNSaveRequest()
@@ -543,7 +543,7 @@ public final class ContactsStore {
 
     public func renameGroup(identifier: String, newName: String) throws -> Group {
         guard let group = try fetchGroup(identifier), let mutable = group.mutableCopy() as? CNMutableGroup else {
-            throw AppleError.notFound("Group not found: \(identifier)")
+            throw AppleError.notFound("Group not found: '\(identifier)'")
         }
         mutable.name = newName
         let save = CNSaveRequest()
@@ -558,7 +558,7 @@ public final class ContactsStore {
 
     public func deleteGroup(identifier: String) throws -> String {
         guard let group = try fetchGroup(identifier), let mutable = group.mutableCopy() as? CNMutableGroup else {
-            throw AppleError.notFound("Group not found: \(identifier)")
+            throw AppleError.notFound("Group not found: '\(identifier)'")
         }
         let save = CNSaveRequest()
         save.delete(mutable)

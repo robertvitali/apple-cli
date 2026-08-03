@@ -413,3 +413,56 @@ END:VCARD"
   echo "$output" | grep -q '"operation" : "add_contact_to_group"'
   echo "$output" | grep -q '"dry_run" : true'
 }
+
+@test "--group is accepted and echoed on every write command (CONTACTS-M1)" {
+  # The oracle takes group_identifier on all eleven write tools; we rejected it with exit 64
+  # on six of them, narrowing the parameter domain. It is a shibboleth the oracle compares to
+  # CONTACTS_TEST_GROUP and never checks against the target, so we accept + echo, never enforce.
+  id="SOME-ID:ABPerson"
+  run "$BIN" contacts update "$id" --set given_name=x --group G --dry-run
+  [ "$status" -eq 0 ]; echo "$output" | grep -q '"group_id" : "G"'
+  run "$BIN" contacts note set "$id" --note hi --group G --dry-run
+  [ "$status" -eq 0 ]; echo "$output" | grep -q '"group_id" : "G"'
+  run "$BIN" contacts photo set "$id" --clear --group G --dry-run
+  [ "$status" -eq 0 ]; echo "$output" | grep -q '"group_id" : "G"'
+  run "$BIN" contacts groups create apple-cli-test-x --group G --dry-run
+  [ "$status" -eq 0 ]; echo "$output" | grep -q '"group_id" : "G"'
+  run "$BIN" contacts groups rename SOME-GROUP apple-cli-test-b --group G --dry-run
+  [ "$status" -eq 0 ]; echo "$output" | grep -q '"group_id" : "G"'
+  run "$BIN" contacts groups delete SOME-GROUP --group G --dry-run
+  [ "$status" -eq 0 ]; echo "$output" | grep -q '"group_id" : "G"'
+  # Pin the grep's discriminating power: group_id must be ABSENT when --group is absent.
+  # Without this the assertions above would still pass if group_id were hard-coded.
+  run "$BIN" contacts update SOME-ID --set given_name=x --dry-run
+  [ "$status" -eq 0 ]; ! echo "$output" | grep -q '"group_id"'
+  run "$BIN" contacts groups delete SOME-GROUP --dry-run
+  [ "$status" -eq 0 ]; ! echo "$output" | grep -q '"group_id"'
+}
+
+@test "not_found messages quote the identifier like the oracle's !r (CONTACTS-L2)" {
+  # The ONLY case in this file that must reach the store, so it is the only one that can
+  # break the header's "no Contacts TCC required / no prompting in CI" contract: not_found
+  # exists only PAST the authorization gate (ContactsReadCommands.swift calls
+  # requireAuthorization() BEFORE the notFound throw), so an unauthorized machine exits 77,
+  # and a notDetermined one would pop the TCC dialog inside requestAccess(). `contacts auth`
+  # reads authorizationStatus() directly and never prompts, so it is a safe probe: skip
+  # unless access is already granted. Same tolerance as assert_no_contact_named above.
+  run "$BIN" contacts auth
+  echo "$output" | grep -qE '"status" : "(authorized|limited)"' \
+    || skip "Contacts TCC not granted — not_found is unreachable without it"
+  run "$BIN" contacts get "SOME-BOGUS-ID"
+  [ "$status" -eq 65 ]
+  echo "$output" | grep -q "No contact found with identifier 'SOME-BOGUS-ID'"
+  run "$BIN" contacts groups members "BOGUS-GROUP:ABGroup"
+  [ "$status" -eq 65 ]
+  echo "$output" | grep -q "No group found with identifier 'BOGUS-GROUP:ABGroup'"
+}
+
+@test "lint: every Contacts not-found message quotes the identifier (CONTACTS-L2)" {
+  # 16 of the 18 not-found sites live past the authorization gate, so no CLI-tier assertion can
+  # reach them without Contacts TCC (see the test above, which skips for exactly that reason).
+  # This source lint is what actually pins them against regression.
+  run python3 "$BATS_TEST_DIRNAME/helpers/quoted_not_found.py" "$BATS_TEST_DIRNAME/../Sources/ContactsKit"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "^OK: 0 unquoted not-found identifiers"
+}
