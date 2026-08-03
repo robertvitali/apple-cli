@@ -12,6 +12,46 @@ with the Apple MCP servers they replace.
 
 ## [Unreleased]
 
+### Fixed — `notes append` silently corrupted note bodies and could not prepend
+
+`append-to-note` is an oracle tool that this port shipped without three of its parameters. The
+tempting explanation — that the docs mislabelled it "an apple-cli extra (MCP lacks)" — is wrong:
+that note was accurate when written, because `append-to-note` did not exist in the pinned oracle
+version (2.5.12, 34 tools) and only arrived in the installed one (2.6.12, 36 tools). Nothing
+checks a spec's pinned oracle version against what is actually installed, on any of the six
+domains. Four defects followed:
+
+- **`--position` was absent entirely**, so prepending was impossible. The oracle has
+  `position: enum(["after","before"]).default("after")`.
+- **`--separator` was absent AND no separator was inserted at all** — appended content was
+  concatenated straight onto the previous body with nothing between. The oracle has
+  `separator: string().max(20).default("\n\n")`.
+- **No title-div split.** Notes stores a note's title as the body's first `<div>`. The oracle
+  splits at the first `</div>` and always re-emits that div first; without it a prepend would
+  have overwritten the note's title.
+- **Plaintext was not escaped for `<`/`>`.** The old path reused `updateEscape`, which escapes
+  `&` and newlines but passes `<`/`>` through, so `--content "<b>x</b>"` was injected as live
+  HTML instead of appearing literally. Multi-line plaintext was also emitted as ONE `<div>`
+  where the oracle emits one per line.
+
+Review then found the first fix incomplete in three more places, all one root cause: Swift's
+default string APIs work on grapheme clusters with canonical equivalence, while the oracle's work
+on UTF-16 code units. `split(separator: "\n")` never breaks `\r\n` (one Character in Swift), so
+CRLF content still collapsed into a single `<div>`; `range(of: "</div>")` slid the title-div
+boundary past a combining mark, so `--position before` could overwrite the note's *title*; and
+`replacingOccurrences` left `&`/`<`/`>` unescaped when followed by a combining mark. All now use
+scalar splitting and `options: .literal`, verified at 0 divergences across a 3,528-case corpus
+generated from the oracle itself.
+
+Also restored the oracle's `content` minimum (`.min(1, "Content to append is required")`) —
+`--content ""` was silently accepted — and its `separator` maximum of 20, measured in UTF-16
+code units to match zod's `.max()`.
+
+A separator beginning with `-` needs the equals form (`--separator=---`); the space form parses
+as an option. The whole value domain stays reachable, same convention the spec already records
+for `--limit=-1`.
+
+
 ### Fixed — Contacts rejected a parameter the oracle accepts on every write op
 
 `apple-contacts-mcp` takes `group_identifier` on all eleven of its `DESTRUCTIVE_OPERATIONS`

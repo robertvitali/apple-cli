@@ -44,6 +44,64 @@ enum NotesText {
         return s
     }
 
+    // MARK: append-to-note assembly (oracle: build/index.js `append-to-note`, 2.6.12)
+
+    /// Oracle `contentToHtml`. NOT `updateEscape`: the oracle escapes `&`, `<` and `>` and splits
+    /// on newlines into one `<div>` per line (`<br>` for an empty line), where `updateEscape`
+    /// leaves `<`/`>` intact and turns `\n` into a bare `<br>`. Reusing `updateEscape` here would
+    /// inject caller plaintext as live HTML — `--content "<b>x</b>"` would render bold.
+    static func appendContentToHtml(_ text: String, html: Bool) -> String {
+        if html { return text }
+        // Split on SCALARS, and escape with .literal. Both are the same lesson: JS operates on
+        // UTF-16 code units, Swift's defaults on grapheme clusters with canonical equivalence.
+        // "\r\n" is ONE Character, so a Character split never breaks a CRLF pair the oracle does
+        // break; and `&` followed by a combining mark is not the grapheme `&`, so a default
+        // replacingOccurrences leaves it unescaped where JS .replace(/&/g) does not.
+        return text.unicodeScalars.split(separator: "\n", omittingEmptySubsequences: false).map { line in
+            let escaped = String(String.UnicodeScalarView(line))
+                .replacingOccurrences(of: "&", with: "&amp;", options: .literal)
+                .replacingOccurrences(of: "<", with: "&lt;", options: .literal)
+                .replacingOccurrences(of: ">", with: "&gt;", options: .literal)
+            return "<div>\(escaped.isEmpty ? "<br>" : escaped)</div>"
+        }.joined()
+    }
+
+    /// Oracle `separatorToHtml`. The default "\n\n" is special-cased to a single blank line
+    /// rather than going through the per-line path (which would yield two empty divs).
+    static func appendSeparatorToHtml(_ sep: String, html: Bool) -> String {
+        if html { return sep }
+        if sep == "\n\n" { return "<div><br></div>" }
+        let escaped = sep
+            .replacingOccurrences(of: "&", with: "&amp;", options: .literal)
+            .replacingOccurrences(of: "<", with: "&lt;", options: .literal)
+            .replacingOccurrences(of: ">", with: "&gt;", options: .literal)
+        return "<div>\(escaped)</div>"
+    }
+
+    /// Oracle body assembly. Notes stores the title as the note's FIRST `<div>`, so a prepend has
+    /// to land after it — otherwise "before" silently rewrites the note's title. Splitting on the
+    /// first `</div>` is the oracle's own rule; when there is none the whole body is treated as
+    /// body with an empty title div, which is what the oracle does too.
+    static func assembleAppend(existingHtml: String, content: String, separator: String,
+                               prepend: Bool, html: Bool) -> String {
+        let marker = "</div>"
+        let titleDiv: String, bodyHtml: String
+        // .literal is load-bearing: without it a combining mark / ZWJ / VS16 immediately after
+        // the first `</div>` forms one grapheme with the `>`, the match slides to a LATER
+        // `</div>`, and a --position before then overwrites the note's real title.
+        if let r = existingHtml.range(of: marker, options: .literal) {
+            titleDiv = String(existingHtml[existingHtml.startIndex..<r.upperBound])
+            bodyHtml = String(existingHtml[r.upperBound...])
+        } else {
+            titleDiv = ""
+            bodyHtml = existingHtml
+        }
+        let newBlock = appendContentToHtml(content, html: html)
+        let sepHtml = appendSeparatorToHtml(separator, html: html)
+        return prepend ? titleDiv + newBlock + sepHtml + bodyHtml
+                       : titleDiv + bodyHtml + sepHtml + newBlock
+    }
+
     /// Full create-note body: `<h1>title</h1>` + (html→raw | plaintext→escaped). The title is
     /// ALWAYS prepended, even in html format (matches the reference).
     static func createNoteBody(title: String, content: String, html: Bool) -> String {

@@ -333,3 +333,25 @@ assert_no_folder_named() {
 }'
   [ "$output" = "$expected" ]
 }
+
+@test "append --position rejects anything but after|before (NOTES-H4)" {
+  # Oracle: position is enum(["after","before"]).default("after"). Resolves before the
+  # authorization gate, so this needs no Notes TCC.
+  run "$BIN" notes append --id X --content x --position bogus --dry-run
+  echo "$output" | grep -q '"type" : "validation_error"'
+  echo "$output" | grep -q 'Expected after|before'
+  run "$BIN" notes append --id X --content x --position before --dry-run
+  [ "$status" -eq 0 ]; echo "$output" | grep -q '"ok" : true'
+  echo "$output" | grep -q 'prepend before'
+}
+
+@test "append rejects empty content and an over-long separator (NOTES-H4)" {
+  # Oracle: content .min(1, "Content to append is required"); separator .max(20).
+  run "$BIN" notes append --id X --content "" --dry-run
+  echo "$output" | grep -q 'Content to append is required'
+  run "$BIN" notes append --id X --content x --separator "123456789012345678901" --dry-run
+  echo "$output" | grep -q 'Separator exceeds maximum length of 20'
+  # 20 exactly is allowed — the bound is inclusive, so an off-by-one turns this red.
+  run "$BIN" notes append --id X --content x --separator "12345678901234567890" --dry-run
+  [ "$status" -eq 0 ]
+}

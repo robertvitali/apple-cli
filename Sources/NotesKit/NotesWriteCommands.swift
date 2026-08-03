@@ -156,39 +156,68 @@ struct UpdateCmd: ParsableCommand {
 // MARK: append (curated extra — non-replace edit)
 
 struct AppendCmd: ParsableCommand {
+    /// Oracle: position is enum(["after","before"]).default("after"). Anything else is a
+    /// validation error, not a silent fallback to "after".
+    static func validatePosition(_ p: String) throws -> Bool {
+        switch p {
+        case "after": return false
+        case "before": return true
+        default: throw AppleError.validation("Invalid position \"\(p)\". Expected after|before.")
+        }
+    }
+
     static let configuration = CommandConfiguration(commandName: "append",
-        abstract: "Append to a note WITHOUT replacing its body, apple-cli extra (EXECUTES; --dry-run previews).")
+        abstract: """
+            Add to a note's body without replacing it. → append-to-note (EXECUTES; --dry-run previews).
+            Safety: reads the existing body, concatenates, then writes the WHOLE body back; that rewrite can drop embedded attachments, so run `notes attachments list` first if unsure.
+            """)
     @OptionGroup var global: GlobalOptions
     @Option(name: .long, help: "Note id (preferred).") var id: String?
     @Option(name: .long, help: "Note title.") var title: String?
     @Option(name: .long, help: "Content to append.") var content: String
     @Option(name: .long, help: "Content format: plaintext|html.") var format: String = "plaintext"
+    @Option(name: .long, help: "Where to insert: after (default) appends, before prepends.")
+    var position: String = "after"
+    @Option(name: .long, help: "String placed between existing and new content (default: two newlines).")
+    var separator: String = "\n\n"
     @Option(name: .long, help: "Account (title path only).") var account: String?
 
     func run() throws {
         try runGuarded(tool: notesTool) {
             let html = try validateFormat(format)
+            let prepend = try Self.validatePosition(position)
+            // The oracle declares content as .min(1, "Content to append is required");
+            // validateBounds only checks the max, so "" was silently accepted here.
+            if content.isEmpty { throw AppleError.validation("Content to append is required.") }
+            // zod .max(20) measures JS string length — UTF-16 code units, not graphemes.
+            if separator.utf16.count > 20 {
+                throw AppleError.validation("Separator exceeds maximum length of 20 characters.")
+            }
             try validateBounds(content: content, account: account)
             let selector = try requireIdOrTitle(id: id, title: title)
             let gate = try resolveNotesWrite(global)
             let undisclosed = try applyArgvSelectorGuard(selector, sandboxActive: gate.sandboxActive)
             guard gate.willExecute else {
                 let extra = undisclosed ? sandboxTargetUncheckedDetail() : ""
-                try emitNotesWrite(DryRunPreview("append", "Would append content to the target note (existing body preserved). Re-run without --dry-run.\(extra)"),
+                // Disclose position + separator: a preview that says only "would append" cannot
+                // tell the caller that --position before is about to PREPEND instead.
+                let where_ = prepend ? "prepend before" : "append after"
+                let sepDesc = separator == "\n\n" ? "a blank line" : "\"\(separator)\""
+                try emitNotesWrite(DryRunPreview("append", "Would \(where_) the existing body, separated by \(sepDesc). This rewrites the WHOLE body, which can drop embedded attachments — run `notes attachments list` first if unsure. Re-run without --dry-run.\(extra)"),
                                    json: global.json, sandboxActive: gate.sandboxActive,
                                    human: "[dry-run] would append.")
                 return
             }
             let script = NotesScript()
-            // Fragment appended: raw HTML in html mode, else escaped in a <div>.
-            let appendFragment = html ? content : "<div>\(NotesText.updateEscape(content))</div>"
             switch selector {
             case .id(let noteId):
                 guard let note = try script.getNoteById(id: noteId) else { throw AppleError.notFound("Note with id \"\(noteId)\" not found.") }
                 if note.passwordProtected { throw AppleError.validation("Note is password-protected. Unlock it in Notes.app first.") }
                 try guardLiveWrite(labeledName: note.title, sandboxActive: gate.sandboxActive)
                 let current = try script.getNoteContentById(id: noteId)
-                try script.updateNoteById(id: noteId, newTitle: nil, newContent: current + appendFragment, html: true)
+                let combined = NotesText.assembleAppend(existingHtml: current, content: content,
+                                                        separator: separator, prepend: prepend, html: html)
+                try script.updateNoteById(id: noteId, newTitle: nil, newContent: combined, html: true)
                 try emitNotesWrite(UpdatedNote(ok: true, id: noteId, title: note.title, shared: note.shared),
                               json: global.json, sandboxActive: gate.sandboxActive,
                               human: "Appended to \"\(note.title)\".")
@@ -197,7 +226,9 @@ struct AppendCmd: ParsableCommand {
                 if note.passwordProtected { throw AppleError.validation("Note is password-protected. Unlock it in Notes.app first.") }
                 try guardLiveWrite(labeledName: noteTitle, sandboxActive: gate.sandboxActive)
                 let current = try script.getNoteContent(title: noteTitle, account: account)
-                try script.updateNote(title: noteTitle, newTitle: nil, newContent: current + appendFragment, account: account, html: true)
+                let combined = NotesText.assembleAppend(existingHtml: current, content: content,
+                                                        separator: separator, prepend: prepend, html: html)
+                try script.updateNote(title: noteTitle, newTitle: nil, newContent: combined, account: account, html: true)
                 try emitNotesWrite(UpdatedNote(ok: true, id: nil, title: noteTitle, shared: note.shared),
                               json: global.json, sandboxActive: gate.sandboxActive,
                               human: "Appended to \"\(noteTitle)\".")

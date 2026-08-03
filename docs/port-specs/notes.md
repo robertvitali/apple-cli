@@ -40,6 +40,7 @@ Class tags: **C**=CORE (read/write data), **D**=DERIVED (convenience/aggregate o
 |---|---|---|---|---|
 | 1 | create-note | C | `title`, `content`, `format`(plaintext\|html), `tags[]`, `folder`(nested `A/B`), `account` | Make note, title as `<h1>`; returns `{ok,id,title,folder,account}`. `tags` echo-only. Nested folder path auto-target. |
 | 2 | update-note | C | `id`\|`title`, `newTitle?`, `newContent`, `format`, `account` | **Replaces** entire body (not append). Warns if shared. Password-protected → refused. |
+| 2b | append-to-note | C | `id`\|`title`, `content`(min 1), `position`(after\|before, def. after), `separator`(max 20, def. `\n\n`), `format`, `account` | Adds to the body WITHOUT replacing it. Splits the existing HTML at the first `</div>` so the note's title div always stays first — a `before` that skipped this would rewrite the title. Plaintext content is escaped (`&<>`) and split into one `<div>` per line; the default `\n\n` separator renders as `<div><br></div>`. In `html` format content AND separator pass through raw. Returns `{ok,id,title,shared}`. |
 | 3 | delete-note | C | `id`\|`title`, `account` | Permanent delete of one note; warns if was shared. Returns `{ok,id,title,wasShared}`. |
 | 4 | move-note | C | `id`\|`title`, `folder`, `account` | Native move preserving id/created/attachments. Dest folder must exist. |
 | 5 | get-note-content | C | `id`\|`title`, `account` | Full **HTML** body + parsed `hashtags[]`. Caps huge inline base64 images. Password → refused. |
@@ -84,7 +85,7 @@ Also ships **MCP resources + prompts** (`registerResourcesAndPrompts`) and env c
 ### 2a. Piesson/apple-notes-cli — Shell, **0★**, 2 commits, last push 2026-01-07, effectively abandoned
 Single `notes-cli` bash script + `lib/{core,styling,utils}.sh` (~1.1k lines). AppleScript `body of theNote`.
 **Commands:** `list [--folder]`, `get <title> [--html]`, `create <title> <content> [styling]`, `update <title> <content>`, `append <title> <content>`, `delete <title>`, `search <keyword>`, folder list/create, `move`. Rich-text styling flags (`--bold/--italic/--color/--size/--highlight/--html`).
-**Absent:** attachments (any), accounts, by-id addressing, markdown, JSON export, batch, checklist-state, metadata, sync, selection, stats, doctor, shared-notes, default-location, show-in-UI, delete-folder. Title-only addressing (no CoreData ids). Has an `append` extra (MCP lacks). A `create_checklist_item` helper only emits HTML that won't render as a real checklist (same AppleScript wall).
+**Absent:** attachments (any), accounts, by-id addressing, markdown, JSON export, batch, checklist-state, metadata, sync, selection, stats, doctor, shared-notes, default-location, show-in-UI, delete-folder. Title-only addressing (no CoreData ids). Has an `append` extra (MCP lacks). *(true at 2.5.12; the installed oracle 2.6.12 ADDED `append-to-note`, so this is stale — NOTES-M10)* A `create_checklist_item` helper only emits HTML that won't render as a real checklist (same AppleScript wall).
 
 ### 2b. xwmx/notes-app-cli — Shell, **83★**, last push 2025-09-16 (~10 mo stale), mature but dormant
 Single 3.3k-line `notes-app` script. Homebrew-installable. Uses `id`/normalized selectors.
@@ -170,14 +171,14 @@ Beyond the checklist: **no candidate emits stable structured JSON output** (the 
 ## 5. Extras Inventory (capabilities beyond the MCP worth folding into the build)
 
 From the candidates:
-- **Piesson:** `append <title> <content>` (add to a note without full-body replace — MCP only replaces); inline rich-text styling flags (`--bold/--italic/--color/--size/--highlight`) as ergonomic sugar over HTML.
+- **Piesson:** `append <title> <content>` (add to a note without full-body replace — MCP only replaces at 2.5.12; 2.6.12 ships `append-to-note`); inline rich-text styling flags (`--bold/--italic/--color/--size/--highlight`) as ergonomic sugar over HTML.
 - **xwmx:** `edit` opens the note in `$EDITOR` (interactive round-trip); `--properties` selector to project arbitrary AppleScript properties; explicit `sync` **trigger** (vs. the MCP's read-only status); `count` as a cheap cardinality op.
 - **memo:** HTML→Markdown converter with image-placeholder preservation (`[MEMO_IMG_N]`) enabling non-destructive edit of image notes; fuzzy search; optional **Reminders** coverage (adjacent domain — out of scope here but note the shared AppleScript plumbing).
 - **kzaremski/pRizz:** batched whole-library export to **multiple formats** (PDF/HTML/MD/TXT) preserving folder tree — a richer `export` than the MCP's JSON-only.
 
 From `apple-notes-mcp` itself (already-built extras to preserve): env/file config fallback, inline-image capping, sync-awareness wrappers on reads, partial-coverage diagnostics in stats, MCP resources/prompts.
 
-**Curated extras to fold into the port:** `append` (non-replace edit), an `--editor` interactive edit mode, richer multi-format `export` (json **+** md/txt/pdf), and a `sync --trigger` companion to `sync-status`.
+**Curated extras to fold into the port:** ~~`append`~~ (NOT an extra — `append-to-note` exists in oracle 2.6.12; ported to parity as NOTES-H4), an `--editor` interactive edit mode, richer multi-format `export` (json **+** md/txt/pdf), and a `sync --trigger` companion to `sync-status`.
 
 ---
 
@@ -196,7 +197,7 @@ From `apple-notes-mcp` itself (already-built extras to preserve): env/file confi
 - Batch: `batch-delete` (`--ids`), `batch-move` (`--ids --folder`).
 - Bulk/diag: `export` (json **+ curated** md/txt), `stats`, `sync-status`, `health`, `doctor`.
 - Reveal-in-UI: `show-note`, `show-folder`, `show-account`.
-- **Curated extras:** `append`, `edit --editor`, `sync --trigger`, multi-format `export`.
+- **Curated extras:** `edit --editor`, `sync --trigger`, multi-format `export`. (`append` was listed here as an extra; it is an oracle tool at 2.6.12 — NOTES-H4.)
 
 Ship a thin **MCP-server mode** (`apple-notes mcp`) wrapping the same core so all three CLIs (Claude Code, Codex, agy) get identical behavior from one source — the fleet's cross-CLI-parity north star.
 
@@ -224,7 +225,7 @@ FDA/Automation permissions and the signed-binary/TCC-stability story are **opera
 
 ## 8. Swift port — implementation notes + deviations (as built)
 
-Implemented in `Sources/NotesKit/` as `apple notes <subcommand>` — all 34 MCP tools mapped (see the mapping in `NotesCommand.swift`), plus the `append` extra and multi-format `export`. The AppleScript templates, protobuf/gzip/checklist decoder, metadata/sync SQLite queries, and attachment guards are ported from MIT `apple-notes-mcp@2.5.12`.
+Implemented in `Sources/NotesKit/` as `apple notes <subcommand>` — mapped against the INSTALLED oracle, **2.6.12**, which registers 36 tools (this spec was originally written against 2.5.12 and still carries stale counts elsewhere — tracked as NOTES-M10). `append` is NOT an apple-cli extra TODAY, though it was not a mislabel when written: `append-to-note` did not exist at 2.5.12 (34 tools, zero hits) and arrived in 2.6.12, so the older "MCP lacks" note was correct and went stale. The port therefore shipped it without `position`/`separator` (NOTES-H4). **Root cause is the missing pin-vs-installed drift check, not the doc string** — the reconciliation found H4 with the stale label still in place. `get-note-link` is the remaining unmapped oracle tool (NOTES-H1). See the mapping in `NotesCommand.swift`; multi-format `export` IS a genuine apple-cli extra. The AppleScript templates, protobuf/gzip/checklist decoder, metadata/sync SQLite queries, and attachment guards are ported from MIT `apple-notes-mcp@2.5.12`.
 
 ### Naming — camelCase → snake_case (deliberate, information-preserving)
 The MCP emits camelCase keys; apple-cli emits snake_case per `docs/DESIGN.md` ("name payload fields in snake_case"). The map is 1:1: `passwordProtected→password_protected`, `hasChecklist→has_checklist`, `hasChecklistInProgress→has_checklist_in_progress`, `wasShared→was_shared`, `savedPath→saved_path`, `contentType→content_type`, `secondsSinceLastChange→seconds_since_last_change`, `totalNotes→total_notes`, `last24h→last_24h`, `widgetSnippet→widget_snippet`, `smartFolderQuery→smart_folder_query`, etc. Every field's *information* is preserved.
