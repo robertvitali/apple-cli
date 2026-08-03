@@ -12,6 +12,37 @@ with the Apple MCP servers they replace.
 
 ## [Unreleased]
 
+### Fixed — a signalled run stranded a snapshot of the operator's mail on disk
+
+`atexit` does not run when a process dies of a signal, so Ctrl-C during a slow read — the most
+likely abnormal exit this tool will ever see — left the whole session directory behind, holding
+copies of the operator's mail and messages at 0600, until some later run's liveness sweep reaped
+it. Measured before the fix: SIGTERM exit 143, SIGHUP 129, SIGQUIT 131, one directory stranded
+each time.
+
+`SIGINT`, `SIGQUIT`, `SIGTERM` and `SIGHUP` now remove it. The handler re-raises with the default
+disposition rather than `_exit`ing, so the shell still sees the conventional 130/131/143/129.
+
+Two things this went through review to get right, both of which had the first version wrong:
+
+- **The handler now touches no Swift variables.** Reading a Swift `Array` static compiles to
+  `swift_beginAccess` plus retain/release that can reach `free()`; none of that is async-signal-safe.
+  Review disassembled the binary and reproduced the consequence — `track`'s append holds a `Modify`
+  access across a `malloc`, so a signal in that window aborted the process at exit 134 *before* any
+  cleanup, stranding the directory anyway. All handler state now lives behind one immutable pointer,
+  verified in both build configurations by disassembly: no exclusivity checks, no refcounting and
+  no allocation, with `unlink`/`rmdir`/`open`/`close`/`signal`/`raise` the only libc calls. (The
+  handler does emit three further branches — two thin Swift overlay shims and the addressor for its
+  one static, whose `swift_once` path is unreachable because arming resolves it first.)
+- **An inherited `SIG_IGN` is left alone.** `nohup` and a POSIX shell's background-job setup hand a
+  child `SIG_IGN` precisely so it survives; installing over it killed `nohup apple …` at 129 where
+  it used to run to completion. Measured 3/3, and pinned by a test.
+
+`SIGKILL`/`SIGSTOP` remain uncatchable, and the fatal-fault signals (`SIGABRT`, `SIGSEGV`, `SIGBUS`,
+`SIGILL`) are declined on purpose — running even this handler on a possibly-corrupt heap is its own
+hazard. Each of those leaves a directory that still has its `.lock`, which is the state the liveness
+reaper collects on the next run.
+
 ### Fixed — snapshots of Apple's live stores were not guaranteed to be coherent
 
 `copyToTemp` snapshots the Envelope Index / chat.db / NoteStore by copying the main database and its
