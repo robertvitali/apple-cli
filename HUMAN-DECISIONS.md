@@ -453,3 +453,61 @@ shipping B and discovering a hang is not.
 then MSG-5 stays open and Q6 is closed on its other two gaps.
 
 ---
+
+## D11 — `schema_version` and a value-changed/shape-unchanged breaking change: the policy contradicts itself
+
+**Status:** OPEN · **Filed:** 2026-08-03 · **Blocks:** nothing (I took the conservative branch and
+documented it; the queue routes around this) · **Severity:** low blast radius today, but it decides
+how every future output-value break is versioned.
+
+### The situation
+
+Q7-L3(a) changes the ERROR envelope's `tool` field from always `"apple"` to the domain named by
+`argv[1]` on pre-dispatch parse failures. The envelope's STRUCTURE is untouched — same keys, same
+types, same nesting. Only the VALUE of one existing field changes, and it changes from a wrong
+value to a right one.
+
+`docs/versioning-policy.md` has two rules for that, and they give opposite answers:
+
+- **`:342-344`** — "`schema_version` is an **integer**, incremented **only** on a breaking output
+  change (i.e. it steps in lockstep with the CLI **MAJOR** for output-affecting MAJORs)."
+  The `:244` table classifies "change status/enum string value" as a `break` in the **JSON output**
+  column → MAJOR. So this IS an output-affecting MAJOR, and under this rule `schema_version` steps.
+- **`:492`** — "if the JSON output changed **shape** incompatibly, bump the integer."
+  The shape did not change, so under this rule it does not step.
+
+`docs/DESIGN.md:33` does not break the tie: "steps only on a breaking output change" is the
+`:342-344` phrasing.
+
+### What I did, and why I am not treating it as settled
+
+I followed `:492` — `schema_version` stays at 1 — and said so explicitly in the CHANGELOG along
+with both citations. The reasoning: `:345` invites agents to "hard-assert `schema_version == N` and
+fail fast/loudly", so stepping it breaks EVERY consumer, including ones that never read `tool`, in
+order to signal a change that only affects consumers routing on `tool`. Not stepping leaves a
+hard-asserting agent unaware of a change that would not have broken it anyway. The conservative
+branch looked like the smaller harm.
+
+I want to be straight that this is a judgement call I made inside a code change, not a policy
+reading that follows. A reviewer caught me stating it as settled — the earlier draft attributed the
+word "SHAPE" to `DESIGN.md:33`, which does not contain it, and did not cite `:342-344` at all. That
+is the failure mode this file exists to prevent: resolving an open policy question silently, inside
+a commit, by paraphrase.
+
+### What I need from you
+
+Which rule governs a value-changed/shape-unchanged break?
+
+- **A** — `:492` wins (shape). `schema_version` tracks STRUCTURE only; value breaks are carried by
+  the MAJOR and the CHANGELOG. I then reword `:342-344` to say "shape" so the two agree. This is
+  what the current commit does.
+- **B** — `:342-344` wins (output). `schema_version` steps to 2 on this change, and in general
+  steps with every output-affecting MAJOR. I then reword `:492` and amend this change.
+- **C** — Something in between: e.g. structure-only for `schema_version`, plus a separate additive
+  `output_revision` (or similar) for value-level breaks, so a hard-asserting agent has something to
+  watch without every value fix breaking it.
+
+Whichever you pick, one of the two policy lines needs editing so this cannot recur — that edit is
+the actual deliverable here, not the choice for this one commit.
+
+---

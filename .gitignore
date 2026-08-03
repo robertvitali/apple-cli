@@ -2,6 +2,11 @@
 .build/
 .swiftpm/
 *.xcodeproj
+# Alternate scratch paths. The CLT and swiftly toolchains cannot share a build cache, so
+# `--scratch-path` is routine here (AGENTS.md "Toolchain + testing"), and red-proofs spawn
+# throwaway ones per mutant. Ignored BY CLASS rather than by enumerating `.build-swiftly/`:
+# three such dirs showed up untracked from one review round alone.
+.build-*/
 
 # OMC runtime / session state (machine-local; never commit)
 .omc/
@@ -35,7 +40,6 @@ PARITY-TEST-MATRIX.md
 MAIL-PARITY-AUDIT-*.json
 __pycache__/
 *.pyc
-.build-swiftly/
 NONMAIL-PARITY-AUDIT-*.json
 MAIL-PARITY-WORKLIST-*.json
 

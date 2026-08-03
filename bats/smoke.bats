@@ -50,6 +50,164 @@ setup() {
   echo "$output" | grep -q '"type" : "validation_error"'
 }
 
+# ── `tool: "<domain>"` on pre-dispatch failures (Q7-L3(a), the cross-domain central fix) ───────
+# AGENTS.md and docs/DESIGN.md both specify `"tool": "<domain>"` on the ERROR envelope with no
+# parse-failure carve-out. The binary previously emitted "apple" for every pre-dispatch failure,
+# so a consumer routing on `tool` was misrouted exactly when something went wrong.
+
+@test "a parse failure under a domain is attributed to that domain, not to apple" {
+  for d in notes mail contacts messages calendar reminders; do
+    local out; out="$("$BIN" "$d" --definitely-not-a-flag 2>/dev/null || true)"
+    # Payload via argv, never spliced into the program text — a value containing a quote would
+    # otherwise break out of the Python string literal. Inert with these constants, but this loop
+    # is one "point it at a name list" away from arbitrary execution in CI.
+    printf '%s' "$out" | python3 -c '
+import sys, json
+d = json.load(sys.stdin)
+want, tool = sys.argv[1], d["tool"]
+assert tool == want, f"{want}: envelope reported tool={tool!r}"
+assert d["ok"] is False and d["error"]["type"] == "validation_error"
+' "$d"
+  done
+}
+
+@test "EVERY registered subcommand spelling attributes its own parse failure (list from the binary)" {
+  # The class-sweep pin. The first version of `toolForParseFailure()` read
+  # `configuration.commandName` through `compactMap`, which silently dropped any subcommand
+  # without an explicit name and ignored `aliases` — review registered two such subcommands and
+  # both DISPATCHED while the envelope said "apple". Fixing the one mechanism I had noticed and
+  # calling the enumeration drift-proof is the same class-sweep failure this repo keeps hitting.
+  #
+  # So this test does NOT hardcode the six domains — it asks the binary. The list comes from
+  # `--experimental-dump-help` (structured JSON) rather than the `--help` TEXT, because scraping
+  # the text is wrong in two ways that review demonstrated against real ArgumentParser 1.8.2:
+  # an aliased subcommand renders as `aliased, al` (HelpGenerator.swift:310-313), so a column
+  # scrape yields the non-existent name `aliased,`; and a `shouldDisplay: false` subcommand is
+  # omitted from the text entirely (HelpGenerator.swift:308) while still being dispatchable.
+  # The structured dump carries commandName, aliases and shouldDisplay explicitly, so this covers
+  # every registered spelling — which is what "forward pin" has to mean to be worth claiming.
+  local dump names primaries
+  dump="$("$BIN" --experimental-dump-help 2>/dev/null)"
+  names="$(printf '%s' "$dump" | python3 -c '
+import sys, json
+for s in json.load(sys.stdin)["command"].get("subcommands", []):
+    n = s.get("commandName")
+    # `help` is injected by ArgumentParser itself and is NOT in Apple.configuration.subcommands,
+    # so the helper cannot resolve it and `apple help --bogus` reports "apple". That is correct,
+    # not a gap: `help` is not a DOMAIN, and the contract enumerates domains. Asserted separately
+    # below so the exclusion is a checked claim rather than a silent filter.
+    if n and n != "help":
+        print(n)
+        for a in (s.get("aliases") or []):
+            print(a)
+')"
+  # The PRIMARY names — the closed set `tool` is allowed to take. Same payload, so it cannot
+  # drift from the spellings above.
+  primaries="$(printf '%s' "$dump" | python3 -c '
+import sys, json
+for s in json.load(sys.stdin)["command"].get("subcommands", []):
+    n = s.get("commandName")
+    if n and n != "help":
+        print(n)
+')"
+  [ -n "$names" ]
+  [ -n "$primaries" ]
+  [ "$(printf '%s\n' "$names" | wc -l | tr -d ' ')" -ge 7 ]   # control: we actually parsed a list
+  # `while read` rather than `for name in $names` — a commandName or alias containing whitespace
+  # or a glob character would otherwise mis-iterate.
+  while IFS= read -r name; do
+    [ -n "$name" ] || continue
+    local out; out="$("$BIN" "$name" --definitely-not-a-flag 2>/dev/null || true)"
+    printf '%s' "$out" | python3 -c '
+import sys, json
+d = json.load(sys.stdin)
+spelling, primaries = sys.argv[1], set(sys.argv[2].split())
+tool = d["tool"]
+# MEMBERSHIP, not merely "not apple". The previous version asserted `tool != "apple"` under a
+# comment claiming it checked for a registered primary name — a comment asserting a check the code
+# did not perform. Review exploited exactly that gap: a caller that used the pinned helper only as
+# a GATE and emitted raw argv made `apple ver --bogus` report tool="ver" (an ALIAS, absent from the
+# domain enum) while this test and the source lint both stayed green.
+assert d["ok"] is False, f"{spelling}: expected ok=false"
+assert tool in primaries, \
+    f"{spelling}: tool={tool!r} is not a registered primary name (expected one of {sorted(primaries)})"
+' "$name" "$primaries"
+  done <<< "$names"
+
+  # The `help` exclusion above, asserted rather than assumed.
+  run "$BIN" help --definitely-not-a-flag
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q '"tool" : "apple"'
+}
+
+@test "an argv[1] that names no subcommand stays apple and is never echoed into the envelope" {
+  # The value lands on the stdout MACHINE channel, so it is matched against the registered
+  # subcommand names — never reflected. Path-traversal and injection-shaped argv must not appear.
+  for bad in nosuchdomain ../../etc/passwd 'x";DROP TABLE t;--' '$(whoami)' '--nonexistent-flag'; do
+    local out; out="$("$BIN" "$bad" 2>/dev/null || true)"
+    # Both assertions run INSIDE python, with the payload passed via argv rather than
+    # interpolated into the script — the same rule AppleScriptRunner enforces for user text.
+    # Interpolating it here would break the script on a payload containing a quote, which is
+    # precisely the shape of one of the payloads above.
+    printf '%s' "$out" | python3 -c '
+import sys, json
+bad = sys.argv[1]
+raw = sys.stdin.read()
+d = json.loads(raw)
+tool = d["tool"]
+assert tool == "apple", f"tool={tool!r} for argv[1]={bad!r}"
+
+# The echo check runs over DECODED values, not the raw text. The previous version grepped the raw
+# JSON, which is defeated by escaping: against a deliberately-leaking passthrough build,
+# `../../etc/passwd` and `$(whoami)` are caught but `x";DROP TABLE t;--` is NOT, because JSON
+# renders the quote as \" so the literal payload never appears.
+#
+# Precisely: the GREP LINE was blind for that payload — the TEST was not, because the parsed
+# `tool == "apple"` assertion above it catches a passthrough for every payload (verified: a failing
+# assert in this heredoc shape does exit 1 and does fail the bats test). So this is a weak
+# assertion beside a sound one, not a vacuous test. It still matters, because the grep was the only
+# thing covering fields OTHER than `tool` — a leak into `message` is the realistic one, and that is
+# what the walk below now covers, for every payload regardless of how JSON chose to spell it.
+def walk(v):
+    if isinstance(v, str):  yield v
+    elif isinstance(v, dict):
+        for k, x in v.items():
+            yield k
+            yield from walk(x)
+    elif isinstance(v, list):
+        for x in v: yield from walk(x)
+
+for s in walk(d):
+    assert bad not in s, f"argv[1]={bad!r} leaked into the machine envelope as {s!r}"
+' "$bad"
+  done
+}
+
+@test "a bare invocation prints help and exits 0 — it emits NO envelope" {
+  # This replaces a test that asserted "bare apple stays tool:apple". That was FALSE and the
+  # test could not have caught it: it guarded on grep '"schema_version"' (quoted), but bare
+  # `apple` prints help text where the token appears only UNQUOTED, so the body never ran and
+  # the test passed in both the fixed and the reverted build. Assert what actually happens.
+  # Capture the two streams SEPARATELY. bats' `run` merges stdout and stderr into `$output`
+  # (measured: a process printing STDOUT_TOKEN and STDERR_TOKEN yields
+  # `output=[STDOUT_TOKENSTDERR_TOKEN]`), so asserting "does not parse as JSON" over `$output`
+  # actually asserts it over the CONCATENATION. That is weaker than the stated property and would
+  # go vacuous under Q27 resolution (c) — moving help to stderr — which is precisely the open
+  # question this test exists to pin. A test that stops testing when its own tracked question is
+  # resolved is not a pin.
+  local out err
+  local errf; errf="$(mktemp)"
+  out="$("$BIN" 2>"$errf")"; local st=$?
+  err="$(cat "$errf")"; rm -f "$errf"
+  [ "$st" -eq 0 ]
+  printf '%s' "$out" | grep -q "SUBCOMMANDS:"
+  # STDOUT specifically must not parse as an envelope.
+  ! printf '%s' "$out" | python3 -c 'import sys,json; json.load(sys.stdin)' 2>/dev/null
+  # and pin the 0-bytes-on-stderr fact Q27 measured, so resolution (c) has to update this test
+  # deliberately rather than silently satisfying it.
+  [ -z "$err" ]
+}
+
 @test "parse error emits EXACTLY ONE envelope on stdout (no double-emit regression)" {
   # The double-emit bug printed two envelopes and clobbered the exit code (77/65 → 64).
   # Capture stdout ONLY, count envelopes, and require a single valid JSON object.
@@ -64,12 +222,35 @@ setup() {
   # a parse error whose ArgumentParser message echoes the token. The token must NOT land on
   # stdout (the agent-captured channel); the generic message must, with detail on stderr.
   local out
-  out="$("$BIN" version SENTINEL_SECRET_XYZ 2>/tmp/apple_perr.$$ || true)"
-  ! echo "$out" | grep -q "SENTINEL_SECRET_XYZ"        # generic on stdout
-  echo "$out" | grep -q '"tool" : "apple"'
+  local perr; perr="$(mktemp)"
+  out="$("$BIN" version SENTINEL_SECRET_XYZ 2>"$perr" || true)"
+  # Assert over PARSED values, not raw bytes. A raw grep is only as strong as the payload's
+  # transparency through JSON: this one survives solely because SENTINEL_SECRET_XYZ is [A-Z_] and
+  # therefore encodes unchanged. One payload containing a quote, backslash or control character
+  # and the assertion would pass against a leaking build — which is exactly what happened to the
+  # sibling assertion on the hostile-argv test. This is the check the whole "argv detail must not
+  # reach stdout" property rests on, so it should not depend on a lucky character class.
+  printf '%s' "$out" | python3 -c '
+import sys, json
+bad = sys.argv[1]
+def walk(v):
+    if isinstance(v, str): yield v
+    elif isinstance(v, dict):
+        for k, x in v.items():
+            yield k
+            yield from walk(x)
+    elif isinstance(v, list):
+        for x in v: yield from walk(x)
+for s in walk(json.load(sys.stdin)):
+    assert bad not in s, f"operator argv leaked onto the stdout machine channel as {s!r}"
+' SENTINEL_SECRET_XYZ
+  # `version` IS a registered subcommand, so argv[1] resolves it and the envelope is attributed
+  # to it per the `tool: "<domain>"` contract. This assertion said "apple" until that contract
+  # violation was fixed; the SECURITY property this test exists for is the two greps around it.
+  echo "$out" | grep -q '"tool" : "version"'
   echo "$out" | grep -q 'see stderr for details'
-  grep -q "SENTINEL_SECRET_XYZ" "/tmp/apple_perr.$$"   # detail on stderr
-  rm -f "/tmp/apple_perr.$$"
+  grep -q "SENTINEL_SECRET_XYZ" "$perr"   # detail on stderr
+  rm -f "$perr"
 }
 
 # ── Write-model v2 sweep invariant (docs/write-model-v2.md, rollout step 2) ─────────────────────
@@ -479,4 +660,37 @@ require_no_stale_session_for() {
       "$BATS_TEST_DIRNAME/../docs/port-specs/notes.md"
   [ "$status" -eq 0 ]
   echo "$output" | grep -q "^OK: "
+}
+
+# The subcommand-attribution test above is a FORWARD pin: it derives its list from
+# `--experimental-dump-help`, so a new subcommand is covered automatically whichever mechanism
+# named it — including an alias or a `shouldDisplay: false` entry, neither of which the `--help`
+# TEXT renders in a scrapable form (see that test's own comment for the two failure modes). It cannot, however, fail
+# on a REVERT — every subcommand registered today sets `commandName` explicitly and none declares
+# an alias, so the buggy `compactMap { $0.configuration.commandName }` spelling is behaviourally
+# identical right now. The bug it shipped (subcommands that dispatch while the envelope says
+# "apple") is latent until someone adds a subcommand that leans on either of the other two naming
+# mechanisms. A latent regression no runtime test can reach is exactly what a source lint is for —
+# same situation, same remedy, as `quoted_not_found.py`.
+#
+# `--require-upstream` also pins the ASSUMPTION, not just our source: it asserts ArgumentParser's
+# own matcher still dispatches on exactly the arms the allowlist unions, so a dependency bump that
+# adds a third naming mechanism fails here instead of silently reintroducing the original bug in a
+# file nobody edited. bats always runs post-build, so the checkout is present and its absence is a
+# violation rather than a skip.
+@test "lint: the parse-failure allowlist unions every arm ArgumentParser matches on" {
+  # --upstream-root binds the lint's subject to the SAME scratch tree this suite built `BIN` from.
+  # Without it the lint discovered a checkout by globbing `.build*`, and since `-` sorts before
+  # `/`, any throwaway `.build-<label>/` outranked the real `.build/` — the subject actually
+  # changed mid-review when a sibling process created one. A stale tree that still matches masks a
+  # real dependency bump; an unrelated one red-flags a correct repo.
+  run python3 "$BATS_TEST_DIRNAME/helpers/subcommand_allowlist.py" --require-upstream \
+      --upstream-root "$(swift build --show-bin-path)/../.." \
+      "$BATS_TEST_DIRNAME/../Sources/apple/Apple.swift"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "^OK: "
+  # the upstream check must have actually RUN, not been skipped into a pass
+  ! echo "$output" | grep -q "^NOTE: skipping upstream-assumption check"
+  # and it must name the tree it checked, so a silent retarget is visible in the log
+  echo "$output" | grep -q "matcher agrees in: .*swift-argument-parser"
 }

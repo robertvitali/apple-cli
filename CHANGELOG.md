@@ -12,6 +12,92 @@ with the Apple MCP servers they replace.
 
 ## [Unreleased]
 
+### BREAKING — a pre-dispatch parse failure is now attributed to its domain, not to `apple`
+
+**Why BREAKING and not Fixed.** `docs/versioning-policy.md:229` makes the test explicit: correcting
+a wrong output value is only a PATCH when *no reasonable agent could have depended on the broken
+value* — "if any agent might parse the old value, it's MAJOR, not PATCH", and the `:244` table lists
+"change status/enum string value" as MAJOR. The consumer note below asserts that agents may indeed
+have keyed on `tool == "apple"`, which is that trigger, so filing this under `### Fixed` would have
+contradicted its own body. Repo precedent: `### BREAKING — not-found now exits 65 (was 69)` cites
+the same policy.
+
+**`schema_version` is NOT stepped, and the policy does not cleanly say whether it should.** Two
+rules in `docs/versioning-policy.md` disagree for this exact case — a field's VALUE changed while
+the envelope's SHAPE did not:
+
+- `:342-344` — "`schema_version` is an **integer**, incremented **only** on a breaking output
+  change (i.e. it steps in lockstep with the CLI **MAJOR** for output-affecting MAJORs)." By the
+  `:244` row cited above, this change's `break` sits in the JSON-output column, so under this rule
+  it steps.
+- `:492` — "if the JSON output changed shape **incompatibly**, bump the integer." The shape is
+  unchanged, so under this rule it does not.
+
+This entry follows `:492`. The reason is `:345` — "Agents can hard-assert `schema_version == N` and
+fail fast/loudly" — which cuts both ways: stepping the integer breaks every such assert, including
+for agents that never read `tool` at all, to signal a change in one field's value; not stepping
+leaves an agent that hard-asserts unaware. Breaking every consumer to signal a change that affects
+only consumers routing on `tool` is the larger harm, and those consumers are addressed directly in
+the note below.
+
+An earlier draft of this paragraph cited `docs/DESIGN.md:33` for the word "SHAPE". That line does
+not contain it — it reads "steps only on a breaking output change", which is the `:342-344` rule,
+i.e. the one arguing the other way. The conflict is real and is filed as `HUMAN-DECISIONS.md` D11
+rather than settled here by paraphrase.
+
+`AGENTS.md` and `docs/DESIGN.md` both specify `"tool": "<domain>"` on the ERROR envelope as well
+as the ok envelope, with no parse-failure carve-out. The binary emitted `"tool": "apple"` for
+every failure that happened before a subcommand resolved, so `apple notes --bogus` reported
+`"apple"` — a consumer routing on `tool` was misrouted at exactly the moment something went
+wrong, uniformly across all six domains.
+
+`argv[1]` names the intended domain even when the parse failed, so it now resolves the envelope's
+`tool`. **The value is matched against the registered subcommand names and never echoed**, because
+it lands on the stdout machine channel — the same reason the detailed message is confined to
+stderr. An unknown `argv[1]` (`apple --bogus`, `apple nosuchdomain`) still reports `"apple"`, which
+is the honest answer when no domain resolved. A BARE `apple` emits no envelope at all: it prints
+help to stdout and exits 0, which is pre-existing behaviour this change did not touch and is
+tracked separately as its own contract question (help text on the stdout machine channel).
+
+The same resolution applies to the non-parse `internal error` path (exit 70), not only to
+validation failures (exit 64) — both `Output.emitError` call sites in `main()` were changed
+identically.
+
+Resolution covers all three ways ArgumentParser lets a subcommand be named — `_commandName`
+(which derives a snake-cased type name when `commandName` is nil) plus each declared alias —
+because an earlier version read `configuration.commandName` alone and silently dropped any
+subcommand that did not set one. The lookup resolves to the SUBCOMMAND and emits its primary
+name, so every spelling maps to the one domain name the contract enumerates: an intermediate
+version flattened the names into one list and returned the matched spelling, which emitted
+`"tool": "<alias>"` for an alias invocation — a value absent from the domain enum, i.e. the same
+wrong-routing-key defect reached by a different spelling.
+
+Both of those misses are latent, not live: every subcommand registered today sets `commandName`
+explicitly and none declares an alias. Since no runtime test can reach either,
+`bats/helpers/subcommand_allowlist.py` pins the helper's body against the one correct
+implementation — an exact match modulo comments and whitespace, rather than a list of forbidden
+spellings, because the set of wrong spellings is unbounded while the set of right ones is one. It
+separately pins ArgumentParser's own matcher, so a dependency bump that changes how subcommands are
+named fails there instead of silently re-breaking attribution in a file nobody edited. Note the
+lint covers the HELPER, not the two call sites that consume it; reverting those is caught by the
+behavioural tests instead, so the two halves of the change have disjoint coverage.
+
+`_commandName` is `public` but underscore-prefixed — SPI, not a stability guarantee — so the
+`Package.resolved` pin on swift-argument-parser is load-bearing here rather than incidental.
+
+**Behaviour changes for consumers:**
+
+- Anything keying on `tool == "apple"` to detect a usage error should key on
+  `error.type == "validation_error"` and exit code 64 instead.
+- `tool` no longer distinguishes a PRE-DISPATCH failure from one raised inside a command body —
+  `apple notes --bogus` and a validation error thrown by `notes list` now both report
+  `"tool": "notes"`. Only the message string differs (`invalid arguments (see stderr for details)`
+  vs the command's own text), and message text is not part of the versioned contract, so a
+  consumer that needs that distinction should use exit code and `error.type`.
+
+Closes CONTACTS-L3(a), which was cross-domain rather than contacts-specific.
+
+
 ### Fixed — `notes update --format html` reported a title Notes would never show
 
 Notes derives a note's title from the first rendered line of its body. The oracle mirrors that:

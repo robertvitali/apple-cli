@@ -104,7 +104,8 @@ fan-out (all APPROVE, no P1), with all findings addressed:
 1. **Parse errors now honor the output contract.** ArgumentParser parse failures
    (bad flag, missing arg, unknown subcommand) previously printed plain text to
    stderr with nothing on stdout — violating "stdout = JSON envelope only". They
-   now emit a JSON error envelope (`tool:"apple"`, `validation_error`, exit 64).
+   now emit a JSON error envelope (`validation_error`, exit 64) whose `tool` names
+   the domain from `argv[1]` when it resolves one, else `"apple"` (Q7-L3(a)).
    The human-readable detail (which can echo argv) stays on stderr; the stdout
    envelope carries a **generic** message so an operator-supplied secret can't
    leak onto the agent-captured channel. A latent double-emit bug (the entry

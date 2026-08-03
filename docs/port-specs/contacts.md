@@ -281,13 +281,16 @@ a literal MCP transcription, and why:
 - **Parse-layer input** (e.g. space-form `--limit -1`, missing required args, wrong types)
   emits the human-readable detail on stderr AND a JSON envelope on stdout (exit 64):
   `{"error":{"message":"invalid arguments (see stderr for details)","type":"validation_error"},
-  "ok":false,"schema_version":1,"tool":"apple"}`. The detail stays on stderr because it echoes
-  operator argv; the stdout envelope carries a generic message. **`tool` is `"apple"`, not the
-  domain** — the parse fails before a subcommand resolves (`Sources/apple/Apple.swift:44-46`).
-  That is uniform across all six domains and is a known deviation from AGENTS.md's
-  `tool: "<domain>"` contract, tracked as CONTACTS-L3(a) for a central cross-domain fix; it is
-  NOT contacts-specific. The `--limit=-1` equals-form and all domain-level validation return
-  the envelope with the proper domain `tool` value.
+  "ok":false,"schema_version":1,"tool":"contacts"}`. The detail stays on stderr because it echoes
+  operator argv; the stdout envelope carries a generic message. **`tool` names the DOMAIN**, per
+  AGENTS.md's `tool: "<domain>"` contract — `Apple.toolForParseFailure()` resolves `argv[1]`
+  against the registered subcommand names. This closes CONTACTS-L3(a), which was a genuine
+  cross-domain deviation: the binary previously emitted `"apple"` for every pre-dispatch failure,
+  so a consumer routing on `tool` was misrouted at exactly the moment something went wrong.
+  `argv[1]` is matched against the allowlist and NEVER echoed, because this value lands on the
+  stdout machine channel — an unknown `argv[1]` (`apple --bogus`, `apple nosuchdomain`) stays
+  `"apple"`, which is the honest answer when no domain resolved. A BARE `apple` is not a case of
+  this at all: it prints help to stdout and exits 0, emitting no envelope.
 
 ---
 
