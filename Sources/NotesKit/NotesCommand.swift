@@ -4,7 +4,10 @@ import AppleKit
 
 /// `apple notes …` — Notes.app.
 ///
-/// Ports `apple-notes-mcp` (@ v2.5.12, 34 tools, MIT) to a strict superset. Mechanism:
+/// Ports `apple-notes-mcp` to a strict superset. The spec was written against v2.5.12 (34
+/// tools); the oracle INSTALLED on this fleet is v2.6.12 (36 tools, +append-to-note
+/// +get-note-link), and nothing pins or drift-checks the two — see COMPLETION-LOOP Q20.
+/// MIT. Mechanism:
 /// `AppleScriptRunner` (CRUD/folders/accounts/attachments/export) + `SQLiteReader` over
 /// NoteStore.sqlite (checklist protobuf, metadata, sync-status). Hard parts, all ported:
 /// gzip+protobuf checklist decode, attachments, HTML↔markdown fidelity, dual id/title
@@ -19,6 +22,7 @@ public struct NotesCommand: ParsableCommand {
             // Notes: read
             GetCmd.self, GetPlaintextCmd.self, GetMarkdownCmd.self, GetByIdCmd.self,
             GetDetailsCmd.self, GetMetadataCmd.self, GetChecklistCmd.self,
+            GetNoteLinkCmd.self,
             ListCmd.self, SearchCmd.self, SelectedCmd.self,
             // Notes: write
             CreateCmd.self, UpdateCmd.self, AppendCmd.self, DeleteCmd.self, MoveCmd.self,

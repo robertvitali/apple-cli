@@ -12,6 +12,48 @@ with the Apple MCP servers they replace.
 
 ## [Unreleased]
 
+### Added — `notes get-link`, the last unmapped oracle tool
+
+`get-note-link` had no CLI subcommand at all — the one oracle tool the HEAD reconciliation found
+unmapped. `apple notes get-link --id <id>` (or `--title`) now returns the `notes://showNote?identifier=…`
+deep link, reading `ZIDENTIFIER` straight from `NoteStore.sqlite` and falling back to AppleScript's
+`note link` property on macOS 12–15 — the same order the oracle uses. Verified against the live
+oracle on a purpose-created `apple-cli-test` note: byte-identical on both the id and title paths,
+including the oracle's asymmetry where the title path omits `id`.
+
+Two behaviours worth naming. A malformed id (`--id garbage`) returns the oracle's distinct
+`Invalid note ID format: "…". Expected CoreData URL (x-coredata://...) or temp ID.` rather than
+collapsing into not-found — the oracle runs `sanitizeId` before any lookup, and this repo already
+had the regex ported with no callers outside the batch paths. And an empty `--id` is treated as
+absent, matching the oracle's JS truthiness: `--id "" --title "Real"` resolves by title, where a
+naive `if let` would have failed on the empty id and never tried.
+
+On **macOS 26.5.1 the AppleScript `note link` property no longer exists** (`The variable link is
+not defined. (-2753)`), so the SQLite read is the only path that can succeed there; the fallback
+is retained because the oracle keeps it for macOS 12–15 where it is reachable. Without Full Disk
+Access on macOS 26 the command can only fail, which is why the failure is classified
+`authorization_denied` rather than a generic internal error.
+
+### BREAKING — not-found now exits 65 (was 69) on every AppleScript-backed Notes lookup
+
+AppleScript says `Notes got an error: Can’t get note id "…". (-1728)` with a CURLY apostrophe
+(U+2019). The error mapper tested for the ASCII `can't`, so that branch never fired and real
+not-founds surfaced as `upstream_error` with exit 69 instead of `not_found` with exit 65.
+
+The affected set was MEASURED by building both ways and diffing, not enumerated by inspection —
+an earlier draft of this entry listed six and was wrong. Eight existing commands change exit code:
+`get`, `get-by-id`, `get-details`, `get-markdown`, **`get-plaintext`**, `attachments`, **`list`**
+and `folders` (the two bolded were missing from that draft). The new `get-link` returns 65 from
+the start. Five commands checked and unchanged. The SQLite-backed `get-metadata` returned 65
+correctly the whole time, which is what made the inconsistency visible.
+
+**This is a breaking change under `docs/versioning-policy.md`** ("Reassign or repurpose an exit
+code" is MAJOR; "if any agent might parse the old value, it's MAJOR"). An agent branching on 69
+to mean "note missing" will not match any more — branch on `error.type == "not_found"` or exit 65.
+The mapper now normalises the apostrophe and also matches AppleScript's `-1728` (errAENoSuchObject)
+so a localised Notes.app still classifies correctly. (NOTES-M3)
+
+
 ### Fixed — `notes append` silently corrupted note bodies and could not prepend
 
 `append-to-note` is an oracle tool that this port shipped without three of its parameters. The

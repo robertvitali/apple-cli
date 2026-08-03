@@ -29,6 +29,28 @@ public enum NotesStore {
         return Int(match)
     }
 
+    // MARK: - Note deep link (get-note-link)
+
+    /// Port of the oracle's `getNoteLinkFromDB`: `SELECT ZIDENTIFIER FROM ZICCLOUDSYNCINGOBJECT
+    /// WHERE Z_PK = ?`, wrapped as `notes://showNote?identifier=<uuid>`.
+    ///
+    /// Returns nil — never throws — for every failure the oracle also swallows: an id with no
+    /// trailing `/pNNN`, a missing database (no Full Disk Access), a row with no ZIDENTIFIER,
+    /// or any SQLite error. The oracle logs and returns null there, and the caller falls back to
+    /// AppleScript, so a throw here would turn a recoverable miss into a hard failure.
+    public static func noteLink(noteId: String) -> String? {
+        guard let pk = primaryKey(from: noteId), dbExists else { return nil }
+        do {
+            let reader = try SQLiteReader(path: dbPath, copyToTemp: true)
+            let rows = try reader.query(
+                "SELECT ZIDENTIFIER AS z FROM ZICCLOUDSYNCINGOBJECT WHERE Z_PK = ?1;", [String(pk)])
+            guard let first = rows.first, let ident = first["z"] ?? nil, !ident.isEmpty else { return nil }
+            return "notes://showNote?identifier=\(ident)"
+        } catch {
+            return nil
+        }
+    }
+
     // MARK: - Checklist state (gzip + protobuf)
 
     public struct ChecklistItem: Encodable, Equatable {

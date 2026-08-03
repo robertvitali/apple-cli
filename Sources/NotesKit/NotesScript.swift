@@ -61,7 +61,12 @@ struct NotesScript {
         case .launchFailed(let m):
             return .upstream("osascript launch failed: \(m)")
         case .scriptFailed(_, let stderr):
+            // NOTES-M3: AppleScript emits a CURLY apostrophe — `Notes got an error: Can’t get
+            // note id "…". (-1728)` — so every `can't` / `doesn't` test below silently never fired
+            // and real not-founds were classified upstream_error/69 instead of not_found/65.
+            // Verified by byte-inspection of live stderr: U+2019, never U+0027. Normalise first.
             let s = stderr.lowercased()
+                .replacingOccurrences(of: "\u{2019}", with: "'", options: .literal)
             if s.contains("not authorized") || s.contains("not permitted") || s.contains("access") && s.contains("denied") {
                 return .permissionDenied("Notes automation not authorized. Grant access in System Settings > "
                     + "Privacy & Security > Automation, then retry.")
@@ -72,7 +77,10 @@ struct NotesScript {
             if s.contains("password protected") || s.contains("locked note") {
                 return .validation("Note is password-protected. Unlock it in Notes.app first.")
             }
-            if s.contains("can't get") || s.contains("doesn't exist") || s.contains("not found") {
+            // -1728 is AppleScript's canonical "can't get <specifier>" (errAENoSuchObject), matched
+            // alongside the prose so a localised Notes.app still classifies correctly.
+            if s.contains("can't get") || s.contains("doesn't exist") || s.contains("not found")
+                || s.contains("-1728") {
                 return .notFound("Notes could not find the requested item (verify the id/title/folder).")
             }
             if s.contains("already exists") {
@@ -187,6 +195,13 @@ struct NotesScript {
 
     func getNotePlaintext(title: String, account: String?) throws -> String {
         try run("get plaintext of note (item 1 of argv)", args: [title, resolveAccount(account)], tellAccount: 2)
+    }
+
+    /// macOS 12-15 fallback for `get-note-link`, mirroring the oracle's
+    /// `return note link of (note id "<id>")`. The oracle string-interpolates a sanitized id;
+    /// we bind it as argv instead, which is strictly safer and is the repo-wide rule.
+    func noteLinkById(id: String) throws -> String {
+        try runApp("return note link of (note id (item 1 of argv))", args: [id])
     }
 
     func getNotePlaintextById(id: String) throws -> String {

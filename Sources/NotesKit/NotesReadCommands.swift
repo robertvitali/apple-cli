@@ -84,6 +84,111 @@ struct GetByIdCmd: ParsableCommand {
     }
 }
 
+/// `get-note-link` — the last unmapped oracle tool (NOTES-H1). SQLite first, AppleScript
+/// `note link` as the macOS 12-15 fallback, exactly as the oracle orders them.
+struct GetNoteLinkCmd: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "get-link",
+        abstract: "notes:// deep link for a note, by id (preferred) or title. → get-note-link")
+    @OptionGroup var global: GlobalOptions
+    @Option(name: .long, help: "Note id (preferred - more reliable than title).") var id: String?
+    @Option(name: .long, help: "Note title (use id instead when available).") var title: String?
+    @Option(name: .long, help: "Account containing the note (ignored if id is provided).") var account: String?
+
+    /// Verbatim from the oracle, including the trailing macOS-12-15 parenthetical.
+    static func linkFailure(_ name: String) -> String {
+        "Failed to get note link for \"\(name)\". The Notes database may not be accessible — grant "
+        + "Full Disk Access to the app that launches the server, fully quit and relaunch, then run "
+        + "the doctor tool. See: \(NotesStore.fdaGuideURL). (On macOS 12–15 this also falls back to "
+        + "the AppleScript note link property.)"
+    }
+
+    /// The message tells the operator to grant Full Disk Access, so the TYPE has to agree:
+    /// `unknown`/70 is documented as "unexpected internal error" and an agent branching on
+    /// error.type could not route it to the FDA remediation path. Sibling commands in this file
+    /// already classify a missing store as authorization_denied/77 and other store failures as
+    /// upstream/69; match them rather than inventing a third answer.
+    static func linkFailureError(_ name: String) -> AppleError {
+        NotesStore.dbExists ? .upstream(linkFailure(name)) : .permissionDenied(linkFailure(name))
+    }
+
+    /// Oracle `getNoteLinkById`: SQLite, then AppleScript. Returns nil rather than throwing so
+    /// the caller emits the oracle's single "Failed to get note link" message for either miss.
+    ///
+    /// MEASURED on macOS 26.5.1: `note link` is GONE from the Notes SDEF — the fallback returns
+    /// `execution error: The variable link is not defined. (-2753)` — so on macOS 26+ the SQLite
+    /// read is the only path that can succeed and this branch is dead. It is kept because the
+    /// oracle keeps it for macOS 12–15, where it IS reachable; without FDA on macOS 26 the only
+    /// outcome is the link-failure error, which is why its classification (authorization_denied
+    /// when the store is unreadable, not `unknown`) matters more here than the prose suggests.
+    static func resolveLink(_ script: NotesScript, id: String) -> String? {
+        if let fromDB = NotesStore.noteLink(noteId: id) { return fromDB }
+        guard let out = try? script.noteLinkById(id: id) else { return nil }
+        let trimmed = out.trimmingCharacters(in: .whitespacesAndNewlines)
+        return trimmed.isEmpty ? nil : trimmed
+    }
+
+    func run() throws {
+        try runGuarded(tool: notesTool) {
+            let script = NotesScript()
+            // The oracle branches on JS TRUTHINESS — `if (id)` / `if (!title)` — so an empty
+            // string is falsy and falls through to the other selector. `if let` would enter the
+            // branch on Optional(""), which loses a real capability: for {id:"", title:"Real"}
+            // the oracle resolves BY TITLE and succeeds where we would 65. `id: ""` meaning
+            // "not supplied" is a common tool-call shape, so this is reachable, not theoretical.
+            // Same coercion the shared `requireIdOrTitle` already does (NotesCommand.swift:162).
+            let id = self.id?.isEmpty == false ? self.id : nil
+            let title = self.title?.isEmpty == false ? self.title : nil
+            if let id {
+                // Oracle `getNoteById` runs `sanitizeId` FIRST (index.js:39751) and throws a
+                // distinct format error before any lookup, so a malformed id is NOT a not-found.
+                // Collapsing the two loses an error class the oracle distinguishes — the same
+                // taxonomy-flattening CONTACTS-L2 was filed for. The regex port already existed
+                // (NotesScript.isValidNoteId) but had no callers outside the batch paths.
+                guard NotesScript.isValidNoteId(id) else {
+                    throw AppleError.validation(
+                        "Invalid note ID format: \"\(id)\". Expected CoreData URL (x-coredata://...) or temp ID.")
+                }
+                // The lookup THROWS a generic not_found rather than returning nil (AppleScript
+                // errors on a bad specifier; see NotesScript.mapError), so the oracle's specific
+                // wording has to be restored here — a bare `guard let` never fires.
+                let found: NotesScript.ParsedNote?
+                do { found = try script.getNoteById(id: id) }
+                catch let e as AppleError where e.type == AppleErrorType.notFound { found = nil }
+                guard let note = found else {
+                    throw AppleError.notFound("Note with ID \"\(id)\" not found")
+                }
+                if note.passwordProtected {
+                    throw AppleError.validation("Note \"\(note.title)\" is password-protected. Unlock it in Notes.app first.")
+                }
+                guard let url = Self.resolveLink(script, id: id) else {
+                    throw Self.linkFailureError(note.title)
+                }
+                try emitNotes(NoteLinkResult(id: id, title: note.title, url: url),
+                              json: global.json, human: url)
+                return
+            }
+            guard let title else {
+                throw AppleError.validation("Either 'id' or 'title' is required")
+            }
+            let foundByTitle: NotesScript.ParsedNote?
+            do { foundByTitle = try script.getNoteDetails(title: title, account: account) }
+            catch let e as AppleError where e.type == AppleErrorType.notFound { foundByTitle = nil }
+            guard let note = foundByTitle else {
+                throw AppleError.notFound("Note \"\(title)\" not found. Use search-notes to find notes, then use the note's ID for reliable operations.")
+            }
+            if note.passwordProtected {
+                throw AppleError.validation("Note \"\(title)\" is password-protected. Unlock it in Notes.app first.")
+            }
+            guard let url = Self.resolveLink(script, id: note.id) else {
+                throw Self.linkFailureError(title)
+            }
+            // No `id` key on this path — the oracle omits it here.
+            try emitNotes(NoteLinkResult(id: nil, title: title, url: url),
+                          json: global.json, human: url)
+        }
+    }
+}
+
 struct GetDetailsCmd: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "get-details",
         abstract: "Note metadata by title (adds account).")

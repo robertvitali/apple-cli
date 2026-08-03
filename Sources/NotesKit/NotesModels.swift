@@ -393,3 +393,13 @@ struct NotesExport: Encodable {
     let accounts: [ExportAccount]
     let summary: ExportSummary
 }
+
+/// `get-note-link` payload. The oracle's two paths emit DIFFERENT key sets — the id path
+/// returns {id, title, url}, the title path returns {title, url} with NO id (server.py-equivalent
+/// index.js:42469 vs :42489) — so `id` is optional and omitted (synthesized encodeIfPresent)
+/// rather than emitted as null, matching the oracle's payload shape on each path.
+struct NoteLinkResult: Encodable {
+    let id: String?
+    let title: String
+    let url: String
+}

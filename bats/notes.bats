@@ -355,3 +355,32 @@ assert_no_folder_named() {
   run "$BIN" notes append --id X --content x --separator "12345678901234567890" --dry-run
   [ "$status" -eq 0 ]
 }
+
+@test "get-link requires id or title, with the oracle's wording (NOTES-H1)" {
+  # Resolves before any store/AppleScript access, so this needs no Notes TCC.
+  run "$BIN" notes get-link
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q "Either 'id' or 'title' is required"
+  echo "$output" | grep -q '"type" : "validation_error"'
+  # get-link is registered as a subcommand at all — the gap was that it did not exist.
+  run "$BIN" notes get-link --help
+  [ "$status" -eq 0 ]; echo "$output" | grep -q 'get-note-link'
+}
+
+@test "get-link matches the oracle's empty-string and malformed-id handling (NOTES-H1)" {
+  # The oracle gates on JS truthiness, so "" is ABSENT, not a lookup target. All TCC-free:
+  # every case below resolves before any store or AppleScript access.
+  run "$BIN" notes get-link --id ""
+  echo "$output" | grep -q "Either 'id' or 'title' is required"
+  run "$BIN" notes get-link --id "" --title ""
+  echo "$output" | grep -q "Either 'id' or 'title' is required"
+  # An empty id must FALL THROUGH to the title, not fail on the id — the capability an
+  # `if let` would have dropped.
+  run "$BIN" notes get-link --id "" --title "ZZZ-no-such-note-xyz"
+  echo "$output" | grep -q 'Use search-notes to find notes'
+  # A malformed id is a distinct oracle error class (sanitizeId), not a not-found.
+  run "$BIN" notes get-link --id garbage
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q 'Invalid note ID format'
+  echo "$output" | grep -q '"type" : "validation_error"'
+}
