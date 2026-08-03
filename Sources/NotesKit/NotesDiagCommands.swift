@@ -158,7 +158,7 @@ struct ExportCmd: ParsableCommand {
                         for note in folder.notes {
                             count += 1
                             if md {
-                                blocks.append("# \(note.title)\n\n" + NotesText.htmlToMarkdown(note.content))
+                                blocks.append("# \(note.title)\n\n" + ((try? NotesText.htmlToMarkdown(note.content)) ?? "_[list nesting too deep to render]_"))
                             } else {
                                 blocks.append("\(note.title)\n\n\(note.plaintext)")
                             }

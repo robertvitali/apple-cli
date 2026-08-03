@@ -67,19 +67,44 @@ struct HtmlConversionTests {
     }
 
     @Test("htmlToMarkdown renders headings, lists, bold, links")
-    func markdown() {
+    func markdown() throws {
         let html = "<h1>Title</h1><div>para</div><ul><li>one</li><li>two</li></ul><b>bold</b> <a href=\"http://x.com\">link</a>"
-        let md = NotesText.htmlToMarkdown(html)
+        let md = try NotesText.htmlToMarkdown(html)
         #expect(md.contains("# Title"))
-        #expect(md.contains("- one"))
-        #expect(md.contains("- two"))
+        // Three spaces after the bullet: turndown's `bulletListMarker + '   '`. This said
+        // `"- one"` until NOTES-M2 measured the oracle. See ListMarkdownParityTests.
+        #expect(md.contains("-   one"))
+        #expect(md.contains("-   two"))
         #expect(md.contains("**bold**"))
         #expect(md.contains("[link](http://x.com)"))
     }
 
-    @Test("markdown list items render as '- ' so checklist enrichment can match")
-    func listMarker() {
-        #expect(NotesText.htmlToMarkdown("<ul><li>Eggs</li></ul>").contains("- Eggs"))
+    /// This replaces a test titled *"markdown list items render as `- ` so checklist enrichment can
+    /// match"*, whose PREMISE was false in both halves.
+    ///
+    /// The oracle renders bullets as `-` + THREE spaces and ordered items as `N.` + two, and its
+    /// enrichment regex is `^(\s*[-*])\s+(.+)$` — which matches either spacing, and matches an
+    /// ordered item not at all. So (a) the one-space marker was never required for enrichment, and
+    /// (b) rendering `<ol>` as `-` did not "let enrichment match" the way the old title claimed; it
+    /// created enrichment the oracle never produces, while destroying the numbering it does.
+    ///
+    /// What is actually worth pinning is the end-to-end property: the oracle's marker survives
+    /// enrichment, and enrichment re-emits with a single space (`prefix + " " + mark + " " + text`).
+    @Test("the oracle's bullet spacing still enriches, and ordered items are left alone")
+    func markerAndEnrichment() throws {
+        #expect(try NotesText.htmlToMarkdown("<ul><li>Eggs</li></ul>") == "-   Eggs")
+        #expect(try NotesText.htmlToMarkdown("<ol><li>Eggs</li></ol>") == "1.  Eggs")
+
+        let bullets = try NotesText.htmlToMarkdown("<ul><li>Eggs</li><li>Milk</li></ul>")
+        let enriched = NotesText.enrichMarkdownWithChecklists(bullets, items: [
+            .init(text: "Eggs", done: true), .init(text: "Milk", done: false),
+        ])
+        #expect(enriched == "- [x] Eggs\n- [ ] Milk")
+
+        // An ordered item is NOT a checklist line for the oracle's regex, so it passes through.
+        let ordered = try NotesText.htmlToMarkdown("<ol><li>Eggs</li></ol>")
+        #expect(NotesText.enrichMarkdownWithChecklists(ordered, items: [.init(text: "Eggs", done: true)])
+                == "1.  Eggs")
     }
 
     @Test("decodeEntities handles named, numeric, and ampersand-last ordering")

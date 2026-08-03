@@ -53,3 +53,8 @@ docs/parity-*
 *-RECONCILIATION-*
 *-reconciliation-*
 live-dumps/
+
+# `npm install` in the notes-markdown-oracle fixture (regenerating goldens) drops these in
+# the repo; the generator is committed, its dependency tree is not.
+node_modules/
+package-lock.json

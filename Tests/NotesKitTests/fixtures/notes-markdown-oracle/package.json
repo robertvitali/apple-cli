@@ -1,0 +1,15 @@
+{
+  "name": "notes-markdown-oracle",
+  "version": "1.0.0",
+  "description": "Ground-truth generator for notes get-markdown list parity (apple-notes-mcp 2.6.12 / turndown 7.2.4).",
+  "scripts": {
+    "generate": "node gen.mjs"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "MIT",
+  "type": "commonjs",
+  "dependencies": {
+    "turndown": "7.2.4"
+  }
+}

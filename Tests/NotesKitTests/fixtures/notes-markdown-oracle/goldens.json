@@ -1,0 +1,422 @@
+[
+  {
+    "name": "ol_simple",
+    "html": "<ol><li>alpha</li><li>beta</li><li>gamma</li></ol>",
+    "markdown": "1.  alpha\n2.  beta\n3.  gamma"
+  },
+  {
+    "name": "ul_simple",
+    "html": "<ul><li>alpha</li><li>beta</li></ul>",
+    "markdown": "-   alpha\n-   beta"
+  },
+  {
+    "name": "ol_start5",
+    "html": "<ol start=\"5\"><li>five</li><li>six</li></ol>",
+    "markdown": "5.  five\n6.  six"
+  },
+  {
+    "name": "ol_start0",
+    "html": "<ol start=\"0\"><li>zero</li><li>one</li></ol>",
+    "markdown": "0.  zero\n1.  one"
+  },
+  {
+    "name": "ol_startneg",
+    "html": "<ol start=\"-3\"><li>x</li><li>y</li></ol>",
+    "markdown": "-3.  x\n-2.  y"
+  },
+  {
+    "name": "ol_startnan",
+    "html": "<ol start=\"abc\"><li>x</li></ol>",
+    "markdown": "NaN.  x"
+  },
+  {
+    "name": "ol_in_ol",
+    "html": "<ol><li>a<ol><li>a1</li><li>a2</li></ol></li><li>b</li></ol>",
+    "markdown": "1.  a\n    1.  a1\n    2.  a2\n2.  b"
+  },
+  {
+    "name": "ol_in_ul",
+    "html": "<ul><li>a<ol><li>a1</li></ol></li></ul>",
+    "markdown": "-   a\n    1.  a1"
+  },
+  {
+    "name": "ul_in_ul",
+    "html": "<ul><li>one<ul><li>deep</li></ul></li></ul>",
+    "markdown": "-   one\n    -   deep"
+  },
+  {
+    "name": "ol_in_divs",
+    "html": "<div><ol><li>one</li><li>two</li></ol></div>",
+    "markdown": "1.  one\n2.  two"
+  },
+  {
+    "name": "ol_eleven",
+    "html": "<ol><li>i1</li><li>i2</li><li>i3</li><li>i4</li><li>i5</li><li>i6</li><li>i7</li><li>i8</li><li>i9</li><li>i10</li><li>i11</li></ol>",
+    "markdown": "1.  i1\n2.  i2\n3.  i3\n4.  i4\n5.  i5\n6.  i6\n7.  i7\n8.  i8\n9.  i9\n10.  i10\n11.  i11"
+  },
+  {
+    "name": "ol_deep_under10",
+    "html": "<ol><li>i1</li><li>i2</li><li>i3</li><li>i4</li><li>i5</li><li>i6</li><li>i7</li><li>i8</li><li>i9</li><li>ten<ol><li>deep</li></ol></li></ol>",
+    "markdown": "1.  i1\n2.  i2\n3.  i3\n4.  i4\n5.  i5\n6.  i6\n7.  i7\n8.  i8\n9.  i9\n10.  ten\n     1.  deep"
+  },
+  {
+    "name": "ol_start99_nested",
+    "html": "<ol start=\"99\"><li>x<ol><li>deep</li></ol></li></ol>",
+    "markdown": "99.  x\n     1.  deep"
+  },
+  {
+    "name": "ol_empty_item",
+    "html": "<ol><li></li><li>b</li></ol>",
+    "markdown": "2.  b"
+  },
+  {
+    "name": "ul_empty_item",
+    "html": "<ul><li></li><li>b</li></ul>",
+    "markdown": "-   b"
+  },
+  {
+    "name": "ol_ws_between",
+    "html": "<ol>\n  <li>a</li>\n  <li>b</li>\n</ol>",
+    "markdown": "1.  a\n2.  b"
+  },
+  {
+    "name": "heading_then_ol",
+    "html": "<div><h1>Title</h1></div><ol><li>one</li></ol>",
+    "markdown": "# Title\n\n1.  one"
+  },
+  {
+    "name": "ol_inline_bold",
+    "html": "<ol><li><b>bold</b> tail</li></ol>",
+    "markdown": "1.  **bold** tail"
+  },
+  {
+    "name": "ol_link",
+    "html": "<ol><li><a href=\"https://x.test\">link</a></li></ol>",
+    "markdown": "1.  [link](https://x.test)"
+  },
+  {
+    "name": "ol_entities",
+    "html": "<ol><li>a &amp; b &lt; c</li></ol>",
+    "markdown": "1.  a & b < c"
+  },
+  {
+    "name": "ul_three_levels",
+    "html": "<ul><li>a<ul><li>b<ul><li>c</li></ul></li></ul></li></ul>",
+    "markdown": "-   a\n    -   b\n        -   c"
+  },
+  {
+    "name": "ol_two_lists",
+    "html": "<ol><li>a</li></ol><ol><li>b</li></ol>",
+    "markdown": "1.  a\n\n1.  b"
+  },
+  {
+    "name": "ol_after_text",
+    "html": "<div>intro</div><ol><li>a</li></ol>",
+    "markdown": "intro\n\n1.  a"
+  },
+  {
+    "name": "ol_br_in_item",
+    "html": "<ol><li>a<br>b</li></ol>",
+    "markdown": "1.  a  \n    b"
+  },
+  {
+    "name": "ol_li_div",
+    "html": "<ol><li><div>d</div></li><li>b</li></ol>",
+    "markdown": "1.  d\n    \n2.  b"
+  },
+  {
+    "name": "ol_li_para",
+    "html": "<ol><li><p>para</p></li><li>b</li></ol>",
+    "markdown": "1.  para\n    \n2.  b"
+  },
+  {
+    "name": "ol_attrs_noise",
+    "html": "<ol class=\"x\" start=\"3\" data-y=\"z\"><li>a</li></ol>",
+    "markdown": "3.  a"
+  },
+  {
+    "name": "ol_start_quoted1",
+    "html": "<ol start='7'><li>a</li></ol>",
+    "markdown": "7.  a"
+  },
+  {
+    "name": "ol_start_bare",
+    "html": "<ol start=4><li>a</li></ol>",
+    "markdown": "4.  a"
+  },
+  {
+    "name": "ol_start_empty",
+    "html": "<ol start=\"\"><li>a</li></ol>",
+    "markdown": "1.  a"
+  },
+  {
+    "name": "ol_start_space",
+    "html": "<ol start=\" 5 \"><li>a</li></ol>",
+    "markdown": "5.  a"
+  },
+  {
+    "name": "ol_start_float",
+    "html": "<ol start=\"1.5\"><li>a</li><li>b</li></ol>",
+    "markdown": "1.5.  a\n2.5.  b"
+  },
+  {
+    "name": "ul_mixed_nest_ol",
+    "html": "<ul><li>a<ol><li>n1</li><li>n2</li></ol></li><li>b</li></ul>",
+    "markdown": "-   a\n    1.  n1\n    2.  n2\n-   b"
+  },
+  {
+    "name": "ol_nested_then_text",
+    "html": "<ol><li>a<ol><li>x</li></ol>tail</li></ol>",
+    "markdown": "1.  a\n    1.  xtail"
+  },
+  {
+    "name": "ol_uppercase_tags",
+    "html": "<OL><LI>a</LI><LI>b</LI></OL>",
+    "markdown": "1.  a\n2.  b"
+  },
+  {
+    "name": "ol_multi_blank",
+    "html": "<ol><li></li><li></li><li>c</li></ol>",
+    "markdown": "3.  c"
+  },
+  {
+    "name": "ul_only_blanks",
+    "html": "<ul><li></li></ul>",
+    "markdown": ""
+  },
+  {
+    "name": "ol_text_before_after",
+    "html": "<div>pre</div><ol><li>a</li></ol><div>post</div>",
+    "markdown": "pre\n\n1.  a\n\npost"
+  },
+  {
+    "name": "ol_four_deep",
+    "html": "<ol><li>a<ol><li>b<ol><li>c<ol><li>d</li></ol></li></ol></li></ol></li></ol>",
+    "markdown": "1.  a\n    1.  b\n        1.  c\n            1.  d"
+  },
+  {
+    "name": "ol_li_unclosed",
+    "html": "<ol><li>a<li>b</ol>",
+    "markdown": "1.  a\n2.  b"
+  },
+  {
+    "name": "ol_unclosed_list",
+    "html": "<ol><li>a</li>",
+    "markdown": "1.  a"
+  },
+  {
+    "name": "ol_nbsp_item",
+    "html": "<ol><li>&nbsp;</li><li>b</li></ol>",
+    "markdown": "2.  b"
+  },
+  {
+    "name": "sib_ul_apple",
+    "html": "<ul class=\"Apple-dash-list\"><li>a</li><ul class=\"Apple-dash-list\"><li>b</li></ul><li>c</li></ul>",
+    "markdown": "-   a\n\n-   b\n\n-   c"
+  },
+  {
+    "name": "sib_ol_numbering",
+    "html": "<ol><li>a</li><ol><li>b</li></ol><li>c</li></ol>",
+    "markdown": "1.  a\n\n1.  b\n\n3.  c"
+  },
+  {
+    "name": "sib_two_deep",
+    "html": "<ul><li>a</li><ul><li>b</li><ul><li>c</li></ul></ul><li>d</li></ul>",
+    "markdown": "-   a\n\n-   b\n\n-   c\n\n-   d"
+  },
+  {
+    "name": "sib_first",
+    "html": "<ul><ul><li>b</li></ul><li>c</li></ul>",
+    "markdown": "-   b\n\n-   c"
+  },
+  {
+    "name": "sib_only",
+    "html": "<ul><ul><li>b</li></ul></ul>",
+    "markdown": "-   b"
+  },
+  {
+    "name": "sib_trailing",
+    "html": "<ul><li>a</li><ul><li>b</li></ul></ul>",
+    "markdown": "-   a\n\n-   b"
+  },
+  {
+    "name": "sib_two_sublists",
+    "html": "<ul><li>a</li><ul><li>b</li></ul><ul><li>c</li></ul><li>d</li></ul>",
+    "markdown": "-   a\n\n-   b\n\n-   c\n\n-   d"
+  },
+  {
+    "name": "ol_div_child",
+    "html": "<ol><div>x</div><li>a</li></ol>",
+    "markdown": "x\n2.  a"
+  },
+  {
+    "name": "ol_p_between",
+    "html": "<ol><li>a</li><p>mid</p><li>b</li></ol>",
+    "markdown": "1.  a\n\nmid\n\n3.  b"
+  },
+  {
+    "name": "li_empty_anchor",
+    "html": "<ol><li><a href=\"http://x\"></a></li><li>b</li></ol>",
+    "markdown": "1.  [](http://x)\n2.  b"
+  },
+  {
+    "name": "li_img",
+    "html": "<ol><li><img src=\"x.png\" alt=\"pic\"></li><li>b</li></ol>",
+    "markdown": "1.  ![pic](x.png)\n2.  b"
+  },
+  {
+    "name": "li_empty_td",
+    "html": "<ol><li><table><tr><td></td></tr></table></li><li>b</li></ol>",
+    "markdown": "1.  \n    \n2.  b"
+  },
+  {
+    "name": "ol_empty_list",
+    "html": "<ol></ol>",
+    "markdown": ""
+  },
+  {
+    "name": "ul_empty_list",
+    "html": "<ul></ul>",
+    "markdown": ""
+  },
+  {
+    "name": "attr_data_start",
+    "html": "<ol data-start=\"9\"><li>a</li></ol>",
+    "markdown": "1.  a"
+  },
+  {
+    "name": "attr_aria_start",
+    "html": "<ol aria-start=\"3\"><li>a</li></ol>",
+    "markdown": "1.  a"
+  },
+  {
+    "name": "attr_decoy_then_real",
+    "html": "<ol data-start=\"9\" start=\"2\"><li>a</li></ol>",
+    "markdown": "2.  a"
+  },
+  {
+    "name": "attr_start_in_value",
+    "html": "<ol title=\"start=5\"><li>a</li></ol>",
+    "markdown": "1.  a"
+  },
+  {
+    "name": "attr_gt_in_value",
+    "html": "<ol><li title=\"a>b\">x</li><li>y</li></ol>",
+    "markdown": "1.  x\n2.  y"
+  },
+  {
+    "name": "attr_gt_then_start",
+    "html": "<ol title=\"a>b\" start=\"3\"><li>x</li></ol>",
+    "markdown": "3.  x"
+  },
+  {
+    "name": "attr_gt_single_quoted",
+    "html": "<ol title='a>b' start='4'><li>x</li></ol>",
+    "markdown": "4.  x"
+  },
+  {
+    "name": "attr_valueless",
+    "html": "<ol reversed start=\"2\"><li>a</li><li>b</li></ol>",
+    "markdown": "2.  a\n3.  b"
+  },
+  {
+    "name": "start_hex",
+    "html": "<ol start=\"0x10\"><li>a</li></ol>",
+    "markdown": "16.  a"
+  },
+  {
+    "name": "start_exp",
+    "html": "<ol start=\"1e3\"><li>a</li></ol>",
+    "markdown": "1000.  a"
+  },
+  {
+    "name": "start_infinity",
+    "html": "<ol start=\"Infinity\"><li>a</li></ol>",
+    "markdown": "Infinity.  a"
+  },
+  {
+    "name": "start_plus",
+    "html": "<ol start=\"+5\"><li>a</li></ol>",
+    "markdown": "5.  a"
+  },
+  {
+    "name": "start_bin",
+    "html": "<ol start=\"0b11\"><li>a</li></ol>",
+    "markdown": "3.  a"
+  },
+  {
+    "name": "start_oct",
+    "html": "<ol start=\"0o17\"><li>a</li></ol>",
+    "markdown": "15.  a"
+  },
+  {
+    "name": "start_neg_hex",
+    "html": "<ol start=\"-0x10\"><li>a</li></ol>",
+    "markdown": "NaN.  a"
+  },
+  {
+    "name": "start_lower_infinity",
+    "html": "<ol start=\"infinity\"><li>a</li></ol>",
+    "markdown": "NaN.  a"
+  },
+  {
+    "name": "start_trailing_garbage",
+    "html": "<ol start=\"12abc\"><li>a</li></ol>",
+    "markdown": "NaN.  a"
+  },
+  {
+    "name": "start_ws_only",
+    "html": "<ol start=\" \"><li>a</li></ol>",
+    "markdown": "0.  a"
+  },
+  {
+    "name": "start_neg_infinity",
+    "html": "<ol start=\"-Infinity\"><li>a</li></ol>",
+    "markdown": "-Infinity.  a"
+  },
+  {
+    "name": "start_hex_big",
+    "html": "<ol start=\"0xffffffffffffffffffffffffffffffffffffffff\"><li>a</li></ol>",
+    "markdown": "1.461501637330903e+48.  a"
+  },
+  {
+    "name": "start_hex_upper",
+    "html": "<ol start=\"0X1A\"><li>a</li></ol>",
+    "markdown": "26.  a"
+  },
+  {
+    "name": "start_hex_empty",
+    "html": "<ol start=\"0x\"><li>a</li></ol>",
+    "markdown": "NaN.  a"
+  },
+  {
+    "name": "start_hex_baddigit",
+    "html": "<ol start=\"0xg\"><li>a</li></ol>",
+    "markdown": "NaN.  a"
+  },
+  {
+    "name": "start_bin_baddigit",
+    "html": "<ol start=\"0b2\"><li>a</li></ol>",
+    "markdown": "NaN.  a"
+  },
+  {
+    "name": "start_hex_float",
+    "html": "<ol start=\"0x1p3\"><li>a</li></ol>",
+    "markdown": "NaN.  a"
+  },
+  {
+    "name": "start_hex_spaced",
+    "html": "<ol start=\" 0x10 \"><li>a</li></ol>",
+    "markdown": "16.  a"
+  },
+  {
+    "name": "start_underscore",
+    "html": "<ol start=\"1_0\"><li>a</li></ol>",
+    "markdown": "NaN.  a"
+  },
+  {
+    "name": "blank_runs_between_lists",
+    "html": "<ol><li>a</li></ol><div><br></div><div><br></div><div><br></div><ol><li>b</li></ol>",
+    "markdown": "1.  a\n\n  \n\n  \n\n  \n\n1.  b"
+  }
+]

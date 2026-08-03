@@ -213,15 +213,40 @@ enum NotesText {
 
     // MARK: HTML → Markdown (turndown-equivalent, pragmatic)
 
-    /// Pragmatic HTML→Markdown for Apple Notes' constrained HTML. Not byte-identical to the
-    /// reference's `turndown` (a full DOM→md engine), but covers the elements Notes emits:
-    /// headings, div/p blocks, `<br>`, ul/ol lists (as `-` so checklist enrichment can match),
-    /// bold/italic, and links. Inline conversions run before block conversions so their
-    /// markdown survives the final tag-strip.
-    static func htmlToMarkdown(_ html: String) -> String {
+    /// Pragmatic HTML→Markdown for Apple Notes' constrained HTML. Covers the elements Notes emits:
+    /// headings, div/p blocks, `<br>`, ul/ol lists, bold/italic, and links. Inline conversions run
+    /// before block conversions so their markdown survives the final tag-strip.
+    ///
+    /// **Lists are handled structurally by `NotesLists`, not by regex** — see that file for the
+    /// transcribed turndown rules and for what the old `<li\b[^>]*>(.*?)</li>` spelling corrupted.
+    /// Everything else is still the regex pipeline, so this is NOT yet byte-identical to the
+    /// oracle's turndown across all constructs; NOTES-L1 tracks the remaining fidelity gaps.
+    static func htmlToMarkdown(_ html: String) throws -> String {
+        var pre = html
+        pre = regexReplace(pre, "<!--.*?-->", "", dotMatchesLineSeparators: true)
+        pre = regexReplace(pre, "<(head|style|script)\\b[^>]*>.*?</\\1>", "", caseInsensitive: true, dotMatchesLineSeparators: true)
+
+        // Split lists out FIRST. Their rendered markdown carries significant leading indentation,
+        // which the per-line trim at the end of the non-list pipeline would destroy, so list output
+        // never passes through it.
+        var out = ""
+        for segment in try NotesLists.segments(pre) {
+            switch segment {
+            case .html(let raw):
+                out += nonListToMarkdown(raw)
+            case .list(let list):
+                out += try NotesLists.render(list, isLastChildOfItem: false, inline: { nonListToMarkdown($0) })
+            }
+        }
+
+        out = regexReplace(out, "\n{3,}", "\n\n")
+        return out.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// The non-list half of the pipeline: inline markup, `<br>`, headings, block separators, tag
+    /// strip, entity decode, per-line trim. Runs on document text and on each list item's content.
+    private static func nonListToMarkdown(_ html: String) -> String {
         var s = html
-        s = regexReplace(s, "<!--.*?-->", "", dotMatchesLineSeparators: true)
-        s = regexReplace(s, "<(head|style|script)\\b[^>]*>.*?</\\1>", "", caseInsensitive: true, dotMatchesLineSeparators: true)
 
         // Inline (wrap with markdown, keep inner text).
         s = regexReplace(s, "<a\\b[^>]*\\bhref\\s*=\\s*[\"']([^\"']*)[\"'][^>]*>(.*?)</a>", "[$2]($1)",
@@ -239,10 +264,6 @@ enum NotesText {
                              caseInsensitive: true, dotMatchesLineSeparators: true)
         }
 
-        // List items → `- inner` (both ul and ol render `-` so checklist enrichment matches).
-        s = regexReplace(s, "<li\\b[^>]*>(.*?)</li>", "\n- $1", caseInsensitive: true, dotMatchesLineSeparators: true)
-        s = regexReplace(s, "</?(ul|ol)\\b[^>]*>", "\n", caseInsensitive: true)
-
         // Block separators.
         s = regexReplace(s, "</(div|p)>", "\n", caseInsensitive: true)
         s = regexReplace(s, "<(div|p)\\b[^>]*>", "", caseInsensitive: true)
@@ -253,11 +274,10 @@ enum NotesText {
         // Decode entities.
         s = decodeEntities(s)
 
-        // Whitespace: trim each line, collapse blank runs.
-        let lines = s.components(separatedBy: "\n").map { $0.trimmingCharacters(in: .whitespaces) }
-        s = lines.joined(separator: "\n")
-        s = regexReplace(s, "\n{3,}", "\n\n")
-        return s.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Whitespace: trim each line.
+        return s.components(separatedBy: "\n")
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+            .joined(separator: "\n")
     }
 
     // MARK: update-note response title (NOTES-M6, oracle 2.6.12)

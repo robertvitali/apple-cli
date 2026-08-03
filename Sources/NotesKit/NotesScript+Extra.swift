@@ -295,7 +295,7 @@ extension NotesScript {
     func getNoteMarkdown(title: String, account: String?) throws -> String {
         let html = try getNoteContent(title: title, account: account)
         if html.isEmpty { return "" }
-        var md = NotesText.htmlToMarkdown(html)
+        var md = try NotesText.htmlToMarkdown(html)
         if let note = try? getNoteDetails(title: title, account: account) {
             let result = NotesStore.checklistItems(noteId: note.id)
             if let items = result.items { md = NotesText.enrichMarkdownWithChecklists(md, items: items) }
@@ -306,7 +306,7 @@ extension NotesScript {
     func getNoteMarkdownById(id: String) throws -> String {
         let html = try getNoteContentById(id: id)
         if html.isEmpty { return "" }
-        var md = NotesText.htmlToMarkdown(html)
+        var md = try NotesText.htmlToMarkdown(html)
         let result = NotesStore.checklistItems(noteId: id)
         if let items = result.items { md = NotesText.enrichMarkdownWithChecklists(md, items: items) }
         return md
