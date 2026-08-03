@@ -12,6 +12,102 @@ with the Apple MCP servers they replace.
 
 ## [Unreleased]
 
+### Fixed — `notes update --format html` reported a title Notes would never show
+
+Notes derives a note's title from the first rendered line of its body. The oracle mirrors that:
+`resolveUpdateResponseTitle` DERIVES the response title from the new HTML and ignores `--new-title`
+entirely in html format, falling back to the current title only when the body renders nothing.
+This port returned `newTitle ?? currentTitle` unconditionally, so `update --format html
+--new-title X` reported `X` while Notes showed the body's first line.
+
+Ported `firstVisibleHtmlLine`: script/style blocks removed, `<br>` and block-closing
+tags become line breaks BEFORE tags are stripped, HTML entities decoded, then the first non-blank
+line wins after internal whitespace is collapsed. The entity decoder is a second, separate one
+because THE ORACLE SHIPS TWO: this one, and an inline decoder in `htmlToPlaintext` that
+`get-note-markdown` uses. Unifying them would regress the markdown path. Plaintext format keeps
+the oracle's JS truthiness: an EMPTY `--new-title` falls back to the current title rather than
+blanking it.
+
+EIGHT ICU-vs-JS regex divergences were found across two review rounds. Round 1 found five: a
+shared helper forced `.anchorsMatchLines`, so `$` matched at every line end and a lazy match
+stopped at the first newline INSIDE a `<script>` body, leaking script source into the note title
+for ordinary multi-line HTML; `\b` (ICU derives it from a Unicode word class, JS from ASCII);
+`\s` (JS includes U+FEFF and excludes U+0085, ICU does the opposite); ICU full case folding
+widening `[0-9a-z]` to match U+212A and U+017F; and a capture-group helper that reindexed groups
+when one did not participate.
+
+Round 2 found three MORE — and they are the same three classes again, at the sibling sites the
+round-1 fixes did not sweep. `.anchorsMatchLines: false` turns out to be necessary but NOT
+sufficient: ICU matches `$` before a FINAL line terminator regardless of that flag, so a trailing
+U+0085 was reported as a note's entire title (`\z` is the correct ICU spelling of JS's
+non-multiline `$`, now documented on the shared helper). ICU case folding also reached the
+`(script|style)` alternation and its backreference, so `<ſcript>` opened a block and `</ſcript>`
+closed an ASCII one. And the `<br>` regex still used ICU `\s`, so `<br` + U+FEFF + `>` merged two
+rendered lines while `<br` + U+0085 + `>` invented a break.
+
+Rather than patch those three individually, the script/style strip is now a scanner
+(`stripNonRenderedBlocks`). `NSRegularExpression` genuinely cannot express the oracle here, and
+the proof is a three-way squeeze: `<script>x</ſcript>AFTER` needs case-SENSITIVE matching to
+behave, while `<SCRIPT>x</script>AFTER` and `<script>x</SCRIPT>AFTER` both need case-INSENSITIVE —
+because JS's backreference is ASCII-case-insensitive and ICU's folding is not. No option set
+satisfies all three; the round-2 regex with both patches applied still diverged from the oracle on
+25.9% of one reviewer's corpus, where the scanner diverges on 0%.
+
+The scanner also removes this site's quadratic behaviour — but only after review caught that the
+first version did NOT. It derived "no `>` remains after this point", then `continue`d and let the
+next `<script` rescan to end-of-input, reproducing the exact O(N²) it was written to remove, in
+the sibling of the function (`stripTags`) that had already derived and acted on the same
+invariant. Measured on `<script` repeated with no `>` anywhere, through the real post-write entry
+point. **All three columns are M6's OWN iterations** — before M6 this path did no HTML parsing at
+all (`displayTitle = newTitle ?? note.title`, O(1)), so there is no pre-existing regression here;
+M6 introduced this work and these are the stages of getting it right:
+
+| input | M6 round 1 (regex) | M6 round 2 (scanner, no bail-out) | shipping |
+|---|---|---|---|
+| 54.7 KiB | 2.00 s | 0.063 s | 0.0049 s |
+| 136.7 KiB | 12.49 s | 0.369 s | 0.0098 s |
+| 273.4 KiB | 50.06 s | 1.454 s | 0.0198 s |
+| 1,025 KiB (at ARG_MAX) | — | 20.26 s | 0.0732 s |
+
+A second quadratic was introduced in this work and caught by the same review: the `<br>` fix above
+used `[jsSpace]*/?[jsSpace]*`, two adjacent unbounded quantifiers around an optional element, which
+backtracks polynomially on `<br` followed by a long whitespace run that never reaches `>` — 0.018 /
+0.070 / 0.282 s at 2 / 4 / 8 KiB, and stack-exhausting outright at larger sizes. The file's two
+other `<br` sites kept the single-quantifier form and stayed linear. Possessive quantifiers (`*+`)
+fix it exactly — `[jsSpace]`, `/` and `>` are pairwise disjoint, so no backtrack can expose a match
+the greedy form would find — verified over an exhaustive 4-token sweep, 14,641 inputs, 0
+divergences.
+
+The title-addressed branch additionally reported the user's `--title` argument rather than the
+fetched note's title, which differ whenever the case does. (NOTES-M6)
+
+### Fixed — HTML tag stripping was quadratic; a large note body could hang the process
+
+`<[^>]*>` as a global regex replace is O(N²): the engine attempts a match at every `<` and each
+attempt scans to end-of-input before failing. Measured here at 0.41 s / 1.64 s / 6.54 s for 10k /
+20k / 40k characters of unmatched `<` — 4× per doubling, so ~1 s at 15 KB and ~60 s at 121 KB.
+`notes update --format html` ran it AFTER the note was already written, so the caller waited on a
+mutation that had already happened; `notes get-plaintext` and `notes get-markdown` run it on
+stored bodies, which have no argv ceiling at all. Replaced with a linear scanner at all FOUR
+`<[^>]*>` sites — including `notes get`'s hashtag extraction, which review caught being left
+behind because it substitutes a space rather than deleting, so the first scanner was not a
+drop-in. 200k unmatched `<` completes in 0.0031 s (the earlier "0.006 s" was conservative but did
+not reproduce). That benchmark is deliberately no longer quoted alone: review pointed out it was
+the one shape that showed linearity while its neighbour — the same byte count of `<script` — was
+still quadratic, and now measures 0.0141 s. Equivalence is established differentially
+against the regex itself over 20,000 generated bodies plus hand-picked adversarial shapes, with
+reach controls asserting the generator actually produced each discriminating shape — including a
+combining mark adjacent to a delimiter, which is the ONLY shape that distinguishes a correct
+scalar-based scanner from a `Character`-based one that would silently retain every such tag.
+
+NINE `[^>]*` sites with the same shape remain on read paths — my census said three until all
+three reviewers independently enumerated the rest, and the worst per byte (`<a href>` inline-link
+conversion, ~78 s on a 128 KiB stored body) was not on my list at all. They are tracked in the
+queue rather than swept here: most live in `htmlToMarkdown`, which has no oracle counterpart at
+all (the oracle delegates to turndown in one line) and is slated for wholesale replacement, so
+hand-fixing them now would likely be discarded work.
+
+
 ### BREAKING — `notes search` now returns at most 50 results by default (was unbounded)
 
 The installed oracle (2.6.12) defaults `search-notes` to 50 (`DEFAULT_SEARCH_LIMIT`); this port

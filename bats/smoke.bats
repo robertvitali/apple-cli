@@ -463,3 +463,20 @@ require_no_stale_session_for() {
   [ "$status" -eq 0 ]
   echo "$output" | grep -q "^OK: "
 }
+
+# Two table corruptions have shipped into this repo's records and BOTH were caught by review
+# rather than tooling: a stray unescaped `|` that dropped a queue row's evidence column, and a
+# prose paragraph fused onto a CHANGELOG table row, which GFM renders by DISCARDING the excess
+# cell — silently deleting a documented fix. The source diff looks fine in both cases; only the
+# rendered output loses content, which is exactly what eyeball review is worst at. The check
+# above covers one table in one file; this covers every table in every record file.
+@test "lint: every markdown table in the records is well-formed" {
+  run python3 "$BATS_TEST_DIRNAME/helpers/md_tables_wellformed.py" \
+      "$BATS_TEST_DIRNAME/../CHANGELOG.md" \
+      "$BATS_TEST_DIRNAME/../README.md" \
+      "$BATS_TEST_DIRNAME/../AGENTS.md" \
+      "$BATS_TEST_DIRNAME/../docs/COMPLETION-LOOP.md" \
+      "$BATS_TEST_DIRNAME/../docs/port-specs/notes.md"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "^OK: "
+}

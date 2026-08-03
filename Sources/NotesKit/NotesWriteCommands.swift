@@ -168,7 +168,12 @@ struct UpdateCmd: ParsableCommand {
                 if note.passwordProtected { throw AppleError.validation("Note is password-protected. Unlock it in Notes.app first.") }
                 try guardLiveWrite(labeledName: note.title, sandboxActive: gate.sandboxActive)
                 try script.updateNoteById(id: noteId, newTitle: newTitle, newContent: newContent, html: html)
-                let displayTitle = (newTitle?.isEmpty == false) ? newTitle! : note.title
+                // Oracle `resolveUpdateResponseTitle`: in html format the reported title is DERIVED
+                // from the new body (first visible line) and newTitle is ignored; plaintext keeps
+                // JS truthiness. Returning newTitle unconditionally reported a title Notes would
+                // not show, because Notes takes a note's title from its first rendered line.
+                let displayTitle = NotesText.resolveUpdateResponseTitle(
+                    current: note.title, newTitle: newTitle, html: html, newContent: newContent)
                 try emitNotesWrite(UpdatedNote(ok: true, id: noteId, title: displayTitle, shared: note.shared),
                                    json: global.json, sandboxActive: gate.sandboxActive,
                                    human: "Updated \"\(displayTitle)\".")
@@ -177,7 +182,11 @@ struct UpdateCmd: ParsableCommand {
                 if note.passwordProtected { throw AppleError.validation("Note is password-protected. Unlock it in Notes.app first.") }
                 try guardLiveWrite(labeledName: noteTitle, sandboxActive: gate.sandboxActive)
                 try script.updateNote(title: noteTitle, newTitle: newTitle, newContent: newContent, account: account, html: html)
-                let finalTitle = (newTitle?.isEmpty == false) ? newTitle! : noteTitle
+                // The FETCHED title, not the user's --title argument: AppleScript's by-name
+                // lookup is case-insensitive, so `--title "hello"` against a note named "Hello"
+                // reported "hello" where the oracle reports "Hello". Same class as 644ffdb.
+                let finalTitle = NotesText.resolveUpdateResponseTitle(
+                    current: note.title, newTitle: newTitle, html: html, newContent: newContent)
                 try emitNotesWrite(UpdatedNote(ok: true, id: nil, title: finalTitle, shared: note.shared),
                                    json: global.json, sandboxActive: gate.sandboxActive,
                                    human: "Updated \"\(finalTitle)\".")

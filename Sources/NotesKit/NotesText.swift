@@ -140,7 +140,7 @@ enum NotesText {
 
     private static func htmlToTextForHashtags(_ html: String) -> String {
         var s = html
-        s = regexReplace(s, "<[^>]*>", " ")
+        s = stripTags(s, replacement: " ")   // linear; `" "` so words never join across a tag
         s = regexReplace(s, "&#x?[0-9a-fA-F]+;", " ")
         s = regexReplace(s, "&[a-zA-Z]+;", " ")
         return s
@@ -200,8 +200,7 @@ enum NotesText {
         text = regexReplace(text, "<br\\s*/?>", "\n", caseInsensitive: true)
         text = regexReplace(text, "</div>", "\n", caseInsensitive: true)
         text = regexReplace(text, "</p>", "\n", caseInsensitive: true)
-        var prev: String
-        repeat { prev = text; text = regexReplace(text, "<[^>]*>", "") } while text != prev
+        text = stripTags(text)   // linear equivalent of the `<[^>]*>` fixed point
         text = text.replacingOccurrences(of: "&nbsp;", with: " ")
         text = text.replacingOccurrences(of: "&lt;", with: "<")
         text = text.replacingOccurrences(of: "&gt;", with: ">")
@@ -249,7 +248,7 @@ enum NotesText {
         s = regexReplace(s, "<(div|p)\\b[^>]*>", "", caseInsensitive: true)
 
         // Strip whatever tags remain.
-        s = regexReplace(s, "<[^>]*>", "")
+        s = stripTags(s)
 
         // Decode entities.
         s = decodeEntities(s)
@@ -259,6 +258,108 @@ enum NotesText {
         s = lines.joined(separator: "\n")
         s = regexReplace(s, "\n{3,}", "\n\n")
         return s.trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    // MARK: update-note response title (NOTES-M6, oracle 2.6.12)
+
+    /// Oracle `decodeHtmlEntities` (index.js:41844). Deliberately SEPARATE from `decodeEntities`
+    /// above — and the reason is STRUCTURAL, not scheduling: the oracle itself ships two decoders.
+    /// `decodeEntities` above mirrors the inline one in `htmlToPlaintext` (index.js:41394) —
+    /// semicolon REQUIRED, fixed named list including `&#92;`, no optional-semicolon lookahead,
+    /// `&amp;` last — which is what `get-note-markdown` must keep. Unifying the two would be a
+    /// parity REGRESSION on the markdown/plaintext path, so two decoders is fidelity, not
+    /// duplication.
+    ///
+    /// Measured differences between the two (both verified against the real 2.6.12 oracle):
+    /// `decodeEntities` requires the trailing semicolon (`a&nbsp b` → oracle `"a  b"`, ours
+    /// unchanged); it makes ONE interleaved left-to-right pass where this one makes two sequential
+    /// whole-string passes (`&#x26;#65;` → oracle `"A"`, `decodeEntities` `"&#65;"`); and its
+    /// numeric class is `[0-9a-fA-F]` for BOTH radixes, so `&#1F;` fails `UInt32(radix: 10)` and
+    /// survives verbatim where the oracle yields U+0001 + `"F;"`. Surrogate/range handling is NOT
+    /// a difference — `Unicode.Scalar(cp)` already returns nil and the match is kept. The
+    /// `decodeEntities` deltas are `get-note-markdown`'s to fix under NOTES-L1.
+    ///
+    /// Faithful points: the semicolon is OPTIONAL when the entity is not followed by `[0-9a-z]`;
+    /// hex runs BEFORE decimal; `&amp` runs LAST so `&amp;lt;` decodes once to `&lt;`; and a code
+    /// point that is a surrogate (U+D800–U+DFFF) or above U+10FFFF is left VERBATIM.
+    static func decodeHtmlEntitiesOracle(_ text: String) -> String {
+        func decodeCodePoint(_ match: String, _ value: String, _ radix: Int) -> String {
+            guard let cp = UInt32(value, radix: radix), cp <= 0x10FFFF,
+                  !(0xD800...0xDFFF).contains(cp), let scalar = Unicode.Scalar(cp) else { return match }
+            return String(scalar)
+        }
+        var s = text
+        s = regexReplaceFunc2(s, "&#x([0-9a-f]+);?", caseInsensitive: true) { m, g in
+            decodeCodePoint(m, g[0], 16)
+        }
+        s = regexReplaceFunc2(s, "&#([0-9]+);?", caseInsensitive: false) { m, g in
+            decodeCodePoint(m, g[0], 10)
+        }
+        // The NAME is matched case-insensitively but the lookahead is spelled with both cases
+        // under a case-SENSITIVE pattern: ICU full case folding makes `[0-9a-z]` match U+212A
+        // (Kelvin) and U+017F (long s), which JS `/i` without `u` refuses to fold onto ASCII.
+        for (name, repl) in [("nbsp", " "), ("quot", "\""), ("apos", "'"),
+                             ("lt", "<"), ("gt", ">"), ("amp", "&")] {
+            let anyCase = name.map { "[\($0.lowercased())\($0.uppercased())]" }.joined()
+            s = regexReplace(s, "&\(anyCase)(?:;|(?![0-9A-Za-z]))", repl)
+        }
+        return s
+    }
+
+    /// Oracle `firstVisibleHtmlLine` (index.js:41854). Returns nil when nothing renders.
+    ///
+    /// The script/style strip runs to a FIXED POINT, exactly as the oracle does — a single pass
+    /// would leave `<scr<script>X</script>ipt>`-style splices behind. The TAG strip does not need
+    /// a loop (see `stripTags`). `<br>` and block-closing tags become newlines BEFORE tags are
+    /// stripped, which is what makes "first line" mean the first rendered line, not the first tag.
+    static func firstVisibleHtmlLine(_ html: String) -> String? {
+        // JS `\s` — spelled out because ICU's `\s` is NOT the same set (see below). Bound here
+        // rather than at the collapse site because `<br>` needs the SAME class: the oracle's
+        // BREAK_RE is `/<br\s*\/?\s*>/gi`, so its whitespace is ECMAScript's, not ICU's.
+        let jsSpace = "\t\n\u{0b}\u{0c}\r \u{a0}\u{1680}\u{2000}-\u{200a}\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}\u{feff}"
+
+        var text = stripNonRenderedBlocks(html)
+        // `[\(jsSpace)]` not `\s`: JS `\s` includes U+FEFF and EXCLUDES U+0085, ICU's does the
+        // opposite on BOTH. Getting this wrong here either merges two rendered lines into one
+        // title (`<br` + U+FEFF + `>`) or invents a break and truncates it (`<br` + U+0085 + `>`).
+        // POSSESSIVE (`*+`), not greedy. Two adjacent unbounded quantifiers around an
+        // optional element is the classic polynomial-backtracking shape: on `<br` + a long
+        // whitespace run that never reaches `>`, the first run gives back one position at a
+        // time and the second re-scans from each. Measured 0.018 / 0.070 / 0.282 s at 2 / 4 /
+        // 8 KiB (4x per doubling) and it can exhaust the stack outright at larger sizes.
+        // This is MY regression, introduced by the round-3 `\s` fix in this very line, while
+        // the file's two OTHER `<br` sites kept the single-quantifier form and stayed linear.
+        // Possessive is safe here because `[jsSpace]`, `/` and `>` are pairwise disjoint, so
+        // no backtrack into either run can expose a match the greedy form would have found —
+        // verified over an exhaustive 4-token sweep, 14,641 inputs, 0 divergences.
+        text = regexReplace(text, "<br[\(jsSpace)]*+/?[\(jsSpace)]*+>", "\n", caseInsensitive: true)
+        text = regexReplace(text, "</(?:div|h[1-6]|p|li)>", "\n", caseInsensitive: true)
+        text = stripTags(text)   // linear equivalent of the oracle's `<[^>]*>` fixed point
+        let decoded = decodeHtmlEntitiesOracle(text)
+        // Oracle splits on /[\r\n\u2028\u2029]+/, collapses internal whitespace, trims, and
+        // takes the first TRUTHY line — i.e. the first non-empty one, not simply line 0.
+        let jsSpaceSet = CharacterSet(charactersIn: "\t\n\u{0b}\u{0c}\r \u{a0}\u{1680}\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}\u{feff}")
+            .union(CharacterSet(charactersIn: Unicode.Scalar(0x2000)!...Unicode.Scalar(0x200a)!))
+        // Splitting per-character rather than on runs is SAFE and deliberate: JS splits on maximal
+        // runs giving P1,P2,…; this gives the same pieces with empty strings interleaved, and the
+        // consumer takes the first piece non-empty after collapse+trim, so the survivor is identical.
+        for raw in decoded.components(separatedBy: CharacterSet(charactersIn: "\r\n\u{2028}\u{2029}")) {
+            let line = regexReplace(raw, "[\(jsSpace)]+", " ")
+                .trimmingCharacters(in: jsSpaceSet)
+            if !line.isEmpty { return line }
+        }
+        return nil
+    }
+
+    /// Oracle `resolveUpdateResponseTitle` (index.js:41868). In HTML format the response title is
+    /// DERIVED from the new body and `newTitle` is ignored entirely — the port previously returned
+    /// `newTitle ?? current` unconditionally, so an html update reported a title Notes would not
+    /// show. Plaintext keeps JS truthiness: an EMPTY newTitle falls back to the current one.
+    static func resolveUpdateResponseTitle(current: String, newTitle: String?,
+                                           html: Bool, newContent: String) -> String {
+        if html { return firstVisibleHtmlLine(newContent) ?? current }
+        if let newTitle, !newTitle.isEmpty { return newTitle }
+        return current
     }
 
     static func decodeEntities(_ input: String) -> String {
@@ -300,21 +401,231 @@ enum NotesText {
         return out.joined(separator: "\n")
     }
 
+    /// Linear-time equivalent of a global `<[^>]*>` replace-with-empty.
+    ///
+    /// The regex form is O(N²): the engine tries a match at EVERY `<`, and each attempt scans
+    /// `[^>]*` to end-of-input before failing, so a body of unmatched `<` costs quadratic time —
+    /// measured on this machine at 0.41 s / 1.64 s / 6.54 s for 10k / 20k / 40k characters (4×
+    /// per doubling), i.e. ~1 s at 15 KB and ~60 s at 121 KB. The oracle's JS engine has the same
+    /// asymptotic shape but a ~10× smaller constant; parity is about behaviour, not about
+    /// inheriting a pathological constant, and this scanner is behaviourally identical.
+    ///
+    /// Equivalence argument: `<[^>]*>` always matches from a `<` to the FIRST following `>`, and
+    /// matches are non-overlapping and left-to-right — exactly what this scan does. When no `>`
+    /// follows a `<`, no match can start at that `<` or at any later position (any later `<` would
+    /// need a `>` further right, and there is none), so the remainder is copied verbatim. Both `<`
+    /// and `>` are ASCII, so scalar boundaries and the regex engine's UTF-16 boundaries coincide;
+    /// no surrogate pair can be split. A single global pass is already a fixed point: a `<` in the
+    /// gap BEFORE a match would itself have matched to that same `>` and been chosen first (the
+    /// regex is leftmost-first and non-overlapping), so every surviving `<` lies in the final
+    /// tail with no `>` after it, and concatenation cannot manufacture a tag. Confirmed
+    /// empirically by the differential in `StripTagsEquivalenceTests`, which compares against
+    /// the regex run to a FIXED POINT and finds no input where one pass differs.
+    /// `replacement` is what each matched tag becomes. `nil` drops it (the `<[^>]*>` → `""`
+    /// form); a scalar substitutes it (the `<[^>]*>` → `" "` form used for hashtag extraction,
+    /// where joining words across a tag boundary would invent hashtags that are not there).
+    static func stripTags(_ s: String, replacement: Unicode.Scalar? = nil) -> String {
+        let src = Array(s.unicodeScalars)
+        var out = String.UnicodeScalarView()
+        out.reserveCapacity(src.count)
+        var i = 0
+        while i < src.count {
+            guard src[i] == "<" else { out.append(src[i]); i += 1; continue }
+            var j = i + 1
+            while j < src.count && src[j] != ">" { j += 1 }
+            if j < src.count {                                   // `<…>` → drop or substitute
+                if let replacement { out.append(replacement) }
+                i = j + 1
+                continue
+            }
+            while i < src.count { out.append(src[i]); i += 1 }   // no `>` left: nothing can match
+        }
+        return String(out)
+    }
+
+    /// Linear-time equivalent of the oracle's NON_RENDERED_BLOCK_RE fixed point
+    /// (`/<(script|style)\b[^>]*>[\s\S]*?(?:<\/\1>|$)/gi`, index.js:41843 + :41859).
+    ///
+    /// This is a SCANNER rather than a regex because `NSRegularExpression` cannot express the
+    /// oracle's semantics — three separate ICU-vs-JS divergences meet in that one pattern:
+    ///
+    /// 1. `.caseInsensitive` applies ICU FULL case folding, which maps U+017F (ſ) onto `s` and
+    ///    U+212A (K) onto `k`. That makes `<ſcript>` match `(script|style)`, makes `</ſcript>`
+    ///    close an ASCII `<script>` via the backreference, and widens the ASCII-only
+    ///    `(?![A-Za-z0-9_])` boundary so `<script` + U+212A + `>` stops being recognised. JS `/i`
+    ///    without `u` canonicalises via `toUpperCase`, and neither scalar upcases to ASCII, so JS
+    ///    folds ASCII only. Spelling the names case-sensitively is NOT a fix either — the three
+    ///    cases SQUEEZE any single option set, which is why this is a scanner and not a regex:
+    ///
+    ///        input                      oracle    ICU .caseInsensitive   ICU case-sensitive
+    ///        <script>x</ſcript>AFTER    ""        "AFTER"  WRONG         ""       right
+    ///        <SCRIPT>x</script>AFTER    "AFTER"   "AFTER"  right         unchanged WRONG
+    ///        <script>x</SCRIPT>AFTER    "AFTER"   "AFTER"  right         ""       WRONG
+    ///
+    ///    Row 1 demands case-sensitive; rows 2-3 demand case-insensitive. No `NSRegularExpression`
+    ///    option set satisfies all three, because JS's backreference is ASCII-case-insensitive
+    ///    while ICU's folding is full. The patched regex still diverged on ~26% of a reviewer's
+    ///    corpus; this scanner diverges on 0%.
+    /// 2. ICU `$` matches at end-of-input OR before a final line terminator, whatever
+    ///    `anchorsMatchLines` says; JS `$` without `m` matches only at absolute end. `\z` is the
+    ///    correct ICU spelling (see `regexReplace`).
+    /// 3. `[^>]*` attempted at every `<` is O(N²) — the same shape `stripTags` exists to avoid.
+    ///
+    /// Verified against the oracle's own regex over 60,028 generated bodies whose alphabet
+    /// deliberately reaches U+017F, U+212A, U+0085, trailing line terminators, mixed-case tags and
+    /// splice fragments: 0 divergences, where the regex form diverges on 11,170 of the same
+    /// inputs. Three independent reviewers reproduced this over a further ~430,000 inputs
+    /// (random, exhaustive-by-depth, and full-scalar case-folding sweeps) with 0 divergences.
+    ///
+    /// The fixed-point loop terminates: a pass sets `changed` only after advancing `i` past a span
+    /// it does not append, so a changed pass strictly shrinks the array — at most N passes. Note
+    /// the pass count IS an O(N) multiplier on deeply left-nested splices — a re-forming chain
+    /// (`Lk = "<sty" + L(k-1) + "le></style>"`) needs one pass per level and each pass copies the
+    /// whole array. The oracle runs ITS regex to a fixed point too, so the shape is inherited
+    /// rather than introduced — but do not read that as "no worse than the oracle": measured
+    /// against the live oracle on byte-identical payloads this port is ~45x slower on that shape
+    /// (46 s vs ~35 min extrapolated at ARG_MAX), so an oracle annoyance is a port hang. Tracked
+    /// in the queue, NOT fixed here. An earlier version of this comment claimed "the regex form is
+    /// slower still on the identical payload"; that was FALSE — review measured the regex form
+    /// 3.4x FASTER on the re-forming chain (0.069 / 0.428 / 2.259 s vs 0.137 / 1.247 / 7.775 s at
+    /// 14 / 36 / 90 KiB). The scanner's win is on the unclosed-tag shapes, not this one.
+    static func stripNonRenderedBlocks(_ s: String) -> String {
+        let names: [[Unicode.Scalar]] = [Array("script".unicodeScalars), Array("style".unicodeScalars)]
+
+        /// ASCII-only case-insensitive compare against a lowercase ASCII `name`.
+        func asciiCaseMatches(_ src: [Unicode.Scalar], _ from: Int, _ name: [Unicode.Scalar]) -> Bool {
+            if from + name.count > src.count { return false }
+            for k in 0..<name.count {
+                var c = src[from + k].value
+                if c >= 65 && c <= 90 { c += 32 }
+                if c != name[k].value { return false }
+            }
+            return true
+        }
+        func isAsciiWord(_ s: Unicode.Scalar) -> Bool {
+            let v = s.value
+            return (v >= 48 && v <= 57) || (v >= 65 && v <= 90) || (v >= 97 && v <= 122) || v == 95
+        }
+
+        func onePass(_ src: [Unicode.Scalar]) -> (out: [Unicode.Scalar], changed: Bool) {
+            var out: [Unicode.Scalar] = []
+            out.reserveCapacity(src.count)
+            let n = src.count
+            var i = 0, changed = false
+            outer: while i < n {
+                if src[i] == "<" {
+                    for name in names {
+                        guard asciiCaseMatches(src, i + 1, name) else { continue }
+                        let afterName = i + 1 + name.count
+                        // JS `\b`: the scalar after the name must not be an ASCII word scalar.
+                        if afterName < n && isAsciiWord(src[afterName]) { continue }
+                        var j = afterName                       // `[^>]*>`
+                        while j < n && src[j] != ">" { j += 1 }
+                        if j == n {
+                            // No `>` at or after `afterName`, and `[i, afterName)` is `<` plus the
+                            // literal tag name (letters only), so there is no `>` at or after `i`
+                            // AT ALL. A match starting at any p >= i needs a `>` strictly right of
+                            // p, so none can start here OR LATER: copy the tail and stop.
+                            //
+                            // `continue` here instead re-scans to end-of-input at every subsequent
+                            // `<script`, which is the very O(N^2) this scanner exists to remove —
+                            // measured 0.036/0.142/0.564/2.252 s at 43k/87k/175k/350k scalars, a
+                            // clean 4x per doubling. `stripTags` already derived this same fact and
+                            // acted on it; this function derived it and threw it away. Carrying an
+                            // invariant across siblings is the whole lesson of this file.
+                            while i < n { out.append(src[i]); i += 1 }
+                            break outer
+                        }
+                        // Lazy `[\s\S]*?(?:</name>|$)` — earliest literal `</name>`, else end.
+                        var k = j + 1, end = n
+                        while k < n {
+                            if src[k] == "<", k + 1 < n, src[k + 1] == "/",
+                               asciiCaseMatches(src, k + 2, name),
+                               k + 2 + name.count < n, src[k + 2 + name.count] == ">" {
+                                end = k + 3 + name.count
+                                break
+                            }
+                            k += 1
+                        }
+                        i = end
+                        changed = true
+                        continue outer
+                    }
+                }
+                out.append(src[i])
+                i += 1
+            }
+            return (out, changed)
+        }
+
+        // The fixed point IS load-bearing here (unlike `stripTags`): removing an inner block can
+        // splice its neighbours into a NEW tag, e.g. `<scr<script>X</script>ipt>SECRET</script>`.
+        var src = Array(s.unicodeScalars)
+        while true {
+            let (out, changed) = onePass(src)
+            if !changed { break }
+            src = out
+        }
+        var view = String.UnicodeScalarView()
+        view.reserveCapacity(src.count)
+        for c in src { view.append(c) }
+        return String(view)
+    }
+
     // MARK: regex helpers
 
+    /// `anchorsMatchLines` defaults to true for the markdown callers that want `^`/`$` per line.
+    ///
+    /// PORTING A JS REGEX: `anchorsMatchLines: false` is NECESSARY BUT NOT SUFFICIENT to reproduce
+    /// a non-multiline JS `$`. ICU (Java semantics) matches `$` at end-of-input OR immediately
+    /// before a FINAL line terminator — U+000A, U+000B, U+000C, U+000D, U+0085, U+2028, U+2029 —
+    /// no matter how this flag is set. JS `$` without `m` matches at absolute end only. The exact
+    /// ICU spellings of JS's non-multiline anchors are `\z` (for `$`) and `\A` (for `^`); use
+    /// those, not `$`/`^`, or a lazy `[\s\S]*?…(?:X|\z)` stops one scalar early on a trailing NEL.
+    /// This bit us for real: `firstVisibleHtmlLine` reported a bare U+0085 as a note's title.
     static func regexReplace(_ input: String, _ pattern: String, _ template: String,
-                             caseInsensitive: Bool = false, dotMatchesLineSeparators: Bool = false) -> String {
+                             caseInsensitive: Bool = false, dotMatchesLineSeparators: Bool = false,
+                             anchorsMatchLines: Bool = true) -> String {
         var options: NSRegularExpression.Options = []
         if caseInsensitive { options.insert(.caseInsensitive) }
         if dotMatchesLineSeparators { options.insert(.dotMatchesLineSeparators) }
         // Default anchors match at line boundaries for `^`/`$` usage in enrichment.
-        options.insert(.anchorsMatchLines)
+        if anchorsMatchLines { options.insert(.anchorsMatchLines) }
         guard let re = try? NSRegularExpression(pattern: pattern, options: options) else { return input }
         let ns = input as NSString
         return re.stringByReplacingMatches(in: input, range: NSRange(location: 0, length: ns.length), withTemplate: template)
     }
 
     /// Regex replace with a Swift closure computing each replacement (for numeric entities).
+    /// Like `regexReplaceFunc` but hands the transform the FULL match too, which the oracle's
+    /// `decodeCodePoint` needs in order to return the original text verbatim when it rejects.
+    /// CONTRACT: `pattern` must have at least one capture group, and callers index `g` by
+    /// GROUP ORDER (`g[0]` = group 1). A non-participating group yields `""` rather than shifting
+    /// the indices, but a zero-group pattern makes `g[0]` trap. NOTE the sibling
+    /// `regexReplaceFunc` below uses the OPPOSITE convention — it passes `0..<numberOfRanges`, so
+    /// its `groups[0]` is the WHOLE match. Check which helper you are calling before indexing.
+    static func regexReplaceFunc2(_ input: String, _ pattern: String, caseInsensitive: Bool,
+                                  _ transform: (String, [String]) -> String) -> String {
+        let opts: NSRegularExpression.Options = caseInsensitive ? [.caseInsensitive] : []
+        guard let re = try? NSRegularExpression(pattern: pattern, options: opts) else { return input }
+        let ns = input as NSString
+        var out = "", last = 0
+        for m in re.matches(in: input, range: NSRange(location: 0, length: ns.length)) {
+            out += ns.substring(with: NSRange(location: last, length: m.range.location - last))
+            var groups: [String] = []
+            // Append "" for a non-participating group rather than skipping it — skipping shifts
+            // every later group down, which `regexReplaceFunc` below already gets right.
+            for i in 1..<m.numberOfRanges {
+                let r = m.range(at: i)
+                groups.append(r.location == NSNotFound ? "" : ns.substring(with: r))
+            }
+            out += transform(ns.substring(with: m.range), groups)
+            last = m.range.location + m.range.length
+        }
+        out += ns.substring(from: last)
+        return out
+    }
+
     static func regexReplaceFunc(_ input: String, _ pattern: String, _ transform: ([String]) -> String?) -> String {
         guard let re = try? NSRegularExpression(pattern: pattern) else { return input }
         let ns = input as NSString
