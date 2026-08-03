@@ -9,10 +9,24 @@ public struct AppleError: Error {
     public let message: String
     public let exitCode: Int32
 
-    public init(type: String, message: String, exitCode: Int32) {
+    /// TCC authorization status (`denied` / `restricted` / `notDetermined`), surfaced as
+    /// `error.status`. The oracles return this ALONGSIDE the message on an authorization failure,
+    /// and an agent is expected to branch on it — retry after prompting vs. send the user to
+    /// System Settings vs. give up because MDM forbids it. We previously folded it into the prose
+    /// of `error.message`, which is not machine-readable, so that branch was unavailable.
+    public let status: String?
+
+    /// Human-facing copy telling the user how to grant access, surfaced as `error.remediation`.
+    /// Same rationale: the oracle returns it as its own key so a client can display it verbatim.
+    public let remediation: String?
+
+    public init(type: String, message: String, exitCode: Int32,
+                status: String? = nil, remediation: String? = nil) {
         self.type = type
         self.message = message
         self.exitCode = exitCode
+        self.status = status
+        self.remediation = remediation
     }
 
     public static func validation(_ m: String) -> AppleError {
@@ -24,8 +38,14 @@ public struct AppleError: Error {
     public static func upstream(_ m: String) -> AppleError {
         .init(type: AppleErrorType.upstream, message: m, exitCode: AppleExit.upstream)
     }
-    public static func permissionDenied(_ m: String) -> AppleError {
-        .init(type: AppleErrorType.permissionDenied, message: m, exitCode: AppleExit.permissionDenied)
+    /// `status` and `remediation` are optional so the ~30 existing call sites keep compiling, but
+    /// a TCC-denial site SHOULD pass them — that is the whole point of the fields. A denial raised
+    /// without a status is indistinguishable, to a machine consumer, from the old behaviour.
+    public static func permissionDenied(_ m: String,
+                                        status: String? = nil,
+                                        remediation: String? = nil) -> AppleError {
+        .init(type: AppleErrorType.permissionDenied, message: m,
+              exitCode: AppleExit.permissionDenied, status: status, remediation: remediation)
     }
     public static func notImplemented(_ m: String) -> AppleError {
         .init(type: AppleErrorType.notImplemented, message: m, exitCode: AppleExit.unknown)

@@ -28,6 +28,27 @@ loaded every session) + owned longevity.
 { "schema_version": 1, "tool": "<domain>", "ok": false, "error": { "type": "...", "message": "..." } }
 ```
 
+On an **authorization failure** the error object carries two further keys, matching what the
+MCP servers return so a client can act on the failure instead of parsing prose:
+
+```json
+{ "schema_version": 1, "tool": "contacts", "ok": false,
+  "error": { "type": "authorization_denied",
+             "message": "Contacts access not granted (status=denied).",
+             "status": "denied",
+             "remediation": "Contacts access was denied. Open System Settings → …" } }
+```
+
+- `status` — the TCC state: `denied`, `restricted`, or `notDetermined`. Branch on it: retrying
+  after a prompt can succeed for `notDetermined`, is pointless for `restricted` (MDM), and needs
+  a visit to System Settings for `denied`.
+- `remediation` — user-facing copy describing how to grant access. Absent when there is nothing
+  useful to say — notably the permission-prompt-timeout case, where the dialog is already on
+  screen.
+
+Both keys are **omitted, not `null`**, on errors with no authorization dimension, so
+`if "status" in error` is a valid test. Only `contacts` populates them today.
+
 Consumers must ignore unknown keys (tolerant reader); key order is not
 guaranteed (we sort keys for snapshot stability). `schema_version` is an integer
 that steps only on a breaking output change.

@@ -25,9 +25,11 @@ public enum Output {
                                    sandbox: sandboxActive ? true : nil, data: data))
     }
 
-    public static func encodeError(tool: String, type: String, message: String) throws -> Data {
+    public static func encodeError(tool: String, type: String, message: String,
+                                   status: String? = nil, remediation: String? = nil) throws -> Data {
         try encode(ErrorEnvelope(schema_version: schemaVersion, tool: tool, ok: false,
-                                 error: .init(type: type, message: message)))
+                                 error: .init(type: type, message: message,
+                                              status: status, remediation: remediation)))
     }
 
     // MARK: Emit (writes the encoded envelope to stdout)
@@ -36,15 +38,41 @@ public enum Output {
         write(try encodeSuccess(tool: tool, data: data, sandboxActive: sandboxActive))
     }
 
-    public static func emitError(tool: String, type: String, message: String) {
-        if let data = try? encodeError(tool: tool, type: type, message: message) {
+    /// Encode the envelope for an `AppleError`, carrying every field it holds.
+    ///
+    /// This exists so the mapping from `AppleError` to envelope is ONE named, pure, testable
+    /// function rather than an argument list spelled out at each `runGuarded` catch site. Review
+    /// flagged that the forwarding of `status`/`remediation` in `runGuarded` was untested, and it
+    /// was untestable in the old shape: `runGuarded` writes to stdout and throws `ExitCode`, so a
+    /// test could only observe it by capturing file descriptors. Now the part that can be wrong —
+    /// which fields get copied — is checkable directly.
+    public static func encodeError(tool: String, from error: AppleError) throws -> Data {
+        try encodeError(tool: tool, type: error.type, message: error.message,
+                        status: error.status, remediation: error.remediation)
+    }
+
+    /// Emit the envelope for an `AppleError`. See `encodeError(tool:from:)`.
+    public static func emitError(tool: String, from error: AppleError) {
+        emitError(tool: tool, type: error.type, message: error.message,
+                  status: error.status, remediation: error.remediation)
+    }
+
+    public static func emitError(tool: String, type: String, message: String,
+                                 status: String? = nil, remediation: String? = nil) {
+        if let data = try? encodeError(tool: tool, type: type, message: message,
+                                       status: status, remediation: remediation) {
             write(data)
         } else {
             // Never leave stdout empty on an error path: hand-roll a minimal valid envelope,
             // JSON-escaping every interpolated string (RFC 8259) so this last-ditch path can
             // never itself emit malformed JSON — a raw ", \, or control char in `message`
             // would otherwise break the very parse the fallback exists to guarantee.
-            write(Data(#"{"schema_version":\#(schemaVersion),"tool":\#(jsonString(tool)),"ok":false,"error":{"type":\#(jsonString(type)),"message":\#(jsonString(message))}}"#.utf8))
+            // The fallback carries status/remediation too. If it dropped them, the one path that
+            // exists BECAUSE encoding failed would also be the one that silently violates the
+            // contract those fields establish.
+            let extra = (status.map { #","status":\#(jsonString($0))"# } ?? "")
+                      + (remediation.map { #","remediation":\#(jsonString($0))"# } ?? "")
+            write(Data(#"{"schema_version":\#(schemaVersion),"tool":\#(jsonString(tool)),"ok":false,"error":{"type":\#(jsonString(type)),"message":\#(jsonString(message))\#(extra)}}"#.utf8))
         }
     }
 
@@ -111,5 +139,10 @@ struct ErrorEnvelope: Encodable {
     struct Payload: Encodable {
         let type: String
         let message: String
+        // Optional, so the synthesized Encodable omits them (encodeIfPresent) on the errors that
+        // have no authorization dimension. Adding optional fields is MINOR per
+        // docs/versioning-policy.md; every existing consumer keeps parsing unchanged.
+        let status: String?
+        let remediation: String?
     }
 }

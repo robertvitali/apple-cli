@@ -265,11 +265,20 @@ a literal MCP transcription, and why:
   <id>`…"*. Restoring the oracle's string verbatim would instruct the operator to call a Python
   function that does not exist in this CLI. The field is present and its meaning identical, so
   this is a changed advisory value, not a dropped field. **Accepted, not a gap** (CONTACTS-L1).
-- **`check_authorization` structured fields.** `contacts auth` returns `{status,
-  remediation?}` structurally — full parity with the MCP diagnostic. On *data* commands, an
-  `authorization_denied` failure folds `status` + `remediation` into `error.message` (the
-  shared CLI error envelope is `{type, message}` only); use `contacts auth` for the structured
-  form.
+- **`check_authorization` structured fields — CLOSED 2026-08-03 (was CONTACTS-M2).** `contacts
+  auth` returns `{status, remediation?}` structurally, and *data* commands now do too: the
+  shared error envelope carries optional `error.status` and `error.remediation`, so an
+  `authorization_denied` failure is machine-readable on every command rather than only on the
+  diagnostic one. This entry previously read "folds `status` + `remediation` into
+  `error.message` … use `contacts auth` for the structured form", recorded as an accepted
+  divergence on the grounds that a Contacts-only shape would break envelope uniformity across
+  six domains. That reasoning was backwards — it argued for adding the fields centrally, which
+  is what was done (`AppleKit/Output.swift`), not for dropping them. The keys are omitted (not
+  `null`) when an error has no authorization dimension. Only Contacts populates them, and that is
+  COMPLETE rather than partial: grepping the installed oracle sources for `remediation` and for
+  an authorization error type finds them in `apple_contacts_mcp` alone — `apple-notes-mcp` and
+  `mcp-server-apple-events` (Calendar + Reminders) return neither. The field lives in `AppleKit`
+  so the shape stays uniform if another oracle ever grows one.
 - **AppleScript ops bind via osascript argv (`on run argv`), never string interpolation** —
   strictly safer than the MCP (which escapes-then-interpolates). They need Contacts.app
   launchable + Automation TCC; failures classify as `error.type: unknown` (MCP parity) with a

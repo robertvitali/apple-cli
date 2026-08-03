@@ -91,7 +91,7 @@ public func runGuarded(tool: String, _ body: () throws -> Void) throws {
     do {
         try body()
     } catch let error as AppleError {
-        Output.emitError(tool: tool, type: error.type, message: error.message)
+        Output.emitError(tool: tool, from: error)
         throw ExitCode(error.exitCode)
     } catch let code as ExitCode {
         throw code // an already-intended exit (e.g. success)

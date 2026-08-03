@@ -12,6 +12,38 @@ with the Apple MCP servers they replace.
 
 ## [Unreleased]
 
+### BREAKING — authorization failures now carry `error.status` and `error.remediation`
+
+`apple contacts` (and any future domain whose oracle reports one) now emits the TCC state and the
+how-to-fix copy as their own keys on the error envelope, instead of folding them into the message:
+
+```json
+{ "ok": false,
+  "error": { "type": "authorization_denied",
+             "message": "Contacts access not granted (status=denied).",
+             "status": "denied",
+             "remediation": "Contacts access was denied. Open System Settings → …" } }
+```
+
+This matches `apple_contacts_mcp/server.py:113-126`, whose own docs tell a client to branch on
+`status` — `notDetermined` can succeed after a prompt, `denied` needs System Settings, `restricted`
+is MDM and will never succeed. Closes CONTACTS-M2.
+
+**Behaviour changes for consumers:**
+
+- `error.message` on a denial NO LONGER has the remediation sentence appended; it is now the
+  oracle's string verbatim. Read `error.remediation` for that copy. This is the breaking half:
+  parsing the message was previously the only way to obtain it.
+- `status` and `remediation` are **omitted, not `null`**, on errors with no authorization
+  dimension, so `if "status" in error` is a valid test.
+- Adding the two fields is itself additive (MINOR); the entry is flagged BREAKING for the message
+  change alone, per `docs/versioning-policy.md:229` and its round-up rule at `:233`.
+
+Only `contacts` populates these today, and that is complete rather than partial: of the installed
+oracles, only `apple_contacts_mcp` returns them — `apple-notes-mcp` and `mcp-server-apple-events`
+return neither. The fields live in `AppleKit` so the shape stays uniform if that changes.
+
+
 ### BREAKING — a pre-dispatch parse failure is now attributed to its domain, not to `apple`
 
 **Why BREAKING and not Fixed.** `docs/versioning-policy.md:229` makes the test explicit: correcting
@@ -92,8 +124,16 @@ behavioural tests instead, so the two halves of the change have disjoint coverag
 - `tool` no longer distinguishes a PRE-DISPATCH failure from one raised inside a command body —
   `apple notes --bogus` and a validation error thrown by `notes list` now both report
   `"tool": "notes"`. Only the message string differs (`invalid arguments (see stderr for details)`
-  vs the command's own text), and message text is not part of the versioned contract, so a
-  consumer that needs that distinction should use exit code and `error.type`.
+  vs the command's own text), so a consumer that needs that distinction should use exit code and
+  `error.type` rather than matching on the message.
+
+  > **Corrected 2026-08-03.** This bullet originally read "message text is not part of the
+  > versioned contract". That was too broad, and a later change caught it: `docs/versioning-policy.md:229`
+  > makes an output-value correction breaking "if any agent might parse the old value", which no
+  > blanket exemption for `error.message` can override. The narrow claim above — don't use message
+  > text to tell these two failure modes apart — is what this entry actually needed. See the
+  > `error.status` / `error.remediation` entry under [Unreleased], which is called out as BREAKING
+  > precisely because parsing a message was the only way to get that information.
 
 Closes CONTACTS-L3(a), which was cross-domain rather than contacts-specific.
 

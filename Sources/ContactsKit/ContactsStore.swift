@@ -79,12 +79,15 @@ public final class ContactsStore {
             sema.signal()
         }
         if sema.wait(timeout: .now() + requestTimeout) == .timedOut {
-            // Carry status=notDetermined for parity with the MCP timeout branch (server.py
-            // returns status:"notDetermined" here). Structured status/remediation is exposed
-            // on `apple contacts auth`; data-command errors fold it into the message.
+            // Mirrors the oracle's request-timeout branch (`server.py:99-109`) EXACTLY, including
+            // that it carries `status` but NO `remediation` — the prompt is already on screen, so
+            // "open System Settings" would be wrong advice. The message text is the oracle's
+            // verbatim; it used to be a paraphrase with the status folded into the prose, which no
+            // consumer could branch on.
             throw AppleError.permissionDenied(
-                "Contacts access not granted (status=notDetermined). The permission prompt is "
-                + "awaiting your response — grant access in the system dialog and retry.")
+                "Contacts permission prompt is awaiting your response. Grant access in the "
+                + "system dialog and retry.",
+                status: "notDetermined")
         }
         if let err = result.error {
             throw AppleError.permissionDenied("Contacts authorization error: \(err.localizedDescription)")
@@ -93,9 +96,9 @@ public final class ContactsStore {
     }
 
     /// Gate every data command (mirror `_require_contacts_authorization`): request on
-    /// `notDetermined`, then require authorized/limited. Throws `authorization_denied`
-    /// (folding status + remediation into the message — the CLI error envelope carries
-    /// type+message; the `auth` command exposes status/remediation structurally).
+    /// `notDetermined`, then require authorized/limited. Throws `authorization_denied` carrying
+    /// `status` and `remediation` as STRUCTURED envelope fields, matching the oracle key-for-key.
+    /// They were previously folded into the message prose, which is what CONTACTS-M2 was.
     public func requireAuthorization() throws {
         var status = authorizationStatus()
         if status == "notDetermined" {
@@ -103,8 +106,12 @@ public final class ContactsStore {
             status = authorizationStatus()
         }
         if status == "authorized" || status == "limited" { return }
+        // `server.py:113-126`: message, status and remediation are three SEPARATE keys, and the
+        // message does NOT have the remediation appended. We used to concatenate them, so the only
+        // way to recover either was to parse English out of one string.
         let rem = Self.remediation(for: status) ?? "Open System Settings → Privacy & Security → Contacts."
-        throw AppleError.permissionDenied("Contacts access not granted (status=\(status)). \(rem)")
+        throw AppleError.permissionDenied("Contacts access not granted (status=\(status)).",
+                                          status: status, remediation: rem)
     }
 
     // MARK: - Key sets
