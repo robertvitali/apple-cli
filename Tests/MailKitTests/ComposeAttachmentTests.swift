@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import TestSupport
 @testable import MailKit
 import AppleKit
 
@@ -9,11 +10,11 @@ import AppleKit
 @Suite("Compose attachment helpers")
 struct ComposeAttachmentTests {
 
+    /// Scratch that is actually reclaimed — this leaked 6 directories per `swift test`.
+    private let scratch = ScratchDirs("attach")
+
     private func tempFile(_ name: String, _ contents: String) throws -> String {
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("apple-cli-test-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-        let url = dir.appendingPathComponent(name)
+        let url = try scratch.directory().appendingPathComponent(name)
         try contents.write(to: url, atomically: true, encoding: .utf8)
         return url.path
     }
@@ -36,9 +37,7 @@ struct ComposeAttachmentTests {
 
     @Test("resolveAttachmentPath rejects a directory (not a regular file)")
     func rejectsDirectory() throws {
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("apple-cli-test-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
+        let dir = try scratch.directory()
         let err = #expect(throws: AppleError.self) { _ = try resolveAttachmentPath(dir.path) }
         #expect(err?.exitCode == 65)
     }

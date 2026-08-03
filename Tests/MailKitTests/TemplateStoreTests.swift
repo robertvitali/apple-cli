@@ -1,15 +1,22 @@
 import Testing
 import Foundation
+import TestSupport
 @testable import MailKit
 import AppleKit
 
 @Suite("TemplateStore")
 struct TemplateStoreTests {
 
+    /// Scratch that is actually reclaimed. This helper used to hand `TemplateStore` a fresh temp
+    /// path per call and never delete it: 6,680 directories had accumulated in the shared temp root,
+    /// 11 more per `swift test`.
+    private let scratch = ScratchDirs("tpl")
+
+    /// `try!` is acceptable in a test helper whose only failure mode is an unusable temp directory:
+    /// there is no meaningful recovery, it fails loudly, and it keeps the helper callable from the
+    /// non-throwing test bodies.
     private func tempStore() -> TemplateStore {
-        let dir = FileManager.default.temporaryDirectory
-            .appendingPathComponent("apple-cli-tpl-\(UUID().uuidString)")
-        return TemplateStore(homeOverride: dir.path)
+        TemplateStore(homeOverride: try! scratch.directory().path)
     }
 
     private func rawFile(_ store: TemplateStore, _ name: String) throws -> String {

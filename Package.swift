@@ -43,10 +43,14 @@ let package = Package(
             ]
         ),
 
-        .testTarget(name: "AppleKitTests", dependencies: ["AppleKit"]),
+        // Test-only helper target. Nothing in the product depends on it, so it is never linked
+        // into `apple`; it exists so the suites share ONE scratch-directory implementation instead
+        // of each growing its own that forgets to clean up (see Sources/TestSupport/ScratchDirs).
+        .target(name: "TestSupport"),
+        .testTarget(name: "AppleKitTests", dependencies: ["AppleKit", "TestSupport"]),
         .testTarget(name: "EventKitCoreTests", dependencies: ["EventKitCore", "AppleKit"]),
         .testTarget(name: "MessagesKitTests", dependencies: ["MessagesKit", "AppleKit"]),
-        .testTarget(name: "MailKitTests", dependencies: ["MailKit", "AppleKit"]),
+        .testTarget(name: "MailKitTests", dependencies: ["MailKit", "AppleKit", "TestSupport"]),
         .testTarget(name: "ContactsKitTests", dependencies: ["ContactsKit", "AppleKit"]),
         .testTarget(name: "NotesKitTests", dependencies: ["NotesKit", "AppleKit"]),
         .testTarget(name: "CalendarKitTests", dependencies: ["CalendarKit", "EventKitCore", "AppleKit"]),

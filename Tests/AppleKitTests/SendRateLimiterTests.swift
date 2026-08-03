@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import TestSupport
 @testable import AppleKit
 
 /// Oracle-mirrored send rate limit (oracle A `security.py` `TIER_LIMITS["sends"] = (3, 60.0)`).
@@ -11,11 +12,24 @@ import Foundation
 /// `APPLE_TEST_SANDBOX` races already documented in docs/write-model-v2.md.
 @Suite("Send rate limiter (oracle A sends tier)")
 struct SendRateLimiterTests {
-    /// A unique, non-existent state path per call.
+    /// A unique, non-existent state path per call, inside scratch that is actually reclaimed.
+    /// Eight labels here leaked one directory each per `swift test`; ~2,100 had accumulated.
+    private let scratch = ScratchDirs("ratelimit")
+
     func tmpState(_ label: String) -> URL {
-        FileManager.default.temporaryDirectory
-            .appendingPathComponent("apple-cli-ratelimit-\(label)-\(UUID().uuidString)", isDirectory: true)
-            .appendingPathComponent("state.json")
+        // NOTE the extra `\(label)/` component: the state file's PARENT must NOT exist, because
+        // that is what exercises the limiter's own mkdir-p (RateLimiter.swift). The first migration
+        // to ScratchDirs used `scratch.path(...)`, whose parent DOES exist, and silently dropped
+        // that coverage while every test stayed green — caught in review. `try!` is acceptable in a
+        // test helper whose only failure mode is an unusable temp directory: no recovery, fails loud.
+        let url = try! scratch.directory().appendingPathComponent("\(label)/state.json")
+        // Asserted HERE, not in a ScratchDirs test: the invariant belongs to these tests, and a
+        // ScratchDirs test claiming to guard it was vacuous — it exercised the helper, not this
+        // usage. If a future edit hands back a path whose parent already exists, every test below
+        // still passes while quietly covering nothing, which is exactly what happened once.
+        precondition(!FileManager.default.fileExists(atPath: url.deletingLastPathComponent().path),
+                     "the state file's parent must NOT exist — it is what exercises the mkdir-p")
+        return url
     }
 
     @Test("the ported constants are the oracle's verbatim")

@@ -12,6 +12,27 @@ with the Apple MCP servers they replace.
 
 ## [Unreleased]
 
+### Fixed — the test suite leaked ~25 temp directories per run into the shared temp root
+
+Closing out the temp-file work, the shared temp root turned out to hold **~14,000 `apple-cli-*`
+files, growing by 25 on every `swift test`**. The product leaks were the smaller half: the suites
+themselves each had a hand-rolled helper that minted
+`temporaryDirectory.appendingPathComponent("apple-cli-<label>-\(UUID())")` per call and never
+deleted it.
+
+A test-only `TestSupport` target now provides `ScratchDirs`, which vends unique directories, tracks
+the exact URLs it created, and removes them in `deinit` — swift-testing builds a fresh suite
+instance per test, so holding one as a stored property reclaims everything when that test ends. It
+deletes only what it vended, by exact URL, never by matching a name pattern in a shared directory:
+pattern-matching deletes there is how a test in this repo twice destroyed a concurrently-running
+command's files. Three suites migrated; measured growth afterwards is 0 per run, with the suites
+fixed earlier as the control that did not grow either way.
+
+**Not done, left for the operator:** the ~14,000 existing files are not removed. Deleting files a
+run did not create is out of bounds autonomously, and that directory is shared with other
+applications. Clear this project's own with
+`find "$TMPDIR" -maxdepth 1 -name 'apple-cli-*' -exec rm -rf {} +`.
+
 ### Fixed — generated `.eml` files left complete message bodies in the shared temp directory
 
 `mail send` / `reply` / `draft-rich` build an RFC-822 `.eml` and hand it to Mail. Without `--out`

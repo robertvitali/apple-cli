@@ -138,6 +138,13 @@ a broken diff but is only a stale cache. Keep the two out of each other's way: s
 to `.build-swiftly/` (gitignored), the CLT `swift build` keeps the default `.build/`. `bats` runs
 whichever binary was built last, so build before you run it.
 
+**Temp files in tests: use `ScratchDirs` (the `TestSupport` target), never a hand-rolled
+`temporaryDirectory.appendingPathComponent(...)`.** Hold one as a stored property on the suite
+(`private let scratch = ScratchDirs("label")`) and take directories from it; swift-testing makes a
+fresh suite instance per test, so its `deinit` reclaims them. Hand-rolled helpers are how ~14,000
+`apple-cli-*` files accumulated in the shared temp root, growing 25 per `swift test`, in the very
+repo whose product bug was leaking into that same directory.
+
 Three test tiers: **logic** (swift-testing, pure — CI), **CLI smoke** (bats,
 invokes the binary — CI + local), **live** (drives the real Apple frameworks
 against the sandbox — real Mac with granted TCC, not CI). Add golden-JSON
