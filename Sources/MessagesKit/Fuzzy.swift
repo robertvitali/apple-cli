@@ -57,21 +57,53 @@ public enum Fuzzy {
     }
 
     /// Port of `thefuzz.utils.full_process(force_ascii=True)` used inside WRatio:
-    /// drop non-ASCII, replace every non-alphanumeric char with a space, then
-    /// `.strip().lower()` (rapidfuzz `default_process` does NOT collapse internal
-    /// runs — reproduced faithfully).
+    /// replace every non-ASCII-alphanumeric char with a SPACE, then `.strip().lower()`
+    /// (rapidfuzz `default_process` does NOT collapse internal runs — reproduced faithfully).
+    ///
+    /// The `force_ascii` step is NOT "drop everything non-ASCII". thefuzz's table is literally
+    ///
+    ///     translation_table = {i: None for i in range(128, 256)}   # ascii dammit!
+    ///
+    /// so it deletes ONLY U+0080...U+00FF (the Latin-1 supplement). Every code point at U+0100 and
+    /// above survives into `default_process`, which replaces non-alphanumerics with a SPACE and
+    /// keeps Unicode letters as-is. Verified per character class against the oracle:
+    ///
+    ///     "x" + U+00E9 + "y" -> "xy"    (Latin-1: DELETED, length shrinks)
+    ///     "x" + U+2019 + "y" -> "x y"   (above Latin-1, punctuation: SPACE, length preserved)
+    ///     "x" + U+1F600 + "y" -> "x y"  (emoji: SPACE)
+    ///     "x" + U+3042 + "y" -> "xあy"  (Unicode LETTER: KEPT verbatim)
+    ///
+    /// Both halves are load-bearing, because `wRatio` branches on `lenRatio` and every one of
+    /// these changes the length differently. On the real message behind the 19-vs-18 probe-term\1divergence, dropping made the processed body 9 characters where the oracle saw 10: that
+    /// moved `lenRatio` from the oracle's 1.429 (10/7) to 1.286 (9/7) — both under 1.5, so the
+    /// same branch — while `ratio` went from 58.82 to 62.5, crossing the 60 threshold and adding a
+    /// message the oracle excluded. (Direction, since it is easy to misread: 1.286 and 62.5 are
+    /// the BUGGY values, 1.429 and 58.82 the oracle's.)
+    ///
+    /// `alnum` is L* + N* only — deliberately NOT `CharacterSet.alphanumerics`, which is
+    /// L* + M* + N*. Those two sets disagree on ~14,450 code points, 2,210 of them combining
+    /// marks, and rapidfuzz keeps only letters and numbers. Using the stdlib set kept combining
+    /// marks that the oracle turns into spaces: `full_process("a" + U+0301 + "b")` is `"a b"`,
+    /// not `"áb"`, and `wRatio("ok", "ok" + U+FE0F)` is 100 where keeping the selector gives 50 —
+    /// across the 60 threshold. No body in the current corpus retains a mark after `cleanText`,
+    /// so this was latent rather than measurable; it fires on NFD text (a macOS paste), Vietnamese,
+    /// Devanagari, and Hebrew/Arabic diacritics.
+    private static let alnum = CharacterSet.alphanumerics.subtracting(.nonBaseCharacters)
+
     static func fullProcess(_ s: String) -> String {
-        var out = ""
-        out.reserveCapacity(s.count)
+        var out = String.UnicodeScalarView()
         for scalar in s.unicodeScalars {
-            if scalar.value >= 128 { continue } // ascii_only
-            let isAlnum = (scalar.value >= 48 && scalar.value <= 57) ||
-                          (scalar.value >= 65 && scalar.value <= 90) ||
-                          (scalar.value >= 97 && scalar.value <= 122)
-            out.unicodeScalars.append(isAlnum ? scalar : " ")
+            if scalar.value >= 128 && scalar.value <= 255 { continue } // thefuzz ascii_only
+            out.append(alnum.contains(scalar) ? scalar : " ")
         }
-        return out.trimmingCharacters(in: CharacterSet(charactersIn: " \t\n\r\u{0b}\u{0c}"))
-            .lowercased()
+        // Trim on SCALARS, not Characters: " " + U+FE0F is a single grapheme that is not in the
+        // trim set, so a Character-based trim leaves the selector behind where the oracle yields
+        // an empty string — which then skips the empty short-circuit in `wRatio`.
+        var lo = out.startIndex, hi = out.endIndex
+        let ws: Set<Unicode.Scalar> = [" ", "\t", "\n", "\r", "\u{0b}", "\u{0c}"]
+        while lo < hi, ws.contains(out[lo]) { lo = out.index(after: lo) }
+        while hi > lo { let p = out.index(hi, offsetBy: -1); if ws.contains(out[p]) { hi = p } else { break } }
+        return String(String.UnicodeScalarView(out[lo..<hi])).lowercased()
     }
 
     /// Digits-only phone normalization (`normalize_phone_number`).
@@ -231,7 +263,11 @@ public enum Fuzzy {
     ///
     /// `best` doubles as rapidfuzz's running `score_cutoff` in spirit — it only ever rises, and an
     /// exact alignment short-circuits at 100.
-    static let windowScanCap = 1200
+    /// Upper bound on loop-2 window offsets. See the long note at the loop itself: 14x the
+    /// longest real message, chosen to keep oracle parity on every body that occurs while
+    /// preventing an unbounded scan on a planted one.
+    static let maxScanWindows = 20_000
+
     static func partialRatio(_ s1: String, _ s2: String) -> Double {
         let a = Array(s1), b = Array(s2)
         if a.isEmpty || b.isEmpty { return 0.0 }
@@ -274,15 +310,28 @@ public enum Fuzzy {
             }
         }
 
-        // 2. Full-length windows. The scan stays bounded by `windowScanCap`: this is the only one
-        //    of the three that is O(len2) in iterations, and search runs it ~5x per candidate over
-        //    up to 10k rows. Loops 1 and 3 are each bounded by len1 (the query), so they are cheap
-        //    regardless of message length and are deliberately NOT capped. Do NOT read that as
-        //    "the tail is still examined" — an earlier draft of this comment did. Loop 3 covers
-        //    only the LAST len1 characters, so in a 5000-char body with a 6-char needle, offsets
-        //    1195..4993 are evaluated by nothing. That is the one remaining recall divergence from
-        //    the oracle, which has no cap at all.
-        let cap = min(len2, windowScanCap)
+        // 2. Full-length windows, bounded by `maxScanWindows` — far above any real message, so
+        //    parity with rapidfuzz (which has no bound) is exact for every body that occurs.
+        //
+        //    The old bound was 1200 windows, and it BIT: across the corpus (10,115 bodies) the
+        //    longest body is 1431 characters and 3 exceed 1200. Loop 3 only ever covers the last
+        //    len1 characters, so offsets between the bound and the tail were evaluated by nothing
+        //    and a match living there was unreachable — the last structural divergence from the
+        //    oracle.
+        //
+        //    Removing the bound entirely was worse. This is the only O(len2) loop, `wRatio` runs
+        //    5 `partialRatio` calls per candidate, search scans up to 10k rows, and NOTHING caps a
+        //    message body (the search term is capped at 1024 by MessagesCommand; `messageBody`
+        //    returns text/attributedBody untruncated). Cost grows linearly in body length, so a
+        //    single long message — plantable by anyone who can iMessage the operator — stalls the
+        //    whole search. Measured, release build, 1024-char term: a 1424-char body takes 0.42s
+        //    per call, a 10,000-char body 2.95s; times 5 scorers, times however many such rows.
+        //
+        //    20,000 windows is 14x the longest real body and ~6s of worst-case work per call. It
+        //    is a DEVIATION, not parity: a body over ~20k characters scores below the oracle. No
+        //    such body exists in the corpus, and the alternative to bounding it is a bit-parallel
+        //    LCS (what rapidfuzz actually does) rather than this O(len1^2)-per-window kernel.
+        let cap = min(len2, len1 + Fuzzy.maxScanWindows)
         var i = 0
         while i + len1 <= cap {
             if needleChars.contains(longer[i + len1 - 1]), consider(longer[i..<(i + len1)]) {
