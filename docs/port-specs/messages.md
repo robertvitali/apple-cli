@@ -195,25 +195,36 @@ oracle) on this fleet. Read ops compared freely; no write/send was diffed.
 ### WRatio fuzzy-search boundary (behavioral, per §6 / §7)
 
 The message fuzzy scorer is `thefuzz.WRatio` (rapidfuzz-backed). This port
-reimplements WRatio on a normalized-Indel/LCS `ratio` + an exhaustive fixed-length
-sliding-window `partial_ratio`. Per §6 hard-part (a), parity here is **behavioral,
-not byte-identical** — rapidfuzz's `partial_ratio` uses an optimal (not
-fixed-length-window) alignment, so at the exact threshold **floor** the two can
-diverge by a few points on low-relevance matches.
+reimplements WRatio on a normalized-Indel/LCS `ratio` plus a **faithful port of
+rapidfuzz's three-loop `partial_ratio`** (`_partial_ratio_impl` in `fuzz_py.py`):
+growing prefixes of the haystack, then full-length windows, then shrinking
+suffixes, each over the same Indel kernel.
 
-Measured on `search "thanks" --hours 48 --threshold 0.6` (2026-07):
-- **Exact-substring tier is identical** — all 5 messages containing "thanks"
-  scored **1.00** in both, same set, same order.
-- Fuzzy-noise tier differed: oracle returned 25 total, CLI returned 21. The 4
-  CLI-only misses are messages with **no semantic relevance** to the term (e.g.
-  "That beat is insane", "Take your time. No rush!") that rapidfuzz's optimal
-  `partial_ratio` floors at exactly 0.60 while this port scores < 0.50. The CLI
-  matches the oracle wherever a clean length-N window exists (e.g. "changes" →
-  "hanges" vs "thanks" = 0.60 in both).
+**This section previously claimed the opposite, and understated the gap it was
+describing.** It said the port used a fixed-length sliding window, called the
+result "an accepted behavioral-parity boundary" affecting only "low-relevance
+matches at the threshold floor", and cited a 25→21 measurement. Two things were
+wrong. The divergence was far larger than 4 marginal hits — re-measured on 768
+real message bodies across 10 query terms at the default 0.6 threshold, the
+oracle matched 276 and the port matched 204, i.e. **73.9% recall, roughly a
+quarter of fuzzy matches dropped**. And the cause was not scoring noise: because
+`ratio` is `2·LCS/(|a|+|b|)`, a window *shorter* than the needle can outscore
+every full-length window, since the denominator shrinks. `partial_ratio("golf",
+"a quiet symbol")` is 66.7 via the two-character suffix `"ol"`, where the
+best four-character window reaches only 50.0. A single fixed length cannot see
+that alignment at all, so the missing recall was structural.
 
-This is an accepted behavioral-parity boundary, not a dropped capability: the
-operation, parameters (term/hours/threshold/match-mode), and output fields are a
-strict superset; only the fuzzy-noise scoring at the threshold floor differs.
-Lower the `--threshold` for higher recall. Exact recall of rapidfuzz's optimal
-partial-alignment would require vendoring rapidfuzz's algorithm and is explicitly
-out of scope per §6.
+**Now measured at parity.** `the probe-term search --hours 72` returns the same 12
+messages as `tool_fuzzy_search_messages`, with identical scores in identical
+order. A 60-pair golden table generated from rapidfuzz itself, over real message
+bodies, is asserted in `Tests/MessagesKitTests/PartialRatioParityTests.swift`;
+deleting either of the two restored loops fails it.
+
+One deliberate bound remains, and it is not the one this section used to
+describe: the full-length-window loop is capped at `Fuzzy.windowScanCap` (1200
+characters of the haystack), because it is the only one of the three whose
+iteration count grows with message length, and search runs it about five times
+per candidate over up to 10k rows. The prefix and suffix loops are bounded by the
+*query* length and are uncapped, so a long message still has its tail examined.
+On the measured corpus (768 bodies, longest 1416 characters) two messages exceed
+the cap.

@@ -213,32 +213,89 @@ public enum Fuzzy {
         return ratioChars(ac[...], bc[...])
     }
 
-    /// `partial_ratio`: best `ratio` of the shorter string against the best-aligned
-    /// window of the longer. rapidfuzz aligns optimally; we approximate that with an
-    /// exhaustive fixed-length-`m` sliding window (much closer to rapidfuzz than the
-    /// classic matching-block-anchored fuzzywuzzy variant, which missed real matches).
-    /// The scan is bounded to the first `windowScanCap` chars of the longer string —
-    /// a short fuzzy term that only aligns beyond that in a long message would have
-    /// already been caught by the exact-substring short-circuit upstream, so the cap
-    /// is safe and bounds worst-case cost. Operates on shared character arrays (no
-    /// per-window allocation) since search runs this ~5×/candidate over up to 10k rows.
+    /// `partial_ratio`: rapidfuzz's optimal-alignment search, ported faithfully.
+    ///
+    /// THREE bounded loops over the same normalized-Indel kernel `ratioChars`, mirroring
+    /// `_partial_ratio_impl` in rapidfuzz's `fuzz_py.py`: growing PREFIXES of the longer string,
+    /// then full-length WINDOWS, then shrinking SUFFIXES. Each is guarded by "the newly-entering
+    /// character appears in the needle at all", which is rapidfuzz's own cheap skip.
+    ///
+    /// WHY ALL THREE, measured rather than argued. The previous port implemented only the middle
+    /// loop, and the missing two are not an edge case: on 768 real message bodies x 10 query terms
+    /// at the default 0.6 threshold, the oracle matched 276 and this matched 204 — **73.9% recall,
+    /// a quarter of fuzzy matches dropped**. The reason is the denominator. `ratio` is
+    /// 2*LCS/(|a|+|b|), so a window SHORTER than the needle can score higher than any full-length
+    /// window: `partial_ratio("golf", "a quiet symbol")` is 66.7 via the two-character suffix
+    /// "ol" (2*2/(4+2)), where the best 4-character window manages only 50.0. Sliding one fixed
+    /// length can never see that.
+    ///
+    /// `best` doubles as rapidfuzz's running `score_cutoff` in spirit — it only ever rises, and an
+    /// exact alignment short-circuits at 100.
     static let windowScanCap = 1200
     static func partialRatio(_ s1: String, _ s2: String) -> Double {
         let a = Array(s1), b = Array(s2)
         if a.isEmpty || b.isEmpty { return 0.0 }
         let (shorter, longer) = a.count <= b.count ? (a, b) : (b, a)
-        let m = shorter.count
-        if m == longer.count { return ratioChars(shorter[...], longer[...]) }
-        let cap = min(longer.count, windowScanCap)
+        // NO EQUAL-LENGTH SHORTCUT. There was one — `if len1 == len2 { return ratioChars(...) }` —
+        // and it was the same defect this function exists to fix, surviving in the one branch the
+        // new loops are skipped on. rapidfuzz does not shortcut: at equal length loop 2 is a single
+        // window but loops 1 and 3 still run, and a shorter prefix/suffix can beat the full
+        // alignment. Both reviewers caught it independently, against the oracle:
+        // `("thanks","thanka")` is 90.91 in rapidfuzz and was 83.33 here; `("abcd","xbcd")` 85.71
+        // vs 75.0. Unreachable from `search` today — `wRatio` gates its call on `lenRatio >= 1.5` —
+        // but `partialRatio` is internal, directly tested, and reachable from three ungated sites.
+        var best = partialRatioImpl(shorter, longer)
+        // rapidfuzz runs the impl a SECOND time with the arguments swapped when the lengths are
+        // equal and the first pass was not exact (`fuzz_py.py` `partial_ratio`), because "shorter"
+        // and "longer" are then arbitrary and the two orderings are not symmetric.
+        if best <= 99.5, shorter.count == longer.count {
+            best = max(best, partialRatioImpl(longer, shorter))
+        }
+        return best
+    }
+
+    private static func partialRatioImpl(_ shorter: [Character], _ longer: [Character]) -> Double {
+        let len1 = shorter.count, len2 = longer.count
+        let needleChars = Set(shorter)
         let sShort = shorter[...]
         var best = 0.0
-        var start = 0
-        while start + m <= cap {
-            let r = ratioChars(sShort, longer[start..<(start + m)])
-            if r > 99.5 { return 100.0 }
+
+        // Returns true when the alignment is exact and the caller should stop.
+        func consider(_ window: ArraySlice<Character>) -> Bool {
+            let r = ratioChars(sShort, window)
             if r > best { best = r }
-            start += 1
+            return r > 99.5
         }
+
+        // 1. Growing prefixes: longer[0..<i] for i < len1.
+        if len1 > 1 {
+            for i in 1..<len1 where needleChars.contains(longer[i - 1]) {
+                if consider(longer[0..<i]) { return 100.0 }
+            }
+        }
+
+        // 2. Full-length windows. The scan stays bounded by `windowScanCap`: this is the only one
+        //    of the three that is O(len2) in iterations, and search runs it ~5x per candidate over
+        //    up to 10k rows. Loops 1 and 3 are each bounded by len1 (the query), so they are cheap
+        //    regardless of message length and are deliberately NOT capped. Do NOT read that as
+        //    "the tail is still examined" — an earlier draft of this comment did. Loop 3 covers
+        //    only the LAST len1 characters, so in a 5000-char body with a 6-char needle, offsets
+        //    1195..4993 are evaluated by nothing. That is the one remaining recall divergence from
+        //    the oracle, which has no cap at all.
+        let cap = min(len2, windowScanCap)
+        var i = 0
+        while i + len1 <= cap {
+            if needleChars.contains(longer[i + len1 - 1]), consider(longer[i..<(i + len1)]) {
+                return 100.0
+            }
+            i += 1
+        }
+
+        // 3. Shrinking suffixes: longer[i...] for i >= len2 - len1.
+        for i in max(len2 - len1, 0)..<len2 where needleChars.contains(longer[i]) {
+            if consider(longer[i..<len2]) { return 100.0 }
+        }
+
         return best
     }
 

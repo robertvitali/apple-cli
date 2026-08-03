@@ -124,8 +124,12 @@ struct SignalCleanupRegistryTests {
 
         #expect(SignalSafeCleanup.removableDirectory == session.path,
                 "a mismatched arm-count must leave the removable directory alone")
-        #expect(SignalSafeCleanup.trackedPaths == before,
-                "and must not disturb the tracked set")
+        // SUPERSET, not equality: suites run in parallel in one process and another may track a
+        // path between the two reads. An equality assertion here went red 1-in-12 — the same
+        // shared-mutable-state race this file has already been bitten by twice. The claim that
+        // matters is that disarm removed nothing.
+        #expect(Set(SignalSafeCleanup.trackedPaths).isSuperset(of: Set(before)),
+                "disarm must not remove anything from the tracked set")
         withExtendedLifetime(armer) { }
 
         // KNOWINGLY UNTESTED: the other half — that a FAILED `createDirectory` re-arms on the next
