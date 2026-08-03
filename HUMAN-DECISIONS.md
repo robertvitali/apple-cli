@@ -383,3 +383,73 @@ been done, in the same file I was editing nearby. This commit does it for `integ
 `main`. I will not rewrite or force-push anything until you answer.
 
 ---
+## D10 — Parity says drop the search/find-contact length caps; measurement says they stop a hang
+
+**Status:** WITHDRAWN (2026-08-03, same day) — **I should not have filed this.** ·
+**Resolution:** MSG-5's premise is a misclassification, and I had already decided the identical
+question myself, the same week, without asking. Kept the caps; see below.
+
+**Why it was withdrawn, recorded because the error is more useful than the entry:**
+
+1. **The bucket was wrong.** `docs/write-model-v2.md` bucket 3 is about CONSENT gates — its
+   stated members are label guards and self-only recipient allowlists. A resource bound is
+   **bucket 1**, which says in as many words: *"refusing an attack path the oracle is merely
+   vulnerable to is not a capability drop."* Under the correct bucket the caps are KEPT and
+   always apply, and there was never a conflict to escalate. I classified a DoS bound as an
+   authorization gate and then escalated the contradiction my own misclassification created.
+2. **I had already made this call unilaterally.** Q5b replaced `windowScanCap` with
+   `maxScanWindows = 20_000` — a documented deviation past ~20k, shipped, marked DONE, no
+   decision filed. This entry's own option C described itself as "the same shape as the
+   `maxScanWindows` bound already shipped". Same shape, same domain, same week, opposite
+   handling. That inconsistency is the tell.
+3. **Filed decisions rot, so filing a spurious one has a real cost.** D7 sat OPEN while the
+   phone number it describes stayed live at HEAD — 23 lines from code I was editing. A fourth
+   open entry dilutes D9, which has a 14-day GitHub-traffic clock on it.
+
+**Nothing is required from you on this entry.** It is left in place, withdrawn rather than
+deleted, because the file is append-only and because "the driver escalated instead of deciding"
+is worth keeping. D7, D8 and D9 remain genuinely open.
+
+**Original entry follows, unedited.**
+
+**Why you and not me (AS FILED — the reasoning that was wrong):** the project's own taxonomy and
+its own security review point opposite ways,
+and the tie-breaker is a risk appetite, not a fact I can measure.
+
+**The parity side.** `MSG-5` is correct on the facts: the oracle validates only empty-term,
+`hours < 0`, `hours > 87600`, and threshold outside `[0,1]`. It imposes **no length limit**. Our
+1024 cap is a CLI-only restriction with no oracle counterpart — `docs/write-model-v2.md` bucket 3 —
+and bucket-3 restrictions are supposed to apply only inside the opt-in sandbox. Under a strict
+reading, `apple messages search` should accept any term the oracle accepts, and today it does not.
+
+**The safety side.** The cap exists because unbounded input hangs the process, and I have measured
+it twice this week:
+
+| path | input | measured |
+|---|---|---|
+| `messages search` | 1024-code-point term vs a 10,000-char body | ~3s per `partialRatio`, and `wRatio` runs 5 per candidate over up to 10k rows |
+| `messages find-contact` | 500,000 conjoining-jamo code points vs **200** candidates | **9.95s** — and a real address book is an order of magnitude larger |
+
+Neither number is theoretical and neither path is bounded by anything else. A message body is
+attacker-influenceable (anyone who can iMessage you), and the term is agent-supplied, so a
+prompt-injected agent reaches this.
+
+**Why the obvious compromise is not obviously right.** "Make the cap sandbox-scoped" is what the
+gap record recommends, and it satisfies the taxonomy — but the sandbox is opt-in, so the DEFAULT
+path is exactly the one that would hang. That inverts the usual reason for a bucket-3 rule, which
+assumes the restriction is a nuisance rather than a guard.
+
+| Option | Parity | Risk |
+|---|---|---|
+| **A. Keep the caps as they are (current state)** | Deviates from the oracle for terms > 1024 code points — inputs no human types | Hang is closed on both paths |
+| **B. Sandbox-scope the caps** (what MSG-5 recommends) | Exact parity outside the sandbox | Re-opens both measured hangs in the DEFAULT path |
+| **C. Raise the caps far above human use and keep them always** (e.g. 64k code points) | Deviates only for inputs that are already pathological | Bounded tail; same shape as the `maxScanWindows` bound already shipped |
+
+**My recommendation: C**, and I have left the code at **A** in the meantime because leaving a guard
+up is the reversible choice — if C or B is what you want, that is a small follow-up, whereas
+shipping B and discovering a hang is not.
+
+**What I need from you:** "A", "B", or "C" (with a number if you want a different ceiling). Until
+then MSG-5 stays open and Q6 is closed on its other two gaps.
+
+---

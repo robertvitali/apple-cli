@@ -37,7 +37,8 @@ final class ChatFixture {
         exec(db, "INSERT INTO handle VALUES (1,'+12125550100','iMessage'),(2,'+12125550101','SMS');")
         exec(db, """
             INSERT INTO chat VALUES
-            (1,'chat999','Test Group','chat999','iMessage;+;chat999','iMessage','G1',43);
+            (1,'chat999','Test Group','chat999','iMessage;+;chat999','iMessage','G1',43),
+            (2,'chatEMPTY','','chatEMPTY','iMessage;+;chatEMPTY','iMessage','G2',43);
             """)
         exec(db, "INSERT INTO chat_handle_join VALUES (1,2);")
 
@@ -50,6 +51,8 @@ final class ChatFixture {
             (5,'g5','error message',0,1,'iMessage',\(base - 400),1);
             """)
         exec(db, "UPDATE message SET cache_roomnames='chat999' WHERE ROWID=4;")
+        // MSG-2: a chat whose display_name is '' — the oracle emits NO group annotation.
+        exec(db, "UPDATE message SET cache_roomnames='chatEMPTY' WHERE ROWID=5;")
 
         // attributedBody-only message (NULL text) — bind the blob for "decoded body".
         let blob: [UInt8] = Array("NSString".utf8) + [0x01, 0x94, 0x84, 0x01, 0x2b, 12]
@@ -84,6 +87,47 @@ struct ChatDBFixtureTests {
         #expect(msgs.count == 5)
         #expect(msgs.first?.rowid == 1)            // newest first
         #expect(msgs.map(\.rowid) == [1, 2, 3, 4, 5])
+    }
+
+    /// MSG-2. The oracle keeps '' in chat_mapping and filters at USE (`if group_chat_name:`),
+    /// so an empty display_name produces NO group annotation. Binding Optional("") through gave
+    /// the wire three states (absent / "" / name) where the oracle has two, so a consumer testing
+    /// `group_name is not None` read a 1:1 message as a group message.
+    @Test func emptyChatDisplayNameEmitsNoGroup() throws {
+        let fx = try ChatFixture()
+        var db = try makeDB(fx, book: friendBook)
+        let msgs = db.recent(hours: 24, handleRowIds: nil, limit: 100)
+        let empty = msgs.first { $0.rowid == 5 }
+        #expect(empty != nil, "precondition: the empty-display-name message is in range")
+        #expect(empty?.group_name == nil, "'' must be absent, not empty-string")
+        // Positive control: a real display_name still comes through, so this is not just
+        // suppressing every group annotation.
+        #expect(msgs.first { $0.rowid == 4 }?.group_name == "Test Group")
+    }
+
+    /// Pins WHERE the truthiness filter lives. The oracle's `get_chat_mapping` KEEPS the ''
+    /// entry and each consumer filters at use (`if group_chat_name:`). Moving our filter into
+    /// `chatMapping()` would make every other test still pass while silently changing that
+    /// public API's contract, so assert the empty entry survives the mapping.
+    @Test func chatMappingKeepsEmptyDisplayNameLikeTheOracle() throws {
+        let fx = try ChatFixture()
+        let db = try makeDB(fx, book: friendBook)
+        let map = db.chatMapping()
+        #expect(map["chatEMPTY"] == "", "the mapping keeps ''; the FILTER belongs at the use site")
+        #expect(map["chat999"] == "Test Group")
+    }
+
+    /// The SEARCH path has the identical empty-`display_name` fix as `recent`, and had NO test —
+    /// reverting `ChatDB.swift`'s search-side binding left the whole suite green, with only a live
+    /// corpus measurement covering it. A corpus measurement evaporates the moment the corpus
+    /// changes, so pin it here too.
+    @Test func searchAlsoOmitsEmptyGroupName() throws {
+        let fx = try ChatFixture()
+        var db = try makeDB(fx, book: friendBook)
+        let hits = db.search(term: "error", hours: 24, threshold: 0.6, match: .contains).matches
+        let empty = hits.first { $0.rowid == 5 }
+        #expect(empty != nil, "precondition: the empty-display-name message is a search hit")
+        #expect(empty?.group_name == nil, "'' must be absent on the search path too, not empty-string")
     }
 
     @Test func attributedBodyDecodedInQuery() throws {

@@ -26,7 +26,18 @@ public final class SQLiteReader {
     /// flake before this was exposed.
     let tempURL: URL?
 
-    public init(path: String, copyToTemp: Bool = false) throws {
+    /// How a DIRECT (non-copied) open treats the live store's `-wal`.
+    public enum DirectOpenMode {
+        /// `immutable=1` — skips locking and WAL bookkeeping. Cheap and lock-error-proof, but
+        /// reads the main DB file as-is and MISSES un-checkpointed WAL writes.
+        case immutable
+        /// `mode=ro` — a normal read-only connection that APPLIES the `-wal`, so it sees exactly
+        /// what the (WAL-aware) oracle sees. Costs the locking the `immutable` mode avoids.
+        case walAware
+    }
+
+    public init(path: String, copyToTemp: Bool = false,
+                directOpen: DirectOpenMode = .immutable) throws {
         var openPath = path
         var temp: URL?
         var diagnostics: SnapshotDiagnostics?
@@ -53,15 +64,24 @@ public final class SQLiteReader {
         //   read. Trade-offs, both consciously accepted: (a) it reads the main DB file as-is and may
         //   miss the newest un-checkpointed WAL writes; (b) per SQLite's immutable contract the file
         //   CAN in fact change (the app may checkpoint mid-read), so a torn read / `SQLITE_CORRUPT`
-        //   is possible. Tolerated because the ONLY direct callers are best-effort `try?` reads
-        //   (AddressBook sender-name resolution, ChatDB diagnostics) that degrade to empty/nil;
-        //   every correctness-critical read passes `copyToTemp: true` (snapshot + WAL, freshest).
+        //   is possible. Tolerated because the direct callers are best-effort reads that degrade
+        //   rather than fail, and every correctness-critical read passes `copyToTemp: true`.
+        //   NOTE (Q6/MSG-3): `immutable` is no longer the only direct mode. AddressBook now asks
+        //   for `.walAware` FIRST — its per-source counts must match the WAL-aware oracle — and
+        //   falls back to `.immutable` on failure, so the justification above now describes the
+        //   FALLBACK, not the only path.
         let (openArg, openFlags): (String, Int32)
         if temp != nil {
             (openArg, openFlags) = (openPath, SQLITE_OPEN_READONLY)
         } else {
-            (openArg, openFlags) = (SQLiteReader.immutableURI(forPath: openPath),
-                                    SQLITE_OPEN_READONLY | SQLITE_OPEN_URI)
+            switch directOpen {
+            case .immutable:
+                (openArg, openFlags) = (SQLiteReader.immutableURI(forPath: openPath),
+                                        SQLITE_OPEN_READONLY | SQLITE_OPEN_URI)
+            case .walAware:
+                (openArg, openFlags) = (SQLiteReader.readOnlyURI(forPath: openPath),
+                                        SQLITE_OPEN_READONLY | SQLITE_OPEN_URI)
+            }
         }
 
         var handle: OpaquePointer?
@@ -240,16 +260,33 @@ public final class SQLiteReader {
         return pinned
     }
 
-    /// Build a `file:` URI with `?immutable=1` for a direct open. The path is percent-encoded so
+    /// Build a `file:` URI carrying `query` for a direct open. The path is percent-encoded so
     /// spaces (e.g. "Application Support") and other reserved characters survive SQLite's URI
     /// parser; `/` is preserved as the path separator. A non-absolute path is returned unchanged
     /// (falls back to a plain filename open) rather than producing a malformed URI.
-    static func immutableURI(forPath path: String) -> String {
+    ///
+    /// The query is a PARAMETER rather than a string substitution on a built URI. An earlier
+    /// version derived the `mode=ro` form by replacing "immutable=1" in the immutable URI, which
+    /// had two failure modes: a non-absolute path containing the literal "immutable=1" would be
+    /// silently rewritten into a DIFFERENT filename, and any change to the URI's shape would make
+    /// the replace a no-op — silently reverting `.walAware` to `immutable=1` and reinstating the
+    /// stale-read bug this exists to fix, with nothing failing.
+    private static func uri(forPath path: String, query: String) -> String {
         guard path.hasPrefix("/") else { return path }
         var allowed = CharacterSet.alphanumerics
         allowed.insert(charactersIn: "/-._~")
         let encoded = path.addingPercentEncoding(withAllowedCharacters: allowed) ?? path
-        return "file:" + encoded + "?immutable=1"
+        return "file:" + encoded + "?" + query
+    }
+
+    /// `immutable=1` — skips locking and WAL bookkeeping; may read stale (pre-checkpoint) data.
+    static func immutableURI(forPath path: String) -> String {
+        uri(forPath: path, query: "immutable=1")
+    }
+
+    /// `mode=ro` — read-only but WAL-aware, unlike `immutable=1`.
+    static func readOnlyURI(forPath path: String) -> String {
+        uri(forPath: path, query: "mode=ro")
     }
 
     deinit {

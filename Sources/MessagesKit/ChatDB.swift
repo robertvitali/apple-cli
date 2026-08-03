@@ -160,7 +160,15 @@ public struct ChatDB {
             let address = row.text("address")
             let sender = senderName(isFromMe: isFromMe, address: address)
             var group: String? = nil
-            if let room = row.text("cache_roomnames") { group = mapping[room] }
+            // Python truthiness, deliberately: the oracle keeps '' in chat_mapping and filters
+            // at USE (`if group_chat_name:`), so an empty display_name yields NO annotation.
+            // Binding the Optional("") straight through gave the wire a THREE-state group_name
+            // (absent / "" / "Name") against the oracle's two, so a consumer testing
+            // `group_name is not None` misclassified 1:1 messages as group messages — and
+            // `--text` printed a bare "[] ". Measured: 4 of 52 messages in a 6-hour window.
+            if let room = row.text("cache_roomnames"), let name = mapping[room], !name.isEmpty {
+                group = name
+            }
             out.append(Message(
                 rowid: row.int("rowid") ?? 0,
                 date: date,
@@ -258,7 +266,15 @@ public struct ChatDB {
             let address = row.text("address")
             let sender = senderName(isFromMe: isFromMe, address: address)
             var group: String? = nil
-            if let room = row.text("cache_roomnames") { group = mapping[room] }
+            // Python truthiness, deliberately: the oracle keeps '' in chat_mapping and filters
+            // at USE (`if group_chat_name:`), so an empty display_name yields NO annotation.
+            // Binding the Optional("") straight through gave the wire a THREE-state group_name
+            // (absent / "" / "Name") against the oracle's two, so a consumer testing
+            // `group_name is not None` misclassified 1:1 messages as group messages — and
+            // `--text` printed a bare "[] ". Measured: 4 of 52 messages in a 6-hour window.
+            if let room = row.text("cache_roomnames"), let name = mapping[room], !name.isEmpty {
+                group = name
+            }
             matches.append(ScoredMessage(
                 rowid: row.int("rowid") ?? 0, date: date, date_local: MessageTime.localString(from: date),
                 timestamp: rawDate, is_from_me: isFromMe, sender: sender, handle: address,

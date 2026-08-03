@@ -335,6 +335,11 @@ struct Search: ParsableCommand {
             }
             // Cap term length: an unbounded term drives O(term·window) WRatio work over
             // up to 10k rows (a ~40KB term measured ~30s CPU) — a local DoS.
+            // KEPT, always — `write-model-v2.md` bucket 1: "refusing an attack path the oracle
+            // is merely vulnerable to is not a capability drop." MSG-5 called this a bucket-3
+            // CLI-only gate that should be sandbox-scoped, but bucket 3 is about CONSENT gates
+            // (label guards, recipient allowlists); a resource bound is bucket 1. The oracle has
+            // no length limit and simply hangs on the input this rejects.
             // COUNT SCALARS, not Characters — this must be the same unit the scorer uses.
             // `Fuzzy` counts code points (Q5c), and a single grapheme cluster can hold
             // unboundedly many of them: "a" + 999 combining acutes is ONE Character and 1000

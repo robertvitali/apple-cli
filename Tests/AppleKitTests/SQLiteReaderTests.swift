@@ -49,4 +49,21 @@ struct SQLiteReaderURITests {
         #expect(uri.hasSuffix("?immutable=1"))
         #expect(uri.filter { $0 == "?" }.count == 1)
     }
+
+    // MARK: - readOnlyURI (the WAL-aware direct-open form, Q6/MSG-3)
+
+    /// The `mode=ro` URI must be built from the same percent-encoding path as the immutable one,
+    /// and must NOT mention `immutable` — an earlier version derived it by string-replacing
+    /// "immutable=1", which would silently no-op (reverting to a stale read) if the URI shape
+    /// ever changed. This is the mutant-catcher for that.
+    @Test func readOnlyURIIsModeRoAndNeverImmutable() {
+        let u = SQLiteReader.readOnlyURI(forPath: "/Users/x/Application Support/AddressBook/a.abcddb")
+        #expect(u.hasSuffix("?mode=ro"))
+        #expect(!u.contains("immutable"))
+        #expect(u.hasPrefix("file:/"))
+        #expect(u.contains("Application%20Support"), "spaces must stay percent-encoded")
+        // Same guard the immutable form has: a non-absolute path is passed through untouched
+        // rather than becoming a malformed URI — and must not be rewritten by any substitution.
+        #expect(SQLiteReader.readOnlyURI(forPath: "relative/immutable=1.db") == "relative/immutable=1.db")
+    }
 }

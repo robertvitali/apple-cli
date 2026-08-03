@@ -75,7 +75,32 @@ public struct AddressBook {
     public static func load() -> AddressBook {
         var book = AddressBook()
         for path in databasePaths() {
-            guard let db = try? SQLiteReader(path: path, copyToTemp: false) else { continue }
+            // FALL BACK, never drop. `.walAware` (mode=ro) is the accurate read — it applies the
+            // -wal, which `immutable=1` skips — but it must write the -shm wal-index, so it FAILS
+            // where an immutable open succeeded (missing -shm on a non-writable dir, lock
+            // contention). That is the very failure `3316a92` adopted `immutable=1` to avoid.
+            //
+            // `load()` is the HOT path — seven command paths call it — and its reads are `try?`,
+            // so skipping a source silently deletes every contact in it and degrades every sender
+            // to a raw phone number. On this machine one source holds the majority of contacts:
+            // dropping it to gain the +30 the WAL adds would be a catastrophic trade. So prefer
+            // accuracy, but degrade to the stale-but-present read rather than to nothing, and say
+            // so on stderr (stdout is the JSON contract). Only a failure of BOTH modes skips —
+            // which is where the oracle also gives up ("Warning: Cannot access …", messages.py:319).
+            let db: SQLiteReader
+            do {
+                db = try SQLiteReader(path: path, copyToTemp: false, directOpen: .walAware)
+            } catch {
+                do {
+                    db = try SQLiteReader(path: path, copyToTemp: false, directOpen: .immutable)
+                    FileHandle.standardError.write(Data(
+                        "Warning: \(path) not readable WAL-aware (\(error)); fell back to immutable=1 — counts may be stale\n".utf8))
+                } catch {
+                    FileHandle.standardError.write(
+                        Data("Warning: Cannot access \(path): \(error)\n".utf8))
+                    continue
+                }
+            }
             let phones = (try? db.rows(phoneQuery)) ?? []
             let emails = (try? db.rows(emailQuery)) ?? []
             book.ingest(phones)
@@ -201,7 +226,7 @@ public struct AddressBook {
                 .map { try? $0.close(); return true } ?? false
             var connected = false, tableCount: Int? = nil
             var hasRecord = false, hasPhone = false, contactCount: Int? = nil
-            if let db = try? SQLiteReader(path: path, copyToTemp: false) {
+            if let db = try? SQLiteReader(path: path, copyToTemp: false, directOpen: .walAware) {
                 connected = true
                 if let r = try? db.query("SELECT count(*) AS c FROM sqlite_master"), let c = r.first?["c"] ?? nil {
                     tableCount = Int(c)
