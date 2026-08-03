@@ -15,6 +15,32 @@ struct ScriptGenTests {
                                limitCheck: "")
     }
 
+    // MARK: emitted limit guard (NOTES-M7/L2)
+
+    /// The generated `exit repeat` guard had NO test at any N — the only call site above passes
+    /// `limitCheck: ""`. That matters because the guard sits AFTER the append (a faithful clone of
+    /// the oracle's own placement, index.js:39599), so it yields exactly N for N>=1 and would have
+    /// yielded 1 for N=0. N=0 is now refused in `NotesScript.searchNotes` itself, but the emitted
+    /// line is what actually bounds the loop, so it gets pinned here.
+    @Test("the emitted limit guard appears after the append and reads >= N")
+    func emittedLimitGuard() {
+        for n in [1, 50] {
+            let body = NotesScript.searchBody(dateSetup: "", notesSource: "notes",
+                                              whereClause: "name contains (item 1 of argv)",
+                                              limitCheck: "\n          if (count of resultList) >= \(n) then exit repeat")
+            #expect(body.contains("if (count of resultList) >= \(n) then exit repeat"))
+            let append = body.range(of: "set end of resultList")
+            let guardPos = body.range(of: "if (count of resultList) >= \(n)")
+            #expect(append != nil && guardPos != nil)
+            // Order is the parity claim: append THEN check, matching the oracle.
+            #expect(append!.lowerBound < guardPos!.lowerBound,
+                    "guard must follow the append, as the oracle emits it")
+        }
+        // Control: with no limit the guard is absent entirely, so the assertions above
+        // cannot pass vacuously on a body that always contains the string.
+        #expect(!makeBody().contains("exit repeat"))
+    }
+
     // MARK: search folder attribution (two-step container binding)
 
     @Test("search body binds the container to its own variable before reading its name")

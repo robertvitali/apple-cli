@@ -238,6 +238,14 @@ struct NotesScript {
 
     func searchNotes(query: String, searchContent: Bool, account: String?,
                      folder: String?, modifiedSince: Date?, limit: Int?) throws -> [NoteSummary] {
+        // Enforced HERE, not only at the CLI boundary, because this is where `limitCheck` is
+        // built and the emitted `exit repeat` guard sits after the append — correct for N>=1
+        // (a faithful clone of the oracle's own placement) but wrong for 0. `searchNotes` has no
+        // internal callers today; the guard is here because the invariant belongs where
+        // `limitCheck` is built, not because one is currently bypassing the command layer.
+        if let limit, limit <= 0 {
+            throw AppleError.validation("Invalid limit \(limit). Expected an integer greater than 0.")
+        }
         var args = [query] // item 1
         var whereParts = [searchContent ? "body contains (item 1 of argv)" : "name contains (item 1 of argv)"]
         var dateSetup = ""
@@ -347,6 +355,13 @@ struct NotesScript {
     }
 
     func listNotes(account: String?, folder: String?, modifiedSince: Date?, limit: Int?) throws -> [String] {
+        // Enforced HERE, not only at the CLI boundary, because this is where `limitCheck` is
+        // built and the emitted `exit repeat` guard sits after the append — correct for N>=1
+        // (a faithful clone of the oracle's own placement) but wrong for 0. Two internal callers
+        // already bypass the command layer, so the invariant cannot live only up there.
+        if let limit, limit <= 0 {
+            throw AppleError.validation("Invalid limit \(limit). Expected an integer greater than 0.")
+        }
         var args: [String] = []
         var dateSetup = ""
         var baseSource = "notes"

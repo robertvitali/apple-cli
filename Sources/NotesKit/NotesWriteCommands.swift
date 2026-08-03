@@ -26,6 +26,39 @@ enum NotesLimits {
     static let content = 5 * 1024 * 1024
     static let folder = 1000
     static let account = 200
+    /// Oracle `DEFAULT_SEARCH_LIMIT = 50`. SEARCH ONLY — verified `resolveSearchLimit` is not
+    /// called from the oracle's list-notes handler, so the CLI's unbounded `list` is correct.
+    static let defaultSearchLimit = 50
+    /// Oracle `MAX.QUERY: 2e3` on `search-notes`. The `.min(1)` half of that same zod line was
+    /// ported and the `.max()` half was not — exactly the case this enum's header exists for.
+    static let query = 2000
+}
+
+/// Oracle schema for search-notes AND list-notes carries `"limit": {"exclusiveMinimum": 0}`, so a
+/// non-positive limit is refused at the MCP boundary before any handler runs. Mirroring that here
+/// is what makes `--limit 0` a validation error instead of the 1 result the AppleScript guard
+/// happened to yield (the `exit repeat` check sits after the append, so 0 behaved as 1).
+enum SearchLimit {
+    /// Oracle `resolveSearchLimit` + `limitWasDefault`. Absent means the default, NOT unbounded.
+    /// nil `effective` means UNBOUNDED — reachable only via the CLI-only `--all`, which restores
+    /// the total query the default would otherwise retire with no replacement.
+    static func resolve(_ limit: Int?, all: Bool = false) -> (effective: Int?, wasDefault: Bool) {
+        if all { return (nil, false) }
+        return (limit ?? NotesLimits.defaultSearchLimit, limit == nil)
+    }
+    /// Oracle `describeSearchLimit`: the note fires when `resultCount >= effectiveLimit`, and
+    /// says "(default limit)" only when the limit was not explicitly passed.
+    static func truncationNote(count: Int, effective: Int?, wasDefault: Bool) -> String? {
+        guard let effective, count >= effective else { return nil }
+        return "showing the first \(effective)\(wasDefault ? " (default limit)" : ""); there may be more. "
+            + "Narrow the query, filter with --folder/--modified-since, or pass a higher --limit."
+    }
+}
+
+func validateSearchLimit(_ limit: Int?) throws {
+    if let limit, limit <= 0 {
+        throw AppleError.validation("Invalid limit \(limit). Expected an integer greater than 0.")
+    }
 }
 
 /// Mirror of the oracle's `folderNameSchema.min(1, "Folder name is required")`, which this port

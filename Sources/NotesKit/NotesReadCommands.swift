@@ -321,11 +321,19 @@ struct ListCmd: ParsableCommand {
 
     func run() throws {
         try runGuarded(tool: notesTool) {
+            // exclusiveMinimum 0, same as search. NO default here: verified `resolveSearchLimit`
+            // is absent from the oracle's list-notes handler, so unbounded list IS the parity.
+            try validateSearchLimit(limit)
             let since = try parseISODateOrThrow(modifiedSince)
             let titles = try NotesScript().listNotes(account: account, folder: folder, modifiedSince: since, limit: limit)
-            try emitNotes(NoteTitleList(notes: titles, count: titles.count, sync_warning: currentSyncWarning()),
+            try emitNotes(NoteTitleList(notes: titles, count: titles.count, sync_warning: currentSyncWarning(),
+                                        applied_limit: limit),
                 json: global.json,
-                human: titles.isEmpty ? "No notes found." : titles.map { "  - \($0)" }.joined(separator: "\n"))
+                // Oracle list-notes renders ` (limit: N)` when a limit was passed. Appended only
+                // on the non-empty branch, matching what `search` does above.
+                human: titles.isEmpty ? "No notes found."
+                    : titles.map { "  - \($0)" }.joined(separator: "\n")
+                        + (limit.map { " (limit: \($0))" } ?? ""))
         }
     }
 }
@@ -341,16 +349,43 @@ struct SearchCmd: ParsableCommand {
     @Option(name: .long, help: "Account to search.") var account: String?
     @Option(name: .long, help: "Limit search to a folder.") var folder: String?
     @Option(name: .customLong("modified-since"), help: "ISO-8601 date filter.") var modifiedSince: String?
-    @Option(name: .long, help: "Max results.") var limit: Int?
+    @Option(name: .long, help: "Max results (default 50, like the MCP).") var limit: Int?
+    @Flag(name: .long, help: "Return every match, no limit. CLI-only superset — the MCP always caps.")
+    var all = false
 
     func run() throws {
         try runGuarded(tool: notesTool) {
+            // Oracle schema: query is minLength 1 AND maxLength 2000; limit is exclusiveMinimum 0.
+            if query.isEmpty { throw AppleError.validation("Search query is required.") }
+            if query.count > NotesLimits.query {
+                throw AppleError.validation("Search query exceeds maximum length of \(NotesLimits.query) characters.")
+            }
+            if all && limit != nil {
+                throw AppleError.validation("--all and --limit are mutually exclusive.")
+            }
+            try validateSearchLimit(limit)
             let since = try parseISODateOrThrow(modifiedSince)
+            // Oracle: `const effectiveLimit = resolveSearchLimit(limit)` — absent means 50, not
+            // unbounded. Measured before this change: a bare `notes search e` returned 245 here
+            // and would return 50 from the oracle; an unbounded search also reads several
+            // properties per match over AppleScript and can time out, which is the reason the
+            // oracle's own schema gives for the default.
+            let (effective, wasDefault) = SearchLimit.resolve(limit, all: all)
             let notes = try NotesScript().searchNotes(query: query, searchContent: content, account: account,
-                folder: folder, modifiedSince: since, limit: limit)
-            try emitNotes(NoteList(notes: notes, count: notes.count, sync_warning: currentSyncWarning()),
+                folder: folder, modifiedSince: since, limit: effective)
+            let note = SearchLimit.truncationNote(count: notes.count, effective: effective, wasDefault: wasDefault)
+            // The oracle renders ` (limit: N[, default])` on EVERY non-empty response, not only
+            // when it truncated; emitting it only on truncation dropped a disclosure it always makes.
+            // The oracle emits its limit info on every NON-EMPTY response and returns early on
+            // the empty branch before rendering it, so a zero-match search carries none.
+            let limitInfo = notes.isEmpty ? ""
+                : (effective.map { " (limit: \($0)\(wasDefault ? ", default" : ""))" } ?? " (no limit)")
+            let suffix = limitInfo + (note.map { "\n  … " + $0 } ?? "")
+            try emitNotes(NoteList(notes: notes, count: notes.count, sync_warning: currentSyncWarning(),
+                                   applied_limit: effective, limit_reached: note != nil,
+                                   limit_was_default: wasDefault),
                 json: global.json,
-                human: notes.isEmpty ? "No matches." : notes.map { "  - \($0.title) [\($0.id)]" }.joined(separator: "\n"))
+                human: (notes.isEmpty ? "No matches." : notes.map { "  - \($0.title) [\($0.id)]" }.joined(separator: "\n")) + suffix)
         }
     }
 }

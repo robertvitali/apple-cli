@@ -384,3 +384,34 @@ assert_no_folder_named() {
   echo "$output" | grep -q 'Invalid note ID format'
   echo "$output" | grep -q '"type" : "validation_error"'
 }
+
+@test "search/list refuse a non-positive --limit like the oracle schema (NOTES-L2)" {
+  # Oracle schema for BOTH tools: "limit": {"exclusiveMinimum": 0}. Refused before any store
+  # access, so this is TCC-free. Before the fix --limit 0 returned ONE result on both commands
+  # (the AppleScript `exit repeat` guard sits after the append, so 0 behaved as 1).
+  run "$BIN" notes search Notes --limit 0
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q 'Expected an integer greater than 0'
+  echo "$output" | grep -q '"type" : "validation_error"'
+  run "$BIN" notes list --limit 0
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q 'Expected an integer greater than 0'
+  # Oracle query schema is minLength 1.
+  run "$BIN" notes search ""
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q 'Search query is required'
+}
+
+@test "search rejects --all with --limit; the envelope shape is pinned in the Swift tier (NOTES-M7)" {
+  # Only the mutual-exclusion case lives here: it refuses from argv alone, before NotesScript()
+  # is constructed, so it honours this file's no-Automation contract. The three new payload
+  # fields are pinned in Tests/NotesKitTests (encoder round-trip) instead — asserting them here
+  # would need a real `notes search`, which reaches Notes.app over AppleScript and would pass
+  # only on a machine that happens to have Automation granted. That is the same defect the
+  # Contacts suite had two commits ago.
+  run "$BIN" notes search foo --all --limit 5
+  [ "$status" -eq 64 ]; echo "$output" | grep -q 'mutually exclusive'
+  # Oracle query schema is maxLength 2000 as well as minLength 1.
+  run "$BIN" notes search "$(printf 'a%.0s' $(seq 1 2001))"
+  [ "$status" -eq 64 ]; echo "$output" | grep -q 'exceeds maximum length of 2000'
+}

@@ -12,6 +12,48 @@ with the Apple MCP servers they replace.
 
 ## [Unreleased]
 
+### BREAKING — `notes search` now returns at most 50 results by default (was unbounded)
+
+The installed oracle (2.6.12) defaults `search-notes` to 50 (`DEFAULT_SEARCH_LIMIT`); this port
+passed `limit` straight through, so an absent `--limit` meant *no cap*. Measured on the live
+store: an uncapped CLI search exceeded the oracle's default result limit; both now apply that
+limit. The oracle side of that diff was observed on `query:"e", one account`; review could not re-run it (the live MCP timed out at its own 30s ceiling), which is consistent with the 28.1s measured below sitting right against that ceiling. The equality was real but the comparison is marginal on this store — a narrower query is the reliable way to re-check it.
+
+The justification is parity, not performance. An earlier draft of this entry claimed an unbounded
+search "timed out at two minutes"; that was wrong and review caught it against the captured probe.
+The two minutes was the harness budget for a three-command block, the unbounded search is the one
+probe that *completed*, and the command still running when the block died was the most tightly
+bounded of the three. Measured properly afterwards: `--limit 5` 8.3s, default-50 28.1s, unbounded
+30.2s — a 7% difference, because `set matchingNotes to notes where name contains …` filters the
+whole store *before* the loop, so `exit repeat` never bounds the expensive step at all.
+
+Any caller relying on a bare `search` to enumerate every match can pass the new `--all` flag,
+which restores the unbounded query as an explicit CLI-only superset (the MCP always caps). The applied limit is disclosed rather than silent: `applied_limit`,
+`limit_reached` and `limit_was_default` are new optional payload fields (additive, MINOR), and `--text` gains the
+oracle's ` (limit: N, default)` info on every response plus its "showing the first N; there may be
+more" note when the limit is reached. The field is `limit_reached`, not `truncated`: at
+count == limit we cannot know a further match exists, so "truncated" would assert more than the
+data supports. `list` also discloses `applied_limit` when `--limit` is passed. The oracle carries this information
+only in its prose response; on a JSON-first contract it belongs in the payload.
+
+`list` deliberately keeps NO default — `resolveSearchLimit` is absent from the oracle's
+list-notes handler, so an unbounded `list` is the correct parity.
+
+### Fixed — `--limit 0` returned one result instead of an error
+
+The oracle's schema declares `"limit": {"exclusiveMinimum": 0}` for both `search-notes` and
+`list-notes`, so a non-positive limit is refused at the MCP boundary. This port had no such
+check, and the generated AppleScript put its `exit repeat` guard *after* the append — so
+`--limit 0` returned exactly one note on both commands. Both now reject it with exit 64.
+An empty query is likewise refused, matching the schema's `minLength: 1`, and one over 2000
+characters is refused too — the `.max(MAX.QUERY)` half of the same zod line, which the first pass
+ported only halfway. (NOTES-L2)
+
+One known nick, recorded rather than fixed: `--limit 99999999999999999999` exits 64 from
+ArgumentParser's `Int` parsing, where the oracle's schema has no `maximum` and accepts it. Both
+spellings mean "unbounded", and `--all` now expresses that intent properly.
+
+
 ### Added — `notes get-link`, the last unmapped oracle tool
 
 `get-note-link` had no CLI subcommand at all — the one oracle tool the HEAD reconciliation found

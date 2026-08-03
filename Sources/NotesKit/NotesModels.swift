@@ -44,12 +44,28 @@ struct NoteList: Encodable {
     let notes: [NoteSummary]
     let count: Int
     let sync_warning: String?
+    /// The limit actually applied. The oracle discloses this only in its PROSE response
+    /// (` (limit: 50, default)`); on a JSON-first contract it belongs in the payload, so these
+    /// two are additive optional fields — MINOR per docs/versioning-policy.md — and stay absent
+    /// on surfaces that apply no limit (e.g. `list`, which the oracle also leaves unbounded).
+    var applied_limit: Int? = nil
+    /// True when the result set REACHED the limit, so more matches may exist. Named
+    /// `limit_reached` rather than `truncated`: at count == limit we cannot know whether a 51st
+    /// match exists, so "truncated" asserts more than the data supports. Renaming later would be
+    /// a MAJOR wire break; it is free now.
+    var limit_reached: Bool? = nil
+    /// True when `applied_limit` came from the default rather than an explicit --limit.
+    var limit_was_default: Bool? = nil
 }
 
 struct NoteTitleList: Encodable {
     let notes: [String]
     let count: Int
     let sync_warning: String?
+    /// Present only when --limit was passed. `list` has no default (the oracle's list-notes
+    /// handler applies none), but a caller-requested cut is still a cut and the oracle discloses
+    /// it too (` (limit: N)`), so silence here would be the same defect the search fields fix.
+    var applied_limit: Int? = nil
 }
 
 struct NoteContent: Encodable {

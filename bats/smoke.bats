@@ -456,3 +456,10 @@ require_no_stale_session_for() {
     echo "the command runs here, yet no leg ever became observable"; false
   fi
 }
+
+@test "lint: every COMPLETION-LOOP queue row keeps its 5 columns" {
+  run python3 "$BATS_TEST_DIRNAME/helpers/queue_table_wellformed.py" \
+      "$BATS_TEST_DIRNAME/../docs/COMPLETION-LOOP.md"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "^OK: "
+}
