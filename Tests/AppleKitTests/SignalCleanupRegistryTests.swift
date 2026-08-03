@@ -199,4 +199,27 @@ struct SignalCleanupRegistryTests {
     // removed here "asserted" the outsider was absent from the set without ever calling `track`,
     // so it would have passed with the containment guard deleted entirely. Release behaviour
     // (refuse, return, carry on) is what ships; the debug trap is the fail-fast that found this.
+
+    @Test("a tracked path is standardized, so `..` cannot smuggle one past the prefix guard")
+    func standardizesBeforeContainmentCheck() throws {
+        // The guard is a prefix test, and `<root>/../../etc/passwd` has the root as a prefix while
+        // pointing well outside it. Standardizing first is what closes that.
+        //
+        // This asserts the POSITIVE direction — a `..` that stays inside the root is accepted and
+        // stored in resolved form — because the refusal path calls `assertionFailure`, which traps
+        // the whole debug test process (established while red-proofing Q4k). Deleting the
+        // standardize line makes this fail: the unresolved path is stored verbatim.
+        _ = try SQLiteReader(path: try sourceDatabase().path, copyToTemp: true)   // arm
+        let root = try scratch.directory()
+        SignalSafeCleanup.registerRoot(root)
+
+        let winding = root.appendingPathComponent("sub/../apple-cli-test-x.html").path
+        let resolved = root.appendingPathComponent("apple-cli-test-x.html").path
+        #expect(winding != resolved, "control: the input really does need resolving")
+
+        SignalSafeCleanup.track(winding)
+        #expect(SignalSafeCleanup.trackedPaths.contains(resolved),
+                "the handler must unlink the resolved path, not a `..`-laden one")
+    }
 }
+

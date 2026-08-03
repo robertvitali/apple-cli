@@ -333,6 +333,45 @@ func emlTempDirectory(materialise: Bool, base: URL? = nil) throws -> URL {
     return dir
 }
 
+/// May a generated `.eml` be queued for signal-time deletion?
+///
+/// The question is never "is it a `.eml`" — Q4k's first answer got that wrong in both directions.
+/// It is "will anything read this file after we exit".
+///
+/// * `--out` given — the operator chose the path and owns the file. Never ours to delete, on any
+///   signal, ever.
+/// * handed to Mail — `openEml` runs `open -a Mail`, which returns immediately and leaves Mail to
+///   read the file AFTER this process is gone. Deleting it on Ctrl-C destroys a live hand-off.
+/// * neither — nothing reads it. `send --html --gui-send` writes a full RFC-822 message here and
+///   then takes the `sendHtmlViaGui` branch, which never opens it. That file was invisible to
+///   Q4k's first pass, which excluded every `.eml` by extension; review caught it.
+///
+/// DELIBERATELY CONSERVATIVE: callers pass `handedToMail: true` for everything except the branch
+/// proven not to read it. A false negative costs a file 24 hours until the age sweep; a false
+/// positive deletes the message out from under the compose window the operator is looking at.
+/// Those are not symmetric, so the doubt goes to leaving the file alone.
+/// Will something outside this process read the generated `.eml` after we exit?
+///
+/// Split out so the argument to `generatedEmlIsDisposable` is itself pinned by a table, not just
+/// the predicate it feeds. Review caught that flipping the old inline `!willGuiSend` to either
+/// constant left all 645 tests green — the same "pinned away from where the mistake is made"
+/// defect this pair of functions exists to retire, recurring one level up.
+///
+/// The negation is deliberate and must stay: an unrecognized future branch defaults to
+/// hand-off-and-keep, never to delete.
+func generatedEmlIsHandedToMail(willGuiSend: Bool, willAutoSend: Bool,
+                                hasAttachments: Bool, willDraft: Bool, hasHTML: Bool) -> Bool {
+    if willGuiSend { return false }                 // sendHtmlViaGui reads htmlTmp, never the .eml
+    if willAutoSend && hasAttachments { return false }  // sendWithAttachments takes attachment paths
+    if willDraft && !hasHTML { return false }       // saveDraft likewise; the HTML draft is a hand-off
+    return true
+}
+
+func generatedEmlIsDisposable(out: String?, handedToMail: Bool) -> Bool {
+    if out != nil { return false }
+    return !handedToMail
+}
+
 func emlDestURL(out: String?, materialise: Bool, base: URL? = nil,
                 action: String = "write the generated .eml to") throws -> URL {
     guard let out else {
@@ -469,6 +508,19 @@ struct SendCommand: ParsableCommand {
                 if willExecute {
                     try eml.write(to: dest, atomically: true, encoding: .utf8)
                     if out == nil { OwnedTempDir.restrictToOwner(dest) }
+                    // THREE routes are proven not to read this file, not one. The first version of
+                    // this comment claimed the enumeration was closed at gui-send and it was not:
+                    // `willAutoSend` with attachments and a plain `willDraft` with attachments both
+                    // write a complete RFC-822 message — base64 attachment payloads included, so
+                    // strictly MORE content than the gui-send file — and then call
+                    // `sendWithAttachments`/`saveDraft`, which take attachment paths and never touch
+                    // it. An over-general claim in exactly the place Q4l exists to stop making them.
+                    let handedOff = generatedEmlIsHandedToMail(
+                        willGuiSend: willGuiSend, willAutoSend: willAutoSend,
+                        hasAttachments: !attPaths.isEmpty, willDraft: willDraft, hasHTML: html != nil)
+                    if generatedEmlIsDisposable(out: out, handedToMail: handedOff) {
+                        SignalSafeCleanup.track(dest.path)
+                    }
                 }
                 emlPath = dest.path
             }

@@ -302,29 +302,54 @@ struct EmlDestinationTests {
 
     // MARK: Q4k — the hand-off must NOT be registered for signal-time deletion
 
-    @Test("the eml directory is a cleanup root, but the generated .eml is deliberately not tracked")
-    func handOffEmlIsNotRegisteredForDeletion() throws {
-        // The distinction Q4k exists to get right, and the reason its original premise was wrong.
-        //
-        // `--gui-send`'s HTML temp IS registered: `sendHtmlViaGui` is synchronous, so nothing reads
-        // the file after the call returns, and a signal death otherwise strands the operator's
-        // message body until the 24-hour sweep.
-        //
-        // A generated `.eml` is the opposite. `openEml` runs `open -a Mail`, which returns
-        // immediately and leaves Mail to read the file AFTER this process exits — the surface even
-        // tells the operator it is kept at that path. Registering it would mean Ctrl-C deletes a
-        // live hand-off out from under the compose window they are looking at. Age-reaping is the
-        // right mechanism there precisely because the owner is Mail.app, which cannot be flocked.
-        let b = try base("handoff"); defer { try? FileManager.default.removeItem(at: b) }
-        let dest = try emlDestURL(out: nil, materialise: true, base: b)
+    // DELETED, and by my own Q4k criterion: `handOffEmlIsNotRegisteredForDeletion` asserted that
+    // `emlDestURL`'s result was absent from the tracked set — after calling only `emlDestURL`,
+    // which never tracks anything. It passed with the predicate, the call site AND the containment
+    // guard all deleted. That is precisely the vacuous shape deleted once already in Q4k, and its
+    // own comment claimed "tracking was possible and declined" when nothing had been attempted.
+    // The two tables below pin the real decisions instead: which routes hand the file to a reader,
+    // and whether a file with a given (out, handedToMail) may be deleted.
 
-        let dir = dest.deletingLastPathComponent()
-        #expect(SignalSafeCleanup.registeredRoots.contains(dir.path + "/"),
-                "control: the directory IS a root, so tracking the file was possible and declined")
-        #expect(!SignalSafeCleanup.trackedPaths.contains(dest.path),
-                "a hand-off .eml must never be queued for signal-time unlink")
-        #expect(SignalSafeCleanup.removableDirectory != dir.path,
-                "and the shared eml directory must never be the one the handler rmdirs")
+    @Test("the disposability decision is exhaustive over out x handed-to-Mail")
+    func emlDisposabilityTable() {
+        // Q4l: the safety-critical negative used to be pinned at the URL factory, which is not
+        // where the mistake gets made — the mistake gets made at the write site, choosing whether
+        // this particular branch's file will ever be read. Pinning the predicate directly covers
+        // every combination instead of the one the factory happens to produce.
+        //
+        // The asymmetry is the whole point: a wrong `true` deletes the operator's message out from
+        // under an open compose window; a wrong `false` costs 24 hours until the age sweep.
+        #expect(generatedEmlIsDisposable(out: nil, handedToMail: false),
+                "nothing reads it and we made it — this is the gui-send file review found stranded")
+        #expect(!generatedEmlIsDisposable(out: nil, handedToMail: true),
+                "handed to Mail: deleting it destroys a live hand-off")
+        #expect(!generatedEmlIsDisposable(out: "/tmp/x.eml", handedToMail: false),
+                "--out is the operator's file; never ours to delete even when nothing reads it")
+        #expect(!generatedEmlIsDisposable(out: "/tmp/x.eml", handedToMail: true),
+                "--out wins over every other consideration")
+    }
+
+    @Test("the hand-off decision covers every route that writes a .eml")
+    func emlHandOffTable() {
+        // Pins the ARGUMENT, not just the predicate it feeds. Review found that flipping the old
+        // inline `!willGuiSend` to either constant left all 645 tests green — the same defect class
+        // ("pinned away from where the mistake is made") one level up from where it was fixed.
+        func handed(gui: Bool = false, auto: Bool = false, att: Bool = false,
+                    draft: Bool = false, html: Bool = false) -> Bool {
+            generatedEmlIsHandedToMail(willGuiSend: gui, willAutoSend: auto,
+                                       hasAttachments: att, willDraft: draft, hasHTML: html)
+        }
+        // Nothing reads the file on these three — all found by review, two of them AFTER the first
+        // fix claimed the enumeration was closed at gui-send.
+        #expect(!handed(gui: true, html: true), "sendHtmlViaGui reads the HTML temp, never the .eml")
+        #expect(!handed(auto: true, att: true), "sendWithAttachments takes attachment paths")
+        #expect(!handed(att: true, draft: true), "saveDraft likewise")
+        // Hand-offs — deleting any of these destroys something a reader still needs.
+        #expect(handed(), "the open path gives it to Mail via openEml")
+        #expect(handed(draft: true, html: true), "the HTML draft points the OPERATOR at eml_path")
+        #expect(handed(auto: true), "a plain auto-send writes no .eml; default must not be delete")
+        // The negation must hold for anything unrecognized: an unknown future branch keeps the file.
+        #expect(handed(html: true), "unrecognized combination defaults to hand-off, never to delete")
     }
 }
 

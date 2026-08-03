@@ -106,6 +106,18 @@ public enum SignalSafeCleanup {
     /// memory: the handler never reads this. It is consulted only by `track`, in normal context,
     /// under `lock`. The raw-buffer discipline exists for what a signal handler touches; applying
     /// it where it buys nothing would be cargo cult.
+    ///
+    /// A root is NOT a claim of exclusive ownership, and since Q4k one of them is not exclusive:
+    /// Mail's `apple-cli-eml` directory is shared with every concurrent `apple` invocation. The
+    /// guard therefore proves less than it did when the only root was this process's own
+    /// `s-<pid>-<uuid>` session — it proves "inside a directory this tool owns", not "inside a
+    /// directory this PROCESS owns". That is still the property that matters, because what the
+    /// handler removes is individual files this process created and named with a UUID, never the
+    /// directory. It is only ever `rmdir`-safe for the one directory `arm` names.
+    ///
+    /// It also grows monotonically and is never pruned, so a root whose directory was since deleted
+    /// stays. Harmless — it only ever widens what `track` will accept, and only to paths under a
+    /// directory this tool made — but worth knowing before treating it as a live inventory.
     nonisolated(unsafe) private static var roots: [String] = []
 
     /// Permit `track` to accept files inside `url`, WITHOUT making that directory removable.
@@ -123,7 +135,13 @@ public enum SignalSafeCleanup {
         // handler would both silently do nothing — the file would strand exactly as before. A root
         // with no handler behind it is decoration.
         ensureRegistryLocked(dir: nil, lockFile: nil)
-        let p = url.path.hasSuffix("/") ? url.path : url.path + "/"
+        // Standardized to match `track`, which standardizes its argument. Comparing a normalized
+        // value against an unnormalized one is a defect on its own terms: a root carrying `.` or
+        // `..` — a `base:` in a test, or a `TMPDIR` like `/tmp/foo/../foo` — would make every
+        // legitimate path miss the prefix, hit `assertionFailure`, and in a debug build raise the
+        // no-cleanup SIGTRAP death this whole area already documents.
+        let std = URL(fileURLWithPath: url.path).standardized.path
+        let p = std.hasSuffix("/") ? std : std + "/"
         if !roots.contains(p) { roots.append(p) }
     }
 
@@ -213,6 +231,18 @@ public enum SignalSafeCleanup {
         //
         // The trailing separator matters: a bare prefix test would accept `<session>-EVIL/x`
         // as being "inside" `<session>`.
+        // Lexically standardized FIRST: the guard is a prefix test, and `<root>/../../etc/x` has
+        // the root as a prefix while pointing outside it.
+        //
+        // LEXICAL, not `resolvingSymlinksInPath`, and the first version of this comment gave the
+        // wrong reason (it claimed resolution would ADD a TOCTOU; review measured the opposite —
+        // resolution closes one, since the handler unlinks the stored string). The actual reason is
+        // that `resolvingSymlinksInPath` silently no-ops on a path that does not exist yet, and the
+        // dominant caller tracks BEFORE creating the file. A guard that resolves only sometimes is
+        // worse than one that never does. Security reviewed the residual symlinked-intermediate
+        // case as unreachable: every tracked string is tool-generated, leaf names carry a fresh
+        // UUID, and the roots are re-validated 0700/uid-owned via `lstat` on every call.
+        let path = URL(fileURLWithPath: path).standardized.path
         guard roots.contains(where: { path.hasPrefix($0) }) else {
             assertionFailure("tracked path is in no registered owned root: \(path)")
             return
