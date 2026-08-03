@@ -206,6 +206,16 @@ setup() {
   [ "$status" -eq 0 ]
 }
 
+@test "find-contact query is length-bounded, in code points (Q5d)" {
+  # matchContacts runs difflib per token AND per full name, per candidate, so an unbounded
+  # query hangs harder here than on search. Measured: 500k jamo scalars vs 200 candidates
+  # = 9.95s. Bounded so a regression fails instead of stalling the suite.
+  long=$(python3 -c "print('\u1100\u1161'*600)")
+  run timeout 60 "$BIN" messages find-contact "$long"
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -qi "too long"
+}
+
 @test "recent --limit out of range → validation error (exit 64)" {
   run "$BIN" messages recent --limit 0
   [ "$status" -eq 64 ]

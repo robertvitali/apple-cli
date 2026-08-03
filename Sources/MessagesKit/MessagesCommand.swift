@@ -268,6 +268,16 @@ struct FindContact: ParsableCommand {
 
     func run() throws {
         try runGuarded(tool: tool) {
+            // Same bound, same unit, as `search` — `matchContacts` runs difflib's O(n*m)
+            // matcher per token AND once per full name, for EVERY candidate, so an unbounded
+            // query is worse here than on search. Measured post-Q5d against 200 candidates:
+            // a 500,000-scalar conjoining-jamo query takes 9.95s, and a real address book is
+            // an order of magnitude larger. (Combining marks do NOT amplify — `cleanName`
+            // deletes them, taking 500,001 scalars to 1 in 0.025s — but Unicode LETTERS
+            // survive cleaning, so the bound cannot rely on the cleaner.)
+            guard name.unicodeScalars.count <= 1024 else {
+                throw AppleError.validation("name too long (max 1024 code points)")
+            }
             let book = AddressBook.load()
             let matches = book.findByName(name)
             let data = FindContactData(query: name, count: matches.count, contacts: matches.map(candidateData))

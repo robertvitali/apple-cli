@@ -43,11 +43,32 @@ public enum Fuzzy {
     public static func cleanName(_ name: String) -> String {
         let noEmoji = stripEmoji(name)
         let filtered = String(noEmoji.unicodeScalars.filter { scalar in
-            CharacterSet.alphanumerics.contains(scalar) ||
-            scalar == " " || scalar == "\t" || scalar == "\n" || scalar == "\r" ||
+            // Python's `\w` is `str.isalnum()` PLUS underscore — so this must be the L*+N*
+            // `alnum` set, NOT `CharacterSet.alphanumerics` (L*+M*+N*), and it must keep "_".
+            // Both halves were wrong and they failed in opposite directions, measured against
+            // the oracle's `clean_name`:
+            //   "x" + U+0301 + "y" -> oracle "xy"  (mark DELETED; we kept it)
+            //   "x_y"              -> oracle "x_y" (underscore KEPT;  we deleted it)
+            // The mark half is the one that matters: an NFD "José" cleaned to "José" instead of
+            // "Jose" scores 0.75 against a "jose" query where the oracle scores a clean 1.0.
+            alnum.contains(scalar) || scalar == "_" ||
+            // `\s`, not a hand-listed four. Python's `\s` is the full Unicode whitespace class,
+            // so U+00A0/U+202F/U+2003/U+1680/U+2028/U+0085 all survive into the whitespace
+            // collapse and become a separating space. Keeping only " \t\n\r" DELETED them,
+            // joining the words: "Ana" + U+00A0 + "Maria" cleaned to "AnaMaria" and scored
+            // 0.31875 against a "ana" query where the oracle scores 0.95 — below the 0.6
+            // threshold, i.e. a contact `find-contact` simply could not find. This function also
+            // already used full-Unicode `isWhitespace` in `collapseWhitespace`, so the two halves
+            // disagreed with each other. Python's `\s` additionally covers U+001C...U+001F.
+            isPythonSpace(scalar) ||
             scalar == "'" || scalar == "-"
         }.map(Character.init))
         return collapseWhitespace(filtered)
+    }
+
+    /// Python `\s` = Unicode whitespace PLUS the C1-adjacent separators U+001C...U+001F.
+    private static func isPythonSpace(_ scalar: Unicode.Scalar) -> Bool {
+        scalar.properties.isWhitespace || (0x1C...0x1F).contains(scalar.value)
     }
 
     /// Port of the MCP's `_clean_text(strip_punctuation=False)`: strip emoji +
@@ -117,7 +138,7 @@ public enum Fuzzy {
     /// junk heuristic (autojunk only triggers on sequences ≥ 200 elements, which
     /// contact tokens never are). Returns `2*M / T`, M = matched chars, T = |a|+|b|.
     public static func sequenceRatio(_ a: String, _ b: String) -> Double {
-        let aChars = Array(a), bChars = Array(b)
+        let aChars = Array(a.unicodeScalars), bChars = Array(b.unicodeScalars)
         let total = aChars.count + bChars.count
         if total == 0 { return 1.0 }
         let matches = matchingBlocksTotal(aChars, bChars)
@@ -125,9 +146,9 @@ public enum Fuzzy {
     }
 
     /// Sum of matching-block sizes (the `M` in difflib's ratio).
-    private static func matchingBlocksTotal(_ a: [Character], _ b: [Character]) -> Int {
+    private static func matchingBlocksTotal(_ a: [Unicode.Scalar], _ b: [Unicode.Scalar]) -> Int {
         // b2j: char -> sorted indices in b.
-        var b2j: [Character: [Int]] = [:]
+        var b2j: [Unicode.Scalar: [Int]] = [:]
         for (j, ch) in b.enumerated() { b2j[ch, default: []].append(j) }
 
         // find_longest_match over a[alo..<ahi] × b[blo..<bhi].
@@ -181,20 +202,29 @@ public enum Fuzzy {
 
         for cand in candidates {
             let clean = cleanName(cand.name).lowercased()
-            if query == clean {
+            // Scalar-exact, for the same reason as the token compares below.
+            if Array(query.unicodeScalars) == Array(clean.unicodeScalars) {
                 results.append(.init(name: cand.name, value: cand.value, score: 1.0))
                 continue
             }
             let tokens = clean.split(separator: " ").map(String.init)
             var best = 0.0
-            let qCount = query.count
+            let qCount = query.unicodeScalars.count
+            let qs = Array(query.unicodeScalars)
             for token in tokens {
-                let tCount = token.count
-                if query == token {
+                let ts = Array(token.unicodeScalars)
+                let tCount = ts.count
+                // Compare SCALARS. Swift `==`/`hasPrefix` are canonical-equivalence and
+                // grapheme-based; Python compares code points exactly. `.lowercased()` can
+                // re-introduce a mark that `cleanName` just removed — U+0130 lowercases to
+                // "i" + U+0307 — and there Python's startswith("i") is True (score 0.425,
+                // excluded at threshold) while Swift's hasPrefix is false, because "i"+U+0307
+                // is ONE grapheme. That flipped a contact into the results at 0.667.
+                if qs == ts {
                     best = max(best, 0.95)
-                } else if token.hasPrefix(query) {
+                } else if ts.starts(with: qs) {
                     best = max(best, 0.85 * (Double(qCount) / Double(tCount)))
-                } else if query.hasPrefix(token) {
+                } else if qs.starts(with: ts) {
                     best = max(best, 0.80 * (Double(tCount) / Double(qCount)))
                 } else {
                     best = max(best, sequenceRatio(query, token))
