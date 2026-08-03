@@ -369,6 +369,22 @@ public final class EnvelopeIndex {
         case newest(Int)
     }
 
+    /// Whether this store exposes indexed body previews: a `summaries` table AND the `messages.summary`
+    /// foreign key into it.
+    ///
+    /// Probed rather than assumed. The Envelope Index schema is Apple's private format and varies by
+    /// Mail version (this is `V10`); a hard-coded join would turn every analytics query into an error
+    /// on a store that lacks it, which is a far worse failure than the degraded question-detection it
+    /// is there to improve. Computed once — `analyticsRows` is called per command, but the schema
+    /// cannot change under a snapshot.
+    private lazy var summariesAvailable: Bool = {
+        let hasTable = (try? reader.query(
+            "SELECT 1 FROM sqlite_master WHERE type='table' AND name='summaries' LIMIT 1"))?.isEmpty == false
+        guard hasTable else { return false }
+        let cols = (try? reader.query("PRAGMA table_info(messages)")) ?? []
+        return cols.contains { ($0["name"] ?? nil) == "summary" }
+    }()
+
     /// All non-deleted messages matching the account/mailbox selector, decoded for the analytics
     /// commands.
     ///
@@ -382,15 +398,22 @@ public final class EnvelopeIndex {
         var where_ = ["m.deleted = 0", EnvelopeIndex.mailboxPredicate(direct: resolved.direct, label: resolved.label)]
         var binds: [String] = []
         if let since = sinceUnix { where_.append("m.date_received >= ?"); binds.append(String(since)) }
+        // Oracle B decides "contains a question" from the subject OR the first 500 characters of
+        // the message CONTENT (smart_inbox.py: `text 1 thru 500 of msgContent`). `summaries` is the
+        // only body text the Envelope Index holds, so it is what stands in for that scan; without
+        // this join `Row.snippet` was nil for every row and the body half of the test was dead.
+        // SUBSTR bounds what is read to the same 500 characters the oracle looks at.
+        let snippetSelect = summariesAvailable ? ", SUBSTR(sm.summary, 1, 500) AS snippet" : ""
+        let snippetJoin = summariesAvailable ? "\n        LEFT JOIN summaries sm ON sm.ROWID = m.summary" : ""
         let sql = """
         SELECT m.ROWID AS rowid, sa.address AS sender_address, sa.comment AS sender_name,
                COALESCE(m.subject_prefix,'') || COALESCE(s.subject,'') AS subject,
                m.date_received AS date_received, m.date_sent AS date_sent, m.read AS read, m.flagged AS flagged,
                m.mailbox AS mailbox_rowid,
-               (SELECT COUNT(*) FROM attachments at WHERE at.message = m.ROWID) AS attachment_count
+               (SELECT COUNT(*) FROM attachments at WHERE at.message = m.ROWID) AS attachment_count\(snippetSelect)
         FROM messages m
         LEFT JOIN subjects s ON s.ROWID = m.subject
-        LEFT JOIN addresses sa ON sa.ROWID = m.sender
+        LEFT JOIN addresses sa ON sa.ROWID = m.sender\(snippetJoin)
         WHERE \(where_.joined(separator: " AND "))
         """
         var tail = ""

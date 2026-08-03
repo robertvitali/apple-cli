@@ -136,7 +136,7 @@ struct AnalyticsScopeTests {
     func row(_ mailboxRowid: Int) -> Analytics.Row {
         Analytics.Row(rowid: mailboxRowid * 100, senderAddress: "a@b.test", senderName: "A",
                       subject: "s", dateReceived: 1, read: false, flagged: false,
-                      hasAttachment: false, mailboxRowid: mailboxRowid)
+                      hasAttachment: false, mailboxRowid: mailboxRowid, snippet: nil)
     }
 
     /// A named breakdown labels its single entry with the mailbox the CALLER asked for.

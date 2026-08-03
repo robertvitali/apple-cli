@@ -7,7 +7,8 @@ struct AnalyticsTests {
                      read: Bool = false, flagged: Bool = false, att: Bool = false,
                      date: Int = 1_784_000_000, mailbox: Int = 4) -> Analytics.Row {
         Analytics.Row(rowid: rowid, senderAddress: addr, senderName: name, subject: subject,
-                      dateReceived: date, read: read, flagged: flagged, hasAttachment: att, mailboxRowid: mailbox)
+                      dateReceived: date, read: read, flagged: flagged, hasAttachment: att,
+                      mailboxRowid: mailbox, snippet: nil)
     }
 
     @Test func topSendersRanksAndPercentages() {

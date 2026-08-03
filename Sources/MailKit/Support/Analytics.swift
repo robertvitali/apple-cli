@@ -20,13 +20,19 @@ public enum Analytics {
         public let flagged: Bool
         public let hasAttachment: Bool
         public let mailboxRowid: Int
-        /// Indexed body preview, INTENDED to stand in for oracle B's first-500-chars-of-content
-        /// question scan without a per-message AppleScript body fetch. Currently always nil on the
-        /// analytics path — `analyticsRows` does not join `summaries` — see `hasQuestion` and Q4e.
+        /// Indexed body preview standing in for oracle B's first-500-chars-of-content question scan
+        /// without a per-message AppleScript body fetch. Populated from the Envelope Index
+        /// `summaries` table; nil where this store has no cached preview for the message, and on any
+        /// Mail schema without that table. See `hasQuestion` for the coverage divergence.
         public let snippet: String?
+        /// `snippet` is deliberately NOT defaulted. The shipped Q4e bug was exactly a nil snippet on
+        /// every row, and with a default a call site that simply forgets the argument reproduces it
+        /// while every test of the join stays green. The same argument is made 40 lines up for
+        /// `RowSlice`: a defaulted parameter has already produced one real defect in this repo, so
+        /// "discouraged" is not good enough. Make every caller say what it means.
         public init(rowid: Int, senderAddress: String?, senderName: String?, subject: String,
                     dateReceived: Int?, read: Bool, flagged: Bool, hasAttachment: Bool, mailboxRowid: Int,
-                    snippet: String? = nil) {
+                    snippet: String?) {
             self.rowid = rowid; self.senderAddress = senderAddress; self.senderName = senderName
             self.subject = subject; self.dateReceived = dateReceived; self.read = read
             self.flagged = flagged; self.hasAttachment = hasAttachment; self.mailboxRowid = mailboxRowid
@@ -345,15 +351,32 @@ public enum Analytics {
         }
     }
 
-    /// B looks for "?" in the message body's first 500 chars.
+    /// B looks for "?" in the subject OR the message body's first 500 chars.
     ///
-    /// KNOWN GAP, do not read the `snippet` branch as coverage: `analyticsRows` never SELECTs a
-    /// snippet column (it has no `summaries` join), so `Row.snippet` is nil for every row reaching
-    /// this function and the body test below is dead code. In practice this is a subject-only `?`
-    /// check, which means `"MEDIUM (contains question)"` can never fire on a body-only question and
-    /// `priorityScore` permanently loses its body term. Tracked as Q4e in docs/COMPLETION-LOOP.md.
-    /// The branch is kept rather than deleted because the fix is to populate `snippet`, not to
-    /// abandon the signal — but the comment must not claim a parity the code does not deliver.
+    /// KNOWN DIVERGENCE, stated in coverage terms because the difference is real but partial. The
+    /// oracle reads `content of aMessage` live over AppleScript, so it sees a body for EVERY message
+    /// it scores. We read the Envelope Index `summaries` preview, which Mail caches for only some
+    /// messages — so where there is no cached preview this silently degrades to a subject-only test
+    /// and can under-score a body-only question. It can also, less often, OVER-score. An earlier
+    /// version of this comment claimed it could not, reasoning that a snippet is a prefix of the
+    /// body — that is wrong and was caught in review. `summaries.summary` is a preview Mail
+    /// GENERATES at index time, whitespace-normalised and with boilerplate collapsed, not a literal
+    /// substring of what `content of aMessage` returns. So a "?" at snippet character 480 can sit
+    /// well past raw-body character 500, outside the window the oracle actually reads. Both
+    /// directions of error are therefore possible; neither is silent about which signal it used.
+    ///
+    /// Measured on the live store, naming each population because the figures look
+    /// inconsistent otherwise — they are ratios over different denominators, and coverage
+    /// concentrates in exactly the recent window these commands score:
+    ///   * of ALL messages in the store, only a small fraction have a preview;
+    ///   * roughly a third of recent messages;
+    ///   * similarly over the last 30 days;
+    ///   * of the newest 200 by date, which is the oracle's own bound, 129.
+    /// Before
+    /// the `summaries` join it was 0% and the body term was dead code; hundreds of messages on that store
+    /// have a body question with no "?" in the subject, and those now score as the oracle scores
+    /// them. Closing the remainder means fetching bodies over AppleScript per message — tracked
+    /// separately rather than folded in here, because it is a latency decision, not a defect.
     static func hasQuestion(_ r: Row) -> Bool {
         if r.subject.contains("?") { return true }
         return (r.snippet ?? "").prefix(500).contains("?")

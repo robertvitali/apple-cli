@@ -12,6 +12,37 @@ with the Apple MCP servers they replace.
 
 ## [Unreleased]
 
+### Fixed — question detection never looked at message bodies
+
+Oracle B scores a message as containing a question if the subject OR the first 500 characters of the
+message content contain `?`. `analyticsRows` selected no body text at all, so `Analytics.Row.snippet`
+was nil for every row and the body half of that test was unreachable: `"MEDIUM (contains question)"`
+could not fire on a body-only question, and `priorityScore` permanently lost its 2-point body term.
+
+`analyticsRows` now joins the Envelope Index `summaries` table (`messages.summary` is an integer key
+into it) and selects the first 500 characters, the same window the oracle reads. Measured on the
+live store with `needs-response --days 90 --max 200`: the same 43 rows come back either way,
+but 7 now score as questions versus 3 before, and 4 of those are body-only detections that were
+structurally impossible.
+
+This narrows the divergence without closing it, so the limit is stated rather than implied. The
+oracle reads the body live over AppleScript and therefore has one for every message it scores; we
+read Mail's cached preview, which exists for only some. On this store that is a small fraction of all
+messages, but the figures are ratios over different populations and coverage concentrates in the
+recent window these commands score: roughly a third of the messages from the last 7 and last 30 days, and
+well over half of the newest 200 by date — the oracle's own bound. Where
+no preview exists the test falls back to subject-only and can under-score. It can also over-score:
+`summaries` holds a preview Mail generates at index time — whitespace-normalised, boilerplate
+collapsed — not a literal substring of the body, so a `?` at preview character 480 may sit past raw
+character 500 and outside the window the oracle reads. Both directions of error are possible.
+Closing the gap means a per-message AppleScript body fetch, which is a latency decision rather than
+a defect and is tracked separately.
+
+The join is gated behind a probe for the table and the `messages.summary` column. The Envelope Index
+is Apple's private schema and varies by Mail version; a hard-coded join would turn every analytics
+query into `no such table: summaries` on a store that lacks it, which is a far worse failure than
+the weaker detection the join exists to improve.
+
 ### Fixed — snapshot copies of the operator's mail and messages accumulated in `$TMPDIR`
 
 `SQLiteReader(copyToTemp:)` copies the Envelope Index / `chat.db` / `NoteStore.sqlite` so reads see
