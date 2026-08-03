@@ -994,6 +994,29 @@ require_index() {
   [ "$status" -eq 0 ]
   [ -f "$OUT" ]
   echo "$output" | grep -q '"opened" : false'
+  # An operator-chosen --out is THEIRS: we write where they said and do not re-mode it. Only the
+  # no---out temp gets relocated into the owned 0700 directory and chmodded 0600 (Q4f). Without
+  # this line, dropping the `if out == nil` guard would silently start chmodding operator files
+  # to 0600 with the whole suite green.
+  [ "$(stat -f '%Lp' "$OUT")" != "600" ]
+}
+
+@test "mail draft-rich with no --out writes 0600 into the owned 0700 directory" {
+  # The POSITIVE counterpart to the --out test above, and the only place the real temp path is
+  # exercised end to end. Without it, deleting every `restrictToOwner` call left the suite green:
+  # the --out test only asserts a file is NOT 600, which stays true when nothing is chmodded at all.
+  # (`$TMPDIR` cannot be redirected to sandbox this: `FileManager.temporaryDirectory` reads
+  # `confstr(_CS_DARWIN_USER_TEMP_DIR)` and ignores the environment variable — verified.)
+  run "$BIN" mail draft-rich --execute --to me@self.test --subject "apple-cli-test dr" --html "<b>x</b>"
+  [ "$status" -eq 0 ]
+  EML="$(echo "$output" | sed -n 's/.*"eml_path" : "\(.*\)".*/\1/p')"
+  [ -n "$EML" ]
+  [ -f "$EML" ]
+  [ "$(stat -f '%Lp' "$EML")" = "600" ]
+  DIR="$(dirname "$EML")"
+  [ "$(basename "$DIR")" = "apple-cli-eml" ]
+  [ "$(stat -f '%Lp' "$DIR")" = "700" ]
+  rm -f "$EML"                      # ours, created by this test — remove only this file
 }
 
 @test "mail draft-rich --dry-run writes nothing (fixed bucket-2 defect)" {

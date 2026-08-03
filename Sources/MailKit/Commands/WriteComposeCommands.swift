@@ -296,9 +296,42 @@ func attachmentsFromPaths(_ paths: [String]) throws -> [EmlBuilder.Attachment] {
 /// on `willExecute`: `--execute` is the DEFAULT posture for the send surface, so an unconfined
 /// `--out` would still write bytes to an arbitrary operator-supplied location on an ordinary
 /// invocation. The guard's own docstring claims every operator write path goes through it.
-func emlDestURL(out: String?, action: String = "write the generated .eml to") throws -> URL {
+/// Where a generated `.eml` goes, and how long it lives.
+///
+/// TWO DIFFERENT ANSWERS, which is the whole of COMPLETION-LOOP Q4f:
+///   * `--out` given — operator-facing OUTPUT. They chose the path, they own the file, we neither
+///     relocate it nor change its mode nor ever delete it.
+///   * no `--out` — an internal temp. It cannot be deleted when the command ends: `openEml` hands
+///     the path to Mail with `open -a Mail`, which returns immediately and leaves Mail to read the
+///     file after this process is gone. (Contrast the `--gui-send` HTML temp a few lines below,
+///     which IS `defer`-deleted, because `sendHtmlViaGui` is synchronous.) So these accumulated:
+///     measured 244 files, 976 KB, every one mode 0644, the oldest 11 days old — and unlike the
+///     SQLite snapshots these are COMPLETE RFC-822 messages, headers and bodies.
+///
+/// The temp now goes in an owned 0700 directory at 0600 and is reaped on a later run. The reaper is
+/// age-based, which is the weaker predicate deliberately rejected for snapshots — but there the
+/// owner is one of our own processes and an `flock` answers exactly; here the owner is Mail.app,
+/// which cannot be locked or interrogated. The hand-off completes in seconds, so a 24-hour window
+/// is orders of magnitude more slack than it needs.
+/// The temp `.eml` directory. `materialise: false` only computes the path.
+///
+/// A `--dry-run` reaches this to REPORT the planned destination, and a preview must not create a
+/// directory, must not delete anything, and must not acquire a new way to fail — before this split
+/// a dry-run did all three, and could exit 69 where it previously could not fail at all.
+func emlTempDirectory(materialise: Bool, base: URL? = nil) throws -> URL {
+    guard materialise else { return OwnedTempDir.path("apple-cli-eml", base: base) }
+    let dir = try OwnedTempDir.make("apple-cli-eml", base: base)
+    // Reaped on every materialising call rather than once per process. A `once` flag would be a
+    // mutable global read from concurrent callers — a real data race for no gain, since this is one
+    // listing of a directory only this tool writes to.
+    OwnedTempDir.reapFiles(in: dir, prefix: "apple-cli-", olderThan: 24 * 60 * 60)
+    return dir
+}
+
+func emlDestURL(out: String?, materialise: Bool, base: URL? = nil,
+                action: String = "write the generated .eml to") throws -> URL {
     guard let out else {
-        return FileManager.default.temporaryDirectory
+        return try emlTempDirectory(materialise: materialise, base: base)
             .appendingPathComponent("apple-cli-\(TestMode.sandboxPrefix)-\(UUID().uuidString).eml")
     }
     // NOT $HOME-confined, deliberately: oracle B's `create_rich_email_draft` only
@@ -423,12 +456,15 @@ struct SendCommand: ParsableCommand {
                 let eml = try EmlBuilder(from: senderAddress ?? account, to: toL, cc: ccL, bcc: bccL, subject: subject,
                                      textBody: body.isEmpty ? nil : body, htmlBody: html, attachments: atts,
                                      emitBcc: true).build()
-                let dest = try emlDestURL(out: out)
+                let dest = try emlDestURL(out: out, materialise: willExecute)
                 // Write ONLY under willExecute (bucket 2, matching DraftRichCommand): a dry-run
                 // still BUILDS the .eml (same validation as execute) and reports the planned
                 // destination, but leaves no bytes on disk. The live open paths below all imply
                 // willExecute, so the file they open always exists.
-                if willExecute { try eml.write(to: dest, atomically: true, encoding: .utf8) }
+                if willExecute {
+                    try eml.write(to: dest, atomically: true, encoding: .utf8)
+                    if out == nil { OwnedTempDir.restrictToOwner(dest) }
+                }
                 emlPath = dest.path
             }
 
@@ -455,9 +491,15 @@ struct SendCommand: ParsableCommand {
             if willGuiSend {
                 // Opt-in HTML auto-send via GUI keystrokes (fragile — see MailScript.sendHtmlViaGui).
                 // The raw HTML goes to a temp file the script reads via `cat` (never interpolated).
-                let htmlTmp = FileManager.default.temporaryDirectory
+                // Same owned directory as the .eml temps, for the same reason: this holds the full
+                // HTML body of an outgoing message. The `defer` below covers the normal exit, but a
+                // SIGKILL or a panic leaves it behind — and a leftover in the SHARED temp root is
+                // one the reaper would never find, which is exactly how the 244 .eml files
+                // accumulated. Inside the owned directory the prefix-matching reaper collects it.
+                let htmlTmp = try emlTempDirectory(materialise: true)
                     .appendingPathComponent("apple-cli-\(TestMode.sandboxPrefix)-\(UUID().uuidString).html")
                 try (html ?? "").write(to: htmlTmp, atomically: true, encoding: .utf8)
+                OwnedTempDir.restrictToOwner(htmlTmp)
                 defer { try? FileManager.default.removeItem(at: htmlTmp) }
                 try MailScript().sendHtmlViaGui(htmlPath: htmlTmp.path, subject: subject,
                     to: toL, cc: ccL, bcc: bccL, attachmentPaths: attPaths, sender: senderAddress)
@@ -674,9 +716,10 @@ struct ReplyCommand: ParsableCommand {
                 } ?? ""
                 if willGuiSend {
                     // Opt-in HTML auto-send via GUI keystrokes (fragile — see MailScript.sendHtmlViaGui).
-                    let htmlTmp = FileManager.default.temporaryDirectory
+                    let htmlTmp = try emlTempDirectory(materialise: true)
                         .appendingPathComponent("apple-cli-\(TestMode.sandboxPrefix)-\(UUID().uuidString).html")
                     try ((html ?? "") + quotedHTML).write(to: htmlTmp, atomically: true, encoding: .utf8)
+                    OwnedTempDir.restrictToOwner(htmlTmp)
                     defer { try? FileManager.default.removeItem(at: htmlTmp) }
                     try MailScript().sendHtmlViaGui(htmlPath: htmlTmp.path, subject: replySubject,
                         to: recipients, cc: ccL, bcc: bccL, attachmentPaths: attachPaths, sender: senderAddress)
@@ -690,8 +733,9 @@ struct ReplyCommand: ParsableCommand {
                     let eml = try EmlBuilder(from: senderAddress, to: recipients, cc: ccL, bcc: bccL, subject: replySubject,
                                              textBody: body + quotedPlain, htmlBody: (html ?? "") + quotedHTML, attachments: atts,
                                              emitBcc: true).build()
-                    let dest = try emlDestURL(out: nil)
+                    let dest = try emlDestURL(out: nil, materialise: true)
                     try eml.write(to: dest, atomically: true, encoding: .utf8)
+                    OwnedTempDir.restrictToOwner(dest)          // always a temp on this path
                     try MailScript().openEml(path: dest.path)
                     opened = true
                     note = "HTML reply rendered in a compose window for review — click Send, or re-run with --gui-send to auto-send."
@@ -915,8 +959,12 @@ struct DraftRichCommand: ParsableCommand {
             // carrying --bcc into it is safe and required for create_rich_email_draft parity.
             let eml = try EmlBuilder(from: senderAddress ?? account, to: toL, cc: try splitRecipients(cc), bcc: try splitRecipients(bcc),
                                  subject: subject, textBody: textBody, htmlBody: html, emitBcc: true).build()
-            let dest = try emlDestURL(out: out, action: "write the rich draft .eml to")
-            if willExecute { try eml.write(to: dest, atomically: true, encoding: .utf8) }
+            let dest = try emlDestURL(out: out, materialise: willExecute,
+                                      action: "write the rich draft .eml to")
+            if willExecute {
+                try eml.write(to: dest, atomically: true, encoding: .utf8)
+                if out == nil { OwnedTempDir.restrictToOwner(dest) }
+            }
             // Optional review window (parity with create_rich_email_draft open_in_mail). Mail cannot
             // auto-save an HTML draft (a LaunchServices-opened .eml window doesn't surface in
             // `outgoing messages`), so --save-as-draft opens the SAME review window and instructs the

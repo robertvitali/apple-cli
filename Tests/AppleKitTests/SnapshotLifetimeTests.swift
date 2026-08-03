@@ -88,7 +88,12 @@ struct SnapshotLifetimeTests {
     func rootRejectsNonDirectory() throws {
         let base = try tmpDir("rootfile"); defer { try? FileManager.default.removeItem(at: base) }
         try Data("x".utf8).write(to: base.appendingPathComponent("apple-cli-snapshots"))
-        #expect(throws: SQLiteReader.DBError.self) { _ = try SQLiteReader.snapshotsRoot(base: base) }
+        // The validation now lives in the shared `OwnedTempDir` helper (MailKit needs the same
+        // guarantees for generated .eml files), so the error type is AppleError rather than the
+        // SQLiteReader-local DBError.
+        #expect {
+            _ = try SQLiteReader.snapshotsRoot(base: base)
+        } throws: { ($0 as? AppleError)?.message.contains("exists but is not a directory") == true }
     }
 
     // MARK: the session directory (what replaces `deinit`)
@@ -268,21 +273,19 @@ struct SnapshotLifetimeTests {
         let src = try sourceDB(dir, walMode: true, ageSeconds: 86_400)
         #expect(exists(URL(fileURLWithPath: src.path + "-wal")), "control: the source really is WAL-mode")
 
-        // This test uses the SHARED session directory, because only the real `SQLiteReader.init`
-        // path is under test and it has no base-directory seam. So assert ONLY about the files this
-        // test created: another suite running in parallel owns the rest, and asserting over the
-        // whole directory would make this test's verdict depend on their files.
-        let session = try SQLiteReader.SnapshotSession.shared.directory()
-        let before = Set(kids(session))
         let reader = try SQLiteReader(path: src.path, copyToTemp: true)
         #expect(try reader.query("SELECT x FROM t").first?["x"] == "hello")
-        let mine = Set(kids(session)).subtracting(before)
 
-        #expect(mine.contains { $0.hasSuffix(".sqlite") }, "the snapshot lands in the locked session directory")
-        #expect(mine.contains { $0.hasSuffix(".sqlite-wal") }, "the -wal sidecar is copied too")
-        for name in mine {
-            #expect(try mode(session.appendingPathComponent(name)) == 0o600, "0600, not the source's 0644")
-        }
+        // Assert on THIS reader's own snapshot. An earlier version diffed the shared session
+        // directory before/after, which races a parallel suite whose reader deinits between the
+        // listing and the stat — a 1-in-12 flake, caught by the 12x gate rather than by luck.
+        let snap = try #require(reader.tempURL)
+        #expect(snap.deletingLastPathComponent().lastPathComponent.hasPrefix("s-"),
+                "the snapshot lives in this process's locked session directory")
+        #expect(try mode(snap) == 0o600, "0600, not the source's 0644")
+        #expect(exists(URL(fileURLWithPath: snap.path + "-wal")), "the -wal sidecar is copied too")
+        #expect(try mode(URL(fileURLWithPath: snap.path + "-wal")) == 0o600)
+
         withExtendedLifetime(reader) { }
     }
 

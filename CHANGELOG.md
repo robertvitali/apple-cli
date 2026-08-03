@@ -12,6 +12,41 @@ with the Apple MCP servers they replace.
 
 ## [Unreleased]
 
+### Fixed — generated `.eml` files left complete message bodies in the shared temp directory
+
+`mail send` / `reply` / `draft-rich` build an RFC-822 `.eml` and hand it to Mail. Without `--out`
+that file went loose into the shared temp root at mode 0644 and was never deleted. Measured: 244
+files, 976 KB, oldest 11 days — full messages, headers and bodies, world-readable.
+
+They cannot simply be deleted when the command ends: `openEml` runs `/usr/bin/open -a Mail <path>`,
+which returns immediately and leaves Mail to read the file after the process is gone. (The sibling
+`--gui-send` HTML temp IS deleted on exit, because that path is synchronous.)
+
+The two call sites now get different answers, which is the substance of the fix. An explicit
+`--out` is operator-facing output: the path is honoured exactly, the mode is left at their umask,
+and nothing ever deletes it. Without `--out` the file is an internal temp: it goes in an owned 0700
+directory at mode 0600 and is reaped after 24 hours by a later run. The `--gui-send` HTML temps
+moved there too — they were `defer`-deleted on the happy path but survived any crash, in the shared
+root where nothing would ever collect them.
+
+Age is a weaker predicate than the `flock` liveness check used for the SQLite snapshots, and that is
+deliberate rather than an oversight: there the owner is one of our own processes and the kernel can
+answer exactly, whereas here the consumer is Mail.app, which cannot be locked or interrogated. The
+hand-off completes in seconds, so 24 hours is orders of magnitude more slack than it needs, and the
+worst case is a visible compose window rather than a corrupted read.
+
+The owned-directory logic is now one shared `AppleKit/OwnedTempDir` rather than two copies, so the
+snapshots and the `.eml` files get the same guarantees: validated on every call (must be a
+directory, must be owned by this uid, mode re-asserted to 0700 and verified, symlinks refused) on
+both the already-exists and the just-created paths. Path computation is separate from
+materialisation, so `--dry-run` reports its planned destination without creating a directory,
+without deleting anything, and without acquiring a failure mode a preview never had.
+
+**Not done, left for the operator:** the 244 pre-existing files are not removed. Deleting files the
+run did not create is out of bounds for an autonomous change, and the shared temp root belongs to
+other applications too. Clear them with
+`find "$TMPDIR" -maxdepth 1 -name 'apple-cli-*.eml' -delete`.
+
 ### Fixed — question detection never looked at message bodies
 
 Oracle B scores a message as containing a question if the subject OR the first 500 characters of the

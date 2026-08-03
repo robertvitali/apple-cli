@@ -20,7 +20,11 @@ public final class SQLiteReader {
     }
 
     private var db: OpaquePointer?
-    private let tempURL: URL?
+    /// The snapshot this reader opened, if any. Internal rather than private so a test can assert
+    /// on ITS OWN file: the alternative is diffing the shared session directory, which races a
+    /// parallel suite whose reader deinits between the listing and the stat — observed as a 1-in-12
+    /// flake before this was exposed.
+    let tempURL: URL?
 
     public init(path: String, copyToTemp: Bool = false) throws {
         var openPath = path
@@ -134,48 +138,12 @@ public final class SQLiteReader {
     /// real shared one passes when the code is wrong (it is create-time only, so a pre-existing
     /// directory keeps whatever mode it has) and fails when the code is right (any stray `chmod`).
     static func snapshotsRoot(base: URL? = nil) throws -> URL {
-        let fm = FileManager.default
-        let dir = (base ?? fm.temporaryDirectory)
-            .appendingPathComponent("apple-cli-snapshots", isDirectory: true)
-
-        // Inspect BEFORE creating. `createDirectory` fails with a Cocoa error naming neither this
-        // tool nor the remedy when a plain file (or a symlink) already sits at the path, and that
-        // error would propagate out of every snapshot-backed read until a human went looking.
-        var st = stat()
-        if lstat(dir.path, &st) == 0 {
-            // `createDirectory(attributes:)` applies the mode only when it CREATES, so a
-            // pre-existing directory — every run after the first — keeps whatever mode and owner it
-            // already had, and may be a symlink pointing elsewhere. Re-assert, because this is
-            // where copies of the operator's mail land.
-            guard (st.st_mode & S_IFMT) == S_IFDIR else {
-                throw DBError.open("\(dir.path) exists but is not a directory; "
-                                   + "remove it so apple can create its snapshot directory")
-            }
-            guard st.st_uid == getuid() else {
-                throw DBError.open("snapshot directory \(dir.path) is owned by uid \(st.st_uid), "
-                                   + "not \(getuid()); remove it or change its owner")
-            }
-            if (st.st_mode & 0o777) != 0o700 {
-                try? fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: dir.path)
-            }
-            return dir
-        }
-
-        do {
-            try fm.createDirectory(at: dir, withIntermediateDirectories: true,
-                                   attributes: [.posixPermissions: 0o700])
-        } catch {
-            throw DBError.open("could not create snapshot directory \(dir.path): "
-                               + "\(error.localizedDescription)")
-        }
-        return dir
+        try OwnedTempDir.make("apple-cli-snapshots", base: base)
     }
 
     /// 0600 on a snapshot. Defense in depth only — the enclosing directory is already 0700 — so
-    /// unlike the reverted design nothing about correctness rides on this call succeeding.
-    static func restrictToOwner(_ url: URL) {
-        try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: url.path)
-    }
+    /// unlike the reverted age-based design nothing about correctness rides on this succeeding.
+    static func restrictToOwner(_ url: URL) { OwnedTempDir.restrictToOwner(url) }
 
     /// This process's snapshot directory: created on first use, `flock`ed for the process lifetime,
     /// removed at `exit()` — the path `deinit` misses.

@@ -1,6 +1,7 @@
 import Testing
 import Foundation
 import SQLite3
+import AppleKit
 @testable import MailKit
 
 /// The `summaries` join that feeds `Analytics.hasQuestion`'s body test (COMPLETION-LOOP Q4e).
@@ -204,5 +205,98 @@ struct AnalyticsSnippetTests {
             snippet: far)
         #expect(!Analytics.hasQuestion(untruncated),
                 "hasQuestion must apply the window itself, not rely on the caller having done it")
+    }
+}
+
+/// Where a generated `.eml` lands (COMPLETION-LOOP Q4f).
+///
+/// The two destinations are different by design and the distinction is the fix: `--out` is
+/// operator-facing output we must not relocate or re-mode, while the no-`--out` temp is ours to
+/// scope and eventually reclaim. Before this, every temp went loose into the shared temp root at
+/// 0644 and was never deleted — measured 244 complete RFC-822 messages, 976 KB, oldest 11 days.
+///
+/// Every test passes its own `base`. The first version of this suite did not, so `swift test`
+/// created the real `$TMPDIR/apple-cli-eml` and reaped real files — a test performing deletions in
+/// shared state, which is the third time that mistake appeared in this change set. It also made the
+/// 0700 assertion vacuous, since a pre-existing directory already at 0700 satisfies it however the
+/// code behaves.
+@Suite("Generated .eml destination")
+struct EmlDestinationTests {
+
+    func base(_ label: String) throws -> URL {
+        let d = FileManager.default.temporaryDirectory
+            .appendingPathComponent("apple-cli-emlbase-\(label)-\(UUID().uuidString)", isDirectory: true)
+        try FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
+        return d
+    }
+
+    @Test("with no --out the .eml goes in an owned 0700 directory, not the shared temp root")
+    func tempGoesInOwnedDirectory() throws {
+        let b = try base("owned"); defer { try? FileManager.default.removeItem(at: b) }
+        let dest = try emlDestURL(out: nil, materialise: true, base: b)
+
+        #expect(dest.deletingLastPathComponent().lastPathComponent == "apple-cli-eml",
+                "a bare temp root is what leaked 244 message bodies")
+        #expect(dest.lastPathComponent.hasSuffix(".eml"))
+        var st = stat()
+        #expect(lstat(dest.deletingLastPathComponent().path, &st) == 0, "and it was actually created")
+        #expect(Int(st.st_mode & 0o777) == 0o700, "private, and asserted on a directory THIS test made")
+    }
+
+    @Test("a preview computes the path without creating or deleting anything")
+    func dryRunIsPure() throws {
+        // A dry-run reaches this to report the planned destination. Before the materialise split it
+        // created the directory and unlinked every .eml older than 24h — and could newly exit 69,
+        // where the same preview previously could not fail at all.
+        let b = try base("pure"); defer { try? FileManager.default.removeItem(at: b) }
+        let dest = try emlDestURL(out: nil, materialise: false, base: b)
+
+        #expect(dest.deletingLastPathComponent().lastPathComponent == "apple-cli-eml",
+                "the reported path is still the real one")
+        #expect(!FileManager.default.fileExists(atPath: dest.deletingLastPathComponent().path),
+                "but nothing was created")
+        #expect(try FileManager.default.contentsOfDirectory(atPath: b.path).isEmpty,
+                "and nothing at all was written under the base")
+    }
+
+    @Test("a preview cannot fail on an occupied path where it previously could not fail")
+    func dryRunDoesNotAcquireNewFailures() throws {
+        let b = try base("occupied"); defer { try? FileManager.default.removeItem(at: b) }
+        // A plain file squatting the directory name makes `make` throw. A preview must not.
+        try Data("x".utf8).write(to: b.appendingPathComponent("apple-cli-eml"))
+        _ = try emlDestURL(out: nil, materialise: false, base: b)     // must not throw
+        #expect(throws: AppleError.self) { _ = try emlDestURL(out: nil, materialise: true, base: b) }
+    }
+
+    @Test("materialising a temp destination actually reaps stale files")
+    func materialiseReaps() throws {
+        // Every other reaper test calls `OwnedTempDir.reapFiles` directly. Nothing asserted that
+        // GENERATING a temp .eml reaps anything — delete the reap call from `emlTempDirectory` and
+        // the whole suite stayed green, on the one behaviour this change exists for.
+        let b = try base("reap"); defer { try? FileManager.default.removeItem(at: b) }
+        let dir = try OwnedTempDir.make("apple-cli-eml", base: b)
+        let stale = dir.appendingPathComponent("apple-cli-stale.eml")
+        let fresh = dir.appendingPathComponent("apple-cli-fresh.eml")
+        for (u, age) in [(stale, 90_000.0), (fresh, 60.0)] {
+            try Data("x".utf8).write(to: u)
+            try FileManager.default.setAttributes(
+                [.modificationDate: Date().addingTimeInterval(-age)], ofItemAtPath: u.path)
+        }
+
+        _ = try emlDestURL(out: nil, materialise: true, base: b)
+
+        #expect(!FileManager.default.fileExists(atPath: stale.path), "a day-old hand-off is done")
+        #expect(FileManager.default.fileExists(atPath: fresh.path), "a recent one may still be live")
+    }
+
+    @Test("an explicit --out path is honoured exactly, never relocated")
+    func explicitOutIsUntouched() throws {
+        let b = try base("out"); defer { try? FileManager.default.removeItem(at: b) }
+        let want = b.appendingPathComponent("operator-chose-this.eml")
+        let got = try emlDestURL(out: want.path, materialise: true)
+        // The operator picked the path; moving it into our private directory would silently break
+        // whatever they were going to do with the file. The MODE half of that promise — that we do
+        // not chmod their file to 0600 — is pinned in bats, where a file is actually written.
+        #expect(got.path == want.path)
     }
 }
