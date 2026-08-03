@@ -325,8 +325,13 @@ struct Search: ParsableCommand {
             }
             // Cap term length: an unbounded term drives O(term·window) WRatio work over
             // up to 10k rows (a ~40KB term measured ~30s CPU) — a local DoS.
-            guard term.count <= 1024 else {
-                throw AppleError.validation("search term too long (max 1024 characters)")
+            // COUNT SCALARS, not Characters — this must be the same unit the scorer uses.
+            // `Fuzzy` counts code points (Q5c), and a single grapheme cluster can hold
+            // unboundedly many of them: "a" + 999 combining acutes is ONE Character and 1000
+            // code points, so a 1024-Character term can carry 1,024,000 scalars into an
+            // O(term x body) LCS — a 1000x amplification straight through this guard.
+            guard term.unicodeScalars.count <= 1024 else {
+                throw AppleError.validation("search term too long (max 1024 code points)")
             }
             guard hours >= 0 else { throw AppleError.validation("hours cannot be negative") }
             guard hours <= MessageTime.maxHours else {

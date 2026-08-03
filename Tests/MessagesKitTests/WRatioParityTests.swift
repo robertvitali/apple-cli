@@ -140,3 +140,64 @@ struct WRatioParityTests {
                 "past maxScanWindows the scan stops; rapidfuzz would return 100.0 here")
     }
 }
+
+/// The scorer must count CODE POINTS, as Python does — not Swift grapheme clusters (Q5c).
+///
+/// `full_process` keeps Unicode letters and numbers verbatim, and some of those COMBINE: Hangul
+/// conjoining jamo U+1100 + U+1161 is two code points (both Lo, both kept) that Swift renders as
+/// one `Character`. So `Array(String)` and `.count` gave 1 where Python's `len()` gives 2, which
+/// changes both the `ratio` denominator and the `lenRatio` that selects the `wRatio` branch.
+///
+/// Scanning the surviving categories, only `Lm`/`Lo`/`Nd` can form a multi-scalar cluster after
+/// processing — combining marks (M*), ZWJ and variation selectors are all turned into spaces
+/// first. So the reachable triggers are NARROW, and narrower than the first draft of this comment
+/// claimed: ordinary Korean is NFC (U+AC00 is ONE code point) and does not trigger this at all,
+/// and an NFD Latin paste does not either, because its marks become spaces on both sides
+/// identically. What actually triggers it is decomposed Hangul (conjoining jamo) and `Lm`
+/// extenders such as halfwidth katakana + voiced mark (U+FF76 U+FF9E).
+///
+/// 7 of these 11 pairs were wrong before the fix; every expected value is `thefuzz.fuzz.WRatio`.
+@Suite("WRatio counts code points, not graphemes")
+struct WRatioCodePointTests {
+
+    /// U+1100 + U+1161 — two code points, one grapheme cluster.
+    static let jamo = "\u{1100}\u{1161}"
+
+    static let golden: [(String, String, Double)] = [
+        ("xab", "x" + jamo, 33.0),           // was 60.0 — grapheme count shortened the haystack
+        ("abc", "x" + jamo, 0.0),
+        (jamo + "ab", "abcd", 50.0),         // was 57.0
+        ("x" + jamo, "x" + jamo + "z", 86.0),// was 90.0
+        (jamo + jamo, "abc", 0.0),
+        ("ab" + jamo, "abcd", 50.0),         // was 57.0
+        (jamo, "ab", 0.0),
+        ("ok", jamo + "ok", 90.0),
+        ("meeting", "meet" + jamo + "ing", 88.0),  // was 93.0
+        ("golf", jamo + "golf", 90.0),             // was 89.0
+        ("abcd", jamo + "ab", 50.0),               // was 57.0
+
+        // Different CONSTRUCTS, not more of the same pair. Every row above is an L+V jamo pair,
+        // so they all share one shape; these cover the other two ways a cluster spans scalars.
+        ("golf", "\u{ff76}\u{ff9e}golf", 90.0),      // Lm extender (halfwidth katakana + dakuten)
+        ("xab", "x\u{1100}\u{1161}\u{11a8}", 29.0),          // 3-scalar cluster: only this shape catches a
+        ("abcd", "\u{1100}\u{1161}\u{11a8}ab", 44.0),        // "count clusters x 2" mis-fix
+    ]
+
+    @Test("jamo pairs score by code point, matching thefuzz")
+    func matchesOracle() {
+        for (a, b, expected) in Self.golden {
+            let got = Fuzzy.wRatio(a, b)
+            #expect(abs(got - expected) < 0.01,
+                    "wRatio(\(a.unicodeScalars.count)cp, \(b.unicodeScalars.count)cp) = \(got), thefuzz says \(expected)")
+        }
+    }
+
+    /// The mechanism itself, stated so a failure points at the cause rather than a score.
+    @Test("a jamo pair is one Character but two code points")
+    func jamoIsTwoCodePointsOneCharacter() {
+        #expect(Self.jamo.count == 1, "precondition: Swift sees one grapheme cluster")
+        #expect(Self.jamo.unicodeScalars.count == 2, "precondition: Python sees two code points")
+        // fullProcess keeps both scalars (both are Lo), so the length difference reaches the scorer.
+        #expect(Fuzzy.fullProcess(Self.jamo).unicodeScalars.count == 2)
+    }
+}

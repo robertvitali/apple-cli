@@ -212,10 +212,10 @@ public enum Fuzzy {
 
     // MARK: - rapidfuzz-style ratios (for message WRatio)
 
-    /// Longest-common-subsequence length over character slices (for normalized
+    /// Longest-common-subsequence length over scalar slices (for normalized
     /// Indel similarity). Slice-based so the hot `partialRatio` sliding window
     /// needs no per-window `Array`/`String` allocation.
-    private static func lcsLength(_ a: ArraySlice<Character>, _ b: ArraySlice<Character>) -> Int {
+    private static func lcsLength(_ a: ArraySlice<Unicode.Scalar>, _ b: ArraySlice<Unicode.Scalar>) -> Int {
         let n = a.count, mm = b.count
         if n == 0 || mm == 0 { return 0 }
         let aBase = a.startIndex, bBase = b.startIndex
@@ -233,7 +233,7 @@ public enum Fuzzy {
         return prev[mm]
     }
 
-    private static func ratioChars(_ a: ArraySlice<Character>, _ b: ArraySlice<Character>) -> Double {
+    private static func ratioChars(_ a: ArraySlice<Unicode.Scalar>, _ b: ArraySlice<Unicode.Scalar>) -> Double {
         let total = a.count + b.count
         if total == 0 { return 100.0 }
         return 100.0 * 2.0 * Double(lcsLength(a, b)) / Double(total)
@@ -241,7 +241,7 @@ public enum Fuzzy {
 
     /// rapidfuzz `ratio` = normalized Indel similarity = 100·2·LCS/(|a|+|b|).
     static func ratio(_ a: String, _ b: String) -> Double {
-        let ac = Array(a), bc = Array(b)
+        let ac = Array(a.unicodeScalars), bc = Array(b.unicodeScalars)
         return ratioChars(ac[...], bc[...])
     }
 
@@ -269,7 +269,7 @@ public enum Fuzzy {
     static let maxScanWindows = 20_000
 
     static func partialRatio(_ s1: String, _ s2: String) -> Double {
-        let a = Array(s1), b = Array(s2)
+        let a = Array(s1.unicodeScalars), b = Array(s2.unicodeScalars)
         if a.isEmpty || b.isEmpty { return 0.0 }
         let (shorter, longer) = a.count <= b.count ? (a, b) : (b, a)
         // NO EQUAL-LENGTH SHORTCUT. There was one — `if len1 == len2 { return ratioChars(...) }` —
@@ -290,14 +290,14 @@ public enum Fuzzy {
         return best
     }
 
-    private static func partialRatioImpl(_ shorter: [Character], _ longer: [Character]) -> Double {
+    private static func partialRatioImpl(_ shorter: [Unicode.Scalar], _ longer: [Unicode.Scalar]) -> Double {
         let len1 = shorter.count, len2 = longer.count
         let needleChars = Set(shorter)
         let sShort = shorter[...]
         var best = 0.0
 
         // Returns true when the alignment is exact and the caller should stop.
-        func consider(_ window: ArraySlice<Character>) -> Bool {
+        func consider(_ window: ArraySlice<Unicode.Scalar>) -> Bool {
             let r = ratioChars(sShort, window)
             if r > best { best = r }
             return r > 99.5
@@ -391,7 +391,9 @@ public enum Fuzzy {
         var tryPartial = true
 
         let base = ratio(p1, p2)
-        let len1 = p1.count, len2 = p2.count
+        // CODE POINTS, not grapheme clusters — Python's len() counts code points, and the
+        // difference changes lenRatio and therefore which wRatio branch runs. See Q5c.
+        let len1 = p1.unicodeScalars.count, len2 = p2.unicodeScalars.count
         let lenRatio = Double(max(len1, len2)) / Double(min(len1, len2))
         if lenRatio < 1.5 { tryPartial = false }
         if lenRatio > 8 { partialScale = 0.6 }

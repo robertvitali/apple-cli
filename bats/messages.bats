@@ -183,6 +183,29 @@ setup() {
   echo "$output" | grep -qi "too long"
 }
 
+@test "search term guard counts CODE POINTS, not grapheme clusters (Q5c)" {
+  # 600 grapheme clusters, 2400 code points: "a" + 3 combining acutes, 600 times.
+  # The scorer counts code points, so the guard must too — a Character-based guard
+  # accepts this (600 < 1024) and hands 2400 scalars to an O(term x body) LCS.
+  # A single cluster can hold unboundedly many scalars, so the gap is not bounded.
+  long=$(python3 -c "print(('a'+'\u0301'*3)*600)")
+  # BOUNDED: if this guard regresses to counting Characters the term is ACCEPTED, and the run
+  # does not fail — it HANGS in the O(term x body) LCS, which is the whole point of the guard.
+  # Without the timeout a regression stalls the suite instead of reporting; verified by mutation.
+  run timeout 60 "$BIN" messages search "$long"
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -qi "too long"
+  echo "$output" | grep -qi "code points"
+}
+
+@test "search term under the cap in BOTH units is still accepted" {
+  # Control for the test above: same shape, 200 clusters / 800 code points, under
+  # 1024 either way. Without this, the guard could reject everything and still pass.
+  ok=$(python3 -c "print(('a'+'\u0301'*3)*200)")
+  run "$BIN" messages search "$ok" --hours 1
+  [ "$status" -eq 0 ]
+}
+
 @test "recent --limit out of range → validation error (exit 64)" {
   run "$BIN" messages recent --limit 0
   [ "$status" -eq 64 ]
