@@ -177,7 +177,11 @@ enum NotesLists {
     /// `<ol><li title="a>b">x</li><li>y</li></ol>` rendered `1.  b">x` instead of `1.  x`. The old
     /// regex had the same flaw, so this is not a regression — but it is a hand-written parser now,
     /// and the fix is local.
-    private static func readTag(_ s: [Unicode.Scalar], _ i: Int) -> Tag? {
+    private static func readTag(_ s: [Unicode.Scalar], _ i: Int, _ lastGt: Int) -> Tag? {
+        // Past the final `>` no tag can be terminated. Without this the scan below runs to
+        // end-of-input on EVERY `<`, which is the quadratic half of the DoS described on
+        // `segments`. `lastGt` is computed once per top-level parse and threaded down.
+        guard i <= lastGt else { return nil }
         guard i < s.count, s[i] == "<" else { return nil }
         var j = i + 1
         var isClose = false
@@ -253,12 +257,22 @@ enum NotesLists {
         var out: [Segment] = []
         var raw = String.UnicodeScalarView()
         var i = 0
+        // Index of the last `>` in the input. Past it no tag can be terminated, so `readTag` there
+        // would scan to end-of-input only to fail — see the note below on why that matters.
+        let lastGt = s.lastIndex(of: ">") ?? -1
         while i < s.count {
-            if s[i] == "<", let t = readTag(s, i), !t.isClose, t.name == "ul" || t.name == "ol" {
-                if !raw.isEmpty { out.append(.html(String(raw))); raw = String.UnicodeScalarView() }
-                let (list, next) = try parseList(s, openTag: t, depth: 0)
-                out.append(.list(list))
-                i = next
+            if s[i] == "<", let t = readTag(s, i, lastGt) {
+                if !t.isClose, t.name == "ul" || t.name == "ol" {
+                    if !raw.isEmpty { out.append(.html(String(raw))); raw = String.UnicodeScalarView() }
+                    let (list, next) = try parseList(s, openTag: t, depth: 0, lastGt)
+                    out.append(.list(list))
+                    i = next
+                    continue
+                }
+                // A NON-list tag: copy it through WHOLE and jump past it. Appending one scalar and
+                // re-entering `readTag` at the next `<` is what made this quadratic — see below.
+                raw.append(contentsOf: s[i..<t.end])
+                i = t.end
                 continue
             }
             raw.append(s[i])
@@ -269,7 +283,7 @@ enum NotesLists {
     }
 
     /// Parse a list subtree, keeping EVERY element child in document order.
-    private static func parseList(_ s: [Unicode.Scalar], openTag: Tag, depth: Int) throws -> (List, Int) {
+    private static func parseList(_ s: [Unicode.Scalar], openTag: Tag, depth: Int, _ lastGt: Int) throws -> (List, Int) {
         guard depth < maxDepth else { throw DepthExceeded() }
         let ordered = openTag.name == "ol"
         let start = attribute(openTag.attrList, named: "start")
@@ -278,7 +292,7 @@ enum NotesLists {
         var trailingNodeAfterLastItem = false
 
         while i < s.count {
-            guard s[i] == "<", let t = readTag(s, i) else {
+            guard s[i] == "<", let t = readTag(s, i, lastGt) else {
                 if !children.isEmpty { trailingNodeAfterLastItem = true }
                 i += 1
                 continue
@@ -288,7 +302,7 @@ enum NotesLists {
                 break
             }
             if !t.isClose, t.name == "li" {
-                let (item, next) = try parseItem(s, from: t.end, depth: depth + 1)
+                let (item, next) = try parseItem(s, from: t.end, depth: depth + 1, lastGt)
                 children.append(.item(item))
                 i = next
                 trailingNodeAfterLastItem = false
@@ -300,7 +314,7 @@ enum NotesLists {
                 // advanced past the OPEN TAG ONLY. That spliced the inner items into the OUTER
                 // list and let the inner `</ul>` satisfy the outer list's close — so every `<li>`
                 // after a sublist fell out of the list entirely and lost its marker.
-                let (nested, next) = try parseList(s, openTag: t, depth: depth + 1)
+                let (nested, next) = try parseList(s, openTag: t, depth: depth + 1, lastGt)
                 children.append(.list(nested))
                 i = next
                 trailingNodeAfterLastItem = true
@@ -312,7 +326,7 @@ enum NotesLists {
             }
             // Any other element child. It occupies an index for `parent.children`, so a `<div>` or
             // `<p>` between items shifts the numbering of everything after it.
-            let (rawHTML, next) = parseUntilClose(s, openTag: t)
+            let (rawHTML, next) = parseUntilClose(s, openTag: t, lastGt)
             children.append(.other(rawHTML))
             i = next
             trailingNodeAfterLastItem = true
@@ -328,12 +342,12 @@ enum NotesLists {
     }
 
     /// Consume an element and its content up to its matching close tag; return the raw HTML.
-    private static func parseUntilClose(_ s: [Unicode.Scalar], openTag: Tag) -> (String, Int) {
+    private static func parseUntilClose(_ s: [Unicode.Scalar], openTag: Tag, _ lastGt: Int) -> (String, Int) {
         var depth = 1
         var i = openTag.end
         let contentStart = openTag.end
         while i < s.count, depth > 0 {
-            guard s[i] == "<", let t = readTag(s, i) else { i += 1; continue }
+            guard s[i] == "<", let t = readTag(s, i, lastGt) else { i += 1; continue }
             if t.name == openTag.name { depth += t.isClose ? -1 : 1 }
             i = t.end
         }
@@ -341,13 +355,13 @@ enum NotesLists {
         return ("<" + openTag.name + openTag.attrs + ">" + inner, i)
     }
 
-    private static func parseItem(_ s: [Unicode.Scalar], from: Int, depth: Int) throws -> (Item, Int) {
+    private static func parseItem(_ s: [Unicode.Scalar], from: Int, depth: Int, _ lastGt: Int) throws -> (Item, Int) {
         guard depth < maxDepth else { throw DepthExceeded() }
         var fragments: [Fragment] = []
         var raw = String.UnicodeScalarView()
         var i = from
         while i < s.count {
-            guard s[i] == "<", let t = readTag(s, i) else {
+            guard s[i] == "<", let t = readTag(s, i, lastGt) else {
                 raw.append(s[i]); i += 1; continue
             }
             if t.isClose, t.name == "li" { i = t.end; break }
@@ -359,7 +373,7 @@ enum NotesLists {
                 // A sublist nested INSIDE the item. Apple does not emit this, but caller-supplied
                 // HTML can, and it is the branch where indentation applies.
                 if !raw.isEmpty { fragments.append(.html(String(raw))); raw = String.UnicodeScalarView() }
-                let (nested, next) = try parseList(s, openTag: t, depth: depth + 1)
+                let (nested, next) = try parseList(s, openTag: t, depth: depth + 1, lastGt)
                 fragments.append(.list(nested))
                 i = next
                 continue

@@ -1,3 +1,4 @@
+import Foundation
 import Testing
 @testable import NotesKit
 
@@ -186,6 +187,43 @@ struct ListMarkdownParityTests {
         // The same input must not take the whole export down: `export-notes --format md`
         // degrades per-note via `try?`, which requires the error to be catchable.
         #expect((try? NotesText.htmlToMarkdown(bomb)) == nil)
+    }
+
+
+    /// SECURITY. `segments` called `readTag` at every `<` and then advanced ONE scalar when the tag
+    /// was not a list, so every non-list tag was re-scanned from each position inside it; and
+    /// `readTag` itself scanned to end-of-input before failing when no `>` followed. Both are
+    /// quadratic in input length. Measured on `"<a"` repeated n times, before the fix:
+    ///
+    ///     n=1,000  0.046s   n=4,000  0.720s   n=16,000  11.431s   n=64,000  181.818s
+    ///
+    /// — 16x per 4x of input, textbook O(n²), and 64,000 is a 128 KB note. Note bodies sync from
+    /// iCloud, so this is attacker-influenceable input, and `export-notes --format md` runs it over
+    /// every note in the store. After the fix the same inputs are ~0.002s.
+    ///
+    /// The bound below is 5s: three orders of magnitude above the fixed cost and 30x below the
+    /// pre-fix cost, so it is not a flaky timing assertion — it can only fail if the quadratic
+    /// behaviour comes back.
+    ///
+    /// SCOPE, stated because the headline is easy to overclaim: this covers the PARSER only.
+    /// `NotesText.htmlToMarkdown` as a whole is still quadratic on the same input through its
+    /// non-list regex pipeline (measured 0.030s / 0.448s / 7.092s at n=1,000 / 4,000 / 16,000),
+    /// which is pre-existing code this change did not touch. `get-markdown` is therefore NOT yet
+    /// safe against a large hostile note; that half is queued, not fixed here.
+    @Test("parser is linear, not quadratic, in tag count")
+    func parsingIsNotQuadratic() throws {
+        let bomb = String(repeating: "<a", count: 64_000)   // 128 KB, no `>` anywhere
+        let started = Date()
+        _ = try? NotesLists.segments(bomb)
+        let elapsed = Date().timeIntervalSince(started)
+        #expect(elapsed < 5.0, "segments() took \(elapsed)s on a 128 KB input — the O(n²) scan is back")
+
+        // Same shape but WITH a terminator, so the whole-tag jump is what is exercised rather than
+        // the no-`>` early-out. Pre-fix this was the slower of the two.
+        let closed = String(repeating: "<b>x</b>", count: 64_000)
+        let t2 = Date()
+        _ = try? NotesLists.segments(closed)
+        #expect(Date().timeIntervalSince(t2) < 5.0, "segments() is quadratic on well-formed tags")
     }
 
     @Test("nesting just under the cap still renders")
