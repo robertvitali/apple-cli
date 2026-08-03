@@ -1,7 +1,7 @@
 import Testing
 import Foundation
 import SQLite3
-import AppleKit
+@testable import AppleKit   // the cleanup registry's test accessors are internal, not API
 @testable import MailKit
 
 /// The `summaries` join that feeds `Analytics.hasQuestion`'s body test (COMPLETION-LOOP Q4e).
@@ -299,4 +299,32 @@ struct EmlDestinationTests {
         // not chmod their file to 0600 — is pinned in bats, where a file is actually written.
         #expect(got.path == want.path)
     }
+
+    // MARK: Q4k — the hand-off must NOT be registered for signal-time deletion
+
+    @Test("the eml directory is a cleanup root, but the generated .eml is deliberately not tracked")
+    func handOffEmlIsNotRegisteredForDeletion() throws {
+        // The distinction Q4k exists to get right, and the reason its original premise was wrong.
+        //
+        // `--gui-send`'s HTML temp IS registered: `sendHtmlViaGui` is synchronous, so nothing reads
+        // the file after the call returns, and a signal death otherwise strands the operator's
+        // message body until the 24-hour sweep.
+        //
+        // A generated `.eml` is the opposite. `openEml` runs `open -a Mail`, which returns
+        // immediately and leaves Mail to read the file AFTER this process exits — the surface even
+        // tells the operator it is kept at that path. Registering it would mean Ctrl-C deletes a
+        // live hand-off out from under the compose window they are looking at. Age-reaping is the
+        // right mechanism there precisely because the owner is Mail.app, which cannot be flocked.
+        let b = try base("handoff"); defer { try? FileManager.default.removeItem(at: b) }
+        let dest = try emlDestURL(out: nil, materialise: true, base: b)
+
+        let dir = dest.deletingLastPathComponent()
+        #expect(SignalSafeCleanup.registeredRoots.contains(dir.path + "/"),
+                "control: the directory IS a root, so tracking the file was possible and declined")
+        #expect(!SignalSafeCleanup.trackedPaths.contains(dest.path),
+                "a hand-off .eml must never be queued for signal-time unlink")
+        #expect(SignalSafeCleanup.removableDirectory != dir.path,
+                "and the shared eml directory must never be the one the handler rmdirs")
+    }
 }
+

@@ -37,7 +37,7 @@ struct SignalCleanupRegistryTests {
         // that appears between the two reads is one that was tracked before it was created — so
         // this ordering cannot produce a false failure, while the reverse could.
         let present = try FileManager.default.contentsOfDirectory(atPath: dir.path)
-        let tracked = Set(SQLiteReader.SignalSafeCleanup.trackedPaths)
+        let tracked = Set(SignalSafeCleanup.trackedPaths)
 
         // Positive controls. Without these the assertion below passes on an empty directory, which
         // is precisely the vacuous shape this change set has already shipped once.
@@ -55,14 +55,18 @@ struct SignalCleanupRegistryTests {
     func trackedSetStaysInsideTheSession() throws {
         let reader = try SQLiteReader(path: try sourceDatabase().path, copyToTemp: true)
         let dir = try SQLiteReader.SnapshotSession.shared.directory()
-        let tracked = SQLiteReader.SignalSafeCleanup.trackedPaths
+        let tracked = SignalSafeCleanup.trackedPaths
         #expect(!tracked.isEmpty, "control")
 
-        // The handler unlinks these paths blind. Anything outside this process's own
-        // `s-<pid>-<uuid>` directory would be someone else's file — the failure class that once had
-        // a test in this repo killing a concurrent reader with `disk I/O error`.
-        let prefix = dir.path + "/"
-        #expect(tracked.allSatisfy { $0.hasPrefix(prefix) }, "escaped the session: \(tracked)")
+        // The handler unlinks these paths blind, so every one must sit inside a directory this
+        // process owns. That used to mean the snapshot session specifically; since Q4k it means ANY
+        // registered root, because Mail registers its own. Asserting the old, narrower invariant
+        // would pass today only because no Mail test has materialised a temp yet, and would turn
+        // into a flake the day one does.
+        let roots = SignalSafeCleanup.registeredRoots
+        #expect(roots.contains(dir.path + "/"), "control: the session directory is a root")
+        let escaped = tracked.filter { p in !roots.contains(where: { p.hasPrefix($0) }) }
+        #expect(escaped.isEmpty, "tracked paths in no owned root: \(escaped)")
         #expect(dir.lastPathComponent.hasPrefix("s-\(getpid())-"))
         withExtendedLifetime(reader) { }
     }
@@ -80,28 +84,48 @@ struct SignalCleanupRegistryTests {
         // the other tests assert stays true. They are never created on disk; `unlink` on a missing
         // path is a harmless ENOENT, which is the same thing the handler already tolerates.
         let probes = (0..<200).map { dir.appendingPathComponent("growth-probe-\(UUID())-\($0)").path }
-        for p in probes { SQLiteReader.SignalSafeCleanup.track(p) }
+        for p in probes { SignalSafeCleanup.track(p) }
 
-        let tracked = Set(SQLiteReader.SignalSafeCleanup.trackedPaths)
+        let tracked = Set(SignalSafeCleanup.trackedPaths)
         let missing = probes.filter { !tracked.contains($0) }
         #expect(missing.isEmpty, "\(missing.count)/200 paths past the initial capacity were dropped")
         #expect(tracked.count > 64, "control: we really did push past the initial capacity")
         withExtendedLifetime(armer) { }
     }
 
-    @Test("disarmForRetry refuses to disarm a registry that already tracks something")
-    func disarmOnlyUndoesAnEmptyArm() throws {
-        // `disarmForRetry` exists so a session whose directory failed to be created can let the
-        // NEXT attempt arm its own (review's N1). Its guard is the safety-critical half: called
-        // once anything is tracked, it would drop a live directory's cleanup on the floor.
+    @Test("disarmForRetry refuses when the count has moved since the arm it is undoing")
+    func disarmOnlyUndoesItsOwnArm() throws {
+        // `disarmForRetry` exists so a session whose directory failed to be created lets the NEXT
+        // attempt arm its own. Its guard is the safety-critical half — clearing when the session
+        // DID track something drops a live directory's cleanup on the floor.
+        //
+        // The guard is scoped to the arm being undone, not to `count == 0`. Review found the
+        // zero-check defeatable once a second client shares the counter: Mail tracks one file, a
+        // snapshot session then fails to create its directory, the guard sees Mail's count and
+        // refuses, and `dir` stays pinned to a directory that never existed — leaving the one that
+        // really holds the operator's mail neither tracked nor removable.
         let armer = try SQLiteReader(path: try sourceDatabase().path, copyToTemp: true)
-        let before = SQLiteReader.SignalSafeCleanup.trackedPaths
+        let session = try SQLiteReader.SnapshotSession.shared.directory()
+        let before = SignalSafeCleanup.trackedPaths
         #expect(!before.isEmpty, "control: the shared registry is armed and non-empty")
+        #expect(SignalSafeCleanup.removableDirectory == session.path, "control: a directory is armed")
 
-        SQLiteReader.SignalSafeCleanup.disarmForRetry()
+        // A count that does not match this arm must be refused, whoever moved it.
+        //
+        // HONEST LIMIT, measured: this does NOT discriminate the fix. Reverting the guard to the
+        // old shared `count == 0` proxy leaves this test green, because with a non-empty registry
+        // both versions refuse. The case that separates them — the session tracked nothing while
+        // the OTHER client did, so a correct guard clears and the old one wrongly refuses — needs
+        // the shared session's removable directory to actually be cleared, and every other suite
+        // in this process depends on it. There is no second-registry seam, and adding one would be
+        // a worse footgun than the gap. So the scoping fix rests on review plus reasoning, not on
+        // a red-proof, and saying so beats a test that looks like coverage and is not.
+        SignalSafeCleanup.disarmForRetry(armedAtCount: Int32.max)
 
-        #expect(SQLiteReader.SignalSafeCleanup.trackedPaths == before,
-                "a non-empty registry must survive disarmForRetry untouched")
+        #expect(SignalSafeCleanup.removableDirectory == session.path,
+                "a mismatched arm-count must leave the removable directory alone")
+        #expect(SignalSafeCleanup.trackedPaths == before,
+                "and must not disturb the tracked set")
         withExtendedLifetime(armer) { }
 
         // KNOWINGLY UNTESTED: the other half — that a FAILED `createDirectory` re-arms on the next
@@ -121,7 +145,7 @@ struct SignalCleanupRegistryTests {
         // unrelated reason, and the assertion passes while the isolation gate is absent: verified
         // by deleting the gate and watching this test stay green until this line was added.
         let armer = try SQLiteReader(path: try sourceDatabase().path, copyToTemp: true)
-        let before = Set(SQLiteReader.SignalSafeCleanup.trackedPaths)
+        let before = Set(SignalSafeCleanup.trackedPaths)
         #expect(!before.isEmpty, "control: the shared session is armed, so `track` would record")
 
         let session = SQLiteReader.SnapshotSession(installsExitHook: false)
@@ -130,11 +154,49 @@ struct SignalCleanupRegistryTests {
         try Data("x".utf8).write(to: url)
         defer { session.remove() }
 
-        let after = Set(SQLiteReader.SignalSafeCleanup.trackedPaths)
+        let after = Set(SignalSafeCleanup.trackedPaths)
         #expect(!after.contains(url.path), "a private session's path reached the global registry")
         // Deliberately not `before == after`: suites run in parallel in one process, so the shared
         // session may legitimately grow between the two reads. The claim is about THIS path.
         #expect(after.isSuperset(of: before), "the registry only ever grows")
         withExtendedLifetime(armer) { }
     }
+
+    // MARK: Q4k — a second client, whose directory must NEVER be removed
+
+    @Test("a file in a registered root is tracked even though the root is not the session")
+    func tracksFilesInOtherOwnedRoots() throws {
+        // The capability Q4k needed: Mail's `--gui-send` HTML temp lives in `apple-cli-eml`, not in
+        // the snapshot session, and before this it was silently refused by the containment guard.
+        _ = try SQLiteReader(path: try sourceDatabase().path, copyToTemp: true)   // arm
+        let other = try scratch.directory()
+        SignalSafeCleanup.registerRoot(other)
+        let f = other.appendingPathComponent("apple-cli-test-gui.html").path
+        SignalSafeCleanup.track(f)
+        #expect(SignalSafeCleanup.trackedPaths.contains(f))
+    }
+
+    @Test("registering a root does NOT make that directory removable")
+    func rootsAreNotRemovable() throws {
+        // THE SAFETY-CRITICAL HALF of the split. `apple-cli-eml` is shared with other invocations
+        // and long-lived; the handler `rmdir`s exactly one directory and it must never be this one.
+        let reader = try SQLiteReader(path: try sourceDatabase().path, copyToTemp: true)
+        let session = try SQLiteReader.SnapshotSession.shared.directory()
+        let shared = try scratch.directory()
+        SignalSafeCleanup.registerRoot(shared)
+
+        #expect(SignalSafeCleanup.registeredRoots.contains(shared.path + "/"), "control: it is a root")
+        #expect(SignalSafeCleanup.removableDirectory == session.path,
+                "the removable directory must still be the session, never a registered root")
+        withExtendedLifetime(reader) { }
+    }
+
+    // KNOWINGLY UNTESTED, and the first version of this WAS a vacuous test that pretended
+    // otherwise: that `track` REFUSES a path in no registered root. It cannot be exercised from
+    // this tier, because the refusal calls `assertionFailure`, which traps in a debug build and
+    // takes the whole test process with it — observed while red-proofing, where a mutation that
+    // tracked an unrooted path aborted the run mid-suite rather than failing one case. The version
+    // removed here "asserted" the outsider was absent from the set without ever calling `track`,
+    // so it would have passed with the containment guard deleted entirely. Release behaviour
+    // (refuse, return, carry on) is what ships; the debug trap is the fail-fast that found this.
 }

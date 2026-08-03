@@ -321,6 +321,11 @@ func attachmentsFromPaths(_ paths: [String]) throws -> [EmlBuilder.Attachment] {
 func emlTempDirectory(materialise: Bool, base: URL? = nil) throws -> URL {
     guard materialise else { return OwnedTempDir.path("apple-cli-eml", base: base) }
     let dir = try OwnedTempDir.make("apple-cli-eml", base: base)
+    // A containment ROOT, never a removable directory: this one is shared with other invocations
+    // and long-lived, and `rmdir`ing it would be a bug. Registering it also arms the process, so
+    // the `--gui-send` temp below is actually removed on a signal death rather than waiting for
+    // the 24-hour sweep. Which files may be registered — and which must NOT — is Q4k.
+    SignalSafeCleanup.registerRoot(dir)
     // Reaped on every materialising call rather than once per process. A `once` flag would be a
     // mutable global read from concurrent callers — a real data race for no gain, since this is one
     // listing of a directory only this tool writes to.
@@ -501,6 +506,12 @@ struct SendCommand: ParsableCommand {
                 try (html ?? "").write(to: htmlTmp, atomically: true, encoding: .utf8)
                 OwnedTempDir.restrictToOwner(htmlTmp)
                 defer { try? FileManager.default.removeItem(at: htmlTmp) }
+                // The `defer` covers a normal exit; a signal death skips it. Safe to register
+                // BECAUSE `sendHtmlViaGui` is synchronous — nothing reads this file once the call
+                // returns. The `.eml` temps a few lines down are deliberately NOT registered: they
+                // are handed to Mail by `open -a Mail` and read AFTER we exit, so unlinking one on
+                // Ctrl-C would destroy a live hand-off rather than clean up a leak (Q4k).
+                SignalSafeCleanup.track(htmlTmp.path)
                 try MailScript().sendHtmlViaGui(htmlPath: htmlTmp.path, subject: subject,
                     to: toL, cc: ccL, bcc: bccL, attachmentPaths: attPaths, sender: senderAddress)
                 executed = true
@@ -721,6 +732,8 @@ struct ReplyCommand: ParsableCommand {
                     try ((html ?? "") + quotedHTML).write(to: htmlTmp, atomically: true, encoding: .utf8)
                     OwnedTempDir.restrictToOwner(htmlTmp)
                     defer { try? FileManager.default.removeItem(at: htmlTmp) }
+                    SignalSafeCleanup.track(htmlTmp.path)   // synchronous consumer; see the send path
+
                     try MailScript().sendHtmlViaGui(htmlPath: htmlTmp.path, subject: replySubject,
                         to: recipients, cc: ccL, bcc: bccL, attachmentPaths: attachPaths, sender: senderAddress)
                     executed = true
