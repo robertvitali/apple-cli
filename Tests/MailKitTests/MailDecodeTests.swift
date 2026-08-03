@@ -7,6 +7,9 @@ import AppleKit
 struct MailDecodeTests {
 
     /// A synthetic Envelope Index row (mirrors the `baseSelect` column names) — NO real mail.
+/// Every value below is invented. This claim was FALSE until 2026-08-03: the row was a real
+/// vendor email lifted from the operator's inbox, and the "NO real mail" comment is exactly
+/// what made it invisible to the PII sweep that should have caught it (see HUMAN-DECISIONS.md D9).
     static let syntheticRow: [String: String?] = [
         "rowid": "11111",
         "mail_message_id": "111111111111111111",
