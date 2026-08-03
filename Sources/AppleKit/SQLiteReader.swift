@@ -29,22 +29,19 @@ public final class SQLiteReader {
     public init(path: String, copyToTemp: Bool = false) throws {
         var openPath = path
         var temp: URL?
+        var diagnostics: SnapshotDiagnostics?
         if copyToTemp {
             // Everything this process writes goes inside its OWN locked directory, which is removed
             // wholesale at exit. Nothing here needs tracking, stamping, or naming carefully: a
             // partially-copied file, a sidecar, a file we never got to open — all of it lives under
             // the one directory and dies with it.
             let dest = try SnapshotSession.shared.newSnapshotURL()
-            try FileManager.default.copyItem(atPath: path, toPath: dest.path)
-            SQLiteReader.restrictToOwner(dest)
-            for suffix in ["-wal", "-shm"] where FileManager.default.fileExists(atPath: path + suffix) {
-                try? FileManager.default.copyItem(atPath: path + suffix, toPath: dest.path + suffix)
-                SQLiteReader.restrictToOwner(URL(fileURLWithPath: dest.path + suffix))
-            }
+            diagnostics = try SQLiteReader.copyCoherentSnapshot(from: path, to: dest)
             openPath = dest.path
             temp = dest
         }
         self.tempURL = temp
+        self.snapshotDiagnostics = diagnostics
 
         // Open mode depends on whether we copied first:
         // • copyToTemp — the snapshot is a PRIVATE file with its `-wal`/`-shm` copied alongside,
@@ -75,6 +72,172 @@ public final class SQLiteReader {
             throw DBError.open(msg)
         }
         self.db = opened
+    }
+
+    /// What a snapshot attempt observed. Observability, not decoration: the pin and the
+    /// verification are otherwise invisible, so both could be deleted from `init` with every test
+    /// still green — a reviewer demonstrated exactly that, and it was the largest gap in this change.
+    ///
+    /// Carried PER READER, never in a global. The first version was a mutable static, which
+    /// swift-testing's parallel suites promptly raced: another suite's reader overwrote it between
+    /// this one's `init` and its assertion, giving a 2-in-12 flake. Shared mutable state for test
+    /// observability is the same mistake this change set has already paid for three times.
+    struct SnapshotDiagnostics: Sendable {
+        var pinned = false
+        var verified = false
+        var retries = 0
+    }
+
+    /// Set when this reader took a `copyToTemp` snapshot; nil for a direct open.
+    let snapshotDiagnostics: SnapshotDiagnostics?
+
+    /// Copy `src` (+ its `-wal`) to `dest` so the two belong to the SAME generation.
+    ///
+    /// Two independent mechanisms, deliberately layered — and the order of trust matters:
+    ///
+    /// 1. **VERIFY (the guarantee).** The `-wal` header's salt-1/salt-2 at bytes 16..32 change
+    ///    whenever the WAL is reset. Reading them before the main-file copy and again after the
+    ///    `-wal` copy detects the exact failure this whole routine exists to prevent — a main file
+    ///    paired with a foreign-generation WAL — for two 32-byte reads, depending on zero SQLite
+    ///    internals and surviving any future SQLite. On mismatch the snapshot is discarded and
+    ///    retried once; the pin's argument says at most one reset can occur, so one retry converges.
+    /// 2. **PIN (an optimization).** `withReadSnapshotPinned` makes the mismatch vanishingly rare in
+    ///    the first place. Its reasoning rests on SQLite WAL internals, which is precisely why it is
+    ///    NOT the guarantee: a reviewer already falsified the first version of that reasoning.
+    ///
+    /// WHY VERIFY AT ALL, given the window is tiny. The failure is asymmetric. If this is wrong the
+    /// dominant outcome is not a crash — WAL recovery validates the salt against the WAL's own
+    /// frames, never against the main file, so a foreign WAL is ACCEPTED and the command returns a
+    /// silently wrong answer. For a tool whose premise is strict-superset parity, silent-wrong is
+    /// the worst failure class available, and it is not something to trade for latency.
+    @discardableResult
+    static func copyCoherentSnapshot(from src: String, to dest: URL) throws -> SnapshotDiagnostics {
+        var diag = SnapshotDiagnostics()
+        for attempt in 0...1 {
+            let before = SQLiteReader.walSalt(src)
+            diag.pinned = try SQLiteReader.withReadSnapshotPinned(src) {
+                try FileManager.default.copyItem(atPath: src, toPath: dest.path)
+                SQLiteReader.restrictToOwner(dest)
+                // `-wal` only. Copying `-shm` was measured INERT — a current one, a deliberately
+                // stale one, and none at all yield identical correct reads, because SQLite rebuilds
+                // the wal-index from the `-wal`. Omitting it removes one more way for the snapshot
+                // to disagree with itself. (It is not a privacy win: a `-shm` holds no mail, and
+                // SQLite creates one in the snapshot directory on first read anyway.)
+                let wal = src + "-wal"
+                if FileManager.default.fileExists(atPath: wal) {
+                    try? FileManager.default.copyItem(atPath: wal, toPath: dest.path + "-wal")
+                    SQLiteReader.restrictToOwner(URL(fileURLWithPath: dest.path + "-wal"))
+                }
+            }
+            let after = SQLiteReader.walSalt(src)
+            if before == after { diag.verified = true; return diag }
+
+            // The WAL was reset inside the window. Throw this snapshot away and take another.
+            diag.retries = attempt + 1
+            SQLiteReader.removeTempDB(dest)
+            if attempt == 1 {
+                throw DBError.open("could not take a coherent snapshot of \(src): the write-ahead "
+                                   + "log was reset twice while copying")
+            }
+        }
+        return diag
+    }
+
+    /// Salt-1/salt-2 from the `-wal` header (bytes 16..32), or nil when there is no WAL.
+    /// SQLite rewrites these on every WAL reset, which is exactly the event worth detecting.
+    static func walSalt(_ src: String) -> Data? {
+        guard let fh = FileHandle(forReadingAtPath: src + "-wal") else { return nil }
+        defer { try? fh.close() }
+        try? fh.seek(toOffset: 16)
+        return try? fh.read(upToCount: 16)
+    }
+
+    /// Run `body` while holding a read transaction on the live store at `path`.
+    ///
+    /// THE COHERENCE STEP. `copyToTemp` copies the main DB and its `-wal` at two different instants.
+    /// SQLite is explicit that a file-level copy of a live database can be inconsistent or corrupt,
+    /// and the interleaving that does it here is a checkpoint RESETTING the WAL between those two
+    /// copies: we would pair a pre-checkpoint main file with a post-reset WAL of a different
+    /// generation, and the outcomes run from a silently stale read to `SQLITE_CORRUPT`.
+    ///
+    /// WHY A READ MARK CLOSES IT — via one of TWO locks, depending on the state at pin time. The
+    /// first draft of this comment claimed only the first of them and was measurably wrong; a
+    /// reviewer reproduced a `TRUNCATE` checkpoint succeeding while pinned, so the distinction is
+    /// recorded here rather than rediscovered:
+    ///   * **WAL has un-backfilled frames** (the common case): our reader occupies read-mark slot
+    ///     1..N-1, and `RESTART`/`TRUNCATE` require that slot exclusively, so the reset is blocked
+    ///     outright.
+    ///   * **WAL already fully backfilled at pin time**: SQLite puts the reader in slot 0, which
+    ///     the restart path does not contend, so ONE reset is permitted. That is harmless — in that
+    ///     state the main file already contains every frame, so a main-file copy needs nothing from
+    ///     the WAL. A *second* reset would hurt, and cannot happen: getting back to
+    ///     `nBackfill == mxFrame` requires backfilling, and the checkpointer must take read-lock 0
+    ///     exclusively to backfill at all, which our shared slot-0 lock denies.
+    /// Either way: **the WAL can never be reset while our main-file copy still depends on it.** A
+    /// PASSIVE checkpoint may still backfill frames at or below our mark, which is harmless because
+    /// those frames remain in the un-reset WAL we copy.
+    ///
+    /// COST, measured on the operator's real few-hundred-MB Envelope Index and chat.db: warm
+    /// end-to-end A/B showed no measurable difference (42 vs 41 ms, 63 vs 63 ms). The coherent
+    /// alternatives were measured and rejected on that basis: `sqlite3_backup` +
+    /// `journal_mode=DELETE` costs 337/493 ms and `VACUUM INTO` costs 692/747 ms, either of which
+    /// would make every snapshot-backed command 13–26x slower. (Raw `sqlite3_backup` output is also
+    /// unreadable by our read-only open: it inherits WAL mode and a read-only connection cannot
+    /// create the `-shm`.)
+    ///
+    /// SIDE-EFFECT GATE: this is the only place the tool opens a LIVE store with a real connection,
+    /// and such an open CREATES a `-shm` next to the store if none exists — inside the operator's
+    /// `~/Library/Mail/`, where a read-only connection cannot remove it again. So the pin is taken
+    /// ONLY when a `-shm` is already present, which means the owning app has the store mapped and
+    /// we are merely attaching. With no `-shm` there is also no concurrent writer to race, so
+    /// skipping the pin costs nothing. Stated precisely, because the weaker claim is tempting and
+    /// wrong: the gate prevents CREATING a `-shm`, it does not make us read-only towards the store.
+    /// Attaching takes a read-mark slot and may run wal-index recovery, and both MODIFY the
+    /// existing `-shm` — that one file, and nothing else.
+    ///
+    /// COST UNDER CONTENTION, which is the only state where the pin does anything and which the
+    /// warm A/B above does NOT cover: measured against a writer inserting continuously and
+    /// TRUNCATE-checkpointing every 200 rows, 40 snapshots ran at median 0.3 ms, p90 0.5 ms, max
+    /// 0.7 ms. The 500 ms busy timeout never bit.
+    ///
+    /// BEST EFFORT: on any failure to pin, `body` still runs unpinned, exactly as before. This step
+    /// can only improve coherence, never turn a working read into a failure.
+    @discardableResult
+    static func withReadSnapshotPinned(_ path: String, _ body: () throws -> Void) rethrows -> Bool {
+        guard FileManager.default.fileExists(atPath: path + "-shm") else {
+            try body()                      // no live writer to race; do not create a -shm
+            return false
+        }
+        var db: OpaquePointer?
+        guard sqlite3_open_v2(path, &db, SQLITE_OPEN_READONLY, nil) == SQLITE_OK else {
+            sqlite3_close_v2(db)
+            try body()
+            return false
+        }
+        // `close_v2` rather than `close`: `close` REFUSES to close while a statement or transaction
+        // is outstanding and returns SQLITE_BUSY, which would leak the connection with its read mark
+        // still held. `close_v2` always releases.
+        defer { sqlite3_exec(db, "COMMIT", nil, nil, nil); sqlite3_close_v2(db) }
+
+        // The default busy timeout is 0, and `walTryBeginRead` can legitimately return SQLITE_BUSY
+        // while the wal-index header is unstable — precisely when a writer is active, which is
+        // exactly when the pin matters. Without this the pin silently did not happen.
+        sqlite3_busy_timeout(db, 500)
+
+        var pinned = false
+        if sqlite3_exec(db, "BEGIN", nil, nil, nil) == SQLITE_OK {
+            // BEGIN alone is DEFERRED and takes no lock; the read mark is acquired only once a
+            // statement actually reads. This SELECT is load-bearing — removing it is red-proofed to
+            // fail the WAL-reset test.
+            var st: OpaquePointer?
+            if sqlite3_prepare_v2(db, "SELECT 1 FROM sqlite_master LIMIT 1", -1, &st, nil) == SQLITE_OK {
+                let rc = sqlite3_step(st)
+                pinned = (rc == SQLITE_ROW || rc == SQLITE_DONE)
+            }
+            sqlite3_finalize(st)
+        }
+        try body()
+        return pinned
     }
 
     /// Build a `file:` URI with `?immutable=1` for a direct open. The path is percent-encoded so

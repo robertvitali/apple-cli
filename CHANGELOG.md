@@ -12,6 +12,37 @@ with the Apple MCP servers they replace.
 
 ## [Unreleased]
 
+### Fixed — snapshots of Apple's live stores were not guaranteed to be coherent
+
+`copyToTemp` snapshots the Envelope Index / chat.db / NoteStore by copying the main database and its
+`-wal` — two files, two instants. SQLite is explicit that a file-level copy of a live database can be
+inconsistent, and the interleaving that does it is a checkpoint resetting the WAL between the two
+copies, pairing a pre-checkpoint main file with a WAL of a different generation.
+
+The failure is why this is worth fixing rather than documenting: WAL recovery validates the salt
+against the WAL's own frames, never against the main file, so an incoherent pair is **accepted** and
+the command returns a silently wrong answer instead of an error.
+
+Two layers now, and the order of trust matters. The guarantee is a **verification**: the `-wal`
+header's salt changes on every reset, so it is read before the main-file copy and again after the
+`-wal` copy, and a mismatch discards the snapshot and retries. That costs two 32-byte reads, depends
+on no SQLite internals, and survives any future SQLite. On top of it, a held **read transaction**
+makes a mismatch vanishingly rare — an optimization, not the proof, because review falsified the
+first version of its rationale: a read mark does not always block a truncate checkpoint, and the
+property actually holds through two different locks depending on which read-mark slot the reader
+lands in.
+
+Chosen after measuring the alternatives on a real few-hundred-MB store pair, against a
+warm end-to-end command baseline of 42 ms and 63 ms: the pinned clone costs nothing measurable
+(42 vs 41 ms, 63 vs 63 ms; 0.3 ms median under a writer with periodic truncate checkpoints), whereas
+`sqlite3_backup` + `journal_mode=DELETE` costs 337/493 ms and `VACUUM INTO` costs 692/747 ms — either
+would make every snapshot-backed command 13–26x slower.
+
+Two smaller results from the same work: the `-shm` copy was measured inert and dropped (SQLite
+rebuilds the wal-index from the `-wal`), and the pin is taken only when a `-shm` already exists,
+because opening a live store creates one inside `~/Library/Mail/` that a read-only connection cannot
+remove again.
+
 ### Fixed — the test suite leaked ~25 temp directories per run into the shared temp root
 
 Closing out the temp-file work, the shared temp root turned out to hold **~14,000 `apple-cli-*`
