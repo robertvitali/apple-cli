@@ -12,6 +12,32 @@ with the Apple MCP servers they replace.
 
 ## [Unreleased]
 
+### BREAKING — a wholly-failed `notes batch-delete` / `batch-move` is now an error
+
+When NO id in a batch succeeded, both commands emitted a success envelope and exit 0. The oracle
+returns an error in that case — its handlers end
+`succeeded > 0 ? successResponse(...) : errorResponse(lines)`, so its behaviour is three-way:
+all-succeeded is a success with `ok:true`, PARTIAL is a success with `ok:false`, and zero-succeeded
+is an error. We matched the first two and got the third wrong.
+
+The payload's `data.ok` was already `false` and `succeeded` already `0`; what was wrong is the
+ENVELOPE `ok` and the exit code — the pair the output contract designates for "did this command
+work". An agent testing the documented signal was told a delete succeeded when nothing was deleted.
+
+**Behaviour changes for consumers:**
+
+- A batch in which every id failed now exits **69** (`upstream_error`) with `ok:false`. It
+  previously exited 0 with envelope `ok:true`.
+- A PARTIAL batch is UNCHANGED — still exit 0, still `data.ok:false`, still carrying the full
+  per-item `results` array.
+- On the wholly-failed path the structured `results` array is not emitted; every per-item reason
+  appears verbatim in `error.message`. This matches the oracle, whose `errorResponse` takes only a
+  message and has no `structured` parameter at all.
+
+One error type is used, not a per-reason classification, deliberately — see the note on
+`requireAnyBatchSuccess`. Closes NOTES-L3.
+
+
 ### BREAKING — authorization failures now carry `error.status` and `error.remediation`
 
 `apple contacts` (and any future domain whose oracle reports one) now emits the TCC state and the

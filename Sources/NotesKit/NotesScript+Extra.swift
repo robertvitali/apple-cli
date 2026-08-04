@@ -12,13 +12,32 @@ extension NotesScript {
             || id.range(of: temp, options: .regularExpression) != nil
     }
 
+    /// The per-item failure strings, byte-for-byte the oracle's (`mapBatchStatus` in its bundle).
+    ///
+    /// Named so the tests can assert against the PRODUCER rather than retyping the literal. Nothing
+    /// branches on these — an earlier version of `requireAnyBatchSuccess` did, sniffing "not found"
+    /// out of the text to pick an error type, and it was wrong in a way worth recording here next
+    /// to the strings that tempted it: the whole-script `catch` below stamps every item with an
+    /// arbitrary `AppleError` message, so these constants are NOT the closed set they look like,
+    /// and the type being guessed at had already been computed and discarded one frame earlier.
+    /// Classify on a token, or propagate the real error — never on prose.
+    enum BatchFailure {
+        static let passwordProtected = "Note is password-protected"
+        static let notFound = "Note not found"
+        static let deleteFailed = "Deletion failed"
+        static let moveFailed = "Move failed"
+        static let invalidId = "Invalid note ID"
+        static let unknown = "Unknown error"
+    }
+
     static func mapBatchStatus(_ id: String, _ status: String?, op: String) -> BatchItemResult {
         switch status {
         case "ok": return BatchItemResult(id: id, success: true, error: nil)
-        case "pw": return BatchItemResult(id: id, success: false, error: "Note is password-protected")
-        case "missing": return BatchItemResult(id: id, success: false, error: "Note not found")
-        case "fail": return BatchItemResult(id: id, success: false, error: op == "delete" ? "Deletion failed" : "Move failed")
-        default: return BatchItemResult(id: id, success: false, error: "Unknown error")
+        case "pw": return BatchItemResult(id: id, success: false, error: BatchFailure.passwordProtected)
+        case "missing": return BatchItemResult(id: id, success: false, error: BatchFailure.notFound)
+        case "fail": return BatchItemResult(id: id, success: false,
+                                            error: op == "delete" ? BatchFailure.deleteFailed : BatchFailure.moveFailed)
+        default: return BatchItemResult(id: id, success: false, error: BatchFailure.unknown)
         }
     }
 
