@@ -74,9 +74,10 @@ public struct TasksRead: ParsableCommand {
                 return true
             }
 
+            // REM-09: EventKit native order IS the user's manual Reminders.app ordering —
+            // re-sorting alphabetically destroyed it (oracle returns native order).
             let lists = store.calendars(for: .reminder)
                 .map { ReadMapping.reminderList(from: $0) }
-                .sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
             let reminders = filtered.map { ReminderRead.enrich(ReminderMapping.reminder(from: $0)) }
             try Output.emit(tool: "reminders", data: RemindersReadData(lists: lists, reminders: reminders))
         }
@@ -117,8 +118,10 @@ public struct TasksCreate: ParsableCommand {
             guard !title.trimmingCharacters(in: .whitespaces).isEmpty else {
                 throw AppleError.validation("reminder title cannot be empty")
             }
-            let startParsed = try start.map { try DateParsing.parse($0) }
-            let dueParsed = try due.map { try DateParsing.parse($0) }
+            let startParsed = try start.map { try DateArg.parse($0) }
+            let dueParsed = try due.map { try DateArg.parse($0) }
+            // REM-04 pre-flight: zone conflicts surface on the preview too (security review).
+            let resolvedTZ = try ReminderTZ.resolve(startParsed: startParsed, dueParsed: dueParsed)
             let priorityValue = try priority.map { try ReminderPriority.parse($0) }
             for t in tag { try ReminderTags.validate(t) }
             for s in subtask { _ = try ReminderSubtasks.validatedTitle(s) } // reject empty subtask titles early (dry-run too)
@@ -142,7 +145,9 @@ public struct TasksCreate: ParsableCommand {
 
             guard gate.willExecute else {
                 try emitRemindersWrite(ReminderWritePreview(
-                    action: "create", title: title, start_date: startParsed?.date, due_date: dueParsed?.date,
+                    action: "create", title: title,
+                    start_date: startParsed.flatMap { OracleDates.dueDateString(from: $0.components, timeZoneHint: nil) },
+                    due_date: dueParsed.flatMap { OracleDates.dueDateString(from: $0.components, timeZoneHint: nil) },
                     completed: completed ? true : nil, priority: priorityValue, note: note, location: location,
                     url: url, target_list: targetList, tags: tag.isEmpty ? nil : tag, subtasks: subtask.isEmpty ? nil : subtask,
                     alarms: alarms.isEmpty ? nil : alarms, recurrence_rules: rules.isEmpty ? nil : rules,
@@ -183,9 +188,11 @@ public struct TasksCreate: ParsableCommand {
             }
             if let notes, !notes.isEmpty { reminder.notes = notes }
 
-            if let startParsed { reminder.startDateComponents = DateParsing.components(from: startParsed.date, dateOnly: startParsed.isDateOnly) }
-            if let dueParsed { reminder.dueDateComponents = DateParsing.components(from: dueParsed.date, dateOnly: dueParsed.isDateOnly) }
-            if startParsed != nil || dueParsed != nil { reminder.timeZone = TimeZone.current }
+            // REM-04: store the ORACLE-shaped components verbatim (granularity + zone intact);
+            // the zone was resolved pre-flight (`startTz ?? dueTz`, conflict already rejected).
+            if let startParsed { reminder.startDateComponents = startParsed.components }
+            if let dueParsed { reminder.dueDateComponents = dueParsed.components }
+            if let resolvedTZ { reminder.timeZone = resolvedTZ }
 
             // Alarms: explicit --alarm wins; else the --geo-* location trigger (mirrors MCP create).
             if !alarms.isEmpty {
@@ -235,6 +242,8 @@ public struct TasksUpdate: ParsableCommand {
     @Option(name: .long, help: "New notes/body.") public var note: String?
     @Option(name: .long, help: "New plain-text location.") public var location: String?
     @Option(name: .long, help: "New URL (empty string clears it).") public var url: String?
+    @Flag(name: .customLong("clear-start"), help: "Clear the start date (conflicts with --start).") public var clearStart = false
+    @Flag(name: .customLong("clear-due"), help: "Clear the due date (conflicts with --due).") public var clearDue = false
     @Flag(inversion: .prefixedNo, help: "Mark completed/uncompleted (--completed / --no-completed).") public var completed: Bool?
     @Option(name: .long, help: "Priority: 0|1|5|9 or none|high|medium|low.") public var priority: String?
     @Option(name: .customLong("target-list"), help: "Move to this list (cross-list move; name or id).") public var targetList: String?
@@ -266,9 +275,20 @@ public struct TasksUpdate: ParsableCommand {
             // Effective tag replacement: --clear-tags → empty-but-present ([] clears all);
             // --tag values → replace; neither → nil (leave tags untouched).
             let tagsArg: [String]? = clearTags ? [] : (tag.isEmpty ? nil : tag)
-            let startParsed = try start.map { try DateParsing.parse($0) }
-            let dueParsed = try due.map { try DateParsing.parse($0) }
-            let completionParsed = try completionDate.map { try DateParsing.parse($0) }
+            // REM-08: clearing a date is an EXPLICIT flag, matching every sibling clear
+            // (--clear-alarms/--clear-recurrence/--clear-tags). Security review rejected the
+            // ""-sentinel design: `--due "$UNSET_VAR"` would have silently destroyed a due date
+            // where the old code failed closed — so "" (and garbage) exit 64, and only
+            // --clear-due/--clear-start clear. (The oracle clears on any unparseable input; the
+            // explicit flag is our documented, fail-closed divergence.)
+            if clearStart && start != nil { throw AppleError.validation("--clear-start conflicts with --start (use one)") }
+            if clearDue && due != nil { throw AppleError.validation("--clear-due conflicts with --due (use one)") }
+            let startParsed = try start.map { try DateArg.parse($0) }
+            let dueParsed = try due.map { try DateArg.parse($0) }
+            let completionParsed = try completionDate.map { try DateArg.parse($0) }
+            // REM-04 pre-flight: the start/due zone-conflict must surface on the PREVIEW too,
+            // not only at execute (security review) — resolve before the gate branch.
+            let resolvedTZ = try ReminderTZ.resolve(startParsed: startParsed, dueParsed: dueParsed)
             let priorityValue = try priority.map { try ReminderPriority.parse($0) }
             for t in tag { try ReminderTags.validate(t) }
             for t in addTag { try ReminderTags.validate(t) }
@@ -294,8 +314,15 @@ public struct TasksUpdate: ParsableCommand {
 
             guard gate.willExecute else {
                 try emitRemindersWrite(ReminderWritePreview(
-                    action: "update", id: id, title: title, start_date: startParsed?.date, due_date: dueParsed?.date,
-                    completion_date: completionParsed?.date, completed: completed, priority: priorityValue, note: note,
+                    action: "update", id: id, title: title,
+                    // Preview and execute must speak the SAME wire format (review: a Date here
+                    // rendered a UTC instant while execute emits REM-02 strings, destroying the
+                    // date-only/timed distinction the change exists to preserve).
+                    start_date: startParsed.flatMap { OracleDates.dueDateString(from: $0.components, timeZoneHint: nil) },
+                    due_date: dueParsed.flatMap { OracleDates.dueDateString(from: $0.components, timeZoneHint: nil) },
+                    completion_date: completionParsed.map { EventDateFormat.string($0.date, timeZone: .current, includeTime: true) },
+                    clear_start: clearStart ? true : nil, clear_due: clearDue ? true : nil,
+                    completed: completed, priority: priorityValue, note: note,
                     location: location, url: url, target_list: targetList, tags: tagsArg,
                     add_tags: addTag.isEmpty ? nil : addTag, remove_tags: removeTag.isEmpty ? nil : removeTag,
                     alarms: alarms.isEmpty ? nil : alarms, recurrence_rules: rules.isEmpty ? nil : rules,
@@ -313,7 +340,9 @@ public struct TasksUpdate: ParsableCommand {
             try requireLabeledReminder(reminder, sandboxActive: gate.sandboxActive)
             if let title { reminder.title = title }
             if let location { reminder.location = location.isEmpty ? nil : location }
-            if let url { reminder.url = url.isEmpty ? nil : URL(string: url) }
+            // REM-12: pure helper — an unparseable --url is a NO-OP, "" clears (pinned in
+            // RemindersSupportTests).
+            if let url { reminder.url = ReminderURLUpdate.resolve(current: reminder.url, arg: url) }
 
             // Rebuild notes (preserving subtasks + reconciling tags) only when note/tags changed.
             if note != nil || tagsArg != nil || !addTag.isEmpty || !removeTag.isEmpty {
@@ -349,9 +378,13 @@ public struct TasksUpdate: ParsableCommand {
                 reminder.addAlarm(try AlarmMapping.ekAlarm(from: Alarm(location_trigger: locTrigger)))
             }
 
-            if let startParsed { reminder.startDateComponents = DateParsing.components(from: startParsed.date, dateOnly: startParsed.isDateOnly) }
-            if let dueParsed { reminder.dueDateComponents = DateParsing.components(from: dueParsed.date, dateOnly: dueParsed.isDateOnly) }
-            if startParsed != nil || dueParsed != nil { reminder.timeZone = TimeZone.current }
+            // REM-08 (explicit clear) + REM-04 (oracle components stored verbatim; zone
+            // resolved pre-flight above, `startTz ?? dueTz`).
+            if clearStart { reminder.startDateComponents = nil }
+            else if let startParsed { reminder.startDateComponents = startParsed.components }
+            if clearDue { reminder.dueDateComponents = nil }
+            else if let dueParsed { reminder.dueDateComponents = dueParsed.components }
+            if let resolvedTZ { reminder.timeZone = resolvedTZ }
 
             if let targetList {
                 guard let list = store.calendar(matching: targetList, entity: .reminder) else {

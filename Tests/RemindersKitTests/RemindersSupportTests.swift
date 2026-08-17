@@ -3,6 +3,7 @@ import Foundation
 @testable import RemindersKit
 import EventKitCore
 import AppleKit
+import EventKit
 
 // Pure logic tests for the Reminders domain — no EKEventStore, no TCC. Cover priority parsing,
 // dueWithin windows, the notes-field tag + subtask model (parity with the apple-events MCP
@@ -323,6 +324,32 @@ struct AlarmSpecTests {
         #expect(a.absolute_date != nil)
     }
 
+    /// REM-05: the Reminders wrapper now delegates to the shared `EventKitCore.GeofenceSpec`,
+    /// closing the per-domain copy's three defects — pinned HERE (not only in EventKitCore)
+    /// so the delegation itself cannot silently regress.
+    @Test func geofenceCommaTitleAndNumericTitle() throws {
+        let a = try ReminderAlarmSpec.parse("geo:37.7,-122.4,100,enter,742 Evergreen Terrace, Springfield, OR 97475")
+        #expect(a.location_trigger?.title == "742 Evergreen Terrace, Springfield, OR 97475")
+        // a numeric title after an explicit radius no longer overwrites the radius
+        let b = try ReminderAlarmSpec.parse("geo:37.7,-122.4,100,enter,2024")
+        #expect(b.location_trigger?.radius == 100)
+        #expect(b.location_trigger?.title == "2024")
+        // the shared parser brings Calendar's lat/lon range validation to Reminders
+        #expect(throws: AppleError.self) { _ = try ReminderAlarmSpec.parse("geo:91,0") }
+    }
+
+    /// REM-07: `until=` routes through the shared `DateParsing`, whose bare dates now anchor
+    /// at MIDNIGHT local (CAL-02) — the recurrence end no longer sits at noon.
+    @Test func recurrenceUntilAnchorsAtMidnight() throws {
+        let rule = try ReminderRecurrenceSpec.parse("freq=daily;until=2026-12-31")
+        let end = try #require(rule.end_date)
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = .current
+        let comps = cal.dateComponents([.hour, .minute, .day], from: end)
+        #expect(comps.hour == 0 && comps.minute == 0 && comps.day == 31,
+                "until= must anchor at local midnight, got \(end)")
+    }
+
     @Test func geofenceProximityKeywordIsPositionIndependent() throws {
         // Regression: `geo:lat,lon,leave` (keyword in the radius slot) must set proximity=leave,
         // not silently keep enter.
@@ -405,3 +432,110 @@ struct EnvelopeTests {
 // see "Reminders write-model v2 posture" in WriteSafetyTests.swift, which pins the new decision
 // (default-execute, --dry-run precedence, sandbox-only label gate) plus the destination-label
 // coverage the v1 suite never had.
+
+// MARK: - Reminder timezone resolution (REM-04)
+
+@Suite("ReminderTZ")
+struct ReminderTZTests {
+    func parsed(_ s: String) throws -> DateParsing.Parsed { try DateParsing.parse(s) }
+
+    @Test("startTz ?? dueTz — offset pins its fixed zone, local pins the current one")
+    func precedence() throws {
+        let offsetOnly = try ReminderTZ.resolve(startParsed: nil,
+                                                dueParsed: parsed("2026-09-01T10:00:00+02:00"))
+        #expect(offsetOnly?.identifier == "GMT+0200")
+        let startWins = try ReminderTZ.resolve(startParsed: parsed("2026-09-01T09:00:00-04:00"),
+                                               dueParsed: parsed("2026-09-01T10:00:00-04:00"))
+        #expect(startWins?.identifier == "GMT-0400")
+        #expect(try ReminderTZ.resolve(startParsed: parsed("2026-09-01"), dueParsed: nil)
+                == TimeZone.current)
+        #expect(try ReminderTZ.resolve(startParsed: nil, dueParsed: nil) == nil)
+    }
+
+    @Test("a same-call start/due zone mismatch is a validation rejection (oracle 400)")
+    func conflict() throws {
+        #expect(throws: AppleError.self) {
+            _ = try ReminderTZ.resolve(startParsed: parsed("2026-09-01T09:00:00+02:00"),
+                                       dueParsed: parsed("2026-09-01T10:00:00-05:00"))
+        }
+        // local start + offset due also mismatches (named zone vs fixed GMT zone, same
+        // identifier quirk the oracle has)
+        #expect(throws: AppleError.self) {
+            _ = try ReminderTZ.resolve(startParsed: parsed("2026-09-01 09:00:00"),
+                                       dueParsed: parsed("2026-09-01T10:00:00+02:00"))
+        }
+    }
+
+    // `apply` itself is a two-line thin writer over `resolve` and is NOT pinned here: an
+    // in-memory `EKReminder` from a storeless `EKEventStore` silently drops `timeZone`
+    // assignments (measured — the setter is a no-op without a backing calendar), so the wiring
+    // is only observable in the live tier. `resolve`, which carries all the logic, is pinned
+    // above.
+}
+
+// MARK: - Reminder read mapping renders REM-02 date strings
+
+@Suite("ReminderMapping date rendering")
+struct ReminderMappingDateTests {
+    /// REM-02 end-to-end at the mapping layer (review: the golden corpus pinned the FORMATTER,
+    /// but `ReminderMapping.reminder(from:)` — the production wiring — was untested; EKReminder
+    /// is in-memory constructible, so it is NOT behind the live store).
+    @Test("date-only due renders date-only; timed due renders timed; both in the pinned zone")
+    func dueRendering() throws {
+        let ny = TimeZone(identifier: "America/New_York")!
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = ny
+
+        let r = EKReminder(eventStore: EKEventStore())
+        r.timeZone = ny
+        var dateOnly = DateComponents(year: 2026, month: 9, day: 1)
+        dateOnly.calendar = cal
+        dateOnly.timeZone = ny
+        r.dueDateComponents = dateOnly
+        #expect(ReminderMapping.reminder(from: r).due_date == "2026-09-01-04:00")
+
+        var timed = DateComponents(year: 2026, month: 9, day: 1, hour: 10, minute: 0, second: 0)
+        timed.calendar = cal
+        timed.timeZone = ny
+        r.dueDateComponents = timed
+        #expect(ReminderMapping.reminder(from: r).due_date == "2026-09-01T10:00:00-04:00")
+    }
+}
+
+// MARK: - URL update guard (REM-12)
+
+@Suite("ReminderURLUpdate")
+struct ReminderURLUpdateTests {
+    @Test("invalid is a NO-OP, empty clears, valid replaces")
+    func resolveRules() {
+        let current = URL(string: "https://example.com/keep")
+        // Modern Foundation's URL(string:) is LENIENT (percent-encodes "not a url" instead of
+        // returning nil) — measured, and the oracle gets the same leniency from the same API,
+        // so parity holds automatically for those. The no-op guard matters for the shapes that
+        // still return nil, e.g. a space inside an authority:
+        #expect(ReminderURLUpdate.resolve(current: current, arg: "http://exa mple.com") == current)
+        #expect(ReminderURLUpdate.resolve(current: current, arg: "") == nil)
+        #expect(ReminderURLUpdate.resolve(current: current, arg: "https://new.example.com")
+                == URL(string: "https://new.example.com"))
+    }
+}
+
+// MARK: - Native list order (REM-09)
+
+@Suite("reminder list ordering")
+struct ReminderListOrderTests {
+    /// REM-09's fix is a sort DELETION in live-store-only paths, so behavior cannot be pinned at
+    /// this tier — this source-text guard keeps the alphabetical re-sort from silently returning
+    /// (same tier-limitation pattern as the Notes wiring test); Q17's live re-audit diffs the
+    /// real order against the oracle.
+    @Test("no title re-sort in the list-emitting command paths")
+    func noResort() throws {
+        for rel in ["Sources/RemindersKit/ListsCommand.swift", "Sources/RemindersKit/TasksCommand.swift"] {
+            let src = try String(contentsOfFile: #filePath
+                .replacingOccurrences(of: "Tests/RemindersKitTests/RemindersSupportTests.swift",
+                                      with: rel), encoding: .utf8)
+            #expect(!src.contains("localizedCaseInsensitiveCompare"),
+                    "\(rel): the alphabetical re-sort is back — EventKit native order IS the user's manual ordering")
+        }
+    }
+}

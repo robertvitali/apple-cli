@@ -341,22 +341,31 @@ struct EventTZUpdateTests {
     }
 }
 
+/// The oracle uses `parseDate`'s instant DIRECTLY as the window bound — no flooring. The old
+/// floor was an artifact of the noon-anchor era, and after the Q10 parser widening it actively
+/// SHIFTED offset-bearing date-only bounds by the zone gap (review measured −18h/−20h vs the
+/// oracle on `+0200`/`Z` forms — these exact-instant pins are the regression guard).
 @Suite("DateArg.windowBound")
 struct WindowBoundTests {
-    @Test("a bare date floors to start-of-day (midnight), matching the MCP bound")
-    func bareFloorsToMidnight() throws {
-        let utc = TimeZone(identifier: "UTC")!
-        var cal = Calendar(identifier: .gregorian); cal.timeZone = utc
-        let bound = try DateArg.windowBound("2026-07-15", calendar: cal)
+    @Test("a bare LOCAL date is midnight in the local zone")
+    func bareIsLocalMidnight() throws {
+        let bound = try DateArg.windowBound("2026-07-15")
+        var cal = Calendar(identifier: .gregorian); cal.timeZone = .current
         let comps = cal.dateComponents([.hour, .minute, .second], from: bound)
         #expect(comps.hour == 0 && comps.minute == 0 && comps.second == 0)
     }
 
+    @Test("offset-bearing date-only bounds are midnight in THEIR zone, not floored locally")
+    func offsetDateOnlyExactInstants() throws {
+        #expect(try DateArg.windowBound("2026-09-01+02:00")
+                == Date(timeIntervalSince1970: 1_788_213_600))   // 2026-08-31T22:00:00Z
+        #expect(try DateArg.windowBound("2026-09-01Z")
+                == Date(timeIntervalSince1970: 1_788_220_800))   // 2026-09-01T00:00:00Z
+    }
+
     @Test("a timed value passes through unchanged")
     func timedUnchanged() throws {
-        let utc = TimeZone(identifier: "UTC")!
-        var cal = Calendar(identifier: .gregorian); cal.timeZone = utc
-        let bound = try DateArg.windowBound("2026-07-15T09:30:00Z", calendar: cal)
+        let bound = try DateArg.windowBound("2026-07-15T09:30:00Z")
         #expect(bound == Date(timeIntervalSince1970: 1_784_107_800)) // 2026-07-15T09:30:00Z
     }
 }

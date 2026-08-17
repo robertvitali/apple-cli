@@ -59,10 +59,21 @@ struct DateParsingTests {
         #expect(throws: DateParsing.ParseError.self) { _ = try DateParsing.parse("not-a-date") }
     }
 
-    @Test("impossible calendar dates are rejected (isLenient = false)")
-    func nonLenient() {
+    /// PARTIAL REVERSAL, recorded and MEASURED (not reasoned): the old test assumed the oracle
+    /// rejects every impossible date. Executing the oracle's own formatters showed the split —
+    /// a month out of 1…12 IS rejected ("2026-13-45" fails both engines), but a day past the
+    /// month's end ROLLS OVER (Feb 30 → Mar 2), because a non-lenient DateFormatter
+    /// bounds-checks the month yet rolls the day. Strict superset + this repo's doctrine
+    /// (reject only where the MCP also rejects) means we match both halves, typo risk and all.
+    @Test("impossible dates: month 13 rejects, Feb 30 rolls to Mar 2 — the oracle's exact split")
+    func impossibleDatesOracleSplit() throws {
+        let utc = TimeZone(identifier: "UTC")!
         #expect(throws: DateParsing.ParseError.self) { _ = try DateParsing.parse("2026-13-45") }
-        #expect(throws: DateParsing.ParseError.self) { _ = try DateParsing.parse("2026-02-30 10:00:00") }
+        let rolled = try DateParsing.parse("2026-02-30 10:00:00", timeZone: utc)
+        #expect(DateParsing.bareDateString(rolled.date, timeZone: utc) == "2026-03-02")
+        // Genuine garbage still throws (our documented stricter divergence — the oracle would
+        // silently null the date instead).
+        #expect(throws: DateParsing.ParseError.self) { _ = try DateParsing.parse("garbage") }
     }
 
     @Test("bareDateString round-trips a parsed bare date in UTC")
@@ -72,19 +83,6 @@ struct DateParsingTests {
         #expect(DateParsing.bareDateString(parsed.date, timeZone: utc) == "2026-07-15")
     }
 
-    @Test("components() yields date-only vs timed granularity for reminder due/start writes")
-    func componentsBridge() throws {
-        let utc = TimeZone(identifier: "UTC")!
-        let bare = try DateParsing.parse("2026-07-15", timeZone: utc)
-        let dateOnly = DateParsing.components(from: bare.date, dateOnly: bare.isDateOnly, timeZone: utc)
-        #expect(dateOnly.year == 2026 && dateOnly.month == 7 && dateOnly.day == 15)
-        #expect(dateOnly.hour == nil) // no time components for an all-day/date-only value
-
-        let timed = try DateParsing.parse("2026-07-15 09:30:00", timeZone: utc)
-        let tc = DateParsing.components(from: timed.date, dateOnly: timed.isDateOnly, timeZone: utc)
-        #expect(tc.hour == 9 && tc.minute == 30 && tc.second == 0)
-        #expect(tc.timeZone == utc)
-    }
 }
 
 // MARK: - Recurrence round-trips + validation
@@ -107,12 +105,25 @@ struct RecurrenceMappingTests {
         #expect(back.occurrence_count == nil)
     }
 
-    @Test("occurrence count survives and wins over end date")
+    @Test("occurrence count survives when it is the only end")
     func occurrenceCount() throws {
         let ek = try RecurrenceMapping.ekRule(from: RecurrenceRule(frequency: "monthly", interval: 1, occurrence_count: 5))
         let back = RecurrenceMapping.rule(from: ek)
         #expect(back.occurrence_count == 5)
         #expect(back.end_date == nil)
+    }
+
+    /// REM-06: the oracle checks endDate FIRST (`if let endDateStr … else if let count`,
+    /// EventKitCLI.swift:283); the old mapper let occurrence_count win, silently inverting a
+    /// spec that carried both.
+    @Test("end_date wins over occurrence_count when a rule carries both")
+    func endDatePrecedence() throws {
+        let end = Date(timeIntervalSince1970: 1_800_000_000)
+        let ek = try RecurrenceMapping.ekRule(from: RecurrenceRule(
+            frequency: "daily", interval: 1, end_date: end, occurrence_count: 5))
+        let back = RecurrenceMapping.rule(from: ek)
+        #expect(back.end_date != nil, "end_date must win")
+        #expect(back.occurrence_count == nil)
     }
 
     @Test("simple daily rule uses the plain initializer")
@@ -343,6 +354,58 @@ struct MapErrorTests {
     }
 }
 
+// MARK: - Oracle date pipeline goldens (REM-02/03/04)
+
+/// Every row was produced by EXECUTING the oracle's own functions (copied verbatim into
+/// `fixtures/oracle-dates/gen-goldens.swift.txt`, with only `TimeZone.current` replaced by a
+/// fixed America/New_York so the goldens are machine-independent). The port must agree on
+/// parse success, granularity (hour set), the pinned zone identifier, the resolved instant,
+/// and both due-date renderings — for all 39 rows, including the 9 formats REM-03 named, the
+/// detector's bare-date false-positive-then-fallthrough, DST edges, and the rollover rows.
+@Suite("oracle date-pipeline goldens")
+struct OracleDatesGoldenTests {
+    struct Row: Codable {
+        let input: String
+        let parses: Bool
+        let hour_set: Bool?
+        let tz_identifier: String?
+        let epoch: Double?
+        let due_render: String?
+        let due_render_hinted: String?
+    }
+
+    static var goldensURL: URL {
+        URL(fileURLWithPath: #filePath)
+            .deletingLastPathComponent()
+            .appendingPathComponent("fixtures/oracle-dates/goldens.json")
+    }
+
+    @Test("the port agrees with the oracle on every golden row")
+    func goldens() throws {
+        let fixed = TimeZone(identifier: "America/New_York")!
+        let rows = try JSONDecoder().decode([Row].self, from: Data(contentsOf: Self.goldensURL))
+        #expect(rows.count == 39, "goldens should have 39 rows, found \(rows.count)")
+        for row in rows {
+            let comps = OracleDates.parseComponents(from: row.input, localZone: fixed)
+            #expect((comps != nil) == row.parses, "\(row.input.debugDescription): parse mismatch")
+            guard let comps, row.parses else { continue }
+            #expect((comps.hour != nil) == row.hour_set, "\(row.input.debugDescription): granularity")
+            #expect(comps.timeZone?.identifier == row.tz_identifier, "\(row.input.debugDescription): zone")
+            let date = OracleDates.parseDate(from: row.input, localZone: fixed)
+            #expect(date?.timeIntervalSince1970 == row.epoch, "\(row.input.debugDescription): instant")
+            #expect(OracleDates.dueDateString(from: comps, timeZoneHint: nil, localZone: fixed)
+                    == row.due_render, "\(row.input.debugDescription): due render")
+            var stripped = comps
+            stripped.timeZone = nil
+            stripped.calendar = nil
+            #expect(OracleDates.dueDateString(from: stripped,
+                                              timeZoneHint: TimeZone(identifier: "Asia/Tokyo")!,
+                                              localZone: fixed)
+                    == row.due_render_hinted, "\(row.input.debugDescription): hinted render")
+        }
+    }
+}
+
 // MARK: - Geofence spec (shared Calendar/Reminders parser — CAL-04 / REM-05)
 
 @Suite("GeofenceSpec")
@@ -556,7 +619,7 @@ struct EncodingTests {
             id: "REM-1", title: "apple-cli-test buy milk", notes: "n", url: "https://x.com",
             location: "Store", list: "Groceries", list_id: "LIST-1", account: "iCloud",
             time_zone: "UTC", external_id: "REXT-1", completed: false,
-            due_date: Date(timeIntervalSince1970: 1_784_116_800), priority: 5, has_recurrence: true,
+            due_date: "2026-07-15T12:00:00Z", priority: 5, has_recurrence: true,
             recurrence_rules: [RecurrenceRule(frequency: "daily", interval: 1)],
             alarms: [Alarm(relative_offset: -600, type: "display")],
             location_trigger: LocationTrigger(title: "Store", latitude: 1.0, longitude: 2.0, radius: 100, proximity: "enter"),

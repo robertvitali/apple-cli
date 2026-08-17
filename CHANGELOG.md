@@ -12,6 +12,58 @@ with the Apple MCP servers they replace.
 
 ## [Unreleased]
 
+### BREAKING — Reminders date I/O rebuilt on the oracle's own pipeline (Q10)
+
+The whole date path — parsing, storage, timezone pinning, rendering — now runs through a
+verbatim port of the oracle's functions (`EventKitCore.OracleDates`), verified by a 37-row
+golden corpus produced by EXECUTING the oracle's own code (copied verbatim into
+`Tests/EventKitCoreTests/fixtures/oracle-dates/`, only `TimeZone.current` pinned for
+machine-independence).
+
+**Behaviour changes for consumers:**
+
+- **REM-02 (BREAKING value format):** `due_date`, `start_date`, `completion_date`,
+  `creation_date`, and `last_modified` on reminder payloads are still JSON strings, but the
+  value moved from a fixed UTC ISO instant to the oracle's rendering: due/start come from the
+  stored COMPONENTS — timed (`yyyy-MM-dd'T'HH:mm:ssZZZZZ`) iff the input carried a time,
+  date-only (`yyyy-MM-ddZZZZZ`) otherwise, in the components' own zone — so a date-only
+  reminder is finally distinguishable from a timed one; the other three render like the
+  Calendar dates, in the reminder's zone.
+- **REM-03:** the 9 oracle-valid input shapes the CLI hard-rejected now parse
+  (`2026-09-01-04:00`, `2026-09-01Z`, `2026-09-01+0200`, minute-precision times, offset-bearing
+  space forms, …). Two measured oracle quirks are matched exactly: granularity keys off the RAW
+  input containing `:`/`T` (so `…-04:00` is timed-at-midnight while `…+0200` is date-only with
+  a pinned zone), and a day past month's end ROLLS (Feb 30 → Mar 2) while month 13 rejects.
+  Genuine garbage still exits 64 — a documented STRICTER divergence (the oracle silently nulls
+  the date instead).
+- **REM-04:** `reminder.timeZone` is pinned from the parsed input (`startTz ?? dueTz`) — an
+  offset-bearing date pins its fixed zone instead of always `TimeZone.current` — and a
+  same-call start/due zone mismatch is now a validation rejection, both matching the oracle.
+- **REM-06:** recurrence end precedence un-inverted: `end_date` wins over `occurrence_count`
+  when a spec carries both (the oracle checks endDate first).
+- **REM-08:** `tasks update` gains `--clear-start` / `--clear-due` (conflicting with
+  `--start`/`--due`), matching every sibling clear flag. Security review rejected the first
+  design (an empty-string sentinel): `--due "$UNSET_VAR"` would have silently destroyed a due
+  date where the old code failed closed — so `""` and garbage still exit 64, only the explicit
+  flags clear, and the flags echo in the `--dry-run` preview. (The oracle clears on ANY
+  unparseable input; the explicit flag is our documented fail-closed divergence.)
+- **REM-09:** reminder lists return in EventKit's native order — the user's manual
+  Reminders.app ordering — instead of being re-sorted alphabetically.
+- **REM-12:** a syntactically invalid `--url` on update is a no-op instead of silently WIPING
+  the reminder's existing URL; `--url ""` still clears.
+- `--dry-run` previews now speak the SAME wire format as execute for reminder dates (REM-02
+  strings, date-only vs timed preserved) — review caught the preview still emitting UTC
+  instants. Start/due timezone conflicts also surface on the preview now, not only at execute.
+- **Calendar side of the shared parser widening (disclosure):** `calendar events
+  create/update --start/--end` and recurrence `until=` accept the same widened format set, the
+  same Feb-30-rolls/month-13-rejects split applies, and read-window bounds now honor an
+  offset-bearing date-only's OWN midnight (`--start 2026-09-01+0200` binds at 22:00Z Aug 31,
+  the oracle's instant — the old startOfDay floor would have shifted it by the zone gap).
+- REM-05/REM-07 (geofence titles, `until=` noon anchor) were closed at the root by the shared
+  Q9 fixes and are now pinned from the Reminders side too. REM-13's key-rename doc claim is
+  corrected in place (four keys are renames, not re-casings — documented, not renamed: that
+  would be its own MAJOR).
+
 ### BREAKING — Calendar event dates now render in the event's zone; all-day events are date-only
 
 The oracle emits every event date through its `formatEventDate`: rendered in the EVENT's own

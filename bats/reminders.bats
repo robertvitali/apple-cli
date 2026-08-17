@@ -93,6 +93,43 @@ setup() {
 
 # --- Error envelopes + exit-code matrix (all fire before any store access) --------------------
 
+@test "update --clear-due echoes in the dry-run preview (REM-08)" {
+  run "$BIN" reminders tasks update --dry-run --id SOME-ID --clear-due
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"clear_due" : true'
+}
+
+@test "an empty --due is a validation_error, NOT a silent clear (REM-08 fail-closed)" {
+  run "$BIN" reminders tasks update --dry-run --id SOME-ID --due ""
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q '"type" : "validation_error"'
+}
+
+@test "a garbage --due is a validation_error (exit 64), not unknown/70" {
+  run "$BIN" reminders tasks update --dry-run --id SOME-ID --due "not-a-date"
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q '"type" : "validation_error"'
+}
+
+@test "a garbage recurrence until= is a validation_error (exit 64)" {
+  run "$BIN" reminders tasks create --dry-run --test-mode --list apple-cli-test \
+    --title "apple-cli-test until" --recurrence "freq=daily;until=nope"
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q '"type" : "validation_error"'
+}
+
+@test "--due with --clear-due conflict is a validation_error" {
+  run "$BIN" reminders tasks update --dry-run --id SOME-ID --due 2026-09-01 --clear-due
+  [ "$status" -eq 64 ]
+}
+
+@test "a start/due timezone conflict surfaces on the PREVIEW (REM-04 pre-flight)" {
+  run "$BIN" reminders tasks update --dry-run --id SOME-ID \
+    --start "2026-09-01T09:00:00+02:00" --due "2026-09-01T10:00:00-05:00"
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q 'different timezones'
+}
+
 @test "bad --due-within is a validation_error (exit 64)" {
   run "$BIN" reminders tasks read --due-within someday
   [ "$status" -eq 64 ]

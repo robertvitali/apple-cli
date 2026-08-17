@@ -1,23 +1,28 @@
 import Foundation
+import AppleKit
 
-/// Date parsing + all-day inference, matching the apple-events MCP's accepted input formats
-/// so the CLI is a behavioral superset. The MCP accepts (per its tool schema):
-///   - `yyyy-MM-dd`                    → date-only ⇒ all-day inferred
-///   - `yyyy-MM-dd HH:mm:ss`           → local time (no timezone)
-///   - `yyyy-MM-dd'T'HH:mm:ss`         → local time (no timezone)
-///   - ISO-8601 with timezone          → honored as given
-///
-/// "No timezone" is interpreted as the current local timezone (the MCP's documented rule).
+/// Date parsing + granularity inference, delegating to the ORACLE's own pipeline
+/// (`OracleDates`, the verbatim port): the full 21-format offset ladder plus the 7 local
+/// formats — bare dates, offset-bearing bare dates (`Z`/`±HH`/`±HHMM`/`±HH:MM`), second- and
+/// minute-precision times with or without `T`, fractional seconds, offset or local. "No
+/// timezone" resolves in the current local zone, exactly as the oracle does.
 public enum DateParsing {
 
     public struct Parsed: Equatable, Sendable {
         public let date: Date
-        /// True when the input was a bare `yyyy-MM-dd` (no time component) — the signal the
-        /// MCP/`event` use to infer an all-day event.
+        /// True when the parse produced no time components (`components.hour == nil`) — the
+        /// oracle's own granularity signal (`componentsSet` keys off the raw input containing
+        /// `:` or `T`, so `2026-09-01+0200` is date-only with a pinned zone while
+        /// `2026-09-01-04:00` is timed at 00:00 in −04:00).
         public let isDateOnly: Bool
-        public init(date: Date, isDateOnly: Bool) {
+        /// The oracle-shaped components (calendar + timeZone always populated). Reminder
+        /// writes store these VERBATIM (`dueDateComponents` etc.), and their `timeZone` is
+        /// what `reminder.timeZone` gets pinned to — REM-04.
+        public let components: DateComponents
+        public init(date: Date, isDateOnly: Bool, components: DateComponents) {
             self.date = date
             self.isDateOnly = isDateOnly
+            self.components = components
         }
     }
 
@@ -31,51 +36,29 @@ public enum DateParsing {
         }
     }
 
-    /// Parse a user-supplied date string. `timeZone` defaults to the current zone (used only
-    /// for the no-offset formats). Throws `ParseError.unrecognized` on no match.
+    /// Parse a user-supplied date string through the ORACLE's own pipeline (`OracleDates`,
+    /// the verbatim port of `parseDateComponents`/`parseDate`) — REM-03: the previous
+    /// hand-written ladder rejected 9 input shapes the oracle accepts (offset-bearing bare
+    /// dates like `2026-09-01-04:00` / `2026-09-01Z` / `2026-09-01+0200`, minute-precision
+    /// times, offset-bearing space forms). `timeZone` is the LOCAL zone for no-offset inputs
+    /// (defaults `.current`, same as the oracle; injectable for tests).
+    ///
+    /// A bare `yyyy-MM-dd` anchors at MIDNIGHT local via the oracle's own mechanism — an
+    /// earlier version lifted to noon; that was CAL-02, a 12-hour divergence on every bare
+    /// create/update date and recurrence end.
+    ///
+    /// One deliberate divergence, STRICTER not looser: on garbage the oracle's create/update
+    /// silently sets the date components to NIL (a typo in `--due` would silently create a
+    /// dateless reminder); we throw `unrecognized` → exit 64. Recorded as an accepted
+    /// divergence in the Q10 row.
     public static func parse(_ raw: String, timeZone: TimeZone = .current) throws -> Parsed {
         let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !s.isEmpty else { throw ParseError.unrecognized(raw) }
-
-        // 1) Bare date → all-day, anchored at MIDNIGHT local — the DateFormatter's own default,
-        //    which is exactly the oracle's mechanism (`basicFormatter.date(from:)` for recurrence
-        //    end dates; `parseDateComponents` → [y,m,d] → `calendar.date(from:)` for event
-        //    start/end — both resolve 00:00 in the current zone). An earlier version lifted the
-        //    result to noon "to dodge DST/midnight drift"; that was CAL-02: a 12-hour divergence
-        //    on every bare create/update date and recurrence end. Anchoring via the SAME API the
-        //    oracle's recurrence-endDate path uses byte-matches it there, including the
-        //    nonexistent-midnight DST edge; the oracle's EVENT path goes through
-        //    Calendar.date(from:) instead, whose resolution of that edge is its own — only the
-        //    normal case is byte-matched against both.
-        if isBareDate(s) {
-            let f = DateFormatter()
-            f.locale = Locale(identifier: "en_US_POSIX")
-            f.timeZone = timeZone
-            f.isLenient = false   // reject 2026-13-45 instead of rolling it over
-            f.dateFormat = "yyyy-MM-dd"
-            if let day = f.date(from: s) {
-                return Parsed(date: day, isDateOnly: true)
-            }
+        guard let comps = OracleDates.parseComponents(from: s, localZone: timeZone),
+              let date = OracleDates.parseDate(from: s, localZone: timeZone) else {
+            throw ParseError.unrecognized(raw)
         }
-
-        // 2) Timed, no timezone → interpret as local.
-        for fmt in ["yyyy-MM-dd HH:mm:ss", "yyyy-MM-dd'T'HH:mm:ss", "yyyy-MM-dd HH:mm", "yyyy-MM-dd'T'HH:mm"] {
-            let f = DateFormatter()
-            f.locale = Locale(identifier: "en_US_POSIX")
-            f.timeZone = timeZone
-            f.isLenient = false
-            f.dateFormat = fmt
-            if let d = f.date(from: s) { return Parsed(date: d, isDateOnly: false) }
-        }
-
-        // 3) Full ISO-8601 with timezone offset / Z.
-        let iso = ISO8601DateFormatter()
-        iso.formatOptions = [.withInternetDateTime]
-        if let d = iso.date(from: s) { return Parsed(date: d, isDateOnly: false) }
-        iso.formatOptions = [.withInternetDateTime, .withFractionalSeconds]
-        if let d = iso.date(from: s) { return Parsed(date: d, isDateOnly: false) }
-
-        throw ParseError.unrecognized(raw)
+        return Parsed(date: date, isDateOnly: comps.hour == nil, components: comps)
     }
 
     /// `true` when the string is exactly `yyyy-MM-dd` (the all-day signal).
@@ -96,22 +79,28 @@ public enum DateParsing {
         return f.string(from: date)
     }
 
-    /// Build the `DateComponents` an `EKReminder` due/start date requires (they are stored as
-    /// `dueDateComponents`/`startDateComponents`, NOT a `Date`). Mirrors the MCP's granularity
-    /// rule: a date-only value yields `[year, month, day]`; a timed value adds
-    /// `[hour, minute, second]`. The component's calendar + timeZone are pinned so EventKit
-    /// resolves the same instant `DateParsing.parse` produced. This is the write-side inverse of
-    /// the `dueDateComponents?.date` read in `ReminderMapping`.
-    public static func components(from date: Date, dateOnly: Bool, timeZone: TimeZone = .current) -> DateComponents {
-        var cal = Calendar(identifier: .gregorian)
-        cal.timeZone = timeZone
-        let fields: Set<Calendar.Component> = dateOnly
-            ? [.year, .month, .day]
-            : [.year, .month, .day, .hour, .minute, .second]
-        var comps = cal.dateComponents(fields, from: date)
-        comps.calendar = cal
-        comps.timeZone = timeZone
-        return comps
+}
+
+/// Command-layer adapter: wrap `DateParsing.parse` so a malformed user date becomes an
+/// `AppleError.validation` (`validation_error`, exit 64) instead of escaping to `runGuarded`'s
+/// generic catch as `unknown` (exit 70). Lives HERE (not per-Kit) because both CalendarKit and
+/// RemindersKit need the identical mapping — a RemindersKit copy drifted out of existence once
+/// already and empty `--due` shipped as exit 70.
+public enum DateArg {
+    public static func parse(_ s: String) throws -> DateParsing.Parsed {
+        do { return try DateParsing.parse(s) }
+        catch { throw AppleError.validation(String(describing: error)) }
+    }
+    public static func date(_ s: String) throws -> Date { try parse(s).date }
+
+    /// A read-window bound. The oracle uses `parseDate`'s result DIRECTLY — no floor — and since
+    /// the CAL-02 fix `parse` anchors a bare local date at its own midnight, flooring is
+    /// redundant for local dates and actively WRONG for the offset-bearing date-only forms the
+    /// Q10 parser widening admitted (`2026-09-01+0200` is midnight IN +02:00; flooring it to the
+    /// LOCAL day shifted the bound by the zone gap — review caught this as an undisclosed
+    /// Calendar ripple). So: the parsed instant, verbatim.
+    public static func windowBound(_ s: String) throws -> Date {
+        try parse(s).date
     }
 }
 

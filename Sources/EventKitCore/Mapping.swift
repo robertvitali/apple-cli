@@ -244,10 +244,13 @@ public enum RecurrenceMapping {
             throw AppleError.validation("recurrence interval must be >= 1 (got \(m.interval))")
         }
         var end: EKRecurrenceEnd?
-        if let c = m.occurrence_count, c > 0 {
-            end = EKRecurrenceEnd(occurrenceCount: c)
-        } else if let d = m.end_date {
+        // REM-06: the oracle checks endDate FIRST (`if let endDateStr … else if let count`,
+        // EventKitCLI.swift:283) — the previous count-first order silently inverted the
+        // precedence when a spec carried both.
+        if let d = m.end_date {
             end = EKRecurrenceEnd(end: d)
+        } else if let c = m.occurrence_count, c > 0 {
+            end = EKRecurrenceEnd(occurrenceCount: c)
         }
 
         let daysOfWeek = try m.days_of_week.map { days -> [EKRecurrenceDayOfWeek] in
@@ -535,8 +538,11 @@ public enum EventMapping {
 public enum ReminderMapping {
 
     public static func reminder(from r: EKReminder) -> Reminder {
-        let due = r.dueDateComponents?.date
-        let start = r.startDateComponents?.date
+        // REM-02: due/start render from their COMPONENTS (oracle `formatDueDateWithTimezone`),
+        // so a date-only reminder stays date-only on the wire instead of collapsing into a UTC
+        // instant; the timed trio renders like the event dates.
+        let due = OracleDates.dueDateString(from: r.dueDateComponents, timeZoneHint: r.timeZone)
+        let start = OracleDates.dueDateString(from: r.startDateComponents, timeZoneHint: r.timeZone)
         // Oracle `EKReminder.toJSON`: alarms render with `preferredTimeZone = timeZone ?? current`.
         let alarmTZ = r.timeZone ?? TimeZone.current
         // Convenience: the first location-based alarm (mirrors the MCP's `locationTrigger`).
@@ -555,7 +561,7 @@ public enum ReminderMapping {
             time_zone: r.timeZone?.identifier,
             external_id: r.calendarItemExternalIdentifier,
             completed: r.isCompleted,
-            completion_date: r.completionDate,
+            completion_date: r.completionDate.map { EventDateFormat.string($0, timeZone: alarmTZ, includeTime: true) },
             due_date: due,
             start_date: start,
             priority: r.priority,
@@ -565,8 +571,8 @@ public enum ReminderMapping {
             location_trigger: locationTrigger,
             tags: nil,        // populated by RemindersKit from the notes [#tag] markers — see Models.swift
             parent_id: nil,   // reserved (no native parent linkage in public EventKit); subtasks live in notes
-            last_modified: r.lastModifiedDate,
-            creation_date: r.creationDate
+            last_modified: r.lastModifiedDate.map { EventDateFormat.string($0, timeZone: alarmTZ, includeTime: true) },
+            creation_date: r.creationDate.map { EventDateFormat.string($0, timeZone: alarmTZ, includeTime: true) }
         )
     }
 }

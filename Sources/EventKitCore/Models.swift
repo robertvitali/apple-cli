@@ -11,8 +11,14 @@ import Foundation
 // recurrence/alarms/structuredLocation/occurrenceDate/externalId; reminders carry due/start/
 // priority/url/location/timeZone/locationTrigger/recurrence/alarms/externalId. The apple-cli
 // contract re-cases the MCP's camelCase keys to snake_case by design — semantic parity, not
-// byte-identical keys. Enum VALUES (availability/status/participant/source strings) DO match
-// the MCP verbatim so a consumer keying on a value survives the swap.
+// byte-identical keys — AND, honestly (REM-13), four keys are RENAMED beyond re-casing:
+// `Reminder.completed` (MCP `isCompleted` — re-casing would give `is_completed`),
+// `Reminder.last_modified` / `CalendarEvent.last_modified` (MCP `lastModifiedDate` — would be
+// `last_modified_date`), `Alarm.type` (MCP `alarmType` — would be `alarm_type`), and
+// `Subtask.completed` (same as Reminder's). These shipped in the first cut and are load-bearing
+// wire keys now; renaming them is a MAJOR bump, so they are documented instead of "fixed".
+// Enum VALUES (availability/status/participant/source strings) DO match the MCP verbatim so a
+// consumer keying on a value survives the swap.
 //
 // STABILITY: RemindersKit imports these unchanged. All optional init params carry `= nil`
 // defaults so an additive field stays source-compatible (a schema-MINOR change per the
@@ -332,9 +338,14 @@ public struct Reminder: Encodable, Sendable, Equatable {
     public let time_zone: String?
     public let external_id: String?
     public let completed: Bool
-    public let completion_date: Date?
-    public let due_date: Date?
-    public let start_date: Date?
+    /// REM-02: the five date fields are pre-formatted STRINGS in the oracle's rendering.
+    /// due/start come from `OracleDates.dueDateString` — timed iff the stored components
+    /// carry an hour, date-only otherwise, in the components' own zone — so the date-only vs
+    /// timed distinction survives the wire; completion/creation/last-modified render through
+    /// `EventDateFormat.string` (always timed) in the reminder's zone.
+    public let completion_date: String?
+    public let due_date: String?
+    public let start_date: String?
     public let priority: Int
     public let has_recurrence: Bool
     public let recurrence_rules: [RecurrenceRule]?
@@ -344,19 +355,19 @@ public struct Reminder: Encodable, Sendable, Equatable {
     public let parent_id: String?
     public let subtasks: [Subtask]?
     public let subtask_progress: SubtaskProgress?
-    public let last_modified: Date?
-    public let creation_date: Date?
+    public let last_modified: String?
+    public let creation_date: String?
 
     public init(
         id: String, title: String? = nil, notes: String? = nil, url: String? = nil,
         location: String? = nil, list: String? = nil, list_id: String? = nil,
         account: String? = nil, time_zone: String? = nil, external_id: String? = nil,
-        completed: Bool, completion_date: Date? = nil, due_date: Date? = nil,
-        start_date: Date? = nil, priority: Int, has_recurrence: Bool,
+        completed: Bool, completion_date: String? = nil, due_date: String? = nil,
+        start_date: String? = nil, priority: Int, has_recurrence: Bool,
         recurrence_rules: [RecurrenceRule]? = nil, alarms: [Alarm]? = nil,
         location_trigger: LocationTrigger? = nil, tags: [String]? = nil, parent_id: String? = nil,
         subtasks: [Subtask]? = nil, subtask_progress: SubtaskProgress? = nil,
-        last_modified: Date? = nil, creation_date: Date? = nil
+        last_modified: String? = nil, creation_date: String? = nil
     ) {
         self.id = id
         self.title = title

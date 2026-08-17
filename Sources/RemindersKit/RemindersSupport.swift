@@ -22,9 +22,11 @@ import EventKit
 // populated from the notes markers on read; `Reminder.parent_id` stays nil (no native linkage
 // exists to populate it).
 //
-// (ReminderAlarmSpec / ReminderRecurrenceSpec duplicate the equivalent CalendarKit parsers by
-// necessity — the natural shared home is EventKitCore, which is frozen; a future unfreeze should
-// hoist them. The names are Reminder-prefixed to avoid any cross-module ambiguity in `apple`.)
+// (ReminderAlarmSpec / ReminderRecurrenceSpec still shadow the equivalent CalendarKit parsers —
+// a legacy of the parallel-worktree phase when EventKitCore was frozen. The freeze is over: the
+// geofence half is already hoisted (`EventKitCore.GeofenceSpec`, CAL-04/REM-05) and both
+// wrappers delegate to shared code where it exists. The names stay Reminder-prefixed to avoid
+// cross-module ambiguity in `apple`.)
 //
 // URL — intentional deviation. The reference MCP Swift backend ALSO mirrors a reminder's URL into
 // its notes as a "URLs:\n- <url>" line (so a notes search matches the URL). This port stores the
@@ -456,6 +458,44 @@ public enum ReminderAlarmSpec {
     }
 }
 
+// MARK: - Reminder timezone resolution (REM-04)
+
+/// Oracle create/update: `reminder.timeZone = startTz ?? dueTz`, where each tz is the parsed
+/// input's components.timeZone (an offset-bearing input pins its fixed GMT zone, a local input
+/// pins the current zone), and a same-call start/due zone-identifier mismatch is a rejection.
+/// Pure `resolve` so the logic tier can pin it; `apply` is the thin EKReminder writer.
+public enum ReminderTZ {
+    public static func resolve(startParsed: DateParsing.Parsed?,
+                               dueParsed: DateParsing.Parsed?) throws -> TimeZone? {
+        let startTz = startParsed?.components.timeZone
+        let dueTz = dueParsed?.components.timeZone
+        if let s = startTz, let d = dueTz, s.identifier != d.identifier {
+            throw AppleError.validation(
+                "reminder start and due dates have different timezones (\(s.identifier) vs \(d.identifier)) — EventKit reminders support only one timezone; use the same timezone for both")
+        }
+        return startTz ?? dueTz
+    }
+
+    public static func apply(to reminder: EKReminder, startParsed: DateParsing.Parsed?,
+                             dueParsed: DateParsing.Parsed?) throws {
+        if let tz = try resolve(startParsed: startParsed, dueParsed: dueParsed) {
+            reminder.timeZone = tz
+        }
+    }
+}
+
+// MARK: - URL update resolution (REM-12)
+
+/// The oracle guards the whole URL assignment (`if let urlStr, !empty, let url = URL(string:)`),
+/// so an unparseable value must be a NO-OP — the old code assigned `URL(string:)`'s nil and
+/// silently wiped the stored URL. "" is the documented clear (pre-existing contract).
+public enum ReminderURLUpdate {
+    public static func resolve(current: URL?, arg: String) -> URL? {
+        if arg.isEmpty { return nil }
+        return URL(string: arg) ?? current
+    }
+}
+
 // MARK: - Recurrence spec parsing (--recurrence, repeatable) — superset of the MCP recurrence JSON
 
 public enum ReminderRecurrenceSpec {
@@ -477,7 +517,7 @@ public enum ReminderRecurrenceSpec {
         let interval = try fields["interval"].map { try intOf($0, "interval") } ?? 1
         let count = try fields["count"].map { try intOf($0, "count") }
         var endDate: Date?
-        if let until = fields["until"] { endDate = try DateParsing.parse(until).date }
+        if let until = fields["until"] { endDate = try DateArg.parse(until).date }
         return RecurrenceRule(
             frequency: freq.lowercased(),
             interval: interval,
@@ -721,9 +761,15 @@ public struct ReminderWritePreview: Encodable {
     public let action: String
     public let id: String?
     public let title: String?
-    public let start_date: Date?
-    public let due_date: Date?
-    public let completion_date: Date?
+    /// REM-02 wire format, same as execute: due/start via `OracleDates.dueDateString` (so the
+    /// preview preserves the date-only vs timed distinction), completion always timed.
+    public let start_date: String?
+    public let due_date: String?
+    public let completion_date: String?
+    /// REM-08: explicit clear flags echo in the preview — a destructive clear must not render
+    /// identically to a no-op (security review).
+    public let clear_start: Bool?
+    public let clear_due: Bool?
     public let completed: Bool?
     public let priority: Int?
     public let note: String?
@@ -747,8 +793,9 @@ public struct ReminderWritePreview: Encodable {
     public let sandbox_target_unchecked: Bool?
 
     public init(
-        action: String, id: String? = nil, title: String? = nil, start_date: Date? = nil,
-        due_date: Date? = nil, completion_date: Date? = nil, completed: Bool? = nil, priority: Int? = nil,
+        action: String, id: String? = nil, title: String? = nil, start_date: String? = nil,
+        due_date: String? = nil, completion_date: String? = nil,
+        clear_start: Bool? = nil, clear_due: Bool? = nil, completed: Bool? = nil, priority: Int? = nil,
         note: String? = nil, location: String? = nil, url: String? = nil, target_list: String? = nil,
         tags: [String]? = nil, add_tags: [String]? = nil, remove_tags: [String]? = nil, subtasks: [String]? = nil,
         alarms: [Alarm]? = nil, recurrence_rules: [RecurrenceRule]? = nil, location_trigger: LocationTrigger? = nil,
@@ -763,6 +810,8 @@ public struct ReminderWritePreview: Encodable {
         self.start_date = start_date
         self.due_date = due_date
         self.completion_date = completion_date
+        self.clear_start = clear_start
+        self.clear_due = clear_due
         self.completed = completed
         self.priority = priority
         self.note = note

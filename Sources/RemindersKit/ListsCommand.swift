@@ -32,7 +32,6 @@ public struct ListsRead: ParsableCommand {
             try store.requestAccess(to: .reminder, mode: .read)
             let lists = store.calendars(for: .reminder)
                 .map { ReadMapping.reminderList(from: $0) }
-                .sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending }
             try Output.emit(tool: "reminders", data: ListsData(lists: lists))
         }
     }

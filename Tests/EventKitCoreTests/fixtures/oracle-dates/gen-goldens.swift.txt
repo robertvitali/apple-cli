@@ -1,0 +1,203 @@
+// Golden generator for OracleDates (REM-02/03/04). Run: swift gen-goldens.swift.txt > goldens.json
+//
+// MIT License, Copyright (c) 2025 Frad LEE (mcp-server-apple-events / FradSer/event) — see NOTICE.
+// The functions below are COPIED VERBATIM from the oracle
+// (~/.npm/_npx/c40e2e94b791912c/node_modules/mcp-server-apple-events/src/swift/EventKitCLI.swift:
+// detectExplicitTimezone :419, formatterWithBaseLocale :462, normalizedComponents :469,
+// componentsSet :476, parseDateComponents :483, parseDate :1115, formatDueDateWithTimezone :1130)
+// with one SEMANTIC edit — the `TimeZone.current` mentions in parseDateComponents and
+// the final fallback in formatDueDateWithTimezone are replaced by FIXED_ZONE so the goldens are
+// machine-independent — plus mechanical compressions (guard-let inlining, a ternary), verified
+// behavior-identical by the golden regeneration matching byte-for-byte. The port under test
+// takes the same zone as its injectable localZone.
+// `.swift.txt` so SwiftPM does not compile this into the test target.
+
+import Foundation
+
+let FIXED_ZONE = TimeZone(identifier: "America/New_York")!
+
+struct ExplicitTimezone { let suffix: String; let timeZone: TimeZone }
+
+func detectExplicitTimezone(in dateString: String) -> ExplicitTimezone? {
+    let trimmed = dateString.trimmingCharacters(in: .whitespacesAndNewlines)
+    if trimmed.hasSuffix("Z") {
+        guard let tz = TimeZone(secondsFromGMT: 0) else { return nil }
+        return ExplicitTimezone(suffix: "Z", timeZone: tz)
+    }
+    let pattern = #"[+-]\d{2}:\d{2}$|[+-]\d{4}$|[+-]\d{2}$"#
+    guard let range = trimmed.range(of: pattern, options: .regularExpression) else { return nil }
+    let suffix = String(trimmed[range])
+    let sign: Int = suffix.first == "-" ? -1 : 1
+    let numeric = suffix.dropFirst()
+    let components: (hours: Int, minutes: Int)? = {
+        if suffix.contains(":") {
+            let parts = numeric.split(separator: ":")
+            guard parts.count == 2, let h = Int(parts[0]), let m = Int(parts[1]) else { return nil }
+            return (h, m)
+        }
+        if numeric.count == 4 {
+            guard let h = Int(numeric.prefix(2)), let m = Int(numeric.suffix(2)) else { return nil }
+            return (h, m)
+        }
+        if numeric.count == 2, let h = Int(numeric) { return (h, 0) }
+        return nil
+    }()
+    guard let offset = components else { return nil }
+    let totalSeconds = sign * ((offset.hours * 60 + offset.minutes) * 60)
+    guard let timeZone = TimeZone(secondsFromGMT: totalSeconds) else { return nil }
+    return ExplicitTimezone(suffix: suffix, timeZone: timeZone)
+}
+
+func formatterWithBaseLocale() -> DateFormatter {
+    let f = DateFormatter()
+    f.locale = Locale(identifier: "en_US_POSIX")
+    f.calendar = Calendar(identifier: .gregorian)
+    return f
+}
+
+func normalizedComponents(_ components: inout DateComponents, using calendar: Calendar, timeZone: TimeZone) {
+    components.calendar = calendar
+    components.timeZone = timeZone
+    if components.second == nil && components.hour != nil { components.second = 0 }
+    if components.nanosecond != nil { components.nanosecond = 0 }
+}
+
+func componentsSet(for input: String) -> Set<Calendar.Component> {
+    if input.contains(":") || input.contains("T") {
+        return [.year, .month, .day, .hour, .minute, .second]
+    }
+    return [.year, .month, .day]
+}
+
+func parseDateComponents(from dateString: String) -> DateComponents? {
+    let trimmedInput = dateString.trimmingCharacters(in: .whitespacesAndNewlines)
+    if let tzInfo = detectExplicitTimezone(in: trimmedInput) {
+        let formatter = formatterWithBaseLocale()
+        formatter.timeZone = tzInfo.timeZone
+        let formatsWithTimezone = [
+            "yyyy-MM-dd'T'HH:mm:ss.SSSZZZZZ", "yyyy-MM-dd HH:mm:ss.SSSZZZZZ",
+            "yyyy-MM-dd'T'HH:mm:ssZZZZZ", "yyyy-MM-dd HH:mm:ssZZZZZ",
+            "yyyy-MM-dd'T'HH:mmZZZZZ", "yyyy-MM-dd HH:mmZZZZZ", "yyyy-MM-ddZZZZZ",
+            "yyyy-MM-dd'T'HH:mm:ss.SSSZZZ", "yyyy-MM-dd HH:mm:ss.SSSZZZ",
+            "yyyy-MM-dd'T'HH:mm:ssZZZ", "yyyy-MM-dd HH:mm:ssZZZ",
+            "yyyy-MM-dd'T'HH:mmZZZ", "yyyy-MM-dd HH:mmZZZ", "yyyy-MM-ddZZZ",
+            "yyyy-MM-dd'T'HH:mm:ss.SSSZ", "yyyy-MM-dd HH:mm:ss.SSSZ",
+            "yyyy-MM-dd'T'HH:mm:ssZ", "yyyy-MM-dd HH:mm:ssZ",
+            "yyyy-MM-dd'T'HH:mmZ", "yyyy-MM-dd HH:mmZ", "yyyy-MM-ddZ"
+        ]
+        for format in formatsWithTimezone {
+            formatter.dateFormat = format
+            if let parsedDate = formatter.date(from: trimmedInput) {
+                var calendar = Calendar(identifier: .gregorian)
+                calendar.timeZone = tzInfo.timeZone
+                var components = calendar.dateComponents(componentsSet(for: trimmedInput), from: parsedDate)
+                normalizedComponents(&components, using: calendar, timeZone: tzInfo.timeZone)
+                return components
+            }
+        }
+    }
+    let formatter = formatterWithBaseLocale()
+    formatter.timeZone = FIXED_ZONE   // oracle: TimeZone.current
+    let localFormats = [
+        "yyyy-MM-dd'T'HH:mm:ss.SSS", "yyyy-MM-dd HH:mm:ss.SSS",
+        "yyyy-MM-dd'T'HH:mm:ss", "yyyy-MM-dd HH:mm:ss",
+        "yyyy-MM-dd'T'HH:mm", "yyyy-MM-dd HH:mm", "yyyy-MM-dd"
+    ]
+    for format in localFormats {
+        formatter.dateFormat = format
+        if let parsedDate = formatter.date(from: trimmedInput) {
+            var calendar = Calendar(identifier: .gregorian)
+            calendar.timeZone = FIXED_ZONE   // oracle: TimeZone.current
+            var components = calendar.dateComponents(componentsSet(for: trimmedInput), from: parsedDate)
+            normalizedComponents(&components, using: calendar, timeZone: FIXED_ZONE)
+            return components
+        }
+    }
+    return nil
+}
+
+func parseDate(from dateString: String) -> Date? {
+    guard var components = parseDateComponents(from: dateString) else { return nil }
+    let calendar: Calendar = {
+        if let existing = components.calendar { return existing }
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = components.timeZone ?? FIXED_ZONE
+        return calendar
+    }()
+    components.calendar = calendar
+    components.timeZone = components.timeZone ?? calendar.timeZone
+    return calendar.date(from: components)
+}
+
+func formatDueDateWithTimezone(from dateComponents: DateComponents?, timeZoneHint: TimeZone?) -> String? {
+    guard var components = dateComponents else { return nil }
+    let timeZone = components.timeZone ?? timeZoneHint ?? components.calendar?.timeZone ?? FIXED_ZONE
+    var calendar = components.calendar ?? Calendar(identifier: .gregorian)
+    calendar.timeZone = timeZone
+    components.calendar = calendar
+    components.timeZone = timeZone
+    guard let date = calendar.date(from: components) else { return nil }
+    let formatter = DateFormatter()
+    formatter.locale = Locale(identifier: "en_US_POSIX")
+    formatter.timeZone = timeZone
+    formatter.calendar = calendar
+    formatter.dateFormat = components.hour != nil ? "yyyy-MM-dd'T'HH:mm:ssZZZZZ" : "yyyy-MM-ddZZZZZ"
+    return formatter.string(from: date)
+}
+
+// ---- corpus ----
+let inputs: [String] = [
+    // the 9 formats REM-03 named as hard-rejected
+    "2026-09-01-04:00", "2026-09-01Z", "2026-09-01+0200", "2026-09-01T10:00-04:00",
+    "2026-09-01T10:00Z", "2026-09-01 10:00:00-04:00", "2026-09-01 10:00-04:00",
+    "2026-09-01T10:00+02", "2026-09-01 10:00",
+    // previously-accepted shapes (must stay identical)
+    "2026-09-01", "2026-09-01 10:00:00", "2026-09-01T10:00:00", "2026-09-01T10:00:00Z",
+    "2026-09-01T10:00:00-04:00", "2026-09-01T10:00:00.123Z", "2026-09-01T10:00:00.123-04:00",
+    // offset edges
+    "2026-09-01T10:00:00+14:00", "2026-09-01T10:00:00-12", "2026-09-01T10:00:00+0545",
+    "2026-09-01T10:00:00+00:00", "2026-01-15+02", "2026-01-15-0430",
+    // false-positive detector then fallthrough
+    "2026-12-31", "2026-01-01",
+    // local fractional-second forms (review: previously missing from the corpus)
+    "2026-09-01T10:00:00.123", "2026-09-01 10:00:00.500",
+    // whitespace trimming
+    "  2026-09-01  ", "\t2026-09-01T10:00Z\n",
+    // DST edges in the fixed zone (America/New_York: spring-forward 2026-03-08 02:00)
+    "2026-03-08", "2026-03-08 02:30:00", "2026-11-01 01:30:00",
+    // rejects
+    "2026-13-45", "2026-02-30 10:00:00", "garbage", "01-09-2026", "2026/09/01",
+    "2026-09-01T10:00:00+19:00", "2026-09-01x", "20260901",
+]
+
+struct Row: Codable {
+    let input: String
+    let parses: Bool
+    let hour_set: Bool?
+    let tz_identifier: String?
+    let epoch: Double?
+    let due_render: String?
+    let due_render_hinted: String?   // hint Asia/Tokyo — exercises the hint fallback order
+}
+
+var rows: [Row] = []
+for input in inputs {
+    let comps = parseDateComponents(from: input)
+    let date = parseDate(from: input)
+    rows.append(Row(
+        input: input,
+        parses: comps != nil,
+        hour_set: comps.map { $0.hour != nil },
+        tz_identifier: comps?.timeZone?.identifier,
+        epoch: date?.timeIntervalSince1970,
+        due_render: formatDueDateWithTimezone(from: comps, timeZoneHint: nil),
+        due_render_hinted: {
+            guard var c = comps else { return nil }
+            c.timeZone = nil; c.calendar = nil   // force the hint to matter
+            return formatDueDateWithTimezone(from: c, timeZoneHint: TimeZone(identifier: "Asia/Tokyo")!)
+        }()
+    ))
+}
+let enc = JSONEncoder()
+enc.outputFormatting = [.prettyPrinted, .sortedKeys]
+print(String(data: try! enc.encode(rows), encoding: .utf8)!)

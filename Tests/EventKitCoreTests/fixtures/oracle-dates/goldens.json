@@ -1,0 +1,323 @@
+[
+  {
+    "due_render" : "2026-09-01T00:00:00-04:00",
+    "due_render_hinted" : "2026-09-01T00:00:00+09:00",
+    "epoch" : 1788235200,
+    "hour_set" : true,
+    "input" : "2026-09-01-04:00",
+    "parses" : true,
+    "tz_identifier" : "GMT-0400"
+  },
+  {
+    "due_render" : "2026-09-01Z",
+    "due_render_hinted" : "2026-09-01+09:00",
+    "epoch" : 1788220800,
+    "hour_set" : false,
+    "input" : "2026-09-01Z",
+    "parses" : true,
+    "tz_identifier" : "GMT"
+  },
+  {
+    "due_render" : "2026-09-01+02:00",
+    "due_render_hinted" : "2026-09-01+09:00",
+    "epoch" : 1788213600,
+    "hour_set" : false,
+    "input" : "2026-09-01+0200",
+    "parses" : true,
+    "tz_identifier" : "GMT+0200"
+  },
+  {
+    "due_render" : "2026-09-01T10:00:00-04:00",
+    "due_render_hinted" : "2026-09-01T10:00:00+09:00",
+    "epoch" : 1788271200,
+    "hour_set" : true,
+    "input" : "2026-09-01T10:00-04:00",
+    "parses" : true,
+    "tz_identifier" : "GMT-0400"
+  },
+  {
+    "due_render" : "2026-09-01T10:00:00Z",
+    "due_render_hinted" : "2026-09-01T10:00:00+09:00",
+    "epoch" : 1788256800,
+    "hour_set" : true,
+    "input" : "2026-09-01T10:00Z",
+    "parses" : true,
+    "tz_identifier" : "GMT"
+  },
+  {
+    "due_render" : "2026-09-01T10:00:00-04:00",
+    "due_render_hinted" : "2026-09-01T10:00:00+09:00",
+    "epoch" : 1788271200,
+    "hour_set" : true,
+    "input" : "2026-09-01 10:00:00-04:00",
+    "parses" : true,
+    "tz_identifier" : "GMT-0400"
+  },
+  {
+    "due_render" : "2026-09-01T10:00:00-04:00",
+    "due_render_hinted" : "2026-09-01T10:00:00+09:00",
+    "epoch" : 1788271200,
+    "hour_set" : true,
+    "input" : "2026-09-01 10:00-04:00",
+    "parses" : true,
+    "tz_identifier" : "GMT-0400"
+  },
+  {
+    "due_render" : "2026-09-01T10:00:00+02:00",
+    "due_render_hinted" : "2026-09-01T10:00:00+09:00",
+    "epoch" : 1788249600,
+    "hour_set" : true,
+    "input" : "2026-09-01T10:00+02",
+    "parses" : true,
+    "tz_identifier" : "GMT+0200"
+  },
+  {
+    "due_render" : "2026-09-01T10:00:00-04:00",
+    "due_render_hinted" : "2026-09-01T10:00:00+09:00",
+    "epoch" : 1788271200,
+    "hour_set" : true,
+    "input" : "2026-09-01 10:00",
+    "parses" : true,
+    "tz_identifier" : "America\/New_York"
+  },
+  {
+    "due_render" : "2026-09-01-04:00",
+    "due_render_hinted" : "2026-09-01+09:00",
+    "epoch" : 1788235200,
+    "hour_set" : false,
+    "input" : "2026-09-01",
+    "parses" : true,
+    "tz_identifier" : "America\/New_York"
+  },
+  {
+    "due_render" : "2026-09-01T10:00:00-04:00",
+    "due_render_hinted" : "2026-09-01T10:00:00+09:00",
+    "epoch" : 1788271200,
+    "hour_set" : true,
+    "input" : "2026-09-01 10:00:00",
+    "parses" : true,
+    "tz_identifier" : "America\/New_York"
+  },
+  {
+    "due_render" : "2026-09-01T10:00:00-04:00",
+    "due_render_hinted" : "2026-09-01T10:00:00+09:00",
+    "epoch" : 1788271200,
+    "hour_set" : true,
+    "input" : "2026-09-01T10:00:00",
+    "parses" : true,
+    "tz_identifier" : "America\/New_York"
+  },
+  {
+    "due_render" : "2026-09-01T10:00:00Z",
+    "due_render_hinted" : "2026-09-01T10:00:00+09:00",
+    "epoch" : 1788256800,
+    "hour_set" : true,
+    "input" : "2026-09-01T10:00:00Z",
+    "parses" : true,
+    "tz_identifier" : "GMT"
+  },
+  {
+    "due_render" : "2026-09-01T10:00:00-04:00",
+    "due_render_hinted" : "2026-09-01T10:00:00+09:00",
+    "epoch" : 1788271200,
+    "hour_set" : true,
+    "input" : "2026-09-01T10:00:00-04:00",
+    "parses" : true,
+    "tz_identifier" : "GMT-0400"
+  },
+  {
+    "due_render" : "2026-09-01T10:00:00Z",
+    "due_render_hinted" : "2026-09-01T10:00:00+09:00",
+    "epoch" : 1788256800,
+    "hour_set" : true,
+    "input" : "2026-09-01T10:00:00.123Z",
+    "parses" : true,
+    "tz_identifier" : "GMT"
+  },
+  {
+    "due_render" : "2026-09-01T10:00:00-04:00",
+    "due_render_hinted" : "2026-09-01T10:00:00+09:00",
+    "epoch" : 1788271200,
+    "hour_set" : true,
+    "input" : "2026-09-01T10:00:00.123-04:00",
+    "parses" : true,
+    "tz_identifier" : "GMT-0400"
+  },
+  {
+    "due_render" : "2026-09-01T10:00:00+14:00",
+    "due_render_hinted" : "2026-09-01T10:00:00+09:00",
+    "epoch" : 1788206400,
+    "hour_set" : true,
+    "input" : "2026-09-01T10:00:00+14:00",
+    "parses" : true,
+    "tz_identifier" : "GMT+1400"
+  },
+  {
+    "due_render" : "2026-09-01T10:00:00-12:00",
+    "due_render_hinted" : "2026-09-01T10:00:00+09:00",
+    "epoch" : 1788300000,
+    "hour_set" : true,
+    "input" : "2026-09-01T10:00:00-12",
+    "parses" : true,
+    "tz_identifier" : "GMT-1200"
+  },
+  {
+    "due_render" : "2026-09-01T10:00:00+05:45",
+    "due_render_hinted" : "2026-09-01T10:00:00+09:00",
+    "epoch" : 1788236100,
+    "hour_set" : true,
+    "input" : "2026-09-01T10:00:00+0545",
+    "parses" : true,
+    "tz_identifier" : "GMT+0545"
+  },
+  {
+    "due_render" : "2026-09-01T10:00:00Z",
+    "due_render_hinted" : "2026-09-01T10:00:00+09:00",
+    "epoch" : 1788256800,
+    "hour_set" : true,
+    "input" : "2026-09-01T10:00:00+00:00",
+    "parses" : true,
+    "tz_identifier" : "GMT"
+  },
+  {
+    "due_render" : "2026-01-15+02:00",
+    "due_render_hinted" : "2026-01-15+09:00",
+    "epoch" : 1768428000,
+    "hour_set" : false,
+    "input" : "2026-01-15+02",
+    "parses" : true,
+    "tz_identifier" : "GMT+0200"
+  },
+  {
+    "due_render" : "2026-01-15-04:30",
+    "due_render_hinted" : "2026-01-15+09:00",
+    "epoch" : 1768451400,
+    "hour_set" : false,
+    "input" : "2026-01-15-0430",
+    "parses" : true,
+    "tz_identifier" : "GMT-0430"
+  },
+  {
+    "due_render" : "2026-12-31-05:00",
+    "due_render_hinted" : "2026-12-31+09:00",
+    "epoch" : 1798693200,
+    "hour_set" : false,
+    "input" : "2026-12-31",
+    "parses" : true,
+    "tz_identifier" : "America\/New_York"
+  },
+  {
+    "due_render" : "2026-01-01-05:00",
+    "due_render_hinted" : "2026-01-01+09:00",
+    "epoch" : 1767243600,
+    "hour_set" : false,
+    "input" : "2026-01-01",
+    "parses" : true,
+    "tz_identifier" : "America\/New_York"
+  },
+  {
+    "due_render" : "2026-09-01T10:00:00-04:00",
+    "due_render_hinted" : "2026-09-01T10:00:00+09:00",
+    "epoch" : 1788271200,
+    "hour_set" : true,
+    "input" : "2026-09-01T10:00:00.123",
+    "parses" : true,
+    "tz_identifier" : "America\/New_York"
+  },
+  {
+    "due_render" : "2026-09-01T10:00:00-04:00",
+    "due_render_hinted" : "2026-09-01T10:00:00+09:00",
+    "epoch" : 1788271200,
+    "hour_set" : true,
+    "input" : "2026-09-01 10:00:00.500",
+    "parses" : true,
+    "tz_identifier" : "America\/New_York"
+  },
+  {
+    "due_render" : "2026-09-01-04:00",
+    "due_render_hinted" : "2026-09-01+09:00",
+    "epoch" : 1788235200,
+    "hour_set" : false,
+    "input" : "  2026-09-01  ",
+    "parses" : true,
+    "tz_identifier" : "America\/New_York"
+  },
+  {
+    "due_render" : "2026-09-01T10:00:00Z",
+    "due_render_hinted" : "2026-09-01T10:00:00+09:00",
+    "epoch" : 1788256800,
+    "hour_set" : true,
+    "input" : "\t2026-09-01T10:00Z\n",
+    "parses" : true,
+    "tz_identifier" : "GMT"
+  },
+  {
+    "due_render" : "2026-03-08-05:00",
+    "due_render_hinted" : "2026-03-08+09:00",
+    "epoch" : 1772946000,
+    "hour_set" : false,
+    "input" : "2026-03-08",
+    "parses" : true,
+    "tz_identifier" : "America\/New_York"
+  },
+  {
+    "due_render" : "2026-03-08T03:30:00-04:00",
+    "due_render_hinted" : "2026-03-08T03:30:00+09:00",
+    "epoch" : 1772955000,
+    "hour_set" : true,
+    "input" : "2026-03-08 02:30:00",
+    "parses" : true,
+    "tz_identifier" : "America\/New_York"
+  },
+  {
+    "due_render" : "2026-11-01T01:30:00-04:00",
+    "due_render_hinted" : "2026-11-01T01:30:00+09:00",
+    "epoch" : 1793511000,
+    "hour_set" : true,
+    "input" : "2026-11-01 01:30:00",
+    "parses" : true,
+    "tz_identifier" : "America\/New_York"
+  },
+  {
+    "input" : "2026-13-45",
+    "parses" : false
+  },
+  {
+    "due_render" : "2026-03-02T10:00:00-05:00",
+    "due_render_hinted" : "2026-03-02T10:00:00+09:00",
+    "epoch" : 1772463600,
+    "hour_set" : true,
+    "input" : "2026-02-30 10:00:00",
+    "parses" : true,
+    "tz_identifier" : "America\/New_York"
+  },
+  {
+    "input" : "garbage",
+    "parses" : false
+  },
+  {
+    "input" : "01-09-2026",
+    "parses" : false
+  },
+  {
+    "due_render" : "2026-09-01-04:00",
+    "due_render_hinted" : "2026-09-01+09:00",
+    "epoch" : 1788235200,
+    "hour_set" : false,
+    "input" : "2026\/09\/01",
+    "parses" : true,
+    "tz_identifier" : "America\/New_York"
+  },
+  {
+    "input" : "2026-09-01T10:00:00+19:00",
+    "parses" : false
+  },
+  {
+    "input" : "2026-09-01x",
+    "parses" : false
+  },
+  {
+    "input" : "20260901",
+    "parses" : false
+  }
+]

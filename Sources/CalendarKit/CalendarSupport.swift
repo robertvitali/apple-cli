@@ -8,28 +8,9 @@ import EventKitCore
 // detection, structured-location + URL validation, the phase write-guard, and the Encodable
 // output DTOs. Kept pure + unit-testable (no EKEventStore).
 
-// MARK: - Date argument parsing (maps EventKitCore's ParseError → AppleError.validation/64)
-
-/// Wrap `DateParsing.parse` so a malformed user date becomes a `validation_error` (exit 64)
-/// instead of escaping to `runGuarded`'s generic catch as `unknown` (exit 70). EventKitCore is
-/// the shared frozen core (it can't depend on the command-layer error mapping), so the command
-/// layer adapts its `ParseError` here.
-public enum DateArg {
-    public static func parse(_ s: String) throws -> DateParsing.Parsed {
-        do { return try DateParsing.parse(s) }
-        catch { throw AppleError.validation(String(describing: error)) }
-    }
-    public static func date(_ s: String) throws -> Date { try parse(s).date }
-
-    /// A read-window bound: a bare `yyyy-MM-dd` floors to START-OF-DAY (midnight), matching the
-    /// MCP's date-only bounds. Since the CAL-02 fix `DateParsing.parse` already anchors bare
-    /// dates at midnight, so the floor is a no-op on the happy path — kept as a regression guard
-    /// (a future re-anchoring of `parse` must not silently shift query bounds again).
-    public static func windowBound(_ s: String, calendar: Calendar = .current) throws -> Date {
-        let p = try parse(s)
-        return p.isDateOnly ? calendar.startOfDay(for: p.date) : p.date
-    }
-}
+// MARK: - Date argument parsing
+// `DateArg` (ParseError → AppleError.validation/64) moved to EventKitCore so CalendarKit and
+// RemindersKit share one mapping instead of drifting apart.
 
 // MARK: - Timezone detection (parity: MCP sets event.timeZone from the input's offset)
 

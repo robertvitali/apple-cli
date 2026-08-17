@@ -9,6 +9,10 @@ MIT terms, and the specific copyright line added below before the port lands.
   iMessage→SMS routing patterns.
 - FradSer/event (MIT) — Calendar & Reminders: EventKit model layer + command
   surface (the apple-events MCP's own backend).
+  Copyright (c) 2025 Frad LEE. Ported verbatim: the date-input pipeline
+  (`Sources/EventKitCore/OracleDates.swift` and the goldens generator under
+  `Tests/EventKitCoreTests/fixtures/oracle-dates/`), from EventKitCLI.swift
+  @1.4.0.
 - sweetrb/apple-notes-mcp (MIT) — Notes: AppleScript templates, NoteStore.sqlite
   checklist protobuf decoder, markdown conversion, attachment handling.
 - gumadeiras/fruitmail-cli (MIT) — Mail: Envelope Index SQLite fast-read approach.
