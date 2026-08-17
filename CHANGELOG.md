@@ -12,10 +12,83 @@ with the Apple MCP servers they replace.
 
 ## [Unreleased]
 
+### Mail read surface + accounts/mailboxes parity (Q11 batch 1)
+
+**Changed — BREAKING** (per docs/versioning-policy.md, every user-visible default/exit-code
+change is flagged even though 0.x cannot signal it)
+
+- **BREAKING:** `mail attachments list --subject` default match scope narrowed from `All` to
+  the account's INBOX (oracle B's scope). Existing callers silently receive INBOX-only
+  results; pass `--mailbox All` to restore the old sweep.
+- **BREAKING:** `mail attachments list --max-results` default dropped from 10 to 1 (oracle
+  B's default). Each match now costs a live Mail.app locator scan, so the old default made
+  the command routinely exceed agent timeouts; raise it deliberately, or pass `--no-live`
+  for fast Envelope-Index rows.
+- **BREAKING:** `mail thread <id>` default changed from a 50-message cap to UNCAPPED (oracle
+  A's get_thread has no cap; the old shared default silently truncated long threads with no
+  signal). The `--subject` path keeps oracle B's default of 50. A consumer relying on the
+  ≤50 bound must pass `--limit 50`.
+- **BREAKING:** unknown `--mailbox` on `search` / `thread --subject` / `attachments list
+  --subject` now exits 65 (`not_found`) instead of returning an empty success
+  indistinguishable from an empty mailbox (the unknown-ACCOUNT path already failed loud).
+- **BREAKING:** `mail search` rejects a negative `--offset` (exit 64) instead of silently
+  clamping to 0 while echoing the negative value; `mail thread` likewise rejects a negative
+  `--limit` (it previously reached SQLite as `LIMIT -n`, meaning unlimited).
+- **BREAKING:** `mail selected --no-content` no longer emits `snippet`/`content_preview`
+  (the same body text under two other wire names — a disclosure leak, but a key removal for
+  any consumer reading them under `--no-content`).
+- **BREAKING:** `mail attachments list <id>` `--account`/`--mailbox` are now scope
+  assertions (exit 65 on mismatch); they were declared and silently IGNORED. `--mailbox
+  All` is the wildcard (no-op) on the id path, and `get` gained the same `All` short-circuit
+  (it previously asserted `All` literally, a guaranteed not_found).
+- **BREAKING:** `mail mailboxes create` echoes NORMALIZED `mailbox`/`parent` wire keys
+  (matching `path`, which callers reconstruct from them); the raw inputs moved to
+  `mailbox_raw`/`parent_raw`.
+
+**Added**
+
+- `mail attachments list` rows now carry oracle A's full metadata — `mime_type`, `size`,
+  `downloaded` — read live from Mail.app in Mail's own attachment order (the same positional
+  space `attachments save` addresses), with the Envelope-Index rows kept as a disclosed
+  degraded path (`note`) when the message is not locatable live. A per-property failure
+  degrades that FIELD, not the row (measured: this store's Mail throws on `MIME type of att`,
+  which costs oracle A the entire message).
+- `mail attachments list --subject` is now oracle B's grouped shape: per-email `emails[]` rows
+  (subject/sender/date/attachment_count), zero-attachment matches included (previously
+  structurally unreachable), and `matched_email_count`. Default match scope is the account's
+  INBOX (oracle B); `--mailbox All` restores the old sweep. The flat `attachments[]`/`count`
+  keys are unchanged.
+- `mail attachments list` rows carry `save_index` — the position in the INDEX-ordered list
+  that `attachments save --indices` selects from. Rows are emitted in Mail's LIVE order,
+  which measurement shows routinely differs from the index order (8/8 multi-attachment
+  messages sampled), so `attachment_id` joins by NAME (a duplicated name yields nil), never
+  by position. A `--no-live` flag skips the live enrichment for fast index-only rows.
+- `mail thread` reports a truncation signal (`total`, `has_more`) whenever a `--limit` caps
+  the thread (the default-change itself is in the BREAKING section above).
+- `mail get` / `mail selected` always emit the `content` key ("" when suppressed) — oracle A's
+  key-presence contract; callers ported from it KeyError'd on the dropped key.
+- `mail unread-counts` non-summary now descends one sub-mailbox level with oracle B's
+  "Parent/Child" keys (nested rows like Vendor/Newsletters were silently missing), and the summary
+  emits oracle B's `-1` error sentinel (with INBOX/"Inbox" fallback) instead of silently
+  dropping an account whose inbox is unreadable. The sentinel never poisons `total_unread`.
+
+**Fixed**
+
+- `mail mailboxes create` normalizes the path like oracle B (trim each segment, DROP empty
+  ones): `'A//B'` and `' A / B '` both create `A/B` — previously the first was rejected and the
+  second created literal whitespace-named folders. `--parent` gets the same normalization and
+  the sandbox label gate now tests the normalized FIRST segment of the full path.
+
+**Docs**
+
+- docs/port-specs/mail.md rows for get/thread/mailboxes/unread-counts gained explicit
+  DIVERGENCE notes (scope assertions vs oracle-A hints; thread argument divergences;
+  index-derived `unread_count` vs live Mail; unknown-account fail-loud vs oracle B empty dict).
+
 ### BREAKING — Reminders date I/O rebuilt on the oracle's own pipeline (Q10)
 
 The whole date path — parsing, storage, timezone pinning, rendering — now runs through a
-verbatim port of the oracle's functions (`EventKitCore.OracleDates`), verified by a 37-row
+verbatim port of the oracle's functions (`EventKitCore.OracleDates`), verified by a 39-row
 golden corpus produced by EXECUTING the oracle's own code (copied verbatim into
 `Tests/EventKitCoreTests/fixtures/oracle-dates/`, only `TimeZone.current` pinned for
 machine-independence).

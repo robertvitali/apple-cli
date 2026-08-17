@@ -211,6 +211,23 @@ func deCollidedBasenames(_ names: [String]) -> [String] {
 
 /// Resolve a user-supplied message identifier — Envelope Index ROWID, RFC-5322 Message-ID,
 /// or a `message://` deep link — to a message row. Returns nil if not found.
+/// Fail-loud mailbox scoping: an unknown mailbox name used to resolve to an empty predicate and
+/// return an empty SUCCESS (indistinguishable from a genuinely empty mailbox), while the
+/// unknown-account path throws not_found. Matches on full path or leaf, case-insensitively —
+/// the same match `mailboxRowids` resolution uses — and lets the "All" wildcard through.
+func requireMailboxKnown(ctx: MailContext, name: String, accountUUID: String?) throws {
+    if EnvelopeIndex.isAllWildcard(name) { return }
+    let known = ctx.index.mailboxes.contains { m in
+        (accountUUID == nil || m.url.accountID == accountUUID)
+            && (m.url.path.caseInsensitiveCompare(name) == .orderedSame
+                || m.url.leaf.caseInsensitiveCompare(name) == .orderedSame)
+    }
+    guard known else {
+        throw AppleError.notFound(
+            "unknown mailbox '\(name)'\(accountUUID != nil ? " in the selected account" : ""). Use `apple mail mailboxes list` to see known mailboxes.")
+    }
+}
+
 func resolveMessageRow(ctx: MailContext, id: String) throws -> [String: String?]? {
     let trimmed = id.trimmingCharacters(in: .whitespacesAndNewlines)
     if let rowid = Int(trimmed) { return try ctx.index.message(rowid: rowid) }

@@ -30,6 +30,10 @@ public struct MailMailbox: Encodable {
     public let path: String               // full slash path ("Vendor/Receipts")
     public let url: String                // raw Envelope Index url
     public let total_count: Int?
+    /// Envelope-Index-derived (the local read bit), NOT Mail.app's live `unread count` —
+    /// measured divergence on server-synced accounts (Gmail All Mail divergent index-vs-live counts
+    /// while total_count matched exactly), the same read-bit split MailScript documents for
+    /// unread-counts. For oracle-matching live values use `apple mail unread-counts` (extra9).
     public let unread_count: Int?
     public let deleted_count: Int?
     public let is_label: Bool             // Gmail label (membership via `labels`, not m.mailbox)
@@ -110,7 +114,18 @@ public struct MailMessageResult: Encodable {
 public struct MailThreadResult: Encodable {
     public let messages: [MailMessage]
     public let count: Int
-    public let matched_by: String             // "message_id" | "subject_keyword"
+    public let matched_by: String             // "message_id" | "references" | "subject_keyword"
+    /// Truncation signal (sibling MailMessagesResult already carries has_more). `total` is the
+    /// full thread size regardless of --limit; has_more true means the page is short of it.
+    /// Thread has no --offset, so the recovery is `--limit 0` (the complete thread), not paging.
+    public let total: Int?
+    public let has_more: Bool?
+
+    public init(messages: [MailMessage], count: Int, matched_by: String,
+                total: Int? = nil, has_more: Bool? = nil) {
+        self.messages = messages; self.count = count; self.matched_by = matched_by
+        self.total = total; self.has_more = has_more
+    }
 }
 
 // MARK: Unread counts
@@ -131,13 +146,56 @@ public struct MailboxUnread: Encodable {
 
 public struct MailAttachment: Encodable {
     public let name: String
-    public let attachment_id: String?         // MIME part id, e.g. "2.10"
-    public let size: Int?                      // bytes (AppleScript path only)
-    public let message_id: String             // owning message ROWID
+    public let attachment_id: String?         // MIME part id, e.g. "2.10" (Envelope Index; CLI extra)
+    // Oracle A's AppleScript row is {name, mime_type, size, downloaded} (mail_connector.py
+    // `_get_attachments_applescript`). The three metadata fields are live Mail.app reads; they
+    // are nil only on the index-fallback path (Mail.app unreachable / message not locatable),
+    // where oracle A would have errored outright.
+    public let mime_type: String?
+    public let size: Int?                      // bytes
+    public let downloaded: Bool?               // Mail.app local-cache state
+    /// Position in the INDEX-ordered (`ORDER BY name`) list — the space `attachments save
+    /// --indices` selects from. Rows here are in Mail's LIVE order, which measurement shows
+    /// routinely differs; use this, never the row's position, to address `save`. nil when the
+    /// name is duplicated in the message (ambiguous) or unknown to the index.
+    public let save_index: Int?
+    public let message_id: String             // owning message ROWID (CLI extra)
+
+    public init(name: String, attachment_id: String?, mime_type: String?, size: Int?,
+                downloaded: Bool?, save_index: Int? = nil, message_id: String) {
+        self.name = name; self.attachment_id = attachment_id; self.mime_type = mime_type
+        self.size = size; self.downloaded = downloaded; self.save_index = save_index
+        self.message_id = message_id
+    }
+}
+
+/// One matched message's grouping row for `attachments list --subject` — oracle B's
+/// list_email_attachments emits subject/From/Date per match, includes zero-attachment
+/// matches ("No attachments"), and reports the matched-email count.
+public struct MailAttachmentEmail: Encodable {
+    public let message_id: String
+    public let subject: String?
+    public let sender: String?
+    public let date_received: String?
+    public let attachment_count: Int
+    public let attachments: [MailAttachment]
 }
 
 public struct MailAttachmentsResult: Encodable {
     public let attachments: [MailAttachment]
     public let count: Int
     public let matched_by: String             // "message_id" | "subject_keyword"
+    /// Present on the --subject path only (oracle B shape); nil (key dropped) on the id path.
+    public let emails: [MailAttachmentEmail]?
+    public let matched_email_count: Int?
+    /// Disclosed when the live Mail.app enrichment failed and rows fell back to the
+    /// Envelope Index (mime_type/size/downloaded nil).
+    public let note: String?
+
+    public init(attachments: [MailAttachment], count: Int, matched_by: String,
+                emails: [MailAttachmentEmail]? = nil, matched_email_count: Int? = nil,
+                note: String? = nil) {
+        self.attachments = attachments; self.count = count; self.matched_by = matched_by
+        self.emails = emails; self.matched_email_count = matched_email_count; self.note = note
+    }
 }

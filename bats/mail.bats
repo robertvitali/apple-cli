@@ -1151,10 +1151,42 @@ require_index() {
   echo "$output" | grep -q '"path" *: *"Projects/2024"'
 }
 
-@test "mail mailboxes create rejects an empty path segment (exit 64)" {
+# Oracle B NORMALIZES the path (manage.py create_mailbox: trim each segment, DROP empties) —
+# the CLI used to reject 'A//B' (validation_error) and pass ' A / B ' through RAW, creating
+# literal whitespace-named folders the oracle never would (extra8).
+@test "mail mailboxes create drops empty path segments like oracle B (extra8)" {
   require_index
   run "$BIN" mail mailboxes create --dry-run --account iCloud --name 'Projects//2024'
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"path" *: *"Projects/2024"'
+}
+
+@test "mail mailboxes create trims segment whitespace like oracle B (extra8)" {
+  require_index
+  run "$BIN" mail mailboxes create --dry-run --account iCloud --name ' Projects / 2024 '
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"path" *: *"Projects/2024"'
+}
+
+@test "mail mailboxes create normalizes --parent too and joins it into path (extra8)" {
+  require_index
+  run "$BIN" mail mailboxes create --dry-run --account iCloud --name '2024' --parent ' Projects /'
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"path" *: *"Projects/2024"'
+}
+
+@test "mail mailboxes create with a name that normalizes to nothing is empty-name (exit 64)" {
+  require_index
+  run "$BIN" mail mailboxes create --dry-run --account iCloud --name ' / / '
   [ "$status" -eq 64 ]
+}
+
+@test "sandboxed mailboxes create gates on the normalized FIRST segment, not the raw name (extra8)" {
+  require_index
+  APPLE_TEST_MODE=1 run "$BIN" mail mailboxes create --dry-run --test-mode --account iCloud \
+    --name 'apple-cli-test-sub' --parent 'Projects'
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q 'first segment'
 }
 
 # --- AppleScript compile coverage ----------------------------------------------
@@ -1670,4 +1702,155 @@ PYEOF
   echo "$output" | grep -q '"type" : "not_found"'
   ! echo "$output" | grep -qi 'too many items'
   ! echo "$output" | grep -q 'at once (max: 100)'
+}
+
+# --- Q11-A read-surface parity pins ----------------------------------------------------------
+
+@test "mail search with an unknown --mailbox is not_found, NOT an empty success (extra5)" {
+  require_index
+  run "$BIN" mail search --mailbox NoSuchMailboxXYZ --limit 1 --no-content
+  [ "$status" -eq 65 ]
+  echo "$output" | grep -q '"type" : "not_found"'
+  echo "$output" | grep -q "unknown mailbox 'NoSuchMailboxXYZ'"
+}
+
+@test "mail thread --subject with an unknown --mailbox is not_found (extra5)" {
+  require_index
+  run "$BIN" mail thread --subject anything --mailbox NoSuchMailboxXYZ
+  [ "$status" -eq 65 ]
+  echo "$output" | grep -q '"type" : "not_found"'
+}
+
+@test "mail search rejects a negative --offset instead of clamping and echoing it (extra6)" {
+  require_index
+  run "$BIN" mail search --account iCloud --limit 1 --offset=-1 --no-content
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q '"type" : "validation_error"'
+}
+
+@test "mail get always emits the content key — empty string when suppressed (extra11)" {
+  require_index
+  id=$("$BIN" mail search --account iCloud --limit 1 --no-content 2>/dev/null \
+    | python3 -c "import json,sys;print(json.load(sys.stdin)['data']['messages'][0]['id'])")
+  [ -n "$id" ]
+  run "$BIN" mail get "$id" --headers-only
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"content" : ""'
+}
+
+@test "mail thread by id reports the truncation signal when --limit caps it (gap5)" {
+  require_index
+  # A conversation with >1 member — a singleton exercises only the hardcoded total=1 fallback
+  # branch, so the pin would stay green if the countMessages-based signal broke (review-caught).
+  id=$("$BIN" mail search --mailbox All --limit 400 2>/dev/null | python3 -c "
+import json,sys,collections
+d=json.load(sys.stdin)['data']['messages']
+c=collections.Counter(m.get('conversation_id') for m in d if m.get('conversation_id'))
+multi=[k for k,n in c.items() if n>1]
+print(next((m['id'] for m in d if m.get('conversation_id') in multi), ''))")
+  [ -n "$id" ] || skip "no multi-message conversation in this store"
+  run "$BIN" mail thread "$id" --limit 1
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"has_more" : true'
+  total=$(echo "$output" | python3 -c "import json,sys;print(json.load(sys.stdin)['data']['total'])")
+  [ "$total" -gt 1 ]
+}
+
+@test "mail thread rejects a negative --limit instead of treating it as unlimited" {
+  require_index
+  run "$BIN" mail thread --subject anything --limit=-5
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q '"type" : "validation_error"'
+}
+
+@test "mail attachments list <id> rejects a nonexistent --account instead of ignoring it (extra2)" {
+  require_index
+  run "$BIN" mail attachments list 1 --account NoSuchAccountXYZ
+  [ "$status" -eq 65 ]
+  echo "$output" | grep -q '"type" : "not_found"'
+}
+
+# --- Q11 batch-1 review-round pins (wiring + fix-delta) --------------------------------------
+
+# gap1 WIRING: the live enrichment must actually reach the wire — deleting the enrichment call
+# in attachmentRows leaves the parser/model suites green (critic B1), so this is the pin that
+# goes red. `size` is the safe key on this store (MIME type throws in Mail.app itself).
+@test "mail attachments list <id> carries live metadata on the wire (gap1 wiring)" {
+  require_index
+  id=$("$BIN" mail search --mailbox INBOX --has-attachment --limit 1 --no-content 2>/dev/null \
+    | python3 -c "import json,sys;d=json.load(sys.stdin)['data']['messages'];print(d[0]['id'] if d else '')")
+  [ -n "$id" ] || skip "no INBOX message with an attachment in this store"
+  run "$BIN" mail attachments list "$id"
+  [ "$status" -eq 0 ]
+  # STRICT: the live keys must be present and the degraded note absent. Accepting the note as
+  # an alternative would keep this green under the exact reversion it exists to catch (the
+  # deleted-enrichment fallback emits the note on every row). On this Mac, bats runs with
+  # Mail.app reachable; CI runners skip at require_index.
+  echo "$output" | grep -q '"size" :'
+  ! echo "$output" | grep -q '"note" :'
+}
+
+# gap6 WIRING: the grouped oracle-B shape must reach the wire, including a ZERO-attachment
+# match (the old forced hasAttachment=true made that row structurally unreachable). --no-live
+# keeps it fast; the grouping is independent of enrichment.
+@test "mail attachments list --subject emits grouped emails with zero-attachment rows (gap6 wiring)" {
+  require_index
+  subj=$("$BIN" mail search --mailbox All --no-attachment --limit 1 --no-content 2>/dev/null \
+    | python3 -c "
+import json,sys
+d=json.load(sys.stdin)['data']['messages']
+s=(d[0].get('subject') or '') if d else ''
+print(s[:40])")
+  [ -n "$subj" ] || skip "no attachment-less message with a subject in this store"
+  run "$BIN" mail attachments list --subject "$subj" --mailbox All --no-live --max-results 5
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"matched_email_count" :'
+  echo "$output" | grep -q '"emails" :'
+  echo "$output" | grep -q '"attachment_count" : 0'
+}
+
+@test "mail attachments list --subject with an unknown --mailbox is not_found (review M2)" {
+  require_index
+  run "$BIN" mail attachments list --subject anything --mailbox NoSuchMailboxXYZ
+  [ "$status" -eq 65 ]
+  echo "$output" | grep -q '"type" : "not_found"'
+}
+
+@test "mail attachments list <id> --mailbox All is the wildcard, not a literal assertion (review H1)" {
+  require_index
+  id=$("$BIN" mail search --account iCloud --limit 1 --no-content 2>/dev/null \
+    | python3 -c "import json,sys;print(json.load(sys.stdin)['data']['messages'][0]['id'])")
+  [ -n "$id" ]
+  run "$BIN" mail attachments list "$id" --mailbox All --no-live
+  [ "$status" -eq 0 ]
+}
+
+@test "mail get <id> --mailbox All is the wildcard, not a literal assertion (review H1)" {
+  require_index
+  id=$("$BIN" mail search --account iCloud --limit 1 --no-content 2>/dev/null \
+    | python3 -c "import json,sys;print(json.load(sys.stdin)['data']['messages'][0]['id'])")
+  [ -n "$id" ]
+  run "$BIN" mail get "$id" --headers-only --mailbox All
+  [ "$status" -eq 0 ]
+}
+
+# Oracle B checks NAME emptiness before prepending the parent — checking after let
+# `--name '/' --parent Projects` "succeed" by creating the PARENT (review M1).
+@test "mail mailboxes create with a name that normalizes empty is rejected even with --parent" {
+  require_index
+  run "$BIN" mail mailboxes create --dry-run --account iCloud --name '/' --parent 'Projects'
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q 'cannot be empty'
+}
+
+# mailbox/parent echo the NORMALIZED components (path must equal parent + "/" + mailbox);
+# raw inputs stay under *_raw (review M4).
+@test "mail mailboxes create echoes normalized mailbox/parent with raw preserved" {
+  require_index
+  run "$BIN" mail mailboxes create --dry-run --account iCloud --name ' Projects / 2024 '
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"mailbox" *: *"2024"'
+  echo "$output" | grep -q '"parent" *: *"Projects"'
+  echo "$output" | grep -q '"mailbox_raw" *: *" Projects \/ 2024 "'
+  echo "$output" | grep -q '"path" *: *"Projects\/2024"'
 }

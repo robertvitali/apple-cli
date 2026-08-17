@@ -114,8 +114,8 @@ struct UnreadCountsCommand: ParsableCommand {
             }
             var total = 0
             if summary {
-                var flat: [String: Int] = [:]
-                for r in rows { flat[r.account, default: 0] += r.unread; total += r.unread }
+                let flat: [String: Int]
+                (flat, total) = UnreadSummary.build(rows)
                 let result = MailUnreadCountsResult(summary: flat, by_account: nil, total_unread: total)
                 if global.json { try Output.emit(tool: "mail", data: result) }
                 else { for (k, v) in flat.sorted(by: { $0.value > $1.value }) { print("\(k): \(v)") } }
@@ -187,5 +187,24 @@ struct MailDoctor: ParsableCommand {
                 for n in notes { print("• \(n)") }
             }
         }
+    }
+}
+
+/// Oracle B's summary keeps every account row, with -1 as the ERROR sentinel for an
+/// unreadable inbox (inbox.py: `counts[acct_name] = -1`). The sentinel must reach the wire
+/// but never poison the CLI-extra total_unread. Pure and internal so the logic tier pins it.
+enum UnreadSummary {
+    static func build(_ rows: [MailScript.UnreadRow]) -> (flat: [String: Int], total: Int) {
+        var flat: [String: Int] = [:]
+        var total = 0
+        for r in rows {
+            // Sticky sentinel: once an account is marked -1, a later same-named row must not
+            // arithmetic on it (-1 + n is neither a count nor the sentinel). Unreachable while
+            // summary emits one row per account, but Mail permits duplicate display names —
+            // review-caught latent case.
+            if r.unread < 0 { flat[r.account] = -1 }
+            else if flat[r.account] != -1 { flat[r.account, default: 0] += r.unread; total += r.unread }
+        }
+        return (flat, total)
     }
 }

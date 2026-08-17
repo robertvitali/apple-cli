@@ -34,10 +34,20 @@ struct SearchCommand: ParsableCommand {
             if let maxContentLength, maxContentLength < 0 {
                 throw AppleError.validation("--max-content-length must be >= 0 (0 = unlimited).")
             }
+            // Sibling validations (--sort, --max-content-length, triState) all fail loud; a
+            // negative --offset was the one input silently clamped (to 0 in EnvelopeIndex) and
+            // then echoed back VERBATIM — the envelope claimed an offset the query never used.
+            guard offset >= 0 else {
+                throw AppleError.validation("--offset must be >= 0.")
+            }
             let ctx = try MailContext()
             var f = EnvelopeIndex.MessageFilters()
             if let account { f.accountUUID = try ctx.requireAccountUUID(account) }
             f.mailboxName = mailbox
+            // Unknown mailbox was an empty SUCCESS (mailboxPredicate resolves to `0`),
+            // indistinguishable from a genuinely empty mailbox — while the unknown-ACCOUNT path
+            // throws not_found. Oracle A's `mailbox "X" of account` errors on an unknown name.
+            try requireMailboxKnown(ctx: ctx, name: mailbox, accountUUID: f.accountUUID)
             // MCP B excludes SKIP_FOLDERS from a broad "All" sweep, so an All-search used to
             // return Trash/Sent/Junk hits the oracle never would. Naming a system mailbox
             // explicitly still searches it — the exclusion only changes what "All" means.
@@ -161,7 +171,9 @@ struct GetCommand: ParsableCommand {
                     throw AppleError.notFound("message '\(id)' is not in account '\(account)'.")
                 }
             }
-            if let mailbox {
+            // Same "All"-wildcard short-circuit as attachments list: asserting the CLI-wide
+            // wildcard as a literal name made `--mailbox All` an unconditional not_found.
+            if let mailbox, !EnvelopeIndex.isAllWildcard(mailbox) {
                 let want = mailbox.lowercased()
                 let path = msg.mailbox.lowercased()
                 let leaf = path.split(separator: "/").last.map(String.init) ?? path
@@ -187,6 +199,11 @@ struct GetCommand: ParsableCommand {
             if content && !noContent && !headersOnly, let internetID = msg.internet_message_id {
                 msg.content = try MailScript().body(internetMessageID: internetID, accountName: msg.account)
             }
+            // Oracle A ALWAYS emits the `content` key, "" when suppressed (mail_connector.py
+            // msgContent) — a caller ported from A KeyErrors when the key is dropped. nil here
+            // (synthesized encodeIfPresent) dropped it under the default, --no-content AND
+            // --headers-only; emit the empty string instead.
+            if msg.content == nil { msg.content = "" }
             let result = MailMessageResult(message: msg)
             if global.json { try Output.emit(tool: "mail", data: result) }
             else { printMessageText(msg, full: true) }
@@ -212,16 +229,27 @@ struct SelectedCommand: ParsableCommand {
             }
             var messages: [MailMessage] = []
             for sel in selections {
+                var m: MailMessage
                 if let internetID = sel.internetMessageID, let ctx,
                    let row = try? ctx.index.message(internetMessageID: internetID) {
-                    var m = ctx.decodeSummary(row)
+                    m = ctx.decodeSummary(row)
                     m.applescript_id = sel.applescriptID
                     m.content = sel.content
                     m.snippet = strVal(row["snippet"])
-                    messages.append(m)
                 } else {
-                    messages.append(MailMessage.fromSelection(sel))
+                    m = MailMessage.fromSelection(sel)
                 }
+                if noContent {
+                    // `--no-content` cleared only `content`; the same body text stayed exposed
+                    // under `snippet` AND `content_preview` (one value, two wire names — the
+                    // search/list siblings clear both, with a comment saying exactly that).
+                    m.snippet = nil
+                    m.content_preview = nil
+                }
+                // Oracle A always emits `content`, "" when suppressed — same key-presence
+                // contract as `get` (see GetCommand).
+                if m.content == nil { m.content = "" }
+                messages.append(m)
             }
             let result = MailMessagesResult(
                 account: nil, mailbox: nil, messages: messages, count: messages.count,
@@ -240,7 +268,7 @@ struct ThreadCommand: ParsableCommand {
     @Option(name: .long, help: "Subject keyword identifying the thread.") var subject: String?
     @Option(name: .long, help: "Account name or UUID (for subject-based lookup).") var account: String?
     @Option(name: .long, help: "Mailbox for subject-based lookup (default All).") var mailbox: String = "All"
-    @Option(name: .long, help: "Max messages (default 50; 0 = the complete thread).") var limit: Int = 50
+    @Option(name: .long, help: "Max messages. Default: by id, the COMPLETE thread (oracle A get_thread is uncapped); by --subject, 50 (oracle B max_messages). 0 = the complete thread.") var limit: Int?
     // NO --include-system-folders here, deliberately. MCP B applies SKIP_FOLDERS only in
     // `search_emails` and analytics (tools/search.py `_search_mail_records`); its
     // `get_email_thread` has NO skip script and iterates every mailbox. Excluding here was both a
@@ -255,11 +283,19 @@ struct ThreadCommand: ParsableCommand {
             let ctx = try MailContext()
             var messages: [MailMessage] = []
             var matchedBy = ""
-            // `--limit 0` == the complete thread (oracle A's get_thread is uncapped), matching
-            // the `0 = all` convention search/list already use. Before, 0 reached the query as a
-            // literal 0, returned nothing, and fell through to the singleton fallback — so asking
-            // for the WHOLE thread returned exactly one message.
-            let effectiveLimit = (self.limit == 0) ? Int.max : self.limit
+            var total: Int? = nil
+            // Per-path defaults: the id path is UNCAPPED (oracle A's get_thread has no cap by
+            // construction — the old shared default of 50 silently truncated long threads with no
+            // signal); the subject path defaults to oracle B's max_messages=50. Explicit
+            // `--limit 0` == the complete thread on either path, matching the `0 = all`
+            // convention search/list already use (before that mapping landed, 0 reached the query
+            // as a literal 0, returned nothing, and fell through to the singleton fallback).
+            // A negative --limit reached SQLite as `LIMIT -n` (= unlimited) — the same
+            // silently-inverted-meaning class as search's negative --offset, in the same batch.
+            if let limit = self.limit, limit < 0 {
+                throw AppleError.validation("--limit must be >= 0 (0 = the complete thread).")
+            }
+            let effectiveLimit = ThreadLimits.effective(self.limit, idPath: id != nil)
             if let id {
                 guard let row = try resolveMessageRow(ctx: ctx, id: id) else {
                     throw AppleError.notFound("no message for id '\(id)'.")
@@ -270,6 +306,8 @@ struct ThreadCommand: ParsableCommand {
                     // chain (via the Envelope Index message_references table), chronologically.
                     matchedBy = "references"
                     messages = try ctx.index.referencesThread(rowid: rowid, limit: effectiveLimit).map { ctx.decodeSummary($0) }
+                    total = effectiveLimit == Int.max ? messages.count
+                        : try ctx.index.referencesThread(rowid: rowid, limit: Int.max).count
                 } else {
                     matchedBy = "message_id"
                     let convID = intVal(row["conversation_id"]) ?? 0
@@ -278,9 +316,10 @@ struct ThreadCommand: ParsableCommand {
                         var f = EnvelopeIndex.MessageFilters()
                         f.mailboxName = "All"; f.conversationID = convID; f.sortAscending = true; f.limit = effectiveLimit
                         messages = try ctx.index.queryMessages(f).map { ctx.decodeSummary($0) }
+                        total = try ctx.index.countMessages(f)
                     }
                 }
-                if messages.isEmpty { messages = [ctx.decodeSummary(row)] } // singleton thread
+                if messages.isEmpty { messages = [ctx.decodeSummary(row)]; total = 1 } // singleton thread
             } else if let subject {
                 matchedBy = "subject_keyword"
                 var f = EnvelopeIndex.MessageFilters()
@@ -295,6 +334,9 @@ struct ThreadCommand: ParsableCommand {
                 guard !cleaned.isEmpty else {
                     throw AppleError.validation("--subject '\(subject)' is only reply/forward prefixes; provide an actual subject keyword.")
                 }
+                // Unknown mailbox → not_found, same reasoning as SearchCommand (an empty success
+                // is indistinguishable from a genuinely empty mailbox).
+                try requireMailboxKnown(ctx: ctx, name: mailbox, accountUUID: f.accountUUID)
                 f.mailboxName = mailbox; f.subjectContains = cleaned
                 // EXPLICIT, same reasoning as resolveTargets: a thread must span EVERY mailbox.
                 // Oracle B applies SKIP_FOLDERS in `_search_mail_records` (tools/search.py:236,
@@ -307,17 +349,46 @@ struct ThreadCommand: ParsableCommand {
                 f.sortAscending = true; f.limit = effectiveLimit
                 let rows = try ctx.index.queryMessages(f)
                 messages = rows.map { ctx.decodeSummary($0) }
+                total = try ctx.index.countMessages(f)
             } else {
                 throw AppleError.validation("provide a message id argument or --subject keyword.")
             }
-            let result = MailThreadResult(messages: messages, count: messages.count, matched_by: matchedBy)
+            let result = MailThreadResult(
+                messages: messages, count: messages.count, matched_by: matchedBy,
+                total: total, has_more: total.map { $0 > messages.count })
             if global.json { try Output.emit(tool: "mail", data: result) }
             else { for m in messages { printMessageText(m, full: false) } }
         }
     }
 }
 
+// Per-path thread limit defaults, extracted pure so the logic tier can pin the DEFAULT-change
+// half of gap5 without a >50-message live thread: nil on the id path is UNCAPPED (oracle A's
+// get_thread has no cap by construction — the old shared default of 50 silently truncated),
+// nil on the subject path is oracle B's max_messages=50, and explicit 0 = the complete thread
+// on either path. Negative limits are rejected by the caller before this runs.
+enum ThreadLimits {
+    static func effective(_ limit: Int?, idPath: Bool) -> Int {
+        guard let limit else { return idPath ? Int.max : 50 }
+        return limit == 0 ? Int.max : limit
+    }
+}
+
 // MARK: attachments
+
+/// Pure name-keyed join between the live Mail.app attachment enumeration and the
+/// Envelope-Index rows (`ORDER BY name`). Positional joins are FORBIDDEN here: the two
+/// orders were measured disagreeing on 8/8 multi-attachment messages (22/24 ids mis-paired
+/// on one real message). A name that appears more than once in the index — or not at all —
+/// yields (nil, nil): ambiguous/unknown beats silently wrong.
+enum AttachmentJoin {
+    static func byName(_ name: String, in indexRows: [(name: String, attachmentID: String?)])
+        -> (attachmentID: String?, saveIndex: Int?) {
+        let matches = indexRows.enumerated().filter { $0.element.name == name }
+        guard matches.count == 1, let m = matches.first else { return (nil, nil) }
+        return (m.element.attachmentID, m.offset)
+    }
+}
 
 struct AttachmentsCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
@@ -332,39 +403,119 @@ struct AttachmentsList: ParsableCommand {
     @OptionGroup var global: GlobalOptions
     @Argument(help: "Message id (ROWID / RFC Message-ID / message:// link).") var id: String?
     @Option(name: .long, help: "Subject keyword to find messages.") var subject: String?
-    @Option(name: .long, help: "Account name or UUID (for subject search).") var account: String?
-    @Option(name: .long, help: "Max messages to inspect for --subject (default 10).") var maxResults: Int = 10
+    @Option(name: .long, help: "Account name or UUID. With an id: scope assertion (rejects if the message is elsewhere — same posture as `get`, see docs/port-specs/mail.md; oracle A treats it as a perf hint). With --subject: which account to search.") var account: String?
+    @Option(name: .long, help: "Mailbox. With an id: scope assertion (oracle A's mailbox param, hint there; 'All' is the no-op wildcard). With --subject: where to match (default INBOX, oracle B's scope; 'All' widens). Ignored-with-an-id note: --max-results applies to --subject only (the id path is oracle A's get_attachments, which has no cap).") var mailbox: String?
+    @Option(name: .long, help: "Max messages to inspect for --subject (default 1, oracle B's default — each match costs a live Mail.app locator scan; raise deliberately). Inert on the id path.") var maxResults: Int = 1
+    @Flag(name: .long, help: "Skip the live Mail.app metadata enrichment (fast Envelope-Index rows only; mime_type/size/downloaded omitted, disclosed via note).") var noLive = false
+
+    /// Oracle-A-shaped rows: the live Mail.app enumeration (name/mime_type/size/downloaded, in
+    /// Mail's own MIME-part order, exactly like oracle A's AppleScript path) is PRIMARY;
+    /// Envelope-Index rows are the degraded path when the message is not locatable live (where
+    /// oracle A errors, the CLI still returns names — disclosed via `note`).
+    ///
+    /// attachment_id joins by NAME, never by position. Review measured the two enumerations'
+    /// orders DISAGREEING on 8 of 8 multi-attachment messages sampled on this store (the index
+    /// is `ORDER BY name`, Mail's live list is MIME-part order) — a positional zip mis-paired
+    /// 22 of 24 ids on one real message, silently. A duplicate name maps to nil (ambiguous).
+    ///
+    /// `save_index` is the position in the INDEX-ordered list — the space `attachments save
+    /// --indices` selects from — emitted so a caller can vet a row here and address the same
+    /// attachment there. NOTE: `attachments save` itself has a pre-existing index-space defect
+    /// (its positional AppleScript selection runs against the LIVE order while its name/dest
+    /// resolution uses the index order) — tracked as its own queue item; do not treat these two
+    /// commands' positions as interchangeable until that lands.
+    private func attachmentRows(ctx: MailContext, row: [String: String?], rowid: Int,
+                                live: Bool) throws
+        -> (rows: [MailAttachment], degraded: Bool) {
+        let indexRows = try ctx.index.attachments(messageRowid: rowid)
+        let msg = ctx.decodeSummary(row)
+        if live, let internetID = msg.internet_message_id,
+           let metas = (try? MailScript().listAttachments(internetMessageID: internetID, accountName: msg.account)) ?? nil {
+            return (metas.map { meta in
+                let (aid, sidx) = AttachmentJoin.byName(meta.name, in: indexRows)
+                return MailAttachment(name: meta.name, attachment_id: aid, mime_type: meta.mimeType,
+                                      size: meta.size, downloaded: meta.downloaded,
+                                      save_index: sidx, message_id: String(rowid))
+            }, false)
+        }
+        return (indexRows.enumerated().map { i, r in
+            MailAttachment(name: r.name, attachment_id: r.attachmentID, mime_type: nil,
+                           size: nil, downloaded: nil, save_index: i, message_id: String(rowid))
+        }, true)
+    }
 
     func run() throws {
         try runGuarded(tool: "mail") {
             let ctx = try MailContext()
             var atts: [MailAttachment] = []
             var matchedBy = ""
+            var emails: [MailAttachmentEmail]? = nil
+            var degraded = false
             if let id {
                 matchedBy = "message_id"
                 guard let row = try resolveMessageRow(ctx: ctx, id: id) else {
                     throw AppleError.notFound("no message for id '\(id)'.")
                 }
-                let rowid = intVal(row["rowid"]) ?? 0
-                atts = try ctx.index.attachments(messageRowid: rowid).map {
-                    MailAttachment(name: $0.name, attachment_id: $0.attachmentID, size: nil, message_id: String(rowid))
+                let msg = ctx.decodeSummary(row)
+                // --account/--mailbox were previously declared and silently IGNORED on the id
+                // path (ok:true with the payload for a nonexistent account). Same scope-assertion
+                // semantics as `get`, with the oracle-A hint divergence disclosed in the help/spec.
+                if let account {
+                    let wantUUID = try ctx.requireAccountUUID(account)
+                    let msgUUID = (try? ctx.requireAccountUUID(msg.account)) ?? ""
+                    guard wantUUID == msgUUID else {
+                        throw AppleError.notFound("message '\(id)' is not in account '\(account)'.")
+                    }
                 }
+                // "All" is the CLI-wide wildcard (search/thread/save) — asserting it literally
+                // made `--mailbox All` a guaranteed not_found on every message (review-caught).
+                if let mailbox, !EnvelopeIndex.isAllWildcard(mailbox) {
+                    let want = mailbox.lowercased()
+                    let path = msg.mailbox.lowercased()
+                    let leaf = path.split(separator: "/").last.map(String.init) ?? path
+                    guard path == want || leaf == want else {
+                        throw AppleError.notFound("message '\(id)' is not in mailbox '\(mailbox)' (it is in '\(msg.mailbox)').")
+                    }
+                }
+                let rowid = intVal(row["rowid"]) ?? 0
+                (atts, degraded) = try attachmentRows(ctx: ctx, row: row, rowid: rowid, live: !noLive)
             } else if let subject {
                 matchedBy = "subject_keyword"
                 var f = EnvelopeIndex.MessageFilters()
                 if let account { f.accountUUID = try ctx.requireAccountUUID(account) }
-                f.mailboxName = "All"; f.subjectContains = subject; f.limit = maxResults; f.hasAttachment = true
+                // Oracle B scopes the subject match to the account's INBOX and groups per email,
+                // INCLUDING zero-attachment matches ("No attachments") — the old forced
+                // hasAttachment=true made a zero-attachment match structurally unreachable.
+                f.mailboxName = mailbox ?? "INBOX"
+                // Same fail-loud rule as search/thread — an unknown --mailbox on the flag this
+                // batch ADDED must not return the empty success the batch exists to kill
+                // (review-caught: the defect was reintroduced on the new flag in the same diff).
+                try requireMailboxKnown(ctx: ctx, name: f.mailboxName, accountUUID: f.accountUUID)
+                f.subjectContains = subject
+                f.limit = maxResults
                 let rows = try ctx.index.queryMessages(f)
+                var grouped: [MailAttachmentEmail] = []
                 for row in rows {
                     let rowid = intVal(row["rowid"]) ?? 0
-                    atts += try ctx.index.attachments(messageRowid: rowid).map {
-                        MailAttachment(name: $0.name, attachment_id: $0.attachmentID, size: nil, message_id: String(rowid))
-                    }
+                    let msg = ctx.decodeSummary(row)
+                    let (rowsForMsg, deg) = try attachmentRows(ctx: ctx, row: row, rowid: rowid, live: !noLive)
+                    degraded = degraded || deg
+                    atts += rowsForMsg
+                    grouped.append(MailAttachmentEmail(
+                        message_id: String(rowid), subject: msg.subject, sender: msg.sender,
+                        date_received: msg.date_received, attachment_count: rowsForMsg.count,
+                        attachments: rowsForMsg))
                 }
+                emails = grouped
             } else {
                 throw AppleError.validation("provide a message id argument or --subject keyword.")
             }
-            let result = MailAttachmentsResult(attachments: atts, count: atts.count, matched_by: matchedBy)
+            let result = MailAttachmentsResult(
+                attachments: atts, count: atts.count, matched_by: matchedBy,
+                emails: emails, matched_email_count: emails?.count,
+                note: !degraded ? nil : (noLive
+                    ? "live enrichment skipped (--no-live) — rows are Envelope-Index only (mime_type/size/downloaded omitted)"
+                    : "live Mail.app enrichment unavailable — rows are Envelope-Index only (mime_type/size/downloaded omitted)"))
             if global.json { try Output.emit(tool: "mail", data: result) }
             else { for a in atts { print("\(a.name)\(a.attachment_id.map { "  [\($0)]" } ?? "")  (msg \(a.message_id))") } }
         }

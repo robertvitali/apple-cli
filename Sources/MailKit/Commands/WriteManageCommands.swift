@@ -819,11 +819,28 @@ struct MailboxesCreate: ParsableCommand {
             guard !name.trimmingCharacters(in: .whitespaces).isEmpty else {
                 throw AppleError.validation("mailbox name cannot be empty.")
             }
-            // Applied per '/'-separated SEGMENT: '/' itself is the documented nesting separator,
-            // so it is legal in `name` but must not appear inside a segment.
-            let segments = name.components(separatedBy: "/")
-            guard !segments.contains(where: { $0.trimmingCharacters(in: .whitespaces).isEmpty }) else {
-                throw AppleError.validation("mailbox path '\(name)' has an empty path segment.")
+            // Oracle B normalizes: split on '/', TRIM each segment, DROP empty ones
+            // (manage.py create_mailbox: `[s.strip() for s in name.split("/") if s.strip()]`) —
+            // so ' apple-cli-test / B ' and 'apple-cli-test//B' both create apple-cli-test/B.
+            // The CLI previously REJECTED empty segments and passed whitespace through raw,
+            // creating literal ' apple-cli-test ' folders the oracle never would.
+            let nameSegments = name.components(separatedBy: "/")
+                .map { $0.trimmingCharacters(in: .whitespaces) }
+                .filter { !$0.isEmpty }
+            // Emptiness is judged on the NAME's segments BEFORE the parent is prepended —
+            // oracle B's order (manage.py: the `if not segments` check precedes the
+            // parent_segments prepend). Checking after let `--name '/' --parent Projects`
+            // "succeed" by creating the PARENT, with an envelope claiming mailbox "/"
+            // (review-caught, reproduced live).
+            guard !nameSegments.isEmpty else {
+                throw AppleError.validation("mailbox name cannot be empty.")
+            }
+            var segments = nameSegments
+            if let parent {
+                // Parent gets the SAME normalization and is prepended (oracle B parent_segments).
+                segments = parent.components(separatedBy: "/")
+                    .map { $0.trimmingCharacters(in: .whitespaces) }
+                    .filter { !$0.isEmpty } + segments
             }
             let invalid = CharacterSet(charactersIn: "\\\"<>|?*:").union(.controlCharacters)
             for seg in segments where seg.rangeOfCharacter(from: invalid) != nil {
@@ -835,24 +852,33 @@ struct MailboxesCreate: ParsableCommand {
             // (preview honesty) and BEFORE the store opens (store-independent): the check
             // needs only `name` (review-caught: it sat inside willExecute, so a sandboxed
             // dry-run previewed clean for a name --execute refuses 77).
-            if sandboxActive, !name.hasPrefix(TestMode.sandboxPrefix) {
-                throw AppleError.mailSafety("sandbox active: mailbox name '\(name)' is not a labeled test item (must start with \"\(TestMode.sandboxPrefix)\") — refusing.")
+            // The gate tests the NORMALIZED FIRST SEGMENT of the full (parent-prepended) path,
+            // not the raw `name` — post-normalization, the raw string is not what gets created
+            // (audit note on extra8), and every created level nests under that first segment,
+            // so a labeled first segment keeps the whole subtree cleanable.
+            if sandboxActive, !(segments.first ?? "").hasPrefix(TestMode.sandboxPrefix) {
+                throw AppleError.mailSafety("sandbox active: mailbox path '\(segments.joined(separator: "/"))' is not a labeled test item (its first segment must start with \"\(TestMode.sandboxPrefix)\") — refusing.")
             }
             let ctx = try MailContext()
             let uuid = try ctx.requireAccountUUID(account)
-            let fullPath = parent.map { "\($0)/\(name)" } ?? name
+            let fullPath = segments.joined(separator: "/")
             var executed = false
             let note: String? = nil
             if willExecute {
                 try MailScript().createMailbox(accountName: account, path: fullPath)
                 executed = true
             }
-            // `mailbox` + `parent` are oracle A create_mailbox's wire keys. `path` (the joined
-            // form) is the CLI's original key and is kept, but it alone is LOSSY: when `name`
-            // itself contains a '/', the name-vs-parent boundary cannot be recovered from it.
+            // `mailbox` + `parent` are oracle A create_mailbox's wire keys and now echo the
+            // NORMALIZED components (post-normalization, the raw strings do not name what gets
+            // created — a consumer reconstructing parent + "/" + mailbox must recover `path`
+            // exactly; review-caught with `--name ' Projects / 2024 '`). The raw inputs stay
+            // available under *_raw so the original spelling is never lost, and `path` remains
+            // the joined form.
+            let normalizedParent = segments.dropLast().isEmpty ? nil : segments.dropLast().joined(separator: "/")
             try Output.emit(tool: "mail", data: ["action": AnyEncodableBox("create_mailbox"), "account": AnyEncodableBox(account),
                 "account_id": AnyEncodableBox(uuid), "path": AnyEncodableBox(fullPath),
-                "mailbox": AnyEncodableBox(name), "parent": AnyEncodableBox(parent),
+                "mailbox": AnyEncodableBox(segments.last ?? ""), "parent": AnyEncodableBox(normalizedParent),
+                "mailbox_raw": AnyEncodableBox(name), "parent_raw": AnyEncodableBox(parent),
                 "dry_run": AnyEncodableBox(!willExecute),
                 "executed": AnyEncodableBox(executed), "note": AnyEncodableBox(note)], sandboxActive: sandboxActive)
         }

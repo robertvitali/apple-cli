@@ -990,6 +990,10 @@ public struct MailScript {
     /// The Envelope Index `read` bit diverges from server-synced seen-state (observed: index
     /// far above Mail's live count on one iCloud INBOX). MCP A/B source unread from Mail's live
     /// `unread count` property, so we do too for parity.
+    /// Internal (not private): UnreadSummaryTests pins the oracle-B arms (Inbox fallback,
+    /// -1 sentinel, one-level descent) as source text, since the script only runs live.
+    static var unreadScriptSource: String { unreadScript }
+
     private static let unreadScript = """
     on run argv
         set mode to item 1 of argv
@@ -1003,17 +1007,40 @@ public struct MailScript {
                 set an to name of a
                 if acctFilter is "" or acctFilter is an then
                     if mode is "summary" then
+                        -- Oracle B (inbox.py summary fast path + core.inbox_mailbox_script):
+                        -- INBOX with an "Inbox" fallback, and an unreadable inbox emits the -1
+                        -- ERROR sentinel instead of silently dropping the account row.
                         try
-                            set uc to unread count of (mailbox "INBOX" of a)
+                            try
+                                set ib to mailbox "INBOX" of a
+                            on error
+                                set ib to mailbox "Inbox" of a
+                            end try
+                            set uc to unread count of ib
                             set out to out & an & US & "INBOX" & US & uc & RS
+                        on error
+                            set out to out & an & US & "INBOX" & US & "-1" & RS
                         end try
                     else
+                        -- Oracle B's non-summary branch descends ONE level: each top mailbox,
+                        -- then `every mailbox of aMailbox` keyed "Parent/Child". Not recursive
+                        -- past one level — deeper nesting is invisible to the oracle too.
                         repeat with mbx in mailboxes of a
                             try
+                                set mn to (name of mbx)
                                 set uc to unread count of mbx
                                 if incZero is "1" or uc > 0 then
-                                    set out to out & an & US & (name of mbx) & US & uc & RS
+                                    set out to out & an & US & mn & US & uc & RS
                                 end if
+                                try
+                                    repeat with subBox in (every mailbox of mbx)
+                                        set sn to (name of subBox)
+                                        set su to unread count of subBox
+                                        if incZero is "1" or su > 0 then
+                                            set out to out & an & US & mn & "/" & sn & US & su & RS
+                                        end if
+                                    end repeat
+                                end try
                             end try
                         end repeat
                     end if
@@ -1693,6 +1720,117 @@ public struct MailScript {
             return Set(saved)
         }
         return nil   // not locatable on either candidate form
+    }
+
+    // MARK: Attachment metadata (READ — enumerates live attachment properties; mutates nothing)
+
+    // Enumerate `mail attachments` of a located message with the FOUR properties oracle A's
+    // AppleScript path reads per attachment (mail_connector.py `_get_attachments_applescript`:
+    // name / MIME type / file size / downloaded). Rows come back in Mail.app's OWN live order —
+    // the same order oracle A reports and the same positional space `saveAttachments` addresses.
+    // `name` is read bare (a nameless attachment row is useless; let the try skip it, matching
+    // the oracle's whole-row `try`); the other three are individually try-wrapped so one
+    // unreadable property degrades that FIELD to "", not the row — strictly more informative
+    // than oracle A, which loses the whole message on any property error.
+    private static let listAttachmentsScript = """
+    on run argv
+        set msg to my findMsg(item 1 of argv, item 2 of argv)
+        if msg is missing value then return "notfound"
+        set RS to (ASCII character 30)
+        set US to (ASCII character 31)
+        set outText to ""
+        tell application "Mail"
+            set attList to mail attachments of msg
+            repeat with att in attList
+                try
+                    set attName to (name of att)
+                    -- The name is REMOTE-supplied (the sender's MIME filename). A name carrying
+                    -- the RS/US wire delimiters would re-split into forged rows on the Swift
+                    -- side — the same blob-desync class saveAttachments hard-refuses and
+                    -- safeAttachmentBasename scrubs. Neutralize both to "_" before emission.
+                    set AppleScript's text item delimiters to US
+                    set attName to text items of attName
+                    set AppleScript's text item delimiters to "_"
+                    set attName to attName as string
+                    set AppleScript's text item delimiters to RS
+                    set attName to text items of attName
+                    set AppleScript's text item delimiters to "_"
+                    set attName to attName as string
+                    set AppleScript's text item delimiters to ""
+                    set attMime to ""
+                    set attSize to ""
+                    set attDown to ""
+                    try
+                        set attMime to (MIME type of att) as string
+                    end try
+                    try
+                        set attSize to (file size of att) as string
+                    end try
+                    try
+                        if downloaded of att then
+                            set attDown to "1"
+                        else
+                            set attDown to "0"
+                        end if
+                    end try
+                    set outText to outText & attName & US & attMime & US & attSize & US & attDown & RS
+                end try
+            end repeat
+        end tell
+        return "ok" & RS & outText
+    end run
+    """
+
+    public struct AttachmentMeta {
+        public let name: String
+        public let mimeType: String?
+        public let size: Int?
+        public let downloaded: Bool?
+    }
+
+    /// List a located message's attachments with oracle A's four metadata fields, in Mail.app's
+    /// live order. Returns `nil` when the message is not locatable in Mail.app on either id form
+    /// (caller falls back to Envelope-Index rows) — never throws for a per-attachment failure.
+    public func listAttachments(internetMessageID: String, accountName: String?) throws -> [AttachmentMeta]? {
+        let script = MailScript.listAttachmentsScript + "\n" + MailScript.locator
+        let bare = MailFormat.stripAngleBrackets(internetMessageID) ?? internetMessageID
+        for candidate in ["<\(bare)>", bare] {
+            let out = try runner.run(script, arguments: [candidate, accountName ?? ""])
+            if out == "notfound" { continue }
+            if let metas = MailScript.parseAttachmentList(out) { return metas }
+        }
+        return nil
+    }
+
+    /// Internal (not private) so the logic tier can pin the fail-closed mapping without a live
+    /// Mail — same rule as `parseNativeCompose`: output not carrying the "ok" sentinel is
+    /// treated as not-located (fallback), never as an empty success.
+    ///
+    /// Belt-and-braces on the remote-supplied name: the script already neutralizes RS/US, but
+    /// a residual C0/DEL control character in a parsed field is scrubbed to "_" here too (the
+    /// `safeAttachmentBasename` rule) — it also keeps a hostile name from rewriting terminal
+    /// output on the --text path.
+    static func parseAttachmentList(_ out: String) -> [AttachmentMeta]? {
+        var rows = out.components(separatedBy: MailScript.RS)
+        guard rows.first == "ok" else { return nil }
+        rows.removeFirst()
+        return rows.compactMap { row in
+            guard !row.isEmpty else { return nil }
+            let f = row.components(separatedBy: MailScript.US)
+            guard f.count == 4, !f[0].isEmpty else { return nil }
+            let name = String(String.UnicodeScalarView(f[0].unicodeScalars.map {
+                $0.value < 0x20 || $0.value == 0x7F ? Unicode.Scalar(0x5F)! : $0
+            }))
+            // AppleScript coerces integers past ±536870911 to reals, and `as string` on a real
+            // yields exponent form ("6.0E+8") — accept it rather than dropping the size for
+            // exactly the attachments where a caller most wants it.
+            let size = Int(f[2]) ?? Double(f[2]).flatMap { Int(exactly: $0.rounded()) }
+            return AttachmentMeta(
+                name: name,
+                mimeType: f[1].isEmpty ? nil : f[1],
+                size: size,
+                downloaded: f[3].isEmpty ? nil : (f[3] == "1"))
+        }
     }
 
     // MARK: Mailbox + rule creation (caller gates: create only labeled `apple-cli-test…` items)
