@@ -38,6 +38,22 @@ struct DateParsingTests {
         #expect(abs(parsed.date.timeIntervalSince1970 - expected.timeIntervalSince1970) < 1.0)
     }
 
+    /// CAL-02: the oracle anchors a bare `yyyy-MM-dd` at MIDNIGHT in the parse zone (its
+    /// `DateFormatter` default); we used to lift to noon, a 12-hour divergence on every bare
+    /// create/update date and recurrence end. Pinned as an exact instant in UTC so a re-anchor
+    /// (noon, end-of-day, anything) goes red.
+    @Test("bare date anchors at midnight in the parse zone, matching the oracle")
+    func bareDateAnchorsAtMidnight() throws {
+        let utc = TimeZone(identifier: "UTC")!
+        let parsed = try DateParsing.parse("2026-07-15", timeZone: utc)
+        #expect(parsed.date == Date(timeIntervalSince1970: 1_784_073_600),  // 2026-07-15T00:00:00Z
+                "bare date must resolve to midnight, got \(parsed.date)")
+        // And in a non-UTC zone the instant shifts by exactly the zone offset (still local 00:00).
+        let tokyo = TimeZone(identifier: "Asia/Tokyo")!   // UTC+9, no DST
+        let jst = try DateParsing.parse("2026-07-15", timeZone: tokyo)
+        #expect(jst.date == Date(timeIntervalSince1970: 1_784_073_600 - 9 * 3600))
+    }
+
     @Test("unrecognized input throws")
     func unrecognized() {
         #expect(throws: DateParsing.ParseError.self) { _ = try DateParsing.parse("not-a-date") }
@@ -166,18 +182,23 @@ struct AlarmMappingTests {
     func relative() throws {
         let ek = try AlarmMapping.ekAlarm(from: Alarm(relative_offset: -1800))
         #expect(ek.relativeOffset == -1800)
-        let back = AlarmMapping.alarm(from: ek)
+        let back = AlarmMapping.alarm(from: ek, preferredTimeZone: .current)
         #expect(back.relative_offset == -1800)
         #expect(back.absolute_date == nil)
         #expect(back.location_trigger == nil)
     }
 
-    @Test("absolute date alarm round-trips")
+    /// The alarm's `absolute_date` is the SIXTH event-payload date site: the oracle renders it
+    /// through the same `formatEventDate` as the event dates, in the ITEM's zone, always timed.
+    /// Pinned as an exact string so a regression to UTC instants goes red.
+    @Test("absolute date alarm round-trips and renders in the item's zone")
     func absolute() throws {
-        let ek = try AlarmMapping.ekAlarm(from: Alarm(absolute_date: Date(timeIntervalSince1970: 1_790_000_000)))
-        #expect(ek.absoluteDate != nil)
-        let back = AlarmMapping.alarm(from: ek)
-        #expect(back.absolute_date != nil)
+        let instant = Date(timeIntervalSince1970: 1_784_073_600)   // 2026-07-15T00:00:00Z
+        let ek = try AlarmMapping.ekAlarm(from: Alarm(absoluteDateValue: instant))
+        #expect(ek.absoluteDate == instant)
+        let ny = TimeZone(identifier: "America/New_York")!
+        let back = AlarmMapping.alarm(from: ek, preferredTimeZone: ny)
+        #expect(back.absolute_date == "2026-07-14T20:00:00-04:00")
         #expect(back.relative_offset == nil)
     }
 
@@ -188,12 +209,27 @@ struct AlarmMappingTests {
         #expect(ek.structuredLocation != nil)
         #expect(ek.proximity == .enter)
 
-        let lt = try #require(AlarmMapping.alarm(from: ek).location_trigger)
+        let lt = try #require(AlarmMapping.alarm(from: ek, preferredTimeZone: .current).location_trigger)
         #expect(lt.title == "Office")
         #expect(lt.proximity == "enter")
         #expect(lt.radius == 150)
         #expect(abs((lt.latitude ?? 0) - 37.3349) < 1e-6)
         #expect(abs((lt.longitude ?? 0) + 122.009) < 1e-6)
+    }
+
+    /// Oracle `locationTriggerToJSON`: `title ?? "Location"` and `radius > 0 ? radius : 100` —
+    /// note the 100 default here, DIFFERENT from the structured-location site's omit-when-0.
+    @Test("titleless / radiusless alarm geofence gets the oracle's fallbacks")
+    func geofenceFallbacks() throws {
+        let ek = EKAlarm()
+        let loc = EKStructuredLocation()
+        loc.title = nil
+        loc.geoLocation = CLLocation(latitude: 1, longitude: 2)
+        loc.radius = 0
+        ek.structuredLocation = loc
+        let lt = try #require(AlarmMapping.alarm(from: ek, preferredTimeZone: .current).location_trigger)
+        #expect(lt.title == "Location")
+        #expect(lt.radius == 100)
     }
 
     @Test("an alarm with no trigger kind throws a validation AppleError")
@@ -307,6 +343,86 @@ struct MapErrorTests {
     }
 }
 
+// MARK: - Geofence spec (shared Calendar/Reminders parser — CAL-04 / REM-05)
+
+@Suite("GeofenceSpec")
+struct GeofenceSpecTests {
+
+    /// CAL-04's headline case: a street address IS a comma-bearing title, and the old parser
+    /// kept only its LAST fragment.
+    @Test("a comma-bearing title survives verbatim, spacing intact")
+    func commaTitle() throws {
+        let g = try GeofenceSpec.parse("40.0,-74.0,100,enter,742 Evergreen Terrace, Springfield, OR 97475")
+        #expect(g.radius == 100)
+        #expect(g.proximity == "enter")
+        #expect(g.title == "742 Evergreen Terrace, Springfield, OR 97475")
+    }
+
+    @Test("radius and proximity are order-independent, each at most once")
+    func orderIndependent() throws {
+        let a = try GeofenceSpec.parse("37.3,-122.0,enter,250,Home")
+        #expect(a.radius == 250 && a.proximity == "enter" && a.title == "Home")
+        let b = try GeofenceSpec.parse("37.3,-122.0,150,leave,Home")
+        #expect(b.radius == 150 && b.proximity == "leave" && b.title == "Home")
+    }
+
+    /// The old Reminders copy let ANY later numeric overwrite the radius, so "500" could never
+    /// be a title; now a second numeric fragment starts the title.
+    @Test("a numeric title is expressible after an explicit radius")
+    func numericTitle() throws {
+        let g = try GeofenceSpec.parse("40.0,-74.0,100,enter,500")
+        #expect(g.radius == 100)
+        #expect(g.title == "500")
+    }
+
+    @Test("defaults: radius 100, proximity enter, title nil; bare keyword/title slots work")
+    func defaults() throws {
+        let bare = try GeofenceSpec.parse("37.33,-122.03")
+        #expect(bare.radius == 100 && bare.proximity == "enter" && bare.title == nil)
+        #expect(try GeofenceSpec.parse("37.3,-122.0,leave").proximity == "leave")
+        #expect(try GeofenceSpec.parse("1.0,2.0,Office").title == "Office")
+        // trailing empty fragment is not a title
+        #expect(try GeofenceSpec.parse("1.0,2.0,100,").title == nil)
+        // empty fragments BEFORE the title are skipped (old-parser behavior kept)
+        #expect(try GeofenceSpec.parse("1.0,2.0,,Home").title == "Home")
+        #expect(try GeofenceSpec.parse("1.0,2.0,100,,Home").title == "Home")
+    }
+
+    /// Documented consequence of comma-bearing titles: once the title starts, a later keyword
+    /// is part of it.
+    @Test("a keyword after the title has started belongs to the title")
+    func keywordInTitle() throws {
+        let g = try GeofenceSpec.parse("40.0,-74.0,Home,leave")
+        #expect(g.proximity == "enter")
+        #expect(g.title == "Home,leave")
+    }
+
+    @Test("validation: lat/lon required + in range, radius finite and non-negative")
+    func validation() {
+        #expect(throws: GeofenceSpec.SpecError.self) { _ = try GeofenceSpec.parse("notanumber") }
+        #expect(throws: GeofenceSpec.SpecError.self) { _ = try GeofenceSpec.parse("91,0") }
+        #expect(throws: GeofenceSpec.SpecError.self) { _ = try GeofenceSpec.parse("0,181") }
+        #expect(throws: GeofenceSpec.SpecError.self) { _ = try GeofenceSpec.parse("1,2,-5") }
+        #expect(throws: GeofenceSpec.SpecError.self) { _ = try GeofenceSpec.parse("1,2,inf") }
+    }
+}
+
+// MARK: - Structured-location read mapping (CAL-09)
+
+@Suite("structured-location read mapping")
+struct StructuredLocationMappingTests {
+    /// CAL-09: the oracle GUARANTEES the `title` key (`structuredLocation.title ?? "Location"`
+    /// onto a non-optional field); omitting it on a titleless location broke `if "title" in`.
+    @Test("a titleless EKStructuredLocation maps with the oracle's \"Location\" fallback")
+    func titleFallback() {
+        let loc = EKStructuredLocation()
+        loc.title = nil
+        #expect(ReadMapping.structuredLocation(from: loc).title == "Location")
+        let named = EKStructuredLocation(title: "HQ")
+        #expect(ReadMapping.structuredLocation(from: named).title == "HQ")
+    }
+}
+
 // MARK: - Encoding (envelope + wire-key shape)
 
 @Suite("EventKitCore encoding")
@@ -317,22 +433,72 @@ struct EncodingTests {
         return try #require(obj["data"] as? [String: Any])
     }
 
-    @Test("CalendarEvent omits nil optionals and uses snake_case ISO-8601")
+    @Test("CalendarEvent omits nil optionals and carries oracle-format date strings")
     func eventNilOmission() throws {
-        let start = Date(timeIntervalSince1970: 1_784_116_800)
+        let start = Date(timeIntervalSince1970: 1_784_116_800)   // 2026-07-15T12:00:00Z
+        let la = TimeZone(identifier: "America/Los_Angeles")!
         let event = CalendarEvent(
             id: "EVT-1", title: "apple-cli-test standup", location: "HQ",
-            start_date: start, end_date: start.addingTimeInterval(1800), is_all_day: false,
+            start_date: EventDateFormat.string(start, timeZone: la, includeTime: true),
+            end_date: EventDateFormat.string(start.addingTimeInterval(1800), timeZone: la, includeTime: true),
+            is_all_day: false,
             availability: "busy", status: "confirmed", calendar: "Work", calendar_id: "CAL-1",
             account: "iCloud", time_zone: "America/Los_Angeles", is_detached: false, has_recurrence: false
         )
         let data = try object(event)
         #expect(data["is_all_day"] as? Bool == false)
         #expect(data["calendar_id"] as? String == "CAL-1")
-        #expect((data["start_date"] as? String)?.hasPrefix("2026-07-15T12:00:00") == true)
+        // CAL-03: the wire value is the EVENT-zone rendering, not a UTC instant.
+        #expect(data["start_date"] as? String == "2026-07-15T05:00:00-07:00")
         #expect(data["notes"] == nil)      // nil optionals omitted, not null
         #expect(data["organizer"] == nil)
         #expect(data["url"] == nil)
+    }
+
+    /// CAL-03: port of the oracle's `formatEventDate` — every event date renders in the event's
+    /// zone; all-day start/end are date-only WITH the offset. Pinned as exact strings so a
+    /// regression to UTC instants (or to timed all-day forms) goes red.
+    @Test("EventDateFormat matches the oracle's rendering")
+    func eventDateFormat() throws {
+        let instant = Date(timeIntervalSince1970: 1_784_073_600)   // 2026-07-15T00:00:00Z
+        let ny = TimeZone(identifier: "America/New_York")!
+        #expect(EventDateFormat.string(instant, timeZone: ny, includeTime: true)
+                == "2026-07-14T20:00:00-04:00")
+        // All-day: date + offset, NO time — and the date is the EVENT-LOCAL day (July 14 in NY).
+        #expect(EventDateFormat.string(instant, timeZone: ny, includeTime: false)
+                == "2026-07-14-04:00")
+        // GMT renders as the formatter's `Z` suffix — same DateFormatter behavior as the oracle.
+        let utc = TimeZone(identifier: "UTC")!
+        #expect(EventDateFormat.string(instant, timeZone: utc, includeTime: false) == "2026-07-15Z")
+        #expect(EventDateFormat.string(instant, timeZone: utc, includeTime: true) == "2026-07-15T00:00:00Z")
+    }
+
+    /// CAL-03's SELECTION, pinned (review: pinning only the formatter left `includeTime =
+    /// !isAllDay` and the `timeZone ?? .current` fallback mutable with every test green).
+    @Test("eventDates: all-day drops the time on start/end ONLY; nil zone falls back to current")
+    func eventDatesSelection() throws {
+        let instant = Date(timeIntervalSince1970: 1_784_073_600)   // 2026-07-15T00:00:00Z
+        let ny = TimeZone(identifier: "America/New_York")!
+        let allDay = EventDateFormat.eventDates(start: instant, end: instant, occurrence: instant,
+                                                created: instant, modified: instant,
+                                                isAllDay: true, timeZone: ny)
+        #expect(allDay.start == "2026-07-14-04:00")                // date-only
+        #expect(allDay.end == "2026-07-14-04:00")
+        #expect(allDay.occurrence == "2026-07-14T20:00:00-04:00")  // ALWAYS timed
+        #expect(allDay.created == "2026-07-14T20:00:00-04:00")
+        #expect(allDay.modified == "2026-07-14T20:00:00-04:00")
+
+        let timed = EventDateFormat.eventDates(start: instant, end: nil, occurrence: nil,
+                                               created: nil, modified: nil,
+                                               isAllDay: false, timeZone: ny)
+        #expect(timed.start == "2026-07-14T20:00:00-04:00")
+        #expect(timed.end == nil)
+
+        // nil zone → the CURRENT zone, whatever it is (pin by recomputing with .current).
+        let fallback = EventDateFormat.eventDates(start: instant, end: nil, occurrence: nil,
+                                                  created: nil, modified: nil,
+                                                  isAllDay: false, timeZone: nil)
+        #expect(fallback.start == EventDateFormat.string(instant, timeZone: .current, includeTime: true))
     }
 
     /// Golden lock on the rich nested wire keys — a rename/retype of any of these is a MAJOR
@@ -340,12 +506,17 @@ struct EncodingTests {
     @Test("fully-populated CalendarEvent locks the rich nested keys")
     func eventGolden() throws {
         let start = Date(timeIntervalSince1970: 1_784_116_800)
+        let utc = TimeZone(identifier: "UTC")!
         let event = CalendarEvent(
             id: "EVT-2", title: "apple-cli-test review", notes: "n", location: "HQ",
-            url: "https://example.com", start_date: start, end_date: start.addingTimeInterval(3600),
+            url: "https://example.com",
+            start_date: EventDateFormat.string(start, timeZone: utc, includeTime: true),
+            end_date: EventDateFormat.string(start.addingTimeInterval(3600), timeZone: utc, includeTime: true),
             is_all_day: false, availability: "busy", status: "confirmed", calendar: "Work",
             calendar_id: "CAL-1", account: "iCloud", time_zone: "UTC", is_detached: true,
-            has_recurrence: true, occurrence_date: start, external_id: "EXT-9",
+            has_recurrence: true,
+            occurrence_date: EventDateFormat.string(start, timeZone: utc, includeTime: true),
+            external_id: "EXT-9",
             organizer: Participant(name: "Org", email: "org@x.com", url: "mailto:org@x.com",
                                    status: "accepted", role: "chair", type: "person", is_current_user: true),
             attendees: [Participant(name: "A", email: "a@x.com", url: "mailto:a@x.com",

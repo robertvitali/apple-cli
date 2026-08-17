@@ -54,10 +54,19 @@ public struct EventsRead: ParsableCommand {
             let allCollections = store.calendars(for: .event)
             var fetchCalendars = allCollections
             if let calendar {
-                guard let cal = store.calendar(matching: calendar, entity: .event) else {
-                    throw AppleError.notFound("no calendar named or id '\(calendar)'")
+                // CAL-07: the oracle's `findCalendar` treats nil OR EMPTY as "the default
+                // calendar" — so `--calendar ""` filters to the default, it does not 404.
+                if calendar.isEmpty {
+                    guard let def = store.defaultCalendarForEvents else {
+                        throw AppleError.notFound("no default calendar available")
+                    }
+                    fetchCalendars = [def]
+                } else {
+                    guard let cal = store.calendar(matching: calendar, entity: .event) else {
+                        throw AppleError.notFound("no calendar named or id '\(calendar)'")
+                    }
+                    fetchCalendars = [cal]
                 }
-                fetchCalendars = [cal]
             }
             if let account {
                 let known = Set(allCollections.compactMap { $0.source?.title })
@@ -83,8 +92,8 @@ public struct EventsRead: ParsableCommand {
             }
 
             let data = EventsReadData(
-                calendars: allCollections.map { ReadMapping.collection(from: $0) }
-                    .sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending },
+                // CAL-10: native source-grouped order, matching the oracle (no re-sort).
+                calendars: allCollections.map { ReadMapping.collection(from: $0) },
                 events: events.map { EventMapping.event(from: $0) })
             try Output.emit(tool: "calendar", data: data)
         }
@@ -178,7 +187,8 @@ public struct EventsCreate: ParsableCommand {
     }
 
     func resolveCalendar(store: EventStore, name: String?) -> EKCalendar? {
-        if let name { return store.calendar(matching: name, entity: .event) }
+        // CAL-07: nil OR EMPTY both mean the default calendar (oracle `findCalendar`).
+        if let name, !name.isEmpty { return store.calendar(matching: name, entity: .event) }
         return store.defaultCalendarForEvents
     }
 }
@@ -279,17 +289,30 @@ public struct EventsUpdate: ParsableCommand {
             if let title { event.title = title }
             if let startParsed { event.startDate = startParsed.date }
             if let endParsed { event.endDate = endParsed.date }
-            if let start, let startParsed, !startParsed.isDateOnly { event.timeZone = TZDetect.from(start) ?? TimeZone.current }
+            // CAL-06 — oracle timezone rules; see `EventTZUpdate.resolve`.
+            if let tz = try EventTZUpdate.resolve(start: startParsed != nil ? start : nil,
+                                                  end: endParsed != nil ? end : nil,
+                                                  existing: event.timeZone) {
+                event.timeZone = tz
+            }
             if let allDay { event.isAllDay = allDay }
             if let note { event.notes = note }
             if let location { event.location = location }
             if let validatedURL { event.url = validatedURL }
             if let availability, let a = EKEnum.availability(from: availability) { event.availability = a }
             if let targetCalendar {
-                guard let cal = store.calendar(matching: targetCalendar, entity: .event) else {
-                    throw AppleError.notFound("no calendar named or id '\(targetCalendar)'")
+                // CAL-07: empty means "move to the default calendar" (oracle `findCalendar`).
+                if targetCalendar.isEmpty {
+                    guard let def = store.defaultCalendarForEvents else {
+                        throw AppleError.notFound("no default calendar available")
+                    }
+                    event.calendar = def
+                } else {
+                    guard let cal = store.calendar(matching: targetCalendar, entity: .event) else {
+                        throw AppleError.notFound("no calendar named or id '\(targetCalendar)'")
+                    }
+                    event.calendar = cal
                 }
-                event.calendar = cal
             }
             if clearStructuredLocation { event.structuredLocation = nil }
             else if let structured { event.structuredLocation = ReadMapping.ekStructuredLocation(from: structured) }

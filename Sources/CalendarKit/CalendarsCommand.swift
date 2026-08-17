@@ -37,9 +37,11 @@ public struct CalendarsList: ParsableCommand {
                 }
                 collections = collections.filter { $0.source?.title == account }
             }
+            // CAL-10: the oracle returns calendars in EventKit's native, source-grouped order
+            // (`eventStore.calendars(for:)` verbatim) — re-sorting alphabetically was a live
+            // diff on every list.
             let data = CalendarsData(
-                calendars: collections.map { ReadMapping.collection(from: $0) }
-                    .sorted { $0.title.localizedCaseInsensitiveCompare($1.title) == .orderedAscending })
+                calendars: collections.map { ReadMapping.collection(from: $0) })
             try Output.emit(tool: "calendar", data: data)
         }
     }

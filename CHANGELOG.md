@@ -12,6 +12,59 @@ with the Apple MCP servers they replace.
 
 ## [Unreleased]
 
+### BREAKING — Calendar event dates now render in the event's zone; all-day events are date-only
+
+The oracle emits every event date through its `formatEventDate`: rendered in the EVENT's own
+timezone (`event.timeZone ?? current`), with all-day start/end as date-only-plus-offset
+(`2026-07-28-04:00`) and occurrence/creation/last-modified always timed. We emitted UTC
+instants (`2026-07-28T04:00:00Z`) for everything — a live diff on every all-day event and on
+every event in a non-UTC zone. Closes CAL-03.
+
+**Behaviour changes for consumers:** `start_date`, `end_date`, `occurrence_date`,
+`creation_date`, `last_modified`, and `alarms[].absolute_date` (the sixth date site — review
+caught the first pass covering only five) on `calendar events read`/`create`/`update` payloads
+are still JSON strings, but the VALUE format changed from a UTC ISO instant to the oracle's
+event-zone rendering (`yyyy-MM-dd'T'HH:mm:ssZZZZZ`, or `yyyy-MM-ddZZZZZ` for all-day
+start/end; GMT renders with the formatter's `Z` suffix). Reminders alarms render the same way
+in the reminder's zone, matching the oracle's shared `alarmToJSON`. Any agent parsing the old
+fixed `…Z` shape must adapt — which is precisely why this is BREAKING under
+`docs/versioning-policy.md` (an output-value change any agent might parse), not MINOR.
+The `--dry-run` preview payloads (a CLI extra with no oracle counterpart) keep their shape,
+with `--alarm` absolute dates now echoed in the oracle format too.
+
+### Fixed — six more Calendar parity gaps (Q9), one of them shared with Reminders
+
+- **CAL-02** — a bare `yyyy-MM-dd` start/end anchored at NOON local; the oracle's
+  `DateFormatter` mechanism anchors at MIDNIGHT. Every bare create/update date and recurrence
+  end sat 12 hours off (read windows were already floored and are unchanged). The fix uses the
+  formatter's own default, so even the nonexistent-midnight DST edge rolls forward exactly as
+  the oracle does. Shared `EventKitCore.DateParsing`, so the same 12-hour skew in Reminders
+  recurrence end dates (REM-07) is fixed at the root, pending Q10's own verification.
+- **CAL-04 / REM-05** — the `geo:` alarm parser existed as two divergent per-domain copies,
+  BOTH of which truncated a comma-bearing title to its last fragment
+  (`…,742 Evergreen Terrace, Springfield, OR 97475` → title `OR 97475`); the Reminders copy also let
+  any later numeric overwrite the radius and skipped lat/lon range validation. There is now
+  ONE parser (`EventKitCore.GeofenceSpec`) with a documented grammar: radius and proximity in
+  either order after lat/lon, then the title verbatim — commas, spacing and all. A numeric
+  title is expressible after an explicit radius; a keyword after the title has started is part
+  of the title.
+- **CAL-06** — `events update` derived the event timezone from `--start` only (and skipped
+  bare dates). Oracle rules now ported exactly (`EventTZUpdate.resolve`): start always
+  re-derives the zone (bare dates → local), end derives it only when the event has none, and
+  start+end with different zone identifiers in one update is a validation rejection.
+- **CAL-07** — `--calendar ""` / `--target-calendar ""` hard-failed with `not_found`; the
+  oracle's `findCalendar` treats nil OR empty as "the default calendar", on read, create, and
+  update alike.
+- **CAL-09** — `structured_location.title` was omitted for a titleless location; the oracle
+  guarantees the key with its `"Location"` fallback. Review then found the ALARM geofence site
+  needed the same treatment with the oracle's OWN alarm-site shape, which differs: alarm
+  triggers get `title ?? "Location"` AND `radius > 0 ? radius : 100` (the structured-location
+  site omits a zero radius instead — the two sites genuinely diverge in the oracle and now
+  diverge identically here).
+- **CAL-10** — calendar collections were re-sorted alphabetically; the oracle returns
+  EventKit's native source-grouped order. The re-sorts are gone from both `calendars list`
+  and the `events read` envelope.
+
 ### Added — `notes create`/`update` warn when the body looks like a checklist
 
 Apple Notes checklists cannot be created through AppleScript: `<input type="checkbox">` is

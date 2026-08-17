@@ -22,8 +22,9 @@ public enum DateArg {
     public static func date(_ s: String) throws -> Date { try parse(s).date }
 
     /// A read-window bound: a bare `yyyy-MM-dd` floors to START-OF-DAY (midnight), matching the
-    /// MCP's date-only bounds (`DateParsing.parse` anchors bare dates at noon, which is right for
-    /// all-day CREATION but 12h off for a query bound).
+    /// MCP's date-only bounds. Since the CAL-02 fix `DateParsing.parse` already anchors bare
+    /// dates at midnight, so the floor is a no-op on the happy path — kept as a regression guard
+    /// (a future re-anchoring of `parse` must not silently shift query bounds again).
     public static func windowBound(_ s: String, calendar: Calendar = .current) throws -> Date {
         let p = try parse(s)
         return p.isDateOnly ? calendar.startOfDay(for: p.date) : p.date
@@ -50,6 +51,40 @@ public enum TZDetect {
         else if digits.count == 2 { hours = Int(digits) ?? 0; minutes = 0 }
         else { return nil }
         return TimeZone(secondsFromGMT: sign * (hours * 3600 + minutes * 60))
+    }
+}
+
+/// CAL-06: the oracle's update-path timezone rules (EventKitCLI.swift `updateEvent`), as a pure
+/// resolver so the logic tier can pin them without a live store:
+///   - a provided START always re-derives the event zone — explicit offset → fixed zone,
+///     otherwise the LOCAL zone, bare dates included (the old code skipped date-only inputs and
+///     never looked at end at all);
+///   - a provided END derives the zone only when the event has NONE;
+///   - start and end both provided in ONE update with different zone identifiers is a rejection
+///     (EventKit events carry a single zone), matching the oracle's 400 verbatim in spirit.
+public enum EventTZUpdate {
+    /// Returns the zone to assign (nil = leave `existing` unchanged). Pass `start`/`end` only
+    /// when that option was supplied and parsed. Throws `validation` on a same-update conflict.
+    public static func resolve(start: String?, end: String?, existing: TimeZone?) throws -> TimeZone? {
+        var effective = existing
+        var assigned: TimeZone?
+        if let start {
+            let t = TZDetect.from(start) ?? TimeZone.current
+            effective = t
+            assigned = t
+        }
+        if let end {
+            let endTz = TZDetect.from(end) ?? TimeZone.current
+            if let cur = effective {
+                if start != nil, cur.identifier != endTz.identifier {
+                    throw AppleError.validation(
+                        "event start and end dates have different timezones (\(cur.identifier) vs \(endTz.identifier)) — EventKit events support only one timezone per event; use the same timezone for both dates")
+                }
+            } else {
+                assigned = endTz
+            }
+        }
+        return assigned
     }
 }
 
@@ -140,13 +175,17 @@ public enum AlarmSpec {
         }
         // A date must be tried before the relative parser so ISO strings aren't misread.
         if s.contains("T") || (s.contains("-") && s.count >= 8 && !s.hasPrefix("-") && !s.hasPrefix("+")) {
-            if let parsed = try? DateParsing.parse(s) { return Alarm(absolute_date: parsed.date) }
+            if let parsed = try? DateParsing.parse(s) {
+                return Alarm(absolute_date: EventDateFormat.string(parsed.date, timeZone: .current, includeTime: true),
+                             absoluteDateValue: parsed.date)
+            }
         }
         if let offset = parseRelativeOffset(s) {
             return Alarm(relative_offset: offset)
         }
         if let parsed = try? DateParsing.parse(s) {
-            return Alarm(absolute_date: parsed.date)
+            return Alarm(absolute_date: EventDateFormat.string(parsed.date, timeZone: .current, includeTime: true),
+                         absoluteDateValue: parsed.date)
         }
         throw AppleError.validation("unrecognized --alarm '\(raw)' (use 15m|2h|1d [before], +15m [after], geo:lat,lon,…, or a date)")
     }
@@ -182,35 +221,18 @@ public enum AlarmSpec {
         return effectiveSign * seconds
     }
 
+    /// CAL-04: delegated to the shared `GeofenceSpec` (EventKitCore) so Calendar and Reminders
+    /// parse `geo:` identically — the old per-domain copy truncated a comma-bearing title to its
+    /// last fragment. This wrapper only maps `SpecError` → `validation` (exit 64).
     static func parseGeofence(_ body: String) throws -> Alarm {
-        let parts = body.split(separator: ",", omittingEmptySubsequences: false).map { $0.trimmingCharacters(in: .whitespaces) }
-        guard parts.count >= 2, let lat = Double(parts[0]), let lon = Double(parts[1]) else {
-            throw AppleError.validation("geofence alarm needs at least lat,lon (got '\(body)')")
+        do {
+            let g = try GeofenceSpec.parse(body)
+            return Alarm(location_trigger: LocationTrigger(
+                title: g.title, latitude: g.latitude, longitude: g.longitude,
+                radius: g.radius, proximity: g.proximity))
+        } catch let e as GeofenceSpec.SpecError {
+            throw AppleError.validation(String(describing: e))
         }
-        guard lat.isFinite, lon.isFinite, (-90...90).contains(lat), (-180...180).contains(lon) else {
-            throw AppleError.validation("geofence lat/lon out of range (lat -90…90, lon -180…180, finite)")
-        }
-        // Radius is optional: it occupies position 2 ONLY when numeric; otherwise position 2 is
-        // already a proximity/title token (so an omitted radius no longer swallows it).
-        var radius = 100.0
-        var extrasStart = 2
-        if parts.count >= 3, let r = Double(parts[2]) {
-            guard r.isFinite, r >= 0 else { throw AppleError.validation("geofence radius must be finite and >= 0") }
-            radius = r
-            extrasStart = 3
-        }
-        var proximity = "enter"
-        var title: String?
-        for extra in parts[extrasStart...] {
-            let low = extra.lowercased()
-            if low == "enter" || low == "leave" || low == "depart" || low == "exit" {
-                proximity = low
-            } else if !extra.isEmpty {
-                title = extra
-            }
-        }
-        return Alarm(location_trigger: LocationTrigger(
-            title: title, latitude: lat, longitude: lon, radius: radius, proximity: proximity))
     }
 }
 

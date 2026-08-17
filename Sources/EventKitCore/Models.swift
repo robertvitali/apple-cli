@@ -176,18 +176,30 @@ public struct StructuredLocation: Encodable, Sendable, Equatable {
 /// and READ-only (display/audio/procedure/email).
 public struct Alarm: Encodable, Sendable, Equatable {
     public let relative_offset: Double?      // seconds; negative = before start
-    public let absolute_date: Date?
+    /// Wire value: the oracle's `formatEventDate` rendering in the ITEM's zone (the sixth date
+    /// site CAL-03's first pass missed — `alarms[].absoluteDate` goes through the same
+    /// formatter as the event dates, always timed).
+    public let absolute_date: String?
     public let type: String?                 // display | audio | procedure | email (read-only)
     public let location_trigger: LocationTrigger?
+    /// The parsed instant for WRITE paths (`ekAlarm(from:)`); NOT encoded — the wire carries
+    /// the pre-formatted `absolute_date` above.
+    public let absoluteDateValue: Date?
+
+    enum CodingKeys: String, CodingKey {
+        case relative_offset, absolute_date, type, location_trigger
+    }
 
     public init(
-        relative_offset: Double? = nil, absolute_date: Date? = nil,
-        type: String? = nil, location_trigger: LocationTrigger? = nil
+        relative_offset: Double? = nil, absolute_date: String? = nil,
+        type: String? = nil, location_trigger: LocationTrigger? = nil,
+        absoluteDateValue: Date? = nil
     ) {
         self.relative_offset = relative_offset
         self.absolute_date = absolute_date
         self.type = type
         self.location_trigger = location_trigger
+        self.absoluteDateValue = absoluteDateValue
     }
 }
 
@@ -195,14 +207,21 @@ public struct Alarm: Encodable, Sendable, Equatable {
 
 /// A calendar event (EKEvent), reading the full MCP surface plus extras. Attendees/organizer/
 /// status/availability are READ-only per EventKit (attendee writes are impossible).
+///
+/// The five date fields are pre-formatted STRINGS in the oracle's rendering (CAL-03), not
+/// `Date`s handed to the envelope's UTC ISO encoder: the oracle emits every event date in the
+/// EVENT's own zone (`event.timeZone ?? .current`), start/end as date-only `yyyy-MM-ddZZZZZ`
+/// when the event is all-day (`2026-07-28-04:00`), and always-timed forms for
+/// occurrence/creation/last-modified. Emitting UTC instants instead was a live diff on every
+/// all-day event. See `EventDateFormat`.
 public struct CalendarEvent: Encodable, Sendable, Equatable {
     public let id: String
     public let title: String?
     public let notes: String?
     public let location: String?
     public let url: String?
-    public let start_date: Date?
-    public let end_date: Date?
+    public let start_date: String?
+    public let end_date: String?
     public let is_all_day: Bool
     public let availability: String
     public let status: String
@@ -212,25 +231,25 @@ public struct CalendarEvent: Encodable, Sendable, Equatable {
     public let time_zone: String?
     public let is_detached: Bool
     public let has_recurrence: Bool
-    public let occurrence_date: Date?
+    public let occurrence_date: String?
     public let external_id: String?
     public let organizer: Participant?
     public let attendees: [Participant]?
     public let recurrence_rules: [RecurrenceRule]?
     public let alarms: [Alarm]?
     public let structured_location: StructuredLocation?
-    public let last_modified: Date?
-    public let creation_date: Date?
+    public let last_modified: String?
+    public let creation_date: String?
 
     public init(
         id: String, title: String? = nil, notes: String? = nil, location: String? = nil,
-        url: String? = nil, start_date: Date? = nil, end_date: Date? = nil, is_all_day: Bool,
+        url: String? = nil, start_date: String? = nil, end_date: String? = nil, is_all_day: Bool,
         availability: String, status: String, calendar: String? = nil, calendar_id: String? = nil,
         account: String? = nil, time_zone: String? = nil, is_detached: Bool, has_recurrence: Bool,
-        occurrence_date: Date? = nil, external_id: String? = nil, organizer: Participant? = nil,
+        occurrence_date: String? = nil, external_id: String? = nil, organizer: Participant? = nil,
         attendees: [Participant]? = nil, recurrence_rules: [RecurrenceRule]? = nil,
         alarms: [Alarm]? = nil, structured_location: StructuredLocation? = nil,
-        last_modified: Date? = nil, creation_date: Date? = nil
+        last_modified: String? = nil, creation_date: String? = nil
     ) {
         self.id = id
         self.title = title

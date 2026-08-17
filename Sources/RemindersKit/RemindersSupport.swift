@@ -416,7 +416,8 @@ public enum ReminderAlarmSpec {
             return Alarm(relative_offset: offset)
         }
         if let parsed = try? DateParsing.parse(s) {
-            return Alarm(absolute_date: parsed.date)
+            return Alarm(absolute_date: EventDateFormat.string(parsed.date, timeZone: .current, includeTime: true),
+                         absoluteDateValue: parsed.date)
         }
         throw AppleError.validation("unrecognized --alarm '\(raw)' (use -15m|-2h|-1d, geo:lat,lon,…, or a date)")
     }
@@ -438,29 +439,20 @@ public enum ReminderAlarmSpec {
         }
     }
 
+    /// REM-05: delegated to the shared `GeofenceSpec` (EventKitCore) so Reminders and Calendar
+    /// parse `geo:` identically — the old per-domain copy truncated a comma-bearing title to its
+    /// last fragment, let ANY later numeric fragment overwrite the radius (making a numeric
+    /// title inexpressible), and skipped the lat/lon range validation Calendar had. This wrapper
+    /// only maps `SpecError` → `validation` (exit 64).
     static func parseGeofence(_ body: String) throws -> Alarm {
-        let parts = body.split(separator: ",", omittingEmptySubsequences: false).map { $0.trimmingCharacters(in: .whitespaces) }
-        guard parts.count >= 2, let lat = Double(parts[0]), let lon = Double(parts[1]) else {
-            throw AppleError.validation("geofence alarm needs at least lat,lon (got '\(body)')")
+        do {
+            let g = try GeofenceSpec.parse(body)
+            return Alarm(location_trigger: LocationTrigger(
+                title: g.title, latitude: g.latitude, longitude: g.longitude,
+                radius: g.radius, proximity: g.proximity))
+        } catch let e as GeofenceSpec.SpecError {
+            throw AppleError.validation(String(describing: e))
         }
-        var radius = 100.0
-        var proximity = "enter"
-        var title: String?
-        // Scan every part after lat,lon position-independently: a proximity keyword sets proximity,
-        // a number sets radius, anything else is the title. (Position-independent so
-        // `geo:lat,lon,leave` correctly sets proximity=leave rather than silently keeping enter.)
-        for extra in parts.dropFirst(2) {
-            let low = extra.lowercased()
-            if low == "enter" || low == "leave" || low == "depart" || low == "exit" {
-                proximity = low
-            } else if let r = Double(extra) {
-                radius = r
-            } else if !extra.isEmpty {
-                title = extra
-            }
-        }
-        return Alarm(location_trigger: LocationTrigger(
-            title: title, latitude: lat, longitude: lon, radius: radius, proximity: proximity))
     }
 }
 

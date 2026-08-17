@@ -298,22 +298,30 @@ public enum RecurrenceMapping {
 
 public enum AlarmMapping {
 
-    /// EKAlarm → model (read). Non-finite coordinates are coerced to nil / 0 so one malformed
+    /// EKAlarm → model (read). Non-finite coordinates are coerced to nil so one malformed
     /// geofence can't make the whole JSON envelope an opaque encode failure.
-    public static func alarm(from ek: EKAlarm) -> Alarm {
+    /// `preferredTimeZone` is the owning ITEM's zone (`event.timeZone ?? current` /
+    /// `reminder.timeZone ?? current`), exactly the oracle's `alarmToJSON` parameter: it renders
+    /// `absoluteDate` through `formatEventDate(…, includeTime: true)`. The location trigger
+    /// carries the oracle's `locationTriggerToJSON` guarantees — `title ?? "Location"` and
+    /// `radius > 0 ? radius : 100` (NOT the structured-location site's omit-when-0; the two
+    /// sites genuinely differ in the oracle).
+    public static func alarm(from ek: EKAlarm, preferredTimeZone: TimeZone) -> Alarm {
         var trigger: LocationTrigger?
         if let loc = ek.structuredLocation {
             trigger = LocationTrigger(
-                title: loc.title,
+                title: loc.title ?? "Location",
                 latitude: finite(loc.geoLocation?.coordinate.latitude),
                 longitude: finite(loc.geoLocation?.coordinate.longitude),
-                radius: finiteOrZero(loc.radius),
+                radius: (loc.radius.isFinite && loc.radius > 0) ? loc.radius : 100,
                 proximity: EKEnum.proximityString(ek.proximity)
             )
         }
         return Alarm(
             relative_offset: (ek.absoluteDate == nil && trigger == nil) ? finite(ek.relativeOffset) : nil,
-            absolute_date: ek.absoluteDate,
+            absolute_date: ek.absoluteDate.map {
+                EventDateFormat.string($0, timeZone: preferredTimeZone, includeTime: true)
+            },
             type: EKEnum.alarmTypeString(ek.type),
             location_trigger: trigger
         )
@@ -332,7 +340,7 @@ public enum AlarmMapping {
             alarm.proximity = EKEnum.proximity(from: trigger.proximity)
             return alarm
         }
-        if let abs = m.absolute_date {
+        if let abs = m.absoluteDateValue {
             return EKAlarm(absoluteDate: abs)
         }
         if let off = m.relative_offset {
@@ -365,7 +373,9 @@ public enum ReadMapping {
 
     public static func structuredLocation(from loc: EKStructuredLocation) -> StructuredLocation {
         StructuredLocation(
-            title: loc.title,
+            // CAL-09: the oracle GUARANTEES the key — `structuredLocation.title ?? "Location"`
+            // onto a non-optional field — so a titleless location must not omit it here either.
+            title: loc.title ?? "Location",
             latitude: finite(loc.geoLocation?.coordinate.latitude),
             longitude: finite(loc.geoLocation?.coordinate.longitude),
             radius: finiteOrZero(loc.radius)
@@ -446,17 +456,60 @@ public enum ReadMapping {
 
 // MARK: - Event / reminder readers (live-tier)
 
+/// Port of the oracle's `formatEventDate` (EventKitCLI.swift:1275-1282): en_US_POSIX +
+/// gregorian, rendered in the given zone. All-day start/end use `yyyy-MM-ddZZZZZ` — date plus
+/// offset, no time (`2026-07-28-04:00`; GMT renders as `2026-07-28Z`, the formatter's own
+/// behavior, same on both sides). Timed dates use `yyyy-MM-dd'T'HH:mm:ssZZZZZ`.
+public enum EventDateFormat {
+    public static func string(_ date: Date, timeZone: TimeZone, includeTime: Bool) -> String {
+        let f = DateFormatter()
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.calendar = Calendar(identifier: .gregorian)
+        f.timeZone = timeZone
+        f.dateFormat = includeTime ? "yyyy-MM-dd'T'HH:mm:ssZZZZZ" : "yyyy-MM-ddZZZZZ"
+        return f.string(from: date)
+    }
+
+    /// The CAL-03 SELECTION, pure so the logic tier can pin it (an `EKEvent` needs a live
+    /// store, so `EventMapping.event` itself is out of unit reach — review caught that pinning
+    /// only the formatter left `includeTime = !isAllDay` and `timeZone ?? .current` mutable
+    /// with every test green): the event's zone falls back to the current one; start/end drop
+    /// the time exactly when the event is all-day; occurrence/creation/last-modified are
+    /// ALWAYS timed.
+    public struct EventDates: Equatable, Sendable {
+        public let start: String?, end: String?, occurrence: String?, created: String?, modified: String?
+    }
+    public static func eventDates(start: Date?, end: Date?, occurrence: Date?, created: Date?,
+                                  modified: Date?, isAllDay: Bool, timeZone: TimeZone?) -> EventDates {
+        let tz = timeZone ?? TimeZone.current
+        let includeTime = !isAllDay
+        return EventDates(
+            start: start.map { string($0, timeZone: tz, includeTime: includeTime) },
+            end: end.map { string($0, timeZone: tz, includeTime: includeTime) },
+            occurrence: occurrence.map { string($0, timeZone: tz, includeTime: true) },
+            created: created.map { string($0, timeZone: tz, includeTime: true) },
+            modified: modified.map { string($0, timeZone: tz, includeTime: true) })
+    }
+}
+
 public enum EventMapping {
 
     public static func event(from e: EKEvent) -> CalendarEvent {
-        CalendarEvent(
+        // The oracle renders every date in the EVENT's zone and drops the time for all-day
+        // start/end; the selection lives in `EventDateFormat.eventDates` so it is pinnable.
+        let tz = e.timeZone ?? TimeZone.current
+        let dates = EventDateFormat.eventDates(
+            start: e.startDate, end: e.endDate, occurrence: e.occurrenceDate,
+            created: e.creationDate, modified: e.lastModifiedDate,
+            isAllDay: e.isAllDay, timeZone: e.timeZone)
+        return CalendarEvent(
             id: e.eventIdentifier ?? e.calendarItemIdentifier,
             title: e.title,
             notes: e.notes,
             location: e.location,
             url: e.url?.absoluteString,
-            start_date: e.startDate,
-            end_date: e.endDate,
+            start_date: dates.start,
+            end_date: dates.end,
             is_all_day: e.isAllDay,
             availability: EKEnum.availabilityString(e.availability),
             status: EKEnum.statusString(e.status),
@@ -466,15 +519,15 @@ public enum EventMapping {
             time_zone: e.timeZone?.identifier,
             is_detached: e.isDetached,
             has_recurrence: e.hasRecurrenceRules,
-            occurrence_date: e.occurrenceDate,
+            occurrence_date: dates.occurrence,
             external_id: e.calendarItemExternalIdentifier,
             organizer: e.organizer.map { ReadMapping.participant(from: $0) },
             attendees: e.attendees?.map { ReadMapping.participant(from: $0) },
             recurrence_rules: e.recurrenceRules?.map { RecurrenceMapping.rule(from: $0) },
-            alarms: e.alarms?.map { AlarmMapping.alarm(from: $0) },
+            alarms: e.alarms?.map { AlarmMapping.alarm(from: $0, preferredTimeZone: tz) },
             structured_location: e.structuredLocation.map { ReadMapping.structuredLocation(from: $0) },
-            last_modified: e.lastModifiedDate,
-            creation_date: e.creationDate
+            last_modified: dates.modified,
+            creation_date: dates.created
         )
     }
 }
@@ -484,10 +537,12 @@ public enum ReminderMapping {
     public static func reminder(from r: EKReminder) -> Reminder {
         let due = r.dueDateComponents?.date
         let start = r.startDateComponents?.date
+        // Oracle `EKReminder.toJSON`: alarms render with `preferredTimeZone = timeZone ?? current`.
+        let alarmTZ = r.timeZone ?? TimeZone.current
         // Convenience: the first location-based alarm (mirrors the MCP's `locationTrigger`).
         let locationTrigger: LocationTrigger? = r.alarms?
             .first(where: { $0.structuredLocation != nil })
-            .map { AlarmMapping.alarm(from: $0).location_trigger } ?? nil
+            .map { AlarmMapping.alarm(from: $0, preferredTimeZone: alarmTZ).location_trigger } ?? nil
         return Reminder(
             id: r.calendarItemIdentifier,
             title: r.title,
@@ -506,7 +561,7 @@ public enum ReminderMapping {
             priority: r.priority,
             has_recurrence: r.hasRecurrenceRules,
             recurrence_rules: r.recurrenceRules?.map { RecurrenceMapping.rule(from: $0) },
-            alarms: r.alarms?.map { AlarmMapping.alarm(from: $0) },
+            alarms: r.alarms?.map { AlarmMapping.alarm(from: $0, preferredTimeZone: alarmTZ) },
             location_trigger: locationTrigger,
             tags: nil,        // populated by RemindersKit from the notes [#tag] markers — see Models.swift
             parent_id: nil,   // reserved (no native parent linkage in public EventKit); subtasks live in notes

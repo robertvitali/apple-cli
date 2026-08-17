@@ -293,6 +293,54 @@ struct StructuredLocationArgTests {
 
 // MARK: - Window-bound flooring (bare date → start-of-day)
 
+/// CAL-06: the oracle's update-path timezone rules, pinned on the pure resolver.
+@Suite("EventTZUpdate")
+struct EventTZUpdateTests {
+
+    @Test("a provided start always re-derives the zone — offset, Z, local, and bare dates")
+    func startDerives() throws {
+        #expect(try EventTZUpdate.resolve(start: "2026-07-15T09:00:00+02:00", end: nil,
+                                          existing: nil)?.identifier == "GMT+0200")
+        #expect(try EventTZUpdate.resolve(start: "2026-07-15T09:00:00Z", end: nil,
+                                          existing: TimeZone(identifier: "Asia/Tokyo"))?.identifier == "GMT")
+        // no offset → the LOCAL zone; bare dates included (the old code skipped date-only)
+        #expect(try EventTZUpdate.resolve(start: "2026-07-15 09:00:00", end: nil,
+                                          existing: nil) == TimeZone.current)
+        #expect(try EventTZUpdate.resolve(start: "2026-07-15", end: nil,
+                                          existing: nil) == TimeZone.current)
+    }
+
+    @Test("a provided end derives the zone ONLY when the event has none")
+    func endDerivesWhenUnset() throws {
+        #expect(try EventTZUpdate.resolve(start: nil, end: "2026-07-15T17:00:00+02:00",
+                                          existing: nil)?.identifier == "GMT+0200")
+        // existing zone + end-only update: zone untouched, no conflict error
+        #expect(try EventTZUpdate.resolve(start: nil, end: "2026-07-15T17:00:00+02:00",
+                                          existing: TimeZone(identifier: "Asia/Tokyo")) == nil)
+    }
+
+    @Test("start and end with different zones in ONE update is a validation rejection")
+    func conflictRejected() {
+        #expect(throws: AppleError.self) {
+            _ = try EventTZUpdate.resolve(start: "2026-07-15T09:00:00+02:00",
+                                          end: "2026-07-15T17:00:00-05:00", existing: nil)
+        }
+        // same zone on both sides is fine
+        #expect(throws: Never.self) {
+            _ = try EventTZUpdate.resolve(start: "2026-07-15T09:00:00+02:00",
+                                          end: "2026-07-15T17:00:00+02:00", existing: nil)
+        }
+        // Local start + offset end ALSO conflicts (oracle quirk preserved): the local side is a
+        // NAMED zone ("America/…"), the offset side a fixed "GMT±…" zone — the identifiers can
+        // never be equal, so the oracle rejects. Deterministic on any machine, since
+        // TimeZone.current is always a named zone.
+        #expect(throws: AppleError.self) {
+            _ = try EventTZUpdate.resolve(start: "2026-07-15 09:00:00",
+                                          end: "2026-07-15T17:00:00+02:00", existing: nil)
+        }
+    }
+}
+
 @Suite("DateArg.windowBound")
 struct WindowBoundTests {
     @Test("a bare date floors to start-of-day (midnight), matching the MCP bound")

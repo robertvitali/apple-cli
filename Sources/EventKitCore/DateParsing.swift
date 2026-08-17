@@ -37,8 +37,16 @@ public enum DateParsing {
         let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !s.isEmpty else { throw ParseError.unrecognized(raw) }
 
-        // 1) Bare date → all-day. Parse at NOON local to dodge DST/midnight boundary drift
-        //    (all-day events key off the calendar day, and noon is safely inside it).
+        // 1) Bare date → all-day, anchored at MIDNIGHT local — the DateFormatter's own default,
+        //    which is exactly the oracle's mechanism (`basicFormatter.date(from:)` for recurrence
+        //    end dates; `parseDateComponents` → [y,m,d] → `calendar.date(from:)` for event
+        //    start/end — both resolve 00:00 in the current zone). An earlier version lifted the
+        //    result to noon "to dodge DST/midnight drift"; that was CAL-02: a 12-hour divergence
+        //    on every bare create/update date and recurrence end. Anchoring via the SAME API the
+        //    oracle's recurrence-endDate path uses byte-matches it there, including the
+        //    nonexistent-midnight DST edge; the oracle's EVENT path goes through
+        //    Calendar.date(from:) instead, whose resolution of that edge is its own — only the
+        //    normal case is byte-matched against both.
         if isBareDate(s) {
             let f = DateFormatter()
             f.locale = Locale(identifier: "en_US_POSIX")
@@ -46,9 +54,7 @@ public enum DateParsing {
             f.isLenient = false   // reject 2026-13-45 instead of rolling it over
             f.dateFormat = "yyyy-MM-dd"
             if let day = f.date(from: s) {
-                let noon = Calendar.currentWithZone(timeZone)
-                    .date(bySettingHour: 12, minute: 0, second: 0, of: day) ?? day
-                return Parsed(date: noon, isDateOnly: true)
+                return Parsed(date: day, isDateOnly: true)
             }
         }
 
