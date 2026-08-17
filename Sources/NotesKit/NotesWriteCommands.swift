@@ -122,9 +122,13 @@ struct CreateCmd: ParsableCommand {
                 return
             }
             let id = try NotesScript().createNote(title: title, content: content, folder: folder, account: account, html: html)
-            try emitNotesWrite(CreatedNote(ok: true, id: id, title: title, folder: folder, account: account),
-                               json: global.json, sandboxActive: gate.sandboxActive,
-                               human: "Created \"\(title)\" [\(id)].")
+            // Oracle appends a checklist warning to the response on create and both update paths. A
+            // checklist cannot be made via AppleScript, so without it the caller gets ok:true and a
+            // note that silently is not a checklist. Built in NotesText so the wiring is testable.
+            let r = NotesText.createResponse(id: id, title: title, folder: folder,
+                                             account: account, content: content)
+            try emitNotesWrite(r.note, json: global.json, sandboxActive: gate.sandboxActive,
+                               human: r.human)
         }
     }
 }
@@ -174,9 +178,10 @@ struct UpdateCmd: ParsableCommand {
                 // not show, because Notes takes a note's title from its first rendered line.
                 let displayTitle = NotesText.resolveUpdateResponseTitle(
                     current: note.title, newTitle: newTitle, html: html, newContent: newContent)
-                try emitNotesWrite(UpdatedNote(ok: true, id: noteId, title: displayTitle, shared: note.shared),
-                                   json: global.json, sandboxActive: gate.sandboxActive,
-                                   human: "Updated \"\(displayTitle)\".")
+                let r = NotesText.updateResponse(id: noteId, title: displayTitle,
+                                                 shared: note.shared, newContent: newContent)
+                try emitNotesWrite(r.note, json: global.json, sandboxActive: gate.sandboxActive,
+                                   human: r.human)
             case .title(let noteTitle):
                 guard let note = try script.getNoteDetails(title: noteTitle, account: account) else { throw AppleError.notFound("Note \"\(noteTitle)\" not found.") }
                 if note.passwordProtected { throw AppleError.validation("Note is password-protected. Unlock it in Notes.app first.") }
@@ -187,9 +192,10 @@ struct UpdateCmd: ParsableCommand {
                 // reported "hello" where the oracle reports "Hello". Same class as 644ffdb.
                 let finalTitle = NotesText.resolveUpdateResponseTitle(
                     current: note.title, newTitle: newTitle, html: html, newContent: newContent)
-                try emitNotesWrite(UpdatedNote(ok: true, id: nil, title: finalTitle, shared: note.shared),
-                                   json: global.json, sandboxActive: gate.sandboxActive,
-                                   human: "Updated \"\(finalTitle)\".")
+                let r = NotesText.updateResponse(id: nil, title: finalTitle,
+                                                 shared: note.shared, newContent: newContent)
+                try emitNotesWrite(r.note, json: global.json, sandboxActive: gate.sandboxActive,
+                                   human: r.human)
             }
         }
     }
@@ -260,7 +266,7 @@ struct AppendCmd: ParsableCommand {
                 let combined = NotesText.assembleAppend(existingHtml: current, content: content,
                                                         separator: separator, prepend: prepend, html: html)
                 try script.updateNoteById(id: noteId, newTitle: nil, newContent: combined, html: true)
-                try emitNotesWrite(UpdatedNote(ok: true, id: noteId, title: note.title, shared: note.shared),
+                try emitNotesWrite(UpdatedNote(ok: true, id: noteId, title: note.title, shared: note.shared, warning: nil),
                               json: global.json, sandboxActive: gate.sandboxActive,
                               human: "Appended to \"\(note.title)\".")
             case .title(let noteTitle):
@@ -271,7 +277,7 @@ struct AppendCmd: ParsableCommand {
                 let combined = NotesText.assembleAppend(existingHtml: current, content: content,
                                                         separator: separator, prepend: prepend, html: html)
                 try script.updateNote(title: noteTitle, newTitle: nil, newContent: combined, account: account, html: true)
-                try emitNotesWrite(UpdatedNote(ok: true, id: nil, title: noteTitle, shared: note.shared),
+                try emitNotesWrite(UpdatedNote(ok: true, id: nil, title: noteTitle, shared: note.shared, warning: nil),
                               json: global.json, sandboxActive: gate.sandboxActive,
                               human: "Appended to \"\(noteTitle)\".")
             }

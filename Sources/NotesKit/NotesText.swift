@@ -213,6 +213,145 @@ enum NotesText {
 
     // MARK: HTML → Markdown (turndown-equivalent, pragmatic)
 
+    /// ECMAScript `\s`, spelled out as an ICU class BODY (interpolate as `[\(jsSpace)]`): JS `\s`
+    /// includes U+FEFF and EXCLUDES U+0085; ICU's `\s` is the opposite on BOTH. Shared by the
+    /// checklist detector below and `firstVisibleHtmlLine` (whose `<br>` rule needs the same set —
+    /// the oracle's BREAK_RE is `/<br\s*\/?\s*>/gi`, so its whitespace is ECMAScript's, not ICU's).
+    static let jsSpace = "\t\n\u{0b}\u{0c}\r \u{a0}\u{1680}\u{2000}-\u{200a}\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}\u{feff}"
+
+    /// ECMAScript `\w`, for `\b` emulation: JS `\b` without the `u` flag is ASCII-only.
+    private static let jsWord = "0-9A-Za-z_"
+
+    /// The oracle's `detectChecklistAttempt` (`src/utils/contentWarnings.ts`) — the warning to
+    /// append, or nil.
+    ///
+    /// WHY IT EXISTS. Apple Notes checklists cannot be created through AppleScript at all:
+    /// `<input type="checkbox">` is stripped, checklist CSS classes are dropped, and markdown
+    /// `- [ ]` arrives as literal text. An agent that writes a checklist therefore gets `ok: true`
+    /// and a note that silently is not one. The oracle warns; we did not. That is NOTES-M8.
+    ///
+    /// The three rules are OR'd. The oracle's source:
+    ///
+    ///     const htmlCheckbox     = /<input\b[^>]*\btype\s*=\s*["']checkbox["']/i.test(content);
+    ///     const markdownCheckbox = /^[ \t]*[-*]\s+\[[ xX]\]/m.test(content);
+    ///     const checklistClass   = /class\s*=\s*["'][^"']*\b(?:checklist|todo)\b/i.test(content);
+    ///
+    /// They are deliberately NOT transcribed as inline-flag ICU patterns: four ICU constructs
+    /// silently diverge from ECMAScript (no `u` flag) on non-ASCII input — a review probe found
+    /// 10 of 14 targeted inputs disagreeing with the oracle. Each is spelled out instead:
+    ///
+    ///   - `(?m)^` — ICU's line-terminator set adds U+000B/U+000C/U+0085 to JS's {LF CR LS PS}.
+    ///     Ported as `(?:\A|[\n\r\u2028\u2029])`; consuming the terminator is harmless for a
+    ///     boolean test.
+    ///   - `\s` — JS includes U+FEFF and excludes U+0085; ICU the opposite on both. Ported as
+    ///     `[jsSpace]`, the same fix `firstVisibleHtmlLine` already carries.
+    ///   - `\b` — JS without `u` is ASCII `[0-9A-Za-z_]`; ICU's is Unicode-aware (é or a combining
+    ///     mark counts as word-internal). Ported as `(?<![jsWord])` / `(?![jsWord])` lookarounds.
+    ///   - `(?i)` — ICU applies full Unicode case folding (U+212A KELVIN SIGN matches `k`); JS
+    ///     canonicalization never maps a non-ASCII character onto an ASCII one. Ported as explicit
+    ///     `[cC]`-style classes.
+    ///
+    /// Two details that are easy to lose in translation: `markdownCheckbox` is MULTILINE, so it
+    /// fires on a `- [ ]` line anywhere in the body rather than only at the very start; and
+    /// `[ xX]` accepts a space, `x` or `X` but NOT an empty `[]`.
+    ///
+    /// SCOPE — create and the two update paths only. The gap was filed as "create / update /
+    /// append", but the oracle calls this from `create-note` and both `update-note` branches and
+    /// NOT from `append-to-note` (exactly three call sites in its bundle). Warning on append would
+    /// be inventing behaviour the oracle does not have, so append is left alone.
+    private static let markdownCheckboxPattern =
+        #"(?:\A|[\n\r\u2028\u2029])[ \t]*[-*][\#(jsSpace)]+\[[ xX]\]"#
+    private static let checklistClassPattern =
+        #"[cC][lL][aA][sS][sS][\#(jsSpace)]*=[\#(jsSpace)]*["'][^"']*(?<![\#(jsWord)])(?:[cC][hH][eE][cC][kK][lL][iI][sS][tT]|[tT][oO][dD][oO])(?![\#(jsWord)])"#
+
+    static func detectChecklistAttempt(_ content: String) -> String? {
+        if content.isEmpty { return nil }
+        guard htmlCheckboxAttempt(content)
+            || content.range(of: markdownCheckboxPattern, options: .regularExpression) != nil
+            || content.range(of: checklistClassPattern, options: .regularExpression) != nil
+        else { return nil }
+        return "\n\n\u{26A0}\u{FE0F} Your content looks like a checklist, but Apple Notes checklists "
+            + "cannot be created via AppleScript \u{2014} `<input type=\"checkbox\">` is stripped, "
+            + "checklist CSS classes are dropped, and markdown `- [ ]` lines arrive as literal text. "
+            + "The note was created with the surrounding structure (list items or paragraphs) intact. "
+            + "To convert it to a real Apple Notes checklist, open the note, select the items, and "
+            + "press \u{21E7}\u{2318}L (Format \u{2192} Checklist)."
+    }
+
+    /// `/<input\b[^>]*\btype\s*=\s*["']checkbox["']/i` as a LINEAR two-phase scan.
+    ///
+    /// The regex form is quadratic on repeated unterminated `<input`: every start position scans
+    /// `[^>]*` to end-of-input before failing — review measured 0.46 / 1.82 / 7.48 / 29.6 s at
+    /// 6 / 12 / 24 / 48 KB (clean 4x per doubling), against a 5 MiB `--content` budget, on a
+    /// WRITE path — and the detector runs after the AppleScript write, so a hang would leave the
+    /// note created while the command appeared dead, inviting an agent retry to duplicate it.
+    /// The oracle's engine backtracks the same way, but matching a hang is not parity worth
+    /// having, and this repo already treats the `[^>]*` shape as a defect class (COMPLETION-LOOP
+    /// Q25; this site is linear at birth and does not join that census).
+    ///
+    /// EQUIVALENCE. The regex matches iff some `<input` (ASCII boundary after) is followed, with
+    /// no `>` in between, by `type\s*=\s*["']checkbox["']` — and neither the gap (`[^>]*`) nor
+    /// the tail can contain `>`. So split at `>` (a plain UTF-16 unit scan; `>` cannot occur
+    /// inside a surrogate pair) and, inside each `>`-free segment, find the FIRST `<input`, then
+    /// the tail anywhere after it. The first `<input` suffices: any tail position that works for
+    /// a later `<input` in the segment also works for an earlier one. Each segment is scanned a
+    /// bounded number of times, so the whole scan is linear; red-proofed by the perf test in
+    /// `ChecklistWarningTests`.
+    private static let htmlInputOpen = try! NSRegularExpression(
+        pattern: "<[iI][nN][pP][uU][tT](?![\(jsWord)])")
+    private static let htmlCheckboxTail = try! NSRegularExpression(
+        pattern: "(?<![\(jsWord)])[tT][yY][pP][eE][\(jsSpace)]*=[\(jsSpace)]*[\"'][cC][hH][eE][cC][kK][bB][oO][xX][\"']")
+
+    private static func htmlCheckboxAttempt(_ content: String) -> Bool {
+        let ns = content as NSString
+        let n = ns.length
+        var segStart = 0
+        while segStart < n {
+            var segEnd = segStart
+            while segEnd < n, ns.character(at: segEnd) != 0x3E { segEnd += 1 }   // 0x3E = ">"
+            if let open = htmlInputOpen.firstMatch(
+                in: content, range: NSRange(location: segStart, length: segEnd - segStart)) {
+                let afterOpen = open.range.location + open.range.length
+                // Transparent bounds so the tail's lookbehind sees the character before the
+                // sub-range (guaranteed non-word by the open's lookahead — same verdict either
+                // way, but the transparent form is what JS actually evaluates).
+                if htmlCheckboxTail.firstMatch(
+                    in: content, options: .withTransparentBounds,
+                    range: NSRange(location: afterOpen, length: segEnd - afterOpen)) != nil {
+                    return true
+                }
+            }
+            segStart = segEnd + 1
+        }
+        return false
+    }
+
+    /// The `create` response, with the checklist warning applied to BOTH the JSON field and the
+    /// human line.
+    ///
+    /// THIS EXISTS TO BE TESTABLE. The three wired sites used to build their result inline, which
+    /// put the wiring — detector → `warning:` field → human suffix — behind an AppleScript call and
+    /// so out of reach of every tier but live. The surviving mutant a reviewer named was exactly
+    /// that: compute the warning correctly, emit `warning: nil`, and nothing notices. Building the
+    /// response here puts that mutant inside a unit-tested function instead.
+    static func createResponse(id: String, title: String, folder: String?, account: String?,
+                               content: String) -> (note: CreatedNote, human: String) {
+        let warning = detectChecklistAttempt(content)
+        return (CreatedNote(ok: true, id: id, title: title, folder: folder, account: account,
+                            warning: warning),
+                "Created \"\(title)\" [\(id)].\(warning ?? "")")
+    }
+
+    /// The `update` response — see `createResponse`. `id` is nil on the by-title branch, matching
+    /// the oracle. `title` is the already-resolved display title (`resolveUpdateResponseTitle`),
+    /// and the warning is computed from the REPLACEMENT body, never the note's existing text.
+    static func updateResponse(id: String?, title: String, shared: Bool,
+                               newContent: String) -> (note: UpdatedNote, human: String) {
+        let warning = detectChecklistAttempt(newContent)
+        return (UpdatedNote(ok: true, id: id, title: title, shared: shared, warning: warning),
+                "Updated \"\(title)\".\(warning ?? "")")
+    }
+
     /// Pragmatic HTML→Markdown for Apple Notes' constrained HTML. Covers the elements Notes emits:
     /// headings, div/p blocks, `<br>`, ul/ol lists, bold/italic, and links. Inline conversions run
     /// before block conversions so their markdown survives the final tag-strip.

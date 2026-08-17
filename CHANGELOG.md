@@ -12,6 +12,42 @@ with the Apple MCP servers they replace.
 
 ## [Unreleased]
 
+### Added — `notes create`/`update` warn when the body looks like a checklist
+
+Apple Notes checklists cannot be created through AppleScript: `<input type="checkbox">` is
+stripped, checklist CSS classes are dropped, and markdown `- [ ]` lines arrive as literal text.
+An agent that wrote a checklist therefore got `ok: true` and a note that silently was not one.
+The oracle appends a warning in that case; we did not. That was NOTES-M8.
+
+- `notes create` and both `notes update` branches now run the oracle's three detection rules
+  (HTML checkbox input, markdown `- [ ]`/`* [x]` line, `checklist`/`todo` CSS class) over the NEW
+  body and, on a hit, add a `warning` string to the JSON payload and append the same text to the
+  `--text` line, including the Format → Checklist (⇧⌘L) conversion hint.
+- The rules are ported to ECMAScript semantics, not transliterated into ICU flags: review probes
+  showed 10/14 non-ASCII inputs diverging under an inline-flag transcription (`(?m)^`'s
+  line-terminator set, the `\s` class, JS's ASCII-only `\b`, ICU's full case folding under
+  `(?i)`), so the port spells each construct out (see `NotesText.detectChecklistAttempt`).
+- The oracle's HTML rule (`<input\b[^>]*\btype…`) is quadratic on repeated unterminated `<input`
+  — measured 29.6 s at 48 KB against a 5 MiB `--content` budget, on the write path. The port
+  detects the same language with a linear two-phase scan instead
+  (`NotesText.htmlCheckboxAttempt`); matching the oracle's hang is not parity worth having.
+- `notes append` never warns — the oracle calls the detector from `create-note` and the two
+  `update-note` paths only (exactly three call sites in its bundle), and warning on append would
+  invent behaviour the oracle does not have.
+- The `warning` key is OMITTED, not `null`, when there is nothing to say: `if "warning" in data`
+  is the natural client test and a `null` would satisfy it wrongly.
+- Adding an optional field is MINOR under `docs/versioning-policy.md`; the human `--text` line is
+  not part of the versioned contract.
+
+Detection is pinned to the oracle two ways: 42 hand-picked boundary rows (23 ASCII + the
+JS-vs-ICU divergence probes) plus a 536-row generated corpus, 366 rows carrying non-ASCII or
+control characters (`Tests/NotesKitTests/fixtures/checklist-warning-oracle/`, deterministic seed,
+every verdict produced by executing the oracle's own regexes, row counts pinned in the test). The
+wiring is covered at the envelope level — responses are built in
+`NotesText.createResponse`/`updateResponse` and encoded through the real `Output.encodeSuccess`
+path — and a 9-mutant sweep (rule drops, boundary/multiline/case degradations, the two
+reviewer-named wiring mutants) kills every mutant behaviorally. Closes NOTES-M8.
+
 ### BREAKING — a wholly-failed `notes batch-delete` / `batch-move` is now an error
 
 When NO id in a batch succeeded, both commands emitted a success envelope and exit 0. The oracle

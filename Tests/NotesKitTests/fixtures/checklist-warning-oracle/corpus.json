@@ -1,0 +1,2146 @@
+[
+ {
+  "input": "<inputx type=\"checkbox\">",
+  "warns": false
+ },
+ {
+  "input": "<input-x type=\"checkbox\">",
+  "warns": true
+ },
+ {
+  "input": "<input data-type=\"checkbox\">",
+  "warns": true
+ },
+ {
+  "input": "<input mytype=\"checkbox\">",
+  "warns": false
+ },
+ {
+  "input": "<input type=\"checkbox2\">",
+  "warns": false
+ },
+ {
+  "input": "<input type=checkbox>",
+  "warns": false
+ },
+ {
+  "input": "<input\ttype=\"checkbox\">",
+  "warns": true
+ },
+ {
+  "input": "<div class=\"todo\">x</div>",
+  "warns": true
+ },
+ {
+  "input": "<div class=\"xtodo\">x</div>",
+  "warns": false
+ },
+ {
+  "input": "<div class=\"todos\">x</div>",
+  "warns": false
+ },
+ {
+  "input": "<div class=\"a todo b\">x</div>",
+  "warns": true
+ },
+ {
+  "input": "<div class = \"todo\">x</div>",
+  "warns": true
+ },
+ {
+  "input": "<div class=\"TODO\">x</div>",
+  "warns": true
+ },
+ {
+  "input": "<div class=\"check list\">x</div>",
+  "warns": false
+ },
+ {
+  "input": "",
+  "warns": false
+ },
+ {
+  "input": "plain text",
+  "warns": false
+ },
+ {
+  "input": "- [ ] milk",
+  "warns": true
+ },
+ {
+  "input": "- [x] milk",
+  "warns": true
+ },
+ {
+  "input": "- [X] milk",
+  "warns": true
+ },
+ {
+  "input": "* [ ] milk",
+  "warns": true
+ },
+ {
+  "input": "  - [ ] indented",
+  "warns": true
+ },
+ {
+  "input": "\t- [ ] tabbed",
+  "warns": true
+ },
+ {
+  "input": "intro\n- [ ] second line",
+  "warns": true
+ },
+ {
+  "input": "- [] empty brackets",
+  "warns": false
+ },
+ {
+  "input": "- [y] wrong char",
+  "warns": false
+ },
+ {
+  "input": "-[ ] no space",
+  "warns": false
+ },
+ {
+  "input": "a - [ ] mid-line only",
+  "warns": false
+ },
+ {
+  "input": "<ul><li>[ ] not a dash</li></ul>",
+  "warns": false
+ },
+ {
+  "input": "<input type=\"checkbox\">",
+  "warns": true
+ },
+ {
+  "input": "<INPUT TYPE='CHECKBOX'>",
+  "warns": true
+ },
+ {
+  "input": "<input class=x type = \"checkbox\">",
+  "warns": true
+ },
+ {
+  "input": "<input type=\"text\">",
+  "warns": false
+ },
+ {
+  "input": "<div class=\"checklist\">x</div>",
+  "warns": true
+ },
+ {
+  "input": "<div class='todo-item'>x</div>",
+  "warns": true
+ },
+ {
+  "input": "<div class=\"my-checklist-thing\">x</div>",
+  "warns": true
+ },
+ {
+  "input": "<div class=\"nottodo\">x</div>",
+  "warns": false
+ },
+ {
+  "input": "x\u000b- [ ] milk",
+  "warns": false
+ },
+ {
+  "input": "x\f- [ ] milk",
+  "warns": false
+ },
+ {
+  "input": "x- [ ] milk",
+  "warns": false
+ },
+ {
+  "input": "x - [ ] milk",
+  "warns": true
+ },
+ {
+  "input": "x - [ ] milk",
+  "warns": true
+ },
+ {
+  "input": "x\r- [ ] milk",
+  "warns": true
+ },
+ {
+  "input": "-﻿[ ] milk",
+  "warns": true
+ },
+ {
+  "input": "-[ ] milk",
+  "warns": false
+ },
+ {
+  "input": "- [ ] milk",
+  "warns": true
+ },
+ {
+  "input": "-　[ ] milk",
+  "warns": true
+ },
+ {
+  "input": "<inputé type=\"checkbox\">",
+  "warns": true
+ },
+ {
+  "input": "<inputK type=\"checkbox\">",
+  "warns": true
+ },
+ {
+  "input": "<input̀ type=\"checkbox\">",
+  "warns": true
+ },
+ {
+  "input": "<input type=\"checKbox\">",
+  "warns": false
+ },
+ {
+  "input": "<div class=\"todoé\">",
+  "warns": true
+ },
+ {
+  "input": "<div class=\"todó\">",
+  "warns": true
+ },
+ {
+  "input": "<div class=\"todó\">",
+  "warns": false
+ },
+ {
+  "input": "<div class=\"✓todo\">",
+  "warns": true
+ },
+ {
+  "input": "<div class=\"todo👍\">",
+  "warns": true
+ },
+ {
+  "input": "- [X]..\"checkbox\"\n[ ][ ]👍 data-type",
+  "warns": true
+ },
+ {
+  "input": "- [X]-[ ]",
+  "warns": true
+ },
+ {
+  "input": "<inputchecklist\u000btodosx</div>checklistmy-checklist",
+  "warns": false
+ },
+ {
+  "input": "\f class- [y]- [x] TYPE ",
+  "warns": false
+ },
+ {
+  "input": "- [x]todo* [ ]my-checklist✓",
+  "warns": true
+ },
+ {
+  "input": "-anottodonottodo<inputé",
+  "warns": false
+ },
+ {
+  "input": "x-",
+  "warns": false
+ },
+ {
+  "input": "<diva<input-x<input-x</div>́x mytype",
+  "warns": false
+ },
+ {
+  "input": "   =  ",
+  "warns": false
+ },
+ {
+  "input": "\n👍</div>todo﻿nottodo- [ ]\"-[ ]",
+  "warns": false
+ },
+ {
+  "input": "   = \u000b==* [ ] \t",
+  "warns": false
+ },
+ {
+  "input": "x data-type\r",
+  "warns": false
+ },
+ {
+  "input": " TYPE﻿<div<input \"\nK",
+  "warns": false
+ },
+ {
+  "input": "-<inputx typeclass\u000b\u000b\"",
+  "warns": false
+ },
+ {
+  "input": "- [ ]<inputx \u000b-[ ]é classchecklist<inputx",
+  "warns": true
+ },
+ {
+  "input": " .\"checkbox2\" data-typecheckboxzz typechecklist",
+  "warns": false
+ },
+ {
+  "input": "todosK K",
+  "warns": false
+ },
+ {
+  "input": "my-checklist-[ ]'checkbox'-[ ]é﻿",
+  "warns": false
+ },
+ {
+  "input": " TYPE<input-xnottodo﻿checklist-xzz   ",
+  "warns": false
+ },
+ {
+  "input": " - [X]\f- []",
+  "warns": false
+ },
+ {
+  "input": "\t-[ ][ ]\t",
+  "warns": false
+ },
+ {
+  "input": "\nnottodo\rx👍<div'",
+  "warns": false
+ },
+ {
+  "input": "\t- [X] = ✓[ ]<inputx",
+  "warns": true
+ },
+ {
+  "input": "<INPUTéK",
+  "warns": false
+ },
+ {
+  "input": " - [y]Kclass",
+  "warns": false
+ },
+ {
+  "input": "  - []*  [ ]  nottodo ",
+  "warns": false
+ },
+ {
+  "input": "<INPUTK type\ntodo ",
+  "warns": false
+ },
+ {
+  "input": ".my-checklist* [ ]<input-x👍",
+  "warns": false
+ },
+ {
+  "input": "*  [ ]",
+  "warns": true
+ },
+ {
+  "input": "my-checklistKnottodochecklist-x mytype TYPEchecklist-x- [y]",
+  "warns": false
+ },
+ {
+  "input": " 　></div>",
+  "warns": false
+ },
+ {
+  "input": "- [X] class✓👍",
+  "warns": true
+ },
+ {
+  "input": "x✓é[ ] class*  [ ]",
+  "warns": false
+ },
+ {
+  "input": "\u000bnottodoK class-",
+  "warns": false
+ },
+ {
+  "input": "- []\n- [X]",
+  "warns": true
+ },
+ {
+  "input": "=todostodoschecklist' x",
+  "warns": false
+ },
+ {
+  "input": "nottodo=\u000b  [ ]a>-",
+  "warns": false
+ },
+ {
+  "input": "\r* [ ]zz-[ ] <INPUTK'",
+  "warns": true
+ },
+ {
+  "input": "[ ]\"checkbox\"a*  [ ]- [x]\rmy-checklist",
+  "warns": false
+ },
+ {
+  "input": "<INPUT",
+  "warns": false
+ },
+ {
+  "input": "= mytype-",
+  "warns": false
+ },
+ {
+  "input": " type- [x]- [x]\na\n\"checkbox\"",
+  "warns": false
+ },
+ {
+  "input": "-[ ]<input -[ ]",
+  "warns": false
+ },
+ {
+  "input": "﻿",
+  "warns": false
+ },
+ {
+  "input": "=<INPUT  ",
+  "warns": false
+ },
+ {
+  "input": "<input-x  - [x]zz* [ ]- []",
+  "warns": false
+ },
+ {
+  "input": "zz type👍todosx é",
+  "warns": false
+ },
+ {
+  "input": " mytype﻿'-[ ]👍 todoschecklist",
+  "warns": false
+ },
+ {
+  "input": "- [y]checkbox TYPE- [x]\"✓",
+  "warns": false
+ },
+ {
+  "input": "checklist-x[ ]x",
+  "warns": false
+ },
+ {
+  "input": " TYPE  <input\n>=é✓",
+  "warns": false
+ },
+ {
+  "input": "checklist",
+  "warns": false
+ },
+ {
+  "input": " TYPEx- [x]\tnottodo\r",
+  "warns": false
+ },
+ {
+  "input": "checklist\ńcheckbox",
+  "warns": false
+ },
+ {
+  "input": " </div>*  [ ]'checkbox'  ",
+  "warns": false
+ },
+ {
+  "input": "\"checkbox2\"'  \t  ' = ",
+  "warns": false
+ },
+ {
+  "input": "a<INPUT́ mytypeK",
+  "warns": false
+ },
+ {
+  "input": "checklist-x",
+  "warns": false
+ },
+ {
+  "input": "\"checkbox2\"<div* [ ]  - [x] mytype<div",
+  "warns": false
+ },
+ {
+  "input": " mytype\"checkbox2\"checklist-x",
+  "warns": false
+ },
+ {
+  "input": "-[ ]\r<INPUT",
+  "warns": false
+ },
+ {
+  "input": " a'﻿",
+  "warns": false
+ },
+ {
+  "input": "\té<inputx́'<input-x- [ ]<input-x",
+  "warns": false
+ },
+ {
+  "input": "\"checkbox\"my-checklist\"checkbox2\"- []\t́</div>",
+  "warns": false
+ },
+ {
+  "input": "\n",
+  "warns": false
+ },
+ {
+  "input": "<div- [ ]todos class ",
+  "warns": false
+ },
+ {
+  "input": "✓   \t",
+  "warns": false
+ },
+ {
+  "input": "<input = \r \f́\r class<input-x",
+  "warns": false
+ },
+ {
+  "input": "'checkbox'\f<inputx- [y]'checkbox'-[ ]﻿nottodo",
+  "warns": false
+ },
+ {
+  "input": "todo 　.checklist-x<inputx* [ ]- []　",
+  "warns": false
+ },
+ {
+  "input": "<inputx<INPUT- [x]\"",
+  "warns": false
+ },
+ {
+  "input": " mytype ",
+  "warns": false
+ },
+ {
+  "input": "a TYPÉ",
+  "warns": false
+ },
+ {
+  "input": "<div",
+  "warns": false
+ },
+ {
+  "input": " ",
+  "warns": false
+ },
+ {
+  "input": "checkbox",
+  "warns": false
+ },
+ {
+  "input": "  </div>✓nottodo data-type- [y]👍 \"",
+  "warns": false
+ },
+ {
+  "input": " nottodoé.[ ] TYPÉ checklist-x",
+  "warns": false
+ },
+ {
+  "input": "a",
+  "warns": false
+ },
+ {
+  "input": "todo.zz\u000b",
+  "warns": false
+ },
+ {
+  "input": ">",
+  "warns": false
+ },
+ {
+  "input": "checklist.>",
+  "warns": false
+ },
+ {
+  "input": "todo\rclass",
+  "warns": false
+ },
+ {
+  "input": " =  ",
+  "warns": false
+ },
+ {
+  "input": "\"checkbox2\" nottodo* [ ]́",
+  "warns": false
+ },
+ {
+  "input": "\n- []'checkbox'",
+  "warns": false
+ },
+ {
+  "input": "class=checklist- [ ]- []<inputx\u000b.<input-x",
+  "warns": false
+ },
+ {
+  "input": "checkbox'checkbox'checkbox",
+  "warns": false
+ },
+ {
+  "input": "class",
+  "warns": false
+ },
+ {
+  "input": "classénottodoé- [X]\t",
+  "warns": false
+ },
+ {
+  "input": " ",
+  "warns": false
+ },
+ {
+  "input": "- [y][ ]K",
+  "warns": false
+ },
+ {
+  "input": " data-type",
+  "warns": false
+ },
+ {
+  "input": ">a nottodo<INPUT. ",
+  "warns": false
+ },
+ {
+  "input": " mytype﻿\"checkbox\"a\"checkbox\"",
+  "warns": false
+ },
+ {
+  "input": "my-checklist = \tchecklist type",
+  "warns": false
+ },
+ {
+  "input": "<div= <div*  [ ]</div>zz'=",
+  "warns": false
+ },
+ {
+  "input": "<inputx TYPE-[ ]- [X]todos</div> ",
+  "warns": false
+ },
+ {
+  "input": "todo- [ ]- [ ]\n classK",
+  "warns": false
+ },
+ {
+  "input": " checklist-x \"<input-xchecklist-xchecklist-xK✓",
+  "warns": false
+ },
+ {
+  "input": "my-checklist",
+  "warns": false
+ },
+ {
+  "input": "\"checkbox\" clasś",
+  "warns": false
+ },
+ {
+  "input": "👍\f- [X]x  class\f",
+  "warns": false
+ },
+ {
+  "input": " [ ] data-type　.<inputx",
+  "warns": false
+ },
+ {
+  "input": "' .́*  [ ] ",
+  "warns": false
+ },
+ {
+  "input": " TYPEcheckbox",
+  "warns": false
+ },
+ {
+  "input": "\"nottodo\r\u000b</div></div>'checkbox' ",
+  "warns": false
+ },
+ {
+  "input": "\u000bcheckbox =  data-type>todo- []-[ ]",
+  "warns": false
+ },
+ {
+  "input": "nottodo",
+  "warns": false
+ },
+ {
+  "input": "　'checkbox'<input-x>\f-[ ]",
+  "warns": false
+ },
+ {
+  "input": "[ ] mytype- [ ]   ",
+  "warns": false
+ },
+ {
+  "input": " mytype\n- [y]",
+  "warns": false
+ },
+ {
+  "input": "my-checklist<input-x👍\fcheckbox'checkbox'",
+  "warns": false
+ },
+ {
+  "input": "échecklist-x- [X]✓x- []zz",
+  "warns": false
+ },
+ {
+  "input": "-[ ]</div><div'\"",
+  "warns": false
+ },
+ {
+  "input": " = ",
+  "warns": false
+ },
+ {
+  "input": "-[ ]nottodo<input mytype✓\n✓",
+  "warns": false
+ },
+ {
+  "input": "<div ✓ax TYPE\ftodo",
+  "warns": false
+ },
+ {
+  "input": "-[ ]　- [X]<inputxx TYPE = ",
+  "warns": false
+ },
+ {
+  "input": "checklist-x- [x]<INPUTé- [ ]  ✓\f\u000b",
+  "warns": false
+ },
+ {
+  "input": "checkbox<div<INPUT<inputx",
+  "warns": false
+ },
+ {
+  "input": "my-checklist\ra\"= data-type\n[ ]",
+  "warns": false
+ },
+ {
+  "input": " type'\" data-type\"checkbox\" mytype",
+  "warns": false
+ },
+ {
+  "input": "  mytype- []",
+  "warns": false
+ },
+ {
+  "input": "<INPUT</div>zzmy-checklist<input='checkbox'</div> ",
+  "warns": false
+ },
+ {
+  "input": "\"checkbox2\"- []checkbox\u000b<input\"",
+  "warns": false
+ },
+ {
+  "input": "checklistmy-checklist- [ ]",
+  "warns": false
+ },
+ {
+  "input": "<input-x",
+  "warns": false
+ },
+ {
+  "input": " type* [ ]K'checkbox'<INPUTcheckboxé\f",
+  "warns": false
+ },
+ {
+  "input": "́class data-typetodos",
+  "warns": false
+ },
+ {
+  "input": "- []- [x]- [X]a*  [ ]<inputx",
+  "warns": false
+ },
+ {
+  "input": "﻿-﻿todos- []=",
+  "warns": false
+ },
+ {
+  "input": " class- [X]- []checklist-x",
+  "warns": false
+ },
+ {
+  "input": "́- []checklist- [ ] - [y]é́",
+  "warns": false
+ },
+ {
+  "input": " TYPE\t<divclass- [X] TYPE ' type",
+  "warns": false
+ },
+ {
+  "input": "  = ",
+  "warns": false
+ },
+ {
+  "input": "-",
+  "warns": false
+ },
+ {
+  "input": " \"checkbox2\"́",
+  "warns": false
+ },
+ {
+  "input": "checkbox- [ ]\"checkbox2\"checklist-x",
+  "warns": false
+ },
+ {
+  "input": "- [].x</div>é- class",
+  "warns": false
+ },
+ {
+  "input": " data-type\t\"- [x]<inputx́* [ ]",
+  "warns": false
+ },
+ {
+  "input": " - [x].\n<input-xK = <input",
+  "warns": true
+ },
+ {
+  "input": "checklist mytypetodos- [X]",
+  "warns": false
+ },
+ {
+  "input": "\f*  [ ]<input <inputx\t",
+  "warns": false
+ },
+ {
+  "input": "todos",
+  "warns": false
+ },
+ {
+  "input": " type=nottodo✓",
+  "warns": false
+ },
+ {
+  "input": " my-checklist﻿ type\u000b- [x]",
+  "warns": false
+ },
+ {
+  "input": " class\f　 class",
+  "warns": false
+ },
+ {
+  "input": "\"checkbox\"  -[ ]- [y]<inputx class",
+  "warns": false
+ },
+ {
+  "input": " checkbox\"checkbox\"",
+  "warns": false
+ },
+ {
+  "input": "    =",
+  "warns": false
+ },
+ {
+  "input": "x",
+  "warns": false
+ },
+ {
+  "input": " TYPE[ ]my-checklist  \"checkbox2\"\r'",
+  "warns": false
+ },
+ {
+  "input": "x\r.<inputx 👍\u000bclass = ",
+  "warns": false
+ },
+ {
+  "input": "'checkbox'todo",
+  "warns": false
+ },
+ {
+  "input": "todo</div>checkbox'  \tmy-checklist- [ ]my-checklist",
+  "warns": false
+ },
+ {
+  "input": "\"K<div",
+  "warns": false
+ },
+ {
+  "input": " mytypex ",
+  "warns": false
+ },
+ {
+  "input": "<div<input class-[ ]👍",
+  "warns": false
+ },
+ {
+  "input": " \"checkbox\"x- [X]- []👍́é<input",
+  "warns": false
+ },
+ {
+  "input": " TYPEa\f atodoclasś  ",
+  "warns": false
+ },
+ {
+  "input": "<div\"checkbox2\"todo</div>́ checklist-x",
+  "warns": false
+ },
+ {
+  "input": " 　.* [ ]",
+  "warns": false
+ },
+ {
+  "input": "✓  ",
+  "warns": false
+ },
+ {
+  "input": "-[ ]=x　é",
+  "warns": false
+ },
+ {
+  "input": "\f-<INPUT",
+  "warns": false
+ },
+ {
+  "input": "\n\tmy-checklist",
+  "warns": false
+ },
+ {
+  "input": "* [ ]",
+  "warns": true
+ },
+ {
+  "input": "todos\"checkbox2\"*  [ ]é",
+  "warns": false
+ },
+ {
+  "input": "zz",
+  "warns": false
+ },
+ {
+  "input": " mytype  K\u000b\f classtodochecklist",
+  "warns": false
+ },
+ {
+  "input": "- [ ]  mytypeé",
+  "warns": true
+ },
+ {
+  "input": " .- [y]",
+  "warns": false
+ },
+ {
+  "input": "*  [ ]✓ todos> type type",
+  "warns": true
+ },
+ {
+  "input": "\fclass",
+  "warns": false
+ },
+ {
+  "input": "todosa'.\tK\"checkbox2\"",
+  "warns": false
+ },
+ {
+  "input": "- []checkbox<inputx✓<div\f",
+  "warns": false
+ },
+ {
+  "input": "　 ﻿.",
+  "warns": false
+ },
+ {
+  "input": " zz- <input",
+  "warns": false
+ },
+ {
+  "input": "- [X]",
+  "warns": true
+ },
+ {
+  "input": "<input-x- [y]checkbox mytype",
+  "warns": false
+ },
+ {
+  "input": "  mytype* [ ]",
+  "warns": false
+ },
+ {
+  "input": " = checklist-x<div<inputx",
+  "warns": false
+ },
+ {
+  "input": "- []\"-[ ]",
+  "warns": false
+ },
+ {
+  "input": "- [y]\"checkbox\">\n\t- [] class",
+  "warns": false
+ },
+ {
+  "input": "class\n ",
+  "warns": false
+ },
+ {
+  "input": "\tK",
+  "warns": false
+ },
+ {
+  "input": "[ ] mytype* [ ]<input-xé",
+  "warns": false
+ },
+ {
+  "input": "'",
+  "warns": false
+ },
+ {
+  "input": " class",
+  "warns": false
+ },
+ {
+  "input": "<INPUT\n\u000b\"checkbox\"zz  mytype",
+  "warns": false
+ },
+ {
+  "input": "\n<inputx\n-[ ] ",
+  "warns": false
+ },
+ {
+  "input": " TYPE<input-xtodo \"checkbox\"[ ]<div",
+  "warns": false
+ },
+ {
+  "input": "a. * [ ]<inputx*  [ ] TYPE",
+  "warns": false
+ },
+ {
+  "input": " mytype",
+  "warns": false
+ },
+ {
+  "input": "\"checkbox2\".<input<input<INPUT",
+  "warns": false
+ },
+ {
+  "input": "[ ]",
+  "warns": false
+ },
+ {
+  "input": ".\r-[ ]zz",
+  "warns": false
+ },
+ {
+  "input": " type.\"checkbox\"",
+  "warns": false
+ },
+ {
+  "input": " mytype　",
+  "warns": false
+ },
+ {
+  "input": " type<inputxclass",
+  "warns": false
+ },
+ {
+  "input": "- []'checkbox'my-checklist   checklist-x́checklist-x- [y]",
+  "warns": false
+ },
+ {
+  "input": "=- [ ]- [X]",
+  "warns": false
+ },
+ {
+  "input": ">[ ]✓checklist-xclass-\"checkbox2\"\nchecklist",
+  "warns": false
+ },
+ {
+  "input": "'checkbox'x\r'checkbox'\"checkbox\"<input-x",
+  "warns": false
+ },
+ {
+  "input": "classK\fénottodo",
+  "warns": false
+ },
+ {
+  "input": "=\u000b",
+  "warns": false
+ },
+ {
+  "input": " acheckboxa- [x]-zz<inputx\n",
+  "warns": false
+ },
+ {
+  "input": "\nmy-checklisté'class = <input-x\u000b",
+  "warns": false
+ },
+ {
+  "input": "-x",
+  "warns": false
+ },
+ {
+  "input": " checklist-x<inputx mytype\"checkbox\"\"checkbox\" mytype*  [ ]my-checklist",
+  "warns": false
+ },
+ {
+  "input": "-'a\n",
+  "warns": false
+ },
+ {
+  "input": " type'",
+  "warns": false
+ },
+ {
+  "input": " type﻿checkbox\r<input",
+  "warns": false
+ },
+ {
+  "input": " ",
+  "warns": false
+ },
+ {
+  "input": "my-checklist>👍\f✓́",
+  "warns": false
+ },
+ {
+  "input": "　.\f\f<INPUT-[ ]",
+  "warns": false
+ },
+ {
+  "input": "\t type[ ]",
+  "warns": false
+ },
+ {
+  "input": "K=[ ]",
+  "warns": false
+ },
+ {
+  "input": "</div>K nottodo- [X]checklist",
+  "warns": false
+ },
+ {
+  "input": "\ńmy-checklist'checkbox'checklist-x",
+  "warns": false
+ },
+ {
+  "input": "<input-x-\"checkbox2\"✓́ ",
+  "warns": false
+ },
+ {
+  "input": "",
+  "warns": false
+ },
+ {
+  "input": " data-type*  [ ]a\ntodos- [X]-[ ] mytype<input-x",
+  "warns": false
+ },
+ {
+  "input": "✓'checkbox'",
+  "warns": false
+ },
+ {
+  "input": "* [ ]x - []<divx",
+  "warns": true
+ },
+ {
+  "input": "- [x]my-checklist　  - [ ]x<INPUT",
+  "warns": true
+ },
+ {
+  "input": "todos ",
+  "warns": false
+ },
+ {
+  "input": "<inputx\t<input- [y]　",
+  "warns": false
+ },
+ {
+  "input": "- []> class\rx*  [ ]* [ ]checklist-x",
+  "warns": false
+ },
+ {
+  "input": "-\n- [y]- [X] typeé",
+  "warns": false
+ },
+ {
+  "input": "\"checkbox2\"K[ ]'checkbox'",
+  "warns": false
+ },
+ {
+  "input": "\f- [y][ ]nottodo",
+  "warns": false
+ },
+ {
+  "input": "  \f- [x]\n",
+  "warns": false
+ },
+ {
+  "input": "\"class mytypetodos　-[ ]checkbox",
+  "warns": false
+ },
+ {
+  "input": "é",
+  "warns": false
+ },
+ {
+  "input": "<inputx   ",
+  "warns": false
+ },
+ {
+  "input": "　- [ ] mytype- [y]　\n</div>my-checklist",
+  "warns": false
+ },
+ {
+  "input": "\r- [x]",
+  "warns": true
+ },
+ {
+  "input": "x> mytype data-type> ",
+  "warns": false
+ },
+ {
+  "input": "\r<inputxé- [ ]",
+  "warns": false
+ },
+ {
+  "input": "<input* [ ] typetodos",
+  "warns": false
+ },
+ {
+  "input": "=",
+  "warns": false
+ },
+ {
+  "input": "́.'x type- [y]",
+  "warns": false
+ },
+ {
+  "input": "'\fzz type- []checkboxcheckboxcheckbox",
+  "warns": false
+ },
+ {
+  "input": " K'✓",
+  "warns": false
+ },
+ {
+  "input": "　- [ ]class.- [x]*  [ ]﻿* [ ]\f",
+  "warns": false
+ },
+ {
+  "input": "\"checkbox\" TYPE- [ ]<div",
+  "warns": false
+ },
+ {
+  "input": "<div﻿<input-x",
+  "warns": false
+ },
+ {
+  "input": "- [X]﻿- [y] typechecklist-x",
+  "warns": true
+ },
+ {
+  "input": "- [x]a",
+  "warns": true
+ },
+ {
+  "input": "\ntodosclass- []checklist-x́\fchecklist-x- [ ]",
+  "warns": false
+ },
+ {
+  "input": "- [x] = ",
+  "warns": true
+ },
+ {
+  "input": "é type[ ] é'　",
+  "warns": false
+ },
+ {
+  "input": "nottodo data-type'́checkbox type*  [ ]",
+  "warns": false
+ },
+ {
+  "input": " class　",
+  "warns": false
+ },
+ {
+  "input": " todo<inputx* [ ]>",
+  "warns": false
+ },
+ {
+  "input": "́-*  [ ] data-type<INPUT<INPUT type TYPEmy-checklist",
+  "warns": false
+ },
+ {
+  "input": " TYPEx<inputx é ",
+  "warns": false
+ },
+ {
+  "input": "Kzz-class",
+  "warns": false
+ },
+ {
+  "input": "<input-x*  [ ]\t",
+  "warns": false
+ },
+ {
+  "input": "é\"checkbox\"\"",
+  "warns": false
+ },
+ {
+  "input": "- [X]zz mytype=[ ]",
+  "warns": true
+ },
+ {
+  "input": "a type　 class",
+  "warns": false
+ },
+ {
+  "input": "<input* [ ]> <input  ",
+  "warns": false
+ },
+ {
+  "input": "\"- [ ]\t<INPUTé><diva ",
+  "warns": false
+ },
+ {
+  "input": "\"checkbox\"my-checklist* [ ]</div> class\u000b -- []",
+  "warns": false
+ },
+ {
+  "input": "- [x]<inputx",
+  "warns": true
+ },
+ {
+  "input": "éx>  = 'checkbox'- [y]　",
+  "warns": false
+ },
+ {
+  "input": " checklist-x\u000b'checkbox'<input-x<INPUT<input-x",
+  "warns": false
+ },
+ {
+  "input": " = - [y]\"checkbox\"<inputx<input-x. \"checkbox2\"",
+  "warns": false
+ },
+ {
+  "input": "\f<input-x\f=<input  <inputatodo",
+  "warns": false
+ },
+ {
+  "input": "K",
+  "warns": false
+ },
+ {
+  "input": "- []",
+  "warns": false
+ },
+ {
+  "input": "<inputxK",
+  "warns": false
+ },
+ {
+  "input": "x*  [ ]my-checklist- [ ]- [ ][ ]<input\"checkbox\"",
+  "warns": false
+ },
+ {
+  "input": "todo TYPE\"checkbox2\"checklist- []",
+  "warns": false
+ },
+ {
+  "input": "- []  ",
+  "warns": false
+ },
+ {
+  "input": "\r<input-x",
+  "warns": false
+ },
+ {
+  "input": "✓> class\u000b=<inputx\u000b",
+  "warns": false
+ },
+ {
+  "input": "- [y]  - [ ]'checkbox' = K\r<div",
+  "warns": true
+ },
+ {
+  "input": "👍",
+  "warns": false
+ },
+ {
+  "input": "'👍✓.",
+  "warns": false
+ },
+ {
+  "input": "-</div>nottodo classK TYPE- [y] = - [X]",
+  "warns": false
+ },
+ {
+  "input": "classx mytypezznottodo",
+  "warns": false
+ },
+ {
+  "input": "my-checklist data-type  checklist-x[ ]checklist-x",
+  "warns": false
+ },
+ {
+  "input": " ́\"checkbox\"",
+  "warns": false
+ },
+ {
+  "input": "x- []",
+  "warns": false
+ },
+ {
+  "input": "todo TYPE  type'checkbox'K\"checkbox\"my-checklist ",
+  "warns": false
+ },
+ {
+  "input": "<INPUT  type mytype zzchecklist",
+  "warns": false
+ },
+ {
+  "input": "'checkbox'👍 = ",
+  "warns": false
+ },
+ {
+  "input": "\rtodos- []<input<div>\f",
+  "warns": false
+ },
+ {
+  "input": "</div>",
+  "warns": false
+ },
+ {
+  "input": "\rchecklist-x- []\n  ",
+  "warns": false
+ },
+ {
+  "input": "-todos- []</div><inputx TYPE</div>",
+  "warns": false
+ },
+ {
+  "input": " xx-[ ]- [X]todo　",
+  "warns": false
+ },
+ {
+  "input": "\u000b\u000bclass\f. - [ ]>",
+  "warns": true
+ },
+ {
+  "input": "　'checkbox'",
+  "warns": false
+ },
+ {
+  "input": "[ ].<inputxa todos\r typeclass",
+  "warns": false
+ },
+ {
+  "input": ".todos-- []\"<input class data-type- [x]",
+  "warns": false
+ },
+ {
+  "input": "\"<div ",
+  "warns": false
+ },
+ {
+  "input": "\u000b mytype* [ ]👍nottodo- [X] typezz",
+  "warns": false
+ },
+ {
+  "input": "\ttodo 　👍",
+  "warns": false
+ },
+ {
+  "input": "</div>*  [ ]my-checklist[ ]- [x] \"",
+  "warns": false
+ },
+ {
+  "input": "x[ ]checklist-xclass\r",
+  "warns": false
+ },
+ {
+  "input": "　\f\f<div",
+  "warns": false
+ },
+ {
+  "input": "<input<inputx\"checkbox\"'",
+  "warns": false
+ },
+ {
+  "input": "</div>nottodo=",
+  "warns": false
+ },
+ {
+  "input": "\t- [X]>todosé\" ",
+  "warns": true
+ },
+ {
+  "input": "nottodochecklist👍<input",
+  "warns": false
+ },
+ {
+  "input": "todoa type  checklist\"checkbox",
+  "warns": false
+ },
+ {
+  "input": "\u000b'",
+  "warns": false
+ },
+ {
+  "input": "́todótodochecklist-xx",
+  "warns": false
+ },
+ {
+  "input": " - [ ] mytype",
+  "warns": true
+ },
+ {
+  "input": " TYPEchecklist",
+  "warns": false
+ },
+ {
+  "input": "\"checkbox2\"- [x]﻿nottodo mytype<inputé class",
+  "warns": false
+ },
+ {
+  "input": "﻿ class = .- [ ]todos class-",
+  "warns": false
+ },
+ {
+  "input": " mytype>",
+  "warns": false
+ },
+ {
+  "input": "-my-checklisttodos TYPE checklist=x",
+  "warns": false
+ },
+ {
+  "input": "﻿ class",
+  "warns": false
+ },
+ {
+  "input": "-todos<input-x",
+  "warns": false
+ },
+ {
+  "input": " <input-x\n\"- [y]checklist　",
+  "warns": false
+ },
+ {
+  "input": "\n<input- [x]﻿K",
+  "warns": false
+ },
+ {
+  "input": "\"checkbox\"",
+  "warns": false
+ },
+ {
+  "input": " TYPE=",
+  "warns": false
+ },
+ {
+  "input": "✓</div><input-x",
+  "warns": false
+ },
+ {
+  "input": "zz  ",
+  "warns": false
+ },
+ {
+  "input": "\u000b<input 👍my-checklist\u000b<div́a",
+  "warns": false
+ },
+ {
+  "input": "class'",
+  "warns": false
+ },
+ {
+  "input": "- [x] = 👍  - [X] class- [X] ",
+  "warns": true
+ },
+ {
+  "input": "axx mytype\" TYPE",
+  "warns": false
+ },
+ {
+  "input": "✓.́todo- [x]nottodo<inputxK",
+  "warns": false
+ },
+ {
+  "input": "<INPUT</div>\"checkbox\"\t́é- [] TYPE",
+  "warns": false
+ },
+ {
+  "input": "'<INPUT-'checkbox'checkbox",
+  "warns": false
+ },
+ {
+  "input": "\f ",
+  "warns": false
+ },
+ {
+  "input": "a<input-x",
+  "warns": false
+ },
+ {
+  "input": "todos- [x]́\f=<div- [X]- []",
+  "warns": false
+ },
+ {
+  "input": "\"checkbox\" mytype'́nottodo<input TYPE ",
+  "warns": false
+ },
+ {
+  "input": "todo mytype<input　 *  [ ]<input",
+  "warns": true
+ },
+ {
+  "input": "todo<input-x﻿<inputx",
+  "warns": false
+ },
+ {
+  "input": "checklist-xtodos = checklist-x.",
+  "warns": false
+ },
+ {
+  "input": "aé'checkbox'x.- [y]K*  [ ]",
+  "warns": false
+ },
+ {
+  "input": "class✓ ́ data-type>-[ ]checklistchecklist",
+  "warns": false
+ },
+ {
+  "input": "</div>' TYPE  class",
+  "warns": false
+ },
+ {
+  "input": " =<div</div>'K*  [ ]'K",
+  "warns": false
+ },
+ {
+  "input": "<input-xx\f[ ]",
+  "warns": false
+ },
+ {
+  "input": " mytype class",
+  "warns": false
+ },
+ {
+  "input": "<input-x- [x]  TYPE\r <inputx",
+  "warns": false
+ },
+ {
+  "input": "K[ ]xtodos<input-xK- []",
+  "warns": false
+ },
+ {
+  "input": " mytype\"x- [y]",
+  "warns": false
+ },
+ {
+  "input": " \r<input-x👍.<inputx",
+  "warns": false
+ },
+ {
+  "input": "<input-x- []<div ",
+  "warns": false
+ },
+ {
+  "input": "*  [ ]todo",
+  "warns": true
+ },
+ {
+  "input": " >  '<div",
+  "warns": false
+ },
+ {
+  "input": "- [X]- [y]- [y] class'checkbox' type* [ ]checkbox",
+  "warns": true
+ },
+ {
+  "input": " type-[ ]<input\n",
+  "warns": false
+ },
+ {
+  "input": "my-checklist<inputxclass- []classclass",
+  "warns": false
+ },
+ {
+  "input": "éK'checkbox'class.\"checkbox2\"checklist",
+  "warns": false
+ },
+ {
+  "input": "\n<div✓\u000b  \"é\r<inputx",
+  "warns": false
+ },
+ {
+  "input": "\n- [x]*  [ ]'[ ]K　 ",
+  "warns": true
+ },
+ {
+  "input": "xa",
+  "warns": false
+ },
+ {
+  "input": "'- [X]*  [ ]\n* [ ]. <input-x",
+  "warns": true
+ },
+ {
+  "input": "-",
+  "warns": false
+ },
+ {
+  "input": "*  [ ][ ]\"checkbox\">=",
+  "warns": true
+ },
+ {
+  "input": " </div>  ",
+  "warns": false
+ },
+ {
+  "input": " - [X]- [x]\ncheckbox- []　\f",
+  "warns": true
+ },
+ {
+  "input": " mytype'my-checklist ",
+  "warns": false
+ },
+ {
+  "input": "\"﻿é <inputx-[ ]nottodo﻿",
+  "warns": false
+ },
+ {
+  "input": "\f",
+  "warns": false
+ },
+ {
+  "input": "-[ ]✓-\u000b",
+  "warns": false
+ },
+ {
+  "input": "* [ ]<input-x<inputx﻿class- []- [y]<inputx",
+  "warns": true
+ },
+ {
+  "input": "checklist- [X]checkboxzz*  [ ]checklist-[ ]",
+  "warns": false
+ },
+ {
+  "input": " TYPE",
+  "warns": false
+ },
+ {
+  "input": "- []* [ ]my-checklist-[ ]nottodo .",
+  "warns": false
+ },
+ {
+  "input": "> mytypetodo = ",
+  "warns": false
+ },
+ {
+  "input": "👍\"✓checkbox\n\"checkbox\"- [x]👍",
+  "warns": false
+ },
+ {
+  "input": "aclass\"\"checkbox2\"my-checklist[ ]K<inputx",
+  "warns": false
+ },
+ {
+  "input": "　 <input-x\"checkbox\" type- [X]",
+  "warns": false
+ },
+ {
+  "input": "zz TYPE-todo- [y]\"checkbox2\"  data-type",
+  "warns": false
+ },
+ {
+  "input": "👍 data-type type\r\"checkbox\"\"<inputxx",
+  "warns": false
+ },
+ {
+  "input": "- [x]nottodo  = - []a",
+  "warns": true
+ },
+ {
+  "input": " </div> TYPE\f",
+  "warns": false
+ },
+ {
+  "input": "́<input TYPE- [ ]</div>   ",
+  "warns": false
+ },
+ {
+  "input": "my-checklistzz*  [ ]- []\ftodo",
+  "warns": false
+ },
+ {
+  "input": "\n</div>\"checkbox2\" ﻿'checkbox'- [y]",
+  "warns": false
+ },
+ {
+  "input": "  todos  TYPE\t<input",
+  "warns": false
+ },
+ {
+  "input": "\u000bmy-checklist-nottodoclass data-type",
+  "warns": false
+ },
+ {
+  "input": "\"checkbox\"*  [ ]checkbox\" data-type",
+  "warns": false
+ },
+ {
+  "input": " mytype'checkbox' mytype>\t mytype*  [ ] * [ ]",
+  "warns": true
+ },
+ {
+  "input": ">﻿ data-type",
+  "warns": false
+ },
+ {
+  "input": "- [X].<input-x =  checklist-x- [X]todos",
+  "warns": true
+ },
+ {
+  "input": "✓ - []todo. data-type mytype",
+  "warns": false
+ },
+ {
+  "input": "- [x]  data-type\rtodo clasś type",
+  "warns": true
+ },
+ {
+  "input": "\n\f<inputx✓\f\u000b  = ",
+  "warns": false
+ },
+ {
+  "input": "-\r- [y]👍  </div>- [ ]",
+  "warns": false
+ },
+ {
+  "input": "'\" mytypexchecklist-x\f",
+  "warns": false
+ },
+ {
+  "input": " data-typechecklist",
+  "warns": false
+ },
+ {
+  "input": "<INPUT-[ ]\"checklist-x* [ ]👍*  [ ]",
+  "warns": false
+ },
+ {
+  "input": "\t\"checkbox\"\"K",
+  "warns": false
+ },
+ {
+  "input": "zz<input- [X]my-checklist",
+  "warns": false
+ },
+ {
+  "input": "K\n  data-type  ",
+  "warns": false
+ },
+ {
+  "input": "\r = - [y]-",
+  "warns": false
+ },
+ {
+  "input": ".-<div- classzz<INPUT*  [ ]K",
+  "warns": false
+ },
+ {
+  "input": "-[ ]a",
+  "warns": false
+ },
+ {
+  "input": "K</div>\u000b👍\f<INPUT",
+  "warns": false
+ },
+ {
+  "input": "* [ ]✓\t  =",
+  "warns": true
+ },
+ {
+  "input": "\"checkbox2\"class-",
+  "warns": false
+ },
+ {
+  "input": "[ ]<input type class- [x]́- [X]todos<INPUT",
+  "warns": false
+ },
+ {
+  "input": "\rmy-checklist \"checkbox\"<input<INPUT<div👍 type",
+  "warns": false
+ },
+ {
+  "input": "[ ]\"checkbox2\"nottodo> = ",
+  "warns": false
+ },
+ {
+  "input": "todo mytype> mytype\t  mytype\r<div",
+  "warns": false
+ },
+ {
+  "input": "x👍 type\"checkbox2\"",
+  "warns": false
+ },
+ {
+  "input": "́　K-[ ] ",
+  "warns": false
+ },
+ {
+  "input": "  mytype</div>",
+  "warns": false
+ },
+ {
+  "input": " - [y]nottodo data-type﻿a<INPUT-todo",
+  "warns": false
+ },
+ {
+  "input": "=<inputx.é<input-*  [ ]",
+  "warns": false
+ },
+ {
+  "input": "- [ ]́ class\"checkbox2\"́=a\"checkbox2\"*  [ ]",
+  "warns": true
+ },
+ {
+  "input": "K*  [ ]",
+  "warns": false
+ },
+ {
+  "input": "*  [ ]  \fclass",
+  "warns": true
+ },
+ {
+  "input": "﻿todosmy-checklist　nottodocheckbox",
+  "warns": false
+ },
+ {
+  "input": "'* [ ]nottodo<inputxchecklist",
+  "warns": false
+ },
+ {
+  "input": "- [x] ",
+  "warns": true
+ },
+ {
+  "input": "checklist-x\f\u000b\f-",
+  "warns": false
+ },
+ {
+  "input": "<INPUT<input</div> = checkbox data-type'x",
+  "warns": false
+ },
+ {
+  "input": "<input-x\n = ✓- [X]  data-typé",
+  "warns": false
+ },
+ {
+  "input": "x  - [x]checklist = todos TYPE✓ data-type",
+  "warns": false
+ },
+ {
+  "input": "﻿\u000b TYPE- [ ]todo ",
+  "warns": false
+ },
+ {
+  "input": "zz\t́.checklist✓<div",
+  "warns": false
+ },
+ {
+  "input": "* [ ]-[ ]>todo <input-xé\n",
+  "warns": true
+ },
+ {
+  "input": "*  [ ] type- [ ]\f\"",
+  "warns": true
+ },
+ {
+  "input": "́",
+  "warns": false
+ },
+ {
+  "input": "todos\f✓<input class>",
+  "warns": false
+ },
+ {
+  "input": "<input-x́= mytype  data-type TYPE✓",
+  "warns": false
+ },
+ {
+  "input": "<input. nottodo\"checkbox́</div>",
+  "warns": false
+ },
+ {
+  "input": "= mytype- [ ]",
+  "warns": false
+ },
+ {
+  "input": "K-[ ]. = ﻿✓* [ ]\f",
+  "warns": false
+ },
+ {
+  "input": " type data-type- [y]-[ ]>",
+  "warns": false
+ },
+ {
+  "input": "\u000b</div>\f-todo- [y]　checkbox",
+  "warns": false
+ },
+ {
+  "input": "checklist́'checkbox'\rtodoclass = ",
+  "warns": false
+ },
+ {
+  "input": "-[ ]checklist-x TYPEtodos* [ ]👍 mytype-[ ]  ",
+  "warns": false
+ },
+ {
+  "input": " type</div>- [y]  - [x]-[ ]",
+  "warns": true
+ },
+ {
+  "input": "\"✓- [X]",
+  "warns": false
+ },
+ {
+  "input": "*  [ ] ",
+  "warns": true
+ },
+ {
+  "input": "nottodo>-[ ]-[ ]✓\"  typechecklist-x",
+  "warns": false
+ },
+ {
+  "input": "- []K✓-[ ]✓",
+  "warns": false
+ },
+ {
+  "input": "́checkbox\t",
+  "warns": false
+ },
+ {
+  "input": "\"\"checkbox2\"a",
+  "warns": false
+ },
+ {
+  "input": "👍todo\f ́",
+  "warns": false
+ },
+ {
+  "input": "<div</div>👍* [ ]\f class-[ ] ",
+  "warns": false
+ },
+ {
+  "input": "nottodo\t- [X]<inputx\r﻿my-checklist\n",
+  "warns": false
+ },
+ {
+  "input": "K'✓checklist-x TYPE data-type",
+  "warns": false
+ },
+ {
+  "input": "- mytypechecklist\t- [x] TYPE　",
+  "warns": false
+ },
+ {
+  "input": "　\"checkbox\"",
+  "warns": false
+ },
+ {
+  "input": "'✓- [y]checklist-x\f\f",
+  "warns": false
+ },
+ {
+  "input": " <INPUTnottodo class TYPE data-type",
+  "warns": false
+ },
+ {
+  "input": ">todoscheckbox class\" data-type",
+  "warns": false
+ },
+ {
+  "input": "K'checkbox'   data-type<div  ﻿",
+  "warns": false
+ },
+ {
+  "input": " data-type\r　  - [ ][ ]- [y]- [x]",
+  "warns": false
+ },
+ {
+  "input": "é  ",
+  "warns": false
+ },
+ {
+  "input": "todos-[ ]todos - [x]",
+  "warns": true
+ },
+ {
+  "input": " data-type\ra -[ ]",
+  "warns": false
+ },
+ {
+  "input": " 　<INPUT",
+  "warns": false
+ },
+ {
+  "input": "todotodos mytype ",
+  "warns": false
+ },
+ {
+  "input": " mytypea- [x]",
+  "warns": false
+ },
+ {
+  "input": "﻿'todos- [ ]́*  [ ]>- [ ]- [y]",
+  "warns": false
+ },
+ {
+  "input": "✓-<input-x　 - []checklist",
+  "warns": false
+ },
+ {
+  "input": "checkbox\u000b",
+  "warns": false
+ },
+ {
+  "input": "é\r-[ ] type</div>́✓\r",
+  "warns": false
+ },
+ {
+  "input": "\n mytype",
+  "warns": false
+ },
+ {
+  "input": "nottodo\n \".",
+  "warns": false
+ },
+ {
+  "input": "é TYPE  >- [y] type TYPEzzzz",
+  "warns": false
+ },
+ {
+  "input": "\"- [ ]-[ ]- [X]",
+  "warns": false
+ },
+ {
+  "input": "class' ́xchecklist-xchecklist-x",
+  "warns": false
+ },
+ {
+  "input": "  <input́　",
+  "warns": false
+ },
+ {
+  "input": "a- [X]* [ ]my-checklist",
+  "warns": false
+ },
+ {
+  "input": "checkbox﻿\"checkbox2\" <inputx",
+  "warns": false
+ },
+ {
+  "input": "Ka\r[ ]</div>- [x]\f",
+  "warns": false
+ },
+ {
+  "input": "<inputx-[ ]é data-type- [x]- [] ",
+  "warns": false
+ },
+ {
+  "input": "zz-x",
+  "warns": false
+ },
+ {
+  "input": "é type\f\f",
+  "warns": false
+ },
+ {
+  "input": "<INPUT clasś<div<INPUTx = todos-",
+  "warns": false
+ }
+]

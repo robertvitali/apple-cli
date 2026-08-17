@@ -18,6 +18,9 @@ struct CreatedNote: Encodable {
     let title: String
     let folder: String?
     let account: String?
+    /// Present only when the body looked like a checklist — see `NotesText.detectChecklistAttempt`.
+    /// Optional, so the synthesized `Encodable` omits the key entirely on the normal path.
+    let warning: String?
 }
 
 /// A search hit. The MCP emits `{id, title, content:"", tags:[], created, modified, folder,
@@ -135,6 +138,10 @@ struct UpdatedNote: Encodable {
     let id: String?
     let title: String
     let shared: Bool
+    /// See `CreatedNote.warning`. `append` never sets it: the oracle calls
+    /// `detectChecklistAttempt` in create-note and the two update-note paths ONLY, and this type is
+    /// shared with append.
+    let warning: String?
 }
 
 struct DeletedNote: Encodable {

@@ -1,0 +1,47 @@
+import Foundation
+
+// NOTES-M8 ReDoS probe. The md/class patterns are verbatim from Sources/NotesKit/NotesText.swift
+// (the JS-semantics spelled-out forms). The html rule is NOT a regex in the shipped code — it is
+// a linear two-phase scan (`NotesText.htmlCheckboxAttempt`) precisely because the regex form
+// below is quadratic on repeated unterminated `<input`; it is kept here, labelled RETIRED, as the
+// red baseline that measurement is against.
+let jsSpace = "\t\n\u{0b}\u{0c}\r \u{a0}\u{1680}\u{2000}-\u{200a}\u{2028}\u{2029}\u{202f}\u{205f}\u{3000}\u{feff}"
+let jsWord = "0-9A-Za-z_"
+let patterns: [(String, String)] = [
+    ("html*", #"(?i)<input\b[^>]*\btype\s*=\s*["']checkbox["']"#),   // * = RETIRED, regex form only
+    ("md   ", "(?:\\A|[\\n\\r\\u2028\\u2029])[ \t]*[-*][\(jsSpace)]+\\[[ xX]\\]"),
+    ("class", "[cC][lL][aA][sS][sS][\(jsSpace)]*=[\(jsSpace)]*[\"'][^\"']*(?<![\(jsWord)])(?:[cC][hH][eE][cC][kK][lL][iI][sS][tT]|[tT][oO][dD][oO])(?![\(jsWord)])"),
+]
+
+func measure(_ label: String, _ s: String) {
+    for (name, p) in patterns {
+        let t0 = Date()
+        _ = s.range(of: p, options: .regularExpression)
+        let dt = Date().timeIntervalSince(t0)
+        print(String(format: "  %@ %-34@ %8.4fs", name, label as NSString, dt))
+    }
+}
+
+for n in [10_000, 40_000, 160_000] {
+    // `[^>]*` with no `>` and no `type=` — one start position scanning to the end and failing.
+    measure("unterminated-input n=\(n)", "<input " + String(repeating: "a", count: n))
+    // The shape the first version of this probe MISSED (review finding): MANY start positions,
+    // each scanning `[^>]*` to end-of-input. This is the quadratic that retired the html regex —
+    // review measured 0.46/1.82/7.48/29.6 s at 6/12/24/48 KB on it (4x per doubling), so it is
+    // capped at n <= 40_000 here to keep the probe runnable. The shipped scanner is linear on
+    // this shape (red-proofed in `ChecklistWarningTests.detectionIsNotQuadratic`, 700 KB).
+    if n <= 40_000 {
+        measure("repeated-input     n=\(n)", String(repeating: "<input ", count: n / 7))
+    }
+    // `[^"']*` with no closing quote and no checklist/todo — same shape for the class pattern
+    // (bounded in practice: the scan stops at the next quote, measured non-exploitable).
+    measure("unterminated-class n=\(n)", "<div class=\"" + String(repeating: "a", count: n))
+    // Near-misses that force the alternation to be tried repeatedly.
+    measure("class-near-miss    n=\(n)", "<div class=\"" + String(repeating: "todX", count: n / 4) + "\">")
+    // Many candidate bullet lines that all fail at the final character class.
+    measure("md-bullets         n=\(n)", String(repeating: "- [z] x\n", count: n / 8))
+    // Many complete <input> tags that never carry type=checkbox.
+    measure("input-no-type      n=\(n)", String(repeating: "<input a=\"b\">", count: n / 13))
+    print("")
+}
+print("done")

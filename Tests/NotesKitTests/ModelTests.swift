@@ -72,7 +72,8 @@ struct ModelTests {
 
     @Test("CreatedNote keeps ok/id/title, omits nil folder/account")
     func createdNote() throws {
-        let data = try jsonObject(CreatedNote(ok: true, id: "x", title: "t", folder: nil, account: nil))
+        let data = try jsonObject(CreatedNote(ok: true, id: "x", title: "t", folder: nil, account: nil,
+                                              warning: nil))
         #expect(data["ok"] as? Bool == true)
         #expect(data["id"] as? String == "x")
         #expect(data["folder"] == nil)
