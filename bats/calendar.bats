@@ -180,3 +180,12 @@ setup() {
   echo "$output" | grep -q '\^\[\[31mRED'
   ! printf '%s' "$output" | grep -q "$(printf '\033')"
 }
+
+# CAL-11: the natural space-separated negative-value form parses for structured-location geo
+# (argv preprocessing merges `--geo-lon -122.4`). Revert-red: without it ArgumentParser fails
+# "Missing value for '--geo-lon'".
+@test "calendar events create accepts space-separated negative geo (CAL-11)" {
+  run "$BIN" calendar events create --title apple-cli-test --start 2030-01-01 --end 2030-01-01 --geo-lon -122.4 --geo-lat 37.7 --dry-run --text
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"longitude":-122'
+}

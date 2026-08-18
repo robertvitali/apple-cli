@@ -312,3 +312,15 @@ setup() {
   echo "$output" | grep -q '\^\[\[31mRED'
   ! printf '%s' "$output" | grep -q "$(printf '\033')"
 }
+
+# REM-10 / CAL-11: the natural space-separated negative-value form parses (argv preprocessing
+# merges `--geo-lon -122.4` -> `--geo-lon=-122.4` before ArgumentParser). Revert-red: without the
+# preprocessor ArgumentParser fails "Missing value for '--geo-lon'". The oracle (an MCP server
+# receiving JSON numbers) accepts negatives, and the CLI's own --help documents `--alarm -15m`.
+@test "reminders tasks create accepts space-separated negative geo + alarm (REM-10)" {
+  run "$BIN" reminders tasks create --title apple-cli-test-x --geo-lon -122.4 --geo-lat -33.8 --alarm -15m --dry-run --text
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"longitude":-122'
+  echo "$output" | grep -q '"latitude":-33'
+  echo "$output" | grep -q '"relative_offset":-900'
+}

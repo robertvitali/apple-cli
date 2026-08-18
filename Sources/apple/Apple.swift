@@ -90,7 +90,12 @@ struct Apple: ParsableCommand {
     static func main() {
         signal(SIGPIPE, SIG_IGN)
         do {
-            var command = try parseAsRoot()
+            // Rewrite the natural space-separated negative-value form (`--geo-lon -122.4`,
+            // `--alarm -15m`) that ArgumentParser otherwise rejects (CAL-11 / REM-10). Operates
+            // on a local copy; `CommandLine.arguments` is untouched so `toolForParseFailure`'s
+            // `argv[1]` read stays correct.
+            let args = ArgvPreprocess.mergeNegativeValues(Array(CommandLine.arguments.dropFirst()))
+            var command = try parseAsRoot(args)
             try command.run()
         } catch let code as ExitCode {
             // A command body already emitted its JSON envelope via `runGuarded`, then signaled

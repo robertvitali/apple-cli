@@ -12,6 +12,24 @@ with the Apple MCP servers they replace.
 
 ## [Unreleased]
 
+### Space-separated negative option values (Q12 batch C, part 1 — CAL-11 / REM-10)
+
+**Fixed**
+
+- The natural space-separated negative-value form — `--geo-lon -122.4`, `--geo-lat -33.8`
+  (southern/western hemisphere coordinates), and the Reminders `--alarm -15m` / `-2h` / `-1d`
+  before-offset — now parses. ArgumentParser reads a `-`-prefixed token as an option, so it
+  previously failed these with "Missing value for '--geo-lon'" and only the attached
+  `--geo-lon=-122.4` form worked; REM-10 is sharper, since `--alarm -15m` is documented in the
+  CLI's OWN `--help`. The oracle (`mcp-server-apple-events`) receives these as JSON numbers and
+  has no such restriction, so the CLI must accept the natural form to stay a strict superset. A
+  pure `AppleKit.ArgvPreprocess.mergeNegativeValues` rewrites exactly `--<name> <neg>` →
+  `--<name>=<neg>` for the three negative-accepting options (`geo-lat` / `geo-lon` / `alarm`),
+  only when the value is unambiguously `-<digit/dot>` — no other option, positional, or
+  already-attached form is touched, and rewriting stops at a bare `--`. Applied to a local copy
+  of the args; `CommandLine.arguments` is unchanged (parse-failure `tool` attribution unaffected).
+  The parse-failure `tool`-attribution half of CAL-11 landed earlier in `8f1c849`.
+
 ### --text honesty + terminal-injection defense (Q12 batch B)
 
 **Fixed**
