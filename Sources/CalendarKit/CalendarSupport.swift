@@ -376,8 +376,10 @@ public struct EventWritePreview: Encodable {
 
 /// Emit a calendar write result, tagging the envelope when the sandbox is engaged so a caller
 /// can tell a restricted write from a normal one without re-reading the environment.
-func emitCalendarWrite<T: Encodable>(_ data: T, sandboxActive: Bool) throws {
-    try Output.emit(tool: "calendar", data: data, sandboxActive: sandboxActive)
+func emitCalendarWrite<T: Encodable>(_ data: T, gate: CalendarWriteGuard.Gate) throws {
+    // Q12 CAL-05: --text was advertised globally but every calendar WRITE emit went out as
+    // JSON. The gate carries the preference; route through the neutralized text overload.
+    try Output.emit(tool: "calendar", data: data, text: gate.text, sandboxActive: gate.sandboxActive)
 }
 
 public enum CalendarWriteGuard {
@@ -386,6 +388,9 @@ public enum CalendarWriteGuard {
     public struct Gate {
         public let willExecute: Bool
         public let sandboxActive: Bool
+        /// The --text preference, carried on the gate so the write choke point honors it
+        /// without threading it through every emit call (Q12 CAL-05).
+        public let text: Bool
     }
 
     /// Resolve a calendar write under write-model v2: **it executes by default**, exactly as
@@ -413,7 +418,7 @@ public enum CalendarWriteGuard {
         try TestMode.validateWriteEnvironment()
         let sandboxActive = try TestMode.sandboxActive(flag: global.testMode)
         let willExecute = try global.willExecute(defaultDryRun: false)
-        return Gate(willExecute: willExecute, sandboxActive: sandboxActive)
+        return Gate(willExecute: willExecute, sandboxActive: sandboxActive, text: global.text)
     }
 
     /// SANDBOX-ONLY label check: inside the sandbox the item being created/mutated must be a

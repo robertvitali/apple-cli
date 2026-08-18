@@ -545,8 +545,9 @@ public enum ReminderRecurrenceSpec {
 
 /// Emit a reminders write result, tagging the envelope when the sandbox is engaged so a caller can
 /// tell a restricted write from a normal one without re-reading the environment.
-func emitRemindersWrite<T: Encodable>(_ data: T, sandboxActive: Bool) throws {
-    try Output.emit(tool: "reminders", data: data, sandboxActive: sandboxActive)
+func emitRemindersWrite<T: Encodable>(_ data: T, gate: ReminderWriteGuard.Gate) throws {
+    // Q12 CAL-05 twin: honor --text on the reminders write surface (neutralized human render).
+    try Output.emit(tool: "reminders", data: data, text: gate.text, sandboxActive: gate.sandboxActive)
 }
 
 /// Execute-path emit (Q12 [4]-class): stamps `dry_run: false` flat via AppleKit.ExecutedWrite.
@@ -554,8 +555,8 @@ func emitRemindersWrite<T: Encodable>(_ data: T, sandboxActive: Bool) throws {
 /// must not grow a permanent wire field just for the execute rule — the wrapper adds the key
 /// only where the rule applies. Previews self-carry dry_run:true; the delete DTOs already
 /// declare `dry_run = false`, so both keep the plain emit.
-func emitRemindersExecutedWrite<T: Encodable>(_ data: T, sandboxActive: Bool) throws {
-    try emitRemindersWrite(ExecutedWrite(data), sandboxActive: sandboxActive)
+func emitRemindersExecutedWrite<T: Encodable>(_ data: T, gate: ReminderWriteGuard.Gate) throws {
+    try emitRemindersWrite(ExecutedWrite(data), gate: gate)
 }
 
 public enum ReminderWriteGuard {
@@ -564,6 +565,9 @@ public enum ReminderWriteGuard {
     public struct Gate {
         public let willExecute: Bool
         public let sandboxActive: Bool
+        /// --text preference carried on the gate (Q12 CAL-05 twin) so the write choke points
+        /// honor it without threading it through every emit call.
+        public let text: Bool
     }
 
     /// Resolve a reminders write under write-model v2: **it executes by default**, exactly as
@@ -583,7 +587,7 @@ public enum ReminderWriteGuard {
         try TestMode.validateWriteEnvironment()
         let sandboxActive = try TestMode.sandboxActive(flag: global.testMode)
         let willExecute = try global.willExecute(defaultDryRun: false)
-        return Gate(willExecute: willExecute, sandboxActive: sandboxActive)
+        return Gate(willExecute: willExecute, sandboxActive: sandboxActive, text: global.text)
     }
 
     /// SANDBOX-ONLY label check for an argv-supplied name — a new reminder/list title, a rename

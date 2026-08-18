@@ -27,7 +27,7 @@ struct AccountsList: ParsableCommand {
             if global.json { try Output.emit(tool: "mail", data: result) }
             else {
                 for a in dir.accounts {
-                    print("\(a.name) [\(a.account_type)]\(a.enabled ? "" : " (disabled)") — \(a.email_addresses.joined(separator: ", "))  \(a.id)")
+                    Output.printText("\(a.name) [\(a.account_type)]\(a.enabled ? "" : " (disabled)") — \(a.email_addresses.joined(separator: ", "))  \(a.id)")
                 }
             }
         }
@@ -76,7 +76,7 @@ struct MailboxesList: ParsableCommand {
             else {
                 for m in out {
                     let c = counts ? "  [\(m.total_count ?? 0) total, \(m.unread_count ?? 0) unread]" : ""
-                    print("\(m.account): \(m.path)\(c)")
+                    Output.printText("\(m.account): \(m.path)\(c)")
                 }
             }
         }
@@ -118,7 +118,7 @@ struct UnreadCountsCommand: ParsableCommand {
                 (flat, total) = UnreadSummary.build(rows)
                 let result = MailUnreadCountsResult(summary: flat, by_account: nil, total_unread: total)
                 if global.json { try Output.emit(tool: "mail", data: result) }
-                else { for (k, v) in flat.sorted(by: { $0.value > $1.value }) { print("\(k): \(v)") } }
+                else { for (k, v) in flat.sorted(by: { $0.value > $1.value }) { Output.printText("\(k): \(v)") } }
             } else {
                 var nested: [String: [MailboxUnread]] = [:]
                 for r in rows {
@@ -129,8 +129,8 @@ struct UnreadCountsCommand: ParsableCommand {
                 if global.json { try Output.emit(tool: "mail", data: result) }
                 else {
                     for (acct, boxes) in nested.sorted(by: { $0.key < $1.key }) {
-                        print("\(acct):")
-                        for b in boxes { print("  \(b.path): \(b.unread_count)") }
+                        Output.printText("\(acct):")
+                        for b in boxes { Output.printText("  \(b.path): \(b.unread_count)") }
                     }
                 }
             }
@@ -181,10 +181,10 @@ struct MailDoctor: ParsableCommand {
                 notes: notes)
             if global.json { try Output.emit(tool: "mail", data: report) }
             else {
-                print("Full Disk Access: \(report.full_disk_access)")
-                print("Envelope Index:   \(report.envelope_index_path ?? "not found") (readable: \(report.envelope_index_readable), \(report.mailbox_count) mailboxes)")
-                print("Mail automation:  \(report.mail_automation) (\(report.account_count) accounts)")
-                for n in notes { print("• \(n)") }
+                Output.printText("Full Disk Access: \(report.full_disk_access)")
+                Output.printText("Envelope Index:   \(report.envelope_index_path ?? "not found") (readable: \(report.envelope_index_readable), \(report.mailbox_count) mailboxes)")
+                Output.printText("Mail automation:  \(report.mail_automation) (\(report.account_count) accounts)")
+                for n in notes { Output.printText("• \(n)") }
             }
         }
     }

@@ -55,7 +55,7 @@ func emitNotes<T: Encodable>(_ data: T, json: Bool, human: @autoclosure () -> St
     if json {
         try Output.emit(tool: notesTool, data: data)
     } else {
-        FileHandle.standardOutput.write(Data((human() + "\n").utf8))
+        FileHandle.standardOutput.write(Data((TextSanitize.neutralizeForTerminal(human()) + "\n").utf8))
     }
 }
 
@@ -70,7 +70,7 @@ func emitNotesWrite<T: Encodable>(_ data: T, json: Bool, sandboxActive: Bool,
         try Output.emit(tool: notesTool, data: data, sandboxActive: sandboxActive)
     } else {
         let line = (sandboxActive ? "[sandbox] " : "") + human()
-        FileHandle.standardOutput.write(Data((line + "\n").utf8))
+        FileHandle.standardOutput.write(Data((TextSanitize.neutralizeForTerminal(line) + "\n").utf8))
     }
 }
 

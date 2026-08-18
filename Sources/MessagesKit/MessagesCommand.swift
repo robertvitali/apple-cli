@@ -42,7 +42,7 @@ private func emit<T: Encodable>(_ global: GlobalOptions, _ data: T, text: () -> 
     if global.json {
         try Output.emit(tool: tool, data: data)
     } else {
-        FileHandle.standardOutput.write(Data((text() + "\n").utf8))
+        FileHandle.standardOutput.write(Data((TextSanitize.neutralizeForTerminal(text()) + "\n").utf8))
     }
 }
 
@@ -54,7 +54,7 @@ private func emitWrite<T: Encodable>(_ global: GlobalOptions, _ data: T, sandbox
         try Output.emit(tool: tool, data: data, sandboxActive: sandboxActive)
     } else {
         let line = (sandboxActive ? "[sandbox] " : "") + text()
-        FileHandle.standardOutput.write(Data((line + "\n").utf8))
+        FileHandle.standardOutput.write(Data((TextSanitize.neutralizeForTerminal(line) + "\n").utf8))
     }
 }
 

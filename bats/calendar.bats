@@ -167,3 +167,16 @@ setup() {
   [ "$status" -eq 0 ]
   echo "$output" | grep -q '"sandbox_target_unchecked" : true'
 }
+
+# Q12 [17]/CAL-05: --text honors the flag AND neutralizes terminal control sequences in
+# store-derived strings (an ESC in an event title must not reach the terminal raw).
+@test "calendar events create --dry-run --text renders text and neutralizes ANSI (Q12)" {
+  title=$(printf 'apple-cli-test \033[31mRED\033[0m')
+  run "$BIN" calendar events create --title "$title" --start 2030-01-01 --end 2030-01-01 --dry-run --text
+  [ "$status" -eq 0 ]
+  # text mode, not JSON (no envelope braces on line 1)
+  echo "${lines[0]}" | grep -q "^action: create"
+  # the ESC (0x1B) must be neutralized to caret notation, never emitted raw
+  echo "$output" | grep -q '\^\[\[31mRED'
+  ! printf '%s' "$output" | grep -q "$(printf '\033')"
+}

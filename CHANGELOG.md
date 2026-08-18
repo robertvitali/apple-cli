@@ -12,6 +12,36 @@ with the Apple MCP servers they replace.
 
 ## [Unreleased]
 
+### --text honesty + terminal-injection defense (Q12 batch B)
+
+**Fixed**
+
+- **Security:** `--text` output now NEUTRALIZES terminal control sequences in every
+  store-derived string (message subjects/senders, contact names/notes, template
+  bodies, event/reminder titles). An embedded ESC/CSI/CR could previously rewrite what
+  the operator SAW relative to what the tool did (Q12 [17]); a shared
+  `AppleKit.TextSanitize.neutralizeForTerminal` renders C0/C1/ESC/DEL/CR as visible
+  caret / `\uXXXX` tokens — plus the Unicode bidi/RTL overrides that reorder displayed
+  text (Trojan-Source, CVE-2021-42574) — while preserving TAB/LF and all printable
+  Unicode, routed through every `--text` sink INCLUDING the Mail read renderers
+  (subjects/senders/bodies/templates), Calendar/Reminders, and the six domain choke
+  points. The JSON envelope — the machine contract — is unchanged (the JSON encoder
+  `\uXXXX`-escapes C0 bytes; C1 safety on the text path comes from the neutralizer,
+  not the encoder).
+- `--text` is now HONORED by every Mail WRITE path — including the `trash empty` dry-run
+  preview / empty-account branches and `draft list` (which previously emitted JSON even in
+  `--text` mode) — the Mail analytics read surface (top-senders / stats / thread-activity /
+  sent-activity / inbox-overview, all of which ignored the flag), and the whole Calendar and
+  Reminders surfaces read+write (Q12 [10] / CAL-05): all previously emitted JSON regardless of
+  the globally-advertised flag. A shared text-aware `Output.emit(…text:…)` overload renders a
+  neutralized `key: value` view; the calendar/reminders write choke points carry the preference
+  on their `Gate`. `--text` remains a non-contractual human convenience; the JSON default is
+  untouched.
+- The shared `--text` renderer now distinguishes a numeric `0`/`1` from a boolean: `JSONSerialization`
+  bridges JSON booleans AND JSON `0`/`1` all to `NSNumber`, and `NSNumber(0/1) as? Bool` succeeds, so a
+  count of `1` (e.g. `moved_count`, `unread`) previously rendered as `true` in `--text`. Fixed by
+  detecting a real JSON boolean via its `CFBoolean` type id. JSON output was never affected.
+
 ### Cross-domain HEAD-defect closures (Q12 batch A)
 
 **Changed — BREAKING**

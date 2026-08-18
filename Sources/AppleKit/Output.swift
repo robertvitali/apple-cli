@@ -38,6 +38,61 @@ public enum Output {
         write(try encodeSuccess(tool: tool, data: data, sandboxActive: sandboxActive))
     }
 
+    /// Text-aware emit (Q12 [10]/CAL-05): JSON when `text` is false (the machine contract,
+    /// byte-exact), else a generic human rendering — one flat `key: value` pass over the
+    /// payload's JSON object, EVERY string value neutralized for the terminal ([17]). Write
+    /// surfaces that used bare `emit(...)` silently ignored `--text`; routing them here makes
+    /// the globally-advertised flag honest without a hand-written formatter per command.
+    /// `--text` is NOT the versioned contract; the JSON path is unchanged.
+    public static func emit<T: Encodable>(tool: String, data: T, text: Bool,
+                                          sandboxActive: Bool = false) throws {
+        guard text else { try emit(tool: tool, data: data, sandboxActive: sandboxActive); return }
+        let body = try humanText(data)
+        let out = sandboxActive ? "sandbox: true\n" + body : body
+        write(Data((out + "\n").utf8))
+    }
+
+    /// Print one human `--text` line to stdout with terminal control sequences neutralized
+    /// (Q12 [17]). The single primitive every hand-written `--text` renderer should use in
+    /// place of `print(...)` so a store-derived string can never carry a driving escape.
+    public static func printText(_ line: String) {
+        FileHandle.standardOutput.write(Data((TextSanitize.neutralizeForTerminal(line) + "\n").utf8))
+    }
+
+    /// One flat pass over the payload's JSON object → `key: value` lines (nested
+    /// objects/arrays as compact JSON), every STRING value run through
+    /// `TextSanitize.neutralizeForTerminal`. Shared by the domain `--text` paths so the
+    /// neutralization ([17]) cannot be forgotten at one sink.
+    public static func humanText<T: Encodable>(_ value: T) throws -> String {
+        let enc = JSONEncoder()
+        enc.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        enc.dateEncodingStrategy = .iso8601
+        let data = try enc.encode(value)
+        guard let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return TextSanitize.neutralizeForTerminal(String(decoding: data, as: UTF8.self))
+        }
+        return obj.keys.sorted().map { "\($0): \(humanValue(obj[$0]!))" }.joined(separator: "\n")
+    }
+
+    private static func humanValue(_ any: Any) -> String {
+        if any is NSNull { return "null" }
+        if let s = any as? String { return TextSanitize.neutralizeForTerminal(s) }
+        // JSONSerialization bridges BOTH JSON booleans and JSON numbers to NSNumber, and
+        // `NSNumber(0/1) as? Bool` succeeds — so an `as? Bool` test placed before the NSNumber
+        // branch would render a numeric count of 0/1 (moved_count, unread, deleted_count) as
+        // "false"/"true". Detect a real JSON boolean by its CFBoolean type id instead of `as?`.
+        if let n = any as? NSNumber {
+            if CFGetTypeID(n) == CFBooleanGetTypeID() { return n.boolValue ? "true" : "false" }
+            return n.stringValue
+        }
+        if let d = try? JSONSerialization.data(withJSONObject: any, options: [.sortedKeys, .withoutEscapingSlashes]) {
+            // Nested container: neutralize the whole serialized blob so an ANSI byte inside a
+            // nested string value can't slip through the compact form.
+            return TextSanitize.neutralizeForTerminal(String(decoding: d, as: UTF8.self))
+        }
+        return TextSanitize.neutralizeForTerminal(String(describing: any))
+    }
+
     /// Encode the envelope for an `AppleError`, carrying every field it holds.
     ///
     /// This exists so the mapping from `AppleError` to envelope is ONE named, pure, testable

@@ -42,7 +42,7 @@ public struct CalendarsList: ParsableCommand {
             // diff on every list.
             let data = CalendarsData(
                 calendars: collections.map { ReadMapping.collection(from: $0) })
-            try Output.emit(tool: "calendar", data: data)
+            try Output.emit(tool: "calendar", data: data, text: global.text)
         }
     }
 }

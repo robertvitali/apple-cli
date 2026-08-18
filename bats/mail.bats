@@ -2424,3 +2424,39 @@ import json,sys;print(json.load(sys.stdin)['data']['eml_path'])")
   [ "$status" -eq 77 ]
   echo "$output" | grep -q 'no-clobber'
 }
+
+# Q12 [17] (review): the Mail READ --text renderers (printMessageText / templates get / rules /
+# accounts) print store-derived strings. An ESC in a stored template body must be neutralized to
+# caret notation, never reach the terminal raw. Uses the file-based template store (CI-safe).
+@test "mail templates get --text neutralizes terminal control sequences (Q12 [17])" {
+  export APPLE_MAIL_MCP_HOME="$BATS_TEST_TMPDIR/text-neutralize"
+  body=$(printf 'line1\033[31mRED\033[0m line2')
+  run "$BIN" mail templates save apple-cli-test-esc --body "$body" --execute
+  [ "$status" -eq 0 ]
+  run "$BIN" mail templates get apple-cli-test-esc --text
+  [ "$status" -eq 0 ]
+  # the ESC (0x1B) must be gone; the caret form present
+  ! printf '%s' "$output" | grep -q "$(printf '\033')"
+  echo "$output" | grep -q '\^\[\[31mRED'
+}
+
+# Q12 [10]/[17] (critic finding #1+#2): the Mail WRITE surface honors --text AND neutralizes.
+# (a) mail send --dry-run echoes the operator subject through the neutralizer; (b) mail trash
+# empty --text -- the exact dry-run preview branch finding #1 caught silently emitting JSON --
+# now renders human text (revert-red for the WriteManageCommands fix).
+@test "mail send --dry-run --text neutralizes ANSI in echoed subject (Q12 [10]/[17])" {
+  subj=$(printf 'apple-cli-test \033[31mRED\033[0m')
+  run "$BIN" mail send --to "apple-cli-test@example.com" --subject "$subj" --body b --dry-run --text
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '\^\[\[31mRED'
+  ! printf '%s' "$output" | grep -q "$(printf '\033')"
+}
+
+@test "mail trash empty --dry-run --text is HONORED (renders text, not JSON) (Q12 [10])" {
+  # --dry-run hits the same `guard willExecute else` preview branch as the surface's default
+  # (trash defaults to dry-run); the explicit flag satisfies the no-flagless-writes lint.
+  run "$BIN" mail trash empty --account "apple-cli-test-noaccount" --dry-run --text
+  [ "$status" -eq 0 ]
+  echo "${lines[0]}" | grep -qv '{'
+  echo "$output" | grep -q '^action: empty_trash'
+}

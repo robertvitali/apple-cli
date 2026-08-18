@@ -32,7 +32,7 @@ public struct ListsRead: ParsableCommand {
             try store.requestAccess(to: .reminder, mode: .read)
             let lists = store.calendars(for: .reminder)
                 .map { ReadMapping.reminderList(from: $0) }
-            try Output.emit(tool: "reminders", data: ListsData(lists: lists))
+            try Output.emit(tool: "reminders", data: ListsData(lists: lists), text: global.text)
         }
     }
 }
@@ -64,8 +64,7 @@ public struct ListsCreate: ParsableCommand {
             try ReminderWriteGuard.requireLabeled(name, what: "list", sandboxActive: gate.sandboxActive)
 
             guard gate.willExecute else {
-                try emitRemindersWrite(ListWritePreview(action: "create", name: name, color: color),
-                                       sandboxActive: gate.sandboxActive)
+                try emitRemindersWrite(ListWritePreview(action: "create", name: name, color: color), gate: gate)
                 return
             }
 
@@ -77,7 +76,7 @@ public struct ListsCreate: ParsableCommand {
             list.title = name
             if let cg { list.cgColor = cg.value }
             try store.saveCalendar(list)
-            try emitRemindersExecutedWrite(ReadMapping.reminderList(from: list), sandboxActive: gate.sandboxActive)
+            try emitRemindersExecutedWrite(ReadMapping.reminderList(from: list), gate: gate)
         }
     }
 }
@@ -123,8 +122,7 @@ public struct ListsUpdate: ParsableCommand {
             guard gate.willExecute else {
                 try emitRemindersWrite(ListWritePreview(
                     action: "update", name: name, new_name: newName, color: color,
-                    sandbox_target_unchecked: subjectDeferred ? true : nil),
-                    sandboxActive: gate.sandboxActive)
+                    sandbox_target_unchecked: subjectDeferred ? true : nil), gate: gate)
                 return
             }
 
@@ -137,7 +135,7 @@ public struct ListsUpdate: ParsableCommand {
             if let newName, !newName.isEmpty { list.title = newName }
             if let cg { list.cgColor = cg.value }
             try store.saveCalendar(list)
-            try emitRemindersExecutedWrite(ReadMapping.reminderList(from: list), sandboxActive: gate.sandboxActive)
+            try emitRemindersExecutedWrite(ReadMapping.reminderList(from: list), gate: gate)
         }
     }
 }
@@ -164,8 +162,7 @@ public struct ListsDelete: ParsableCommand {
             guard gate.willExecute else {
                 try emitRemindersWrite(ListWritePreview(
                     action: "delete", name: name,
-                    sandbox_target_unchecked: subjectDeferred ? true : nil),
-                    sandboxActive: gate.sandboxActive)
+                    sandbox_target_unchecked: subjectDeferred ? true : nil), gate: gate)
                 return
             }
             let store = EventStore()
@@ -177,7 +174,7 @@ public struct ListsDelete: ParsableCommand {
             // reminder in it, so this is the last line before an irreversible bulk delete.
             try requireLabeledList(list, what: "list", sandboxActive: gate.sandboxActive)
             try store.removeCalendar(list)
-            try emitRemindersWrite(ListDeleteData(name: name, deleted: true), sandboxActive: gate.sandboxActive)
+            try emitRemindersWrite(ListDeleteData(name: name, deleted: true), gate: gate)
         }
     }
 }

@@ -5,60 +5,24 @@ import AppleKit
 
 /// Emit a payload as the JSON envelope (default) or a human rendering (`--text`).
 /// JSON is the versioned contract; `--text` is a non-contractual convenience.
+///
+/// Both paths delegate to the shared `Output` renderer so contacts `--text` gets the
+/// terminal-neutralization ([17]) and the numeric-vs-boolean rendering fix for free, and
+/// there is exactly ONE `key: value` formatter on the fleet rather than a per-domain copy
+/// that can drift (review LOW: the previous local `humanRender`/`compact` duplicated
+/// `Output.humanText`/`humanValue` and carried its own copy of the NSNumber→Bool bug).
 func emitContacts<T: Encodable>(_ global: GlobalOptions, _ data: T) throws {
-    if global.json {
-        try Output.emit(tool: "contacts", data: data)
-    } else {
-        let text = (try? humanRender(data)) ?? ""
-        FileHandle.standardOutput.write(Data((text + "\n").utf8))
-    }
+    try Output.emit(tool: "contacts", data: data, text: !global.json)
 }
 
 /// Write-path emit. `sandboxActive` is REQUIRED — no default — so a write can never
 /// silently under-report the sandbox in its envelope. (`Output.emit` defaults the
 /// parameter for the read path's benefit, which would let an omission here compile;
-/// docs/write-model-v2.md flags exactly that as the flip-commit residual risk.)
+/// docs/write-model-v2.md flags exactly that as the flip-commit residual risk.) The
+/// text-aware overload surfaces `sandbox: true` on the `--text` branch too — a human
+/// reading text output has the same need to know the write was confined as a machine.
 func emitContactsWrite<T: Encodable>(_ global: GlobalOptions, _ data: T, sandboxActive: Bool) throws {
-    if global.json {
-        try Output.emit(tool: "contacts", data: data, sandboxActive: sandboxActive)
-    } else {
-        // `--text` surfaces the sandbox too. It is not part of the versioned contract, but a
-        // human reading text output has the same need to know the write was confined as a
-        // machine reading the envelope — dropping the parameter on this branch would make the
-        // doc comment above true only half the time.
-        let body = (try? humanRender(data)) ?? ""
-        let text = sandboxActive ? "sandbox: true\n" + body : body
-        FileHandle.standardOutput.write(Data((text + "\n").utf8))
-    }
-}
-
-/// Generic human renderer — one flat pass over the payload's JSON object, printing
-/// `key: value` lines (nested objects/arrays shown as compact JSON). Honest, DRY, and
-/// good enough for the convenience `--text` mode without per-type formatters.
-private func humanRender<T: Encodable>(_ value: T) throws -> String {
-    let enc = JSONEncoder()
-    enc.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
-    enc.dateEncodingStrategy = .iso8601
-    let data = try enc.encode(value)
-    guard let obj = try JSONSerialization.jsonObject(with: data) as? [String: Any] else {
-        return String(decoding: data, as: UTF8.self)
-    }
-    var lines: [String] = []
-    for key in obj.keys.sorted() {
-        lines.append("\(key): \(compact(obj[key]!))")
-    }
-    return lines.joined(separator: "\n")
-}
-
-private func compact(_ any: Any) -> String {
-    if any is NSNull { return "null" }
-    if let s = any as? String { return s }
-    if let b = any as? Bool { return b ? "true" : "false" }
-    if let n = any as? NSNumber { return n.stringValue }
-    if let data = try? JSONSerialization.data(withJSONObject: any, options: [.sortedKeys, .withoutEscapingSlashes]) {
-        return String(decoding: data, as: UTF8.self)
-    }
-    return String(describing: any)
+    try Output.emit(tool: "contacts", data: data, text: !global.json, sandboxActive: sandboxActive)
 }
 
 // MARK: - Pure list helpers (unit-testable without a store)

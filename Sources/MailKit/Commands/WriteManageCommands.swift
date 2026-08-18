@@ -251,7 +251,7 @@ struct MoveCommand: ParsableCommand {
             guard willExecute else {
                 try previewValidateSandboxTargets(msgs, sandboxActive: sandboxActive)
                 try Output.emit(tool: "mail", data: BulkPreview(action: "move", matched: msgs.count, filter_based: filterBased,
-                    dry_run: true, executed: false, messages: msgs, detail: detail, note: skipNote, applied: nil, not_found: nil, scope_note: scopeNote), sandboxActive: sandboxActive); return
+                    dry_run: true, executed: false, messages: msgs, detail: detail, note: skipNote, applied: nil, not_found: nil, scope_note: scopeNote), text: global.text, sandboxActive: sandboxActive); return
             }
             // --gmail-mode routes to gmailMove (Gmail copy+delete label semantics: duplicate to the
             // destination, then delete the original to Trash); plain move otherwise. BOTH go through
@@ -266,7 +266,7 @@ struct MoveCommand: ParsableCommand {
                 return try script.move(internetMessageID: imid, accountName: acct, toMailbox: to)
             }
             try Output.emit(tool: "mail", data: BulkPreview(action: "move", matched: msgs.count, filter_based: filterBased,
-                dry_run: false, executed: true, messages: msgs, detail: detail, note: joinNotes(skipNote, notLocatedNote(notFound)), applied: applied, not_found: notFound, scope_note: scopeNote), sandboxActive: sandboxActive)
+                dry_run: false, executed: true, messages: msgs, detail: detail, note: joinNotes(skipNote, notLocatedNote(notFound)), applied: applied, not_found: notFound, scope_note: scopeNote), text: global.text, sandboxActive: sandboxActive)
         }
     }
 }
@@ -302,14 +302,14 @@ struct MarkCommand: ParsableCommand {
                 try previewValidateSandboxTargets(msgs, sandboxActive: sandboxActive)
                 try Output.emit(tool: "mail", data: BulkPreview(action: action, matched: msgs.count, filter_based: filterBased,
                     dry_run: true, executed: false, messages: msgs, detail: [:], note: skipNote,
-                    applied: nil, not_found: nil, scope_note: scopeNote), sandboxActive: sandboxActive); return
+                    applied: nil, not_found: nil, scope_note: scopeNote), text: global.text, sandboxActive: sandboxActive); return
             }
             let script = MailScript()
             let (applied, notFound) = try executeMessageMutation(msgs, sandboxActive: sandboxActive) { imid, acct in
                 try script.setRead(internetMessageID: imid, accountName: acct, read: markRead)
             }
             try Output.emit(tool: "mail", data: BulkPreview(action: action, matched: msgs.count, filter_based: filterBased,
-                dry_run: false, executed: true, messages: msgs, detail: [:], note: joinNotes(skipNote, notLocatedNote(notFound)), applied: applied, not_found: notFound, scope_note: scopeNote), sandboxActive: sandboxActive)
+                dry_run: false, executed: true, messages: msgs, detail: [:], note: joinNotes(skipNote, notLocatedNote(notFound)), applied: applied, not_found: notFound, scope_note: scopeNote), text: global.text, sandboxActive: sandboxActive)
         }
     }
 }
@@ -365,7 +365,7 @@ struct FlagCommand: ParsableCommand {
             guard willExecute else {
                 try previewValidateSandboxTargets(msgs, sandboxActive: sandboxActive)
                 try Output.emit(tool: "mail", data: BulkPreview(action: act, matched: msgs.count, filter_based: filterBased,
-                    dry_run: true, executed: false, messages: msgs, detail: detail, note: skipNote, applied: nil, not_found: nil, scope_note: scopeNote), sandboxActive: sandboxActive); return
+                    dry_run: true, executed: false, messages: msgs, detail: detail, note: skipNote, applied: nil, not_found: nil, scope_note: scopeNote), text: global.text, sandboxActive: sandboxActive); return
             }
             // clearing (--unflag or --color none) → flagged:false; otherwise flagged:true with the
             // resolved color index (red default).
@@ -376,7 +376,7 @@ struct FlagCommand: ParsableCommand {
                 try script.setFlag(internetMessageID: imid, accountName: acct, flagged: flagged, colorIndex: colorIndex)
             }
             try Output.emit(tool: "mail", data: BulkPreview(action: act, matched: msgs.count, filter_based: filterBased,
-                dry_run: false, executed: true, messages: msgs, detail: detail, note: joinNotes(skipNote, notLocatedNote(notFound)), applied: applied, not_found: notFound, scope_note: scopeNote), sandboxActive: sandboxActive)
+                dry_run: false, executed: true, messages: msgs, detail: detail, note: joinNotes(skipNote, notLocatedNote(notFound)), applied: applied, not_found: notFound, scope_note: scopeNote), text: global.text, sandboxActive: sandboxActive)
         }
     }
 }
@@ -509,7 +509,7 @@ struct DeleteCommand: ParsableCommand {
                 // renderable, matching oracle B's ungated dry_run=True.
                 if !permanent { try previewValidateSandboxTargets(msgs, sandboxActive: sandboxActive) }
                 try Output.emit(tool: "mail", data: BulkPreview(action: action, matched: msgs.count, filter_based: filterBased,
-                    dry_run: true, executed: false, messages: msgs, detail: detail, note: joinNotes(skipNote, previewNote), applied: nil, not_found: nil, scope_note: scopeNote), sandboxActive: sandboxActive); return
+                    dry_run: true, executed: false, messages: msgs, detail: detail, note: joinNotes(skipNote, previewNote), applied: nil, not_found: nil, scope_note: scopeNote), text: global.text, sandboxActive: sandboxActive); return
             }
             // Both paths run through executeMessageMutation (all-or-nothing; sandbox-scoped label
             // gate) — and for --permanent the UNCONDITIONAL requireCanonicalLabels above already
@@ -556,7 +556,7 @@ struct DeleteCommand: ParsableCommand {
             try Output.emit(tool: "mail", data: BulkPreview(action: action, matched: msgs.count, filter_based: filterBased,
                 dry_run: false, executed: true, messages: msgs, detail: detail,
                 note: joinNotes(skipNote, note), applied: applied, not_found: notFound, scope_note: scopeNote,
-                expunge_unsupported: unsupported.isEmpty ? nil : unsupported), sandboxActive: sandboxActive)
+                expunge_unsupported: unsupported.isEmpty ? nil : unsupported), text: global.text, sandboxActive: sandboxActive)
         }
     }
 }
@@ -641,7 +641,7 @@ struct TrashEmpty: ParsableCommand {
                     "would_erase": AnyEncodableBox(target.map { Swift.min($0.count, max) } ?? 0), "max": AnyEncodableBox(max),
                     "dry_run": AnyEncodableBox(true), "executed": AnyEncodableBox(false),
                     "note": AnyEncodableBox("IRREVERSIBLE. To execute: --execute --confirm with \(TrashEmpty.operatorEnvVar) (1/true/yes) set. Emptying trash cannot be scoped to \(TestMode.sandboxPrefix) data, so it is never run autonomously.")],
-                    sandboxActive: sandboxActive)
+                    text: global.text, sandboxActive: sandboxActive)
                 return
             }
             guard let target = try MailScript.resolveTrashMailbox(boxes, explicit: trashMailbox) else {
@@ -650,7 +650,7 @@ struct TrashEmpty: ParsableCommand {
                     "erased": AnyEncodableBox(0), "in_trash_before": AnyEncodableBox(0),
                     "dry_run": AnyEncodableBox(false), "executed": AnyEncodableBox(true),
                     "note": AnyEncodableBox("nothing to erase — no non-empty trash mailbox on this account")],
-                    sandboxActive: sandboxActive)
+                    text: global.text, sandboxActive: sandboxActive)
                 return
             }
             let (removed, total, stalled) = try script.emptyTrash(accountName: account, mailboxName: target.name, max: max)
@@ -669,7 +669,7 @@ struct TrashEmpty: ParsableCommand {
                 "max": AnyEncodableBox(max), "remaining": AnyEncodableBox(total - removed),
                 "expunge_unsupported": AnyEncodableBox(stalled),
                 "dry_run": AnyEncodableBox(false), "executed": AnyEncodableBox(true),
-                "note": AnyEncodableBox(emptyNote)], sandboxActive: sandboxActive)
+                "note": AnyEncodableBox(emptyNote)], text: global.text, sandboxActive: sandboxActive)
         }
     }
 }
@@ -848,7 +848,7 @@ struct AttachmentsSave: ParsableCommand {
                 try Output.emit(tool: "mail", data: Result(message_id: String(rowid), directory: absDir, out_path: absOut,
                     attachments: selectedNames, dry_run: true,
                     note: masterIsLive ? nil : "\(liveFailure ?? "live enumeration unavailable") — this preview enumerates the Envelope-Index (ORDER BY name) list; the live save order can differ, and --execute refuses from this fallback",
-                    saved: nil, saved_paths: nil, not_saved: nil), sandboxActive: sandboxActive); return
+                    saved: nil, saved_paths: nil, not_saved: nil), text: global.text, sandboxActive: sandboxActive); return
             }
             // The execute path REQUIRES the live master: positions are handed to the AppleScript
             // as `item (i+1)` of Mail's live list, so an index-ordered master could write one
@@ -931,7 +931,7 @@ struct AttachmentsSave: ParsableCommand {
 
             try Output.emit(tool: "mail", data: Result(message_id: String(rowid), directory: absDir, out_path: absOut,
                 attachments: selectedNames, dry_run: false, note: note, saved: savedPaths.count, saved_paths: savedPaths,
-                not_saved: notSaved.isEmpty ? nil : notSaved), sandboxActive: sandboxActive)
+                not_saved: notSaved.isEmpty ? nil : notSaved), text: global.text, sandboxActive: sandboxActive)
         }
     }
 }
@@ -1021,7 +1021,7 @@ struct MailboxesCreate: ParsableCommand {
                 "mailbox": AnyEncodableBox(segments.last ?? ""), "parent": AnyEncodableBox(normalizedParent),
                 "mailbox_raw": AnyEncodableBox(name), "parent_raw": AnyEncodableBox(parent),
                 "dry_run": AnyEncodableBox(!willExecute),
-                "executed": AnyEncodableBox(executed), "note": AnyEncodableBox(note)], sandboxActive: sandboxActive)
+                "executed": AnyEncodableBox(executed), "note": AnyEncodableBox(note)], text: global.text, sandboxActive: sandboxActive)
         }
     }
 }

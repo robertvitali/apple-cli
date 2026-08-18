@@ -47,7 +47,7 @@ public struct TasksRead: ParsableCommand {
                 guard let r = store.reminder(withIdentifier: id) else {
                     throw AppleError.notFound("no reminder with id '\(id)'")
                 }
-                try Output.emit(tool: "reminders", data: ReminderRead.enrich(ReminderMapping.reminder(from: r)))
+                try Output.emit(tool: "reminders", data: ReminderRead.enrich(ReminderMapping.reminder(from: r)), text: global.text)
                 return
             }
 
@@ -79,7 +79,7 @@ public struct TasksRead: ParsableCommand {
             let lists = store.calendars(for: .reminder)
                 .map { ReadMapping.reminderList(from: $0) }
             let reminders = filtered.map { ReminderRead.enrich(ReminderMapping.reminder(from: $0)) }
-            try Output.emit(tool: "reminders", data: RemindersReadData(lists: lists, reminders: reminders))
+            try Output.emit(tool: "reminders", data: RemindersReadData(lists: lists, reminders: reminders), text: global.text)
         }
     }
 }
@@ -152,8 +152,7 @@ public struct TasksCreate: ParsableCommand {
                     url: url, target_list: targetList, tags: tag.isEmpty ? nil : tag, subtasks: subtask.isEmpty ? nil : subtask,
                     alarms: alarms.isEmpty ? nil : alarms, recurrence_rules: rules.isEmpty ? nil : rules,
                     location_trigger: locTrigger,
-                    sandbox_target_unchecked: destinationDeferred ? true : nil),
-                    sandboxActive: gate.sandboxActive)
+                    sandbox_target_unchecked: destinationDeferred ? true : nil), gate: gate)
                 return
             }
 
@@ -203,8 +202,7 @@ public struct TasksCreate: ParsableCommand {
             for rule in rules { reminder.addRecurrenceRule(try RecurrenceMapping.ekRule(from: rule)) }
 
             try store.save(reminder)
-            try emitRemindersExecutedWrite(ReminderRead.enrich(ReminderMapping.reminder(from: reminder)),
-                                   sandboxActive: gate.sandboxActive)
+            try emitRemindersExecutedWrite(ReminderRead.enrich(ReminderMapping.reminder(from: reminder)), gate: gate)
         }
     }
 
@@ -328,8 +326,7 @@ public struct TasksUpdate: ParsableCommand {
                     alarms: alarms.isEmpty ? nil : alarms, recurrence_rules: rules.isEmpty ? nil : rules,
                     location_trigger: locTrigger, clear_alarms: clearAlarms ? true : nil,
                     clear_recurrence: clearRecurrence ? true : nil, clear_location_trigger: clearLocationTrigger ? true : nil,
-                    sandbox_target_unchecked: gate.sandboxActive ? true : nil),
-                    sandboxActive: gate.sandboxActive)
+                    sandbox_target_unchecked: gate.sandboxActive ? true : nil), gate: gate)
                 return
             }
 
@@ -398,8 +395,7 @@ public struct TasksUpdate: ParsableCommand {
             }
 
             try store.save(reminder)
-            try emitRemindersExecutedWrite(ReminderRead.enrich(ReminderMapping.reminder(from: reminder)),
-                                   sandboxActive: gate.sandboxActive)
+            try emitRemindersExecutedWrite(ReminderRead.enrich(ReminderMapping.reminder(from: reminder)), gate: gate)
         }
     }
 
@@ -435,8 +431,7 @@ public struct TasksDelete: ParsableCommand {
             guard gate.willExecute else {
                 try emitRemindersWrite(ReminderWritePreview(
                     action: "delete", id: id,
-                    sandbox_target_unchecked: gate.sandboxActive ? true : nil),
-                    sandboxActive: gate.sandboxActive)
+                    sandbox_target_unchecked: gate.sandboxActive ? true : nil), gate: gate)
                 return
             }
             let store = EventStore()
@@ -445,8 +440,7 @@ public struct TasksDelete: ParsableCommand {
             // Sandbox-only post-fetch check: only delete a labeled test item inside the sandbox.
             try requireLabeledReminder(reminder, sandboxActive: gate.sandboxActive)
             try store.remove(reminder)
-            try emitRemindersWrite(ReminderDeleteData(id: id, deleted: true),
-                                   sandboxActive: gate.sandboxActive)
+            try emitRemindersWrite(ReminderDeleteData(id: id, deleted: true), gate: gate)
         }
     }
 }

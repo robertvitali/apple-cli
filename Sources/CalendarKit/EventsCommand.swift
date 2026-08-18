@@ -42,7 +42,7 @@ public struct EventsRead: ParsableCommand {
                 guard let ekEvent = store.event(withIdentifier: id) else {
                     throw AppleError.notFound("no event with id '\(id)'")
                 }
-                try Output.emit(tool: "calendar", data: EventMapping.event(from: ekEvent))
+                try Output.emit(tool: "calendar", data: EventMapping.event(from: ekEvent), text: global.text)
                 return
             }
 
@@ -95,7 +95,7 @@ public struct EventsRead: ParsableCommand {
                 // CAL-10: native source-grouped order, matching the oracle (no re-sort).
                 calendars: allCollections.map { ReadMapping.collection(from: $0) },
                 events: events.map { EventMapping.event(from: $0) })
-            try Output.emit(tool: "calendar", data: data)
+            try Output.emit(tool: "calendar", data: data, text: global.text)
         }
     }
 }
@@ -156,8 +156,7 @@ public struct EventsCreate: ParsableCommand {
                     action: "create", title: title, start_date: startParsed.date, end_date: endParsed.date,
                     is_all_day: isAllDay, availability: availability, location: location, url: url, note: note,
                     target_calendar: targetCalendar, structured_location: structured,
-                    alarms: alarms.isEmpty ? nil : alarms, recurrence_rules: rules.isEmpty ? nil : rules),
-                    sandboxActive: gate.sandboxActive)
+                    alarms: alarms.isEmpty ? nil : alarms, recurrence_rules: rules.isEmpty ? nil : rules), gate: gate)
                 return
             }
 
@@ -185,7 +184,7 @@ public struct EventsCreate: ParsableCommand {
             // Q12 [7]: create/update omitted the execute-path `dry_run: false` discriminator
             // that delete already carried (AGENTS.md wiring rule); ExecutedWrite stamps it
             // flat without polluting the shared read-path Event model.
-            try emitCalendarWrite(ExecutedWrite(EventMapping.event(from: event)), sandboxActive: gate.sandboxActive)
+            try emitCalendarWrite(ExecutedWrite(EventMapping.event(from: event)), gate: gate)
         }
     }
 
@@ -274,8 +273,7 @@ public struct EventsUpdate: ParsableCommand {
                     clear_structured_location: clearStructuredLocation ? true : nil, span: span,
                     // Addressed by opaque id: the EXISTING event's title is what the sandbox vets,
                     // and only the execute path fetches it. Disclose the deferral.
-                    sandbox_target_unchecked: gate.sandboxActive ? true : nil),
-                    sandboxActive: gate.sandboxActive)
+                    sandbox_target_unchecked: gate.sandboxActive ? true : nil), gate: gate)
                 return
             }
 
@@ -328,7 +326,7 @@ public struct EventsUpdate: ParsableCommand {
             // Q12 [7]: create/update omitted the execute-path `dry_run: false` discriminator
             // that delete already carried (AGENTS.md wiring rule); ExecutedWrite stamps it
             // flat without polluting the shared read-path Event model.
-            try emitCalendarWrite(ExecutedWrite(EventMapping.event(from: event)), sandboxActive: gate.sandboxActive)
+            try emitCalendarWrite(ExecutedWrite(EventMapping.event(from: event)), gate: gate)
         }
     }
 
@@ -366,8 +364,7 @@ public struct EventsDelete: ParsableCommand {
             guard gate.willExecute else {
                 try emitCalendarWrite(EventWritePreview(
                     action: "delete", id: id, span: spanLabel,
-                    sandbox_target_unchecked: gate.sandboxActive ? true : nil),
-                    sandboxActive: gate.sandboxActive)
+                    sandbox_target_unchecked: gate.sandboxActive ? true : nil), gate: gate)
                 return
             }
 
@@ -382,8 +379,7 @@ public struct EventsDelete: ParsableCommand {
             try CalendarWriteGuard.requireLabeled(event.title ?? "", sandboxActive: gate.sandboxActive)
 
             try store.remove(event, span: ekSpan)
-            try emitCalendarWrite(DeleteData(id: id, deleted: true, span: spanLabel),
-                                  sandboxActive: gate.sandboxActive)
+            try emitCalendarWrite(DeleteData(id: id, deleted: true, span: spanLabel), gate: gate)
         }
     }
 

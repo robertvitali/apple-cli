@@ -220,3 +220,14 @@ setup() {
   run "$BIN" messages recent --limit 0
   [ "$status" -eq 64 ]
 }
+
+# Q12 [17] (critic finding #2): the messages --text sink neutralizes terminal control
+# sequences in echoed strings. Revert-red: dropping the TextSanitize wrap in MessagesCommand
+# lets a raw ESC reach the terminal. --dry-run never sends (safe with a fake handle).
+@test "messages send --dry-run --text neutralizes ANSI (Q12 [17])" {
+  msg=$(printf 'apple-cli-test \033[31mRED\033[0m')
+  run "$BIN" messages send "+15555550123" --message "$msg" --dry-run --text
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '\^\[\[31mRED'
+  ! printf '%s' "$output" | grep -q "$(printf '\033')"
+}

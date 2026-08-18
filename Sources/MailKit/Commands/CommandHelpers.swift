@@ -267,15 +267,15 @@ func emitMessages(_ result: MailMessagesResult, json: Bool) throws {
 func printMessageText(_ m: MailMessage, full: Bool) {
     let flag = m.flagged ? " ⚑\(m.flag_color_name.map { "(\($0))" } ?? "")" : ""
     let unread = m.is_read ? "" : " •"
-    print("[\(m.id)]\(unread)\(flag) \(m.subject)")
-    print("    from: \(m.sender)   \(m.date_received ?? "")   \(m.account)/\(m.mailbox)")
-    if let to = m.to, !to.isEmpty { print("    to: \(to.joined(separator: ", "))") }
-    if let cc = m.cc, !cc.isEmpty { print("    cc: \(cc.joined(separator: ", "))") }
+    Output.printText("[\(m.id)]\(unread)\(flag) \(m.subject)")
+    Output.printText("    from: \(m.sender)   \(m.date_received ?? "")   \(m.account)/\(m.mailbox)")
+    if let to = m.to, !to.isEmpty { Output.printText("    to: \(to.joined(separator: ", "))") }
+    if let cc = m.cc, !cc.isEmpty { Output.printText("    cc: \(cc.joined(separator: ", "))") }
     if full, let content = m.content, !content.isEmpty {
-        print("    ----")
-        print(content)
+        Output.printText("    ----")
+        Output.printText(content)
     } else if let snip = m.snippet, !snip.isEmpty {
-        print("    \(snip.prefix(140))")
+        Output.printText("    \(snip.prefix(140))")
     }
 }
 

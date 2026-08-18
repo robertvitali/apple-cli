@@ -27,7 +27,7 @@ struct RulesList: ParsableCommand {
             let infos = rules.map { RuleInfo(index: $0.index, name: $0.name, enabled: $0.enabled) }
             let result = Result(rules: infos, count: infos.count)
             if global.json { try Output.emit(tool: "mail", data: result) }
-            else { for r in infos { print("\(r.index). \(r.name) [\(r.enabled ? "enabled" : "disabled")]") } }
+            else { for r in infos { Output.printText("\(r.index). \(r.name) [\(r.enabled ? "enabled" : "disabled")]") } }
         }
     }
 }
@@ -165,7 +165,7 @@ struct RulesCreate: ParsableCommand {
                 "enabled": AnyEncodableBox(createEnabled), "dry_run": AnyEncodableBox(false), "executed": AnyEncodableBox(true),
                 "note": AnyEncodableBox(sandboxActive
                     ? "sandbox: created SELF-SCOPED to the test label + DISABLED — it can only ever act on apple-cli-test mail; `rules enable <index>` to activate"
-                    : nil)], sandboxActive: sandboxActive)
+                    : nil)], text: global.text, sandboxActive: sandboxActive)
         }
     }
 }
@@ -240,8 +240,8 @@ struct RulesUpdate: ParsableCommand {
                         "would_recreate": AnyEncodableBox(recreates), "live_blockers": AnyEncodableBox(blockers),
                         "note": AnyEncodableBox(note)], sandboxActive: sandboxActive)
                 } else {
-                    print("Would update rule \(index) (dry-run; \(recreates ? "condition change → delete-and-recreate" : "in-place"))")
-                    for b in blockers { print("  would be refused live: \(b)") }
+                    Output.printText("Would update rule \(index) (dry-run; \(recreates ? "condition change → delete-and-recreate" : "in-place"))")
+                    for b in blockers { Output.printText("  would be refused live: \(b)") }
                 }
                 return
             }
@@ -295,7 +295,7 @@ struct RulesUpdate: ParsableCommand {
                     // (wholesale replace, matching the oracle) — the `patch.actions` ARE the rule's
                     // full modeled action set afterward; rules carrying unmodeled actions were refused
                     // above, so nothing unmanaged survives.
-                    "note": AnyEncodableBox(plan != nil ? "patched in place; supported actions reset to the given set (wholesale replace)" : "patched in place")], sandboxActive: sandboxActive)
+                    "note": AnyEncodableBox(plan != nil ? "patched in place; supported actions reset to the given set (wholesale replace)" : "patched in place")], text: global.text, sandboxActive: sandboxActive)
                 return
             }
             // ---- Condition replacement → whole-rule DELETE-AND-RECREATE. Two Mail bugs force this
@@ -373,7 +373,7 @@ struct RulesUpdate: ParsableCommand {
                 "actions": AnyEncodableBox(mergedPlan.tokens),
                 "patch": AnyEncodableBox(patch), "recreated": AnyEncodableBox(true),
                 "dry_run": AnyEncodableBox(false), "executed": AnyEncodableBox(true),
-                "note": AnyEncodableBox("condition change → delete-and-recreated (Mail can't delete a rule condition); created disabled, conditions verified, re-enabled if it was enabled. DIVERGES from the MCP in-place update: rule MOVED TO END of list, and actions RESET to [\(mergedPlan.tokens.joined(separator: ", "))] — pass --action (move_to/copy_to/mark_read/mark_flagged/flag_color) to set them explicitly, since a prior action NOT re-passed is not read back off the old rule.")], sandboxActive: sandboxActive)
+                "note": AnyEncodableBox("condition change → delete-and-recreated (Mail can't delete a rule condition); created disabled, conditions verified, re-enabled if it was enabled. DIVERGES from the MCP in-place update: rule MOVED TO END of list, and actions RESET to [\(mergedPlan.tokens.joined(separator: ", "))] — pass --action (move_to/copy_to/mark_read/mark_flagged/flag_color) to set them explicitly, since a prior action NOT re-passed is not read back off the old rule.")], text: global.text, sandboxActive: sandboxActive)
         }
     }
 }
@@ -390,7 +390,7 @@ struct RulesDelete: ParsableCommand {
             let willExecute = try global.willExecute(defaultDryRun: false)
 
             guard willExecute else {
-                try Output.emit(tool: "mail", data: ["would_delete_rule_index": AnyEncodableBox(index), "dry_run": AnyEncodableBox(true), "note": AnyEncodableBox(Optional<String>.none)], sandboxActive: sandboxActive)
+                try Output.emit(tool: "mail", data: ["would_delete_rule_index": AnyEncodableBox(index), "dry_run": AnyEncodableBox(true), "note": AnyEncodableBox(Optional<String>.none)], text: global.text, sandboxActive: sandboxActive)
                 return
             }
             let r = try requireLabeledRule(index: index, sandboxActive: sandboxActive)
@@ -398,7 +398,7 @@ struct RulesDelete: ParsableCommand {
             try Output.emit(tool: "mail", data: ["deleted_rule_index": AnyEncodableBox(index), "rule_name": AnyEncodableBox(r.name),
              // `rule_index` + `deleted_name` are oracle A delete_rule's wire names.
              "rule_index": AnyEncodableBox(index), "deleted_name": AnyEncodableBox(r.name),
-             "dry_run": AnyEncodableBox(false), "executed": AnyEncodableBox(true)], sandboxActive: sandboxActive)
+             "dry_run": AnyEncodableBox(false), "executed": AnyEncodableBox(true)], text: global.text, sandboxActive: sandboxActive)
         }
     }
 }
@@ -445,7 +445,7 @@ private func setEnabled(index: Int, enabled: Bool, global: GlobalOptions) throws
         let willExecute = try global.willExecute(defaultDryRun: false)
 
         guard willExecute else {
-            try Output.emit(tool: "mail", data: ["rule_index": AnyEncodableBox(index), "would_set_enabled": AnyEncodableBox(enabled), "dry_run": AnyEncodableBox(true), "note": AnyEncodableBox(Optional<String>.none)], sandboxActive: sandboxActive)
+            try Output.emit(tool: "mail", data: ["rule_index": AnyEncodableBox(index), "would_set_enabled": AnyEncodableBox(enabled), "dry_run": AnyEncodableBox(true), "note": AnyEncodableBox(Optional<String>.none)], text: global.text, sandboxActive: sandboxActive)
             return
         }
         let r = try requireLabeledRule(index: index, sandboxActive: sandboxActive)
@@ -454,7 +454,7 @@ private func setEnabled(index: Int, enabled: Bool, global: GlobalOptions) throws
          // `name` + `enabled` are oracle A set_rule_enabled's wire names; `rule_name` +
          // `set_enabled` are the CLI's original keys, kept for existing consumers.
          "name": AnyEncodableBox(r.name), "enabled": AnyEncodableBox(enabled),
-         "executed": AnyEncodableBox(true), "dry_run": AnyEncodableBox(false)], sandboxActive: sandboxActive)
+         "executed": AnyEncodableBox(true), "dry_run": AnyEncodableBox(false)], text: global.text, sandboxActive: sandboxActive)
     }
 }
 
@@ -476,8 +476,8 @@ func emitRulePreview(_ rule: RuleSchema.Rule, willExecute: Bool, json: Bool,
             "live_blockers": AnyEncodableBox(liveBlockers), "note": AnyEncodableBox(note)],
             sandboxActive: sandboxActive)
     } else {
-        print("Rule '\(rule.name)' (\(rule.match_logic), \(rule.enabled ? "enabled" : "disabled")) — dry-run: \(!willExecute)")
-        for b in liveBlockers { print("  would be refused live: \(b)") }
+        Output.printText("Rule '\(rule.name)' (\(rule.match_logic), \(rule.enabled ? "enabled" : "disabled")) — dry-run: \(!willExecute)")
+        for b in liveBlockers { Output.printText("  would be refused live: \(b)") }
     }
 }
 
@@ -500,7 +500,7 @@ struct TemplatesList: ParsableCommand {
             if global.json {
                 try Output.emit(tool: "mail", data: TemplateStore.TemplatesResult(templates: list, count: list.count))
             } else {
-                for t in list { print("\(t.name)\(t.subject != nil ? "  [subject]" : "")") }
+                for t in list { Output.printText("\(t.name)\(t.subject != nil ? "  [subject]" : "")") }
             }
         }
     }
@@ -515,8 +515,8 @@ struct TemplatesGet: ParsableCommand {
             let tpl = try TemplateStore().get(name)
             if global.json { try Output.emit(tool: "mail", data: tpl) }
             else {
-                if let subj = tpl.subject { print("subject: \(subj)") }
-                print(tpl.body)
+                if let subj = tpl.subject { Output.printText("subject: \(subj)") }
+                Output.printText(tpl.body)
             }
         }
     }
@@ -544,7 +544,7 @@ struct TemplatesSave: ParsableCommand {
             try TemplateStore.validateSave(name: name, body: body, subject: subject)
             guard willExecute else {
                 try Output.emit(tool: "mail", data: ["would_save_template": AnyEncodableBox(name),
-                    "has_subject": AnyEncodableBox(subject != nil), "dry_run": AnyEncodableBox(true)], sandboxActive: sandboxActive)
+                    "has_subject": AnyEncodableBox(subject != nil), "dry_run": AnyEncodableBox(true)], text: global.text, sandboxActive: sandboxActive)
                 return
             }
             let tpl = try TemplateStore().save(name: name, body: body, subject: subject)
@@ -552,7 +552,7 @@ struct TemplatesSave: ParsableCommand {
             // object's own fields are unchanged; "original shape" no longer trumps the v2
             // execute-envelope rule the other 20 Mail writes follow.
             if global.json { try Output.emit(tool: "mail", data: ExecutedWrite(tpl), sandboxActive: sandboxActive) }
-            else { print("saved template '\(tpl.name)'") }
+            else { Output.printText("saved template '\(tpl.name)'") }
         }
     }
 }
@@ -579,9 +579,9 @@ struct TemplatesDelete: ParsableCommand {
                 // EXPLICIT — under v2 it is how a caller distinguishes previewed from done.
                 if global.json {
                     try Output.emit(tool: "mail", data: ["deleted_template": AnyEncodableBox(name), "name": AnyEncodableBox(name), "executed": AnyEncodableBox(true), "dry_run": AnyEncodableBox(false)], sandboxActive: sandboxActive)
-                } else { print("deleted template '\(name)'") }
+                } else { Output.printText("deleted template '\(name)'") }
             } else {
-                try Output.emit(tool: "mail", data: ["would_delete_template": AnyEncodableBox(name), "dry_run": AnyEncodableBox(true)], sandboxActive: sandboxActive)
+                try Output.emit(tool: "mail", data: ["would_delete_template": AnyEncodableBox(name), "dry_run": AnyEncodableBox(true)], text: global.text, sandboxActive: sandboxActive)
             }
         }
     }
@@ -627,8 +627,8 @@ struct TemplatesRender: ParsableCommand {
             let result = try TemplateStore().render(name: name, autoVars: autoVars, userVars: userVars)
             if global.json { try Output.emit(tool: "mail", data: result) }
             else {
-                if let subj = result.subject { print("subject: \(subj)") }
-                print(result.body)
+                if let subj = result.subject { Output.printText("subject: \(subj)") }
+                Output.printText(result.body)
             }
         }
     }

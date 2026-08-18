@@ -728,7 +728,7 @@ struct AttachmentsList: ParsableCommand {
                     ? "live enrichment skipped (--no-live) — rows are Envelope-Index only (mime_type/size/downloaded omitted)"
                     : "live Mail.app enrichment unavailable — rows are Envelope-Index only (mime_type/size/downloaded omitted)"))
             if global.json { try Output.emit(tool: "mail", data: result) }
-            else { for a in atts { print("\(a.name)\(a.attachment_id.map { "  [\($0)]" } ?? "")  (msg \(a.message_id))") } }
+            else { for a in atts { Output.printText("\(a.name)\(a.attachment_id.map { "  [\($0)]" } ?? "")  (msg \(a.message_id))") } }
         }
     }
 }

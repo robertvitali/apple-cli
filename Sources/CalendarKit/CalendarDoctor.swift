@@ -38,7 +38,7 @@ public struct CalendarDoctor: ParsableCommand {
                 reminders_authorization: remStatus.rawValue,
                 calendar_ready: ready,
                 full_disk_access: pre.full_disk_access,
-                notes: notes))
+                notes: notes), text: global.text)
         }
     }
 }

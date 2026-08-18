@@ -301,3 +301,14 @@ setup() {
   [ "$status" -eq 0 ]
   echo "$output" | grep -q '"sandbox_target_unchecked" : true'
 }
+
+# Q12 [10]/[17] (critic finding #2): reminders --text is honored AND neutralizes terminal
+# control sequences (reminders write emits thread the preference via Gate.text). Revert-red:
+# reverting the Gate.text wiring emits JSON / a raw ESC.
+@test "reminders tasks create --dry-run --text neutralizes ANSI (Q12 [17])" {
+  title=$(printf 'apple-cli-test \033[31mRED\033[0m')
+  run "$BIN" reminders tasks create --title "$title" --dry-run --text
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '\^\[\[31mRED'
+  ! printf '%s' "$output" | grep -q "$(printf '\033')"
+}

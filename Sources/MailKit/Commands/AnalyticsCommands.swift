@@ -77,7 +77,7 @@ struct AnalyticsTopSenders: ParsableCommand {
             try requireMailboxExists(ctx: ctx, uuid: uuid, mailbox: mailbox, account: account)
             let rows = try ctx.index.analyticsRows(accountUUID: uuid, mailboxName: mailbox, sinceUnix: sinceUnix(daysBack: days)).map(analyticsRow)
             let result = Analytics.topSenders(rows, topN: topN, byDomain: byDomain, account: account, mailbox: mailbox, daysBack: days)
-            try Output.emit(tool: "mail", data: result)
+            try Output.emit(tool: "mail", data: result, text: global.text)
         }
     }
 }
@@ -145,7 +145,7 @@ struct AnalyticsStats: ParsableCommand {
                                               namedMailbox: named) {
                 ctx.index.mailbox(forRowid: $0)?.url.path ?? "?"
             }
-            try Output.emit(tool: "mail", data: result)
+            try Output.emit(tool: "mail", data: result, text: global.text)
         }
     }
 }
@@ -206,7 +206,7 @@ struct AnalyticsNeedsResponse: ParsableCommand {
                     .map { MailFormat.stripThreadPrefixes(strVal($0["subject"]) ?? "") } ?? []
             }
             let items = Analytics.needsResponse(rows, maxResults: max, sentSubjects: sentSubjects)
-            try Output.emit(tool: "mail", data: Result(account: account, mailbox: mailbox, days_back: days, sent_mailbox: sentPath, items: items, count: items.count))
+            try Output.emit(tool: "mail", data: Result(account: account, mailbox: mailbox, days_back: days, sent_mailbox: sentPath, items: items, count: items.count), text: global.text)
         }
     }
 }
@@ -282,7 +282,7 @@ struct AnalyticsAwaitingReply: ParsableCommand {
             }
             let all = Analytics.awaitingReply(sent: sent, received: received, excludeNoreply: excludeNoreply)
             let items = Array(all.prefix(max))
-            try Output.emit(tool: "mail", data: Result(account: account, days_back: days, sent_mailbox: sentName, items: items, count: items.count))
+            try Output.emit(tool: "mail", data: Result(account: account, days_back: days, sent_mailbox: sentName, items: items, count: items.count), text: global.text)
         }
     }
 }
@@ -335,7 +335,7 @@ struct AnalyticsOverview: ParsableCommand {
                 "Track follow-ups with `apple mail analytics awaiting-reply --account <a>`.",
                 "Identify high-volume senders with `apple mail analytics top-senders --account <a>`.",
             ]
-            try Output.emit(tool: "mail", data: Result(accounts: accounts, total_unread: total, recent: recent, suggestions: suggestions))
+            try Output.emit(tool: "mail", data: Result(accounts: accounts, total_unread: total, recent: recent, suggestions: suggestions), text: global.text)
         }
     }
 }

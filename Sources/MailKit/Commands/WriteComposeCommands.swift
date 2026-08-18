@@ -637,7 +637,7 @@ struct SendCommand: ParsableCommand {
                                   to: toL, cc: ccL, bcc: bccL,
                                   subject: subject, has_html: html != nil, attachments: attach,
                                   eml_path: emlPath, dry_run: !willExecute, executed: executed, opened: opened, drafted: drafted, note: note)
-            try Output.emit(tool: "mail", data: preview, sandboxActive: sandboxActive)
+            try Output.emit(tool: "mail", data: preview, text: global.text, sandboxActive: sandboxActive)
         }
     }
 }
@@ -930,7 +930,7 @@ struct ReplyCommand: ParsableCommand {
                 matched_message_id: target.id, reply_all: all, mode: mode, has_html: html != nil, sender_address: senderAddress,
                 to: recipients, cc: ccL, bcc: bccL, attachments: attach,
                 dry_run: !willExecute, executed: executed, opened: opened, note: note,
-                reply_id: replyID, drafted: drafted, original_message_id: target.id), sandboxActive: sandboxActive)
+                reply_id: replyID, drafted: drafted, original_message_id: target.id), text: global.text, sandboxActive: sandboxActive)
         }
     }
 }
@@ -1063,7 +1063,7 @@ struct ForwardCommand: ParsableCommand {
             try Output.emit(tool: "mail", data: Preview(action: "forward", matched_message_id: target.id, sender_address: senderAddress,
                 to: toL, cc: ccL, bcc: bccL, dry_run: !willExecute, executed: executed, note: note,
                 forward_id: forwardID, original_message_id: target.id,
-                recipients: verifiedRecipients), sandboxActive: sandboxActive)
+                recipients: verifiedRecipients), text: global.text, sandboxActive: sandboxActive)
         }
     }
 }
@@ -1336,7 +1336,7 @@ struct DraftRichCommand: ParsableCommand {
                 has_html: html != nil, sender_address: senderAddress, opened: opened, note: note,
                 dry_run: !willExecute,
                 account: account, cc: ccL, bcc: bccL, missing_details: missing,
-                saved: saved), sandboxActive: sandboxActive)
+                saved: saved), text: global.text, sandboxActive: sandboxActive)
         }
     }
 }
@@ -1371,7 +1371,8 @@ struct DraftCommand: ParsableCommand {
                 struct DraftRow: Encodable { let subject: String; let recipient: String; let date_sent: String }
                 struct DraftsResult: Encodable { let action: String; let drafts: [DraftRow]; let count: Int }
                 let rows = drafts.map { DraftRow(subject: $0.subject, recipient: $0.recipient, date_sent: $0.date_sent) }
-                try Output.emit(tool: "mail", data: DraftsResult(action: "list", drafts: rows, count: rows.count))
+                try Output.emit(tool: "mail", data: DraftsResult(action: "list", drafts: rows, count: rows.count),
+                                text: global.text)
                 return
             }
 
@@ -1495,7 +1496,7 @@ struct DraftCommand: ParsableCommand {
                 "dry_run": AnyEncodableBox(!willExecute), "executed": AnyEncodableBox(executed),
                 "note": AnyEncodableBox(note),
             ]
-            try Output.emit(tool: "mail", data: payload, sandboxActive: sandboxActive)
+            try Output.emit(tool: "mail", data: payload, text: global.text, sandboxActive: sandboxActive)
         }
     }
 }

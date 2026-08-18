@@ -466,3 +466,15 @@ END:VCARD"
   [ "$status" -eq 0 ]
   echo "$output" | grep -q "^OK: 0 unquoted not-found identifiers"
 }
+
+# Q12 [17] (critic finding #2): contacts --text (now routed through the shared Output.humanText)
+# neutralizes control bytes in echoed fields. given_name sits in a nested fields object, so the
+# ESC is escaped to the literal six-char u-escape by JSONSerialization and any C1 byte is
+# neutralized -- never a raw driving byte. Revert-red for the shared renderer nested path.
+@test "contacts create --dry-run --text neutralizes ANSI in echoed fields (Q12 [17])" {
+  gn=$(printf 'apple-cli-testZ\033[31mX')
+  run "$BIN" contacts create --given "$gn" --dry-run --text
+  [ "$status" -eq 0 ]
+  ! printf '%s' "$output" | grep -q "$(printf '\033')"
+  echo "$output" | grep -q 'u001b'
+}

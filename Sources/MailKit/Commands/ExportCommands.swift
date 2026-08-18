@@ -34,7 +34,7 @@ struct AnalyticsDashboard: ParsableCommand {
             let html = MailDashboard.render(unread: unread, totalUnread: total, recent: recent)
             if willExecute { try html.write(to: url, atomically: true, encoding: .utf8) }
             try Output.emit(tool: "mail", data: Result(path: url.path, total_unread: total,
-                accounts: unread.count, dry_run: !willExecute), sandboxActive: sandboxActive)
+                accounts: unread.count, dry_run: !willExecute), text: global.text, sandboxActive: sandboxActive)
         }
     }
 }
@@ -212,7 +212,7 @@ struct ExportCommand: ParsableCommand {
                 try Output.emit(tool: "mail", data: Result(
                     exported: 0, directory: reportedDir, files: planned, format: format,
                     body_source: bodySource, dry_run: true,
-                    total_in_mailbox: totalInMailbox, capped: totalInMailbox > messages.count), sandboxActive: sandboxActive)
+                    total_in_mailbox: totalInMailbox, capped: totalInMailbox > messages.count), text: global.text, sandboxActive: sandboxActive)
                 return
             }
             var files: [String] = []
@@ -255,7 +255,7 @@ struct ExportCommand: ParsableCommand {
                 exported: files.count, directory: reportedDir, files: files, format: format,
                 body_source: bodySource, dry_run: false,
                 write_failures: writeFailures.isEmpty ? nil : writeFailures,
-                total_in_mailbox: totalInMailbox, capped: totalInMailbox > files.count), sandboxActive: sandboxActive)
+                total_in_mailbox: totalInMailbox, capped: totalInMailbox > files.count), text: global.text, sandboxActive: sandboxActive)
         }
     }
 }

@@ -49,7 +49,7 @@ public struct SubtasksRead: ParsableCommand {
             let subs = ReminderSubtasks.parse(reminder.notes)
             try Output.emit(tool: "reminders", data: SubtasksData(
                 reminder_id: reminderId, reminder_title: reminder.title,
-                progress: ReminderSubtasks.progress(subs), subtasks: subs))
+                progress: ReminderSubtasks.progress(subs), subtasks: subs), text: global.text)
         }
     }
 }
@@ -73,8 +73,7 @@ public struct SubtasksCreate: ParsableCommand {
             guard gate.willExecute else {
                 try emitRemindersWrite(SubtaskWritePreview(
                     action: "create", reminder_id: reminderId, title: title,
-                    sandbox_target_unchecked: gate.sandboxActive ? true : nil),
-                    sandboxActive: gate.sandboxActive)
+                    sandbox_target_unchecked: gate.sandboxActive ? true : nil), gate: gate)
                 return
             }
             let store = EventStore()
@@ -87,8 +86,7 @@ public struct SubtasksCreate: ParsableCommand {
             let subs = ReminderSubtasks.parse(newNotes)
             try emitRemindersExecutedWrite(SubtasksData(
                 reminder_id: reminderId, reminder_title: reminder.title,
-                progress: ReminderSubtasks.progress(subs), subtasks: subs, subtask: created),
-                                   sandboxActive: gate.sandboxActive)
+                progress: ReminderSubtasks.progress(subs), subtasks: subs, subtask: created), gate: gate)
         }
     }
 }
@@ -116,8 +114,7 @@ public struct SubtasksUpdate: ParsableCommand {
                 try emitRemindersWrite(SubtaskWritePreview(
                     action: "update", reminder_id: reminderId, subtask_id: subtaskId, title: title,
                     completed: completed,
-                    sandbox_target_unchecked: gate.sandboxActive ? true : nil),
-                    sandboxActive: gate.sandboxActive)
+                    sandbox_target_unchecked: gate.sandboxActive ? true : nil), gate: gate)
                 return
             }
             let store = EventStore()
@@ -130,8 +127,7 @@ public struct SubtasksUpdate: ParsableCommand {
             let subs = ReminderSubtasks.parse(newNotes)
             try emitRemindersExecutedWrite(SubtasksData(
                 reminder_id: reminderId, reminder_title: reminder.title,
-                progress: ReminderSubtasks.progress(subs), subtasks: subs, subtask: updated),
-                                   sandboxActive: gate.sandboxActive)
+                progress: ReminderSubtasks.progress(subs), subtasks: subs, subtask: updated), gate: gate)
         }
     }
 }
@@ -156,8 +152,7 @@ public struct SubtasksDelete: ParsableCommand {
             guard gate.willExecute else {
                 try emitRemindersWrite(SubtaskWritePreview(
                     action: "delete", reminder_id: reminderId, subtask_id: subtaskId,
-                    sandbox_target_unchecked: gate.sandboxActive ? true : nil),
-                    sandboxActive: gate.sandboxActive)
+                    sandbox_target_unchecked: gate.sandboxActive ? true : nil), gate: gate)
                 return
             }
             let store = EventStore()
@@ -170,8 +165,7 @@ public struct SubtasksDelete: ParsableCommand {
             let subs = ReminderSubtasks.parse(newNotes)
             try emitRemindersExecutedWrite(SubtasksData(
                 reminder_id: reminderId, reminder_title: reminder.title,
-                progress: ReminderSubtasks.progress(subs), subtasks: subs),
-                                   sandboxActive: gate.sandboxActive)
+                progress: ReminderSubtasks.progress(subs), subtasks: subs), gate: gate)
         }
     }
 }
@@ -196,8 +190,7 @@ public struct SubtasksToggle: ParsableCommand {
             guard gate.willExecute else {
                 try emitRemindersWrite(SubtaskWritePreview(
                     action: "toggle", reminder_id: reminderId, subtask_id: subtaskId,
-                    sandbox_target_unchecked: gate.sandboxActive ? true : nil),
-                    sandboxActive: gate.sandboxActive)
+                    sandbox_target_unchecked: gate.sandboxActive ? true : nil), gate: gate)
                 return
             }
             let store = EventStore()
@@ -210,8 +203,7 @@ public struct SubtasksToggle: ParsableCommand {
             let subs = ReminderSubtasks.parse(newNotes)
             try emitRemindersExecutedWrite(SubtasksData(
                 reminder_id: reminderId, reminder_title: reminder.title,
-                progress: ReminderSubtasks.progress(subs), subtasks: subs, subtask: toggled),
-                                   sandboxActive: gate.sandboxActive)
+                progress: ReminderSubtasks.progress(subs), subtasks: subs, subtask: toggled), gate: gate)
         }
     }
 }
@@ -237,8 +229,7 @@ public struct SubtasksReorder: ParsableCommand {
             guard gate.willExecute else {
                 try emitRemindersWrite(SubtaskWritePreview(
                     action: "reorder", reminder_id: reminderId, order: order,
-                    sandbox_target_unchecked: gate.sandboxActive ? true : nil),
-                    sandboxActive: gate.sandboxActive)
+                    sandbox_target_unchecked: gate.sandboxActive ? true : nil), gate: gate)
                 return
             }
             let store = EventStore()
@@ -250,8 +241,7 @@ public struct SubtasksReorder: ParsableCommand {
             try store.save(reminder)
             try emitRemindersExecutedWrite(SubtasksData(
                 reminder_id: reminderId, reminder_title: reminder.title,
-                progress: ReminderSubtasks.progress(reordered), subtasks: reordered),
-                                   sandboxActive: gate.sandboxActive)
+                progress: ReminderSubtasks.progress(reordered), subtasks: reordered), gate: gate)
         }
     }
 }

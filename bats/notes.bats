@@ -415,3 +415,13 @@ assert_no_folder_named() {
   run "$BIN" notes search "$(printf 'a%.0s' $(seq 1 2001))"
   [ "$status" -eq 64 ]; echo "$output" | grep -q 'exceeds maximum length of 2000'
 }
+
+# Q12 [17] (critic finding #2): the notes --text sink neutralizes terminal control sequences.
+# Revert-red: dropping the TextSanitize wrap in NotesCommand lets a raw ESC through.
+@test "notes create --dry-run --text neutralizes ANSI (Q12 [17])" {
+  title=$(printf 'apple-cli-test \033[31mRED\033[0m')
+  run "$BIN" notes create "$title" --content b --dry-run --text
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '\^\[\[31mRED'
+  ! printf '%s' "$output" | grep -q "$(printf '\033')"
+}
