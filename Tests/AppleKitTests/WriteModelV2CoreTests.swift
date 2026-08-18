@@ -183,8 +183,8 @@ struct WriteModelV2CoreTests {
 
     @Test("isTruthyEnv is the ONE documented fail-open reader: junk reads false, never throws")
     func isTruthyEnvFailOpenPinned() {
-        // Deliberate and confined: isTruthyEnv exists for Bool-property contexts that cannot
-        // throw (TestMode.isEnabled). v2 write-path gates use the THROWING readers, where an
+        // Deliberate and confined: isTruthyEnv exists for the few Bool-property contexts that
+        // cannot throw (e.g. the Contacts env-gate reader). v2 write-path gates use the THROWING readers, where an
         // unparseable value refuses the command. This test pins the boundary so a future
         // refactor can't silently widen the fail-open surface without touching a test.
         let name = "APPLE_CLI_TEST_TRUTHY_UNIQ2"
@@ -193,13 +193,4 @@ struct WriteModelV2CoreTests {
         unsetenv(name)
     }
 
-    // MARK: v1 property (deprecated, deleted at the final flip; semantics frozen until then)
-
-    @Test("the v1 willExecute property still requires --execute and yields to --dry-run")
-    func v1PropertyUnchanged() throws {
-        // Deprecation warnings HERE are expected — this test pins the frozen v1 semantics.
-        #expect(try GlobalOptions.parse([]).willExecute == false)
-        #expect(try GlobalOptions.parse(["--execute"]).willExecute == true)
-        #expect(try GlobalOptions.parse(["--execute", "--dry-run"]).willExecute == false)
-    }
 }

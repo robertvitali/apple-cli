@@ -675,17 +675,6 @@ public enum ReminderRead {
     }
 }
 
-// MARK: - Write-target label guard (shared by tasks + subtasks mutation paths)
-
-public enum LabelGuard {
-    /// Pure predicate: is `name` a labeled test target (has the sandbox prefix)? The env-gated
-    /// enable check lives in `TestMode`/`ReminderWriteGuard`; this is the label discriminator the
-    /// post-fetch guard applies, kept pure so the write-safety refusal is unit-testable.
-    public static func isLabeled(_ name: String?) -> Bool {
-        (name ?? "").hasPrefix(TestMode.sandboxPrefix)
-    }
-}
-
 /// Fetch a reminder by id or throw `.notFound`.
 func fetchReminder(_ store: EventStore, _ id: String) throws -> EKReminder {
     guard let r = store.reminder(withIdentifier: id) else {

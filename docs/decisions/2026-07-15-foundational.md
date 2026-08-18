@@ -24,7 +24,10 @@ error escapes to a non-JSON stderr/exit-1. Domains throw `AppleError.*`, never h
 ## Safety: track-and-cleanup, not a sandbox
 No dedicated sandbox. Live tests + MCP-parity writes go to real stores as clearly-labeled
 (`apple-cli-test*`) test items, logged to `TEST-CLEANUP.md`, deleted via the MCP afterward.
-`TestMode` provides fail-closed guards (`requireLabeledTarget`, `requireAllowedRecipient`).
+`TestMode` provides the write-model-v2 sandbox primitives (`sandboxActive(flag:)`, the
+`truthyEnv` fail-loud env readers); each domain applies its own fail-closed label guard
+(`requireLabeled` / `requireLabeledReminder` / `ContactsLabel.isLabeled`) threaded with
+`sandboxActive`.
 Messages send only to the operator's own number; Mail drafts/self only. Never a dangerous
 action (real-recipient send, deleting/mutating pre-existing real data) autonomously.
 

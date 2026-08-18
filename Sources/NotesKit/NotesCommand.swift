@@ -206,8 +206,8 @@ struct DryRunPreview: Encodable {
 /// be a labeled `apple-cli-test…` item.
 ///
 /// `sandboxActive` is a PARAMETER, never re-read from the environment here: the flag-only path
-/// (`--test-mode` with no env var) must engage the same confinement, and an internal
-/// `TestMode.isEnabled` re-check — which is what v1 did — would silently skip it.
+/// (`--test-mode` with no env var) must engage the same confinement, and re-reading the
+/// environment here (as v1 did) would silently skip it.
 /// Refusals stay `AppleError.validation` (exit 64), the per-domain refusal type for Notes.
 ///
 /// `prefix` is a logic-tier seam: `TestMode.sandboxPrefix` reads `APPLE_TEST_SANDBOX` from the

@@ -29,15 +29,6 @@ public struct GlobalOptions: ParsableArguments {
     /// Output is JSON by DEFAULT (stdout = machine JSON); `--text` opts into a human rendering.
     public var json: Bool { !text }
 
-    /// Destructive verbs default to dry-run; a real mutation requires an explicit `--execute`.
-    /// V1 SEMANTICS — deprecated so every un-migrated (or MIS-migrated: `global.willExecute`
-    /// without the argument label binds THIS property, silently keeping v1 semantics) call
-    /// site carries a per-line compiler warning until its domain's write-model-v2 flip
-    /// commit migrates it to `willExecute(defaultDryRun:)`. The FINAL flip commit deletes
-    /// this property; "zero deprecation warnings" is the mechanical completion criterion.
-    @available(*, deprecated, message: "v1 write gate; migrate to willExecute(defaultDryRun:) per docs/write-model-v2.md")
-    public var willExecute: Bool { execute && !dryRun }
-
     /// Write-model v2 (docs/write-model-v2.md): whether this invocation EXECUTES, resolved
     /// once from flag + env precedence. Call it ONCE at the top of `run()` and thread the
     /// result — the spec's bind-once discipline exists because guards, previews, and the

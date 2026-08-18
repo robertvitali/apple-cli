@@ -4,7 +4,7 @@ import Foundation
 
 // Logic-tier tests — no Apple permissions / TCC required; runnable in CI.
 // These test the PURE prefix-normalization helper directly (no process-env mutation),
-// so they can't race with the sibling suites that read `TestMode.isEnabled` in parallel.
+// so they can't race with the sibling suites that read APPLE_TEST_MODE in parallel.
 
 @Suite("TestMode sandbox-prefix normalization")
 struct TestModeTests {
@@ -12,7 +12,7 @@ struct TestModeTests {
     func emptyFallsBackToDefault() {
         // The security-critical case: an empty override must NOT vacate the label gate.
         // If normalizedPrefix returned "", `name.hasPrefix("")` would be true for ANY name,
-        // and requireLabeledTarget would wave every unlabeled real item through.
+        // and the sandbox label check would wave every unlabeled real item through.
         #expect(TestMode.normalizedPrefix(from: nil) == "apple-cli-test")
         #expect(TestMode.normalizedPrefix(from: "") == "apple-cli-test")
         #expect(TestMode.normalizedPrefix(from: "   ") == "apple-cli-test")

@@ -11,22 +11,6 @@ public enum TestMode {
     public static let testModeVar = "APPLE_TEST_MODE"
     public static let dryRunVar = "APPLE_DRY_RUN"
 
-    /// ONE parser for APPLE_TEST_MODE (the v2 truthy contract — {1,true,yes} case-insens).
-    /// In V1 SEMANTICS `isEnabled == true` is what UNLOCKS the write gates (every v1 site is
-    /// `guard testMode && isEnabled else refuse`), so widening the accepted spellings widens
-    /// the unlock — bounded, because every unlocked path keeps an independent second factor
-    /// this change does not touch (label prefix, recipient allowlist, the APPLE_ALLOW_*
-    /// vars), and an unparseable value still reads false, keeping the gate SHUT.
-    /// DEPRECATED for the same staged-flip reason as the v1 `willExecute` property: this is
-    /// the remaining fail-open env reader on the write path, and the flip commits replace
-    /// each gate's internal re-check with the thrown-through `sandboxActive(flag:)`
-    /// parameter (docs/write-model-v2.md "Guards change signature"). The final flip deletes
-    /// it; zero deprecation warnings is the completion criterion.
-    @available(*, deprecated, message: "v1 gate reader; flips replace with the threaded sandboxActive per docs/write-model-v2.md")
-    public static var isEnabled: Bool {
-        isTruthyEnv(testModeVar)
-    }
-
     /// Prefix every test item's name carries so it's recognizable + cleanable.
     public static var sandboxPrefix: String {
         normalizedPrefix(from: ProcessInfo.processInfo.environment["APPLE_TEST_SANDBOX"])
@@ -42,7 +26,7 @@ public enum TestMode {
     /// Pure normalization (unit-testable without mutating process env): an empty or
     /// whitespace-only `APPLE_TEST_SANDBOX` is treated as ABSENT and falls back to the
     /// default prefix — otherwise the override would vacate the label gate
-    /// (`name.hasPrefix("")` is always true), letting ANY name pass `requireLabeledTarget`.
+    /// (`name.hasPrefix("")` is always true), letting ANY name pass a sandbox label check.
     static func normalizedPrefix(from raw: String?) -> String {
         let trimmed = (raw ?? "").trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? "apple-cli-test" : trimmed
@@ -53,32 +37,6 @@ public enum TestMode {
     public static var allowedRecipients: [String] {
         (ProcessInfo.processInfo.environment["APPLE_TEST_RECIPIENTS"] ?? "")
             .split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
-    }
-
-    public enum SandboxError: Error, CustomStringConvertible {
-        case notTestMode
-        case notLabeled(String)
-        case recipientNotAllowed(String)
-        public var description: String {
-            switch self {
-            case .notTestMode: return "APPLE_TEST_MODE is not set — refusing a live write"
-            case .notLabeled(let n): return "target '\(n)' is not a labeled test item (must start with the test prefix)"
-            case .recipientNotAllowed(let r): return "recipient '\(r)' is not in the test allowlist"
-            }
-        }
-    }
-
-    /// Fail-closed: refuse a create/mutate unless test mode is on AND the target name is a
-    /// labeled test item. Throw `AppleError.validation(...)` in callers if this throws.
-    public static func requireLabeledTarget(_ name: String) throws {
-        guard isEnabled else { throw SandboxError.notTestMode }
-        guard name.hasPrefix(sandboxPrefix) else { throw SandboxError.notLabeled(name) }
-    }
-
-    /// Fail-closed: refuse a send to any recipient not on the operator's test allowlist.
-    public static func requireAllowedRecipient(_ recipient: String) throws {
-        guard isEnabled else { throw SandboxError.notTestMode }
-        guard allowedRecipients.contains(recipient) else { throw SandboxError.recipientNotAllowed(recipient) }
     }
 
     // MARK: - Write-model v2 (docs/write-model-v2.md)
@@ -110,8 +68,8 @@ public enum TestMode {
             + "Refusing to guess whether you meant on or off.")
     }
 
-    /// Non-throwing accessor over `truthyEnv`, for Bool-property contexts that cannot
-    /// throw (`isEnabled`). Gate logic on the v2 write path must use the THROWING readers
+    /// Non-throwing accessor over `truthyEnv`, for the few Bool-property contexts that cannot
+    /// throw (e.g. the Contacts env-gate reader). Gate logic on the v2 write path must use the THROWING readers
     /// (`truthyEnv`, `sandboxActive(flag:)`, `GlobalOptions.willExecute(defaultDryRun:)`) —
     /// the fail-loud contract is carried by the type system there, not by call-order
     /// discipline.

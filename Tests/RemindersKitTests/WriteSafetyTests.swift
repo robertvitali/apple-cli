@@ -12,15 +12,7 @@ import AppleKit
 // MARK: - Write-safety label guard (regression guard for the tasks update/delete fix)
 
 @Suite("Write-safety: requireLabeledReminder")
-struct LabelGuardTests {
-    @Test func isLabeledPredicate() {
-        #expect(LabelGuard.isLabeled("apple-cli-test-x") == true)
-        #expect(LabelGuard.isLabeled("apple-cli-test") == true)
-        #expect(LabelGuard.isLabeled("Buy groceries") == false)
-        #expect(LabelGuard.isLabeled(nil) == false)
-        #expect(LabelGuard.isLabeled("") == false)
-    }
-
+struct RequireLabeledReminderTests {
     func reminder(titled title: String?) -> EKReminder {
         let r = EKReminder(eventStore: EKEventStore())
         r.title = title

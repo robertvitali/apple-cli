@@ -52,8 +52,8 @@ public enum Send {
 
     /// SANDBOX-ONLY recipient allowlist. Normalizes BOTH the resolved handle AND the operator's
     /// `APPLE_TEST_RECIPIENTS` entries before comparing, so a `+1 555…` allowlist entry matches a
-    /// digits-normalized handle. (The shared `TestMode.requireAllowedRecipient` does an EXACT
-    /// string compare, which is a footgun given `resolve()` digit-normalizes phones.)
+    /// digits-normalized handle. (A naive exact-string allowlist compare would be a footgun
+    /// here, given `resolve()` digit-normalizes phones.)
     ///
     /// WRITE-MODEL v2: outside the sandbox this is a NO-OP, because
     /// `mac_messages_mcp`'s `tool_send_message` sends to any recipient on call — it goes straight
