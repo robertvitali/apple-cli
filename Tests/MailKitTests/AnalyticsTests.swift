@@ -81,20 +81,24 @@ struct AnalyticsTests {
         #expect(items.last?.priority == "NORMAL")
     }
 
+    private func rcpt(_ address: String, name: String? = nil) -> Analytics.SentRecipient {
+        Analytics.SentRecipient(display: name.map { "\($0) <\(address)>" } ?? address, address: address)
+    }
+
     @Test func awaitingReplyExcludesNoreplyAndPreSendReplies() {
         // Sent only to a noreply address → excluded when excludeNoreply.
-        let toNoreply = [Analytics.SentItem(subject: "Ticket", recipients: ["noreply@svc.com"], dateSent: 100, rowid: 1)]
+        let toNoreply = [Analytics.SentItem(subject: "Ticket", recipients: [rcpt("noreply@svc.com")], dateSent: 100, rowid: 1)]
         #expect(Analytics.awaitingReply(sent: toNoreply, received: [], excludeNoreply: true).isEmpty)
         // A "reply" dated BEFORE the send is not a reply → the sent item is still awaiting.
-        let sent = [Analytics.SentItem(subject: "Q3", recipients: ["bob@x.io"], dateSent: 200, rowid: 2)]
+        let sent = [Analytics.SentItem(subject: "Q3", recipients: [rcpt("bob@x.io")], dateSent: 200, rowid: 2)]
         let preSend = [Analytics.ReceivedItem(normalizedSubject: "q3", senderAddress: "bob@x.io", dateReceived: 100)]
         #expect(Analytics.awaitingReply(sent: sent, received: preSend, excludeNoreply: true).count == 1)
     }
 
     @Test func awaitingReplyFindsUnanswered() {
         let sent = [
-            Analytics.SentItem(subject: "Project update", recipients: ["bob@x.io"], dateSent: 100, rowid: 10),
-            Analytics.SentItem(subject: "Lunch?", recipients: ["cara@x.io"], dateSent: 200, rowid: 11),
+            Analytics.SentItem(subject: "Project update", recipients: [rcpt("bob@x.io")], dateSent: 100, rowid: 10),
+            Analytics.SentItem(subject: "Lunch?", recipients: [rcpt("cara@x.io")], dateSent: 200, rowid: 11),
         ]
         let received = [
             // Bob replied (normalized subject matches, later date) → NOT awaiting.
@@ -103,6 +107,95 @@ struct AnalyticsTests {
         let awaiting = Analytics.awaitingReply(sent: sent, received: received, excludeNoreply: true)
         #expect(awaiting.count == 1)
         #expect(awaiting.first?.subject == "Lunch?")   // Cara never replied
+    }
+
+    /// gap44: the reported recipient is oracle B's `name & " <" & addr & ">"` display string,
+    /// not the bare address the matching keys on.
+    @Test func awaitingReplyReportsTheDisplayRecipient() {
+        let sent = [Analytics.SentItem(subject: "Contract", recipients: [rcpt("cara@x.io", name: "Cara Lee")],
+                                       dateSent: 200, rowid: 12)]
+        let awaiting = Analytics.awaitingReply(sent: sent, received: [], excludeNoreply: true)
+        #expect(awaiting.first?.recipient == "Cara Lee <cara@x.io>")
+    }
+
+    /// review H3: selection and ordering are the ORACLE'S two-bucket emit — the collected set
+    /// is the NEWEST max qualifying candidates, high bucket (question OR flagged) first in scan
+    /// order, then NORMAL in scan order. A NORMAL item never precedes a high-bucket item even
+    /// when newer; the old global score-sort put a MEDIUM question above a HIGH flagged item,
+    /// contradicting its own labels, and ranked on an urgent-keyword term the oracle lacks.
+    @Test func needsResponseUsesTheOraclesTwoBucketOrder() {
+        let rows = [
+            row(1, "a@x.io", "A", "old flagged", flagged: true, date: 100),
+            row(2, "b@x.io", "B", "newer normal fyi", date: 300),
+            row(3, "c@x.io", "C", "middle question?", date: 200),
+        ]
+        let items = Analytics.needsResponse(rows, maxResults: 10)
+        // High bucket in date order (question 200 after? no — scan is newest-first: q(200), flagged(100)),
+        // then the NEWEST item of all — a NORMAL — comes LAST despite being newest.
+        #expect(items.map(\.subject) == ["middle question?", "old flagged", "newer normal fyi"])
+        #expect(items.map(\.rank) == [1, 2, 3])
+        // An urgent keyword confers NO rank (the oracle has no such term).
+        let urgent = [row(4, "d@x.io", "D", "URGENT deadline asap", date: 50),
+                      row(5, "e@x.io", "E", "plain note", date: 60)]
+        #expect(Analytics.needsResponse(urgent, maxResults: 10).first?.subject == "plain note")
+    }
+
+    /// review H3: the cap keeps the NEWEST max qualifying candidates (the oracle exits its
+    /// newest-first walk once it has collected max_results), THEN partitions — not the top-max
+    /// after a global ranking.
+    @Test func needsResponseCapKeepsTheNewestCandidates() {
+        let rows = [
+            row(1, "a@x.io", "A", "oldest question?", date: 100),
+            row(2, "b@x.io", "B", "new normal", date: 300),
+            row(3, "c@x.io", "C", "newest normal", date: 400),
+        ]
+        let items = Analytics.needsResponse(rows, maxResults: 2)
+        // The two NEWEST candidates are both normal; the old score-sort would have kept the
+        // question instead.
+        #expect(items.map(\.subject) == ["newest normal", "new normal"])
+        // maxResults 0 → empty, never a trap (review H5 pure half).
+        #expect(Analytics.needsResponse(rows, maxResults: 0).isEmpty)
+    }
+
+    /// review B1: the awaiting-reply subject test is the oracle's BIDIRECTIONAL containment
+    /// (smart_inbox.py:178) shared with needs-response — exact equality was silently stricter
+    /// (a reply whose normalized subject gains words was missed).
+    @Test func awaitingReplySubjectMatchIsBidirectionalContainment() {
+        let sent = [Analytics.SentItem(subject: "Budget", recipients: [rcpt("bob@x.io")], dateSent: 100, rowid: 20)]
+        let contained = [Analytics.ReceivedItem(normalizedSubject: "budget plan for q3", senderAddress: "bob@x.io", dateReceived: 150)]
+        #expect(Analytics.awaitingReply(sent: sent, received: contained, excludeNoreply: true).isEmpty)
+        // Empty normalized subjects never match everything (the CLI's disclosed guard —
+        // AppleScript's `contains ""` is true, so ONE empty subject would suppress all).
+        let emptyRec = [Analytics.ReceivedItem(normalizedSubject: "", senderAddress: "bob@x.io", dateReceived: 150)]
+        #expect(Analytics.awaitingReply(sent: sent, received: emptyRec, excludeNoreply: true).count == 1)
+    }
+
+    /// review (missing-pin list): awaitingReply preserves INPUT order — the command feeds
+    /// newest-first rows and applies --max AFTER filtering, so order preservation is what makes
+    /// that the newest max still-unanswered sends.
+    @Test func awaitingReplyPreservesInputOrder() {
+        let sent = [
+            Analytics.SentItem(subject: "First", recipients: [rcpt("a@x.io")], dateSent: 300, rowid: 31),
+            Analytics.SentItem(subject: "Second", recipients: [rcpt("b@x.io")], dateSent: 200, rowid: 32),
+            Analytics.SentItem(subject: "Third", recipients: [rcpt("c@x.io")], dateSent: 100, rowid: 33),
+        ]
+        #expect(Analytics.awaitingReply(sent: sent, received: [], excludeNoreply: true).map(\.subject)
+                == ["First", "Second", "Third"])
+    }
+
+    /// gap44: exclude-noreply filters recipients on EXACTLY the oracle's four patterns
+    /// (smart_inbox.py:92). A recipient the broader SENDER marker list would drop — e.g.
+    /// `notifications@` or `postmaster@` — is KEPT, matching the oracle.
+    @Test func excludeNoreplyUsesExactlyTheOraclesFourRecipientPatterns() {
+        #expect(Analytics.noreplyRecipientPatterns == ["noreply", "no-reply", "do-not-reply", "donotreply"])
+        for a in ["noreply@x.io", "no-reply@x.io", "do-not-reply@x.io", "donotreply@x.io"] {
+            #expect(Analytics.isNoreplyRecipient(a), "expected \(a) filtered")
+        }
+        for a in ["notifications@x.io", "postmaster@x.io", "mailer-daemon@x.io", "support@x.io"] {
+            #expect(!Analytics.isNoreplyRecipient(a), "expected \(a) kept — sender markers must not leak into the recipient filter")
+        }
+        let sent = [Analytics.SentItem(subject: "Ping", recipients: [rcpt("notifications@svc.io")], dateSent: 100, rowid: 13)]
+        #expect(Analytics.awaitingReply(sent: sent, received: [], excludeNoreply: true).count == 1)
     }
 }
 
@@ -155,6 +248,64 @@ struct NeedsResponseParityTests {
         Analytics.Row(rowid: id, senderAddress: addr, senderName: name, subject: subj,
                       dateReceived: 1_700_000_000 + id, read: false, flagged: flagged,
                       hasAttachment: false, mailboxRowid: 1, snippet: snippet)
+    }
+
+    /// gap40: the automated-sender list is EXACTLY oracle B's seven markers (smart_inbox.py:320).
+    /// The negative half is the fix: the CLI's earlier 17-marker heuristic dropped `support@` /
+    /// `info@` / `alerts@` / bare `notification` senders the oracle KEEPS — real correspondence
+    /// silently vanishing from needs-response. (`updates@`/`news@` stay dropped via the separate
+    /// newsletter keyword list, matching the oracle's newsletter_condition.)
+    @Test func automatedSenderListIsExactlyTheOraclesSeven() {
+        #expect(Analytics.oracleAutomatedMarkers == ["noreply", "no-reply", "donotreply", "do-not-reply",
+                                                     "notifications@", "mailer-daemon", "postmaster@"])
+        for a in ["noreply@bank.com", "no-reply@x.io", "donotreply@x.io", "do-not-reply@x.io",
+                  "notifications@github.com", "mailer-daemon@x.io", "postmaster@x.io"] {
+            #expect(Analytics.isAutomatedSender(address: a, name: nil), "expected \(a) automated")
+        }
+        for a in ["support@vendor.com", "info@shop.com", "alerts@bank.com", "friend@x.io"] {
+            #expect(!Analytics.isAutomatedSender(address: a, name: nil),
+                    "expected \(a) KEPT — the over-broad marker dropped real correspondence")
+        }
+        // A marker in the display NAME counts too (B matches its combined lowerSender string).
+        #expect(Analytics.isAutomatedSender(address: "x@y.io", name: "Mailer-Daemon"))
+    }
+
+    /// gap40 end-to-end: a support@ sender now REACHES needs-response (it was silently dropped).
+    @Test func supportSendersReachNeedsResponse() {
+        let rows = [row(1, "support@vendor.com", "Vendor Support", "Any update on your ticket?")]
+        let items = Analytics.needsResponse(rows, maxResults: 5)
+        #expect(items.count == 1)
+        #expect(items.first?.priority == "MEDIUM (contains question)")
+    }
+
+    /// gap40's other half, end-to-end (review H2): an `updates@` sender is STILL dropped — by
+    /// the NEWSLETTER keyword filter, exactly as the oracle's newsletter_condition drops it.
+    /// This is the pin that locks the two-filter structure: deleting the isNewsletterSender
+    /// term from the needsResponse chain would pass every marker-list pin and fail only here.
+    @Test func updatesSendersStayDroppedByTheNewsletterFilter() {
+        #expect(!Analytics.isAutomatedSender(address: "updates@shop.com", name: nil),
+                "updates@ is NOT an automated marker…")
+        #expect(Analytics.isNewsletterSender(address: "updates@shop.com", name: nil),
+                "…it is a newsletter keyword")
+        let rows = [row(1, "updates@shop.com", "Shop", "Big sale this week?")]
+        #expect(Analytics.needsResponse(rows, maxResults: 5).isEmpty)
+    }
+
+    /// review (missing-pin list): days 0 = all time (oracle's `days_back > 0` conditional).
+    @Test func sinceUnixTreatsZeroDaysAsAllTime() {
+        #expect(sinceUnix(daysBack: 0) == nil)
+        #expect(sinceUnix(daysBack: -3) == nil)
+        #expect(sinceUnix(daysBack: 7) != nil)
+    }
+
+    /// gap44 seam (review missing-pin list): To recipients come BEFORE CC in the pair list —
+    /// `recipients.first` is what awaiting-reply REPORTS, approximating the oracle's
+    /// `item 1 of messageRecipients` (To-only). A name-only display with no parseable address
+    /// is KEPT with an empty address (review L4), never dropped.
+    @Test func sentRecipientPairsAreToBeforeCCAndKeepNameOnly() {
+        let pairs = sentRecipientPairs(to: ["Ann <ann@x.io>"], cc: ["Cee <cee@x.io>", "Just A Name"])
+        #expect(pairs.map(\.address) == ["ann@x.io", "cee@x.io", ""])
+        #expect(pairs.map(\.display) == ["Ann <ann@x.io>", "Cee <cee@x.io>", "Just A Name"])
     }
 
     /// All four of B's label strings, verbatim.

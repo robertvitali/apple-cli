@@ -39,6 +39,7 @@ struct AnalyticsSnippetTests {
         CREATE TABLE addresses (ROWID INTEGER PRIMARY KEY, address TEXT, comment TEXT);
         INSERT INTO addresses VALUES (1000,'alice@x.io','Alice');
         CREATE TABLE attachments (ROWID INTEGER PRIMARY KEY, message INT, attachment_id TEXT, name TEXT);
+        INSERT INTO attachments VALUES (1,10,'1.1','a.pdf'),(2,10,'1.2','b.png'),(3,11,'2.1','c.txt');
         CREATE TABLE messages (ROWID INTEGER PRIMARY KEY, subject_prefix TEXT, subject INT, \(column ? "summary INT," : "")
           sender INT, date_sent INT, date_received INT, mailbox INT, read INT, flagged INT, deleted INT);
 
@@ -82,6 +83,18 @@ struct AnalyticsSnippetTests {
             if let s = r["rowid"] ?? nil, let n = Int(s) { out[n] = r }
         }
         return out
+    }
+
+    /// extra31 regression pin for the grouped attachment-count join: zero-, one- and
+    /// multi-attachment messages must report exactly the counts the old correlated subquery
+    /// produced (COALESCE turns the join's NULL into 0). This is the committed artifact behind
+    /// the "measured identical on the real store" claim.
+    @Test("analyticsRows attachment_count survives the grouped-join rewrite")
+    func attachmentCountsFromGroupedJoin() throws {
+        let rows = try rowsByID(Self.index(table: true, column: true))
+        #expect((rows[10]?["attachment_count"] ?? nil) == "2")
+        #expect((rows[11]?["attachment_count"] ?? nil) == "1")
+        #expect((rows[12]?["attachment_count"] ?? nil) == "0")
     }
 
     @Test("analyticsRows sources snippet from the summaries table")

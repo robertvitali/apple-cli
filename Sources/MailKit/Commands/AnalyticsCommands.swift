@@ -33,6 +33,29 @@ func sinceUnix(daysBack: Int) -> Int? {
     return Int(Date().timeIntervalSince1970) - daysBack * 86400
 }
 
+
+/// Oracle-parity guard shared by the analytics commands (review H4): an unresolvable mailbox
+/// raises `error "Mailbox not found"` in oracle B (needs-response smart_inbox.py:260-268,
+/// top-senders :485-493, stats analytics.py:362-370) — checked on EXISTENCE, not row count, so
+/// a real-but-empty mailbox still returns ok:true with zero rows exactly as the oracle does.
+/// Without it a typo returns a confident zero, indistinguishable from an empty mailbox.
+func requireMailboxExists(ctx: MailContext, uuid: String, mailbox: String, account: String) throws {
+    guard !EnvelopeIndex.isAllWildcard(mailbox) else { return }
+    let hit = ctx.index.resolveMailboxes(accountUUID: uuid, mailboxName: mailbox)
+    guard !hit.direct.isEmpty || !hit.label.isEmpty else {
+        throw AppleError.notFound("no mailbox named \"\(mailbox)\" in account '\(account)'.")
+    }
+}
+
+/// gap44 seam, pinned: sent-recipient pairs in the oracle's order — every To BEFORE every CC —
+/// so `recipients.first` approximates the oracle's `item 1 of messageRecipients` (To-only).
+/// Reordering this concatenation silently changes which recipient awaiting-reply REPORTS.
+func sentRecipientPairs(to: [String], cc: [String]) -> [Analytics.SentRecipient] {
+    (to + cc).map { display in
+        Analytics.SentRecipient(display: display, address: extractAddress(display) ?? "")
+    }
+}
+
 // MARK: top-senders
 
 struct AnalyticsTopSenders: ParsableCommand {
@@ -46,8 +69,12 @@ struct AnalyticsTopSenders: ParsableCommand {
 
     func run() throws {
         try runGuarded(tool: "mail") {
+            // Review H5 class: a negative bound reached Swift's `.prefix` and TRAPPED — no JSON
+            // envelope, exit 133. Typed 64 mirrors extra6's negative --offset precedent.
+            guard topN >= 0 else { throw AppleError.validation("--top-n must be >= 0.") }
             let ctx = try MailContext()
             let uuid = try ctx.requireAccountUUID(account)
+            try requireMailboxExists(ctx: ctx, uuid: uuid, mailbox: mailbox, account: account)
             let rows = try ctx.index.analyticsRows(accountUUID: uuid, mailboxName: mailbox, sinceUnix: sinceUnix(daysBack: days)).map(analyticsRow)
             let result = Analytics.topSenders(rows, topN: topN, byDomain: byDomain, account: account, mailbox: mailbox, daysBack: days)
             try Output.emit(tool: "mail", data: result)
@@ -98,10 +125,7 @@ struct AnalyticsStats: ParsableCommand {
             // throw a few lines up.
             let named: String? = plan.mailbox == "All" ? nil : plan.mailbox
             if let named {
-                let hit = ctx.index.resolveMailboxes(accountUUID: uuid, mailboxName: named)
-                guard !hit.direct.isEmpty || !hit.label.isEmpty else {
-                    throw AppleError.notFound("no mailbox named \"\(named)\" in account '\(account)'.")
-                }
+                try requireMailboxExists(ctx: ctx, uuid: uuid, mailbox: named, account: account)
             }
             var rows = try ctx.index.analyticsRows(accountUUID: uuid, mailboxName: plan.mailbox,
                                                    sinceUnix: sinceUnix(daysBack: plan.daysBack)).map(analyticsRow)
@@ -136,12 +160,18 @@ struct AnalyticsNeedsResponse: ParsableCommand {
     @Option(name: .long, help: "Look back this many days.") var days: Int = 7
     @Option(name: .long, help: "Max results.") var max: Int = 20
 
-    struct Result: Encodable { let account: String; let mailbox: String; let days_back: Int; let items: [Analytics.NeedsResponseItem]; let count: Int }
+    /// `sent_mailbox` (additive, MINOR): the Sent mailbox actually scanned for the
+    /// already-replied suppression. OMITTED from the JSON when none resolved — an absent key
+    /// is the signal that suppression silently did nothing (review M4: the oracle would skip
+    /// it silently too; the caller deserves the signal).
+    struct Result: Encodable { let account: String; let mailbox: String; let days_back: Int; let sent_mailbox: String?; let items: [Analytics.NeedsResponseItem]; let count: Int }
 
     func run() throws {
         try runGuarded(tool: "mail") {
+            guard max >= 0 else { throw AppleError.validation("--max must be >= 0.") }
             let ctx = try MailContext()
             let uuid = try ctx.requireAccountUUID(account)
+            try requireMailboxExists(ctx: ctx, uuid: uuid, mailbox: mailbox, account: account)
             let rows = try ctx.index.analyticsRows(accountUUID: uuid, mailboxName: mailbox, sinceUnix: sinceUnix(daysBack: days)).map(analyticsRow)
             // Oracle B drops any candidate whose thread already appears in Sent — a message you
             // have answered is not awaiting your response. B reads the first 200 Sent subjects;
@@ -169,13 +199,14 @@ struct AnalyticsNeedsResponse: ParsableCommand {
             // suppressing. A filter that quietly does nothing is worse than an absent one.
             var sentSubjects: [String] = []
             let ownPaths = ctx.index.mailboxes.filter { $0.url.accountID == uuid }.map(\.url.path)
-            if let sentPath = Analytics.preferredSentMailbox(ownPaths) {
+            let sentPath = Analytics.preferredSentMailbox(ownPaths)
+            if let sentPath {
                 sentSubjects = (try? ctx.index.analyticsRows(accountUUID: uuid, mailboxName: sentPath,
                                                              sinceUnix: nil, slice: .newest(200)))?
                     .map { MailFormat.stripThreadPrefixes(strVal($0["subject"]) ?? "") } ?? []
             }
             let items = Analytics.needsResponse(rows, maxResults: max, sentSubjects: sentSubjects)
-            try Output.emit(tool: "mail", data: Result(account: account, mailbox: mailbox, days_back: days, items: items, count: items.count))
+            try Output.emit(tool: "mail", data: Result(account: account, mailbox: mailbox, days_back: days, sent_mailbox: sentPath, items: items, count: items.count))
         }
     }
 }
@@ -190,10 +221,14 @@ struct AnalyticsAwaitingReply: ParsableCommand {
     @Option(name: .long, help: "Max results.") var max: Int = 20
     @Flag(name: .long, inversion: .prefixedNo, help: "Skip messages sent to noreply addresses (default on).") var excludeNoreply = true
 
-    struct Result: Encodable { let account: String; let days_back: Int; let items: [Analytics.AwaitingReplyItem]; let count: Int }
+    /// `sent_mailbox` (additive, MINOR): the Sent mailbox scanned — here it can only be the
+    /// resolved probe result or the "Sent" fallback name; disclosed so a caller can tell WHICH
+    /// mailbox the follow-up tracking read (review M4).
+    struct Result: Encodable { let account: String; let days_back: Int; let sent_mailbox: String?; let items: [Analytics.AwaitingReplyItem]; let count: Int }
 
     func run() throws {
         try runGuarded(tool: "mail") {
+            guard max >= 0 else { throw AppleError.validation("--max must be >= 0.") }
             let ctx = try MailContext()
             let uuid = try ctx.requireAccountUUID(account)
             let since = sinceUnix(daysBack: days)
@@ -219,13 +254,23 @@ struct AnalyticsAwaitingReply: ParsableCommand {
                                                        sinceUnix: nil, slice: .newestFirst)
             var sent: [Analytics.SentItem] = []
             for row in sentRows {
-                let effDate = intVal(row["date_sent"]) ?? intVal(row["date_received"])
+                // Mirror the SQL's COALESCE(NULLIF(date_sent,0), date_received) (review L8): a
+                // PRESENT date_sent of 0 must fall back to date_received here too, or the row
+                // sorts on one clock and windows on another (and is always dropped by `since`).
+                let effDate = intVal(row["date_sent"]).flatMap { $0 == 0 ? nil : $0 } ?? intVal(row["date_received"])
                 if let since, (effDate ?? 0) < since { continue }
                 let rowid = intVal(row["rowid"]) ?? 0
                 let recips = try ctx.index.recipients(messageRowid: rowid)
-                // recipients() returns display strings; extract addresses.
-                let addrs = (recips.to + recips.cc).compactMap { extractAddress($0) }
-                sent.append(Analytics.SentItem(subject: strVal(row["subject"]) ?? "", recipients: addrs,
+                // recipients() returns "Name <addr>" display strings — keep BOTH halves (gap44):
+                // the oracle reports the recipient as `name & " <" & addr & ">"`, while matching
+                // and noreply filtering key on the bare address.
+                // A recipient with a display NAME but no parseable address is KEPT with an
+                // empty address (review L4) — the oracle reports it as `Name <>`; dropping it
+                // would also shift which recipient is reported as "first". Empty addresses are
+                // excluded from reply/noreply matching inside awaitingReply. To-before-CC order
+                // lives in the pinned sentRecipientPairs helper.
+                let pairs = sentRecipientPairs(to: recips.to, cc: recips.cc)
+                sent.append(Analytics.SentItem(subject: strVal(row["subject"]) ?? "", recipients: pairs,
                                                dateSent: effDate, rowid: rowid))
             }
 
@@ -237,7 +282,7 @@ struct AnalyticsAwaitingReply: ParsableCommand {
             }
             let all = Analytics.awaitingReply(sent: sent, received: received, excludeNoreply: excludeNoreply)
             let items = Array(all.prefix(max))
-            try Output.emit(tool: "mail", data: Result(account: account, days_back: days, items: items, count: items.count))
+            try Output.emit(tool: "mail", data: Result(account: account, days_back: days, sent_mailbox: sentName, items: items, count: items.count))
         }
     }
 }

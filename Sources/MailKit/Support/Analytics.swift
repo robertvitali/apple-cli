@@ -109,27 +109,44 @@ public enum Analytics {
     // MARK: Helpers (pure)
 
     /// Normalize a subject for thread/reply matching: strip leading Re:/Fwd:/Fw: (repeated),
-    /// collapse whitespace, lowercase.
+    /// trim, lowercase. Delegates the prefix stripping to `MailFormat.stripThreadPrefixes` so
+    /// there is exactly ONE prefix list in the codebase (review L2) — the two halves of the
+    /// awaiting-reply feature previously each carried their own copy, which agreed only by
+    /// coincidence.
     public static func normalizeSubject(_ s: String) -> String {
-        var t = s.trimmingCharacters(in: .whitespacesAndNewlines)
-        let prefixes = ["re:", "fwd:", "fw:"]
-        var changed = true
-        while changed {
-            changed = false
-            for p in prefixes where t.lowercased().hasPrefix(p) {
-                t = String(t.dropFirst(p.count)).trimmingCharacters(in: .whitespaces); changed = true
-            }
-        }
-        return t.lowercased()
+        MailFormat.stripThreadPrefixes(s.trimmingCharacters(in: .whitespacesAndNewlines)).lowercased()
     }
 
-    /// Heuristic: is this an automated / newsletter / noreply sender (skip for needs-response)?
+    /// Oracle B's needs-response automated-sender markers — EXACTLY these seven
+    /// (smart_inbox.py:320), matched `contains` against the lowercased sender string (gap40).
+    /// The CLI's earlier 17-marker heuristic was measurably OVER-broad: `support@` / `info@` /
+    /// `alerts@` / bare `notification` dropped real correspondence the oracle keeps, so a
+    /// narrower list here is a parity fix, not a loosening. (`updates@`/`news@` are NOT in that
+    /// kept set — the separate newsletter keyword list below still drops them, exactly as the
+    /// oracle's own newsletter_condition does.) Element ORDER mirrors the oracle's `or`-chain
+    /// and the pins assert it verbatim — deliberate, though matching is order-independent.
+    public static let oracleAutomatedMarkers = [
+        "noreply", "no-reply", "donotreply", "do-not-reply",
+        "notifications@", "mailer-daemon", "postmaster@",
+    ]
+
+    /// Automated-sender test for needs-response, oracle-exact (gap40). B builds `lowerSender`
+    /// from the sender string it reads off the message; we match over address + display name so
+    /// a marker in either half counts, same as B's combined string.
     public static func isAutomatedSender(address: String?, name: String?) -> Bool {
         let hay = ((address ?? "") + " " + (name ?? "")).lowercased()
-        let markers = ["noreply", "no-reply", "no_reply", "donotreply", "do-not-reply",
-                       "notification", "notifications", "newsletter", "mailer", "mailer-daemon",
-                       "bounce", "automated", "updates@", "info@", "news@", "alerts@", "support@"]
-        return markers.contains { hay.contains($0) }
+        return oracleAutomatedMarkers.contains { hay.contains($0) }
+    }
+
+    /// Oracle B's awaiting-reply `exclude_noreply` RECIPIENT patterns — EXACTLY these four
+    /// (smart_inbox.py:92), matched against the lowercased recipient address (gap44). This is a
+    /// DIFFERENT, smaller list than the sender markers above: the oracle does not drop a
+    /// follow-up merely because it went to `notifications@` or `postmaster@`.
+    public static let noreplyRecipientPatterns = ["noreply", "no-reply", "do-not-reply", "donotreply"]
+
+    public static func isNoreplyRecipient(_ address: String) -> Bool {
+        let a = address.lowercased()
+        return noreplyRecipientPatterns.contains { a.contains($0) }
     }
 
     // MARK: Top senders
@@ -153,7 +170,7 @@ public enum Analytics {
             counts[key]!.count += 1
         }
         let total = rows.count
-        let ranked = counts.sorted { $0.value.count > $1.value.count }.prefix(topN)
+        let ranked = counts.sorted { $0.value.count > $1.value.count }.prefix(Swift.max(0, topN))
         var senders: [TopSender] = []
         for (i, entry) in ranked.enumerated() {
             let pct = total > 0 ? (Double(entry.value.count) / Double(total) * 100).rounded(toPlaces: 1) : 0
@@ -313,12 +330,21 @@ public enum Analytics {
     public static func alreadyReplied(subject: String, sentSubjects: [String]) -> Bool {
         let base = MailFormat.stripThreadPrefixes(subject)
             .trimmingCharacters(in: .whitespaces).lowercased()
-        guard !base.isEmpty else { return false }
         return sentSubjects.contains { sent in
-            let s = sent.trimmingCharacters(in: .whitespaces).lowercased()
-            guard !s.isEmpty else { return false }
-            return s.contains(base) || base.contains(s)
+            subjectsMatch(base, sent.trimmingCharacters(in: .whitespaces).lowercased())
         }
+    }
+
+    /// Oracle B's bidirectional-containment subject match (`smart_inbox.py:178` in awaiting-reply,
+    /// `:327-332` in needs-response) — ONE helper for both tools so the rule cannot drift (the
+    /// awaiting-reply half previously used exact equality, silently stricter than the oracle:
+    /// review B1). Inputs are pre-normalized (prefix-stripped where applicable, lowercased).
+    /// The empty guards are a deliberate, strictly-better CLI divergence: AppleScript's
+    /// `x contains ""` is TRUE, so one empty Sent subject would make the oracle suppress
+    /// EVERYTHING — disclosed on port-spec rows 37/38.
+    public static func subjectsMatch(_ a: String, _ b: String) -> Bool {
+        guard !a.isEmpty, !b.isEmpty else { return false }
+        return a.contains(b) || b.contains(a)
     }
 
     /// Unread mail plausibly awaiting a personal reply (MCP B `get_needs_response`).
@@ -334,12 +360,22 @@ public enum Analytics {
                 && !isNewsletterSender(address: $0.senderAddress, name: $0.senderName)
                 && !alreadyReplied(subject: $0.subject, sentSubjects: sentSubjects)
         }
-        let ranked = candidates.sorted { a, b in
-            let ap = priorityScore(a), bp = priorityScore(b)
-            if ap != bp { return ap > bp }
-            return (a.dateReceived ?? 0) > (b.dateReceived ?? 0)
-        }.prefix(maxResults)
-        return ranked.enumerated().map { i, r in
+        // Selection + ordering are the ORACLE'S, not a score sort (review H3). The oracle walks
+        // the mailbox newest-first, exits once (high + normal) has collected max_results — i.e.
+        // it keeps the NEWEST max qualifying candidates — then emits the high-priority bucket
+        // (question OR flagged: the HIGH*/MEDIUM labels) in scan order followed by the normal
+        // bucket in scan order (smart_inbox.py:306, :351-365, :372-390). The old CLI ranking
+        // globally score-sorted with an urgent-keyword term the oracle lacks, and its score put
+        // a MEDIUM question-only item ABOVE a HIGH flagged one — an ordering that contradicted
+        // its own labels. ROWID breaks date ties so the collected set is deterministic.
+        let scanned = candidates.sorted { a, b in
+            let ad = a.dateReceived ?? 0, bd = b.dateReceived ?? 0
+            if ad != bd { return ad > bd }
+            return a.rowid > b.rowid
+        }.prefix(Swift.max(0, maxResults))
+        let high = scanned.filter { r in r.flagged || hasQuestion(r) }
+        let normal = scanned.filter { r in !(r.flagged || hasQuestion(r)) }
+        return (high + normal).enumerated().map { i, r in
             NeedsResponseItem(
                 rank: i + 1,
                 priority: priorityLabel(flagged: r.flagged, hasQuestion: hasQuestion(r)),
@@ -382,41 +418,56 @@ public enum Analytics {
         return (r.snippet ?? "").prefix(500).contains("?")
     }
 
-    private static func priorityScore(_ r: Row) -> Int {
-        var score = 0
-        if hasQuestion(r) { score += 2 }
-        let urgent = ["urgent", "asap", "action required", "action needed", "deadline", "please respond", "reply"]
-        let lower = r.subject.lowercased()
-        if urgent.contains(where: { lower.contains($0) }) { score += 1 }
-        if r.flagged { score += 1 }
-        return score
-    }
-
     // MARK: Awaiting reply
 
-    public struct SentItem { public let subject: String; public let recipients: [String]; public let dateSent: Int?; public let rowid: Int
-        public init(subject: String, recipients: [String], dateSent: Int?, rowid: Int) {
+    /// One recipient of a Sent message. `display` is the "Name <addr>" string the index stores
+    /// (or the bare address when Mail recorded no name) — gap44: oracle B reports the recipient
+    /// as `name & " <" & addr & ">"`, and the CLI previously stripped it to the bare address.
+    /// `address` is the bare address the reply-matching and noreply filtering key on.
+    public struct SentRecipient {
+        public let display: String
+        public let address: String
+        public init(display: String, address: String) { self.display = display; self.address = address }
+    }
+
+    public struct SentItem { public let subject: String; public let recipients: [SentRecipient]; public let dateSent: Int?; public let rowid: Int
+        public init(subject: String, recipients: [SentRecipient], dateSent: Int?, rowid: Int) {
             self.subject = subject; self.recipients = recipients; self.dateSent = dateSent; self.rowid = rowid } }
     public struct ReceivedItem { public let normalizedSubject: String; public let senderAddress: String; public let dateReceived: Int?
         public init(normalizedSubject: String, senderAddress: String, dateReceived: Int?) {
             self.normalizedSubject = normalizedSubject; self.senderAddress = senderAddress; self.dateReceived = dateReceived } }
 
-    /// Sent messages with no matching inbound reply: no received message from a recipient with
-    /// the same normalized subject, dated at/after the send. MCP B's `get_awaiting_reply`,
-    /// but computed over the index (MCP B's AppleScript version times out).
+    /// Sent messages with no matching inbound reply: no received message from a recipient
+    /// matching the subject (oracle's bidirectional containment), dated at/after the send.
+    /// MCP B's `get_awaiting_reply`, but computed over the index (MCP B's AppleScript version
+    /// times out). TWO deliberate, disclosed divergences in the reply test (port-spec row 38):
+    /// the `>=` DATE constraint (the oracle has none — a "reply" predating the send would count
+    /// for it) and the received set being windowed to --days (lossless GIVEN the date test:
+    /// every sent item satisfies effDate >= since, so any reply it can match is >= since too).
     public static func awaitingReply(sent: [SentItem], received: [ReceivedItem], excludeNoreply: Bool) -> [AwaitingReplyItem] {
         var result: [AwaitingReplyItem] = []
         for s in sent {
             let norm = normalizeSubject(s.subject)
-            let recipients = excludeNoreply ? s.recipients.filter { !isAutomatedSender(address: $0, name: nil) } : s.recipients
+            // gap44: the oracle's exclude_noreply filters RECIPIENTS on exactly four patterns
+            // (smart_inbox.py:92) — not the broader automated-SENDER marker list.
+            let recipients = excludeNoreply ? s.recipients.filter { !isNoreplyRecipient($0.address) } : s.recipients
             if recipients.isEmpty { continue }
             let replied = received.contains { rec in
-                rec.normalizedSubject == norm
-                && recipients.contains { $0.caseInsensitiveCompare(rec.senderAddress) == .orderedSame }
+                // Oracle's bidirectional-containment subject rule (smart_inbox.py:178), shared
+                // with needs-response via subjectsMatch (review B1 — this was exact equality,
+                // silently stricter than the oracle).
+                subjectsMatch(norm, rec.normalizedSubject)
+                // Empty addresses are excluded from the match (review L5): a recipient whose
+                // address could not be parsed and a received row with no sender address would
+                // otherwise compare "" == "" and silently mark the send as replied.
+                && recipients.contains { !$0.address.isEmpty
+                    && $0.address.caseInsensitiveCompare(rec.senderAddress) == .orderedSame }
                 && (rec.dateReceived ?? 0) >= (s.dateSent ?? 0)
             }
             if !replied {
-                result.append(AwaitingReplyItem(subject: s.subject, recipient: recipients.first ?? "",
+                // recipients is non-empty here (guarded above) — no fallback to mask that.
+                result.append(AwaitingReplyItem(subject: s.subject,
+                                                recipient: recipients[0].display,
                                                 date_sent: MailFormat.iso(fromUnix: s.dateSent),
                                                 message_id: String(s.rowid)))
             }

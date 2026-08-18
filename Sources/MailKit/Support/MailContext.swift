@@ -27,9 +27,26 @@ public final class MailContext {
         if let uuid = accounts().resolveUUID(selector) { return uuid }
         // Fall back to matching a UUID that actually appears in the mailbox store.
         if index.accountUUIDs().contains(selector) { return selector }
-        let names = accounts().accounts.map(\.name)
-        let hint = names.isEmpty ? "" : " Known accounts: \(names.joined(separator: ", "))."
-        throw AppleError.notFound("unknown account '\(selector)'.\(hint)")
+        throw MailContext.accountResolutionError(selector: selector,
+                                                 directoryLoadError: accounts().loadError,
+                                                 knownNames: accounts().accounts.map(\.name))
+    }
+
+    /// extra31 pure core (pinned): which error a FAILED account resolution reports. When the
+    /// name→UUID directory itself failed to load (Mail stalled on the AppleScript, automation
+    /// denied, timeout), "unknown account" is a lie — the account may exist and the CLI just
+    /// couldn't ask; report upstream_error (exit 69) with the failure CLASS and the headless
+    /// escape hatch. The interpolated error is `AppleScriptRunner.RunError`, whose description
+    /// deliberately suppresses osascript stderr (info-leak posture) — so the message
+    /// distinguishes launch-failed vs exited-N, NOT stall vs automation-denied. A directory
+    /// that loaded FINE and simply has no such account keeps the honest not_found.
+    static func accountResolutionError(selector: String, directoryLoadError: Error?,
+                                       knownNames: [String]) -> AppleError {
+        if let err = directoryLoadError {
+            return AppleError.upstream("cannot resolve account '\(selector)': the Mail account directory could not be read (\(err)). Mail may be stalled or automation denied — retry, or pass the account UUID directly (it resolves from the index without Mail).")
+        }
+        let hint = knownNames.isEmpty ? "" : " Known accounts: \(knownNames.joined(separator: ", "))."
+        return AppleError.notFound("unknown account '\(selector)'.\(hint)")
     }
 
     /// (mailbox path, account label) for a message's mailbox ROWID.

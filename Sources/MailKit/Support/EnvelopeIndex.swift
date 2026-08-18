@@ -228,6 +228,10 @@ public final class EnvelopeIndex {
       m.conversation_id AS conversation_id,
       mgd.message_id_header AS message_id_header,
       m.mailbox AS mailbox_rowid,
+      -- Correlated on purpose HERE (unlike analyticsRows' grouped join): this query is
+      -- narrow and LIMIT-bounded, so a per-row index seek beats materializing the whole
+      -- grouped attachments scan (measured equal at 200 rows; the grouped form wins only
+      -- on account-wide sweeps).
       (SELECT COUNT(*) FROM attachments at WHERE at.message = m.ROWID) AS attachment_count,
       su.summary AS snippet
     FROM messages m
@@ -405,15 +409,24 @@ public final class EnvelopeIndex {
         // SUBSTR bounds what is read to the same 500 characters the oracle looks at.
         let snippetSelect = summariesAvailable ? ", SUBSTR(sm.summary, 1, 500) AS snippet" : ""
         let snippetJoin = summariesAvailable ? "\n        LEFT JOIN summaries sm ON sm.ROWID = m.summary" : ""
+        // Attachment counts come from ONE grouped scan of `attachments` joined back on message
+        // (extra31): the correlated `(SELECT COUNT(*) … WHERE at.message = m.ROWID)` this
+        // replaces re-probed the attachments index once PER ROW, which on the account-wide
+        // sweeps this function exists for (six-figure stores, `stats`/`top-senders` over All)
+        // multiplies a per-row index seek across every message scanned. Same result shape:
+        // COALESCE turns the join's NULL (no attachments row) into the 0 the correlated form
+        // returned.
         let sql = """
         SELECT m.ROWID AS rowid, sa.address AS sender_address, sa.comment AS sender_name,
                COALESCE(m.subject_prefix,'') || COALESCE(s.subject,'') AS subject,
                m.date_received AS date_received, m.date_sent AS date_sent, m.read AS read, m.flagged AS flagged,
                m.mailbox AS mailbox_rowid,
-               (SELECT COUNT(*) FROM attachments at WHERE at.message = m.ROWID) AS attachment_count\(snippetSelect)
+               COALESCE(att.n, 0) AS attachment_count\(snippetSelect)
         FROM messages m
         LEFT JOIN subjects s ON s.ROWID = m.subject
-        LEFT JOIN addresses sa ON sa.ROWID = m.sender\(snippetJoin)
+        LEFT JOIN addresses sa ON sa.ROWID = m.sender
+        LEFT JOIN (SELECT message, COUNT(*) AS n FROM attachments GROUP BY message) att
+               ON att.message = m.ROWID\(snippetJoin)
         WHERE \(where_.joined(separator: " AND "))
         """
         var tail = ""

@@ -2109,3 +2109,55 @@ print('\n'.join(d['attachments']))")
   ! echo "$output" | grep -q '"schema_version"'
   echo "$output" | grep -q "deleted template 'apple-cli-test-gap37'"
 }
+
+# --- Q11 batch-3 analytics parity pins --------------------------------------------------------
+
+# review H4 (measured): an unknown --mailbox returned a confident ok:true/zero, indistinguishable
+# from an empty mailbox; the oracle raises "Mailbox not found" (smart_inbox.py:260-268, :485-493).
+@test "mail analytics needs-response with an unknown --mailbox is not_found (review H4)" {
+  require_index
+  run "$BIN" mail analytics needs-response --account iCloud --mailbox NoSuchMailbox-xyz --days 3
+  [ "$status" -eq 65 ]
+  echo "$output" | grep -q '"type" : "not_found"'
+}
+
+@test "mail analytics top-senders with an unknown --mailbox is not_found (review H4)" {
+  require_index
+  run "$BIN" mail analytics top-senders --account iCloud --mailbox NoSuchMailbox-xyz --days 3
+  [ "$status" -eq 65 ]
+  echo "$output" | grep -q '"type" : "not_found"'
+}
+
+# review H5 (measured): a negative bound reached Swift's .prefix and TRAPPED — exit 133, empty
+# stdout, violating the JSON-envelope contract. Typed 64 mirrors extra6's negative --offset.
+@test "mail analytics needs-response/awaiting-reply/top-senders reject a negative bound (review H5)" {
+  require_index
+  run "$BIN" mail analytics needs-response --account iCloud --max=-1 --days 3
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q '"type" : "validation_error"'
+  run "$BIN" mail analytics awaiting-reply --account iCloud --max=-1 --days 3
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q '"type" : "validation_error"'
+  run "$BIN" mail analytics top-senders --account iCloud --top-n=-1 --days 3
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q '"type" : "validation_error"'
+}
+
+# e2e wiring (review missing-pin list): the two commands actually reach the new code paths and
+# carry the sent_mailbox disclosure. The key is OMITTED (not null) when no Sent mailbox
+# resolved — this store resolves one, so its presence is the wiring signal here.
+@test "mail analytics needs-response e2e emits items + sent_mailbox disclosure" {
+  require_index
+  run "$BIN" mail analytics needs-response --account iCloud --days 7 --max 5
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"count" :'
+  echo "$output" | grep -q '"sent_mailbox" :'
+}
+
+@test "mail analytics awaiting-reply e2e emits items + sent_mailbox disclosure" {
+  require_index
+  run "$BIN" mail analytics awaiting-reply --account iCloud --days 7 --max 5
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"count" :'
+  echo "$output" | grep -q '"sent_mailbox" :'
+}

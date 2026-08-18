@@ -15,16 +15,23 @@ public final class AccountDirectory {
     private var nameByUUID: [String: String] = [:]
     private var uuidByLowerName: [String: String] = [:]
     private let loaded: Bool
+    /// Why the AppleScript fetch failed, when it did (extra31). The `try?` this replaces
+    /// conflated "Mail unavailable — fall back to UUID labels" (fine for reads) with a stalled
+    /// or automation-denied Mail.app; callers that REQUIRE name→UUID resolution use this to
+    /// report the real upstream cause instead of a misleading "unknown account" not_found.
+    public private(set) var loadError: Error?
 
     public init(runner: AppleScriptRunner = AppleScriptRunner()) {
-        if let fetched = try? AccountDirectory.fetch(runner: runner) {
+        do {
+            let fetched = try AccountDirectory.fetch(runner: runner)
             accounts = fetched
             for a in fetched {
                 nameByUUID[a.id] = a.name
                 uuidByLowerName[a.name.lowercased()] = a.id
             }
             loaded = true
-        } else {
+        } catch {
+            loadError = error
             loaded = false
         }
     }

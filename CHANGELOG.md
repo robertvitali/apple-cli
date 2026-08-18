@@ -12,6 +12,83 @@ with the Apple MCP servers they replace.
 
 ## [Unreleased]
 
+### Mail analytics parity (Q11 batch 3)
+
+**Changed — BREAKING**
+
+- **BREAKING:** `analytics needs-response` filters automated senders on EXACTLY oracle B's
+  seven markers (smart_inbox.py:320 — noreply, no-reply, donotreply, do-not-reply,
+  notifications@, mailer-daemon, postmaster@), verified verbatim against the installed
+  oracle source. The CLI's earlier 17-marker heuristic was over-broad: `support@` /
+  `info@` / `alerts@` / bare `notification` senders — real correspondence the oracle
+  keeps — were silently dropped from the results (gap40). (`updates@`/`news@` senders are
+  still dropped, by the separate newsletter keyword filter — matching the oracle's own
+  newsletter_condition, not the automated-sender markers.)
+- **BREAKING:** `analytics awaiting-reply --exclude-noreply` filters RECIPIENTS on exactly
+  the oracle's four patterns (smart_inbox.py:92 — noreply, no-reply, do-not-reply,
+  donotreply), not the automated-SENDER marker list: a follow-up sent to `notifications@`
+  or `postmaster@` is no longer suppressed (gap44). The reported `recipient` is now the
+  oracle's `Name <addr>` display string (bare address when Mail recorded no name) instead
+  of the bare address (gap44).
+
+**Changed — BREAKING** (continued)
+
+- **BREAKING:** `analytics needs-response` selection + ordering are now the oracle's
+  (review): the result is the NEWEST `--max` qualifying candidates, emitted high-priority
+  bucket first (question OR flagged — the HIGH*/MEDIUM labels) then NORMAL, each in scan
+  order. The old global score-sort ranked a MEDIUM question-only item ABOVE a HIGH flagged
+  one — contradicting its own labels — and ranked on an urgent-keyword term the oracle
+  does not have; both are gone, so result sets and ordering change.
+- **BREAKING:** `analytics awaiting-reply` matches reply subjects with the oracle's
+  BIDIRECTIONAL containment (shared helper with needs-response) instead of exact equality
+  on the normalized subject — a reply whose subject gained words now counts as a reply, so
+  fewer sends are reported as awaiting (this was a silently-stricter parity gap).
+- **BREAKING:** an unknown `--mailbox` on `analytics needs-response` / `top-senders` is
+  now `not_found` (exit 65) like the oracle's "Mailbox not found" raise — it previously
+  returned a confident ok:true zero, indistinguishable from an empty mailbox (measured;
+  `stats` already behaved correctly, the guard is now shared).
+
+- **BREAKING (error class):** an account selector that fails to resolve because the Mail
+  account directory itself could not be read (Mail stalled, automation denied, AppleScript
+  timeout) now reports `upstream_error` (exit 69) instead of a misleading "unknown
+  account" `not_found` (exit 65) — the account may exist; the CLI just couldn't ask Mail.
+  Blast radius: every name-based `--account` on every Mail command, on any machine where
+  Mail automation is unavailable (headless/CI, TCC not yet granted). The message carries
+  the failure CLASS only (osascript launch-failed vs exited-N — stderr is deliberately
+  suppressed, so stall vs automation-denied is not distinguished). A raw account UUID
+  still resolves headless from the index (extra31).
+
+**Added**
+
+- `analytics needs-response` / `awaiting-reply` emit `sent_mailbox` — the Sent mailbox
+  actually scanned for reply suppression, OMITTED when none resolved (an absent key is the
+  signal that suppression silently did nothing).
+
+**Fixed**
+
+- A negative `--max` on `analytics needs-response`/`awaiting-reply` (and `--top-n` on
+  `top-senders`) reached Swift's `.prefix` and CRASHED with no JSON envelope (measured:
+  exit 133); it is now a typed validation error (64), matching extra6's negative --offset
+  precedent.
+- `analyticsRows` computes attachment counts with one grouped join instead of a correlated
+  per-row subquery (measured identical results on all the full account-wide count rows of the live
+  store; ~3-5x faster on the account-wide sweep and marginally slower — 4ms absolute — on
+  LIMIT-bounded slices, where the correlated form deliberately remains in queryMessages)
+  (extra31). A fixture pin locks the 0/1/multi attachment counts.
+- extra31 is PARTIAL, not closed: the error-class half landed (pinned pure both ways); the
+  filed defect's TIMEOUT half — `AppleScriptRunner` has no deadline, so a genuinely
+  STALLED Mail still blocks instead of reaching the new upstream error path — remains open
+  on the worklist.
+- Port-spec rows 37/38 carry the batch-3 PARITY NOTES incl. the disclosed supersets: the
+  Gmail `[Gmail]/Sent Mail` 4th Sent-probe (the oracle silently skips suppression on
+  Gmail-backed accounts), and awaiting-reply matching across all To+CC recipients where
+  the oracle keys on the FIRST To recipient only.
+
+(gap39/gap41/extra29 — Sent-mailbox probe order, account scoping, newest-first bounds, and
+the summaries-preview body-question join — landed in earlier commits `6b79190`/`3a2c46c`
+with their pins; this batch closes their worklist entries with the port-spec disclosures
+above.)
+
 ### Mail bulk-targeting + rules/templates parity (Q11 batch 2)
 
 **Changed — BREAKING**
