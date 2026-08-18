@@ -132,4 +132,33 @@ struct AuthErrorFieldsTests {
         #expect(v.keys.contains("status") == false)
         #expect(v.keys.contains("remediation") == false)
     }
+
+    /// `error.applied` (extra33 / SEC-M2): a bulk mutation that aborts mid-loop surfaces the ids it
+    /// already changed so a retry can exclude them (move/delete are not idempotent). Same
+    /// encodeIfPresent discipline as status/remediation — present as its own array key when set,
+    /// ABSENT (not null) on every other error, and forwarded by the `AppleError` → envelope mapping.
+    @Test("error.applied is rendered as an array key when a bulk op reports partial mutation")
+    func appliedRenderedWhenPresent() throws {
+        let e = AppleError.upstream("Mail returned an error for 'c'.")
+                          .addingBulkContext(applied: ["a", "b"], failedID: "c")
+        #expect(e.applied == ["a", "b"])
+        #expect(e.type == AppleErrorType.upstream)          // underlying classification preserved
+        #expect(e.exitCode == AppleExit.upstream)           // and exit code — abort semantics unchanged
+        let err = try errorObject(try Output.encodeError(tool: "mail", from: e))
+        #expect(err["applied"] as? [String] == ["a", "b"])
+        #expect((err["message"] as? String)?.contains("EXCLUDE") == true)
+    }
+
+    @Test("errors with no partial-mutation dimension omit the applied key entirely")
+    func appliedOmittedWhenAbsent() throws {
+        // A plain error and a first-id bulk failure (empty applied) both omit the key.
+        let plain = try errorObject(try Output.encodeError(tool: "notes", from: .validation("bad")))
+        #expect(plain.keys.contains("applied") == false, "applied must be omitted, not null")
+        let firstIdFail = AppleError.upstream("boom").addingBulkContext(applied: [], failedID: "a")
+        #expect(firstIdFail.applied == nil)                 // nothing mutated → no list
+        let err = try errorObject(try Output.encodeError(tool: "mail", from: firstIdFail))
+        #expect(err.keys.contains("applied") == false)
+        let raw = String(data: try Output.encodeError(tool: "mail", from: firstIdFail), encoding: .utf8) ?? ""
+        #expect(raw.contains("null") == false)
+    }
 }

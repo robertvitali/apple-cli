@@ -191,6 +191,45 @@ struct MailWriteSafetyTests {
             #expect(result?.notFound == ["1"])   // fromSelection sets id = "1"
         }
     }
+
+    /// A message with a distinct id (fromSelection maps `applescriptID` → `id`), so a partial
+    /// batch can assert exactly WHICH ids were applied before a mid-loop failure.
+    private func idMsg(_ aid: String) -> MailMessage {
+        MailMessage.fromSelection(.init(applescriptID: aid, internetMessageID: "im-\(aid)",
+                                        subject: "apple-cli-test \(aid)", sender: "me@self.test",
+                                        readStatus: false, flagged: false, dateReceived: nil, content: nil))
+    }
+
+    @Test("a hard op failure mid-batch aborts but reports the ids already applied (extra33)")
+    func bulkPartialFailureCarriesApplied() {
+        withEnv(recipients: nil) {
+            // op applies "a", then hard-fails on "b" (an AppleScript-class error); "c" never runs.
+            let err = #expect(throws: AppleError.self) {
+                _ = try executeMessageMutation([idMsg("a"), idMsg("b"), idMsg("c")], sandboxActive: false) { imid, _ in
+                    if imid == "im-b" { throw AppleError.upstream("Mail returned an error for \(imid)") }
+                    return true
+                }
+            }
+            #expect(err?.applied == ["a"])                       // "a" was already mutated
+            #expect(err?.message.contains("'b'") == true)        // names the failing id
+            #expect(err?.message.contains("EXCLUDE") == true)    // retry guidance present
+            #expect(err?.type == AppleErrorType.upstream)        // underlying classification preserved
+            #expect(err?.exitCode == AppleExit.upstream)         // and its exit code — abort unchanged
+        }
+    }
+
+    @Test("a failure on the FIRST id reports no applied ids (nothing to exclude on retry)")
+    func bulkFailureOnFirstIdHasNilApplied() {
+        withEnv(recipients: nil) {
+            let err = #expect(throws: AppleError.self) {
+                _ = try executeMessageMutation([idMsg("a"), idMsg("b")], sandboxActive: false) { _, _ in
+                    throw AppleError.upstream("fail immediately")
+                }
+            }
+            #expect(err?.applied == nil)                         // nothing mutated → key omitted
+            #expect(err?.message.contains("before any change applied") == true)
+        }
+    }
 }
 
 // Logic-tier regression lock for `DraftSendResult.parse` — the safety-critical string→enum mapping

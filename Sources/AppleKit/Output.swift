@@ -26,10 +26,12 @@ public enum Output {
     }
 
     public static func encodeError(tool: String, type: String, message: String,
-                                   status: String? = nil, remediation: String? = nil) throws -> Data {
+                                   status: String? = nil, remediation: String? = nil,
+                                   applied: [String]? = nil) throws -> Data {
         try encode(ErrorEnvelope(schema_version: schemaVersion, tool: tool, ok: false,
                                  error: .init(type: type, message: message,
-                                              status: status, remediation: remediation)))
+                                              status: status, remediation: remediation,
+                                              applied: applied)))
     }
 
     // MARK: Emit (writes the encoded envelope to stdout)
@@ -103,30 +105,36 @@ public enum Output {
     /// which fields get copied — is checkable directly.
     public static func encodeError(tool: String, from error: AppleError) throws -> Data {
         try encodeError(tool: tool, type: error.type, message: error.message,
-                        status: error.status, remediation: error.remediation)
+                        status: error.status, remediation: error.remediation,
+                        applied: error.applied)
     }
 
     /// Emit the envelope for an `AppleError`. See `encodeError(tool:from:)`.
     public static func emitError(tool: String, from error: AppleError) {
         emitError(tool: tool, type: error.type, message: error.message,
-                  status: error.status, remediation: error.remediation)
+                  status: error.status, remediation: error.remediation,
+                  applied: error.applied)
     }
 
     public static func emitError(tool: String, type: String, message: String,
-                                 status: String? = nil, remediation: String? = nil) {
+                                 status: String? = nil, remediation: String? = nil,
+                                 applied: [String]? = nil) {
         if let data = try? encodeError(tool: tool, type: type, message: message,
-                                       status: status, remediation: remediation) {
+                                       status: status, remediation: remediation,
+                                       applied: applied) {
             write(data)
         } else {
             // Never leave stdout empty on an error path: hand-roll a minimal valid envelope,
             // JSON-escaping every interpolated string (RFC 8259) so this last-ditch path can
             // never itself emit malformed JSON — a raw ", \, or control char in `message`
             // would otherwise break the very parse the fallback exists to guarantee.
-            // The fallback carries status/remediation too. If it dropped them, the one path that
-            // exists BECAUSE encoding failed would also be the one that silently violates the
+            // The fallback carries status/remediation/applied too. If it dropped them, the one path
+            // that exists BECAUSE encoding failed would also be the one that silently violates the
             // contract those fields establish.
+            let appliedJSON = applied.map { "[" + $0.map(jsonString).joined(separator: ",") + "]" }
             let extra = (status.map { #","status":\#(jsonString($0))"# } ?? "")
                       + (remediation.map { #","remediation":\#(jsonString($0))"# } ?? "")
+                      + (appliedJSON.map { #","applied":\#($0)"# } ?? "")
             write(Data(#"{"schema_version":\#(schemaVersion),"tool":\#(jsonString(tool)),"ok":false,"error":{"type":\#(jsonString(type)),"message":\#(jsonString(message))\#(extra)}}"#.utf8))
         }
     }
@@ -199,6 +207,9 @@ struct ErrorEnvelope: Encodable {
         // docs/versioning-policy.md; every existing consumer keeps parsing unchanged.
         let status: String?
         let remediation: String?
+        // Ids a bulk mutation already applied before it aborted mid-loop (extra33 / SEC-M2).
+        // nil / omitted on every non-bulk error, so no other error envelope changes shape.
+        let applied: [String]?
     }
 }
 

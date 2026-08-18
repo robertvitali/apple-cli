@@ -20,13 +20,38 @@ public struct AppleError: Error {
     /// Same rationale: the oracle returns it as its own key so a client can display it verbatim.
     public let remediation: String?
 
+    /// Ids a bulk mutation ALREADY applied before it failed mid-loop, surfaced as `error.applied`
+    /// (extra33 / SEC-M2). A bulk op (`mail move`/`mark`/`flag`/`delete`) mutates per id; if one id
+    /// hard-fails, the earlier ones are already changed. Reporting them lets a retry EXCLUDE them —
+    /// move/delete are not idempotent, so re-targeting an already-moved id is a real hazard. nil on
+    /// every non-bulk error (encodeIfPresent omits the key), so no other envelope changes shape.
+    public let applied: [String]?
+
     public init(type: String, message: String, exitCode: Int32,
-                status: String? = nil, remediation: String? = nil) {
+                status: String? = nil, remediation: String? = nil,
+                applied: [String]? = nil) {
         self.type = type
         self.message = message
         self.exitCode = exitCode
         self.status = status
         self.remediation = remediation
+        self.applied = applied
+    }
+
+    /// Re-wrap this error with the bulk partial-mutation context: the ids already applied plus a
+    /// message naming the failing id. Preserves `type` / `exitCode` / `status` / `remediation` so
+    /// the underlying failure's classification and exit code are unchanged — this only ADDS the
+    /// applied list and prepends an explanatory sentence. `applied` stays nil when empty (the
+    /// first id failed, nothing was mutated, nothing to exclude on retry).
+    public func addingBulkContext(applied: [String], failedID: String) -> AppleError {
+        let note = applied.isEmpty
+            ? "bulk mutation failed at '\(failedID)' before any change applied — "
+            : "bulk mutation failed at '\(failedID)' after mutating \(applied.count) message(s); "
+              + "the ids in `applied` were already changed, so EXCLUDE them from a retry "
+              + "(move/delete are not idempotent) — "
+        return AppleError(type: type, message: note + message, exitCode: exitCode,
+                          status: status, remediation: remediation,
+                          applied: applied.isEmpty ? nil : applied)
     }
 
     public static func validation(_ m: String) -> AppleError {

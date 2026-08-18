@@ -12,6 +12,25 @@ with the Apple MCP servers they replace.
 
 ## [Unreleased]
 
+### Bulk mutation reports already-applied ids on a mid-loop failure (Q12 batch C, part 2 — extra33)
+
+**Fixed**
+
+- A Mail bulk mutation (`mail move` / `mark` / `flag` / `delete`) applies per id; if one id
+  HARD-failed partway (a thrown AppleScript execution error, distinct from an unlocatable id,
+  which was already collected non-fatally into `not_found`), the error discarded the list of ids
+  already mutated. A retry then re-targeted them — and `move` / `delete` are not idempotent, so
+  a message could be moved twice or an already-trashed one re-processed (surfaced by the Q11b2
+  security review, SEC-M2). The error now carries an `error.applied` array of the ids mutated
+  before the failure, so a retry can exclude them. Threaded through a new optional `applied`
+  field on `AppleError` and the JSON error envelope (`encodeIfPresent` — absent, never `null`, on
+  every other error, so no other envelope changes shape; additive/MINOR). The failure still
+  aborts with the underlying error's type and exit code unchanged — only the previously-lost
+  partial-mutation record is now surfaced. `error.applied` is primarily an explicit-ids retry
+  affordance (re-run excluding those ids); on the `--match` filter path a retry re-resolves the
+  filter, and the already-mutated ids largely self-exclude because the filter seeds the
+  action-inverse (a moved/marked/flagged message no longer matches).
+
 ### Space-separated negative option values (Q12 batch C, part 1 — CAL-11 / REM-10)
 
 **Fixed**

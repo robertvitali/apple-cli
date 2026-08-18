@@ -60,10 +60,16 @@ func requireCanonicalLabels(_ msgs: [MailMessage]) throws {
 
 /// Execute a per-message mutation over resolved targets, ALL-OR-NOTHING on the label gate.
 /// Phase 1 validates EVERY target's gate (`requireLiveMessageMutation`) before ANY mutation runs,
-/// so a mixed batch containing one unlabeled/real message mutates nothing AND the throw can't
-/// leave already-applied ids unreported. Phase 2 then mutates; a target Mail can't locate is
-/// collected into `not_found` (not a throw). `op` returns true when the change applied. Returns
-/// (applied ids, not-found ids).
+/// so a mixed batch containing one unlabeled/real message mutates nothing. Phase 2 then mutates;
+/// a target Mail can't locate is collected into `not_found` (op returns false — not a throw).
+///
+/// If an op HARD-fails mid-loop (an AppleScript execution error, thrown), Phase 2 re-throws the
+/// underlying error ANNOTATED with the ids already applied (`AppleError.addingBulkContext`), so a
+/// bulk failure no longer discards the partial-mutation record — a retry can exclude those ids
+/// (extra33 / SEC-M2: move/delete are not idempotent). The failure still aborts (unchanged exit
+/// code); only the previously-lost `applied` list is now surfaced on `error.applied`.
+///
+/// `op` returns true when the change applied. Returns (applied ids, not-found ids).
 func executeMessageMutation(_ msgs: [MailMessage], sandboxActive: Bool,
                             _ op: (_ internetMessageID: String, _ account: String?) throws -> Bool) throws
     -> (applied: [String], notFound: [String]) {
@@ -71,10 +77,26 @@ func executeMessageMutation(_ msgs: [MailMessage], sandboxActive: Bool,
     let validated: [(id: String, imid: String, account: String?)] = try msgs.map { m in
         (m.id, try requireLiveMessageMutation(m, sandboxActive: sandboxActive), m.account.isEmpty ? nil : m.account)
     }
-    // Phase 2 — mutate the fully-validated set; op failures mean "not locatable", not a gate breach.
+    // Phase 2 — mutate the fully-validated set; op returning false means "not locatable", a THROW
+    // means a hard failure that aborts — carrying the ids already applied so they aren't lost.
+    //
+    // Two deliberate scoping choices (review):
+    //  * only `applied` is carried on the abort, NOT the partial `not_found` accumulated so far —
+    //    a not-found id was never mutated, so there is nothing to exclude from a retry; the
+    //    retry-safety contract is strictly about ids that CHANGED.
+    //  * this reports the ids applied in PRIOR iterations, not `failedID` — so it is correct only
+    //    while each `op` is mutate-or-throw (it throws BEFORE any state change, never after). The
+    //    Mail ops satisfy this (e.g. `moveLocated` returns true only on "ok" and throws first); an
+    //    op that mutated then threw would leave `failedID` changed-but-excluded, re-opening the
+    //    double-mutation hazard for that one id. Keep new ops mutate-or-throw.
     var applied: [String] = [], notFound: [String] = []
     for t in validated {
-        if try op(t.imid, t.account) { applied.append(t.id) } else { notFound.append(t.id) }
+        do {
+            if try op(t.imid, t.account) { applied.append(t.id) } else { notFound.append(t.id) }
+        } catch {
+            let base = (error as? AppleError) ?? AppleError.upstream("\(error)")
+            throw base.addingBulkContext(applied: applied, failedID: t.id)
+        }
     }
     return (applied, notFound)
 }
