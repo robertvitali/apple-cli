@@ -271,6 +271,45 @@ public struct MailScript {
     /// executes against live Mail).
     static var bodySearchScriptSource: String { bodySearchScript }
 
+    /// extra19: oracle B's `_save_open_message_as_draft` (compose.py:104-131) — ask Mail to
+    /// `save` the open outgoing message whose subject matches; retried by the caller. Returns
+    /// "saved" / "not-found" / "error: …" exactly like the oracle's script.
+    private static let saveOpenDraftScript = """
+    on run argv
+        set wantedSubject to item 1 of argv
+        tell application "Mail"
+            try
+                set matchingMessages to every outgoing message whose subject is wantedSubject
+                if (count of matchingMessages) is 0 then
+                    return "not-found"
+                end if
+                save item 1 of matchingMessages
+                return "saved"
+            on error errMsg
+                return "error: " & errMsg
+            end try
+        end tell
+    end run
+    """
+
+    /// Internal for the logic tier: source pin on the oracle-verbatim save script.
+    static var saveOpenDraftScriptSource: String { saveOpenDraftScript }
+
+    /// See `saveOpenDraftScript`. Mirrors the oracle's 10 x 0.5s retry loop; false when the
+    /// subject is empty (oracle guard), the window never surfaces, or Mail errors.
+    public func saveOpenDraft(subject: String, retries: Int = 10,
+                              delaySeconds: TimeInterval = 0.5) -> Bool {
+        guard !subject.isEmpty else { return false }
+        for _ in 0..<retries {
+            let out = (try? runner.run(MailScript.saveOpenDraftScript, arguments: [subject]))?
+                .trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? "error: run failed"
+            if out == "saved" { return true }
+            if out.hasPrefix("error:") { return false }
+            Thread.sleep(forTimeInterval: delaySeconds)
+        }
+        return false
+    }
+
     public func body(internetMessageID: String, accountName: String?) throws -> String? {
         // Mail's `message id` carries angle brackets; try the bracketed form.
         let bare = MailFormat.stripAngleBrackets(internetMessageID) ?? internetMessageID
@@ -751,9 +790,27 @@ public struct MailScript {
                 end if
                 -- Attach only AFTER the guard passes, so a refused send never loads files.
                 my addAttachments(m, attRaw, US)
-                -- RE-VERIFY immediately before dispatch. addAttachments delays ~1s PER FILE, so
-                -- the set verified above is stale by send time; the send-draft path re-checks for
-                -- exactly this reason. Any delta (or a now-empty read) refuses.
+                -- gap17/gap15: the HTML paste (oracle B's NSPasteboard flow) runs BEFORE the
+                -- re-verify below (review M1: its ~2s of delays would otherwise widen the very
+                -- staleness window the re-verify exists to close) and AFTER the first audit, so
+                -- a refused reply is discarded unpasted; delivery then branches on theMode so a
+                -- draft files the pasted body and a send sends it.
+                -- (pasteHtmlIntoWindow is defined ONLY in nativeReplyHtmlScript; the plain
+                -- reply/forward scripts pin htmlPasteRaw to "" so this call is unreachable
+                -- there — and AppleScript resolves `my` handlers at runtime, so if that
+                -- invariant ever broke, the undefined-handler error lands in this try and
+                -- refuses via setupfail. Fail-closed either way.)
+                if htmlPasteRaw is not "" then
+                    try
+                        my pasteHtmlIntoWindow(m, htmlPasteRaw)
+                    on error errMsg
+                        return "setupfail" & US & "HTML paste failed: " & errMsg & US & my discardDraft(m)
+                    end try
+                end if
+                -- RE-VERIFY immediately before dispatch. addAttachments delays ~1s PER FILE and
+                -- the HTML paste above adds ~2s more, so the set verified above is stale by send
+                -- time; the send-draft path re-checks for exactly this reason. Any delta (or a
+                -- now-empty read) refuses.
                 set addrs2 to {}
                 try
                     set addrs2 to my collectAddrs(m)
@@ -772,6 +829,42 @@ public struct MailScript {
                 set AppleScript's text item delimiters to RS
                 set verified to addrs2 as string
                 set AppleScript's text item delimiters to ""
+                if theMode is "draft" then
+                    -- MEASURED (probe on the live store): a saving-yes close aimed at the
+                    -- outgoing MESSAGE silently DISCARDS it — nothing lands in Drafts. What files the
+                    -- draft is the oracle's other save shape: an OPEN compose window + `save m`
+                    -- (oracle B _save_open_message_as_draft / close window 1 saving yes). The
+                    -- window is revealed only HERE — after the audit — then saved and closed
+                    -- without re-saving (the filed draft survives — measured).
+                    try
+                        tell application "Mail"
+                            set visible of m to true
+                        end tell
+                        delay 0.5
+                        tell application "Mail" to save m
+                    on error errMsg
+                        return "setupfail" & US & "saving the draft failed: " & errMsg & US & my discardDraft(m)
+                    end try
+                    try
+                        tell application "Mail" to close m saving no
+                    end try
+                    return "drafted" & US & newID & US & verified
+                end if
+                if theMode is "open" then
+                    try
+                        tell application "Mail"
+                            set visible of m to true
+                            activate
+                        end tell
+                    end try
+                    return "opened" & US & newID & US & verified
+                end if
+                -- Fail CLOSED on an unrecognized mode (review: send was the fall-through
+                -- default — the most dangerous verb must be opt-in, even though the Swift
+                -- layer already validates the mode set).
+                if theMode is not "send" then
+                    return "setupfail" & US & "unknown delivery mode '" & theMode & "'" & US & my discardDraft(m)
+                end if
                 -- Mail.sdef: `send` returns a BOOLEAN (true iff sending succeeded). Ignoring it
                 -- reported executed:true for a send Mail said had failed.
                 set sentOK to false
@@ -790,10 +883,17 @@ public struct MailScript {
         set ccRaw to item 8 of argv
         set bccRaw to item 9 of argv
         set mbxHint to item 10 of argv
+        set theMode to item 11 of argv -- send | draft | open (gap17)
+        set htmlPasteRaw to "" -- plain script: never pastes
         set US to (ASCII character 31)
         set RS to (ASCII character 30)
         set msg to my findMsgHinted(item 1 of argv, item 2 of argv, mbxHint)
         if msg is missing value then return "notfound"
+        -- NOTE: the reply is ALWAYS composed windowless below (review: Mail server-auto-saves
+        -- an OPEN compose window on IMAP/Gmail, so a visible-then-REFUSED reply could leave a
+        -- recallable copy with a non-allowlisted recipient in remote Drafts). The shared tail
+        -- reveals the window only AFTER the allowlist audit passes — draft mode needs it for
+        -- `save m` (measured: the windowless save was a silent discard), open for the operator.
         set m to missing value
         try
             tell application "Mail"
@@ -827,7 +927,173 @@ public struct MailScript {
         on error errMsg
             return "setupfail" & US & errMsg & US & my discardDraft(m)
         end try
-    """ + guardAndSendTail + """
+    """ + "\n" + guardAndSendTail + """
+
+
+    end run
+
+    on pasteHtmlIntoWindow(theMsg, htmlPath)
+        -- UNREACHABLE stub: this script pins htmlPasteRaw to "", so the shared tail's
+        -- paste branch never fires here. Defined anyway so the assembly harness can
+        -- statically prove every called handler exists — and so a broken invariant
+        -- fails LOUDLY (raises into the tail's try, refusing via setupfail) instead of
+        -- as a bare undefined-handler runtime error.
+        error "internal: pasteHtmlIntoWindow is not available in this script"
+    end pasteHtmlIntoWindow
+    """
+
+    /// gap15/extra15: the ORACLE's HTML reply flow — Mail's native `reply` verb (threading
+    /// headers + replied-to state + Mail's own quoted original in the HTML layer) with the
+    /// reply body inserted via an NSPasteboard HTML paste, never `set content` (which
+    /// clobbers the HTML layer — oracle B's own engineering comment, compose.py:601-605).
+    /// Requires Accessibility (System Events keystroke) and steals focus, same as
+    /// `sendHtmlViaGui` — the command routes here only for --gui-send / --mode draft / open
+    /// with --html. Runs via runViaStdin (AppleScriptObjC `use framework`).
+    private static let nativeReplyHtmlScript = """
+    use framework "Foundation"
+    use framework "AppKit"
+    use scripting additions
+
+    on pasteHtmlIntoWindow(theMsg, htmlPath)
+        -- NSString file read — no shell hop for a path argument, however
+        -- internally-generated. MEASURED: `(missing value) as text` coerces to the literal
+        -- string "missing value" WITHOUT erroring — so the read is tested explicitly and a
+        -- missing/unreadable fragment raises into the caller's setupfail instead of pasting
+        -- (and possibly sending) the literal text "missing value" (review H1).
+        set rawHtml to (current application's NSString's stringWithContentsOfFile:htmlPath encoding:(current application's NSUTF8StringEncoding) |error|:(missing value))
+        if rawHtml is missing value then error "html fragment unreadable: " & htmlPath
+        set htmlString to rawHtml as text
+        set pb to current application's NSPasteboard's generalPasteboard()
+        set oldClip to pb's stringForType:(current application's NSPasteboardTypeString)
+        pb's clearContents()
+        set htmlData to (current application's NSString's stringWithString:htmlString)'s dataUsingEncoding:(current application's NSUTF8StringEncoding)
+        pb's setData:htmlData forType:(current application's NSPasteboardTypeHTML)
+        set lenBefore to 0
+        try
+            tell application "Mail" to set lenBefore to (count of characters of (content of theMsg))
+        end try
+        -- WINDOW BINDING (review HIGH — same hazard sendHtmlViaGui's nonce guard already
+        -- documents): a blind Cmd-V lands in whatever holds keyboard focus, and a stray
+        -- compose window titled "Re: <same subject>" is the single most likely front window
+        -- on that thread. Tag OUR message's subject with a per-call nonce, reveal it, and
+        -- refuse to type until the FRONT window carries the nonce. `random number` suffices —
+        -- the nonce disambiguates windows, it is not an attacker-facing secret (and a shell
+        -- hop to uuidgen is exactly what this script avoids).
+        set theNonce to "apple-cli-" & (random number from 100000 to 999999)
+        set realSubject to ""
+        tell application "Mail"
+            set realSubject to subject of theMsg
+            set subject of theMsg to realSubject & " " & theNonce
+            set visible of theMsg to true
+            activate
+        end tell
+        set bound to false
+        try
+            tell application "System Events"
+                set frontmost of process "Mail" to true
+                repeat 12 times
+                    if (exists front window of process "Mail") then
+                        if (name of front window of process "Mail") contains theNonce then
+                            set bound to true
+                            exit repeat
+                        end if
+                    end if
+                    delay 0.25
+                end repeat
+            end tell
+        end try
+        -- Restore the real subject BEFORE anything else can raise, so a refusal never
+        -- leaves the nonce on the draft.
+        try
+            tell application "Mail" to set subject of theMsg to realSubject
+        end try
+        if not bound then
+            my restoreClipboard(pb, oldClip)
+            error "the reply compose window never took focus; refusing to paste"
+        end if
+        try
+            tell application "System Events"
+                tell process "Mail"
+                    keystroke "v" using command down
+                end tell
+            end tell
+        on error errMsg
+            -- The fragment must not linger on the pasteboard on the failure path either
+            -- (review: the Accessibility-denied fail-closed path left it behind).
+            my restoreClipboard(pb, oldClip)
+            error errMsg
+        end try
+        delay 0.5
+        -- Paste READBACK (review M2/HIGH-2): a cmd-v Mail swallows (sheet up, body not
+        -- first responder) raises no error — verify the target message actually grew, or
+        -- refuse BEFORE any delivery branch can run. Only enforced for a non-empty
+        -- fragment; measured lengths, not styled equality.
+        if (count of characters of htmlString) > 0 then
+            set lenAfter to 0
+            try
+                tell application "Mail" to set lenAfter to (count of characters of (content of theMsg))
+            end try
+            if lenAfter is lenBefore then
+                my restoreClipboard(pb, oldClip)
+                error "paste verification failed: the reply body did not change (keystroke likely landed in another window)"
+            end if
+        end if
+        my restoreClipboard(pb, oldClip)
+    end pasteHtmlIntoWindow
+
+    on restoreClipboard(pb, oldClip)
+        -- Best-effort clipboard restore (string layer only, like sendHtmlViaGui) — and when
+        -- the prior clipboard had no string flavor, still CLEAR it so the outgoing email's
+        -- HTML does not linger on the user's pasteboard (review L6).
+        try
+            pb's clearContents()
+            if oldClip is not missing value then
+                pb's setString:oldClip forType:(current application's NSPasteboardTypeString)
+            end if
+        end try
+    end restoreClipboard
+
+    on run argv
+        set doAll to (item 4 of argv) is "1"
+        set senderAddr to item 5 of argv
+        set allowRaw to item 6 of argv
+        set attRaw to item 7 of argv
+        set ccRaw to item 8 of argv
+        set bccRaw to item 9 of argv
+        set mbxHint to item 10 of argv
+        set theMode to item 11 of argv -- send | draft | open
+        set htmlPasteRaw to item 12 of argv -- path to the HTML fragment to paste
+        set US to (ASCII character 31)
+        set RS to (ASCII character 30)
+        set msg to my findMsgHinted(item 1 of argv, item 2 of argv, mbxHint)
+        if msg is missing value then return "notfound"
+        set m to missing value
+        try
+            tell application "Mail"
+                -- Composed WINDOWLESS like the plain script (server-auto-save hardening);
+                -- pasteHtmlIntoWindow reveals the window itself, which runs only AFTER the
+                -- allowlist audit in the shared tail.
+                if doAll then
+                    set m to reply msg opening window false reply to all true
+                else
+                    set m to reply msg opening window false reply to all false
+                end if
+            end tell
+        on error errMsg
+            return "createfail" & US & errMsg
+        end try
+        try
+            tell application "Mail"
+                -- NO `set content` here (extra15): the body arrives via the pasteboard so
+                -- Mail's quoted original keeps its HTML layer.
+                if senderAddr is not "" then set sender of m to senderAddr
+            end tell
+            my addRecipients(m, ccRaw, US, "cc")
+            my addRecipients(m, bccRaw, US, "bcc")
+        on error errMsg
+            return "setupfail" & US & errMsg & US & my discardDraft(m)
+        end try
+    """ + "\n" + guardAndSendTail + """
 
     end run
     """
@@ -842,6 +1108,8 @@ public struct MailScript {
         set allowRaw to item 8 of argv
         set attRaw to item 9 of argv
         set mbxHint to item 10 of argv
+        set theMode to "send" -- forward has no mode surface
+        set htmlPasteRaw to ""
         set US to (ASCII character 31)
         set RS to (ASCII character 30)
         set msg to my findMsgHinted(item 1 of argv, item 2 of argv, mbxHint)
@@ -869,9 +1137,19 @@ public struct MailScript {
         on error errMsg
             return "setupfail" & US & errMsg & US & my discardDraft(m)
         end try
-    """ + guardAndSendTail + """
+    """ + "\n" + guardAndSendTail + """
+
 
     end run
+
+    on pasteHtmlIntoWindow(theMsg, htmlPath)
+        -- UNREACHABLE stub: this script pins htmlPasteRaw to "", so the shared tail's
+        -- paste branch never fires here. Defined anyway so the assembly harness can
+        -- statically prove every called handler exists — and so a broken invariant
+        -- fails LOUDLY (raises into the tail's try, refusing via setupfail) instead of
+        -- as a bare undefined-handler runtime error.
+        error "internal: pasteHtmlIntoWindow is not available in this script"
+    end pasteHtmlIntoWindow
     """
 
     /// Result of a native reply/forward.
@@ -884,17 +1162,29 @@ public struct MailScript {
         case refused(nonSelfRecipients: String, discarded: Bool)
         /// `send` returned false (offline / SMTP refused). The draft may still exist.
         case sendFailed(newMessageID: String)
+        /// createfail/setupfail: composing in Mail failed BEFORE any delivery — not an
+        /// allowlist refusal, and the wording must not claim one (review: an
+        /// Accessibility-denied paste rendered as "recipients outside the allowlist").
+        /// `discarded` carries the same pessimistic semantics as `.refused`.
+        case composeFailed(reason: String, discarded: Bool)
+        /// gap17 --mode draft: composed, guard-passed, filed to Drafts — NOT sent.
+        case drafted(newMessageID: String, recipients: [String])
+        /// gap17 --mode open: composed, guard-passed, left open in a visible window — NOT sent.
+        case opened(newMessageID: String, recipients: [String])
     }
 
     /// Like `mutateLocated`, but returns the script's raw output (for scripts that report a
     /// value, e.g. the new message id) instead of a Bool. nil == "notfound" on BOTH id forms.
-    private func runLocated(_ body: String, id: String, account: String?, extra: [String]) throws -> String? {
+    private func runLocated(_ body: String, id: String, account: String?, extra: [String],
+                            viaStdin: Bool = false) throws -> String? {
         let script = body + "\n" + MailScript.locator + "\n" + MailScript.hintedLocator
             + "\n" + MailScript.outboundGuardHelpers
             + "\n" + MailScript.addressGuardHelpers + "\n" + MailScript.mailboxPathResolver
         let bare = MailFormat.stripAngleBrackets(id) ?? id
         for candidate in ["<\(bare)>", bare] {
-            let out = try runner.run(script, arguments: [candidate, account ?? ""] + extra)
+            let out = viaStdin
+                ? try runner.runViaStdin(script, arguments: [candidate, account ?? ""] + extra)
+                : try runner.run(script, arguments: [candidate, account ?? ""] + extra)
             if out != "notfound" { return out }
         }
         return nil
@@ -915,6 +1205,10 @@ public struct MailScript {
             return .sent(newMessageID: f[1], recipients: list(2))
         case "sendfail" where f.count > 1:
             return .sendFailed(newMessageID: f[1])
+        case "drafted" where f.count > 1:
+            return .drafted(newMessageID: f[1], recipients: list(2))
+        case "opened" where f.count > 1:
+            return .opened(newMessageID: f[1], recipients: list(2))
         case "refused" where f.count > 1:
             // A missing discard flag is read as NOT discarded — the pessimistic reading.
             return .refused(nonSelfRecipients: list(1).joined(separator: ", "),
@@ -922,13 +1216,12 @@ public struct MailScript {
         case "createfail":
             // The native verb itself threw, so no draft was ever created — nothing to discard.
             let why = f.count > 1 ? f[1] : "(no detail)"
-            return .refused(nonSelfRecipients: "(Mail could not create the message: \(why))", discarded: true)
+            return .composeFailed(reason: "Mail could not create the message: \(why)", discarded: true)
         case "setupfail":
             // A throw AFTER the draft existed. The script attempted to close it; report whether
             // that actually worked rather than assuming it did.
             let why = f.count > 1 ? f[1] : "(no detail)"
-            return .refused(nonSelfRecipients: "(composing the message failed: \(why))",
-                            discarded: f.count > 2 && f[2] == "1")
+            return .composeFailed(reason: why, discarded: f.count > 2 && f[2] == "1")
         default:
             // Anything unrecognized is a refusal, never a success — and we cannot claim the
             // draft was cleaned up, so report it as possibly-present.
@@ -943,15 +1236,48 @@ public struct MailScript {
     public func nativeReply(internetMessageID: String, accountName: String?, body: String,
                             replyAll: Bool, sender: String?, selfAllowlist: [String],
                             cc: [String] = [], bcc: [String] = [],
-                            attachmentPaths: [String] = [], mailboxHint: String = "") throws -> NativeComposeOutcome {
-        let US = MailScript.US
+                            attachmentPaths: [String] = [], mailboxHint: String = "",
+                            mode: String = "send") throws -> NativeComposeOutcome {
         return MailScript.parseNativeCompose(try runLocated(MailScript.nativeReplyScript, id: internetMessageID, account: accountName,
-                                                            extra: [body, replyAll ? "1" : "0", sender ?? "",
-                                                                    selfAllowlist.joined(separator: US),
-                                                                    attachmentPaths.joined(separator: US),
-                                                                    cc.joined(separator: US), bcc.joined(separator: US),
-                                                                    mailboxHint]))
+                                                            extra: MailScript.replyExtras(body: body, replyAll: replyAll, sender: sender,
+                                                                                          selfAllowlist: selfAllowlist, attachmentPaths: attachmentPaths,
+                                                                                          cc: cc, bcc: bcc, mailboxHint: mailboxHint, mode: mode)))
     }
+
+    /// The positional extra-args contract for `nativeReplyScript` (argv items 3–11), and —
+    /// with `htmlFragmentPath` appended as item 12 — for `nativeReplyHtmlScript`. PINNED
+    /// (review M6): the scripts read `item N of argv` positionally, so a silent reorder at
+    /// the call site ships green through every other tier and fails only against live Mail.
+    static func replyExtras(body: String, replyAll: Bool, sender: String?, selfAllowlist: [String],
+                            attachmentPaths: [String], cc: [String], bcc: [String],
+                            mailboxHint: String, mode: String) -> [String] {
+        [body, replyAll ? "1" : "0", sender ?? "",
+         selfAllowlist.joined(separator: MailScript.US),
+         attachmentPaths.joined(separator: MailScript.US),
+         cc.joined(separator: MailScript.US), bcc.joined(separator: MailScript.US),
+         mailboxHint, mode]
+    }
+
+    /// gap15/extra15: threaded HTML reply via the oracle's pasteboard flow (see
+    /// `nativeReplyHtmlScript`). `htmlFragmentPath` is a temp file the COMMAND wrote — pure
+    /// path plumbing, the fragment itself never enters script source. Requires Accessibility.
+    public func nativeReplyHtml(internetMessageID: String, accountName: String?,
+                                replyAll: Bool, sender: String?, selfAllowlist: [String],
+                                cc: [String] = [], bcc: [String] = [],
+                                attachmentPaths: [String] = [], mailboxHint: String = "",
+                                mode: String, htmlFragmentPath: String) throws -> NativeComposeOutcome {
+        return MailScript.parseNativeCompose(try runLocated(MailScript.nativeReplyHtmlScript, id: internetMessageID, account: accountName,
+                                                            extra: MailScript.replyExtras(body: "", replyAll: replyAll, sender: sender,
+                                                                                          selfAllowlist: selfAllowlist, attachmentPaths: attachmentPaths,
+                                                                                          cc: cc, bcc: bcc, mailboxHint: mailboxHint, mode: mode)
+                                                                   + [htmlFragmentPath],
+                                                            viaStdin: true))
+    }
+
+    /// Internal for the logic tier: source pins on the assembled compose scripts.
+    static var nativeReplyScriptSource: String { nativeReplyScript }
+    static var nativeReplyHtmlScriptSource: String { nativeReplyHtmlScript }
+    static var nativeForwardScriptSource: String { nativeForwardScript }
 
     /// Forward a located message with Mail's native `forward` verb (carries the original's
     /// attachments + rich formatting), prepending `body`. Recipients come from the caller, but
@@ -1117,10 +1443,15 @@ public struct MailScript {
             end tell
         end if
         delay 1
-        if oldClip is not missing value then
+        -- Unconditional clear (review L6 twin): when the prior clipboard had no string
+        -- flavor, the old conditional skipped the clear too and the email HTML lingered
+        -- on the pasteboard.
+        try
             pb's clearContents()
-            pb's setString:oldClip forType:(current application's NSPasteboardTypeString)
-        end if
+            if oldClip is not missing value then
+                pb's setString:oldClip forType:(current application's NSPasteboardTypeString)
+            end if
+        end try
         if sendOK then
             return "sent"
         else if windowMatched then

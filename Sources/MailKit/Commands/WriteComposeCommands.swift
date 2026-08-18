@@ -132,13 +132,34 @@ func refusalMessage(kind: String, bad: String, discarded: Bool, sandboxActive: B
     // reachable `bad` is the `<empty-address>` sentinel — a malformed compose, not an
     // allowlist miss; saying "non-self recipient(s)" there would be flatly wrong.
     let head: String
-    if bad == "<empty-address>" {
+    if bad.hasPrefix("(unrecognized script result") {
+        // The parser's fail-closed default: output we cannot interpret is never a success,
+        // but it is not an allowlist miss either — say what actually happened. (createfail/
+        // setupfail are a TYPED outcome now — composeFailureMessage below — so the only
+        // parenthesized pseudo-reason left here is this sentinel; the in-script guard's own
+        // "(no recipients populated)" / "(recipients vanished before send)" rows are genuine
+        // audit trips and KEEP the refusal wording — review caught the broad `(`-prefix
+        // branch swallowing them as compose failures.)
+        head = "refusing the \(kind): Mail returned an unrecognized script result \(bad). Nothing was sent."
+    } else if bad == "<empty-address>" {
         head = "refusing the \(kind): Mail composed it with an empty/blank recipient address. Nothing was sent."
     } else if sandboxActive {
         head = "refusing the \(kind): Mail addressed it to recipient(s) outside the sandbox's self-only allowlist (\(bad)). Nothing was sent."
     } else {
         head = "refusing the \(kind): Mail addressed it to recipient(s) that failed verification (\(bad)). Nothing was sent."
     }
+    return discarded
+        ? "\(head) The composed draft was discarded."
+        : "\(head) WARNING: the composed draft could NOT be discarded and may still be in Mail's outgoing messages — open Mail and delete it manually."
+}
+
+/// Companion to `refusalMessage` for the typed `.composeFailed` outcome (createfail/setupfail):
+/// composing in Mail failed BEFORE any delivery — an upstream failure, never an allowlist
+/// refusal, and the wording must not claim one (review: an Accessibility-denied HTML paste
+/// rendered as "recipients outside the allowlist"). The discard warning carries the same
+/// operator action as the refusal path.
+func composeFailureMessage(kind: String, reason: String, discarded: Bool) -> String {
+    let head = "composing the \(kind) in Mail failed: \(reason). Nothing was sent."
     return discarded
         ? "\(head) The composed draft was discarded."
         : "\(head) WARNING: the composed draft could NOT be discarded and may still be in Mail's outgoing messages — open Mail and delete it manually."
@@ -626,6 +647,7 @@ struct ReplyCommand: ParsableCommand {
     @OptionGroup var global: GlobalOptions
     @Argument(help: "Message id to reply to (ROWID / RFC Message-ID); or use --subject.") var id: String?
     @Option(name: .long, help: "Reply to the newest message matching this subject keyword.") var subject: String?
+    @Option(name: .long, help: "Mailbox to scope the --subject lookup (default INBOX — oracle B searches only the inbox; use 'All' for the previous store-wide sweep).") var mailbox: String = "INBOX"
     @Option(name: .long, help: "Account (name or UUID) — used for --subject lookup AND as the send-from identity.") var account: String?
     @Option(name: .long) var body: String
     @Flag(name: .long, help: "Reply to all recipients.") var all = false
@@ -634,16 +656,22 @@ struct ReplyCommand: ParsableCommand {
     @Option(name: .long, help: "HTML reply body. Default opens a rendered compose window for review; add --gui-send to auto-send.") var html: String?
     @Option(name: .long, help: "Attachment file path (repeatable).") var attach: [String] = []
     @Option(name: .long, help: "Delivery mode: send | draft | open.") var mode: String = "send"
-    @Flag(name: .long, help: "Auto-send an --html reply via GUI keystroke automation (needs Accessibility, steals focus, fragile). Opt-in.") var guiSend = false
+    @Flag(name: .long, help: "Auto-send an --html reply THREADED via Mail's native reply verb + pasteboard paste (needs Accessibility, steals focus). Opt-in; without it --html --mode send opens an unthreaded .eml compose window.") var guiSend = false
 
     struct Preview: Encodable {
         let action: String; let target: String; let matched_message_id: String?
         let reply_all: Bool; let mode: String; let has_html: Bool; let sender_address: String?
         let to: [String]; let cc: [String]; let bcc: [String]; let attachments: [String]
         let dry_run: Bool; let executed: Bool; let opened: Bool; let note: String?
-        /// Id of the newly-created reply (oracle A `reply_to_message` → `reply_id`). Present only
-        /// on the native-reply path; nil on dry-run and on the HTML open/gui-send paths.
+        /// Id of the newly-created reply (oracle A `reply_to_message` → `reply_id`). Populated
+        /// on BOTH native paths (plain and pasteboard-HTML) in every delivery mode; nil on
+        /// dry-run and on the unthreaded .eml open path (Mail assigns no id to a
+        /// LaunchServices-opened window).
         var reply_id: String? = nil
+        /// gap17 --mode draft: true when the reply was composed and filed to Drafts, NOT sent
+        /// (oracle B reply_to_email send=False). Always emitted, like `mail send`'s twin field
+        /// (review: the same wire key must not have two shapes across verbs of one tool).
+        var drafted: Bool = false
         /// Oracle A returns the ORIGINAL message's id as `original_message_id`; `matched_message_id`
         /// is the CLI's original key for the same value. Both are emitted (additive).
         var original_message_id: String? = nil
@@ -671,14 +699,6 @@ struct ReplyCommand: ParsableCommand {
             guard ["send", "draft", "open"].contains(mode) else {
                 throw AppleError.validation("--mode must be send, draft, or open.")
             }
-            // `--mode draft` / `--mode open` are oracle B `reply_to_email(mode=…, send=False)`
-            // capabilities that are NOT implemented for reply yet (tracked as a parity gap).
-            // Refuse explicitly IN BOTH MODES rather than emitting a success-shaped envelope
-            // that did nothing — a preview of an unimplemented mode is as misleading as an
-            // execute of one.
-            guard mode == "send" else {
-                throw AppleError.notImplemented("`reply --mode \(mode)` is not implemented yet (oracle B reply_to_email mode=\(mode)); use --mode send, or pass --dry-run to preview.")
-            }
             if guiSend {
                 guard html != nil else { throw AppleError.validation("--gui-send only applies to an --html reply.") }
             }
@@ -699,8 +719,14 @@ struct ReplyCommand: ParsableCommand {
             } else if let subject {
                 var f = EnvelopeIndex.MessageFilters()
                 if let account { f.accountUUID = try ctx.requireAccountUUID(account) }
-                f.mailboxName = "All"; f.subjectContains = subject; f.limit = 1
-                guard let r = try ctx.index.queryMessages(f).first else { throw AppleError.notFound("no message matching subject '\(subject)'.") }
+                // extra16: oracle B scopes the reply subject lookup to the account's INBOX;
+                // the old hardwired "All" could bind an archived/sent message to the same
+                // keyword. --mailbox restores the sweep deliberately. Unknown mailbox is the
+                // SHARED fail-loud guard (review L2: reply had adopted the weakest of the
+                // three not-found shapes).
+                try requireMailboxKnown(ctx: ctx, name: mailbox, accountUUID: f.accountUUID)
+                f.mailboxName = mailbox; f.subjectContains = subject; f.limit = 1
+                guard let r = try ctx.index.queryMessages(f).first else { throw AppleError.notFound("no message matching subject '\(subject)' in mailbox '\(mailbox)' (pass --mailbox All to sweep the whole store).") }
                 row = r
             } else {
                 throw AppleError.validation("provide a message id argument or --subject.")
@@ -736,16 +762,16 @@ struct ReplyCommand: ParsableCommand {
             let original = target.content ?? target.snippet
             let quotedPlain = original.map { "\n\n> " + $0.replacingOccurrences(of: "\n", with: "\n> ") } ?? ""
 
-            // (mode + --gui-send validity were hoisted above the store open — see the
-            // preview-honesty block at the top of run(). Past this point mode == "send".)
-            // Three mutually-exclusive live outbound actions (mirrors SendCommand / Option A).
-            // NOTE the `mode == "send"` clause on willOpenHtml: without it (as before), a
-            // `reply --mode draft --html …` took the HTML-open path and OPENED a compose window
-            // for a caller who asked for a draft. SendCommand's twin already had the clause.
-            let willAutoSend = willExecute && mode == "send" && html == nil
-            let willGuiSend = willExecute && guiSend
-            let willOpenHtml = willExecute && mode == "send" && html != nil && !guiSend
-            let willLiveOutbound = willAutoSend || willGuiSend || willOpenHtml
+            // Four mutually-exclusive live actions (gap17/gap15) — the partition is a PURE
+            // pinned function (review M6: the PREVIOUS version of this partition shipped a
+            // real bug — `--mode draft --html` opened a compose window for a caller who
+            // asked for a draft — and nothing pinned it).
+            let route = ReplyRouting.decide(willExecute: willExecute, hasHtml: html != nil,
+                                            guiSend: guiSend, mode: mode)
+            let willNative = route.native
+            let willNativeHtml = route.nativeHtml
+            let willOpenHtml = route.openHtml
+            let willLiveOutbound = willNative || willNativeHtml || willOpenHtml
 
             // Outbound gate in BOTH modes (preview honesty): the recipient set is already
             // resolved above on the dry-run path too, so a sandboxed preview refuses a
@@ -755,6 +781,7 @@ struct ReplyCommand: ParsableCommand {
                                   applyRecipientCap: false)   // oracle reply_to_message: no cap
             var executed = false
             var opened = false
+            var drafted = false
             var senderAddress: String?
             var note: String?
             var replyID: String?
@@ -773,23 +800,66 @@ struct ReplyCommand: ParsableCommand {
                     }
                     senderAddress = addr
                 }
-                // Quoted original, escaped into the HTML part (shared by the gui-send + open paths).
+                // Quoted original, escaped into the HTML part (willOpenHtml only — the
+                // willNativeHtml path pastes the BARE fragment on top of Mail's native reply,
+                // which already carries its own quoted original; adding ours would double-quote).
                 let quotedHTML = original.map {
                     "<br><br><blockquote>" + EmlBuilder.escapeHTML($0).replacingOccurrences(of: "\n", with: "<br>") + "</blockquote>"
                 } ?? ""
-                if willGuiSend {
-                    // Opt-in HTML auto-send via GUI keystrokes (fragile — see MailScript.sendHtmlViaGui).
+                if willNativeHtml {
+                    // gap15/extra15: THREADED HTML reply via the oracle's pasteboard flow —
+                    // Mail's native reply verb composes the threaded reply (In-Reply-To /
+                    // References / replied-to state / native quote), then the HTML fragment is
+                    // pasted into the compose window via NSPasteboard + cmd-v (needs
+                    // Accessibility, steals focus, restores the clipboard after). The fragment
+                    // travels by TEMP FILE PATH, never through script source.
+                    guard let imid = target.internet_message_id, !imid.isEmpty else {
+                        throw AppleError.upstream("message '\(target.id)' has no RFC Message-ID; cannot reply to it via Mail.app.")
+                    }
                     let htmlTmp = try emlTempDirectory(materialise: true)
                         .appendingPathComponent("apple-cli-\(TestMode.sandboxPrefix)-\(UUID().uuidString).html")
-                    try ((html ?? "") + quotedHTML).write(to: htmlTmp, atomically: true, encoding: .utf8)
+                    // Oracle fidelity (compose.py:522-528): append the gap divs so a visible
+                    // gap separates the pasted body from Mail's quoted original (Mail strips
+                    // trailing <br>, hence divs — the oracle's own comment).
+                    try ((html ?? "") + "<div><br></div><div><br></div>").write(to: htmlTmp, atomically: true, encoding: .utf8)
                     OwnedTempDir.restrictToOwner(htmlTmp)
                     defer { try? FileManager.default.removeItem(at: htmlTmp) }
                     SignalSafeCleanup.track(htmlTmp.path)   // synchronous consumer; see the send path
 
-                    try MailScript().sendHtmlViaGui(htmlPath: htmlTmp.path, subject: replySubject,
-                        to: recipients, cc: ccL, bcc: bccL, attachmentPaths: attachPaths, sender: senderAddress)
-                    executed = true
-                    note = "sent via GUI keystroke automation (--gui-send); required Accessibility and stole focus"
+                    switch try MailScript().nativeReplyHtml(internetMessageID: imid,
+                                                            accountName: target.account.isEmpty ? nil : target.account,
+                                                            replyAll: all, sender: senderAddress,
+                                                            selfAllowlist: outboundAllowlist(sandboxActive: sandboxActive),
+                                                            cc: ccL, bcc: bccL, attachmentPaths: attachPaths,
+                                                            mailboxHint: target.mailbox,
+                                                            mode: mode, htmlFragmentPath: htmlTmp.path) {
+                    case .sent(let newID, let actual):
+                        executed = true
+                        replyID = newID
+                        if !actual.isEmpty { recipients = actual }
+                        note = "HTML reply sent via Mail's native reply verb + pasteboard paste (needed Accessibility, stole focus); threading preserved. NOTE: --body is not carried on this path (oracle parity — the HTML fragment IS the reply body)."
+                    case .drafted(let newID, let actual):
+                        // executed stays false: nothing left the machine (matches
+                        // `mail send --mode draft`'s contract — review caught the two verbs
+                        // answering "did mail go out?" oppositely for identical semantics).
+                        drafted = true
+                        replyID = newID
+                        if !actual.isEmpty { recipients = actual }
+                        note = "HTML reply composed and saved to Drafts (--mode draft) — NOT sent; pasteboard paste needed Accessibility. A compose window showing the filed draft may remain open (Mail quirk, measured); close it with Cmd-W."
+                    case .opened(let newID, let actual):
+                        opened = true
+                        replyID = newID
+                        if !actual.isEmpty { recipients = actual }
+                        note = "HTML reply composed and left open in a visible compose window (--mode open) — NOT sent; review and click Send"
+                    case .notFound:
+                        throw AppleError.notFound("message '\(imid)' is not reachable in Mail.app to reply to.")
+                    case .sendFailed(let newID):
+                        throw AppleError.upstream("Mail reported the reply was NOT sent (send returned false — account offline or the server refused). Draft id \(newID) may still be in Mail.")
+                    case .refused(let bad, let discarded):
+                        throw AppleError.mailSafety(refusalMessage(kind: "reply", bad: bad, discarded: discarded, sandboxActive: sandboxActive))
+                    case .composeFailed(let reason, let discarded):
+                        throw AppleError.upstream(composeFailureMessage(kind: "reply", reason: reason, discarded: discarded))
+                    }
                 } else if willOpenHtml {
                     // Reliable HTML reply: build a multipart .eml (quote embedded) and open a
                     // rendered compose window for review.
@@ -804,7 +874,7 @@ struct ReplyCommand: ParsableCommand {
                     try MailScript().openEml(path: dest.path)
                     opened = true
                     note = "HTML reply rendered in a compose window for review — click Send, or re-run with --gui-send to auto-send."
-                } else { // willAutoSend — plain reply via Mail's NATIVE `reply` verb
+                } else { // willNative — plain reply via Mail's NATIVE `reply` verb, ALL modes
                     // Parity: a re-composed "Re:" message is NOT a reply — only Mail's `reply`
                     // verb sets In-Reply-To/References and the original's replied-to state, and
                     // returns the new message's id (oracle A `reply_id`). See MailScript's
@@ -822,7 +892,7 @@ struct ReplyCommand: ParsableCommand {
                                                         // message (incl. [Gmail]/All Mail, which the
                                                         // blind scan skips to avoid hanging) is a
                                                         // targeted lookup rather than unreachable.
-                                                        mailboxHint: target.mailbox) {
+                                                        mailboxHint: target.mailbox, mode: mode) {
                     case .sent(let newID, let actual):
                         executed = true
                         replyID = newID
@@ -830,23 +900,37 @@ struct ReplyCommand: ParsableCommand {
                         // this one command the CLI does not choose the recipients.
                         if !actual.isEmpty { recipients = actual }
                         note = "replied via Mail's native reply verb — threading headers and the original's replied-to state are preserved"
+                    case .drafted(let newID, let actual):
+                        // executed stays false — see the willNativeHtml twin.
+                        drafted = true
+                        replyID = newID
+                        if !actual.isEmpty { recipients = actual }
+                        note = "reply composed via Mail's native reply verb and saved to Drafts (--mode draft) — NOT sent. A compose window showing the filed draft may remain open (Mail quirk, measured); close it with Cmd-W."
+                    case .opened(let newID, let actual):
+                        opened = true
+                        replyID = newID
+                        if !actual.isEmpty { recipients = actual }
+                        note = "reply composed via Mail's native reply verb and left open in a visible compose window (--mode open) — NOT sent; review and click Send"
                     case .notFound:
                         throw AppleError.notFound("message '\(imid)' is not reachable in Mail.app to reply to.")
                     case .sendFailed(let newID):
                         throw AppleError.upstream("Mail reported the reply was NOT sent (send returned false — account offline or the server refused). Draft id \(newID) may still be in Mail.")
                     case .refused(let bad, let discarded):
                         throw AppleError.mailSafety(refusalMessage(kind: "reply", bad: bad, discarded: discarded, sandboxActive: sandboxActive))
+                    case .composeFailed(let reason, let discarded):
+                        throw AppleError.upstream(composeFailureMessage(kind: "reply", reason: reason, discarded: discarded))
                     }
                 }
             }
-            // (No preview-only else-branch: mode is always "send" past the hoisted guard, so
-            // willLiveOutbound == willExecute — an unreachable note would just be dead code.)
+            // (willLiveOutbound == willExecute — the three live flags partition every
+            // mode × html × gui-send combination, so the only non-live path is a dry-run,
+            // which falls through to the honest executed=false/opened=false preview below.)
 
             try Output.emit(tool: "mail", data: Preview(action: "reply", target: id ?? "subject:\(subject ?? "")",
                 matched_message_id: target.id, reply_all: all, mode: mode, has_html: html != nil, sender_address: senderAddress,
                 to: recipients, cc: ccL, bcc: bccL, attachments: attach,
                 dry_run: !willExecute, executed: executed, opened: opened, note: note,
-                reply_id: replyID, original_message_id: target.id), sandboxActive: sandboxActive)
+                reply_id: replyID, drafted: drafted, original_message_id: target.id), sandboxActive: sandboxActive)
         }
     }
 }
@@ -857,7 +941,7 @@ struct ForwardCommand: ParsableCommand {
     @Argument(help: "Message id to forward; or use --subject.") var id: String?
     @Option(name: .long, help: "Forward the newest message matching this subject keyword.") var subject: String?
     @Option(name: .long, help: "Account (name or UUID) — used for --subject lookup AND as the send-from identity.") var account: String?
-    @Option(name: .long, help: "Mailbox to scope the --subject lookup (default All; MCP B forward_email mailbox).") var mailbox: String = "All"
+    @Option(name: .long, help: "Mailbox to scope the --subject lookup (default INBOX — oracle B forward_email's default; use 'All' for a store-wide sweep).") var mailbox: String = "INBOX"
     @Option(name: .long, help: "Recipient (repeatable).") var to: [String] = []
     @Option(name: .long) var cc: [String] = []
     @Option(name: .long) var bcc: [String] = []
@@ -871,6 +955,9 @@ struct ForwardCommand: ParsableCommand {
         var forward_id: String? = nil
         /// Oracle A `forward_message` → `original_message_id`; mirrors `matched_message_id`.
         var original_message_id: String? = nil
+        /// Oracle A `forward_message` → `recipients` (server.py:1901-1908); mirrors `to`
+        /// under the alias convention (extra14).
+        var recipients: [String] = []
     }
 
     func run() throws {
@@ -914,8 +1001,9 @@ struct ForwardCommand: ParsableCommand {
             } else if let subject {
                 var f = EnvelopeIndex.MessageFilters()
                 if let account { f.accountUUID = try ctx.requireAccountUUID(account) }
+                try requireMailboxKnown(ctx: ctx, name: mailbox, accountUUID: f.accountUUID)
                 f.mailboxName = mailbox; f.subjectContains = subject; f.limit = 1
-                guard let row = try ctx.index.queryMessages(f).first else { throw AppleError.notFound("no message matching subject '\(subject)' in mailbox '\(mailbox)'.") }
+                guard let row = try ctx.index.queryMessages(f).first else { throw AppleError.notFound("no message matching subject '\(subject)' in mailbox '\(mailbox)' (pass --mailbox All to sweep the whole store).") }
                 target = ctx.decodeSummary(row)
             } else {
                 throw AppleError.validation("provide a message id argument or --subject.")
@@ -925,6 +1013,7 @@ struct ForwardCommand: ParsableCommand {
             var executed = false
             var note: String?
             var forwardID: String?
+            var verifiedRecipients = toL
             if willExecute {
                 // Parity: use Mail's NATIVE `forward` verb. A re-composed plain-text quote drops
                 // the original's ATTACHMENTS and flattens its rich formatting — both oracles
@@ -950,9 +1039,12 @@ struct ForwardCommand: ParsableCommand {
                                                       sender: senderAddress,
                                                       selfAllowlist: outboundAllowlist(sandboxActive: sandboxActive),
                                                       mailboxHint: target.mailbox) {
-                case .sent(let newID, _):
+                case .sent(let newID, let actual):
                     executed = true
                     forwardID = newID
+                    // Echo what MAIL actually addressed when it reported it (review L7 —
+                    // reply already does this; the request-echo stays the preview shape).
+                    if !actual.isEmpty { verifiedRecipients = actual }
                     note = "forwarded via Mail's native forward verb — the original's attachments and formatting are carried"
                 case .notFound:
                     throw AppleError.notFound("message '\(imid)' is not reachable in Mail.app to forward.")
@@ -960,12 +1052,134 @@ struct ForwardCommand: ParsableCommand {
                     throw AppleError.upstream("Mail reported the forward was NOT sent (send returned false — account offline or the server refused). Draft id \(newID) may still be in Mail.")
                 case .refused(let bad, let discarded):
                     throw AppleError.mailSafety(refusalMessage(kind: "forward", bad: bad, discarded: discarded, sandboxActive: sandboxActive))
+                case .composeFailed(let reason, let discarded):
+                    throw AppleError.upstream(composeFailureMessage(kind: "forward", reason: reason, discarded: discarded))
+                case .drafted, .opened:
+                    // nativeForwardScript pins theMode to "send" in its preamble, so the script
+                    // can never emit drafted/opened. Total-switch arm, fail-loud if it ever does.
+                    throw AppleError.upstream("Mail returned an unexpected non-send outcome for a forward; nothing was sent.")
                 }
             }
             try Output.emit(tool: "mail", data: Preview(action: "forward", matched_message_id: target.id, sender_address: senderAddress,
                 to: toL, cc: ccL, bcc: bccL, dry_run: !willExecute, executed: executed, note: note,
-                forward_id: forwardID, original_message_id: target.id), sandboxActive: sandboxActive)
+                forward_id: forwardID, original_message_id: target.id,
+                recipients: verifiedRecipients), sandboxActive: sandboxActive)
         }
+    }
+}
+
+
+/// gap19/gap20 pure cores (pinned): oracle B's rich-draft helpers, ported verbatim from
+/// tools/compose.py.
+enum RichDraft {
+    /// `_safe_eml_name` (compose.py:29-33): non-[A-Za-z0-9._-] runs → "-", strip "-._" from
+    /// both ends, fallback "rich-email-draft", cap 80. The regex output is pure ASCII, so the
+    /// 80 cap is code-point == byte exact like Python's slice.
+    static func safeEmlName(_ subject: String) -> String {
+        let base = subject.isEmpty ? "rich-email-draft" : subject
+        var cleaned = ""
+        var pendingDash = false
+        for ch in base.trimmingCharacters(in: .whitespacesAndNewlines) {
+            if ch.isASCII && (ch.isLetter || ch.isNumber || ch == "." || ch == "_" || ch == "-") {
+                if pendingDash { cleaned.append("-"); pendingDash = false }
+                cleaned.append(ch)
+            } else {
+                pendingDash = true
+            }
+        }
+        // Python's re.sub replaces LEADING runs with "-" too; the strip("-._") then removes
+        // them — replicate by stripping the edge set after the fact.
+        var trimmed = cleaned
+        while let f = trimmed.first, f == "-" || f == "." || f == "_" { trimmed.removeFirst() }
+        while let l = trimmed.last, l == "-" || l == "." || l == "_" { trimmed.removeLast() }
+        if trimmed.isEmpty { trimmed = "rich-email-draft" }
+        return String(trimmed.prefix(80))
+    }
+
+    /// `_default_rich_draft_path` (compose.py:36-40): a DETERMINISTIC subject-named cache file,
+    /// idempotently overwritten — preview and execute name the SAME path, unlike the old
+    /// per-run temp UUID. Root is the CLI's own cache dir (the oracle writes into
+    /// `apple-mail-mcp/rich-drafts` — writing into another tool's cache would be rude;
+    /// disclosed on port-spec row 18).
+    static func defaultPath(subject: String) -> URL {
+        FileManager.default.homeDirectoryForCurrentUser
+            .appendingPathComponent("Library/Caches/apple-cli/rich-drafts")
+            .appendingPathComponent(safeEmlName(subject) + ".eml")
+    }
+
+    /// `_build_html_from_text` (compose.py:64-74), byte-identical markup. Escaping is
+    /// Python `html.escape` with its DEFAULT quote=True — measured: it escapes `"` to
+    /// `&quot;` and `'` to `&#x27;` too, so the three-entity version diverged on any body
+    /// carrying quotes. `&` first, exactly like Python.
+    static func htmlFromText(_ text: String) -> String {
+        let safe = text
+            .replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+            .replacingOccurrences(of: "'", with: "&#x27;")
+        return "<html><body style=\"font-family: -apple-system, BlinkMacSystemFont, "
+            + "'Segoe UI', Arial, sans-serif; line-height: 1.45; color: #111111;\">"
+            + "<pre style=\"white-space: pre-wrap; font: inherit; margin: 0;\">"
+            + safe
+            + "</pre></body></html>"
+    }
+
+    /// `_prepare_rich_bodies` (compose.py:77-101): fill placeholders, report what is missing.
+    static func prepareBodies(subject: String, text: String?, html: String?)
+        -> (plain: String, html: String, missing: [String]) {
+        var plain = text ?? ""
+        var rich = html ?? ""
+        if plain.isEmpty && rich.isEmpty {
+            plain = "Draft outline\n\n- Add recipients\n- Add the final rich-text content\n- Review before sending"
+            return (plain, htmlFromText(plain), ["body"])
+        }
+        if !rich.isEmpty && plain.isEmpty {
+            let trimmedSubject = subject.trimmingCharacters(in: RichDraft.pythonWhitespace)
+            plain = (trimmedSubject.isEmpty ? "" : trimmedSubject + "\n\n")
+                + "This message contains rich HTML content. Open it in Mail for the rendered version."
+        }
+        if !plain.isEmpty && rich.isEmpty {
+            rich = htmlFromText(plain)
+        }
+        return (plain, rich, [])
+    }
+
+    /// Python `str.strip()`'s default whitespace (review M1, the repo's recurring
+    /// counting-unit/API-set class, 3rd occurrence): `.whitespacesAndNewlines` covers
+    /// Zs/Zl/Zp + TAB/LF/VT/FF/CR/NEL but NOT the C0 separators FS/GS/RS/US
+    /// (U+001C–U+001F), which Python's isspace includes — measured end-to-end: a
+    /// VT/FF/FS-only subject diverged from the executed oracle on missing_details.
+    static let pythonWhitespace: CharacterSet = {
+        var set = CharacterSet.whitespacesAndNewlines
+        set.insert(charactersIn: Unicode.Scalar(0x1C)!...Unicode.Scalar(0x1F)!)
+        return set
+    }()
+
+    /// gap19: the oracle's missing_details list (compose.py:180-185).
+    static func missingDetails(subject: String, to: [String], bodyMissing: [String]) -> [String] {
+        var out: [String] = []
+        if subject.trimmingCharacters(in: RichDraft.pythonWhitespace).isEmpty { out.append("subject") }
+        if to.isEmpty { out.append("to") }
+        out.append(contentsOf: bodyMissing)
+        return out
+    }
+}
+
+/// gap17/gap15 (pinned): which live path a reply takes. Exactly ONE of the three is true
+/// when willExecute; all false otherwise.
+///  * native — plain reply via Mail's native verb, ALL modes (send/draft/open);
+///  * nativeHtml — THREADED HTML via the oracle's pasteboard flow (gui-send, or an --html
+///    draft/open) — needs Accessibility, steals focus;
+///  * openHtml — the reliable no-Accessibility default for --html --mode send: a rendered
+///    .eml compose window (unthreaded, disclosed).
+enum ReplyRouting {
+    static func decide(willExecute: Bool, hasHtml: Bool, guiSend: Bool, mode: String)
+        -> (native: Bool, nativeHtml: Bool, openHtml: Bool) {
+        guard willExecute else { return (false, false, false) }
+        if !hasHtml { return (true, false, false) }
+        if guiSend || mode != "send" { return (false, true, false) }
+        return (false, false, true)
     }
 }
 
@@ -982,8 +1196,20 @@ struct DraftRichCommand: ParsableCommand {
     @Option(name: .long, help: "Output .eml path (default: temp dir).") var out: String?
     @Flag(name: .customLong("open"), help: "Open the generated .eml in a Mail compose window for review (no send).") var openInMail = false
     @Flag(name: .long, help: "Open the .eml and save it to Drafts (no send; sandboxed runs restrict recipients to the self-only allowlist).") var saveAsDraft = false
+    @Flag(name: .long, help: "Refuse to overwrite an existing .eml at the destination (the deterministic subject-named default overwrites, and DIFFERENT subjects can sanitize to the SAME filename).") var noClobber = false
 
-    struct Result: Encodable { let eml_path: String; let subject: String; let to: [String]; let has_html: Bool; let sender_address: String?; let opened: Bool; let note: String?; let dry_run: Bool }
+    struct Result: Encodable {
+        let eml_path: String; let subject: String; let to: [String]; let has_html: Bool
+        let sender_address: String?; let opened: Bool; let note: String?; let dry_run: Bool
+        /// gap19 (oracle create_rich_email_draft echoes): the account identity, CC/BCC, the
+        /// oracle's missing_details list ("subject"/"to"/"body"), and whether the compose
+        /// window was auto-filed to Drafts (extra19; nil when --save-as-draft wasn't asked).
+        var account: String? = nil
+        var cc: [String] = []
+        var bcc: [String] = []
+        var missing_details: [String] = []
+        var saved: Bool? = nil
+    }
 
     func run() throws {
         try runGuarded(tool: "mail") {
@@ -995,6 +1221,11 @@ struct DraftRichCommand: ParsableCommand {
             let willExecute = try global.willExecute(defaultDryRun: false)
 
             let toL = try splitRecipients(to)
+            let ccL = try splitRecipients(cc), bccL = try splitRecipients(bcc)
+            // gap19: the oracle fills placeholder bodies (Draft outline / HTML wrapper /
+            // rich-content fallback) and reports what is missing — ported pure + pinned.
+            let bodies = RichDraft.prepareBodies(subject: subject, text: textBody, html: html)
+            let missing = RichDraft.missingDetails(subject: subject, to: toL, bodyMissing: bodies.missing)
             // Opening the .eml in Mail (either flag) is a live compose-window action, so gate it
             // consistently with `send --mode open`: guardOutbound (self-only allowlist when the
             // sandbox is active; write-model v2 matches the create_rich_email_draft oracle, which
@@ -1003,51 +1234,109 @@ struct DraftRichCommand: ParsableCommand {
             // would. The DEFAULT (neither flag) just writes the .eml headlessly and is ungated.
             var senderAddress: String?
             if openInMail || saveAsDraft {
-                try guardOutbound(recipients: toL + (try splitRecipients(cc)) + (try splitRecipients(bcc)),
+                try guardOutbound(recipients: toL + ccL + bccL,
                                   sandboxActive: sandboxActive,
                                   applyRecipientCap: false)   // oracle-B-only surface: no cap
                 guard !subject.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
                     throw AppleError.validation("--subject is required to open a draft-rich compose window.")
                 }
-                // Resolve --account to a real From ADDRESS on the live-open path (mirrors
-                // create_rich_email_draft's _resolve_sender_address): a raw account NAME in `From:`
-                // is malformed and Mail ignores it. Headless default keeps the raw fallback so it
-                // never touches Mail (and never launches it).
+                // On the live-open path an unresolvable account stays FAIL-LOUD (deliberate,
+                // stricter than the oracle, which silently omits From).
                 if let account {
                     guard let addr = AccountDirectory().sendAddress(for: account) else {
                         throw AppleError.notFound("account '\(account)' not found or has no send address.")
                     }
                     senderAddress = addr
                 }
+            } else if let account, willExecute {
+                // extra18: the oracle resolves the sender UNCONDITIONALLY and OMITS From when
+                // resolution fails (compose.py:186, :191-192). The headless default used
+                // to write the raw account NAME into `From:` — a malformed header Mail
+                // ignores. Resolution failure here (Mail unavailable, unknown account) omits
+                // the header, byte-what the oracle writes. Gated on willExecute (review):
+                // AccountDirectory drives Mail via AppleScript, and a dry-run that LAUNCHES
+                // Mail is not a preview — sender_address stays nil in preview, disclosed.
+                senderAddress = AccountDirectory().sendAddress(for: account)
             }
             // emitBcc: a draft-rich .eml is only opened / written to disk, never wire-sent, so
             // carrying --bcc into it is safe and required for create_rich_email_draft parity.
-            let eml = try EmlBuilder(from: senderAddress ?? account, to: toL, cc: try splitRecipients(cc), bcc: try splitRecipients(bcc),
-                                 subject: subject, textBody: textBody, htmlBody: html, emitBcc: true).build()
-            let dest = try emlDestURL(out: out, materialise: willExecute,
+            // From: the RESOLVED address or nothing (extra18) — never the raw account name.
+            let eml = try EmlBuilder(from: senderAddress, to: toL, cc: ccL, bcc: bccL,
+                                 subject: subject, textBody: bodies.plain, htmlBody: bodies.html,
+                                 emitBcc: true).build()
+            // gap20: the default destination is the oracle's DETERMINISTIC subject-named cache
+            // file, idempotently overwritten — so the dry-run preview's eml_path IS the path a
+            // subsequent --execute writes (the old per-run temp UUID broke that identity).
+            let dest: URL
+            if let out {
+                dest = try emlDestURL(out: out, materialise: willExecute,
                                       action: "write the rich draft .eml to")
+            } else {
+                dest = RichDraft.defaultPath(subject: subject)
+            }
+            if noClobber, FileManager.default.fileExists(atPath: dest.path) {
+                throw AppleError.mailSafety("refusing to overwrite existing file '\(dest.path)' (--no-clobber).")
+            }
             if willExecute {
-                try eml.write(to: dest, atomically: true, encoding: .utf8)
+                // extra17: the oracle mkdir -p's the parent immediately before writing
+                // (compose.py:208) — without it a fresh cache dir (or an --out into a missing
+                // directory) leaked a raw NSError as 'unknown'/70. The DEFAULT path's
+                // directories go through OwnedTempDir.make (0700 + lstat symlink/owner
+                // validation — a pre-planted symlink at the cache dir must not redirect
+                // drafts, review); a user-chosen --out parent keeps the plain mkdir since
+                // the operator owns that layout.
+                do {
+                    if out == nil {
+                        // Same literal root RichDraft.defaultPath names, so the validated
+                        // dirs and the write target cannot drift apart.
+                        let caches = FileManager.default.homeDirectoryForCurrentUser
+                            .appendingPathComponent("Library/Caches")
+                        let appDir = try OwnedTempDir.make("apple-cli", base: caches)
+                        _ = try OwnedTempDir.make("rich-drafts", base: appDir)
+                    } else {
+                        try FileManager.default.createDirectory(at: dest.deletingLastPathComponent(),
+                                                                withIntermediateDirectories: true)
+                    }
+                    try eml.write(to: dest, atomically: true, encoding: .utf8)
+                } catch let e as AppleError {
+                    throw e
+                } catch {
+                    throw AppleError.upstream("could not write the rich draft .eml to '\(dest.path)': \(error.localizedDescription)")
+                }
+                // Default-path files are 0600 (they carry Bcc + full bodies); a user-chosen
+                // --out is operator-facing OUTPUT whose mode we do not touch (pinned contract
+                // in emlDestURL's doc — review caught the unconditional chmod contradicting it).
                 if out == nil { OwnedTempDir.restrictToOwner(dest) }
             }
-            // Optional review window (parity with create_rich_email_draft open_in_mail). Mail cannot
-            // auto-save an HTML draft (a LaunchServices-opened .eml window doesn't surface in
-            // `outgoing messages`), so --save-as-draft opens the SAME review window and instructs the
-            // operator to Cmd-S — it never auto-files, so there is no `saved` claim.
+            // Optional review window (parity with create_rich_email_draft open_in_mail).
+            // extra19: --save-as-draft now ATTEMPTS the oracle's auto-file (`save` on the
+            // matching open outgoing message, 10 x 0.5s retries — compose.py:104-131) and
+            // reports `saved` honestly either way: a LaunchServices-opened .eml window often
+            // never surfaces in `outgoing messages`, in which case the oracle reports
+            // "Saved in Drafts: no" too, and the Cmd-S instruction remains the fallback.
             var opened = false
+            var saved: Bool? = nil
             var note: String?
             if willExecute && (openInMail || saveAsDraft) {
                 try MailScript().openEml(path: dest.path)
                 opened = true
-                note = saveAsDraft
-                    ? "compose window opened — press Cmd-S to file it in Drafts (Mail can't auto-save an HTML draft)."
-                    : "compose window opened for review (not sent)."
+                if saveAsDraft {
+                    let ok = MailScript().saveOpenDraft(subject: subject)
+                    saved = ok
+                    note = ok
+                        ? "compose window opened and auto-filed to Drafts (oracle save verb)."
+                        : "compose window opened — the auto-save found no matching outgoing message (Mail often doesn't register a LaunchServices-opened .eml); press Cmd-S to file it in Drafts."
+                } else {
+                    note = "compose window opened for review (not sent)."
+                }
             } else if !willExecute {
                 note = "dry-run: nothing written or opened; eml_path is the planned destination."
             }
             try Output.emit(tool: "mail", data: Result(eml_path: dest.path, subject: subject, to: toL,
                 has_html: html != nil, sender_address: senderAddress, opened: opened, note: note,
-                dry_run: !willExecute), sandboxActive: sandboxActive)
+                dry_run: !willExecute,
+                account: account, cc: ccL, bcc: bccL, missing_details: missing,
+                saved: saved), sandboxActive: sandboxActive)
         }
     }
 }

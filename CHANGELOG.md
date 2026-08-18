@@ -12,6 +12,114 @@ with the Apple MCP servers they replace.
 
 ## [Unreleased]
 
+### Mail compose/reply/forward parity (Q11 batch 5)
+
+**Fixed — CRITICAL**
+
+- Native reply/forward AppleScripts were syntactically INVALID since the shared
+  guard-tail extraction (bbc5f26, 2026-07-30): Swift multiline literals drop the
+  newline before the closing delimiter, so `""" + guardAndSendTail` merged the
+  fragment's closing `end try` and the tail's first `set` onto one line — every
+  `mail reply`/`mail forward` --execute since then failed at script compile
+  (measured via osacompile; the last live reply/forward proof predates the
+  regression). The join now inserts an explicit newline, all four compose
+  scripts are osacompile-verified, and a seam pin fails the suite if any
+  assembled script ever carries text after an `end try` again.
+
+**Changed — BREAKING**
+
+- **BREAKING:** `mail reply --subject` and `mail forward --subject` scope the
+  lookup to INBOX by default (oracle B searches only the inbox; the old
+  store-wide sweep could bind an archived/sent message to the keyword) —
+  `--mailbox All` restores the sweep (extra16).
+- **BREAKING:** `mail reply --html --gui-send` changed semantics: it now performs a
+  THREADED native reply with the fragment pasted via NSPasteboard (previously an
+  unthreaded fresh compose window via `sendHtmlViaGui` carrying our own quoted HTML).
+  Threading is preserved and the in-script re-read allowlist audit now covers the path
+  (it previously relied on the Swift-side predicted-recipient guard alone); the pasted
+  fragment no longer embeds a quoted copy of the original (Mail's native quote carries
+  it) and `--body` is not carried on this path (oracle parity, disclosed in the note).
+- **BREAKING:** `mail draft-rich` fills oracle B's placeholder bodies when
+  `--text-body`/`--html` are omitted (Draft-outline / HTML-wrapper / rich-content
+  fallback), writes to the oracle's DETERMINISTIC subject-named default path
+  (`~/Library/Caches/apple-cli/rich-drafts/<safe>.eml` — preview and execute name
+  the SAME file; previously a fresh temp-UUID path per run), and OMITS the From
+  header when the sender identity cannot be resolved instead of failing
+  (extra18; the --open path stays fail-loud). `--no-clobber` refuses an existing
+  default-path file.
+
+**Added**
+
+- `mail reply --mode send|draft|open` (gap17): oracle B's delivery modes on
+  Mail's NATIVE reply verb — threading headers, replied-to state and Mail's own
+  quoted original are preserved in every mode, and every mode passes the SAME
+  in-script self-allowlist audit before delivery. Draft mode files via the
+  MEASURED verb pair — an open compose window + `save m`, then a close WITHOUT
+  re-saving — because a saving-yes close aimed at the outgoing MESSAGE silently
+  DISCARDS it (measured live on this store; the oracle's own draft save is the
+  window-close shape). Live-verified end-to-end: the reply draft landed in
+  the account's Drafts with `drafted: true` + `reply_id`, then was deleted via the MCP
+  oracle.
+- `mail reply --html` threaded modes (gap15/extra15): with `--gui-send` or
+  `--mode draft|open`, the reply runs the ORACLE's NSPasteboard flow — native
+  reply window + Cmd-V paste of the HTML fragment, never `set content` (which
+  clobbers the HTML layer of Mail's own quote — the oracle's engineering comment
+  is explicit about this). Requires Accessibility and steals focus, like the
+  oracle. FAIL-CLOSED measured live with Accessibility denied: the composed
+  draft is discarded, nothing is sent, and the error is a typed compose failure.
+  The fragment travels by temp-file path read via NSString in-script (the oracle
+  shells `cat` with an interpolated path). Plain `--html --mode send` keeps the
+  reliable no-Accessibility `.eml` compose-window path (unthreaded, disclosed).
+- `mail forward` preview/result now carries oracle B's `recipients` echo
+  (extra14), and `mail reply`'s result gains additive `drafted` + the rich-draft
+  result gains `account`/`cc`/`bcc`/`missing_details`/`saved` fields.
+- `mail draft-rich --save-as-draft` (extra19): attempts oracle B's
+  `_save_open_message_as_draft` retry save and reports `saved` HONESTLY —
+  oracle-diffed live: BOTH sides return saved=no on this store (a
+  LaunchServices-opened .eml never registers as an outgoing message), so the
+  note tells the operator to press Cmd-S. gap19: `missing_details` reports
+  subject→to→body in the oracle's order; the safe-name/html-wrapper/body
+  helpers are pure ports pinned against python-executed goldens (incl.
+  html.escape's `&quot;`/`&#x27;` entities the first draft missed).
+- Compose failures are a TYPED outcome (`composeFailed`) with their own honest
+  message class (upstream error, never the allowlist-refusal wording — measured
+  live: an Accessibility-denied paste previously read as "recipients outside
+  the allowlist"), while the in-script guard's own sentinels ("no recipients
+  populated" / "recipients vanished before send") KEEP the refusal framing —
+  they are genuine audit trips (review-caught: a broad prefix match swallowed
+  them).
+- Review-round hardening on the pasteboard flow (all pinned): the blind Cmd-V
+  is NONCE-BOUND to the compose window this call created (subject-tagged,
+  front-window polled, refused if unbound — the same hazard sendHtmlViaGui's
+  nonce guard documents); the paste is READBACK-verified so an unlanded
+  keystroke refuses instead of sending an empty reply; the fragment read is
+  fail-closed (measured: `missing value as text` coerces without erroring —
+  an unreadable fragment now refuses rather than pasting the literal text
+  "missing value"); the clipboard is cleared unconditionally on success AND
+  error paths (the email HTML never lingers, even when the prior clipboard
+  had no string flavor — sendHtmlViaGui's twin fixed too); replies compose
+  WINDOWLESS in every mode with the reveal AFTER the allowlist audit (a
+  visible-then-refused window could leave a server auto-saved copy with a
+  non-allowlisted recipient in remote Drafts); the delivery-mode ladder fails
+  CLOSED (an unrecognized mode refuses instead of falling through to send);
+  and the paste runs BEFORE the recipient re-verify so its multi-second delays
+  cannot widen the TOCTOU window the re-verify exists to close.
+- `mail draft-rich` review fixes: `--no-clobber` implemented; `--account`
+  sender resolution gated to execute (a dry-run no longer launches Mail);
+  default-path directories go through the validated 0700/lstat primitive (a
+  pre-planted symlink cannot redirect drafts); user-chosen `--out` files keep
+  their mode (the unconditional 0600 chmod contradicted the pinned contract);
+  subject trimming uses Python `str.strip()`'s full whitespace set (VT/FF/the
+  C0 separators/NEL/LINE SEPARATOR — measured divergence vs the executed
+  oracle, the repo's recurring API-set class).
+- The bats osacompile harness now reads the script-assembly SEAM from the
+  Swift source instead of synthesizing the newline itself (the false-green
+  that let the invalid-seam regression ship), compile-checks
+  nativeReplyHtmlScript with the full helper set, and tracks the new argv
+  arity/holes; the plain reply/forward scripts carry a fail-loud stub of the
+  paste handler so the harness can statically prove every called handler
+  exists.
+
 ### Mail search/list/export parity (Q11 batch 4)
 
 **Changed — BREAKING**

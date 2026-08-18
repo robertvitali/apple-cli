@@ -114,9 +114,11 @@ require_index() {
   # Round-4 additions: the same principle on the surfaces the first hoist missed.
   APPLE_TEST_MODE=1 run "$BIN" mail mailboxes create --dry-run --account iCloud --name "Quarterly Reports" --test-mode
   [ "$status" -eq 77 ]
-  run "$BIN" mail reply 1 --body x --mode draft --dry-run
-  [ "$status" -eq 70 ]
-  echo "$output" | grep -q 'not_implemented'
+  # gap17 landed: --mode draft/open are now real delivery modes; the hoisted validation
+  # guard still refuses an UNKNOWN mode in preview exactly as --execute would.
+  run "$BIN" mail reply 1 --body x --mode bogus --dry-run
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q 'mode'
   run "$BIN" mail mark --dry-run --match-sender "" --read --account iCloud
   [ "$status" -eq 64 ]
   echo "$output" | grep -q 'match-sender'
@@ -1010,12 +1012,13 @@ require_index() {
   [ "$(stat -f '%Lp' "$OUT")" != "600" ]
 }
 
-@test "mail draft-rich with no --out writes 0600 into the owned 0700 directory" {
-  # The POSITIVE counterpart to the --out test above, and the only place the real temp path is
-  # exercised end to end. Without it, deleting every `restrictToOwner` call left the suite green:
-  # the --out test only asserts a file is NOT 600, which stays true when nothing is chmodded at all.
-  # (`$TMPDIR` cannot be redirected to sandbox this: `FileManager.temporaryDirectory` reads
-  # `confstr(_CS_DARWIN_USER_TEMP_DIR)` and ignores the environment variable — verified.)
+@test "mail draft-rich with no --out writes 0600 into the validated 0700 cache dirs" {
+  # The POSITIVE counterpart to the --out test above. Without it, deleting every
+  # `restrictToOwner` call left the suite green: the --out test only asserts a file is NOT
+  # 600, which stays true when nothing is chmodded at all. gap20 moved the default from the
+  # apple-cli-eml temp dir to the DETERMINISTIC rich-drafts cache path, created through the
+  # OwnedTempDir.make 0700/lstat primitive (review: a pre-planted symlink must not redirect
+  # drafts) — assert the new contract end to end.
   run "$BIN" mail draft-rich --execute --to me@self.test --subject "apple-cli-test dr" --html "<b>x</b>"
   [ "$status" -eq 0 ]
   EML="$(echo "$output" | sed -n 's/.*"eml_path" : "\(.*\)".*/\1/p')"
@@ -1023,8 +1026,10 @@ require_index() {
   [ -f "$EML" ]
   [ "$(stat -f '%Lp' "$EML")" = "600" ]
   DIR="$(dirname "$EML")"
-  [ "$(basename "$DIR")" = "apple-cli-eml" ]
+  [ "$(basename "$DIR")" = "rich-drafts" ]
   [ "$(stat -f '%Lp' "$DIR")" = "700" ]
+  [ "$(basename "$(dirname "$DIR")")" = "apple-cli" ]
+  [ "$(stat -f '%Lp' "$(dirname "$DIR")")" = "700" ]
   rm -f "$EML"                      # ours, created by this test — remove only this file
 }
 
@@ -2313,4 +2318,109 @@ for m in d:
   echo "$output" | python3 -c "
 import json,sys;d=json.load(sys.stdin)['data']
 assert d['files'] == [], d['files']"
+}
+
+# ---- Q11-C batch 5: reply modes + rich-draft oracle echoes (gap17/19/20, extra14/16) ----
+
+# gap17: a dry-run previews --mode draft/open honestly (mode echoed, nothing executed).
+@test "mail reply --mode draft --dry-run previews the mode without executing (gap17)" {
+  require_index
+  id=$("$BIN" mail search --mailbox INBOX --limit 1 --no-content | python3 -c "
+import json,sys;m=json.load(sys.stdin)['data']['messages'];print(m[0]['id'] if m else '')")
+  [ -n "$id" ] || skip "no INBOX message to target"
+  run "$BIN" mail reply "$id" --body "apple-cli-test preview" --mode draft --dry-run
+  [ "$status" -eq 0 ]
+  echo "$output" | python3 -c "
+import json,sys;d=json.load(sys.stdin)['data']
+assert d['mode'] == 'draft', d['mode']
+assert d['dry_run'] is True and d['executed'] is False and d['opened'] is False
+assert d['drafted'] is False"
+  run "$BIN" mail reply "$id" --body "apple-cli-test preview" --mode open --dry-run
+  [ "$status" -eq 0 ]
+  echo "$output" | python3 -c "
+import json,sys;d=json.load(sys.stdin)['data']
+assert d['mode'] == 'open' and d['executed'] is False"
+}
+
+# extra16 (BREAKING): the reply --subject lookup scopes to INBOX by default, like oracle B.
+@test "mail reply --mailbox subject-scope defaults to INBOX (extra16)" {
+  run "$BIN" mail reply --help
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q -- '--mailbox'
+  echo "$output" | grep -qi 'default INBOX'
+  echo "$output" | grep -q -- '--mode'
+}
+
+# extra16 BEHAVIOR pin (review M5: the help-text grep alone would stay green if the lookup
+# reverted to the old hardwired "All"): a subject that lives ONLY outside INBOX must be
+# not_found under the default scope and resolve under --mailbox All.
+@test "mail reply --subject default scope excludes non-INBOX messages (extra16 behavior)" {
+  require_index
+  probe=$("$BIN" mail search --mailbox "Sent Messages" --limit 25 --no-content | python3 -c "
+import json,sys,subprocess
+bin=sys.argv[1]
+msgs=json.load(sys.stdin)['data']['messages']
+for m in msgs:
+    s=m['subject'].strip()
+    if len(s) < 8 or s.lower().startswith('re:'): continue
+    r=subprocess.run([bin,'mail','search','--mailbox','INBOX','--subject',s,'--limit','1','--no-content'],
+                     capture_output=True,text=True)
+    try: hits=json.loads(r.stdout)['data']['messages']
+    except Exception: continue
+    if not hits:
+        print(s); break" "$BIN")
+  [ -n "$probe" ] || skip "no Sent-only subject found to probe with"
+  run "$BIN" mail reply --dry-run --subject "$probe" --body x
+  [ "$status" -eq 65 ]
+  echo "$output" | grep -q 'mailbox'
+  run "$BIN" mail reply --dry-run --subject "$probe" --mailbox All --body x
+  [ "$status" -eq 0 ]
+}
+
+# extra14: the forward preview carries oracle B's `recipients` echo (== the --to list).
+@test "mail forward --dry-run echoes recipients (extra14)" {
+  require_index
+  id=$("$BIN" mail search --mailbox INBOX --limit 1 --no-content | python3 -c "
+import json,sys;m=json.load(sys.stdin)['data']['messages'];print(m[0]['id'] if m else '')")
+  [ -n "$id" ] || skip "no INBOX message to target"
+  APPLE_TEST_MODE=1 APPLE_TEST_RECIPIENTS="me@self.test" \
+    run "$BIN" mail forward "$id" --to me@self.test --dry-run --test-mode
+  [ "$status" -eq 0 ]
+  echo "$output" | python3 -c "
+import json,sys;d=json.load(sys.stdin)['data']
+assert d['recipients'] == ['me@self.test'], d"
+}
+
+# gap19: with nothing supplied, the preview reports the oracle's missing_details in the
+# oracle's order (subject -> to -> body) and fills placeholder bodies.
+@test "mail draft-rich --dry-run reports oracle missing_details (gap19)" {
+  run "$BIN" mail draft-rich --dry-run
+  [ "$status" -eq 0 ]
+  echo "$output" | python3 -c "
+import json,sys;d=json.load(sys.stdin)['data']
+assert d['missing_details'] == ['subject', 'to', 'body'], d['missing_details']
+assert d['dry_run'] is True"
+}
+
+# gap20: the default destination is DETERMINISTIC and subject-named — preview and execute
+# name the SAME path (the old per-run temp UUID broke preview/execute identity).
+@test "mail draft-rich default eml_path is deterministic and subject-named (gap20)" {
+  a=$("$BIN" mail draft-rich --dry-run --subject "apple-cli-test det" --to me@self.test --html "<b>x</b>" | python3 -c "
+import json,sys;print(json.load(sys.stdin)['data']['eml_path'])")
+  b=$("$BIN" mail draft-rich --dry-run --subject "apple-cli-test det" --to me@self.test --html "<b>x</b>" | python3 -c "
+import json,sys;print(json.load(sys.stdin)['data']['eml_path'])")
+  [ "$a" = "$b" ]
+  echo "$a" | grep -q 'rich-drafts'
+  echo "$a" | grep -q 'apple-cli-test-det.eml'
+}
+
+# --no-clobber refuses an existing destination (the deterministic default overwrites, and
+# DIFFERENT subjects can sanitize to the SAME filename — review-added guard).
+@test "mail draft-rich --no-clobber refuses an existing destination (exit 77)" {
+  OUT="$BATS_TEST_TMPDIR/apple-cli-test-clobber.eml"
+  run "$BIN" mail draft-rich --execute --to me@self.test --subject "apple-cli-test clobber" --html "<b>x</b>" --out "$OUT"
+  [ "$status" -eq 0 ]
+  run "$BIN" mail draft-rich --execute --to me@self.test --subject "apple-cli-test clobber" --html "<b>x</b>" --out "$OUT" --no-clobber
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q 'no-clobber'
 }

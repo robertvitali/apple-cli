@@ -465,6 +465,10 @@ struct NativeComposeOutcomeTests {
         #expect(MailScript.parseNativeCompose("refused\(Self.US)boss@corp.test\(Self.US)0")
                 == .refused(nonSelfRecipients: "boss@corp.test", discarded: false))
         // A refusal with NO discard field is read pessimistically as not-discarded.
+        #expect(MailScript.parseNativeCompose("setupfail\(Self.US)HTML paste failed: x\(Self.US)1")
+                == .composeFailed(reason: "HTML paste failed: x", discarded: true))
+        #expect(MailScript.parseNativeCompose("createfail\(Self.US)boom")
+                == .composeFailed(reason: "Mail could not create the message: boom", discarded: true))
         #expect(MailScript.parseNativeCompose("refused\(Self.US)boss@corp.test")
                 == .refused(nonSelfRecipients: "boss@corp.test", discarded: false))
         // ...and the operator-facing message says so, loudly — in both modes.
@@ -480,6 +484,28 @@ struct NativeComposeOutcomeTests {
         #expect(!unsand.contains("allowlist"))
         #expect(refusalMessage(kind: "reply", bad: "<empty-address>", discarded: true, sandboxActive: false)
                     .contains("empty/blank recipient address"))
+        // createfail/setupfail are a TYPED outcome with their own message: a compose
+        // failure is never framed as an allowlist miss (measured live: an
+        // Accessibility-denied HTML paste rendered as an allowlist refusal before the
+        // typed case existed).
+        let compose = composeFailureMessage(kind: "reply", reason: "HTML paste failed: x", discarded: true)
+        #expect(compose.contains("composing the reply in Mail failed"))
+        #expect(!compose.contains("allowlist"))
+        #expect(compose.contains("was discarded"))
+        #expect(composeFailureMessage(kind: "reply", reason: "x", discarded: false)
+                    .contains("could NOT be discarded"))
+        // ...but the in-script guard's OWN parenthesized sentinels are genuine audit trips
+        // and MUST keep the refusal wording (review: a broad `(`-prefix branch swallowed
+        // "(recipients vanished before send)" — a TOCTOU signal — as a compose failure).
+        let vanished = refusalMessage(kind: "reply", bad: "(recipients vanished before send)",
+                                      discarded: true, sandboxActive: true)
+        #expect(vanished.contains("allowlist"))
+        #expect(!vanished.contains("composing"))
+        // The parser's unrecognized-output sentinel says what happened, honestly.
+        let unrec = refusalMessage(kind: "reply", bad: "(unrecognized script result 'zz')",
+                                   discarded: false, sandboxActive: true)
+        #expect(unrec.contains("unrecognized script result"))
+        #expect(!unrec.contains("allowlist"))
     }
 
     /// The unreadable-recipient-list sentinel the script seeds the readback with — an AppleScript
@@ -497,23 +523,25 @@ struct NativeComposeOutcomeTests {
     }
 
     /// A throw from the native verb itself: no draft was ever created, so there is nothing to
-    /// discard — but it is still a refusal, never a success.
+    /// discard — and it is the TYPED compose-failure outcome now (review: encoding intent in
+    /// string punctuation let a broad prefix match swallow genuine guard sentinels), never a
+    /// success.
     @Test func createFailIsARefusalWithNothingToDiscard() {
         let o = MailScript.parseNativeCompose("createfail\(Self.US)Mail got an error: -1728")
-        #expect(o == .refused(nonSelfRecipients: "(Mail could not create the message: Mail got an error: -1728)",
-                              discarded: true))
+        #expect(o == .composeFailed(reason: "Mail could not create the message: Mail got an error: -1728",
+                                    discarded: true))
     }
 
     /// A throw AFTER the draft exists is the dangerous shape: the draft may be addressed to a
     /// real third party. The discard result must be reported, not assumed.
     @Test func setupFailReportsWhetherTheDraftSurvived() {
         #expect(MailScript.parseNativeCompose("setupfail\(Self.US)bad sender\(Self.US)1")
-                == .refused(nonSelfRecipients: "(composing the message failed: bad sender)", discarded: true))
+                == .composeFailed(reason: "bad sender", discarded: true))
         #expect(MailScript.parseNativeCompose("setupfail\(Self.US)bad sender\(Self.US)0")
-                == .refused(nonSelfRecipients: "(composing the message failed: bad sender)", discarded: false))
+                == .composeFailed(reason: "bad sender", discarded: false))
         // No flag at all → pessimistic.
         #expect(MailScript.parseNativeCompose("setupfail\(Self.US)x")
-                == .refused(nonSelfRecipients: "(composing the message failed: x)", discarded: false))
+                == .composeFailed(reason: "x", discarded: false))
     }
 
     /// FAIL-CLOSED: anything unrecognized is a refusal, and never claims the draft was cleaned up.

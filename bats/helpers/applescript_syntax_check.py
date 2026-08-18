@@ -29,11 +29,27 @@ def literals(src: str) -> dict[str, str]:
 
 
 def concat_form(src: str, name: str, tail: str) -> str | None:
-    """Scripts built as head + guardAndSendTail + foot across three literals."""
+    """Scripts built as head + guardAndSendTail + foot across three literals.
+
+    THE JOIN IS READ FROM THE SOURCE, NEVER ASSUMED. Swift multiline literals carry NO
+    trailing newline before the closing delimiter, so a bare `+ guardAndSendTail` join merges
+    the head's last statement and the tail's first statement onto ONE line — invalid
+    AppleScript.
+    The previous version of this helper inserted the newline itself, which is exactly why a
+    compile-breaking seam shipped with a green osacompile pin (review B2: the harness
+    compiled a script Swift never emitted). Now the seam newline appears here if and ONLY if
+    the Swift expression spells it (`+ "\\n" +`) — a reverted join assembles merged, fails
+    osacompile, and turns this harness red.
+    """
     m = re.search(
-        r'static let %s\s*=\s*"""\n(.*?)\n\s*"""\s*\+\s*guardAndSendTail\s*\+\s*"""\n(.*?)\n\s*"""'
+        r'static let %s\s*=\s*"""\n(.*?)\n\s*"""(\s*\+\s*"\\n")?\s*\+\s*guardAndSendTail\s*\+\s*"""\n(.*?)\n\s*"""'
         % re.escape(name), src, re.S)
-    return None if not m else m.group(1) + "\n" + tail + "\n" + m.group(2)
+    if not m:
+        return None
+    joiner = "\n" if m.group(2) else ""
+    # The foot's captured body keeps its leading blank-line newline (faithful to Swift's
+    # content), so no second joiner is synthesized either.
+    return m.group(1) + joiner + tail + m.group(3)
 
 
 def check(label: str, body: str) -> bool:
@@ -86,16 +102,21 @@ def check_argv_arity(src: str, lit: dict) -> bool:
     # (script literal, wrapper func name, TOTAL argv count the Swift wrapper passes).
     # The locator-based scripts pass [candidate, account] first and then their extras, so their
     # total is 2 + extras; scripts that build their own argv list (sendHtmlGui) state it whole.
+    # (name, wrapper, total argv, slots deliberately never read in-script)
     expectations = [
-        ("nativeReplyScript", "nativeReply", 2 + 8),    # +body, replyAll, sender, allow, att, cc, bcc, mbxHint
-        ("nativeForwardScript", "nativeForward", 2 + 8),  # +body, to, cc, bcc, sender, allow, att, mbxHint
+        ("nativeReplyScript", "nativeReply", 2 + 9, set()),    # +body, replyAll, sender, allow, att, cc, bcc, mbxHint, mode (gap17)
+        # Slot 3 (body) is passed as "" and never read — the pasted HTML fragment IS the
+        # body on this path; the slot is kept so both reply wrappers share one extra-args
+        # ordering (a hole ANYWHERE ELSE is still a silent off-by-one).
+        ("nativeReplyHtmlScript", "nativeReplyHtml", 2 + 10, {3}),  # …, mode, htmlFragmentPath (gap15)
+        ("nativeForwardScript", "nativeForward", 2 + 8, set()),  # +body, to, cc, bcc, sender, allow, att, mbxHint
         # No locator prefix: htmlPath, subject, to, cc, bcc, att, sender, nonce. The nonce slot
         # is the gui-send window-binding marker — an arity drift here would make the script read
         # `item 8 of argv` off an empty list and fail only against live Mail, on the one path
         # that cannot be exercised autonomously (Accessibility + focus theft).
-        ("sendHtmlGuiScript", "sendHtmlViaGui", 8),
+        ("sendHtmlGuiScript", "sendHtmlViaGui", 8, set()),
     ]
-    for name, func, want in expectations:
+    for name, func, want, allowed_holes in expectations:
         body = lit.get(name, "")
         used = [int(m) for m in re.findall(r"item (\d+) of argv", body)]
         high = max(used) if used else 0
@@ -104,7 +125,7 @@ def check_argv_arity(src: str, lit: dict) -> bool:
             ok = False
             continue
         # Every slot from 1..high must actually be read — a hole means a silent off-by-one.
-        holes = sorted(set(range(1, high + 1)) - set(used))
+        holes = sorted(set(range(1, high + 1)) - set(used) - allowed_holes)
         if holes:
             print(f"FAIL - {name}: argv slots never read: {holes}")
             ok = False
@@ -125,7 +146,10 @@ def main() -> int:
     ok = True
 
     # Native compose scripts: body + guardAndSendTail + locator + outbound helpers.
-    for name in ("nativeReplyScript", "nativeForwardScript"):
+    # nativeReplyHtmlScript is one of them — it shares the tail (review B1: it initially fell
+    # through to the bare-locator loop, failed to compile there, and reply/forward were not
+    # being compile-checked AT ALL because the seam regex no longer matched).
+    for name in ("nativeReplyScript", "nativeReplyHtmlScript", "nativeForwardScript"):
         body = concat_form(src, name, lit["guardAndSendTail"])
         if body is None:
             print(f"FAIL - {name} not found in the expected concatenated form")
@@ -151,7 +175,8 @@ def main() -> int:
     for name, body in sorted(lit.items()):
         if not name.endswith("Script"):
             continue
-        if name in ("nativeReplyScript", "nativeForwardScript", "moveScript", "gmailMoveScript"):
+        if name in ("nativeReplyScript", "nativeReplyHtmlScript", "nativeForwardScript",
+                    "moveScript", "gmailMoveScript"):
             continue
         extra = ("\n" + locator) if "my findMsg(" in body else ""
         # Scripts that dispatch an outgoing message get the shared address guard appended at
