@@ -144,7 +144,16 @@ MCP-side extras to **preserve** (not in any CLI): `include_niche` field expansio
 ## 6. PORT SPEC (BUILD)
 
 ### 6.1 Command surface = MCP parity + curated extras
-Namespaced subcommands, each with `--json` (default machine) / `--text` / `--csv` and honoring the error envelope + test-mode gating:
+
+**DESIGN-ERA SKETCH — the as-built surface diverges (Q12 [2], measured 2026-08-18):**
+`--csv` was never built (output is `--json` default / `--text` opt-out only); `search`
+has `--deep` but no `--all`; no delete carries `--force` (the destructive gate is the
+oracle-mirrored `APPLE_TEST_MODE` requirement, not a flag); `containers` has no `list`
+subcommand (bare `contacts containers`); and there is no `mcp serve` (the dual-frontend
+idea below is aspirational). These are examples, NOT an exhaustive divergence list — the
+block is the original plan and `--help` on the built binary is the authoritative surface.
+
+Namespaced subcommands, each with `--json` (default machine) / `--text` and honoring the error envelope + test-mode gating:
 
 ```
 contacts auth                                   # → check_authorization

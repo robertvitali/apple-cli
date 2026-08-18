@@ -381,7 +381,12 @@ public enum ReadMapping {
             title: loc.title ?? "Location",
             latitude: finite(loc.geoLocation?.coordinate.latitude),
             longitude: finite(loc.geoLocation?.coordinate.longitude),
-            radius: finiteOrZero(loc.radius)
+            // Q12 [14]: the oracle OMITS radius when <= 0 (`radius > 0 ? radius : nil`,
+            // EventKitCLI.swift:169) — a 0 here was an extra value where the oracle emits
+            // key-absence. The extra `isFinite` conjunct is a SUPERSET of the oracle's bare
+            // `> 0`: an infinite radius (`inf > 0` is true) would make the oracle emit a
+            // value JSONEncoder rejects by default; we omit the key instead (review L3).
+            radius: (loc.radius.isFinite && loc.radius > 0) ? loc.radius : nil
         )
     }
 
@@ -392,7 +397,7 @@ public enum ReadMapping {
         if let lat = m.latitude, let lon = m.longitude {
             loc.geoLocation = CLLocation(latitude: lat, longitude: lon)
         }
-        loc.radius = m.radius
+        loc.radius = m.radius ?? 0
         return loc
     }
 
@@ -586,4 +591,3 @@ func finite(_ d: Double?) -> Double? {
     return d
 }
 
-func finiteOrZero(_ d: Double) -> Double { d.isFinite ? d : 0 }

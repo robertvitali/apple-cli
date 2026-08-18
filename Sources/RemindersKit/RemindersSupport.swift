@@ -549,6 +549,15 @@ func emitRemindersWrite<T: Encodable>(_ data: T, sandboxActive: Bool) throws {
     try Output.emit(tool: "reminders", data: data, sandboxActive: sandboxActive)
 }
 
+/// Execute-path emit (Q12 [4]-class): stamps `dry_run: false` flat via AppleKit.ExecutedWrite.
+/// The create/update paths re-emit READ DTOs (Reminder / ReminderList / SubtasksData), which
+/// must not grow a permanent wire field just for the execute rule — the wrapper adds the key
+/// only where the rule applies. Previews self-carry dry_run:true; the delete DTOs already
+/// declare `dry_run = false`, so both keep the plain emit.
+func emitRemindersExecutedWrite<T: Encodable>(_ data: T, sandboxActive: Bool) throws {
+    try emitRemindersWrite(ExecutedWrite(data), sandboxActive: sandboxActive)
+}
+
 public enum ReminderWriteGuard {
     /// The resolved write posture for one reminders command. Bound ONCE at the top of every write
     /// `run()` and threaded from there — never re-derived mid-command.

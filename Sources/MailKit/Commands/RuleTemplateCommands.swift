@@ -532,7 +532,8 @@ struct TemplatesSave: ParsableCommand {
         try runGuarded(tool: "mail") {
             // Write-model v2 preamble. This command was the spec's named bucket-2 defect: it had
             // NO willExecute branch and wrote despite --dry-run. It now previews faithfully; the
-            // execute-path envelope keeps its original shape (the template object) unchanged.
+            // execute-path envelope is the template object plus the v2 `dry_run: false` stamp
+            // (Q12 — the one Mail write that omitted it).
             try TestMode.validateWriteEnvironment()
             let sandboxActive = try TestMode.sandboxActive(flag: global.testMode)
             let willExecute = try global.willExecute(defaultDryRun: false)
@@ -547,7 +548,10 @@ struct TemplatesSave: ParsableCommand {
                 return
             }
             let tpl = try TemplateStore().save(name: name, body: body, subject: subject)
-            if global.json { try Output.emit(tool: "mail", data: tpl, sandboxActive: sandboxActive) }
+            // Q12: the execute envelope stamps `dry_run: false` (additive) — the template
+            // object's own fields are unchanged; "original shape" no longer trumps the v2
+            // execute-envelope rule the other 20 Mail writes follow.
+            if global.json { try Output.emit(tool: "mail", data: ExecutedWrite(tpl), sandboxActive: sandboxActive) }
             else { print("saved template '\(tpl.name)'") }
         }
     }

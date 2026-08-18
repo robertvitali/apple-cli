@@ -97,7 +97,7 @@ struct BatchDeleteCmd: ParsableCommand {
         try runGuarded(tool: notesTool) {
             guard !ids.isEmpty else { throw AppleError.validation("No note ids provided (--ids).") }
             guard ids.count <= maxBatchIds else { throw AppleError.validation("Too many ids (max \(maxBatchIds)).") }
-            let gate = try resolveNotesWrite(global)
+            let gate = try resolveNotesWrite(global, defaultDryRun: false)
             guard gate.willExecute else {
                 let extra = gate.sandboxActive ? sandboxTargetUncheckedDetail() : ""
                 try emitNotesWrite(DryRunPreview("batch-delete-notes", "Would delete \(ids.count) note(s) (Notes.app moves them to Recently Deleted, where they stay recoverable). Re-run without --dry-run.\(extra)"),
@@ -111,7 +111,7 @@ struct BatchDeleteCmd: ParsableCommand {
             try requireAnyBatchSuccess(results, verb: "delete")
             let succeeded = results.filter { $0.success }.count
             let failed = results.count - succeeded
-            try emitNotesWrite(BatchDeleteResult(ok: failed == 0, succeeded: succeeded, failed: failed, results: results),
+            try emitNotesExecutedWrite(BatchDeleteResult(ok: failed == 0, succeeded: succeeded, failed: failed, results: results),
                                json: global.json, sandboxActive: gate.sandboxActive,
                                human: "Batch delete: \(succeeded) succeeded, \(failed) failed.")
         }
@@ -133,7 +133,7 @@ struct BatchMoveCmd: ParsableCommand {
             guard !ids.isEmpty else { throw AppleError.validation("No note ids provided (--ids).") }
             guard ids.count <= maxBatchIds else { throw AppleError.validation("Too many ids (max \(maxBatchIds)).") }
             try requireNonEmptyFolderName(folder)
-            let gate = try resolveNotesWrite(global)
+            let gate = try resolveNotesWrite(global, defaultDryRun: false)
             // The destination folder comes from argv, so its label check is computable here and
             // runs on BOTH paths — a sandboxed preview refuses a real destination exactly as
             // execute would, without touching Notes.app.
@@ -151,7 +151,7 @@ struct BatchMoveCmd: ParsableCommand {
             try requireAnyBatchSuccess(results, verb: "move", folder: folder)
             let succeeded = results.filter { $0.success }.count
             let failed = results.count - succeeded
-            try emitNotesWrite(BatchMoveResult(ok: failed == 0, folder: folder, succeeded: succeeded, failed: failed, results: results),
+            try emitNotesExecutedWrite(BatchMoveResult(ok: failed == 0, folder: folder, succeeded: succeeded, failed: failed, results: results),
                                json: global.json, sandboxActive: gate.sandboxActive,
                                human: "Batch move to \"\(folder)\": \(succeeded) succeeded, \(failed) failed.")
         }

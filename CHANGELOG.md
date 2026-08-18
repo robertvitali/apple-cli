@@ -12,6 +12,62 @@ with the Apple MCP servers they replace.
 
 ## [Unreleased]
 
+### Cross-domain HEAD-defect closures (Q12 batch A)
+
+**Changed — BREAKING**
+
+- **BREAKING:** `mail attachments save` refuses a SYMLINK destination in PREVIEW
+  too (exit 77 where a --dry-run previously returned ok:true for a destination
+  --execute refuses) — and `--out` gained the symlink check it never had (a
+  pre-planted symlink at the exact --out path would have redirected attachment
+  bytes anywhere), with a pre-write re-check on BOTH branches as the TOCTOU
+  backstop. Success→error on a preview is an exit-code contract change, hence
+  BREAKING.
+- **BREAKING:** calendar `structured_location.radius` is OMITTED when not positive,
+  matching the oracle's key-absence (`radius > 0 ? radius : nil`,
+  EventKitCLI.swift:169 — measured); it previously emitted a spurious `0`. Field
+  retyped Double → Double? (MAJOR-class retype, pre-1.0).
+- **BREAKING:** calendar AND reminders recurrence `end_date` renders as the
+  oracle's bare LOCAL `yyyy-MM-dd` (recurrenceRuleToJSON, measured — a
+  DateFormatter with no zone = device zone; the oracle calls it from BOTH
+  EKEvent.toJSON and EKReminder.toJSON), not the envelope's ISO-UTC instant.
+  `RecurrenceRule` is the shared EventKitCore type, so `reminders tasks`
+  output changes too.
+
+**Fixed**
+
+- Write-model v2 normalization: every execute-path envelope across ALL SIX domains
+  now emits `dry_run: false` explicitly (the v2 rule Contacts and most of Mail
+  already followed). A shared `AppleKit.ExecutedWrite` wrapper stamps the key FLAT
+  into the payload's own top-level object (additive, MINOR) so read-path models
+  (calendar's Event, reminders' Reminder/ReminderList/SubtasksData) don't grow a
+  permanent field. Covered: 14 Notes emit sites, 9 Reminders (tasks/lists
+  create+update, all five subtask mutations), calendar create/update, messages
+  send, and Mail `templates save` — 23 write COMMANDS via 27 emit sites (a
+  command can emit from more than one execute branch), inventoried by a full
+  sweep and re-swept independently in review; wire shape pinned + revert-red
+  proved, per-domain source-lint pins added in the review round, and a bats pin
+  covers a real execute envelope end-to-end; live-verified on sandboxed notes
+  and reminders create/delete round-trips. SCOPE: the rule (and this sweep)
+  covers willExecute-bearing WRITE commands; read-surface exports that offer an
+  optional `--out` convenience (contacts vcard/photo export) are Q13's
+  confinement item, and `notes export` writes nothing to disk (measured — it
+  emits the content in the envelope).
+
+- `mail export --scope single_email --dry-run` no longer pays the live AppleScript
+  full-body fetch (a preview with side costs is not a preview); the preview's
+  `body_source` is therefore a PREDICTION ("full_body" whenever an RFC id
+  exists) that can differ from execute only when the live fetch fails there and
+  falls back — disclosed on port-spec row 42.
+- Stale v1 doc comment on Notes' DryRunPreview corrected (writes execute by
+  default under v2; the payload is preview-only).
+- Port-spec honesty: messages §8 parity counts date-anchored as point-in-time
+  measurements (live values had drifted); contacts §6.1 annotated as the
+  design-era sketch (no `--csv`/`--all`/`--force` were ever built — measured);
+  calendar read row now discloses the ORACLE BUG (filterAccount naming an
+  event-less source returns the FULL unfiltered window) and why the CLI
+  deliberately diverges (fail-loud not_found / honestly-empty set).
+
 ### Mail compose/reply/forward parity (Q11 batch 5)
 
 **Fixed — CRITICAL**

@@ -203,7 +203,7 @@ public struct TasksCreate: ParsableCommand {
             for rule in rules { reminder.addRecurrenceRule(try RecurrenceMapping.ekRule(from: rule)) }
 
             try store.save(reminder)
-            try emitRemindersWrite(ReminderRead.enrich(ReminderMapping.reminder(from: reminder)),
+            try emitRemindersExecutedWrite(ReminderRead.enrich(ReminderMapping.reminder(from: reminder)),
                                    sandboxActive: gate.sandboxActive)
         }
     }
@@ -398,7 +398,7 @@ public struct TasksUpdate: ParsableCommand {
             }
 
             try store.save(reminder)
-            try emitRemindersWrite(ReminderRead.enrich(ReminderMapping.reminder(from: reminder)),
+            try emitRemindersExecutedWrite(ReminderRead.enrich(ReminderMapping.reminder(from: reminder)),
                                    sandboxActive: gate.sandboxActive)
         }
     }

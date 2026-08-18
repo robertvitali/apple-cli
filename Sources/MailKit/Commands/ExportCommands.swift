@@ -164,11 +164,18 @@ struct ExportCommand: ParsableCommand {
 
             // single_email exports the FULL body (AppleScript, bounded to one message = a strict
             // superset of MCP B); entire_mailbox uses the fast indexed preview (documented).
+            // The LIVE fetch is execute-only (Q12 [12]: a preview that writes nothing still
+            // paid Mail's unindexed body scan — a preview with side costs is not a preview);
+            // the preview REPORTS the planned source, which can only differ from execute's if
+            // the live fetch fails there and falls back (disclosed here, not silently wrong).
             var bodySource = "indexed_preview"
-            if scope == "single_email", let iid = messages[0].internet_message_id,
-               let body = try? MailScript().body(internetMessageID: iid, accountName: messages[0].account) {
-                messages[0].content = body
-                bodySource = "full_body"
+            if scope == "single_email", let iid = messages[0].internet_message_id, !iid.isEmpty {
+                if !willExecute {
+                    bodySource = "full_body"
+                } else if let body = try? MailScript().body(internetMessageID: iid, accountName: messages[0].account) {
+                    messages[0].content = body
+                    bodySource = "full_body"
+                }
             }
 
             let outDir = try resolveExportDirectory(dir)

@@ -319,10 +319,10 @@ reverting the model. The sandbox itself is the operator's per-invocation rollbac
   included, `mail.bats` migrated (sandbox-refusal / env-brake / operator-gate shapes; two
   permanent marker tests pin the per-surface defaults). Bucket-2 closed for Mail: TemplatesSave,
   DraftRich, `send --out`, and `analytics dashboard` (which also gained `confineWriteDestination`
-  on `--out`) all honor `--dry-run`. ONE documented bucket-2 exception: `templates save
-  --execute` keeps its pre-v2 envelope (the bare template object, the shape `templates get`
-  shares) and so carries no explicit `dry_run: false` key — its preview's `would_save_template`
-  + `dry_run: true` is the discriminator (also noted in the CHANGELOG contract bullet).
+  on `--out`) all honor `--dry-run`. (Q12 batch A CLOSED the former `templates save`
+  exception: the execute envelope now stamps `dry_run: false` via `AppleKit.ExecutedWrite`
+  like every other domain — the bare template object plus the key — so there is NO remaining
+  execute-path envelope without the discriminator.)
   The OMC review rounds (a three-reviewer fan-out per round, each round's fixes re-verified green)
   additionally hardened the lifted-gate paths: duplicate-name `rules create` refusal, match-logic
   preservation on rule recreate, `--match any` honored in-place, the `"*"` allowlist sentinel made
@@ -578,13 +578,16 @@ reverting the model. The sandbox itself is the operator's per-invocation rollbac
   without a fetch, so those previews emit `sandbox_target_unchecked: true` instead of letting a
   silent non-refusal read as approval.
 
-  **`dry_run: false` on the execute path** was added to the write-only DTOs (`DeleteData`,
-  `ReminderDeleteData`, `ListDeleteData`) but deliberately NOT to the shared read models an
-  execute path also returns (`EventMapping.event`, `SubtasksData`) — adding it there would put a
-  write-only key into `events read` / `subtasks read` output. Preview and result remain
-  distinguishable by shape. **Known inconsistency across already-landed flips, flagged not
-  hidden:** Contacts' result DTOs carry `dry_run: false`, Notes' do not. Normalising all six is a
-  follow-up commit, not a silent in-flight change.
+  **`dry_run: false` on the execute path** was first added only to the write-only DTOs
+  (`DeleteData`, `ReminderDeleteData`, `ListDeleteData`), NOT to the shared read models an
+  execute path also returns (`EventMapping.event`, `SubtasksData`) — because adding the field
+  to those types would put a write-only key into `events read` / `subtasks read` output.
+  **RESOLVED in Q12 batch A** (the follow-up this paragraph pre-registered): the
+  `AppleKit.ExecutedWrite<T>` wrapper stamps `dry_run: false` FLAT into the payload's own
+  top-level object at the emit site, so the shared read models stay clean while all six
+  domains' execute envelopes carry the key. A source-lint
+  (`bats/helpers/execute_envelope_lint.py`) now fails the suite if any execute payload takes
+  the plain emit path, so the inconsistency cannot silently reappear.
 
   **REVIEW ROUND (three OMC lenses, 15 agents, 0 errors — a real gate, unlike the Notes round's
   session-limit collapse).** 21 findings filed, 12 adversarially verified (4 confirmed, 8 refuted),

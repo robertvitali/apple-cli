@@ -66,7 +66,7 @@ struct SaveAttachmentCmd: ParsableCommand {
             // for the post-mkdir symlink re-check.
             do { _ = try AttachmentFS.assertSafeSavePath(path) }
             catch let e as AttachmentFS.FSError { throw AppleError.validation(e.description) }
-            let gate = try resolveNotesWrite(global)
+            let gate = try resolveNotesWrite(global, defaultDryRun: false)
             guard gate.willExecute else {
                 try emitNotesWrite(DryRunPreview("save-attachment", "Would write attachment \"\(attachmentId)\" of note \"\(noteId)\" to \"\(path)\". Re-run without --dry-run."),
                                    json: global.json, sandboxActive: gate.sandboxActive,
@@ -77,7 +77,7 @@ struct SaveAttachmentCmd: ParsableCommand {
             guard r.ok, let savedPath = r.savedPath else {
                 throw AppleError.upstream("Failed to save attachment: \(r.error ?? "unknown error")")
             }
-            try emitNotesWrite(SavedAttachment(saved_path: savedPath, name: r.name, content_type: r.contentType),
+            try emitNotesExecutedWrite(SavedAttachment(saved_path: savedPath, name: r.name, content_type: r.contentType),
                                json: global.json, sandboxActive: gate.sandboxActive,
                                human: "Saved \"\(r.name ?? "attachment")\" to \(savedPath).")
         }

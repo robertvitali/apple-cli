@@ -105,7 +105,7 @@ struct CreateCmd: ParsableCommand {
             let html = try validateFormat(format)
             try validateBounds(title: title, content: content, folder: folder, account: account)
             if let folder { try requireNonEmptyFolderName(folder) }
-            let gate = try resolveNotesWrite(global)
+            let gate = try resolveNotesWrite(global, defaultDryRun: false)
             // The new note's title comes from argv, so the sandbox label check is computable
             // here and runs on BOTH paths — a sandboxed preview refuses exactly what execute
             // refuses, at the same exit code, without touching Notes.app.
@@ -127,7 +127,7 @@ struct CreateCmd: ParsableCommand {
             // note that silently is not a checklist. Built in NotesText so the wiring is testable.
             let r = NotesText.createResponse(id: id, title: title, folder: folder,
                                              account: account, content: content)
-            try emitNotesWrite(r.note, json: global.json, sandboxActive: gate.sandboxActive,
+            try emitNotesExecutedWrite(r.note, json: global.json, sandboxActive: gate.sandboxActive,
                                human: r.human)
         }
     }
@@ -151,7 +151,7 @@ struct UpdateCmd: ParsableCommand {
             let html = try validateFormat(format)
             try validateBounds(title: newTitle, content: newContent, account: account)
             let selector = try requireIdOrTitle(id: id, title: title)
-            let gate = try resolveNotesWrite(global)
+            let gate = try resolveNotesWrite(global, defaultDryRun: false)
             // A rename must land on a labeled name too, and --new-title is argv-computable, so
             // that half of the check runs on both paths.
             if let newTitle, !newTitle.isEmpty {
@@ -180,7 +180,7 @@ struct UpdateCmd: ParsableCommand {
                     current: note.title, newTitle: newTitle, html: html, newContent: newContent)
                 let r = NotesText.updateResponse(id: noteId, title: displayTitle,
                                                  shared: note.shared, newContent: newContent)
-                try emitNotesWrite(r.note, json: global.json, sandboxActive: gate.sandboxActive,
+                try emitNotesExecutedWrite(r.note, json: global.json, sandboxActive: gate.sandboxActive,
                                    human: r.human)
             case .title(let noteTitle):
                 guard let note = try script.getNoteDetails(title: noteTitle, account: account) else { throw AppleError.notFound("Note \"\(noteTitle)\" not found.") }
@@ -194,7 +194,7 @@ struct UpdateCmd: ParsableCommand {
                     current: note.title, newTitle: newTitle, html: html, newContent: newContent)
                 let r = NotesText.updateResponse(id: nil, title: finalTitle,
                                                  shared: note.shared, newContent: newContent)
-                try emitNotesWrite(r.note, json: global.json, sandboxActive: gate.sandboxActive,
+                try emitNotesExecutedWrite(r.note, json: global.json, sandboxActive: gate.sandboxActive,
                                    human: r.human)
             }
         }
@@ -243,7 +243,7 @@ struct AppendCmd: ParsableCommand {
             }
             try validateBounds(content: content, account: account)
             let selector = try requireIdOrTitle(id: id, title: title)
-            let gate = try resolveNotesWrite(global)
+            let gate = try resolveNotesWrite(global, defaultDryRun: false)
             let undisclosed = try applyArgvSelectorGuard(selector, sandboxActive: gate.sandboxActive)
             guard gate.willExecute else {
                 let extra = undisclosed ? sandboxTargetUncheckedDetail() : ""
@@ -266,7 +266,7 @@ struct AppendCmd: ParsableCommand {
                 let combined = NotesText.assembleAppend(existingHtml: current, content: content,
                                                         separator: separator, prepend: prepend, html: html)
                 try script.updateNoteById(id: noteId, newTitle: nil, newContent: combined, html: true)
-                try emitNotesWrite(UpdatedNote(ok: true, id: noteId, title: note.title, shared: note.shared, warning: nil),
+                try emitNotesExecutedWrite(UpdatedNote(ok: true, id: noteId, title: note.title, shared: note.shared, warning: nil),
                               json: global.json, sandboxActive: gate.sandboxActive,
                               human: "Appended to \"\(note.title)\".")
             case .title(let noteTitle):
@@ -277,7 +277,7 @@ struct AppendCmd: ParsableCommand {
                 let combined = NotesText.assembleAppend(existingHtml: current, content: content,
                                                         separator: separator, prepend: prepend, html: html)
                 try script.updateNote(title: noteTitle, newTitle: nil, newContent: combined, account: account, html: true)
-                try emitNotesWrite(UpdatedNote(ok: true, id: nil, title: noteTitle, shared: note.shared, warning: nil),
+                try emitNotesExecutedWrite(UpdatedNote(ok: true, id: nil, title: noteTitle, shared: note.shared, warning: nil),
                               json: global.json, sandboxActive: gate.sandboxActive,
                               human: "Appended to \"\(noteTitle)\".")
             }
@@ -298,7 +298,7 @@ struct DeleteCmd: ParsableCommand {
     func run() throws {
         try runGuarded(tool: notesTool) {
             let selector = try requireIdOrTitle(id: id, title: title)
-            let gate = try resolveNotesWrite(global)
+            let gate = try resolveNotesWrite(global, defaultDryRun: false)
             let undisclosed = try applyArgvSelectorGuard(selector, sandboxActive: gate.sandboxActive)
             guard gate.willExecute else {
                 let extra = undisclosed ? sandboxTargetUncheckedDetail() : ""
@@ -313,14 +313,14 @@ struct DeleteCmd: ParsableCommand {
                 guard let note = try script.getNoteById(id: noteId) else { throw AppleError.notFound("Note with id \"\(noteId)\" not found.") }
                 try guardLiveWrite(labeledName: note.title, sandboxActive: gate.sandboxActive)
                 try script.deleteNoteById(id: noteId)
-                try emitNotesWrite(DeletedNote(ok: true, id: noteId, title: note.title, was_shared: note.shared),
+                try emitNotesExecutedWrite(DeletedNote(ok: true, id: noteId, title: note.title, was_shared: note.shared),
                               json: global.json, sandboxActive: gate.sandboxActive,
                               human: "Deleted \"\(note.title)\".")
             case .title(let noteTitle):
                 guard let note = try script.getNoteDetails(title: noteTitle, account: account) else { throw AppleError.notFound("Note \"\(noteTitle)\" not found.") }
                 try guardLiveWrite(labeledName: noteTitle, sandboxActive: gate.sandboxActive)
                 try script.deleteNote(title: noteTitle, account: account)
-                try emitNotesWrite(DeletedNote(ok: true, id: nil, title: noteTitle, was_shared: note.shared),
+                try emitNotesExecutedWrite(DeletedNote(ok: true, id: nil, title: noteTitle, was_shared: note.shared),
                               json: global.json, sandboxActive: gate.sandboxActive,
                               human: "Deleted \"\(noteTitle)\".")
             }
@@ -342,7 +342,7 @@ struct MoveCmd: ParsableCommand {
     func run() throws {
         try runGuarded(tool: notesTool) {
             let selector = try requireIdOrTitle(id: id, title: title)
-            let gate = try resolveNotesWrite(global)
+            let gate = try resolveNotesWrite(global, defaultDryRun: false)
             try requireNonEmptyFolderName(folder)
             // The DESTINATION is argv-supplied, so it is checked on both paths — batch-move
             // already did this and single move did not, which let a sandboxed move drop a
@@ -362,14 +362,14 @@ struct MoveCmd: ParsableCommand {
                 guard let note = try script.getNoteById(id: noteId) else { throw AppleError.notFound("Note with id \"\(noteId)\" not found.") }
                 try guardLiveWrite(labeledName: note.title, sandboxActive: gate.sandboxActive)
                 try script.moveNoteById(id: noteId, folder: folder, account: account)
-                try emitNotesWrite(MovedNote(ok: true, id: noteId, title: note.title, folder: folder),
+                try emitNotesExecutedWrite(MovedNote(ok: true, id: noteId, title: note.title, folder: folder),
                               json: global.json, sandboxActive: gate.sandboxActive,
                               human: "Moved \"\(note.title)\" -> \(folder).")
             case .title(let noteTitle):
                 guard let note = try script.getNoteDetails(title: noteTitle, account: account) else { throw AppleError.notFound("Note \"\(noteTitle)\" not found.") }
                 try guardLiveWrite(labeledName: noteTitle, sandboxActive: gate.sandboxActive)
                 try script.moveNoteById(id: note.id, folder: folder, account: account)
-                try emitNotesWrite(MovedNote(ok: true, id: nil, title: noteTitle, folder: folder),
+                try emitNotesExecutedWrite(MovedNote(ok: true, id: nil, title: noteTitle, folder: folder),
                               json: global.json, sandboxActive: gate.sandboxActive,
                               human: "Moved \"\(noteTitle)\" -> \(folder).")
             }

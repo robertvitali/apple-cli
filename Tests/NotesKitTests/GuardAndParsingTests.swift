@@ -184,21 +184,21 @@ struct NotesWriteModelV2Tests {
 
     @Test("DEFAULT PIN: a flagless notes write EXECUTES and is unsandboxed")
     func defaultsToExecute() throws {
-        let gate = try resolveNotesWrite(opts([]))
+        let gate = try resolveNotesWrite(opts([]), defaultDryRun: false)
         #expect(gate.willExecute == true)
         #expect(gate.sandboxActive == false)
     }
 
     @Test("--dry-run previews; --execute is redundant; --dry-run wins over --execute")
     func dryRunPrecedence() throws {
-        #expect(try resolveNotesWrite(opts(["--dry-run"])).willExecute == false)
-        #expect(try resolveNotesWrite(opts(["--execute"])).willExecute == true)
-        #expect(try resolveNotesWrite(opts(["--dry-run", "--execute"])).willExecute == false)
+        #expect(try resolveNotesWrite(opts(["--dry-run"]), defaultDryRun: false).willExecute == false)
+        #expect(try resolveNotesWrite(opts(["--execute"]), defaultDryRun: false).willExecute == true)
+        #expect(try resolveNotesWrite(opts(["--dry-run", "--execute"]), defaultDryRun: false).willExecute == false)
     }
 
     @Test("--test-mode alone engages the sandbox without forcing a preview")
     func flagEngagesSandbox() throws {
-        let gate = try resolveNotesWrite(opts(["--test-mode"]))
+        let gate = try resolveNotesWrite(opts(["--test-mode"]), defaultDryRun: false)
         #expect(gate.sandboxActive == true)
         #expect(gate.willExecute == true)
     }

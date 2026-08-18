@@ -111,7 +111,7 @@ public struct Participant: Encodable, Sendable, Equatable {
 /// A recurrence rule. Round-trips with EKRecurrenceRule (see Mapping.swift). `days_of_week`
 /// uses 1=Sunday … 7=Saturday (EKWeekday / the MCP convention, verified against the reference
 /// EventKitCLI.swift @1.4.0).
-public struct RecurrenceRule: Encodable, Sendable, Equatable {
+public struct RecurrenceRule: Sendable, Equatable {
     public let frequency: String            // daily | weekly | monthly | yearly
     public let interval: Int
     public let end_date: Date?
@@ -160,14 +160,63 @@ public struct LocationTrigger: Encodable, Sendable, Equatable {
     }
 }
 
+extension RecurrenceRule: Encodable {
+    enum CodingKeys: String, CodingKey {
+        case frequency, interval, end_date, occurrence_count, days_of_week, days_of_month,
+             months_of_year, weeks_of_year, days_of_year, set_positions
+    }
+
+    /// `end_date` renders as the ORACLE's bare local `yyyy-MM-dd`
+    /// (recurrenceRuleToJSON, EventKitCLI.swift:339-344: a DateFormatter with no explicit
+    /// zone = the device's current zone — measured), NOT the envelope's ISO-UTC Date
+    /// encoding (Q12 [13], BREAKING). The stored value stays `Date` so the write path
+    /// (`ekRule(from:)`) is unchanged.
+    /// Shared, allocated once (read paths encode many rules). Deliberately mirrors the
+    /// oracle's zoneless, locale-less DateFormatter — including its quirk that a device
+    /// defaulting to a non-Gregorian calendar renders a different year (oracle parity;
+    /// review L5 records this as mirrored, not accidental).
+    private static let endDateFormatter: DateFormatter = {
+        let f = DateFormatter()
+        // en_US_POSIX (security M2, measured): a locale-less DateFormatter inherits
+        // Locale.current for BOTH the calendar system and the digit set, so a Thai/Japanese/
+        // Hijri device would emit a Buddhist-era year or Arabic-Indic digits on the versioned
+        // wire. The oracle sets POSIX at its four OTHER formatters (EventKitCLI.swift:367/464/
+        // 1147/1277) — its omission at recurrenceRuleToJSON is an oversight, not a behavior —
+        // and all ten formatters elsewhere in this repo pin POSIX. Zone stays UNSET (device
+        // zone) to match the oracle's deliberate no-zone choice.
+        f.locale = Locale(identifier: "en_US_POSIX")
+        f.dateFormat = "yyyy-MM-dd"
+        return f
+    }()
+
+    public func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(frequency, forKey: .frequency)
+        try c.encode(interval, forKey: .interval)
+        if let d = end_date {
+            try c.encode(Self.endDateFormatter.string(from: d), forKey: .end_date)
+        }
+        try c.encodeIfPresent(occurrence_count, forKey: .occurrence_count)
+        try c.encodeIfPresent(days_of_week, forKey: .days_of_week)
+        try c.encodeIfPresent(days_of_month, forKey: .days_of_month)
+        try c.encodeIfPresent(months_of_year, forKey: .months_of_year)
+        try c.encodeIfPresent(weeks_of_year, forKey: .weeks_of_year)
+        try c.encodeIfPresent(days_of_year, forKey: .days_of_year)
+        try c.encodeIfPresent(set_positions, forKey: .set_positions)
+    }
+}
+
 /// A structured (geo) location on an event (EKEvent.structuredLocation).
+/// `radius` is optional on the WIRE: the oracle OMITS the key when radius <= 0
+/// (structuredLocationToJSON: `radius > 0 ? radius : nil`, EventKitCLI.swift:169 — measured);
+/// the old non-optional field emitted a spurious `0` (Q12 [14], BREAKING).
 public struct StructuredLocation: Encodable, Sendable, Equatable {
     public let title: String?
     public let latitude: Double?
     public let longitude: Double?
-    public let radius: Double
+    public let radius: Double?
 
-    public init(title: String? = nil, latitude: Double? = nil, longitude: Double? = nil, radius: Double) {
+    public init(title: String? = nil, latitude: Double? = nil, longitude: Double? = nil, radius: Double?) {
         self.title = title
         self.latitude = latitude
         self.longitude = longitude

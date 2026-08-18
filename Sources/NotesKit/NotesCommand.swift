@@ -74,6 +74,15 @@ func emitNotesWrite<T: Encodable>(_ data: T, json: Bool, sandboxActive: Bool,
     }
 }
 
+/// Execute-path write emit (Q12 [4]): stamps `dry_run: false` flat into the payload via
+/// AppleKit.ExecutedWrite, satisfying write-model v2's "every execute-path envelope emits
+/// dry_run:false explicitly" — the preview path keeps plain emitNotesWrite (DryRunPreview
+/// already self-carries dry_run:true).
+func emitNotesExecutedWrite<T: Encodable>(_ data: T, json: Bool, sandboxActive: Bool,
+                                          human: @autoclosure () -> String) throws {
+    try emitNotesWrite(ExecutedWrite(data), json: json, sandboxActive: sandboxActive, human: human())
+}
+
 // MARK: - Write-model v2 gate (docs/write-model-v2.md)
 
 /// The resolved write posture for one notes command. Bound ONCE at the top of every write
@@ -121,7 +130,7 @@ struct NotesWriteGate {
 /// same discipline the Mail trash surface established. General Notes writes pass `false`
 /// (execute-by-default, oracle parity); `delete-folder` passes `true`, see
 /// `DeleteFolderCmd.surfaceDefaultDryRun`.
-func resolveNotesWrite(_ global: GlobalOptions, defaultDryRun: Bool = false) throws -> NotesWriteGate {
+func resolveNotesWrite(_ global: GlobalOptions, defaultDryRun: Bool) throws -> NotesWriteGate {
     try TestMode.validateWriteEnvironment()
     let sandboxActive = try TestMode.sandboxActive(flag: global.testMode)
     let willExecute = try global.willExecute(defaultDryRun: defaultDryRun)
@@ -177,7 +186,11 @@ func currentSyncWarning() -> String? {
 }
 
 /// A generic dry-run preview payload (apple-cli safety extra; not part of MCP parity output).
-/// Every write command defaults to dry-run — a real mutation requires `--execute`.
+/// Write-model v2: writes EXECUTE by default — this payload is emitted only when the run is
+/// a preview: the caller opted into `--dry-run` (or `APPLE_DRY_RUN=1`), or the surface is
+/// `folders delete`, whose per-surface `surfaceDefaultDryRun = true` makes preview the
+/// default (the ONE irreversible Notes op — see DeleteFolderCmd). `dry_run` is hardwired
+/// true because every emit of this type IS a preview (Q12 [6]).
 struct DryRunPreview: Encodable {
     let dry_run: Bool
     let operation: String

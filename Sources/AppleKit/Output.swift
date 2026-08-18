@@ -146,3 +146,52 @@ struct ErrorEnvelope: Encodable {
         let remediation: String?
     }
 }
+
+/// Write-model v2 normalization (Q12): stamps `dry_run: false` into the SAME top-level
+/// object as the wrapped execute-path payload — flat on the wire, additive (MINOR) — so
+/// result models that are SHARED with read paths (calendar's Event, notes' op results)
+/// don't grow a permanent optional field just to satisfy the execute-envelope rule
+/// ("Every execute-path envelope must emit `dry_run: false` explicitly",
+/// docs/write-model-v2.md). Wrap the payload at the emit site:
+/// `Output.emit(tool:, data: ExecutedWrite(payload), …)`.
+///
+/// CONSTRAINTS (review M2/M3): the payload MUST encode into a KEYED container — an array or
+/// single-value payload hits Foundation's precondition and aborts with an EMPTY stdout, the
+/// exact outcome emitError exists to prevent — and MUST NOT declare its own `dry_run` field
+/// (a keyed container silently last-write-wins, so a payload's `dry_run: true` would be
+/// overwritten to `false` — the dangerous direction). Every current payload is a keyed
+/// struct without the field (swept + reviewed); keep it that way when wiring new writes.
+public struct ExecutedWrite<T: Encodable>: Encodable {
+    public let payload: T
+    public init(_ payload: T) { self.payload = payload }
+    private struct DynKey: CodingKey {
+        var stringValue: String
+        var intValue: Int? { nil }
+        init(_ s: String) { stringValue = s }
+        init?(stringValue: String) { self.stringValue = stringValue }
+        init?(intValue: Int) { nil }
+    }
+    public func encode(to encoder: Encoder) throws {
+        #if DEBUG
+        // Fail loudly in debug on the two wiring mistakes the wire cannot signal (review
+        // M1/M2): a payload that ALREADY declares dry_run (a preview stamped false is the
+        // dangerous direction — "a write happened" when it did not), or a non-keyed payload
+        // (array/scalar → Foundation traps with EMPTY stdout, defeating runGuarded). Both are
+        // unreachable at every current call site; this converts a future footgun into a test
+        // failure rather than a silent lie or a crash.
+        if let data = try? JSONEncoder().encode(payload),
+           let obj = try? JSONSerialization.jsonObject(with: data) {
+            precondition(obj is [String: Any],
+                         "ExecutedWrite requires a KEYED payload; got a non-object")
+            if let dict = obj as? [String: Any] {
+                precondition(dict["dry_run"] == nil,
+                             "ExecutedWrite wraps a payload that already declares dry_run — "
+                             + "previews must use the plain emit path, never ExecutedWrite")
+            }
+        }
+        #endif
+        try payload.encode(to: encoder)
+        var c = encoder.container(keyedBy: DynKey.self)
+        try c.encode(false, forKey: DynKey("dry_run"))
+    }
+}

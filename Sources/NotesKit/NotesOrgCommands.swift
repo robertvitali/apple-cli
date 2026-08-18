@@ -35,7 +35,7 @@ struct CreateFolderCmd: ParsableCommand {
         try runGuarded(tool: notesTool) {
             try validateBounds(folder: name, account: account)
             try requireNonEmptyFolderName(name)
-            let gate = try resolveNotesWrite(global)
+            let gate = try resolveNotesWrite(global, defaultDryRun: false)
             // The folder name is argv-supplied, so the sandbox label check is computable here
             // and runs on BOTH paths — no store read, and the preview refuses what execute does.
             try guardLiveWrite(labeledName: name, sandboxActive: gate.sandboxActive)
@@ -46,7 +46,7 @@ struct CreateFolderCmd: ParsableCommand {
                 return
             }
             let folder = try NotesScript().createFolder(name: name, account: account)
-            try emitNotesWrite(CreatedFolder(ok: true, folder: folder.name), json: global.json,
+            try emitNotesExecutedWrite(CreatedFolder(ok: true, folder: folder.name), json: global.json,
                                sandboxActive: gate.sandboxActive,
                                human: "Created folder \"\(folder.name)\".")
         }
@@ -85,7 +85,7 @@ struct DeleteFolderCmd: ParsableCommand {
                 return
             }
             try NotesScript().deleteFolder(name: name, account: account)
-            try emitNotesWrite(CreatedFolder(ok: true, folder: name), json: global.json,
+            try emitNotesExecutedWrite(CreatedFolder(ok: true, folder: name), json: global.json,
                                sandboxActive: gate.sandboxActive,
                                human: "Deleted folder \"\(name)\".")
         }

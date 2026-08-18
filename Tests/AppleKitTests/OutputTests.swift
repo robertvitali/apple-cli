@@ -78,3 +78,18 @@ struct JSONStringEscapingTests {
         #expect(Output.jsonString("\u{01}") == "\"\\u0001\"")
     }
 }
+
+/// Q12 write-model-v2 normalization: ExecutedWrite stamps `dry_run: false` FLAT into the
+/// wrapped payload's own top-level object (additive — the payload's fields are untouched).
+@Suite("ExecutedWrite dry_run stamping")
+struct ExecutedWriteTests {
+    struct P: Encodable { let id = "x1"; let title = "t" }
+
+    @Test func stampsDryRunFalseFlat() throws {
+        let json = try String(data: JSONEncoder().encode(ExecutedWrite(P())), encoding: .utf8)!
+        #expect(json.contains("\"dry_run\":false"))
+        #expect(json.contains("\"id\":\"x1\""))
+        #expect(json.contains("\"title\":\"t\""))
+        #expect(!json.contains("payload"))     // flat, never nested
+    }
+}

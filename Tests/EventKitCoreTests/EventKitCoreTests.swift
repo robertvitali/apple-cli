@@ -89,6 +89,42 @@ struct DateParsingTests {
 
 @Suite("RecurrenceMapping")
 struct RecurrenceMappingTests {
+    @Test("recurrence end_date encodes as the oracle's bare local yyyy-MM-dd (Q12 [13])")
+    func recurrenceEndDateEncodesBareLocalDate() throws {
+        // Noon UTC avoids date flips in any plausible test-runner zone.
+        let end = Date(timeIntervalSince1970: 1_756_728_000)   // 2025-09-01T12:00:00Z
+        let rule = RecurrenceRule(frequency: "daily", interval: 1, end_date: end)
+        let json = try String(data: JSONEncoder().encode(rule), encoding: .utf8)!
+        let f = DateFormatter(); f.dateFormat = "yyyy-MM-dd"
+        #expect(json.contains("\"end_date\":\"\(f.string(from: end))\""))
+        // Non-tautological half (review L5): a POSIX-locale Gregorian literal — on any
+        // machine whose default calendar is Gregorian these agree; the mirrored oracle
+        // quirk (non-Gregorian device calendars render differently) is documented at the
+        // formatter, not silently depended on here.
+        // On a Gregorian device this instant is 2025-09-01 in every US-continental zone and
+        // 2025-09-02 only east of UTC+12 — pin the LITERAL date (no formatter reuse) so a
+        // local-vs-UTC or era regression is actually caught, guarding the common case.
+        if Calendar.current.identifier == .gregorian,
+           TimeZone.current.secondsFromGMT() > -12 * 3600, TimeZone.current.secondsFromGMT() < 12 * 3600 {
+            #expect(json.contains("\"end_date\":\"2025-09-01\""))
+        }
+        #expect(!json.contains("T12:00"))          // never the ISO-UTC instant form
+        // nil end_date omits the key entirely.
+        let open = RecurrenceRule(frequency: "daily", interval: 1)
+        let openJSON = try String(data: JSONEncoder().encode(open), encoding: .utf8)!
+        #expect(!openJSON.contains("end_date"))
+    }
+
+    @Test("structured_location omits radius when <= 0, like the oracle (Q12 [14])")
+    func structuredLocationOmitsNonPositiveRadius() throws {
+        let zero = StructuredLocation(title: "HQ", latitude: 1, longitude: 2, radius: nil)
+        let j0 = try String(data: JSONEncoder().encode(zero), encoding: .utf8)!
+        #expect(!j0.contains("radius"))
+        let pos = StructuredLocation(title: "HQ", latitude: 1, longitude: 2, radius: 50)
+        let j1 = try String(data: JSONEncoder().encode(pos), encoding: .utf8)!
+        #expect(j1.contains("\"radius\":50"))
+    }
+
     @Test("weekly by-day rule round-trips model → EK → model")
     func weeklyByDay() throws {
         let end = Date(timeIntervalSince1970: 1_800_000_000)
@@ -322,8 +358,6 @@ struct ColorHelperTests {
         #expect(finite(Double.nan) == nil)
         #expect(finite(Double.infinity) == nil)
         #expect(finite(1.5) == 1.5)
-        #expect(finiteOrZero(Double.nan) == 0)
-        #expect(finiteOrZero(42) == 42)
     }
 }
 
@@ -483,6 +517,22 @@ struct StructuredLocationMappingTests {
         #expect(ReadMapping.structuredLocation(from: loc).title == "Location")
         let named = EKStructuredLocation(title: "HQ")
         #expect(ReadMapping.structuredLocation(from: named).title == "HQ")
+    }
+
+    /// Review H4: the radius omit-when-<=0 defect lived HERE (ReadMapping.structuredLocation),
+    /// not in the DTO — the earlier pin built the DTO directly and could not catch a mapping
+    /// revert (Double promotes to Double? implicitly, so `radius: finiteOrZero(...)` would
+    /// re-compile and re-emit the spurious 0 with a green suite). Pin the mapping + the wire.
+    @Test("read mapping omits radius when <= 0, matching the oracle (radius > 0 ? r : nil)")
+    func mappingRadiusOmission() throws {
+        let zero = EKStructuredLocation(title: "HQ")   // radius defaults to 0
+        #expect(ReadMapping.structuredLocation(from: zero).radius == nil)
+        let neg = EKStructuredLocation(title: "HQ"); neg.radius = -5
+        #expect(ReadMapping.structuredLocation(from: neg).radius == nil)
+        let pos = EKStructuredLocation(title: "HQ"); pos.radius = 42
+        #expect(ReadMapping.structuredLocation(from: pos).radius == 42)
+        let json = try String(data: JSONEncoder().encode(ReadMapping.structuredLocation(from: zero)), encoding: .utf8)!
+        #expect(!json.contains("radius"))
     }
 }
 

@@ -657,7 +657,11 @@ require_no_stale_session_for() {
       "$BATS_TEST_DIRNAME/../README.md" \
       "$BATS_TEST_DIRNAME/../AGENTS.md" \
       "$BATS_TEST_DIRNAME/../docs/COMPLETION-LOOP.md" \
-      "$BATS_TEST_DIRNAME/../docs/port-specs/notes.md"
+      "$BATS_TEST_DIRNAME/../docs/port-specs/notes.md" \
+      "$BATS_TEST_DIRNAME/../docs/port-specs/mail.md" \
+      "$BATS_TEST_DIRNAME/../docs/port-specs/messages.md" \
+      "$BATS_TEST_DIRNAME/../docs/port-specs/contacts.md" \
+      "$BATS_TEST_DIRNAME/../docs/port-specs/calendar-reminders.md"
   [ "$status" -eq 0 ]
   echo "$output" | grep -q "^OK: "
 }
@@ -693,4 +697,15 @@ require_no_stale_session_for() {
   ! echo "$output" | grep -q "^NOTE: skipping upstream-assumption check"
   # and it must name the tree it checked, so a silent retarget is visible in the log
   echo "$output" | grep -q "matcher agrees in: .*swift-argument-parser"
+}
+
+# Q12-A / review H3: write-model v2's `dry_run:false` execute-envelope rule is convention-only
+# (the plain emit helpers stay callable with an execute payload). This source-lint gives it
+# teeth: a bare read/domain payload on a plain emitNotesWrite/emitRemindersWrite/
+# emitCalendarWrite is the drift that silently dropped the key across 27 sites.
+@test "lint: execute-path envelopes route through the dry_run-stamping emit" {
+  run python3 "$BATS_TEST_DIRNAME/helpers/execute_envelope_lint.py"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "^ok - plain write-emits"
+  ! echo "$output" | grep -q "^FAIL"
 }

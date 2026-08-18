@@ -77,7 +77,7 @@ public struct ListsCreate: ParsableCommand {
             list.title = name
             if let cg { list.cgColor = cg.value }
             try store.saveCalendar(list)
-            try emitRemindersWrite(ReadMapping.reminderList(from: list), sandboxActive: gate.sandboxActive)
+            try emitRemindersExecutedWrite(ReadMapping.reminderList(from: list), sandboxActive: gate.sandboxActive)
         }
     }
 }
@@ -137,7 +137,7 @@ public struct ListsUpdate: ParsableCommand {
             if let newName, !newName.isEmpty { list.title = newName }
             if let cg { list.cgColor = cg.value }
             try store.saveCalendar(list)
-            try emitRemindersWrite(ReadMapping.reminderList(from: list), sandboxActive: gate.sandboxActive)
+            try emitRemindersExecutedWrite(ReadMapping.reminderList(from: list), sandboxActive: gate.sandboxActive)
         }
     }
 }

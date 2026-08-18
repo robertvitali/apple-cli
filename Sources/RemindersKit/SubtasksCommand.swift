@@ -85,7 +85,7 @@ public struct SubtasksCreate: ParsableCommand {
             reminder.notes = newNotes
             try store.save(reminder)
             let subs = ReminderSubtasks.parse(newNotes)
-            try emitRemindersWrite(SubtasksData(
+            try emitRemindersExecutedWrite(SubtasksData(
                 reminder_id: reminderId, reminder_title: reminder.title,
                 progress: ReminderSubtasks.progress(subs), subtasks: subs, subtask: created),
                                    sandboxActive: gate.sandboxActive)
@@ -128,7 +128,7 @@ public struct SubtasksUpdate: ParsableCommand {
             reminder.notes = newNotes
             try store.save(reminder)
             let subs = ReminderSubtasks.parse(newNotes)
-            try emitRemindersWrite(SubtasksData(
+            try emitRemindersExecutedWrite(SubtasksData(
                 reminder_id: reminderId, reminder_title: reminder.title,
                 progress: ReminderSubtasks.progress(subs), subtasks: subs, subtask: updated),
                                    sandboxActive: gate.sandboxActive)
@@ -168,7 +168,7 @@ public struct SubtasksDelete: ParsableCommand {
             reminder.notes = newNotes
             try store.save(reminder)
             let subs = ReminderSubtasks.parse(newNotes)
-            try emitRemindersWrite(SubtasksData(
+            try emitRemindersExecutedWrite(SubtasksData(
                 reminder_id: reminderId, reminder_title: reminder.title,
                 progress: ReminderSubtasks.progress(subs), subtasks: subs),
                                    sandboxActive: gate.sandboxActive)
@@ -208,7 +208,7 @@ public struct SubtasksToggle: ParsableCommand {
             reminder.notes = newNotes
             try store.save(reminder)
             let subs = ReminderSubtasks.parse(newNotes)
-            try emitRemindersWrite(SubtasksData(
+            try emitRemindersExecutedWrite(SubtasksData(
                 reminder_id: reminderId, reminder_title: reminder.title,
                 progress: ReminderSubtasks.progress(subs), subtasks: subs, subtask: toggled),
                                    sandboxActive: gate.sandboxActive)
@@ -248,7 +248,7 @@ public struct SubtasksReorder: ParsableCommand {
             let (newNotes, reordered) = try ReminderSubtasks.reorder(order: order, notes: reminder.notes)
             reminder.notes = newNotes
             try store.save(reminder)
-            try emitRemindersWrite(SubtasksData(
+            try emitRemindersExecutedWrite(SubtasksData(
                 reminder_id: reminderId, reminder_title: reminder.title,
                 progress: ReminderSubtasks.progress(reordered), subtasks: reordered),
                                    sandboxActive: gate.sandboxActive)

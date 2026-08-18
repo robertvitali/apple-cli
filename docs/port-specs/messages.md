@@ -27,7 +27,7 @@ Prior research cited both `github.com/openclaw/imsg` and `brew install steipete/
 
 | Tool | Class | Key params | Behavior / output notes |
 |---|---|---|---|
-| `tool_get_recent_messages` | **CORE** | `hours:int=24`, `contact:str=None` | Reads `message` table, `CAST(date AS TEXT) > <apple-ns-epoch>`, `ORDER BY date DESC LIMIT 100`, **across ALL chats**. `contact` optional: fuzzy name→handle, or phone/email, or stateful `"contact:N"` selection. Extracts body from `text` **or** `attributedBody` (hand-rolled NSArchiver typedstream parser). Resolves sender name via AddressBook; annotates group-chat name. Output: lines `[YYYY-MM-DD HH:MM:SS] [group?] <You|Name>: <body>`. |
+| `tool_get_recent_messages` | **CORE** | `hours:int=24`, `contact:str=None` | Reads `message` table, `CAST(date AS TEXT) > <apple-ns-epoch>`, `ORDER BY date DESC LIMIT 100`, **across ALL chats**. `contact` optional: fuzzy name→handle, or phone/email, or stateful `"contact:N"` selection. Extracts body from `text` **or** `attributedBody` (hand-rolled NSArchiver typedstream parser). Resolves sender name via AddressBook; annotates group-chat name. Output: lines `[YYYY-MM-DD HH:MM:SS] [group?] <You\|Name>: <body>`. |
 | `tool_send_message` | **CORE** | `recipient:str`, `message:str`, `group_chat:bool=False` | `recipient`= phone \| email \| contact-name (fuzzy) \| `"contact:N"` \| group chat id. iMessage-first with **automatic SMS/RCS fallback** for phone numbers. Group send via `chat id "<guid>"`. File-based AppleScript send (writes msg to tempfile, `read POSIX file … as «class utf8»`) with a direct-AppleScript fallback path. Output: success/error string incl. service used. |
 | `tool_find_contact` | **DERIVED** | `name:str` | Fuzzy match over AddressBook (full name **+ nickname**), token-based scoring (exact token 0.95, prefix 0.85/0.80, `difflib.SequenceMatcher` fallback), dedup by phone. Output: ranked list `N. <name> (<phone>) - confidence <score>`, top 10. **Returns candidates WITH confidence scores.** |
 | `tool_get_chats` | **CORE** (narrow) | — | `SELECT chat_identifier, display_name FROM chat WHERE display_name IS NOT NULL` → **only NAMED group chats**. Output: `N. <display_name> (ID: <chat_identifier>)`. Used to obtain group chat ids for `group_chat=True` sends. |
@@ -181,11 +181,21 @@ Greenfield (non-fork) would be **L** (reimplement the whole engine); forking `im
 The `apple messages` CLI was diffed against the live `mac_messages_mcp` MCP (the
 oracle) on this fleet. Read ops compared freely; no write/send was diffed.
 
+**Every count below is a POINT-IN-TIME measurement from the verification run — the
+live store drifts continuously.** Re-measured twice on 2026-08-18 the per-source
+counts had already moved (and moved AGAIN between two runs minutes apart), while
+the STABLE invariants held both times: the total contact count and the
+top-level `AddressBook-v22.abcddb` diagnostic source. Specific per-source
+figures are deliberately NOT re-embedded here — they are stale on arrival. The
+parity claim each row records is "CLI == oracle ON THE SAME RUN", not that any
+absolute number still holds; a future re-audit must diff both sides fresh, never
+against a historical value (Q12 [1]).
+
 | Tool | Result |
 |---|---|
 | `check_db_access` | 134 tables, message/handle/chat present — match (CLI superset adds `message_count`, `path`, `readable`). |
 | `check_contacts` | **CLI count == oracle count on the verification run**. Sample ordering aligned to the oracle's `ORDER BY ZLASTNAME, ZFIRSTNAME`. |
-| `check_addressbook` | Per-source counts match (per-source counts); total <total>. CLI also reports the top-level `AddressBook-v22.abcddb` the MCP's *diagnostic* omits (its contact loader reads it) — superset, not a drop. |
+| `check_addressbook` | Per-source counts matched CLI==oracle on the verification run (then per-source counts, total <total> — see the point-in-time note above). CLI also reports the top-level `AddressBook-v22.abcddb` the MCP's *diagnostic* omits (its contact loader reads it) — superset, not a drop. |
 | `find_contact` | A common first name → **count 30 == 30**, all 0.95 (exact-token) — scores byte-exact. |
 | `check_imessage_availability` | 2125550142 → `available=true`, recommendation string **byte-identical**. |
 | `get_chats` | **CLI == oracle** on named-chat count (superset fields: guid, room_name, service_name, group_id, style). |

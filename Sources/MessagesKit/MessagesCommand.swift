@@ -249,7 +249,9 @@ struct Send_: ParsableCommand {
                 let data = SendResult(action: "send", executed: true, ok: true, group_chat: group,
                     recipient: recipient, resolved_handle: handle, display_name: displayName,
                     service_used: result.service, message: message)
-                try emitWrite(global, data, sandboxActive: gate.sandboxActive) {
+                // Q12: the execute envelope carries the v2 `dry_run: false` discriminator like
+                // every other domain (SendPreview already carries dry_run: true).
+                try emitWrite(global, ExecutedWrite(data), sandboxActive: gate.sandboxActive) {
                     "Message sent successfully via \(result.service ?? "Messages") to \(displayName ?? handle)"
                 }
             }

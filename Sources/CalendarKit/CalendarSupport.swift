@@ -106,8 +106,12 @@ public enum StructuredLocationArg {
         return StructuredLocation(title: title, latitude: nil, longitude: nil, radius: finiteRadius(radius))
     }
 
-    static func finiteRadius(_ r: Double?) -> Double {
-        guard let r, r.isFinite, r >= 0 else { return 0 }
+    /// Review HIGH (Q12-A): nil (key OMITTED) when not strictly positive, matching the
+    /// oracle's read-side omit rule — the old non-optional 0 leaked the spurious `radius: 0`
+    /// into the PREVIEW while --execute omitted it, breaking preview↔execute agreement.
+    /// `ekStructuredLocation`'s `?? 0` absorbs nil on the write path.
+    static func finiteRadius(_ r: Double?) -> Double? {
+        guard let r, r.isFinite, r > 0 else { return nil }
         return r
     }
 }

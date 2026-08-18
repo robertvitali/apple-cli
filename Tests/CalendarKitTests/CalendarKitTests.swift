@@ -289,6 +289,22 @@ struct StructuredLocationArgTests {
     func none() throws {
         #expect(try StructuredLocationArg.parse(lat: nil, lon: nil, radius: nil, title: nil) == nil)
     }
+
+    /// Review HIGH (Q12-A): the preview builds its structured_location from THIS parse, so a
+    /// nil/zero radius must be nil (key omitted) here too — the read mapping already omits it,
+    /// and a preview emitting `radius: 0` while --execute omits the key broke the
+    /// preview↔execute byte-agreement invariant. Encoded both ways to pin the WIRE.
+    @Test("radius omitted when absent or zero — preview agrees with the read mapping")
+    func radiusOmission() throws {
+        let none = try #require(try StructuredLocationArg.parse(lat: 1, lon: 2, radius: nil, title: "HQ"))
+        #expect(none.radius == nil)
+        let zero = try #require(try StructuredLocationArg.parse(lat: 1, lon: 2, radius: 0, title: "HQ"))
+        #expect(zero.radius == nil)
+        let json = try String(data: JSONEncoder().encode(zero), encoding: .utf8)!
+        #expect(!json.contains("radius"))
+        let pos = try #require(try StructuredLocationArg.parse(lat: 1, lon: 2, radius: 75, title: "HQ"))
+        #expect(pos.radius == 75)
+    }
 }
 
 // MARK: - Window-bound flooring (bare date → start-of-day)

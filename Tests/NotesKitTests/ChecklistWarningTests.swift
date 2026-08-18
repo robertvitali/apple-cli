@@ -251,7 +251,7 @@ struct ChecklistWarningTests {
                 "both update branches must inspect newContent")
 
         // …and the built response is what gets emitted, JSON and human both, at all three sites.
-        #expect(src.components(separatedBy: "emitNotesWrite(r.note").count - 1 == 3,
+        #expect(src.components(separatedBy: "emitNotesExecutedWrite(r.note").count - 1 == 3,
                 "each site must emit the built note")
         #expect(src.components(separatedBy: "human: r.human)").count - 1 == 3,
                 "each site must emit the built human line")

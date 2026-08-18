@@ -816,6 +816,34 @@ struct AttachmentsSave: ParsableCommand {
                 }
             }
 
+            // Symlink refusal in BOTH modes (Q12 [11]): it sat on the execute path only, so a
+            // preview blessed a destination --execute refuses — and --out had NO symlink check
+            // at all (a pre-planted symlink at the exact --out path would have redirected the
+            // attachment bytes anywhere). The in-loop execute-path check stays as the TOCTOU
+            // backstop for a symlink planted after the preview.
+            let plannedDirBasenames = absDir != nil
+                ? deCollidedBasenames(wanted.map { safeAttachmentBasename(master[$0], fallbackIndex: $0) }) : []
+            if let absDir {
+                for base in plannedDirBasenames {
+                    let destPath = (absDir as NSString).appendingPathComponent(base)
+                    if (try? FileManager.default.destinationOfSymbolicLink(atPath: destPath)) != nil {
+                        throw AppleError.mailSafety("destination '\(destPath)' is a symlink; refusing to save an attachment through it.")
+                    }
+                }
+            }
+            // The --out check MUST test the RAW operator-typed path (tilde-expanded only):
+            // confineWriteDestination runs resolvingSymlinksInPath(), so by the time absOut
+            // exists an EXISTING symlink has been resolved AWAY and a check on absOut only
+            // ever catches dangling links — measured in review (security M1): a planted
+            // `invoice.pdf -> ~/.zshrc` passed the resolved-path check and the bytes would
+            // have landed in the rc file. (--dir is safe on the resolved path because the
+            // leaf basename is appended AFTER resolution — load-bearing ordering, do not
+            // reorder that composition.)
+            let rawOut = out.map { ($0 as NSString).expandingTildeInPath }
+            if let rawOut, (try? FileManager.default.destinationOfSymbolicLink(atPath: rawOut)) != nil {
+                throw AppleError.mailSafety("destination '\(rawOut)' is a symlink; refusing to save an attachment through it.")
+            }
+
             guard willExecute else {
                 try Output.emit(tool: "mail", data: Result(message_id: String(rowid), directory: absDir, out_path: absOut,
                     attachments: selectedNames, dry_run: true,
@@ -843,7 +871,7 @@ struct AttachmentsSave: ParsableCommand {
             if let absDir {
                 // Existence / is-a-directory already validated above the dry-run guard so the
                 // preview and --execute refuse identically.
-                let basenames = deCollidedBasenames(wanted.map { safeAttachmentBasename(master[$0], fallbackIndex: $0) })
+                let basenames = plannedDirBasenames
                 let fm = FileManager.default
                 // Phase 1, all-or-nothing on the dangerous case: a SYMLINK at any computed
                 // destination refuses the WHOLE export (a pre-planted symlink could redirect
@@ -862,7 +890,12 @@ struct AttachmentsSave: ParsableCommand {
             } else if let absOut, let idx = wanted.first {
                 // --out (single exact path, MCP B style, rename-on-save): the operator-chosen path
                 // when it already resolves to a directory (can't save a file's bytes onto a dir).
-                // is-a-directory already validated above the dry-run guard.
+                // is-a-directory already validated above the dry-run guard. TOCTOU backstop
+                // mirroring --dir's in-loop check — on the RAW path, for the same
+                // resolved-away reason as the pre-guard check (security M1).
+                if let rawOut, (try? FileManager.default.destinationOfSymbolicLink(atPath: rawOut)) != nil {
+                    throw AppleError.mailSafety("destination '\(rawOut)' is a symlink; refusing to save an attachment through it.")
+                }
                 pairs.append((index: idx, destPath: absOut))
             }
 

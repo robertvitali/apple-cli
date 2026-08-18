@@ -182,7 +182,10 @@ public struct EventsCreate: ParsableCommand {
             if !rules.isEmpty { event.recurrenceRules = try rules.map { try RecurrenceMapping.ekRule(from: $0) } }
 
             try store.save(event, span: .thisEvent)
-            try emitCalendarWrite(EventMapping.event(from: event), sandboxActive: gate.sandboxActive)
+            // Q12 [7]: create/update omitted the execute-path `dry_run: false` discriminator
+            // that delete already carried (AGENTS.md wiring rule); ExecutedWrite stamps it
+            // flat without polluting the shared read-path Event model.
+            try emitCalendarWrite(ExecutedWrite(EventMapping.event(from: event)), sandboxActive: gate.sandboxActive)
         }
     }
 
@@ -322,7 +325,10 @@ public struct EventsUpdate: ParsableCommand {
             else if !rules.isEmpty { event.recurrenceRules = try rules.map { try RecurrenceMapping.ekRule(from: $0) } }
 
             try store.save(event, span: ekSpan)
-            try emitCalendarWrite(EventMapping.event(from: event), sandboxActive: gate.sandboxActive)
+            // Q12 [7]: create/update omitted the execute-path `dry_run: false` discriminator
+            // that delete already carried (AGENTS.md wiring rule); ExecutedWrite stamps it
+            // flat without polluting the shared read-path Event model.
+            try emitCalendarWrite(ExecutedWrite(EventMapping.event(from: event)), sandboxActive: gate.sandboxActive)
         }
     }
 
