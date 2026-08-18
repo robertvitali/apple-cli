@@ -1,0 +1,385 @@
+{
+ "vars": {
+  "x": "hi",
+  "name": "Ada",
+  "width": "6",
+  "empty": "",
+  "uni": "héllo",
+  "q": "it's",
+  "qq": "say \"hi\"",
+  "both": "'\"",
+  "tabs": "a\tb",
+  "long": "abcdefghij",
+  "dec": "éabc",
+  "fam": "👨‍👩‍👧",
+  "flag": "🇺🇸xy",
+  "crlf": "a\r\nb",
+  "smile": "😀ab"
+ },
+ "rows": [
+  {
+   "template": "{x}",
+   "output": "hi"
+  },
+  {
+   "template": "{x:>5}",
+   "output": "   hi"
+  },
+  {
+   "template": "{x:<5}",
+   "output": "hi   "
+  },
+  {
+   "template": "{x:^5}",
+   "output": " hi  "
+  },
+  {
+   "template": "{x:*>5}",
+   "output": "***hi"
+  },
+  {
+   "template": "{x:*^7}",
+   "output": "**hi***"
+  },
+  {
+   "template": "{x:05}",
+   "output": "hi000"
+  },
+  {
+   "template": "{x:.1}",
+   "output": "h"
+  },
+  {
+   "template": "{long:.4}",
+   "output": "abcd"
+  },
+  {
+   "template": "{long:>6.3}",
+   "output": "   abc"
+  },
+  {
+   "template": "{x:s}",
+   "output": "hi"
+  },
+  {
+   "template": "{x:5s}",
+   "output": "hi   "
+  },
+  {
+   "template": "{x!r}",
+   "output": "'hi'"
+  },
+  {
+   "template": "{x!s}",
+   "output": "hi"
+  },
+  {
+   "template": "{x!a}",
+   "output": "'hi'"
+  },
+  {
+   "template": "{uni!r}",
+   "output": "'héllo'"
+  },
+  {
+   "template": "{uni!a}",
+   "output": "'h\\xe9llo'"
+  },
+  {
+   "template": "{q!r}",
+   "output": "\"it's\""
+  },
+  {
+   "template": "{qq!r}",
+   "output": "'say \"hi\"'"
+  },
+  {
+   "template": "{both!r}",
+   "output": "'\\'\"'"
+  },
+  {
+   "template": "{tabs!r}",
+   "output": "'a\\tb'"
+  },
+  {
+   "template": "{x:{width}}",
+   "output": "hi    "
+  },
+  {
+   "template": "{name} and {x:>{width}}",
+   "output": "Ada and     hi"
+  },
+  {
+   "template": "{x[0]}",
+   "output": "h"
+  },
+  {
+   "template": "{x[1]}",
+   "output": "i"
+  },
+  {
+   "template": "{x[-1]}",
+   "error": "string indices must be integers, not 'str'"
+  },
+  {
+   "template": "{long[3]}",
+   "output": "d"
+  },
+  {
+   "template": "{empty:>3}",
+   "output": "   "
+  },
+  {
+   "template": "{empty!r}",
+   "output": "''"
+  },
+  {
+   "template": "pre {x:>4} post",
+   "output": "pre   hi post"
+  },
+  {
+   "template": "{{literal}} {x}",
+   "output": "{literal} hi"
+  },
+  {
+   "template": "{dec:.1}",
+   "output": "e"
+  },
+  {
+   "template": "{dec:.2}",
+   "output": "é"
+  },
+  {
+   "template": "{dec[1]}",
+   "output": "́"
+  },
+  {
+   "template": "{dec[4]}",
+   "output": "c"
+  },
+  {
+   "template": "{dec:>10}",
+   "output": "     éabc"
+  },
+  {
+   "template": "{dec:*^12}",
+   "output": "***éabc****"
+  },
+  {
+   "template": "{fam:.1}",
+   "output": "👨"
+  },
+  {
+   "template": "{fam:.2}",
+   "output": "👨‍"
+  },
+  {
+   "template": "{fam[1]}",
+   "output": "‍"
+  },
+  {
+   "template": "{fam[2]}",
+   "output": "👩"
+  },
+  {
+   "template": "{fam[4]}",
+   "output": "👧"
+  },
+  {
+   "template": "{fam:>10}",
+   "output": "     👨‍👩‍👧"
+  },
+  {
+   "template": "{flag:.2}",
+   "output": "🇺🇸"
+  },
+  {
+   "template": "{flag[1]}",
+   "output": "🇸"
+  },
+  {
+   "template": "{flag[2]}",
+   "output": "x"
+  },
+  {
+   "template": "{crlf[2]}",
+   "output": "\n"
+  },
+  {
+   "template": "{crlf:.3}",
+   "output": "a\r\n"
+  },
+  {
+   "template": "{smile:.1}",
+   "output": "😀"
+  },
+  {
+   "template": "{smile[1]}",
+   "output": "a"
+  },
+  {
+   "template": "{smile:>5}",
+   "output": "  😀ab"
+  },
+  {
+   "template": "{x:<05}",
+   "output": "hi000"
+  },
+  {
+   "template": "{x:>05}",
+   "output": "000hi"
+  },
+  {
+   "template": "{x:^05}",
+   "output": "0hi00"
+  },
+  {
+   "template": "{x:0<5}",
+   "output": "hi000"
+  },
+  {
+   "template": "{x:9<5}",
+   "output": "hi999"
+  },
+  {
+   "template": "{long[٣]}",
+   "output": "d"
+  },
+  {
+   "template": "{x:d}",
+   "error": "Unknown format code 'd' for object of type 'str'"
+  },
+  {
+   "template": "{x:>5d}",
+   "error": "Unknown format code 'd' for object of type 'str'"
+  },
+  {
+   "template": "{x:+5}",
+   "error": "Sign not allowed in string format specifier"
+  },
+  {
+   "template": "{x:#5}",
+   "error": "Alternate form (#) not allowed in string format specifier"
+  },
+  {
+   "template": "{x:,}",
+   "error": "Cannot specify ',' with 's'."
+  },
+  {
+   "template": "{x:=5}",
+   "error": "'=' alignment not allowed in string format specifier"
+  },
+  {
+   "template": "{x!z}",
+   "error": "Unknown conversion specifier z"
+  },
+  {
+   "template": "{x.y}",
+   "error": "'str' object has no attribute 'y'"
+  },
+  {
+   "template": "{x[5]}",
+   "error": "string index out of range"
+  },
+  {
+   "template": "{x[abc]}",
+   "error": "string indices must be integers, not 'str'"
+  },
+  {
+   "template": "{x[-4]}",
+   "error": "string indices must be integers, not 'str'"
+  },
+  {
+   "template": "{x: }",
+   "error": "Space not allowed in string format specifier"
+  },
+  {
+   "template": "{x: 5}",
+   "error": "Space not allowed in string format specifier"
+  },
+  {
+   "template": "{x:z}",
+   "error": "Negative zero coercion (z) not allowed in string format specifier"
+  },
+  {
+   "template": "{x:z5}",
+   "error": "Negative zero coercion (z) not allowed in string format specifier"
+  },
+  {
+   "template": "{x:ss}",
+   "error": "Invalid format specifier 'ss' for object of type 'str'"
+  },
+  {
+   "template": "{x:5ss}",
+   "error": "Invalid format specifier '5ss' for object of type 'str'"
+  },
+  {
+   "template": "{x:.}",
+   "error": "Format specifier missing precision"
+  },
+  {
+   "template": "{x:.99999999999999999999}",
+   "error": "Too many decimal digits in format string"
+  },
+  {
+   "template": "{x:99999999999999999999}",
+   "error": "Too many decimal digits in format string"
+  },
+  {
+   "template": "{ x }",
+   "error": "KeyError: x "
+  },
+  {
+   "template": "{x }",
+   "error": "KeyError:x "
+  },
+  {
+   "template": "{2x}",
+   "error": "KeyError:2x"
+  },
+  {
+   "template": "{x]}",
+   "error": "KeyError:x]"
+  },
+  {
+   "template": "{x.}",
+   "error": "Empty attribute in format string"
+  },
+  {
+   "template": "{x[}",
+   "error": "expected '}' before end of string"
+  },
+  {
+   "template": "{x[0}",
+   "error": "expected '}' before end of string"
+  },
+  {
+   "template": "{x!}",
+   "error": "unmatched '{' in format spec"
+  },
+  {
+   "template": "{x!rr}",
+   "error": "expected ':' after conversion specifier"
+  },
+  {
+   "template": "{x!!r}",
+   "error": "expected ':' after conversion specifier"
+  },
+  {
+   "template": "{x!r[0]}",
+   "error": "expected ':' after conversion specifier"
+  },
+  {
+   "template": "{}",
+   "error": "tuple index out of range"
+  },
+  {
+   "template": "{0}",
+   "error": "tuple index out of range"
+  },
+  {
+   "template": "{1}",
+   "error": "tuple index out of range"
+  }
+ ]
+}

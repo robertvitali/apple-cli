@@ -420,10 +420,10 @@ struct AttachmentsList: ParsableCommand {
     ///
     /// `save_index` is the position in the INDEX-ordered list — the space `attachments save
     /// --indices` selects from — emitted so a caller can vet a row here and address the same
-    /// attachment there. NOTE: `attachments save` itself has a pre-existing index-space defect
-    /// (its positional AppleScript selection runs against the LIVE order while its name/dest
-    /// resolution uses the index order) — tracked as its own queue item; do not treat these two
-    /// commands' positions as interchangeable until that lands.
+    /// attachment there for the index-space views. Since the extra32 fix, `attachments save`
+    /// builds its own master from the SAME live enumeration (and refuses to execute from the
+    /// index fallback), so a row's POSITION here equals save's selection position on the happy
+    /// path — `save_index` remains the honest pointer for the degraded/index views.
     private func attachmentRows(ctx: MailContext, row: [String: String?], rowid: Int,
                                 live: Bool) throws
         -> (rows: [MailAttachment], degraded: Bool) {

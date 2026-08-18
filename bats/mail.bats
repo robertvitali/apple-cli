@@ -6,6 +6,15 @@ setup() {
   BIN="$(swift build --show-bin-path)/apple"
 }
 
+teardown() {
+  # Template-fixture hygiene (review I1): a mid-test failure must not strand a fixture in the
+  # template store. Only tests that set GAP37_FIXTURE pay the cleanup invocation; the delete
+  # is idempotent and best-effort (the happy path already deleted it as an assertion).
+  if [ -n "${GAP37_FIXTURE:-}" ]; then
+    "$BIN" mail templates delete --execute "$GAP37_FIXTURE" >/dev/null 2>&1 || true
+  fi
+}
+
 # Skip a test when the Mail Envelope Index isn't readable (no Full Disk Access / no Mail).
 require_index() {
   local found=""
@@ -1853,4 +1862,250 @@ print(s[:40])")
   echo "$output" | grep -q '"parent" *: *"Projects"'
   echo "$output" | grep -q '"mailbox_raw" *: *" Projects \/ 2024 "'
   echo "$output" | grep -q '"path" *: *"Projects\/2024"'
+}
+
+# --- Q11-D bulk-targeting parity pins ---------------------------------------------------------
+
+# gap23: the filter path seeds the ACTION-INVERSE (oracle B manage.py:419-427), so mark --read
+# matches only UNREAD messages and --max budgets CHANGES, not matches.
+@test "mail mark --read --all targets only unread messages (gap23 inverse seed)" {
+  require_index
+  run "$BIN" mail mark --read --dry-run --all --account iCloud --mailbox All
+  [ "$status" -eq 0 ]
+  ! echo "$output" | grep -q '"is_read" : true'
+  echo "$output" | grep -q '"is_read" : false'
+  # Anchored (a bare '"matched" : 1' would prefix-match 10/50 — that false-green shipped once
+  # in this very batch's red-proof round for the delete pin below).
+  echo "$output" | grep -qE '"matched" : 10(,|$)'
+}
+
+@test "mail mark --unread --all targets only read messages (gap23 inverse seed)" {
+  require_index
+  run "$BIN" mail mark --unread --dry-run --all --account iCloud --mailbox All
+  [ "$status" -eq 0 ]
+  # Positive control first — an empty match would pass the negation vacuously.
+  echo "$output" | grep -q '"is_read" : true'
+  ! echo "$output" | grep -q '"is_read" : false'
+}
+
+@test "mail flag --all targets only unflagged messages (gap23 inverse seed)" {
+  require_index
+  run "$BIN" mail flag --dry-run --all --account iCloud --mailbox All
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"flagged" : false'
+  ! echo "$output" | grep -q '"flagged" : true'
+  echo "$output" | grep -qE '"matched" : 10(,|$)'
+}
+
+# extra22: per-op --max defaults mirror oracle B (max_updates=10, max_deletes=5; move keeps 50).
+# The store has far more candidates than the caps, so matched == the default cap.
+@test "mail mark --all defaults --max to oracle B's 10 (extra22)" {
+  require_index
+  run "$BIN" mail mark --read --dry-run --all --account iCloud --mailbox All
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -qE '"matched" : 10(,|$)'
+}
+
+@test "mail delete --all defaults --max to oracle B's 5 (extra22)" {
+  require_index
+  run "$BIN" mail delete --dry-run --all --account iCloud --mailbox INBOX
+  [ "$status" -eq 0 ]
+  # ANCHORED: the unanchored grep '"matched" : 5' prefix-matched the old code's
+  # '"matched" : 50' and shipped a false-green red-proof (caught same session).
+  echo "$output" | grep -qE '"matched" : 5(,|$)'
+}
+
+# extra21: on the explicit-ids path, --account scopes the ids (oracle A's narrow loop) — an id
+# outside the scope is SKIPPED with a disclosure note and counted 0, never silently accepted.
+@test "mail mark <id> with a mismatched --account skips the id with a note (extra21)" {
+  require_index
+  id=$("$BIN" mail search --account iCloud --limit 1 --no-content 2>/dev/null \
+    | python3 -c "import json,sys;print(json.load(sys.stdin)['data']['messages'][0]['id'])")
+  other=$("$BIN" mail accounts list 2>/dev/null | python3 -c "
+import json,sys;a=json.load(sys.stdin)['data']['accounts']
+print(next((x['name'] for x in a if x['name']!='iCloud'), ''))")
+  [ -n "$id" ] && [ -n "$other" ] || skip "store lacks a second account"
+  run "$BIN" mail mark --read --dry-run "$id" --account "$other" --mailbox All
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"matched" : 0'
+  echo "$output" | grep -q 'outside the --account/mailbox scope'
+}
+
+@test "mail mark <id> with no --account keeps the legacy unscoped resolution (extra21)" {
+  require_index
+  id=$("$BIN" mail search --account iCloud --limit 1 --no-content 2>/dev/null \
+    | python3 -c "import json,sys;print(json.load(sys.stdin)['data']['messages'][0]['id'])")
+  [ -n "$id" ]
+  run "$BIN" mail mark --read --dry-run "$id"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"matched" : 1'
+}
+
+# --- Q11-E rules/templates parity pins --------------------------------------------------------
+
+# gap32 (deliberate divergence, bats-locked): no-field update stays a fail-loud 64 where
+# oracle A returns a no-op success — see docs/port-specs/mail.md row 28.
+@test "mail rules update with no fields stays a validation_error (gap32 lock)" {
+  run "$BIN" mail rules update --dry-run 0
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q 'nothing to update'
+}
+
+# gap26: forward_to entries are validated with oracle A's email regex at parse time.
+@test "mail rules create rejects forward_to=notanemail at parse (gap26)" {
+  run "$BIN" mail rules create --dry-run --name apple-cli-test-fwd \
+    --condition subject:contains:apple-cli-test --action forward_to=notanemail
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q 'valid email addresses'
+}
+
+# extra25: malformed move_to fails the PREVIEW even when a sandbox blocker is also present
+# (the shape check used to be skipped whenever blockers were non-empty).
+@test "mail rules create preview validates move_to shape even alongside a blocker (extra25)" {
+  APPLE_TEST_MODE=1 run "$BIN" mail rules create --dry-run --test-mode --name not-labeled \
+    --condition subject:contains:whatever --action move_to=NoSlashHere
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q "move_to must be 'Account/Mailbox'"
+}
+
+# extra26: template errors carry oracle A's TYPED strings (exit codes unchanged).
+@test "mail templates get on a missing name is template_not_found (extra26)" {
+  run "$BIN" mail templates get no-such-template-xyz
+  [ "$status" -eq 65 ]
+  echo "$output" | grep -q '"type" : "template_not_found"'
+}
+
+@test "mail templates get on a malformed name is invalid_template_name (extra26)" {
+  run "$BIN" mail templates get 'bad name!'
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q '"type" : "invalid_template_name"'
+}
+
+# extra27: --text is honored (was declared and silently ignored on all five subcommands).
+@test "mail templates list --text prints text, not the JSON envelope (extra27)" {
+  run "$BIN" mail templates list --text
+  [ "$status" -eq 0 ]
+  ! echo "$output" | grep -q '"schema_version"'
+}
+
+# gap37 E2E: a spec-bearing token renders through the Python-parity formatter; a missing
+# spec-bearing variable raises missing_template_variable instead of leaking the token.
+@test "mail templates render applies the format mini-language (gap37)" {
+  GAP37_FIXTURE=apple-cli-test-gap37
+  run "$BIN" mail templates save --execute apple-cli-test-gap37 --body 'W:{w:*>6}!'
+  [ "$status" -eq 0 ]
+  run "$BIN" mail templates render apple-cli-test-gap37 --var w=hi
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q 'W:\*\*\*\*hi!'
+  run "$BIN" mail templates render apple-cli-test-gap37
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q '"type" : "missing_template_variable"'
+  run "$BIN" mail templates delete --execute apple-cli-test-gap37
+  [ "$status" -eq 0 ]
+}
+
+@test "mail templates render maps a bad format spec to oracle A's unknown class (gap37)" {
+  GAP37_FIXTURE=apple-cli-test-gap37b
+  run "$BIN" mail templates save --execute apple-cli-test-gap37b --body 'X:{w:d}'
+  [ "$status" -eq 0 ]
+  run "$BIN" mail templates render apple-cli-test-gap37b --var w=hi
+  [ "$status" -eq 70 ]
+  echo "$output" | grep -q "Unknown format code 'd' for object of type 'str'"
+  run "$BIN" mail templates delete --execute apple-cli-test-gap37b
+  [ "$status" -eq 0 ]
+}
+
+# --- Q11 batch-2 review-round pins ------------------------------------------------------------
+
+# review H1: an empty/whitespace message id used to fall through resolveMessageRow's numeric
+# parse into a store query that matched nothing helpful; it is a usage error, refused typed.
+@test "mail get with an empty message id is a validation error (review H1)" {
+  require_index
+  run "$BIN" mail get ""
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q "message id must not be empty"
+}
+
+# review M1: move's explicit-ids path honors --account scoping exactly like mark/flag/delete
+# (oracle A's _bulk_repeat_block scoped loop) — an out-of-scope id is skipped with a note and
+# counted 0, never resolved cross-account.
+@test "mail move <id> with a mismatched --account skips the id with a note (review M1)" {
+  require_index
+  id=$("$BIN" mail search --account iCloud --limit 1 --no-content 2>/dev/null \
+    | python3 -c "import json,sys;d=json.load(sys.stdin)['data']['messages'];print(d[0]['id'] if d else '')")
+  other=$("$BIN" mail accounts list 2>/dev/null | python3 -c "
+import json,sys;a=json.load(sys.stdin)['data']['accounts']
+print(next((x['name'] for x in a if x['name']!='iCloud'), ''))")
+  [ -n "$id" ] && [ -n "$other" ] || skip "store lacks a second account"
+  run "$BIN" mail move --dry-run "$id" --to INBOX --account "$other"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"matched" : 0'
+  echo "$output" | grep -q 'outside the --account/mailbox scope'
+}
+
+# review M4: on the explicit-ids path the mailbox narrows the scope ONLY when TYPED — the
+# silent "INBOX" default must not narrow (that would skip every non-INBOX id the moment
+# --account is given). Typed-and-wrong skips; typed-and-right matches.
+@test "mail mark <id> --mailbox narrows the ids path only when typed (review M4)" {
+  require_index
+  id=$("$BIN" mail search --account iCloud --mailbox INBOX --limit 1 --no-content 2>/dev/null \
+    | python3 -c "import json,sys;d=json.load(sys.stdin)['data']['messages'];print(d[0]['id'] if d else '')")
+  wrong=$("$BIN" mail mailboxes list --account iCloud 2>/dev/null | python3 -c "
+import json,sys;d=json.load(sys.stdin)['data'];rows=d.get('mailboxes',d)
+print(next((r['name'] for r in rows if r['name'] not in ('INBOX','All')), ''))")
+  [ -n "$id" ] && [ -n "$wrong" ] || skip "store lacks an iCloud INBOX message or a second mailbox"
+  run "$BIN" mail mark --read --dry-run "$id" --account iCloud --mailbox "$wrong"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"matched" : 0'
+  echo "$output" | grep -q 'outside the --account/mailbox scope'
+  # Positive control: the typed CORRECT mailbox (and the correct account) still matches.
+  run "$BIN" mail mark --read --dry-run "$id" --account iCloud --mailbox INBOX
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"matched" : 1'
+}
+
+# extra32: the save preview's positional master IS the live Mail.app enumeration — the same
+# list (same order) `attachments list` reports live — and a live-resolved message carries no
+# degraded note. Dry-run only: nothing is written.
+@test "mail attachments save --dry-run previews the LIVE attachment order (extra32)" {
+  require_index
+  id=$("$BIN" mail search --mailbox INBOX --has-attachment --limit 1 --no-content 2>/dev/null \
+    | python3 -c "import json,sys;d=json.load(sys.stdin)['data']['messages'];print(d[0]['id'] if d else '')")
+  [ -n "$id" ] || skip "no INBOX message with an attachment in this store"
+  live=$("$BIN" mail attachments list "$id" 2>/dev/null | python3 -c "
+import json,sys;d=json.load(sys.stdin)['data']
+print('\n'.join(a['name'] for a in d['attachments']))")
+  [ -n "$live" ] || skip "attachment enumeration unavailable"
+  dest=$(mktemp -d "$HOME/.cache/apple-cli-bats.XXXXXX")
+  run "$BIN" mail attachments save "$id" --dir "$dest" --dry-run
+  rmdir "$dest" 2>/dev/null || true
+  [ "$status" -eq 0 ]
+  preview=$(echo "$output" | python3 -c "
+import json,sys;d=json.load(sys.stdin)['data']
+print('\n'.join(d['attachments']))")
+  [ "$preview" = "$live" ]
+  # STRICT: a live-resolved message must NOT carry the degraded index-order note.
+  ! echo "$output" | grep -q '"note" :'
+}
+
+# extra27 follow-up (review M3): --text on get/save/delete/render prints the text rendering —
+# POSITIVE assertions on the content, not just the absence of the JSON envelope.
+@test "mail templates get/save/render/delete honor --text with real content (review M3)" {
+  GAP37_FIXTURE=apple-cli-test-gap37
+  run "$BIN" mail templates save --execute --text apple-cli-test-gap37 --body 'Hello {name}'
+  [ "$status" -eq 0 ]
+  ! echo "$output" | grep -q '"schema_version"'
+  echo "$output" | grep -q "saved template 'apple-cli-test-gap37'"
+  run "$BIN" mail templates get --text apple-cli-test-gap37
+  [ "$status" -eq 0 ]
+  ! echo "$output" | grep -q '"schema_version"'
+  echo "$output" | grep -q 'Hello {name}'
+  run "$BIN" mail templates render --text apple-cli-test-gap37 --var name=Sam
+  [ "$status" -eq 0 ]
+  ! echo "$output" | grep -q '"schema_version"'
+  echo "$output" | grep -q 'Hello Sam'
+  run "$BIN" mail templates delete --execute --text apple-cli-test-gap37
+  [ "$status" -eq 0 ]
+  ! echo "$output" | grep -q '"schema_version"'
+  echo "$output" | grep -q "deleted template 'apple-cli-test-gap37'"
 }

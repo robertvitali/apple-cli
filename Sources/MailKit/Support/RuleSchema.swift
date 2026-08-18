@@ -69,6 +69,13 @@ public enum RuleSchema {
 
     /// Fold `key=value` action tokens into a single Action. Recognized keys:
     /// move_to, copy_to, mark_read, mark_flagged, flag_color, delete, forward_to.
+    /// Oracle A's validate_email regex, verbatim (utils.py:142):
+    /// ^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$
+    static func isValidForwardAddress(_ s: String) -> Bool {
+        s.range(of: #"^[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}$"#,
+                options: .regularExpression) != nil
+    }
+
     public static func parseActions(_ raw: [String]) throws -> Action {
         var a = Action()
         for token in raw {
@@ -91,7 +98,15 @@ public enum RuleSchema {
                 }
                 a.flag_color = value.lowercased()
             case "delete": a.delete = (value.lowercased() == "true")
-            case "forward_to": a.forward_to = value.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+            case "forward_to":
+                let entries = value.split(separator: ",").map { $0.trimmingCharacters(in: .whitespaces) }.filter { !$0.isEmpty }
+                // Oracle A validates EVERY entry (mail_connector.py:505-511, utils.validate_email)
+                // and raises ValueError → validation_error; the bare comma-split let
+                // `forward_to=notanemail` parse and preview ok (gap26). Same regex as the oracle.
+                for e in entries where !RuleSchema.isValidForwardAddress(e) {
+                    throw AppleError.validation("forward_to entries must be valid email addresses; got '\(e)'.")
+                }
+                a.forward_to = entries
             default:
                 throw AppleError.validation("unknown action key '\(key)'.")
             }
@@ -212,7 +227,23 @@ public enum RuleLiveGuards {
         return out
     }
 
+    /// SHAPE validation for move_to/copy_to, split out of `liveActionPlan` so previews run it
+    /// UNCONDITIONALLY (extra25): both preview paths used to gate the whole plan on
+    /// `blockers.isEmpty`, so a malformed target paired with a delete/forward_to blocker
+    /// skipped these checks entirely and previewed ok — where oracle A validates always.
+    public static func validateActionShapes(_ actions: RuleSchema.Action) throws {
+        if let mv = actions.move_to, !mv.isEmpty {
+            guard mv.rangeOfCharacter(from: ctrlChars) == nil else { throw AppleError.validation("move_to must not contain RS/US (0x1E/0x1F) control characters.") }
+            guard mv.contains("/") else { throw AppleError.validation("move_to must be 'Account/Mailbox' (e.g. 'iCloud/Archive'); got '\(mv)'.") }
+        }
+        if let cp = actions.copy_to, !cp.isEmpty {
+            guard cp.rangeOfCharacter(from: ctrlChars) == nil else { throw AppleError.validation("copy_to must not contain RS/US (0x1E/0x1F) control characters.") }
+            guard cp.contains("/") else { throw AppleError.validation("copy_to must be 'Account/Mailbox' (e.g. 'iCloud/Archive'); got '\(cp)'.") }
+        }
+    }
+
     public static func liveActionPlan(_ actions: RuleSchema.Action) throws -> LiveActionPlan {
+        try validateActionShapes(actions)
         if let fwd = actions.forward_to, !fwd.isEmpty {
             throw AppleError.mailSafety("a live rule with forward_to can auto-send to others — refused; edit such a rule in Mail.app.")
         }

@@ -84,7 +84,12 @@ public struct TemplateStore {
                 || $0 == "_" || $0 == "-"
         }
         guard ok else {
-            throw AppleError.validation("template name must be 1–64 chars of ASCII letters, digits, '_' or '-'; got '\(name)'.")
+            // Oracle A maps this to the TYPED `invalid_template_name`
+            // (_template_error_response, server.py) — type-only, exit stays 64 (extra26,
+            // same precedent as rule_not_found / unsupported_rule_action).
+            throw AppleError(type: "invalid_template_name",
+                             message: "template name must be 1–64 chars of ASCII letters, digits, '_' or '-'; got '\(name)'.",
+                             exitCode: AppleExit.usage)
         }
     }
 
@@ -107,7 +112,9 @@ public struct TemplateStore {
     public func get(_ name: String) throws -> Template {
         try TemplateStore.validateName(name)
         guard FileManager.default.fileExists(atPath: fileURL(name).path) else {
-            throw AppleError.notFound("no template named '\(name)'.")
+            throw AppleError(type: "template_not_found",
+                             message: "no template named '\(name)'.",
+                             exitCode: AppleExit.notFound)
         }
         let (subject, body) = try readParsed(name)
         return Template(name: name, subject: subject, body: body,
@@ -162,7 +169,9 @@ public struct TemplateStore {
     public func delete(_ name: String) throws {
         try TemplateStore.validateName(name)
         guard FileManager.default.fileExists(atPath: fileURL(name).path) else {
-            throw AppleError.notFound("no template named '\(name)'.")
+            throw AppleError(type: "template_not_found",
+                             message: "no template named '\(name)'.",
+                             exitCode: AppleExit.notFound)
         }
         try FileManager.default.removeItem(at: fileURL(name))
     }
@@ -248,16 +257,21 @@ public struct TemplateStore {
         return found.sorted()
     }
 
-    /// Resolve `{token}` placeholders in `text` from `vars`, in a SINGLE forward pass — a
-    /// substituted value is never re-scanned, so the result can't depend on dictionary iteration
-    /// order (the previous repeated-`replacingOccurrences` version was nondeterministic across
-    /// processes when a value happened to contain another token's text). `{{`/`}}` are literal
-    /// `{`/`}`, matching Python `str.format`. A token with no matching var is left VERBATIM
-    /// (a documented CLI-vs-oracle divergence: the oracle raises instead — see docs/port-specs).
-    /// Substitute `{token}`s in `text`. `{{` / `}}` collapse to one literal brace. Every token
-    /// with no entry in `vars` is inserted into `missing` (and left verbatim in the returned
-    /// string, which callers that raise on `missing` never use).
-    static func fill(_ text: String, vars: [String: String], missing: inout Set<String>) -> String {
+    /// Resolve replacement fields in `text` from `vars`, in a SINGLE forward pass — a
+    /// substituted value is never re-scanned, so the result can't depend on dictionary
+    /// iteration order. `{{`/`}}` are literal braces, matching Python `str.format`.
+    ///
+    /// gap37: fields now run the FULL string-value subset of Python's format machinery via
+    /// `PyFormat` — accessor chains (`{x[0]}`), conversions (`!r`), and the mini-language
+    /// (`{x:>5}`, `{x:{width}}`), matching oracle A's `string.Formatter().vformat`. The old
+    /// scanner required `}` right after the identifier, so a spec-bearing field was copied
+    /// VERBATIM and never recorded as missing — bypassing the missing_template_variable guard
+    /// straight into outbound subject/body text. Every field whose base variable is absent is
+    /// inserted into `missing` (callers that raise on `missing` never use the returned text);
+    /// an evaluation error (unknown format code, attribute access on a string, …) THROWS with
+    /// Python's own message, mapped to oracle A's class for it — its render catches only
+    /// MailTemplateError specially, so these land in the generic arm as error_type "unknown".
+    static func fill(_ text: String, vars: [String: String], missing: inout Set<String>) throws -> String {
         var out = ""
         var i = text.startIndex
         while i < text.endIndex {
@@ -267,18 +281,45 @@ public struct TemplateStore {
                 if next < text.endIndex, text[next] == c {     // `{{` / `}}` → one literal brace
                     out.append(c); i = text.index(after: next); continue
                 }
-                if c == "{", let (name, after) = scanToken(text, from: i) {
-                    if let v = vars[name] {
-                        out.append(v)
+                if c == "{" {
+                    switch PyFormat.parseField(text, from: i) {
+                    case .literal:
+                        break   // lone '{' — the ONE pinned divergence; falls through to literal copy
+                    case .error(let msg):
+                        // Python's ValueError/IndexError → oracle A's generic arm ("unknown").
+                        throw AppleError(type: "unknown", message: msg, exitCode: AppleExit.unknown)
+                    case .field(let field, let after):
+                    if let base = vars[field.name] {
+                        do {
+                            var v = try PyFormat.applyAccessors(base, field.accessors)
+                            v = try PyFormat.applyConversion(v, field.conversion)
+                            // A missing NESTED spec field ({x:{width}} with width absent) is a
+                            // KeyError in Python — record it and leave the whole field verbatim
+                            // (never feed the unresolved brace into the formatter, whose
+                            // "Unknown format code '{'" would mask the real cause).
+                            var specMissing = Set<String>()
+                            let spec = PyFormat.resolveSpec(field.spec, vars: vars, missing: &specMissing)
+                            guard specMissing.isEmpty else {
+                                missing.formUnion(specMissing)
+                                out.append(String(text[i..<after]))
+                                i = after; continue
+                            }
+                            v = try PyFormat.formatString(v, spec: spec)
+                            out.append(v)
+                        } catch let e as PyFormat.EvalError {
+                            throw AppleError(type: "unknown", message: e.message,
+                                             exitCode: AppleExit.unknown)
+                        }
                     } else {
-                        // RECORD the unresolved token. Oracle A's `_substitute` raises
-                        // MailTemplateMissingVariableError naming every missing placeholder —
-                        // leaving `{token}` verbatim would let an un-substituted
-                        // `{recipient_name}` flow into outbound subject/body text.
-                        missing.insert(name)
-                        out.append("{\(name)}")
+                        // RECORD the unresolved field — including a raw name with spaces
+                        // (`{ x }` is Python's KeyError(' x ')). Oracle A raises
+                        // MailTemplateMissingVariableError; leaving the field verbatim would
+                        // let it flow into outbound subject/body text (review B3).
+                        missing.insert(field.name)
+                        out.append(String(text[i..<after]))
                     }
                     i = after; continue
+                    }
                 }
             }
             out.append(c)
@@ -294,8 +335,8 @@ public struct TemplateStore {
         var vars = autoVars
         for (k, v) in userVars { vars[k] = v }               // user overrides auto
         var missing = Set<String>()
-        let subject = tpl.subject.map { TemplateStore.fill($0, vars: vars, missing: &missing) }
-        let body = TemplateStore.fill(tpl.body, vars: vars, missing: &missing)
+        let subject = try tpl.subject.map { try TemplateStore.fill($0, vars: vars, missing: &missing) }
+        let body = try TemplateStore.fill(tpl.body, vars: vars, missing: &missing)
         // Oracle parity: an unresolved placeholder is an ERROR, not a silent literal. Oracle A's
         // `_substitute` collects ALL missing names and raises MailTemplateMissingVariableError
         // with them sorted; `error_type` on the wire is `missing_template_variable`.

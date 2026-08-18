@@ -230,6 +230,13 @@ func requireMailboxKnown(ctx: MailContext, name: String, accountUUID: String?) t
 
 func resolveMessageRow(ctx: MailContext, id: String) throws -> [String: String?]? {
     let trimmed = id.trimmingCharacters(in: .whitespacesAndNewlines)
+    // An EMPTY id fell through to `message(internetMessageID: "")`, which matches a row whose
+    // internet-message-id column is empty — review measured `delete --permanent ""` resolving
+    // an ARBITRARY real message with ok:true. A script's unset $ID variable must fail loud,
+    // not permanently destroy an unrelated message.
+    guard !trimmed.isEmpty else {
+        throw AppleError.validation("message id must not be empty.")
+    }
     if let rowid = Int(trimmed) { return try ctx.index.message(rowid: rowid) }
     if trimmed.lowercased().hasPrefix("message://") {
         // message://%3C<encoded id>%3E  → strip scheme + angle-bracket wrappers, decode.

@@ -1195,6 +1195,12 @@ public struct MailScript {
                     set accts to hitsA
                 end if
                 repeat with a in accts
+                    -- The bare `try` DELIBERATELY swallows resolveMailboxPath's ambiguity
+                    -- sentinel here (review L2): this is a READ-side locator HINT, not a
+                    -- mutation destination — an ambiguous hint just means "the hint didn't
+                    -- disambiguate", and the correct behavior is the blind findMsg fallback
+                    -- below, which locates by message-id alone. Only the MUTATION path
+                    -- (moveLocated) surfaces the sentinel as a typed refusal.
                     try
                         set mb to my resolveMailboxPath(a, mbxName)
                         if mb is not missing value then
@@ -1282,7 +1288,18 @@ public struct MailScript {
         let script = body + "\n" + MailScript.locator + "\n" + MailScript.mailboxPathResolver
         let bare = MailFormat.stripAngleBrackets(id) ?? id
         for candidate in ["<\(bare)>", bare] {
-            let out = try runner.run(script, arguments: [candidate, account ?? "", toMailbox])
+            let out: String
+            do {
+                out = try runner.run(script, arguments: [candidate, account ?? "", toMailbox])
+            } catch let e as AppleScriptRunner.RunError {
+                // The resolver raises the typed ambiguity sentinel (extra23): a bare leaf name
+                // matching several nesting points must refuse, never pick item 1 arbitrarily
+                // as a mutation destination.
+                if case .scriptFailed(_, let stderr) = e, MailScript.isAmbiguousMailboxError(stderr) {
+                    throw AppleError.validation("destination mailbox '\(toMailbox)' is ambiguous — the name exists at more than one nesting point in this account. Address it by full path (\"Parent/\(toMailbox)\").")
+                }
+                throw e
+            }
             if out == "ok" { return true }
             if out == "nodest" {
                 throw AppleError.notFound("destination mailbox '\(toMailbox)' not found in the message's account (for a nested mailbox use \"Parent/Child\").")
@@ -1290,6 +1307,23 @@ public struct MailScript {
         }
         return false
     }
+
+    /// Internal for the logic tier: the typed ambiguity sentinel the resolver raises when a
+    /// bare leaf (or a segment) matches more than one mailbox — mapped to a validation error
+    /// instead of an arbitrary item-1 pick (extra23).
+    static func isAmbiguousMailboxError(_ stderr: String) -> Bool {
+        // Anchored (security review M1): require BOTH the -10001 error number the sentinel is
+        // raised with AND osascript's `execution error:` framing, so unrelated stderr that
+        // merely CONTAINS the token (e.g. an operator-named mailbox echoed by a different
+        // Mail error) cannot masquerade as ambiguity and downgrade an upstream error class.
+        stderr.contains("(-10001)")
+            && stderr.range(of: #"execution error:.*apple-cli-ambiguous-mailbox:\d+"#,
+                            options: .regularExpression) != nil
+    }
+
+    /// Internal for the logic tier: pins the resolver's ambiguity guards as source text (the
+    /// script only executes against live Mail, and executing a move in bats would mutate mail).
+    static var mailboxPathResolverSource: String { mailboxPathResolver }
 
     private static let mailboxPathResolver = """
 
@@ -1302,6 +1336,22 @@ public struct MailScript {
             -- would be dead code, and the caller would get the opaque Mail error this resolver
             -- exists to replace. `count of` forces resolution now, so the branch is real.
             set hits to (mailboxes of acct whose name is pathRaw)
+            -- `mailboxes of acct` is FLATTENED and `name` is leaf-only, so a bare leaf that
+            -- exists at several nesting points matches them ALL — `item 1` silently picked an
+            -- arbitrary one as a mutation DESTINATION (extra23). MEASURED (2026-08-17,
+            -- review round): oracle A's own reference form `mailbox "X" of acct` resolves
+            -- TOP-LEVEL ONLY and errors -1728 on a nested leaf (probed live: 1 nested hit,
+            -- direct reference still errors). So on >1 hits: a top-level match wins exactly
+            -- as the oracle would resolve it; otherwise raise the typed sentinel the Swift
+            -- side maps to a validation error naming the full-path fix (the oracle would
+            -- have errored -1728 there too — our refusal names the remedy).
+            if (count of hits) > 1 then
+                try
+                    return mailbox pathRaw of acct
+                on error
+                    error "apple-cli-ambiguous-mailbox:" & (count of hits) number -10001
+                end try
+            end if
             if (count of hits) > 0 then return (item 1 of hits)
             set AppleScript's text item delimiters to "/"
             set parts to text items of pathRaw
@@ -1316,11 +1366,15 @@ public struct MailScript {
                         else
                             set segHits to (mailboxes of mbx whose name is seg)
                         end if
-                        if (count of segHits) is 0 then return missing value
-                        set mbx to (item 1 of segHits)
                     on error
                         return missing value
                     end try
+                    if (count of segHits) is 0 then return missing value
+                    -- Same ambiguity rule per segment: `mailboxes of mbx` is also a flattened
+                    -- descendant view, so a segment name occurring at several depths under the
+                    -- current parent is ambiguous, not first-match.
+                    if (count of segHits) > 1 then error "apple-cli-ambiguous-mailbox:" & (count of segHits) number -10001
+                    set mbx to (item 1 of segHits)
                 end if
             end repeat
             return mbx
@@ -1681,12 +1735,13 @@ public struct MailScript {
     /// path)]`, fully resolved by the caller (index selection, basename safety, and de-collision
     /// all happen in Swift — see CommandHelpers.swift). `index` is passed straight through to
     /// AppleScript's `item (index + 1) of (mail attachments of msg)` — i.e. it addresses Mail.app's
-    /// OWN live attachment order, matching MCP A's `items {i} of mail attachments of msg`. KNOWN
-    /// ASSUMPTION: the caller's index space (Envelope-Index attachments, `ORDER BY name`) is
-    /// assumed to enumerate in the same order Mail.app reports live; this holds in practice but
-    /// isn't independently verified here — a mismatch would select the wrong attachment by
-    /// position, the same class of edge case MCP A's own index numbering has no defense against
-    /// either (self-consistent only within its own listing/save pair).
+    /// OWN live attachment order, matching MCP A's `items {i} of mail attachments of msg`.
+    /// The caller's master list MUST therefore be the LIVE enumeration (`listAttachments`) —
+    /// the old assumption that the Envelope-Index `ORDER BY name` list matches Mail's live
+    /// order was MEASURED FALSE on 8/8 multi-attachment messages sampled (extra32): an
+    /// index-ordered master selected the wrong attachment by position, writing one
+    /// attachment's bytes under another's filename. AttachmentsSave now builds its master from
+    /// the live list and refuses to execute from the index fallback.
     ///
     /// Locates the message by RFC message-id via the shared `findMsg` (bracketed + bare form).
     /// Returns the SET of indices actually saved — a per-item AppleScript failure (not-yet-
@@ -2306,7 +2361,14 @@ public struct MailScript {
         }
         guard !raw.isEmpty else { return }
         let names = raw.components(separatedBy: MailScript.US).joined(separator: ", ")
-        throw AppleError.mailSafety("rule \(index) uses actions outside the supported schema: \(names). The CLI can't safely update a rule whose existing actions it doesn't model (they'd be silently preserved or dropped) — edit this rule in Mail.app's Rules pane instead.")
+        // Oracle A's update_rule maps this to the TYPED `unsupported_rule_action`
+        // (MailUnsupportedRuleActionError, server.py:546-551) — the generic safety_violation
+        // left a consumer unable to tell "this rule uses actions I can't model" from "not in
+        // test mode" (extra24). Type-only change, same rule_not_found precedent; the exit code
+        // stays 77 (the refusal class is unchanged, per versioning policy).
+        throw AppleError(type: "unsupported_rule_action",
+                         message: "rule \(index) uses actions outside the supported schema: \(names). The CLI can't safely update a rule whose existing actions it doesn't model (they'd be silently preserved or dropped) — edit this rule in Mail.app's Rules pane instead.",
+                         exitCode: AppleExit.permissionDenied)
     }
 
     private static let ruleCondCountScript = """

@@ -24,6 +24,12 @@ func notLocatedNote(_ notFound: [String]) -> String? {
         : "\(notFound.count) message(s) could not be located to mutate: the Mail.app locator skips Gmail '[Gmail]/*' mailboxes (All Mail, Sent, Trash, …). Mutate archived/sent mail in Mail.app, or move it to INBOX first."
 }
 
+/// Join optional note fragments into one wire `note` (nil when none).
+func joinNotes(_ parts: String?...) -> String? {
+    let xs = parts.compactMap { $0 }
+    return xs.isEmpty ? nil : xs.joined(separator: " | ")
+}
+
 /// Filter selector for bulk ops (MCP B move/update/trash filter model).
 struct MatchOptions: ParsableArguments {
     @Option(name: .long, help: "Match subject keyword (repeatable — matches ANY, MCP B subject_keywords).") var matchSubject: [String] = []
@@ -31,7 +37,7 @@ struct MatchOptions: ParsableArguments {
     @Option(name: .long, help: "Only messages older than N days.") var olderThanDays: Int?
     @Flag(name: .long, help: "Only already-read messages.") var onlyRead = false
     @Flag(name: .long, help: "Operate on the WHOLE mailbox with no subject/sender filter required (MCP B apply_to_all); if a --match filter is also given, that filter still narrows the set. Bounded by --max. MUTATES REAL MAIL when unsandboxed — preview with --dry-run first. Inside the sandbox it stays per-message label-gated: a batch containing any unlabeled real message aborts before mutating anything.") var all = false
-    @Option(name: .long, help: "Max messages to affect (safety cap; MCP B max_updates/max_deletes).") var max: Int = 50
+    @Option(name: .long, help: "Max messages to affect (safety cap). Per-op defaults mirror MCP B: move 50 (max_moves), mark/flag 10 (max_updates), delete 5 (max_deletes).") var max: Int?
     // Count only NON-BLANK keywords: a lone `--match-subject ""` is not an active filter (buildFilter
     // drops empty keywords), so it must not silently mean "whole mailbox" — that intent needs --all.
     var isActive: Bool {
@@ -84,7 +90,9 @@ func enforceBulkCap(_ ids: [String], verb: String) throws {
 }
 
 func resolveTargets(ctx: MailContext, ids: [String], match: MatchOptions, account: String?,
-                    mailbox: String) throws -> (messages: [MailMessage], filterBased: Bool) {
+                    mailbox: String, mailboxWasExplicit: Bool = true, defaultMax: Int = 50,
+                    seedReadStatus: Bool? = nil, seedFlagged: Bool? = nil) throws
+    -> (messages: [MailMessage], filterBased: Bool, scopeSkippedNote: String?) {
     // A blank --match-sender or --match-subject would slip past the filter machinery while
     // contributing NO WHERE predicate (EnvelopeIndex drops empty entries) — or, whitespace-only,
     // bind a `% %` LIKE that nearly every subject matches — silently widening a targeted
@@ -99,11 +107,44 @@ func resolveTargets(ctx: MailContext, ids: [String], match: MatchOptions, accoun
     }
     if !ids.isEmpty {
         var out: [MailMessage] = []
+        var outOfScope: [String] = []
+        // Oracle A's _bulk_repeat_block (extra21): with account + source_mailbox both provided
+        // it runs a NARROW loop scoped to that one mailbox — an id living elsewhere is simply
+        // not found there and counted 0, never mutated. The CLI's mailbox flags always carry a
+        // value (default INBOX), so the pair rule keys off `--account` being given: account
+        // present → both rows' account AND mailbox must match (skipped rows disclosed, matching
+        // the oracle's silent 0-count but visible); account absent → the legacy unscoped
+        // resolution, exactly the oracle's neither-given cross-scan. Previously BOTH flags were
+        // silently ignored on the ids path — `move 122836 --account NoSuchAccount_XYZ` returned
+        // ok:true, matched 1.
+        let scopeUUID = try account.map { try ctx.requireAccountUUID($0) }
+        var uuidMemo: [String: String] = [:]   // review: don't re-resolve per id
         for id in ids {
             guard let row = try resolveMessageRow(ctx: ctx, id: id) else { throw AppleError.notFound("no message for id '\(id)'.") }
-            out.append(ctx.decodeSummary(row))
+            let m = ctx.decodeSummary(row)
+            if let scopeUUID {
+                let msgUUID = uuidMemo[m.account]
+                    ?? ((try? ctx.requireAccountUUID(m.account)) ?? "")
+                uuidMemo[m.account] = msgUUID
+                // Mailbox narrows ONLY when the flag was explicitly typed — the commands
+                // default it to INBOX, and review measured `mark <archived-id> --account X`
+                // silently skipping the id against a default the user never set (oracle A
+                // never narrows the scan on account alone: for move it passes account=None
+                // unless source_mailbox was given, and for the pair rule it RAISES on a
+                // partial pair rather than guessing — that raise is a disclosed divergence,
+                // see port-spec row 19).
+                let path = m.mailbox.lowercased()
+                let leaf = path.split(separator: "/").last.map(String.init) ?? path
+                let want = mailbox.lowercased()
+                let inMailbox = !mailboxWasExplicit || EnvelopeIndex.isAllWildcard(mailbox)
+                    || path == want || leaf == want
+                guard msgUUID == scopeUUID, inMailbox else { outOfScope.append(id); continue }
+            }
+            out.append(m)
         }
-        return (out, false)
+        let note = outOfScope.isEmpty ? nil
+            : "\(outOfScope.count) id(s) outside the --account/mailbox scope (or with an unresolvable account) were skipped, not mutated (oracle A's scoped-loop semantics): \(outOfScope.joined(separator: ", "))"
+        return (out, false, note)
     }
     guard match.isActive else { throw AppleError.validation("provide message ids, a --match filter, or --all.") }
     var f = EnvelopeIndex.MessageFilters()
@@ -121,11 +162,19 @@ func resolveTargets(ctx: MailContext, ids: [String], match: MatchOptions, accoun
     // by --max). subject keywords match ANY (MCP B subject_keywords OR-semantics).
     f.subjectContainsAny = match.matchSubject
     f.senderContains = match.matchSender
+    // Oracle B seeds the ACTION-INVERSE predicate before subject/sender (manage.py:419-427:
+    // mark_read → "read status is false", flag → "flagged status is false", …) so max_updates
+    // budgets CHANGES, not matches — gap23. Seeded FIRST; the CLI-extra --only-read remains an
+    // explicit override for the old budget-matches behavior.
+    if let seedReadStatus { f.readStatus = seedReadStatus }
+    if let seedFlagged { f.flagged = seedFlagged }
     if match.onlyRead { f.readStatus = true }
     if let days = match.olderThanDays { f.dateToUnix = Int(Date().timeIntervalSince1970) - days * 86400 }
-    f.limit = match.max
+    // Per-operation cap defaults (extra22): oracle B's max_moves=50 / max_updates=10 /
+    // max_deletes=5 — the old shared 50 left mark/flag 5x and delete 10x looser than the oracle.
+    f.limit = match.max ?? defaultMax
     let rows = try ctx.index.queryMessages(f)
-    return (rows.map { ctx.decodeSummary($0) }, true)
+    return (rows.map { ctx.decodeSummary($0) }, true, nil)
 }
 
 /// Scope warning for a FILTER-BASED bulk mutation. Two cases warrant one:
@@ -184,7 +233,7 @@ struct MoveCommand: ParsableCommand {
     @Argument(help: "Message ids (or use --match).") var ids: [String] = []
     @Option(name: .long, help: "Destination mailbox (use '/' for nested).") var to: String
     @Option(name: .long, help: "Source account (name or UUID).") var account: String?
-    @Option(name: .long, help: "Source mailbox (default INBOX).") var source: String = "INBOX"
+    @Option(name: .long, help: "Source mailbox (default INBOX for filter targeting; on the explicit-ids path it narrows the scope ONLY when typed, with --account).") var source: String?
     @Flag(name: .long, help: "Gmail label-move handling (copy + delete).") var gmailMode = false
 
     func run() throws {
@@ -195,13 +244,14 @@ struct MoveCommand: ParsableCommand {
             let willExecute = try global.willExecute(defaultDryRun: false)
 
             let ctx = try MailContext()
-            let (msgs, filterBased) = try resolveTargets(ctx: ctx, ids: ids, match: match, account: account, mailbox: source)
-            let scopeNote = filterBased ? mailboxScopeNote(source) : nil
+            let effectiveSource = source ?? "INBOX"
+            let (msgs, filterBased, skipNote) = try resolveTargets(ctx: ctx, ids: ids, match: match, account: account, mailbox: effectiveSource, mailboxWasExplicit: source != nil, defaultMax: 50)
+            let scopeNote = filterBased ? mailboxScopeNote(effectiveSource) : nil
             let detail = ["to": to, "gmail_mode": String(gmailMode)]
             guard willExecute else {
                 try previewValidateSandboxTargets(msgs, sandboxActive: sandboxActive)
                 try Output.emit(tool: "mail", data: BulkPreview(action: "move", matched: msgs.count, filter_based: filterBased,
-                    dry_run: true, executed: false, messages: msgs, detail: detail, note: nil, applied: nil, not_found: nil, scope_note: scopeNote), sandboxActive: sandboxActive); return
+                    dry_run: true, executed: false, messages: msgs, detail: detail, note: skipNote, applied: nil, not_found: nil, scope_note: scopeNote), sandboxActive: sandboxActive); return
             }
             // --gmail-mode routes to gmailMove (Gmail copy+delete label semantics: duplicate to the
             // destination, then delete the original to Trash); plain move otherwise. BOTH go through
@@ -216,7 +266,7 @@ struct MoveCommand: ParsableCommand {
                 return try script.move(internetMessageID: imid, accountName: acct, toMailbox: to)
             }
             try Output.emit(tool: "mail", data: BulkPreview(action: "move", matched: msgs.count, filter_based: filterBased,
-                dry_run: false, executed: true, messages: msgs, detail: detail, note: notLocatedNote(notFound), applied: applied, not_found: notFound, scope_note: scopeNote), sandboxActive: sandboxActive)
+                dry_run: false, executed: true, messages: msgs, detail: detail, note: joinNotes(skipNote, notLocatedNote(notFound)), applied: applied, not_found: notFound, scope_note: scopeNote), sandboxActive: sandboxActive)
         }
     }
 }
@@ -227,7 +277,7 @@ struct MarkCommand: ParsableCommand {
     @OptionGroup var match: MatchOptions
     @Argument var ids: [String] = []
     @Option(name: .long) var account: String?
-    @Option(name: .long) var mailbox: String = "INBOX"
+    @Option(name: .long, help: "Mailbox (default INBOX for filter targeting; narrows the ids path only when typed, with --account).") var mailbox: String?
     @Flag(name: .long) var read = false
     @Flag(name: .long) var unread = false
 
@@ -242,13 +292,16 @@ struct MarkCommand: ParsableCommand {
             guard let markRead = target else { throw AppleError.validation("specify --read or --unread.") }
             try enforceBulkCap(ids, verb: "mark")   // BEFORE MailContext() — see enforceBulkCap
             let ctx = try MailContext()
-            let (msgs, filterBased) = try resolveTargets(ctx: ctx, ids: ids, match: match, account: account, mailbox: mailbox)
-            let scopeNote = filterBased ? mailboxScopeNote(mailbox) : nil
+            // gap23: seed the ACTION-INVERSE so --max budgets CHANGES (oracle B seeds
+            // "read status is false" for mark_read before any other predicate).
+            let effectiveMailbox = mailbox ?? "INBOX"
+            let (msgs, filterBased, skipNote) = try resolveTargets(ctx: ctx, ids: ids, match: match, account: account, mailbox: effectiveMailbox, mailboxWasExplicit: mailbox != nil, defaultMax: 10, seedReadStatus: !markRead)
+            let scopeNote = filterBased ? mailboxScopeNote(effectiveMailbox) : nil
             let action = markRead ? "mark_read" : "mark_unread"
             guard willExecute else {
                 try previewValidateSandboxTargets(msgs, sandboxActive: sandboxActive)
                 try Output.emit(tool: "mail", data: BulkPreview(action: action, matched: msgs.count, filter_based: filterBased,
-                    dry_run: true, executed: false, messages: msgs, detail: [:], note: nil,
+                    dry_run: true, executed: false, messages: msgs, detail: [:], note: skipNote,
                     applied: nil, not_found: nil, scope_note: scopeNote), sandboxActive: sandboxActive); return
             }
             let script = MailScript()
@@ -256,7 +309,7 @@ struct MarkCommand: ParsableCommand {
                 try script.setRead(internetMessageID: imid, accountName: acct, read: markRead)
             }
             try Output.emit(tool: "mail", data: BulkPreview(action: action, matched: msgs.count, filter_based: filterBased,
-                dry_run: false, executed: true, messages: msgs, detail: [:], note: notLocatedNote(notFound), applied: applied, not_found: notFound, scope_note: scopeNote), sandboxActive: sandboxActive)
+                dry_run: false, executed: true, messages: msgs, detail: [:], note: joinNotes(skipNote, notLocatedNote(notFound)), applied: applied, not_found: notFound, scope_note: scopeNote), sandboxActive: sandboxActive)
         }
     }
 }
@@ -267,7 +320,7 @@ struct FlagCommand: ParsableCommand {
     @OptionGroup var match: MatchOptions
     @Argument var ids: [String] = []
     @Option(name: .long) var account: String?
-    @Option(name: .long) var mailbox: String = "INBOX"
+    @Option(name: .long, help: "Mailbox (default INBOX for filter targeting; narrows the ids path only when typed, with --account).") var mailbox: String?
     @Option(name: .long, help: "Flag color: none/orange/red/yellow/blue/green/purple/gray.") var color: String?
     @Flag(name: .long, help: "Remove the flag.") var unflag = false
 
@@ -281,9 +334,6 @@ struct FlagCommand: ParsableCommand {
             if let color, !MailFlagColor.acceptedTokens.contains(color.lowercased()) {
                 throw AppleError.validation("--color must be one of \(MailFlagColor.acceptedTokens.joined(separator: "/")).")
             }
-            let ctx = try MailContext()
-            let (msgs, filterBased) = try resolveTargets(ctx: ctx, ids: ids, match: match, account: account, mailbox: mailbox)
-            let scopeNote = filterBased ? mailboxScopeNote(mailbox) : nil
             // Oracle parity: `flag_color="none"` IS the unflag spelling — oracle A's
             // `flag_message` derives `flagged_status = flag_color != "none"` (mail_connector.py)
             // and maps "none" to flag index -1. So `--color none` unflags exactly like `--unflag`;
@@ -296,6 +346,17 @@ struct FlagCommand: ParsableCommand {
                 throw AppleError.validation("--unflag conflicts with --color \(color); pass --unflag (or --color none) to clear, or --color \(color) alone to set.")
             }
             let clearing = unflag || wantsNone
+            let ctx = try MailContext()
+            // gap23: inverse seed — flag targets the unflagged, unflag targets the flagged.
+            // EXCEPT recolor (an explicit non-none --color): seeding flagged:false there made
+            // recoloring already-flagged mail impossible via the filter path, a capability the
+            // CLI had and the oracle's binary flag never modeled — review M2. An explicit
+            // color targets both flagged and unflagged; --only-read-style narrowing is still
+            // available via the ids path.
+            let seedFlagged: Bool? = clearing ? true : (color == nil ? false : nil)
+            let effectiveMailbox = mailbox ?? "INBOX"
+            let (msgs, filterBased, skipNote) = try resolveTargets(ctx: ctx, ids: ids, match: match, account: account, mailbox: effectiveMailbox, mailboxWasExplicit: mailbox != nil, defaultMax: 10, seedFlagged: seedFlagged)
+            let scopeNote = filterBased ? mailboxScopeNote(effectiveMailbox) : nil
             let act = clearing ? "unflag" : "flag"
             let colorName = color ?? (unflag ? "none" : "red")
             // `color` is this CLI's original key; `flag_color` mirrors oracle A's wire name
@@ -304,7 +365,7 @@ struct FlagCommand: ParsableCommand {
             guard willExecute else {
                 try previewValidateSandboxTargets(msgs, sandboxActive: sandboxActive)
                 try Output.emit(tool: "mail", data: BulkPreview(action: act, matched: msgs.count, filter_based: filterBased,
-                    dry_run: true, executed: false, messages: msgs, detail: detail, note: nil, applied: nil, not_found: nil, scope_note: scopeNote), sandboxActive: sandboxActive); return
+                    dry_run: true, executed: false, messages: msgs, detail: detail, note: skipNote, applied: nil, not_found: nil, scope_note: scopeNote), sandboxActive: sandboxActive); return
             }
             // clearing (--unflag or --color none) → flagged:false; otherwise flagged:true with the
             // resolved color index (red default).
@@ -315,7 +376,7 @@ struct FlagCommand: ParsableCommand {
                 try script.setFlag(internetMessageID: imid, accountName: acct, flagged: flagged, colorIndex: colorIndex)
             }
             try Output.emit(tool: "mail", data: BulkPreview(action: act, matched: msgs.count, filter_based: filterBased,
-                dry_run: false, executed: true, messages: msgs, detail: detail, note: notLocatedNote(notFound), applied: applied, not_found: notFound, scope_note: scopeNote), sandboxActive: sandboxActive)
+                dry_run: false, executed: true, messages: msgs, detail: detail, note: joinNotes(skipNote, notLocatedNote(notFound)), applied: applied, not_found: notFound, scope_note: scopeNote), sandboxActive: sandboxActive)
         }
     }
 }
@@ -413,7 +474,7 @@ struct DeleteCommand: ParsableCommand {
             let effectiveMailbox = mailbox ?? (permanent ? "All" : "INBOX")
             try enforceBulkCap(ids, verb: "delete")   // BEFORE MailContext() — see enforceBulkCap
             let ctx = try MailContext()
-            let (msgs, filterBased) = try resolveTargets(ctx: ctx, ids: ids, match: match, account: account, mailbox: effectiveMailbox)
+            let (msgs, filterBased, skipNote) = try resolveTargets(ctx: ctx, ids: ids, match: match, account: account, mailbox: effectiveMailbox, mailboxWasExplicit: mailbox != nil, defaultMax: 5)
             let scopeNote = filterBased ? mailboxScopeNote(effectiveMailbox) : nil
             if permanent && willExecute {
                 // Re-check the label against the CANONICAL prefix (ignoring any APPLE_TEST_SANDBOX
@@ -448,7 +509,7 @@ struct DeleteCommand: ParsableCommand {
                 // renderable, matching oracle B's ungated dry_run=True.
                 if !permanent { try previewValidateSandboxTargets(msgs, sandboxActive: sandboxActive) }
                 try Output.emit(tool: "mail", data: BulkPreview(action: action, matched: msgs.count, filter_based: filterBased,
-                    dry_run: true, executed: false, messages: msgs, detail: detail, note: previewNote, applied: nil, not_found: nil, scope_note: scopeNote), sandboxActive: sandboxActive); return
+                    dry_run: true, executed: false, messages: msgs, detail: detail, note: joinNotes(skipNote, previewNote), applied: nil, not_found: nil, scope_note: scopeNote), sandboxActive: sandboxActive); return
             }
             // Both paths run through executeMessageMutation (all-or-nothing; sandbox-scoped label
             // gate) — and for --permanent the UNCONDITIONAL requireCanonicalLabels above already
@@ -494,7 +555,7 @@ struct DeleteCommand: ParsableCommand {
             }
             try Output.emit(tool: "mail", data: BulkPreview(action: action, matched: msgs.count, filter_based: filterBased,
                 dry_run: false, executed: true, messages: msgs, detail: detail,
-                note: note, applied: applied, not_found: notFound, scope_note: scopeNote,
+                note: joinNotes(skipNote, note), applied: applied, not_found: notFound, scope_note: scopeNote,
                 expunge_unsupported: unsupported.isEmpty ? nil : unsupported), sandboxActive: sandboxActive)
         }
     }
@@ -631,6 +692,16 @@ struct AttachmentsSave: ParsableCommand {
     // (possibly []) on --execute only. `not_saved` lists requested attachment names that did NOT
     // end up saved (a pre-existing-file skip in --dir mode, or an AppleScript-level export
     // failure) so a short save is a visible, agent-detectable signal — never silent success.
+    /// extra32 pure core, pinned at the logic tier: the positional master is the LIVE
+    /// Mail.app enumeration whenever one exists — even an EMPTY live list wins (the message
+    /// was located; zero/mismatched selections then fail loudly downstream) — and the
+    /// index-ordered (`ORDER BY name`) list is only ever the isLive=false fallback, which
+    /// the execute path refuses (measured 8/8 order-divergent from Mail's own list).
+    static func selectAttachmentMaster(indexNames: [String], liveNames: [String]?) -> (master: [String], isLive: Bool) {
+        if let liveNames { return (liveNames, true) }
+        return (indexNames, false)
+    }
+
     struct Result: Encodable {
         let message_id: String
         let directory: String?
@@ -683,11 +754,35 @@ struct AttachmentsSave: ParsableCommand {
             let msg = ctx.decodeSummary(row)
             let rowid = intVal(row["rowid"]) ?? 0
 
-            // Positional selection (never by name — see MailScript.saveAttachments's doc for the
-            // known ordering assumption). `master` is the message's attachment list in
-            // Envelope-Index order; `wanted` is the ascending 0-based positions --name/--indices/
-            // default-all resolves to.
-            let master = try ctx.index.attachments(messageRowid: rowid).map(\.name)
+            // Positional selection. `master` is now the LIVE Mail.app enumeration (extra32):
+            // the AppleScript selects `item (i+1) of (mail attachments of msg)` in Mail's own
+            // MIME-part order, and the old index-ordered (`ORDER BY name`) master was MEASURED
+            // disagreeing with it on 8/8 multi-attachment messages sampled — so `--name X`
+            // could resolve to an alphabetical position whose live occupant is a DIFFERENT
+            // attachment, writing the wrong bytes under X's filename. The index list is the
+            // dry-run-only fallback when the message is not locatable live (the execute path
+            // needs Mail anyway, so a fallback there could never save), disclosed via `note`.
+            let indexNames = try ctx.index.attachments(messageRowid: rowid).map(\.name)
+            var liveFailure: String? = nil   // review M5: `try?` conflated "not locatable"
+                                             // with Mail-down / timeout / TCC-denied
+            let liveNames: [String]?
+            if let internetID = msg.internet_message_id {
+                do {
+                    if let live = try MailScript().listAttachments(internetMessageID: internetID, accountName: msg.account) {
+                        liveNames = live.map(\.name)
+                    } else {
+                        liveNames = nil
+                        liveFailure = "message not locatable in Mail.app"
+                    }
+                } catch {
+                    liveNames = nil
+                    liveFailure = "Mail.app enumeration failed (\(error))"
+                }
+            } else {
+                liveNames = nil
+                liveFailure = "message has no RFC Message-ID to locate it in Mail.app"
+            }
+            let (master, masterIsLive) = Self.selectAttachmentMaster(indexNames: indexNames, liveNames: liveNames)
             let wanted = resolveAttachmentIndices(names: master, name: name, indices: indices)
             try requireSingleForOut(out: out, selectedCount: wanted.count)
             let selectedNames = wanted.map { master[$0] }
@@ -723,7 +818,20 @@ struct AttachmentsSave: ParsableCommand {
 
             guard willExecute else {
                 try Output.emit(tool: "mail", data: Result(message_id: String(rowid), directory: absDir, out_path: absOut,
-                    attachments: selectedNames, dry_run: true, note: nil, saved: nil, saved_paths: nil, not_saved: nil), sandboxActive: sandboxActive); return
+                    attachments: selectedNames, dry_run: true,
+                    note: masterIsLive ? nil : "\(liveFailure ?? "live enumeration unavailable") — this preview enumerates the Envelope-Index (ORDER BY name) list; the live save order can differ, and --execute refuses from this fallback",
+                    saved: nil, saved_paths: nil, not_saved: nil), sandboxActive: sandboxActive); return
+            }
+            // The execute path REQUIRES the live master: positions are handed to the AppleScript
+            // as `item (i+1)` of Mail's live list, so an index-ordered master could write one
+            // attachment's bytes under another's filename (extra32, measured 8/8 divergent).
+            guard masterIsLive else {
+                throw AppleError.upstream("cannot save attachments of message '\(rowid)': \(liveFailure ?? "live enumeration unavailable") — refusing to save by index-order positions (they routinely differ from Mail's own order — extra32).")
+            }
+            // review M5 second half: a successful-but-empty live list with a --name that
+            // matched nothing used to emit ok:true with attachments: [] and save nothing.
+            if name != nil, wanted.isEmpty {
+                throw AppleError.notFound("no attachment named '\(name ?? "")' on message '\(rowid)'.")
             }
 
             // Live export: extract existing attachment bytes to disk. This is a READ/EXPORT

@@ -95,6 +95,9 @@ struct RulesCreate: ParsableCommand {
                         blockers.append("conditions: a sandboxed rule must include a subject condition bound to \"\(TestMode.sandboxPrefix)\" so it only ever acts on test mail")
                     }
                 }
+                // extra25: SHAPE validation runs unconditionally — a malformed move_to/copy_to
+                // must fail the preview even when a safety blocker is also present.
+                try RuleLiveGuards.validateActionShapes(actions)
                 if blockers.isEmpty { _ = try RuleLiveGuards.liveActionPlan(actions) }
                 try emitRulePreview(rule, willExecute: false, json: global.json, liveBlockers: blockers,
                                     sandboxActive: sandboxActive)
@@ -227,6 +230,7 @@ struct RulesUpdate: ParsableCommand {
                 // Still fail the preview on MALFORMED input, so a dry-run keeps predicting the
                 // execute outcome for everything that is not a deliberate safety refusal.
                 try RuleLiveGuards.requireNoControlChars(name: name, conditions: conds ?? [])
+                if let acts { try RuleLiveGuards.validateActionShapes(acts) }   // extra25: unconditional
                 if blockers.isEmpty, let acts { _ = try RuleLiveGuards.liveActionPlan(acts) }
                 let recreates = conds != nil
                 let note = blockers.isEmpty ? nil
@@ -493,7 +497,11 @@ struct TemplatesList: ParsableCommand {
     func run() throws {
         try runGuarded(tool: "mail") {
             let list = try TemplateStore().list()
-            try Output.emit(tool: "mail", data: TemplateStore.TemplatesResult(templates: list, count: list.count))
+            if global.json {
+                try Output.emit(tool: "mail", data: TemplateStore.TemplatesResult(templates: list, count: list.count))
+            } else {
+                for t in list { print("\(t.name)\(t.subject != nil ? "  [subject]" : "")") }
+            }
         }
     }
 }
@@ -502,7 +510,16 @@ struct TemplatesGet: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "get", abstract: "Read a template by name.")
     @OptionGroup var global: GlobalOptions
     @Argument var name: String
-    func run() throws { try runGuarded(tool: "mail") { try Output.emit(tool: "mail", data: try TemplateStore().get(name)) } }
+    func run() throws {
+        try runGuarded(tool: "mail") {
+            let tpl = try TemplateStore().get(name)
+            if global.json { try Output.emit(tool: "mail", data: tpl) }
+            else {
+                if let subj = tpl.subject { print("subject: \(subj)") }
+                print(tpl.body)
+            }
+        }
+    }
 }
 
 struct TemplatesSave: ParsableCommand {
@@ -530,7 +547,8 @@ struct TemplatesSave: ParsableCommand {
                 return
             }
             let tpl = try TemplateStore().save(name: name, body: body, subject: subject)
-            try Output.emit(tool: "mail", data: tpl, sandboxActive: sandboxActive)
+            if global.json { try Output.emit(tool: "mail", data: tpl, sandboxActive: sandboxActive) }
+            else { print("saved template '\(tpl.name)'") }
         }
     }
 }
@@ -555,7 +573,9 @@ struct TemplatesDelete: ParsableCommand {
                 // `name` mirrors the oracle's delete_template wire key; `deleted_template` is the
                 // CLI's original name, kept so existing consumers don't break. dry_run: false is
                 // EXPLICIT — under v2 it is how a caller distinguishes previewed from done.
-                try Output.emit(tool: "mail", data: ["deleted_template": AnyEncodableBox(name), "name": AnyEncodableBox(name), "executed": AnyEncodableBox(true), "dry_run": AnyEncodableBox(false)], sandboxActive: sandboxActive)
+                if global.json {
+                    try Output.emit(tool: "mail", data: ["deleted_template": AnyEncodableBox(name), "name": AnyEncodableBox(name), "executed": AnyEncodableBox(true), "dry_run": AnyEncodableBox(false)], sandboxActive: sandboxActive)
+                } else { print("deleted template '\(name)'") }
             } else {
                 try Output.emit(tool: "mail", data: ["would_delete_template": AnyEncodableBox(name), "dry_run": AnyEncodableBox(true)], sandboxActive: sandboxActive)
             }
@@ -601,7 +621,11 @@ struct TemplatesRender: ParsableCommand {
                 userVars[String(kv[kv.startIndex..<eq])] = String(kv[kv.index(after: eq)...])
             }
             let result = try TemplateStore().render(name: name, autoVars: autoVars, userVars: userVars)
-            try Output.emit(tool: "mail", data: result)
+            if global.json { try Output.emit(tool: "mail", data: result) }
+            else {
+                if let subj = result.subject { print("subject: \(subj)") }
+                print(result.body)
+            }
         }
     }
 }

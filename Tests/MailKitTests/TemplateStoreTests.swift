@@ -203,28 +203,28 @@ struct TemplateStoreTests {
 
     /// A substituted VALUE must never be re-scanned — otherwise the render depends on dictionary
     /// iteration order and differs run-to-run for attacker-influenced input.
-    @Test func fillIsSinglePassAndDeterministic() {
+    @Test func fillIsSinglePassAndDeterministic() throws {
         // `original_subject`'s value is itself a token; a re-scanning fill would sometimes expand it.
         let vars = ["original_subject": "{recipient_email}", "recipient_email": "me@example.com"]
         for _ in 0..<50 {
             var miss = Set<String>()
-            #expect(TemplateStore.fill("Re: {original_subject}", vars: vars, missing: &miss) == "Re: {recipient_email}")
+            #expect(try TemplateStore.fill("Re: {original_subject}", vars: vars, missing: &miss) == "Re: {recipient_email}")
             // The re-emitted `{recipient_email}` is a VALUE, not a placeholder that was scanned —
             // so it must NOT be reported missing (it was never a token in the template text).
             #expect(miss.isEmpty)
         }
         // `{{`/`}}` are literal braces (Python str.format semantics), not a corrupted third thing.
         var m1 = Set<String>()
-        #expect(TemplateStore.fill("{{name}} literal", vars: ["name": "X"], missing: &m1) == "{name} literal")
+        #expect(try TemplateStore.fill("{{name}} literal", vars: ["name": "X"], missing: &m1) == "{name} literal")
         #expect(m1.isEmpty)   // an escaped brace pair is not a placeholder
         // An unknown token is left verbatim in the string but IS reported, so `render` can raise
         // oracle A's `missing_template_variable` instead of shipping `{unknown}` in real mail.
         var m2 = Set<String>()
-        #expect(TemplateStore.fill("Hi {unknown}", vars: [:], missing: &m2) == "Hi {unknown}")
+        #expect(try TemplateStore.fill("Hi {unknown}", vars: [:], missing: &m2) == "Hi {unknown}")
         #expect(m2 == ["unknown"])
         // A lone brace passes through untouched and is not a placeholder.
         var m3 = Set<String>()
-        #expect(TemplateStore.fill("100% { of it", vars: [:], missing: &m3) == "100% { of it")
+        #expect(try TemplateStore.fill("100% { of it", vars: [:], missing: &m3) == "100% { of it")
         #expect(m3.isEmpty)
     }
 
