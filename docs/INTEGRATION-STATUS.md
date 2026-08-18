@@ -1,47 +1,45 @@
 # apple-cli — integration status (overnight build, 2026-07-15/16)
 
-> **SUPERSEDED IN PART (last updated 2026-08-02, write-model v2 — docs/write-model-v2.md).**
-> This file is a dated snapshot of the 2026-07-15/16 overnight run; its safety-posture claims
-> describe THAT NIGHT, not the current tree. Since then the live write paths were wired
-> (2026-07-2x) and two domains flipped to write-model v2, where writes EXECUTE when invoked,
-> `--dry-run` previews, `APPLE_DRY_RUN=1` restores dry-run-by-default, and
-> `APPLE_TEST_MODE`/`--test-mode` is an opt-in SANDBOX restriction rather than a write
-> prerequisite:
->
-> - **Mail** (2026-08-01) — the trash surface keeps dry-run as its default (oracle parity).
-> - **Contacts** (2026-08-02) — all 11 writes execute; `delete` and `groups delete` keep a hard
->   `APPLE_TEST_MODE=1` ENVIRONMENT requirement, mirroring the oracle's `require_test_mode_for`.
->
-> Read every "v1 two-factor gate" statement below as historical **for those two domains**; it
-> still describes Notes, Calendar, Reminders and Messages, which flip next per the spec's
-> rollout order. The "**Zero live writes**" claim in the TL;DR is likewise historical — it was
-> true of that overnight run, and tracked, labeled, cleaned-up live writes have happened since
-> under the AGENTS.md conduct rules (logged in the gitignored `TEST-CLEANUP.md`).
+> **HISTORICAL SNAPSHOT (2026-07-15/16 overnight run) — SUPERSEDED for ALL six domains by
+> write-model v2 (`docs/write-model-v2.md`).** This file records where the integration tree
+> stood that night; do NOT read its present-tense safety-posture, test-count, or `main`-status
+> claims as the current state. Since then **all six domains flipped to write-model v2** (rollout
+> order Mail → Contacts → Notes → Calendar+Reminders → Messages, completed 2026-08; the last
+> `@available(*, deprecated)` v1 remnants were deleted in Q15, integration HEAD `a-prior-head`).
+> Under v2, writes EXECUTE when invoked, `--dry-run`/`APPLE_DRY_RUN=1` preview, and
+> `APPLE_TEST_MODE`/`--test-mode` is an opt-in SANDBOX policy (a label/self-recipient restriction
+> on the real store, `sandbox: true` in the success envelope and `error.sandbox: true` on a
+> sandbox refusal), NOT a write prerequisite. Every "v1 two-factor gate" and "zero live writes"
+> statement below is therefore historical for ALL domains; `main` has since advanced with the
+> live-write wiring and perf work (see `git log main`). For the current model read
+> `docs/write-model-v2.md`; for current status read `docs/COMPLETION-LOOP.md`.
 
-**TL;DR.** All six domains are implemented to strict-superset MCP parity, each
+**TL;DR (2026-07-16 snapshot).** All six domains are implemented to strict-superset MCP parity, each
 independently reviewed (3-pass OMC) and verified green, then aggregated onto the
-`integration` branch with a shared-core hardening pass. The combined tree builds
-clean and passes **341 swift-testing tests (76 suites) + 117 bats tests**. **Zero
-live writes** occurred — every write path ships as a preview/guard and executes
-nothing. What remains is **operator-gated** and could not be done unattended:
-live end-to-end verification against the MCP oracles (needs TCC grants),
-wiring the deferred live-write paths, merging to `main`, and the `1.0.0` tag +
-MCP retirement.
+`integration` branch with a shared-core hardening pass. The combined tree built
+clean and passed **341 swift-testing tests (76 suites) + 117 bats tests** *at that time* —
+the suites have grown substantially since (run `swift test` / `bats -r bats/` on the current
+HEAD for live counts). **Zero live writes** occurred *that night* — but write-model v2 has since
+made writes execute by default, and tracked/labeled/cleaned-up live writes have happened under
+the AGENTS.md conduct rules. The live-write paths have since been **wired** (write-model v2, all
+domains). What remains **operator-gated**: live end-to-end verification against the MCP oracles
+(TCC grants), and the `1.0.0` tag + MCP retirement.
 
-The complete, verified tree is on **`origin/integration`** (commit `a-prior-commit`).
-`main` was never touched.
+As of this snapshot the tree was on `origin/integration` commit `a-prior-commit`; the branch has since
+advanced through the write-model-v2 work (HEAD `a-prior-head`), and `main` has since taken the
+live-write wiring + perf commits (it was untouched *as of this snapshot only*).
 
 ---
 
-## Verification state
+## Verification state (2026-07-16 snapshot — counts have since grown; see current HEAD)
 
-| Check | Result |
+| Check | Result (as of 2026-07-16) |
 |---|---|
 | `swift build` (all 6 domains + shared core) | ✅ clean |
-| `swift test` (logic tier, no TCC) | ✅ 341 tests / 76 suites |
-| `bats -r bats/` (CLI smoke tier) | ✅ 117 tests |
+| `swift test` (logic tier, no TCC) | ✅ 341 tests / 76 suites *(snapshot; far higher now)* |
+| `bats -r bats/` (CLI smoke tier) | ✅ 117 tests *(snapshot; far higher now)* |
 | Live writes this session | ✅ none (TEST-CLEANUP.md empty) |
-| `main` pushed | ✅ never (operator-gated) |
+| `main` pushed | ✅ never *(true as of this snapshot; main has since advanced)* |
 
 Reproduce:
 
@@ -74,12 +72,16 @@ Shared core (`AppleKit`) + `EventKitCore` merged cleanly (only additive
 
 ---
 
-## Safety posture (held all night)
+## Safety posture (held all night — HISTORICAL, superseded by write-model v2)
 
-- **Zero live writes.** `TEST-CLEANUP.md` is empty — nothing was created on any
-  real store. Every domain's write/delete/send path is implemented as a
-  **preview/guard** and executes nothing; the default is `--dry-run`, and
-  `--execute` without the full `APPLE_TEST_MODE=1 + --test-mode` gate is refused
+> The mechanism described here is the v1 two-factor gate as it stood on 2026-07-16.
+> It no longer describes the tree: under write-model v2 writes EXECUTE by default and
+> the `APPLE_TEST_MODE=1 + --test-mode` prerequisite is gone (see the banner + `docs/write-model-v2.md`).
+
+- **Zero live writes** *(that night)*. `TEST-CLEANUP.md` was empty — nothing was created on any
+  real store. At that time every domain's write/delete/send path was implemented as a
+  **preview/guard** and executed nothing; the default was `--dry-run`, and
+  `--execute` without the full `APPLE_TEST_MODE=1 + --test-mode` gate was refused
   (exit 77/64 depending on domain).
 - **No dangerous actions.** No mail sent, no iMessage sent, no existing real data
   modified or deleted, no permanent-delete/empty-trash.

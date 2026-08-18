@@ -148,8 +148,7 @@ MCP-side extras to **preserve** (not in any CLI): `include_niche` field expansio
 **DESIGN-ERA SKETCH — the as-built surface diverges (Q12 [2], measured 2026-08-18):**
 `--csv` was never built (output is `--json` default / `--text` opt-out only); `search`
 has `--deep` but no `--all`; no delete carries `--force` (the destructive gate is the
-oracle-mirrored `APPLE_TEST_MODE` requirement, not a flag); `containers` has no `list`
-subcommand (bare `contacts containers`); and there is no `mcp serve` (the dual-frontend
+oracle-mirrored `APPLE_TEST_MODE` requirement, not a flag); and there is no `mcp serve` (the dual-frontend
 idea below is aspirational). These are examples, NOT an exhaustive divergence list — the
 block is the original plan and `--help` on the built binary is the authoritative surface.
 
@@ -223,7 +222,8 @@ a literal MCP transcription, and why:
   which was a CLI-only restriction with no oracle counterpart on 9 of the 11 write ops.
   - **The sandbox is opt-in.** `APPLE_TEST_MODE` truthy (`1`/`true`/`yes`) **or**
     `--test-mode` — either signal alone — engages it, and the SUCCESS envelope then carries
-    `"sandbox": true` (refusal envelopes have no such field yet — see `docs/write-model-v2.md`).
+    `"sandbox": true`; a sandbox-policy REFUSAL likewise carries `error.sandbox: true` (Q14), the
+    error-envelope counterpart, absent on non-sandbox errors — see `docs/write-model-v2.md`.
     This is the CLI's analogue of the oracle's own test-mode restriction — note
     `check_test_mode_safety` (security.py:56) returns `None`, i.e. ALLOWS, when test mode is
     off, and confines destructive ops to `CONTACTS_TEST_GROUP` when it is on. Same shape, label

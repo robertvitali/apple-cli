@@ -115,7 +115,8 @@ lanes are really four parallel + the EventKit pair serialized on the core.)
 `--execute`, `--test-mode`), `AppleScriptRunner` (pass user text via `arguments:`/argv —
 NEVER string-interpolate it into script source; injection is RCE-class), `SQLiteReader`
 (read-only, WAL-aware, parameter-bound), `Permissions` (FDA preflight), and `TestMode`
-(fail-closed write guard). Extend these in `AppleKit`. A new shared dependency (Notes needs
+(opt-in sandbox policy mode — `sandboxActive(flag:)` + the fail-loud `truthyEnv` env readers).
+Extend these in `AppleKit`. A new shared dependency (Notes needs
 protobuf; Messages needs fuzzy-match; SQLite is the system lib) means a coordinated
 `Package.swift` edit — the one shared-contention file.
 

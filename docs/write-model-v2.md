@@ -1,5 +1,16 @@
 # Write-model v2 — the CLI behaves exactly like the MCPs
 
+> **STATUS: COMPLETE as of 2026-08-18 (Q15) — all six domains flipped to write-model v2.**
+> This document is both the SPEC and the rollout record for that migration, so much of it is
+> written in the imperative/future tense of a plan-in-progress ("becomes a METHOD", "the final
+> flip deletes it"). Read those as the completed design, not open work. Symbols named as
+> DELETED — `TestMode.isEnabled`, `TestMode.requireLabeledTarget`/`requireAllowedRecipient`/
+> `SandboxError`, and the `GlobalOptions.willExecute` PROPERTY — were removed in the final flip
+> (Q15); only the `willExecute(defaultDryRun:)` METHOD remains. The two deferred follow-ups this
+> doc tracked as open — the error-envelope `sandbox` field and the `mail templates save`
+> `willExecute` branch — have both since landed (Q14 / Q12). The dated "202X-XX-XX — X flip
+> landed" blocks are a historical log and are left as written.
+
 **Operator decision (Robert, 2026-08-01, verbatim):** *"the apple cli should be a replacement
 for the mcp. it should behave exactly like the mcp just as a cli. read, write etc."*
 
@@ -52,13 +63,13 @@ From oracle A `security.py` — all three are PORTED, because dropping them is a
 
 ### Bucket-2 obligation, not assertion
 
-`--dry-run` must actually work on every mutating subcommand. It does not today:
-`mail templates save` has NO `willExecute` branch and writes unconditionally
-(RuleTemplateCommands.swift:436-448). The rollout includes an audit of every mutating
-subcommand for a `willExecute` branch; any without one is fixed or explicitly excepted with
-rationale in this file. Every execute-path envelope must emit `dry_run: false` explicitly
-(TemplatesDelete currently omits it), because under v2 that key is how a caller distinguishes
-"previewed" from "done".
+`--dry-run` must actually work on every mutating subcommand. At spec time it did not:
+`mail templates save` had NO `willExecute` branch and wrote unconditionally. The rollout
+audited every mutating subcommand for a `willExecute` branch; all now carry one (`TemplatesSave`
+binds it via `RuleTemplateCommands.swift`, its execute path using `AppleKit.ExecutedWrite`).
+Every execute-path envelope emits `dry_run: false` explicitly (`TemplatesDelete` originally
+omitted it; closed in the Q12 batch — its execute branch now stamps `dry_run: false` directly),
+because under v2 that key is how a caller distinguishes "previewed" from "done".
 
 ## Defaults are mapped per oracle surface — NOT a blanket flip
 
@@ -97,11 +108,12 @@ accidental *unsandboxed* writes — each fails safe for its own model).
   Any OTHER non-empty value is a `validation_error` (exit 64) at the start of any write
   command — never silently "no sandbox". (`""`/unset = off, as today.)
 - **Visible engagement.** Every write SUCCESS envelope gains `"sandbox": true` when the sandbox
-  is active (key absent otherwise — additive, MINOR). SUCCESS only: `Output.encodeError` has no
-  such field, so a sandboxed REFUSAL is today indistinguishable from an unsandboxed one to a
-  machine consumer — a real gap (a machine cannot tell which policy produced a 77), tracked as
-  its own commit because adding the key to the shared error envelope changes all six domains at
-  once. This bullet previously said "every write envelope", which was an overclaim.
+  is active (key absent otherwise — additive, MINOR). This was originally SUCCESS-only; the gap
+  (a machine could not tell whether the sandbox produced a 77) was closed in Q14: `AppleError`
+  gained `public let sandbox: Bool?`, `Output.encodeError`/`emitError` thread it, and a
+  sandbox-policy refusal now stamps `error.sandbox: true` — the error-envelope counterpart of
+  the success key, so a sandbox refusal is machine-distinguishable. This bullet previously said
+  "every write envelope", which was an overclaim.
   Mechanism AS LANDED (core review tightened
   the first sketch's `sandbox: Bool? = nil`, which let a plain `false` auto-promote and emit a
   meaningless `"sandbox": false` tri-state): `SuccessEnvelope` gains `let sandbox: Bool?`, but
@@ -125,7 +137,7 @@ accidental *unsandboxed* writes — each fails safe for its own model).
   drift, with a swift-tier case asserting the rejection for each. AS LANDED (core review
   rejected this section's first rationale, which leaned on preamble call-order):
   `TestMode.isTruthyEnv` is the non-throwing accessor, used ONLY where `false` is the
-  REFUSING direction (`TestMode.isEnabled`; the contacts-delete hard gate, whose `false`
+  REFUSING direction (the contacts-delete hard gate, whose `false`
   refuses the delete). Every v2 gate whose `false` would be PERMISSIVE uses the THROWING
   readers (`truthyEnv`, `sandboxActive(flag:)`, `willExecute(defaultDryRun:)`) — the
   fail-loud contract is carried by the type system. The preamble
@@ -156,9 +168,12 @@ accidental *unsandboxed* writes — each fails safe for its own model).
   independent reads each making its own decision; a partial conversion would either regress
   `--permanent` to a hard refusal or silently trash real mail by default. Bind-once plus the
   deprecation warning makes a missed site VISIBLE, not a latent divergence.
-- **Guards change signature — this is explicit, not "unchanged".** Sandbox state becomes a
-  parameter and the internal `TestMode.isEnabled` re-checks are REMOVED (they would defeat the
-  flag-only path): `requireLabeledTarget(_:sandboxActive:)`, recipient checks likewise.
+- **Guards change signature — this is explicit, not "unchanged".** Sandbox state is a
+  parameter and the internal env re-checks were REMOVED (they would defeat the flag-only path):
+  each domain's guard takes `sandboxActive` — e.g. `guardLiveWrite(labeledName:sandboxActive:)`
+  (Notes), `CalendarSupport.requireLabeled(_:sandboxActive:)`, `requireLabeledReminder(_:sandboxActive:)`,
+  `Send.assertAllowedRecipient(_:sandboxActive:)` (Messages). (No generic
+  `requireLabeledTarget(_:sandboxActive:)` landed — the guards are per-domain.)
   `TestMode.sandboxActive(flag:)` — AS LANDED it THROWS and validates the env EAGERLY
   (`let env = try truthyEnv(testModeVar); return flag || env`), so a malformed
   `APPLE_TEST_MODE` refuses even when `--test-mode` is passed — is computed once per command
@@ -503,7 +518,10 @@ reverting the model. The sandbox itself is the operator's per-invocation rollbac
   `Output.encodeError` has no such field; this file's "every write envelope" wording was an
   overclaim and now reads "every write SUCCESS envelope". Adding the key to the shared error
   envelope would change all six domains mid-rollout, so it is likewise deferred to its own
-  commit. Both are tracked as follow-ups, not silently absorbed.
+  commit. Both are tracked as follow-ups, not silently absorbed. — **RESOLVED since:** (a)
+  `confineWriteDestination`/`sensitiveWriteDir` were promoted to `AppleKit.PathConfinement` and
+  the Contacts `--out` writes now route through it (Q13); (b) `AppleError.sandbox` +
+  `Output.encodeError(sandbox:)` landed and refusals now stamp `error.sandbox: true` (Q14).
 
 - 2026-08-02 — **Calendar + Reminders flip landed** (step 4, fourth and fifth domains; the two
   coordinated module edits). Fourteen write ops move to v2: Calendar's 3 (`events

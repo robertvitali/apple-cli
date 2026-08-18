@@ -19,6 +19,13 @@ loaded every session) + owned longevity.
   `.eml`; Contacts = Contacts.framework; Notes = AppleScript + NoteStore.sqlite
   (gzip+protobuf checklist); Calendar/Reminders = EventKit.
 
+## Write model
+
+Writes EXECUTE by default (oracle parity); `--dry-run` / `APPLE_DRY_RUN=1` preview, and
+`APPLE_TEST_MODE` / `--test-mode` engages an opt-in SANDBOX policy — a label + self-recipient
+restriction on the real store, surfaced as `sandbox: true` in the success envelope and
+`error.sandbox: true` on a sandbox-policy refusal. Full spec: [`write-model-v2.md`](./write-model-v2.md).
+
 ## Output = versioned contract
 
 `stdout` carries only the JSON envelope; `stderr` carries human/diagnostic text.
