@@ -12,6 +12,88 @@ with the Apple MCP servers they replace.
 
 ## [Unreleased]
 
+### Mail search/list/export parity (Q11 batch 4)
+
+**Changed — BREAKING**
+
+- **BREAKING:** `mail export` writes the ORACLE's file layout by default (gap45, verified
+  verbatim from analytics.py): single_email saves `<dir>/<subject>.<fmt>` (no id prefix;
+  same-name runs OVERWRITE, like the oracle's `set eof to 0`), entire_mailbox saves into
+  `<dir>/<mailbox>_export/` as 1-based `<n>_<subject>.<fmt>`, with '/'→'-' the only
+  character substitution. The legacy collision-proof `<id>-<subject:60>` flat naming
+  remains under `--layout flat`. Disclosed deviation: names cap at 150 chars before the
+  extension (the oracle would error at the filesystem's 255-byte limit mid-export).
+- **BREAKING:** a negative `--limit` on `search`/`list` (and a negative
+  `--limit-per-account`, and `export --max`) is a typed validation error (64) — it was
+  previously clamped to `LIMIT 0` at the query boundary and returned an EMPTY SUCCESS
+  while echoing the negative value back, indistinguishable from an empty store
+  (git-verified against the base commit; the first draft of this entry misattributed the
+  mechanism to SQL `LIMIT -n` — review-caught, the same inverted-claim class batch 3
+  corrected).
+
+**Added**
+
+- `mail search --body-live` (gap2): oracle B's body_text semantics — one live AppleScript
+  pass per mailbox that reads the FULL content of every candidate message and applies the
+  whole condition set (subject/sender/read/flagged/dates/attachments + body) in-loop with
+  the oracle's collectLimit/offset early exit. Ported semantics, not the oracle's defects:
+  values travel via argv (the oracle string-interpolates the needle into script source),
+  and there is no `tr` subprocess per field (AppleScript `contains` is already
+  case-insensitive — the shell-out-per-message is the oracle's own timeout cause). The
+  collected window is SORTED per --sort and sliced, exactly as the oracle's response
+  builder does (_build_search_response, search.py:146-149 — the first draft claimed scan
+  order from reading only the collection half; review-caught and measured). Live matches
+  missing from the Envelope Index are counted in a `note`. The default `--body` stays the
+  fast indexed-preview match (CLI extra, disclosed).
+- `mail list --limit-per-account` (gap9): oracle B's max_emails caps PER ACCOUNT and
+  counts inbox messages EXAMINED, not returned (its counter increments BEFORE the
+  include_read filter) — the CLI windows the newest `per` rows first and applies
+  `--unread` INSIDE the window via a pinned helper, so fewer rows than the cap can
+  return, exactly like the oracle (review-caught: the first cut filtered in SQL and
+  returned strictly more). 0 = no per-account cap; merged globally newest-first (the
+  oracle groups per account — disclosed); cap echoed as `limit_per_account`. The global
+  `--limit` stays a disclosed CLI extra that still caps the merge at its default 50.
+
+**Fixed (batch-4 review round — security + code review, pre-commit)**
+
+- The live body-search return channel neutralizes the RS wire delimiter inside the
+  REMOTE-chosen RFC Message-ID in-script, and the Swift parser drops any token still
+  carrying a C0/DEL byte — a crafted `Message-ID:` header could otherwise forge extra
+  result rows, and a NUMERIC forgery would resolve as an arbitrary Envelope-Index ROWID
+  (attacker-chosen message emitted as a "match"). Same defense as the batch-1
+  attachment-name sink; pinned both layers.
+- Live-path rows are scope-checked with the index's OWN label-aware resolution before
+  emission (a forged or mismatched id can never surface a row outside the requested
+  --account/--mailbox; a plain home-mailbox compare would have wrongly rejected every
+  Gmail LABEL hit). A FULL nested mailbox path now works on the live path (leaf reduction
+  — it silently returned an empty success), measured on the real store.
+- The live paging arithmetic is a pure, pinned helper (LiveBodyPage): operator-sized
+  --offset/--limit SATURATE instead of overflow-trapping with no envelope; the collect
+  bound handed to AppleScript stays inside its 32-bit integer range; the page cursor
+  advances by CONSUMED scan positions (skipped ids no longer repeat rows on the next
+  page); and a scan truncated at the collect bound reports has_more (it previously claimed
+  a silently truncated result was complete).
+- Live date bounds are rebuilt from host-computed LOCAL calendar components — the
+  epoch-arithmetic form compared instants 4-5h off the index path's SQL bound (1970-vs-now
+  UTC-offset delta). One failing mailbox now degrades (per-mailbox try) instead of
+  aborting the whole sweep; Gmail INBOX/All-Mail double-listings de-dupe; the envelope
+  honors --sort by sorting the collected window like the oracle's response builder
+  (initially mislabeled "scan order" — the oracle sorts in body mode too);
+  --max-content-length is honored on live rows; C0 control characters in live-path
+  needles/terms are refused (they would re-split the argv wire protocol); the live date
+  bounds now match the oracle's LOCAL calendar-day semantics (the indexed path's UTC
+  binding is a disclosed pre-existing divergence).
+- Export hardening: the resolved `<mailbox>_export` subdirectory is re-confined per write
+  (a pre-planted symlink inside the export dir could route message bodies outside the
+  confined tree); name caps count UTF-8 BYTES, not graphemes (150 CJK characters are 450
+  bytes — the cap exists for the filesystem's 255-byte component limit); an empty subject
+  falls back to `untitled` instead of a hidden dotfile; `--no-clobber` refuses the
+  oracle-parity silent overwrite; an unknown --mailbox is not_found like the oracle's
+  raise; a per-message write failure is recorded in `write_failures` and the export
+  CONTINUES like the oracle's per-message try (one bad name no longer aborts mid-export);
+  `--max 0` is the oracle's empty success; the `directory` field reports the
+  `<mailbox>_export` dir files actually land in.
+
 ### Mail analytics parity (Q11 batch 3)
 
 **Changed — BREAKING**

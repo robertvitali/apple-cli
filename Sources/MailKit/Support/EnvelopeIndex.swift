@@ -135,6 +135,17 @@ public final class EnvelopeIndex {
         return (direct, label)
     }
 
+    /// Is one message inside a resolved (direct, label) mailbox scope? Used by the live
+    /// body-search path to enforce the SAME scope the indexed path gets from its SQL predicate
+    /// — including Gmail LABEL membership, where the message's home mailbox row is
+    /// `[Gmail]/All Mail` and a leaf/path compare on it wrongly rejects every labeled hit.
+    /// Ints only — no user text reaches the SQL.
+    public func messageInScope(rowid: Int, direct: [Int], label: [Int]) -> Bool {
+        let predicate = EnvelopeIndex.mailboxPredicate(direct: direct, label: label)
+        let sql = "SELECT 1 FROM messages m WHERE m.ROWID = \(rowid) AND \(predicate) LIMIT 1"
+        return ((try? reader.query(sql))?.isEmpty == false)
+    }
+
     /// SQL predicate (no user text — ROWIDs are internal validated ints) for a resolved set.
     /// Empty resolution → `0` (matches nothing) so an unknown mailbox yields an empty result.
     public static func mailboxPredicate(direct: [Int], label: [Int]) -> String {

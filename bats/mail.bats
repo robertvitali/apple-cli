@@ -2161,3 +2161,156 @@ print('\n'.join(d['attachments']))")
   echo "$output" | grep -q '"count" :'
   echo "$output" | grep -q '"sent_mailbox" :'
 }
+
+# --- Q11 batch-4 search/list/export parity pins -----------------------------------------------
+
+# gap2: --body-live runs oracle B's live full-content scan (early-exit-bounded, so a common
+# needle in a small scope returns fast). A live wiring pin, not a semantics pin — the per-message
+# condition set is pinned at the logic tier against the script source.
+@test "mail search --body --body-live returns live matches from Mail.app (gap2)" {
+  require_index
+  run "$BIN" mail search --account iCloud --mailbox INBOX --body the --body-live --limit 2 --no-content
+  [ "$status" -eq 0 ]
+  echo "$output" | python3 -c "
+import json,sys;d=json.load(sys.stdin)['data']
+assert d['count'] <= 2, d['count']
+assert all('id' in m for m in d['messages'])"
+}
+
+@test "mail search --body-live without --body is a validation error (gap2)" {
+  require_index
+  run "$BIN" mail search --body-live
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q -- "--body-live requires"
+}
+
+# Negative-limit class: a negative --limit was clamped to LIMIT 0 at the query boundary and
+# returned an EMPTY SUCCESS echoing the negative value — indistinguishable from an empty store
+# (git-verified; the first draft misattributed it to SQL LIMIT -n). Typed 64 now.
+@test "mail search/list reject a negative --limit; list rejects negative --limit-per-account" {
+  run "$BIN" mail search --limit=-1
+  [ "$status" -eq 64 ]
+  run "$BIN" mail list --limit=-1
+  [ "$status" -eq 64 ]
+  run "$BIN" mail list --limit-per-account=-1
+  [ "$status" -eq 64 ]
+}
+
+# gap9: oracle B's max_emails caps PER ACCOUNT; the merged result echoes the cap.
+@test "mail list --limit-per-account caps each account and echoes the cap (gap9)" {
+  require_index
+  run "$BIN" mail list --limit-per-account 1 --no-content
+  [ "$status" -eq 0 ]
+  naccounts=$("$BIN" mail accounts list 2>/dev/null | python3 -c "import json,sys;print(len(json.load(sys.stdin)['data']['accounts']))")
+  echo "$output" | python3 -c "
+import json,sys
+n=int('$naccounts')
+d=json.load(sys.stdin)['data']
+assert d['limit_per_account'] == 1, d.get('limit_per_account')
+assert d['count'] <= n, (d['count'], n)
+# per-account cap: no account contributes more than one row
+from collections import Counter
+c=Counter(m['account'] for m in d['messages'])
+assert all(v == 1 for v in c.values()), c"
+}
+
+# gap45: export layouts, dry-run only (no writes). Oracle layout is the default.
+@test "mail export dry-run plans the oracle mailbox layout by default (gap45)" {
+  require_index
+  run "$BIN" mail export --account iCloud --scope entire_mailbox --mailbox INBOX --max 2 --dry-run
+  [ "$status" -eq 0 ]
+  echo "$output" | python3 -c "
+import json,sys;d=json.load(sys.stdin)['data']
+assert d['dry_run'] is True
+assert all('INBOX_export/' in f for f in d['files']), d['files']
+assert any('/1_' in f for f in d['files']), d['files']"
+}
+
+@test "mail export dry-run single_email plans a subject-named file, no id prefix (gap45)" {
+  require_index
+  subj=$("$BIN" mail search --account iCloud --mailbox INBOX --limit 1 --no-content 2>/dev/null \
+    | python3 -c "import json,sys;d=json.load(sys.stdin)['data']['messages'];print(d[0]['subject'][:12] if d else '')")
+  [ -n "$subj" ] || skip "no INBOX message"
+  run "$BIN" mail export --account iCloud --scope single_email --subject "$subj" --dry-run
+  [ "$status" -eq 0 ]
+  echo "$output" | python3 -c "
+import json,sys,os;d=json.load(sys.stdin)['data']
+name=os.path.basename(d['files'][0])
+assert not name.split('.')[0].split('-')[0].isdigit() or '-' not in name, name  # no <id>- prefix shape
+assert '_export/' not in d['files'][0], d['files'][0]"
+}
+
+@test "mail export --layout flat keeps the legacy id-prefixed names; bogus layout is 64 (gap45)" {
+  require_index
+  run "$BIN" mail export --account iCloud --scope entire_mailbox --mailbox INBOX --max 1 --layout flat --dry-run
+  [ "$status" -eq 0 ]
+  echo "$output" | python3 -c "
+import json,sys,os;d=json.load(sys.stdin)['data']
+name=os.path.basename(d['files'][0])
+assert name.split('-')[0].isdigit(), name
+assert '_export/' not in d['files'][0]"
+  run "$BIN" mail export --account iCloud --layout bogus --dry-run
+  [ "$status" -eq 64 ]
+}
+
+# review H1 (measured): a FULL nested mailbox path silently returned an empty success on the
+# live path (leaf-only `whose` filter); the leaf reduction must make it match.
+@test "mail search --body-live accepts a full nested mailbox path (review H1)" {
+  require_index
+  acct="${APPLE_TEST_NESTED_ACCOUNT:-}"
+  "$BIN" mail mailboxes list --account "$acct" >/dev/null 2>&1 || skip "store lacks the configured test account"
+  run "$BIN" mail search --account "$acct" --mailbox "[Gmail]/Important" --body a --body-live --limit 2 --no-content
+  [ "$status" -eq 0 ]
+  echo "$output" | python3 -c "
+import json,sys;d=json.load(sys.stdin)['data']
+assert d['count'] >= 1, d
+assert d['sort'] == 'date_desc', d['sort']"
+}
+
+# review B2 (measured): the oracle SORTS the collected body-search window then slices
+# (_build_search_response, search.py:146-149) — the live path must honor --sort, and the
+# envelope must echo what was applied.
+@test "mail search --body-live honors --sort date_asc (review B2)" {
+  require_index
+  run "$BIN" mail search --account iCloud --mailbox INBOX --body the --body-live --limit 3 --sort date_asc --no-content
+  [ "$status" -eq 0 ]
+  echo "$output" | python3 -c "
+import json,sys;d=json.load(sys.stdin)['data']
+assert d['sort'] == 'date_asc', d['sort']
+dates=[m['date_received'] for m in d['messages']]
+assert dates == sorted(dates), dates"
+}
+
+# Differential pin (critic missing-pin list): a needle taken from a message's own indexed
+# preview must be found by BOTH --body paths, and the live path must include that message.
+@test "mail search --body indexed vs --body-live agree on a preview-sourced needle" {
+  require_index
+  probe=$("$BIN" mail search --account iCloud --mailbox INBOX --limit 5 2>/dev/null | python3 -c "
+import json,sys
+d=json.load(sys.stdin)['data']['messages']
+for m in d:
+    s=(m.get('snippet') or '')
+    words=[w for w in s.split() if w.isalpha() and len(w) >= 6]
+    if words:
+        print(m['id']); print(words[0]); break")
+  id=$(echo "$probe" | sed -n 1p); needle=$(echo "$probe" | sed -n 2p)
+  [ -n "$id" ] && [ -n "$needle" ] || skip "no preview-bearing message to probe"
+  run "$BIN" mail search --account iCloud --mailbox INBOX --body "$needle" --limit 50 --no-content
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "\"id\" : \"$id\""
+  run "$BIN" mail search --account iCloud --mailbox INBOX --body "$needle" --body-live --limit 50 --no-content
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q "\"id\" : \"$id\""
+}
+
+# review M9: export --max sign guard + the oracle's zero-success for --max 0.
+@test "mail export --max validates sign and treats 0 as the oracle's empty success (review M9)" {
+  require_index
+  run "$BIN" mail export --account iCloud --scope entire_mailbox --mailbox INBOX --max=-1 --dry-run
+  [ "$status" -eq 64 ]
+  run "$BIN" mail export --account iCloud --scope entire_mailbox --mailbox INBOX --max 0 --dry-run
+  [ "$status" -eq 0 ]
+  echo "$output" | python3 -c "
+import json,sys;d=json.load(sys.stdin)['data']
+assert d['files'] == [], d['files']"
+}

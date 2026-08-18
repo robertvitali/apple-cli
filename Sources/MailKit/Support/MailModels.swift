@@ -105,6 +105,12 @@ public struct MailMessagesResult: Encodable {
     /// consistent (count and has_more share one filter), so nothing else in the envelope reveals
     /// that ~2k messages were excluded from "All". nil when the query was not an "All" sweep.
     public var system_folders_excluded: Bool? = nil
+    /// Free-form disclosure (e.g. live body-search matches that had no Envelope-Index row).
+    /// Omitted when nil (additive, MINOR).
+    public var note: String? = nil
+    /// gap9: echoes `--limit-per-account` when the caller used oracle B's per-account cap on
+    /// `list` (max_emails caps PER ACCOUNT, 0 = all). Omitted when nil (additive, MINOR).
+    public var limit_per_account: Int? = nil
 }
 
 public struct MailMessageResult: Encodable {

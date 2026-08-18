@@ -4,6 +4,49 @@ import AppleKit
 
 // P1 message reads: search, list, get, selected, thread, attachments list.
 
+
+/// gap2 pure core (pinned; reviews H2/H3/B2): the live body-search paging arithmetic.
+/// The oracle collects offset+limit+1 matches in scan order (`collectLimit = limit + 1` plus
+/// `offsetRemaining`, search.py:393-421 — the +1 is its has_more probe), then SORTS the
+/// collected window and slices `[:limit]` (`_build_search_response`, search.py:146-149).
+/// Everything here SATURATES: operator-sized --offset/--limit must never overflow-trap (no
+/// envelope, signal exit), and the value handed to AppleScript must stay within its 32-bit
+/// integer range, so every collect bound is capped at `scanCap`.
+enum LiveBodyPage {
+    /// Also the ceiling a `--limit 0` (all) scan collects before reporting has_more.
+    static let scanCap = 1_000_000
+
+    static func collectLimit(offset: Int, limit: Int) -> Int {
+        guard limit > 0 else { return scanCap }
+        let (sum, overflow) = offset.addingReportingOverflow(limit)
+        if overflow || sum >= scanCap { return scanCap }
+        return sum + 1
+    }
+
+    /// Page verdict AFTER the whole post-offset window was resolved and sorted. `resolved` =
+    /// rows that mapped into scope; `unindexed` = skipped scan slots (no index row /
+    /// out-of-scope). has_more mirrors the oracle's probe (`len(sorted) > limit`) plus the
+    /// truncated-scan signal; the cursor advances by the oracle's client contract
+    /// (offset+limit) PLUS the skipped slots, so a skipped id never repeats a row on the
+    /// next page (review H3) and a truncated scan is never reported complete.
+    static func page(resolved: Int, unindexed: Int, offset: Int, limit: Int,
+                     totalIDs: Int, collectLimit: Int) -> (hasMore: Bool, nextOffset: Int?) {
+        let truncated = totalIDs >= collectLimit
+        let more: Bool
+        let advance: Int
+        if limit == 0 {
+            more = truncated
+            advance = resolved + unindexed
+        } else {
+            more = truncated || resolved + unindexed > limit
+            advance = limit + unindexed
+        }
+        guard more else { return (false, nil) }
+        let (next, overflow) = offset.addingReportingOverflow(advance)
+        return (true, overflow ? nil : next)
+    }
+}
+
 // MARK: search
 
 struct SearchCommand: ParsableCommand {
@@ -13,7 +56,8 @@ struct SearchCommand: ParsableCommand {
     @Option(name: .long, help: "Mailbox name (default INBOX; use 'All' for every mailbox).") var mailbox: String = "INBOX"
     @Option(name: .long, help: "Substring match on subject (repeatable — matches ANY, MCP B subject_keywords).") var subject: [String] = []
     @Option(name: .long, help: "Substring match on sender name/email.") var sender: String?
-    @Option(name: .long, help: "Substring match on the indexed body preview.") var body: String?
+    @Option(name: .long, help: "Substring match on the message body. Default: fast match on the indexed body preview (CLI extra — Mail caches previews for only some messages). Add --body-live for oracle B's semantics: a live Mail.app scan of the FULL content of every candidate message (slow; per-Apple-event 180s timeout only — there is NO overall deadline, so a broad sweep can hold Mail busy for a long time; bound it with --limit/--mailbox).") var body: String?
+    @Flag(name: .long, help: "With --body: scan live full message content via Mail.app (oracle B body_text semantics) instead of the indexed preview. The collected window is sorted per --sort and sliced, exactly as the oracle's response builder does.") var bodyLive = false
     @Option(name: .long, help: "Lower bound on date received (YYYY-MM-DD).") var fromDate: String?
     @Option(name: .long, help: "Upper bound on date received (YYYY-MM-DD, inclusive).") var toDate: String?
     @Flag(name: .long, help: "Only read messages.") var read = false
@@ -39,6 +83,28 @@ struct SearchCommand: ParsableCommand {
             // then echoed back VERBATIM — the envelope claimed an offset the query never used.
             guard offset >= 0 else {
                 throw AppleError.validation("--offset must be >= 0.")
+            }
+            // A negative --limit was clamped to `LIMIT 0` at the query boundary and returned
+            // an EMPTY SUCCESS while echoing the negative value back — indistinguishable from
+            // an empty store (git-verified against the base commit; review H3 corrected the
+            // first draft's claim that it reached SQLite as unlimited `LIMIT -n`).
+            guard limit >= 0 else {
+                throw AppleError.validation("--limit must be >= 0 (0 = all).")
+            }
+            // Pure --body-live usage checks, hoisted above the store open (store-independent
+            // usage errors — the export command's established convention; review L1).
+            if bodyLive {
+                guard let body, !body.isEmpty else {
+                    throw AppleError.validation("--body-live requires a non-empty --body needle.")
+                }
+                // Security L1: a C0 control character (notably the RS/US wire delimiters) in a
+                // live-path needle would re-split inside the AppleScript argv protocol —
+                // refuse instead of silently altering match semantics.
+                for (label, value) in [("--body", body), ("--sender", sender ?? "")] + subject.map({ ("--subject", $0) }) {
+                    if value.unicodeScalars.contains(where: { $0.value < 0x20 || $0.value == 0x7F }) {
+                        throw AppleError.validation("\(label) must not contain control characters on the --body-live path.")
+                    }
+                }
             }
             let ctx = try MailContext()
             var f = EnvelopeIndex.MessageFilters()
@@ -70,6 +136,109 @@ struct SearchCommand: ParsableCommand {
             f.sortAscending = (sort == "date_asc")
             f.limit = (limit == 0) ? Int.max : limit
             f.offset = offset
+
+            // gap2: oracle B's live body search. ONE AppleScript pass applies the FULL
+            // condition set per message in-loop (with the oracle's early exit) and returns RFC
+            // Message-IDs in scan order; the index then supplies the JSON rows. The default
+            // --body path (indexed preview) stays the fast CLI extra, disclosed in --help.
+            if bodyLive {
+                let body = body ?? ""   // non-empty: validated above the store open
+                // Review H1: the script's `whose name is` filter is LEAF-ONLY (flattened),
+                // so a FULL nested path — which requireMailboxKnown accepts — silently
+                // matched nothing and returned an empty success. Reduce a path to its leaf
+                // host-side; the leaf then matches every nesting point (disclosed superset,
+                // row 4).
+                let scriptMailbox = EnvelopeIndex.isAllWildcard(mailbox)
+                    ? "All" : (mailbox.split(separator: "/").last.map(String.init) ?? mailbox)
+                // Account must be addressed by DISPLAY NAME in AppleScript; requireAccountUUID
+                // already validated the selector above. A raw UUID validated against the
+                // index but unknown to the directory has NO name Mail.app can match — that
+                // would be a silent empty result, so refuse it loudly instead.
+                var acctDisplay: String? = nil
+                if let account {
+                    guard let d = ctx.accounts().displayName(for: account) else {
+                        throw AppleError.upstream("--body-live must address the account by its Mail display name, and '\(account)' could not be resolved to one (Mail's account directory is unavailable). Use the account NAME, or drop --body-live for the indexed path.")
+                    }
+                    acctDisplay = d
+                }
+                // The oracle consumes offset and limit IN SCAN ORDER (offsetRemaining /
+                // collectLimit, search.py:393-421): collect offset+limit+1 matches, drop the
+                // offset, keep limit, and the +1 leftover is the has_more signal.
+                let collectLimit = LiveBodyPage.collectLimit(offset: offset, limit: limit)
+                var liveIDs = try MailScript().bodySearch(
+                    needle: body, subjectTerms: subject, sender: sender,
+                    readStatus: f.readStatus, flagged: f.flagged,
+                    fromUnix: f.dateFromUnix, toUnix: f.dateToUnix,
+                    hasAttachment: f.hasAttachment,
+                    accountName: acctDisplay, mailboxName: scriptMailbox,
+                    collectLimit: collectLimit,
+                    includeSystemFolders: includeSystemFolders)
+                // Order-preserving de-dupe: a Gmail store lists the same message under INBOX
+                // and [Gmail]/All Mail, and both map to ONE index row — byte-identical
+                // duplicate rows silently consuming --limit (review).
+                var seenIDs = Set<String>()
+                liveIDs = liveIDs.filter { seenIDs.insert($0).inserted }
+                // Security M4: the live path must enforce the SAME scope the indexed path
+                // gets from its SQL predicate — resolveMessageRow is unscoped, so a
+                // mismatched live/index view (or a forged id, defense in depth) could
+                // otherwise emit rows outside the requested --account/--mailbox. The check is
+                // the index's OWN resolution (direct rowids + Gmail LABEL membership): a
+                // path/leaf compare on the row's home mailbox wrongly rejects every
+                // label-backed hit, whose home row is `[Gmail]/All Mail`.
+                let scope = EnvelopeIndex.isAllWildcard(mailbox)
+                    ? nil : ctx.index.resolveMailboxes(accountUUID: f.accountUUID, mailboxName: mailbox)
+                var live: [MailMessage] = []
+                var unindexed = 0
+                for rfcID in liveIDs.dropFirst(offset) {
+                    guard let row = try resolveMessageRow(ctx: ctx, id: rfcID) else {
+                        unindexed += 1; continue
+                    }
+                    let mbRowid = intVal(row["mailbox_rowid"]) ?? 0
+                    if let wantUUID = f.accountUUID,
+                       ctx.index.mailbox(forRowid: mbRowid)?.url.accountID != wantUUID {
+                        unindexed += 1; continue
+                    }
+                    if let scope, !ctx.index.messageInScope(rowid: intVal(row["rowid"]) ?? 0,
+                                                            direct: scope.direct, label: scope.label) {
+                        unindexed += 1; continue
+                    }
+                    live.append(ctx.decodeSummary(row))
+                }
+                // Review B2 (the oracle SORTS in body mode): `_build_search_response`
+                // sorts the collected window by received_date, then slices `[:limit]`
+                // (search.py:94-101, :146-149) — on both its paths, no body-mode branch. The
+                // first cut claimed "scan order, --sort not applied" from reading only the
+                // collection half; measured live, the echoed sort was a lie. Sorting the ISO
+                // strings is byte-what the oracle sorts (its received_date is a string too).
+                let asc = (sort == "date_asc")
+                live.sort {
+                    let a = $0.date_received ?? "", b = $1.date_received ?? ""
+                    return asc ? a < b : a > b
+                }
+                let resolvedCount = live.count
+                if limit != 0, live.count > limit { live = Array(live.prefix(limit)) }
+                if !content {
+                    for i in live.indices { live[i].snippet = nil; live[i].content_preview = nil }
+                } else if let cap = maxContentLength, cap > 0 {
+                    // Security L2: --max-content-length was validated then ignored here.
+                    for i in live.indices where (live[i].snippet?.count ?? 0) > cap {
+                        let capped = String(live[i].snippet!.prefix(cap))
+                        live[i].snippet = capped
+                        live[i].content_preview = capped
+                    }
+                }
+                let (more, nextOff) = LiveBodyPage.page(resolved: resolvedCount, unindexed: unindexed,
+                                                        offset: offset, limit: limit,
+                                                        totalIDs: liveIDs.count, collectLimit: collectLimit)
+                let result = MailMessagesResult(
+                    account: account, mailbox: mailbox, messages: live, count: live.count,
+                    offset: offset, limit: limit, has_more: more,
+                    next_offset: nextOff, sort: sort,
+                    system_folders_excluded: EnvelopeIndex.isAllWildcard(mailbox) ? !includeSystemFolders : nil,
+                    note: unindexed > 0 ? "\(unindexed) live match(es) were omitted (not present in the Envelope Index, or outside the requested --account/--mailbox scope)." : nil)
+                try emitMessages(result, json: global.json)
+                return
+            }
 
             let rows = try ctx.index.queryMessages(f)
             var messages = rows.map { ctx.decodeSummary($0) }
@@ -114,18 +283,59 @@ struct ListCommand: ParsableCommand {
     @OptionGroup var global: GlobalOptions
     @Option(name: .long, help: "Account name or UUID; omit for all accounts.") var account: String?
     @Flag(name: .long, help: "Only unread messages.") var unread = false
-    @Option(name: .long, help: "Max messages (default 50; 0 = all).") var limit: Int = 50
+    @Option(name: .long, help: "Max messages GLOBALLY (default 50; 0 = all). CLI extra — oracle B's max_emails caps per account; see --limit-per-account.") var limit: Int = 50
+    @Option(name: .long, help: "Cap messages PER ACCOUNT (oracle B max_emails semantics: the cap counts inbox messages EXAMINED, so with --unread fewer rows than the cap can return; 0 = no per-account cap). Accounts are merged newest-first (the oracle groups per account — disclosed); the global --limit still applies, pass --limit 0 for all.") var limitPerAccount: Int?
     @Flag(name: .long, inversion: .prefixedNo, help: "Include the indexed body preview (default on; MCP B include_content).") var content = true
+
+    /// gap9 pure core (pinned; review H2): the oracle's per-account window. `max_emails`
+    /// counts messages EXAMINED — the newest `per` inbox rows are taken FIRST and the unread
+    /// filter applies INSIDE that window, so fewer rows than the cap can return.
+    static func perAccountWindow(_ rows: [[String: String?]], per: Int,
+                                 unreadOnly: Bool) -> [[String: String?]] {
+        let window = per == 0 ? rows : Array(rows.prefix(per))
+        return unreadOnly ? window.filter { (intVal($0["read"]) ?? 0) == 0 } : window
+    }
 
     func run() throws {
         try runGuarded(tool: "mail") {
+            guard limit >= 0 else { throw AppleError.validation("--limit must be >= 0 (0 = all).") }
+            if let limitPerAccount, limitPerAccount < 0 {
+                throw AppleError.validation("--limit-per-account must be >= 0 (0 = no per-account cap).")
+            }
             let ctx = try MailContext()
             var f = EnvelopeIndex.MessageFilters()
             if let account { f.accountUUID = try ctx.requireAccountUUID(account) }
             f.mailboxName = "INBOX"
             if unread { f.readStatus = false }
-            f.limit = (limit == 0) ? Int.max : limit
-            let rows = try ctx.index.queryMessages(f)
+            let rows: [[String: String?]]
+            if let per = limitPerAccount {
+                // gap9: oracle B's max_emails caps PER ACCOUNT — and it counts inbox messages
+                // EXAMINED, not returned: `currentIndex` increments BEFORE the include_read
+                // filter (inbox.py:167-176), so `--unread --limit-per-account 2` means "the
+                // unread among each account's 2 newest inbox messages", not "2 unread each"
+                // (review H2 — the first cut pushed the read predicate into SQL and returned
+                // strictly more). Window first (no read predicate in the query), filter
+                // inside the window via the pinned helper.
+                let uuids = f.accountUUID.map { [$0] } ?? ctx.index.accountUUIDs()
+                var merged: [[String: String?]] = []
+                for uuid in uuids {
+                    var pf = f
+                    pf.accountUUID = uuid
+                    pf.readStatus = nil
+                    pf.limit = (per == 0) ? Int.max : per
+                    merged += ListCommand.perAccountWindow(try ctx.index.queryMessages(pf),
+                                                           per: per, unreadOnly: unread)
+                }
+                merged.sort {
+                    let a = (intVal($0["date_received"]) ?? 0, intVal($0["rowid"]) ?? 0)
+                    let b = (intVal($1["date_received"]) ?? 0, intVal($1["rowid"]) ?? 0)
+                    return a > b
+                }
+                rows = limit == 0 ? merged : Array(merged.prefix(limit))
+            } else {
+                f.limit = (limit == 0) ? Int.max : limit
+                rows = try ctx.index.queryMessages(f)
+            }
             var messages = rows.map { ctx.decodeSummary($0) }
             if !content {
                 for i in messages.indices {
@@ -135,7 +345,8 @@ struct ListCommand: ParsableCommand {
             }
             let result = MailMessagesResult(
                 account: account, mailbox: "INBOX", messages: messages, count: messages.count,
-                offset: 0, limit: limit, has_more: nil, next_offset: nil, sort: "date_desc")
+                offset: 0, limit: limit, has_more: nil, next_offset: nil, sort: "date_desc",
+                limit_per_account: limitPerAccount)
             try emitMessages(result, json: global.json)
         }
     }

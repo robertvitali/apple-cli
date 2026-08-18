@@ -51,14 +51,60 @@ struct ExportCommand: ParsableCommand {
     @Option(name: .long, help: "Directory to save exports (default ~/Desktop).") var dir: String = "~/Desktop"
     @Option(name: .long, help: "Format: txt or html.") var format: String = "txt"
     @Option(name: .long, help: "Max messages for entire_mailbox (safety cap).") var max: Int = 1000
+    @Option(name: .long, help: "File layout: 'oracle' (default, oracle B's — single_email: <dir>/<subject>.<fmt>; entire_mailbox: <dir>/<mailbox>_export/<n>_<subject>.<fmt>, 1-based, '/' replaced by '-') or 'flat' (legacy CLI extra: <dir>/<id>-<subject:60>.<fmt>, collision-proof). NOTE: like the oracle, an existing file of the same name is OVERWRITTEN — the single_email name comes from the matched message's subject; pass --no-clobber to refuse instead.") var layout: String = "oracle"
+    @Flag(name: .long, help: "Refuse to overwrite an existing file (the oracle, and the default, overwrite silently — oracle parity).") var noClobber = false
+
+    /// gap45 pure core (pinned): the exported file names, oracle layout by default.
+    /// Oracle transforms (analytics.py, verified verbatim): '/' → '-' is the ONLY character
+    /// substitution; single_email = `<subject>.<fmt>` directly in the save dir; entire_mailbox
+    /// = `<mailbox>_export/<n>_<subject>.<fmt>` with a 1-based index (the '/'→'-' pass runs
+    /// over the whole `n_subject` name, and over the MAILBOX segment so a nested name cannot
+    /// escape the export dir). CLI deviations, both disclosed: names are capped at 150 chars
+    /// before the extension (the oracle would hit the filesystem's 255-byte limit and error),
+    /// and the legacy 'flat' layout (`<id>-<subject:60>`) remains as a collision-proof extra.
+    static func plannedFiles(layout: String, scope: String, mailbox: String, format: String,
+                             messages: [(id: String, subject: String)]) -> [String] {
+        func deslash(_ s: String) -> String { s.replacingOccurrences(of: "/", with: "-") }
+        // BYTE cap, not a Character cap (review): 150 CJK/emoji graphemes are 450-600 UTF-8
+        // bytes, which still breaches the filesystem's 255-byte component limit the cap
+        // exists for — the repo's recurring grapheme-vs-code-unit class. Whole Characters
+        // only (never split a scalar); empty result falls back to "untitled" so a blank
+        // subject cannot yield a HIDDEN dotfile like the oracle's ".txt" (disclosed).
+        func capped(_ s: String, bytes: Int = 150) -> String {
+            var out = ""
+            var used = 0
+            for ch in s {
+                used += ch.utf8.count
+                if used > bytes { break }
+                out.append(ch)
+            }
+            return out.isEmpty ? "untitled" : out
+        }
+        if layout == "flat" {
+            return messages.map { "\($0.id)-\(capped(deslash($0.subject), bytes: 60)).\(format)" }
+        }
+        if scope == "single_email" {
+            return messages.map { "\(capped(deslash($0.subject))).\(format)" }
+        }
+        let sub = capped(deslash(mailbox)) + "_export"
+        return messages.enumerated().map { i, m in
+            "\(sub)/\(capped(deslash("\(i + 1)_\(m.subject)"))).\(format)"
+        }
+    }
 
     struct Result: Encodable {
         let exported: Int
+        /// The directory files actually land in — under the oracle layout's entire_mailbox
+        /// scope that is the `<mailbox>_export/` subdir, matching the oracle's `Location:`
+        /// report (review L3); otherwise the confined --dir itself.
         let directory: String
         let files: [String]
         let format: String
         let body_source: String
         let dry_run: Bool
+        /// File names whose write failed (per-message tolerance, review M3) — the export
+        /// continues past them like the oracle; omitted when none.
+        var write_failures: [String]? = nil
         /// Oracle B reports BOTH numbers (analytics.py:627-628 emits "Total emails in mailbox"
         /// and "Exported"), so a caller can tell a capped export from a complete one. A single
         /// count cannot distinguish "the mailbox held 800" from "capped at 1000 of 40,000".
@@ -75,6 +121,14 @@ struct ExportCommand: ParsableCommand {
             let willExecute = try global.willExecute(defaultDryRun: false)
 
             guard format == "txt" || format == "html" else { throw AppleError.validation("--format must be txt or html.") }
+            guard layout == "oracle" || layout == "flat" else {
+                throw AppleError.validation("invalid --layout '\(layout)'. Use: oracle, flat.")
+            }
+            // Review M9: --max was the one write-surface bound without a sign guard (the query
+            // clamp turned -1 into a misleading not_found). And the oracle returns a SUCCESS
+            // with Exported: 0 for max_emails=0 (its `exit repeat` fires before the first
+            // message), where the CLI's no-messages guard threw not_found.
+            guard max >= 0 else { throw AppleError.validation("--max must be >= 0.") }
             // Oracle B: "Error: Invalid scope '<s>'. Use: single_email, entire_mailbox"
             // (tools/analytics.py). An unknown scope previously fell through to the
             // entire_mailbox branch and exported the whole mailbox — the opposite of narrowing.
@@ -92,6 +146,9 @@ struct ExportCommand: ParsableCommand {
             }
             let ctx = try MailContext()
             let uuid = try ctx.requireAccountUUID(account)
+            // An unknown --mailbox previously surfaced as "no messages matched" — the oracle
+            // raises "Mailbox not found" (security L3 / oracle parity, same guard as search).
+            try requireMailboxKnown(ctx: ctx, name: mailbox, accountUUID: uuid)
             var f = EnvelopeIndex.MessageFilters()
             f.accountUUID = uuid; f.mailboxName = mailbox
             if scope == "single_email" {
@@ -100,7 +157,10 @@ struct ExportCommand: ParsableCommand {
                 f.limit = max
             }
             var messages = try ctx.index.queryMessages(f).map { ctx.decodeSummary($0) }
-            guard !messages.isEmpty else { throw AppleError.notFound("no messages matched to export.") }
+            if scope == "entire_mailbox", max == 0 { messages = [] }
+            guard scope == "entire_mailbox" && max == 0 || !messages.isEmpty else {
+                throw AppleError.notFound("no messages matched to export.")
+            }
 
             // single_email exports the FULL body (AppleScript, bounded to one message = a strict
             // superset of MCP B); entire_mailbox uses the fast indexed preview (documented).
@@ -124,34 +184,70 @@ struct ExportCommand: ParsableCommand {
                 var countFilters = f; countFilters.limit = Int.max; countFilters.offset = 0
                 totalInMailbox = (try? ctx.index.countMessages(countFilters)) ?? messages.count
             }
-            let planned = messages.map { m -> String in
-                let safe = m.subject.replacingOccurrences(of: "/", with: "-").prefix(60)
-                return outDir.appendingPathComponent("\(m.id)-\(safe).\(format)").path
-            }
+            // gap45: file names + directory shape are the ORACLE'S by default
+            // (analytics.py:500-513 single, :570-585 mailbox) — computed ONCE by the pure
+            // builder so the dry-run preview and --execute agree byte-for-byte.
+            let names = ExportCommand.plannedFiles(layout: layout, scope: scope, mailbox: mailbox,
+                                                   format: format,
+                                                   messages: messages.map { (id: $0.id, subject: $0.subject) })
+            let planned = names.map { outDir.appendingPathComponent($0).path }
+            // Review L3: the oracle reports the `<mailbox>_export` dir as its Location; report
+            // the directory files actually land in (derived from the planned names so preview
+            // and execute agree).
+            let reportedDir = names.first.flatMap { n -> String? in
+                n.contains("/") ? outDir.appendingPathComponent(String(n.split(separator: "/")[0])).path : nil
+            } ?? outDir.path
             // `--dry-run` was ADVERTISED in --help and silently ignored: the command mkdir -p'd
             // and wrote one file per message regardless. On a command that writes message bodies
             // to disk that is the worst kind of ignored parameter, so the preview now returns
             // before any filesystem mutation — no directory creation, no writes.
             guard willExecute else {
                 try Output.emit(tool: "mail", data: Result(
-                    exported: 0, directory: outDir.path, files: planned, format: format,
+                    exported: 0, directory: reportedDir, files: planned, format: format,
                     body_source: bodySource, dry_run: true,
                     total_in_mailbox: totalInMailbox, capped: totalInMailbox > messages.count), sandboxActive: sandboxActive)
                 return
             }
-            try FileManager.default.createDirectory(at: outDir, withIntermediateDirectories: true)
             var files: [String] = []
-            for m in messages {
-                let safe = m.subject.replacingOccurrences(of: "/", with: "-").prefix(60)
-                let name = "\(m.id)-\(safe).\(format)"
-                let url = outDir.appendingPathComponent(String(name))
+            var writeFailures: [String] = []
+            for (m, name) in zip(messages, names) {
+                let url = outDir.appendingPathComponent(name)
+                // Create the per-file parent (the oracle's `<mailbox>_export/` subdir under
+                // the entire_mailbox layout; outDir itself otherwise) — mkdir -p semantics.
+                let parent = url.deletingLastPathComponent()
+                try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+                // Security M1: confineWriteDestination resolved symlinks on the TOP directory
+                // only; a pre-planted `<mailbox>_export` SYMLINK inside it would route message
+                // bodies outside the confined dir. Re-confine the RESOLVED parent per write.
+                let realParent = parent.resolvingSymlinksInPath().path
+                let realOut = outDir.resolvingSymlinksInPath().path
+                guard realParent == realOut || realParent.hasPrefix(realOut + "/") else {
+                    throw AppleError.mailSafety("export subdirectory '\(parent.path)' resolves outside '\(realOut)' — refusing to write through it.")
+                }
+                // Oracle B OVERWRITES an existing file of the same name (`set eof of fileRef
+                // to 0`) — kept as the parity default; --no-clobber opts out fail-loud (M3).
+                // NOTE (review L6): under the oracle naming the single_email file carries no
+                // id, and the CLI picks the index's newest subject match where the oracle
+                // picks its live-scan first — two runs can overwrite the same path with
+                // DIFFERENT messages. Disclosed on row 42; --no-clobber is the guard.
+                if noClobber, FileManager.default.fileExists(atPath: url.path) {
+                    throw AppleError.mailSafety("refusing to overwrite existing file '\(url.path)' (--no-clobber).")
+                }
                 let content = (format == "html") ? MailExport.html(m) : MailExport.text(m)
-                try content.write(to: url, atomically: true, encoding: .utf8)
-                files.append(url.path)
+                do {
+                    try content.write(to: url, atomically: true, encoding: .utf8)
+                    files.append(url.path)
+                } catch {
+                    // Review M3: the oracle wraps each message in try/on-error and CONTINUES —
+                    // one unwritable name must not abort the export with N files already on
+                    // disk. Recorded, never silent.
+                    writeFailures.append(url.lastPathComponent)
+                }
             }
             try Output.emit(tool: "mail", data: Result(
-                exported: files.count, directory: outDir.path, files: files, format: format,
+                exported: files.count, directory: reportedDir, files: files, format: format,
                 body_source: bodySource, dry_run: false,
+                write_failures: writeFailures.isEmpty ? nil : writeFailures,
                 total_in_mailbox: totalInMailbox, capped: totalInMailbox > files.count), sandboxActive: sandboxActive)
         }
     }

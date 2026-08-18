@@ -53,6 +53,224 @@ public struct MailScript {
     end run
     """
 
+    /// gap2: oracle B's live BODY search (search.py:200-330) — ONE AppleScript pass that walks
+    /// each mailbox's messages, reads `content of aMessage`, and applies the full per-message
+    /// condition set in-loop with the oracle's early exit (`collectLimit <= 0`), returning RFC
+    /// Message-IDs. Ported semantics, not the oracle's implementation defects:
+    ///   * every user value arrives via argv, never interpolated into the script source (the
+    ///     oracle string-interpolates the needle — the injection class this repo refuses);
+    ///   * NO `lowercase` handler: the oracle shells out to `tr` PER FIELD PER MESSAGE (its
+    ///     timeout cause). AppleScript's `contains` ignores case by default — equivalent to
+    ///     the oracle's tr for ASCII, a SUPERSET for non-ASCII (tr folds ASCII only, so the
+    ///     oracle misses `É`/`é` matches this port makes) — zero subprocesses;
+    ///   * the "All" sweep skips the oracle's SKIP_FOLDERS list verbatim;
+    ///   * a named mailbox matches by leaf across nesting (the CLI's read-side convention; the
+    ///     command validated existence against the index first) with the oracle's INBOX→Inbox
+    ///     retry covered by the leaf match being case-insensitive.
+    /// argv: 1 needle, 2 RS-joined subject terms, 3 sender, 4 read mode (read/unread/""),
+    /// 5/6 from/to bounds as LOCAL "y,m,d,secs" components ("" = none), 7 attachment mode
+    /// (has/no/""), 8 flag mode (flagged/unflagged/""), 9 account name ("" = all),
+    /// 10 mailbox LEAF name (a full path is reduced host-side; the flattened `whose name is`
+    /// match then scans every nesting point of that leaf — a disclosed superset),
+    /// 11 collect limit (host-capped), 12 "include" to sweep system folders on All.
+    private static let bodySearchScript = """
+    -- Build a date from HOST-computed LOCAL calendar components ("y,m,d,secs"). Never a
+    -- locale-dependent `date "<string>"` literal, and never local-1970-epoch + seconds
+    -- arithmetic (whose instant is shifted by the 1970-vs-today UTC-offset delta — measured
+    -- 4-5h against the index path). `set day to 1` first: the rollover guard this repo's
+    -- date handling already standardizes on.
+    on datebound(spec)
+        set AppleScript's text item delimiters to ","
+        set parts to text items of spec
+        set AppleScript's text item delimiters to ""
+        set d to current date
+        set day of d to 1
+        set year of d to (item 1 of parts) as integer
+        set month of d to (item 2 of parts) as integer
+        set day of d to (item 3 of parts) as integer
+        set time of d to (item 4 of parts) as integer
+        return d
+    end datebound
+
+    on run argv
+        set needle to item 1 of argv
+        set subjTermsRaw to item 2 of argv
+        set senderNeedle to item 3 of argv
+        set readMode to item 4 of argv
+        set fromRaw to item 5 of argv -- "y,m,d,secs" LOCAL components, or ""
+        set toRaw to item 6 of argv -- same shape
+        set attMode to item 7 of argv
+        set flagMode to item 8 of argv
+        set acctName to item 9 of argv
+        set mbxName to item 10 of argv
+        set collectLimit to (item 11 of argv) as integer
+        set includeSystem to item 12 of argv
+        set RS to (ASCII character 30)
+        set fromDate to missing value
+        if fromRaw is not "" then set fromDate to my datebound(fromRaw)
+        set toDate to missing value
+        if toRaw is not "" then set toDate to my datebound(toRaw)
+        set subjTerms to {}
+        if subjTermsRaw is not "" then
+            set AppleScript's text item delimiters to RS
+            set subjTerms to text items of subjTermsRaw
+            set AppleScript's text item delimiters to ""
+        end if
+        set skipFolders to {"Trash", "Junk", "Junk Email", "Deleted Items", "Sent", "Sent Items", "Sent Messages", "Drafts", "Spam", "Deleted Messages"}
+        set out to ""
+        tell application "Mail"
+            with timeout of 180 seconds
+                set searchAccounts to accounts
+                if acctName is not "" then set searchAccounts to (accounts whose name is acctName)
+                repeat with targetAccount in searchAccounts
+                    if collectLimit <= 0 then exit repeat
+                    if mbxName is "All" then
+                        set searchMailboxes to every mailbox of targetAccount
+                    else
+                        set searchMailboxes to (mailboxes of targetAccount whose name is mbxName)
+                    end if
+                    repeat with currentMailbox in searchMailboxes
+                        if collectLimit <= 0 then exit repeat
+                        try
+                        set shouldSkip to false
+                        if mbxName is "All" and includeSystem is not "include" then
+                            set mailboxLeaf to (name of currentMailbox)
+                            repeat with skipFolder in skipFolders
+                                if mailboxLeaf is (skipFolder as string) then
+                                    set shouldSkip to true
+                                    exit repeat
+                                end if
+                            end repeat
+                        end if
+                        if not shouldSkip then
+                            set allMessages to every message of currentMailbox
+                            repeat with aMessage in allMessages
+                                if collectLimit <= 0 then exit repeat
+                                try
+                                    set matches to true
+                                    if (count of subjTerms) > 0 then
+                                        set messageSubject to subject of aMessage
+                                        set subjHit to false
+                                        repeat with t in subjTerms
+                                            if messageSubject contains (t as string) then
+                                                set subjHit to true
+                                                exit repeat
+                                            end if
+                                        end repeat
+                                        if not subjHit then set matches to false
+                                    end if
+                                    if matches and senderNeedle is not "" then
+                                        if (sender of aMessage) does not contain senderNeedle then set matches to false
+                                    end if
+                                    if matches and readMode is "read" then
+                                        if (read status of aMessage) is false then set matches to false
+                                    end if
+                                    if matches and readMode is "unread" then
+                                        if (read status of aMessage) is true then set matches to false
+                                    end if
+                                    if matches and flagMode is "flagged" then
+                                        if (flagged status of aMessage) is false then set matches to false
+                                    end if
+                                    if matches and flagMode is "unflagged" then
+                                        if (flagged status of aMessage) is true then set matches to false
+                                    end if
+                                    if matches and fromDate is not missing value then
+                                        if (date received of aMessage) < fromDate then set matches to false
+                                    end if
+                                    if matches and toDate is not missing value then
+                                        if (date received of aMessage) > toDate then set matches to false
+                                    end if
+                                    if matches and attMode is "has" then
+                                        if (count of mail attachments of aMessage) is 0 then set matches to false
+                                    end if
+                                    if matches and attMode is "no" then
+                                        if (count of mail attachments of aMessage) > 0 then set matches to false
+                                    end if
+                                    if matches then
+                                        -- Body test LAST: `content of aMessage` is the expensive
+                                        -- read, so every cheap predicate above short-circuits it
+                                        -- (the oracle reads content unconditionally per message).
+                                        set msgContent to ""
+                                        try
+                                            set msgContent to content of aMessage
+                                        end try
+                                        if msgContent contains needle then
+                                            -- `message id` is the REMOTE-chosen RFC Message-ID:
+                                            -- neutralize the RS wire delimiter in-script
+                                            -- (security H1 — a crafted id could forge extra
+                                            -- result rows; same defense as the attachment-name
+                                            -- sink). Swift re-scrubs any remaining C0.
+                                            set mid to (message id of aMessage) as string
+                                            set AppleScript's text item delimiters to RS
+                                            set mid to text items of mid
+                                            set AppleScript's text item delimiters to "_"
+                                            set mid to mid as string
+                                            set AppleScript's text item delimiters to ""
+                                            set out to out & mid & RS
+                                            set collectLimit to collectLimit - 1
+                                        end if
+                                    end if
+                                end try
+                            end repeat
+                        end if
+                        end try
+                    end repeat
+                end repeat
+            end timeout
+        end tell
+        return out
+    end run
+    """
+
+    /// See `bodySearchScript`. Returns RFC Message-IDs of live matches, in the oracle's scan
+    /// order, at most `collectLimit`.
+    public func bodySearch(needle: String, subjectTerms: [String], sender: String?,
+                           readStatus: Bool?, flagged: Bool?, fromUnix: Int?, toUnix: Int?,
+                           hasAttachment: Bool?, accountName: String?, mailboxName: String,
+                           collectLimit: Int, includeSystemFolders: Bool = false) throws -> [String] {
+        let rs = String(UnicodeScalar(30)!)
+        let readMode = readStatus.map { $0 ? "read" : "unread" } ?? ""
+        let flagMode = flagged.map { $0 ? "flagged" : "unflagged" } ?? ""
+        let attMode = hasAttachment.map { $0 ? "has" : "no" } ?? ""
+        let out = try runner.run(MailScript.bodySearchScript, arguments: [
+            needle, subjectTerms.joined(separator: rs), sender ?? "", readMode,
+            fromUnix.map(MailScript.localDateComponents) ?? "",
+            toUnix.map(MailScript.localDateComponents) ?? "", attMode, flagMode,
+            accountName ?? "", mailboxName, String(collectLimit),
+            includeSystemFolders ? "include" : "",
+        ])
+        return MailScript.parseBodySearchIDs(out)
+    }
+
+    /// Pure, pinned: a unix bound rendered as the LOCAL "y,m,d,seconds-of-day" components the
+    /// script's `datebound` handler rebuilds — so the live comparison lands on the SAME
+    /// instant the index path binds in SQL (the earlier epoch-arithmetic form was measured
+    /// 4-5h off: local-1970-midnight's instant shifts by the 1970-vs-today UTC-offset delta).
+    static func localDateComponents(_ unix: Int) -> String {
+        let c = Calendar.current.dateComponents([.year, .month, .day, .hour, .minute, .second],
+                                                from: Date(timeIntervalSince1970: TimeInterval(unix)))
+        let secs = (c.hour ?? 0) * 3600 + (c.minute ?? 0) * 60 + (c.second ?? 0)
+        return "\(c.year ?? 1970),\(c.month ?? 1),\(c.day ?? 1),\(secs)"
+    }
+
+    /// Pure, pinned (security H1): split the RS-joined id blob and DROP any token still
+    /// carrying a C0/DEL control byte — the emitting script neutralizes RS inside a
+    /// remote-chosen Message-ID, and this is the fail-closed second layer (a token that
+    /// re-split would have forged an extra result row; a numeric forgery would even resolve
+    /// as an arbitrary Envelope-Index ROWID).
+    static func parseBodySearchIDs(_ raw: String) -> [String] {
+        let rs = String(UnicodeScalar(30)!)
+        return raw.components(separatedBy: rs)
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { tok in
+                !tok.isEmpty && !tok.unicodeScalars.contains { $0.value < 0x20 || $0.value == 0x7F }
+            }
+    }
+
+    /// Internal for the logic tier: pins on the body-search script's structure (it only
+    /// executes against live Mail).
+    static var bodySearchScriptSource: String { bodySearchScript }
+
     public func body(internetMessageID: String, accountName: String?) throws -> String? {
         // Mail's `message id` carries angle brackets; try the bracketed form.
         let bare = MailFormat.stripAngleBrackets(internetMessageID) ?? internetMessageID
