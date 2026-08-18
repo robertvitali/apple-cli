@@ -543,3 +543,101 @@ honestly rather than silently claiming universal coverage. This entry is the dec
 (a) or ratify (b).
 
 ---
+
+## D13 — Strict-superset GO/NO-GO package (the D2 gate)
+
+- **Status:** OPEN — this is the go/no-go package [D2](#d2--tag-100-and-retire-the-six-mcp-servers)
+  promised. The loop has run every autonomous task to completion and STOPS here.
+- **Filed:** 2026-08-18, after the Q17 re-audit (`a gitignored local re-audit artifact`, a gitignored
+  local artifact; the tracked summary is the Q17 row in `docs/COMPLETION-LOOP.md`).
+- **Category:** the terminal go/no-go — decisions here gate closing the domain Asana parents and,
+  ultimately, D2 (tag 1.0.0 + retire the MCPs).
+
+### Where each domain stands (Q17 re-audit, HEAD after this commit)
+
+The write-model-v2 migration (your 2026-08-01 "behave exactly like the mcp" decision) plus the
+Q1–Q16 gap-closure work closed the vast majority of the 2026-07-31 audit's 111 gaps: **every HIGH
+write-drop is lifted** (writes execute by default, sandbox opt-in) and **every silent-corruption
+defect is fixed**. No domain has a blocker.
+
+| Domain | Verdict | Gate before its parent closes / MCP retires |
+|---|---|---|
+| **contacts** | **STRICT_SUPERSET** | none — clear to close now |
+| **mail** | **STRICT_SUPERSET** at op+param (55/55) | ratify the plain-reply divergence (decision 5 below) + resolve the OPEN **D8** (which Mail oracle wins a limit disagreement) |
+| messages | GAPS_REMAIN (3 LOW) | D10 (length cap, already yours) + the cheap fixes below |
+| reminders | GAPS_REMAIN (1 LOW) | **REM-11** below (+ record REM-08) |
+| calendar | GAPS_REMAIN (1 LOW + verify) | **CAL-08** below + a safe live read-diff (CAL-07/CAL-10) |
+| notes | GAPS_REMAIN (2 MED + 3 doc'd) | **notes-#8** below + the cheap #9 fix; D12 already yours |
+
+### New divergence decisions I need from you (each is CLI-arguably-better or safety-motivated)
+
+1. **REM-11 — reminders stores a URL in the structured `url` field, not appended to the notes
+   body.** The oracle appends `\n\nURLs:\n- <url>` to notes; the CLI keeps the URL as a first-class
+   field and preserves url-search parity. Read-parity of oracle-authored data is intact.
+   **Recommend: RATIFY the CLI behavior** as a documented, strictly-cleaner divergence (or I
+   implement the notes-append for byte-parity — a small change).
+2. **REM-08 — an unparseable `--due` is REJECTED (exit 64) where the oracle silently clears the
+   date.** The clear capability is preserved via explicit `--clear-due`/`--clear-start`.
+   **Recommend: RATIFY** as a fail-closed divergence and record it in the port spec.
+3. **CAL-08 — `calendar events --account` is validated against event-owning sources only; the
+   oracle accepts an event-less source but then data-leaks the full window.** The CLI deliberately
+   refuses to replicate the leak (exit 65). **Recommend: KEEP fail-loud**, documented as an
+   intentional stricter-than-oracle divergence.
+4. **notes-#8 — the oracle retries transient AppleScript failures (−1712 timeout, "not responding",
+   "lost connection", "busy", mid-listing mutation) up to 2×; the CLI fails hard on first error
+   (clean exit 69, no corruption).** This is a real behavior-granularity gap on a large/syncing
+   store. **Choose: PORT the 2× retry/backoff wrapper (a MED behavior change I can do), or BLESS it
+   as an accepted robustness divergence.**
+5. **mail gap17/extra15 — a *plain-text* reply/forward prepends the quote via `set content`,
+   flattening the HTML quote layer the oracle preserves.** The HTML path (`--html`/`--mode
+   draft|open`) has full parity via the NSPasteboard flow; this is the ONE sub-path where mail's
+   behavior is *worse* than the oracle. **Choose: ACCEPT as a disclosed plain-text-reply divergence,
+   or route plain replies through the pasteboard flow too (a MED fix I can do).** Mail is otherwise
+   a full op+param strict superset (55/55).
+
+Already-filed Bucket-C decisions that still apply: **D5** (messages fuzzy recall), **D6** (eight
+posture calls), **D8** (which Mail oracle wins a limit disagreement — gates mail closure), **D10**
+(messages length caps = the term-cap gap), **D12** (notes `save-attachment` path reach).
+
+### Cheap fast-follows — greenlight to execute, or accept as carve-outs (no blocker either way)
+
+- **messages gap6** — negative `--hours -1` (space form) gives a generic parser error where
+  `--hours=-1` gives the specific one; mechanical fix via the existing `ArgvPreprocess` seam.
+- **messages gap4** — `check_contacts` "first 10" sample uses an alphabetical sort instead of the
+  oracle's dict-insertion order (the `count` contract matches). Matching the oracle's insertion-order
+  quirk in a diagnostic sample is non-trivial for negligible value — **recommend accept as cosmetic**.
+- **notes-#9** — richer entity-specific error-mapping table (oracle's 11 buckets vs the CLI's 5);
+  diagnostic-quality only, no wrong output or missing op.
+- **mail port-spec notes** — add the op-27/28 divergence notes (live forward_to/delete-action rule
+  refusal; `--match any`) and the row-18 `open_in_mail` note to `docs/port-specs/mail.md`. Code is
+  oracle-correct; only the notes are missing. (Deferred here rather than guessed, to avoid a doc
+  inaccuracy.)
+- **calendar doc-comment** — DONE in this commit (the `CalendarCommand.swift` header still carried
+  the v1 "dry-run by default" wording Q16 missed).
+
+### Safe live-verification I can run on your TCC-granted machine (read-only, no writes)
+
+- **calendar CAL-07** (empty `--calendar` → default) and **CAL-10** (EventKit-native ordering) —
+  code-correct but not yet live-diffed against the oracle.
+- **notes** — a live MCP-diff of the three fixed silent-corruption defects (folder / modified-since
+  rollover / ordered-list) to convert code-verified → runtime-verified.
+- **mail** — spot live `size`/`downloaded` bytes on 2–3 attachment-bearing messages + one HTML reply.
+
+Say the word and I'll run these read-only diffs; they need no decision, only your go to spend the
+time against real accounts.
+
+### My recommendation
+
+1. **Close the contacts Asana domain parent now** — it is a verified strict superset with no
+   residual. Mail is a full op+param strict superset (55/55) and is close behind, but its parent
+   should close only after you ratify decision 5 (the plain-text-reply divergence) and D8 (the
+   oracle-limit disagreement). (I did NOT close any parent autonomously: declaring a domain
+   shippable is adjacent to the D2 milestone you reserved, and the prior audit said "do not close
+   parents until settled." Confirm and I'll close them under the closure protocol.)
+2. **Rule on the five new divergences (1–5 above)** — my recommendations are ratify/keep for REM-11,
+   REM-08, CAL-08; a genuine port-or-bless choice for notes-#8; and accept-or-fix for mail's
+   plain-reply divergence (5). Plus the already-open D8 for mail.
+3. **Greenlight (or wave off) the cheap fast-follows** — I can land them behind the usual gates.
+4. **Then, and only then, D2** — tag 1.0.0 + retire the MCPs. Still yours alone; the loop stops here.
+
+---

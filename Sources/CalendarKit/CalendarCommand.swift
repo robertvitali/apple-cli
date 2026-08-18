@@ -13,9 +13,9 @@ import EventKitCore
 ///   calendar doctor                  → permission/health preflight (extra)
 ///
 /// All heavy EventKit work lives in the shared `EventKitCore` engine (models + mapping +
-/// EKEventStore access); this module is the command tree only. Writes default to a dry-run
-/// preview; a live write requires `--execute` under the `--test-mode` + `APPLE_TEST_MODE`
-/// safety gate.
+/// EKEventStore access); this module is the command tree only. Write-model v2: writes EXECUTE
+/// by default (oracle parity); `--dry-run` / `APPLE_DRY_RUN=1` preview, and
+/// `--test-mode` / `APPLE_TEST_MODE` engages the opt-in sandbox policy (label-scoped targets).
 ///
 /// Asana: feat/asana-GID-REDACTED-calendar
 public struct CalendarCommand: ParsableCommand {
