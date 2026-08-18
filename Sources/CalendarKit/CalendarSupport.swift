@@ -436,9 +436,10 @@ public enum CalendarWriteGuard {
         guard sandboxActive else { return }
         let required = prefix ?? TestMode.sandboxPrefix
         guard name.hasPrefix(required) else {
-            throw AppleError.validation(
-                "Sandbox is engaged: refusing to write to \"\(name)\" — the target must be a "
-                + "labeled '\(required)…' test item.")
+            throw AppleError(type: AppleErrorType.validation,        // sandbox refusal (Q14)
+                message: "Sandbox is engaged: refusing to write to \"\(name)\" — the target must be a "
+                       + "labeled '\(required)…' test item.",
+                exitCode: AppleExit.usage, sandbox: true)
         }
     }
 }

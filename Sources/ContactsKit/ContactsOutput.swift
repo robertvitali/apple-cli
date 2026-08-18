@@ -107,7 +107,7 @@ func resolveWrite(_ global: GlobalOptions, labeledName: String? = nil,
         guard name.hasPrefix(required) else {
             throw AppleError.safetyViolation(
                 "refusing to create unlabeled data in the sandbox: the name must start with "
-                + "'\(required)'.")
+                + "'\(required)'.", sandbox: true)
         }
     }
     return WriteGate(willExecute: willExecute, sandboxActive: sandboxActive)

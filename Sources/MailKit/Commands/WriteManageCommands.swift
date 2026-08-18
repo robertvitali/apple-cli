@@ -998,7 +998,7 @@ struct MailboxesCreate: ParsableCommand {
             // (audit note on extra8), and every created level nests under that first segment,
             // so a labeled first segment keeps the whole subtree cleanable.
             if sandboxActive, !(segments.first ?? "").hasPrefix(TestMode.sandboxPrefix) {
-                throw AppleError.mailSafety("sandbox active: mailbox path '\(segments.joined(separator: "/"))' is not a labeled test item (its first segment must start with \"\(TestMode.sandboxPrefix)\") — refusing.")
+                throw AppleError.mailSafety("sandbox active: mailbox path '\(segments.joined(separator: "/"))' is not a labeled test item (its first segment must start with \"\(TestMode.sandboxPrefix)\") — refusing.", sandbox: true)
             }
             let ctx = try MailContext()
             let uuid = try ctx.requireAccountUUID(account)

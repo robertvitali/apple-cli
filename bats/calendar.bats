@@ -189,3 +189,13 @@ setup() {
   [ "$status" -eq 0 ]
   echo "$output" | grep -q '"longitude":-122'
 }
+
+# Q14: a sandbox-policy refusal (unlabeled title in --test-mode) carries error.sandbox=true.
+@test "calendar events create unlabeled in --test-mode marks error.sandbox (Q14)" {
+  run "$BIN" calendar events create --title notlabeled --start 2030-01-01 --end 2030-01-01 --test-mode --execute
+  # The unlabeled-title guard is a PURE check that fires BEFORE any EventKit auth, so this refuses
+  # (exit 64) identically on a TCC-less CI runner; assert the code so a guard that ever moved
+  # post-auth fails loudly here instead of silently going red on authorization_denied output.
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q '"sandbox" : true'
+}

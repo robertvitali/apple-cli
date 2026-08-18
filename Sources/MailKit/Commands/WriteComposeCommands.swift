@@ -97,7 +97,7 @@ func guardOutbound(recipients: [String], sandboxActive: Bool, applyRecipientCap:
     // valid address — see outboundAllowlist) so operator data can't smuggle a match-anything.
     let allow = Set(TestMode.allowedRecipients.filter { $0 != "*" }.map { $0.lowercased() })
     for r in recipients where !allow.contains(r.lowercased()) {
-        throw AppleError.mailSafety("sandbox active: recipient '\(r)' is not in the self-only allowlist (APPLE_TEST_RECIPIENTS) — refusing. Disengage the sandbox to send beyond it.")
+        throw AppleError.mailSafety("sandbox active: recipient '\(r)' is not in the self-only allowlist (APPLE_TEST_RECIPIENTS) — refusing. Disengage the sandbox to send beyond it.", sandbox: true)
     }
 }
 
@@ -141,6 +141,14 @@ func refusalMessage(kind: String, bad: String, discarded: Bool, sandboxActive: B
         // audit trips and KEEP the refusal wording — review caught the broad `(`-prefix
         // branch swallowing them as compose failures.)
         head = "refusing the \(kind): Mail returned an unrecognized script result \(bad). Nothing was sent."
+    } else if bad == "(no recipients populated)" || bad == "(recipients vanished before send)" {
+        // Zero-recipient audit trips from the reply/forward tail: they fire BEFORE the allowlist is
+        // consulted and are unconditional of the sandbox wildcard, so they are refusals-to-send but
+        // NOT allowlist misses. The message must not claim the sandbox refused a recipient — that
+        // would disagree with `error.sandbox` being absent (they are not sandbox-caused, per
+        // `mailOutboundRefusalIsSandboxCaused`). Kept as a refusal (not a compose failure), per the
+        // prior review that these trips retain refusal wording.
+        head = "refusing the \(kind): Mail reported no deliverable recipients \(bad). Nothing was sent."
     } else if bad == "<empty-address>" {
         head = "refusing the \(kind): Mail composed it with an empty/blank recipient address. Nothing was sent."
     } else if sandboxActive {
@@ -181,6 +189,47 @@ let dangerousAttachmentExtensions: Set<String> = [
     "msi", "msp", "scf", "lnk", "inf", "reg", "ps1", "psm1", "app", "deb", "rpm", "sh",
     "bash", "csh", "ksh", "zsh", "command",
 ]
+
+/// Whether a Mail outbound refusal `reason` (the `bad`/`addr` value an in-script recipient check
+/// returns) was caused BY the sandbox's self-only allowlist rather than an always-on condition.
+/// Only an allowlist miss — a real recipient outside the self-only set — is a sandbox-policy
+/// refusal, so only it stamps `error.sandbox`. Every other reason is an always-on trip that fires
+/// identically whether the sandbox is on or off, so marking it `sandbox: true` would tell a
+/// consumer "retry unsandboxed" when that retry hits the very same block (the false-positive class
+/// Q14 exists to kill). Those always-on reasons are exactly the non-address sentinels the in-script
+/// checks emit: `<empty-address>` (a blank recipient), and the parenthesized audit trips `(no
+/// recipients populated)` / `(recipients vanished before send)` / `(unrecognized script result …)`.
+/// A real disallowed address (from `firstDisallowed`) never begins with `(` or `<`, so excluding
+/// those two prefixes covers every current sentinel AND any future parenthesized one. Single-sourced
+/// across the draft-send `.blocked` and reply/forward `.refused` paths, mirroring `refusalMessage`'s
+/// own reason partition so message and flag agree.
+func mailOutboundRefusalIsSandboxCaused(reason: String, sandboxActive: Bool) -> Bool {
+    guard sandboxActive else { return false }
+    if reason == "<empty-address>" { return false }
+    if reason.hasPrefix("(") { return false }
+    return true
+}
+
+/// Builds the refusal error for a `sendDraft` `.blocked` result. Factored out of the
+/// `manage_drafts action=send` switch so the sandbox-causation is unit-pinnable without driving
+/// live Mail. Message clauses AND the `sandbox` flag derive from the SAME reason predicate
+/// (`mailOutboundRefusalIsSandboxCaused`) so they never disagree: an allowlist miss (real non-self
+/// recipient) reads as a self-only refusal and stamps `sandbox: true`; an always-on
+/// `<empty-address>` broken compose points at fixing the draft and leaves the flag absent, even
+/// under an active sandbox.
+func blockedDraftSendError(address: String, subject: String, sandboxActive: Bool) -> AppleError {
+    let sandboxCaused = mailOutboundRefusalIsSandboxCaused(reason: address, sandboxActive: sandboxActive)
+    let which = address == "<empty-address>" ? "an empty/blank recipient address" : "'\(address)'"
+    // Allowlist advice/wording only when the allowlist is actually what refused; an empty/blank
+    // address is a broken compose (always-on), so it must NOT claim an allowlist miss.
+    let advice = sandboxCaused
+        ? "Set APPLE_TEST_RECIPIENTS to your own address(es) or fix the draft's recipients."
+        : "Fix the draft's recipients in Mail."
+    let why = sandboxCaused ? ", which is not in the self-only test allowlist" : ""
+    return AppleError.mailSafety(
+        "draft \"\(subject)\" is addressed to \(which)\(why) — refusing to send it. \(advice)",
+        sandbox: sandboxCaused)
+}
 
 func resolveAttachmentPath(_ raw: String) throws -> String {
     // CONTROL CHARACTERS FIRST, unconditionally — the exact rule (and rationale) of
@@ -412,7 +461,7 @@ struct SendCommand: ParsableCommand {
             // not a send). Unsandboxed drafts are unrestricted (the oracle saves on call).
             if mode == "draft" && sandboxActive {
                 guard subject.hasPrefix(TestMode.sandboxPrefix) else {
-                    throw AppleError.mailSafety("sandbox active: draft --subject must be a labeled test item (start with \"\(TestMode.sandboxPrefix)\") — refusing.")
+                    throw AppleError.mailSafety("sandbox active: draft --subject must be a labeled test item (start with \"\(TestMode.sandboxPrefix)\") — refusing.", sandbox: true)
                 }
             }
 
@@ -784,7 +833,7 @@ struct ReplyCommand: ParsableCommand {
                     case .sendFailed(let newID):
                         throw AppleError.upstream("Mail reported the reply was NOT sent (send returned false — account offline or the server refused). Draft id \(newID) may still be in Mail.")
                     case .refused(let bad, let discarded):
-                        throw AppleError.mailSafety(refusalMessage(kind: "reply", bad: bad, discarded: discarded, sandboxActive: sandboxActive))
+                        throw AppleError.mailSafety(refusalMessage(kind: "reply", bad: bad, discarded: discarded, sandboxActive: sandboxActive), sandbox: mailOutboundRefusalIsSandboxCaused(reason: bad, sandboxActive: sandboxActive))
                     case .composeFailed(let reason, let discarded):
                         throw AppleError.upstream(composeFailureMessage(kind: "reply", reason: reason, discarded: discarded))
                     }
@@ -844,7 +893,7 @@ struct ReplyCommand: ParsableCommand {
                     case .sendFailed(let newID):
                         throw AppleError.upstream("Mail reported the reply was NOT sent (send returned false — account offline or the server refused). Draft id \(newID) may still be in Mail.")
                     case .refused(let bad, let discarded):
-                        throw AppleError.mailSafety(refusalMessage(kind: "reply", bad: bad, discarded: discarded, sandboxActive: sandboxActive))
+                        throw AppleError.mailSafety(refusalMessage(kind: "reply", bad: bad, discarded: discarded, sandboxActive: sandboxActive), sandbox: mailOutboundRefusalIsSandboxCaused(reason: bad, sandboxActive: sandboxActive))
                     case .composeFailed(let reason, let discarded):
                         throw AppleError.upstream(composeFailureMessage(kind: "reply", reason: reason, discarded: discarded))
                     }
@@ -979,7 +1028,7 @@ struct ForwardCommand: ParsableCommand {
                 case .sendFailed(let newID):
                     throw AppleError.upstream("Mail reported the forward was NOT sent (send returned false — account offline or the server refused). Draft id \(newID) may still be in Mail.")
                 case .refused(let bad, let discarded):
-                    throw AppleError.mailSafety(refusalMessage(kind: "forward", bad: bad, discarded: discarded, sandboxActive: sandboxActive))
+                    throw AppleError.mailSafety(refusalMessage(kind: "forward", bad: bad, discarded: discarded, sandboxActive: sandboxActive), sandbox: mailOutboundRefusalIsSandboxCaused(reason: bad, sandboxActive: sandboxActive))
                 case .composeFailed(let reason, let discarded):
                     throw AppleError.upstream(composeFailureMessage(kind: "forward", reason: reason, discarded: discarded))
                 case .drafted, .opened:
@@ -1326,7 +1375,7 @@ struct DraftCommand: ParsableCommand {
                     throw AppleError.validation("--subject (or --draft-subject) must not be empty or whitespace for draft \(verb).")
                 }
                 if sandboxActive, !s.hasPrefix(TestMode.sandboxPrefix) {
-                    throw AppleError.mailSafety("sandbox active: draft --subject must be a labeled test item (start with \"\(TestMode.sandboxPrefix)\") to \(verb) — refusing.")
+                    throw AppleError.mailSafety("sandbox active: draft --subject must be a labeled test item (start with \"\(TestMode.sandboxPrefix)\") to \(verb) — refusing.", sandbox: true)
                 }
             }
             // PREVIEW HONESTY: subject presence/emptiness and the sandbox label restriction are
@@ -1397,14 +1446,12 @@ struct DraftCommand: ParsableCommand {
                     case .noRecipients:
                         throw AppleError.validation("draft \"\(s)\" has no valid recipients; add a recipient in Mail or recreate it.")
                     case .blocked(let addr):
-                        let which = addr == "<empty-address>" ? "an empty/blank recipient address" : "'\(addr)'"
-                        // Unsandboxed, the only reachable block is <empty-address> (the allowlist
-                        // comparison is skipped) — allowlist advice would be misleading there.
-                        let advice = sandboxActive
-                            ? "Set APPLE_TEST_RECIPIENTS to your own address(es) or fix the draft's recipients."
-                            : "Fix the draft's recipients in Mail."
-                        let why = sandboxActive ? ", which is not in the self-only test allowlist" : ""
-                        throw AppleError.mailSafety("draft \"\(s)\" is addressed to \(which)\(why) — refusing to send it. \(advice)")
+                        // Under an active sandbox a `.blocked` carries a REAL non-self address
+                        // (the self-only allowlist ran) — a sandbox-policy refusal that MUST
+                        // stamp error.sandbox; unsandboxed the only reachable block is
+                        // <empty-address>. The construction is factored into a pure helper so
+                        // that sandbox-causation is revert-red-pinnable without live Mail.
+                        throw blockedDraftSendError(address: addr, subject: s, sandboxActive: sandboxActive)
                     case .wrongWindow:
                         throw AppleError.mailSafety("the outgoing message Mail surfaced for subject \"\(s)\" does not carry the draft's own stored recipients — most likely an OPEN compose window sharing that subject. Nothing was sent. Close the compose window (or send it manually) and retry.")
                     case .openFailed:

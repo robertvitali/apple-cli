@@ -218,8 +218,13 @@ func guardLiveWrite(labeledName: String?, sandboxActive: Bool, prefix: String? =
     guard sandboxActive, let name = labeledName else { return }
     let required = prefix ?? TestMode.sandboxPrefix
     guard name.hasPrefix(required) else {
-        throw AppleError.validation(
-            "Sandbox is engaged: refusing to write to \"\(name)\" — the target must be a labeled "
-            + "'\(required)…' test item.")
+        // A sandbox refusal, so it carries `error.sandbox` like the Mail/Contacts ones (Q14). It
+        // keeps `validation` / exit 64 (unchanged) rather than the exit-77 `safety_violation` the
+        // other domains' sandbox refusals use — that exit-code inconsistency is pre-existing and
+        // aligning it is a separate breaking change, out of scope here.
+        throw AppleError(type: AppleErrorType.validation,
+            message: "Sandbox is engaged: refusing to write to \"\(name)\" — the target must be a labeled "
+                   + "'\(required)…' test item.",
+            exitCode: AppleExit.usage, sandbox: true)
     }
 }

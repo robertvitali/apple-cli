@@ -606,9 +606,10 @@ public enum ReminderWriteGuard {
         guard sandboxActive, let name else { return }
         let required = prefix ?? TestMode.sandboxPrefix
         guard name.hasPrefix(required) else {
-            throw AppleError.validation(
-                "Sandbox is engaged: refusing to write to \(what) \"\(name)\" — it must be a "
-                + "labeled '\(required)…' test item.")
+            throw AppleError(type: AppleErrorType.validation,        // sandbox refusal (Q14): carries error.sandbox, keeps exit 64
+                message: "Sandbox is engaged: refusing to write to \(what) \"\(name)\" — it must be a "
+                       + "labeled '\(required)…' test item.",
+                exitCode: AppleExit.usage, sandbox: true)
         }
     }
 
@@ -644,9 +645,10 @@ func requireLabeledList(_ list: EKCalendar, what: String = "destination list",
     guard sandboxActive else { return }
     let required = prefix ?? TestMode.sandboxPrefix
     guard list.title.hasPrefix(required) else {
-        throw AppleError.validation(
-            "Sandbox is engaged: refusing to write to \(what) \"\(list.title)\" — it "
-            + "must be a labeled '\(required)…' test list.")
+        throw AppleError(type: AppleErrorType.validation,            // sandbox refusal (Q14)
+            message: "Sandbox is engaged: refusing to write to \(what) \"\(list.title)\" — it "
+                   + "must be a labeled '\(required)…' test list.",
+            exitCode: AppleExit.usage, sandbox: true)
     }
 }
 
@@ -706,9 +708,10 @@ func requireLabeledReminder(_ reminder: EKReminder, sandboxActive: Bool,
     guard sandboxActive else { return }
     let required = prefix ?? TestMode.sandboxPrefix
     guard (reminder.title ?? "").hasPrefix(required) else {
-        throw AppleError.validation(
-            "Sandbox is engaged: refusing to mutate '\(reminder.title ?? "")' — it is not a labeled "
-            + "test item (must start with '\(required)').")
+        throw AppleError(type: AppleErrorType.validation,            // sandbox refusal (Q14)
+            message: "Sandbox is engaged: refusing to mutate '\(reminder.title ?? "")' — it is not a labeled "
+                   + "test item (must start with '\(required)').",
+            exitCode: AppleExit.usage, sandbox: true)
     }
 }
 

@@ -224,7 +224,11 @@ struct Send_: ParsableCommand {
                 do {
                     try Send.assertAllowedRecipient(handle, sandboxActive: gate.sandboxActive)
                 } catch {
-                    throw AppleError.validation("refusing send: \(String(describing: error))")
+                    // assertAllowedRecipient only throws under the sandbox (self-only allowlist), so
+                    // this is a sandbox refusal (Q14): carries error.sandbox, keeps exit 64.
+                    throw AppleError(type: AppleErrorType.validation,
+                        message: "refusing send: \(String(describing: error))",
+                        exitCode: AppleExit.usage, sandbox: true)
                 }
 
                 guard gate.willExecute else {

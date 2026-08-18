@@ -12,6 +12,37 @@ with the Apple MCP servers they replace.
 
 ## [Unreleased]
 
+### Error envelopes carry `sandbox` on a sandbox refusal (Q14)
+
+**Added**
+
+- The JSON ERROR envelope now carries `error.sandbox: true` when the opt-in sandbox (write-model
+  v2) REFUSED a write — an unlabeled target, a non-self recipient, a sandbox-incompatible rule. It
+  is the error-envelope counterpart of the SUCCESS envelope's `sandbox: true`: on success it means
+  "this write executed under the sandbox", on a refusal it means "the sandbox is why this write did
+  NOT execute". Present across all six domains' sandbox gates. `encodeIfPresent` keeps the key
+  ABSENT (never `false`/`null`) on every error the sandbox did not cause — including the
+  path-confinement `safety_violation`, which fires regardless of sandbox state — so a consumer can
+  distinguish a sandbox refusal from any other failure. Additive / MINOR; no other envelope changes
+  shape, and each domain's refusal keeps its existing `error.type` / exit code (the fleet's
+  sandbox refusals are heterogeneous — Mail/Contacts `safety_violation`/77, Notes/Reminders/
+  Calendar/Messages `validation_error`/64 — and Q14 marks them without normalizing that, which is a
+  separate change).
+- The Mail OUTBOUND refusals (`manage_drafts action=send` `.blocked`, reply/forward `.refused`) are
+  DATA-dependent: under an active sandbox they can fire for a real allowlist miss (sandbox-caused) OR
+  for an always-on reason that fires identically whether the sandbox is on or off — an
+  `<empty-address>` blank recipient, or any of the parenthesized audit trips the in-script checks
+  emit (`(no recipients populated)`, `(recipients vanished before send)`, `(unrecognized script
+  result …)`). Only the allowlist miss stamps `error.sandbox`; the always-on reasons stay unmarked
+  even under the sandbox. A single-sourced `mailOutboundRefusalIsSandboxCaused` predicate treats a
+  real disallowed address (never `(`/`<`-prefixed) as the only sandbox-caused case, and
+  `refusalMessage` mirrors that partition, so the flag and wording never disagree. Marking an
+  always-on reason as a sandbox refusal would tell a consumer to retry unsandboxed into the very same
+  block — the false positive `sandbox` exists to eliminate.
+- `false → nil` is normalized at the `Output.encodeError`/`emitError` boundary, so the structured
+  (`encodeIfPresent`) and hand-rolled-fallback encode paths cannot diverge — the key is only ever
+  emitted (as `true`) on an actual sandbox refusal, never as `"sandbox": false`.
+
 ### Contacts `--out` writes are path-confined (Q13)
 
 **Fixed**

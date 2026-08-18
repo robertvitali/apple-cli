@@ -324,3 +324,14 @@ setup() {
   echo "$output" | grep -q '"latitude":-33'
   echo "$output" | grep -q '"relative_offset":-900'
 }
+
+# Q14: a sandbox-policy refusal (unlabeled title in --test-mode) carries error.sandbox=true. The
+# Reminders refusal keeps validation / exit 64 (pre-existing type), but now carries the marker.
+@test "reminders tasks create unlabeled in --test-mode marks error.sandbox (Q14)" {
+  run "$BIN" reminders tasks create --title notlabeled --test-mode --execute
+  # The unlabeled-title guard is a PURE check that fires BEFORE any EventKit auth, so this refuses
+  # (exit 64) identically on a TCC-less CI runner; assert the code so a guard that ever moved
+  # post-auth fails loudly here instead of silently going red on authorization_denied output.
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q '"sandbox" : true'
+}

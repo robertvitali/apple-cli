@@ -161,4 +161,46 @@ struct AuthErrorFieldsTests {
         let raw = String(data: try Output.encodeError(tool: "mail", from: firstIdFail), encoding: .utf8) ?? ""
         #expect(raw.contains("null") == false)
     }
+
+    /// `error.sandbox` (Q14): a sandbox-policy refusal carries `sandbox: true`, the error-envelope
+    /// counterpart of the success envelope's `sandbox: true`. Present only when the sandbox refused.
+    @Test("a sandbox-policy refusal carries error.sandbox = true")
+    func sandboxRefusalCarriesFlag() throws {
+        let e = AppleError.safetyViolation("refusing: unlabeled target", sandbox: true)
+        #expect(e.sandbox == true)
+        #expect(e.type == AppleErrorType.safetyViolation)   // classification unchanged
+        let err = try errorObject(try Output.encodeError(tool: "contacts", from: e))
+        #expect(err["sandbox"] as? Bool == true)
+        // The marker rides on any error type (Notes/Reminders use validation + sandbox).
+        let v = AppleError(type: AppleErrorType.validation, message: "Sandbox is engaged: …",
+                           exitCode: AppleExit.usage, sandbox: true)
+        #expect(try errorObject(try Output.encodeError(tool: "reminders", from: v))["sandbox"] as? Bool == true)
+    }
+
+    @Test("non-sandbox errors omit the sandbox key entirely (never false/null)")
+    func sandboxOmittedWhenNotARefusal() throws {
+        // A confinement safety_violation (fires regardless of sandbox) and a plain validation both omit it.
+        let confine = AppleError.safetyViolation("cannot write to a sensitive directory")   // sandbox defaults nil
+        #expect(confine.sandbox == nil)
+        let err = try errorObject(try Output.encodeError(tool: "contacts", from: confine))
+        #expect(err.keys.contains("sandbox") == false, "sandbox must be omitted, not null/false")
+        let plain = try errorObject(try Output.encodeError(tool: "notes", from: .validation("bad")))
+        #expect(plain.keys.contains("sandbox") == false)
+        let raw = String(data: try Output.encodeError(tool: "contacts", from: confine), encoding: .utf8) ?? ""
+        #expect(raw.contains("null") == false && raw.contains("\"sandbox\":false") == false)
+    }
+
+    /// The base `encodeError(...,sandbox:)` API accepts a `Bool?`, so an explicit `false` is
+    /// expressible even though today's callers only pass `true`/`nil`. Normalizing `false → nil` at
+    /// the boundary keeps the synthesized `encodeIfPresent` path and `emitError`'s hand-rolled
+    /// fallback from diverging (one emitting `"sandbox":false`, the other omitting). Pin: an explicit
+    /// `false` is omitted, not rendered.
+    @Test("encodeError(sandbox: false) omits the key (never renders false)")
+    func sandboxFalseNormalizedToOmitted() throws {
+        let data = try Output.encodeError(tool: "notes", type: "validation", message: "bad", sandbox: false)
+        let err = try errorObject(data)
+        #expect(err.keys.contains("sandbox") == false)
+        let raw = String(data: data, encoding: .utf8) ?? ""
+        #expect(raw.contains("\"sandbox\":false") == false && raw.contains("\"sandbox\" : false") == false)
+    }
 }

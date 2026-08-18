@@ -8,7 +8,15 @@ extension AppleError {
     /// test-mode / subject-label / recipient guard. Delegates to `AppleError.safetyViolation`
     /// (AppleKit) so all three domains emit the identical `error.type` / exit 77; kept as a named
     /// alias only because the ~30 Mail call sites read as `mailSafety`.
-    static func mailSafety(_ m: String) -> AppleError { .safetyViolation(m) }
+    /// Pass `sandbox: true` at a SANDBOX-policy gate (an unlabeled target, a non-self recipient, a
+    /// sandbox-incompatible rule) so the refusal carries `error.sandbox` (Q14); leave it false for a
+    /// refusal that fires regardless of sandbox state. Marked EXPLICITLY at each throw rather than
+    /// inferred from the message text — an earlier prefix-sniffing version silently missed the rule
+    /// gates (`requireLabeledName`/`requireSelfScoped`) and the reply/forward self-only refusal,
+    /// whose messages don't start "sandbox active:".
+    static func mailSafety(_ m: String, sandbox: Bool = false) -> AppleError {
+        .safetyViolation(m, sandbox: sandbox)
+    }
 }
 
 /// Gate a live mutation on an EXISTING message (write-model v2): mutations EXECUTE when
@@ -26,7 +34,7 @@ extension AppleError {
 func requireLiveMessageMutation(_ m: MailMessage, sandboxActive: Bool) throws -> String {
     if sandboxActive {
         guard m.subject.hasPrefix(TestMode.sandboxPrefix) else {
-            throw AppleError.mailSafety("sandbox active: target message '\(m.id)' (subject: \"\(m.subject)\") is not a labeled test item (must start with \"\(TestMode.sandboxPrefix)\") — refusing to mutate it. Disengage the sandbox to operate on real mail.")
+            throw AppleError.mailSafety("sandbox active: target message '\(m.id)' (subject: \"\(m.subject)\") is not a labeled test item (must start with \"\(TestMode.sandboxPrefix)\") — refusing to mutate it. Disengage the sandbox to operate on real mail.", sandbox: true)
         }
     }
     guard let imid = m.internet_message_id, !imid.isEmpty else {
@@ -43,7 +51,7 @@ func requireLiveMessageMutation(_ m: MailMessage, sandboxActive: Bool) throws ->
 func previewValidateSandboxTargets(_ msgs: [MailMessage], sandboxActive: Bool) throws {
     guard sandboxActive else { return }
     for m in msgs where !m.subject.hasPrefix(TestMode.sandboxPrefix) {
-        throw AppleError.mailSafety("sandbox active: target message '\(m.id)' (subject: \"\(m.subject)\") is not a labeled test item (must start with \"\(TestMode.sandboxPrefix)\") — refusing to mutate it. Disengage the sandbox to operate on real mail.")
+        throw AppleError.mailSafety("sandbox active: target message '\(m.id)' (subject: \"\(m.subject)\") is not a labeled test item (must start with \"\(TestMode.sandboxPrefix)\") — refusing to mutate it. Disengage the sandbox to operate on real mail.", sandbox: true)
     }
 }
 

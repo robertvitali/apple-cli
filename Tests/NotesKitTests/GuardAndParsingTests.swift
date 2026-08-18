@@ -218,6 +218,19 @@ struct NotesWriteModelV2Tests {
         try guardLiveWrite(labeledName: nil, sandboxActive: true, prefix: P)
     }
 
+    /// Q14: the Notes sandbox refusal must stamp `error.sandbox` like the other five domains, so an
+    /// agent can machine-distinguish it from an always-on validation error. Pins the flag directly
+    /// (the write-model posture test above only checks that a throw happens); revert-red on the
+    /// `sandbox: true` arg at `NotesCommand.guardLiveWrite`.
+    @Test("guardLiveWrite sandbox refusal carries error.sandbox = true")
+    func guardMarksSandbox() {
+        let err = #expect(throws: AppleError.self) {
+            try guardLiveWrite(labeledName: "Zz A Real Note", sandboxActive: true, prefix: P)
+        }
+        #expect(err?.sandbox == true)
+        // The unsandboxed no-op path never throws, so there is no error to (wrongly) mark there.
+    }
+
     @Test("--title addressing is checked from argv; --id addressing defers to the execute path")
     func selectorGuardSplit() throws {
         // A --title write is fully argv-checkable, so it refuses in the sandbox with nothing

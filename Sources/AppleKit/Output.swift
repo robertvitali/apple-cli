@@ -27,11 +27,16 @@ public enum Output {
 
     public static func encodeError(tool: String, type: String, message: String,
                                    status: String? = nil, remediation: String? = nil,
-                                   applied: [String]? = nil) throws -> Data {
-        try encode(ErrorEnvelope(schema_version: schemaVersion, tool: tool, ok: false,
+                                   applied: [String]? = nil, sandbox: Bool? = nil) throws -> Data {
+        // Normalize the "never `false`" invariant AT the type boundary rather than trusting every
+        // caller to pass `true`/`nil`: a stray `false` would make the synthesized `encodeIfPresent`
+        // Payload emit `"sandbox":false` while `emitError`'s hand-rolled fallback omits it — the two
+        // encode paths must agree (only the sandbox refusal emits the key at all).
+        let sandbox: Bool? = (sandbox == true) ? true : nil
+        return try encode(ErrorEnvelope(schema_version: schemaVersion, tool: tool, ok: false,
                                  error: .init(type: type, message: message,
                                               status: status, remediation: remediation,
-                                              applied: applied)))
+                                              applied: applied, sandbox: sandbox)))
     }
 
     // MARK: Emit (writes the encoded envelope to stdout)
@@ -106,22 +111,25 @@ public enum Output {
     public static func encodeError(tool: String, from error: AppleError) throws -> Data {
         try encodeError(tool: tool, type: error.type, message: error.message,
                         status: error.status, remediation: error.remediation,
-                        applied: error.applied)
+                        applied: error.applied, sandbox: error.sandbox)
     }
 
     /// Emit the envelope for an `AppleError`. See `encodeError(tool:from:)`.
     public static func emitError(tool: String, from error: AppleError) {
         emitError(tool: tool, type: error.type, message: error.message,
                   status: error.status, remediation: error.remediation,
-                  applied: error.applied)
+                  applied: error.applied, sandbox: error.sandbox)
     }
 
     public static func emitError(tool: String, type: String, message: String,
                                  status: String? = nil, remediation: String? = nil,
-                                 applied: [String]? = nil) {
+                                 applied: [String]? = nil, sandbox: Bool? = nil) {
+        // Same "never `false`" normalization as encodeError, so BOTH the encoded path (below) and
+        // the hand-rolled fallback (which reads this param directly) agree.
+        let sandbox: Bool? = (sandbox == true) ? true : nil
         if let data = try? encodeError(tool: tool, type: type, message: message,
                                        status: status, remediation: remediation,
-                                       applied: applied) {
+                                       applied: applied, sandbox: sandbox) {
             write(data)
         } else {
             // Never leave stdout empty on an error path: hand-roll a minimal valid envelope,
@@ -135,6 +143,7 @@ public enum Output {
             let extra = (status.map { #","status":\#(jsonString($0))"# } ?? "")
                       + (remediation.map { #","remediation":\#(jsonString($0))"# } ?? "")
                       + (appliedJSON.map { #","applied":\#($0)"# } ?? "")
+                      + ((sandbox == true) ? #","sandbox":true"# : "")
             write(Data(#"{"schema_version":\#(schemaVersion),"tool":\#(jsonString(tool)),"ok":false,"error":{"type":\#(jsonString(type)),"message":\#(jsonString(message))\#(extra)}}"#.utf8))
         }
     }
@@ -210,6 +219,9 @@ struct ErrorEnvelope: Encodable {
         // Ids a bulk mutation already applied before it aborted mid-loop (extra33 / SEC-M2).
         // nil / omitted on every non-bulk error, so no other error envelope changes shape.
         let applied: [String]?
+        // true when the opt-in sandbox refused the write (Q14) — the error-envelope counterpart of
+        // the success envelope's `sandbox: true`. nil / omitted on every non-sandbox error.
+        let sandbox: Bool?
     }
 }
 

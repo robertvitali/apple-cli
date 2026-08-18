@@ -496,3 +496,13 @@ END:VCARD"
   [ "$status" -eq 77 ]
   echo "$output" | grep -q 'control character'
 }
+
+# Q14: a sandbox-policy refusal (unlabeled target in --test-mode) carries error.sandbox=true — the
+# error-envelope counterpart of the success envelope's sandbox:true. Fires before the store touch
+# (CI-safe). Revert-red: drop `sandbox: true` at the resolveWrite gate → the key disappears.
+@test "contacts create unlabeled in --test-mode marks error.sandbox (Q14)" {
+  run "$BIN" contacts create --given notlabeled --test-mode --execute
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q '"sandbox" : true'
+  echo "$output" | grep -q '"type" : "safety_violation"'
+}

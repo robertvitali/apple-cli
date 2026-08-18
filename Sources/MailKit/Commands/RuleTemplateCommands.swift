@@ -247,7 +247,7 @@ struct RulesUpdate: ParsableCommand {
             }
             if sandboxActive {
                 if match == "any" {   // a sandboxed rule must stay match=all so its label always constrains it
-                    throw AppleError.mailSafety("sandbox active: a sandboxed rule must stay --match all so its label condition always constrains it — refusing to set --match any.")
+                    throw AppleError.mailSafety("sandbox active: a sandboxed rule must stay --match all so its label condition always constrains it — refusing to set --match any.", sandbox: true)
                 }
                 if let name { try RuleLiveGuards.requireLabeledName(name) }    // a rename must keep the label
                 if let conds { try RuleLiveGuards.requireSelfScoped(conditions: conds, match: "all") }
@@ -274,7 +274,7 @@ struct RulesUpdate: ParsableCommand {
                 // recreate path). A CLI-authored rule is always created disabled + self-scoped, so this
                 // never blocks the normal flow.
                 if sandboxActive, enabled == true, let p = plan, (p.moveTo != nil || p.copyTo != nil) {
-                    throw AppleError.mailSafety("sandbox active: wiring move_to/copy_to on an in-place update cannot also ENABLE the rule in the same command (its existing conditions are not re-verified self-scoped) — omit --enabled and enable separately after review, or pass --condition to route through the self-scoping recreate path.")
+                    throw AppleError.mailSafety("sandbox active: wiring move_to/copy_to on an in-place update cannot also ENABLE the rule in the same command (its existing conditions are not re-verified self-scoped) — omit --enabled and enable separately after review, or pass --condition to route through the self-scoping recreate path.", sandbox: true)
                 }
                 // `map` so `--match any` actually applies (false = set OR). The old
                 // `match == "all" ? true : nil` collapsed "any" to nil = "don't change" — a
@@ -432,7 +432,7 @@ func requireLabeledRule(index: Int, sandboxActive: Bool) throws -> MailScript.Sc
                          exitCode: AppleExit.notFound)
     }
     if sandboxActive, !r.name.hasPrefix(TestMode.sandboxPrefix) {
-        throw AppleError.mailSafety("sandbox active: rule \(index) ('\(r.name)') is not a labeled test item (must start with \"\(TestMode.sandboxPrefix)\") — refusing to mutate it.")
+        throw AppleError.mailSafety("sandbox active: rule \(index) ('\(r.name)') is not a labeled test item (must start with \"\(TestMode.sandboxPrefix)\") — refusing to mutate it.", sandbox: true)
     }
     return r
 }

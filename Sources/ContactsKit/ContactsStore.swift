@@ -220,7 +220,7 @@ public final class ContactsStore {
         guard ContactsLabel.isLabeled(name, prefix: prefix) else {
             throw AppleError.safetyViolation(
                 "refusing to mutate a non-test contact: its name '\(name)' does not start with "
-                + "'\(prefix)' — id-addressed writes only touch labeled test data.")
+                + "'\(prefix)' — id-addressed writes only touch labeled test data.", sandbox: true)
         }
     }
 
@@ -232,7 +232,7 @@ public final class ContactsStore {
         guard ContactsLabel.isLabeled(g.name, prefix: prefix) else {
             throw AppleError.safetyViolation(
                 "refusing to mutate a non-test group: its name '\(g.name)' does not start with "
-                + "'\(prefix)' — id-addressed writes only touch labeled test data.")
+                + "'\(prefix)' — id-addressed writes only touch labeled test data.", sandbox: true)
         }
     }
 

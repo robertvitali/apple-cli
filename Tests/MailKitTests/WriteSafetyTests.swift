@@ -230,6 +230,99 @@ struct MailWriteSafetyTests {
             #expect(err?.message.contains("before any change applied") == true)
         }
     }
+
+    /// Q14: `mailSafety` marks `error.sandbox` from an EXPLICIT flag (no message-text inference — a
+    /// prefix-sniffing version silently missed the rule gates below, whose messages don't start
+    /// "sandbox active:"). Default false → key absent; `sandbox: true` → present.
+    @Test("mailSafety marks error.sandbox only from the explicit flag")
+    func mailSafetyExplicitSandboxFlag() {
+        #expect(AppleError.mailSafety("some refusal").sandbox == nil)                 // default: unmarked
+        #expect(AppleError.mailSafety("sandbox active: …").sandbox == nil)            // NOT inferred from text
+        #expect(AppleError.mailSafety("any refusal", sandbox: true).sandbox == true)  // explicit marks it
+    }
+
+    /// The Mail RULE sandbox gates are a refusal class the prefix-sniffing version missed: their
+    /// messages don't start "sandbox active:" yet they fire ONLY under the sandbox (every caller is
+    /// `if sandboxActive`). Pin that their thrown errors carry `error.sandbox` (Q14 — the miss the
+    /// review caught). `requireLabeledName` (unlabeled rule name) + both `requireSelfScoped` gates.
+    @Test("Mail rule sandbox gates (requireLabeledName / requireSelfScoped) mark error.sandbox")
+    func mailRuleGatesMarkSandbox() {
+        let nameErr = #expect(throws: AppleError.self) {
+            try RuleLiveGuards.requireLabeledName("unlabeled-rule")
+        }
+        #expect(nameErr?.sandbox == true)
+        #expect(nameErr?.type == AppleErrorType.safetyViolation)
+
+        // --match any without the self-scoping is a sandbox-incompatible rule shape.
+        let scopeErr = #expect(throws: AppleError.self) {
+            try RuleLiveGuards.requireSelfScoped(conditions: [], match: "any")
+        }
+        #expect(scopeErr?.sandbox == true)
+    }
+
+    /// The `manage_drafts action=send` `.blocked` refusal is DATA-dependent, not lexical: under an
+    /// active sandbox `sendDraft` returns `.blocked(realNonSelfAddress)` because the self-only
+    /// allowlist ran, so it IS a sandbox-policy refusal and must stamp `error.sandbox` — the exact
+    /// miss the critic caught (the throw site had no `sandbox:` arg). But an `<empty-address>` block
+    /// is an ALWAYS-ON broken compose that fires identically sandboxed or not, so it must stay
+    /// unmarked EVEN under an active sandbox (the false-positive the code-reviewer caught — marking
+    /// it would tell a consumer to "retry unsandboxed" into the same block). The live AppleScript
+    /// needs a Mac, but the error-construction is pure, so every branch is CI-pinnable.
+    @Test("blocked draft-send refusal marks error.sandbox only for a real allowlist miss")
+    func blockedDraftSendMarksSandbox() {
+        // Active sandbox + real non-self recipient → allowlist miss → sandbox refusal.
+        let sandboxed = blockedDraftSendError(address: "someone@else.example",
+                                              subject: "apple-cli-test draft", sandboxActive: true)
+        #expect(sandboxed.sandbox == true)
+        #expect(sandboxed.type == AppleErrorType.safetyViolation)
+
+        // Active sandbox + empty address → always-on broken compose → NO sandbox flag (false positive
+        // the code-reviewer caught), and the message must NOT claim an allowlist miss.
+        let emptyUnderSandbox = blockedDraftSendError(address: "<empty-address>",
+                                                      subject: "apple-cli-test draft", sandboxActive: true)
+        #expect(emptyUnderSandbox.sandbox == nil)
+        #expect(!emptyUnderSandbox.message.contains("self-only test allowlist"))
+
+        // Unsandboxed: the only reachable block is an empty address — a plain refusal, no flag.
+        let unsandboxed = blockedDraftSendError(address: "<empty-address>",
+                                                subject: "apple-cli-test draft", sandboxActive: false)
+        #expect(unsandboxed.sandbox == nil)
+    }
+
+    /// The single-sourced reason→flag predicate shared by the draft-send `.blocked` and reply/forward
+    /// `.refused` paths. Only a real allowlist miss under an active sandbox is sandbox-caused; the two
+    /// always-on reasons (`<empty-address>`, `(unrecognized script result …)`) and anything while the
+    /// sandbox is off are not — this is the exact partition `refusalMessage` uses for its wording.
+    @Test("mailOutboundRefusalIsSandboxCaused: only a real allowlist miss under sandbox is true")
+    func outboundRefusalReasonPartition() {
+        // Real recipient outside the self-only set, sandbox on → the one sandbox-caused case.
+        #expect(mailOutboundRefusalIsSandboxCaused(reason: "someone@else.example", sandboxActive: true))
+        // Every always-on sentinel, even under an active sandbox → not sandbox-caused. These are the
+        // full set the in-script recipient checks emit: a blank address, and the parenthesized audit
+        // trips (zero-recipient guards + the parser fail-closed default), all of which fire before or
+        // independent of the allowlist and refuse identically sandboxed or not.
+        #expect(!mailOutboundRefusalIsSandboxCaused(reason: "<empty-address>", sandboxActive: true))
+        #expect(!mailOutboundRefusalIsSandboxCaused(reason: "(no recipients populated)", sandboxActive: true))
+        #expect(!mailOutboundRefusalIsSandboxCaused(reason: "(recipients vanished before send)", sandboxActive: true))
+        #expect(!mailOutboundRefusalIsSandboxCaused(reason: "(unrecognized script result 'xyz')", sandboxActive: true))
+        // Sandbox off → never sandbox-caused, whatever the reason.
+        #expect(!mailOutboundRefusalIsSandboxCaused(reason: "someone@else.example", sandboxActive: false))
+    }
+
+    /// Message/flag agreement: the two zero-recipient audit trips must read as refusals (not compose
+    /// failures — the prior review) yet must NOT claim an allowlist miss under an active sandbox,
+    /// since their flag is absent. A real disallowed address still reads as the allowlist miss.
+    @Test("refusalMessage: zero-recipient trips refuse without claiming an allowlist miss")
+    func refusalMessageZeroRecipientWording() {
+        for reason in ["(no recipients populated)", "(recipients vanished before send)"] {
+            let m = refusalMessage(kind: "reply", bad: reason, discarded: true, sandboxActive: true)
+            #expect(m.contains("refusing the reply"))          // still a refusal, not a compose failure
+            #expect(!m.contains("self-only allowlist"))        // but not a false allowlist-miss claim
+        }
+        // A real disallowed address under the sandbox DOES read as the allowlist miss (unchanged).
+        let miss = refusalMessage(kind: "reply", bad: "someone@else.example", discarded: true, sandboxActive: true)
+        #expect(miss.contains("self-only allowlist"))
+    }
 }
 
 // Logic-tier regression lock for `DraftSendResult.parse` — the safety-critical string→enum mapping
@@ -533,13 +626,17 @@ struct NativeComposeOutcomeTests {
         #expect(compose.contains("was discarded"))
         #expect(composeFailureMessage(kind: "reply", reason: "x", discarded: false)
                     .contains("could NOT be discarded"))
-        // ...but the in-script guard's OWN parenthesized sentinels are genuine audit trips
-        // and MUST keep the refusal wording (review: a broad `(`-prefix branch swallowed
-        // "(recipients vanished before send)" — a TOCTOU signal — as a compose failure).
+        // ...but the in-script guard's OWN parenthesized sentinels are genuine audit trips and MUST
+        // keep the REFUSAL wording — NOT be reframed as a compose failure (review: a broad
+        // `(`-prefix branch swallowed "(recipients vanished before send)" — a TOCTOU signal — as a
+        // compose failure). They are always-on (fire before/independent of the allowlist), so under
+        // Q14 they must ALSO not claim an allowlist miss: the message stays a refusal WITHOUT the
+        // false allowlist wording, agreeing with `error.sandbox` being absent for these reasons.
         let vanished = refusalMessage(kind: "reply", bad: "(recipients vanished before send)",
                                       discarded: true, sandboxActive: true)
-        #expect(vanished.contains("allowlist"))
-        #expect(!vanished.contains("composing"))
+        #expect(vanished.contains("refusing the reply"))   // still a refusal...
+        #expect(!vanished.contains("composing"))           // ...not a compose failure...
+        #expect(!vanished.contains("allowlist"))           // ...and no false allowlist-miss claim (Q14)
         // The parser's unrecognized-output sentinel says what happened, honestly.
         let unrec = refusalMessage(kind: "reply", bad: "(unrecognized script result 'zz')",
                                    discarded: false, sandboxActive: true)

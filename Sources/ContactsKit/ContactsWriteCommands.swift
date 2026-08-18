@@ -382,7 +382,7 @@ struct VCardImportCommand: ParsableCommand {
                     guard ContactsLabel.isLabeled(name, prefix: TestMode.sandboxPrefix) else {
                         throw AppleError.safetyViolation(
                             "refusing to import the unlabeled contact '\(name)': in the sandbox every "
-                            + "imported card's name must start with '\(TestMode.sandboxPrefix)'.")
+                            + "imported card's name must start with '\(TestMode.sandboxPrefix)'.", sandbox: true)
                     }
                 }
             }
@@ -490,7 +490,7 @@ struct GroupsRenameCommand: ParsableCommand {
                 guard ContactsLabel.isLabeled(newName, prefix: TestMode.sandboxPrefix) else {
                     throw AppleError.safetyViolation(
                         "refusing to rename a test group to the unlabeled name '\(newName)': in the "
-                        + "sandbox it must stay prefixed with '\(TestMode.sandboxPrefix)'.")
+                        + "sandbox it must stay prefixed with '\(TestMode.sandboxPrefix)'.", sandbox: true)
                 }
             }
             guard gate.willExecute else {

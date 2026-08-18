@@ -27,15 +27,25 @@ public struct AppleError: Error {
     /// every non-bulk error (encodeIfPresent omits the key), so no other envelope changes shape.
     public let applied: [String]?
 
+    /// `true` when the opt-in sandbox (write-model v2) REFUSED this operation — an unlabeled
+    /// target, a non-self recipient, a sandbox-incompatible rule shape. Surfaced as
+    /// `error.sandbox`, the error-envelope counterpart of the SUCCESS envelope's `sandbox: true`:
+    /// on success it means "this write executed under the sandbox", on a refusal it means "the
+    /// sandbox is why this write did NOT execute". nil (key omitted) on every error the sandbox
+    /// did not cause — including the path-confinement `safety_violation`, which fires regardless of
+    /// sandbox state — so a consumer can distinguish a sandbox refusal from any other failure.
+    public let sandbox: Bool?
+
     public init(type: String, message: String, exitCode: Int32,
                 status: String? = nil, remediation: String? = nil,
-                applied: [String]? = nil) {
+                applied: [String]? = nil, sandbox: Bool? = nil) {
         self.type = type
         self.message = message
         self.exitCode = exitCode
         self.status = status
         self.remediation = remediation
         self.applied = applied
+        self.sandbox = sandbox
     }
 
     /// Re-wrap this error with the bulk partial-mutation context: the ids already applied plus a
@@ -51,7 +61,7 @@ public struct AppleError: Error {
               + "(move/delete are not idempotent) — "
         return AppleError(type: type, message: note + message, exitCode: exitCode,
                           status: status, remediation: remediation,
-                          applied: applied.isEmpty ? nil : applied)
+                          applied: applied.isEmpty ? nil : applied, sandbox: sandbox)
     }
 
     public static func validation(_ m: String) -> AppleError {
@@ -83,8 +93,14 @@ public struct AppleError: Error {
     /// "safety_violation"` (the string the Contacts MCP uses) at exit 77 (EX_NOPERM), so a client
     /// can tell a deliberate refusal from a real failure. Canonical home for what MailKit's
     /// `mailSafety` and the former ContactsKit `safetyViolation` each spelled separately.
-    public static func safetyViolation(_ m: String) -> AppleError {
-        .init(type: AppleErrorType.safetyViolation, message: m, exitCode: AppleExit.permissionDenied)
+    ///
+    /// Pass `sandbox: true` ONLY at the sandbox-policy gates (unlabeled target / non-self recipient
+    /// / sandbox-incompatible rule) — it sets `error.sandbox` so a consumer sees the sandbox is why
+    /// the write was refused. Leave it false for confinement/other refusals that fire regardless of
+    /// sandbox state.
+    public static func safetyViolation(_ m: String, sandbox: Bool = false) -> AppleError {
+        .init(type: AppleErrorType.safetyViolation, message: m,
+              exitCode: AppleExit.permissionDenied, sandbox: sandbox ? true : nil)
     }
 }
 

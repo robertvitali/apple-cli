@@ -139,7 +139,8 @@ public enum RuleLiveGuards {
     /// The rule name must carry the test label (so a real rule can never be authored/renamed live).
     public static func requireLabeledName(_ name: String) throws {
         guard name.hasPrefix(TestMode.sandboxPrefix) else {
-            throw AppleError.mailSafety("rule name '\(name)' is not a labeled test item (must start with \"\(TestMode.sandboxPrefix)\") — refusing.")
+            // Sandbox-only gate (every caller is under `if sandboxActive`), so it carries error.sandbox (Q14).
+            throw AppleError.mailSafety("rule name '\(name)' is not a labeled test item (must start with \"\(TestMode.sandboxPrefix)\") — refusing.", sandbox: true)
         }
     }
 
@@ -179,10 +180,10 @@ public enum RuleLiveGuards {
 
     public static func requireSelfScoped(conditions: [RuleSchema.Condition], match: String) throws {
         guard match == "all" else {
-            throw AppleError.mailSafety("a live test rule must use --match all so its test-label condition always constrains it — refusing (use the preview for --match any).")
+            throw AppleError.mailSafety("a live test rule must use --match all so its test-label condition always constrains it — refusing (use the preview for --match any).", sandbox: true)
         }
         guard isSelfScoped(conditions) else {
-            throw AppleError.mailSafety("a live test rule must include a subject condition bound to the test label (e.g. \"subject:contains:\(TestMode.sandboxPrefix)\") so it only ever acts on test mail — refusing.")
+            throw AppleError.mailSafety("a live test rule must include a subject condition bound to the test label (e.g. \"subject:contains:\(TestMode.sandboxPrefix)\") so it only ever acts on test mail — refusing.", sandbox: true)
         }
         // header_name IS now wired for live mutation (Mail.sdef RuleType `header key` + the rule
         // condition's `header` property), so it is no longer refused. The self-scoping invariant

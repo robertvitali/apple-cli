@@ -87,12 +87,16 @@ setup() {
   [ "$status" -eq 64 ]
   echo "$output" | grep -q '"ok" : false'
   echo "$output" | grep -qi "not in the test allowlist"
+  # Q14: a sandbox-policy refusal (non-self recipient under an active sandbox) carries error.sandbox.
+  echo "$output" | grep -q '"sandbox" : true'
 }
 
 @test "sandbox via APPLE_TEST_MODE env alone refuses a non-allowlisted recipient (exit 64)" {
   APPLE_TEST_MODE=1 run "$BIN" messages send 2125550100 --message "must not send" --execute
   [ "$status" -eq 64 ]
   echo "$output" | grep -qi "not in the test allowlist"
+  # Q14: same refusal via the env signal also carries error.sandbox.
+  echo "$output" | grep -q '"sandbox" : true'
 }
 
 # Preview honesty: the recipient is argv-derived, so a sandboxed --dry-run must refuse EXACTLY what
