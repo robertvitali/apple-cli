@@ -192,13 +192,19 @@ struct VCardExportCommand: ParsableCommand {
             for (i, id) in identifiers.enumerated() where id.trimmingCharacters(in: .whitespaces).isEmpty {
                 throw AppleError.validation("identifiers[\(i)] must be a non-empty string")
             }
+            // Confine the operator-supplied --out path UP FRONT (Q13): reject control chars +
+            // credential/config dirs so `--out ~/.ssh/authorized_keys` can't overwrite an SSH key
+            // with vCard text. Bound before the store touch so a bad path fails fast (and without
+            // TCC). `allowOutsideHome` — this `--out` is a CLI extra (the MCP returns the text
+            // inline), so /tmp and external volumes stay legitimate, matching Mail's attachments save.
+            let dest = try out.map { try confineWriteDestination($0, action: "write the vCard to", allowOutsideHome: true).path }
             let store = ContactsStore()
             try store.requireAuthorization()
             let vcard = try store.exportVCard(identifiers)
             var writtenTo: String?
-            if let out {
-                do { try vcard.write(toFile: out, atomically: true, encoding: .utf8); writtenTo = out }
-                catch { throw AppleError.unknown("failed to write vcard to \(out): \(error.localizedDescription)") }
+            if let dest {
+                do { try vcard.write(toFile: dest, atomically: true, encoding: .utf8); writtenTo = dest }
+                catch { throw AppleError.unknown("failed to write vcard to \(dest): \(error.localizedDescription)") }
             }
             try emitContacts(global, ExportVCardResult(
                 vcard: vcard, count: identifiers.count,
@@ -246,6 +252,11 @@ struct PhotoGetCommand: ParsableCommand {
             if identifier.trimmingCharacters(in: .whitespaces).isEmpty {
                 throw AppleError.validation("identifier must be a non-empty string")
             }
+            // Confine --out up front (Q13) — same guard as the vCard --out: reject control chars +
+            // credential/config dirs so raw photo bytes can't overwrite an SSH key / keychain. Bound
+            // before the store touch (fail fast, testable without TCC). CLI-extra path, so
+            // allowOutsideHome (the MCP returns bytes inline).
+            let dest = try out.map { try confineWriteDestination($0, action: "write the photo to", allowOutsideHome: true).path }
             let store = ContactsStore()
             try store.requireAuthorization()
             guard let photo = store.readPhoto(identifier) else {
@@ -257,9 +268,9 @@ struct PhotoGetCommand: ParsableCommand {
                 return
             }
             var writtenTo: String?
-            if let out {
-                do { try photo.bytes.write(to: URL(fileURLWithPath: out)); writtenTo = out }
-                catch { throw AppleError.unknown("failed to write photo to \(out): \(error.localizedDescription)") }
+            if let dest {
+                do { try photo.bytes.write(to: URL(fileURLWithPath: dest)); writtenTo = dest }
+                catch { throw AppleError.unknown("failed to write photo to \(dest): \(error.localizedDescription)") }
             }
             try emitContacts(global, ReadPhotoResult(
                 identifier: identifier,

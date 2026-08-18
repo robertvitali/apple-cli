@@ -478,3 +478,21 @@ END:VCARD"
   ! printf '%s' "$output" | grep -q "$(printf '\033')"
   echo "$output" | grep -q 'u001b'
 }
+
+# Q13: the Contacts --out writes (a CLI extra — the MCP returns bytes inline) now route through
+# the shared AppleKit.confineWriteDestination, bound UP FRONT so the path refusal fires before any
+# store touch (CI-safe, no TCC). Without it, `--out ~/.ssh/authorized_keys` would overwrite an SSH
+# key with vCard/photo bytes. Revert-red: drop the confineWriteDestination call → the write reaches
+# the raw path.
+@test "contacts vcard export --out refuses a credential directory (Q13)" {
+  run "$BIN" contacts vcard export apple-cli-test-x --out '~/.ssh/authorized_keys'
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q '"type" : "safety_violation"'
+  echo "$output" | grep -q 'sensitive directory'
+}
+
+@test "contacts photo get --out refuses a control-character path (Q13)" {
+  run "$BIN" contacts photo get apple-cli-test-x --out "$(printf '/tmp/a\037b')"
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q 'control character'
+}

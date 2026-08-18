@@ -511,3 +511,35 @@ Whichever you pick, one of the two policy lines needs editing so this cannot rec
 the actual deliverable here, not the choice for this one commit.
 
 ---
+
+## D12 — Notes `save-attachment` can write to `~/.ssh` etc. (matches its oracle); Mail/Contacts refuse
+
+- **Status:** OPEN
+- **Filed:** 2026-08-18 (Q13 review — critic finding on the shared write-confinement promotion)
+- **Category:** parity-vs-safety posture call
+- **One-line:** `apple notes save-attachment --path ~/.ssh/authorized_keys --execute` is **accepted**
+  and overwrites the SSH key with attachment bytes, because Notes' guard (`NotesKit.AttachmentFS`)
+  is a verbatim port of `apple-notes-mcp@2.5.12` `attachmentFs.ts` — it confines writes to
+  home / temp / `/Volumes` but has **no credential-directory blocklist**. Mail's attachment-save and
+  Contacts' `--out` DO block credential dirs (`.ssh`/`.gnupg`/`.aws`/`.config`/`.claude`/Keychains/
+  LaunchAgents/LaunchDaemons), because the **Mail** oracle (patrickfreyer) blocks them and Contacts
+  has no oracle output-path at all. So the fleet is inconsistent by ORACLE, not by code drift.
+
+- **Why it's your call:** adding the blocklist to Notes would make the CLI *stricter* than the Notes
+  oracle — i.e. it would DROP a write the oracle permits (writing an attachment into a dir under
+  home that happens to be `~/.ssh`). Under the strict-superset rule "capabilities it drops are
+  failures," that is a deliberate parity divergence, not obviously correct. But the capability being
+  "dropped" is *overwriting your own credentials with attachment bytes*, which no real workflow
+  wants and an attacker who controls a note's attachment + the path very much does.
+
+- **(a) Add the credential blocklist to Notes too** (route `AttachmentFS.assertSafeSavePath` through
+  the shared `sensitiveWriteDir`). Fleet-consistent, closes the hole; a documented, safety-only
+  superset *narrowing* vs the Notes oracle. Recommended.
+- **(b) Keep strict Notes-oracle parity** (current state). `notes save-attachment` can still target
+  `~/.ssh`; the residual is documented in `PathConfinement.swift` + the Q13 CHANGELOG entry.
+
+Q13 shipped option (b) as the status quo (it did not touch Notes) and documented the residual
+honestly rather than silently claiming universal coverage. This entry is the decision to promote to
+(a) or ratify (b).
+
+---

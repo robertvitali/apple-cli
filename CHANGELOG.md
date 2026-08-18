@@ -12,6 +12,32 @@ with the Apple MCP servers they replace.
 
 ## [Unreleased]
 
+### Contacts `--out` writes are path-confined (Q13)
+
+**Fixed**
+
+- **Security:** the Contacts `vcard export --out` and `photo get --out` writes (a CLI superset
+  extra — the Contacts MCP returns the vCard text / photo bytes inline and takes no output path)
+  wrote to the raw operator-supplied path with no guard, so `--out ~/.ssh/authorized_keys` would
+  overwrite an SSH key with vCard/photo bytes — the exact hazard the Mail attachment-save fix
+  closed. Both now route through the write-destination guard, bound UP FRONT (before the store
+  touch, so a bad path fails fast and the check runs without TCC): it rejects control characters
+  and credential/config directories (`.ssh` / `.gnupg` / `.aws` / `.config` / `.claude` /
+  `Library/Keychains` / `LaunchAgents` / `LaunchDaemons`) absolutely, with `allowOutsideHome` so
+  legitimate `/tmp` / external-volume exports still work. Refusal is `error.type =
+  "safety_violation"`, exit 77. **Not universal:** Notes `save-attachment` still uses its own
+  oracle-ported guard (`AttachmentFS`, home/temp/`/Volumes`, no credential blocklist — matching
+  `apple-notes-mcp`); adding the blocklist there would narrow the strict-superset, so it is tracked
+  as a separate parity-vs-safety decision, not folded in here.
+
+**Changed (internal)**
+
+- `confineWriteDestination` + `sensitiveWriteDir` (renamed from the Mail-flavored
+  `sensitiveAttachmentDir`) were promoted from MailKit to `AppleKit` so Contacts can share the
+  exact guard — no second copy to drift. The `safety_violation` error factory is now the single
+  `AppleError.safetyViolation` in AppleKit; MailKit's `mailSafety` delegates to it and the
+  duplicate ContactsKit `safetyViolation` was removed. No output-shape or exit-code change.
+
 ### Bulk mutation reports already-applied ids on a mid-loop failure (Q12 batch C, part 2 — extra33)
 
 **Fixed**

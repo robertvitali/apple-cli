@@ -87,14 +87,14 @@ struct ComposeAttachmentTests {
         #expect(try resolveAttachmentPath(path) == URL(fileURLWithPath: path).resolvingSymlinksInPath().path)
     }
 
-    @Test("sensitiveAttachmentDir flags credential dirs but not ordinary paths")
+    @Test("sensitiveWriteDir flags credential dirs but not ordinary paths")
     func sensitiveDirDetection() {
         let home = "/Users/tester"
-        #expect(sensitiveAttachmentDir("\(home)/.ssh/id_rsa", home: home) == "\(home)/.ssh")
-        #expect(sensitiveAttachmentDir("\(home)/Library/Keychains/login.keychain-db", home: home) == "\(home)/Library/Keychains")
-        #expect(sensitiveAttachmentDir("\(home)/.aws", home: home) == "\(home)/.aws")       // exact dir match
-        #expect(sensitiveAttachmentDir("\(home)/Documents/report.pdf", home: home) == nil)
-        #expect(sensitiveAttachmentDir("\(home)/.sshfoo/x", home: home) == nil)             // prefix, not a path boundary
+        #expect(sensitiveWriteDir("\(home)/.ssh/id_rsa", home: home) == "\(home)/.ssh")
+        #expect(sensitiveWriteDir("\(home)/Library/Keychains/login.keychain-db", home: home) == "\(home)/Library/Keychains")
+        #expect(sensitiveWriteDir("\(home)/.aws", home: home) == "\(home)/.aws")       // exact dir match
+        #expect(sensitiveWriteDir("\(home)/Documents/report.pdf", home: home) == nil)
+        #expect(sensitiveWriteDir("\(home)/.sshfoo/x", home: home) == nil)             // prefix, not a path boundary
     }
 }
 

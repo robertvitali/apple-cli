@@ -108,19 +108,8 @@ public enum ContactsLabel {
 }
 
 // MARK: - Domain errors + error-type parity
-
-/// `error.type` strings the MCP emits. AppleKit's `AppleErrorType` covers most;
-/// `safety_violation` is contacts-specific (the MCP's test-mode refusal signal),
-/// preserved verbatim so an agent matching on `error.type` sees the same value.
-public enum ContactsErrorType {
-    public static let safetyViolation = "safety_violation"
-}
-
-extension AppleError {
-    /// A test-mode / write-guard refusal. Preserves the MCP's `safety_violation`
-    /// `error.type`. Mapped to exit 77 (EX_NOPERM) — a policy-based refusal, the
-    /// closest contractual code; the exit code is additive (the MCP has none).
-    public static func safetyViolation(_ m: String) -> AppleError {
-        .init(type: ContactsErrorType.safetyViolation, message: m, exitCode: AppleExit.permissionDenied)
-    }
-}
+//
+// The `safety_violation` refusal (the MCP's test-mode signal, exit 77) is now the shared
+// `AppleError.safetyViolation` in AppleKit — the contacts write guards call it directly. The
+// former ContactsKit-local `AppleError.safetyViolation` + `ContactsErrorType` were removed when
+// it was promoted (Q13); a second same-signature extension would make the call ambiguous.

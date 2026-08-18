@@ -78,6 +78,14 @@ public struct AppleError: Error {
     public static func unknown(_ m: String) -> AppleError {
         .init(type: AppleErrorType.unknown, message: m, exitCode: AppleExit.unknown)
     }
+    /// A policy-based safety refusal — a write the guard deliberately declines (a sandbox /
+    /// label / recipient gate, or a write-destination confinement). Emits `error.type =
+    /// "safety_violation"` (the string the Contacts MCP uses) at exit 77 (EX_NOPERM), so a client
+    /// can tell a deliberate refusal from a real failure. Canonical home for what MailKit's
+    /// `mailSafety` and the former ContactsKit `safetyViolation` each spelled separately.
+    public static func safetyViolation(_ m: String) -> AppleError {
+        .init(type: AppleErrorType.safetyViolation, message: m, exitCode: AppleExit.permissionDenied)
+    }
 }
 
 /// Contractual exit codes (documented in README + docs/DESIGN.md). Repurposing a code
@@ -99,4 +107,5 @@ public enum AppleErrorType {
     public static let upstream = "upstream_error"
     public static let notImplemented = "not_implemented"
     public static let unknown = "unknown"
+    public static let safetyViolation = "safety_violation"
 }

@@ -4,12 +4,11 @@ import AppleKit
 // Shared helpers for the Mail command tree — kept small + pure where possible.
 
 extension AppleError {
-    /// Mail-side safety refusal (mirrors Contacts' `safetyViolation`): a live mutation blocked
-    /// by the test-mode / subject-label / recipient guard. Exit 77 (permission-denied) — a
-    /// deliberate refusal, not a bug — so callers can distinguish it from a real failure.
-    static func mailSafety(_ m: String) -> AppleError {
-        .init(type: "safety_violation", message: m, exitCode: AppleExit.permissionDenied)
-    }
+    /// Mail-side spelling of the shared safety refusal — a live mutation blocked by the
+    /// test-mode / subject-label / recipient guard. Delegates to `AppleError.safetyViolation`
+    /// (AppleKit) so all three domains emit the identical `error.type` / exit 77; kept as a named
+    /// alias only because the ~30 Mail call sites read as `mailSafety`.
+    static func mailSafety(_ m: String) -> AppleError { .safetyViolation(m) }
 }
 
 /// Gate a live mutation on an EXISTING message (write-model v2): mutations EXECUTE when
