@@ -674,4 +674,29 @@ lock + corrupt-state degraded signal to the D8 limiters), gate-tested (886 swift
 - `86728f4` feat(mail): plain-reply via pasteboard + D8 reply/draft-send rate caps (items 5–6)
 Remaining before the close recommendations: the read-only live-verifications (next loop step).
 
+**LIVE-VERIFIED (2026-08-19, #39 read-only sweep) — all Bucket-B obligations discharged:**
+- **CAL-10 PASS** — calendars byte-identical in EventKit-native order + IDs, CLI vs oracle.
+- **CAL-07 PASS** — empty `--calendar` resolves to the DEFAULT calendar on BOTH sides (same 3
+  events, same default calendar); create-half verified dry-run (empty echoes through; resolution
+  is execute-time, code-audited).
+- **notes triple-fix PASS + a NEW defect found and fixed** — checklist note normalized-identical
+  (12/12 `- [ ]` byte-match); the 166-item ordered-list note exposed real corruption: Notes.app
+  serialized an unterminated `&amp ` which the oracle's DOM decoded and the CLI left verbatim.
+  Fixed as NOTES-L1 (`e88cadf`, legacy-entity optional-semicolon decode + nbsp→U+00A0 on the
+  markdown path), re-diffed live: both notes normalized-identical. Residual divergence is
+  trailing-whitespace cosmetics only (CLI right-trims; turndown preserves) — documented.
+- **mail attachments PASS (CLI-superset)** — reported `size` byte-exact vs the saved file
+  (37164 == on-disk), `downloaded` verified by a real save; the ORACLE returned an EMPTY
+  attachment list for the same message on both its paths (its deficiency, not ours).
+- **Process disclosure:** the sweep also caught a stale bats harness expectation left red by the
+  decision-5 script deletion — and with it a tests-green breach at the `86728f4` push (the bats
+  run before that push was tail-masked). Fixed + disclosed in `11a63df`; suites now counted
+  strictly (swift 889/889, bats 420/420).
+
+**Close recommendations (operator's call — nothing auto-closed):** contacts and mail were
+already clear; calendar's Bucket-B is now discharged (CAL-08 ratified) → clear; reminders'
+ratifications landed → clear; notes' #8/#9 + NOTES-L1 landed and live-verified → clear;
+messages' gap6 landed → clear. All six domain parents are now closable on the D13 evidence,
+pending your review. D2 (tag 1.0.0 + retire the MCPs) remains yours alone — the loop STOPS here.
+
 ---
