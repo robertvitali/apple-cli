@@ -17,6 +17,17 @@ struct ArgvPreprocessTests {
         #expect(ArgvPreprocess.mergeNegativeValues(["--alarm", "-1d"]) == ["--alarm=-1d"])
     }
 
+    @Test func mergesMessagesHoursAndThreshold() {
+        // messages gap6: `--hours -1` (space form) must reach the same "hours cannot be
+        // negative" guard as `--hours=-1`, on both `recent` and `search`.
+        #expect(ArgvPreprocess.mergeNegativeValues(["messages", "recent", "--hours", "-1"])
+                == ["messages", "recent", "--hours=-1"])
+        #expect(ArgvPreprocess.mergeNegativeValues(["messages", "search", "--hours", "-1"])
+                == ["messages", "search", "--hours=-1"])
+        #expect(ArgvPreprocess.mergeNegativeValues(["messages", "search", "--threshold", "-0.5"])
+                == ["messages", "search", "--threshold=-0.5"])
+    }
+
     @Test func mergesEachOccurrenceOfARepeatableOption() {
         #expect(ArgvPreprocess.mergeNegativeValues(["--alarm", "-15m", "--alarm", "-2h"])
                 == ["--alarm=-15m", "--alarm=-2h"])

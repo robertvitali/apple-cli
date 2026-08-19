@@ -27,14 +27,21 @@ public enum ArgvPreprocess {
     ///     `+15m` after forms, so a Calendar `--alarm -15m` is not a supported form; if one is
     ///     given it still merges (the rewrite is purely syntactic) and the Calendar alarm parser
     ///     then rejects it downstream like any other unrecognized value.
+    ///   * `hours` / `threshold` — Messages `recent --hours` / `search --hours` / `search
+    ///     --threshold` (messages gap6). Each already rejects a negative value with an oracle-
+    ///     matching specific message (`"hours cannot be negative"` /
+    ///     `"threshold must be between 0.0 and 1.0"`) in the attached `=` form; the space form
+    ///     (`--hours -1`) never reached that guard — ArgumentParser rejected `-1` as an unknown
+    ///     option first, producing a generic "invalid arguments" error instead of the oracle's
+    ///     specific one. The merge makes both forms reach the same guard.
     ///
     /// INVARIANT (reviewers, LOW): every name here must remain a value-taking `@Option`, never an
     /// `@Flag`, ANYWHERE in the fleet. The merge runs over the whole argv before subcommand
     /// resolution, so if a future domain registered `@Flag(name: .customLong("alarm"))`, then
     /// `--alarm -15m` would rewrite to the illegal `--alarm=-15m` and change that flag's parse.
-    /// It is safe today because all three names exist ONLY as value-`@Option`s in Calendar and
-    /// Reminders (grep-verified). Keep it that way when adding options fleet-wide.
-    public static let negativeValueOptions: Set<String> = ["geo-lat", "geo-lon", "alarm"]
+    /// It is safe today because all five names exist ONLY as value-`@Option`s in Calendar,
+    /// Reminders, and Messages (grep-verified). Keep it that way when adding options fleet-wide.
+    public static let negativeValueOptions: Set<String> = ["geo-lat", "geo-lon", "alarm", "hours", "threshold"]
 
     /// Rewrite `--<allowlisted> <neg>` → `--<allowlisted>=<neg>` in `args`. Order-preserving;
     /// every non-matching token passes through verbatim. Stops rewriting at a bare `--`
