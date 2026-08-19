@@ -262,3 +262,23 @@ this is not the class of bug the Notes flip hit: EventKit is id-based, so `event
 "")` / `reminder(withIdentifier: "")` return nil → `not_found` and `calendar(matching: "")` matches
 only a literally-empty title. There is no analogue of Notes' empty folder specifier collapsing to
 a bare `delete` bound to the account container. See `RemindersSupport.swift:35-42`.
+
+### Ratified divergences (operator decision, 2026-08-18 — see HUMAN-DECISIONS.md)
+
+Three behavior divergences from the oracle were surfaced by the Q17 re-audit and **ratified by
+the operator** as intentional. Each is a case where the CLI is cleaner or safer than the oracle;
+none drops an oracle capability (the underlying operation is fully reachable).
+
+- **REM-11 — a reminder's URL lives in a structured `url` field, not appended to the notes body.**
+  The oracle appends `\n\nURLs:\n- <url>` to the notes text on create; the CLI keeps the URL as a
+  first-class `url` field and preserves URL search (`reminders tasks --url …` matches on it).
+  Read-parity of oracle-authored reminders is intact (the CLI reads existing notes verbatim). The
+  only difference is the stored notes text after an identical create. RATIFIED: structured field.
+- **REM-08 — an unparseable `--due` is REJECTED (validation_error / exit 64), not silently cleared.**
+  The oracle silently clears the date on an unparseable value; the CLI refuses, and clearing a date
+  requires the explicit `--clear-due` / `--clear-start` flag. This prevents a typo'd date from
+  silently wiping an existing one; the clear capability is fully preserved. RATIFIED: fail-closed.
+- **CAL-08 — `calendar events --account <X>` rejects an event-less account (exit 65), not leak the
+  window.** The oracle has a bug: when the named account/source owns no events in the window it
+  ignores the filter and returns ALL events (a data leak). The CLI validates `--account` against
+  event-owning sources and refuses rather than replicate the leak. RATIFIED: keep fail-loud.

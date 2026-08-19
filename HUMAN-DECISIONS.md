@@ -264,7 +264,14 @@ you saying so explicitly.
 
 ## D8 — When the two Mail oracles disagree about a limit, which one wins?
 
-**Status:** OPEN · **Filed:** 2026-08-02 · **Blocks:** nothing (Q3 landed on the reading below)
+**Status:** RESOLVED 2026-08-18 — **SAFETY WINS.** Robert's ruling: add oracle A's `expensive_ops`
+(20/60s) rate limit to `reply`, cap `draft send` (recipient cap + send-budget consumption), and
+adopt the **scoped standing rule**: *on an A-vs-B disagreement about a SAFETY limit (send rate,
+recipient caps, bulk caps on destructive ops), the stricter limit wins.* This knowingly makes the
+CLI stricter than oracle B on those paths — accepted as a deliberate safety posture for an
+agent-driven tool where a runaway mass-send is irreversible. Implementation tracked as a Q17-follow
+commit; the stricter-than-B posture is documented in `docs/port-specs/mail.md`. · **Filed:**
+2026-08-02 · **Blocks:** mail parent closure until the reply-limit + draft-send cap land.
 
 Mail is the one domain replacing TWO servers (`AGENTS.md`): oracle A
 (s-morgan-jeffries@0.6.0) and oracle B (patrickfreyer@3.1.3). I verified they disagree about
@@ -639,5 +646,20 @@ time against real accounts.
    plain-reply divergence (5). Plus the already-open D8 for mail.
 3. **Greenlight (or wave off) the cheap fast-follows** — I can land them behind the usual gates.
 4. **Then, and only then, D2** — tag 1.0.0 + retire the MCPs. Still yours alone; the loop stops here.
+
+### RULINGS (Robert, 2026-08-18 — one at a time)
+
+1. **REM-11 → RATIFY** structured `url` field (documented in `docs/port-specs/calendar-reminders.md`).
+2. **REM-08 → RATIFY** fail-closed `--due` reject (documented).
+3. **CAL-08 → KEEP fail-loud** `--account` reject; do not port the oracle's data-leak (documented).
+4. **notes-#8 → PORT** the oracle's 2× transient-retry, scoped to the Notes AppleScript path.
+5. **mail plain-reply → FIX** — route plain reply/forward through the pasteboard (preserve the HTML
+   quote), removing mail's last behavior-inferior sub-path.
+6. **D8 → SAFETY WINS** — add oracle A's 20/60s `expensive_ops` limit to `reply`, cap `draft send`,
+   and adopt the scoped rule: on an A-vs-B SAFETY-limit disagreement, the stricter limit wins.
+
+Items 1–3 are doc-only (landed with this ruling). Items 4–6 are code, each landing behind the usual
+gates. After they land + the read-only live-verifications pass, contacts/reminders/calendar/notes/
+mail are all clear to close, and I bring you D2.
 
 ---
