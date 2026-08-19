@@ -422,21 +422,26 @@ enum NotesText {
     // MARK: update-note response title (NOTES-M6, oracle 2.6.12)
 
     /// Oracle `decodeHtmlEntities` (index.js:41844). Deliberately SEPARATE from `decodeEntities`
-    /// above — and the reason is STRUCTURAL, not scheduling: the oracle itself ships two decoders.
-    /// `decodeEntities` above mirrors the inline one in `htmlToPlaintext` (index.js:41394) —
-    /// semicolon REQUIRED, fixed named list including `&#92;`, no optional-semicolon lookahead,
-    /// `&amp;` last — which is what `get-note-markdown` must keep. Unifying the two would be a
-    /// parity REGRESSION on the markdown/plaintext path, so two decoders is fidelity, not
+    /// above — and the reason is STRUCTURAL, not scheduling: the oracle itself ships two decoders,
+    /// and at 2.7.5 its MARKDOWN path is neither of them — `htmlToMarkdown` is turndown over a
+    /// real DOM (index.js:41694), whose HTML5 parsing decodes legacy names without semicolons.
+    /// `decodeEntities` above serves the markdown/list path and (since the 2026-08-19 NOTES-L1
+    /// live finding) matches that DOM behavior for the legacy five (nbsp/lt/gt/quot/amp,
+    /// optional-semicolon); `htmlToPlaintext`'s inline decode stays semicolon-required, mirroring
+    /// the oracle's regex converter (index.js:41604) verbatim. Unifying the decoders would be a
+    /// parity REGRESSION on one path or the other, so multiple decoders is fidelity, not
     /// duplication.
     ///
-    /// Measured differences between the two (both verified against the real 2.6.12 oracle):
-    /// `decodeEntities` requires the trailing semicolon (`a&nbsp b` → oracle `"a  b"`, ours
-    /// unchanged); it makes ONE interleaved left-to-right pass where this one makes two sequential
-    /// whole-string passes (`&#x26;#65;` → oracle `"A"`, `decodeEntities` `"&#65;"`); and its
-    /// numeric class is `[0-9a-fA-F]` for BOTH radixes, so `&#1F;` fails `UInt32(radix: 10)` and
-    /// survives verbatim where the oracle yields U+0001 + `"F;"`. Surrogate/range handling is NOT
-    /// a difference — `Unicode.Scalar(cp)` already returns nil and the match is kept. The
-    /// `decodeEntities` deltas are `get-note-markdown`'s to fix under NOTES-L1.
+    /// Remaining measured differences between `decodeEntities` and THIS decoder: it makes ONE
+    /// interleaved left-to-right pass where this one makes two sequential whole-string passes
+    /// (`&#x26;#65;` → oracle `"A"`, `decodeEntities` `"&#65;"`); `decodeEntities`' numeric
+    /// class is `[0-9a-fA-F]` for BOTH radixes with semicolon required, so `&#1F;` fails
+    /// `UInt32(radix: 10)` and survives verbatim where this one yields U+0001 + `"F;"`; THIS
+    /// decoder matches names CASE-INSENSITIVELY where `decodeEntities` is exact-lowercase
+    /// (`&AMP;` decodes here, not there); and `apos` takes the optional-semicolon form here but
+    /// stays semicolon-required there (bare `&apos` is not an HTML5 legacy form, which is what
+    /// `decodeEntities` shadows). Surrogate/range handling is NOT a difference —
+    /// `Unicode.Scalar(cp)` already returns nil and the match is kept.
     ///
     /// Faithful points: the semicolon is OPTIONAL when the entity is not followed by `[0-9a-z]`;
     /// hex runs BEFORE decimal; `&amp` runs LAST so `&amp;lt;` decodes once to `&lt;`; and a code
@@ -523,12 +528,41 @@ enum NotesText {
 
     static func decodeEntities(_ input: String) -> String {
         var s = input
-        let named: [(String, String)] = [
-            ("&nbsp;", " "), ("&lt;", "<"), ("&gt;", ">"), ("&quot;", "\""),
-            ("&#39;", "'"), ("&apos;", "'"), ("&#92;", "\\"),
-        ]
-        for (e, r) in named { s = s.replacingOccurrences(of: e, with: r) }
-        // Numeric decimal/hex entities.
+        // `&apos` is NOT in HTML5's legacy semicolon-less NAMED set (a DOM leaves the bare form
+        // verbatim — measured — so must we). `&#39;`/`&#92;` sit here only because the numeric
+        // pass below is semicolon-required; that requirement is itself a documented residual (a
+        // DOM decodes bare NUMERIC refs unconditionally: measured "&#39 x" → "' x"), so these two
+        // are a known one-directional under-decode, not DOM parity.
+        let strict: [(String, String)] = [("&#39;", "'"), ("&apos;", "'"), ("&#92;", "\\")]
+        for (e, r) in strict { s = s.replacingOccurrences(of: e, with: r) }
+        // HTML5 LEGACY names (nbsp/lt/gt/quot here, amp last below): the oracle's markdown path is
+        // turndown over a REAL DOM (index.js:41694 at 2.7.5). In TEXT content the HTML5 tokenizer
+        // decodes named refs by LONGEST MATCH, unconditionally — measured against the oracle's own
+        // bundled DOM (domino): "&amplt" → "&lt", "&ampX" → "&X", "&nbspx" → "\u{00A0}x". Measured
+        // live 2026-08-19 (NOTES-L1): Notes.app itself serialized a literal unterminated "&amp "
+        // mid-sentence in a real note, which the oracle's markdown decoded to "& " while the old
+        // semicolon-required decode here left "&amp" — user text corrupted on read.
+        //
+        // The `(?![0-9A-Za-z])` lookahead is a DELIBERATE CONSERVATIVE APPROXIMATION of that
+        // longest-match rule, not the DOM rule itself — DO NOT delete it to "finish" the decode.
+        // Per-name replacement WITHOUT the guard over-decodes every longer entity that shares a
+        // legacy prefix ("&notin;" → "¬in;", "&ltimes;" → "<imes;", "&parallel;", "&timesb;" —
+        // all single entities under the DOM's full ~2231-name table). The guard trades
+        // under-decoding "&ampX" (rare; DOM says "&X") for never corrupting a real longer entity;
+        // the only faithful fix is longest-match over the full named table (NOTES-L1 residual).
+        // Guard-pinned by `legacyGuardProtectsLongerEntities` in NotesTextTests.
+        //
+        // nbsp decodes to U+00A0 on THIS path: the DOM's textContent carries U+00A0 and turndown's
+        // collapseWhitespace folds only [ \r\n\t], so U+00A0 SURVIVES into the oracle's markdown
+        // (measured). `htmlToPlaintext` above keeps U+0020 — its oracle really does
+        // `replace(/&nbsp;/g, " ")` (index.js:41604 verbatim). Two paths, two correct values.
+        for (name, repl) in [("nbsp", "\u{00A0}"), ("lt", "<"), ("gt", ">"), ("quot", "\"")] {
+            s = regexReplace(s, "&\(name)(?:;|(?![0-9A-Za-z]))", repl)
+        }
+        // Numeric decimal/hex entities. Semicolon-required — a known under-decode vs the DOM,
+        // which decodes bare numerics ("&#65 x" → "A x", measured); documented NOTES-L1 residual
+        // along with UPPERCASE legacy forms ("&AMP;" — DOM decodes, this path is case-sensitive)
+        // and the ~2200 other named refs ("&copy;" etc.).
         s = regexReplaceFunc(s, "&#(x?)([0-9a-fA-F]+);") { groups in
             let isHex = !groups[1].isEmpty
             guard let code = UInt32(groups[2], radix: isHex ? 16 : 10), let scalar = Unicode.Scalar(code) else {
@@ -536,7 +570,12 @@ enum NotesText {
             }
             return String(scalar)
         }
-        s = s.replacingOccurrences(of: "&amp;", with: "&") // last, so "&amp;lt;" → "&lt;"
+        // Last, so "&amp;lt;" decodes exactly once → "&lt;". KNOWN two-pass artifact (measured,
+        // pinned): "&#38;amp" — the numeric pass synthesizes "&", this separate whole-string pass
+        // rescans it and eats the literal "amp" (CLI "&", oracle/DOM "&amp"). Reordering cannot
+        // fix it ("&amp;#38;" must stay "&#38;"); the fix is a single left-to-right scanner
+        // (NOTES-L1 residual, same bucket as longest-match above).
+        s = regexReplace(s, "&amp(?:;|(?![0-9A-Za-z]))", "&")
         return s
     }
 
