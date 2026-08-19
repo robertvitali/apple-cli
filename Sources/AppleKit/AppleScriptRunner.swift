@@ -8,7 +8,7 @@ import Foundation
 /// string-interpolated into the script source. AppleScript injection here is RCE-class
 /// (`do shell script`, cross-recipient send, data exfil). Where a value genuinely must
 /// be embedded (rare), route it through `quote(_:)` — never ad-hoc per domain.
-public struct AppleScriptRunner {
+public struct AppleScriptRunner: AppleScriptRunning {
     public enum RunError: Error, CustomStringConvertible {
         case launchFailed(String)
         case scriptFailed(status: Int32, stderr: String)

@@ -85,7 +85,8 @@ extension NotesScript {
             return out
             """
             do {
-                let out = try runApp(body, args: args)
+                // Batch delete/move are data mutations — no retry (oracle executeMutationAppleScript).
+                let out = try runApp(body, args: args, maxAttempts: NotesScript.maxMutationAttempts)
                 let statuses = Self.splitRows(out).map { $0.trimmingCharacters(in: .whitespaces) }
                 for (k, idx) in runnableIdx.enumerated() {
                     results[idx] = Self.mapBatchStatus(ids[idx], k < statuses.count ? statuses[k] : nil, op: "delete")
@@ -148,7 +149,8 @@ extension NotesScript {
             return out
             """
             do {
-                let out = try runApp(body, args: args)
+                // Batch delete/move are data mutations — no retry (oracle executeMutationAppleScript).
+                let out = try runApp(body, args: args, maxAttempts: NotesScript.maxMutationAttempts)
                 let statuses = Self.splitRows(out).map { $0.trimmingCharacters(in: .whitespaces) }
                 for (k, idx) in runnableIdx.enumerated() {
                     results[idx] = Self.mapBatchStatus(ids[idx], k < statuses.count ? statuses[k] : nil, op: "move")

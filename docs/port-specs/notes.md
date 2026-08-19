@@ -5,6 +5,7 @@
 **Version analyzed:** **2.5.12** (published 2026-07-14; latest at analysis time 2026-07-15)
 **Source repo:** https://github.com/sweetrb/apple-notes-mcp (tag `v2.5.12`, MIT, author Rob Sweet)
 **Analysis basis:** Clean TypeScript source read at tag `v2.5.12` (not the bundled `build/index.js`); published tarball verified to match. No binaries executed.
+**Update (2026-08-18):** the transient-retry wrapper (NOTES-#8) and the 11-entry error-mapping table (NOTES-#9) were ported against the **currently-installed** oracle `apple-notes-mcp@2.7.5` (`build/index.js`), NOT 2.5.12 — 2.7.5 is what the parity oracle runs on the fleet. Ported byte/value-exact: `RETRYABLE_ERROR_PATTERNS` (6 patterns), `DEFAULT_MAX_RETRIES=2` / `executeMutationAppleScript maxRetries:1` (reads retry once, MUTATIONS never retry — a non-idempotent write must not double-apply), `DEFAULT_RETRY_DELAY_MS=1000` with `2^(attempt-1)` backoff, and the `ERROR_MAPPINGS` table. This §5-era header still cites the 2.5.12/2.6.12 analysis baseline; the retry/error-map behavior is anchored to 2.7.5 as noted here.
 **Verdict (TL;DR): BUILD.** No candidate CLI covers even half the surface. The strongest (memo) reaches ~12/34 and uses an interactive-picker UX unsuitable for agent scripting. Attachments-to-disk, checklist state, note metadata, sync status, full-library JSON export, batch ops, and account/selection/diagnostic tools are absent across every candidate.
 
 ---

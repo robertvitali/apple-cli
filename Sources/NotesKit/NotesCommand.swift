@@ -5,8 +5,10 @@ import AppleKit
 /// `apple notes …` — Notes.app.
 ///
 /// Ports `apple-notes-mcp` to a strict superset. The spec was written against v2.5.12 (34
-/// tools); the oracle INSTALLED on this fleet is v2.6.12 (36 tools, +append-to-note
-/// +get-note-link), and nothing pins or drift-checks the two — see COMPLETION-LOOP Q20.
+/// tools); the oracle INSTALLED on this fleet is v2.7.5 (verified against the npx cache
+/// 2026-08-18 — earlier drafts of this comment said 2.6.12, itself stale), and nothing pins
+/// or drift-checks the two — see COMPLETION-LOOP Q20. The transient-retry wrapper and the
+/// error-mapping table in `NotesScript` are ported byte/value-exact against 2.7.5.
 /// MIT. Mechanism:
 /// `AppleScriptRunner` (CRUD/folders/accounts/attachments/export) + `SQLiteReader` over
 /// NoteStore.sqlite (checklist protobuf, metadata, sync-status). Hard parts, all ported:

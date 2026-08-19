@@ -12,8 +12,16 @@ import AppleKit
 /// the script as `item N of argv`. Only NUMERIC, model-derived values (limits, date parts) are
 /// embedded, and only after Swift-side validation.
 struct NotesScript {
-    let runner = AppleScriptRunner()
-    let defaultAccount = "iCloud"
+    let runner: AppleScriptRunning
+    let defaultAccount: String
+
+    /// Defaults preserve every existing `NotesScript()` / `NotesScript(...)` call site unchanged;
+    /// `runner` is injectable so tests can pin the retry policy (see `AppleScriptRunning`) without
+    /// a live Notes.app.
+    init(runner: AppleScriptRunning = AppleScriptRunner(), defaultAccount: String = "iCloud") {
+        self.runner = runner
+        self.defaultAccount = defaultAccount
+    }
 
     // AppleScript builds field/record separators via `character id N`; we split on the same.
     static let US = "\u{1F}" // unit separator  (fields)
@@ -29,10 +37,64 @@ struct NotesScript {
 
     // MARK: script execution + error mapping
 
+    // MARK: transient-failure retry (ported from apple-notes-mcp@2.7.5 executeAppleScript)
+
+    /// How many TIMES a READ script is attempted (NOT the retry count). Mirrors the oracle's
+    /// `executeAppleScript` default `maxRetries = 2` — its loop is `for attempt <= maxRetries`,
+    /// i.e. up to 2 executions = one retry on a transient failure.
+    static let maxReadAttempts = 2
+    /// MUTATION scripts (create/update/delete/move/append, batch delete/move) are attempted exactly
+    /// ONCE. The oracle routes every data-changing script through `executeMutationAppleScript`,
+    /// which hardcodes `maxRetries: 1` (no retry). A write is NOT idempotent and the transient
+    /// patterns below (timeout/busy/lost-connection) can fire AFTER Notes.app already applied the
+    /// change, so retrying could double-apply. The oracle side-steps this by never retrying writes;
+    /// we match that scoping exactly by passing `maxAttempts: maxMutationAttempts` at write sites.
+    static let maxMutationAttempts = 1
+    /// Base delay before a retry — the oracle's `DEFAULT_RETRY_DELAY_MS`. Exponential backoff
+    /// factor `2^(attempt-1)` (1st retry waits 1×) matches `retryDelayMs * Math.pow(2, attempt-1)`.
+    static let retryDelayMs = 1000
+
+    /// Verbatim port of the oracle's `RETRYABLE_ERROR_PATTERNS` (build/index.js). A failure whose
+    /// text matches ANY of these is TRANSIENT — Notes.app timed out, is busy, dropped/invalidated
+    /// the Apple-event connection, or the note list mutated mid-scan (an iCloud sync landed) —
+    /// meaning the operation did NOT complete, so re-running the whole script is safe. Genuine
+    /// errors (not-found, validation, permission, syntax) are deliberately ABSENT and must fail
+    /// fast. Kept as a pure `String -> Bool` predicate so the retry decision is unit-testable
+    /// without a live Notes.app.
+    static let retryableErrorPatterns = [
+        "timed? out",              // /timed? out/i — includes "-1712 AppleEvent timed out"
+        "not responding",          // /not responding/i
+        "connection.*invalid",     // /connection.*invalid/i
+        "lost connection",         // /lost connection/i
+        "busy",                    // /busy/i
+        "changed during listing",  // /changed during listing/i — bulk-list mid-scan mutation (#86)
+    ]
+
+    /// Whether an osascript error message is a transient one worth retrying (mirrors the oracle's
+    /// `isRetryableError`). Matched against the RAW stderr, not the mapped message, so a "busy" /
+    /// "connection invalid" that `mapError` buckets differently is still recognised as transient.
+    static func isRetryable(_ errorMessage: String) -> Bool {
+        retryableErrorPatterns.contains { pattern in
+            errorMessage.range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil
+        }
+    }
+
+    /// Whether a raw `RunError` should be retried: only `.scriptFailed` whose stderr is transient.
+    /// A `.launchFailed` (osascript could not even start) is never transient.
+    static func isRetryable(_ e: AppleScriptRunner.RunError) -> Bool {
+        switch e {
+        case .launchFailed: return false
+        case .scriptFailed(_, let stderr): return Self.isRetryable(stderr)
+        }
+    }
+
     /// Wrap a command body in `on run argv` + a `with timeout` (bounds Notes.app hangs), run it,
     /// and map osascript failures to the right `AppleError`. `tellAccount` (an argv index) scopes
-    /// the body in `tell account (item i of argv)`.
-    func run(_ commandBody: String, args: [String], tellAccount: Int? = nil) throws -> String {
+    /// the body in `tell account (item i of argv)`. `maxAttempts` defaults to the READ policy
+    /// (`maxReadAttempts` = retry-once on a transient failure); mutation call sites pass
+    /// `maxMutationAttempts` (= 1, no retry) so a non-idempotent write is never re-run.
+    func run(_ commandBody: String, args: [String], tellAccount: Int? = nil,
+             maxAttempts: Int = NotesScript.maxReadAttempts) throws -> String {
         let accountOpen = tellAccount.map { "tell account (item \($0) of argv)\n" } ?? ""
         let accountClose = tellAccount != nil ? "end tell\n" : ""
         let script = """
@@ -44,18 +106,41 @@ struct NotesScript {
           end timeout
         end run
         """
-        do {
-            return try runner.run(script, arguments: args)
-        } catch let e as AppleScriptRunner.RunError {
-            throw Self.mapError(e)
+        var attempt = 1
+        while true {
+            do {
+                return try runner.run(script, arguments: args)
+            } catch let e as AppleScriptRunner.RunError {
+                // Retry ONLY a transient failure, and ONLY while attempts remain. Backoff
+                // `retryDelayMs * 2^(attempt-1)` matches the oracle. `maxAttempts == 1` (mutations)
+                // makes `attempt < maxAttempts` false on the first failure → no retry.
+                if attempt < maxAttempts, Self.isRetryable(e) {
+                    let delayMs = Self.retryDelayMs * (1 << (attempt - 1))
+                    Thread.sleep(forTimeInterval: Double(delayMs) / 1000.0)
+                    attempt += 1
+                    continue
+                }
+                throw Self.mapError(e)
+            }
         }
     }
 
-    /// Run an app-level command (no account scope).
-    func runApp(_ commandBody: String, args: [String]) throws -> String {
-        try run(commandBody, args: args, tellAccount: nil)
+    /// Run an app-level command (no account scope). Forwards `maxAttempts` so app-level mutations
+    /// (delete/update/move by id, batch delete/move) can opt out of retry.
+    func runApp(_ commandBody: String, args: [String],
+                maxAttempts: Int = NotesScript.maxReadAttempts) throws -> String {
+        try run(commandBody, args: args, tellAccount: nil, maxAttempts: maxAttempts)
     }
 
+    /// Port of the oracle's `ERROR_MAPPINGS` table + `parseErrorMessage` (build/index.js), evaluated
+    /// in the oracle's ORDER (first match wins). Messages match the oracle VERBATIM where ported;
+    /// the CLI keeps its own `error.type`/exit-code assignment — this is MESSAGE RICHNESS ONLY, no
+    /// exit-code changes. Every branch that previously fell through to the generic
+    /// `.upstream("Notes.app returned an error.")` fallback (app-not-running, lost-connection,
+    /// cannot-delete, changed-during-listing, syntax) keeps that upstream/69 classification, only
+    /// with a specific message; the not-found variants keep notFound/65; password + already-exists
+    /// keep validation/64; permission keeps authorization_denied/77. The permission + timeout copy
+    /// is CLI-specific (the oracle's is Claude-Desktop-flavoured) and is left unchanged.
     static func mapError(_ e: AppleScriptRunner.RunError) -> AppleError {
         switch e {
         case .launchFailed(let m):
@@ -65,29 +150,88 @@ struct NotesScript {
             // note id "…". (-1728)` — so every `can't` / `doesn't` test below silently never fired
             // and real not-founds were classified upstream_error/69 instead of not_found/65.
             // Verified by byte-inspection of live stderr: U+2019, never U+0027. Normalise first.
-            let s = stderr.lowercased()
-                .replacingOccurrences(of: "\u{2019}", with: "'", options: .literal)
+            // Capture-group patterns match `normalized` (NOT lowercased) so an echoed note/folder/
+            // account NAME keeps its original case; literal tests use the lowercased `s`.
+            let normalized = stderr.replacingOccurrences(of: "\u{2019}", with: "'", options: .literal)
+            let s = normalized.lowercased()
+
             if s.contains("not authorized") || s.contains("not permitted") || s.contains("access") && s.contains("denied") {
                 return .permissionDenied("Notes automation not authorized. Grant access in System Settings > "
                     + "Privacy & Security > Automation, then retry.")
             }
+            // Timeout is CLI-specific: the oracle handles it via its process-timeout path, not
+            // ERROR_MAPPINGS. Kept early + unchanged.
             if s.contains("timed out") || s.contains("-1712") {
                 return .upstream("Notes.app timed out. It may be unresponsive or busy syncing; try again.")
             }
-            if s.contains("password protected") || s.contains("locked note") {
-                return .validation("Note is password-protected. Unlock it in Notes.app first.")
+            // Application not running (oracle ERROR_MAPPINGS: /application isn't running|not running/i).
+            if s.contains("isn't running") || s.contains("not running") {
+                return .upstream("Notes.app is not responding. Try opening Notes.app manually.")
             }
-            // -1728 is AppleScript's canonical "can't get <specifier>" (errAENoSuchObject), matched
-            // alongside the prose so a localised Notes.app still classifies correctly.
-            if s.contains("can't get") || s.contains("doesn't exist") || s.contains("not found")
-                || s.contains("-1728") {
-                return .notFound("Notes could not find the requested item (verify the id/title/folder).")
+            // Lost / invalid Apple-event connection (/connection is invalid|lost connection/i).
+            if s.contains("lost connection")
+                || s.range(of: "connection.*invalid", options: .regularExpression) != nil {
+                return .upstream("Lost connection to Notes.app. The app may have crashed or been restarted.")
+            }
+            // Not-found, specific: note by name (echoes the exact title). /can't get note "([^"]+)"/i.
+            if let name = Self.capture("can't get note \"([^\"]+)\"", in: normalized) {
+                return .notFound("Note \"\(name)\" not found. Verify the title is exact (case-sensitive).")
+            }
+            // Not-found, specific: note by id. /can't get note id/i.
+            if s.contains("can't get note id") {
+                return .notFound("Note not found. The note may have been deleted or the ID is invalid.")
+            }
+            // Not-found, specific: folder by name. /can't get folder "([^"]+)"/i.
+            if let name = Self.capture("can't get folder \"([^\"]+)\"", in: normalized) {
+                return .notFound("Folder \"\(name)\" not found. Use list-folders to see available folders.")
+            }
+            // Not-found, specific: account by name. /can't get account "([^"]+)"/i.
+            if let name = Self.capture("can't get account \"([^\"]+)\"", in: normalized) {
+                return .notFound("Account \"\(name)\" not found. Use list-accounts to see available accounts.")
             }
             if s.contains("already exists") {
                 return .validation("A folder with that name already exists.")
             }
+            // Cannot delete (locked / in use). /can't delete|cannot delete/i. Previously hit the
+            // generic fallback → upstream/69; kept at upstream/69, only the message is richer.
+            if s.contains("can't delete") || s.contains("cannot delete") {
+                return .upstream("Cannot delete. The item may be locked or in use.")
+            }
+            if s.contains("password protected") || s.contains("locked note") {
+                return .validation("Note is password-protected. Unlock it in Notes.app first.")
+            }
+            // Bulk-list mid-scan mutation (#86). The message KEEPS the phrase "changed during
+            // listing" so `isRetryable` still matches it. Retryable → upstream/69 (was fallback/69).
+            if s.contains("changed during listing") {
+                return .upstream("Notes changed during listing (an iCloud sync may have landed mid-read). "
+                    + "The operation is retried automatically; run it again if this persists.")
+            }
+            // Syntax / script error — an internal bug. /syntax error|expected/i. Previously the
+            // generic fallback → upstream/69; kept at upstream/69, message only.
+            if s.contains("syntax error") || s.contains("expected") {
+                return .upstream("Internal error. Please report this issue.")
+            }
+            // -1728 is AppleScript's canonical "can't get <specifier>" (errAENoSuchObject), matched
+            // alongside the prose so a localised Notes.app still classifies correctly. Generic
+            // not-found catch-all for any `can't get …` not matched by the specific cases above.
+            if s.contains("can't get") || s.contains("doesn't exist") || s.contains("not found")
+                || s.contains("-1728") {
+                return .notFound("Notes could not find the requested item (verify the id/title/folder).")
+            }
             return .upstream("Notes.app returned an error.")
         }
+    }
+
+    /// First capture group of a case-insensitive regex against `text`, or nil. Used by `mapError`
+    /// to echo the exact entity name out of an oracle-style `Can't get <kind> "<name>"` error.
+    static func capture(_ pattern: String, in text: String) -> String? {
+        guard let re = try? NSRegularExpression(pattern: pattern, options: [.caseInsensitive]) else { return nil }
+        let ns = text as NSString
+        guard let m = re.firstMatch(in: text, range: NSRange(location: 0, length: ns.length)),
+              m.numberOfRanges > 1 else { return nil }
+        let r = m.range(at: 1)
+        guard r.location != NSNotFound else { return nil }
+        return ns.substring(with: r)
     }
 
     // MARK: parsing helpers
@@ -461,7 +605,7 @@ struct NotesScript {
             """
         }
         let acctIndex = accountArgIndex(&args, account) // see off-by-one note in searchNotes
-        let out = try run(command, args: args, tellAccount: acctIndex)
+        let out = try run(command, args: args, tellAccount: acctIndex, maxAttempts: Self.maxMutationAttempts)
         return Self.extractId(out, prefix: "note") ?? out.trimmingCharacters(in: .whitespacesAndNewlines)
     }
 
@@ -483,7 +627,8 @@ struct NotesScript {
         }
         let bodyHtml = NotesText.updateNoteBody(effectiveTitle: effectiveTitle, content: newContent, html: html)
         // argv: 1 = id, 2 = body
-        _ = try runApp("set body of note id (item 1 of argv) to (item 2 of argv)", args: [id, bodyHtml])
+        _ = try runApp("set body of note id (item 1 of argv) to (item 2 of argv)", args: [id, bodyHtml],
+                       maxAttempts: Self.maxMutationAttempts)
     }
 
     func updateNote(title: String, newTitle: String?, newContent: String, account: String?, html: Bool) throws {
@@ -491,15 +636,17 @@ struct NotesScript {
         let bodyHtml = NotesText.updateNoteBody(effectiveTitle: effectiveTitle, content: newContent, html: html)
         // argv: 1 = current title, 2 = body, 3 = account
         _ = try run("set body of note (item 1 of argv) to (item 2 of argv)",
-                    args: [title, bodyHtml, resolveAccount(account)], tellAccount: 3)
+                    args: [title, bodyHtml, resolveAccount(account)], tellAccount: 3,
+                    maxAttempts: Self.maxMutationAttempts)
     }
 
     func deleteNoteById(id: String) throws {
-        _ = try runApp("delete note id (item 1 of argv)", args: [id])
+        _ = try runApp("delete note id (item 1 of argv)", args: [id], maxAttempts: Self.maxMutationAttempts)
     }
 
     func deleteNote(title: String, account: String?) throws {
-        _ = try run("delete note (item 1 of argv)", args: [title, resolveAccount(account)], tellAccount: 2)
+        _ = try run("delete note (item 1 of argv)", args: [title, resolveAccount(account)], tellAccount: 2,
+                    maxAttempts: Self.maxMutationAttempts)
     }
 
     func moveNoteById(id: String, folder: String, account: String?) throws {
@@ -515,7 +662,7 @@ struct NotesScript {
         set noteRef to note id (item 1 of argv)
         move noteRef to destFolder
         """
-        _ = try runApp(body, args: args)
+        _ = try runApp(body, args: args, maxAttempts: Self.maxMutationAttempts)
     }
 
     // MARK: - Folders
@@ -584,7 +731,7 @@ struct NotesScript {
                 var mkArgs = [comps[0]]
                 let mkAcctIdx = accountArgIndex(&mkArgs, acct) // split before call (inout eval order)
                 _ = try run("make new folder with properties {name:(item 1 of argv)}",
-                            args: mkArgs, tellAccount: mkAcctIdx)
+                            args: mkArgs, tellAccount: mkAcctIdx, maxAttempts: Self.maxMutationAttempts)
             } else {
                 let parent = Array(comps[0..<i])
                 var mkArgs: [String] = [comps[i]] // item 1 = new segment name
@@ -592,7 +739,7 @@ struct NotesScript {
                 mkArgs.append(contentsOf: pargs)
                 let mkAcctIdx = accountArgIndex(&mkArgs, acct) // split before call (inout eval order)
                 _ = try run("make new folder at \(pexpr) with properties {name:(item 1 of argv)}",
-                            args: mkArgs, tellAccount: mkAcctIdx)
+                            args: mkArgs, tellAccount: mkAcctIdx, maxAttempts: Self.maxMutationAttempts)
             }
         }
         // Resolve the final folder id.
@@ -618,7 +765,7 @@ struct NotesScript {
         let (expr, fargs) = Self.folderRefExpr(comps, startIndex: args.count + 1)
         args.append(contentsOf: fargs)
         let acctIndex = accountArgIndex(&args, acct) // split before call (inout eval order)
-        _ = try run("delete \(expr)", args: args, tellAccount: acctIndex)
+        _ = try run("delete \(expr)", args: args, tellAccount: acctIndex, maxAttempts: Self.maxMutationAttempts)
     }
 
     // MARK: - Accounts
