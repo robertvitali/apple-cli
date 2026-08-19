@@ -1213,7 +1213,10 @@ require_index() {
 @test "every AppleScript embedded in MailScript.swift compiles (osacompile)" {
   run python3 "$BATS_TEST_DIRNAME/helpers/applescript_syntax_check.py"
   [ "$status" -eq 0 ]
-  echo "$output" | grep -q "ok - nativeReplyScript"
+  # Sentinels proving the helper really ran over the compose + mutation script sets. The plain
+  # nativeReplyScript was DELETED by decision-5 (2026-08-19) — plain replies route through
+  # nativeReplyHtmlScript now — so that is the reply-side sentinel.
+  echo "$output" | grep -q "ok - nativeReplyHtmlScript"
   echo "$output" | grep -q "ok - emptyTrashScript"
   ! echo "$output" | grep -q "^FAIL"
 }

@@ -104,9 +104,11 @@ def check_argv_arity(src: str, lit: dict) -> bool:
     # total is 2 + extras; scripts that build their own argv list (sendHtmlGui) state it whole.
     # (name, wrapper, total argv, slots deliberately never read in-script)
     expectations = [
-        ("nativeReplyScript", "nativeReply", 2 + 9, set()),    # +body, replyAll, sender, allow, att, cc, bcc, mbxHint, mode (gap17)
+        # nativeReplyScript/nativeReply (the plain `set content` reply) were DELETED by
+        # decision-5 (2026-08-19): plain replies now route through nativeReplyHtmlScript with
+        # the --body wrapped as an HTML fragment, so there is one reply script, below.
         # Slot 3 (body) is passed as "" and never read — the pasted HTML fragment IS the
-        # body on this path; the slot is kept so both reply wrappers share one extra-args
+        # body on this path; the slot is kept from the two-wrapper era's shared extra-args
         # ordering (a hole ANYWHERE ELSE is still a silent off-by-one).
         ("nativeReplyHtmlScript", "nativeReplyHtml", 2 + 10, {3}),  # …, mode, htmlFragmentPath (gap15)
         ("nativeForwardScript", "nativeForward", 2 + 8, set()),  # +body, to, cc, bcc, sender, allow, att, mbxHint
@@ -149,7 +151,7 @@ def main() -> int:
     # nativeReplyHtmlScript is one of them — it shares the tail (review B1: it initially fell
     # through to the bare-locator loop, failed to compile there, and reply/forward were not
     # being compile-checked AT ALL because the seam regex no longer matched).
-    for name in ("nativeReplyScript", "nativeReplyHtmlScript", "nativeForwardScript"):
+    for name in ("nativeReplyHtmlScript", "nativeForwardScript"):
         body = concat_form(src, name, lit["guardAndSendTail"])
         if body is None:
             print(f"FAIL - {name} not found in the expected concatenated form")
@@ -175,7 +177,7 @@ def main() -> int:
     for name, body in sorted(lit.items()):
         if not name.endswith("Script"):
             continue
-        if name in ("nativeReplyScript", "nativeReplyHtmlScript", "nativeForwardScript",
+        if name in ("nativeReplyHtmlScript", "nativeForwardScript",
                     "moveScript", "gmailMoveScript"):
             continue
         extra = ("\n" + locator) if "my findMsg(" in body else ""
