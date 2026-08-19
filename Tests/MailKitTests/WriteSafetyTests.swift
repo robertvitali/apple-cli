@@ -365,6 +365,18 @@ struct DraftSendResultParseTests {
         #expect(MailScript.DraftSendResult.parse("senderror:-1708", us: US) == .sendError("-1708"))
     }
 
+    /// D8: the draft-send recipient cap. `toomany:<n>` carries the actual stored-recipient count so
+    /// the command can report the oracle's "Too many recipients (max: 100) — N given". A `toomany:`
+    /// without a parseable integer is UNRECOGNIZED (nil ⇒ the caller throws) — it must never be
+    /// read as anything sendable.
+    @Test("`toomany:<n>` maps to .tooManyRecipients(n); a non-numeric suffix is nil")
+    func tooManyRecipientsSentinel() {
+        #expect(MailScript.DraftSendResult.parse("toomany:101", us: US) == .tooManyRecipients(101))
+        #expect(MailScript.DraftSendResult.parse("toomany:5000", us: US) == .tooManyRecipients(5000))
+        #expect(MailScript.DraftSendResult.parse("toomany:", us: US) == nil)
+        #expect(MailScript.DraftSendResult.parse("toomany:abc", us: US) == nil)
+    }
+
     @Test("an UNRECOGNIZED string parses to nil so the caller throws — never a silent .sent")
     func unrecognizedIsNil() {
         #expect(MailScript.DraftSendResult.parse("", us: US) == nil)

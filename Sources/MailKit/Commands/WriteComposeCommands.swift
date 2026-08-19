@@ -745,10 +745,9 @@ struct ReplyCommand: ParsableCommand {
             // asked for a draft — and nothing pinned it).
             let route = ReplyRouting.decide(willExecute: willExecute, hasHtml: html != nil,
                                             guiSend: guiSend, mode: mode)
-            let willNative = route.native
             let willNativeHtml = route.nativeHtml
             let willOpenHtml = route.openHtml
-            let willLiveOutbound = willNative || willNativeHtml || willOpenHtml
+            let willLiveOutbound = willNativeHtml || willOpenHtml
 
             // Outbound gate in BOTH modes (preview honesty): the recipient set is already
             // resolved above on the dry-run path too, so a sandboxed preview refuses a
@@ -777,6 +776,20 @@ struct ReplyCommand: ParsableCommand {
                     }
                     senderAddress = addr
                 }
+                // ORACLE-MIRRORED REPLY RATE LIMIT (D8, SAFETY WINS). Oracle A tiers
+                // `reply_to_message` as `expensive_ops` (20/60s) and runs check_rate_limit per
+                // operation regardless of send/draft/open — so this consumes the reply budget once
+                // per live reply, closing the runaway-loop hole where a loop replied instead of
+                // sending to route around the `sends` cap. Only the EXECUTE path reaches here (the
+                // preview returns before willLiveOutbound), so a dry-run consumes no budget. The
+                // reply window is SEPARATE from the send window (distinct oracle tiers).
+                let rl = ReplyRateLimiter.consume()
+                guard rl.allowed else { throw AppleError.validation(ReplyRateLimiter.refusal(rl)) }
+                if rl.degraded {
+                    FileHandle.standardError.write(Data(
+                        ("warning: reply rate-limit state is unwritable — the oracle's 20-replies/60s "
+                         + "(expensive_ops) cap is NOT being enforced for this call (failing open).\n").utf8))
+                }
                 // Quoted original, escaped into the HTML part (willOpenHtml only — the
                 // willNativeHtml path pastes the BARE fragment on top of Mail's native reply,
                 // which already carries its own quoted original; adding ours would double-quote).
@@ -784,21 +797,24 @@ struct ReplyCommand: ParsableCommand {
                     "<br><br><blockquote>" + EmlBuilder.escapeHTML($0).replacingOccurrences(of: "\n", with: "<br>") + "</blockquote>"
                 } ?? ""
                 if willNativeHtml {
-                    // gap15/extra15: THREADED HTML reply via the oracle's pasteboard flow —
-                    // Mail's native reply verb composes the threaded reply (In-Reply-To /
-                    // References / replied-to state / native quote), then the HTML fragment is
-                    // pasted into the compose window via NSPasteboard + cmd-v (needs
-                    // Accessibility, steals focus, restores the clipboard after). The fragment
-                    // travels by TEMP FILE PATH, never through script source.
+                    // gap15/extra15 + D8 item 5: reply via the oracle's pasteboard flow — Mail's
+                    // native reply verb composes the threaded reply (In-Reply-To / References /
+                    // replied-to state / native quote), then the fragment is pasted into the
+                    // compose window via NSPasteboard + cmd-v (needs Accessibility, steals focus,
+                    // restores the clipboard after). Serves BOTH the plain reply (fragment =
+                    // oracle-B plain-wrap of --body) and the HTML reply (fragment = --html). The
+                    // fragment travels by TEMP FILE PATH, never through script source.
                     guard let imid = target.internet_message_id, !imid.isEmpty else {
                         throw AppleError.upstream("message '\(target.id)' has no RFC Message-ID; cannot reply to it via Mail.app.")
                     }
                     let htmlTmp = try emlTempDirectory(materialise: true)
                         .appendingPathComponent("apple-cli-\(TestMode.sandboxPrefix)-\(UUID().uuidString).html")
-                    // Oracle fidelity (compose.py:522-528): append the gap divs so a visible
-                    // gap separates the pasted body from Mail's quoted original (Mail strips
-                    // trailing <br>, hence divs — the oracle's own comment).
-                    try ((html ?? "") + "<div><br></div><div><br></div>").write(to: htmlTmp, atomically: true, encoding: .utf8)
+                    // Oracle B fidelity (compose.py:519-530): the plain reply wraps --body in a
+                    // <div> + gap divs (`MailComposeFragment.replyPlain`); the HTML reply appends
+                    // the gap divs to --html (`replyHtml`). Both keep Mail's quoted original in its
+                    // HTML layer (Mail strips trailing <br>, hence divs — the oracle's own comment).
+                    let fragment = html.map(MailComposeFragment.replyHtml) ?? MailComposeFragment.replyPlain(body)
+                    try fragment.write(to: htmlTmp, atomically: true, encoding: .utf8)
                     OwnedTempDir.restrictToOwner(htmlTmp)
                     defer { try? FileManager.default.removeItem(at: htmlTmp) }
                     SignalSafeCleanup.track(htmlTmp.path)   // synchronous consumer; see the send path
@@ -814,7 +830,9 @@ struct ReplyCommand: ParsableCommand {
                         executed = true
                         replyID = newID
                         if !actual.isEmpty { recipients = actual }
-                        note = "HTML reply sent via Mail's native reply verb + pasteboard paste (needed Accessibility, stole focus); threading preserved. NOTE: --body is not carried on this path (oracle parity — the HTML fragment IS the reply body)."
+                        note = html != nil
+                            ? "HTML reply sent via Mail's native reply verb + pasteboard paste (needed Accessibility, stole focus); threading + Mail's HTML quote layer preserved. NOTE: --body is not carried on this path (oracle parity — the HTML fragment IS the reply body)."
+                            : "replied via Mail's native reply verb + pasteboard paste (needed Accessibility, stole focus); threading headers, replied-to state, and Mail's HTML quote layer preserved (--body pasted as HTML per oracle B)."
                     case .drafted(let newID, let actual):
                         // executed stays false: nothing left the machine (matches
                         // `mail send --mode draft`'s contract — review caught the two verbs
@@ -822,12 +840,14 @@ struct ReplyCommand: ParsableCommand {
                         drafted = true
                         replyID = newID
                         if !actual.isEmpty { recipients = actual }
-                        note = "HTML reply composed and saved to Drafts (--mode draft) — NOT sent; pasteboard paste needed Accessibility. A compose window showing the filed draft may remain open (Mail quirk, measured); close it with Cmd-W."
+                        note = (html != nil ? "HTML reply" : "reply")
+                            + " composed via Mail's native reply verb + pasteboard paste and saved to Drafts (--mode draft) — NOT sent; needed Accessibility. A compose window showing the filed draft may remain open (Mail quirk, measured); close it with Cmd-W."
                     case .opened(let newID, let actual):
                         opened = true
                         replyID = newID
                         if !actual.isEmpty { recipients = actual }
-                        note = "HTML reply composed and left open in a visible compose window (--mode open) — NOT sent; review and click Send"
+                        note = (html != nil ? "HTML reply" : "reply")
+                            + " composed via Mail's native reply verb + pasteboard paste and left open in a visible compose window (--mode open) — NOT sent; review and click Send"
                     case .notFound:
                         throw AppleError.notFound("message '\(imid)' is not reachable in Mail.app to reply to.")
                     case .sendFailed(let newID):
@@ -851,55 +871,9 @@ struct ReplyCommand: ParsableCommand {
                     try MailScript().openEml(path: dest.path)
                     opened = true
                     note = "HTML reply rendered in a compose window for review — click Send, or re-run with --gui-send to auto-send."
-                } else { // willNative — plain reply via Mail's NATIVE `reply` verb, ALL modes
-                    // Parity: a re-composed "Re:" message is NOT a reply — only Mail's `reply`
-                    // verb sets In-Reply-To/References and the original's replied-to state, and
-                    // returns the new message's id (oracle A `reply_id`). See MailScript's
-                    // "Native reply / forward" note for the safety readback.
-                    guard let imid = target.internet_message_id, !imid.isEmpty else {
-                        throw AppleError.upstream("message '\(target.id)' has no RFC Message-ID; cannot reply to it via Mail.app.")
-                    }
-                    switch try MailScript().nativeReply(internetMessageID: imid,
-                                                        accountName: target.account.isEmpty ? nil : target.account,
-                                                        body: body, replyAll: all, sender: senderAddress,
-                                                        selfAllowlist: outboundAllowlist(sandboxActive: sandboxActive),
-                                                        cc: ccL, bcc: bccL, attachmentPaths: attachPaths,
-                                                        // Hand the locator the mailbox the Envelope
-                                                        // Index already resolved, so an ARCHIVED
-                                                        // message (incl. [Gmail]/All Mail, which the
-                                                        // blind scan skips to avoid hanging) is a
-                                                        // targeted lookup rather than unreachable.
-                                                        mailboxHint: target.mailbox, mode: mode) {
-                    case .sent(let newID, let actual):
-                        executed = true
-                        replyID = newID
-                        // Report what MAIL actually addressed, not our pre-send prediction — on
-                        // this one command the CLI does not choose the recipients.
-                        if !actual.isEmpty { recipients = actual }
-                        note = "replied via Mail's native reply verb — threading headers and the original's replied-to state are preserved"
-                    case .drafted(let newID, let actual):
-                        // executed stays false — see the willNativeHtml twin.
-                        drafted = true
-                        replyID = newID
-                        if !actual.isEmpty { recipients = actual }
-                        note = "reply composed via Mail's native reply verb and saved to Drafts (--mode draft) — NOT sent. A compose window showing the filed draft may remain open (Mail quirk, measured); close it with Cmd-W."
-                    case .opened(let newID, let actual):
-                        opened = true
-                        replyID = newID
-                        if !actual.isEmpty { recipients = actual }
-                        note = "reply composed via Mail's native reply verb and left open in a visible compose window (--mode open) — NOT sent; review and click Send"
-                    case .notFound:
-                        throw AppleError.notFound("message '\(imid)' is not reachable in Mail.app to reply to.")
-                    case .sendFailed(let newID):
-                        throw AppleError.upstream("Mail reported the reply was NOT sent (send returned false — account offline or the server refused). Draft id \(newID) may still be in Mail.")
-                    case .refused(let bad, let discarded):
-                        throw AppleError.mailSafety(refusalMessage(kind: "reply", bad: bad, discarded: discarded, sandboxActive: sandboxActive), sandbox: mailOutboundRefusalIsSandboxCaused(reason: bad, sandboxActive: sandboxActive))
-                    case .composeFailed(let reason, let discarded):
-                        throw AppleError.upstream(composeFailureMessage(kind: "reply", reason: reason, discarded: discarded))
-                    }
                 }
             }
-            // (willLiveOutbound == willExecute — the three live flags partition every
+            // (willLiveOutbound == willExecute — the two live flags partition every
             // mode × html × gui-send combination, so the only non-live path is a dry-run,
             // which falls through to the honest executed=false/opened=false preview below.)
 
@@ -1010,9 +984,29 @@ struct ForwardCommand: ParsableCommand {
                         ("warning: send rate-limit state is unwritable — the oracle's 3-sends/60s cap "
                          + "is NOT being enforced for this call (failing open).\n").utf8))
                 }
+                // gap17/extra15 (D8 item 5): a --body prepend is pasted as HTML (oracle B
+                // forward_email), NEVER `set content` — so Mail's forwarded original keeps its HTML
+                // layer. No --body ⇒ empty fragment path ⇒ the shared tail skips the paste and the
+                // native forward is delivered untouched (matches oracle B, which pastes only when a
+                // message is provided; the empty-body forward then needs no Accessibility).
+                var fwdFragmentPath = ""
+                var fwdHtmlTmp: URL?
+                let prepend = body ?? ""
+                if !prepend.isEmpty {
+                    let htmlTmp = try emlTempDirectory(materialise: true)
+                        .appendingPathComponent("apple-cli-\(TestMode.sandboxPrefix)-\(UUID().uuidString).html")
+                    try MailComposeFragment.forwardPrepend(prepend).write(to: htmlTmp, atomically: true, encoding: .utf8)
+                    OwnedTempDir.restrictToOwner(htmlTmp)
+                    SignalSafeCleanup.track(htmlTmp.path)   // synchronous consumer; see the reply path
+                    fwdHtmlTmp = htmlTmp
+                    fwdFragmentPath = htmlTmp.path
+                }
+                // Deleted after nativeForward returns (synchronous consumer); the defer is at the
+                // `if willExecute` scope so it fires AFTER the switch, not before the paste reads it.
+                defer { if let f = fwdHtmlTmp { try? FileManager.default.removeItem(at: f) } }
                 switch try MailScript().nativeForward(internetMessageID: imid,
                                                       accountName: target.account.isEmpty ? nil : target.account,
-                                                      body: body ?? "", to: toL, cc: ccL, bcc: bccL,
+                                                      htmlFragmentPath: fwdFragmentPath, to: toL, cc: ccL, bcc: bccL,
                                                       sender: senderAddress,
                                                       selfAllowlist: outboundAllowlist(sandboxActive: sandboxActive),
                                                       mailboxHint: target.mailbox) {
@@ -1022,7 +1016,13 @@ struct ForwardCommand: ParsableCommand {
                     // Echo what MAIL actually addressed when it reported it (review L7 —
                     // reply already does this; the request-echo stays the preview shape).
                     if !actual.isEmpty { verifiedRecipients = actual }
-                    note = "forwarded via Mail's native forward verb — the original's attachments and formatting are carried"
+                    // Disclose the Accessibility/focus-steal only when a --body prepend was actually
+                    // pasted (decision-5, 2026-08-18) — an empty-body forward uses the native verb
+                    // untouched and needs no Accessibility, mirroring oracle B (pastes only when a
+                    // message is provided). Keeps the surfacing consistent with the reply notes.
+                    note = prepend.isEmpty
+                        ? "forwarded via Mail's native forward verb — the original's attachments and formatting are carried"
+                        : "forwarded via Mail's native forward verb — the original's attachments and formatting are carried; --body was pasted as HTML (needed Accessibility, stole focus) so Mail's forwarded original keeps its HTML layer"
                 case .notFound:
                     throw AppleError.notFound("message '\(imid)' is not reachable in Mail.app to forward.")
                 case .sendFailed(let newID):
@@ -1143,20 +1143,58 @@ enum RichDraft {
     }
 }
 
-/// gap17/gap15 (pinned): which live path a reply takes. Exactly ONE of the three is true
-/// when willExecute; all false otherwise.
-///  * native — plain reply via Mail's native verb, ALL modes (send/draft/open);
-///  * nativeHtml — THREADED HTML via the oracle's pasteboard flow (gui-send, or an --html
-///    draft/open) — needs Accessibility, steals focus;
-///  * openHtml — the reliable no-Accessibility default for --html --mode send: a rendered
-///    .eml compose window (unthreaded, disclosed).
+/// gap17/gap15 + D8 item 5 (pinned): which live path a reply takes. Exactly ONE of the two is
+/// true when willExecute; both false otherwise.
+///  * nativeHtml — Mail's native `reply` verb + the oracle's NSPasteboard paste. Serves BOTH the
+///    plain reply (D8: an oracle-B plain-wrapped fragment preserving Mail's HTML quote) AND the
+///    threaded HTML reply (gui-send, or an --html draft/open) — needs Accessibility, steals focus.
+///  * openHtml — the reliable no-Accessibility path for --html --mode send WITHOUT --gui-send: a
+///    rendered .eml compose window (unthreaded, disclosed).
+/// The former plain `native` (`set content`) path was REMOVED per D8: it flattened Mail's HTML
+/// quote layer, the last behavior-inferior mail sub-path.
 enum ReplyRouting {
     static func decide(willExecute: Bool, hasHtml: Bool, guiSend: Bool, mode: String)
-        -> (native: Bool, nativeHtml: Bool, openHtml: Bool) {
-        guard willExecute else { return (false, false, false) }
-        if !hasHtml { return (true, false, false) }
-        if guiSend || mode != "send" { return (false, true, false) }
-        return (false, false, true)
+        -> (nativeHtml: Bool, openHtml: Bool) {
+        guard willExecute else { return (false, false) }
+        if !hasHtml { return (true, false) }                 // plain → pasteboard (D8: preserves quote)
+        if guiSend || mode != "send" { return (true, false) }
+        return (false, true)
+    }
+}
+
+/// Oracle B's reply/forward body → HTML-fragment wrappers (`tools/compose.py`), ported PURE so the
+/// pasteboard fragment is byte-exact to the oracle and revert-red pinnable without live Mail.
+enum MailComposeFragment {
+    /// Python `html.escape` with its DEFAULT quote=True (`&` first): & < > " ' →
+    /// &amp; &lt; &gt; &quot; &#x27;. This matches oracle B's `html_escape` exactly — NOT
+    /// `EmlBuilder.escapeHTML`, which emits `&#39;` for the apostrophe (renders identically but is
+    /// not the oracle's byte; the repo pins the oracle's byte elsewhere, e.g. RichDraft.htmlFromText).
+    static func htmlEscape(_ s: String) -> String {
+        s.replacingOccurrences(of: "&", with: "&amp;")
+            .replacingOccurrences(of: "<", with: "&lt;")
+            .replacingOccurrences(of: ">", with: "&gt;")
+            .replacingOccurrences(of: "\"", with: "&quot;")
+            .replacingOccurrences(of: "'", with: "&#x27;")
+    }
+
+    /// The gap divs oracle B appends so a visible gap separates the pasted body from Mail's quoted
+    /// original (Mail strips trailing <br>, hence divs — compose.py:521-523).
+    static let gapDivs = "<div><br></div><div><br></div>"
+
+    /// `reply_to_email` plain branch (compose.py:527-530):
+    /// `html_content = f"<div>{escape(body).replace(chr(10),'<br>')}</div>{gap}"`.
+    static func replyPlain(_ body: String) -> String {
+        "<div>" + htmlEscape(body).replacingOccurrences(of: "\n", with: "<br>") + "</div>" + gapDivs
+    }
+
+    /// `reply_to_email` HTML branch (compose.py:524-525): `html_content = body_html + gap`.
+    static func replyHtml(_ html: String) -> String { html + gapDivs }
+
+    /// `forward_email` message branch (compose.py:1033-1035):
+    /// `fwd_html_content = f"{escape(msg).replace(chr(10),'<br>')}<br><br>"` (NO div wrapper, NO
+    /// gap divs — the forward's own shape). Only produced when a prepend body is given.
+    static func forwardPrepend(_ body: String) -> String {
+        htmlEscape(body).replacingOccurrences(of: "\n", with: "<br>") + "<br><br>"
     }
 }
 
@@ -1428,8 +1466,22 @@ struct DraftCommand: ParsableCommand {
                     // allowlist INSIDE the single AppleScript call (find→verify→send, no TOCTOU).
                     // Unsandboxed, the wildcard allowlist skips recipient restriction (oracle
                     // parity: manage_drafts sends the draft as addressed, on call).
+                    //
+                    // D8 (SAFETY WINS): a draft-send delivers real mail, so it is throttled like a
+                    // normal send — consume the `sends` budget here (mirrors `mail send`/`forward`)
+                    // and pass oracle A's 100-recipient cap into the script (enforced BEFORE the
+                    // open/send). Consuming before dispatch matches `forward`, where an in-script
+                    // refusal after `consume` also spends a slot — deliberately stricter, and rare.
+                    let rl = SendRateLimiter.consume()
+                    guard rl.allowed else { throw AppleError.validation(SendRateLimiter.refusal(rl)) }
+                    if rl.degraded {
+                        FileHandle.standardError.write(Data(
+                            ("warning: send rate-limit state is unwritable — the oracle's 3-sends/60s cap "
+                             + "is NOT being enforced for this call (failing open).\n").utf8))
+                    }
                     switch try script.sendDraft(subject: s, prefix: sandboxActive ? TestMode.sandboxPrefix : "",
-                                                account: account, allowlist: outboundAllowlist(sandboxActive: sandboxActive)) {
+                                                account: account, allowlist: outboundAllowlist(sandboxActive: sandboxActive),
+                                                recipientCap: outboundRecipientCap) {
                     case .sent(let recipients):
                         executed = true
                         draftSentTo = recipients
@@ -1445,6 +1497,11 @@ struct DraftCommand: ParsableCommand {
                         throw AppleError.notFound("no \(labeled)draft with the exact subject \"\(s)\"\(inAcct) found.")
                     case .noRecipients:
                         throw AppleError.validation("draft \"\(s)\" has no valid recipients; add a recipient in Mail or recreate it.")
+                    case .tooManyRecipients(let n):
+                        // D8: oracle A's send cap, applied to the draft-send. Matches the CLI's own
+                        // `guardOutbound` phrasing (oracle A's "Too many recipients (max: 100)" +
+                        // the "— N given" addendum). Nothing was opened or sent.
+                        throw AppleError.validation("Too many recipients (max: \(outboundRecipientCap)) — \(n) given.")
                     case .blocked(let addr):
                         // Under an active sandbox a `.blocked` carries a REAL non-self address
                         // (the self-only allowlist ran) — a sandbox-policy refusal that MUST

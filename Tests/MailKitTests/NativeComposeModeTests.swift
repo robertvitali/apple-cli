@@ -37,8 +37,7 @@ struct NativeComposeModeTests {
     /// explicit "\n"; this pin holds the seam: no line in any assembled compose script may
     /// carry anything after `end try`.
     @Test func assembledScriptsKeepEveryEndTryOnItsOwnLine() {
-        for (name, src) in [("reply", MailScript.nativeReplyScriptSource),
-                            ("replyHtml", MailScript.nativeReplyHtmlScriptSource),
+        for (name, src) in [("replyHtml", MailScript.nativeReplyHtmlScriptSource),
                             ("forward", MailScript.nativeForwardScriptSource)] {
             for line in src.split(separator: "\n", omittingEmptySubsequences: false)
             where line.contains("end try") {
@@ -50,27 +49,20 @@ struct NativeComposeModeTests {
 
     // MARK: mode plumbing
 
-    /// gap17: the plain reply script takes the delivery mode as argv item 11 and never
-    /// pastes; forward has no mode surface and pins itself to "send".
-    @Test func modePreamblesAreWiredPerScript() {
-        let reply = MailScript.nativeReplyScriptSource
-        #expect(reply.contains("set theMode to item 11 of argv"))
-        #expect(reply.contains("set htmlPasteRaw to \"\""))
-        // Composed WINDOWLESS in every mode (server-auto-save hardening: a visible-then-
-        // refused reply could leave a recallable non-allowlisted copy in remote Drafts);
-        // the tail reveals only after the audit.
-        #expect(reply.contains("reply msg opening window false reply to all true"))
-        #expect(reply.contains("reply msg opening window false reply to all false"))
-        #expect(!reply.contains("opening window true"))
-        // The plain script carries only the FAIL-LOUD stub of the paste handler (so the
-        // assembly harness can statically prove every called handler exists) — never the
-        // real pasteboard implementation.
-        #expect(reply.contains("pasteHtmlIntoWindow is not available in this script"))
-        #expect(!reply.contains("NSPasteboard's"))   // the CODE form; a tail comment names the word
-
+    /// D8 item 5: forward has no mode surface (pins "send") and now inserts its --body prepend via
+    /// the oracle's NSPasteboard paste — reading the fragment PATH from argv, NEVER `set content`
+    /// (which flattened Mail's forwarded HTML original). An empty fragment path ⇒ no paste.
+    @Test func forwardPreambleIsWiredForThePasteFlow() {
         let fwd = MailScript.nativeForwardScriptSource
         #expect(fwd.contains("set theMode to \"send\""))
-        #expect(fwd.contains("set htmlPasteRaw to \"\""))
+        #expect(fwd.contains("set htmlPasteRaw to item 3 of argv"))
+        // The prepend now travels through the same pasteboard machinery as the HTML reply.
+        #expect(fwd.contains("use framework \"Foundation\""))
+        #expect(fwd.contains("use framework \"AppKit\""))
+        #expect(fwd.contains("NSPasteboardTypeHTML"))
+        #expect(fwd.contains("keystroke \"v\" using command down"))
+        // The forwarded original's HTML layer is preserved — nothing clobbers `content`.
+        #expect(!fwd.contains("set content of m"))
     }
 
     /// The shared tail branches AFTER the allowlist audit: paste (HTML path), then the
@@ -78,7 +70,9 @@ struct NativeComposeModeTests {
     /// widen the very staleness window the re-verify closes), then draft/open/send — so
     /// every mode passes the SAME guard (ordering pinned by index, not just presence).
     @Test func tailAuditsBeforeAnyDeliveryBranch() throws {
-        let src = MailScript.nativeReplyScriptSource
+        // The forward script embeds the same shared `guardAndSendTail`, so it pins the ordering
+        // independently of the HTML reply (which the paste-specific test below also covers).
+        let src = MailScript.nativeForwardScriptSource
         let audit = try #require(src.range(of: "auditedAddrs(m, allowList)"))
         let paste = try #require(src.range(of: "my pasteHtmlIntoWindow(m, htmlPasteRaw)"))
         let reverify = try #require(src.range(of: "collectAddrs(m)"))
@@ -181,20 +175,23 @@ struct NativeComposeModeTests {
             for hasHtml in [false, true] {
                 for guiSend in [false, true] where !guiSend || hasHtml {   // guard rejects gui-send without html
                     let r = ReplyRouting.decide(willExecute: true, hasHtml: hasHtml, guiSend: guiSend, mode: mode)
-                    #expect([r.native, r.nativeHtml, r.openHtml].filter { $0 }.count == 1,
+                    #expect([r.nativeHtml, r.openHtml].filter { $0 }.count == 1,
                             "mode=\(mode) html=\(hasHtml) gui=\(guiSend)")
                     let p = ReplyRouting.decide(willExecute: false, hasHtml: hasHtml, guiSend: guiSend, mode: mode)
-                    #expect(p == (false, false, false))
+                    #expect(p == (false, false))
                 }
             }
         }
-        // The concrete table: plain → native (all modes); html+gui → pasteboard (all modes);
-        // html draft/open → pasteboard; html send w/o gui → the unthreaded .eml window.
-        #expect(ReplyRouting.decide(willExecute: true, hasHtml: false, guiSend: false, mode: "draft") == (true, false, false))
-        #expect(ReplyRouting.decide(willExecute: true, hasHtml: true, guiSend: true, mode: "send") == (false, true, false))
-        #expect(ReplyRouting.decide(willExecute: true, hasHtml: true, guiSend: false, mode: "draft") == (false, true, false))
-        #expect(ReplyRouting.decide(willExecute: true, hasHtml: true, guiSend: false, mode: "open") == (false, true, false))
-        #expect(ReplyRouting.decide(willExecute: true, hasHtml: true, guiSend: false, mode: "send") == (false, false, true))
+        // D8 item 5: plain → pasteboard for EVERY mode (preserving Mail's HTML quote — the former
+        // `set content` `native` path is gone); html+gui → pasteboard; html draft/open →
+        // pasteboard; html send w/o gui → the unthreaded no-Accessibility .eml window.
+        #expect(ReplyRouting.decide(willExecute: true, hasHtml: false, guiSend: false, mode: "send") == (true, false))
+        #expect(ReplyRouting.decide(willExecute: true, hasHtml: false, guiSend: false, mode: "draft") == (true, false))
+        #expect(ReplyRouting.decide(willExecute: true, hasHtml: false, guiSend: false, mode: "open") == (true, false))
+        #expect(ReplyRouting.decide(willExecute: true, hasHtml: true, guiSend: true, mode: "send") == (true, false))
+        #expect(ReplyRouting.decide(willExecute: true, hasHtml: true, guiSend: false, mode: "draft") == (true, false))
+        #expect(ReplyRouting.decide(willExecute: true, hasHtml: true, guiSend: false, mode: "open") == (true, false))
+        #expect(ReplyRouting.decide(willExecute: true, hasHtml: true, guiSend: false, mode: "send") == (false, true))
     }
 
     /// The positional argv contract both reply wrappers share (review M6): the scripts read
@@ -222,8 +219,7 @@ struct NativeComposeModeTests {
     @Test func assembledScriptsOsacompile() throws {
         let osacompile = "/usr/bin/osacompile"
         guard FileManager.default.isExecutableFile(atPath: osacompile) else { return }
-        for (name, src) in [("reply", MailScript.nativeReplyScriptSource),
-                            ("replyHtml", MailScript.nativeReplyHtmlScriptSource),
+        for (name, src) in [("replyHtml", MailScript.nativeReplyHtmlScriptSource),
                             ("forward", MailScript.nativeForwardScriptSource),
                             ("saveDraft", MailScript.saveOpenDraftScriptSource)] {
             let dir = FileManager.default.temporaryDirectory

@@ -795,11 +795,12 @@ public struct MailScript {
                 -- staleness window the re-verify exists to close) and AFTER the first audit, so
                 -- a refused reply is discarded unpasted; delivery then branches on theMode so a
                 -- draft files the pasted body and a send sends it.
-                -- (pasteHtmlIntoWindow is defined ONLY in nativeReplyHtmlScript; the plain
-                -- reply/forward scripts pin htmlPasteRaw to "" so this call is unreachable
-                -- there — and AppleScript resolves `my` handlers at runtime, so if that
-                -- invariant ever broke, the undefined-handler error lands in this try and
-                -- refuses via setupfail. Fail-closed either way.)
+                -- (pasteHtmlIntoWindow is defined in nativeReplyHtmlScript AND
+                -- nativeForwardScript — the two scripts that embed this tail; the paste is
+                -- skipped only when htmlPasteRaw is empty (an empty-body forward). AppleScript
+                -- resolves `my` handlers at runtime, so if a tail-embedding script ever lacked
+                -- the handler, the undefined-handler error lands in this try and refuses via
+                -- setupfail. Fail-closed either way.)
                 if htmlPasteRaw is not "" then
                     try
                         my pasteHtmlIntoWindow(m, htmlPasteRaw)
@@ -873,74 +874,12 @@ public struct MailScript {
                 return "ok" & US & newID & US & verified
     """
 
-    private static let nativeReplyScript = """
-    on run argv
-        set theBody to item 3 of argv
-        set doAll to (item 4 of argv) is "1"
-        set senderAddr to item 5 of argv
-        set allowRaw to item 6 of argv
-        set attRaw to item 7 of argv
-        set ccRaw to item 8 of argv
-        set bccRaw to item 9 of argv
-        set mbxHint to item 10 of argv
-        set theMode to item 11 of argv -- send | draft | open (gap17)
-        set htmlPasteRaw to "" -- plain script: never pastes
-        set US to (ASCII character 31)
-        set RS to (ASCII character 30)
-        set msg to my findMsgHinted(item 1 of argv, item 2 of argv, mbxHint)
-        if msg is missing value then return "notfound"
-        -- NOTE: the reply is ALWAYS composed windowless below (review: Mail server-auto-saves
-        -- an OPEN compose window on IMAP/Gmail, so a visible-then-REFUSED reply could leave a
-        -- recallable copy with a non-allowlisted recipient in remote Drafts). The shared tail
-        -- reveals the window only AFTER the allowlist audit passes — draft mode needs it for
-        -- `save m` (measured: the windowless save was a silent discard), open for the operator.
-        set m to missing value
-        try
-            tell application "Mail"
-                if doAll then
-                    set m to reply msg opening window false reply to all true
-                else
-                    set m to reply msg opening window false reply to all false
-                end if
-            end tell
-        on error errMsg
-            return "createfail" & US & errMsg
-        end try
-        -- EVERY step between creating the draft and the guard is wrapped: the draft already
-        -- exists and is addressed by MAIL to whoever it chose, so bailing out uncaught would
-        -- orphan a possibly-real-recipient message in Mail's outgoing store.
-        try
-            tell application "Mail"
-                -- Mail pre-fills the native quoted original; PREPEND the body so the quote
-                -- survives (the s-morgan oracle clobbers `content`, losing its own quote).
-                try
-                    set content of m to theBody & return & return & (content of m)
-                on error
-                    set content of m to theBody
-                end try
-                if senderAddr is not "" then set sender of m to senderAddr
-            end tell
-            -- Mail addresses the reply itself; --cc/--bcc are ADDITIONS on top, and the audit
-            -- below validates the union, so a caller-supplied Cc cannot escape the allowlist.
-            my addRecipients(m, ccRaw, US, "cc")
-            my addRecipients(m, bccRaw, US, "bcc")
-        on error errMsg
-            return "setupfail" & US & errMsg & US & my discardDraft(m)
-        end try
-    """ + "\n" + guardAndSendTail + """
-
-
-    end run
-
-    on pasteHtmlIntoWindow(theMsg, htmlPath)
-        -- UNREACHABLE stub: this script pins htmlPasteRaw to "", so the shared tail's
-        -- paste branch never fires here. Defined anyway so the assembly harness can
-        -- statically prove every called handler exists — and so a broken invariant
-        -- fails LOUDLY (raises into the tail's try, refusing via setupfail) instead of
-        -- as a bare undefined-handler runtime error.
-        error "internal: pasteHtmlIntoWindow is not available in this script"
-    end pasteHtmlIntoWindow
-    """
+    // The plain reply's former `set content` script (which flattened Mail's HTML quote layer) was
+    // REMOVED per HUMAN-DECISIONS.md D8 ruling item 5 (2026-08-18): every plain reply now routes
+    // through `nativeReplyHtmlScript` below with an oracle-B-shaped plain-wrapped fragment
+    // (`MailComposeFragment.replyPlain`), so Mail's native quoted original keeps its HTML layer —
+    // matching oracle B, which pastes even plain-text reply bodies. One reply script now serves
+    // both plain and HTML.
 
     /// gap15/extra15: the ORACLE's HTML reply flow — Mail's native `reply` verb (threading
     /// headers + replied-to state + Mail's own quoted original in the HTML layer) with the
@@ -1070,7 +1009,8 @@ public struct MailScript {
         set m to missing value
         try
             tell application "Mail"
-                -- Composed WINDOWLESS like the plain script (server-auto-save hardening);
+                -- Composed WINDOWLESS (server-auto-save hardening — a visible-then-refused
+                -- window could leave a server auto-saved copy in remote Drafts);
                 -- pasteHtmlIntoWindow reveals the window itself, which runs only AFTER the
                 -- allowlist audit in the shared tail.
                 if doAll then
@@ -1098,9 +1038,23 @@ public struct MailScript {
     end run
     """
 
+    // gap17/extra15 (D8 ruling item 5): the PLAIN forward now inserts its prepend body via the
+    // oracle's NSPasteboard HTML paste, NEVER `set content` — which clobbered the HTML layer of
+    // Mail's native forwarded original (oracle B forward_email pastes the prepend as HTML for
+    // exactly this reason, compose.py:1027-1070). When no prepend body is given, `htmlPasteRaw` is
+    // "" and the shared tail skips the paste, so Mail's native forward (which already carries the
+    // original's attachments + HTML formatting) is delivered untouched — matching oracle B, which
+    // only pastes when a `message` is provided. Runs via runViaStdin (AppleScriptObjC `use
+    // framework`), same as the threaded HTML reply; the prepend fragment travels by temp-file PATH
+    // read with NSString (never interpolated into source; the oracle shells `cat` — the injection
+    // class this repo refuses). Requires Accessibility and steals focus when a prepend is pasted.
     private static let nativeForwardScript = """
+    use framework "Foundation"
+    use framework "AppKit"
+    use scripting additions
+
     on run argv
-        set theBody to item 3 of argv
+        set htmlPasteRaw to item 3 of argv -- prepend fragment PATH, or "" for no prepend
         set toRaw to item 4 of argv
         set ccRaw to item 5 of argv
         set bccRaw to item 6 of argv
@@ -1109,26 +1063,22 @@ public struct MailScript {
         set attRaw to item 9 of argv
         set mbxHint to item 10 of argv
         set theMode to "send" -- forward has no mode surface
-        set htmlPasteRaw to ""
         set US to (ASCII character 31)
         set RS to (ASCII character 30)
         set msg to my findMsgHinted(item 1 of argv, item 2 of argv, mbxHint)
         if msg is missing value then return "notfound"
         set m to missing value
         try
+            -- Composed WINDOWLESS (server-auto-save hardening); pasteHtmlIntoWindow reveals the
+            -- window itself, and only AFTER the allowlist audit in the shared tail.
             tell application "Mail" to set m to forward msg opening window false
         on error errMsg
             return "createfail" & US & errMsg
         end try
         try
             tell application "Mail"
-                if theBody is not "" then
-                    try
-                        set content of m to theBody & return & return & (content of m)
-                    on error
-                        set content of m to theBody
-                    end try
-                end if
+                -- NO `set content` here (extra15): the prepend arrives via the pasteboard so
+                -- Mail's forwarded original keeps its HTML layer.
                 if senderAddr is not "" then set sender of m to senderAddr
             end tell
             my addRecipients(m, toRaw, US, "to")
@@ -1143,13 +1093,94 @@ public struct MailScript {
     end run
 
     on pasteHtmlIntoWindow(theMsg, htmlPath)
-        -- UNREACHABLE stub: this script pins htmlPasteRaw to "", so the shared tail's
-        -- paste branch never fires here. Defined anyway so the assembly harness can
-        -- statically prove every called handler exists — and so a broken invariant
-        -- fails LOUDLY (raises into the tail's try, refusing via setupfail) instead of
-        -- as a bare undefined-handler runtime error.
-        error "internal: pasteHtmlIntoWindow is not available in this script"
+        -- NSString file read — no shell hop for a path argument. MEASURED: `(missing value) as
+        -- text` coerces to the literal string "missing value" WITHOUT erroring, so the read is
+        -- tested explicitly and a missing/unreadable fragment raises into the caller's setupfail
+        -- instead of pasting the literal text "missing value" (review H1).
+        set rawHtml to (current application's NSString's stringWithContentsOfFile:htmlPath encoding:(current application's NSUTF8StringEncoding) |error|:(missing value))
+        if rawHtml is missing value then error "html fragment unreadable: " & htmlPath
+        set htmlString to rawHtml as text
+        set pb to current application's NSPasteboard's generalPasteboard()
+        set oldClip to pb's stringForType:(current application's NSPasteboardTypeString)
+        pb's clearContents()
+        set htmlData to (current application's NSString's stringWithString:htmlString)'s dataUsingEncoding:(current application's NSUTF8StringEncoding)
+        pb's setData:htmlData forType:(current application's NSPasteboardTypeHTML)
+        set lenBefore to 0
+        try
+            tell application "Mail" to set lenBefore to (count of characters of (content of theMsg))
+        end try
+        -- WINDOW BINDING (review HIGH): a blind Cmd-V lands in whatever holds keyboard focus, and a
+        -- stray compose window sharing this subject is the likeliest front window. Tag OUR message's
+        -- subject with a per-call nonce, reveal it, and refuse to type until the FRONT window carries
+        -- the nonce.
+        set theNonce to "apple-cli-" & (random number from 100000 to 999999)
+        set realSubject to ""
+        tell application "Mail"
+            set realSubject to subject of theMsg
+            set subject of theMsg to realSubject & " " & theNonce
+            set visible of theMsg to true
+            activate
+        end tell
+        set bound to false
+        try
+            tell application "System Events"
+                set frontmost of process "Mail" to true
+                repeat 12 times
+                    if (exists front window of process "Mail") then
+                        if (name of front window of process "Mail") contains theNonce then
+                            set bound to true
+                            exit repeat
+                        end if
+                    end if
+                    delay 0.25
+                end repeat
+            end tell
+        end try
+        -- Restore the real subject BEFORE anything else can raise, so a refusal never leaves the
+        -- nonce on the draft.
+        try
+            tell application "Mail" to set subject of theMsg to realSubject
+        end try
+        if not bound then
+            my restoreClipboard(pb, oldClip)
+            error "the forward compose window never took focus; refusing to paste"
+        end if
+        try
+            tell application "System Events"
+                tell process "Mail"
+                    keystroke "v" using command down
+                end tell
+            end tell
+        on error errMsg
+            my restoreClipboard(pb, oldClip)
+            error errMsg
+        end try
+        delay 0.5
+        -- Paste READBACK (review M2): a Cmd-V Mail swallows raises no error — verify the target
+        -- grew, or refuse BEFORE any delivery branch. Only for a non-empty fragment.
+        if (count of characters of htmlString) > 0 then
+            set lenAfter to 0
+            try
+                tell application "Mail" to set lenAfter to (count of characters of (content of theMsg))
+            end try
+            if lenAfter is lenBefore then
+                my restoreClipboard(pb, oldClip)
+                error "paste verification failed: the forward body did not change (keystroke likely landed in another window)"
+            end if
+        end if
+        my restoreClipboard(pb, oldClip)
     end pasteHtmlIntoWindow
+
+    on restoreClipboard(pb, oldClip)
+        -- Best-effort clipboard restore (string layer only); when the prior clipboard had no string
+        -- flavor, still CLEAR it so the outgoing email's HTML does not linger on the pasteboard.
+        try
+            pb's clearContents()
+            if oldClip is not missing value then
+                pb's setString:oldClip forType:(current application's NSPasteboardTypeString)
+            end if
+        end try
+    end restoreClipboard
     """
 
     /// Result of a native reply/forward.
@@ -1229,22 +1260,7 @@ public struct MailScript {
         }
     }
 
-    /// Reply to a located message with Mail's native `reply` verb (threading headers +
-    /// replied-to state + native quoted original), prepending `body`. `cc`/`bcc` are ADDED on
-    /// top of Mail's own addressing. `selfAllowlist` is the operator's self-only address set;
-    /// every recipient Mail ends up with must match it or the reply is discarded unsent.
-    public func nativeReply(internetMessageID: String, accountName: String?, body: String,
-                            replyAll: Bool, sender: String?, selfAllowlist: [String],
-                            cc: [String] = [], bcc: [String] = [],
-                            attachmentPaths: [String] = [], mailboxHint: String = "",
-                            mode: String = "send") throws -> NativeComposeOutcome {
-        return MailScript.parseNativeCompose(try runLocated(MailScript.nativeReplyScript, id: internetMessageID, account: accountName,
-                                                            extra: MailScript.replyExtras(body: body, replyAll: replyAll, sender: sender,
-                                                                                          selfAllowlist: selfAllowlist, attachmentPaths: attachmentPaths,
-                                                                                          cc: cc, bcc: bcc, mailboxHint: mailboxHint, mode: mode)))
-    }
-
-    /// The positional extra-args contract for `nativeReplyScript` (argv items 3–11), and —
+    /// The positional extra-args contract for the reply pasteboard script (argv items 3–11), and —
     /// with `htmlFragmentPath` appended as item 12 — for `nativeReplyHtmlScript`. PINNED
     /// (review M6): the scripts read `item N of argv` positionally, so a silent reorder at
     /// the call site ships green through every other tier and fails only against live Mail.
@@ -1275,24 +1291,27 @@ public struct MailScript {
     }
 
     /// Internal for the logic tier: source pins on the assembled compose scripts.
-    static var nativeReplyScriptSource: String { nativeReplyScript }
     static var nativeReplyHtmlScriptSource: String { nativeReplyHtmlScript }
     static var nativeForwardScriptSource: String { nativeForwardScript }
 
     /// Forward a located message with Mail's native `forward` verb (carries the original's
-    /// attachments + rich formatting), prepending `body`. Recipients come from the caller, but
-    /// are still re-read and allowlist-checked before send (defense in depth).
-    public func nativeForward(internetMessageID: String, accountName: String?, body: String,
+    /// attachments + rich formatting). A non-empty `htmlFragmentPath` (a temp file the COMMAND
+    /// wrote from the prepend body via `MailComposeFragment.forwardPrepend`) is pasted on top via
+    /// the oracle's NSPasteboard flow so Mail's forwarded original keeps its HTML layer; "" means
+    /// no prepend and no paste. Recipients come from the caller but are still re-read and
+    /// allowlist-checked before send (defense in depth). Runs via stdin (AppleScriptObjC).
+    public func nativeForward(internetMessageID: String, accountName: String?, htmlFragmentPath: String,
                               to: [String], cc: [String], bcc: [String], sender: String?,
                               selfAllowlist: [String], attachmentPaths: [String] = [],
                               mailboxHint: String = "") throws -> NativeComposeOutcome {
         let US = MailScript.US
         return MailScript.parseNativeCompose(try runLocated(MailScript.nativeForwardScript, id: internetMessageID, account: accountName,
-                                                             extra: [body, to.joined(separator: US), cc.joined(separator: US),
+                                                             extra: [htmlFragmentPath, to.joined(separator: US), cc.joined(separator: US),
                                                                      bcc.joined(separator: US), sender ?? "",
                                                                      selfAllowlist.joined(separator: US),
                                                                      attachmentPaths.joined(separator: US),
-                                                                     mailboxHint]))
+                                                                     mailboxHint],
+                                                             viaStdin: true))
     }
 
     // MARK: HTML delivery — reliable open (default) + opt-in GUI keystroke auto-send
@@ -3121,6 +3140,10 @@ public struct MailScript {
         set thePrefix to item 2 of argv
         set acctFilter to item 3 of argv
         set allowRaw to item 4 of argv
+        -- D8 (SAFETY WINS): oracle A's 100-recipient send cap, applied to a draft-send so it is
+        -- throttled like a normal send. Passed in (never hardcoded) so `outboundRecipientCap` is
+        -- single-sourced. A count above it returns the `toomany:` sentinel BEFORE any open/send.
+        set theCap to (item 5 of argv) as integer
         set US to (ASCII character 31)
         set AppleScript's text item delimiters to US
         set allowList to text items of allowRaw
@@ -3151,6 +3174,7 @@ public struct MailScript {
                                         -- returns its own sentinel (never masked as a send error).
                                         set addrs to my collectAddrs(m)
                                         if (count of addrs) is 0 then return "norecipients"
+                                        if (count of addrs) > theCap then return "toomany:" & (count of addrs)
                                         set bad to my firstDisallowed(addrs, allowList)
                                         if bad is not "" then return "blocked:" & bad
                                         -- (2)–(6) open-then-send CRITICAL SECTION, wrapped in its OWN
@@ -3205,6 +3229,7 @@ public struct MailScript {
                                             -- depth — this is the object actually about to be sent)
                                             set addrs2 to my collectAddrs(target)
                                             if (count of addrs2) is 0 then return "norecipients"
+                                            if (count of addrs2) > theCap then return "toomany:" & (count of addrs2)
                                             set bad2 to my firstDisallowed(addrs2, allowList)
                                             if bad2 is not "" then return "blocked:" & bad2
                                             -- Build the sent-recipient report BEFORE dispatch. Any error in
@@ -3296,6 +3321,9 @@ public struct MailScript {
         /// The subject matched an outgoing message whose recipients are NOT the draft's own —
         /// most likely an operator compose window sharing the subject. Nothing was sent.
         case wrongWindow
+        /// D8: the draft's stored recipient count exceeds oracle A's 100-recipient send cap.
+        /// Carries the actual count. Nothing was opened or sent — the cap fires before any dispatch.
+        case tooManyRecipients(Int)
 
         /// Pure parser for `sendDraftScript`'s raw stdout → result. Extracted so the safety-critical
         /// string→enum mapping (esp. the `blocked:<addr>` verdict and the recipient split) is
@@ -3308,6 +3336,9 @@ public struct MailScript {
             if raw == "norecipients" { return .noRecipients }
             if raw == "openfailed" { return .openFailed }
             if raw == "wrongwindow" { return .wrongWindow }
+            if raw.hasPrefix("toomany:"), let n = Int(raw.dropFirst("toomany:".count)) {
+                return .tooManyRecipients(n)
+            }
             if raw.hasPrefix("blocked:") { return .blocked(String(raw.dropFirst("blocked:".count))) }
             if raw.hasPrefix("senderror:") { return .sendError(String(raw.dropFirst("senderror:".count))) }
             if raw == "sent" { return .sent([]) }
@@ -3330,11 +3361,13 @@ public struct MailScript {
     /// untouched so the caller can retry or send it manually. `.sendError(detail)` means `open`/`send`
     /// itself threw (Mail/network) AFTER recipient verification — reported honestly, never masked as
     /// `.notFound`.
-    public func sendDraft(subject: String, prefix: String, account: String?, allowlist: [String]) throws -> DraftSendResult {
+    public func sendDraft(subject: String, prefix: String, account: String?, allowlist: [String],
+                          recipientCap: Int) throws -> DraftSendResult {
         // `addressGuardHelpers` (collectAddrs + firstDisallowed) used to live inside this
         // script's own literal; it is now the SHARED block appended to every dispatching script.
         let out = try runner.run(MailScript.sendDraftScript + "\n" + MailScript.addressGuardHelpers, arguments: [
             subject, prefix, account ?? "", allowlist.joined(separator: MailScript.US),
+            String(recipientCap),
         ])
         guard let result = DraftSendResult.parse(out, us: MailScript.US) else {
             throw AppleScriptRunner.RunError.scriptFailed(status: 1, stderr: "sendDraft returned '\(out)'")

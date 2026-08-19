@@ -102,7 +102,7 @@ struct SendRateLimiterTests {
         #expect(d.degraded == true, "must be visible, not silent")
     }
 
-    @Test("a corrupt state file resets the window rather than refusing every send")
+    @Test("a corrupt state file resets the window (still allowed) but is flagged degraded, not silent")
     func corruptStateResets() throws {
         let url = tmpState("corrupt")
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
@@ -110,7 +110,10 @@ struct SendRateLimiterTests {
         try Data("not json at all".utf8).write(to: url)
         let d = SendRateLimiter.consume(stateURL: url)
         #expect(d.allowed == true)
-        #expect(d.degraded == false)
+        // Reset-to-empty (allowed) rather than bricking sends — but NOW flagged degraded so the
+        // caller warns on stderr. A persistently-unparseable file must not silently reset the cap to
+        // zero every call with no operator-visible signal (security review 2026-08-18).
+        #expect(d.degraded == true)
     }
 
     /// A FUTURE-dated stamp must not pin the window shut.
