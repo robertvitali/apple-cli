@@ -269,9 +269,12 @@ you saying so explicitly.
 adopt the **scoped standing rule**: *on an A-vs-B disagreement about a SAFETY limit (send rate,
 recipient caps, bulk caps on destructive ops), the stricter limit wins.* This knowingly makes the
 CLI stricter than oracle B on those paths — accepted as a deliberate safety posture for an
-agent-driven tool where a runaway mass-send is irreversible. Implementation tracked as a Q17-follow
-commit; the stricter-than-B posture is documented in `docs/port-specs/mail.md`. · **Filed:**
-2026-08-02 · **Blocks:** mail parent closure until the reply-limit + draft-send cap land.
+agent-driven tool where a runaway mass-send is irreversible. **LANDED 2026-08-19** in `86728f4`
+(ReplyRateLimiter 20/60s consumed once per live reply; draft-send consumes the sends budget +
+100-recipient in-script cap; dry-run never consumes; review-hardened with a cross-process flock
+and a corrupt-state degraded signal); the stricter-than-B posture is documented in
+`docs/port-specs/mail.md` (rate-limit table + rows 15/16). · **Filed:** 2026-08-02 ·
+**Blocks:** nothing — the mail-parent close gate is satisfied on this decision.
 
 Mail is the one domain replacing TWO servers (`AGENTS.md`): oracle A
 (s-morgan-jeffries@0.6.0) and oracle B (patrickfreyer@3.1.3). I verified they disagree about
@@ -661,5 +664,14 @@ time against real accounts.
 Items 1–3 are doc-only (landed with this ruling). Items 4–6 are code, each landing behind the usual
 gates. After they land + the read-only live-verifications pass, contacts/reminders/calendar/notes/
 mail are all clear to close, and I bring you D2.
+
+**LANDED (2026-08-19):** items 4–6 are implemented, double-fan-out-reviewed (two full OMC
+code/security/critic rounds, both APPROVE; the round-2 hardening added an flock cross-process
+lock + corrupt-state degraded signal to the D8 limiters), gate-tested (886 swift-testing +
+420 bats, all green), and pushed to `integration`:
+- `e67bb8c` fix(messages): space-form negative `--hours`/`--threshold` (gap6 fast-follow)
+- `39e6d4a` feat(notes): transient-retry + error-map ported from installed 2.7.5 (item 4 + #9)
+- `86728f4` feat(mail): plain-reply via pasteboard + D8 reply/draft-send rate caps (items 5–6)
+Remaining before the close recommendations: the read-only live-verifications (next loop step).
 
 ---
