@@ -34,6 +34,42 @@ returned (superset — may add more, must not drop any).
 - **Write ops** — only as clearly-labeled, tracked, cleaned-up test data on the real
   store (see Safety). Never a dangerous action; never diff a real send/mutation.
 
+## No personal data in this repo — ever, anywhere
+
+This repo is published. **Every committed byte is public**: source, tests, fixtures, comments,
+docs, JSON artifacts, AND commit messages. Nothing that identifies a real person may be committed —
+not the operator's, and especially not a third party's (theirs is not ours to disclose).
+
+**BANNED in tracked files and in commit messages:** real phone numbers, street addresses,
+geocoordinates, email addresses, real names, message/mail bodies, contact/calendar/reminder
+records, account identifiers, note contents, screenshots of any of the above. This holds even when
+the value is "already public" or "just the operator's own" — the rule is bright-line so it cannot
+be argued away one exception at a time.
+
+**Use these instead:** reserved-by-standard placeholders — `555-0100`–`555-0199` (RFC-reserved
+phone), `example.com` / `example.org` domains, `Jane Doe` / `Alice` / `Bob` names, `1 Main St` and
+invented coordinates. Synthesize fixtures rather than sampling a real store. **A "synthetic" label
+on real data is worse than no label** — the label is what the next audit trusts and skips.
+
+**Live oracle-diffs are how real data leaks in.** Running the CLI or an MCP against real accounts
+is required for parity work, and its output is FULL of personal data. Such output is scratch,
+never a commit: keep it in the session scratchpad, never under the repo, and never paste it into a
+test, a doc, an audit JSON, or a commit message. Quote counts, hashes, field names, and
+byte-lengths in write-ups — not values. `.gitignore` matches audit dumps BY CLASS (not by known
+filename) because the 2026-08-03 leak was a dump whose name matched none of the enumerated
+patterns.
+
+**Before every `git add`, check the diff for personal data**, and re-check the commit message
+separately — a file-path history rewrite (`filter-repo --path`) does NOT touch commit messages, so
+a leak there survives the obvious fix.
+
+**If you find personal data already committed: STOP and tell the operator immediately.** Redact at
+HEAD right away (cheap, always correct, forecloses nothing), and treat history rewriting as the
+operator's decision alone — it force-pushes published history and never reaches forks, caches, or
+existing clones. Never rewrite or force-push without an explicit instruction. The standing record
+of such incidents is `HUMAN-DECISIONS.md` (D7, D9); the repo was taken private on 2026-08-19 while
+that remediation is pending, which is a temporary containment, NOT a licence to relax this rule.
+
 ## Safety — product capability vs agent conduct
 
 **Product capability (write-model v2, operator decision 2026-08-01 — see
