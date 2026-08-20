@@ -339,9 +339,15 @@ envelope, e.g.:
 { "schema_version": 1, "tool": "apple-events", "ok": true, "data": [ ... ] }
 ```
 
-- `schema_version` is an **integer**, incremented **only** on a breaking output
-  change (i.e. it steps in lockstep with the CLI **MAJOR** for output-affecting
-  MAJORs). Adding optional fields does **not** bump it.
+- `schema_version` is an **integer**, incremented **only** on a breaking change to
+  the output's **SHAPE** — a key added-as-required, removed, renamed, or retyped,
+  or an enum/exit-code change. Adding optional fields does **not** bump it, and
+  neither does a **value-level** break (same keys, same types, a corrected value):
+  those ride the CLI **MAJOR** + the CHANGELOG instead. Operator ruling D11-A
+  (2026-08-19): `schema_version` answers exactly one question — *"can my parser
+  still read this?"* — so it must not churn on value fixes, or it stops being a
+  usable parse-compatibility signal. It therefore does NOT step in lockstep with
+  every output-affecting MAJOR; only with shape-affecting ones.
 - Agents can hard-assert `schema_version == N` and fail fast/loudly on an
   unexpected shape instead of silently misparsing — the single biggest robustness
   win for machine consumers.
@@ -489,9 +495,13 @@ review/test gates. Run per CLI at each release boundary:
 2. **Parity check (0.x only)** — update the MCP↔CLI parity matrix. If this release
    completes 100% strict-superset parity, this is the **1.0.0** release (§4.2);
    otherwise stay 0.x.
-3. **`schema_version`** — if the JSON output changed shape incompatibly, bump the
-   integer and (if supported) wire the `--schema-version` fallback for the prior
-   schema (§5.3).
+3. **`schema_version`** — if the JSON output changed **SHAPE** incompatibly (key
+   added-as-required / removed / renamed / retyped, or an enum or exit code
+   changed), bump the integer and (if supported) wire the `--schema-version`
+   fallback for the prior schema (§5.3). A **value-level** break with an unchanged
+   shape does NOT bump it — record it in the MAJOR + CHANGELOG (operator ruling
+   D11-A, 2026-08-19; this line and the `schema_version` bullet above previously
+   contradicted each other, one saying "output change" and the other "shape").
 
 **Verify (tests + review — HARD-GATEs)**
 4. Canonical test suite green on the release SHA (HARD-GATE 6): unit + integration,

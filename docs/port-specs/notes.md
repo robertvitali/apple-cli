@@ -80,6 +80,8 @@ Class tags: **C**=CORE (read/write data), **D**=DERIVED (convenience/aggregate o
 
 Also ships **MCP resources + prompts** (`registerResourcesAndPrompts`) and env config (`APPLE_NOTES_MCP_*`, file-config fallback) — not CLI-portable surface, noted for completeness.
 
+**NOTES-L4 — RATIFIED as an accepted structural divergence (operator ruling, 2026-08-19).** Measured against the installed oracle 2.7.5, the 4 resources are `notes://accounts`, `notes://folders`, `notes://stats`, and the templated `notes://note/{id}`; the 3 prompts are `search`, `summary`, and `weekly-review` (e.g. *"Review notes changed recently and surface follow-ups"*). **No capability is missing.** Every resource is a URI alias for a CLI command that already exists — `notes://accounts` → `notes list-accounts`, `notes://folders` → `notes list-folders`, `notes://stats` → `notes get-notes-stats`, `notes://note/{id}` → `notes get` — and a URI addressing scheme is meaningless to a shell caller. The prompts are canned instruction templates an MCP client offers in a menu; they are LLM-client UX text, not operations. The strict-superset bar is defined over operations, parameters, and behavior, and resources/prompts are none of those, so **nothing is ported and nothing is dropped** — this closes NOTES-L4 rather than deferring it.
+
 **Surface totals:** 34 tools. CORE ≈ 20, DERIVED ≈ 7, DIAGNOSTIC ≈ 7. Dual id-or-title addressing on ~11 tools is itself a behavioral requirement.
 
 ---

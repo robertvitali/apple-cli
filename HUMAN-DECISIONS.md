@@ -25,13 +25,37 @@ experiment, or applying a rule already written down. If it is knowable, the driv
 it instead of asking.
 
 **Status values:** `OPEN` (waiting on Robert) · `ANSWERED` (decided, being applied) ·
-`APPLIED` (decision is in the code/repo) · `SUPERSEDED`.
+`APPLIED` (decision is in the code/repo) · `RATIFIED` (decided, no code change needed) ·
+`WITHDRAWN` (should not have been asked) · `SUPERSEDED`.
+
+---
+
+## LEDGER — every decision at a glance (updated 2026-08-19)
+
+**Still needs you: D2, D3, D4, and the pending half of D9.** Everything else is settled.
+
+| # | Topic | Status | Ruling |
+|---|---|---|---|
+| D1 | `notes delete-folder` previews by default | **RATIFIED** | Keep the preview default — `--execute` stays required on the only irreversible-and-unrecoverable write |
+| D2 | Tag 1.0.0 + retire the six MCP servers | **OPEN** | **Terminal gate. Yours alone.** The loop stops here by design; go/no-go package is D13 |
+| D3 | Live-validate `mail send --gui-send` | **OPEN (task)** | Not a decision — needs ~10 min with you at the machine, self-addressed |
+| D4 | Live-validate iMessage group-chat send | **OPEN (task)** | Not a decision — no self-addressed shape exists, so only you can verify it |
+| D5 | Chasing the Messages fuzzy-search recall gap | WITHDRAWN | Should not have been asked; became ordinary queue work |
+| D6 | Eight parity posture calls | **APPLIED** | CONTACTS-L4 delete claim · NOTES-M1 restore 4 keys · NOTES-L4 structural divergence · gap10 keep opt-in body · **gap25 wire delete-rules live** · extra20 open by default |
+| D7 | Committed phone number in public history | **ANSWERED** | "B then A" — superseded by D9, which covers the same number plus more |
+| D8 | Which Mail oracle wins on a safety limit | RESOLVED | **Safety wins** — stricter limit wins on A/B conflicts; landed in `86728f4` |
+| D9 | Personal data published to a public repo | **ANSWERED, HALF PENDING** | Repo made **private** 2026-08-19 (step B done) · **history rewrite + `main` redaction still TODO** |
+| D10 | Search/find-contact length caps | WITHDRAWN | Should not have been filed |
+| D11 | What `schema_version` tracks | **APPLIED** | **Shape only** — value breaks ride the MAJOR + CHANGELOG; both policy lines rewritten to agree |
+| D12 | `notes save-attachment` can write to `~/.ssh` | **RATIFIED** | Keep strict Notes-oracle parity; residual documented, fleet stays intentionally inconsistent |
+| D13 | Strict-superset go/no-go package | **APPLIED** | All items landed + live-verified; only D2 itself remains |
 
 ---
 
 ## D1 — `notes delete-folder` previews by default instead of executing
 
-- **Status:** OPEN
+- **Status:** **RATIFIED 2026-08-19** — keep the preview-by-default deviation (option (a)).
+- **Resolution:** Robert ruled to keep `--execute` required. `delete-folder` is the CLI's only irreversible-AND-unrecoverable write (measured: it cascades, and cascaded notes do NOT reach Recently Deleted), so the one-command divergence from the oracle stands as a documented safety posture, same class as the `APPLE_ALLOW_EMPTY_TRASH` precedent. No code change.
 - **Filed:** 2026-08-02 (Notes write-model v2 flip, commit `ac0a7d0`)
 - **Category:** product-posture deviation
 - **One-line:** The only write that previews by default **without an oracle counterpart doing the
@@ -102,7 +126,7 @@ condition you asked for.
 
 ## D3 — Operator-present live validation: `mail send --gui-send`
 
-- **Status:** OPEN
+- **Status:** OPEN — **not a decision; a task needing you at the machine.** Nothing blocks on it.
 - **Filed:** 2026-08-02 (carried from task #34)
 - **Category:** operator-present verification
 
@@ -121,7 +145,7 @@ mean Mail's parity claim carries one "wired, not live-validated" asterisk until 
 
 ## D4 — Operator-present live validation: iMessage group-chat send
 
-- **Status:** OPEN
+- **Status:** OPEN — **not a decision; a task needing you at the machine.** Nothing blocks on it.
 - **Filed:** 2026-08-02
 - **Category:** operator-present verification
 
@@ -201,7 +225,8 @@ answer arrives before it matters.
 
 ## D6 — Eight parity gaps that are posture calls, not engineering
 
-- **Status:** OPEN (each independently answerable; none blocks the others)
+- **Status:** **APPLIED 2026-08-19** — all eight ruled (CAL-08 + REM-11 on 2026-08-18; the other six one-at-a-time on 2026-08-19).
+- **Resolution:** CONTACTS-L4 → **delete the claim** (`contacts mcp serve` was never built and is now explicitly out of scope; an MCP server inside the MCP replacement defeats D2). NOTES-M1 → **restore all four wire keys** (`content`/`tags`/`created`/`modified`), accepting the per-hit round-trip: strict parity. NOTES-L4 → **accepted structural divergence** (measured: the 4 resources are URI aliases for commands the CLI already has, the 3 prompts are LLM-client menu text; no capability missing). mail/gap10 → **keep the body opt-in** (the `content` key is always emitted, `""` when suppressed, so a ported caller never KeyErrors; Mail has no body index and the fetch is a slow scan). mail/gap25 → **wire the rule delete action LIVE** (full parity; the CLI can now install standing rules that permanently delete matching mail unattended — preview still warns). mail/extra20 → **open by default** (matches oracle B; `--no-open` suppresses; the command still cannot send anything).
 - **Filed:** 2026-08-02, from the HEAD reconciliation (`the D9 live-audit dump`)
 - **Category:** product-posture deviations
 
@@ -231,7 +256,7 @@ apply exactly that.
 
 ## D7 — Committed PII: a real phone number is in this PUBLIC repo's git history
 
-**Status:** OPEN · **Filed:** 2026-08-02 · **Blocks:** nothing (the queue routes around it)
+**Status:** **ANSWERED 2026-08-19 — "B then A", plus redact `main`.** · **Filed:** 2026-08-02 · Superseded in practice by [D9](#d9), which covers the same phone number plus two larger leaks; track the remediation there.
 
 **What I found.** A real phone number is committed in a tracked port spec and in
 `Tests/MessagesKitTests/MessagesKitTests.swift`. It predates the completion loop — I did not
@@ -322,7 +347,7 @@ everywhere instead of asking again.
 ---
 ## D9 — I published your personal data to this PUBLIC repo, twice, and one leak is bigger than the one I set out to fix
 
-**Status:** OPEN · **Filed:** 2026-08-03 · **Blocks:** nothing (the queue routes around it) ·
+**Status:** **ANSWERED 2026-08-19 — "B then A", plus redact `main`.** · **Filed:** 2026-08-03 · **Step B is DONE:** the repo was made **private** on 2026-08-19 (containment). **Step A (history rewrite + force-push, including the commit-message rewrite) and the `main` HEAD redaction are still PENDING** and are the only outstanding items in this file besides D2/D3/D4. A same-day value-free rescan of `integration` HEAD found three MORE live leaks the earlier pass missed — the phone "redaction" had been partial rather than complete, alongside two further address leaks; all fixed in `a-fix-commit`, and a standing no-personal-data rule was added to `AGENTS.md`. ·
 **Severity:** the highest-severity entry in this file. I caused both leaks.
 
 ### What is exposed
@@ -466,7 +491,8 @@ then MSG-5 stays open and Q6 is closed on its other two gaps.
 
 ## D11 — `schema_version` and a value-changed/shape-unchanged breaking change: the policy contradicts itself
 
-**Status:** OPEN · **Filed:** 2026-08-03 · **Blocks:** nothing (I took the conservative branch and
+**Status:** **APPLIED 2026-08-19 — option A (shape only).** · **Filed:** 2026-08-03 ·
+**Resolution:** `schema_version` tracks STRUCTURE only — key added-as-required/removed/renamed/retyped, or an enum/exit-code change. A value-level break with unchanged shape rides the MAJOR + CHANGELOG instead. Rationale: the field answers exactly one question, *"can my parser still read this?"*, so it must not churn on value fixes. Both contradicting lines in `docs/versioning-policy.md` were rewritten to agree (that edit, not the one commit, was the deliverable). No amend needed — the shipped commit already took this branch.
 documented it; the queue routes around this) · **Severity:** low blast radius today, but it decides
 how every future output-value break is versioned.
 
@@ -524,7 +550,8 @@ the actual deliverable here, not the choice for this one commit.
 
 ## D12 — Notes `save-attachment` can write to `~/.ssh` etc. (matches its oracle); Mail/Contacts refuse
 
-- **Status:** OPEN
+- **Status:** **RATIFIED 2026-08-19** — keep option (b), strict Notes-oracle parity.
+- **Resolution:** Robert ruled to keep `notes save-attachment` matching its oracle verbatim, so it can still target `~/.ssh` and friends; the fleet stays intentionally inconsistent (Mail and Contacts block credential dirs because THEIR oracles do). The residual stays documented in `PathConfinement.swift` + the Q13 CHANGELOG entry. No code change.
 - **Filed:** 2026-08-18 (Q13 review — critic finding on the shared write-confinement promotion)
 - **Category:** parity-vs-safety posture call
 - **One-line:** `apple notes save-attachment --path ~/.ssh/authorized_keys --execute` is **accepted**
@@ -556,7 +583,7 @@ honestly rather than silently claiming universal coverage. This entry is the dec
 
 ## D13 — Strict-superset GO/NO-GO package (the D2 gate)
 
-- **Status:** OPEN — this is the go/no-go package [D2](#d2--tag-100-and-retire-the-six-mcp-servers)
+- **Status:** **APPLIED 2026-08-19** — every item in the package is landed and live-verified; only [D2](#d2--tag-100-and-retire-the-six-mcp-servers) itself remains.
   promised. The loop has run every autonomous task to completion and STOPS here.
 - **Filed:** 2026-08-18, after the Q17 re-audit (`a gitignored local re-audit artifact`, a gitignored
   local artifact; the tracked summary is the Q17 row in `docs/COMPLETION-LOOP.md`).

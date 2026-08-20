@@ -181,8 +181,14 @@ contacts vcard export <id...> [--out <file>]    # → export_vcard (atomic, vCar
 contacts vcard import (--file <p>|--vcard <s>) [--group <id>] # → import_vcard (HARD: 3.0/4.0); --vcard, NOT --text (global-flag collision)
 
 contacts containers list                        # → list_containers
-contacts mcp serve                              # dual-frontend (Contactbook model)
 ```
+
+> **`contacts mcp serve` was cut (operator ruling D6/CONTACTS-L4, 2026-08-19).** The §6.2
+> fork-base sketch below proposed a dual CLI+MCP frontend over one core, and this surface list
+> carried it as if it were planned work — it was never implemented, and it is now explicitly out
+> of scope. The program's premise is that this CLI **replaces** the six MCP servers; shipping an
+> MCP server inside the replacement re-creates what the retirement gate (D2) exists to remove.
+> The §6.2 paragraph is preserved below as the historical fork-base analysis, not as a plan.
 
 ### 6.2 Fork-base + language + mechanism (recommended)
 
