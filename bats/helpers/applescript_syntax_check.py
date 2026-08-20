@@ -19,6 +19,26 @@ import os
 SRC = os.path.join(os.path.dirname(__file__), "..", "..",
                    "Sources", "MailKit", "Support", "MailScript.swift")
 
+# Literals that MUST end up compile-checked, asserted at the end of main().
+#
+# WHY A LIST AT ALL: the catch-all loop in main() discovers scripts by the `*Script` NAME
+# SUFFIX. That is INCIDENTAL coverage — rename a literal off the suffix, or let the
+# `literals()` regex drift past it, and the script silently drops out of the run with no FAIL
+# line at all. That is exactly how reply/forward stopped being compiled (review B1): the
+# harness stayed green while covering less. Naming a script here converts "quietly uncovered"
+# into a red run.
+#
+# WHY THESE TWO: the rule scripts carry destructive branches — createRuleScript arms
+# `delete message` (the rule auto-trashes matching mail), updateRuleMetaScript resets and
+# reapplies the whole action plan on an existing rule. No agent is permitted to live-verify a
+# delete rule (AGENTS.md dangerous actions), and there is no logic-tier or bats coverage of
+# AppleScript literals, so osacompile is the ONLY automated validation those branches get.
+# Extend this set whenever a script gains a branch nobody may exercise by hand.
+REQUIRED_SCRIPTS = {
+    "createRuleScript",
+    "updateRuleMetaScript",
+}
+
 
 def literals(src: str) -> dict[str, str]:
     """Every triple-quoted `static let NAME` body, keyed by NAME."""
@@ -95,8 +115,10 @@ def check_argv_arity(src: str, lit: dict) -> bool:
     and the mismatch surfaces ONLY as a runtime failure against live Mail (`item 9 of argv` on an
     8-element list). This is the arity half of the same blind spot the compile check covers.
 
-    The wrapper always passes [candidate, account] first, then `extra`, so
-    expected arity == 2 + len(extra).
+    Two argv shapes exist. A locator-based wrapper passes [candidate, account] first and then
+    `extra`, so its expected arity is 2 + len(extra). A wrapper that addresses its target some
+    other way (sendHtmlGui by window nonce, the rule scripts by index or by building a rule
+    from scratch) has no locator prefix and states its total whole.
     """
     ok = True
     # (script literal, wrapper func name, TOTAL argv count the Swift wrapper passes).
@@ -117,6 +139,16 @@ def check_argv_arity(src: str, lit: dict) -> bool:
         # `item 8 of argv` off an empty list and fail only against live Mail, on the one path
         # that cannot be exercised autonomously (Accessibility + focus theft).
         ("sendHtmlGuiScript", "sendHtmlViaGui", 8, set()),
+        # Rule scripts — no locator prefix: createRule builds a rule from scratch and
+        # updateRuleMeta addresses one by 1-based index, so each states its argv total whole
+        # (same shape as sendHtmlGuiScript above).
+        # createRule passes: name, enabled, condBlob, actBlob, matchAll, moveTo, copyTo, flagIdx.
+        ("createRuleScript", "createRule", 8, set()),
+        # updateRuleMeta passes: idx, then three has/value pairs (name, enabled, matchAll), then
+        # hasActs, actBlob, moveTo, copyTo, flagIdx. Every "has" flag is read next to its value,
+        # so a drift that drops one shifts EVERY later slot — an off-by-one here would silently
+        # patch the wrong field of a live Mail rule, on a path no agent may live-verify.
+        ("updateRuleMetaScript", "updateRuleMeta", 12, set()),
     ]
     for name, func, want, allowed_holes in expectations:
         body = lit.get(name, "")
@@ -146,6 +178,10 @@ def main() -> int:
         return 1
     locator = lit["locator"]
     ok = True
+    # Every literal actually handed to osacompile below, for the REQUIRED_SCRIPTS assertion.
+    # Recorded at the call sites rather than derived from `lit`, so it reflects what was
+    # COMPILED, not merely what was parsed out of the source.
+    compiled: set[str] = set()
 
     # Native compose scripts: body + guardAndSendTail + locator + outbound helpers.
     # nativeReplyHtmlScript is one of them — it shares the tail (review B1: it initially fell
@@ -166,12 +202,14 @@ def main() -> int:
                      + "\n" + lit["addressGuardHelpers"] + "\n" + lit["mailboxPathResolver"])
         ok &= check(name, assembled)
         ok &= check_handlers_defined(name, assembled)
+        compiled.add(name)
 
     # Move scripts additionally append the nested-mailbox resolver.
     for name in ("moveScript", "gmailMoveScript"):
         assembled = lit[name] + "\n" + locator + "\n" + lit["mailboxPathResolver"]
         ok &= check(name, assembled)
         ok &= check_handlers_defined(name, assembled)
+        compiled.add(name)
 
     # Every other findMsg-based mutation script compiles with just the locator.
     for name, body in sorted(lit.items()):
@@ -187,6 +225,16 @@ def main() -> int:
             extra += "\n" + lit["addressGuardHelpers"]
         ok &= check(name, body + extra)
         ok &= check_handlers_defined(name, body + extra)
+        compiled.add(name)
+
+    # Coverage assertion: the loops above find most scripts by name suffix, which is incidental
+    # (see REQUIRED_SCRIPTS). A script that quietly stops being compiled must turn this red.
+    never = sorted(REQUIRED_SCRIPTS - compiled)
+    if never:
+        print(f"FAIL - required scripts never compile-checked: {never}")
+        ok = False
+    else:
+        print("ok - required scripts all compile-checked")
 
     ok &= check_argv_arity(src, lit)
 

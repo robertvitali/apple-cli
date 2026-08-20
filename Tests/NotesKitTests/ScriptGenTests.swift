@@ -93,6 +93,35 @@ struct ScriptGenTests {
         #expect((m.year, m.month, m.day) == (2025, 12, 31))
     }
 
+    // MARK: search hit content/tags placeholders (NOTES-M1 — operator-ruled strict parity)
+
+    /// The oracle's `searchNotes()` hardcodes `content: ""` / `tags: []` on EVERY hit
+    /// (build/index.js ~39810: `content: "", // Not fetched in search`) — never a real fetch, so
+    /// mirroring it byte-for-byte means literal empty values, not populated ones.
+    @Test("parseSummaries emits the oracle's literal content/tags placeholders on every hit")
+    func parseSummariesContentTagsPlaceholders() throws {
+        let us = NotesScript.US
+        let row = ["My note", "x-coredata://ABC/p42", "Work", "2024-3-9-14-30-5", "2025-12-31-23-59-59"]
+            .joined(separator: us)
+        let notes = NotesScript.parseSummaries(row, account: "iCloud")
+        let n = try #require(notes.first)
+        #expect(n.content == "")
+        #expect(n.tags == [])
+    }
+
+    /// Golden-envelope pin: guards the wire key NAMES/VALUES against a future accidental
+    /// Optional-ification of `content`/`tags` (which would let `JSONEncoder` silently omit them
+    /// again — the exact regression NOTES-M1 restores). Mirrors
+    /// `SearchLimitParityTests.envelopeFieldNames`'s style.
+    @Test("the search-hit envelope encodes the oracle's content/tags keys verbatim")
+    func searchHitEnvelopeContentTagsKeys() throws {
+        let hit = NoteSummary(id: "x-coredata://ABC/p42", title: "My note", content: "", tags: [],
+                              folder: "Work", account: "iCloud", created: Date(), modified: Date())
+        let json = try String(data: JSONEncoder().encode(hit), encoding: .utf8)!
+        #expect(json.contains("\"content\":\"\""))
+        #expect(json.contains("\"tags\":[]"))
+    }
+
     // MARK: dateVarSetup month-rollover guard (oracle issue #86)
 
     @Test("dateVarSetup clamps day to 1 BEFORE setting the month, and restores it after")

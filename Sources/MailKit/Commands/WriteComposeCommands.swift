@@ -1199,7 +1199,7 @@ enum MailComposeFragment {
 }
 
 struct DraftRichCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "draft-rich", abstract: "Generate a multipart .eml draft (EXECUTES by default; --dry-run previews; reliable HTML); optionally open it or save it to Drafts.")
+    static let configuration = CommandConfiguration(commandName: "draft-rich", abstract: "Generate a multipart .eml draft (EXECUTES by default; --dry-run previews; reliable HTML); opens a Mail compose window for review by default (--no-open to skip), or save it to Drafts.")
     @OptionGroup var global: GlobalOptions
     @Option(name: .long) var account: String?
     @Option(name: .long) var subject: String = ""
@@ -1209,7 +1209,12 @@ struct DraftRichCommand: ParsableCommand {
     @Option(name: .long) var cc: [String] = []
     @Option(name: .long) var bcc: [String] = []
     @Option(name: .long, help: "Output .eml path (default: temp dir).") var out: String?
-    @Flag(name: .customLong("open"), help: "Open the generated .eml in a Mail compose window for review (no send).") var openInMail = false
+    // Oracle B `create_rich_email_draft` defaults `open_in_mail=True` — match it: the compose
+    // window opens by default, `--no-open` suppresses it, and `--open` is still accepted
+    // (explicit, redundant with the default) for compatibility with existing callers/scripts.
+    @Flag(name: .customLong("open"), inversion: .prefixedNo,
+          help: "Open the generated .eml in a Mail compose window for review (no send). On by default; pass --no-open to just write the .eml headlessly.")
+    var openInMail = true
     @Flag(name: .long, help: "Open the .eml and save it to Drafts (no send; sandboxed runs restrict recipients to the self-only allowlist).") var saveAsDraft = false
     @Flag(name: .long, help: "Refuse to overwrite an existing .eml at the destination (the deterministic subject-named default overwrites, and DIFFERENT subjects can sanitize to the SAME filename).") var noClobber = false
 
@@ -1249,11 +1254,27 @@ struct DraftRichCommand: ParsableCommand {
             // would. The DEFAULT (neither flag) just writes the .eml headlessly and is ungated.
             var senderAddress: String?
             if openInMail || saveAsDraft {
-                try guardOutbound(recipients: toL + ccL + bccL,
-                                  sandboxActive: sandboxActive,
-                                  applyRecipientCap: false)   // oracle-B-only surface: no cap
-                guard !subject.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
-                    throw AppleError.validation("--subject is required to open a draft-rich compose window.")
+                // extra20 (2026-08-19): `--open` now DEFAULTS true to match oracle B, which moved
+                // this block onto the default path and broke the invariant the comment above
+                // states. Oracle B opens a recipient-less, subject-less draft and REPORTS
+                // `missing_details` (compose.py:139-140 declare `subject: str = ""` /
+                // `to: Optional[str] = None`; :178-186, :211-213 echo what is missing) — so an
+                // unconditional guard here made the CLI strictly LESS capable than the oracle on
+                // the oracle's own default config, and made gap19's `missing_details` unreachable
+                // without `--no-open`. Review-caught; the first fix attempt edited the gap19 TEST
+                // onto `--no-open` instead, which is the silent-flip pattern extra20 exists to
+                // prevent.
+                //
+                // So: the outbound guard runs only when there IS someone to guard — an empty
+                // recipient set cannot reach anyone, so skipping it forfeits nothing, and the
+                // sandbox self-only allowlist still applies in full the moment a recipient is
+                // typed. Subject stays unenforced; `missingDetails` above already reports it, and
+                // `_safe_eml_name`'s fallback handles the empty-subject filename.
+                let recipients = toL + ccL + bccL
+                if !recipients.isEmpty {
+                    try guardOutbound(recipients: recipients,
+                                      sandboxActive: sandboxActive,
+                                      applyRecipientCap: false)   // oracle-B-only surface: no cap
                 }
                 // On the live-open path an unresolvable account stays FAIL-LOUD (deliberate,
                 // stricter than the oracle, which silently omits From).

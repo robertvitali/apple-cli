@@ -492,7 +492,11 @@ struct NotesScript {
             // parseDate — the same now-fallback the oracle applies to an unreadable date.
             let created = parseDate(f.count > 3 ? f[3] : "")
             let modified = parseDate(f.count > 4 ? f[4] : "")
-            result.append(NoteSummary(id: id, title: title, folder: folder?.isEmpty == true ? nil : folder,
+            // content/tags: the oracle hardcodes these to ""/[] on every search hit (never
+            // fetched — see the NoteSummary doc comment), so matching them byte-for-byte is a
+            // literal-value mirror, not an extra AppleScript round trip.
+            result.append(NoteSummary(id: id, title: title, content: "", tags: [],
+                                      folder: folder?.isEmpty == true ? nil : folder,
                                       account: account, created: created, modified: modified))
         }
         return result
@@ -845,9 +849,13 @@ struct NotesScript {
             for row in Self.splitRows(out) {
                 let f = Self.splitFields(row)
                 guard f.count >= 6 else { continue }
+                // content/tags: the oracle hardcodes these to ""/[] on every shared note too
+                // (never fetched — see the SharedNote doc comment), so this is a literal-value
+                // mirror, not an extra AppleScript round trip.
                 shared.append(SharedNote(
                     id: f[1].trimmingCharacters(in: .whitespaces),
                     title: f[0].trimmingCharacters(in: .whitespaces),
+                    content: "", tags: [],
                     account: account.name,
                     created: Self.parseDate(f[2]), modified: Self.parseDate(f[3]),
                     shared: f[4].trimmingCharacters(in: .whitespaces) == "true",
@@ -884,8 +892,12 @@ struct NotesScript {
         return Self.splitRows(out).map { row in
             let f = Self.splitFields(row)
             func at(_ i: Int) -> String { i < f.count ? f[i].trimmingCharacters(in: .whitespaces) : "" }
+            // content/tags: the oracle hardcodes these to ""/[] on every selected note too
+            // (never fetched — see the SelectedNote doc comment), so this is a literal-value
+            // mirror, not an extra AppleScript round trip.
             return SelectedNote(
-                id: at(0), title: at(1), created: Self.parseDate(at(2)), modified: Self.parseDate(at(3)),
+                id: at(0), title: at(1), content: "", tags: [],
+                created: Self.parseDate(at(2)), modified: Self.parseDate(at(3)),
                 shared: at(4).lowercased() == "true", password_protected: at(5).lowercased() == "true",
                 folder: at(6).isEmpty ? nil : at(6), account: at(7).isEmpty ? nil : at(7))
         }

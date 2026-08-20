@@ -107,15 +107,17 @@ struct RuleLiveGuardsTests {
     }
 
     /// Previews describe what the live path would refuse rather than refusing outright, so
-    /// `liveActionBlockers` must name exactly the actions `liveActionPlan` throws on.
+    /// `liveActionBlockers` must name exactly the actions `liveActionPlan` throws on. `delete` is
+    /// live-wired (operator-ruled full parity, 2026-08-19) so it is no longer a blocker — it now
+    /// carries an advisory `liveActionWarnings` entry instead (locked separately below).
     @Test func liveActionBlockersMatchWhatLiveActionPlanRefuses() throws {
         let fwd = try RuleSchema.parseActions(["forward_to=x@y.test"])
         #expect(RuleLiveGuards.liveActionBlockers(fwd).count == 1)
         #expect(throws: Error.self) { _ = try RuleLiveGuards.liveActionPlan(fwd) }
 
         let del = try RuleSchema.parseActions(["delete=true"])
-        #expect(RuleLiveGuards.liveActionBlockers(del).count == 1)
-        #expect(throws: Error.self) { _ = try RuleLiveGuards.liveActionPlan(del) }
+        #expect(RuleLiveGuards.liveActionBlockers(del).isEmpty)
+        _ = try RuleLiveGuards.liveActionPlan(del)
 
         // A supported action has no blockers and plans cleanly — the two must not disagree.
         let ok = try RuleSchema.parseActions(["mark_read=true"])
@@ -151,10 +153,29 @@ struct RuleLiveGuardsTests {
         #expect(throws: Error.self) { _ = try RuleLiveGuards.liveActionPlan(RuleSchema.parseActions(["flag_color=none"])) }
     }
 
-    @Test func liveActionPlanRefusesForwardAndDelete() throws {
-        // forward_to (auto-send) + delete (auto-trash) remain refused — latent exfil/destructive.
+    @Test func liveActionPlanRefusesForward() throws {
+        // forward_to (auto-send to others) remains refused — latent exfil surface.
         #expect(throws: Error.self) { _ = try RuleLiveGuards.liveActionPlan(RuleSchema.parseActions(["forward_to=a@x.io"])) }
-        #expect(throws: Error.self) { _ = try RuleLiveGuards.liveActionPlan(RuleSchema.parseActions(["delete=true"])) }
+    }
+
+    /// delete (auto-trash) is now LIVE-WIRED (operator-ruled full parity with oracle A,
+    /// 2026-08-19): a rule may carry `delete` and `liveActionPlan` must not throw on it, must
+    /// mark `plan.delete == true`, and must emit a `"delete"` token (consumed by
+    /// `MailScript.createRule`/`updateRuleMeta` to set Mail.sdef's `delete message` property). The
+    /// action stays advisory-flagged (not blocked) via `liveActionWarnings`.
+    @Test func liveActionPlanWiresDelete() throws {
+        let plan = try RuleLiveGuards.liveActionPlan(RuleSchema.parseActions(["delete=true"]))
+        #expect(plan.delete == true)
+        #expect(plan.tokens.contains("delete"))
+
+        let warnings = RuleLiveGuards.liveActionWarnings(try RuleSchema.parseActions(["delete=true"]))
+        #expect(warnings.count == 1)
+        #expect(RuleLiveGuards.liveActionWarnings(try RuleSchema.parseActions(["mark_read=true"])).isEmpty)
+
+        // delete=false is not a real action — same "at least one action" refusal as any empty set.
+        var noDelete = RuleSchema.Action()
+        noDelete.delete = false
+        #expect(throws: Error.self) { _ = try RuleLiveGuards.liveActionPlan(noDelete) }
     }
 }
 

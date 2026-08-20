@@ -655,10 +655,11 @@ require_index() {
 
 @test "mail draft-rich --bcc writes a Bcc header into the generated .eml (compose-window safe)" {
   # draft-rich .eml is only opened / saved, never wire-sent, so carrying --bcc is safe + parity.
-  # The default (no open/save flags) path is a headless local file write — tmpdir-confined here.
+  # --no-open keeps this a headless local file write (open_in_mail now defaults to true, oracle
+  # B parity) — tmpdir-confined here, and this test is about the Bcc header, not opening.
   OUT="$BATS_TEST_TMPDIR/apple-cli-test-draft.eml"
   run "$BIN" mail draft-rich --execute --to me@self.test --bcc secret@self.test \
-    --subject "apple-cli-test dr" --html "<b>x</b>" --out "$OUT"
+    --subject "apple-cli-test dr" --html "<b>x</b>" --out "$OUT" --no-open
   [ "$status" -eq 0 ]
   grep -q "^Bcc: secret@self.test" "$OUT"
 }
@@ -756,10 +757,13 @@ require_index() {
 }
 
 # CONTRACT CHANGE (2026-07-31): a dry-run now DESCRIBES a rule the live path would refuse,
-# reporting `live_blockers`, instead of failing with exit 77. `forward_to`, `delete` and
-# `--match any` are real oracle capabilities; a preview that cannot represent them drops the
-# capability from the CLI surface entirely, which is the very thing strict-superset parity
-# forbids. The live refusal itself is unchanged — see the --execute test below.
+# reporting `live_blockers`, instead of failing with exit 77. `forward_to` and `--match any` are
+# real oracle capabilities; a preview that cannot represent them drops the capability from the CLI
+# surface entirely, which is the very thing strict-superset parity forbids. The live refusal itself
+# is unchanged — see the --execute test below.
+# UPDATE (gap25, operator-ruled 2026-08-19): `delete` USED to sit in that refused-live list too. It
+# no longer does — it is LIVE-WIRED (full oracle-A parity), so it is not a blocker at all; it
+# carries an advisory `warnings` entry instead. See the delete preview test below.
 @test "mail rules create DRY-RUN describes a forward_to rule and names the live blocker" {
   run "$BIN" mail rules create --dry-run --name "apple-cli-test-b" --condition "subject:contains:apple-cli-test" --action "forward_to=a@x.io"
   [ "$status" -eq 0 ]
@@ -768,12 +772,61 @@ require_index() {
   echo "$output" | grep -q 'would refuse'
 }
 
-@test "mail rules create DRY-RUN describes delete and (sandboxed) --match any blockers too" {
-  # The delete blocker is an UNWIRED capability — reported in both modes; the --match any
-  # restriction is the SANDBOX's, so its blocker only appears in a sandboxed preview (v2).
+# gap25 (operator-ruled 2026-08-19): `delete` is LIVE-WIRED, so the preview must report it as an
+# advisory WARNING and NOT as a live blocker.
+#
+# ASSERT ON THE STRUCTURED FIELDS, NOT ON PROSE. The first version of this test grepped the
+# substring `auto-trash`, which appears in BOTH the pre-wiring blocker ("delete: a live rule that
+# can auto-trash mail is refused …") and the new advisory warning — so it passed identically with
+# the wiring present or reverted, i.e. it was not revert-red for the thing it claimed to cover.
+# The discriminator is the SHAPE, not the words: on the pre-wiring build `live_blockers` carried
+# the delete entry (so `== []` fails) and `warnings` was empty (so `len(w) == 1` fails).
+@test "mail rules create DRY-RUN reports delete via warnings with an EMPTY live_blockers (gap25)" {
   run "$BIN" mail rules create --dry-run --name "apple-cli-test-b" --condition "subject:contains:apple-cli-test" --action "delete=true"
   [ "$status" -eq 0 ]
-  echo "$output" | grep -q 'auto-trash'
+  echo "$output" | python3 -c "
+import json,sys
+d = json.load(sys.stdin)['data']
+assert d['dry_run'] is True, d
+# The previewed rule still CARRIES the action — a preview that silently drops the capability is
+# exactly the strict-superset failure this contract exists to prevent.
+assert d['rule']['actions']['delete'] is True, d['rule']
+# TRUE ONLY WITH DELETE WIRED: not a blocker at all, and the concern rides on warnings instead.
+assert d['live_blockers'] == [], d['live_blockers']
+w = d['warnings']
+assert len(w) == 1, w
+assert w[0].startswith('delete:') and 'auto-trash' in w[0], w
+note = d['note'] or ''
+assert 'advisory' in note, note
+assert 'would refuse' not in note, note
+"
+}
+
+# The same wiring landed on the UPDATE preview, which builds its note independently of
+# emitRulePreview — a regression on one surface only would otherwise go unseen. Mail-free: a
+# dry-run returns before `requireLabeledRule`, so index 1 is named but never read or touched.
+# --enabled is deliberately NOT passed here: the execute-time enable-gate is not modeled by the
+# preview, and asserting `live_blockers == []` with --enabled present would lock that divergence in.
+@test "mail rules update DRY-RUN reports delete via warnings with an EMPTY live_blockers (gap25)" {
+  run "$BIN" mail rules update --dry-run 1 --action "delete=true"
+  [ "$status" -eq 0 ]
+  echo "$output" | python3 -c "
+import json,sys
+d = json.load(sys.stdin)['data']
+assert d['dry_run'] is True, d
+assert d['patch']['actions']['delete'] is True, d['patch']
+assert d['live_blockers'] == [], d['live_blockers']
+w = d['warnings']
+assert len(w) == 1, w
+assert w[0].startswith('delete:') and 'auto-trash' in w[0], w
+note = d['note'] or ''
+assert 'advisory' in note, note
+assert 'would refuse' not in note, note
+"
+}
+
+@test "mail rules create DRY-RUN describes (sandboxed) --match any as a blocker" {
+  # The --match any restriction is the SANDBOX's, so its blocker only appears in a sandboxed preview (v2).
   APPLE_TEST_MODE=1 run "$BIN" mail rules create --dry-run --name "apple-cli-test-b" --condition "subject:contains:apple-cli-test" --action "mark_read=true" --match any --test-mode
   [ "$status" -eq 0 ]
   echo "$output" | grep -q 'match any'
@@ -811,6 +864,36 @@ require_index() {
   APPLE_TEST_MODE=1 run "$BIN" mail rules update 1 --name "real-inbox-rule" --execute --test-mode
   [ "$status" -eq 77 ]
   echo "$output" | grep -q '"type" : "safety_violation"'
+}
+
+# gap25 sandbox gate, asserted in the ONLY shape that is safe to run. TWO independent properties
+# make it impossible for this test to arm a delete rule, so its failure mode is a red test and
+# never a mutation:
+#   1. the refusal fires in the sandbox block, BEFORE `liveActionPlan` and before
+#      `requireLabeledRule` touches Mail at all (non-self-scoped --condition);
+#   2. the target index is one that cannot exist, so even if (1) ever regressed the run dies at
+#      `requireLabeledRule` with rule_not_found (exit 65) having mutated nothing.
+#
+# WHAT THIS DOES NOT COVER, DELIBERATELY: the in-place enable-gate itself (RuleTemplateCommands
+# "wiring move_to/copy_to/delete on an in-place update cannot also ENABLE the rule in the same
+# command"). Reaching that gate requires a REAL `apple-cli-test`-labeled rule in the live store,
+# because `requireLabeledRule` reads Mail's rule list first — and if the gate ever regressed, the
+# act of running such a test would ARM an auto-trash rule on the operator's machine. A
+# refusal-asserting test whose failure mode is "does the dangerous thing it was written to forbid"
+# is not a safe test, and docs/port-specs/mail.md (op 27) already rules that no agent may
+# live-verify a delete rule — the first live exercise is the operator's. That gate is covered
+# where it can be exercised without a live store: the Swift logic tier under Tests/MailKitTests
+# (the in-place enable-gate predicate + its refusal wording), not here.
+@test "mail rules update wiring delete + --enabled is refused pre-Mail when conditions are not self-scoped (exit 77)" {
+  APPLE_TEST_MODE=1 run "$BIN" mail rules update 999999 --action "delete=true" --enabled \
+    --condition "from:contains:someone@example.com" --execute --test-mode
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q '"type" : "safety_violation"'
+  # Name WHICH gate fired — a bare 77 could be any sandbox refusal, which would make this vacuous.
+  echo "$output" | grep -q 'subject condition'
+  # Nothing was applied: no success envelope, no executed flag.
+  echo "$output" | grep -q '"ok" : false'
+  ! echo "$output" | grep -q '"executed" : true'
 }
 
 @test "mail rules update with an invalid --match is a validation_error (exit 64)" {
@@ -904,9 +987,12 @@ require_index() {
 }
 
 # ── Non-sending draft/open modes (gap 4) — all CI-safe: dry-run previews + gate refusals ─────────
-# send --mode open / --mode draft, draft open, and draft-rich --open/--save-as-draft are NON-sending
+# send --mode open / --mode draft, draft open, and draft-rich --open/--save-as-draft (--open is now
+# ALSO the default — oracle B `open_in_mail=True` parity, `--no-open` opts out) are NON-sending
 # (they never reach an AppleScript `send`). These lock the dry-run + safety-gate surface WITHOUT any
 # real Mail access: every assertion is a dry-run preview or a refusal that fires before Mail is touched.
+# draft-rich tests below that DO `--execute` a headless write pass `--no-open` explicitly so the
+# suite never launches a live Mail.app compose window.
 
 @test "mail send --mode open --dry-run is a preview (exit 0, opened/drafted false)" {
   run "$BIN" mail send --dry-run --to me@self.test --subject "apple-cli-test open" --body hi --mode open
@@ -977,6 +1063,29 @@ require_index() {
   [ ! -f "$OUT" ]
 }
 
+@test "mail draft-rich with NEITHER --open NOR --no-open hits the same live-open gate as --open (open_in_mail defaults true, oracle B parity)" {
+  # Operator-ruled (2026-08-19): open_in_mail now defaults to true, matching oracle B's
+  # create_rich_email_draft signature. A bare invocation (no --open/--no-open) must therefore be
+  # refused by the SAME sandbox self-only guardOutbound gate as an explicit --open — proven here
+  # without ever touching Mail (dry-run refuses before any Mail access, same as the --open test
+  # immediately above).
+  OUT="$BATS_TEST_TMPDIR/apple-cli-test-dr-default.eml"
+  run env -u APPLE_TEST_RECIPIENTS APPLE_TEST_MODE=1 "$BIN" mail draft-rich --dry-run --to me@self.test --subject "apple-cli-test dr" --html "<b>x</b>" --out "$OUT" --test-mode
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q '"type" : "safety_violation"'
+  [ ! -f "$OUT" ]
+}
+
+@test "mail draft-rich --no-open bypasses the live-open gate even with an EMPTY sandbox allowlist (headless write, exit 0)" {
+  # The converse of the test above: --no-open reverts to the pre-2026-08-19 headless-write path,
+  # which never calls guardOutbound, so an empty recipient allowlist does not block it.
+  OUT="$BATS_TEST_TMPDIR/apple-cli-test-dr-noopen.eml"
+  run env -u APPLE_TEST_RECIPIENTS APPLE_TEST_MODE=1 "$BIN" mail draft-rich --execute --to me@self.test --subject "apple-cli-test dr" --html "<b>x</b>" --out "$OUT" --no-open --test-mode
+  [ "$status" -eq 0 ]
+  [ -f "$OUT" ]
+  echo "$output" | grep -q '"opened" : false'
+}
+
 @test "mail forward --account with an unknown account is not_found before the index opens (exit 65)" {
   # --account resolves to a send-from address on the live path, BEFORE MailContext — so an unknown
   # account fails fast with not_found even where the Envelope Index is unreadable (CI-safe).
@@ -998,10 +1107,12 @@ require_index() {
   [ ! -f "$OUT" ]
 }
 
-@test "mail draft-rich (no open/save flags) writes the .eml and reports opened false (exit 0)" {
-  # Default path — no Mail access, ungated; asserts the opened field + the written artifact.
+@test "mail draft-rich --no-open (no save flag) writes the .eml and reports opened false (exit 0)" {
+  # --no-open is required here: since open_in_mail now defaults to true (oracle B parity), a bare
+  # invocation would try to launch a live Mail.app compose window — --no-open keeps this test's
+  # actual subject (headless write + the `opened` field + the written artifact) CI-safe.
   OUT="$BATS_TEST_TMPDIR/apple-cli-test-dr.eml"
-  run "$BIN" mail draft-rich --execute --to me@self.test --subject "apple-cli-test dr" --html "<b>x</b>" --out "$OUT"
+  run "$BIN" mail draft-rich --execute --to me@self.test --subject "apple-cli-test dr" --html "<b>x</b>" --out "$OUT" --no-open
   [ "$status" -eq 0 ]
   [ -f "$OUT" ]
   echo "$output" | grep -q '"opened" : false'
@@ -1018,8 +1129,9 @@ require_index() {
   # 600, which stays true when nothing is chmodded at all. gap20 moved the default from the
   # apple-cli-eml temp dir to the DETERMINISTIC rich-drafts cache path, created through the
   # OwnedTempDir.make 0700/lstat primitive (review: a pre-planted symlink must not redirect
-  # drafts) — assert the new contract end to end.
-  run "$BIN" mail draft-rich --execute --to me@self.test --subject "apple-cli-test dr" --html "<b>x</b>"
+  # drafts) — assert the new contract end to end. --no-open keeps this headless (see the test
+  # above — open_in_mail now defaults to true).
+  run "$BIN" mail draft-rich --execute --to me@self.test --subject "apple-cli-test dr" --html "<b>x</b>" --no-open
   [ "$status" -eq 0 ]
   EML="$(echo "$output" | sed -n 's/.*"eml_path" : "\(.*\)".*/\1/p')"
   [ -n "$EML" ]
@@ -1218,6 +1330,13 @@ require_index() {
   # nativeReplyHtmlScript now — so that is the reply-side sentinel.
   echo "$output" | grep -q "ok - nativeReplyHtmlScript"
   echo "$output" | grep -q "ok - emptyTrashScript"
+  # The RULE scripts are the least exercisable of the lot: `delete` went live-wired on 2026-08-19
+  # (gap25), so a syntax slip in either of these now surfaces as a botched LIVE rule mutation —
+  # and no agent may live-verify a delete rule (docs/port-specs/mail.md op 27), which makes
+  # osacompile the only automated coverage they will ever get. Pin both by name so a helper change
+  # that stops assembling them cannot pass silently.
+  echo "$output" | grep -q "ok - createRuleScript"
+  echo "$output" | grep -q "ok - updateRuleMetaScript"
   ! echo "$output" | grep -q "^FAIL"
 }
 
@@ -2396,6 +2515,14 @@ assert d['recipients'] == ['me@self.test'], d"
 
 # gap19: with nothing supplied, the preview reports the oracle's missing_details in the
 # oracle's order (subject -> to -> body) and fills placeholder bodies.
+#
+# This runs on the BARE default (no --no-open) deliberately. `--open` defaults true since
+# extra20, and a first implementation of that flip put guardOutbound + a required --subject on
+# the default path, which made this call exit 64 — strictly less capable than oracle B, whose
+# `compose.py:139-140` defaults `subject=""`/`to=None` and whose :178-186 reports exactly these
+# missing_details. That attempt "fixed" the red by rewriting this test onto --no-open, hiding
+# the regression behind the flag; review caught it. Keep the bare form: it is what pins the
+# oracle-default path.
 @test "mail draft-rich --dry-run reports oracle missing_details (gap19)" {
   run "$BIN" mail draft-rich --dry-run
   [ "$status" -eq 0 ]
@@ -2418,12 +2545,14 @@ import json,sys;print(json.load(sys.stdin)['data']['eml_path'])")
 }
 
 # --no-clobber refuses an existing destination (the deterministic default overwrites, and
-# DIFFERENT subjects can sanitize to the SAME filename — review-added guard).
+# DIFFERENT subjects can sanitize to the SAME filename — review-added guard). --no-open on both
+# calls keeps this headless (open_in_mail now defaults to true, oracle B parity); the first call
+# below would otherwise launch a live Mail.app compose window before the second call even runs.
 @test "mail draft-rich --no-clobber refuses an existing destination (exit 77)" {
   OUT="$BATS_TEST_TMPDIR/apple-cli-test-clobber.eml"
-  run "$BIN" mail draft-rich --execute --to me@self.test --subject "apple-cli-test clobber" --html "<b>x</b>" --out "$OUT"
+  run "$BIN" mail draft-rich --execute --to me@self.test --subject "apple-cli-test clobber" --html "<b>x</b>" --out "$OUT" --no-open
   [ "$status" -eq 0 ]
-  run "$BIN" mail draft-rich --execute --to me@self.test --subject "apple-cli-test clobber" --html "<b>x</b>" --out "$OUT" --no-clobber
+  run "$BIN" mail draft-rich --execute --to me@self.test --subject "apple-cli-test clobber" --html "<b>x</b>" --out "$OUT" --no-clobber --no-open
   [ "$status" -eq 77 ]
   echo "$output" | grep -q 'no-clobber'
 }

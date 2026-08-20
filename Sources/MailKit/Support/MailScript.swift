@@ -2551,8 +2551,26 @@ public struct MailScript {
                 if cpMailbox is missing value then return "unresolved:copy_to=" & copyTo
             end if
             set r to make new rule with properties {name:ruleName, enabled:isEnabled}
+            -- FAIL LOUD, matching the `delete message` set below. The ENTIRE sandboxed
+            -- self-scoping invariant (safety argued purely from "match=all + a test-label
+            -- subject condition", so the label always constrains the rule) depends on this SET
+            -- actually taking effect — a swallowed failure here would silently leave the rule
+            -- match=ANY (Mail's default), and the label would stop constraining it. The
+            -- caller's readback verification (RuleTemplateCommands.swift, next to the
+            -- condition-count check) is what CONFIRMS this took, but only if the AppleScript
+            -- itself doesn't hide the failure first. Rolled back like the delete branch below:
+            -- an armed-but-malformed rule must not be left behind just because its match-logic
+            -- set failed.
             try
                 set all conditions must be met of r to ((item 5 of argv) is "1")
+            on error acmErr
+                set rbNote to "no partial rule left behind"
+                try
+                    delete r
+                on error
+                    set rbNote to "ROLLBACK FAILED, rule may still exist: " & ruleName
+                end try
+                error "could not set the rule's match-all/any logic (" & rbNote & "): " & acmErr
             end try
             repeat with c in condList
                 set rt to rtype of c
@@ -2578,6 +2596,41 @@ public struct MailScript {
                 else if tok is "mark_flagged" then
                     try
                         set mark flagged of r to true
+                    end try
+                else if tok is "delete" then
+                    -- `delete message` is Mail.sdef's RuleType action boolean — the rule auto-trashes
+                    -- (moves to Trash) a matching message once enabled, mirroring the oracle's
+                    -- create_rule `delete` action. No separate "should delete" activation boolean
+                    -- exists (unlike move/copy): this single flag is both presence and activation.
+                    --
+                    -- FAIL LOUD. This set is deliberately NOT `try`-tolerated like the mark_read /
+                    -- mark_flagged sets above, and it is now symmetric with its twin in
+                    -- updateRuleMetaScript (a bare set, i.e. also a hard failure). Tolerating stays
+                    -- right for the mark_* flags — a missed cosmetic flag is a small lie — but a
+                    -- swallowed failure HERE let createRule return "ok" and the CLI report
+                    -- actions:["delete"] for a rule whose delete action never armed. On a
+                    -- destructive action a silent no-op reported as success is the worse of the two
+                    -- failure modes: the operator believes matching mail is being trashed and stops
+                    -- watching it, and nothing in the result betrays the gap.
+                    --
+                    -- The rollback holds this path to the same invariant the move/copy
+                    -- pre-resolution above establishes — an action that cannot attach leaves NO
+                    -- partial rule behind. Move/copy get there by resolving BEFORE `make new rule`;
+                    -- a property set cannot be pre-resolved, so the already-created rule is undone
+                    -- instead. Without it a bare set would strand an ENABLED rule acting on real
+                    -- mail while the CLI reported failure — the operator would not know it exists.
+                    -- The rollback is itself `try`-wrapped so a failed cleanup cannot mask the real
+                    -- error, and the message states whether an orphan rule may remain.
+                    try
+                        set delete message of r to true
+                    on error dmErr
+                        set rbNote to "no partial rule left behind"
+                        try
+                            delete r
+                        on error
+                            set rbNote to "ROLLBACK FAILED, rule may still exist: " & ruleName
+                        end try
+                        error "could not arm the rule's delete action (" & rbNote & "): " & dmErr
                     end try
                 end if
             end repeat
@@ -2632,7 +2685,7 @@ public struct MailScript {
     end qualifier
     """
     /// Create a Mail rule with the live-safe action plan (mark_read / mark_flagged / flag_color /
-    /// move_to / copy_to). forward_to (auto-send) and delete (auto-trash) are refused upstream by
+    /// move_to / copy_to / delete). forward_to (auto-send) is refused upstream by
     /// `RuleSchema.liveActionPlan`. move_to/copy_to resolve `Account/Mailbox` to a concrete target
     /// mailbox in the script. Caller MUST have label-checked the rule name + self-scoped it.
     public func createRule(name: String, enabled: Bool, matchAll: Bool,
@@ -2643,6 +2696,7 @@ public struct MailScript {
         var toks: [String] = []
         if plan.markRead { toks.append("mark_read") }
         if plan.markFlagged { toks.append("mark_flagged") }
+        if plan.delete { toks.append("delete") }
         let actBlob = toks.joined(separator: MailScript.RS)
         let out = try runner.run(MailScript.createRuleScript,
                                  arguments: [name, enabled ? "1" : "0", condBlob, actBlob, matchAll ? "1" : "0",
@@ -2719,9 +2773,14 @@ public struct MailScript {
                 if cpMailbox is missing value then return "unresolved:copy_to=" & copyTo
             end if
             if hasMatch then
-                try
-                    set all conditions must be met of r to matchAll
-                end try
+                -- FAIL LOUD, no `try` — same reasoning as createRuleScript's twin above, and the
+                -- same NO-ROLLBACK shape as the `delete message` set below on THIS script: the
+                -- rule PRE-EXISTS this call, so there is nothing this script created to undo. An
+                -- uncaught error here aborts the whole script before the actions/enabled/rename
+                -- patches below ever apply, so the caller's thrown error is the whole truth —
+                -- no partial-success claim, no silently-still-match-any rule left constrained by
+                -- nothing but its (untouched) existing conditions.
+                set all conditions must be met of r to matchAll
             end if
             if hasActs then
                 -- actions REPLACE wholesale (mirror the MCP oracle's update_rule reset): the
@@ -2746,6 +2805,16 @@ public struct MailScript {
                         set mark read of r to true
                     else if tok is "mark_flagged" then
                         set mark flagged of r to true
+                    else if tok is "delete" then
+                        -- Bare set, no `try` — the same fail-loud rule as createRuleScript's delete
+                        -- branch (the reasoning lives there): swallowing this would report an armed
+                        -- delete rule that is not armed. Do NOT re-wrap it in `try`. There is no
+                        -- rollback counterpart on this path: the rule pre-exists the call, so there
+                        -- is nothing this script created to undo. The reset block above has already
+                        -- cleared the previous plan, so a failure here leaves the rule with its
+                        -- actions partially reapplied — which is exactly what the thrown error
+                        -- tells the caller, instead of the patch claiming to have succeeded.
+                        set delete message of r to true
                     end if
                 end repeat
                 if mvMailbox is not missing value then
@@ -2781,6 +2850,7 @@ public struct MailScript {
         if let plan {
             if plan.markRead { toks.append("mark_read") }
             if plan.markFlagged { toks.append("mark_flagged") }
+            if plan.delete { toks.append("delete") }
         }
         let actBlob = toks.joined(separator: MailScript.RS)
         let args = [
@@ -2800,13 +2870,22 @@ public struct MailScript {
 
     /// A rule's scalar properties, read back so a CONDITION-replacing update can delete-and-recreate
     /// the rule while preserving the fields the caller didn't patch — without ever mutating a rule
-    /// condition (Mail's `delete rule condition` crasher).
+    /// condition (Mail's `delete rule condition` crasher) — and so an ENABLE mutation can gate/warn
+    /// off the rule's REAL delete state (see `deleteMessage` below).
     public struct RuleScalars {
         public let name: String; public let enabled: Bool
         public let markRead: Bool; public let markFlagged: Bool
         /// `all conditions must be met` — carried so an unsandboxed condition-replacing recreate
         /// preserves a real rule's OR/AND logic instead of silently forcing AND (review-caught).
         public let matchAll: Bool
+        /// `delete message` — the rule's REAL, on-disk auto-trash state (added 2026-08-19,
+        /// review-caught). Closes two gaps that both trace to this readback not existing before:
+        /// (1) `rules enable`/`rules update --enabled` could not gate/warn off a PRE-EXISTING
+        /// delete action, only one wired in the SAME command — letting `rules update --action
+        /// delete=true` (no --enabled) followed by a separate enable bypass the in-place
+        /// enable-gate entirely; (2) the condition-replacing recreate's carry-forward plan
+        /// silently dropped an existing delete action instead of preserving it.
+        public let deleteMessage: Bool
     }
 
     private static let readRuleScalarsScript = """
@@ -2819,30 +2898,44 @@ public struct MailScript {
             set mr to mark read of r
             set mf to mark flagged of r
             set ml to all conditions must be met of r
+            set dm to delete message of r
             set nm to name of r
         end tell
         -- Coerce each boolean to text: `boolean & text` in AppleScript builds a LIST (joined with
         -- ", " on return), not concatenated text, when the boolean is the FIRST operand. Explicit
         -- `as text` forces string concatenation regardless of order, so name-last stays US-safe.
-        return (en as text) & US & (mr as text) & US & (mf as text) & US & (ml as text) & US & nm
+        return (en as text) & US & (mr as text) & US & (mf as text) & US & (ml as text) & US & (dm as text) & US & nm
     end run
     """
-    /// Read a rule's scalar props for the recreate path. NAME IS LAST so a name that itself contains
-    /// the US delimiter still round-trips (the trailing fields are rejoined). Match-logic IS read
-    /// (write-model v2): an unsandboxed recreate preserves the rule's OR/AND logic; only a SANDBOXED
-    /// recreate forces match=all (its label condition must always constrain it). Only the two mark_*
-    /// action flags are read — the recreate resets a rule to the mark set (documented), so any
-    /// non-mark action set manually in Mail.app is intentionally not round-tripped.
+    /// Read a rule's scalar props for the recreate path (and the enable-arming gate). NAME IS LAST
+    /// so a name that itself contains the US delimiter still round-trips (the trailing fields are
+    /// rejoined). Match-logic IS read (write-model v2): an unsandboxed recreate preserves the
+    /// rule's OR/AND logic; only a SANDBOXED recreate forces match=all (its label condition must
+    /// always constrain it). `delete message` IS read (2026-08-19, review-caught) — see
+    /// `RuleScalars.deleteMessage`. Only mark_read/mark_flagged/delete are read — the recreate
+    /// resets a rule to that set (documented), so a move_to/copy_to/flag_color action set manually
+    /// in Mail.app is intentionally still not round-tripped.
     public func readRuleScalars(index: Int) throws -> RuleScalars {
         let raw = try runner.run(MailScript.readRuleScalarsScript, arguments: [String(index)])
+        return try MailScript.parseRuleScalars(raw)
+    }
+
+    /// Pure parse of `readRuleScalarsScript`'s raw US-joined output — split out of
+    /// `readRuleScalars` so the field layout (6 fields as of 2026-08-19: enabled/markRead/
+    /// markFlagged/matchAll/deleteMessage, then the trailing name) is directly unit-testable
+    /// without a live Mail.app or a runner fake (`MailScript.runner` is the concrete
+    /// `AppleScriptRunner`, not an injectable protocol — see `AppleScriptRunning`'s doc comment
+    /// for why that seam exists on `NotesScript` but not here: this type also calls
+    /// `runViaStdin`, which isn't part of that protocol).
+    static func parseRuleScalars(_ raw: String) throws -> RuleScalars {
         let f = raw.trimmingCharacters(in: .whitespacesAndNewlines).components(separatedBy: MailScript.US)
-        guard f.count >= 5 else {
+        guard f.count >= 6 else {
             throw AppleScriptRunner.RunError.scriptFailed(status: 1, stderr: "readRuleScalars: unexpected output '\(raw)'")
         }
         func flag(_ s: String) -> Bool { s.trimmingCharacters(in: .whitespaces).lowercased() == "true" }
-        let name = f[4...].joined(separator: MailScript.US)
+        let name = f[5...].joined(separator: MailScript.US)
         return RuleScalars(name: name, enabled: flag(f[0]), markRead: flag(f[1]), markFlagged: flag(f[2]),
-                           matchAll: flag(f[3]))
+                           matchAll: flag(f[3]), deleteMessage: flag(f[4]))
     }
 
     private static let checkSupportedActionsScript = """

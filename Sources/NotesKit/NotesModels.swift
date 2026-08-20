@@ -23,17 +23,24 @@ struct CreatedNote: Encodable {
     let warning: String?
 }
 
-/// A search hit. The MCP emits `{id, title, content:"", tags:[], created, modified, folder,
-/// account}` — where `created`/`modified` are the note's REAL dates, read per-hit in the search
-/// loop (`new Date()` is only its unreadable-date fallback). apple-cli emits
-/// `id, title, folder, account, created, modified` and deliberately drops ONLY content/tags,
-/// which genuinely are empty placeholders (`""`/`[]`) on search; see docs/port-specs/notes.md
-/// §"Output-field deviations". (An earlier revision dropped created/modified too, on the
-/// mistaken belief the MCP fabricated them at response time — review disproved that against
-/// the oracle source, so they were ported.)
+/// A search hit. The MCP's `searchNotes()` pushes exactly `{id, title, content:"", tags:[],
+/// created, modified, folder, account}` per match (build/index.js ~39810: `content: "", // Not
+/// fetched in search` and `tags: []` — both hardcoded, never populated, on every hit, permanently
+/// — while `created`/`modified` ARE the note's real dates, read per-hit in the same single search
+/// loop via `asDatePartsExpr`, `new Date()` only its unreadable-date fallback). Operator-ruled
+/// STRICT PARITY (NOTES-M1): apple-cli now emits all eight keys, `content`/`tags` included, so the
+/// wire shape matches byte-for-byte — including the oracle's own placeholder-ness of those two
+/// fields. This costs NO extra AppleScript round trip: the oracle itself never fetches real
+/// content/tags for a search hit, so mirroring it exactly means emitting the same literal `""`/
+/// `[]`, not a per-hit content fetch. (An earlier revision dropped created/modified too, on the
+/// mistaken belief the MCP fabricated them at response time — review disproved that against the
+/// oracle source, so they were ported. A later revision dropped content/tags as "useless
+/// placeholders"; the operator has since ruled that strict parity outweighs that rationale.)
 struct NoteSummary: Encodable {
     let id: String
     let title: String
+    let content: String
+    let tags: [String]
     let folder: String?
     let account: String?
     let created: Date
@@ -98,11 +105,19 @@ struct NoteMetaByLookup: Encodable {
     let account: String?
 }
 
-/// Drops the MCP's placeholder `content:""`/`tags:[]` (never populated for selection) — same
-/// documented deviation as NoteSummary; every other field is real. See docs/port-specs/notes.md.
+/// `get-selected-notes`. The MCP's `getSelectedNotes()` pushes `{id, title, content:"", tags:[],
+/// created, modified, shared, passwordProtected, folder, account}` per selected note
+/// (build/index.js:40717-40728: `content: "",` / `tags: [],` — both hardcoded, never fetched, same
+/// as search — while `created`/`modified`/`shared`/`passwordProtected`/`folder`/`account` are all
+/// real, read in the same single AppleScript call). Operator-ruled STRICT PARITY (NOTES-M1
+/// follow-up): apple-cli emits all ten keys, `content`/`tags` included — byte-for-byte, zero extra
+/// AppleScript round trips (see NoteSummary's doc comment for the same reasoning). See
+/// docs/port-specs/notes.md.
 struct SelectedNote: Encodable {
     let id: String
     let title: String
+    let content: String
+    let tags: [String]
     let created: Date
     let modified: Date
     let shared: Bool
@@ -116,11 +131,21 @@ struct SelectedNoteList: Encodable {
     let count: Int
 }
 
-/// Drops the MCP's placeholder `content:""`/`tags:[]` (never populated for the shared-notes
-/// listing) — same documented deviation as NoteSummary. See docs/port-specs/notes.md.
+/// `list-shared-notes`. The MCP's `listSharedNotes()` pushes `{id, title, content:"", tags:[],
+/// created, modified, account, shared, passwordProtected}` per shared note (build/index.js:
+/// 40371-40381: `content: "",` / `tags: [],` — both hardcoded, never fetched, same as search —
+/// while `created`/`modified`/`account`/`shared`/`passwordProtected` are all real). Note the
+/// absence of a `folder` key here — that is a REAL divergence from `search`/`selected`, not a gap:
+/// the oracle's shared-notes AppleScript loop (index.js:40341-40347) never reads `container of n`
+/// at all, so `folder` genuinely does not exist on this endpoint's wire shape; apple-cli's omission
+/// of `folder` on `SharedNote` already matched this before NOTES-M1. Operator-ruled STRICT PARITY
+/// (NOTES-M1 follow-up): apple-cli emits all nine of the oracle's keys, `content`/`tags` included —
+/// byte-for-byte, zero extra AppleScript round trips. See docs/port-specs/notes.md.
 struct SharedNote: Encodable {
     let id: String
     let title: String
+    let content: String
+    let tags: [String]
     let account: String?
     let created: Date
     let modified: Date

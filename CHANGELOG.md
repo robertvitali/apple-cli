@@ -12,6 +12,32 @@ with the Apple MCP servers they replace.
 
 ## [Unreleased]
 
+### Added
+
+- **`mail rules` can now create rules with a live `delete` (auto-trash) action.** Previously
+  `--execute` refused this with exit 77; it is now wired for full parity with oracle A
+  (operator ruling D6/gap25, 2026-08-19). **Read this before using it:** a Mail rule is a
+  standing, unattended order — once the rule exists and is enabled, every future message matching
+  its conditions is deleted with no agent involved, no confirmation, and no undo, and an
+  over-broad condition applies to mail you never intended. The dry-run preview and the execute
+  envelope both carry an advisory `warnings` entry naming the action; the sandbox additionally
+  refuses to wire `delete` and ENABLE a rule in the same command. `forward_to` remains refused in
+  both modes (see Divergences). Automated coverage is unit + dry-run only: by the same ruling, no
+  agent may live-verify a delete rule, so **the first live exercise is yours**.
+- `notes search`, `notes selected`, and `notes shared` now emit the oracle's `content` and `tags`
+  keys (hardcoded `""` / `[]`, exactly as `apple-notes-mcp@2.7.5` emits them). Strict-parity
+  ruling D6/NOTES-M1; zero added cost — the oracle never fetches these either.
+
+### Changed
+
+- **BREAKING (exit code):** `mail rules create --action "delete=true" --execute` returned exit 77
+  (`safety_violation`) and now succeeds. Any script relying on the refusal will change behavior.
+- `mail draft-rich` now opens the generated `.eml` in a Mail compose window **by default**,
+  matching oracle B's `open_in_mail=True` (ruling D6/extra20). Pass `--no-open` for the previous
+  headless behavior. The command still cannot send anything — it writes a draft and, optionally,
+  shows it to you.
+- New optional `warnings` wire key on `mail rules` create/update envelopes (additive; MINOR).
+
 ### Error envelopes carry `sandbox` on a sandbox refusal (Q14)
 
 **Added**

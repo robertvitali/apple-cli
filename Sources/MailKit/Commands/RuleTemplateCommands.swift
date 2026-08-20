@@ -62,20 +62,23 @@ struct RulesCreate: ParsableCommand {
                 // A dry-run must still faithfully PREDICT the execute outcome — a malformed
                 // `move_to=Archive` (missing the Account/Mailbox slash) previewing ok and then
                 // failing under --execute was the original create-vs-update divergence. But
-                // predicting is not the same as refusing: `delete`, `forward_to` and `--match any`
-                // are real oracle capabilities the live path declines for safety, and a preview
-                // that cannot even describe them loses the capability entirely. So: report every
-                // blocker, and only fail the preview on genuinely MALFORMED input.
+                // predicting is not the same as refusing: `forward_to` and (sandboxed) `--match
+                // any` are real oracle capabilities the live path declines for safety, and a
+                // preview that cannot even describe them loses the capability entirely. So: report
+                // every blocker, and only fail the preview on genuinely MALFORMED input. `delete`
+                // is live-wired (no longer a blocker) but still carries an advisory `warnings`
+                // entry — see `liveActionWarnings`.
                 // MALFORMED input still fails the preview. Control characters in a name/value/
                 // header would desynchronize the US/RS framing the condition blob uses, so they
                 // are rejected here too — not only on the live path, which a preview would
                 // otherwise misreport as fine.
                 try RuleLiveGuards.requireNoControlChars(name: name, conditions: conditions)
                 // Blockers are computed under the SAME sandboxActive the execute path uses, or
-                // the preview lies (docs/write-model-v2.md). The delete/forward_to blockers are
-                // UNWIRED capabilities and apply in both modes; the label/self-scope/match-any
-                // restrictions are the sandbox's.
+                // the preview lies (docs/write-model-v2.md). The forward_to blocker is an UNWIRED
+                // capability and applies in both modes; the label/self-scope/match-any
+                // restrictions are the sandbox's. `warnings` are advisory-only (never thrown on).
                 var blockers = RuleLiveGuards.liveActionBlockers(actions)
+                let warnings = RuleLiveGuards.liveActionWarnings(actions)
                 if sandboxActive {
                     if match == "any" {
                         blockers.append("--match any: a sandboxed rule must stay --match all so its test-label condition always constrains it")
@@ -100,15 +103,17 @@ struct RulesCreate: ParsableCommand {
                 try RuleLiveGuards.validateActionShapes(actions)
                 if blockers.isEmpty { _ = try RuleLiveGuards.liveActionPlan(actions) }
                 try emitRulePreview(rule, willExecute: false, json: global.json, liveBlockers: blockers,
-                                    sandboxActive: sandboxActive)
+                                    warnings: warnings, sandboxActive: sandboxActive)
                 return
             }
-            // ---- Live create (write-model v2). Sandboxed: SELF-SCOPED, non-destructive,
-            // force-disabled — a sandboxed rule must be UNABLE to affect real mail even if later
-            // enabled: (a) bound to the test label, (b) no destructive/redirect action, (c)
-            // force-disabled. Unsandboxed: the rule is created AS SPECIFIED (the oracle's
-            // create_rule creates on call) — delete/forward_to remain refused in liveActionPlan
-            // because they are unwired in MailScript, a tracked capability gap, not a gate.
+            // ---- Live create (write-model v2). Sandboxed: SELF-SCOPED + force-disabled — a
+            // sandboxed rule must be UNABLE to affect real mail even if later enabled: (a) bound
+            // to the test label, (b) force-disabled. `delete` (auto-trash) is live-wired
+            // (operator-ruled full parity, 2026-08-19) and safe even in the sandbox because the
+            // self-scoping invariant confines it to `apple-cli-test`-labeled mail only. Unsandboxed:
+            // the rule is created AS SPECIFIED (the oracle's create_rule creates on call) —
+            // forward_to remains refused in liveActionPlan (a live rule that can auto-send to a
+            // third party is a latent exfil surface, a deliberate gate, not an unwired gap).
             try RuleLiveGuards.requireNoControlChars(name: name, conditions: conditions)
             if sandboxActive {
                 try RuleLiveGuards.requireLabeledName(name)
@@ -148,6 +153,23 @@ struct RulesCreate: ParsableCommand {
                 try? script.deleteRule(index: created.index)
                 throw AppleError.upstream("rule create attached \(attached)/\(conds.count) conditions — removed the malformed rule rather than leave one whose conditions may be missing (a 0-condition rule matches ALL mail).")
             }
+            // MATCH-LOGIC VERIFICATION (review-caught 2026-08-19): the sandboxed self-scoping
+            // invariant argues safety purely from "match=all + a test-label subject condition",
+            // so the CLI must not just ASK Mail for match=all and trust it took — it must CONFIRM
+            // the rule actually carries it, exactly like `attached` confirms the condition count
+            // above. A readback failure is treated the same as a mismatch: fail closed (remove
+            // the rule) rather than leave one whose AND/OR logic is unverified.
+            let matchLogicReadback: Bool
+            do {
+                matchLogicReadback = try script.readRuleScalars(index: created.index).matchAll
+            } catch {
+                try? script.deleteRule(index: created.index)
+                throw AppleError.upstream("rule create could not verify its match-all/any logic after creation (\(error)) — removed the malformed rule rather than leave one whose AND/OR logic is unverified.")
+            }
+            if let mismatch = RuleLiveGuards.matchLogicMismatch(requested: createMatchAll, readback: matchLogicReadback) {
+                try? script.deleteRule(index: created.index)
+                throw AppleError.upstream(mismatch)
+            }
             if createEnabled {
                 try script.updateRuleMeta(index: created.index, name: nil, enabled: true, matchAll: nil, plan: nil)
             }
@@ -156,6 +178,23 @@ struct RulesCreate: ParsableCommand {
             // count — same definition the oracle uses. Best-effort: a read failure must not fail
             // an already-successful create, so the key is simply omitted then.
             let newIndex = (try? script.listRules().count).map(AnyEncodableBox.init)
+            // Advisory note, independent of the sandbox note below: a live delete action needs to
+            // stay visible even in the success envelope, not just the dry-run preview — the rule
+            // now exists and (once enabled) will auto-trash matching mail unattended.
+            let noteParts = [
+                sandboxActive
+                    ? "sandbox: created SELF-SCOPED to the test label + DISABLED — it can only ever act on apple-cli-test mail; `rules enable <index>` to activate"
+                    : nil,
+                plan.delete
+                    ? "WARNING: this rule's delete action will auto-trash matching mail (move it to Trash) once enabled — unattended, no confirmation step"
+                    : nil,
+            ].compactMap { $0 }
+            // `warnings` is MACHINE-READABLE on the preview envelope, so it must be machine-readable
+            // here too: JSON is the contract (AGENTS.md), and an agent that parsed `warnings[]` on
+            // --dry-run should not have to substring-match the prose `note` to learn the same fact
+            // after --execute. Computed off the RESOLVED plan (what the rule actually carries), and
+            // ADDITIVE — the `note` above is unchanged, so no consumer loses anything (MINOR).
+            let warnings = RuleLiveGuards.liveActionWarnings(plan: plan)
             try Output.emit(tool: "mail", data: [
                 "created_rule": AnyEncodableBox(name), "conditions": AnyEncodableBox(conditions),
                 // `name` + `rule_index` are oracle A's wire names; `created_rule` is the CLI's
@@ -163,9 +202,8 @@ struct RulesCreate: ParsableCommand {
                 "name": AnyEncodableBox(name), "rule_index": AnyEncodableBox(newIndex),
                 "actions": AnyEncodableBox(plan.tokens), "match_logic": AnyEncodableBox(createMatchAll ? "all" : "any"),
                 "enabled": AnyEncodableBox(createEnabled), "dry_run": AnyEncodableBox(false), "executed": AnyEncodableBox(true),
-                "note": AnyEncodableBox(sandboxActive
-                    ? "sandbox: created SELF-SCOPED to the test label + DISABLED — it can only ever act on apple-cli-test mail; `rules enable <index>` to activate"
-                    : nil)], text: global.text, sandboxActive: sandboxActive)
+                "warnings": AnyEncodableBox(warnings),
+                "note": AnyEncodableBox(noteParts.isEmpty ? nil : noteParts.joined(separator: " "))], text: global.text, sandboxActive: sandboxActive)
         }
     }
 }
@@ -202,14 +240,19 @@ struct RulesUpdate: ParsableCommand {
                 throw AppleError.validation("nothing to update — pass at least one of --name/--enabled/--match/--condition/--action.")
             }
             // Blockers the LIVE path enforces. In a dry-run these are REPORTED, not thrown: an
-            // OR-rule and a delete/forward_to action are real oracle capabilities, and a preview
-            // that refuses to describe them loses the capability from the surface entirely. Under
+            // OR-rule and a forward_to action are real oracle capabilities, and a preview that
+            // refuses to describe them loses the capability from the surface entirely. Under
             // --execute they are still hard refusals (below).
             // Blockers computed under the SAME sandboxActive the execute path uses, or the
-            // preview lies. delete/forward_to blockers are unwired capabilities (both modes);
-            // the label/self-scope/match-any restrictions are the sandbox's.
+            // preview lies. forward_to is an unwired capability (both modes); the
+            // label/self-scope/match-any restrictions are the sandbox's. `warnings` are
+            // advisory-only (delete is live-wired but dangerous) and never thrown on.
             var blockers: [String] = []
-            if let acts { blockers.append(contentsOf: RuleLiveGuards.liveActionBlockers(acts)) }
+            var warnings: [String] = []
+            if let acts {
+                blockers.append(contentsOf: RuleLiveGuards.liveActionBlockers(acts))
+                warnings.append(contentsOf: RuleLiveGuards.liveActionWarnings(acts))
+            }
             if sandboxActive {
                 if match == "any" {
                     blockers.append("--match any: a sandboxed rule must stay --match all so its test-label condition always constrains it")
@@ -224,6 +267,20 @@ struct RulesUpdate: ParsableCommand {
                 if let name, !name.hasPrefix(TestMode.sandboxPrefix) {
                     blockers.append("--name must keep the \"\(TestMode.sandboxPrefix)\" label for a sandboxed rename")
                 }
+                // Mirror of the execute path's in-place ENABLE-GATE (in the `guard let conds else`
+                // branch below): a sandboxed metadata-only update may not wire a relocating/
+                // destructive action AND enable the rule in one command. Gated on `conds == nil`
+                // because that guard sits on the metadata-only path — WITH --condition the update
+                // routes through the self-scoping recreate, which re-verifies the conditions and so
+                // is not refused. Without this mirror the preview printed `live_blockers: []` for
+                // an update execute refuses with 77 — the affirmative "execute would accept this"
+                // claim this whole block exists to prevent. The gate predates `delete`; the mirror
+                // was missing for move_to/copy_to too, and covers all three via the shared
+                // predicate so the two can never diverge again (review-caught 2026-08-19).
+                if conds == nil, enabled == true, let acts,
+                   RuleLiveGuards.armsRelocatingOrDestructiveAction(acts) {
+                    blockers.append(RuleLiveGuards.inPlaceEnableRefusal)
+                }
             }
 
             guard willExecute else {
@@ -233,15 +290,23 @@ struct RulesUpdate: ParsableCommand {
                 if let acts { try RuleLiveGuards.validateActionShapes(acts) }   // extra25: unconditional
                 if blockers.isEmpty, let acts { _ = try RuleLiveGuards.liveActionPlan(acts) }
                 let recreates = conds != nil
-                let note = blockers.isEmpty ? nil
-                    : "preview only — `--execute` would refuse this update: " + blockers.joined(separator: "; ")
+                var noteParts: [String] = []
+                if !blockers.isEmpty {
+                    noteParts.append("preview only — `--execute` would refuse this update: " + blockers.joined(separator: "; "))
+                }
+                if !warnings.isEmpty {
+                    noteParts.append("advisory (would NOT be refused, but): " + warnings.joined(separator: "; "))
+                }
+                let note = noteParts.isEmpty ? nil : noteParts.joined(separator: " ")
                 if global.json {
                     try Output.emit(tool: "mail", data: ["dry_run": AnyEncodableBox(true), "patch": AnyEncodableBox(patch),
                         "would_recreate": AnyEncodableBox(recreates), "live_blockers": AnyEncodableBox(blockers),
+                        "warnings": AnyEncodableBox(warnings),
                         "note": AnyEncodableBox(note)], sandboxActive: sandboxActive)
                 } else {
                     Output.printText("Would update rule \(index) (dry-run; \(recreates ? "condition change → delete-and-recreate" : "in-place"))")
                     for b in blockers { Output.printText("  would be refused live: \(b)") }
+                    for w in warnings { Output.printText("  warning: \(w)") }
                 }
                 return
             }
@@ -265,23 +330,73 @@ struct RulesUpdate: ParsableCommand {
             guard let conds else {
                 // ---- Metadata-only patch → modify IN PLACE (reliable; preserves rule position). ----
                 // LABEL-TRUST BOUNDARY: enabling here trusts the rule's NAME label only — its EXISTING
-                // conditions are NOT re-verified self-scoped (same boundary as `rules enable`). The
-                // tool's own create/recreate can't author a labeled rule that acts on real mail; a
-                // hand-made one (Mail.app UI) is the operator's responsibility. To keep that boundary
-                // from being widened by the newly-wired move/copy actions, refuse to ENABLE a rule in
+                // conditions are NOT re-verified self-scoped (same boundary as `rules enable`).
+                // CORRECTED (review-caught 2026-08-19; the prior wording here was a false rationale
+                // load-bearing in a safety guard): under write-model v2 an UNSANDBOXED `rules
+                // create`/`rules update` absolutely CAN author a labeled `apple-cli-test…` rule
+                // with arbitrary, non-self-scoped conditions and arbitrary actions — creation only
+                // enforces self-scoping while `--test-mode`/`APPLE_TEST_MODE` is engaged. So the
+                // label alone is NOT proof the rule's conditions are self-scoped; it is proof only
+                // that a prior command (this tool's or a hand-made one in Mail.app) chose that
+                // name. `realDeleteEnableWarnings` below closes the gap this created for `delete`
+                // specifically. To keep the remaining (move_to/copy_to) label-trust boundary from
+                // being widened further, refuse to ENABLE a rule in
                 // the SAME call that wires a move_to/copy_to: activation must be a separate, operator-
                 // visible `rules enable` (or pass --condition to route through the self-scoping
                 // recreate path). A CLI-authored rule is always created disabled + self-scoped, so this
                 // never blocks the normal flow.
-                if sandboxActive, enabled == true, let p = plan, (p.moveTo != nil || p.copyTo != nil) {
-                    throw AppleError.mailSafety("sandbox active: wiring move_to/copy_to on an in-place update cannot also ENABLE the rule in the same command (its existing conditions are not re-verified self-scoped) — omit --enabled and enable separately after review, or pass --condition to route through the self-scoping recreate path.", sandbox: true)
+                // `delete` joined move_to/copy_to as a live-wired action on 2026-08-19 (gap25) and
+                // belongs in this condition for the same reason, only more so: arming an unverified
+                // rule with auto-trash is strictly worse than arming it with a move. It was omitted
+                // when delete was wired — review-caught before the change shipped.
+                // The gated set and the refusal wording now live in RuleLiveGuards, called from BOTH
+                // here and the dry-run blocker above, so preview and execute cannot disagree about
+                // which actions this gate covers. Reading `acts` rather than `plan` is equivalent
+                // (plan is derived from acts, and is non-nil exactly when acts is) and keeps one
+                // predicate over one input type.
+                if sandboxActive, enabled == true, let acts,
+                   RuleLiveGuards.armsRelocatingOrDestructiveAction(acts) {
+                    throw AppleError.mailSafety("sandbox active: " + RuleLiveGuards.inPlaceEnableRefusal, sandbox: true)
                 }
+                // GATE OFF THE RULE'S REAL STATE, not just THIS command's --action (review-caught
+                // 2026-08-19): the check above only sees an action THIS call wires. `rules update
+                // <n> --action delete=true` (no --enabled) followed by a SEPARATE `rules update
+                // <n> --enabled` (no --action) never touched the check above and could arm a
+                // PRE-EXISTING delete action unverified — the same two-command bypass `rules
+                // enable` closes via `realDeleteEnableWarnings` (see
+                // `RuleLiveGuards.realDeleteEnableRefusal`); this is the metadata-only-update half
+                // of that same fix. Runs BEFORE any mutation applies, so a sandboxed refusal here
+                // leaves the rule untouched. Only read back when ARMING (`enabled == true`).
+                let realDeleteMessage = (enabled == true) ? try MailScript().readRuleScalars(index: target.index).deleteMessage : false
+                let realDeleteWarnings = try realDeleteEnableWarnings(target: target, realDeleteMessage: realDeleteMessage,
+                                                                       enabling: enabled == true, sandboxActive: sandboxActive)
                 // `map` so `--match any` actually applies (false = set OR). The old
                 // `match == "all" ? true : nil` collapsed "any" to nil = "don't change" — a
                 // silent no-op reported as executed:true once the sandbox-only refusal stopped
                 // covering the unsandboxed path (review-caught).
                 try MailScript().updateRuleMeta(index: target.index, name: name, enabled: enabled,
                                                 matchAll: match.map { $0 == "all" }, plan: plan)
+                // When --action is given, the supported action set is RESET then reapplied
+                // (wholesale replace, matching the oracle) — the `patch.actions` ARE the rule's
+                // full modeled action set afterward; rules carrying unmodeled actions were refused
+                // above, so nothing unmanaged survives. A live delete action needs to stay visible
+                // in the success envelope too, not just the dry-run preview.
+                let inPlaceNoteParts = [
+                    plan != nil ? "patched in place; supported actions reset to the given set (wholesale replace)" : "patched in place",
+                    (plan?.delete == true)
+                        ? "WARNING: this rule's delete action will auto-trash matching mail (move it to Trash) once enabled — unattended, no confirmation step"
+                        : nil,
+                ].compactMap { $0 }
+                // Machine-readable twin of the prose advisory above (same reason as `rules create`:
+                // `warnings[]` is parseable on the preview envelope, so it must be parseable here).
+                // Merges in `realDeleteWarnings` (the rule's REAL pre-existing delete state, read
+                // back above) alongside whatever THIS command's --action resolved: the two are
+                // disjoint in the sandboxed-and-newly-wired case (the arms-gate above already
+                // refuses that combination before either warning list is computed), but a plain
+                // `rules update --enabled` with no --action still needs the real-state warning
+                // surfaced on the unsandboxed path.
+                var inPlaceWarnings = plan.map { RuleLiveGuards.liveActionWarnings(plan: $0) } ?? []
+                for w in realDeleteWarnings where !inPlaceWarnings.contains(w) { inPlaceWarnings.append(w) }
                 try Output.emit(tool: "mail", data: [
                     "updated_rule_index": AnyEncodableBox(target.index),
                     // `rule_index` is oracle A update_rule's wire name; `updated_rule_index` is
@@ -291,11 +406,8 @@ struct RulesUpdate: ParsableCommand {
                     "name": AnyEncodableBox(name ?? target.name),
                     "patch": AnyEncodableBox(patch), "recreated": AnyEncodableBox(false),
                     "dry_run": AnyEncodableBox(false), "executed": AnyEncodableBox(true),
-                    // When --action is given, the supported action set is RESET then reapplied
-                    // (wholesale replace, matching the oracle) — the `patch.actions` ARE the rule's
-                    // full modeled action set afterward; rules carrying unmodeled actions were refused
-                    // above, so nothing unmanaged survives.
-                    "note": AnyEncodableBox(plan != nil ? "patched in place; supported actions reset to the given set (wholesale replace)" : "patched in place")], text: global.text, sandboxActive: sandboxActive)
+                    "warnings": AnyEncodableBox(inPlaceWarnings),
+                    "note": AnyEncodableBox(inPlaceNoteParts.joined(separator: " "))], text: global.text, sandboxActive: sandboxActive)
                 return
             }
             // ---- Condition replacement → whole-rule DELETE-AND-RECREATE. Two Mail bugs force this
@@ -305,8 +417,10 @@ struct RulesUpdate: ParsableCommand {
             // attached, and only THEN re-enable it (a silently-condition-less rule would match ALL
             // mail). Two documented divergences from the MCP's in-place update (see CHANGELOG): the
             // rule MOVES TO THE END of the list, and its actions are RESET to the carried
-            // mark_read/mark_flagged set — a non-mark action set manually in Mail.app is NOT preserved
-            // (readRuleScalars reads only the mark flags). ----
+            // mark_read/mark_flagged/delete set (2026-08-19, review-caught: `delete` joined the mark
+            // flags once `readRuleScalars` started reading `delete message` back) — a move_to/
+            // copy_to/flag_color action set manually in Mail.app is still NOT preserved
+            // (readRuleScalars doesn't read those back). ----
             let old = try MailScript().readRuleScalars(index: target.index)
             let mergedName = name ?? old.name
             if sandboxActive { try RuleLiveGuards.requireLabeledName(mergedName) }  // sandboxed: preserved/renamed name stays labeled
@@ -319,15 +433,23 @@ struct RulesUpdate: ParsableCommand {
             if let plan {
                 mergedPlan = plan
             } else {
-                // No --action given: carry the old rule's actions. readRuleScalars reads only the mark
-                // flags (Mail exposes no easy readback of a rule's move/copy/flag-color target), so a
-                // condition-replace recreate WITHOUT an explicit --action loses any prior move/copy/
-                // flag-color action — a documented divergence (CHANGELOG); pass --action to preserve it.
+                // No --action given: carry the old rule's actions. readRuleScalars reads the mark
+                // flags AND (2026-08-19, review-caught) `delete message` back; it still has no easy
+                // readback of a rule's move/copy/flag-color target, so a condition-replace recreate
+                // WITHOUT an explicit --action still loses any prior move_to/copy_to/flag_color
+                // action — a documented divergence (CHANGELOG); pass --action to preserve those.
                 var carried: [String] = []
                 if old.markRead { carried.append("mark_read") }
                 if old.markFlagged { carried.append("mark_flagged") }
+                // delete IS now carried forward — readRuleScalars reads `delete message` back,
+                // closing the gap this comment used to document. Safe: self-scoping for the
+                // recreated rule is re-verified above (`requireSelfScoped` on the passed
+                // --condition, sandboxed), so preserving a real delete action here is exactly as
+                // safe as wiring it explicitly with --action delete=true would be.
+                if old.deleteMessage { carried.append("delete") }
                 mergedPlan = RuleLiveGuards.LiveActionPlan(markRead: old.markRead, markFlagged: old.markFlagged,
-                                                           moveTo: nil, copyTo: nil, flagColorIndex: nil, tokens: carried)
+                                                           moveTo: nil, copyTo: nil, flagColorIndex: nil,
+                                                           delete: old.deleteMessage, tokens: carried)
             }
             guard !mergedPlan.tokens.isEmpty else {
                 throw AppleError.validation("the rule has no action and none was given — a live rule needs one; add --action move_to=… / mark_read=true / mark_flagged=true / flag_color=… .")
@@ -356,6 +478,22 @@ struct RulesUpdate: ParsableCommand {
                 try? MailScript().deleteRule(index: created.index)                           //    remove the malformed rule
                 throw AppleError.upstream("rule recreate dropped conditions (\(attached)/\(condTriples.count) attached) — removed the malformed rule and did NOT enable it (a 0-condition rule matches ALL mail). Recreate in Mail.app: \(recovery)")
             }
+            // MATCH-LOGIC VERIFICATION (review-caught 2026-08-19) — same rationale + fail-safe
+            // shape as `RulesCreate.run()`'s twin (RuleLiveGuards.matchLogicMismatch): this
+            // recreate calls the SAME createRule AppleScript, so it depends on the SAME
+            // match-all invariant (forced true when sandboxed, so the label condition always
+            // constrains the rebuilt rule) — it needs the same readback confirmation.
+            let matchLogicReadback: Bool
+            do {
+                matchLogicReadback = try MailScript().readRuleScalars(index: created.index).matchAll
+            } catch {
+                try? MailScript().deleteRule(index: created.index)
+                throw AppleError.upstream("rule recreate could not verify its match-all/any logic after creation (\(error)) — removed the malformed rule and did NOT enable it. Recreate in Mail.app: \(recovery)")
+            }
+            if let mismatch = RuleLiveGuards.matchLogicMismatch(requested: mergedMatchAll, readback: matchLogicReadback) {
+                try? MailScript().deleteRule(index: created.index)
+                throw AppleError.upstream(mismatch + " Recreate in Mail.app: \(recovery)")
+            }
             if mergedEnabled {                                                              // 4) re-enable only once verified
                 try MailScript().updateRuleMeta(index: created.index, name: nil, enabled: true, matchAll: nil, plan: nil)
             }
@@ -373,7 +511,12 @@ struct RulesUpdate: ParsableCommand {
                 "actions": AnyEncodableBox(mergedPlan.tokens),
                 "patch": AnyEncodableBox(patch), "recreated": AnyEncodableBox(true),
                 "dry_run": AnyEncodableBox(false), "executed": AnyEncodableBox(true),
-                "note": AnyEncodableBox("condition change → delete-and-recreated (Mail can't delete a rule condition); created disabled, conditions verified, re-enabled if it was enabled. DIVERGES from the MCP in-place update: rule MOVED TO END of list, and actions RESET to [\(mergedPlan.tokens.joined(separator: ", "))] — pass --action (move_to/copy_to/mark_read/mark_flagged/flag_color) to set them explicitly, since a prior action NOT re-passed is not read back off the old rule.")], text: global.text, sandboxActive: sandboxActive)
+                // Machine-readable twin of the prose advisory appended to `note` below. Computed off
+                // the MERGED plan, not the requested --action: a recreate RESETS the action set, so
+                // the merged plan is what the rebuilt rule actually carries.
+                "warnings": AnyEncodableBox(RuleLiveGuards.liveActionWarnings(plan: mergedPlan)),
+                "note": AnyEncodableBox("condition change → delete-and-recreated (Mail can't delete a rule condition); created disabled, conditions verified, re-enabled if it was enabled. DIVERGES from the MCP in-place update: rule MOVED TO END of list, and actions RESET to [\(mergedPlan.tokens.joined(separator: ", "))] — pass --action (move_to/copy_to/mark_read/mark_flagged/flag_color/delete) to set them explicitly, since a prior action NOT re-passed is not read back off the old rule."
+                    + (mergedPlan.delete ? " WARNING: this rule's delete action will auto-trash matching mail (move it to Trash) once enabled — unattended, no confirmation step." : ""))], text: global.text, sandboxActive: sandboxActive)
         }
     }
 }
@@ -437,6 +580,31 @@ func requireLabeledRule(index: Int, sandboxActive: Bool) throws -> MailScript.Sc
     return r
 }
 
+/// Gate/warn an ENABLE mutation off `target`'s REAL, on-disk delete state — not off any
+/// `--action` passed in the CURRENT command. PURE (the caller reads `realDeleteMessage` back via
+/// `MailScript.readRuleScalars` BEFORE calling this — `MailScript.runner` is the concrete
+/// `AppleScriptRunner`, not an injectable protocol, so keeping the DECISION free of I/O is what
+/// makes it directly unit-testable). Shared by `setEnabled` (`rules enable`/`rules disable`) and
+/// the metadata-only branch of `rules update --enabled`, so a rule armed with `delete` by ONE
+/// command and enabled by a SEPARATE command cannot bypass the single-command
+/// `armsRelocatingOrDestructiveAction` refusal (review-caught 2026-08-19 — see
+/// `RuleLiveGuards.realDeleteEnableRefusal`). Always `[]` when `enabling` is false — disabling a
+/// rule only ever REDUCES what it can do, never arms anything.
+func realDeleteEnableWarnings(target: MailScript.ScriptRule, realDeleteMessage: Bool, enabling: Bool,
+                              sandboxActive: Bool) throws -> [String] {
+    guard enabling, realDeleteMessage else { return [] }
+    if sandboxActive {
+        // Neither this gate nor the metadata-only `rules update --enabled` path re-reads/
+        // re-verifies the rule's CONDITIONS as self-scoped — only its name label was checked
+        // (`requireLabeledRule`), and under write-model v2 an UNSANDBOXED `rules create`/`rules
+        // update` can author a labeled rule with arbitrary (non-self-scoped) conditions, so the
+        // label alone is not trustworthy for a destructive action. Refuse unconditionally.
+        throw AppleError.mailSafety("sandbox active: rule \(target.index) ('\(target.name)') "
+            + RuleLiveGuards.realDeleteEnableRefusal, sandbox: true)
+    }
+    return [RuleLiveGuards.deleteActionWarning]
+}
+
 private func setEnabled(index: Int, enabled: Bool, global: GlobalOptions) throws {
     try runGuarded(tool: "mail") {
         // Write-model v2 preamble.
@@ -449,11 +617,23 @@ private func setEnabled(index: Int, enabled: Bool, global: GlobalOptions) throws
             return
         }
         let r = try requireLabeledRule(index: index, sandboxActive: sandboxActive)
+        // ARMING GATE (review-caught 2026-08-19; closes the two-command bypass — see
+        // `realDeleteEnableWarnings` + `RuleLiveGuards.realDeleteEnableRefusal`). This command is
+        // the ARMING MOMENT for any rule the sandboxed `rules create` path leaves disabled (its
+        // envelope tells the operator to run `rules enable <index>`), so it is exactly where a
+        // rule carrying a real `delete` action starts auto-trashing mail unattended if left
+        // ungated. Gated off the rule's REAL on-disk state (`MailScript.readRuleScalars`), not
+        // off anything passed in this command — `rules enable` takes no --action at all. Only
+        // read back when ARMING (`enabled`): disabling never needs it (`realDeleteEnableWarnings`
+        // is a no-op there anyway, but skipping the read avoids a pointless AppleScript round trip).
+        let realDeleteMessage = enabled ? try MailScript().readRuleScalars(index: r.index).deleteMessage : false
+        let warnings = try realDeleteEnableWarnings(target: r, realDeleteMessage: realDeleteMessage,
+                                                     enabling: enabled, sandboxActive: sandboxActive)
         try MailScript().setRuleEnabled(index: r.index, enabled: enabled)
         try Output.emit(tool: "mail", data: ["rule_index": AnyEncodableBox(index), "rule_name": AnyEncodableBox(r.name), "set_enabled": AnyEncodableBox(enabled),
          // `name` + `enabled` are oracle A set_rule_enabled's wire names; `rule_name` +
          // `set_enabled` are the CLI's original keys, kept for existing consumers.
-         "name": AnyEncodableBox(r.name), "enabled": AnyEncodableBox(enabled),
+         "name": AnyEncodableBox(r.name), "enabled": AnyEncodableBox(enabled), "warnings": AnyEncodableBox(warnings),
          "executed": AnyEncodableBox(true), "dry_run": AnyEncodableBox(false)], text: global.text, sandboxActive: sandboxActive)
     }
 }
@@ -463,21 +643,31 @@ private func setEnabled(index: Int, enabled: Bool, global: GlobalOptions) throws
 /// mutations behind the RuleLiveGuards safety invariant, each emitting their own executed envelope.
 /// Render a rule dry-run. `live_blockers` names every reason `--execute` would refuse THIS rule,
 /// so the preview describes the rule the caller asked for (including oracle capabilities the live
-/// path declines, such as `delete` / `forward_to` / `--match any`) instead of failing outright.
-/// A preview that cannot represent a capability is strictly less useful than one that represents
-/// it and says plainly what would be refused.
+/// path declines, such as `forward_to` / `--match any`) instead of failing outright. `warnings`
+/// names advisory-only concerns for actions that ARE live-wired but stay dangerous (e.g. `delete`
+/// auto-trashing matching mail once enabled) — these do NOT block execute. A preview that cannot
+/// represent a capability is strictly less useful than one that represents it and says plainly
+/// what would be refused (or should give the caller pause).
 func emitRulePreview(_ rule: RuleSchema.Rule, willExecute: Bool, json: Bool,
-                     liveBlockers: [String] = [], sandboxActive: Bool = false) throws {
-    let note = liveBlockers.isEmpty ? nil
-        : "preview only — `--execute` would refuse this rule: " + liveBlockers.joined(separator: "; ")
+                     liveBlockers: [String] = [], warnings: [String] = [], sandboxActive: Bool = false) throws {
+    var noteParts: [String] = []
+    if !liveBlockers.isEmpty {
+        noteParts.append("preview only — `--execute` would refuse this rule: " + liveBlockers.joined(separator: "; "))
+    }
+    if !warnings.isEmpty {
+        noteParts.append("advisory (would NOT be refused, but): " + warnings.joined(separator: "; "))
+    }
+    let note = noteParts.isEmpty ? nil : noteParts.joined(separator: " ")
     if json {
         try Output.emit(tool: "mail", data: [
             "dry_run": AnyEncodableBox(!willExecute), "rule": AnyEncodableBox(rule),
-            "live_blockers": AnyEncodableBox(liveBlockers), "note": AnyEncodableBox(note)],
+            "live_blockers": AnyEncodableBox(liveBlockers), "warnings": AnyEncodableBox(warnings),
+            "note": AnyEncodableBox(note)],
             sandboxActive: sandboxActive)
     } else {
         Output.printText("Rule '\(rule.name)' (\(rule.match_logic), \(rule.enabled ? "enabled" : "disabled")) — dry-run: \(!willExecute)")
         for b in liveBlockers { Output.printText("  would be refused live: \(b)") }
+        for w in warnings { Output.printText("  warning: \(w)") }
     }
 }
 

@@ -192,29 +192,34 @@ public enum RuleLiveGuards {
     }
 
     /// The live-safe rule action plan resolved from an Action: move_to/copy_to (resolved-mailbox
-    /// move/copy), mark_read, mark_flagged, and flag_color are WIRED for live execution; forward_to
-    /// and delete stay refused (see `liveActionPlan`). `tokens` is the human/JSON-facing summary.
+    /// move/copy), mark_read, mark_flagged, flag_color, and delete are WIRED for live execution;
+    /// forward_to stays refused (see `liveActionPlan`). `tokens` is the human/JSON-facing summary.
     public struct LiveActionPlan: Encodable {
         public var markRead: Bool
         public var markFlagged: Bool
         public var moveTo: String?          // "Account/Mailbox"
         public var copyTo: String?          // "Account/Mailbox"
         public var flagColorIndex: Int?     // 0..6 (MailFlagColor rawValue)
+        /// Delete (auto-trash) action. Operator-ruled full parity with oracle A (2026-08-19): a
+        /// live rule may now carry `delete` — matching mail moves to Trash automatically once the
+        /// rule is enabled. `liveActionWarnings` surfaces the advisory that goes with wiring this;
+        /// it is not a blocker.
+        public var delete: Bool
         public var tokens: [String]
     }
 
     /// Reduce an Action to the live-safe plan. move_to/copy_to (a resolved-mailbox move/copy),
-    /// mark_read, mark_flagged, and flag_color are now WIRED for live execution; forward_to
-    /// (auto-send to others) and delete (auto-trash) remain refused — a live rule carrying either is
-    /// a latent exfil/destructive surface once enabled, so those stay Mail.app-only. At least one
-    /// supported action is required. move_to/copy_to must be `Account/Mailbox` so the AppleScript can
-    /// resolve a concrete target mailbox.
+    /// mark_read, mark_flagged, flag_color, and delete (auto-trash) are now WIRED for live
+    /// execution; forward_to (auto-send to others) remains refused — a live rule that can silently
+    /// send mail to a third party is a latent exfil surface once enabled, so it stays
+    /// Mail.app-only. At least one supported action is required. move_to/copy_to must be
+    /// `Account/Mailbox` so the AppleScript can resolve a concrete target mailbox.
     /// The actions the LIVE path refuses, as caller-facing reasons. Empty means `liveActionPlan`
     /// will succeed for these actions.
     ///
     /// WHY THIS EXISTS: `liveActionPlan` throws, and the create/update commands call it before the
     /// dry-run branch so a preview faithfully predicts execute. The side effect was that a rule
-    /// with `delete` or `forward_to` — both real oracle capabilities — could not even be
+    /// with an action the live path refuses — a real oracle capability — could not even be
     /// PREVIEWED. A preview that refuses to describe a rule is strictly less useful than one that
     /// describes it and says plainly which parts would be refused live, so previews now use this.
     public static func liveActionBlockers(_ actions: RuleSchema.Action) -> [String] {
@@ -222,11 +227,87 @@ public enum RuleLiveGuards {
         if let fwd = actions.forward_to, !fwd.isEmpty {
             out.append("forward_to: a live rule that auto-sends to others is refused (edit it in Mail.app)")
         }
-        if actions.delete == true {
-            out.append("delete: a live rule that can auto-trash mail is refused (test it in Mail.app)")
-        }
         return out
     }
+
+    /// The ONE wording for the delete advisory, so the dry-run preview, the execute envelope, and
+    /// the `--text` renderer cannot drift apart into three near-identical sentences.
+    public static let deleteActionWarning =
+        "delete: this rule will auto-trash matching mail (move it to Trash) once enabled — unattended, no confirmation step (test it in Mail.app first if unsure)"
+
+    /// Non-blocking ADVISORY warnings for live-wired actions that stay dangerous even though they
+    /// are no longer refused. `delete` is wired for live execution (full oracle-A parity,
+    /// operator-ruled 2026-08-19) but can silently move matching mail to Trash, unattended, once
+    /// the rule is enabled — surfaced here so both the dry-run preview and the execute success
+    /// envelope carry the same wording. `liveActionPlan` does NOT throw on any of these; they are
+    /// disjoint from `liveActionBlockers`.
+    public static func liveActionWarnings(_ actions: RuleSchema.Action) -> [String] {
+        actions.delete == true ? [deleteActionWarning] : []
+    }
+
+    /// Same advisory set computed from a RESOLVED plan rather than the requested `--action` tokens.
+    /// The condition-replacing recreate path emits a MERGED plan (an existing rule's delete action
+    /// is not read back, so it is NOT carried unless `--action delete=true` is re-passed), so an
+    /// envelope warning off the requested actions there would misreport what the rule now carries.
+    /// Both overloads return the identical wording — one constant, two accessors.
+    public static func liveActionWarnings(plan: LiveActionPlan) -> [String] {
+        plan.delete ? [deleteActionWarning] : []
+    }
+
+    /// True when an Action wires one of the live actions that RELOCATE or DESTROY mail
+    /// (`move_to` / `copy_to` / `delete`), as opposed to the merely-annotating ones (`mark_read` /
+    /// `mark_flagged` / `flag_color`). This is the set a SANDBOXED in-place `rules update` refuses
+    /// to arm and ENABLE in the same command, because the target rule's EXISTING conditions are
+    /// not re-verified self-scoped on that path.
+    ///
+    /// ONE source of truth, deliberately: the execute-path guard AND the dry-run blocker that must
+    /// predict it both call this. `delete` shipped into the guard but not into the preview's
+    /// blocker list, so a preview reported `live_blockers: []` — an affirmative "execute would
+    /// accept this" — for an update execute refuses with 77. Two hand-maintained copies of the
+    /// condition is exactly how that divergence happened (review-caught 2026-08-19).
+    ///
+    /// Equivalent to `plan.moveTo != nil || plan.copyTo != nil || plan.delete` on the plan
+    /// `liveActionPlan` resolves from the same Action — locked by
+    /// `RuleDeleteAdvisoryTests.armsPredicateMatchesResolvedPlan`.
+    public static func armsRelocatingOrDestructiveAction(_ actions: RuleSchema.Action) -> Bool {
+        actions.move_to?.isEmpty == false || actions.copy_to?.isEmpty == false || actions.delete == true
+    }
+
+    /// The ONE wording for that refusal, shared by the live `mailSafety` throw (prefixed with
+    /// "sandbox active: ") and the dry-run blocker entry, so the preview quotes the reason execute
+    /// will actually give instead of a paraphrase that can rot independently.
+    public static let inPlaceEnableRefusal =
+        "wiring move_to/copy_to/delete on an in-place update cannot also ENABLE the rule in the same command (its existing conditions are not re-verified self-scoped) — omit --enabled and enable separately after review, or pass --condition to route through the self-scoping recreate path."
+
+    /// The failure reason when a freshly-created (or freshly-recreated) rule's match-all/any
+    /// READBACK does not agree with what was requested — nil when they agree. Split out (mirrors
+    /// `isSelfScoped` / `armsRelocatingOrDestructiveAction` above) so the create-path verification
+    /// (`RulesCreate.run()`, right next to its condition-COUNT verification) and its test read
+    /// from ONE predicate rather than a hand-inlined `!=` at the call site. Review-caught
+    /// 2026-08-19: the AppleScript-level match-all SET used to be silently swallowed
+    /// (`try ... end try`), so nothing downstream ever confirmed it actually took — a sandboxed
+    /// rule's entire self-scoping argument depends on staying match-all. This is the Swift-side
+    /// half of closing that gap; the AppleScript half is now fail-loud too (see
+    /// `MailScript.createRuleScript` / `updateRuleMetaScript`).
+    public static func matchLogicMismatch(requested: Bool, readback: Bool) -> String? {
+        guard requested != readback else { return nil }
+        return "rule create match logic mismatch (requested matchAll=\(requested), Mail reports matchAll=\(readback)) — removed the malformed rule rather than leave one whose AND/OR logic doesn't match what was requested (a sandboxed rule's self-scoping depends on staying match-all so its test-label condition always constrains it)."
+    }
+
+    /// The ONE wording for the enable-time refusal fired when a rule's REAL, on-disk state already
+    /// carries a live delete action — shared by `rules enable`/`rules disable` (`setEnabled`, via
+    /// `realDeleteEnableWarnings` in RuleTemplateCommands.swift) and the metadata-only branch of
+    /// `rules update --enabled`. Closes the two-command bypass (review-caught 2026-08-19):
+    /// `rules update <n> --action delete=true` (wires delete, no --enabled) followed by a SEPARATE
+    /// `rules enable <n>` never re-checked the target's real action state — only its name label
+    /// (`requireLabeledRule`), and under write-model v2 that label alone is not trustworthy for a
+    /// destructive action: an UNSANDBOXED create/update can author a labeled rule with arbitrary,
+    /// non-self-scoped conditions. Neither `rules enable` nor the metadata-only update re-reads
+    /// the rule's CONDITIONS, so the refusal fires unconditionally rather than trust the label —
+    /// arm such a rule via `rules update <index> --condition ... --action delete=true --enabled`,
+    /// which re-verifies self-scoping against the conditions it is given.
+    public static let realDeleteEnableRefusal =
+        "already carries a live delete action — refusing to enable it because its conditions were not re-verified self-scoped (only its name label was checked). Re-arm it via `rules update <index> --condition ... --action delete=true --enabled`, which re-verifies self-scoping from the conditions you pass."
 
     /// SHAPE validation for move_to/copy_to, split out of `liveActionPlan` so previews run it
     /// UNCONDITIONALLY (extra25): both preview paths used to gate the whole plan on
@@ -248,11 +329,8 @@ public enum RuleLiveGuards {
         if let fwd = actions.forward_to, !fwd.isEmpty {
             throw AppleError.mailSafety("a live rule with forward_to can auto-send to others — refused; edit such a rule in Mail.app.")
         }
-        if actions.delete == true {
-            throw AppleError.mailSafety("a live rule with a delete action could auto-trash mail once enabled — refused; test delete-action rules in Mail.app.")
-        }
         var plan = LiveActionPlan(markRead: actions.mark_read == true, markFlagged: actions.mark_flagged == true,
-                                  moveTo: nil, copyTo: nil, flagColorIndex: nil, tokens: [])
+                                  moveTo: nil, copyTo: nil, flagColorIndex: nil, delete: actions.delete == true, tokens: [])
         var toks: [String] = []
         if let mv = actions.move_to, !mv.isEmpty {
             guard mv.rangeOfCharacter(from: ctrlChars) == nil else { throw AppleError.validation("move_to must not contain RS/US (0x1E/0x1F) control characters.") }
@@ -272,8 +350,9 @@ public enum RuleLiveGuards {
         // token presence: `flag_color=none` (accepted but resolves to no index) must NOT suppress an
         // accompanying mark_flagged, and `flag_color=<color>` already implies flagged via its token.
         if plan.markFlagged && plan.flagColorIndex == nil { toks.append("mark_flagged") }
+        if plan.delete { toks.append("delete") }
         guard !toks.isEmpty else {
-            throw AppleError.validation("live rule mutation needs at least one of move_to/copy_to/mark_read/mark_flagged/flag_color (delete/forward remain refused).")
+            throw AppleError.validation("live rule mutation needs at least one of move_to/copy_to/mark_read/mark_flagged/flag_color/delete (forward remains refused).")
         }
         plan.tokens = toks
         return plan

@@ -32,7 +32,9 @@ it instead of asking.
 
 ## LEDGER — every decision at a glance (updated 2026-08-19)
 
-**Still needs you: D2, D3, D4, and the pending half of D9.** Everything else is settled.
+**Still needs you: D2, D3, D4, the pending half of D9, and now D14.** Everything else is settled.
+
+> **D14 (new, 2026-08-19) — `mail rules` delete action is LIVE but has never been exercised against real Mail.** Wiring it was your D6/gap25 ruling and it is implemented, adversarially reviewed, and hardened (fail-loud match-logic with readback verification, sandbox enable-gate keyed on the rule's REAL state, advisory warnings on every arming path). But by that same ruling **no agent may live-verify a delete rule**, so its first real exercise is yours — the same shape as D3/D4. Until then the mail domain's parity claim carries a "wired, not live-validated" asterisk on this one action.
 
 | # | Topic | Status | Ruling |
 |---|---|---|---|
@@ -48,7 +50,8 @@ it instead of asking.
 | D10 | Search/find-contact length caps | WITHDRAWN | Should not have been filed |
 | D11 | What `schema_version` tracks | **APPLIED** | **Shape only** — value breaks ride the MAJOR + CHANGELOG; both policy lines rewritten to agree |
 | D12 | `notes save-attachment` can write to `~/.ssh` | **RATIFIED** | Keep strict Notes-oracle parity; residual documented, fleet stays intentionally inconsistent |
-| D13 | Strict-superset go/no-go package | **APPLIED** | All items landed + live-verified; only D2 itself remains |
+| D13 | Strict-superset go/no-go package | **APPLIED** | All items landed; live-verified EXCEPT the D14 delete action (no agent may exercise it) |
+| D14 | `mail rules` delete action never live-exercised | **OPEN (task)** | Not a decision — wired + hardened per your gap25 ruling, but its first real run is yours |
 
 ---
 
@@ -690,7 +693,7 @@ time against real accounts.
 
 Items 1–3 are doc-only (landed with this ruling). Items 4–6 are code, each landing behind the usual
 gates. After they land + the read-only live-verifications pass, contacts/reminders/calendar/notes/
-mail are all clear to close, and I bring you D2.
+mail are all clear to close, and I bring you D2. (Amended 2026-08-19: mail's close now carries the D14 asterisk — its delete action is wired but never live-exercised.)
 
 **LANDED (2026-08-19):** items 4–6 are implemented, double-fan-out-reviewed (two full OMC
 code/security/critic rounds, both APPROVE; the round-2 hardening added an flock cross-process
