@@ -2,7 +2,7 @@ name: CI
 
 on:
   push:
-    branches: ["**"]        # every branch, incl. the per-domain feat/asana-* branches
+    branches: [main]         # repo-local main-only workflow
   pull_request:
 
 # Least privilege: the build/test job needs only read access to repo contents.
@@ -16,8 +16,8 @@ concurrency:
 jobs:
   build-test:
     # GitHub-hosted macOS runners ship full Xcode, so swift-testing is available here.
-    # Free for public repositories. (Uses pull_request, NOT pull_request_target — forked
-    # PRs get a read-only token and no secrets.)
+    # This repo is private, so do not assume hosted-runner minutes are free. Uses
+    # pull_request, NOT pull_request_target — forked PRs get a read-only token and no secrets.
     runs-on: macos-15
     steps:
       - uses: actions/checkout@v4   # TODO(hardening): pin to a commit SHA + add Dependabot

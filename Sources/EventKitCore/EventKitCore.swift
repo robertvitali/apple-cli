@@ -2,16 +2,14 @@ import Foundation
 
 /// Shared EventKit engine for the Calendar and Reminders domains.
 ///
-/// IMPORTANT (parallel-work coordination): Calendar and Reminders are two separate
-/// worktrees but BOTH depend on this one module. Build the shared `EKEventStore`
+/// Calendar and Reminders both depend on this one module. Keep shared `EKEventStore`
 /// access, model types (events, reminders, calendars, recurrence, alarms), date/
-/// timezone handling, and permission preflight HERE, once. Do NOT edit this target
-/// from both worktrees simultaneously — land the shared core first, then flesh out
-/// the two domain surfaces in parallel.
+/// timezone handling, and permission preflight HERE, once. Verify both domain
+/// surfaces together when this shared engine changes on `main`.
 ///
-/// Asana:
-///   Calendar  — feat/asana-GID-REDACTED-calendar
-///   Reminders — feat/asana-GID-REDACTED-reminders
+/// Asana parent GIDs:
+///   Calendar  — GID-REDACTED
+///   Reminders — GID-REDACTED
 ///
 /// Fork/reference base: FradSer/event (MIT) — its Swift models already read the
 /// full surface (attendees/availability/recurrence/alarms/structuredLocation).

@@ -18,7 +18,7 @@ actually says (with file paths); sections 3–7 are the synthesized recommendati
 
 gstack is installed on this machine as a Claude Code / cross-CLI skill suite. Its
 release contract lives in the **`ship` skill**:
-`/path/to/local/resource`.
+`~/.claude/skills/gstack/ship/SKILL.md`.
 
 ### 1.1 Four-digit version scheme
 
@@ -86,7 +86,7 @@ can rename a flag = MAJOR; a 900-line diff can be pure internal refactor = PATCH
 ## 2. What ollama-marshal defines
 
 ollama-marshal is a published fleet CLI (git repo at
-`/path/to/local/resource`). It defines a **contract-driven, strict
+`~/path/to/local/resource`). It defines a **contract-driven, strict
 SemVer 2.0.0** policy — the right model for the ports. Sources:
 `CLAUDE.md` (the "Versioning" + "Bright-line Bug Patterns" sections), `CHANGELOG.md`
 (header), `pyproject.toml` (`version = "0.6.5"`), and git tags
@@ -296,7 +296,7 @@ Define "strict superset / 100% parity" as a **testable checklist**, not a vibe:
   drop the MCP?" is identical to "is the CLI a strict superset?". Making that the
   1.0 line means the version number directly answers the retire question — `1.0.0`
   literally *means* "safe to retire the MCP." (The fleet already treats
-  MCP-capability loss as serious: `docs/decisions/hot/mcp.md:74` — dropping
+  MCP-capability loss as serious: `PRIVATE-PATH-REDACTED` — dropping
   apple-contacts "breaks the graph at the most-referenced node.")
 - **It matches SemVer's own 1.0 guidance.** SemVer FAQ: *"If you have a stable API
   on which users have come to depend, you should be 1.0.0."* Agents (the users)
@@ -314,6 +314,10 @@ server until its replacement CLI has shipped `1.0.0` (parity proven) AND all thr
 agent CLIs have been repointed at the tool. `1.0.0` is the *gate* for the retire
 step, not a consequence of it. Keep the MCP and the CLI co-installed across the 0.x
 → 1.0 window (the ports run alongside the MCPs they replace until parity lands).
+
+**HARD STOP — operator-present only (HUMAN-DECISIONS D2).** Parity is necessary but does not
+authorize release: no agent may tag `1.0.0` or unregister any MCP server. The pre-1.0 PII re-audit
+gate (Asana `GID-REDACTED`) must also be verified and closed first.
 
 ### 4.3 Post-1.0
 
@@ -507,8 +511,8 @@ review/test gates. Run per CLI at each release boundary:
 4. Canonical test suite green on the release SHA (HARD-GATE 6): unit + integration,
    including a **golden-output/JSON-schema snapshot test** and an **exit-code
    matrix test** so an accidental output/behavior break fails CI, not an agent.
-5. `/codex review` (HARD-GATE 1) + OMC fan-out on large/sensitive diffs
-   (HARD-GATE 3); trailer hook (HARD-GATE 4).
+5. Run the repo-mandated independent review gate and trailer hook. In apple-cli, the three-reviewer
+   OMC fan-out replaces codex per `docs/decisions/hot/foundational.md`.
 6. Verify OS-permission posture unchanged (or, if changed, it's flagged MAJOR +
    documented) — EventKit / Full-Disk-Access / Automation / Contacts prompts.
 
@@ -522,6 +526,7 @@ review/test gates. Run per CLI at each release boundary:
    is a blocker.
 10. Commit (Conventional Commit + fleet trailers), annotated tag **`vX.Y.Z`**, push
     (tests green — HARD-GATE 6).
+    **For `1.0.0`, stop before this step and wait for the operator in the live session (D2).**
 
 **Distribute (fleet converge)**
 11. Update the tap formula (`url`@`vX.Y.Z` + new `sha256`, `version=X.Y.Z`); bump the
@@ -532,20 +537,21 @@ review/test gates. Run per CLI at each release boundary:
     against the new version.
 13. **If this is the 1.0.0 parity release:** only now schedule the replaced MCP
     server's retirement (unregister from `.chezmoidata/mcp-servers.yaml`), as a
-    separate gated change — never bundled with the CLI release.
+    separate gated change — never bundled with the CLI release. **Operator-present only:** no
+    agent performs this step; D2 and Asana `GID-REDACTED` must both be closed first.
 
 ---
 
 ## 8. Sources
 
 **Local — gstack** (installed skill suite)
-- `/path/to/local/resource` — Step 12 version bump
+- `~/.claude/skills/gstack/ship/SKILL.md` — Step 12 version bump
   (4-digit `MAJOR.MINOR.PATCH.MICRO`, lines 2498–2560), auto-decide bump levels
   (2500–2506), stop-conditions (744, 754), queue-aware pick (2510–2534),
   idempotency (2441), Step 13 CHANGELOG generation, `## [X.Y.Z.W] - YYYY-MM-DD`.
-- `/path/to/local/resource` (format reference).
+- `~/.claude/skills/gstack/CHANGELOG.md` (format reference).
 
-**Local — ollama-marshal** (`/path/to/local/resource`)
+**Local — ollama-marshal** (`~/path/to/local/resource`)
 - `CLAUDE.md:255-337` — "Versioning" section (SemVer declaration, pre/post-1.0
   table, 1.0.0 commitment, per-PR workflow, "what counts as breaking") + "Bright-line
   Bug Patterns" #13 version-drift and #14 wrong-bump.
@@ -559,9 +565,10 @@ review/test gates. Run per CLI at each release boundary:
   `pin_epoch` pin schema; converged by `lib/skill-pin-converge.sh`.
 - `.chezmoidata/plugin-pins.yaml` — marketplace `sha` + `realized_version`
   (H1 pin-the-marketplace / H2 verify-realized, fail-closed).
-- `Brewfile.tmpl` + `brew-bundle` software-lane converge; `docs/decisions/hot/mcp.md`
+- `Brewfile.tmpl` + `brew-bundle` software-lane converge;
+  `private fleet-config repo:docs/decisions/hot/mcp.md`
   (apple-suite parity rationale — dropping an MCP "breaks the graph"),
-  `docs/decisions/hot/brew.md` (parity-superset precedent).
+  `PRIVATE-PATH-REDACTED` (parity-superset precedent).
 - `AGENTS.md` — Conventional Commits → git-cliff; cross-CLI parity north star
   (Claude ↔ Codex ↔ agy from one canonical source).
 

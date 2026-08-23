@@ -14,6 +14,9 @@
 # In-repo per-domain worktrees (each a checkout of a feature branch)
 .worktrees/
 
+# Session scratchpads may contain raw oracle output; ignore by class if one is misplaced here.
+scratchpad/
+
 # Ephemeral session-handoff brief — MUST NEVER be committed
 START-HERE.md
 

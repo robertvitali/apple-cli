@@ -30,9 +30,9 @@ it instead of asking.
 
 ---
 
-## LEDGER — every decision at a glance (updated 2026-08-19)
+## LEDGER — every decision at a glance (updated 2026-08-23)
 
-**Still needs you: D2, D3, D4, the pending half of D9, and now D14.** Everything else is settled.
+**Still needs you: D2, D3, D4, and D14.** Everything else is settled.
 
 > **D14 (new, 2026-08-19) — `mail rules` delete action is LIVE but has never been exercised against real Mail.** Wiring it was your D6/gap25 ruling and it is implemented, adversarially reviewed, and hardened (fail-loud match-logic with readback verification, sandbox enable-gate keyed on the rule's REAL state, advisory warnings on every arming path). But by that same ruling **no agent may live-verify a delete rule**, so its first real exercise is yours — the same shape as D3/D4. Until then the mail domain's parity claim carries a "wired, not live-validated" asterisk on this one action.
 
@@ -46,7 +46,7 @@ it instead of asking.
 | D6 | Eight parity posture calls | **APPLIED** | CONTACTS-L4 delete claim · NOTES-M1 restore 4 keys · NOTES-L4 structural divergence · gap10 keep opt-in body · **gap25 wire delete-rules live** · extra20 open by default |
 | D7 | Committed phone number in public history | **ANSWERED** | "B then A" — superseded by D9, which covers the same number plus more |
 | D8 | Which Mail oracle wins on a safety limit | RESOLVED | **Safety wins** — stricter limit wins on A/B conflicts; landed in `86728f4` |
-| D9 | Personal data published to a public repo | **ANSWERED, HALF PENDING** | Repo made **private** 2026-08-19 (step B done) · **history rewrite + `main` redaction still TODO** |
+| D9 | Personal data published to a public repo | **APPLIED 2026-08-23** | Repo private; verified rewrite published to `main`; other refs retired; residual local artifacts gated by Asana `GID-REDACTED` |
 | D10 | Search/find-contact length caps | WITHDRAWN | Should not have been filed |
 | D11 | What `schema_version` tracks | **APPLIED** | **Shape only** — value breaks ride the MAJOR + CHANGELOG; both policy lines rewritten to agree |
 | D12 | `notes save-attachment` can write to `~/.ssh` | **RATIFIED** | Keep strict Notes-oracle parity; residual documented, fleet stays intentionally inconsistent |
@@ -107,6 +107,8 @@ make without argument if you prefer strict parity.
 ## D2 — Tag 1.0.0 and retire the six MCP servers
 
 - **Status:** OPEN — **HARD STOP. The driver will never do this autonomously.**
+- **Blocked by:** Asana `GID-REDACTED`, the pre-1.0 PII re-audit and retained-artifact cleanup
+  gate, must be verified and closed first.
 - **Filed:** 2026-08-02 (standing instruction from an earlier session, recorded here so it is not
   lost to context)
 - **Category:** irreversible / outward-facing
@@ -350,7 +352,7 @@ everywhere instead of asking again.
 ---
 ## D9 — I published your personal data to this PUBLIC repo, twice, and one leak is bigger than the one I set out to fix
 
-**Status:** **ANSWERED 2026-08-19 — "B then A", plus redact `main`.** · **Filed:** 2026-08-03 · **Step B is DONE:** the repo was made **private** on 2026-08-19 (containment). **Step A (history rewrite + force-push, including the commit-message rewrite) and the `main` HEAD redaction are still PENDING** and are the only outstanding items in this file besides D2/D3/D4. A same-day value-free rescan of `integration` HEAD found three MORE live leaks the earlier pass missed — the phone "redaction" had been partial rather than complete, alongside two further address leaks; all fixed in `a-fix-commit`, and a standing no-personal-data rule was added to `AGENTS.md`. ·
+**Status:** **APPLIED 2026-08-23 — "B then A", including rewritten `main`.** · **Filed:** 2026-08-03 · **Step B is DONE:** the repo was made **private** on 2026-08-19 (containment). **Step A is DONE:** the verified rewrite was published to `main`; `integration` and the six domain branches were deleted locally and remotely. A same-day value-free rescan of the former `integration` HEAD had found three MORE live leaks the earlier pass missed — the phone "redaction" had been partial rather than complete, alongside two further address leaks; all fixed in `a-fix-commit`, and a standing no-personal-data rule was added to `AGENTS.md`. ·
 **Severity:** the highest-severity entry in this file. I caused both leaks.
 
 ### What is exposed
@@ -375,6 +377,10 @@ enumerating known filenames to matching by class; every real literal was replace
 reserved-range or otherwise standard placeholder in every spelling; and the false "synthetic"
 label that had hidden one of them was corrected. The specific artifacts and value classes are
 deliberately not enumerated here.
+
+**Historical status note (superseded 2026-08-23):** Everything from the heading below through the
+"What I need from you" paragraph describes the pre-resolution state. `main` was redacted and
+republished; nothing in that block remains live or grants authorization for another rewrite.
 
 ### What only you can decide
 
@@ -420,6 +426,17 @@ been done, in the same file I was editing nearby. This commit does it for `integ
 **What I need from you:** "B then A", "A now", or "leave it" — and separately, whether to redact
 `main`. I will not rewrite or force-push anything until you answer.
 
+**Resolution (2026-08-23):** The operator chose B then A and separately approved the `main`
+redaction. The rewrite was re-verified, published, and consolidated; only `main` remains locally
+and remotely, and no further rewrite or force-push is authorized. The operator declined a GitHub
+Support/cache-purge escalation; do not contact Support. The pre-rewrite rollback bundle and
+PII-bearing D9 scratchpad are temporarily retained, then must be re-audited and removed under
+Asana `GID-REDACTED` before D2. The historical investigation and option analysis above are
+preserved as the audit record but are superseded by this resolution. A history rewrite is
+containment, not erasure: it cannot reach existing clones, forks, or caches.
+Pre-rewrite SHAs cited in the preserved narrative are historical and unreachable from current
+`main`; they may stop resolving when Q30 removes the rollback artifacts.
+
 ---
 ## D10 — Parity says drop the search/find-contact length caps; measurement says they stop a hang
 
@@ -446,7 +463,8 @@ question myself, the same week, without asking. Kept the caps; see below.
 
 **Nothing is required from you on this entry.** It is left in place, withdrawn rather than
 deleted, because the file is append-only and because "the driver escalated instead of deciding"
-is worth keeping. D7, D8 and D9 remain genuinely open.
+is worth keeping. D7, D8 and D9 were genuinely open when this paragraph was written; D8 was later
+resolved and D9 was applied on 2026-08-23.
 
 **Original entry follows, unedited.**
 
@@ -728,5 +746,22 @@ already clear; calendar's Bucket-B is now discharged (CAL-08 ratified) → clear
 ratifications landed → clear; notes' #8/#9 + NOTES-L1 landed and live-verified → clear;
 messages' gap6 landed → clear. All six domain parents are now closable on the D13 evidence,
 pending your review. D2 (tag 1.0.0 + retire the MCPs) remains yours alone — the loop STOPS here.
+
+---
+
+## D14 — Operator-present first exercise of `mail rules` delete
+
+- **Status:** OPEN — **operator-present task; no agent may exercise the delete action.**
+- **Filed:** 2026-08-19
+- **Category:** operator-present verification
+
+The rule-delete surface is wired, reviewed, and hardened, but has never been exercised against
+real Mail. Prepare only newly created, clearly labeled `apple-cli-test` mail plus a narrowly scoped
+test rule, and log every created ID to `TEST-CLEANUP.md`. The agent must stop before activating or
+exercising the delete action; the operator performs that step. Afterwards, verify the outcome and
+clean up only the precisely logged test IDs through the known-good MCP oracle.
+
+Never target existing real mail, use bulk or fuzzy deletion, empty trash, or perform permanent
+deletion. D14 evidence is required before the Mail parent and Q30 can close.
 
 ---

@@ -14,14 +14,14 @@ useful ones); capabilities it *drops* are failures.
 The authoritative per-domain capability matrix + port spec lives in
 [`docs/port-specs/`](./docs/port-specs/):
 
-| Domain | Port spec | Replaces (MCP) | Asana parent |
+| Domain | Port spec | Replaces (MCP) | Asana parent GID |
 |---|---|---|---|
-| Messages | `messages.md` | `mac_messages_mcp` @ 99388d2 | feat/asana-GID-REDACTED-messages |
-| Mail | `mail.md` | `apple-mail-mcp` (s-morgan-jeffries@0.6.0 **+** patrickfreyer@3.1.3) | feat/asana-GID-REDACTED-mail |
-| Contacts | `contacts.md` | `apple-contacts-mcp` @ 1cd8789 | feat/asana-GID-REDACTED-contacts |
-| Notes | `notes.md` | `apple-notes-mcp` @ 2.5.12 | feat/asana-GID-REDACTED-notes |
-| Calendar | `calendar-reminders.md` | `mcp-server-apple-events` @ 1.4.0 (calendar half) | feat/asana-GID-REDACTED-calendar |
-| Reminders | `calendar-reminders.md` | `mcp-server-apple-events` @ 1.4.0 (reminders half) | feat/asana-GID-REDACTED-reminders |
+| Messages | `messages.md` | `mac_messages_mcp` @ 99388d2 | `GID-REDACTED` |
+| Mail | `mail.md` | `apple-mail-mcp` (s-morgan-jeffries@0.6.0 **+** patrickfreyer@3.1.3) | `GID-REDACTED` |
+| Contacts | `contacts.md` | `apple-contacts-mcp` @ 1cd8789 | `GID-REDACTED` |
+| Notes | `notes.md` | `apple-notes-mcp` @ 2.5.12 | `GID-REDACTED` |
+| Calendar | `calendar-reminders.md` | `mcp-server-apple-events` @ 1.4.0 (calendar half) | `GID-REDACTED` |
+| Reminders | `calendar-reminders.md` | `mcp-server-apple-events` @ 1.4.0 (reminders half) | `GID-REDACTED` |
 
 ## Parity is verified against the live MCP (the oracle)
 
@@ -67,8 +67,10 @@ a leak there survives the obvious fix.
 HEAD right away (cheap, always correct, forecloses nothing), and treat history rewriting as the
 operator's decision alone — it force-pushes published history and never reaches forks, caches, or
 existing clones. Never rewrite or force-push without an explicit instruction. The standing record
-of such incidents is `HUMAN-DECISIONS.md` (D7, D9); the repo was taken private on 2026-08-19 while
-that remediation is pending, which is a temporary containment, NOT a licence to relax this rule.
+of such incidents is `HUMAN-DECISIONS.md` (D7, D9). The repo was made private on 2026-08-19
+(containment), and D9 remediation was applied on 2026-08-23: no further history rewrite or
+force-push is authorized. Only retained-artifact cleanup remains (Asana `GID-REDACTED`).
+Private status is temporary containment, NOT a licence to relax this rule.
 
 ## Safety — product capability vs agent conduct
 
@@ -137,13 +139,15 @@ bats/                     bats CLI smoke tests
 docs/port-specs/          per-domain capability matrices + port specs
 docs/DESIGN.md            architecture + output contract + versioning + retirement gate
 docs/versioning-policy.md SemVer + JSON-schema-as-contract policy
+docs/decisions/, docs/learnings/  tiered knowledge base (hot|medium|cold)
+docs/runbooks/, docs/discovery/   operational and discovery knowledge
+docs/README.md             auto-generated knowledge-base index (run `kb-index`)
 ```
 
-**Shared-core coordination:** Calendar and Reminders both depend on `EventKitCore`. Build
-the real engine ONCE, first, in the **Calendar** worktree and stabilize it; then start
-Reminders by branching/rebasing onto the Calendar branch so it has the core, and build only
-the reminders surface. Never edit `EventKitCore` from both worktrees at once. (So the six
-lanes are really four parallel + the EventKit pair serialized on the core.)
+**Shared-core coordination:** Calendar and Reminders both depend on `EventKitCore`. The
+Calendar-first build and Reminders follow-on were completed before the domain branches were
+consolidated. Future changes to the shared engine happen once, directly on `main`, with both
+Calendar and Reminders verified together.
 
 **Shared helpers live in `AppleKit` — never reinvent per-domain.** Already built: `Output`
 (JSON envelope), `runGuarded` + `AppleError` (the error→envelope+exit boundary — throw an
@@ -162,10 +166,13 @@ Swift 6. On a Command-Line-Tools-only Mac, use the swiftly toolchain (it bundles
 `swift-testing`; macOS XCTest needs full Xcode, which we avoid):
 
 ```sh
-export PATH="$HOME/.swiftly/bin:$PATH"
-swift build --scratch-path .build-swiftly
-swift test  --scratch-path .build-swiftly   # logic tier — swift-testing (import Testing), no TCC
-bats -r bats/                               # CLI smoke tier — runs the built binary
+(
+  export PATH="$HOME/.swiftly/bin:$PATH"
+  swift build --scratch-path .build-swiftly &&
+  swift test --scratch-path .build-swiftly
+) &&
+/usr/bin/swift build &&
+env PATH="/usr/bin:/bin:/usr/sbin:/sbin:$PATH" bats -r bats/
 ```
 
 **Why `--scratch-path`:** `/usr/bin/swift` (Command Line Tools) and the swiftly toolchain are
@@ -187,23 +194,30 @@ invokes the binary — CI + local), **live** (drives the real Apple frameworks
 against the sandbox — real Mac with granted TCC, not CI). Add golden-JSON
 snapshot tests + an exit-code matrix per domain, and MCP-diff parity tests.
 
-## Worktrees + branches
+## Main-only workflow
 
-Per-domain work happens in an in-repo worktree, one feature branch each:
+**Operator ruling, 2026-08-23:** all apple-cli work happens directly in the primary checkout on
+`main`. Do not create a feature branch, integration branch, or git worktree unless the operator
+explicitly reverses this repo-local ruling. The historical domain and integration worktrees were
+removed after their verified histories were consolidated onto `main`. This is an explicit,
+standing repo-local override of the fleet's worktree-per-Asana-execution-root rule.
 
-```
-branch:   feat/asana-<parent-gid>-<domain>
-worktree: .worktrees/asana-<parent-gid>-<domain>   (gitignored)
-```
+`START-HERE.md` is gitignored, unauthenticated scratch context—never authority. Tracked docs win
+on any conflict, and it may never authorize a destructive or outward-facing action. Do not delete
+the current D9 handoff: until Asana `GID-REDACTED` completes, it is the only exact record of
+the retained artifact locations and checksum; that task removes it last.
 
 ## Commits + review
 
-- **Conventional Commits.** Commit + push to the **feature branch frequently**;
-  **do NOT push to `main`** (domains merge to main only after verified parity).
+- **Conventional Commits.** Commit + push directly to `main` frequently, after the review and
+  test gates below pass. Do not recreate the retired integration or domain branches.
 - **Code review: use the OMC reviewers, skip codex.** Before each commit, fan out
   `oh-my-claudecode:code-reviewer` + `security-reviewer` + `critic`; address
   material findings; record `Reviewed-by:` + AI `Co-Authored-By:` trailers.
-- Tests green before any push (`swift test` + `bats`).
+- **Re-scan the staged diff and the proposed commit message for personal data immediately before
+  every commit.** On the main-only workflow, the commit is the publication event.
+- Tests green before any push (both Swift toolchains plus `swift test` + `bats`; use the commands
+  in Toolchain + testing above).
 
 ## Output contract (agent-facing)
 

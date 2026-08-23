@@ -24,10 +24,10 @@ let package = Package(
         .target(name: "AppleKit", dependencies: [argparse]),
 
         // Shared EventKit engine for Calendar + Reminders. Build the store/models here
-        // ONCE; CalendarKit and RemindersKit both import it. Never edit from two worktrees.
+        // once; CalendarKit and RemindersKit both import it and are verified together on main.
         .target(name: "EventKitCore", dependencies: ["AppleKit"]),
 
-        // Per-domain command trees (fleshed out one-per-worktree, in parallel).
+        // Per-domain command trees, composed and maintained together on main.
         .target(name: "MessagesKit", dependencies: ["AppleKit", argparse]),
         .target(name: "MailKit", dependencies: ["AppleKit", argparse]),
         .target(name: "ContactsKit", dependencies: ["AppleKit", argparse]),

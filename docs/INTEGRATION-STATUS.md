@@ -12,7 +12,13 @@
 > sandbox refusal), NOT a write prerequisite. Every "v1 two-factor gate" and "zero live writes"
 > statement below is therefore historical for ALL domains; `main` has since advanced with the
 > live-write wiring and perf work (see `git log main`). For the current model read
-> `docs/write-model-v2.md`; for current status read `docs/COMPLETION-LOOP.md`.
+> `docs/write-model-v2.md`; for current status read `docs/COMPLETION-LOOP.md`. On 2026-08-23,
+> the verified domain/integration histories were consolidated onto rewritten `main`; all other
+> local and remote branches and all worktrees were retired by operator direction. Future work is
+> main-only unless the operator explicitly reverses that ruling.
+> The rewrite is containment, not erasure: it cannot reach existing clones, forks, or caches.
+> PII-bearing D9 rollback artifacts remain temporarily retained, and the pre-1.0 re-audit and
+> cleanup gate (Asana `GID-REDACTED`) remains OPEN and blocks item 4 below.
 
 **TL;DR (2026-07-16 snapshot).** All six domains are implemented to strict-superset MCP parity, each
 independently reviewed (3-pass OMC) and verified green, then aggregated onto the
@@ -25,9 +31,10 @@ the AGENTS.md conduct rules. The live-write paths have since been **wired** (wri
 domains). What remains **operator-gated**: live end-to-end verification against the MCP oracles
 (TCC grants), and the `1.0.0` tag + MCP retirement.
 
-As of this snapshot the tree was on `origin/integration` commit `a-prior-commit`; the branch has since
-advanced through the write-model-v2 work (HEAD `a-prior-head`), and `main` has since taken the
-live-write wiring + perf commits (it was untouched *as of this snapshot only*).
+At this snapshot the tree was on `origin/integration` commit `a-prior-commit`; that branch later advanced
+through the write-model-v2 work (pre-rewrite HEAD `a-prior-head`), and `main` later took the live-write
+wiring + perf commits. Both SHAs predate the 2026-08-23 rewrite and are unreachable from current
+`main`; they remain here only as historical snapshot identifiers.
 
 ---
 
@@ -44,9 +51,15 @@ live-write wiring + perf commits (it was untouched *as of this snapshot only*).
 Reproduce:
 
 ```sh
-git fetch && git checkout integration      # or: cd .worktrees/integration
-export PATH="$HOME/.swiftly/bin:$PATH"
-swift build && swift test && bats -r bats/
+git status --porcelain   # must be empty before proceeding
+git fetch origin && git switch main && git pull --ff-only
+(
+  export PATH="$HOME/.swiftly/bin:$PATH"
+  swift build --scratch-path .build-swiftly &&
+  swift test --scratch-path .build-swiftly
+) &&
+/usr/bin/swift build &&
+env PATH="/usr/bin:/bin:/usr/sbin:/sbin:$PATH" bats -r bats/
 ```
 
 ---
@@ -146,7 +159,7 @@ in code.
 
 Ordered. Nothing here is safe to do unattended, which is why it waited.
 
-1. **Live e2e / MCP-oracle diff.** Run the `integration` binary against the live
+1. **Live e2e / MCP-oracle diff.** Run the `main` binary against the live
    MCP servers for read ops across all six domains and diff (CLI JSON must be a
    superset of each MCP field). Calendar/Reminders/Contacts use frameworks that
    will prompt for TCC on first run — grant them. (Messages/Mail/Notes read
@@ -157,11 +170,11 @@ Ordered. Nothing here is safe to do unattended, which is why it waited.
    `APPLE_TEST_MODE=1 + --test-mode` gate, and **audit every id-addressed
    write/delete to fail-closed on the fetched target's label** (the class-bug
    above) before enabling.
-3. **Merge to `main`.** `origin/integration` (`a-prior-commit`) is the complete, verified
-   tree — merge it (not the six feature branches individually, or the shared-core
-   fixes are lost). Re-run `swift test` + `bats` on `main` after.
-4. **Tag `1.0.0` + retire the MCPs** once live e2e passes, per the retirement gate
-   in `docs/DESIGN.md`.
+3. **Consolidate on `main`.** Completed 2026-08-23 after a verified history rewrite. The
+   integration and six domain branches/worktrees were then retired; `main` is the sole branch.
+4. **HARD STOP — D2, operator-present only.** No agent may tag `1.0.0` or unregister any MCP
+   server. This is additionally blocked by the pre-1.0 PII re-audit gate (Asana
+   `GID-REDACTED`). After both gates clear, follow the retirement gate in `docs/DESIGN.md`.
 5. **`SQLiteReader immutable=1` (M2).** A Messages-specific perf/PII hardening
    (the current `copyToTemp` of chat.db leaves a full copy in `$TMPDIR` if the
    process dies). Left for its own review because it touches the shared reader's

@@ -17,7 +17,7 @@ import EventKitCore
 /// by default (oracle parity); `--dry-run` / `APPLE_DRY_RUN=1` preview, and
 /// `--test-mode` / `APPLE_TEST_MODE` engages the opt-in sandbox policy (label-scoped targets).
 ///
-/// Asana: feat/asana-GID-REDACTED-calendar
+/// Asana parent GID: GID-REDACTED
 public struct CalendarCommand: ParsableCommand {
     public static let configuration = CommandConfiguration(
         commandName: "calendar",

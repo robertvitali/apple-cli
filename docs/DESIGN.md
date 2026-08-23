@@ -78,6 +78,9 @@ Full policy in [`versioning-policy.md`](./versioning-policy.md). Summary:
   hits `1.0.0` AND agent-driven end-to-end validation proves every domain works;
   then they're retired together (unregistered from private fleet-config repo
   `.chezmoidata/mcp-servers.yaml`). Do not retire per-domain.
+  **HARD STOP — operator-present only (HUMAN-DECISIONS D2).** No agent may tag
+  `1.0.0` or unregister any MCP server, regardless of the conditions above. This is
+  additionally blocked by the pre-1.0 PII re-audit gate (Asana `GID-REDACTED`).
 
 ## Testing
 

@@ -530,7 +530,8 @@ reverting the model. The sandbox itself is the operator's per-invocation rollbac
   `ReminderWriteGuard.resolve` plus a sandbox-conditional `requireLabeledReminder`. **`EventKitCore`
   holds no write guard of any kind** — its `EventStore.swift` documents that callers gate and
   enforces nothing itself — so the AGENTS.md "never edit EventKitCore from both worktrees at once"
-  hazard did not apply and the two domains are genuinely independent edits. The one shared-file
+  hazard did not apply and the two domains are genuinely independent edits. (That historical
+  AGENTS.md worktree rule was retired with the worktrees on 2026-08-23.) The one shared-file
   change is **comment-only and behaviourally inert**: `EventStore.swift`'s WRITE-GUARD CONTRACT
   block still described the v1 posture ("`willExecute` — real mutation vs the dry-run default" plus
   an unconditional `TestMode.requireLabeledTarget`), which is exactly the contract v2 removes. Left
