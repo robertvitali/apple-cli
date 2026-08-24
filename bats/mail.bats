@@ -364,26 +364,21 @@ require_index() {
 # overwritten an SSH key with attachment bytes. Refusal is exit 77 (safety), not 64 (usage),
 # and it MUST fire on the default dry-run path too — a preview that promises a write --execute
 # would refuse is the dishonest-preview failure mode.
-@test "mail attachments save refuses a destination outside \$HOME (exit 77, on dry-run)" {
-  require_index
-  id=$("$BIN" mail search --mailbox All --has-attachment --limit 1 \
-        | python3 -c "import json,sys;m=json.load(sys.stdin)['data']['messages'];print(m[0]['id'] if m else '')")
-  [ -n "$id" ] || skip "store has no message with attachments"
-  run "$BIN" mail attachments save --dry-run "$id" --dir /private/etc
+@test "mail attachments save refuses an outside-home destination before store access" {
+  # Deliberately use a nonexistent id: path safety must win before Envelope Index or Mail.app
+  # resolution. If message resolution runs first, this returns not_found instead of exit 77.
+  run "$BIN" mail attachments save --dry-run apple-cli-test-missing-message --dir /private/etc
   [ "$status" -eq 77 ]
   echo "$output" | grep -q '"safety_violation"'
 }
 
 @test "mail attachments save refuses a sensitive directory (exit 77, on dry-run)" {
-  require_index
-  id=$("$BIN" mail search --mailbox All --has-attachment --limit 1 \
-        | python3 -c "import json,sys;m=json.load(sys.stdin)['data']['messages'];print(m[0]['id'] if m else '')")
-  [ -n "$id" ] || skip "store has no message with attachments"
-  run "$BIN" mail attachments save --dry-run "$id" --dir "$HOME/.ssh"
+  run "$BIN" mail attachments save --dry-run apple-cli-test-missing-message --dir "$HOME/.ssh"
   [ "$status" -eq 77 ]
   echo "$output" | grep -q '"safety_violation"'
   # --out is the sharper edge: it names a FILE, so an unguarded run would clobber a key.
-  run "$BIN" mail attachments save --dry-run "$id" --indices 0 --out "$HOME/.ssh/authorized_keys"
+  run "$BIN" mail attachments save --dry-run apple-cli-test-missing-message \
+    --indices 0 --out "$HOME/.ssh/authorized_keys"
   [ "$status" -eq 77 ]
   echo "$output" | grep -q '"safety_violation"'
 }
@@ -391,13 +386,49 @@ require_index() {
 # The existence / is-a-directory checks used to sit AFTER the dry-run guard, so a preview
 # reported success for a destination --execute would reject.
 @test "mail attachments save dry-run rejects a nonexistent directory (preview honesty)" {
-  require_index
-  id=$("$BIN" mail search --mailbox All --has-attachment --limit 1 \
-        | python3 -c "import json,sys;m=json.load(sys.stdin)['data']['messages'];print(m[0]['id'] if m else '')")
-  [ -n "$id" ] || skip "store has no message with attachments"
-  run "$BIN" mail attachments save --dry-run "$id" --dir "$HOME/apple-cli-test-definitely-absent-12345"
+  missing="$BATS_TEST_TMPDIR/apple-cli-test-definitely-absent"
+  [ ! -e "$missing" ]
+  run "$BIN" mail attachments save --dry-run apple-cli-test-missing-message \
+    --allow-outside-home --dir "$missing"
   [ "$status" -eq 64 ]
   echo "$output" | grep -q '"validation_error"'
+}
+
+@test "mail attachments save dry-run rejects a directory passed to --out before store access" {
+  run "$BIN" mail attachments save --dry-run apple-cli-test-missing-message \
+    --allow-outside-home --out "$BATS_TEST_TMPDIR"
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q '"validation_error"'
+}
+
+@test "mail attachments save dry-run rejects a missing --out parent before store access" {
+  missing_parent="$BATS_TEST_TMPDIR/apple-cli-test-missing-parent"
+  [ ! -e "$missing_parent" ]
+  run "$BIN" mail attachments save --dry-run apple-cli-test-missing-message \
+    --allow-outside-home --out "$missing_parent/attachment.txt"
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q '"validation_error"'
+  echo "$output" | grep -q -- '--out parent directory does not exist'
+}
+
+@test "mail attachments save refuses a raw --out symlink before store access" {
+  target="$BATS_TEST_TMPDIR/apple-cli-test-target"
+  link="$BATS_TEST_TMPDIR/apple-cli-test-link"
+  printf 'synthetic' > "$target"
+  ln -s "$target" "$link"
+  run "$BIN" mail attachments save --dry-run apple-cli-test-missing-message \
+    --allow-outside-home --out "$link"
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q '"safety_violation"'
+  echo "$output" | grep -q 'is a symlink'
+  # Foundation's symlink check must keep catching equivalent trailing spellings too.
+  for suffix in / /. /./; do
+    run "$BIN" mail attachments save --dry-run apple-cli-test-missing-message \
+      --allow-outside-home --out "$link$suffix"
+    [ "$status" -eq 77 ]
+    echo "$output" | grep -q '"safety_violation"'
+    echo "$output" | grep -q 'is a symlink'
+  done
 }
 
 # `--dry-run` was advertised in --help and silently ignored: export mkdir -p'd and wrote one file

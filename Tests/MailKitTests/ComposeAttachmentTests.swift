@@ -142,7 +142,14 @@ struct ExportDirectoryTests {
 /// bytes — a divergence in the less-safe direction from both oracles.
 @Suite("Shared write-destination confinement")
 struct WriteDestinationConfinementTests {
+    private let scratch = ScratchDirs("write-confine")
     private var home: String { FileManager.default.homeDirectoryForCurrentUser.resolvingSymlinksInPath().path }
+
+    private func attachmentSnapshot(_ raw: String, allowOutsideHome: Bool) throws -> String {
+        let confined = try confineWriteDestination(
+            raw, action: "save attachments into", allowOutsideHome: allowOutsideHome).path
+        return AttachmentsSave.normalizeDestinationPath(confined)
+    }
 
     @Test func acceptsOrdinaryPathsUnderHome() throws {
         #expect(try confineWriteDestination("~/Desktop", action: "save attachments into").path.hasPrefix(home))
@@ -222,6 +229,156 @@ struct WriteDestinationConfinementTests {
                 _ = try confineWriteDestination("\(home)/ok\(scalar)evil", action: "x")
             }
         }
+    }
+
+    @Test func attachmentSaveAcceptsStableDestinationParents() throws {
+        let outside = try scratch.directory()
+        let homeURL = FileManager.default.homeDirectoryForCurrentUser
+
+        for (raw, allowOutsideHome) in [(outside.path, true), (homeURL.path, false)] {
+            let expected = try attachmentSnapshot(raw, allowOutsideHome: allowOutsideHome)
+            let suffix = UUID().uuidString
+            let dirDestination = (expected as NSString)
+                .appendingPathComponent("apple-cli-test-dir-file-\(suffix).txt")
+            #expect(throws: Never.self) {
+                try AttachmentsSave.validateDestinationsBeforeSave(
+                    destPaths: [dirDestination], directory: expected, outPath: nil, rawOut: nil,
+                    allowOutsideHome: allowOutsideHome)
+            }
+
+            let outDestination = (expected as NSString)
+                .appendingPathComponent("apple-cli-test-out-file-\(suffix).txt")
+            #expect(throws: Never.self) {
+                try AttachmentsSave.validateDestinationsBeforeSave(
+                    destPaths: [outDestination], directory: nil, outPath: outDestination,
+                    rawOut: outDestination,
+                    allowOutsideHome: allowOutsideHome)
+            }
+        }
+    }
+
+    @Test func attachmentSaveRefusesReparentedDirAndOutBeforeWrite() throws {
+        let root = try scratch.directory()
+        let expected = root.appendingPathComponent("expected", isDirectory: true)
+        let replacement = root.appendingPathComponent("replacement", isDirectory: true)
+        let original = root.appendingPathComponent("original", isDirectory: true)
+        try FileManager.default.createDirectory(at: expected, withIntermediateDirectories: false)
+        try FileManager.default.createDirectory(at: replacement, withIntermediateDirectories: false)
+        let expectedSnapshot = try attachmentSnapshot(expected.path, allowOutsideHome: true)
+        let destination = URL(fileURLWithPath: expectedSnapshot).appendingPathComponent("attachment.txt")
+
+        try FileManager.default.moveItem(at: expected, to: original)
+        try FileManager.default.createSymbolicLink(at: expected, withDestinationURL: replacement)
+
+        for (directory, outPath, rawOut) in [(expectedSnapshot as String?, nil as String?, nil as String?),
+                                             (nil, destination.path, destination.path)] {
+            let err = #expect(throws: AppleError.self) {
+                try AttachmentsSave.validateDestinationsBeforeSave(
+                    destPaths: [destination.path], directory: directory, outPath: outPath,
+                    rawOut: rawOut,
+                    allowOutsideHome: true)
+            }
+            #expect(err?.exitCode == 77)
+            #expect(err?.message.contains("destination parent changed after validation") == true)
+        }
+    }
+
+    @Test func attachmentSaveRefusesLeafSymlinkImmediatelyBeforeWrite() throws {
+        let root = try scratch.directory()
+        let expected = root.appendingPathComponent("expected", isDirectory: true)
+        try FileManager.default.createDirectory(at: expected, withIntermediateDirectories: false)
+        let expectedSnapshot = try attachmentSnapshot(expected.path, allowOutsideHome: true)
+        let target = root.appendingPathComponent("target.txt")
+        try Data("synthetic".utf8).write(to: target)
+        let destination = URL(fileURLWithPath: expectedSnapshot).appendingPathComponent("attachment.txt")
+        try FileManager.default.createSymbolicLink(at: destination, withDestinationURL: target)
+
+        let err = #expect(throws: AppleError.self) {
+            try AttachmentsSave.validateDestinationsBeforeSave(
+                destPaths: [destination.path], directory: expectedSnapshot, outPath: nil,
+                rawOut: nil,
+                allowOutsideHome: true)
+        }
+        #expect(err?.exitCode == 77)
+        #expect(err?.message.contains("is a symlink") == true)
+    }
+
+    @Test func attachmentSaveRefusesMissingOrAmbiguousDestinationMode() throws {
+        let root = try scratch.directory()
+        let destination = root.appendingPathComponent("attachment.txt").path
+        for (directory, outPath, rawOut) in [(nil as String?, nil as String?, nil as String?),
+                                             (root.path, destination, destination)] {
+            let err = #expect(throws: AppleError.self) {
+                try AttachmentsSave.validateDestinationsBeforeSave(
+                    destPaths: [destination], directory: directory, outPath: outPath,
+                    rawOut: rawOut, allowOutsideHome: true)
+            }
+            #expect(err?.exitCode == 77)
+            #expect(err?.message.contains("exactly one validated attachment destination mode") == true)
+        }
+    }
+
+    @Test func attachmentSaveRefusesDeletedParentBeforeWrite() throws {
+        let root = try scratch.directory()
+        let expected = root.appendingPathComponent("expected", isDirectory: true)
+        try FileManager.default.createDirectory(at: expected, withIntermediateDirectories: false)
+        let expectedSnapshot = try attachmentSnapshot(expected.path, allowOutsideHome: true)
+        let destination = expected.appendingPathComponent("attachment.txt").path
+        try FileManager.default.removeItem(at: expected)
+
+        let err = #expect(throws: AppleError.self) {
+            try AttachmentsSave.validateDestinationsBeforeSave(
+                destPaths: [destination], directory: expectedSnapshot, outPath: nil,
+                rawOut: nil, allowOutsideHome: true)
+        }
+        #expect(err?.exitCode == 77)
+        #expect(err?.message.contains("no longer exists as a directory") == true)
+    }
+
+    @Test func attachmentSaveNormalizesRawSymlinkSpellingsForSymlinkCheck() throws {
+        let root = try scratch.directory()
+        let target = root.appendingPathComponent("target.txt")
+        try Data("synthetic".utf8).write(to: target)
+        let link = root.appendingPathComponent("link")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+
+        for suffix in ["", "/", "/.", "/./"] {
+            let raw = AttachmentsSave.lexicalDestinationPath(link.path + suffix)
+            #expect(raw == link.path)
+            #expect((try? FileManager.default.destinationOfSymbolicLink(atPath: raw)) != nil)
+        }
+    }
+
+    @Test func attachmentSaveRefusesRawOutSymlinkImmediatelyBeforeWrite() throws {
+        let root = try scratch.directory()
+        let target = root.appendingPathComponent("target.txt")
+        try Data("synthetic".utf8).write(to: target)
+        let link = root.appendingPathComponent("link")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+
+        let err = #expect(throws: AppleError.self) {
+            try AttachmentsSave.validateDestinationsBeforeSave(
+                destPaths: [target.path], directory: nil, outPath: target.path,
+                rawOut: AttachmentsSave.lexicalDestinationPath(link.path + "/."),
+                allowOutsideHome: true)
+        }
+        #expect(err?.exitCode == 77)
+        #expect(err?.message.contains("is a symlink") == true)
+    }
+
+    @Test func attachmentSaveRefusesRegularFilePlantedBeforeFinalDirCheck() throws {
+        let root = try scratch.directory()
+        let expectedSnapshot = try attachmentSnapshot(root.path, allowOutsideHome: true)
+        let destination = root.appendingPathComponent("attachment.txt")
+        try Data("synthetic".utf8).write(to: destination)
+
+        let err = #expect(throws: AppleError.self) {
+            try AttachmentsSave.validateDestinationsBeforeSave(
+                destPaths: [destination.path], directory: expectedSnapshot, outPath: nil,
+                rawOut: nil, allowOutsideHome: true)
+        }
+        #expect(err?.exitCode == 77)
+        #expect(err?.message.contains("appeared after validation") == true)
     }
 
     /// Oracle A's `save_attachments` has NO confinement, so /tmp and /Volumes/* are legitimate

@@ -30,6 +30,20 @@ with the Apple MCP servers they replace.
 
 ### Changed
 
+- **BREAKING (error precedence):** `mail attachments save` now validates destination
+  confinement, filesystem shape, and a raw `--out` symlink before resolving the source message.
+  An unsafe or invalid destination therefore returns `safety_violation` / exit 77 or
+  `validation_error` / exit 64 even when message resolution would previously have returned
+  `not_found` / exit 65 or `upstream_error` / exit 69. This keeps previews fail-closed and avoids
+  Envelope Index or Mail.app access for deterministic destination refusals. Immediately before a
+  live save, both `--dir` and `--out` also revalidate that the destination parent still resolves
+  to the preflight path and remains a directory, plus refuse a newly planted leaf symlink. This
+  narrows symlink reparenting to the interval between the final host check and Mail.app's separate-
+  process save. A same-path rename swap between two real directories also remains outside the
+  path-based guard. A missing or non-directory `--out` parent now returns `validation_error` /
+  exit 64 before store access instead of the previous exit-0 `not_saved` result. Oracle B also
+  creates no parent and saves no file for this input; it suppresses Mail's save error and reports
+  the attachment as not found.
 - **BREAKING (exit code):** `mail rules create --action "delete=true" --execute` returned exit 77
   (`safety_violation`) and now succeeds. Any script relying on the refusal will change behavior.
 - `mail draft-rich` now opens the generated `.eml` in a Mail compose window **by default**,

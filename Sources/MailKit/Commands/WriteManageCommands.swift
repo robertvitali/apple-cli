@@ -702,6 +702,110 @@ struct AttachmentsSave: ParsableCommand {
         return (indexNames, false)
     }
 
+    static func normalizeDestinationPath(_ path: String) -> String {
+        URL(fileURLWithPath: (path as NSString).expandingTildeInPath).standardizedFileURL.path
+    }
+
+    /// Preserve an operator destination's unresolved spelling for the leaf-symlink check, but
+    /// normalize trailing slash and `/.` spellings lexically so they reach the same `readlink` probe.
+    /// Do not standardize or resolve this path: either would erase an existing symlink before the
+    /// check that is specifically meant to detect it.
+    static func lexicalDestinationPath(_ path: String) -> String {
+        var raw = (path as NSString).expandingTildeInPath
+        while raw.count > 1 {
+            if raw.hasSuffix("/") {
+                raw.removeLast()
+                continue
+            }
+            if raw == "/." {
+                raw = "/"
+                break
+            }
+            if raw.count > 2, raw.hasSuffix("/.") {
+                raw.removeLast(2)
+                continue
+            }
+            break
+        }
+        return raw
+    }
+
+    /// Re-resolve an attachment destination's parent immediately before the live save. The
+    /// directory was resolved and confined during preflight; if an ancestor is replaced with a
+    /// symlink while Mail.app enumerates attachments, the current parent no longer equals that
+    /// original snapshot and the write must fail closed. This narrows the race to the unavoidable
+    /// interval between the final host check and Mail.app's separate-process `save` operation.
+    /// It detects symlink reparenting; a same-path rename-swap of one real directory for another
+    /// is indistinguishable by path and remains outside this guard's guarantee.
+    static func validateStableDestinationParent(destPath: String, expectedDirectory: String,
+                                                action: String, allowOutsideHome: Bool) throws {
+        let rawParent = URL(fileURLWithPath: destPath).deletingLastPathComponent().path
+        let currentParent = normalizeDestinationPath(try confineWriteDestination(
+            rawParent, action: action, allowOutsideHome: allowOutsideHome).path)
+        let expectedParent = normalizeDestinationPath(expectedDirectory)
+        guard currentParent == expectedParent else {
+            throw AppleError.mailSafety(
+                "destination parent changed after validation; expected '\(expectedParent)', " +
+                "now resolves to '\(currentParent)' — refusing.")
+        }
+        var isDirectory: ObjCBool = false
+        guard FileManager.default.fileExists(atPath: currentParent, isDirectory: &isDirectory),
+              isDirectory.boolValue else {
+            throw AppleError.mailSafety(
+                "destination parent '\(currentParent)' no longer exists as a directory — refusing.")
+        }
+    }
+
+    /// Final execute-only parent + leaf validation shared by `--dir` and `--out`. Preview performs
+    /// the same argv-derived checks; this pass detects symlink reparenting, parent removal/type
+    /// changes, and leaf symlinks planted while Mail.app supplies the live attachment ordering.
+    static func validateDestinationsBeforeSave(destPaths: [String], directory: String?,
+                                               outPath: String?, rawOut: String?,
+                                               allowOutsideHome: Bool) throws {
+        guard !destPaths.isEmpty else { return }
+        let expectedParent: String
+        let action: String
+        switch (directory, outPath) {
+        case let (directory?, nil):
+            expectedParent = directory
+            action = "save attachments into"
+        case let (nil, outPath?):
+            expectedParent = URL(fileURLWithPath: outPath).deletingLastPathComponent().path
+            action = "save an attachment to"
+        default:
+            // This is an internal invariant violation, but keep the write boundary fail-closed as
+            // a deliberate safety refusal rather than allowing any pending destination through.
+            throw AppleError.mailSafety(
+                "exactly one validated attachment destination mode is required — refusing.")
+        }
+
+        if outPath != nil {
+            guard let rawOut else {
+                // Same fail-closed policy for a future caller that forgets the unresolved spelling.
+                throw AppleError.mailSafety(
+                    "raw --out destination is unavailable for final symlink validation — refusing.")
+            }
+            if (try? FileManager.default.destinationOfSymbolicLink(atPath: rawOut)) != nil {
+                throw AppleError.mailSafety(
+                    "destination '\(rawOut)' is a symlink; refusing to save an attachment through it.")
+            }
+        }
+
+        for destPath in destPaths {
+            try validateStableDestinationParent(
+                destPath: destPath, expectedDirectory: expectedParent,
+                action: action, allowOutsideHome: allowOutsideHome)
+            if (try? FileManager.default.destinationOfSymbolicLink(atPath: destPath)) != nil {
+                throw AppleError.mailSafety(
+                    "destination '\(destPath)' is a symlink; refusing to save an attachment through it.")
+            }
+            if directory != nil, FileManager.default.fileExists(atPath: destPath) {
+                throw AppleError.mailSafety(
+                    "destination '\(destPath)' appeared after validation; refusing to overwrite it.")
+            }
+        }
+    }
+
     struct Result: Encodable {
         let message_id: String
         let directory: String?
@@ -737,6 +841,55 @@ struct AttachmentsSave: ParsableCommand {
             }
             try requireDirXorOut(dir: dir, out: out)
             try requireNameXorIndices(name: name, indices: indices)
+
+            // Normalize and confine operator-supplied destinations before opening the Envelope
+            // Index or touching Mail.app. These checks depend only on argv. Oracle B refuses an
+            // outside-home or credential-directory destination before store access
+            // (manage.py:197-220); oracle A has no confinement, restored by --allow-outside-home.
+            // A refused write is safety_violation / exit 77, not a usage error.
+            let rawDir = dir.map(Self.lexicalDestinationPath)
+            let absDir = try rawDir.map {
+                Self.normalizeDestinationPath(try confineWriteDestination(
+                    $0, action: "save attachments into", allowOutsideHome: allowOutsideHome).path)
+            }
+            // Test the RAW operator path: confineWriteDestination resolves an existing symlink
+            // away, so checking only absOut would miss the planted-link case. The execute path
+            // repeats this immediately before composing the live save as a TOCTOU backstop.
+            let rawOut = out.map(Self.lexicalDestinationPath)
+            if let rawOut, (try? FileManager.default.destinationOfSymbolicLink(atPath: rawOut)) != nil {
+                throw AppleError.mailSafety(
+                    "destination '\(rawOut)' is a symlink; refusing to save an attachment through it.")
+            }
+            let absOut = try out.map {
+                Self.normalizeDestinationPath(try confineWriteDestination(
+                    $0, action: "save an attachment to", allowOutsideHome: allowOutsideHome).path)
+            }
+
+            // Validate destination shape before resolving the source message. These checks are
+            // also argv/filesystem-only, so a preview cannot stall in Mail.app before rejecting
+            // a path that --execute would refuse.
+            if let absDir {
+                var isDir: ObjCBool = false
+                guard FileManager.default.fileExists(atPath: absDir, isDirectory: &isDir) else {
+                    throw AppleError.validation("destination directory does not exist: \(absDir)")
+                }
+                guard isDir.boolValue else {
+                    throw AppleError.validation("destination path is not a directory: \(absDir)")
+                }
+            }
+            if let absOut {
+                var isDir: ObjCBool = false
+                if FileManager.default.fileExists(atPath: absOut, isDirectory: &isDir), isDir.boolValue {
+                    throw AppleError.validation("--out path is a directory, not a file: \(absOut)")
+                }
+                let parent = URL(fileURLWithPath: absOut).deletingLastPathComponent().path
+                guard FileManager.default.fileExists(atPath: parent, isDirectory: &isDir) else {
+                    throw AppleError.validation("--out parent directory does not exist: \(parent)")
+                }
+                guard isDir.boolValue else {
+                    throw AppleError.validation("--out parent path is not a directory: \(parent)")
+                }
+            }
 
             let ctx = try MailContext()
             let row: [String: String?]
@@ -787,42 +940,16 @@ struct AttachmentsSave: ParsableCommand {
             try requireSingleForOut(out: out, selectedCount: wanted.count)
             let selectedNames = wanted.map { master[$0] }
 
-            // Normalize destination(s) ONCE, so preview + execute always agree byte-for-byte.
-            func normalize(_ p: String) -> String { URL(fileURLWithPath: (p as NSString).expandingTildeInPath).standardizedFileURL.path }
-            // CONFINE FIRST. Both oracles refuse an out-of-home or credential-directory
-            // destination before touching Mail (patrickfreyer manage.py:197-220); this command
-            // `--out ~/.ssh/authorized_keys --execute` would have overwritten an SSH key with
-            // attachment bytes. Exit 77, not 64: a refused write is a safety violation.
-            let absDir = try dir.map { normalize(try confineWriteDestination($0, action: "save attachments into", allowOutsideHome: allowOutsideHome).path) }
-            let absOut = try out.map { normalize(try confineWriteDestination($0, action: "save an attachment to", allowOutsideHome: allowOutsideHome).path) }
-
-            // VALIDATE BEFORE PREVIEWING. These checks used to sit after the dry-run guard, so a
-            // preview happily reported a destination that --execute would reject — the same
-            // preview-honesty rule `trash empty` already follows by re-throwing resolution errors
-            // on its dry-run path.
-            if let absDir {
-                var isDir: ObjCBool = false
-                guard FileManager.default.fileExists(atPath: absDir, isDirectory: &isDir) else {
-                    throw AppleError.validation("destination directory does not exist: \(absDir)")
-                }
-                guard isDir.boolValue else {
-                    throw AppleError.validation("destination path is not a directory: \(absDir)")
-                }
-            }
-            if let absOut {
-                var isDir: ObjCBool = false
-                if FileManager.default.fileExists(atPath: absOut, isDirectory: &isDir), isDir.boolValue {
-                    throw AppleError.validation("--out path is a directory, not a file: \(absOut)")
-                }
-            }
-
             // Symlink refusal in BOTH modes (Q12 [11]): it sat on the execute path only, so a
             // preview blessed a destination --execute refuses — and --out had NO symlink check
             // at all (a pre-planted symlink at the exact --out path would have redirected the
-            // attachment bytes anywhere). The in-loop execute-path check stays as the TOCTOU
-            // backstop for a symlink planted after the preview.
+            // attachment bytes anywhere). The execute loop and final validateDestinationsBeforeSave
+            // pass repeat the check as TOCTOU backstops for a link planted after the preview.
             let plannedDirBasenames = absDir != nil
                 ? deCollidedBasenames(wanted.map { safeAttachmentBasename(master[$0], fallbackIndex: $0) }) : []
+            // The leaf basename is appended only AFTER the operator directory has been resolved;
+            // that ordering is load-bearing. Do not compose a remote attachment name before path
+            // confinement or an embedded component could escape the validated directory.
             if let absDir {
                 for base in plannedDirBasenames {
                     let destPath = (absDir as NSString).appendingPathComponent(base)
@@ -831,19 +958,6 @@ struct AttachmentsSave: ParsableCommand {
                     }
                 }
             }
-            // The --out check MUST test the RAW operator-typed path (tilde-expanded only):
-            // confineWriteDestination runs resolvingSymlinksInPath(), so by the time absOut
-            // exists an EXISTING symlink has been resolved AWAY and a check on absOut only
-            // ever catches dangling links — measured in review (security M1): a planted
-            // `invoice.pdf -> ~/.zshrc` passed the resolved-path check and the bytes would
-            // have landed in the rc file. (--dir is safe on the resolved path because the
-            // leaf basename is appended AFTER resolution — load-bearing ordering, do not
-            // reorder that composition.)
-            let rawOut = out.map { ($0 as NSString).expandingTildeInPath }
-            if let rawOut, (try? FileManager.default.destinationOfSymbolicLink(atPath: rawOut)) != nil {
-                throw AppleError.mailSafety("destination '\(rawOut)' is a symlink; refusing to save an attachment through it.")
-            }
-
             guard willExecute else {
                 try Output.emit(tool: "mail", data: Result(message_id: String(rowid), directory: absDir, out_path: absOut,
                     attachments: selectedNames, dry_run: true,
@@ -873,14 +987,14 @@ struct AttachmentsSave: ParsableCommand {
                 // preview and --execute refuse identically.
                 let basenames = plannedDirBasenames
                 let fm = FileManager.default
-                // Phase 1, all-or-nothing on the dangerous case: a SYMLINK at any computed
-                // destination refuses the WHOLE export (a pre-planted symlink could redirect
-                // attachment bytes outside --dir). A plain pre-existing FILE just skips that one
-                // target — never clobbers an operator's file — recorded in not_saved, not refused.
+                // Refuse a symlink BEFORE fileExists: fileExists follows a link to an existing
+                // target and would otherwise misclassify it as a benign already-exists skip. A
+                // plain pre-existing file skips only that target and is recorded in not_saved.
                 for (offset, idx) in wanted.enumerated() {
                     let destPath = (absDir as NSString).appendingPathComponent(basenames[offset])
                     if (try? fm.destinationOfSymbolicLink(atPath: destPath)) != nil {
-                        throw AppleError.mailSafety("destination '\(destPath)' is a symlink; refusing to save an attachment through it.")
+                        throw AppleError.mailSafety(
+                            "destination '\(destPath)' is a symlink; refusing to save an attachment through it.")
                     }
                     if fm.fileExists(atPath: destPath) {
                         notSavedIdx.insert(idx); continue
@@ -890,12 +1004,8 @@ struct AttachmentsSave: ParsableCommand {
             } else if let absOut, let idx = wanted.first {
                 // --out (single exact path, MCP B style, rename-on-save): the operator-chosen path
                 // when it already resolves to a directory (can't save a file's bytes onto a dir).
-                // is-a-directory already validated above the dry-run guard. TOCTOU backstop
-                // mirroring --dir's in-loop check — on the RAW path, for the same
-                // resolved-away reason as the pre-guard check (security M1).
-                if let rawOut, (try? FileManager.default.destinationOfSymbolicLink(atPath: rawOut)) != nil {
-                    throw AppleError.mailSafety("destination '\(rawOut)' is a symlink; refusing to save an attachment through it.")
-                }
+                // is-a-directory already validated above the dry-run guard. The shared final
+                // validation repeats the raw-path check immediately before Mail.app saves.
                 pairs.append((index: idx, destPath: absOut))
             }
 
@@ -915,6 +1025,9 @@ struct AttachmentsSave: ParsableCommand {
                     throw AppleError.upstream("message '\(rowid)' has no RFC Message-ID; cannot fetch its attachments via Mail.app.")
                 }
                 let acct = msg.account.isEmpty ? nil : msg.account
+                try Self.validateDestinationsBeforeSave(
+                    destPaths: pairs.map(\.destPath), directory: absDir, outPath: absOut,
+                    rawOut: rawOut, allowOutsideHome: allowOutsideHome)
                 guard let saved = try MailScript().saveAttachments(internetMessageID: messageID, accountName: acct, pairs: pairs) else {
                     throw AppleError.upstream("message '\(rowid)' could not be located in Mail.app to save its attachments; the Mail.app locator skips Gmail '[Gmail]/*' mailboxes (All Mail, Sent, …). Move it to INBOX, or save it from Mail.app.")
                 }
