@@ -196,10 +196,21 @@ setup() {
   # BOUNDED: if this guard regresses to counting Characters the term is ACCEPTED, and the run
   # does not fail — it HANGS in the O(term x body) LCS, which is the whole point of the guard.
   # Without the timeout a regression stalls the suite instead of reporting; verified by mutation.
-  run timeout 60 "$BIN" messages search "$long"
-  [ "$status" -eq 64 ]
-  echo "$output" | grep -qi "too long"
-  echo "$output" | grep -qi "code points"
+  local xtrace_was_on=0
+  case "$-" in
+    *x*) xtrace_was_on=1; set +x ;;
+  esac
+  run /usr/bin/python3 "$BATS_TEST_DIRNAME/helpers/bounded_exec.py" \
+    --timeout 60 --grace 2 -- "$BIN" messages search "$long"
+  local guard_status="$status"
+  local guard_output="$output"
+  output=""
+  lines=()
+  [ "$guard_status" -eq 64 ]
+  printf '%s' "$guard_output" | grep -qi "too long"
+  printf '%s' "$guard_output" | grep -qi "code points"
+  unset guard_output
+  [ "$xtrace_was_on" -eq 0 ] || set -x
 }
 
 @test "search term under the cap in BOTH units is still accepted" {
@@ -215,9 +226,20 @@ setup() {
   # query hangs harder here than on search. Measured: 500k jamo scalars vs 200 candidates
   # = 9.95s. Bounded so a regression fails instead of stalling the suite.
   long=$(python3 -c "print('\u1100\u1161'*600)")
-  run timeout 60 "$BIN" messages find-contact "$long"
-  [ "$status" -eq 64 ]
-  echo "$output" | grep -qi "too long"
+  local xtrace_was_on=0
+  case "$-" in
+    *x*) xtrace_was_on=1; set +x ;;
+  esac
+  run /usr/bin/python3 "$BATS_TEST_DIRNAME/helpers/bounded_exec.py" \
+    --timeout 60 --grace 2 -- "$BIN" messages find-contact "$long"
+  local guard_status="$status"
+  local guard_output="$output"
+  output=""
+  lines=()
+  [ "$guard_status" -eq 64 ]
+  printf '%s' "$guard_output" | grep -qi "too long"
+  unset guard_output
+  [ "$xtrace_was_on" -eq 0 ] || set -x
 }
 
 @test "recent --limit out of range → validation error (exit 64)" {
