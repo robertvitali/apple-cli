@@ -94,6 +94,12 @@ struct GetNoteLinkCmd: ParsableCommand {
     @Option(name: .long, help: "Note title (use id instead when available).") var title: String?
     @Option(name: .long, help: "Account containing the note (ignored if id is provided).") var account: String?
 
+    /// Verbatim from the oracle's title-path miss.
+    static func titleNotFound(_ title: String) -> String {
+        "Note \"\(title)\" not found. Use search-notes to find notes, then use the note's ID "
+        + "for reliable operations."
+    }
+
     /// Verbatim from the oracle, including the trailing macOS-12-15 parenthetical.
     static func linkFailure(_ name: String) -> String {
         "Failed to get note link for \"\(name)\". The Notes database may not be accessible — grant "
@@ -127,27 +133,31 @@ struct GetNoteLinkCmd: ParsableCommand {
         return trimmed.isEmpty ? nil : trimmed
     }
 
+    /// The oracle uses JS truthiness (`if (id)` / `if (!title)`), so exact `""` is absent;
+    /// `{id:"", title:"…"}` is a common, reachable tool-call shape. This mirrors shared
+    /// `requireIdOrTitle` (NotesCommand.swift:173), but the oracle's `getNoteById` runs
+    /// `sanitizeId` first (index.js:39751): any other id, including whitespace, wins over title
+    /// and is validation-tested rather than flattened into not_found.
+    static func requireSelector(id: String?, title: String?) throws -> NoteSelector {
+        switch (id?.isEmpty == false ? id : nil, title?.isEmpty == false ? title : nil) {
+        case let (id?, _):
+            // Oracle `getNoteById` runs `sanitizeId` first, so malformed ids fail before lookup
+            // and never fall through to a simultaneously supplied title.
+            guard NotesScript.isValidNoteId(id) else {
+                throw AppleError.validation(
+                    "Invalid note ID format: \"\(id)\". Expected CoreData URL (x-coredata://...) or temp ID.")
+            }
+            return .id(id)
+        case let (nil, title?): return .title(title)
+        default: throw AppleError.validation("Either 'id' or 'title' is required")
+        }
+    }
+
     func run() throws {
         try runGuarded(tool: notesTool) {
             let script = NotesScript()
-            // The oracle branches on JS TRUTHINESS — `if (id)` / `if (!title)` — so an empty
-            // string is falsy and falls through to the other selector. `if let` would enter the
-            // branch on Optional(""), which loses a real capability: for {id:"", title:"Real"}
-            // the oracle resolves BY TITLE and succeeds where we would 65. `id: ""` meaning
-            // "not supplied" is a common tool-call shape, so this is reachable, not theoretical.
-            // Same coercion the shared `requireIdOrTitle` already does (NotesCommand.swift:162).
-            let id = self.id?.isEmpty == false ? self.id : nil
-            let title = self.title?.isEmpty == false ? self.title : nil
-            if let id {
-                // Oracle `getNoteById` runs `sanitizeId` FIRST (index.js:39751) and throws a
-                // distinct format error before any lookup, so a malformed id is NOT a not-found.
-                // Collapsing the two loses an error class the oracle distinguishes — the same
-                // taxonomy-flattening CONTACTS-L2 was filed for. The regex port already existed
-                // (NotesScript.isValidNoteId) but had no callers outside the batch paths.
-                guard NotesScript.isValidNoteId(id) else {
-                    throw AppleError.validation(
-                        "Invalid note ID format: \"\(id)\". Expected CoreData URL (x-coredata://...) or temp ID.")
-                }
+            switch try Self.requireSelector(id: id, title: title) {
+            case .id(let id):
                 // The lookup THROWS a generic not_found rather than returning nil (AppleScript
                 // errors on a bad specifier; see NotesScript.mapError), so the oracle's specific
                 // wording has to be restored here — a bare `guard let` never fires.
@@ -165,26 +175,23 @@ struct GetNoteLinkCmd: ParsableCommand {
                 }
                 try emitNotes(NoteLinkResult(id: id, title: note.title, url: url),
                               json: global.json, human: url)
-                return
+            case .title(let title):
+                let foundByTitle: NotesScript.ParsedNote?
+                do { foundByTitle = try script.getNoteDetails(title: title, account: account) }
+                catch let e as AppleError where e.type == AppleErrorType.notFound { foundByTitle = nil }
+                guard let note = foundByTitle else {
+                    throw AppleError.notFound(Self.titleNotFound(title))
+                }
+                if note.passwordProtected {
+                    throw AppleError.validation("Note \"\(title)\" is password-protected. Unlock it in Notes.app first.")
+                }
+                guard let url = Self.resolveLink(script, id: note.id) else {
+                    throw Self.linkFailureError(title)
+                }
+                // No `id` key on this path — the oracle omits it here.
+                try emitNotes(NoteLinkResult(id: nil, title: title, url: url),
+                              json: global.json, human: url)
             }
-            guard let title else {
-                throw AppleError.validation("Either 'id' or 'title' is required")
-            }
-            let foundByTitle: NotesScript.ParsedNote?
-            do { foundByTitle = try script.getNoteDetails(title: title, account: account) }
-            catch let e as AppleError where e.type == AppleErrorType.notFound { foundByTitle = nil }
-            guard let note = foundByTitle else {
-                throw AppleError.notFound("Note \"\(title)\" not found. Use search-notes to find notes, then use the note's ID for reliable operations.")
-            }
-            if note.passwordProtected {
-                throw AppleError.validation("Note \"\(title)\" is password-protected. Unlock it in Notes.app first.")
-            }
-            guard let url = Self.resolveLink(script, id: note.id) else {
-                throw Self.linkFailureError(title)
-            }
-            // No `id` key on this path — the oracle omits it here.
-            try emitNotes(NoteLinkResult(id: nil, title: title, url: url),
-                          json: global.json, human: url)
         }
     }
 }

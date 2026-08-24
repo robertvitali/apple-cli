@@ -279,4 +279,15 @@ User data reaches `osascript` ONLY as argv (`on run argv` → `item N of argv`),
 
 ### Validated live vs. blocked
 - **Validated against the live MCP oracle:** `get-metadata` (field-for-field match on multiple notes), `get-checklist` (protobuf decode on real ZDATA), `sync-status`.
+- **NOTES-H1 verification tiers:** the default tier uses pure Swift selector/message tests plus
+  TCC-free CLI selector-rejection cases. Those default checks pin selector semantics but do not
+  exercise the command's title-branch wiring; the opt-in live tier below is the wiring proof.
+  Enable the read-only, host-bounded live title fallthrough explicitly with:
+
+  ```sh
+  env APPLE_LIVE_NOTES=1 PATH="/usr/bin:/bin:/usr/sbin:/sbin:$PATH" bats --filter 'NOTES-H1' bats/notes.bats
+  ```
+
+  The live invocation has a 100s host cap. Status 124 is an explicit skip because the host deadline
+  fired; it is not evidence of parity.
 - **Implemented + guarded + unit-tested but NOT exercised live:** all AppleScript ops (CRUD/folders/accounts/attachments/export/selection) — Notes.app automation timed out (`-1712`) on this large store during the build session, so live AppleScript testing is deferred to a machine where Notes.app scripting is responsive. The argv-safety, parsing, and guard logic are unit-tested.

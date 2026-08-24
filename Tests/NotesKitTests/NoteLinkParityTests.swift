@@ -16,9 +16,93 @@ struct NoteLinkParityTests {
         + "the doctor tool. See: https://github.com/sweetrb/apple-notes-mcp/blob/main/docs/FULL-DISK-ACCESS.md. "
         + "(On macOS 12–15 this also falls back to the AppleScript note link property.)"
 
+    /// Verbatim from the oracle's title-path miss. The synthetic title matches the bounded live
+    /// probe without requiring Notes.app or AppleEvents in the default test tier.
+    static let oracleTitleNotFound =
+        "Note \"ZZZ-no-such-note-xyz\" not found. Use search-notes to find notes, then use the "
+        + "note's ID for reliable operations."
+
+    @Test("an exactly empty id is absent and falls through to a nonempty title")
+    func emptyIdFallsThroughToTitle() throws {
+        let selector = try GetNoteLinkCmd.requireSelector(id: "", title: "ZZZ-no-such-note-xyz")
+
+        switch selector {
+        case .title(let title):
+            #expect(title == "ZZZ-no-such-note-xyz")
+        case .id:
+            Issue.record("an exactly empty id must not select the id path")
+        }
+    }
+
+    @Test("a valid nonempty id wins over a simultaneous title")
+    func validIdWinsOverTitle() throws {
+        let id = "x-coredata://ABC/ICNote/p42"
+        let selector = try GetNoteLinkCmd.requireSelector(id: id, title: "ZZZ-no-such-note-xyz")
+
+        switch selector {
+        case .id(let selectedID):
+            #expect(selectedID == id)
+        case .title:
+            Issue.record("a valid id must take precedence over title")
+        }
+    }
+
+    @Test("nil and exactly empty selectors keep the oracle's validation error")
+    func emptySelectorsFailExactly() {
+        let inputs: [(String?, String?)] = [(nil, nil), ("", nil), (nil, ""), ("", "")]
+
+        for (id, title) in inputs {
+            do {
+                _ = try GetNoteLinkCmd.requireSelector(id: id, title: title)
+                Issue.record("missing selectors must throw")
+            } catch let error as AppleError {
+                #expect(error.type == AppleErrorType.validation)
+                #expect(error.exitCode == AppleExit.usage)
+                #expect(error.message == "Either 'id' or 'title' is required")
+            } catch {
+                Issue.record("unexpected error type: \(error)")
+            }
+        }
+    }
+
+    @Test("a malformed nonempty id wins over title and keeps the exact format error")
+    func malformedIdFailsExactly() {
+        do {
+            _ = try GetNoteLinkCmd.requireSelector(id: "garbage", title: "ZZZ-no-such-note-xyz")
+            Issue.record("a malformed id must fail before title lookup")
+        } catch let error as AppleError {
+            #expect(error.type == AppleErrorType.validation)
+            #expect(error.exitCode == AppleExit.usage)
+            #expect(error.message == "Invalid note ID format: \"garbage\". "
+                    + "Expected CoreData URL (x-coredata://...) or temp ID.")
+        } catch {
+            Issue.record("unexpected error type: \(error)")
+        }
+    }
+
+    @Test("whitespace-only id remains truthy and fails exact format validation")
+    func whitespaceOnlyIdFailsValidation() {
+        do {
+            _ = try GetNoteLinkCmd.requireSelector(id: "   ", title: "ZZZ-no-such-note-xyz")
+            Issue.record("whitespace-only id must be validated, not treated as absent")
+        } catch let error as AppleError {
+            #expect(error.type == AppleErrorType.validation)
+            #expect(error.exitCode == AppleExit.usage)
+            #expect(error.message == "Invalid note ID format: \"   \". "
+                    + "Expected CoreData URL (x-coredata://...) or temp ID.")
+        } catch {
+            Issue.record("unexpected error type: \(error)")
+        }
+    }
+
     @Test("the link-failure message matches the oracle verbatim, including the macOS 12-15 note")
     func linkFailureMessage() {
         #expect(GetNoteLinkCmd.linkFailure("MyNote") == Self.oracleLinkFailure)
+    }
+
+    @Test("the title-path not-found message matches the oracle verbatim")
+    func titleNotFoundMessage() {
+        #expect(GetNoteLinkCmd.titleNotFound("ZZZ-no-such-note-xyz") == Self.oracleTitleNotFound)
     }
 
     /// The payload asymmetry is what the CHANGELOG, port spec and queue row all LEAD with, and

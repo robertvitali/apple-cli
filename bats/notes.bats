@@ -1,7 +1,10 @@
 #!/usr/bin/env bats
-# CLI smoke tests for the `notes` domain — invoke the built binary. No Apple automation and no
-# real note data required: every assertion is an error path, a dry-run preview, or the read-only
-# sync-status diagnostic, so nothing here depends on (or emits) real PII.
+# CLI smoke tests for the `notes` domain — invoke the built binary. No real note data is used.
+# Most assertions avoid Apple automation. The one NOTES-H1 title-fallthrough assertion is an
+# explicit `APPLE_LIVE_NOTES=1` live-tier opt-in and skips before its helper/AppleEvents otherwise.
+# When opted in, it is a read-only synthetic miss, host-bounded, and gated only for narrowly
+# recognized automation unavailability. Authorization and arbitrary failures remain red, and no
+# successful live payload is emitted.
 #
 # WRITE-MODEL v2 (docs/write-model-v2.md): notes writes EXECUTE by default. That makes
 # automation-freedom a SAFETY property here, not just a portability one — a case that reaches
@@ -41,6 +44,60 @@ assert_no_folder_named() {
       && { echo "LEAKED: the refusal did not hold — a folder named '$1' now exists"; return 1; }
   fi
   return 0
+}
+
+# A NOTES-H1 live-title probe may be skipped only when Notes automation is unavailable in one of
+# the three ways the command maps explicitly, or when the portable host deadline returns its single
+# timeout sentinel (124). Status 69 alone is insufficient: unrelated failures must stay red.
+notes_h1_automation_unavailable() {
+  local probe_status="$1"
+  local probe_output="$2"
+
+  [ "$probe_status" -eq 124 ] && return 0
+  [ "$probe_status" -eq 69 ] || return 1
+  case "$probe_output" in
+    *'"type" : "upstream_error"'*) ;;
+    *) return 1 ;;
+  esac
+  case "$probe_output" in
+    *'"message" : "Notes.app timed out. It may be unresponsive or busy syncing; try again."'*) return 0 ;;
+    *'"message" : "Lost connection to Notes.app. The app may have crashed or been restarted."'*) return 0 ;;
+    *'"message" : "Notes.app is not responding. Try opening Notes.app manually."'*) return 0 ;;
+    *) return 1 ;;
+  esac
+}
+
+notes_h1_exact_not_found() {
+  local probe_output="$1"
+  local expected_message="$2"
+
+  # Parse the envelope without echoing it: even a surprising success payload must stay private.
+  # The Bash builtin is deliberate so live payload never appears in a child process argv.
+  printf '%s' "$probe_output" | /usr/bin/python3 -c '
+import json, sys
+raw = sys.stdin.read()
+decoder = json.JSONDecoder()
+payload = None
+for index, character in enumerate(raw):
+    if character != "{":
+        continue
+    try:
+        candidate, _ = decoder.raw_decode(raw[index:])
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        continue
+    if isinstance(candidate, dict):
+        payload = candidate
+        break
+if payload is None:
+    raise SystemExit(1)
+error = payload.get("error") if isinstance(payload, dict) else None
+matches = (
+    isinstance(error, dict)
+    and error.get("type") == "not_found"
+    and error.get("message") == sys.argv[1]
+)
+raise SystemExit(0 if matches else 1)
+' "$expected_message"
 }
 
 @test "notes --help lists the core subcommands" {
@@ -367,22 +424,119 @@ assert_no_folder_named() {
   [ "$status" -eq 0 ]; echo "$output" | grep -q 'get-note-link'
 }
 
+@test "NOTES-H1 classifiers accept only exact private failures" {
+  run notes_h1_automation_unavailable 124 "synthetic host timeout"
+  [ "$status" -eq 0 ]
+
+  run notes_h1_automation_unavailable 69 \
+    '{ "type" : "upstream_error", "message" : "Notes.app timed out. It may be unresponsive or busy syncing; try again." }'
+  [ "$status" -eq 0 ]
+
+  run notes_h1_automation_unavailable 69 \
+    '{ "type" : "upstream_error", "message" : "Lost connection to Notes.app. The app may have crashed or been restarted." }'
+  [ "$status" -eq 0 ]
+
+  run notes_h1_automation_unavailable 69 \
+    '{ "type" : "upstream_error", "message" : "Notes.app is not responding. Try opening Notes.app manually." }'
+  [ "$status" -eq 0 ]
+
+  run notes_h1_automation_unavailable 69 \
+    '{ "type" : "not_found", "message" : "Notes.app is not responding. Try opening Notes.app manually." }'
+  [ "$status" -eq 1 ]
+
+  run notes_h1_automation_unavailable 77 \
+    '{ "type" : "authorization_denied", "message" : "Notes.app is not responding. Try opening Notes.app manually." }'
+  [ "$status" -eq 1 ]
+
+  run notes_h1_automation_unavailable 69 \
+    '{ "type" : "upstream_error", "message" : "Notes.app returned an error." }'
+  [ "$status" -eq 1 ]
+
+  run notes_h1_automation_unavailable 69 \
+    '{ "type" : "not_found", "message" : "Notes.app timed out. It may be unresponsive or busy syncing; try again." }'
+  [ "$status" -eq 1 ]
+
+  run notes_h1_automation_unavailable 65 \
+    '{ "type" : "upstream_error", "message" : "Notes.app timed out. It may be unresponsive or busy syncing; try again." }'
+  [ "$status" -eq 1 ]
+
+  local exact_missing="Note \"ZZZ-no-such-note-xyz\" not found. Use search-notes to find notes, then use the note's ID for reliable operations."
+  run notes_h1_exact_not_found \
+    '{ "error" : { "type" : "not_found", "message" : "Note \"ZZZ-no-such-note-xyz\" not found. Use search-notes to find notes, then use the note'"'"'s ID for reliable operations." } }' \
+    "$exact_missing"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  run notes_h1_exact_not_found \
+    $'synthetic stderr diagnostic\n{ "error" : { "type" : "not_found", "message" : "Note \\"ZZZ-no-such-note-xyz\\" not found. Use search-notes to find notes, then use the note'"'"'s ID for reliable operations." } }' \
+    "$exact_missing"
+  [ "$status" -eq 0 ]
+  [ -z "$output" ]
+  run notes_h1_exact_not_found \
+    '{ "error" : { "type" : "not_found", "message" : "different" } }' \
+    "$exact_missing"
+  [ "$status" -eq 1 ]
+  [ -z "$output" ]
+}
+
 @test "get-link matches the oracle's empty-string and malformed-id handling (NOTES-H1)" {
-  # The oracle gates on JS truthiness, so "" is ABSENT, not a lookup target. All TCC-free:
-  # every case below resolves before any store or AppleScript access.
+  # The oracle gates on JS truthiness, so "" is ABSENT, not a lookup target. These cases resolve
+  # before any store or AppleScript access and therefore stay unconditional.
+  # A nonempty title reaches the AppleEvents read policy; pure Swift pins that fallthrough,
+  # while only the bounded opt-in test below exercises the command wiring against Notes.app.
   run "$BIN" notes get-link --id ""
+  [ "$status" -eq 64 ]
   echo "$output" | grep -q "Either 'id' or 'title' is required"
+  echo "$output" | grep -q '"type" : "validation_error"'
   run "$BIN" notes get-link --id "" --title ""
+  [ "$status" -eq 64 ]
   echo "$output" | grep -q "Either 'id' or 'title' is required"
-  # An empty id must FALL THROUGH to the title, not fail on the id — the capability an
-  # `if let` would have dropped.
-  run "$BIN" notes get-link --id "" --title "ZZZ-no-such-note-xyz"
-  echo "$output" | grep -q 'Use search-notes to find notes'
+  echo "$output" | grep -q '"type" : "validation_error"'
   # A malformed id is a distinct oracle error class (sanitizeId), not a not-found.
   run "$BIN" notes get-link --id garbage
   [ "$status" -eq 64 ]
   echo "$output" | grep -q 'Invalid note ID format'
   echo "$output" | grep -q '"type" : "validation_error"'
+  # A malformed, truthy id still wins over a simultaneous title through the real command wiring.
+  run "$BIN" notes get-link --id garbage --title "ZZZ-no-such-note-xyz"
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q 'Invalid note ID format'
+  echo "$output" | grep -q '"type" : "validation_error"'
+}
+
+@test "get-link empty id falls through to title when Notes automation is available (NOTES-H1)" {
+  [ "${APPLE_LIVE_NOTES:-0}" = "1" ] \
+    || skip "set APPLE_LIVE_NOTES=1 to run live Notes automation"
+  local probe_title="ZZZ-no-such-note-xyz"
+  local expected_message="Note \"$probe_title\" not found. Use search-notes to find notes, then use the note's ID for reliable operations."
+  # NotesScript.swift:31,45,55 define a 45s attempt timeout, two read attempts, and a 1000ms
+  # backoff; lines 102 and 117-120 apply them. The 91s retried-transient upper bound fits this cap;
+  # a coincidental title hit may need a second link lookup and intentionally reaches the 124 skip.
+  local deadline=100
+
+  # Exercise the exact path once under a host deadline. A coincidental success payload remains
+  # captured only long enough to classify the result and is never emitted by this test.
+  local xtrace_was_on=0
+  case "$-" in
+    *x*) xtrace_was_on=1; set +x ;;
+  esac
+  run /usr/bin/python3 "$BATS_TEST_DIRNAME/helpers/bounded_exec.py" \
+    --timeout "$deadline" --grace 2 -- "$BIN" notes get-link --id "" --title "$probe_title"
+  local live_status="$status"
+  local live_output="$output"
+  output=""
+  lines=()
+
+  if notes_h1_automation_unavailable "$live_status" "$live_output"; then
+    # Accepted opt-in-live residual: a host timeout cannot prove parity, but status 124 is the
+    # bounded alternative to hanging the test runner indefinitely.
+    [ "$live_status" -eq 124 ] \
+      && skip "Notes automation unavailable: host invocation timed out"
+    skip "Notes automation unavailable: recognized upstream error"
+  fi
+  [ "$live_status" -eq 65 ]
+  notes_h1_exact_not_found "$live_output" "$expected_message"
+  unset live_output
+  [ "$xtrace_was_on" -eq 0 ] || set -x
 }
 
 @test "search/list refuse a non-positive --limit like the oracle schema (NOTES-L2)" {
