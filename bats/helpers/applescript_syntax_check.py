@@ -15,6 +15,7 @@ import subprocess
 import sys
 import tempfile
 import os
+from typing import Optional
 
 SRC = os.path.join(os.path.dirname(__file__), "..", "..",
                    "Sources", "MailKit", "Support", "MailScript.swift")
@@ -48,7 +49,7 @@ def literals(src: str) -> dict[str, str]:
     return out
 
 
-def concat_form(src: str, name: str, tail: str) -> str | None:
+def concat_form(src: str, name: str, tail: str) -> Optional[str]:
     """Scripts built as head + guardAndSendTail + foot across three literals.
 
     THE JOIN IS READ FROM THE SOURCE, NEVER ASSUMED. Swift multiline literals carry NO
