@@ -702,6 +702,42 @@ struct AttachmentsSave: ParsableCommand {
         return (indexNames, false)
     }
 
+    static func resolveLiveAttachmentNames(
+        _ lookup: () throws -> [MailScript.AttachmentMeta]?
+    ) -> (names: [String]?, failure: String?) {
+        do {
+            guard let live = try lookup() else {
+                return (nil, "message not locatable in Mail.app")
+            }
+            return (live.map(\.name), nil)
+        } catch {
+            return (nil, "Mail.app enumeration failed (\(error))")
+        }
+    }
+
+    static func previewFallbackNote(isLive: Bool, failure: String?) -> String? {
+        guard !isLive else { return nil }
+        return "\(failure ?? "live enumeration unavailable") — this preview enumerates the "
+            + "Envelope-Index (ORDER BY name) list; the live save order can differ, and "
+            + "--execute refuses from this fallback"
+    }
+
+    /// Execute may address Mail attachments only in Mail.app's live positional order. Keep the
+    /// refusal pure and directly testable so a timeout can never silently fall through to the
+    /// index ordering measured to disagree with Mail on multi-attachment messages.
+    static func requireLiveAttachmentMasterForExecute(
+        _ isLive: Bool,
+        rowid: Int,
+        failure: String?
+    ) throws {
+        guard isLive else {
+            throw AppleError.upstream(
+                "cannot save attachments of message '\(rowid)': "
+                + "\(failure ?? "live enumeration unavailable") — refusing to save by "
+                + "index-order positions (they routinely differ from Mail's own order — extra32).")
+        }
+    }
+
     static func normalizeDestinationPath(_ path: String) -> String {
         URL(fileURLWithPath: (path as NSString).expandingTildeInPath).standardizedFileURL.path
     }
@@ -920,17 +956,12 @@ struct AttachmentsSave: ParsableCommand {
                                              // with Mail-down / timeout / TCC-denied
             let liveNames: [String]?
             if let internetID = msg.internet_message_id {
-                do {
-                    if let live = try MailScript().listAttachments(internetMessageID: internetID, accountName: msg.account) {
-                        liveNames = live.map(\.name)
-                    } else {
-                        liveNames = nil
-                        liveFailure = "message not locatable in Mail.app"
-                    }
-                } catch {
-                    liveNames = nil
-                    liveFailure = "Mail.app enumeration failed (\(error))"
+                let resolution = Self.resolveLiveAttachmentNames {
+                    try MailScript().listAttachments(
+                        internetMessageID: internetID, accountName: msg.account)
                 }
+                liveNames = resolution.names
+                liveFailure = resolution.failure
             } else {
                 liveNames = nil
                 liveFailure = "message has no RFC Message-ID to locate it in Mail.app"
@@ -961,15 +992,14 @@ struct AttachmentsSave: ParsableCommand {
             guard willExecute else {
                 try Output.emit(tool: "mail", data: Result(message_id: String(rowid), directory: absDir, out_path: absOut,
                     attachments: selectedNames, dry_run: true,
-                    note: masterIsLive ? nil : "\(liveFailure ?? "live enumeration unavailable") — this preview enumerates the Envelope-Index (ORDER BY name) list; the live save order can differ, and --execute refuses from this fallback",
+                    note: Self.previewFallbackNote(isLive: masterIsLive, failure: liveFailure),
                     saved: nil, saved_paths: nil, not_saved: nil), text: global.text, sandboxActive: sandboxActive); return
             }
             // The execute path REQUIRES the live master: positions are handed to the AppleScript
             // as `item (i+1)` of Mail's live list, so an index-ordered master could write one
             // attachment's bytes under another's filename (extra32, measured 8/8 divergent).
-            guard masterIsLive else {
-                throw AppleError.upstream("cannot save attachments of message '\(rowid)': \(liveFailure ?? "live enumeration unavailable") — refusing to save by index-order positions (they routinely differ from Mail's own order — extra32).")
-            }
+            try Self.requireLiveAttachmentMasterForExecute(
+                masterIsLive, rowid: rowid, failure: liveFailure)
             // review M5 second half: a successful-but-empty live list with a --name that
             // matched nothing used to emit ok:true with attachments: [] and save nothing.
             if name != nil, wanted.isEmpty {

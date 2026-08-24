@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import AppleKit
 @testable import MailKit
 
 /// Q11-D pins (gap23 / extra21 / extra22 / extra23): the pure halves of the bulk-targeting
@@ -63,6 +64,37 @@ struct BulkTargetingTests {
         #expect(fallback.master == idx && !fallback.isLive)
         let locatedEmpty = AttachmentsSave.selectAttachmentMaster(indexNames: idx, liveNames: [])
         #expect(locatedEmpty.master.isEmpty && locatedEmpty.isLive)
+    }
+
+    @Test func attachmentSaveRefusesTimeoutFallbackOnExecute() throws {
+        let resolution = AttachmentsSave.resolveLiveAttachmentNames {
+            throw AppleScriptRunner.TimeoutError(seconds: 30)
+        }
+        #expect(resolution.names == nil)
+        #expect(resolution.failure == "Mail.app enumeration failed (osascript timed out after 30s)")
+        let fallback = AttachmentsSave.selectAttachmentMaster(
+            indexNames: ["report.pdf"], liveNames: resolution.names)
+        #expect(fallback.master == ["report.pdf"])
+        #expect(!fallback.isLive)
+        let previewNote = try #require(AttachmentsSave.previewFallbackNote(
+            isLive: fallback.isLive, failure: resolution.failure))
+        #expect(previewNote.contains("osascript timed out after 30s"))
+        #expect(previewNote.contains("--execute refuses from this fallback"))
+
+        let error = #expect(throws: AppleError.self) {
+            try AttachmentsSave.requireLiveAttachmentMasterForExecute(
+                fallback.isLive, rowid: 42, failure: resolution.failure)
+        }
+        let upstream = try #require(error)
+        #expect(upstream.type == "upstream_error")
+        #expect(upstream.exitCode == 69)
+        #expect(upstream.message.contains("osascript timed out after 30s"))
+        #expect(upstream.message.contains("refusing to save by index-order positions"))
+
+        #expect(throws: Never.self) {
+            try AttachmentsSave.requireLiveAttachmentMasterForExecute(
+                true, rowid: 42, failure: nil)
+        }
     }
 
     /// joinNotes: nil-compaction contract for the merged wire `note`.

@@ -6,6 +6,8 @@ import AppleKit
 /// values are passed as `arguments:` (osascript argv) — never interpolated into script source
 /// (AppleScript injection is RCE-class; see `AppleScriptRunner`).
 public struct MailScript {
+    /// Intentionally concrete: attachment metadata uses AppleScriptRunner's timed overload.
+    /// Protocol-typing this property would silently remove that overload from the call surface.
     public let runner: AppleScriptRunner
     public init(runner: AppleScriptRunner = AppleScriptRunner()) { self.runner = runner }
 
@@ -2411,14 +2413,37 @@ public struct MailScript {
         public let downloaded: Bool?
     }
 
+    static let attachmentLookupTimeoutSeconds: TimeInterval = 30
+
     /// List a located message's attachments with oracle A's four metadata fields, in Mail.app's
     /// live order. Returns `nil` when the message is not locatable in Mail.app on either id form
     /// (caller falls back to Envelope-Index rows) — never throws for a per-attachment failure.
+    /// A process timeout aborts the lookup immediately instead of spending another 30 seconds on
+    /// the alternate spelling; callers then apply their documented fallback/refusal policy.
     public func listAttachments(internetMessageID: String, accountName: String?) throws -> [AttachmentMeta]? {
+        try MailScript.listAttachments(
+            internetMessageID: internetMessageID,
+            accountName: accountName,
+            using: { script, arguments, timeout in
+                try runner.run(script, arguments: arguments, timeout: timeout)
+            })
+    }
+
+    /// Internal injection seam for deterministic deadline/candidate-order tests. Timeout errors
+    /// intentionally propagate: list callers degrade to Envelope-Index rows, while save callers
+    /// preserve the cause and refuse execution without trustworthy live positional order.
+    static func listAttachments(
+        internetMessageID: String,
+        accountName: String?,
+        using run: (String, [String], TimeInterval) throws -> String
+    ) throws -> [AttachmentMeta]? {
         let script = MailScript.listAttachmentsScript + "\n" + MailScript.locator
         let bare = MailFormat.stripAngleBrackets(internetMessageID) ?? internetMessageID
         for candidate in ["<\(bare)>", bare] {
-            let out = try runner.run(script, arguments: [candidate, accountName ?? ""])
+            let out = try run(
+                script,
+                [candidate, accountName ?? ""],
+                MailScript.attachmentLookupTimeoutSeconds)
             if out == "notfound" { continue }
             if let metas = MailScript.parseAttachmentList(out) { return metas }
         }

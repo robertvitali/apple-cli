@@ -1942,19 +1942,116 @@ print(next((m['id'] for m in d if m.get('conversation_id') in multi), ''))")
 # gap1 WIRING: the live enrichment must actually reach the wire — deleting the enrichment call
 # in attachmentRows leaves the parser/model suites green (critic B1), so this is the pin that
 # goes red. `size` is the safe key on this store (MIME type throws in Mail.app itself).
-@test "mail attachments list <id> carries live metadata on the wire (gap1 wiring)" {
-  require_index
-  id=$("$BIN" mail search --mailbox INBOX --has-attachment --limit 1 --no-content 2>/dev/null \
-    | python3 -c "import json,sys;d=json.load(sys.stdin)['data']['messages'];print(d[0]['id'] if d else '')")
-  [ -n "$id" ] || skip "no INBOX message with an attachment in this store"
-  run "$BIN" mail attachments list "$id"
+@test "mail attachment metadata instance path uses the timed runner" {
+  run /usr/bin/python3 -c '
+from pathlib import Path
+import re
+import sys
+src = Path(sys.argv[1]).read_text()
+start = src.index("public func listAttachments(")
+end = src.index("static func listAttachments(", start)
+instance = src[start:end]
+assert re.search(r"runner\.run\(\s*script,\s*arguments:\s*arguments,\s*timeout:\s*timeout\s*\)", instance)
+
+read_src = Path(sys.argv[2]).read_text()
+rows_start = read_src.index("private func attachmentRows(")
+rows_end = read_src.index("func run()", rows_start)
+assert "Self.liveAttachmentMetadataOrNil" in read_src[rows_start:rows_end]
+
+write_src = Path(sys.argv[3]).read_text()
+save_start = write_src.index("struct AttachmentsSave:")
+save_run = write_src.index("func run()", save_start)
+assert "try Self.requireLiveAttachmentMasterForExecute(" in write_src[save_run:]
+' "$BATS_TEST_DIRNAME/../Sources/MailKit/Support/MailScript.swift" \
+  "$BATS_TEST_DIRNAME/../Sources/MailKit/Commands/MessageReadCommands.swift" \
+  "$BATS_TEST_DIRNAME/../Sources/MailKit/Commands/WriteManageCommands.swift"
   [ "$status" -eq 0 ]
+}
+
+@test "mail attachments list <id> carries live metadata on the wire (gap1 wiring)" {
+  local xtrace_was_on=0
+  case "$-" in
+    *x*) xtrace_was_on=1; set +x ;;
+  esac
+  require_index
+  # The index can remain readable while Mail automation is unavailable. This is a live wiring
+  # test, so preflight that separate dependency without retaining or printing account payloads;
+  # a failed preflight is an environment skip, never an accepted degraded attachment response.
+  run /usr/bin/python3 "$BATS_TEST_DIRNAME/helpers/bounded_exec.py" \
+    --timeout 30 --grace 2 -- "$BIN" mail accounts list
+  local automation_status="$status"
+  output=""
+  lines=()
+  BATS_RUN_COMMAND=""
+  case "$automation_status" in
+    0) ;;
+    69|77|124) skip "Mail automation unavailable" ;;
+    *) [ "$automation_status" -eq 0 ] ;;
+  esac
+
+  run /usr/bin/python3 "$BATS_TEST_DIRNAME/helpers/bounded_exec.py" \
+    --timeout 30 --grace 2 -- "$BIN" mail search --mailbox INBOX \
+    --has-attachment --limit 1 --no-content
+  local search_status="$status"
+  local search_output="$output"
+  output=""
+  lines=()
+  BATS_RUN_COMMAND=""
+  case "$search_status" in
+    0) ;;
+    69|77|124) unset search_output; skip "Mail search prerequisite unavailable" ;;
+    *) unset search_output; [ "$search_status" -eq 0 ] ;;
+  esac
+  id=$(printf '%s' "$search_output" | /usr/bin/python3 -c \
+    "import json,sys;d=json.load(sys.stdin)['data']['messages'];print(d[0]['id'] if d else '')")
+  unset search_output
+  [ -n "$id" ] || skip "no INBOX message with an attachment in this store"
+
+  # 90 seconds sits outside the 2×30-second per-spelling maximum, leaving 30 seconds
+  # for process startup, index reads, JSON encoding, and bounded cleanup.
+  run /usr/bin/python3 "$BATS_TEST_DIRNAME/helpers/bounded_exec.py" \
+    --timeout 90 --grace 2 -- "$BIN" mail attachments list "$id"
+  local live_status="$status"
+  local live_output="$output"
+  output=""
+  lines=()
+  BATS_RUN_COMMAND=""
+  unset id
+  if [ "$live_status" -eq 124 ]; then
+    unset live_output
+    # The `|| rc=$?` shape is required under Bats' `set -e`; a bare nonzero command would
+    # abort before the environment-loss classifier can inspect it (same rule as smoke.bats).
+    local automation_recheck_rc=0
+    /usr/bin/python3 "$BATS_TEST_DIRNAME/helpers/bounded_exec.py" \
+      --timeout 30 --grace 2 -- "$BIN" mail accounts list >/dev/null 2>&1 \
+      || automation_recheck_rc=$?
+    case "$automation_recheck_rc" in
+      69|77|124) skip "Mail automation became unavailable during attachment lookup" ;;
+      0) printf '%s\n' "in-CLI attachment deadline did not fire before host backstop" >&2; false ;;
+      *) [ "$automation_recheck_rc" -eq 0 ] ;;
+    esac
+  fi
+  if [ "$live_status" -ne 0 ]; then
+    unset live_output
+    [ "$live_status" -eq 0 ]
+  fi
   # STRICT: the live keys must be present and the degraded note absent. Accepting the note as
   # an alternative would keep this green under the exact reversion it exists to catch (the
   # deleted-enrichment fallback emits the note on every row). On this Mac, bats runs with
   # Mail.app reachable; CI runners skip at require_index.
-  echo "$output" | grep -q '"size" :'
-  ! echo "$output" | grep -q '"note" :'
+  if ! printf '%s' "$live_output" | grep -q '"size" :'; then
+    unset live_output
+    printf '%s\n' "live attachment metadata key missing from successful response" >&2
+    false
+  fi
+  if printf '%s' "$live_output" | grep -q '"note" :'; then
+    unset live_output
+    printf '%s\n' "live attachment lookup returned the degraded fallback note" >&2
+    false
+  fi
+  unset live_output
+  # Skips/failures exit this isolated Bats test process, so xtrace cannot leak to another test.
+  [ "$xtrace_was_on" -eq 0 ] || set -x
 }
 
 # gap6 WIRING: the grouped oracle-B shape must reach the wire, including a ZERO-attachment

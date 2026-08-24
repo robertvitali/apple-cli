@@ -1,4 +1,34 @@
 import Foundation
+import Darwin
+
+private final class UnlinkedCaptureFile {
+    let handle: FileHandle
+
+    init() throws {
+        let captureURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("apple-cli-osascript.XXXXXX")
+        var template = Array(captureURL.path.utf8CString)
+        let descriptor = template.withUnsafeMutableBufferPointer { buffer in
+            mkstemp(buffer.baseAddress!)
+        }
+        guard descriptor >= 0 else {
+            throw AppleScriptRunner.RunError.launchFailed("cannot create private output capture")
+        }
+        let unlinked = template.withUnsafeBufferPointer { buffer in
+            unlink(buffer.baseAddress!)
+        }
+        guard unlinked == 0 else {
+            close(descriptor)
+            throw AppleScriptRunner.RunError.launchFailed("cannot unlink private output capture")
+        }
+        handle = FileHandle(fileDescriptor: descriptor, closeOnDealloc: true)
+    }
+
+    func read() throws -> Data {
+        try handle.seek(toOffset: 0)
+        return try handle.readToEnd() ?? Data()
+    }
+}
 
 /// Runs AppleScript via `/usr/bin/osascript` with stdin CLOSED (never blocks on input).
 ///
@@ -18,6 +48,23 @@ public struct AppleScriptRunner: AppleScriptRunning {
             case .scriptFailed(let s, _): return "osascript exited \(s)" // stderr kept off the public message (info-leak)
             }
         }
+    }
+
+    public struct TimeoutError: Error, CustomStringConvertible {
+        public let seconds: TimeInterval
+        public init(seconds: TimeInterval) { self.seconds = seconds }
+        public var description: String {
+            let value = Int(exactly: seconds).map(String.init) ?? String(seconds)
+            return "osascript timed out after \(value)s"
+        }
+    }
+
+    public static let maximumTimeoutSeconds: TimeInterval = 86_400
+
+    public struct InvalidTimeoutError: Error, CustomStringConvertible {
+        public let seconds: TimeInterval
+        public init(seconds: TimeInterval) { self.seconds = seconds }
+        public var description: String { "invalid osascript timeout: \(seconds)" }
     }
 
     public init() {}
@@ -52,6 +99,74 @@ public struct AppleScriptRunner: AppleScriptRunning {
         process.waitUntilExit()
         let errData = stderrPipe.fileHandleForReading.readDataToEndOfFile()
 
+        if process.terminationStatus != 0 {
+            throw RunError.scriptFailed(status: process.terminationStatus,
+                                        stderr: String(decoding: errData, as: UTF8.self))
+        }
+        return String(decoding: outData, as: UTF8.self)
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// Execute an AppleScript with a host-side wall-clock deadline. This overload is opt-in:
+    /// existing callers retain their current behavior, while operations whose Apple-event
+    /// handlers can swallow a per-event timeout can still impose an overall process bound.
+    ///
+    /// Regular files are used for output instead of pipes so a large result cannot fill a pipe
+    /// while this thread waits for termination. Each mode-0600 file is created in the process's
+    /// temporary directory (`TMPDIR`, normally macOS's per-user Darwin temp directory) and
+    /// unlinked before osascript starts. It has a pathname only for the short
+    /// `mkstemp`→`unlink` window, before live Apple data can be written, and is reclaimed by the
+    /// kernel when the handles close.
+    public func run(_ script: String, arguments: [String] = [],
+                    timeout seconds: TimeInterval) throws -> String {
+        guard seconds.isFinite, seconds > 0,
+              seconds <= AppleScriptRunner.maximumTimeoutSeconds else {
+            throw InvalidTimeoutError(seconds: seconds)
+        }
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: "/usr/bin/osascript")
+        process.arguments = ["-e", script, "--"] + arguments
+
+        let outFile = try UnlinkedCaptureFile()
+        let errFile = try UnlinkedCaptureFile()
+        process.standardOutput = outFile.handle
+        process.standardError = errFile.handle
+        process.standardInput = FileHandle.nullDevice
+
+        let terminated = DispatchSemaphore(value: 0)
+        process.terminationHandler = { _ in terminated.signal() }
+        do {
+            try process.run()
+        } catch {
+            throw RunError.launchFailed(String(describing: error))
+        }
+
+        let deadline = DispatchTime.now() + seconds
+        if terminated.wait(timeout: deadline) == .timedOut {
+            var cleanup = terminated.wait(timeout: .now())
+            if cleanup == .timedOut, process.isRunning {
+                process.terminate()
+                cleanup = terminated.wait(timeout: .now() + 1)
+            }
+            if cleanup == .timedOut, process.isRunning {
+                // Foundation exposes no race-free process handle for the KILL escalation. The
+                // liveness check narrows, but cannot eliminate, the same-user PID-reuse window
+                // between child exit/reap and kill(2); macOS Process has no stronger primitive.
+                _ = Darwin.kill(process.processIdentifier, SIGKILL)
+                cleanup = terminated.wait(timeout: .now() + 1)
+            }
+            if cleanup == .success {
+                process.waitUntilExit()
+            }
+            // If a child remains uninterruptible even after SIGKILL, do not turn the deadline
+            // into another unbounded wait. The unlinked captures retain no filesystem names and
+            // the kernel reclaims them when the child eventually exits.
+            throw TimeoutError(seconds: seconds)
+        }
+
+        process.waitUntilExit()
+        let outData = try outFile.read()
+        let errData = try errFile.read()
         if process.terminationStatus != 0 {
             throw RunError.scriptFailed(status: process.terminationStatus,
                                         stderr: String(decoding: errData, as: UTF8.self))

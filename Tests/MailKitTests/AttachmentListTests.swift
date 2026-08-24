@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import AppleKit
 @testable import MailKit
 
 /// Q11-A pins: oracle-A attachment metadata rows (gap1), the oracle-B grouped subject shape
@@ -8,8 +9,67 @@ import Foundation
 @Suite("Attachment list parity (Q11-A)")
 struct AttachmentListTests {
 
+    private struct ProbeTimeout: Error {}
+
     private static let RS = String(UnicodeScalar(30)!)
     private static let US = String(UnicodeScalar(31)!)
+
+    @Test func liveLookupBoundsBothMessageIDSpellings() throws {
+        var calls: [(arguments: [String], timeout: TimeInterval)] = []
+        let rows = try MailScript.listAttachments(
+            internetMessageID: "message-id@example.com",
+            accountName: "Example Account",
+            using: { _, arguments, timeout in
+                calls.append((arguments, timeout))
+                if calls.count == 1 { return "notfound" }
+                return "ok" + Self.RS
+                    + ["report.pdf", "application/pdf", "7", "1"].joined(separator: Self.US)
+                    + Self.RS
+            })
+
+        #expect(calls.count == 2)
+        #expect(calls.map(\.arguments) == [
+            ["<message-id@example.com>", "Example Account"],
+            ["message-id@example.com", "Example Account"],
+        ])
+        #expect(calls.map(\.timeout) == [30, 30])
+        #expect(rows?.map(\.name) == ["report.pdf"])
+    }
+
+    @Test func liveLookupPropagatesTimeoutForCallerFallback() {
+        var calls = 0
+        #expect(throws: ProbeTimeout.self) {
+            _ = try MailScript.listAttachments(
+                internetMessageID: "message-id@example.com",
+                accountName: nil,
+                using: { _, _, _ in
+                    calls += 1
+                    throw ProbeTimeout()
+                })
+        }
+        #expect(calls == 1)
+    }
+
+    @Test func callerMapsTimeoutToDisclosedIndexFallback() throws {
+        let live = AttachmentsList.liveAttachmentMetadataOrNil {
+            throw AppleScriptRunner.TimeoutError(seconds: 30)
+        }
+        let shaped = AttachmentsList.shapeAttachmentRows(
+            indexRows: [(name: "report.pdf", attachmentID: "2.7")],
+            liveMetas: live,
+            rowid: 42)
+
+        #expect(shaped.degraded)
+        #expect(shaped.rows.count == 1)
+        #expect(shaped.rows[0].name == "report.pdf")
+        #expect(shaped.rows[0].attachment_id == "2.7")
+        #expect(shaped.rows[0].mime_type == nil)
+        #expect(shaped.rows[0].size == nil)
+        #expect(shaped.rows[0].downloaded == nil)
+        let note = try #require(AttachmentsList.degradedNote(degraded: shaped.degraded, noLive: false))
+        #expect(note.contains("live Mail.app enrichment unavailable"))
+        #expect(note.contains("Envelope-Index only"))
+    }
 
     // MARK: parseAttachmentList — the fail-closed AppleScript-output boundary
 

@@ -616,8 +616,44 @@ struct AttachmentsList: ParsableCommand {
     @Option(name: .long, help: "Subject keyword to find messages.") var subject: String?
     @Option(name: .long, help: "Account name or UUID. With an id: scope assertion (rejects if the message is elsewhere — same posture as `get`, see docs/port-specs/mail.md; oracle A treats it as a perf hint). With --subject: which account to search.") var account: String?
     @Option(name: .long, help: "Mailbox. With an id: scope assertion (oracle A's mailbox param, hint there; 'All' is the no-op wildcard). With --subject: where to match (default INBOX, oracle B's scope; 'All' widens). Ignored-with-an-id note: --max-results applies to --subject only (the id path is oracle A's get_attachments, which has no cap).") var mailbox: String?
-    @Option(name: .long, help: "Max messages to inspect for --subject (default 1, oracle B's default — each match costs a live Mail.app locator scan; raise deliberately). Inert on the id path.") var maxResults: Int = 1
+    @Option(name: .long, help: "Max messages to inspect for --subject (default 1, oracle B's default — each match costs a live Mail.app locator scan, bounded at 30s per Message-ID spelling / 60s per match; raise deliberately). Inert on the id path.") var maxResults: Int = 1
     @Flag(name: .long, help: "Skip the live Mail.app metadata enrichment (fast Envelope-Index rows only; mime_type/size/downloaded omitted, disclosed via note).") var noLive = false
+
+    /// A live lookup failure is a disclosed index fallback, not a command failure. Keep the
+    /// catch policy outside MailScript so save can preserve the same error and refuse execute.
+    static func liveAttachmentMetadataOrNil(
+        _ lookup: () throws -> [MailScript.AttachmentMeta]?
+    ) -> [MailScript.AttachmentMeta]? {
+        do { return try lookup() }
+        catch { return nil }
+    }
+
+    static func shapeAttachmentRows(
+        indexRows: [(name: String, attachmentID: String?)],
+        liveMetas: [MailScript.AttachmentMeta]?,
+        rowid: Int
+    ) -> (rows: [MailAttachment], degraded: Bool) {
+        if let liveMetas {
+            return (liveMetas.map { meta in
+                let (aid, sidx) = AttachmentJoin.byName(meta.name, in: indexRows)
+                return MailAttachment(name: meta.name, attachment_id: aid, mime_type: meta.mimeType,
+                                      size: meta.size, downloaded: meta.downloaded,
+                                      save_index: sidx, message_id: String(rowid))
+            }, false)
+        }
+        return (indexRows.enumerated().map { i, row in
+            MailAttachment(name: row.name, attachment_id: row.attachmentID, mime_type: nil,
+                           size: nil, downloaded: nil, save_index: i,
+                           message_id: String(rowid))
+        }, true)
+    }
+
+    static func degradedNote(degraded: Bool, noLive: Bool) -> String? {
+        guard degraded else { return nil }
+        return noLive
+            ? "live enrichment skipped (--no-live) — rows are Envelope-Index only (mime_type/size/downloaded omitted)"
+            : "live Mail.app enrichment unavailable — rows are Envelope-Index only (mime_type/size/downloaded omitted)"
+    }
 
     /// Oracle-A-shaped rows: the live Mail.app enumeration (name/mime_type/size/downloaded, in
     /// Mail's own MIME-part order, exactly like oracle A's AppleScript path) is PRIMARY;
@@ -640,19 +676,15 @@ struct AttachmentsList: ParsableCommand {
         -> (rows: [MailAttachment], degraded: Bool) {
         let indexRows = try ctx.index.attachments(messageRowid: rowid)
         let msg = ctx.decodeSummary(row)
-        if live, let internetID = msg.internet_message_id,
-           let metas = (try? MailScript().listAttachments(internetMessageID: internetID, accountName: msg.account)) ?? nil {
-            return (metas.map { meta in
-                let (aid, sidx) = AttachmentJoin.byName(meta.name, in: indexRows)
-                return MailAttachment(name: meta.name, attachment_id: aid, mime_type: meta.mimeType,
-                                      size: meta.size, downloaded: meta.downloaded,
-                                      save_index: sidx, message_id: String(rowid))
-            }, false)
+        var liveMetas: [MailScript.AttachmentMeta]? = nil
+        if live, let internetID = msg.internet_message_id {
+            liveMetas = Self.liveAttachmentMetadataOrNil {
+                try MailScript().listAttachments(
+                    internetMessageID: internetID, accountName: msg.account)
+            }
         }
-        return (indexRows.enumerated().map { i, r in
-            MailAttachment(name: r.name, attachment_id: r.attachmentID, mime_type: nil,
-                           size: nil, downloaded: nil, save_index: i, message_id: String(rowid))
-        }, true)
+        return Self.shapeAttachmentRows(
+            indexRows: indexRows, liveMetas: liveMetas, rowid: rowid)
     }
 
     func run() throws {
@@ -724,9 +756,7 @@ struct AttachmentsList: ParsableCommand {
             let result = MailAttachmentsResult(
                 attachments: atts, count: atts.count, matched_by: matchedBy,
                 emails: emails, matched_email_count: emails?.count,
-                note: !degraded ? nil : (noLive
-                    ? "live enrichment skipped (--no-live) — rows are Envelope-Index only (mime_type/size/downloaded omitted)"
-                    : "live Mail.app enrichment unavailable — rows are Envelope-Index only (mime_type/size/downloaded omitted)"))
+                note: Self.degradedNote(degraded: degraded, noLive: noLive))
             if global.json { try Output.emit(tool: "mail", data: result) }
             else { for a in atts { Output.printText("\(a.name)\(a.attachment_id.map { "  [\($0)]" } ?? "")  (msg \(a.message_id))") } }
         }

@@ -17,7 +17,7 @@
 ## learnings
 
 ### hot
-- _(empty)_
+- [mail-automation](learnings/hot/mail-automation.md)
 
 ### medium
 - _(empty)_
