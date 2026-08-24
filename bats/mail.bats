@@ -2780,6 +2780,28 @@ assert all('id' in m for m in d['messages'])"
   echo "$output" | grep -q -- "--body-live requires"
 }
 
+@test "mail search --body-live-timeout without --body-live is validation/64" {
+  run "$BIN" mail search --body-live-timeout 30
+  [ "$status" -eq 64 ]
+  echo "$output" | python3 -c '
+import json,sys
+doc=json.load(sys.stdin)
+assert doc["ok"] is False
+assert doc["error"]["type"] == "validation_error"
+assert "requires --body-live" in doc["error"]["message"]'
+}
+
+@test "mail search --body-live-timeout rejects malformed values as validation/64" {
+  run "$BIN" mail search --body needle --body-live --body-live-timeout not-a-number
+  [ "$status" -eq 64 ]
+  echo "$output" | python3 -c '
+import json,sys
+doc=json.load(sys.stdin)
+assert doc["ok"] is False
+assert doc["error"]["type"] == "validation_error"
+assert "must be 0 or a finite number" in doc["error"]["message"]'
+}
+
 # Negative-limit class: a negative --limit was clamped to LIMIT 0 at the query boundary and
 # returned an EMPTY SUCCESS echoing the negative value — indistinguishable from an empty store
 # (git-verified; the first draft misattributed it to SQL LIMIT -n). Typed 64 now.

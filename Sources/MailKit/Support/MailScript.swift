@@ -55,6 +55,17 @@ public struct MailScript {
     end run
     """
 
+    /// Oracle-aligned per-Apple-event timeout. This immutable integer is the sole Swift value
+    /// interpolated into `bodySearchScript`; every user/data-derived value remains argv-only.
+    static let bodySearchAppleEventTimeoutSeconds = 180
+
+    /// Deliberate aggregate scan budget as well as an anti-orphan bound. Deriving it as the
+    /// per-event limit plus 15 seconds gives a single stalled event process-teardown headroom,
+    /// but healthy multi-event work can also exhaust the budget. No startup time is reserved,
+    /// so either clock may fire first; after roughly 15 seconds of prior scan work, the host
+    /// budget preempts a later per-event timeout. Keep the help and Mail port spec in sync.
+    static let bodySearchHostTimeoutSeconds = bodySearchAppleEventTimeoutSeconds + 15
+
     /// gap2: oracle B's live BODY search (search.py:200-330) — ONE AppleScript pass that walks
     /// each mailbox's messages, reads `content of aMessage`, and applies the full per-message
     /// condition set in-loop with the oracle's early exit (`collectLimit <= 0`), returning RFC
@@ -121,7 +132,7 @@ public struct MailScript {
         set skipFolders to {"Trash", "Junk", "Junk Email", "Deleted Items", "Sent", "Sent Items", "Sent Messages", "Drafts", "Spam", "Deleted Messages"}
         set out to ""
         tell application "Mail"
-            with timeout of 180 seconds
+            with timeout of \(MailScript.bodySearchAppleEventTimeoutSeconds) seconds
                 set searchAccounts to accounts
                 if acctName is not "" then set searchAccounts to (accounts whose name is acctName)
                 repeat with targetAccount in searchAccounts
@@ -224,23 +235,74 @@ public struct MailScript {
     end run
     """
 
-    /// See `bodySearchScript`. Returns RFC Message-IDs of live matches, in the oracle's scan
-    /// order, at most `collectLimit`.
+    /// Compatibility entry point preserving the original untimed-host behavior. See
+    /// `bodySearchScript`; returns RFC Message-IDs in oracle scan order, at most `collectLimit`.
     public func bodySearch(needle: String, subjectTerms: [String], sender: String?,
                            readStatus: Bool?, flagged: Bool?, fromUnix: Int?, toUnix: Int?,
                            hasAttachment: Bool?, accountName: String?, mailboxName: String,
                            collectLimit: Int, includeSystemFolders: Bool = false) throws -> [String] {
+        try bodySearch(
+            needle: needle, subjectTerms: subjectTerms, sender: sender,
+            readStatus: readStatus, flagged: flagged, fromUnix: fromUnix, toUnix: toUnix,
+            hasAttachment: hasAttachment, accountName: accountName, mailboxName: mailboxName,
+            collectLimit: collectLimit, includeSystemFolders: includeSystemFolders,
+            hostTimeout: nil)
+    }
+
+    /// Explicit host policy: positive values apply the timed runner; `nil` preserves oracle B's
+    /// unbounded aggregate host behavior while retaining the script's per-event timeout.
+    public func bodySearch(needle: String, subjectTerms: [String], sender: String?,
+                           readStatus: Bool?, flagged: Bool?, fromUnix: Int?, toUnix: Int?,
+                           hasAttachment: Bool?, accountName: String?, mailboxName: String,
+                           collectLimit: Int, includeSystemFolders: Bool,
+                           hostTimeout: TimeInterval?) throws -> [String] {
+        try Self.bodySearch(
+            needle: needle, subjectTerms: subjectTerms, sender: sender,
+            readStatus: readStatus, flagged: flagged, fromUnix: fromUnix, toUnix: toUnix,
+            hasAttachment: hasAttachment, accountName: accountName, mailboxName: mailboxName,
+            collectLimit: collectLimit, includeSystemFolders: includeSystemFolders,
+            hostTimeout: hostTimeout,
+            timedRun: { script, arguments, timeout in
+                try runner.run(script, arguments: arguments, timeout: timeout)
+            },
+            untimedRun: { script, arguments in
+                try runner.run(script, arguments: arguments)
+            })
+    }
+
+    /// Injectable core keeps deadline wiring and timeout mapping pure-testable without Mail/TCC.
+    static func bodySearch(
+        needle: String, subjectTerms: [String], sender: String?,
+        readStatus: Bool?, flagged: Bool?, fromUnix: Int?, toUnix: Int?,
+        hasAttachment: Bool?, accountName: String?, mailboxName: String,
+        collectLimit: Int, includeSystemFolders: Bool = false,
+        hostTimeout: TimeInterval?,
+        timedRun: (String, [String], TimeInterval) throws -> String,
+        untimedRun: (String, [String]) throws -> String
+    ) throws -> [String] {
         let rs = String(UnicodeScalar(30)!)
         let readMode = readStatus.map { $0 ? "read" : "unread" } ?? ""
         let flagMode = flagged.map { $0 ? "flagged" : "unflagged" } ?? ""
         let attMode = hasAttachment.map { $0 ? "has" : "no" } ?? ""
-        let out = try runner.run(MailScript.bodySearchScript, arguments: [
+        let arguments = [
             needle, subjectTerms.joined(separator: rs), sender ?? "", readMode,
             fromUnix.map(MailScript.localDateComponents) ?? "",
             toUnix.map(MailScript.localDateComponents) ?? "", attMode, flagMode,
             accountName ?? "", mailboxName, String(collectLimit),
             includeSystemFolders ? "include" : "",
-        ])
+        ]
+        let out: String
+        if let hostTimeout {
+            do {
+                out = try timedRun(MailScript.bodySearchScript, arguments, hostTimeout)
+            } catch is AppleScriptRunner.TimeoutError {
+                let seconds = Int(exactly: hostTimeout).map(String.init) ?? String(hostTimeout)
+                throw AppleError.upstream(
+                    "Mail body search exceeded its \(seconds)-second aggregate deadline; no partial results returned. Narrow with --mailbox/--account, raise the cap with --body-live-timeout <seconds>, pass 0 for oracle B's unbounded aggregate behavior, or drop --body-live.")
+            }
+        } else {
+            out = try untimedRun(MailScript.bodySearchScript, arguments)
+        }
         return MailScript.parseBodySearchIDs(out)
     }
 

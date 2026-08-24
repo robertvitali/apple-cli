@@ -56,8 +56,9 @@ struct SearchCommand: ParsableCommand {
     @Option(name: .long, help: "Mailbox name (default INBOX; use 'All' for every mailbox).") var mailbox: String = "INBOX"
     @Option(name: .long, help: "Substring match on subject (repeatable — matches ANY, MCP B subject_keywords).") var subject: [String] = []
     @Option(name: .long, help: "Substring match on sender name/email.") var sender: String?
-    @Option(name: .long, help: "Substring match on the message body. Default: fast match on the indexed body preview (CLI extra — Mail caches previews for only some messages). Add --body-live for oracle B's semantics: a live Mail.app scan of the FULL content of every candidate message (slow; per-Apple-event 180s timeout only — there is NO overall deadline, so a broad sweep can hold Mail busy for a long time; bound it with --limit/--mailbox).") var body: String?
+    @Option(name: .long, help: "Substring match on the message body. Default: fast match on the indexed body preview (CLI extra — Mail caches previews for only some messages). Add --body-live for oracle B's semantics: a live Mail.app scan of the FULL content of every candidate message (slow; the oracle-aligned script keeps its per-Apple-event 180s timeout; the CLI's default 195s aggregate host deadline fails as upstream_error/69 with no partial results; pass --body-live-timeout 0 for oracle B's unbounded aggregate behavior; Mail may remain busy with an in-flight event; narrow with --mailbox/--account — a lower --limit helps only when matches are plentiful — or drop --body-live).") var body: String?
     @Flag(name: .long, help: "With --body: scan live full message content via Mail.app (oracle B body_text semantics) instead of the indexed preview. The collected window is sorted per --sort and sliced, exactly as the oracle's response builder does.") var bodyLive = false
+    @Option(name: .long, help: "Overall --body-live host deadline in seconds (default 195; positive values customize it; 0 disables the host deadline and restores oracle B's unbounded aggregate scan). Requires --body-live; maximum \(Int(AppleScriptRunner.maximumTimeoutSeconds)) seconds.") var bodyLiveTimeout: String?
     @Option(name: .long, help: "Lower bound on date received (YYYY-MM-DD).") var fromDate: String?
     @Option(name: .long, help: "Upper bound on date received (YYYY-MM-DD, inclusive).") var toDate: String?
     @Flag(name: .long, help: "Only read messages.") var read = false
@@ -72,6 +73,23 @@ struct SearchCommand: ParsableCommand {
     @Flag(name: .long, inversion: .prefixedNo, help: "Include the indexed body preview (default on).") var content = true
     @Option(name: .long, help: "Truncate each included body preview to N chars (0 = unlimited; MCP B max_content_length).") var maxContentLength: Int?
     @Flag(name: .long, help: "With --mailbox All, also sweep the system mailboxes MCP B skips. Excluded by leaf name: Trash, Junk, Junk Email, Deleted Items, Deleted Messages, Sent, Sent Items, Sent Messages, Drafts, Spam. Provider-specific names outside that list (notably Gmail's '[Gmail]/Sent Mail' and '[Gmail]/All Mail') are NOT excluded.") var includeSystemFolders = false
+
+    /// Pure option resolver. `nil` means use AppleScriptRunner's untimed overload, selected only
+    /// by an explicit zero; the omitted option retains the bounded agent-safe default.
+    static func resolveBodyLiveTimeout(raw: String?, bodyLive: Bool) throws -> TimeInterval? {
+        if raw != nil && !bodyLive {
+            throw AppleError.validation("--body-live-timeout requires --body-live (and --body).")
+        }
+        guard let raw else {
+            return TimeInterval(MailScript.bodySearchHostTimeoutSeconds)
+        }
+        guard !raw.hasPrefix("-"), let seconds = TimeInterval(raw), seconds.isFinite,
+              seconds >= 0, seconds <= AppleScriptRunner.maximumTimeoutSeconds else {
+            throw AppleError.validation(
+                "--body-live-timeout must be 0 or a finite number of seconds no greater than \(Int(AppleScriptRunner.maximumTimeoutSeconds)).")
+        }
+        return seconds == 0 ? nil : seconds
+    }
 
     func run() throws {
         try runGuarded(tool: "mail") {
@@ -91,6 +109,8 @@ struct SearchCommand: ParsableCommand {
             guard limit >= 0 else {
                 throw AppleError.validation("--limit must be >= 0 (0 = all).")
             }
+            let bodyLiveHostTimeout = try Self.resolveBodyLiveTimeout(
+                raw: bodyLiveTimeout, bodyLive: bodyLive)
             // Pure --body-live usage checks, hoisted above the store open (store-independent
             // usage errors — the export command's established convention; review L1).
             if bodyLive {
@@ -172,7 +192,8 @@ struct SearchCommand: ParsableCommand {
                     hasAttachment: f.hasAttachment,
                     accountName: acctDisplay, mailboxName: scriptMailbox,
                     collectLimit: collectLimit,
-                    includeSystemFolders: includeSystemFolders)
+                    includeSystemFolders: includeSystemFolders,
+                    hostTimeout: bodyLiveHostTimeout)
                 // Order-preserving de-dupe: a Gmail store lists the same message under INBOX
                 // and [Gmail]/All Mail, and both map to ONE index row — byte-identical
                 // duplicate rows silently consuming --limit (review).

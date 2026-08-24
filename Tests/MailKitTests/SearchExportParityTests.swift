@@ -1,11 +1,14 @@
 import Testing
 import Foundation
+import AppleKit
 @testable import MailKit
 
 /// Q11-G pins (gap2 / gap9 / gap45): the pure halves of the live body search and the oracle
 /// export layout. The live halves are pinned in bats against the real store.
 @Suite("Search/export parity (Q11-G)")
 struct SearchExportParityTests {
+
+    private struct ProbeError: Error {}
 
     // MARK: gap45 — export file names (oracle layout, verified verbatim from analytics.py)
 
@@ -104,8 +107,8 @@ struct SearchExportParityTests {
         }
         #expect(!src.contains("to date \""))
         #expect(!src.contains("epochBase"))
-        // The oracle's own 180-second PER-EVENT timeout (not an overall deadline — the help
-        // text says so; extra31's runner-deadline half is the tracked fix).
+        // The oracle's own 180-second Apple-event timeout remains inside the script; the CLI
+        // adds a 195-second aggregate osascript deadline by default and can explicitly disable it.
         #expect(src.contains("with timeout of 180 seconds"))
         // Security H1: the emitted Message-ID is REMOTE-chosen — the script must neutralize
         // the RS wire delimiter inside it before appending to the RS-joined blob.
@@ -115,6 +118,122 @@ struct SearchExportParityTests {
         } else {
             Issue.record("expected the Message-ID RS-neutralization block before the emit")
         }
+    }
+
+    @Test func bodySearchUsesTheOverallRunnerDeadline() throws {
+        #expect(MailScript.bodySearchAppleEventTimeoutSeconds == 180)
+        #expect(MailScript.bodySearchHostTimeoutSeconds == 195)
+        #expect(MailScript.bodySearchHostTimeoutSeconds
+                > MailScript.bodySearchAppleEventTimeoutSeconds)
+
+        var observedScript = ""
+        var observedArguments: [String] = []
+        var observedTimeout: TimeInterval = 0
+        var untimedCalls = 0
+        let ids = try bodySearch(
+            hostTimeout: TimeInterval(MailScript.bodySearchHostTimeoutSeconds),
+            timedRun: { script, arguments, timeout in
+                observedScript = script
+                observedArguments = arguments
+                observedTimeout = timeout
+                return "message-id@example.com\u{1E}"
+            },
+            untimedRun: { _, _ in
+                untimedCalls += 1
+                return ""
+            })
+
+        #expect(observedScript.contains("with timeout of 180 seconds"))
+        #expect(observedArguments.first == "needle")
+        #expect(observedTimeout == TimeInterval(MailScript.bodySearchHostTimeoutSeconds))
+        #expect(untimedCalls == 0)
+        #expect(ids == ["message-id@example.com"])
+    }
+
+    @Test func bodySearchZeroOverrideUsesOnlyTheUntimedRunner() throws {
+        var timedCalls = 0
+        var untimedCalls = 0
+        let ids = try bodySearch(
+            hostTimeout: nil,
+            timedRun: { _, _, _ in
+                timedCalls += 1
+                return ""
+            },
+            untimedRun: { script, arguments in
+                untimedCalls += 1
+                #expect(script.contains("with timeout of 180 seconds"))
+                #expect(arguments.first == "needle")
+                return "message-id@example.com\u{1E}"
+            })
+
+        #expect(timedCalls == 0)
+        #expect(untimedCalls == 1)
+        #expect(ids == ["message-id@example.com"])
+    }
+
+    @Test func bodySearchDeadlineIsUpstreamAndNeverPartialSuccess() throws {
+        let error = #expect(throws: AppleError.self) {
+            _ = try bodySearch(
+                hostTimeout: 12,
+                timedRun: { _, _, timeout in
+                    #expect(timeout == 12)
+                    throw AppleScriptRunner.TimeoutError(seconds: 12)
+                },
+                untimedRun: { _, _ in "" })
+        }
+        let upstream = try #require(error)
+        #expect(upstream.type == AppleErrorType.upstream)
+        #expect(upstream.exitCode == AppleExit.upstream)
+        #expect(upstream.message == "Mail body search exceeded its 12-second aggregate deadline; no partial results returned. Narrow with --mailbox/--account, raise the cap with --body-live-timeout <seconds>, pass 0 for oracle B's unbounded aggregate behavior, or drop --body-live.")
+    }
+
+    @Test func bodySearchPreservesNonTimeoutFailures() {
+        #expect(throws: ProbeError.self) {
+            _ = try bodySearch(
+                hostTimeout: 12,
+                timedRun: { _, _, _ in throw ProbeError() },
+                untimedRun: { _, _ in "" })
+        }
+    }
+
+    private func bodySearch(
+        hostTimeout: TimeInterval?,
+        timedRun: (String, [String], TimeInterval) throws -> String,
+        untimedRun: (String, [String]) throws -> String
+    ) throws -> [String] {
+        try MailScript.bodySearch(
+            needle: "needle", subjectTerms: ["subject"], sender: nil,
+            readStatus: nil, flagged: nil, fromUnix: nil, toUnix: nil,
+            hasAttachment: nil, accountName: "Example Account", mailboxName: "INBOX",
+            collectLimit: 2, includeSystemFolders: false, hostTimeout: hostTimeout,
+            timedRun: timedRun, untimedRun: untimedRun)
+    }
+
+    @Test func bodyLiveTimeoutOptionResolvesDefaultCustomAndUnbounded() throws {
+        #expect(try SearchCommand.resolveBodyLiveTimeout(raw: nil, bodyLive: true) == 195)
+        #expect(try SearchCommand.resolveBodyLiveTimeout(raw: "12.5", bodyLive: true) == 12.5)
+        #expect(try SearchCommand.resolveBodyLiveTimeout(raw: "0", bodyLive: true) == nil)
+    }
+
+    @Test func bodyLiveTimeoutOptionRejectsInvalidOrInertValues() throws {
+        let overMaximum = String(Int(AppleScriptRunner.maximumTimeoutSeconds) + 1)
+        for raw in ["-1", "-0", "nan", "inf", overMaximum, "not-a-number"] {
+            let error = #expect(throws: AppleError.self) {
+                _ = try SearchCommand.resolveBodyLiveTimeout(raw: raw, bodyLive: true)
+            }
+            let validation = try #require(error)
+            #expect(validation.type == AppleErrorType.validation)
+            #expect(validation.exitCode == AppleExit.usage)
+        }
+
+        #expect(try SearchCommand.resolveBodyLiveTimeout(
+            raw: String(Int(AppleScriptRunner.maximumTimeoutSeconds)), bodyLive: true)
+            == AppleScriptRunner.maximumTimeoutSeconds)
+
+        let inert = #expect(throws: AppleError.self) {
+            _ = try SearchCommand.resolveBodyLiveTimeout(raw: "0", bodyLive: false)
+        }
+        #expect(try #require(inert).message.contains("requires --body-live"))
     }
 
     /// gap2 paging core (reviews H2/H3/B2): saturating collect bounds + the oracle's
