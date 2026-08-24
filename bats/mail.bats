@@ -24,6 +24,321 @@ require_index() {
   [ -n "$found" ] || skip "Mail Envelope Index not readable (no FDA / no Mail)"
 }
 
+# Probe the Apple Events client used by the fixture itself. This must not route through the CLI
+# under test: a CLI regression may fail, but it must never green-skip its own live wiring pin.
+require_osascript_mail_automation() {
+  case "$-" in *x*) set +x ;; esac
+  local timeout_policy="${1:-skip}"
+  local probe_status probe_output
+  run /usr/bin/python3 "$BATS_TEST_DIRNAME/helpers/bounded_exec.py" \
+    --timeout 30 --grace 2 -- /usr/bin/osascript \
+    -e 'tell application "Mail" to count of accounts'
+  probe_status="$status"
+  probe_output="$output"
+  output=""
+  lines=()
+  BATS_RUN_COMMAND=""
+  case "$probe_status" in
+    0) unset probe_output ;;
+    124)
+      unset probe_output
+      if [ "$timeout_policy" = strict ]; then
+        printf '%s\n' "Mail automation remained unresponsive after the CLI host timeout" >&2
+        return 1
+      fi
+      skip "Mail automation authorization probe timed out"
+      ;;
+    *)
+      case "$probe_output" in
+        *-1743*|*"Not authorized to send Apple events"*)
+          unset probe_output
+          skip "Mail automation is not authorized for the test runner"
+          ;;
+        *)
+          unset probe_output
+          printf '%s\n' "Mail automation authorization probe failed unexpectedly" >&2
+          false
+          ;;
+      esac
+      ;;
+  esac
+}
+
+# Select the oldest indexed INBOX attachment as a private hint, then make Mail.app independently
+# confirm that exact RFC Message-ID and report its live count. The product may nominate a fixture;
+# only the oracle validates it. No broad live mailbox scan, no age-out window, and no cached PII.
+select_live_attachment_fixture() {
+  case "$-" in *x*) set +x ;; esac
+  local hint_status hint_output hint_parse_status=0 hint_tuple hint_account hint_id
+  local fixture_status fixture_output fixture_rest
+  local fixture_script='on run argv
+set targetID to item 1 of argv
+set accountSelector to item 2 of argv
+set RS to character id 30
+tell application "Mail"
+  set searchAccounts to accounts whose name is accountSelector
+  if (count of searchAccounts) is 0 then set searchAccounts to accounts whose id is accountSelector
+  repeat with a in searchAccounts
+    try
+      set hits to messages of mailbox "INBOX" of a whose message id is targetID
+      if (count of hits) > 0 then
+        set m to item 1 of hits
+        set attachmentCount to count of mail attachments of m
+        if attachmentCount > 0 then
+          return ((id of a) as string) & RS & ((message id of m) as string) & RS & (attachmentCount as string)
+        end if
+      end if
+    end try
+  end repeat
+end tell
+return ""
+end run'
+
+  require_osascript_mail_automation
+  run /usr/bin/python3 "$BATS_TEST_DIRNAME/helpers/bounded_exec.py" \
+    --timeout 30 --grace 2 -- "$BIN" mail search --mailbox INBOX \
+    --has-attachment --sort date_asc --limit 1 --no-content
+  hint_status="$status"
+  hint_output="$output"
+  output=""
+  lines=()
+  BATS_RUN_COMMAND=""
+  if [ "$hint_status" -ne 0 ]; then
+    unset hint_output
+    printf '%s\n' "attachment fixture index hint failed" >&2
+    false
+  fi
+  hint_tuple=$(printf '%s' "$hint_output" | /usr/bin/python3 -c '
+import json,sys
+messages=json.load(sys.stdin)["data"]["messages"]
+if not messages:
+    raise SystemExit(12)
+message=messages[0]
+account=message.get("account") or ""
+internet_id=message.get("internet_message_id") or ""
+if not account or not internet_id:
+    raise SystemExit(13)
+sys.stdout.write(account + "\x1e" + internet_id)
+' 2>/dev/null) || hint_parse_status=$?
+  unset hint_output
+  case "$hint_parse_status" in
+    0) ;;
+    12) unset hint_tuple; skip "store has no indexed INBOX attachment fixture" ;;
+    *) unset hint_tuple; printf '%s\n' "attachment fixture index hint was invalid" >&2; false ;;
+  esac
+  case "$hint_tuple" in
+    *$'\n'*|*$'\r'*)
+      unset hint_tuple
+      printf '%s\n' "attachment fixture index hint contained an invalid identifier" >&2
+      false
+      ;;
+    *$'\036'*) ;;
+    *)
+      unset hint_tuple
+      printf '%s\n' "attachment fixture index hint omitted its account" >&2
+      false
+      ;;
+  esac
+  hint_account="${hint_tuple%%$'\036'*}"
+  hint_id="${hint_tuple#*$'\036'}"
+  unset hint_tuple
+  case "$hint_id" in
+    ""|*$'\036'*)
+      unset hint_account hint_id
+      printf '%s\n' "attachment fixture index hint contained an invalid message identifier" >&2
+      false
+      ;;
+  esac
+
+  run /usr/bin/python3 "$BATS_TEST_DIRNAME/helpers/bounded_exec.py" \
+    --timeout 60 --grace 2 -- /usr/bin/osascript -e "$fixture_script" -- "$hint_id" "$hint_account"
+  fixture_status="$status"
+  fixture_output="$output"
+  output=""
+  lines=()
+  BATS_RUN_COMMAND=""
+  unset hint_account hint_id
+  case "$fixture_status" in
+    0) ;;
+    124) unset fixture_output; skip "Mail.app fixture confirmation exceeded its bound" ;;
+    *) unset fixture_output; printf '%s\n' "Mail.app fixture confirmation failed" >&2; false ;;
+  esac
+  [ -n "$fixture_output" ] || skip "indexed attachment fixture is not live-locatable in Mail.app"
+  case "$fixture_output" in
+    *$'\n'*|*$'\r'*)
+      unset fixture_output
+      printf '%s\n' "live attachment fixture returned an invalid identifier tuple" >&2
+      false
+      ;;
+    *$'\036'*) ;;
+    *)
+      unset fixture_output
+      printf '%s\n' "live attachment fixture omitted its account scope" >&2
+      false
+      ;;
+  esac
+  LIVE_ATTACHMENT_ACCOUNT_ID="${fixture_output%%$'\036'*}"
+  fixture_rest="${fixture_output#*$'\036'}"
+  case "$fixture_rest" in
+    *$'\036'*) ;;
+    *)
+      unset fixture_output fixture_rest LIVE_ATTACHMENT_ACCOUNT_ID
+      printf '%s\n' "live attachment fixture omitted its attachment count" >&2
+      false
+      ;;
+  esac
+  LIVE_ATTACHMENT_ID="${fixture_rest%%$'\036'*}"
+  LIVE_ATTACHMENT_ORACLE_COUNT="${fixture_rest#*$'\036'}"
+  case "$LIVE_ATTACHMENT_ORACLE_COUNT" in
+    ""|*[!0-9]*|*$'\036'*)
+      unset fixture_output fixture_rest LIVE_ATTACHMENT_ACCOUNT_ID \
+        LIVE_ATTACHMENT_ID LIVE_ATTACHMENT_ORACLE_COUNT
+      printf '%s\n' "live attachment fixture returned an invalid attachment count" >&2
+      false
+      ;;
+  esac
+  unset fixture_output fixture_rest
+  if [ -z "$LIVE_ATTACHMENT_ACCOUNT_ID" ] || [ -z "$LIVE_ATTACHMENT_ID" ]; then
+    unset LIVE_ATTACHMENT_ACCOUNT_ID LIVE_ATTACHMENT_ID LIVE_ATTACHMENT_ORACLE_COUNT
+    printf '%s\n' "live attachment fixture returned an empty account or message identifier" >&2
+    false
+  fi
+}
+
+# Capture the CLI's live list response for the selected fixture. This is separate from fixture
+# selection so the oracle setup does not decide whether the product response is acceptable.
+load_live_attachment_list() {
+  case "$-" in *x*) set +x ;; esac
+  local live_status
+  if [ -z "${LIVE_ATTACHMENT_ACCOUNT_ID:-}" ] || [ -z "${LIVE_ATTACHMENT_ID:-}" ] \
+    || [ -z "${LIVE_ATTACHMENT_ORACLE_COUNT:-}" ]; then
+    unset LIVE_ATTACHMENT_ACCOUNT_ID LIVE_ATTACHMENT_ID LIVE_ATTACHMENT_ORACLE_COUNT
+    printf '%s\n' "live attachment fixture must be selected before it is loaded" >&2
+    false
+  fi
+  # 90 seconds sits outside the 2x30-second per-spelling maximum, leaving 30 seconds
+  # for process startup, index reads, JSON encoding, and bounded cleanup.
+  run /usr/bin/python3 "$BATS_TEST_DIRNAME/helpers/bounded_exec.py" \
+    --timeout 90 --grace 2 -- "$BIN" mail attachments list \
+    --account "$LIVE_ATTACHMENT_ACCOUNT_ID" -- "$LIVE_ATTACHMENT_ID"
+  live_status="$status"
+  LIVE_ATTACHMENT_LIST_JSON="$output"
+  output=""
+  lines=()
+  BATS_RUN_COMMAND=""
+  if [ "$live_status" -eq 124 ]; then
+    unset LIVE_ATTACHMENT_LIST_JSON
+    unset LIVE_ATTACHMENT_ACCOUNT_ID LIVE_ATTACHMENT_ID LIVE_ATTACHMENT_ORACLE_COUNT
+    require_osascript_mail_automation strict
+    printf '%s\n' "in-CLI attachment list deadline did not fire before its host backstop" >&2
+    false
+  fi
+  if [ "$live_status" -eq 69 ] || [ "$live_status" -eq 77 ]; then
+    unset LIVE_ATTACHMENT_ACCOUNT_ID LIVE_ATTACHMENT_ID LIVE_ATTACHMENT_ORACLE_COUNT \
+      LIVE_ATTACHMENT_LIST_JSON
+    require_osascript_mail_automation strict
+    printf '%s\n' "apple CLI reported Mail automation unavailable while the oracle was healthy" >&2
+    false
+  fi
+  if [ "$live_status" -ne 0 ]; then
+    unset LIVE_ATTACHMENT_ACCOUNT_ID LIVE_ATTACHMENT_ID LIVE_ATTACHMENT_ORACLE_COUNT \
+      LIVE_ATTACHMENT_LIST_JSON
+    printf '%s\n' "live attachment list command failed" >&2
+    false
+  fi
+}
+
+# Require product enrichment independently from selecting/loading the live fixture. Parse JSON
+# rather than depending on pretty-printer whitespace, and emit only fixed diagnostics.
+assert_live_attachment_enriched() {
+  case "$-" in *x*) set +x ;; esac
+  local assertion_status=0
+  printf '%s' "$LIVE_ATTACHMENT_LIST_JSON" | /usr/bin/python3 -c '
+import json, sys
+
+try:
+    envelope = json.load(sys.stdin)
+except (TypeError, ValueError):
+    raise SystemExit(20)
+if envelope.get("ok") is not True or envelope.get("tool") != "mail" or "schema_version" not in envelope:
+    raise SystemExit(23)
+try:
+    data = envelope["data"]
+    attachments = data["attachments"]
+except (KeyError, TypeError):
+    raise SystemExit(21)
+if not isinstance(attachments, list) or any(not isinstance(a, dict) for a in attachments):
+    raise SystemExit(22)
+if not attachments:
+    raise SystemExit(12)
+if any("size" not in attachment for attachment in attachments):
+    raise SystemExit(10)
+# MessageReadCommands emits the degraded disclosure as Result.note -> data.note. Keep this
+# assertion exact so a future unrelated nested note field does not become a false regression.
+if "note" in data:
+    raise SystemExit(11)
+if len(attachments) != int(sys.argv[1]):
+    raise SystemExit(13)
+' "$LIVE_ATTACHMENT_ORACLE_COUNT" 2>/dev/null || assertion_status=$?
+  case "$assertion_status" in
+    0) ;;
+    10)
+      unset LIVE_ATTACHMENT_ACCOUNT_ID LIVE_ATTACHMENT_ID LIVE_ATTACHMENT_ORACLE_COUNT \
+        LIVE_ATTACHMENT_LIST_JSON
+      printf '%s\n' "live attachment metadata size is missing from a successful response" >&2
+      false
+      ;;
+    11)
+      unset LIVE_ATTACHMENT_ACCOUNT_ID LIVE_ATTACHMENT_ID LIVE_ATTACHMENT_ORACLE_COUNT \
+        LIVE_ATTACHMENT_LIST_JSON
+      printf '%s\n' "live attachment lookup returned the degraded fallback note" >&2
+      false
+      ;;
+    12)
+      unset LIVE_ATTACHMENT_ACCOUNT_ID LIVE_ATTACHMENT_ID LIVE_ATTACHMENT_ORACLE_COUNT \
+        LIVE_ATTACHMENT_LIST_JSON
+      printf '%s\n' "live attachment fixture resolved with no attachment rows" >&2
+      false
+      ;;
+    13)
+      unset LIVE_ATTACHMENT_ACCOUNT_ID LIVE_ATTACHMENT_ID LIVE_ATTACHMENT_ORACLE_COUNT \
+        LIVE_ATTACHMENT_LIST_JSON
+      printf '%s\n' "live attachment row count disagreed with the Mail.app oracle" >&2
+      false
+      ;;
+    20)
+      unset LIVE_ATTACHMENT_ACCOUNT_ID LIVE_ATTACHMENT_ID LIVE_ATTACHMENT_ORACLE_COUNT \
+        LIVE_ATTACHMENT_LIST_JSON
+      printf '%s\n' "live attachment response was not valid JSON" >&2
+      false
+      ;;
+    21)
+      unset LIVE_ATTACHMENT_ACCOUNT_ID LIVE_ATTACHMENT_ID LIVE_ATTACHMENT_ORACLE_COUNT \
+        LIVE_ATTACHMENT_LIST_JSON
+      printf '%s\n' "live attachment response omitted its data or attachments field" >&2
+      false
+      ;;
+    22)
+      unset LIVE_ATTACHMENT_ACCOUNT_ID LIVE_ATTACHMENT_ID LIVE_ATTACHMENT_ORACLE_COUNT \
+        LIVE_ATTACHMENT_LIST_JSON
+      printf '%s\n' "live attachment response used an invalid attachments shape" >&2
+      false
+      ;;
+    23)
+      unset LIVE_ATTACHMENT_ACCOUNT_ID LIVE_ATTACHMENT_ID LIVE_ATTACHMENT_ORACLE_COUNT \
+        LIVE_ATTACHMENT_LIST_JSON
+      printf '%s\n' "live attachment response violated the JSON envelope contract" >&2
+      false
+      ;;
+    *)
+      unset LIVE_ATTACHMENT_ACCOUNT_ID LIVE_ATTACHMENT_ID LIVE_ATTACHMENT_ORACLE_COUNT \
+        LIVE_ATTACHMENT_LIST_JSON
+      printf '%s\n' "live attachment assertion failed unexpectedly" >&2
+      false
+      ;;
+  esac
+}
+
 @test "mail --help lists the P1 subcommands" {
   run "$BIN" mail --help
   [ "$status" -eq 0 ]
@@ -1974,82 +2289,11 @@ assert "try Self.requireLiveAttachmentMasterForExecute(" in write_src[save_run:]
     *x*) xtrace_was_on=1; set +x ;;
   esac
   require_index
-  # The index can remain readable while Mail automation is unavailable. This is a live wiring
-  # test, so preflight that separate dependency without retaining or printing account payloads;
-  # a failed preflight is an environment skip, never an accepted degraded attachment response.
-  run /usr/bin/python3 "$BATS_TEST_DIRNAME/helpers/bounded_exec.py" \
-    --timeout 30 --grace 2 -- "$BIN" mail accounts list
-  local automation_status="$status"
-  output=""
-  lines=()
-  BATS_RUN_COMMAND=""
-  case "$automation_status" in
-    0) ;;
-    69|77|124) skip "Mail automation unavailable" ;;
-    *) [ "$automation_status" -eq 0 ] ;;
-  esac
-
-  run /usr/bin/python3 "$BATS_TEST_DIRNAME/helpers/bounded_exec.py" \
-    --timeout 30 --grace 2 -- "$BIN" mail search --mailbox INBOX \
-    --has-attachment --limit 1 --no-content
-  local search_status="$status"
-  local search_output="$output"
-  output=""
-  lines=()
-  BATS_RUN_COMMAND=""
-  case "$search_status" in
-    0) ;;
-    69|77|124) unset search_output; skip "Mail search prerequisite unavailable" ;;
-    *) unset search_output; [ "$search_status" -eq 0 ] ;;
-  esac
-  id=$(printf '%s' "$search_output" | /usr/bin/python3 -c \
-    "import json,sys;d=json.load(sys.stdin)['data']['messages'];print(d[0]['id'] if d else '')")
-  unset search_output
-  [ -n "$id" ] || skip "no INBOX message with an attachment in this store"
-
-  # 90 seconds sits outside the 2×30-second per-spelling maximum, leaving 30 seconds
-  # for process startup, index reads, JSON encoding, and bounded cleanup.
-  run /usr/bin/python3 "$BATS_TEST_DIRNAME/helpers/bounded_exec.py" \
-    --timeout 90 --grace 2 -- "$BIN" mail attachments list "$id"
-  local live_status="$status"
-  local live_output="$output"
-  output=""
-  lines=()
-  BATS_RUN_COMMAND=""
-  unset id
-  if [ "$live_status" -eq 124 ]; then
-    unset live_output
-    # The `|| rc=$?` shape is required under Bats' `set -e`; a bare nonzero command would
-    # abort before the environment-loss classifier can inspect it (same rule as smoke.bats).
-    local automation_recheck_rc=0
-    /usr/bin/python3 "$BATS_TEST_DIRNAME/helpers/bounded_exec.py" \
-      --timeout 30 --grace 2 -- "$BIN" mail accounts list >/dev/null 2>&1 \
-      || automation_recheck_rc=$?
-    case "$automation_recheck_rc" in
-      69|77|124) skip "Mail automation became unavailable during attachment lookup" ;;
-      0) printf '%s\n' "in-CLI attachment deadline did not fire before host backstop" >&2; false ;;
-      *) [ "$automation_recheck_rc" -eq 0 ] ;;
-    esac
-  fi
-  if [ "$live_status" -ne 0 ]; then
-    unset live_output
-    [ "$live_status" -eq 0 ]
-  fi
-  # STRICT: the live keys must be present and the degraded note absent. Accepting the note as
-  # an alternative would keep this green under the exact reversion it exists to catch (the
-  # deleted-enrichment fallback emits the note on every row). On this Mac, bats runs with
-  # Mail.app reachable; CI runners skip at require_index.
-  if ! printf '%s' "$live_output" | grep -q '"size" :'; then
-    unset live_output
-    printf '%s\n' "live attachment metadata key missing from successful response" >&2
-    false
-  fi
-  if printf '%s' "$live_output" | grep -q '"note" :'; then
-    unset live_output
-    printf '%s\n' "live attachment lookup returned the degraded fallback note" >&2
-    false
-  fi
-  unset live_output
+  select_live_attachment_fixture
+  load_live_attachment_list
+  assert_live_attachment_enriched
+  unset LIVE_ATTACHMENT_ACCOUNT_ID LIVE_ATTACHMENT_ID LIVE_ATTACHMENT_ORACLE_COUNT \
+    LIVE_ATTACHMENT_LIST_JSON
   # Skips/failures exit this isolated Bats test process, so xtrace cannot leak to another test.
   [ "$xtrace_was_on" -eq 0 ] || set -x
 }
@@ -2323,24 +2567,121 @@ print(next((r['name'] for r in rows if r['name'] not in ('INBOX','All')), ''))")
 # list (same order) `attachments list` reports live — and a live-resolved message carries no
 # degraded note. Dry-run only: nothing is written.
 @test "mail attachments save --dry-run previews the LIVE attachment order (extra32)" {
+  local xtrace_was_on=0
+  local live_hash preview_hash dest
+  case "$-" in
+    *x*) xtrace_was_on=1; set +x ;;
+  esac
   require_index
-  id=$("$BIN" mail search --mailbox INBOX --has-attachment --limit 1 --no-content 2>/dev/null \
-    | python3 -c "import json,sys;d=json.load(sys.stdin)['data']['messages'];print(d[0]['id'] if d else '')")
-  [ -n "$id" ] || skip "no INBOX message with an attachment in this store"
-  live=$("$BIN" mail attachments list "$id" 2>/dev/null | python3 -c "
-import json,sys;d=json.load(sys.stdin)['data']
-print('\n'.join(a['name'] for a in d['attachments']))")
-  [ -n "$live" ] || skip "attachment enumeration unavailable"
+  select_live_attachment_fixture
+  load_live_attachment_list
+  assert_live_attachment_enriched
+  local live_parse_status=0
+  live_hash=$(printf '%s' "$LIVE_ATTACHMENT_LIST_JSON" | /usr/bin/python3 -c '
+import hashlib,json,sys
+d=json.load(sys.stdin)["data"]
+names=[a["name"] for a in d["attachments"]]
+blob=json.dumps(names,ensure_ascii=True,separators=(",",":")).encode()
+print(hashlib.sha256(blob).hexdigest())
+' 2>/dev/null) || live_parse_status=$?
+  unset LIVE_ATTACHMENT_LIST_JSON LIVE_ATTACHMENT_ORACLE_COUNT
+  if [ "$live_parse_status" -ne 0 ]; then
+    unset LIVE_ATTACHMENT_ACCOUNT_ID LIVE_ATTACHMENT_ID live_hash
+    printf '%s\n' "live attachment order could not be hashed" >&2
+    false
+  fi
   dest=$(mktemp -d "$HOME/.cache/apple-cli-bats.XXXXXX")
-  run "$BIN" mail attachments save "$id" --dir "$dest" --dry-run
-  rmdir "$dest" 2>/dev/null || true
-  [ "$status" -eq 0 ]
-  preview=$(echo "$output" | python3 -c "
-import json,sys;d=json.load(sys.stdin)['data']
-print('\n'.join(d['attachments']))")
-  [ "$preview" = "$live" ]
+  run /usr/bin/python3 "$BATS_TEST_DIRNAME/helpers/bounded_exec.py" \
+    --timeout 90 --grace 2 -- "$BIN" mail attachments save \
+    --account "$LIVE_ATTACHMENT_ACCOUNT_ID" --dir "$dest" --dry-run -- "$LIVE_ATTACHMENT_ID"
+  local save_status="$status"
+  local save_output="$output"
+  output=""
+  lines=()
+  BATS_RUN_COMMAND=""
+  local cleanup_status=0
+  local dest_hint="${dest#"$HOME"/}"
+  rmdir "$dest" 2>/dev/null || cleanup_status=$?
+  if [ "$cleanup_status" -ne 0 ]; then
+    unset LIVE_ATTACHMENT_ACCOUNT_ID LIVE_ATTACHMENT_ID live_hash save_output
+    local cleanup_log_status=0
+    printf '%s\n' "retained local artifact: \$HOME/$dest_hint (possible real attachment bytes; manual cleanup required)" \
+      >> "$BATS_TEST_DIRNAME/../TEST-CLEANUP.md" || cleanup_log_status=$?
+    printf '%s\n' "attachment save dry-run left content under \$HOME/$dest_hint" >&2
+    printf '%s\n' "manual cleanup is required because it may contain real attachment bytes" >&2
+    if [ "$cleanup_log_status" -ne 0 ]; then
+      printf '%s\n' "the retained artifact could not be recorded in TEST-CLEANUP.md" >&2
+    fi
+    unset dest dest_hint
+    false
+  fi
+  unset dest dest_hint
+  if [ "$save_status" -eq 124 ]; then
+    unset LIVE_ATTACHMENT_ACCOUNT_ID LIVE_ATTACHMENT_ID live_hash save_output
+    require_osascript_mail_automation strict
+    printf '%s\n' "in-CLI attachment save deadline did not fire before its host backstop" >&2
+    false
+  fi
+  if [ "$save_status" -eq 69 ] || [ "$save_status" -eq 77 ]; then
+    unset LIVE_ATTACHMENT_ACCOUNT_ID LIVE_ATTACHMENT_ID live_hash save_output
+    require_osascript_mail_automation strict
+    printf '%s\n' "attachment save reported Mail automation unavailable while the oracle was healthy" >&2
+    false
+  fi
+  if [ "$save_status" -ne 0 ]; then
+    unset LIVE_ATTACHMENT_ACCOUNT_ID LIVE_ATTACHMENT_ID live_hash save_output
+    printf '%s\n' "attachment save dry-run command failed" >&2
+    false
+  fi
+  unset LIVE_ATTACHMENT_ACCOUNT_ID LIVE_ATTACHMENT_ID
   # STRICT: a live-resolved message must NOT carry the degraded index-order note.
-  ! echo "$output" | grep -q '"note" :'
+  local note_status=0
+  printf '%s' "$save_output" | /usr/bin/python3 -c '
+import json,sys
+try:
+    envelope=json.load(sys.stdin)
+except (TypeError, ValueError):
+    raise SystemExit(20)
+if envelope.get("ok") is not True or envelope.get("tool") != "mail" or "schema_version" not in envelope:
+    raise SystemExit(23)
+try:
+    data=envelope["data"]
+except (KeyError, TypeError):
+    raise SystemExit(21)
+if data.get("dry_run") is not True:
+    raise SystemExit(24)
+raise SystemExit(11 if "note" in data else 0)
+' 2>/dev/null || note_status=$?
+  case "$note_status" in
+    0) ;;
+    11) unset live_hash save_output; printf '%s\n' "attachment save preview returned the degraded fallback note" >&2; false ;;
+    20) unset live_hash save_output; printf '%s\n' "attachment save preview was not valid JSON" >&2; false ;;
+    21) unset live_hash save_output; printf '%s\n' "attachment save preview omitted its data field" >&2; false ;;
+    23) unset live_hash save_output; printf '%s\n' "attachment save preview violated the JSON envelope contract" >&2; false ;;
+    24) unset live_hash save_output; printf '%s\n' "attachment save preview did not confirm dry-run mode" >&2; false ;;
+    *) unset live_hash save_output; printf '%s\n' "attachment save preview assertion failed unexpectedly" >&2; false ;;
+  esac
+  local preview_parse_status=0
+  preview_hash=$(printf '%s' "$save_output" | /usr/bin/python3 -c '
+import hashlib,json,sys
+d=json.load(sys.stdin)["data"]
+blob=json.dumps(d["attachments"],ensure_ascii=True,separators=(",",":")).encode()
+print(hashlib.sha256(blob).hexdigest())
+' 2>/dev/null) || preview_parse_status=$?
+  unset save_output
+  if [ "$preview_parse_status" -ne 0 ]; then
+    unset live_hash preview_hash
+    printf '%s\n' "attachment save preview order could not be hashed" >&2
+    false
+  fi
+  if [ "$preview_hash" != "$live_hash" ]; then
+    unset live_hash preview_hash
+    printf '%s\n' "attachment save preview order disagreed with the live list" >&2
+    false
+  fi
+  unset live_hash preview_hash
+  # Skips/failures exit this isolated Bats test process, so xtrace cannot leak to another test.
+  [ "$xtrace_was_on" -eq 0 ] || set -x
 }
 
 # extra27 follow-up (review M3): --text on get/save/delete/render prints the text rendering —
