@@ -179,7 +179,8 @@ Greenfield (non-fork) would be **L** (reimplement the whole engine); forking `im
 ## 8. Parity verification (live oracle diffs) — as-built
 
 The `apple messages` CLI was diffed against the live `mac_messages_mcp` MCP (the
-oracle) on this fleet. Read ops compared freely; no write/send was diffed.
+oracle) on this fleet. Read ops compared freely; no write/send was diffed. The
+send row below records a validation-evidence limitation, not a live diff result.
 
 **Every count below is a POINT-IN-TIME measurement from the verification run — the
 live store drifts continuously.** Re-measured twice on 2026-08-18 the per-source
@@ -199,6 +200,7 @@ against a historical value (Q12 [1]).
 | `find_contact` | A common first name → **count 30 == 30**, all 0.95 (exact-token) — scores byte-exact. |
 | `check_imessage_availability` | 2125550142 → `available=true`, recommendation string **byte-identical**. |
 | `get_chats` | **CLI == oracle** on named-chat count (superset fields: guid, room_name, service_name, group_id, style). |
+| `send_message --group` | Validation-evidence asterisk: the `--group` path accepts the oracle group-chat identifier and dispatches via chat id, but it has never been exercised against a live group. No live group was created or messaged, and no live group send is authorized. This limits validation evidence; it does not mark the capability missing. |
 | `get_recent_messages` | hours=6 cross-chat: every MCP output line reproduced **byte-verbatim** (attributedBody-decoded bodies, group names, sender resolution, timestamps). |
 | `fuzzy_search_messages` | See the WRatio boundary note below. |
 

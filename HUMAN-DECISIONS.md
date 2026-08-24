@@ -32,16 +32,16 @@ it instead of asking.
 
 ## LEDGER — every decision at a glance (updated 2026-08-23)
 
-**Still needs you: D2, D3, D4, and D14.** Everything else is settled.
+**Still needs you: D2, D3, and D14.** Everything else is settled.
 
-> **D14 (new, 2026-08-19) — `mail rules` delete action is LIVE but has never been exercised against real Mail.** Wiring it was your D6/gap25 ruling and it is implemented, adversarially reviewed, and hardened (fail-loud match-logic with readback verification, sandbox enable-gate keyed on the rule's REAL state, advisory warnings on every arming path). But by that same ruling **no agent may live-verify a delete rule**, so its first real exercise is yours — the same shape as D3/D4. Until then the mail domain's parity claim carries a "wired, not live-validated" asterisk on this one action.
+> **D14 (new, 2026-08-19) — `mail rules` delete action is LIVE but has never been exercised against real Mail.** Wiring it was your D6/gap25 ruling and it is implemented, adversarially reviewed, and hardened (fail-loud match-logic with readback verification, sandbox enable-gate keyed on the rule's REAL state, advisory warnings on every arming path). But by that same ruling **no agent may live-verify a delete rule**, so its first real exercise is yours — the same shape as D3. Until then the mail domain's parity claim carries a "wired, not live-validated" asterisk on this one action.
 
 | # | Topic | Status | Ruling |
 |---|---|---|---|
 | D1 | `notes delete-folder` previews by default | **RATIFIED** | Keep the preview default — `--execute` stays required on the only irreversible-and-unrecoverable write |
 | D2 | Tag 1.0.0 + retire the six MCP servers | **OPEN** | **Terminal gate. Yours alone.** The loop stops here by design; go/no-go package is D13 |
 | D3 | Live-validate `mail send --gui-send` | **OPEN (task)** | Not a decision — needs ~10 min with you at the machine, self-addressed |
-| D4 | Live-validate iMessage group-chat send | **OPEN (task)** | Not a decision — no self-addressed shape exists, so only you can verify it |
+| D4 | Live-validate iMessage group-chat send | **APPLIED 2026-08-23** | Option (b): record "wired + code-inspected, never live-validated" as a port-spec asterisk |
 | D5 | Chasing the Messages fuzzy-search recall gap | WITHDRAWN | Should not have been asked; became ordinary queue work |
 | D6 | Eight parity posture calls | **APPLIED** | CONTACTS-L4 delete claim · NOTES-M1 restore 4 keys · NOTES-L4 structural divergence · gap10 keep opt-in body · **gap25 wire delete-rules live** · extra20 open by default |
 | D7 | Committed phone number in public history | **ANSWERED** | "B then A" — superseded by D9, which covers the same number plus more |
@@ -50,7 +50,7 @@ it instead of asking.
 | D10 | Search/find-contact length caps | WITHDRAWN | Should not have been filed |
 | D11 | What `schema_version` tracks | **APPLIED** | **Shape only** — value breaks ride the MAJOR + CHANGELOG; both policy lines rewritten to agree |
 | D12 | `notes save-attachment` can write to `~/.ssh` | **RATIFIED** | Keep strict Notes-oracle parity; residual documented, fleet stays intentionally inconsistent |
-| D13 | Strict-superset go/no-go package | **APPLIED** | All items landed; live-verified EXCEPT the D14 delete action (no agent may exercise it) |
+| D13 | Strict-superset go/no-go package | **APPLIED** | All scoped items landed; D4/D14 carry never-live-exercised asterisks, and D3 remains an open operator-present task |
 | D14 | `mail rules` delete action never live-exercised | **OPEN (task)** | Not a decision — wired + hardened per your gap25 ruling, but its first real run is yours |
 
 ---
@@ -150,7 +150,14 @@ mean Mail's parity claim carries one "wired, not live-validated" asterisk until 
 
 ## D4 — Operator-present live validation: iMessage group-chat send
 
-- **Status:** OPEN — **not a decision; a task needing you at the machine.** Nothing blocks on it.
+- **Status:** **APPLIED 2026-08-23** — option (b), record the validation-evidence asterisk.
+- **Resolution:** The operator chose option (b): accept the group-send surface as "wired +
+  code-inspected, never live-validated." No operator action remains for D4. The Messages port spec
+  now records that `--group` accepts the oracle group-chat identifier and dispatches by chat id,
+  but that no live group was created or messaged and no live group send is authorized. This limits
+  validation evidence; it does not mark the capability missing. The original request below is
+  retained verbatim for append-only provenance; it is not a live instruction or authorization,
+  and D4 is closed.
 - **Filed:** 2026-08-02
 - **Category:** operator-present verification
 
@@ -606,6 +613,9 @@ honestly rather than silently claiming universal coverage. This entry is the dec
 
 - **Status:** **APPLIED 2026-08-19** — every item in the package is landed and live-verified; only [D2](#d2--tag-100-and-retire-the-six-mcp-servers) itself remains.
   promised. The loop has run every autonomous task to completion and STOPS here.
+- **Evidence amendment (2026-08-23):** The status sentence above is superseded as to live evidence
+  and remaining tasks. D4 is closed with a permanent never-live-exercised asterisk; D3 and D14
+  remain open operator-present tasks; D2 remains the operator-only terminal gate.
 - **Filed:** 2026-08-18, after the Q17 re-audit (`a gitignored local re-audit artifact`, a gitignored
   local artifact; the tracked summary is the Q17 row in `docs/COMPLETION-LOOP.md`).
 - **Category:** the terminal go/no-go — decisions here gate closing the domain Asana parents and,
@@ -746,6 +756,10 @@ already clear; calendar's Bucket-B is now discharged (CAL-08 ratified) → clear
 ratifications landed → clear; notes' #8/#9 + NOTES-L1 landed and live-verified → clear;
 messages' gap6 landed → clear. All six domain parents are now closable on the D13 evidence,
 pending your review. D2 (tag 1.0.0 + retire the MCPs) remains yours alone — the loop STOPS here.
+
+**D4 EVIDENCE AMENDMENT (2026-08-23):** "Messages is clear" means capability-complete with the
+D4 validation-evidence asterisk: group send is wired and code-inspected but was never exercised
+against a live group. No live group was created or messaged, and no live group send is authorized.
 
 ---
 
