@@ -2899,26 +2899,263 @@ dates=[m['date_received'] for m in d['messages']]
 assert dates == sorted(dates), dates"
 }
 
-# Differential pin (critic missing-pin list): a needle taken from a message's own indexed
-# preview must be found by BOTH --body paths, and the live path must include that message.
-@test "mail search --body indexed vs --body-live agree on a preview-sourced needle" {
+# Differential pin (critic missing-pin list): inside one subject-scoped candidate set, a needle
+# taken from a message's own indexed preview must be found by BOTH --body paths. Subject/body
+# predicates AND together in both engines (pinned by the logic tier); one `--subject` value is one
+# literal full-subject substring (not word-tokenized), keeping this live oracle probe narrow
+# without changing which body predicate must match.
+@test "mail search --body indexed vs --body-live agree for a subject-scoped preview needle" {
+  local xtrace_was_on=0
+  local bats_trace_level_was="${BATS_TRACE_LEVEL:-0}"
+  local bats_verbose_run_was="${BATS_VERBOSE_RUN:-}"
+  local probe probe_rest id needle subject
+  case "$-" in
+    *x*) xtrace_was_on=1; set +x ;;
+  esac
+  # `bats --trace` uses a DEBUG trap independent of shell xtrace. Disable both before any
+  # mailbox-derived value reaches argv; this test process is isolated, so early exits cannot
+  # carry either setting into a later test.
+  BATS_TRACE_LEVEL=0
+  # `--verbose-run` prints `$output` from inside `run`, before post-run scrubbing can happen.
+  BATS_VERBOSE_RUN=
   require_index
-  probe=$("$BIN" mail search --account iCloud --mailbox INBOX --limit 5 2>/dev/null | python3 -c "
+  # bounded_exec intentionally combines its child's stdout/stderr. Discard only the CLI's human
+  # stderr inside the same process group so the parser receives JSON stdout alone. Dynamic values
+  # stay in argv (`$@`), never in shell source. Losing human diagnostics is deliberate: they can
+  # contain mailbox text and must not escape into a test log.
+  run /usr/bin/python3 "$BATS_TEST_DIRNAME/helpers/bounded_exec.py" \
+    --timeout 30 --grace 2 -- /bin/sh -c 'exec "$@" 2>/dev/null' apple-json \
+    "$BIN" mail search \
+    --account iCloud --mailbox INBOX --limit 10
+  local probe_status="$status"
+  local probe_output="$output"
+  output=""
+  lines=()
+  BATS_RUN_COMMAND=""
+  case "$probe_status" in
+    0) ;;
+    69|77) unset probe_output; skip "preview fixture search unavailable" ;;
+    124) unset probe_output; printf '%s\n' "indexed preview fixture search exceeded its outer bound" >&2; false ;;
+    *) unset probe_output; printf '%s\n' "preview fixture search failed" >&2; false ;;
+  esac
+  local probe_parse_status=0
+  probe=$(printf '%s' "$probe_output" | /usr/bin/python3 -c '
 import json,sys
-d=json.load(sys.stdin)['data']['messages']
-for m in d:
-    s=(m.get('snippet') or '')
-    words=[w for w in s.split() if w.isalpha() and len(w) >= 6]
+messages=json.load(sys.stdin)["data"]["messages"]
+for message in messages:
+    message_id=message.get("id") or ""
+    snippet=message.get("snippet") or ""
+    subject=message.get("subject") or ""
+    if (not message_id or any(ord(c) < 32 or ord(c) == 127 for c in message_id)
+            or not subject or subject.startswith("-")
+            or any(ord(c) < 32 or ord(c) == 127 for c in subject)):
+        continue
+    words=[word for word in snippet.split()
+           if word.isascii() and word.isalpha() and len(word) >= 6]
     if words:
-        print(m['id']); print(words[0]); break")
-  id=$(echo "$probe" | sed -n 1p); needle=$(echo "$probe" | sed -n 2p)
-  [ -n "$id" ] && [ -n "$needle" ] || skip "no preview-bearing message to probe"
-  run "$BIN" mail search --account iCloud --mailbox INBOX --body "$needle" --limit 50 --no-content
-  [ "$status" -eq 0 ]
-  echo "$output" | grep -q "\"id\" : \"$id\""
-  run "$BIN" mail search --account iCloud --mailbox INBOX --body "$needle" --body-live --limit 50 --no-content
-  [ "$status" -eq 0 ]
-  echo "$output" | grep -q "\"id\" : \"$id\""
+        sys.stdout.write(message_id + "\x1e" + words[0] + "\x1e" + subject)
+        break
+' 2>/dev/null) || probe_parse_status=$?
+  unset probe_output
+  if [ "$probe_parse_status" -ne 0 ]; then
+    unset probe
+    printf '%s\n' "preview fixture response was invalid" >&2
+    false
+  fi
+  [ -n "$probe" ] || skip "no preview-bearing message with a safe subject to probe"
+  case "$probe" in
+    *$'\n'*|*$'\r'*) unset probe; printf '%s\n' "preview fixture tuple was invalid" >&2; false ;;
+    *$'\036'*) ;;
+    *) unset probe; printf '%s\n' "preview fixture tuple omitted its needle" >&2; false ;;
+  esac
+  id="${probe%%$'\036'*}"
+  probe_rest="${probe#*$'\036'}"
+  case "$probe_rest" in
+    *$'\036'*) ;;
+    *) unset probe probe_rest id; printf '%s\n' "preview fixture tuple omitted its subject" >&2; false ;;
+  esac
+  needle="${probe_rest%%$'\036'*}"
+  subject="${probe_rest#*$'\036'}"
+  unset probe probe_rest
+  if [ -z "$id" ] || [ -z "$needle" ] || [ -z "$subject" ]; then
+    unset id needle subject
+    printf '%s\n' "preview fixture tuple contained an empty field" >&2
+    false
+  fi
+
+  run /usr/bin/python3 "$BATS_TEST_DIRNAME/helpers/bounded_exec.py" \
+    --timeout 30 --grace 2 -- /bin/sh -c 'exec "$@" 2>/dev/null' apple-json \
+    "$BIN" mail search --account iCloud --mailbox INBOX \
+    --subject "$subject" --body "$needle" --limit 50 --no-content
+  local indexed_status="$status"
+  local indexed_output="$output"
+  output=""
+  lines=()
+  BATS_RUN_COMMAND=""
+  if [ "$indexed_status" -ne 0 ]; then
+    unset id needle subject indexed_output
+    printf '%s\n' "indexed preview parity query failed" >&2
+    false
+  fi
+  local indexed_assert_status=0
+  printf '%s' "$indexed_output" | /usr/bin/python3 -c '
+import json,sys
+try:
+    expected=sys.argv[1]
+    messages=json.load(sys.stdin)["data"]["messages"]
+except Exception:
+    raise SystemExit(2)
+raise SystemExit(0 if any(message["id"] == expected for message in messages) else 1)
+' "$id" 2>/dev/null || indexed_assert_status=$?
+  unset indexed_output
+  case "$indexed_assert_status" in
+    0) ;;
+    1)
+      unset id needle subject
+      printf '%s\n' "indexed preview query omitted its source message" >&2
+      false
+      ;;
+    *)
+      unset id needle subject
+      printf '%s\n' "indexed preview response was invalid" >&2
+      false
+      ;;
+  esac
+
+  # Establish the uncapped subject-only baseline before the negative control. Search defines
+  # --limit 0 as all results; these two calls are otherwise identical, so the body's synthetic
+  # token is the only variable governing the required present -> absent transition.
+  run /usr/bin/python3 "$BATS_TEST_DIRNAME/helpers/bounded_exec.py" \
+    --timeout 30 --grace 2 -- /bin/sh -c 'exec "$@" 2>/dev/null' apple-json \
+    "$BIN" mail search --account iCloud --mailbox INBOX \
+    --subject "$subject" --limit 0 --no-content
+  local baseline_status="$status"
+  local baseline_output="$output"
+  output=""
+  lines=()
+  BATS_RUN_COMMAND=""
+  if [ "$baseline_status" -ne 0 ]; then
+    unset id needle subject baseline_output
+    printf '%s\n' "indexed subject-only baseline query failed" >&2
+    false
+  fi
+  local baseline_assert_status=0
+  printf '%s' "$baseline_output" | /usr/bin/python3 -c '
+import json,sys
+try:
+    expected=sys.argv[1]
+    messages=json.load(sys.stdin)["data"]["messages"]
+except Exception:
+    raise SystemExit(2)
+raise SystemExit(0 if any(message["id"] == expected for message in messages) else 1)
+' "$id" 2>/dev/null || baseline_assert_status=$?
+  unset baseline_output
+  case "$baseline_assert_status" in
+    0) ;;
+    1)
+      unset id needle subject
+      printf '%s\n' "indexed subject-only baseline omitted its source message" >&2
+      false
+      ;;
+    *)
+      unset id needle subject
+      printf '%s\n' "indexed subject-only baseline response was invalid" >&2
+      false
+      ;;
+  esac
+
+  # Cheap negative control: with the same literal subject and uncapped result set, the source id
+  # must disappear for a reserved synthetic body token. This makes --body load-bearing
+  # independently of the live engine's static AND-semantics pin, without a second Mail.app scan.
+  local negative_needle="apple-cli-test-body-negative-control-9f4a7c2e"
+  run /usr/bin/python3 "$BATS_TEST_DIRNAME/helpers/bounded_exec.py" \
+    --timeout 30 --grace 2 -- /bin/sh -c 'exec "$@" 2>/dev/null' apple-json \
+    "$BIN" mail search --account iCloud --mailbox INBOX \
+    --subject "$subject" --body "$negative_needle" --limit 0 --no-content
+  local negative_status="$status"
+  local negative_output="$output"
+  output=""
+  lines=()
+  BATS_RUN_COMMAND=""
+  unset negative_needle
+  if [ "$negative_status" -ne 0 ]; then
+    unset id needle subject negative_output
+    printf '%s\n' "indexed body negative-control query failed" >&2
+    false
+  fi
+  local negative_assert_status=0
+  printf '%s' "$negative_output" | /usr/bin/python3 -c '
+import json,sys
+try:
+    expected=sys.argv[1]
+    messages=json.load(sys.stdin)["data"]["messages"]
+except Exception:
+    raise SystemExit(2)
+raise SystemExit(1 if any(message["id"] == expected for message in messages) else 0)
+' "$id" 2>/dev/null || negative_assert_status=$?
+  unset negative_output
+  case "$negative_assert_status" in
+    0) ;;
+    1)
+      unset id needle subject
+      printf '%s\n' "indexed body negative control still included its source message" >&2
+      false
+      ;;
+    *)
+      unset id needle subject
+      printf '%s\n' "indexed body negative-control response was invalid" >&2
+      false
+      ;;
+  esac
+
+  # 195 < 210: the CLI host deadline must fire before the outer process-group backstop.
+  run /usr/bin/python3 "$BATS_TEST_DIRNAME/helpers/bounded_exec.py" \
+    --timeout 210 --grace 2 -- /bin/sh -c 'exec "$@" 2>/dev/null' apple-json \
+    "$BIN" mail search --account iCloud --mailbox INBOX \
+    --subject "$subject" --body "$needle" --body-live --body-live-timeout 195 \
+    --limit 50 --no-content
+  local live_status="$status"
+  local live_output="$output"
+  output=""
+  lines=()
+  BATS_RUN_COMMAND=""
+  case "$live_status" in
+    0) ;;
+    69|77)
+      unset id needle subject live_output
+      skip "live body-search parity query unavailable within its host bound"
+      ;;
+    124)
+      unset id needle subject live_output
+      printf '%s\n' "outer live body-search bound fired before the CLI host deadline completed" >&2
+      false
+      ;;
+    *)
+      unset id needle subject live_output
+      printf '%s\n' "live body-search parity query failed" >&2
+      false
+      ;;
+  esac
+  local live_assert_status=0
+  printf '%s' "$live_output" | /usr/bin/python3 -c '
+import json,sys
+try:
+    expected=sys.argv[1]
+    messages=json.load(sys.stdin)["data"]["messages"]
+except Exception:
+    raise SystemExit(2)
+raise SystemExit(0 if any(message["id"] == expected for message in messages) else 1)
+' "$id" 2>/dev/null || live_assert_status=$?
+  unset id needle subject live_output
+  case "$live_assert_status" in
+    0) ;;
+    1) printf '%s\n' "live body query omitted the preview source message" >&2; false ;;
+    *) printf '%s\n' "live body response was invalid" >&2; false ;;
+  esac
+  # Skips/failures exit this isolated Bats test process, so trace state cannot leak to another.
+  [ "$xtrace_was_on" -eq 0 ] || set -x
+  BATS_TRACE_LEVEL="$bats_trace_level_was"
+  BATS_VERBOSE_RUN="$bats_verbose_run_was"
 }
 
 # review M9: export --max sign guard + the oracle's zero-success for --max 0.
