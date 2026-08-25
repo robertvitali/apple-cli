@@ -25,6 +25,7 @@ struct AnalyticsDashboard: ParsableCommand {
             let sandboxActive = try TestMode.sandboxActive(flag: global.testMode)
             let willExecute = try global.willExecute(defaultDryRun: false)
 
+            try refuseRawFinalLeafSymlink(out, action: "write the dashboard HTML to")
             let url = try confineWriteDestination(out, action: "write the dashboard HTML to", allowOutsideHome: true)
             let ctx = try MailContext()
             let unread = (try? MailScript().unreadCounts(summary: true, includeZero: true, accountFilter: nil)) ?? []
@@ -32,7 +33,10 @@ struct AnalyticsDashboard: ParsableCommand {
             var f = EnvelopeIndex.MessageFilters(); f.mailboxName = "INBOX"; f.limit = 15
             let recent = try ctx.index.queryMessages(f).map { ctx.decodeSummary($0) }
             let html = MailDashboard.render(unread: unread, totalUnread: total, recent: recent)
-            if willExecute { try html.write(to: url, atomically: true, encoding: .utf8) }
+            if willExecute {
+                try refuseRawFinalLeafSymlink(out, action: "write the dashboard HTML to")
+                try html.write(to: url, atomically: true, encoding: .utf8)
+            }
             try Output.emit(tool: "mail", data: Result(path: url.path, total_unread: total,
                 accounts: unread.count, dry_run: !willExecute), text: global.text, sandboxActive: sandboxActive)
         }

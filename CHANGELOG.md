@@ -30,6 +30,21 @@ with the Apple MCP servers they replace.
 
 ### Changed
 
+- **BREAKING (file-output safety):** Mail `send --out`, Mail `draft-rich --out`,
+  Mail `analytics dashboard --out`, Contacts `vcard export --out`, Contacts `photo get --out`,
+  and Notes `save-attachment --path` now refuse an operator-supplied raw final-leaf symlink before
+  touching Mail, Contacts, or Notes. The same guard re-runs immediately before execute-path writes
+  where those six surfaces write bytes. The refusal is `safety_violation` / exit 77 and
+  intentionally beats generic write failures and `draft-rich --no-clobber`; the existing
+  Mail/Contacts confinement and Notes AttachmentFS root policy are unchanged. This closes the
+  redirect class on those six raw operator-supplied leaves only; it does not claim every file
+  writer. Mail export `--dir` remains out of this task because it uses derived leaf names plus
+  atomic writes. Narrow residual: a raw spelling with `..` through a preceding intermediate
+  component that does not exist cannot be inspected through that exact raw spelling and may be
+  standardized by downstream confinement. That shape is operator-controlled and narrow. The normal
+  time-of-check/time-of-use race after the final host check and before the filesystem or AppleScript
+  write still exists. Mail attachment-save keeps the same `safety_violation` / 77 contract, but its
+  symlink-refusal message now uses the shared helper's `raw destination` wording.
 - **BREAKING (error precedence):** `mail attachments save` now validates destination
   confinement, filesystem shape, and a raw `--out` symlink before resolving the source message.
   An unsafe or invalid destination therefore returns `safety_violation` / exit 77 or

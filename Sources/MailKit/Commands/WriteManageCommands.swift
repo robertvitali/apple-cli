@@ -821,20 +821,14 @@ struct AttachmentsSave: ParsableCommand {
                 throw AppleError.mailSafety(
                     "raw --out destination is unavailable for final symlink validation — refusing.")
             }
-            if (try? FileManager.default.destinationOfSymbolicLink(atPath: rawOut)) != nil {
-                throw AppleError.mailSafety(
-                    "destination '\(rawOut)' is a symlink; refusing to save an attachment through it.")
-            }
+            try refuseRawFinalLeafSymlink(rawOut, action: "save an attachment to")
         }
 
         for destPath in destPaths {
             try validateStableDestinationParent(
                 destPath: destPath, expectedDirectory: expectedParent,
                 action: action, allowOutsideHome: allowOutsideHome)
-            if (try? FileManager.default.destinationOfSymbolicLink(atPath: destPath)) != nil {
-                throw AppleError.mailSafety(
-                    "destination '\(destPath)' is a symlink; refusing to save an attachment through it.")
-            }
+            try refuseRawFinalLeafSymlink(destPath, action: "save an attachment to")
             if directory != nil, FileManager.default.fileExists(atPath: destPath) {
                 throw AppleError.mailSafety(
                     "destination '\(destPath)' appeared after validation; refusing to overwrite it.")
@@ -892,9 +886,8 @@ struct AttachmentsSave: ParsableCommand {
             // away, so checking only absOut would miss the planted-link case. The execute path
             // repeats this immediately before composing the live save as a TOCTOU backstop.
             let rawOut = out.map(Self.lexicalDestinationPath)
-            if let rawOut, (try? FileManager.default.destinationOfSymbolicLink(atPath: rawOut)) != nil {
-                throw AppleError.mailSafety(
-                    "destination '\(rawOut)' is a symlink; refusing to save an attachment through it.")
+            if let rawOut {
+                try refuseRawFinalLeafSymlink(rawOut, action: "save an attachment to")
             }
             let absOut = try out.map {
                 Self.normalizeDestinationPath(try confineWriteDestination(
@@ -984,9 +977,7 @@ struct AttachmentsSave: ParsableCommand {
             if let absDir {
                 for base in plannedDirBasenames {
                     let destPath = (absDir as NSString).appendingPathComponent(base)
-                    if (try? FileManager.default.destinationOfSymbolicLink(atPath: destPath)) != nil {
-                        throw AppleError.mailSafety("destination '\(destPath)' is a symlink; refusing to save an attachment through it.")
-                    }
+                    try refuseRawFinalLeafSymlink(destPath, action: "save an attachment to")
                 }
             }
             guard willExecute else {
@@ -1022,10 +1013,7 @@ struct AttachmentsSave: ParsableCommand {
                 // plain pre-existing file skips only that target and is recorded in not_saved.
                 for (offset, idx) in wanted.enumerated() {
                     let destPath = (absDir as NSString).appendingPathComponent(basenames[offset])
-                    if (try? fm.destinationOfSymbolicLink(atPath: destPath)) != nil {
-                        throw AppleError.mailSafety(
-                            "destination '\(destPath)' is a symlink; refusing to save an attachment through it.")
-                    }
+                    try refuseRawFinalLeafSymlink(destPath, action: "save an attachment to")
                     if fm.fileExists(atPath: destPath) {
                         notSavedIdx.insert(idx); continue
                     }

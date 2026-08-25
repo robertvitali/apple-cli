@@ -197,13 +197,20 @@ struct VCardExportCommand: ParsableCommand {
             // with vCard text. Bound before the store touch so a bad path fails fast (and without
             // TCC). `allowOutsideHome` — this `--out` is a CLI extra (the MCP returns the text
             // inline), so /tmp and external volumes stay legitimate, matching Mail's attachments save.
-            let dest = try out.map { try confineWriteDestination($0, action: "write the vCard to", allowOutsideHome: true).path }
+            let dest = try out.map {
+                try refuseRawFinalLeafSymlink($0, action: "write the vCard to")
+                return try confineWriteDestination($0, action: "write the vCard to", allowOutsideHome: true).path
+            }
             let store = ContactsStore()
             try store.requireAuthorization()
             let vcard = try store.exportVCard(identifiers)
             var writtenTo: String?
             if let dest {
-                do { try vcard.write(toFile: dest, atomically: true, encoding: .utf8); writtenTo = dest }
+                do {
+                    if let out { try refuseRawFinalLeafSymlink(out, action: "write the vCard to") }
+                    try vcard.write(toFile: dest, atomically: true, encoding: .utf8); writtenTo = dest
+                }
+                catch let e as AppleError { throw e }
                 catch { throw AppleError.unknown("failed to write vcard to \(dest): \(error.localizedDescription)") }
             }
             try emitContacts(global, ExportVCardResult(
@@ -256,7 +263,10 @@ struct PhotoGetCommand: ParsableCommand {
             // credential/config dirs so raw photo bytes can't overwrite an SSH key / keychain. Bound
             // before the store touch (fail fast, testable without TCC). CLI-extra path, so
             // allowOutsideHome (the MCP returns bytes inline).
-            let dest = try out.map { try confineWriteDestination($0, action: "write the photo to", allowOutsideHome: true).path }
+            let dest = try out.map {
+                try refuseRawFinalLeafSymlink($0, action: "write the photo to")
+                return try confineWriteDestination($0, action: "write the photo to", allowOutsideHome: true).path
+            }
             let store = ContactsStore()
             try store.requireAuthorization()
             guard let photo = store.readPhoto(identifier) else {
@@ -269,7 +279,11 @@ struct PhotoGetCommand: ParsableCommand {
             }
             var writtenTo: String?
             if let dest {
-                do { try photo.bytes.write(to: URL(fileURLWithPath: dest)); writtenTo = dest }
+                do {
+                    if let out { try refuseRawFinalLeafSymlink(out, action: "write the photo to") }
+                    try photo.bytes.write(to: URL(fileURLWithPath: dest)); writtenTo = dest
+                }
+                catch let e as AppleError { throw e }
                 catch { throw AppleError.unknown("failed to write photo to \(dest): \(error.localizedDescription)") }
             }
             try emitContacts(global, ReadPhotoResult(

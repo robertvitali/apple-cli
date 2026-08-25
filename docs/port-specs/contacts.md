@@ -299,7 +299,12 @@ a literal MCP transcription, and why:
   launchable + Automation TCC; failures classify as `error.type: unknown` (MCP parity) with a
   stable message (raw osascript stderr is kept out of the envelope).
 - **Curated extras (supersets, not in the MCP):** `search --deep` (match a value across all
-  four fields, unioned + de-duped); `--dry-run` / `--execute`; `--out` (vcard/photo to file),
+  four fields, unioned + de-duped); `--dry-run` / `--execute`; `--out` (vcard/photo to file;
+  raw final-leaf symlinks are refused as `safety_violation` / 77 before Contacts access and
+  rechecked before writing; narrow residual: a raw spelling with `..` through a preceding
+  intermediate component that does not exist cannot be inspected through that exact raw spelling
+  and may be standardized by downstream confinement, an operator-controlled/narrow shape; a
+  residual time-of-check race remains after the final host check and before the filesystem write),
   `--file` (note/vcard/photo/base64 inputs), `--json` (full-fidelity create/update); `--text`
   human output. File / base64 / json inputs are size-bounded (25 MB) as a DoS guard.
 - **Parse-layer input** (e.g. space-form `--limit -1`, missing required args, wrong types)

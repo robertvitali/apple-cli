@@ -266,6 +266,27 @@ raise SystemExit(0 if matches else 1)
   [ ! -e /etc/apple-cli-probe.png ]
 }
 
+@test "notes save-attachment --path refuses a raw final-leaf symlink before Notes access" {
+  target="$BATS_TEST_TMPDIR/notes-target.bin"
+  link="$BATS_TEST_TMPDIR/notes-link.bin"
+  printf '%s' "synthetic-before" >"$target"
+  ln -s "$target" "$link"
+
+  run "$BIN" notes save-attachment --dry-run \
+    --note-id "x-coredata://A/ICNote/p1" --attachment-id z --path "$link"
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q '"type" : "safety_violation"'
+  echo "$output" | grep -q 'raw destination'
+  [ "$(cat "$target")" = "synthetic-before" ]
+
+  run env APPLE_TEST_MODE=1 "$BIN" notes save-attachment --execute \
+    --note-id "x-coredata://A/ICNote/p1" --attachment-id z --path "$link"
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q '"type" : "safety_violation"'
+  echo "$output" | grep -q 'raw destination'
+  [ "$(cat "$target")" = "synthetic-before" ]
+}
+
 # ── v2 envelope + precedence contract ────────────────────────────────────────────────
 @test "sandbox engagement is visible in the envelope; absent when unsandboxed" {
   run env APPLE_TEST_MODE=1 "$BIN" notes create --dry-run "apple-cli-test smoke" --content "b"

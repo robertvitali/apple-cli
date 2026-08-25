@@ -381,6 +381,7 @@ func emlDestURL(out: String?, materialise: Bool, base: URL? = nil,
     // compose.py:410+ belong to the ATTACHMENT helper, not this one — so `/tmp/x.eml` is a
     // legitimate destination and refusing it would DROP a capability. The credential blocklist
     // and the control-character rejection still apply, which is what actually protects keys.
+    try refuseRawFinalLeafSymlink(out, action: action)
     return try confineWriteDestination(out, action: action, allowOutsideHome: true)
 }
 
@@ -464,6 +465,11 @@ struct SendCommand: ParsableCommand {
                     throw AppleError.mailSafety("sandbox active: draft --subject must be a labeled test item (start with \"\(TestMode.sandboxPrefix)\") — refusing.", sandbox: true)
                 }
             }
+            if let out, html != nil || !attach.isEmpty || mode == "open" {
+                // AccountDirectory drives Mail via AppleScript. A raw leaf symlink in a
+                // materialized `--out` must lose before account lookup on live/open paths.
+                try refuseRawFinalLeafSymlink(out, action: "write the generated .eml to")
+            }
 
             // Resolve --account to a send (From) identity for EVERY live path: the send paths set
             // the outgoing message `sender`; the open path uses it as the `.eml` `From:` so Mail
@@ -504,6 +510,11 @@ struct SendCommand: ParsableCommand {
                 // destination, but leaves no bytes on disk. The live open paths below all imply
                 // willExecute, so the file they open always exists.
                 if willExecute {
+                    if let out {
+                        // No local catch wraps this boundary; `AppleError` reaches `runGuarded`
+                        // unchanged as `safety_violation` / 77.
+                        try refuseRawFinalLeafSymlink(out, action: "write the generated .eml to")
+                    }
                     try eml.write(to: dest, atomically: true, encoding: .utf8)
                     if out == nil { OwnedTempDir.restrictToOwner(dest) }
                     // THREE routes are proven not to read this file, not one. The first version of
@@ -1242,10 +1253,20 @@ struct DraftRichCommand: ParsableCommand {
 
             let toL = try splitRecipients(to)
             let ccL = try splitRecipients(cc), bccL = try splitRecipients(bcc)
+            if let out {
+                // AccountDirectory drives Mail via AppleScript. Refuse a raw leaf symlink
+                // before live-open/account resolution, then check again immediately pre-write.
+                try refuseRawFinalLeafSymlink(out, action: "write the rich draft .eml to")
+            }
             // gap19: the oracle fills placeholder bodies (Draft outline / HTML wrapper /
             // rich-content fallback) and reports what is missing — ported pure + pinned.
             let bodies = RichDraft.prepareBodies(subject: subject, text: textBody, html: html)
             let missing = RichDraft.missingDetails(subject: subject, to: toL, bodyMissing: bodies.missing)
+            if let out {
+                // AccountDirectory below drives Mail via AppleScript. The raw output leaf must
+                // lose before an account lookup on both live-open and headless execute paths.
+                try refuseRawFinalLeafSymlink(out, action: "write the rich draft .eml to")
+            }
             // Opening the .eml in Mail (either flag) is a live compose-window action, so gate it
             // consistently with `send --mode open`: guardOutbound (self-only allowlist when the
             // sandbox is active; write-model v2 matches the create_rich_email_draft oracle, which
@@ -1322,6 +1343,10 @@ struct DraftRichCommand: ParsableCommand {
                 // drafts, review); a user-chosen --out parent keeps the plain mkdir since
                 // the operator owns that layout.
                 do {
+                    if let out {
+                        // The typed catch below rethrows this `AppleError` unchanged.
+                        try refuseRawFinalLeafSymlink(out, action: "write the rich draft .eml to")
+                    }
                     if out == nil {
                         // Same literal root RichDraft.defaultPath names, so the validated
                         // dirs and the write target cannot drift apart.

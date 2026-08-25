@@ -35,6 +35,45 @@ public func sensitiveWriteDir(_ resolvedPath: String, home: String) -> String? {
     })
 }
 
+/// Lexically reduce only terminal slash / dot spellings before checking the raw final leaf.
+/// This deliberately does NOT standardize the whole path: `..` components, interior dots, and
+/// symlinked parents stay exactly the operator's spelling for the final-leaf lstat check.
+public func rawFinalLeafPath(_ raw: String) -> String {
+    // Keep this expansion identical to `confineWriteDestination`; the guard and eventual write
+    // must address the same tilde-spelled path. ASCII slash/dot suffixes that do not match
+    // literally fail toward non-reduction.
+    var path = (raw as NSString).expandingTildeInPath
+    while true {
+        let before = path
+        while path.count > 1 && path.hasSuffix("/") {
+            path.removeLast()
+        }
+        if path.count > 2 && path.hasSuffix("/.") {
+            path.removeLast(2)
+            continue
+        }
+        if path == before {
+            return path
+        }
+    }
+}
+
+/// Refuse an operator-supplied destination whose raw final leaf is a symlink.
+///
+/// `confineWriteDestination` resolves symlinks so it can check the real target against home and
+/// credential-directory policy. That is correct for containment, but it also means a planted final
+/// symlink can redirect the bytes to its target. This helper is intentionally narrower: it checks
+/// only the final raw leaf, including dangling symlinks, and leaves broader path policy to callers.
+/// `destinationOfSymbolicLink` errors are deliberately treated as "not a link": an inaccessible
+/// parent cannot be written by the later write path, while ENOENT is required for legitimate new
+/// leaves. Do not widen this helper into an errno-specific filesystem policy check.
+public func refuseRawFinalLeafSymlink(_ raw: String, action: String) throws {
+    let path = rawFinalLeafPath(raw)
+    if (try? FileManager.default.destinationOfSymbolicLink(atPath: path)) != nil {
+        throw AppleError.safetyViolation("cannot \(action) raw destination '\(path)' because it is a symlink — refusing.")
+    }
+}
+
 /// Resolve and confine an operator-supplied write path, or throw `AppleError.safetyViolation`
 /// (exit 77 — a deliberate refusal, not a bug, so callers apply it on the DRY-RUN path too and a
 /// preview never promises a write `--execute` would refuse).

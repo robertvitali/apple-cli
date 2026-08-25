@@ -67,7 +67,7 @@ Class tags: **C**=CORE (read/write data), **D**=DERIVED (convenience/aggregate o
 | 22 | list-shared-notes | C | — | Notes shared with collaborators → `{id,title,content:"",tags:[],created,modified,account,shared,passwordProtected}[]` — **nine** keys (`build/index.js:40371-40381`); apple-cli emits **all nine verbatim**, including the oracle's hardcoded `content:""`/`tags:[]` (operator ruling D6/NOTES-M1, 2026-08-19; no longer a deviation). **No `folder` key** — the oracle's shared loop (`:40341-40347`) never reads `container of n`, so `folder` is genuinely absent from this endpoint's wire shape, unlike search/selected; apple-cli's `SharedNote` matches. |
 | 23 | show-note | X | `id`, `separately?` | Reveals a note in Notes UI. |
 | 24 | list-attachments | C | `id`\|`title`, `account` | Per-attachment `{id,name,contentType,contentId,url,created,modified,shared}`. |
-| 25 | save-attachment | C | `noteId`, `attachmentId`, `savePath`(abs, home/temp/`/Volumes`) | AppleScript `save` to disk; path-traversal-guarded; link-previews rejected with hint. |
+| 25 | save-attachment | C | `noteId`, `attachmentId`, `savePath`(abs, home/temp/`/Volumes`) | AppleScript `save` to disk; path-traversal-guarded; raw final-leaf symlinks are refused as `safety_violation` / 77 before Notes access and rechecked after parent creation. The post-parent-creation recheck is helper-level race-tested and source-inspected; the actual gap between preflight and the separate Notes AppleScript save is live-verify-only, and the caller directly propagates `AppleError` to `runGuarded`. The Notes AttachmentFS root policy is unchanged and does not inherit the Mail/Contacts credential-directory blocklist. Narrow residual: a raw spelling with `..` through a preceding intermediate component that does not exist cannot be inspected through that exact raw spelling and may be standardized by downstream confinement, an operator-controlled/narrow shape. A residual time-of-check race remains after the final host check and before the separate Notes AppleScript save. |
 | 26 | fetch-attachment | C | `noteId`, `attachmentId` | Bytes inline as **base64** (temp-file round-trip, 25 MB cap) + `{name,contentType,bytes}`. |
 | 27 | show-attachment | X | `noteId`, `attachmentId`, `separately?` | Reveals attachment in Notes UI. |
 | 28 | batch-delete-notes | D | `ids[]` (≤500) | Bulk delete; per-id `{success,error}` + counts. |
@@ -270,6 +270,9 @@ The MCP emits camelCase keys; apple-cli emits snake_case per `docs/DESIGN.md` ("
     destinations, and any `--title`-addressed target. Only `--id` addressing needs Automation to
     learn the target's title, and only there does a sandboxed preview disclose an unchecked gate.
   - `save-attachment` writes to the filesystem and honours `--dry-run` like any other write.
+    Raw final-leaf symlink refusal returns `safety_violation` / 77 on dry-run and execute before
+    Notes access; the final execute recheck propagates the same class instead of reclassifying it
+    as an upstream Notes failure.
   - Input bounds mirror the MCP's zod limits (title ≤2000, content ≤5 MiB, folder ≤1000,
     account ≤200) and are checked BEFORE the write gate.
 - **Hardening** (from the OMC review pass): gzip inflate clamps the attacker-controllable ISIZE to a 64 MiB cap (decompression-bomb defense); the attachment path guard adds a symlink-aware post-mkdir re-check; the protobuf checklist line-mapping counts UTF-16 code units (correct for emoji/non-BMP text, matching Apple's run lengths); SQLite PKs are bound positionally.

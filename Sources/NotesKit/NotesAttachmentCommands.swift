@@ -64,8 +64,12 @@ struct SaveAttachmentCmd: ParsableCommand {
             // as the catch-all `unknown`. Running it here also makes preview and execute agree
             // on the class — the inner call in `saveAttachmentById` stays as defense in depth
             // for the post-mkdir symlink re-check.
-            do { _ = try AttachmentFS.assertSafeSavePath(path) }
-            catch let e as AttachmentFS.FSError { throw AppleError.validation(e.description) }
+            do {
+                _ = try AttachmentFS.assertSafeSavePath(path)
+                try refuseRawFinalLeafSymlink(path, action: "write the attachment to")
+            } catch let e as AttachmentFS.FSError {
+                throw AppleError.validation(e.description)
+            }
             let gate = try resolveNotesWrite(global, defaultDryRun: false)
             guard gate.willExecute else {
                 try emitNotesWrite(DryRunPreview("save-attachment", "Would write attachment \"\(attachmentId)\" of note \"\(noteId)\" to \"\(path)\". Re-run without --dry-run."),

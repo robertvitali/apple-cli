@@ -552,6 +552,55 @@ if len(attachments) != int(sys.argv[1]):
   [ ! -f "$OUT" ]
 }
 
+@test "mail send --out refuses a raw final-leaf symlink before Mail access" {
+  target="$BATS_TEST_TMPDIR/send-target.eml"
+  link="$BATS_TEST_TMPDIR/send-link.eml"
+  printf '%s' "synthetic-before" >"$target"
+  ln -s "$target" "$link"
+
+  run "$BIN" mail send --dry-run --to alice@example.com --subject "apple-cli-test raw out" \
+    --html "<p>synthetic</p>" --out "$link"
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q '"type" : "safety_violation"'
+  echo "$output" | grep -q 'raw destination'
+  [ "$(cat "$target")" = "synthetic-before" ]
+
+  run env APPLE_TEST_MODE=1 APPLE_TEST_RECIPIENTS=alice@example.com "$BIN" mail send \
+    --execute --test-mode --to alice@example.com --subject "apple-cli-test raw out" \
+    --body "synthetic" --mode open --account "apple-cli-test-missing-account" --out "$link"
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q '"type" : "safety_violation"'
+  echo "$output" | grep -q 'raw destination'
+  [ "$(cat "$target")" = "synthetic-before" ]
+
+  run "$BIN" mail draft-rich --dry-run --no-open --subject "apple-cli-test raw out" \
+    --text-body "synthetic" --out "$link" --no-clobber
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q 'raw destination'
+  [ "$(cat "$target")" = "synthetic-before" ]
+}
+
+@test "mail draft-rich --out refuses a raw final-leaf symlink before Mail access" {
+  target="$BATS_TEST_TMPDIR/draft-rich-target.eml"
+  link="$BATS_TEST_TMPDIR/draft-rich-link.eml"
+  printf '%s' "synthetic-before" >"$target"
+  ln -s "$target" "$link"
+
+  run "$BIN" mail draft-rich --dry-run --no-open --subject "apple-cli-test raw out" \
+    --text-body "synthetic" --out "$link"
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q '"type" : "safety_violation"'
+  echo "$output" | grep -q 'raw destination'
+  [ "$(cat "$target")" = "synthetic-before" ]
+
+  run "$BIN" mail draft-rich --execute --no-open --subject "apple-cli-test raw out" \
+    --text-body "synthetic" --out "$link" --account "apple-cli-test-missing-account"
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q '"type" : "safety_violation"'
+  echo "$output" | grep -q 'raw destination'
+  [ "$(cat "$target")" = "synthetic-before" ]
+}
+
 @test "mail analytics dashboard --dry-run writes nothing; a credential-dir --out refuses even in preview (77)" {
   require_index
   OUT="$BATS_TEST_TMPDIR/apple-cli-test-dash.html"
@@ -562,6 +611,19 @@ if len(attachments) != int(sys.argv[1]):
   run "$BIN" mail analytics dashboard --dry-run --out "$HOME/.ssh/apple-cli-test-dash.html"
   [ "$status" -eq 77 ]
   echo "$output" | grep -q '"safety_violation"'
+}
+
+@test "mail analytics dashboard --out refuses a raw final-leaf symlink before Mail access" {
+  target="$BATS_TEST_TMPDIR/dashboard-target.html"
+  link="$BATS_TEST_TMPDIR/dashboard-link.html"
+  printf '%s' "synthetic-before" >"$target"
+  ln -s "$target" "$link"
+
+  run "$BIN" mail analytics dashboard --dry-run --out "$link"
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q '"type" : "safety_violation"'
+  echo "$output" | grep -q 'raw destination'
+  [ "$(cat "$target")" = "synthetic-before" ]
 }
 
 # The two per-surface DEFAULTS, pinned with deliberately flagless invocations (markers): the

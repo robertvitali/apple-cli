@@ -13,6 +13,14 @@ struct AttachmentFSTests {
         #expect((try? AttachmentFS.assertSafeSavePath(tmp)) != nil)
     }
 
+    @Test("accepts /Volumes and home credential spellings per Notes oracle policy")
+    func acceptsVolumesAndHomeCredentialSpelling() throws {
+        let homeCredentialPath = NSHomeDirectory() + "/.ssh/apple-cli-test-placeholder.bin"
+        #expect(try AttachmentFS.assertSafeSavePath(homeCredentialPath) == AttachmentFS.resolvedPath(homeCredentialPath))
+        let volumesPath = "/Volumes/apple-cli-test-drive/file.bin"
+        #expect(try AttachmentFS.assertSafeSavePath(volumesPath) == AttachmentFS.resolvedPath(volumesPath))
+    }
+
     @Test("rejects paths outside the allowed roots")
     func rejectsOutside() {
         #expect(throws: AttachmentFS.FSError.self) { try AttachmentFS.assertSafeSavePath("/etc/passwd") }

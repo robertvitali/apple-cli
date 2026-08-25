@@ -1001,6 +1001,11 @@ struct NotesScript {
             abs = try AttachmentFS.assertSafeSavePath(savePath)
             try AttachmentFS.ensureParentDir(abs)
             try AttachmentFS.assertResolvedParentContained(abs) // symlink-aware re-check post-mkdir
+            try refuseRawFinalLeafSymlink(savePath, action: "write the attachment to")
+        } catch let e as AppleError {
+            // The AttachmentFS calls above throw only FSError/Foundation errors; this typed branch
+            // preserves the shared final-leaf refusal as `safety_violation` / 77.
+            throw e
         } catch {
             return SaveResult(ok: false, savedPath: nil, name: nil, contentType: nil,
                               error: (error as? AttachmentFS.FSError)?.description ?? String(describing: error))

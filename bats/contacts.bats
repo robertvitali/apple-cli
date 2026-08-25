@@ -497,6 +497,32 @@ END:VCARD"
   echo "$output" | grep -q 'control character'
 }
 
+@test "contacts vcard export --out refuses a raw final-leaf symlink before Contacts access" {
+  target="$BATS_TEST_TMPDIR/vcard-target.vcf"
+  link="$BATS_TEST_TMPDIR/vcard-link.vcf"
+  printf '%s' "synthetic-before" >"$target"
+  ln -s "$target" "$link"
+
+  run "$BIN" contacts vcard export apple-cli-test-x --out "$link"
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q '"type" : "safety_violation"'
+  echo "$output" | grep -q 'raw destination'
+  [ "$(cat "$target")" = "synthetic-before" ]
+}
+
+@test "contacts photo get --out refuses a raw final-leaf symlink before Contacts access" {
+  target="$BATS_TEST_TMPDIR/photo-target.bin"
+  link="$BATS_TEST_TMPDIR/photo-link.bin"
+  printf '%s' "synthetic-before" >"$target"
+  ln -s "$target" "$link"
+
+  run "$BIN" contacts photo get apple-cli-test-x --out "$link"
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q '"type" : "safety_violation"'
+  echo "$output" | grep -q 'raw destination'
+  [ "$(cat "$target")" = "synthetic-before" ]
+}
+
 # Q14: a sandbox-policy refusal (unlabeled target in --test-mode) carries error.sandbox=true — the
 # error-envelope counterpart of the success envelope's sandbox:true. Fires before the store touch
 # (CI-safe). Revert-red: drop `sandbox: true` at the resolveWrite gate → the key disappears.
