@@ -1686,6 +1686,85 @@ assert 'would refuse' not in note, note
   ! echo "$output" | grep -q "^FAIL"
 }
 
+@test "AppleScript syntax checker materializes integers and rejects unresolved interpolation" {
+  run python3 - "$BATS_TEST_DIRNAME/helpers/applescript_syntax_check.py" <<'PY'
+import importlib.util
+import sys
+
+spec = importlib.util.spec_from_file_location("applescript_syntax_check", sys.argv[1])
+module = importlib.util.module_from_spec(spec)
+# The helper's __main__ guard keeps this import from running the full osacompile sweep.
+spec.loader.exec_module(module)
+
+def expect_equal(label, actual, expected):
+    if actual != expected:
+        raise SystemExit(f"FAIL - {label}")
+
+source = "    static let timeoutSeconds = 180\n"
+body = r"with timeout of \(MailScript.timeoutSeconds) seconds"
+materialized = module.materialize_integer_interpolations(source, body)
+expect_equal("integer", materialized, "with timeout of 180 seconds")
+expect_equal(
+    "idempotence",
+    module.materialize_integer_interpolations(source, materialized),
+    materialized,
+)
+expect_equal(
+    "unknown",
+    module.materialize_integer_interpolations(
+        source, r"\(MailScript.unknownValue)"
+    ),
+    r"\(MailScript.unknownValue)",
+)
+expect_equal(
+    "escaped",
+    module.materialize_integer_interpolations(
+        source, r"\\(MailScript.timeoutSeconds)"
+    ),
+    r"\\(MailScript.timeoutSeconds)",
+)
+expect_equal(
+    "escaped-then-interpolated",
+    module.materialize_integer_interpolations(
+        source, r"\\\(MailScript.timeoutSeconds)"
+    ),
+    r"\\180",
+)
+expect_equal(
+    "string-constant",
+    module.materialize_integer_interpolations(
+        '    static let timeoutSeconds = "180"\n',
+        r"\(MailScript.timeoutSeconds)",
+    ),
+    r"\(MailScript.timeoutSeconds)",
+)
+expect_equal(
+    "typed-constant",
+    module.materialize_integer_interpolations(
+        "    static let timeoutSeconds: Int = 180\n",
+        r"\(MailScript.timeoutSeconds)",
+    ),
+    r"\(MailScript.timeoutSeconds)",
+)
+expect_equal(
+    "ambiguous-constant",
+    module.materialize_integer_interpolations(
+        "    static let timeoutSeconds = 180\n"
+        "    static let timeoutSeconds = 181\n",
+        r"\(MailScript.timeoutSeconds)",
+    ),
+    r"\(MailScript.timeoutSeconds)",
+)
+
+if not module.check("synthetic-escaped", r'return "a\\(b)"'):
+    raise SystemExit("FAIL - escaped backslash was rejected")
+if module.check("synthetic-unresolved", r'return "\(MailScript.unknownValue)"'):
+    raise SystemExit("FAIL - unresolved interpolation was accepted")
+PY
+  [ "$status" -eq 0 ]
+  [[ "$output" == *"FAIL - synthetic-unresolved: unresolved Swift interpolation"* ]]
+}
+
 # --- Oracle-parity: reads (batch 4) --------------------------------------------
 # MCP B names the indexed preview `content_preview`; this repo's own dual-key rule
 # (Sources/MailKit/Support/MailModels.swift header) requires carrying BOTH names, and it was

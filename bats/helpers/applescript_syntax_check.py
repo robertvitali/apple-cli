@@ -20,6 +20,38 @@ from typing import Optional
 SRC = os.path.join(os.path.dirname(__file__), "..", "..",
                    "Sources", "MailKit", "Support", "MailScript.swift")
 
+
+def materialize_integer_interpolations(src: str, body: str) -> str:
+    """Resolve `\\(MailScript.someIntegerConstant)` exactly as Swift does at runtime.
+
+    The syntax harness reads Swift source rather than executing Swift. Without this narrow
+    materialization step, a runtime-valid script that interpolates a shared integer constant is
+    handed to osacompile with the raw Swift token still present and fails as invalid AppleScript.
+    Only literal integer constants are supported; every other interpolation remains visible for
+    check() to reject instead of letting the harness invent Swift evaluation semantics.
+    """
+    constants = {}
+    ambiguous = set()
+    for name, value in re.findall(
+        r"^\s*static let (\w+)\s*=\s*([0-9]+)\s*$", src, re.M
+    ):
+        if name in constants and constants[name] != value:
+            ambiguous.add(name)
+        else:
+            constants.setdefault(name, value)
+    for name in ambiguous:
+        constants.pop(name, None)
+
+    def replace(match: re.Match) -> str:
+        prefix = match.group(1)
+        value = constants.get(match.group(2))
+        return match.group(0) if value is None else prefix + value
+
+    # An even run is escaped source text; an odd run ends in real Swift interpolation.
+    return re.sub(
+        r"(?<!\\)((?:\\\\)*)\\\(MailScript\.(\w+)\)", replace, body
+    )
+
 # Literals that MUST end up compile-checked, asserted at the end of main().
 #
 # WHY A LIST AT ALL: the catch-all loop in main() discovers scripts by the `*Script` NAME
@@ -45,7 +77,7 @@ def literals(src: str) -> dict[str, str]:
     """Every triple-quoted `static let NAME` body, keyed by NAME."""
     out = {}
     for m in re.finditer(r'static let (\w+)\s*=\s*"""\n(.*?)\n\s*"""', src, re.S):
-        out.setdefault(m.group(1), m.group(2))
+        out.setdefault(m.group(1), materialize_integer_interpolations(src, m.group(2)))
     return out
 
 
@@ -70,10 +102,19 @@ def concat_form(src: str, name: str, tail: str) -> Optional[str]:
     joiner = "\n" if m.group(2) else ""
     # The foot's captured body keeps its leading blank-line newline (faithful to Swift's
     # content), so no second joiner is synthesized either.
-    return m.group(1) + joiner + tail + m.group(3)
+    assembled = m.group(1) + joiner + tail + m.group(3)
+    return materialize_integer_interpolations(src, assembled)
 
 
 def check(label: str, body: str) -> bool:
+    unresolved = re.findall(r"(?<!\\)(?:\\\\)*\\\([^\n)]+\)", body)
+    if unresolved:
+        print(
+            f"FAIL - {label}: unresolved Swift interpolation "
+            f"({len(unresolved)} occurrence(s))"
+        )
+        return False
+
     with tempfile.NamedTemporaryFile("w", suffix=".applescript", delete=False) as f:
         f.write(body)
         path = f.name
