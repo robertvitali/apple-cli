@@ -3049,7 +3049,7 @@ assert dates == sorted(dates), dates"
   local xtrace_was_on=0
   local bats_trace_level_was="${BATS_TRACE_LEVEL:-0}"
   local bats_verbose_run_was="${BATS_VERBOSE_RUN:-}"
-  local probe probe_rest id needle subject
+  local probe selected probe_rest id internet_id needle subject
   case "$-" in
     *x*) xtrace_was_on=1; set +x ;;
   esac
@@ -3083,19 +3083,27 @@ assert dates == sorted(dates), dates"
   probe=$(printf '%s' "$probe_output" | /usr/bin/python3 -c '
 import json,sys
 messages=json.load(sys.stdin)["data"]["messages"]
+candidates=[]
 for message in messages:
     message_id=message.get("id") or ""
+    internet_id=message.get("internet_message_id") or ""
     snippet=message.get("snippet") or ""
     subject=message.get("subject") or ""
-    if (not message_id or any(ord(c) < 32 or ord(c) == 127 for c in message_id)
+    fields=(message_id,internet_id,snippet,subject)
+    tuple_fields=(message_id,internet_id,subject)
+    if (not all(isinstance(field,str) for field in fields)
+            or not message_id.isascii() or not message_id.isdigit()
+            or message_id.startswith("-")
+            or not internet_id or internet_id.startswith("-")
             or not subject or subject.startswith("-")
-            or any(ord(c) < 32 or ord(c) == 127 for c in subject)):
+            or any(any(ord(c) < 32 or ord(c) == 127 for c in field)
+                   for field in tuple_fields)):
         continue
     words=[word for word in snippet.split()
            if word.isascii() and word.isalpha() and len(word) >= 6]
     if words:
-        sys.stdout.write(message_id + "\x1e" + words[0] + "\x1e" + subject)
-        break
+        candidates.append("\x1e".join((message_id,internet_id,words[0],subject)))
+sys.stdout.write("\x1f".join(candidates))
 ' 2>/dev/null) || probe_parse_status=$?
   unset probe_output
   if [ "$probe_parse_status" -ne 0 ]; then
@@ -3103,26 +3111,160 @@ for message in messages:
     printf '%s\n' "preview fixture response was invalid" >&2
     false
   fi
-  [ -n "$probe" ] || skip "no preview-bearing message with a safe subject to probe"
-  case "$probe" in
-    *$'\n'*|*$'\r'*) unset probe; printf '%s\n' "preview fixture tuple was invalid" >&2; false ;;
-    *$'\036'*) ;;
-    *) unset probe; printf '%s\n' "preview fixture tuple omitted its needle" >&2; false ;;
+  [ -n "$probe" ] || skip "no preview-bearing message with safe oracle fields to probe"
+
+  # Independently validate the indexed fixture candidates against Mail.app. The script returns
+  # only a fixed literal plus the winning ordinal: live bodies never cross the process boundary.
+  # Every mailbox-derived value is one opaque argv item after `--`, never AppleScript source.
+  local oracle_script='on run argv
+set RS to ASCII character 30
+set US to ASCII character 31
+set packedCandidates to item 1 of argv
+set text item delimiters of AppleScript to US
+set candidateRecords to text items of packedCandidates
+set text item delimiters of AppleScript to ""
+tell application "Mail"
+  set searchAccounts to accounts whose name is "iCloud"
+  if (count of searchAccounts) is 0 then return "unavailable"
+  set targetAccount to item 1 of searchAccounts
+  try
+    set targetMailbox to mailbox "INBOX" of targetAccount
+  on error
+    return "unavailable"
+  end try
+  set locatedAny to false
+  repeat with candidateIndex from 1 to count of candidateRecords
+    set candidateRecord to item candidateIndex of candidateRecords
+    set text item delimiters of AppleScript to RS
+    set candidateParts to text items of candidateRecord
+    set text item delimiters of AppleScript to ""
+    if (count of candidateParts) is not 4 then return "invalid"
+    set targetID to item 2 of candidateParts
+    set candidateNeedle to item 3 of candidateParts
+    if targetID is "" or candidateNeedle is "" then return "invalid"
+    set hits to messages of targetMailbox whose message id is targetID
+    if (count of hits) is 0 then
+      if targetID starts with "<" and targetID ends with ">" and (length of targetID) > 2 then
+        set alternateID to text 2 thru -2 of targetID
+      else
+        set alternateID to "<" & targetID & ">"
+      end if
+      set hits to messages of targetMailbox whose message id is alternateID
+    end if
+    repeat with candidateMessage in hits
+      set locatedAny to true
+      try
+        if (content of candidateMessage) contains candidateNeedle then return "present:" & (candidateIndex as string)
+      end try
+    end repeat
+  end repeat
+end tell
+if locatedAny then return "absent"
+return "not-found"
+end run'
+  require_osascript_mail_automation
+  run /usr/bin/python3 "$BATS_TEST_DIRNAME/helpers/bounded_exec.py" \
+    --timeout 30 --grace 2 -- /usr/bin/osascript -e "$oracle_script" -- "$probe"
+  local oracle_status="$status"
+  local oracle_output="$output"
+  output=""
+  lines=()
+  BATS_RUN_COMMAND=""
+  unset oracle_script
+  case "$oracle_status" in
+    0) ;;
+    124)
+      unset probe oracle_output
+      skip "Mail.app preview fixture confirmation exceeded its bound"
+      ;;
+    *)
+      case "$oracle_output" in
+        *-1743*|*"Not authorized to send Apple events"*)
+          unset probe oracle_output
+          skip "Mail automation is not authorized for the test runner"
+          ;;
+        *)
+          unset probe oracle_output
+          printf '%s\n' "Mail.app preview fixture confirmation failed" >&2
+          false
+          ;;
+      esac
+      ;;
   esac
-  id="${probe%%$'\036'*}"
-  probe_rest="${probe#*$'\036'}"
-  case "$probe_rest" in
-    *$'\036'*) ;;
-    *) unset probe probe_rest id; printf '%s\n' "preview fixture tuple omitted its subject" >&2; false ;;
+  local oracle_index=""
+  case "$oracle_output" in
+    present:[1-9]* ) oracle_index="${oracle_output#present:}" ;;
+    absent|not-found|unavailable)
+      unset probe oracle_output
+      skip "no indexed preview candidate was independently verified against live content"
+      ;;
+    *)
+      unset probe oracle_output
+      printf '%s\n' "Mail.app preview fixture confirmation returned an invalid result" >&2
+      false
+      ;;
   esac
-  needle="${probe_rest%%$'\036'*}"
-  subject="${probe_rest#*$'\036'}"
-  unset probe probe_rest
-  if [ -z "$id" ] || [ -z "$needle" ] || [ -z "$subject" ]; then
-    unset id needle subject
-    printf '%s\n' "preview fixture tuple contained an empty field" >&2
+  unset oracle_output
+  case "$oracle_index" in
+    *[!0-9]*|"")
+      unset probe oracle_index
+      printf '%s\n' "Mail.app preview fixture confirmation returned an invalid ordinal" >&2
+      false
+      ;;
+  esac
+  local selected_parse_status=0
+  selected=$(printf '%s' "$probe" | /usr/bin/python3 -c '
+import sys
+try:
+    index=int(sys.argv[1])
+    candidates=sys.stdin.read().split("\x1f")
+    if index < 1 or index > len(candidates):
+        raise ValueError
+    fields=candidates[index-1].split("\x1e")
+    if (len(fields) != 4 or not all(fields)
+            or not fields[0].isascii() or not fields[0].isdigit()
+            or not fields[2].isascii() or not fields[2].isalpha()
+            or len(fields[2]) < 6 or any(field.startswith("-") for field in fields)
+            or any(any(ord(c) < 32 or ord(c) == 127 for c in field)
+                   for field in fields)):
+        raise ValueError
+except Exception:
+    raise SystemExit(2)
+sys.stdout.write("\x1e".join(fields))
+' "$oracle_index" 2>/dev/null) || selected_parse_status=$?
+  unset probe oracle_index
+  if [ "$selected_parse_status" -ne 0 ]; then
+    unset selected
+    printf '%s\n' "verified preview fixture ordinal was invalid" >&2
     false
   fi
+  case "$selected" in
+    *$'\n'*|*$'\r'*|*$'\037'*)
+      unset selected
+      printf '%s\n' "verified preview fixture tuple was invalid" >&2
+      false
+      ;;
+  esac
+  id="${selected%%$'\036'*}"
+  probe_rest="${selected#*$'\036'}"
+  internet_id="${probe_rest%%$'\036'*}"
+  probe_rest="${probe_rest#*$'\036'}"
+  needle="${probe_rest%%$'\036'*}"
+  subject="${probe_rest#*$'\036'}"
+  unset selected probe_rest
+  case "$id:$internet_id:$needle:$subject" in
+    *$'\036'*|*$'\037'*|*$'\n'*|*$'\r'*|-*)
+      unset id internet_id needle subject
+      printf '%s\n' "verified preview fixture tuple contained an invalid field" >&2
+      false
+      ;;
+  esac
+  if [ -z "$id" ] || [ -z "$internet_id" ] || [ -z "$needle" ] || [ -z "$subject" ]; then
+    unset id internet_id needle subject
+    printf '%s\n' "verified preview fixture tuple contained an empty field" >&2
+    false
+  fi
+  unset internet_id
 
   run /usr/bin/python3 "$BATS_TEST_DIRNAME/helpers/bounded_exec.py" \
     --timeout 30 --grace 2 -- /bin/sh -c 'exec "$@" 2>/dev/null' apple-json \
