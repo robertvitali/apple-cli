@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import TestSupport
 @testable import MailKit
 
 /// Q11-C pins (gap17/gap15/extra15): reply delivery modes + the threaded HTML pasteboard
@@ -8,6 +9,13 @@ import Foundation
 struct NativeComposeModeTests {
     static let US = String(UnicodeScalar(31))
     static let RS = String(UnicodeScalar(30))
+
+    private let scratch = ScratchDirs("mail-native-compose")
+
+    private static func trimmedLines(_ source: String) -> [String] {
+        source.components(separatedBy: .newlines)
+            .map { $0.trimmingCharacters(in: .whitespaces) }
+    }
 
     // MARK: parser — drafted / opened outcomes
 
@@ -48,6 +56,172 @@ struct NativeComposeModeTests {
     }
 
     // MARK: mode plumbing
+
+    /// D3 gui-send incident: the unique-window condition is polled for exactly 30 seconds. The
+    /// nonce check itself must be enclosed by that one bounded loop, never an unbounded retry.
+    @Test func guiSendPollIsExactlyBoundedAndChecksMailFocus() throws {
+        let script = MailScript.sendHtmlGuiScriptSource
+        let lines = Self.trimmedLines(script)
+        let pollStart = try #require(lines.firstIndex(of: "repeat 60 times"))
+        let pollEnd = try #require(lines[(pollStart + 1)...].firstIndex(of: "end repeat"))
+        let poll = Array(lines[pollStart...pollEnd])
+        let repeatLines = poll.filter { $0 == "repeat" || $0.hasPrefix("repeat ") }
+        #expect(repeatLines == ["repeat 60 times"],
+                "the nonce poll must contain no nested or unbounded repeat")
+
+        let match = try #require(poll.firstIndex(of:
+            "if frontmost and (exists front window) and ((name of front window) contains nonce) then"))
+        let exit = try #require(poll.firstIndex(of: "exit repeat"))
+        let delay = try #require(poll.firstIndex(of: "delay 0.5"))
+        #expect(match < exit)
+        #expect(exit < delay)
+        #expect(poll.filter { $0 == "delay 0.5" }.count == 1)
+
+        let advertisedSeconds = 60.0 * 0.5
+        #expect(MailScript.sendHtmlGuiError(for: "wrong-window").message
+            .contains("\(Int(advertisedSeconds)) seconds"))
+    }
+
+    /// A match is only provisional: after the proven 2.5-second settle, re-check focus + nonce before
+    /// Tab/Cmd-A, repeat the same check immediately before paste, and check focus again before Send.
+    @Test func guiSendRechecksFocusBeforeEveryDestructiveStage() throws {
+        let script = MailScript.sendHtmlGuiScriptSource
+        let matched = try #require(script.range(of: "if windowMatched then"))
+        let settle = try #require(script.range(of: "delay 2.5", range: matched.upperBound..<script.endIndex))
+        let readyCheck = try #require(script.range(of:
+            "if frontmost and (exists front window) and ((name of front window) contains nonce) then",
+            range: settle.upperBound..<script.endIndex))
+        let tab = try #require(script.range(of: "key code 48", range: readyCheck.upperBound..<script.endIndex))
+        let beforeReady = Self.trimmedLines(String(script[matched.upperBound..<readyCheck.lowerBound]))
+            .filter { !$0.hasPrefix("--") }
+        #expect(!beforeReady.contains { $0.hasPrefix("key code") })
+        #expect(!beforeReady.contains { $0.hasPrefix("keystroke") })
+
+        let select = try #require(script.range(of: "keystroke \"a\" using command down",
+                                               range: tab.upperBound..<script.endIndex))
+        let pasteCheck = try #require(script.range(of:
+            "if frontmost and (exists front window) and ((name of front window) contains nonce) then",
+            range: select.upperBound..<script.endIndex))
+        let paste = try #require(script.range(of: "keystroke \"v\" using command down",
+                                              range: pasteCheck.upperBound..<script.endIndex))
+        #expect(script[pasteCheck.upperBound..<paste.lowerBound]
+            .trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+
+        let subjectVerified = try #require(script.range(of:
+            "if (subject of newMsg) is theSubject then set subjectRestored to true",
+            range: paste.upperBound..<script.endIndex))
+        let sendFocus = try #require(script.range(of: "if frontmost then",
+                                                  range: subjectVerified.upperBound..<script.endIndex))
+        let send = try #require(script.range(of: "keystroke \"d\" using {command down, shift down}",
+                                             range: sendFocus.upperBound..<script.endIndex))
+        let sendGateEnd = try #require(script.range(of: "end if", range: send.upperBound..<script.endIndex))
+        #expect(script[send.upperBound..<sendGateEnd.lowerBound].contains("set sendOK to true"))
+        #expect(script[sendFocus.lowerBound..<sendGateEnd.upperBound].contains("set focusLost to true"))
+
+        let focusCleanup = try #require(script.range(of: "if focusLost then",
+                                                     range: sendGateEnd.upperBound..<script.endIndex))
+        let restore = try #require(script.range(of: "set subject of newMsg to theSubject",
+                                                range: focusCleanup.upperBound..<script.endIndex))
+        _ = try #require(script.range(of: "return \"focus-lost\"",
+                                      range: restore.upperBound..<script.endIndex))
+        let allLines = Self.trimmedLines(script)
+        let uiInit = try #require(allLines.firstIndex(of: "set uiFailed to false"))
+        let uiTry = try #require(allLines[(uiInit + 1)...].firstIndex(of: "try"))
+        let systemEvents = try #require(allLines[(uiTry + 1)...]
+            .firstIndex(of: "tell application \"System Events\""))
+        let pasteboardWrite = try #require(allLines[(systemEvents + 1)...]
+            .firstIndex(of: "pb's setData:htmlData forType:(current application's NSPasteboardTypeHTML)"))
+        let uiCatch = try #require(allLines[(pasteboardWrite + 1)...].firstIndex(of: "on error"))
+        let uiFlag = try #require(allLines[(uiCatch + 1)...].firstIndex(of: "set uiFailed to true"))
+        #expect(uiInit < uiTry)
+        #expect(uiTry < systemEvents)
+        #expect(systemEvents < pasteboardWrite)
+        #expect(pasteboardWrite < uiCatch)
+        #expect(uiCatch < uiFlag)
+        let uiRestore = try #require(script.range(of: "if uiFailed then",
+                                                  range: matched.lowerBound..<script.endIndex))
+        _ = try #require(script.range(of: "return \"ui-error\"",
+                                      range: uiRestore.upperBound..<script.endIndex))
+    }
+
+    /// The operator's clipboard stays untouched while Mail is allowed to take up to 30 seconds.
+    /// Once touched, cleanup restores the snapshot only if no one changed the clipboard meanwhile.
+    @Test func guiSendDefersAndConditionallyRestoresPasteboard() throws {
+        let script = MailScript.sendHtmlGuiScriptSource
+        let poll = try #require(script.range(of: "repeat 60 times"))
+        let pollEnd = try #require(script.range(of: "end repeat", range: poll.upperBound..<script.endIndex))
+        let beforePoll = script[..<poll.lowerBound]
+        #expect(!beforePoll.contains("set oldClip to pb's stringForType:"))
+        #expect(!beforePoll.contains("pb's clearContents()"))
+        #expect(!beforePoll.contains("pb's setData:htmlData forType:"))
+        let capture = try #require(script.range(of: "set oldClip to pb's stringForType:",
+                                                range: pollEnd.upperBound..<script.endIndex))
+        let touched = try #require(script.range(of: "set pasteboardTouched to true",
+                                                range: capture.upperBound..<script.endIndex))
+        let clear = try #require(script.range(of: "pb's clearContents()",
+                                              range: touched.upperBound..<script.endIndex))
+        let setData = try #require(script.range(of: "pb's setData:htmlData forType:",
+                                                range: clear.upperBound..<script.endIndex))
+        let snapshot = try #require(script.range(of:
+            "set pasteboardChangeCount to (pb's changeCount()) as integer",
+            range: setData.upperBound..<script.endIndex))
+        let paste = try #require(script.range(of: "keystroke \"v\" using command down",
+                                              range: snapshot.upperBound..<script.endIndex))
+        #expect(script.contains("set pasteboardTouched to false"))
+
+        let cleanup = try #require(script.range(of: "if pasteboardTouched then",
+                                                range: paste.upperBound..<script.endIndex))
+        let unchanged = try #require(script.range(of:
+            "if ((pb's changeCount()) as integer) is pasteboardChangeCount then",
+            range: cleanup.upperBound..<script.endIndex))
+        let cleanupClear = try #require(script.range(of: "pb's clearContents()",
+                                                     range: unchanged.upperBound..<script.endIndex))
+        _ = try #require(script.range(of: "pb's setString:oldClip",
+                                      range: cleanupClear.upperBound..<script.endIndex))
+        let lines = Self.trimmedLines(script)
+        #expect(lines.filter { $0 == "pb's clearContents()" }.count == 2)
+        #expect(lines.filter { $0.hasPrefix("pb's setString:oldClip") }.count == 1)
+    }
+
+    /// A refusal sentinel is an expected fail-closed outcome, not an osascript execution fault.
+    /// It must therefore retain the typed upstream error envelope instead of escaping as unknown.
+    @Test func guiSendRefusalSentinelsMapToUpstreamErrors() {
+        let script = MailScript.sendHtmlGuiScriptSource
+        #expect(script.contains("return \"wrong-window\""))
+        #expect(script.contains("return \"subject-restore-failed\""))
+        #expect(script.contains("return \"focus-lost\""))
+        #expect(script.contains("return \"ui-error\""))
+
+        for sentinel in ["wrong-window", "subject-restore-failed", "focus-lost", "ui-error"] {
+            let error = MailScript.sendHtmlGuiError(for: sentinel)
+            #expect(error.type == "upstream_error")
+            #expect(error.exitCode == 69)
+        }
+        #expect(MailScript.sendHtmlGuiError(for: "subject-restore-failed").message
+            .contains("[apple-cli-…]"))
+        let unexpected = "unexpected-private-sentinel"
+        let unexpectedError = MailScript.sendHtmlGuiError(for: unexpected)
+        #expect(unexpectedError.type == "unknown")
+        #expect(unexpectedError.exitCode == 70)
+        #expect(!unexpectedError.message.contains(unexpected))
+
+        let focusReturn = script.range(of: "return \"focus-lost\"")
+        let sentReturn = script.range(of: "return \"sent\"")
+        let uiReturn = script.range(of: "return \"ui-error\"")
+        let matchedReturn = script.range(of: "else if windowMatched then")
+        #expect(focusReturn != nil)
+        #expect(sentReturn != nil)
+        #expect(uiReturn != nil)
+        #expect(matchedReturn != nil)
+        if let focusReturn, let sentReturn, let uiReturn, let matchedReturn {
+            #expect(sentReturn.lowerBound < uiReturn.lowerBound,
+                    "a reported send must outrank a later caught UI error")
+            #expect(uiReturn.lowerBound < matchedReturn.lowerBound,
+                    "ui-error must precede the broader windowMatched refusal arm")
+            #expect(focusReturn.lowerBound < matchedReturn.lowerBound,
+                    "focus-lost must precede the broader windowMatched refusal arm")
+        }
+    }
 
     /// D8 item 5: forward has no mode surface (pins "send") and now inserts its --body prepend via
     /// the oracle's NSPasteboard paste — reading the fragment PATH from argv, NEVER `set content`
@@ -221,11 +395,9 @@ struct NativeComposeModeTests {
         guard FileManager.default.isExecutableFile(atPath: osacompile) else { return }
         for (name, src) in [("replyHtml", MailScript.nativeReplyHtmlScriptSource),
                             ("forward", MailScript.nativeForwardScriptSource),
-                            ("saveDraft", MailScript.saveOpenDraftScriptSource)] {
-            let dir = FileManager.default.temporaryDirectory
-                .appendingPathComponent("apple-cli-osacompile-\(UUID().uuidString)")
-            try FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
-            defer { try? FileManager.default.removeItem(at: dir) }
+                            ("saveDraft", MailScript.saveOpenDraftScriptSource),
+                            ("sendHtmlGui", MailScript.sendHtmlGuiScriptSource)] {
+            let dir = try scratch.directory()
             let srcFile = dir.appendingPathComponent("\(name).applescript")
             try src.write(to: srcFile, atomically: true, encoding: .utf8)
             let proc = Process()

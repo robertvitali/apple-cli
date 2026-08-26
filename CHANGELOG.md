@@ -30,6 +30,12 @@ with the Apple MCP servers they replace.
 
 ### Changed
 
+- **BREAKING (exit code):** expected `--gui-send` UI refusals now surface as
+  `upstream_error` / exit 69 instead of the generic `unknown` / exit 70. This corrects the error
+  classification for a focus loss, a nonce-window timeout, a subject-restore refusal, or a caught
+  Accessibility/System Events failure; no send is reported on the three proven-refusal paths, and
+  the GUI-failure path reports delivery as unconfirmed. This is a pre-1.0 contract disclosure and
+  does not bump or tag a release.
 - **BREAKING (file-output safety):** Mail `send --out`, Mail `draft-rich --out`,
   Mail `analytics dashboard --out`, Contacts `vcard export --out`, Contacts `photo get --out`,
   and Notes `save-attachment --path` now refuse an operator-supplied raw final-leaf symlink before

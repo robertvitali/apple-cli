@@ -1423,13 +1423,14 @@ public struct MailScript {
     /// the controlling process, STEALS focus, and is timing-fragile. It is therefore gated
     /// behind an explicit `--gui-send` opt-in and is NEVER the default.
     ///
-    /// SAFETY: recipients are set PROGRAMMATICALLY on the outgoing message before the window is
-    /// shown, and the caller MUST have passed the self-only `guardOutbound` first — so even the
-    /// GUI Cmd-Shift-D send can only ever reach a self-allowlisted address. The prior clipboard
-    /// contents are saved and restored around the paste. Inputs are opaque argv (`on run argv`);
-    /// the HTML body is read from `htmlPath` via `cat` inside the script, so no body text is
-    /// interpolated into source. Uses `runViaStdin` because the AppleScriptObjC `use framework`
-    /// header requires the stdin form.
+    /// SAFETY: recipients are set PROGRAMMATICALLY on this call's outgoing message before the
+    /// window is shown, and the caller MUST have passed `guardOutbound` first. The keystroke must
+    /// still be proven to land on this call's window: another compose was never gated and may
+    /// carry unrelated recipients. The prior clipboard string is restored only when the
+    /// pasteboard still contains this call's write; a newer operator clipboard is preserved.
+    /// Inputs are opaque argv (`on run argv`); the HTML body is read from `htmlPath` via `cat`
+    /// inside the script, so no body text is interpolated into source. Uses `runViaStdin` because
+    /// the AppleScriptObjC `use framework` header requires the stdin form.
     private static let sendHtmlGuiScript = """
     use framework "Foundation"
     use framework "AppKit"
@@ -1450,10 +1451,10 @@ public struct MailScript {
         set titleSubject to theSubject & " " & nonce
         set htmlString to (do shell script "cat " & quoted form of htmlPath)
         set pb to current application's NSPasteboard's generalPasteboard()
-        set oldClip to pb's stringForType:(current application's NSPasteboardTypeString)
-        pb's clearContents()
+        set oldClip to missing value
+        set pasteboardTouched to false
+        set pasteboardChangeCount to -1
         set htmlData to (current application's NSString's stringWithString:htmlString)'s dataUsingEncoding:(current application's NSUTF8StringEncoding)
-        pb's setData:htmlData forType:(current application's NSPasteboardTypeHTML)
         tell application "Mail"
             set newMsg to make new outgoing message with properties {subject:titleSubject, content:"", visible:true}
             if senderAddr is not "" then set sender of newMsg to senderAddr
@@ -1463,7 +1464,6 @@ public struct MailScript {
             my addAtts(newMsg, attRaw, US)
             activate
         end tell
-        delay 2.5
         -- SAFETY (review M1, re-hardened for write-model v2): the blind Cmd-Shift-D must land
         -- ONLY on the compose window THIS call created — never a stray compose window the
         -- operator left open (which could carry a real, non-self recipient and would bypass
@@ -1479,64 +1479,114 @@ public struct MailScript {
         -- on the NONCE, which by construction cannot appear in any other window's title. The real
         -- subject is restored only once the window is bound, and the restore is VERIFIED before
         -- the send keystroke — a failed restore refuses rather than mailing the nonce out.
-        -- Restore the clipboard on every exit path.
+        -- Remove our pasteboard write on every normal exit path without overwriting a newer one.
         set sendOK to false
         set subjectRestored to false
         set windowMatched to false
-        tell application "System Events"
-            set frontmost of process "Mail" to true
-            delay 0.5
-            tell process "Mail"
-                if (exists front window) and ((name of front window) contains nonce) then
-                    set windowMatched to true
-                    repeat 7 times
-                        key code 48
-                        delay 0.1
-                    end repeat
-                    delay 0.3
-                    keystroke "a" using command down
-                    delay 0.2
-                    keystroke "v" using command down
+        set focusLost to false
+        set uiFailed to false
+        try
+            tell application "System Events"
+                set frontmost of process "Mail" to true
+                tell process "Mail"
+                -- Patient (up to 30s): Mail can lag surfacing the compose window after the
+                -- outgoing message becomes visible. Keep polling for THIS call's nonce only.
+                repeat 60 times
+                    if frontmost and (exists front window) and ((name of front window) contains nonce) then
+                        set windowMatched to true
+                        exit repeat
+                    end if
                     delay 0.5
-                    -- Drop the nonce from the subject NOW (the window is proven ours) and read
-                    -- it back: only an exact match may proceed to the send keystroke.
-                    tell application "Mail"
-                        try
-                            set subject of newMsg to theSubject
-                            if (subject of newMsg) is theSubject then set subjectRestored to true
-                        end try
-                    end tell
-                    if subjectRestored then
+                end repeat
+                if windowMatched then
+                    -- Treat the poll match as provisional. Mail must remain focused with this
+                    -- call's nonce after the proven 2.5-second UI settle before ANY editing keystroke.
+                    delay 2.5
+                    if frontmost and (exists front window) and ((name of front window) contains nonce) then
+                        -- Snapshot and replace the clipboard only once the target window is ready;
+                        -- the up-to-30s wait leaves the operator's clipboard untouched.
+                        set oldClip to pb's stringForType:(current application's NSPasteboardTypeString)
+                        set pasteboardTouched to true
+                        pb's clearContents()
+                        pb's setData:htmlData forType:(current application's NSPasteboardTypeHTML)
+                        set pasteboardChangeCount to (pb's changeCount()) as integer
+                        repeat 7 times
+                            key code 48
+                            delay 0.1
+                        end repeat
                         delay 0.3
-                        keystroke "d" using {command down, shift down}
-                        set sendOK to true
+                        keystroke "a" using command down
+                        delay 0.2
+                        if frontmost and (exists front window) and ((name of front window) contains nonce) then
+                            keystroke "v" using command down
+                            delay 0.5
+                            -- Drop the nonce from the subject NOW (the window is proven ours) and
+                            -- read it back: only an exact match may proceed to the send keystroke.
+                            tell application "Mail"
+                                try
+                                    set subject of newMsg to theSubject
+                                    if (subject of newMsg) is theSubject then set subjectRestored to true
+                                end try
+                            end tell
+                            if subjectRestored then
+                                delay 0.3
+                                if frontmost then
+                                    keystroke "d" using {command down, shift down}
+                                    set sendOK to true
+                                else
+                                    set focusLost to true
+                                end if
+                            end if
+                        else
+                            set focusLost to true
+                        end if
+                    else
+                        set focusLost to true
                     end if
                 end if
+                end tell
             end tell
-        end tell
-        -- Not our window: the compose message we created is still open, addressed, and titled
-        -- with the nonce. Drop the nonce so the orphan reads as an ordinary unsent draft of the
-        -- message the operator asked for, rather than a marker-titled mystery they might send
-        -- as-is (review-caught: only the restore-failed branch used to clean up).
-        if not windowMatched then
+        on error
+            -- Fall through to subject + pasteboard cleanup; never let an Accessibility failure
+            -- strand message HTML on the general pasteboard or report a send.
+            set uiFailed to true
+        end try
+        -- A timeout or focus loss leaves the compose unsent. Restore its real subject so the
+        -- orphan is not left carrying an internal marker; never broaden the window match.
+        set shouldRestoreSubject to false
+        if uiFailed then
+            set shouldRestoreSubject to true
+        else if focusLost then
+            set shouldRestoreSubject to true
+        else if not windowMatched then
+            set shouldRestoreSubject to true
+        end if
+        if shouldRestoreSubject then
             tell application "Mail"
                 try
                     set subject of newMsg to theSubject
                 end try
             end tell
         end if
-        delay 1
-        -- Unconditional clear (review L6 twin): when the prior clipboard had no string
-        -- flavor, the old conditional skipped the clear too and the email HTML lingered
-        -- on the pasteboard.
-        try
-            pb's clearContents()
-            if oldClip is not missing value then
-                pb's setString:oldClip forType:(current application's NSPasteboardTypeString)
-            end if
-        end try
+        -- Clear our HTML and restore the prior string only if the pasteboard still contains our
+        -- write. If the operator changed it meanwhile, their newer clipboard wins.
+        if pasteboardTouched then
+            delay 1
+            try
+                if ((pb's changeCount()) as integer) is pasteboardChangeCount then
+                    pb's clearContents()
+                    if oldClip is not missing value then
+                        pb's setString:oldClip forType:(current application's NSPasteboardTypeString)
+                    end if
+                end if
+            end try
+        end if
         if sendOK then
             return "sent"
+        else if uiFailed then
+            return "ui-error"
+        else if focusLost then
+            return "focus-lost"
         else if windowMatched then
             -- Our window, but the subject restore failed — REFUSED rather than mail the nonce
             -- out. A composed window is sitting there with the nonce still in its subject.
@@ -1585,10 +1635,33 @@ public struct MailScript {
         end tell
     end addAtts
     """
+
+    /// Internal for the logic tier: source pins on the GUI send script.
+    static var sendHtmlGuiScriptSource: String { sendHtmlGuiScript }
+
+    /// Convert GUI-send refusal sentinels into the typed upstream error the command envelope
+    /// expects. Keep messages value-free: subjects, recipients, paths, and nonces stay out.
+    static func sendHtmlGuiError(for result: String) -> AppleError {
+        let reason: String
+        switch result {
+        case "wrong-window":
+            reason = "Mail did not surface this send's compose window within 30 seconds; the Send keystroke was refused. The unsent compose window may still be open; close it before retrying, or use the reliable --html open path."
+        case "subject-restore-failed":
+            reason = "Mail surfaced this send's compose window, but could not restore and verify its subject; the Send keystroke was refused. The unsent compose may still carry a generic [apple-cli-…] marker; restore its intended subject and send manually, or close it."
+        case "focus-lost":
+            reason = "Mail lost focus during GUI send; the Send keystroke was refused. The compose remains unsent, but its body may be empty and its subject restore was not verified; confirm it does not carry a generic [apple-cli-…] marker before sending manually, or close it."
+        case "ui-error":
+            reason = "Mail GUI automation failed; delivery was not confirmed. Check Sent and Outbox before retrying. If an unsent compose remains, its body may be empty and its subject restore was not verified; confirm it does not carry a generic [apple-cli-…] marker before sending manually, or close it."
+        default:
+            return AppleError.unknown("Mail returned an unexpected result from GUI send; delivery was not reported. Inspect Mail for an unsent compose before retrying.")
+        }
+        return AppleError.upstream(reason)
+    }
+
     /// Auto-send a rendered-HTML message via the GUI keystroke path (see `sendHtmlGuiScript`).
     /// `htmlPath` points at a temp file holding the raw HTML body (the caller writes it and
     /// deletes it after this returns). Returns normally on "sent"; throws otherwise. Caller
-    /// MUST have passed the self-only `guardOutbound` first; this method performs NO gating.
+    /// MUST have passed `guardOutbound` first; this method performs NO gating.
     public func sendHtmlViaGui(htmlPath: String, subject: String, to: [String],
                                cc: [String], bcc: [String], attachmentPaths: [String],
                                sender: String? = nil) throws {
@@ -1604,16 +1677,7 @@ public struct MailScript {
             attachmentPaths.joined(separator: US), sender ?? "", nonce,
         ])
         guard out == "sent" else {
-            let reason: String
-            switch out {
-            case "wrong-window":
-                reason = "the frontmost Mail window was not the compose window this send created (its title did not carry this call's unique marker) — refused the Send keystroke to avoid overwriting and sending an unrelated compose window. NOTE: this call left its OWN compose window open and unsent (subject \"\(subject)\", body empty, recipients+attachments set) — close it before retrying, along with whatever other compose window was in front, or use the reliable --html open path."
-            case "subject-restore-failed":
-                reason = "the compose window was located but its subject could not be restored from the internal marker \(nonce) — refused the Send keystroke rather than mail a marked subject. An unsent compose window carrying \(nonce) in its subject is open in Mail: fix its subject and send manually, or close it."
-            default:
-                reason = "sendHtmlViaGui returned '\(out)'"
-            }
-            throw AppleScriptRunner.RunError.scriptFailed(status: 1, stderr: reason)
+            throw MailScript.sendHtmlGuiError(for: out)
         }
     }
 
