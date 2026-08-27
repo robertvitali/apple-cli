@@ -30,17 +30,17 @@ it instead of asking.
 
 ---
 
-## LEDGER — every decision at a glance (updated 2026-08-23)
+## LEDGER — every decision at a glance (updated 2026-08-27)
 
-**Still needs you: D2, D3, and D14.** Everything else is settled.
-
-> **D14 (new, 2026-08-19) — `mail rules` delete action is LIVE but has never been exercised against real Mail.** Wiring it was your D6/gap25 ruling and it is implemented, adversarially reviewed, and hardened (fail-loud match-logic with readback verification, sandbox enable-gate keyed on the rule's REAL state, advisory warnings on every arming path). But by that same ruling **no agent may live-verify a delete rule**, so its first real exercise is yours — the same shape as D3. Until then the mail domain's parity claim carries a "wired, not live-validated" asterisk on this one action.
+**Still needs you: D2.** Everything else is settled — D3 and D14 were live-validated
+operator-present on 2026-08-27 (evidence on their Asana tasks; the Mail parent closed the
+same day under the closure-verification protocol).
 
 | # | Topic | Status | Ruling |
 |---|---|---|---|
 | D1 | `notes delete-folder` previews by default | **RATIFIED** | Keep the preview default — `--execute` stays required on the only irreversible-and-unrecoverable write |
 | D2 | Tag 1.0.0 + retire the six MCP servers | **OPEN** | **Terminal gate. Yours alone.** The loop stops here by design; go/no-go package is D13 |
-| D3 | Live-validate `mail send --gui-send` | **OPEN (task)** | Not a decision — needs ~10 min with you at the machine, self-addressed |
+| D3 | Live-validate `mail send --gui-send` | **APPLIED 2026-08-27** | Live-validated operator-present: one self-addressed send executed and delivered (oracle-verified both sides), test items cleaned by exact id |
 | D4 | Live-validate iMessage group-chat send | **APPLIED 2026-08-23** | Option (b): record "wired + code-inspected, never live-validated" as a port-spec asterisk |
 | D5 | Chasing the Messages fuzzy-search recall gap | WITHDRAWN | Should not have been asked; became ordinary queue work |
 | D6 | Eight parity posture calls | **APPLIED** | CONTACTS-L4 delete claim · NOTES-M1 restore 4 keys · NOTES-L4 structural divergence · gap10 keep opt-in body · **gap25 wire delete-rules live** · extra20 open by default |
@@ -50,8 +50,8 @@ it instead of asking.
 | D10 | Search/find-contact length caps | WITHDRAWN | Should not have been filed |
 | D11 | What `schema_version` tracks | **APPLIED** | **Shape only** — value breaks ride the MAJOR + CHANGELOG; both policy lines rewritten to agree |
 | D12 | `notes save-attachment` can write to `~/.ssh` | **RATIFIED** | Keep strict Notes-oracle parity; residual documented, fleet stays intentionally inconsistent |
-| D13 | Strict-superset go/no-go package | **APPLIED** | All scoped items landed; D4/D14 carry never-live-exercised asterisks, and D3 remains an open operator-present task |
-| D14 | `mail rules` delete action never live-exercised | **OPEN (task)** | Not a decision — wired + hardened per your gap25 ruling, but its first real run is yours |
+| D13 | Strict-superset go/no-go package | **APPLIED** | All scoped items landed; D4 keeps its permanent never-live-exercised asterisk; D3 and D14 were live-validated 2026-08-27 |
+| D14 | Live-exercise `mail rules` delete | **APPLIED 2026-08-27** | First live exercise done operator-present: labeled disabled test rule deleted by index, readback matched, 3 real rules untouched |
 
 ---
 
@@ -131,7 +131,15 @@ condition you asked for.
 
 ## D3 — Operator-present live validation: `mail send --gui-send`
 
-- **Status:** OPEN — **not a decision; a task needing you at the machine.** Nothing blocks on it.
+- **Status:** **APPLIED 2026-08-27** — live-validated operator-present.
+- **Resolution:** After a first failed attempt (2026-08-26, exit 70) and a second failed
+  attempt (2026-08-27, exit 69 upstream_error, body paste never occurred), the automation
+  fix landed (`dd83be1`, bounded nonce-window poll) and a no-send diagnostic passed the full
+  flow. The operator authorized attempt 3, watched the compose auto-send, and delivery was
+  oracle-verified on both the sent and inbox sides (one self-addressed message, sandbox
+  engaged). Test items were cleaned by exact id. Evidence: Asana `GID-REDACTED`.
+  The original request below is retained verbatim for append-only provenance; it is not a live
+  instruction or authorization, and D3 is closed.
 - **Filed:** 2026-08-02 (carried from task #34)
 - **Category:** operator-present verification
 
@@ -616,6 +624,11 @@ honestly rather than silently claiming universal coverage. This entry is the dec
 - **Evidence amendment (2026-08-23):** The status sentence above is superseded as to live evidence
   and remaining tasks. D4 is closed with a permanent never-live-exercised asterisk; D3 and D14
   remain open operator-present tasks; D2 remains the operator-only terminal gate.
+- **Evidence amendment (2026-08-27):** The 2026-08-23 amendment above is superseded as to D3 and
+  D14: both were live-validated operator-present on 2026-08-27 (Asana `GID-REDACTED` and
+  `GID-REDACTED`); the 2026-08-19 parenthetical at the end of the "Items 1–3 are doc-only"
+  paragraph below is likewise superseded — the D14 asterisk is discharged. D4's permanent
+  never-live-exercised asterisk and D2's operator-only terminal gate are unchanged.
 - **Filed:** 2026-08-18, after the Q17 re-audit (`a gitignored local re-audit artifact`, a gitignored
   local artifact; the tracked summary is the Q17 row in `docs/COMPLETION-LOOP.md`).
 - **Category:** the terminal go/no-go — decisions here gate closing the domain Asana parents and,
@@ -765,7 +778,19 @@ against a live group. No live group was created or messaged, and no live group s
 
 ## D14 — Operator-present first exercise of `mail rules` delete
 
-- **Status:** OPEN — **operator-present task; no agent may exercise the delete action.**
+- **Status:** **APPLIED 2026-08-27** — first live exercise done operator-present.
+- **Resolution:** The agent prepared a DISABLED, uniquely-tokened `apple-cli-test` rule
+  (created at index 4; the 3 pre-existing real rules untouched) plus one inert labeled
+  draft, verified targeting with a delete dry-run, and stopped. The operator, present and
+  watching, explicitly directed the execution of `mail rules delete 4` in real time
+  (amending the who-presses-the-key step while retaining supervision and per-command
+  consent). The envelope's fail-loud readback matched the test rule verbatim; the post-
+  delete list showed exactly the 3 original real rules. All created test items were cleaned
+  by exact identifier via the MCP oracle. Evidence: Asana `GID-REDACTED`. The in-session
+  amendment was specific to that one supervised command and is NOT a standing authorization for
+  agent-executed destructive Mail operations — AGENTS.md's DANGEROUS ACTIONS list still governs.
+  The original text below is retained verbatim for append-only provenance; it is not a live
+  instruction or authorization, and D14 is closed.
 - **Filed:** 2026-08-19
 - **Category:** operator-present verification
 

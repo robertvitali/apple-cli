@@ -413,3 +413,21 @@ XL only if all of rules + templates + analytics + HTML + dual-targeting are take
 - mail-app-cli — https://github.com/intelligrit/mail-app-cli (10★, MIT, Go, no releases) + review: https://robertmelton.com/posts/mail-app-cli-automation/
 - email-cli — https://github.com/joshuaswanson/email-cli (0★, Python, no releases, license unspecified).
 - Envelope Index background — `~/Library/Mail/V{9,10,11}/MailData/Envelope Index` (SQLite).
+
+## 8. Validation evidence (live write surfaces)
+
+Value-free record of the operator-present live validations that discharged Mail's
+"wired, not live-validated" asterisks (details: `HUMAN-DECISIONS.md` D3/D14 and the
+Asana tasks cited there).
+
+- `send --gui-send` — **live-validated 2026-08-27** (D3, Asana `GID-REDACTED`): one
+  self-addressed HTML send executed via GUI keystroke automation with the sandbox engaged;
+  delivery oracle-verified on both the sent and inbox sides (same internet message id);
+  test items cleaned by exact id. Two earlier failed attempts (exit 70; exit 69
+  upstream_error) preceded the `dd83be1` window-binding fix.
+- `rules delete` — **first live exercise 2026-08-27** (D14, Asana `GID-REDACTED`):
+  an agent-created, DISABLED, uniquely-tokened `apple-cli-test` rule was deleted by index
+  operator-present; the envelope's fail-loud readback matched the rule name verbatim and
+  the pre-existing real rules were untouched.
+- `send --group` equivalent for Mail does not exist; the Messages-domain D4 asterisk lives
+  in `messages.md` §"send_message --group".

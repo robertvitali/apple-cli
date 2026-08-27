@@ -23,7 +23,9 @@ with the Apple MCP servers they replace.
   envelope both carry an advisory `warnings` entry naming the action; the sandbox additionally
   refuses to wire `delete` and ENABLE a rule in the same command. `forward_to` remains refused in
   both modes (see Divergences). Automated coverage is unit + dry-run only: by the same ruling, no
-  agent may live-verify a delete rule, so **the first live exercise is yours**.
+  agent may live-verify a delete rule, so **the first live exercise is yours**. (Completed
+  2026-08-27: the first live exercise ran operator-present against an agent-created disabled
+  `apple-cli-test` rule; readback matched and the pre-existing rules were untouched — D14.)
 - `notes search`, `notes selected`, and `notes shared` now emit the oracle's `content` and `tags`
   keys (hardcoded `""` / `[]`, exactly as `apple-notes-mcp@2.7.5` emits them). Strict-parity
   ruling D6/NOTES-M1; zero added cost — the oracle never fetches these either.
