@@ -17,8 +17,10 @@
 > local and remote branches and all worktrees were retired by operator direction. Future work is
 > main-only unless the operator explicitly reverses that ruling.
 > The rewrite is containment, not erasure: it cannot reach existing clones, forks, or caches.
-> PII-bearing D9 rollback artifacts remain temporarily retained, and the pre-1.0 re-audit and
-> cleanup gate (Asana `GID-REDACTED`) remains OPEN and blocks item 4 below.
+> Update 2026-08-29: the pre-1.0 re-audit and cleanup gate (Asana `GID-REDACTED`) is CLOSED —
+> zero residual hits after three further operator-authorized targeted rewrite passes; all
+> rollback artifacts destroyed and verified absent. Item 4 below is now blocked only by its own
+> operator-present hard stop.
 
 **TL;DR (2026-07-16 snapshot).** All six domains are implemented to strict-superset MCP parity, each
 independently reviewed (3-pass OMC) and verified green, then aggregated onto the
@@ -173,8 +175,8 @@ Ordered. Nothing here is safe to do unattended, which is why it waited.
 3. **Consolidate on `main`.** Completed 2026-08-23 after a verified history rewrite. The
    integration and six domain branches/worktrees were then retired; `main` is the sole branch.
 4. **HARD STOP — D2, operator-present only.** No agent may tag `1.0.0` or unregister any MCP
-   server. This is additionally blocked by the pre-1.0 PII re-audit gate (Asana
-   `GID-REDACTED`). After both gates clear, follow the retirement gate in `docs/DESIGN.md`.
+   server. The pre-1.0 PII re-audit gate (Asana `GID-REDACTED`) cleared on 2026-08-29; only
+   the operator-present hard stop remains. Follow the retirement gate in `docs/DESIGN.md`.
 5. **`SQLiteReader immutable=1` (M2).** A Messages-specific perf/PII hardening
    (the current `copyToTemp` of chat.db leaves a full copy in `$TMPDIR` if the
    process dies). Left for its own review because it touches the shared reader's

@@ -46,7 +46,7 @@ same day under the closure-verification protocol).
 | D6 | Eight parity posture calls | **APPLIED** | CONTACTS-L4 delete claim · NOTES-M1 restore 4 keys · NOTES-L4 structural divergence · gap10 keep opt-in body · **gap25 wire delete-rules live** · extra20 open by default |
 | D7 | Committed phone number in public history | **ANSWERED** | "B then A" — superseded by D9, which covers the same number plus more |
 | D8 | Which Mail oracle wins on a safety limit | RESOLVED | **Safety wins** — stricter limit wins on A/B conflicts; landed in `86728f4` |
-| D9 | Personal data published to a public repo | **APPLIED 2026-08-23** | Repo private; verified rewrite published to `main`; other refs retired; residual local artifacts gated by Asana `GID-REDACTED` |
+| D9 | Personal data published to a public repo | **APPLIED 2026-08-23; amended 2026-08-29** | Repo private; verified rewrite published; pre-1.0 PII gate CLOSED after three operator-authorized targeted rewrite passes removed all audit-surfaced residuals; zero hits remain; no rollback artifacts retained |
 | D10 | Search/find-contact length caps | WITHDRAWN | Should not have been filed |
 | D11 | What `schema_version` tracks | **APPLIED** | **Shape only** — value breaks ride the MAJOR + CHANGELOG; both policy lines rewritten to agree |
 | D12 | `notes save-attachment` can write to `~/.ssh` | **RATIFIED** | Keep strict Notes-oracle parity; residual documented, fleet stays intentionally inconsistent |
@@ -108,7 +108,8 @@ make without argument if you prefer strict parity.
 
 - **Status:** OPEN — **HARD STOP. The driver will never do this autonomously.**
 - **Blocked by:** Asana `GID-REDACTED`, the pre-1.0 PII re-audit and retained-artifact cleanup
-  gate, must be verified and closed first.
+  gate — SATISFIED: verified and closed 2026-08-29. Only this entry's own operator-present hard
+  stop remains.
 - **Filed:** 2026-08-02 (standing instruction from an earlier session, recorded here so it is not
   lost to context)
 - **Category:** irreversible / outward-facing
@@ -370,6 +371,23 @@ everywhere instead of asking again.
 **Status:** **APPLIED 2026-08-23 — "B then A", including rewritten `main`.** · **Filed:** 2026-08-03 · **Step B is DONE:** the repo was made **private** on 2026-08-19 (containment). **Step A is DONE:** the verified rewrite was published to `main`; `integration` and the six domain branches were deleted locally and remotely. A same-day value-free rescan of the former `integration` HEAD had found three MORE live leaks the earlier pass missed — the phone "redaction" had been partial rather than complete, alongside two further address leaks; all fixed in `a-fix-commit`, and a standing no-personal-data rule was added to `AGENTS.md`. ·
 **Severity:** the highest-severity entry in this file. I caused both leaks.
 
+**Amendment (2026-08-29):** the pre-1.0 PII gate (Asana `GID-REDACTED`) surfaced residuals the
+2026-08-23 rewrite had missed: two operator-own email addresses quoted in one published commit
+message, three history-only blobs with addresses at real-world domains, one real-shaped phone
+literal in historical test blobs, and — via re-reading the Status paragraph above — the
+area-code-swapped twin literal whose literal survived in historical
+occurrences (8 is the count in post-D9-rewrite reachable history; the Status paragraph's "14
+places" counted the former `integration` HEAD before that rewrite — different scopes, no
+unaccounted hits). The operator explicitly authorized targeted remediation ("option 2; don't defer any
+PII cleanup"), amending the earlier no-further-rewrite posture for that session only. Three
+targeted `git filter-repo` passes (6+1+1 replacement rules) ran in fresh clones; each verified 128
+commits preserved, HEAD tree byte-identical to the suite-tested tree, zero residual hits; `main`
+was force-pushed after each pass. Local repo reset, codex checkpoint refs deleted, reflogs
+expired, pruned; the fresh backup bundle, clones, and replacement maps were destroyed after
+verification, and the gitignored D9 handoff file was removed last. Final scan across every
+reachable blob and commit message: 0 hits for all remediated literal classes. The gate is CLOSED;
+the no-rewrite-without-fresh-explicit-instruction posture is restored.
+
 ### What is exposed
 
 **(1) Verbatim iMessage bodies.** A golden table generated from live oracle output over a real store was committed and pushed. Some of that content originated with third parties, so the disclosure was not the operator's alone to forgive. The carrying artifact is deliberately not named here.
@@ -451,6 +469,9 @@ preserved as the audit record but are superseded by this resolution. A history r
 containment, not erasure: it cannot reach existing clones, forks, or caches.
 Pre-rewrite SHAs cited in the preserved narrative are historical and unreachable from current
 `main`; they may stop resolving when Q30 removes the rollback artifacts.
+(2026-08-29: this paragraph's no-further-rewrite posture and retained-artifact description are
+superseded by the dated Amendment below — Q30 completed, artifacts removed, and the no-rewrite
+default was restored after three further operator-authorized targeted passes.)
 
 ---
 ## D10 — Parity says drop the search/find-contact length caps; measurement says they stop a hang
@@ -801,6 +822,7 @@ exercising the delete action; the operator performs that step. Afterwards, verif
 clean up only the precisely logged test IDs through the known-good MCP oracle.
 
 Never target existing real mail, use bulk or fuzzy deletion, empty trash, or perform permanent
-deletion. D14 evidence is required before the Mail parent and Q30 can close.
+deletion. D14 evidence is required before the Mail parent and Q30 can close. (Both closed:
+Mail parent 2026-08-27, Q30 2026-08-29.)
 
 ---

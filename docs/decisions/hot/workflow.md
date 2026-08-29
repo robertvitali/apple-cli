@@ -19,7 +19,9 @@ This changes only the branch topology. The independent-review, tests-green, Conv
 Commit, Asana-traceability, and frequent-push gates still apply before each direct push to
 `main`.
 
-The `1.0.0` tag and MCP retirement remain a manual operator hard stop (D2). Before that stop
+The `1.0.0` tag and MCP retirement remain a manual operator hard stop (D2). (Closed 2026-08-29:
+the audit described below ran and the gate closed with zero residual hits; the procedure text is
+retained as the record of what was required.) Before that stop
 can be reached, Asana subtask `GID-REDACTED` must re-audit reachable history and retained
 artifacts for PII. Read its notes in full before executing; they are authoritative and include the
 required verification-script rerun and repeat-the-whole-audit-on-any-hit rule. Clean up only the

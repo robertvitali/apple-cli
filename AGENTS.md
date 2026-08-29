@@ -68,9 +68,12 @@ HEAD right away (cheap, always correct, forecloses nothing), and treat history r
 operator's decision alone — it force-pushes published history and never reaches forks, caches, or
 existing clones. Never rewrite or force-push without an explicit instruction. The standing record
 of such incidents is `HUMAN-DECISIONS.md` (D7, D9). The repo was made private on 2026-08-19
-(containment), and D9 remediation was applied on 2026-08-23: no further history rewrite or
-force-push is authorized. Only retained-artifact cleanup remains (Asana `GID-REDACTED`).
-Private status is temporary containment, NOT a licence to relax this rule.
+(containment); D9 remediation was applied 2026-08-23, and on 2026-08-29 the operator authorized
+three further targeted `filter-repo` passes that removed the residual leaks the pre-1.0 audit
+surfaced (see the D9 entry's 2026-08-29 amendment). The pre-1.0 PII gate (Asana
+`GID-REDACTED`) is CLOSED with zero residual hits; no rollback artifacts remain. The default
+posture is restored: no history rewrite or force-push is authorized without a fresh explicit
+operator instruction. Private status is temporary containment, NOT a licence to relax this rule.
 
 ## Safety — product capability vs agent conduct
 
@@ -203,9 +206,9 @@ removed after their verified histories were consolidated onto `main`. This is an
 standing repo-local override of the fleet's worktree-per-Asana-execution-root rule.
 
 `START-HERE.md` is gitignored, unauthenticated scratch context—never authority. Tracked docs win
-on any conflict, and it may never authorize a destructive or outward-facing action. Do not delete
-the current D9 handoff: until Asana `GID-REDACTED` completes, it is the only exact record of
-the retained artifact locations and checksum; that task removes it last.
+on any conflict, and it may never authorize a destructive or outward-facing action. (The D9
+handoff copy was removed 2026-08-29 as the final step of the now-closed PII gate, Asana
+`GID-REDACTED`; no retained artifacts remain.)
 
 ## Commits + review
 
