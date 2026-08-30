@@ -22,7 +22,7 @@ Commit, Asana-traceability, and frequent-push gates still apply before each dire
 The `1.0.0` tag and MCP retirement remain a manual operator hard stop (D2). (Audit closed
 2026-08-29 with zero residual hits. D2 parts 1–2 EXECUTED 2026-08-30 on explicit live operator
 instruction: first release cut as `v26.0.0` under the platform-keyed scheme, and the six MCPs
-retired via private fleet-config repo `REVISION-REDACTED`. Only fleet deployment remains; the hard-stop rule
+retired via the private fleet-config repo. Only fleet deployment remains; the hard-stop rule
 itself — operator-present only — is unchanged. The procedure text below is the record of what
 was required.) Before that stop
 can be reached, Asana subtask `GID-REDACTED` must re-audit reachable history and retained

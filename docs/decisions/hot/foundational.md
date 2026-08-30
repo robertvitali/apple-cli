@@ -46,7 +46,7 @@ action (real-recipient send, deleting/mutating pre-existing real data) autonomou
 
 Tests use swift-testing (`import Testing`), run via the swiftly-managed swift.org toolchain
 (`PATH="$HOME/.swiftly/bin:$PATH"`). macOS XCTest needs full Xcode, which we avoid. Fleet
-toolchain management is tracked in the private fleet-config repo repo.
+toolchain management is tracked in the private fleet-config repo.
 
 ### EventKitCore: build once, Calendar-first
 

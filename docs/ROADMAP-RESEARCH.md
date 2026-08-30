@@ -30,7 +30,7 @@ invitations/RSVP/attendee-writes (EventKit read-only); Reminders native-flag/nat
 > attachments-save, HTML/attachment send, draft send/open, gmail-mode move). Those write-parity
 > gaps are tracked authoritatively in `CHANGELOG.md` → "Known parity gaps (Mail)".
 
-## New CLI domains to build next (verified on this macOS 26.5.1 machine)
+## New CLI domains to build next (verified on macOS 26)
 | candidate | why | feasibility |
 |---|---|---|
 | **Shortcuts** (`/usr/bin/shortcuts`) | **force-multiplier** — the ONE clean bridge to every non-scriptable thing (Focus, Home, Weather, Stocks, timers, Maps directions) | 🟢 first-party CLI |

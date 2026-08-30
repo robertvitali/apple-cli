@@ -11,7 +11,7 @@
 > `willExecute` branch — have both since landed (Q14 / Q12). The dated "202X-XX-XX — X flip
 > landed" blocks are a historical log and are left as written.
 
-**Operator decision (Robert, 2026-08-01, verbatim):** *"the apple cli should be a replacement
+**Operator decision (2026-08-01, verbatim):** *"the apple cli should be a replacement
 for the mcp. it should behave exactly like the mcp just as a cli. read, write etc."*
 
 Asana: task GID-REDACTED ("Write-model v2"), resolving the write-gate HIGH findings of

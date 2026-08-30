@@ -95,7 +95,7 @@ public enum Fuzzy {
     ///     "x" + U+3042 + "y" -> "xあy"  (Unicode LETTER: KEPT verbatim)
     ///
     /// Both halves are load-bearing, because `wRatio` branches on `lenRatio` and every one of
-    /// these changes the length differently. On the real message behind the 19-vs-18 probe-term\1divergence, dropping made the processed body 9 characters where the oracle saw 10: that
+    /// these changes the length differently. On the real message behind the 19-vs-18 probe-term    /// divergence, dropping made the processed body 9 characters where the oracle saw 10: that
     /// moved `lenRatio` from the oracle's 1.429 (10/7) to 1.286 (9/7) — both under 1.5, so the
     /// same branch — while `ratio` went from 58.82 to 62.5, crossing the 60 threshold and adding a
     /// message the oracle excluded. (Direction, since it is easy to misread: 1.286 and 62.5 are

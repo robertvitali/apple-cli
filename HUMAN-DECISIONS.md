@@ -1,4 +1,4 @@
-# HUMAN-DECISIONS.md — things only Robert can decide
+# HUMAN-DECISIONS.md — things only the operator can decide
 
 **APPEND-ONLY.** Entries are never edited in place except to flip `Status:` and append a
 `Resolution:` line with the date. Never delete an entry; a resolved decision is the audit record of
@@ -24,7 +24,7 @@ the whole queue on one answer.
 experiment, or applying a rule already written down. If it is knowable, the driver goes and knows
 it instead of asking.
 
-**Status values:** `OPEN` (waiting on Robert) · `ANSWERED` (decided, being applied) ·
+**Status values:** `OPEN` (waiting on the operator) · `ANSWERED` (decided, being applied) ·
 `APPLIED` (decision is in the code/repo) · `RATIFIED` (decided, no code change needed) ·
 `WITHDRAWN` (should not have been asked) · `SUPERSEDED`.
 
@@ -39,7 +39,7 @@ same day under the closure-verification protocol).
 | # | Topic | Status | Ruling |
 |---|---|---|---|
 | D1 | `notes delete-folder` previews by default | **RATIFIED** | Keep the preview default — `--execute` stays required on the only irreversible-and-unrecoverable write |
-| D2 | Cut the first release + retire the six MCP servers | **2 of 3 parts APPLIED 2026-08-30** | **Terminal gate. Yours alone.** Release DONE: `v26.0.0` cut, tagged, GitHub Release published (notes-length recovery was manual; workflow fixed after). Retirement DONE: all six MCPs moved to `retiredServers` in private fleet-config repo `REVISION-REDACTED`; hosts converge on their next whole-tree apply. REMAINING: fleet deployment of the binary — and the operator ruled 2026-08-30 that this is Homebrew-ONLY (a tap; the previously-scoped install script and self-update subcommand are CANCELLED), and that a RELEASE FREEZE holds until that tap actually serves `brew install apple-cli`: version stays pinned at `v26.0.0`, work lands UNRELEASED under `[Unreleased]`, do not dispatch release.yml or edit the version constant. Completing this part lifts the freeze; an explicit operator release instruction also lifts it for that release. D2 closes then |
+| D2 | Cut the first release + retire the six MCP servers | **2 of 3 parts APPLIED 2026-08-30** | **Terminal gate. Yours alone.** Release DONE: `v26.0.0` cut, tagged, GitHub Release published (notes-length recovery was manual; workflow fixed after). Retirement DONE: all six MCPs moved to `retiredServers` in the private fleet-config repo; hosts converge on their next whole-tree apply. REMAINING: fleet deployment of the binary — and the operator ruled 2026-08-30 that this is Homebrew-ONLY (a tap; the previously-scoped install script and self-update subcommand are CANCELLED), and that a RELEASE FREEZE holds until that tap actually serves `brew install apple-cli`: version stays pinned at `v26.0.0`, work lands UNRELEASED under `[Unreleased]`, do not dispatch release.yml or edit the version constant. Completing this part lifts the freeze; an explicit operator release instruction also lifts it for that release. D2 closes then |
 | D3 | Live-validate `mail send --gui-send` | **APPLIED 2026-08-27** | Live-validated operator-present: one self-addressed send executed and delivered (oracle-verified both sides), test items cleaned by exact id |
 | D4 | Live-validate iMessage group-chat send | **APPLIED 2026-08-23** | Option (b): record "wired + code-inspected, never live-validated" as a port-spec asterisk |
 | D5 | Chasing the Messages fuzzy-search recall gap | WITHDRAWN | Should not have been asked; became ordinary queue work |
@@ -58,7 +58,7 @@ same day under the closure-verification protocol).
 ## D1 — `notes delete-folder` previews by default instead of executing
 
 - **Status:** **RATIFIED 2026-08-19** — keep the preview-by-default deviation (option (a)).
-- **Resolution:** Robert ruled to keep `--execute` required. `delete-folder` is the CLI's only irreversible-AND-unrecoverable write (measured: it cascades, and cascaded notes do NOT reach Recently Deleted), so the one-command divergence from the oracle stands as a documented safety posture, same class as the `APPLE_ALLOW_EMPTY_TRASH` precedent. No code change.
+- **Resolution:** The operator ruled to keep `--execute` required. `delete-folder` is the CLI's only irreversible-AND-unrecoverable write (measured: it cascades, and cascaded notes do NOT reach Recently Deleted), so the one-command divergence from the oracle stands as a documented safety posture, same class as the `APPLE_ALLOW_EMPTY_TRASH` precedent. No code change.
 - **Filed:** 2026-08-02 (Notes write-model v2 flip, commit `ac0a7d0`)
 - **Category:** product-posture deviation
 - **One-line:** The only write that previews by default **without an oracle counterpart doing the
@@ -112,7 +112,7 @@ make without argument if you prefer strict parity.
   superseded the "1.0.0" name; operator: "let's deploy this as 26.0.0") via release.yml —
   tag + release commit pushed atomically; the Release object needed a manual re-create after
   a notes-length 422, and the workflow was fixed. (2) The six MCPs RETIRED (operator: "you
-  can sunset the apple MCPs") — private fleet-config repo `REVISION-REDACTED` moves them to `retiredServers`;
+  can sunset the apple MCPs") — the private fleet-config repo moves them to `retiredServers`;
   hosts converge on their next whole-tree apply. (3) REMAINING: fleet deployment of the
   binary + install/upgrade design, deferred by the operator to an operator-present follow-up
   session — D2 and the execution parent close after that lands.
@@ -319,7 +319,7 @@ you saying so explicitly.
 
 ## D8 — When the two Mail oracles disagree about a limit, which one wins?
 
-**Status:** RESOLVED 2026-08-18 — **SAFETY WINS.** Robert's ruling: add oracle A's `expensive_ops`
+**Status:** RESOLVED 2026-08-18 — **SAFETY WINS.** The operator's ruling: add oracle A's `expensive_ops`
 (20/60s) rate limit to `reply`, cap `draft send` (recipient cap + send-budget consumption), and
 adopt the **scoped standing rule**: *on an A-vs-B disagreement about a SAFETY limit (send rate,
 recipient caps, bulk caps on destructive ops), the stricter limit wins.* This knowingly makes the
@@ -377,18 +377,16 @@ everywhere instead of asking again.
 ---
 ## D9 — I published your personal data to this PUBLIC repo, twice, and one leak is bigger than the one I set out to fix
 
-**Status:** **APPLIED 2026-08-23 — "B then A", including rewritten `main`.** · **Filed:** 2026-08-03 · **Step B is DONE:** the repo was made **private** on 2026-08-19 (containment). **Step A is DONE:** the verified rewrite was published to `main`; `integration` and the six domain branches were deleted locally and remotely. A same-day value-free rescan of the former `integration` HEAD had found three MORE live leaks the earlier pass missed — the earlier phone "redaction" had been partial rather than complete, so the literal was still effectively real in a number of places, alongside two further address leaks; all fixed, and a standing no-personal-data rule was added to `AGENTS.md`. ·
+**Status:** **APPLIED 2026-08-23 — "B then A", including rewritten `main`.** · **Filed:** 2026-08-03 · **Step B is DONE:** the repo was made **private** on 2026-08-19 (containment). **Step A is DONE:** the verified rewrite was published to `main`; the superseded branches were deleted locally and remotely. A same-day value-free rescan found further live leaks the earlier pass had missed — one earlier "redaction" had been partial rather than complete, so the literal was still effectively real in a number of places; all fixed, and a standing no-personal-data rule was added to `AGENTS.md`. ·
 **Severity:** the highest-severity entry in this file. I caused both leaks.
 
 **Amendment (2026-08-29):** the pre-1.0 PII gate (Asana `GID-REDACTED`) surfaced residuals the
-2026-08-23 rewrite had missed: two operator-own email addresses quoted in one published commit
-message, three history-only blobs with addresses at real-world domains, one real-shaped phone
-literal in historical test blobs, and — via re-reading the Status paragraph above — the
-earlier partial phone "redaction", which had left the literal effectively real in a number
-of historical occurrences (counts differed between the pre- and post-rewrite scopes, no
-unaccounted hits). The operator explicitly authorized targeted remediation ("option 2; don't defer any
-PII cleanup"), amending the earlier no-further-rewrite posture for that session only. Three
-targeted `git filter-repo` passes (6+1+1 replacement rules) ran in fresh clones; each verified 128
+2026-08-23 rewrite had missed — some in tracked content, some history-only, and one in a
+published commit message, which is the case a file-scoped rewrite structurally cannot reach.
+This entry does not re-enumerate their classes or locations, per the note below. The
+operator explicitly authorized targeted remediation ("option 2; don't defer any
+PII cleanup"), amending the earlier no-further-rewrite posture for that session only. Targeted
+`git filter-repo` passes ran in fresh clones; each verified all
 commits preserved, HEAD tree byte-identical to the suite-tested tree, zero residual hits; `main`
 was force-pushed after each pass. Local repo reset, codex checkpoint refs deleted, reflogs
 expired, pruned; the fresh backup bundle, clones, and replacement maps were destroyed after
@@ -398,35 +396,50 @@ the no-rewrite-without-fresh-explicit-instruction posture is restored.
 
 ### What is exposed
 
-**(1) Verbatim iMessage bodies.** Building a fuzzy-match golden table, I generated test
-fixtures by running the oracle over a sample of the real Messages database, committed the
-result, and pushed it. Some of those bodies were messages other people sent, so the
-disclosure was not only the operator's to forgive.
+Two incidents put personal data — the operator's and third parties' — into tracked files and
+into a commit message. Both were remediated at HEAD and, under separate operator authorization,
+in history; the gate is closed with zero residual hits.
 
-**(2) A live account dump — worse, and I did not notice it until a reviewer swept for it.**
-A tracked live-audit dump, generated by running the CLI against real accounts, containing
-substantial personal data of the operator AND third parties in clear. It had been
-**partially** redacted, which means the PII was seen at authoring time and the pass simply
-was not finished.
+**This entry no longer re-enumerates the full inventory of what was exposed, where, and in
+which artifacts.** Assembling classes and artifacts into one list turns this record into a
+search plan for anyone holding a clone taken from before the rewrites — and a rewrite reaches
+neither clones nor forks, which is precisely that population. So the consolidated list is not
+reproduced here.
 
-**(3) Smaller, also live at HEAD until this commit:** the D7 phone number in several
-spellings across tracked files; a real third-party address used as a test fixture; and a real
-vendor email sitting under a comment that declared it synthetic — the label being the actual
-hazard, since that is what a future audit trusts and skips.
+**What that claim does NOT mean, because a label that overstates its protection is exactly
+lesson 1 below.** This is a reduction, not a guarantee. Class-level detail still exists
+elsewhere in this repo, deliberately: D7 is an open record of a phone-number leak, and the
+fixture docstrings in `PartialRatioParityTests.swift` and `MailDecodeTests.swift` state plainly
+what the original rows were. Those docstrings are a control, not an oversight — they exist to
+stop a future maintainer regenerating those fixtures from live data, which is the mistake that
+caused this entry. Removing their specificity would trade a real engineering safeguard for
+cosmetic tidiness. Read the withholding above as "this entry declines to assemble the map",
+never as "the map cannot be assembled".
 
-**(4) One leak commit's MESSAGE itself** contained a real message body and a real first name.
-This matters for the remediation: a file-level history rewrite (`filter-repo --path`) does **not**
-touch commit messages, so an operator who ran the obvious fix would verify a clean file and still
-be publishing the value. Commit messages render on the commit page and in every clone.
+The lessons below are the durable part and cost nothing to publish:
+
+1. **A "synthetic" label on real data is worse than no label.** One leak sat under a comment
+   asserting it was invented. The label is what the next audit trusts and skips, so a false one
+   converts a finding into a permanent blind spot.
+2. **A partial redaction is not a redaction.** One value had been "redacted" by an incomplete
+   transform, leaving it effectively real while *looking* handled — the same blind-spot shape as
+   the false label.
+3. **A file-path history rewrite does NOT touch commit messages.** An operator who ran the
+   obvious fix would verify a clean file and still be publishing the value, because messages
+   render on the commit page and live in every clone. Rewrites must cover messages explicitly.
+4. **Ignore artifacts by CLASS, not by known filename.** One dump was committed precisely
+   because its name matched none of the enumerated patterns.
+5. **Live oracle output is the vector.** Parity work requires running against real accounts, and
+   that output is dense with personal data; it belongs in session scratch and nowhere else.
 
 ### What this commit fixes (all at HEAD only)
 
-Every fixture implicated was regenerated as wholly synthetic and re-verified against the
-oracle at identical value; live-audit artifacts were untracked; `.gitignore` switched from
-enumerating known filenames to matching by class; every real literal was replaced with a
-reserved-range or otherwise standard placeholder in every spelling; and the false "synthetic"
-label that had hidden one of them was corrected. The specific artifacts and value classes are
-deliberately not enumerated here.
+Every fixture implicated was regenerated as wholly synthetic and re-verified against the oracle at
+identical value; live-audit artifacts were untracked; `.gitignore` switched from enumerating known
+filenames to matching by class; every real literal was replaced with a reserved-range or otherwise
+standard placeholder in every spelling; and the false "synthetic" label that had hidden one of
+them was corrected. Per the note above, the specific artifacts and value classes are not
+enumerated here.
 
 **Historical status note (superseded 2026-08-23):** Everything from the heading below through the
 "What I need from you" paragraph describes the pre-resolution state. `main` was redacted and
@@ -437,27 +450,25 @@ republished; nothing in that block remains live or grants authorization for anot
 Everything above is HEAD. **Both leaks remain in the pushed history**, and removing them means
 rewriting published history and force-pushing — destructive and outward-facing, so I stop here.
 
-**Step zero, and it expires.** Before choosing, capture
-the repo traffic page (clones + unique cloners for the exposure window)
-and the forks page. GitHub retains traffic data for
-**14 days only**, so the evidence that decides whether this needs escalation is being deleted on a
-rolling clock while this entry sits open. If a fork exists, note that going private **detaches**
-forks rather than deleting them.
+**Step zero, and it expires.** Before choosing, capture the repository's traffic and forks
+pages. The host retains that data on a short rolling clock, so the evidence that decides whether
+this needs escalation is being deleted while this entry sits open. If a fork exists, note that
+going private **detaches** forks rather than deleting them.
 
 **Verified blast radius** (I checked rather than assumed, because my first draft of this entry
-overstated it): the first leak commit was contained by the integration branch **only** — zero of
-the six domain worktrees, and **not `main`**. Same for the second. Rewriting is a small operation on
-one branch nothing else tracks, not a multi-worktree hazard.
+overstated it): both leak commits were confined to a single branch that nothing else tracked —
+not `main`, and none of the domain worktrees. Rewriting is a small operation, not a
+multi-worktree hazard.
 
 | Option | What it costs | What it actually achieves |
 |---|---|---|
-| **A. Rewrite history** (`filter-repo`, force-push `integration`) | SHAs from the earliest bad commit forward change; ~3 doc references go stale | Removes both leaks from this repo. Must ALSO rewrite commit messages, or the leak survives there. Old commits stay viewable at their URL until **GitHub Support purges cached views — a documented request, not automatic** |
+| **A. Rewrite history** (`filter-repo`, force-push) | SHAs from the earliest bad commit forward change; a few doc references go stale | Removes both leaks from this repo. Must ALSO rewrite commit messages, or the leak survives there — lesson 3 above. Old commits stay viewable at their URL until the host purges cached views, which is a request rather than something automatic |
 | **B. Make the repo private first, rewrite at leisure** | Loses public visibility while private | Closes the window now and makes A unhurried. Does **not** reach an existing fork |
-| **C. Accept it** | Nothing | Not defensible -- the second leak carries third-party data, which is not the operator's alone to accept |
+| **C. Accept it** | Nothing | Not defensible — the second leak carries third-party data, which is not the operator's alone to accept |
 
 **My recommendation: B, then A.** Going private is instant and reversible; the rewrite is then
 scheduled rather than an emergency. I would not have said this before checking the blast radius —
-A alone is genuinely small here — but (2) is severe enough that stopping the exposure beats
+A alone is genuinely small here — but the second leak is severe enough that stopping the exposure beats
 sequencing elegance.
 
 **One thing I got wrong and should own:** my first draft of this entry said "HEAD is already
@@ -629,7 +640,7 @@ the actual deliverable here, not the choice for this one commit.
 ## D12 — Notes `save-attachment` can write to `~/.ssh` etc. (matches its oracle); Mail/Contacts refuse
 
 - **Status:** **RATIFIED 2026-08-19** — keep option (b), strict Notes-oracle parity.
-- **Resolution:** Robert ruled to keep `notes save-attachment` matching its oracle verbatim, so it can still target `~/.ssh` and friends; the fleet stays intentionally inconsistent (Mail and Contacts block credential dirs because THEIR oracles do). The residual stays documented in `PathConfinement.swift` + the Q13 CHANGELOG entry. No code change.
+- **Resolution:** The operator ruled to keep `notes save-attachment` matching its oracle verbatim, so it can still target `~/.ssh` and friends; the fleet stays intentionally inconsistent (Mail and Contacts block credential dirs because THEIR oracles do). The residual stays documented in `PathConfinement.swift` + the Q13 CHANGELOG entry. No code change.
 - **Filed:** 2026-08-18 (Q13 review — critic finding on the shared write-confinement promotion)
 - **Category:** parity-vs-safety posture call
 - **One-line:** `apple notes save-attachment --path ~/.ssh/authorized_keys --execute` is **accepted**
@@ -762,7 +773,7 @@ time against real accounts.
 3. **Greenlight (or wave off) the cheap fast-follows** — I can land them behind the usual gates.
 4. **Then, and only then, D2** — tag 1.0.0 + retire the MCPs. Still yours alone; the loop stops here.
 
-### RULINGS (Robert, 2026-08-18 — one at a time)
+### RULINGS (operator, 2026-08-18 — one at a time)
 
 1. **REM-11 → RATIFY** structured `url` field (documented in `docs/port-specs/calendar-reminders.md`).
 2. **REM-08 → RATIFY** fail-closed `--due` reject (documented).

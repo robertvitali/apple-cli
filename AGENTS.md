@@ -26,7 +26,7 @@ The authoritative per-domain capability matrix + port spec lives in
 ## Parity is verified against the live MCP (the oracle)
 
 **RETIRED 2026-08-30:** the six Apple MCPs were retired after `v26.0.0` shipped
-(private fleet-config repo `REVISION-REDACTED`); hosts converge on their next whole-tree apply, so the
+(in the private fleet-config repo); hosts converge on their next whole-tree apply, so the
 oracle tools may still answer on a not-yet-converged host but MUST NOT be relied on —
 and are gone once converged. Parity is now a FROZEN, recorded claim (the
 `docs/port-specs/` matrices + the audit trail through D13/Q17), not a re-runnable live

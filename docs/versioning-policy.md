@@ -40,8 +40,7 @@ actually says (with file paths); sections 3–7 are the synthesized recommendati
 ## 1. What gstack defines
 
 gstack is installed on this machine as a Claude Code / cross-CLI skill suite. Its
-release contract lives in the **`ship` skill**:
-`~/.claude/skills/gstack/ship/SKILL.md`.
+release contract lives in the **`ship` skill**.
 
 ### 1.1 Four-digit version scheme
 
@@ -319,7 +318,7 @@ Define "strict superset / 100% parity" as a **testable checklist**, not a vibe:
   drop the MCP?" is identical to "is the CLI a strict superset?". Making that the
   1.0 line means the version number directly answers the retire question — `1.0.0`
   literally *means* "safe to retire the MCP." (The fleet already treats
-  MCP-capability loss as serious: `PRIVATE-PATH-REDACTED` — dropping
+  MCP-capability loss as serious: a decision record in the private fleet-config repo — dropping
   apple-contacts "breaks the graph at the most-referenced node.")
 - **It matches SemVer's own 1.0 guidance.** SemVer FAQ: *"If you have a stable API
   on which users have come to depend, you should be 1.0.0."* Agents (the users)
@@ -483,7 +482,7 @@ formula in a personal tap (e.g. `robertvitali/tap`) and add
 - **Version + SHA determinism** — the formula pins the release tarball by
   `url` (the `vX.Y.Z` tag) + `sha256`. The git tag ↔ formula map is 1:1; a moved
   tag can't change what installs (sha256 mismatch fails closed). The Brewfile line
-  itself is SHA-pinned by the private fleet-config repo commit that edits it (the whole
+  itself is SHA-pinned by the private fleet-config repo's commit that edits it (the whole
   repo is chezmoi-source-controlled).
 - **macOS-native** — brew is already the fleet package manager on the
   `/opt/homebrew` Apple-Silicon path; these are macOS-only tools.
@@ -554,7 +553,7 @@ review/test gates. Run per CLI at each release boundary:
 **Distribute (fleet converge)**
 11. Update the tap formula (`url`@`vX.Y.Z` + new `sha256`, `version=X.Y.Z`); bump the
     `brew "…/<cli>"` line (or the `cli-repo-pins.yaml` `sha`+`fetch_ref`) in
-    private fleet-config repo. This edit rides the normal commit-gates + HARD-GATE 7
+    the private fleet-config repo. This edit rides the normal commit-gates + HARD-GATE 7
     apply confirmation.
 12. Repoint / smoke-test all three agent CLIs (Claude Code, Codex, Antigravity)
     against the new version.
@@ -568,11 +567,11 @@ review/test gates. Run per CLI at each release boundary:
 ## 8. Sources
 
 **Local — gstack** (installed skill suite)
-- `~/.claude/skills/gstack/ship/SKILL.md` — Step 12 version bump
+- gstack's ship skill — Step 12 version bump
   (4-digit `MAJOR.MINOR.PATCH.MICRO`, lines 2498–2560), auto-decide bump levels
   (2500–2506), stop-conditions (744, 754), queue-aware pick (2510–2534),
   idempotency (2441), Step 13 CHANGELOG generation, `## [X.Y.Z.W] - YYYY-MM-DD`.
-- `~/.claude/skills/gstack/CHANGELOG.md` (format reference).
+- gstack's changelog (format reference).
 
 **Local — ollama-marshal** (`~/path/to/local/resource`)
 - `CLAUDE.md:255-337` — "Versioning" section (SemVer declaration, pre/post-1.0
@@ -583,15 +582,15 @@ review/test gates. Run per CLI at each release boundary:
   source of truth).
 - Git tags `v0.1.0 … v0.6.6` (`git -C ~/path/to/local/resource tag`).
 
-**Local — fleet pin/converge machinery** (`private fleet-config repo`)
+**Local — fleet pin/converge machinery** (private fleet-config repo)
 - `.chezmoidata/skill-repo-pins.yaml` — SHA (`sha`, 40-hex) + `fetch_ref` +
   `pin_epoch` pin schema; converged by `lib/skill-pin-converge.sh`.
 - `.chezmoidata/plugin-pins.yaml` — marketplace `sha` + `realized_version`
   (H1 pin-the-marketplace / H2 verify-realized, fail-closed).
 - `Brewfile.tmpl` + `brew-bundle` software-lane converge;
-  `private fleet-config repo:docs/decisions/hot/mcp.md`
+  a fleet-config decision record on MCP capability loss
   (apple-suite parity rationale — dropping an MCP "breaks the graph"),
-  `PRIVATE-PATH-REDACTED` (parity-superset precedent).
+  and one on the brew parity-superset precedent.
 - `AGENTS.md` — Conventional Commits → git-cliff; cross-CLI parity north star
   (Claude ↔ Codex ↔ agy from one canonical source).
 
