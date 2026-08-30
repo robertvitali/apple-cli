@@ -6,9 +6,9 @@ built so AI CLIs (and humans) can drive Apple apps from the command line instead
 of a stack of always-on MCP servers.
 
 > Status: **pre-release, in active development.** Each domain is built to a
-> strict superset of the Apple MCP server it replaces. Versioning is
-> platform-keyed: the binary cuts `v26.0.0` (macOS 26) as its first release once
-> all six domains reach verified parity; MINOR = features, PATCH = fixes.
+> strict superset of the Apple MCP server it replaces; the binary cuts its first
+> release (`v26.0.0`) once all six domains reach verified parity. See
+> [Versioning](#versioning) below.
 
 ## Domains
 
@@ -36,6 +36,27 @@ swift build            # build the `apple` binary
 swift test             # logic-tier unit tests (swift-testing)
 bats -r bats/          # CLI smoke tests
 ```
+
+## Versioning
+
+Versions are **platform-keyed**, not classic SemVer (tags carry a `v` prefix:
+`v26.0.0`):
+
+| Digit | Meaning | Example |
+|---|---|---|
+| **MAJOR** | The macOS major this release is built and validated against | `26.x.y` = macOS 26; `27.0.0` lands when macOS 27 support is adopted |
+| **MINOR** | Feature additions (and any breaking-flagged change) | `26.1.0` |
+| **PATCH** | Bug fixes, docs, small non-feature updates | `26.0.1` |
+
+MAJOR is a validation target, not a deployment minimum — the binary currently
+runs on macOS 14+ (`Package.swift` declares the minimum independently). Breaking
+changes to the agent-facing JSON contract never bump MAJOR — they bump the
+envelope's `schema_version` and ship in at least a MINOR flagged `BREAKING:` in
+the [CHANGELOG](./CHANGELOG.md). At runtime, `apple version` emits both
+`version` and `schema_version` as JSON (`apple --version` prints the bare
+string). Release binaries are attached to
+[GitHub Releases](https://github.com/robertvitali/apple-cli/releases). Full
+policy: [`docs/versioning-policy.md`](./docs/versioning-policy.md).
 
 ## Output contract
 
