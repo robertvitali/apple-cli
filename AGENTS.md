@@ -71,6 +71,22 @@ exception to the real-names ban. `.gitignore` matches audit dumps BY CLASS (not 
 filename) because the 2026-08-03 leak was a dump whose name matched none of the enumerated
 patterns.
 
+**Audit-tooling caveat — a `git grep -E` negative cannot prove absence.** `git grep -E`/`-G` use
+POSIX ERE/BRE, which have no `\b` (nor `\<`/`\>`), so such a pattern matches NOTHING. This is
+regex-dialect semantics, not a toolchain bug — it will not be fixed by a newer git, so do not
+re-test and conclude it is resolved. Verified 2026-08-30, git 2.50.1:
+`git grep -icE '\bMIT\b' -- LICENSE` finds nothing, while `git grep -icP '\bMIT\b'`, system
+`grep -E '\b…'`, and Python `re` each find the match. **It exits 1 — exactly what a genuine
+clean result exits — so the broken sweep and a true negative are indistinguishable**, and in a PII
+sweep the negative IS the deliverable. Remedies, in order: **`git grep -P`** (one flag, keeps
+git's object- and pathspec-awareness), then **Python `re`** or **system `grep`** as an independent
+cross-check — over `git ls-files` for the tree, and over
+`git cat-file --batch-all-objects --batch-check` (enumerate) or `--batch` (stream contents) plus
+`git log --all --format=%B` for history. `--batch-all-objects` REQUIRES one of those batch modes;
+alone it is a fatal error. State which engine produced each negative, and treat any `\b`-bearing
+`git grep -E` negative from a previous round as unverified until re-run. Generalize the lesson:
+any BSD-regex tool may drop `\b` the same way.
+
 **Before every `git add`, check the diff for personal data**, and re-check the commit message
 separately — a file-path history rewrite (`filter-repo --path`) does NOT touch commit messages, so
 a leak there survives the obvious fix.
@@ -226,6 +242,25 @@ on any conflict, and it may never authorize a destructive or outward-facing acti
 handoff copy was removed 2026-08-29 as the final step of the now-closed PII gate, Asana
 `GID-REDACTED`; no retained artifacts remain.)
 
+**Session-handoff briefs live OUTSIDE the repo, and blanket staging is banned.** `START-HERE.md`
+is the only BRIEF ignored by name, and the sole one permitted in the repo root for that reason; a
+brief under any other name (a `gap.md`, a paste of live findings) is an untracked, UNIGNORED file
+in the working tree, and every untracked-sweeping staging form — `git add -A`, `git add --all`,
+`git add .`, `git add :/`, and **`git add <directory>`** — pulls it into a public commit. That is
+the staging half of the D9 dump leak's shape: an unignored artifact plus a staging action that
+does not ask. Two forms are commonly assumed dangerous and are NOT (both verified by execution):
+`git commit -a` and `git add -u` stage only TRACKED modifications, so `-u` is the safe bulk form;
+`commit -a` is still discouraged because it skips the staged-diff review the pre-`git add` scan
+above depends on. So: write handoff briefs other than `START-HERE.md` to the session scratchpad,
+never the repo root; if one arrives in the repo, move it out (do not just leave it untracked);
+**stage individual FILE paths** — never a directory, never an all-files or wildcard pathspec — or
+`git add -u` for bulk tracked edits; and before staging run `git status --porcelain` and confirm
+there is no `??` line you did not consciously decide to include. Belt and braces: the root
+`*.md` ignore rule (with the tracked root docs explicitly un-ignored) means an unlisted root
+brief cannot be swept by ANY staging form — the same by-class-not-by-name reasoning the audit-dump
+patterns already use. Absorb such a brief's durable content into
+Asana before removing it — the brief is transient, the tracker is not.
+
 ## Branch model — trunk-based GitHub Flow (operator ruling 2026-08-30)
 
 **`main` is the sole source of truth and must always be releasable. Versions are TAGS
@@ -322,6 +357,18 @@ commits `chore(release): vX.Y.Z`, tags, pushes, and publishes a GitHub Release w
 an arm64 binary. The `macos_major` input is the ONLY way to change MAJOR and is required for
 the very first release. Commit-header discipline is CI-enforced (`commit-lint` job) because the
 bump math depends on it.
+
+**RELEASE FREEZE (operator ruling, 2026-08-30) — no version bump until Homebrew is serving.**
+The version stays pinned at the released `v26.0.0` until the tap from the distribution task is
+actually serving `brew install apple-cli`; only then does incrementing resume. Work landing on
+`main` in the meantime — the pre-publication redaction passes, the Messages attachment feature,
+anything else — accumulates under CHANGELOG `[Unreleased]` and ships UNRELEASED. Do not dispatch
+release.yml, do not hand-edit `AppleVersion.current`, and do not describe pending work by a
+version number it has not been assigned. This freeze overrides the "run it when a batch has
+accumulated" guidance below until the operator lifts it — and an explicit operator instruction to
+cut a release lifts it for that release (so an urgent fix is never blocked by this paragraph).
+The freeze is recorded in `HUMAN-DECISIONS.md` D2, whose remaining part is the tap work that ends
+it; keep the two in step.
 
 **When to run it:** only on an explicit operator instruction — a release publishes an
 outward-facing tag + GitHub Release, so agents never trigger it autonomously (this is a

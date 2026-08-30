@@ -62,3 +62,17 @@ live-dumps/
 node_modules/
 package-lock.json
 .omx/
+
+# Root-level briefs BY CLASS, not by name. Any root-level *.md that is not explicitly
+# un-ignored below is invisible to every form of `git add` — including `git add .` and
+# `git add <dir>`, which DO sweep untracked files. This is the technical control behind the
+# "session-handoff briefs live outside the repo" rule in AGENTS.md: a brief that lands here
+# under an arbitrary name (a gap.md, a paste of live findings) cannot be staged by accident.
+# Same by-class reasoning as the audit-dump patterns above. Adding a legitimate new root
+# document means adding its negation here, deliberately.
+/*.md
+!/README.md
+!/AGENTS.md
+!/CLAUDE.md
+!/CHANGELOG.md
+!/HUMAN-DECISIONS.md

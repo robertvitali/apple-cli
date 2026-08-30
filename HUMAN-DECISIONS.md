@@ -39,7 +39,7 @@ same day under the closure-verification protocol).
 | # | Topic | Status | Ruling |
 |---|---|---|---|
 | D1 | `notes delete-folder` previews by default | **RATIFIED** | Keep the preview default — `--execute` stays required on the only irreversible-and-unrecoverable write |
-| D2 | Cut the first release + retire the six MCP servers | **2 of 3 parts APPLIED 2026-08-30** | **Terminal gate. Yours alone.** Release DONE: `v26.0.0` cut, tagged, GitHub Release published (notes-length recovery was manual; workflow fixed after). Retirement DONE: all six MCPs moved to `retiredServers` in private fleet-config repo `REVISION-REDACTED`; hosts converge on their next whole-tree apply. REMAINING: fleet deployment of the binary + install/upgrade design (operator-present follow-up) — D2 closes then |
+| D2 | Cut the first release + retire the six MCP servers | **2 of 3 parts APPLIED 2026-08-30** | **Terminal gate. Yours alone.** Release DONE: `v26.0.0` cut, tagged, GitHub Release published (notes-length recovery was manual; workflow fixed after). Retirement DONE: all six MCPs moved to `retiredServers` in private fleet-config repo `REVISION-REDACTED`; hosts converge on their next whole-tree apply. REMAINING: fleet deployment of the binary — and the operator ruled 2026-08-30 that this is Homebrew-ONLY (a tap; the previously-scoped install script and self-update subcommand are CANCELLED), and that a RELEASE FREEZE holds until that tap actually serves `brew install apple-cli`: version stays pinned at `v26.0.0`, work lands UNRELEASED under `[Unreleased]`, do not dispatch release.yml or edit the version constant. Completing this part lifts the freeze; an explicit operator release instruction also lifts it for that release. D2 closes then |
 | D3 | Live-validate `mail send --gui-send` | **APPLIED 2026-08-27** | Live-validated operator-present: one self-addressed send executed and delivered (oracle-verified both sides), test items cleaned by exact id |
 | D4 | Live-validate iMessage group-chat send | **APPLIED 2026-08-23** | Option (b): record "wired + code-inspected, never live-validated" as a port-spec asterisk |
 | D5 | Chasing the Messages fuzzy-search recall gap | WITHDRAWN | Should not have been asked; became ordinary queue work |
@@ -473,8 +473,9 @@ I will land a redacted version and keep the detail out-of-band.
 **Related:** **D7** is the same phone number. I mischaracterised it above as "the same history
 problem" — it was not; it was live at HEAD in several places (and still was on `main`, which that
 worktree could not reach). D7's own recommendation was "B now" — redact at HEAD — and that had never
-been done, in the very file I was editing. This commit does it for `integration`;
-**`main` still carries it**.
+been done, in the very file I was editing. This commit did it for `integration`;
+**`main` still carried it at the time of writing** — redacted there on 2026-08-23, and
+re-synthesized to a reserved-range literal in the 2026-08-30 passes (see Resolution below).
 
 **What I need from you:** "B then A", "A now", or "leave it" — and separately, whether to redact
 `main`. I will not rewrite or force-push anything until you answer.
@@ -670,8 +671,7 @@ honestly rather than silently claiming universal coverage. This entry is the dec
   `GID-REDACTED`); the 2026-08-19 parenthetical at the end of the "Items 1–3 are doc-only"
   paragraph below is likewise superseded — the D14 asterisk is discharged. D4's permanent
   never-live-exercised asterisk and D2's operator-only terminal gate are unchanged.
-- **Filed:** 2026-08-18, after the Q17 re-audit (`a gitignored local re-audit artifact`, a gitignored
-  local artifact; the tracked summary is the Q17 row in `docs/COMPLETION-LOOP.md`).
+- **Filed:** 2026-08-18, after the Q17 re-audit (a gitignored local artifact; the tracked summary is the Q17 row in `docs/COMPLETION-LOOP.md`).
 - **Category:** the terminal go/no-go — decisions here gate closing the domain Asana parents and,
   ultimately, D2 (tag 1.0.0 + retire the MCPs).
 
