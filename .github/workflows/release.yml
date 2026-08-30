@@ -41,6 +41,7 @@ concurrency:
 jobs:
   release:
     runs-on: macos-15
+    timeout-minutes: 45
     steps:
       - name: Refuse non-main refs (loud, not silently skipped)
         env:
@@ -51,7 +52,7 @@ jobs:
 
       # TODO(hardening): pin to a commit SHA + add Dependabot (same posture as ci.yml).
       # persist-credentials stays on because the push step needs the token; the build steps
-      # between checkout and push run only repo-pinned code (Package.resolved) + brew bats.
+      # between checkout and push run only repo-pinned code (Package.resolved).
       - uses: actions/checkout@v4
         with:
           fetch-depth: 0
@@ -135,13 +136,14 @@ jobs:
           grep -q "^## \[$NEW\] " CHANGELOG.md
           if git rev-parse "v$NEW" >/dev/null 2>&1; then echo "tag v$NEW already exists"; exit 1; fi
 
-      - name: Build + full test suite (tests-green gate)
+      # bats does not run on hosted runners (environment-dependent + ~75 min; see ci.yml).
+      # The bats tier is enforced by the LOCAL canonical pre-push suite, which must be green
+      # on the tip being released (AGENTS.md release prerequisites).
+      - name: Build + swift test (hosted tests-green gate)
         run: |
           set -euo pipefail
           swift build -v
           swift test -v
-          brew install bats-core
-          bats -r bats/
 
       - name: Release build + runtime version check + checksummed artifact
         run: |

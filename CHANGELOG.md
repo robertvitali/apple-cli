@@ -2085,7 +2085,8 @@ was one item away from parity were understated.
   command stubs (Messages, Mail, Contacts, Notes, Calendar, Reminders); shared
   `AppleKit` (JSON output envelope + `schema_version`, error/exit-code taxonomy,
   AppleScript runner, test-mode) and shared `EventKitCore` (Calendar + Reminders).
-- CI (GitHub-hosted macOS): `swift build` + `swift test` + `bats` smoke tests.
+- CI (GitHub-hosted macOS): `swift build` + `swift test` (the `bats` smoke tier is
+  local-only — hosted runners lack the real Apple state it exercises).
 - Design + per-domain port specs under `docs/`.
 - **Read parity** across all six domains, verified against the live Apple MCP oracles
   (CLI JSON is a field-superset of every MCP field).

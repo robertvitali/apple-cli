@@ -19,6 +19,7 @@ jobs:
     # This repo is private, so do not assume hosted-runner minutes are free. Uses
     # pull_request, NOT pull_request_target — forked PRs get a read-only token and no secrets.
     runs-on: macos-15
+    timeout-minutes: 30
     steps:
       - uses: actions/checkout@v4   # TODO(hardening): pin to a commit SHA + add Dependabot
 
@@ -31,21 +32,20 @@ jobs:
       - name: Unit tests (logic tier — swift-testing, no TCC / Apple permissions required)
         run: swift test -v
 
-      - name: Install bats
-        run: brew install bats-core
-
-      - name: CLI smoke tests (bats)
-        run: bats -r bats/
-
-      # NOTE: the LIVE end-to-end tier (drives EventKit/Contacts/Mail/Notes/Messages against
-      # real data under track-and-cleanup) is NOT run in CI — it needs a real Mac with granted
-      # TCC permissions. It must NEVER be wired to a pull_request trigger from a fork.
+      # NOTE: the bats CLI-smoke tier does NOT run on hosted CI (measured 2026-08-30, run
+      # 33288975170): observed failures were Mail tests needing a real Envelope Index (e.g.
+      # mail search --sort exit codes), at ~10s/test (cancelled at 205/445, ~41 min); the
+      # untested remainder (chat.db, AppleScript surfaces) is expected to fail the same way.
+      # bats remains part of the LOCAL canonical pre-push suite (AGENTS.md "Toolchain +
+      # testing") on a real Mac. The LIVE end-to-end tier likewise never runs in CI — it
+      # needs granted TCC — and must NEVER be wired to a pull_request trigger from a fork.
 
   # The release workflow (release.yml) computes bump levels from Conventional Commit
   # headers, so malformed headers silently corrupt version math. This job hard-fails
   # any pushed commit whose subject is not Conventional (git-mechanical forms exempt).
   commit-lint:
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v4
         with:

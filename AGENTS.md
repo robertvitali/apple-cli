@@ -192,8 +192,10 @@ fresh suite instance per test, so its `deinit` reclaims them. Hand-rolled helper
 `apple-cli-*` files accumulated in the shared temp root, growing 25 per `swift test`, in the very
 repo whose product bug was leaking into that same directory.
 
-Three test tiers: **logic** (swift-testing, pure — CI), **CLI smoke** (bats,
-invokes the binary — CI + local), **live** (drives the real Apple frameworks
+Three test tiers: **logic** (swift-testing, pure — CI + local), **CLI smoke** (bats,
+invokes the binary — LOCAL ONLY: measured 2026-08-30, hosted runners lack the real
+Apple state many tests exercise, failing environment-dependently and crawling at
+~10s/test), **live** (drives the real Apple frameworks
 against the sandbox — real Mac with granted TCC, not CI). Add golden-JSON
 snapshot tests + an exit-code matrix per domain, and MCP-diff parity tests.
 
@@ -256,7 +258,8 @@ CHANGELOG headings — the release workflow owns both.
 bump from Conventional Commit subjects since the last tag (`feat:` present → MINOR, else
 PATCH; `bump` input can force a level), rewrites `AppleVersion.current`, moves CHANGELOG
 `[Unreleased]` under `## [X.Y.Z] - date`, enforces a drift gate (constant == changelog == tag),
-runs the full build+test suite (aborts on red), verifies the built binary's `--version`, then
+runs the hosted build + logic-tier test gate (aborts on red; the bats tier is local-only — see
+Toolchain + testing), verifies the built binary's `--version`, then
 commits `chore(release): vX.Y.Z`, tags, pushes, and publishes a GitHub Release with notes and
 an arm64 binary. The `macos_major` input is the ONLY way to change MAJOR and is required for
 the very first release. Commit-header discipline is CI-enforced (`commit-lint` job) because the
@@ -268,9 +271,12 @@ conduct rule, not a technical control: anyone with repo write access CAN dispatc
 discipline lives here). Run it when a batch of merged work has accumulated under
 `[Unreleased]` and the operator calls the release: `gh workflow run release.yml` (add
 `-f bump=minor|patch` to override auto, or `-f macos_major=NN` for a macOS adoption release).
-Prerequisites: clean main, suite green, `[Unreleased]` accurately describes the batch (the
-workflow refuses an empty section), and a quick `git log <last-tag>..HEAD --format=%s` review
-since release notes and history are public surfaces. The FIRST release is part of D2
+Prerequisites: clean main; the FULL local canonical suite (both Swift toolchains AND
+`bats -r bats/`, per Toolchain + testing) green on the EXACT tip being dispatched — the hosted
+release gate runs only build + swift test, so the bats tier is enforced here and nowhere else;
+`[Unreleased]` accurately describes the batch (the workflow refuses an empty section); and a
+quick `git log <last-tag>..HEAD --format=%s` review since release notes and history are public
+surfaces. The FIRST release is part of D2
 (operator-present): `gh workflow run release.yml -f macos_major=26` cuts `v26.0.0`.
 
 **Release-commit review posture:** the `chore(release): vX.Y.Z` commit is mechanical, authored
