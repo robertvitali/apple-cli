@@ -498,7 +498,15 @@ struct ReminderMappingDateTests {
         timed.calendar = cal
         timed.timeZone = ny
         r.dueDateComponents = timed
-        #expect(ReminderMapping.reminder(from: r).due_date == "2026-09-01T10:00:00-04:00")
+        // Storeless EKReminder normalizes TIMED dueDateComponents into the HOST zone on some
+        // OS builds (observed: hosted macos-15 CI renders this instant as 2026-09-01T14:00:00Z;
+        // a New York host renders 2026-09-01T10:00:00-04:00 — same moment). The wiring
+        // contract here is the INSTANT + timed rendering; exact zone pinning is covered by the
+        // formatter golden corpus, which feeds components directly and skips EKReminder.
+        let rendered = try #require(ReminderMapping.reminder(from: r).due_date)
+        let iso = ISO8601DateFormatter()
+        #expect(iso.date(from: rendered) == iso.date(from: "2026-09-01T10:00:00-04:00"))
+        #expect(rendered.contains("T"), "timed due must render with a time component")
     }
 }
 
