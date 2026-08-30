@@ -174,11 +174,12 @@ Ordered. Nothing here is safe to do unattended, which is why it waited.
    above) before enabling.
 3. **Consolidate on `main`.** Completed 2026-08-23 after a verified history rewrite. The
    integration and six domain branches/worktrees were then retired; `main` is the sole branch.
-4. **HARD STOP — D2, operator-present only.** No agent may cut the first release (now
-   `v26.0.0` under the 2026-08-29 platform-keyed versioning ruling — formerly "tag 1.0.0")
-   or unregister any MCP server. The pre-1.0 PII re-audit gate (Asana `GID-REDACTED`)
-   cleared on 2026-08-29; only the operator-present hard stop remains. Follow the
-   retirement gate in `docs/DESIGN.md`.
+4. **HARD STOP — D2, operator-present only. 2 of 3 parts EXECUTED 2026-08-30** on explicit
+   live operator instruction: `v26.0.0` released, and the six MCPs retired
+   (private fleet-config repo `REVISION-REDACTED`; hosts converge on their next whole-tree apply). Remaining:
+   fleet deployment of the binary + install/upgrade design (operator-present follow-up).
+   The rule stands: no agent may cut a release or unregister an MCP server without a
+   direct in-session instruction.
 5. **`SQLiteReader immutable=1` (M2).** A Messages-specific perf/PII hardening
    (the current `copyToTemp` of chat.db leaves a full copy in `$TMPDIR` if the
    process dies). Left for its own review because it touches the shared reader's

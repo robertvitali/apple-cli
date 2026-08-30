@@ -82,12 +82,12 @@ platform-keyed amendment) and AGENTS.md "Versioning + releases". Summary:
   parity** — the milestone previously named `1.0.0`.
 - Releases are cut by `.github/workflows/release.yml` (workflow_dispatch,
   operator-instructed only).
-- **Retirement gate:** the old Apple MCP servers stay registered until the first
-  release (`v26.0.0`) is cut AND agent-driven end-to-end validation proves every
-  domain works; then they're retired together (unregistered from private fleet-config repo
-  `.chezmoidata/mcp-servers.yaml`). Do not retire per-domain.
-  **HARD STOP — operator-present only (HUMAN-DECISIONS D2).** No agent may cut the
-  first release or unregister any MCP server, regardless of the conditions above.
+- **Retirement gate — EXECUTED 2026-08-30:** both conditions were met (v26.0.0 cut;
+  e2e validation complete) and the six MCPs were retired together on explicit live
+  operator instruction (private fleet-config repo `REVISION-REDACTED`; hosts converge on their next
+  whole-tree apply). The gate's rule stands for any future re-add/re-retire cycle:
+  never per-domain, and **operator-present only (HUMAN-DECISIONS D2)** — no agent may
+  cut a release or unregister an MCP server without a direct in-session instruction.
 
 ## Testing
 

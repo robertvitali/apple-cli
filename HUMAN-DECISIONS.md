@@ -39,7 +39,7 @@ same day under the closure-verification protocol).
 | # | Topic | Status | Ruling |
 |---|---|---|---|
 | D1 | `notes delete-folder` previews by default | **RATIFIED** | Keep the preview default — `--execute` stays required on the only irreversible-and-unrecoverable write |
-| D2 | Cut the first release + retire the six MCP servers | **OPEN** | **Terminal gate. Yours alone.** The loop stops here by design; go/no-go package is D13. First tag is `v26.0.0` per the 2026-08-29 platform-keyed versioning ruling (was "1.0.0"); cut via `gh workflow run release.yml -f macos_major=26` |
+| D2 | Cut the first release + retire the six MCP servers | **2 of 3 parts APPLIED 2026-08-30** | **Terminal gate. Yours alone.** Release DONE: `v26.0.0` cut, tagged, GitHub Release published (notes-length recovery was manual; workflow fixed after). Retirement DONE: all six MCPs moved to `retiredServers` in private fleet-config repo `REVISION-REDACTED`; hosts converge on their next whole-tree apply. REMAINING: fleet deployment of the binary + install/upgrade design (operator-present follow-up) — D2 closes then |
 | D3 | Live-validate `mail send --gui-send` | **APPLIED 2026-08-27** | Live-validated operator-present: one self-addressed send executed and delivered (oracle-verified both sides), test items cleaned by exact id |
 | D4 | Live-validate iMessage group-chat send | **APPLIED 2026-08-23** | Option (b): record "wired + code-inspected, never live-validated" as a port-spec asterisk |
 | D5 | Chasing the Messages fuzzy-search recall gap | WITHDRAWN | Should not have been asked; became ordinary queue work |
@@ -106,7 +106,16 @@ make without argument if you prefer strict parity.
 
 ## D2 — Tag 1.0.0 and retire the six MCP servers
 
-- **Status:** OPEN — **HARD STOP. The driver will never do this autonomously.**
+- **Status:** 2 of 3 parts APPLIED 2026-08-30 — **the hard stop held: both parts ran on
+  explicit, live operator instruction in the 2026-08-30 session.**
+- **Progress (2026-08-30):** (1) First release CUT as `v26.0.0` (platform-keyed scheme
+  superseded the "1.0.0" name; operator: "let's deploy this as 26.0.0") via release.yml —
+  tag + release commit pushed atomically; the Release object needed a manual re-create after
+  a notes-length 422, and the workflow was fixed. (2) The six MCPs RETIRED (operator: "you
+  can sunset the apple MCPs") — private fleet-config repo `REVISION-REDACTED` moves them to `retiredServers`;
+  hosts converge on their next whole-tree apply. (3) REMAINING: fleet deployment of the
+  binary + install/upgrade design, deferred by the operator to an operator-present follow-up
+  session — D2 and the execution parent close after that lands.
 - **Blocked by:** Asana `GID-REDACTED`, the pre-1.0 PII re-audit and retained-artifact cleanup
   gate — SATISFIED: verified and closed 2026-08-29. Only this entry's own operator-present hard
   stop remains.

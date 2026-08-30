@@ -71,7 +71,10 @@ The loop halts, and reports, when **any** of:
 - **(B) `D2` (cut the first release — `v26.0.0` per the 2026-08-29 platform-keyed ruling — +
   retire the MCP servers) is reached.** Always halt. Asana
   `GID-REDACTED` (mirrored by Q30) was verified and CLOSED on 2026-08-29; D2's own
-  operator-present hard stop still applies in full.
+  operator-present hard stop still applies in full. (2026-08-30: parts 1–2 executed on
+  direct in-conversation instruction — `v26.0.0` released, MCPs retired via
+  private fleet-config repo `REVISION-REDACTED`; fleet deployment remains, and the clause below is
+  unchanged and still binding for it and any future release.)
   Retiring the servers destroys the parity oracle every claim here is verified
   against. **This stop does not depend on a `Status:` field the driver itself can edit:** treat
   "tag a release" and "retire/uninstall/deregister an MCP server" as forbidden verbs regardless of

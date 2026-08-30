@@ -25,6 +25,14 @@ The authoritative per-domain capability matrix + port spec lives in
 
 ## Parity is verified against the live MCP (the oracle)
 
+**RETIRED 2026-08-30:** the six Apple MCPs were retired after `v26.0.0` shipped
+(private fleet-config repo `REVISION-REDACTED`); hosts converge on their next whole-tree apply, so the
+oracle tools may still answer on a not-yet-converged host but MUST NOT be relied on —
+and are gone once converged. Parity is now a FROZEN, recorded claim (the
+`docs/port-specs/` matrices + the audit trail through D13/Q17), not a re-runnable live
+diff. New behavior questions are settled against those records and Apple's own apps.
+The text below is retained as the record of how parity WAS verified.
+
 The Apple MCP servers are still installed on the fleet. **Use them as the parity
 oracle**: for each capability, run the MCP tool AND the `apple` CLI on the same
 input and diff the results. The CLI's JSON must contain every field the MCP
@@ -118,8 +126,10 @@ these, so YOUR discipline carries them):**
    events, notes, contacts, lists/calendars, mail drafts).
 3. **Log every created item immediately** to `TEST-CLEANUP.md` (gitignored) with enough to
    delete it later: kind, id, name, list/folder/account.
-4. **Clean up via the MCP** (the known-good oracle) at the end of each run — delete ONLY the
-   tracked ids from `TEST-CLEANUP.md`. Never a bulk or fuzzy delete.
+4. **Clean up at the end of each run** — delete ONLY the tracked ids from
+   `TEST-CLEANUP.md`. Never a bulk or fuzzy delete. (Historically this went via the MCP
+   oracle; post-retirement 2026-08-30, use the apple CLI's own precise-id delete surfaces —
+   an MCP tool may be used only if it still answers on a not-yet-converged host.)
 5. **Messages:** send ONLY to the operator's own number (given in the kickoff brief) — never
    anyone else.
 6. **Mail:** drafts only, or send only to the operator's own address — never a real recipient.
@@ -276,8 +286,9 @@ Prerequisites: clean main; the FULL local canonical suite (both Swift toolchains
 release gate runs only build + swift test, so the bats tier is enforced here and nowhere else;
 `[Unreleased]` accurately describes the batch (the workflow refuses an empty section); and a
 quick `git log <last-tag>..HEAD --format=%s` review since release notes and history are public
-surfaces. The FIRST release is part of D2
-(operator-present): `gh workflow run release.yml -f macos_major=26` cuts `v26.0.0`.
+surfaces. (The FIRST release — `v26.0.0` via `-f macos_major=26` — was cut 2026-08-30 under
+D2; every subsequent dispatch is an ordinary auto-bump with NO `macos_major` input until the
+next macOS major is adopted.)
 
 **Release-commit review posture:** the `chore(release): vX.Y.Z` commit is mechanical, authored
 by the workflow bot, and contains only the version-constant rewrite and the CHANGELOG heading

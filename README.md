@@ -5,10 +5,10 @@ Reminders** — on macOS. A single Swift binary (`apple`) with JSON-first output
 built so AI CLIs (and humans) can drive Apple apps from the command line instead
 of a stack of always-on MCP servers.
 
-> Status: **pre-release, in active development.** Each domain is built to a
-> strict superset of the Apple MCP server it replaces; the binary cuts its first
-> release (`v26.0.0`) once all six domains reach verified parity. See
-> [Versioning](#versioning) below.
+> Status: **released — `v26.0.0`** (2026-08-30). Every domain is a verified strict
+> superset of the Apple MCP server it replaced; the six MCPs are retired. See
+> [Versioning](#versioning) below and the
+> [releases page](https://github.com/robertvitali/apple-cli/releases).
 
 ## Domains
 

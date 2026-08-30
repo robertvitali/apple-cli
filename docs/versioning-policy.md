@@ -17,6 +17,11 @@
 > steps — the workflow owns the bump, the CHANGELOG promotion, the tag, and the Release).
 > §5's "what counts as breaking" list and §5.4's `schema_version` / `apple version` contract
 > remain fully in force.
+>
+> **Executed 2026-08-30:** the first release shipped as `v26.0.0` and the six MCPs were
+> retired the same day on explicit operator instruction — §4's pre-1.0/until-1.0 clauses
+> (incl. §4.2's don't-retire-before-1.0 corollary and step 10's wait-for-D2) are now
+> historical: their conditions were met and discharged at `v26.0.0`.
 
 Scope: a suite of published, macOS-native command-line tools that port existing
 MCP-server capabilities to the command line, consumed primarily by three AI CLIs

@@ -11,8 +11,9 @@ See AGENTS.md "Versioning + releases" and docs/versioning-policy.md (2026-08-29
 amendment). Releases are cut by `.github/workflows/release.yml`, which moves
 `[Unreleased]` under a dated heading — do not hand-edit released headings.
 
-Pre-release: until the first tag (`v26.0.0`, cut at D2), the CLI surface and JSON
-output are not yet stable and `[Unreleased]` may include `BREAKING:`-flagged changes.
+The first tag, `v26.0.0`, was cut 2026-08-30 (D2); from it onward the CLI surface and
+JSON output are stable per the versioning policy — breaking changes bump
+`schema_version`, carry a `BREAKING:` flag here, and ship in at least a MINOR.
 
 ## [Unreleased]
 
