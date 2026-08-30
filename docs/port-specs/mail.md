@@ -335,12 +335,9 @@ bounds).
 | order | Mail enumeration, measured newest-first | `ORDER BY COALESCE(NULLIF(date_sent,0), date_received) DESC, ROWID DESC` |
 | bound | `needs-response` 200 sent subjects; `awaiting-reply` stops at `max_results` RESULTS | `.newest(200)`; `.newestFirst` unbounded then `prefix(max)` after filtering |
 
-Measured on the live store before the fix: one account owned both a near-empty `Sent` (a single
-years-old message)
-and a populated `Sent Messages`, and ROWID-order selection took the former — so `needs-response`
-suppressed against one stale subject and `awaiting-reply` analysed one email. Ordering was a second,
-masked defect: unordered-first-200 of `Sent Messages` spans a much wider window against a correct
-newest-200 spanning only recent months.
+Live verification showed ROWID-first selection choosing a lower-priority candidate, so both
+analytics commands used the wrong Sent source. Ordering was a second, masked defect:
+unordered-first-200 of `sentRows` covers a much wider window than the correct newest-200.
 
 **Known gap (Q4e):** `hasQuestion` cannot see message bodies. `analyticsRows` does not join
 `summaries`, so `Row.snippet` is always nil and the check degrades to subject-only, where the oracle

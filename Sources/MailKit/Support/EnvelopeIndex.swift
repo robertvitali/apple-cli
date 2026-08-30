@@ -405,8 +405,8 @@ public final class EnvelopeIndex {
     ///
     /// - Parameter slice: see `RowSlice`. `needs-response` previously took `.prefix(200)` of an
     ///   unordered scan, so it kept an arbitrary 200 rather than the newest 200 the oracle reads.
-    ///   Measured live on a populated `Sent Messages`: an unordered first-200 spans a
-    ///   much wider window, where the correct newest-200 is far narrower.
+    ///   Measured live on a populated `Sent Messages`: an unordered first-200 covers a
+    ///   much wider window than the correct newest-200.
     public func analyticsRows(accountUUID: String?, mailboxName: String, sinceUnix: Int?,
                               slice: RowSlice = .all) throws -> [[String: String?]] {
         let resolved = resolveMailboxes(accountUUID: accountUUID, mailboxName: mailboxName)

@@ -5,7 +5,7 @@
 > stood that night; do NOT read its present-tense safety-posture, test-count, or `main`-status
 > claims as the current state. Since then **all six domains flipped to write-model v2** (rollout
 > order Mail → Contacts → Notes → Calendar+Reminders → Messages, completed 2026-08; the last
-> `@available(*, deprecated)` v1 remnants were deleted in Q15, integration HEAD `a-prior-head`).
+> `@available(*, deprecated)` v1 remnants were deleted in Q15, the integration branch HEAD).
 > Under v2, writes EXECUTE when invoked, `--dry-run`/`APPLE_DRY_RUN=1` preview, and
 > `APPLE_TEST_MODE`/`--test-mode` is an opt-in SANDBOX policy (a label/self-recipient restriction
 > on the real store, `sandbox: true` in the success envelope and `error.sandbox: true` on a
@@ -33,8 +33,8 @@ the AGENTS.md conduct rules. The live-write paths have since been **wired** (wri
 domains). What remains **operator-gated**: live end-to-end verification against the MCP oracles
 (TCC grants), and the `1.0.0` tag + MCP retirement.
 
-At this snapshot the tree was on `origin/integration` commit `a-prior-commit`; that branch later advanced
-through the write-model-v2 work (pre-rewrite HEAD `a-prior-head`), and `main` later took the live-write
+At this snapshot the tree was on an `origin/integration` snapshot commit; that branch later advanced
+through the write-model-v2 work (its pre-rewrite HEAD), and `main` later took the live-write
 wiring + perf commits. Both SHAs predate the 2026-08-23 rewrite and are unreachable from current
 `main`; they remain here only as historical snapshot identifiers.
 
@@ -113,7 +113,7 @@ Shared core (`AppleKit`) + `EventKitCore` merged cleanly (only additive
 
 ---
 
-## Shared-core hardening (task #7, commit `a-prior-commit`)
+## Shared-core hardening (task #7)
 
 Three fixes to `AppleKit` + the `apple` entry point, reviewed by the full OMC
 fan-out (all APPROVE, no P1), with all findings addressed:

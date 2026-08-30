@@ -53,7 +53,7 @@ struct EmlBuilderTests {
     }
 
     @Test func rfc2822DateShape() {
-        // 2026-01-02T03:04:05Z
+        // 2026-01-02T03:04:05Z (invented anchor)
         let s = EmlBuilder.rfc2822Date(Date(timeIntervalSince1970: 1767323045))
         #expect(s.contains("02 Jan 2026"))
         #expect(s.hasSuffix("+0000"))

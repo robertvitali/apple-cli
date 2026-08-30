@@ -1411,15 +1411,13 @@ error; both commands returned plausible output and quietly stopped doing their f
 - **Wrong mailbox (the one that actually bit).** Sent selection used
   `first(where: isSentMailbox)` — whichever candidate came first in ROWID order — ignoring the
   oracle's fallback priority `Sent Messages` → `Sent` → `Sent Items` (smart_inbox.py:274-283).
-  Measured on the live store: one account owned BOTH a near-empty `Sent` (a single years-old
-  message) and a populated `Sent Messages`, and the near-empty mailbox had the lower ROWID, so
-  first-match selection took it. So `needs-response` suppressed against
-  a single stale subject, and `awaiting-reply` analysed one sent email. `awaiting-reply`'s
-  `leaf.contains("sent")` additionally matched unrelated names merely containing "sent".
+  Live verification showed ROWID-first selection choosing a lower-priority candidate, so both
+  analytics commands used the wrong Sent source. The broad substring predicate additionally
+  matched unrelated mailbox names merely containing "sent".
 - **Wrong order, masked behind it.** `analyticsRows` had no `ORDER BY`, so `.prefix(200)` and
   `prefix(max)` kept insertion order. This goes live the moment the mailbox fix lands and the real
-  populated mailbox is read: unordered-first-200 spans a much wider window where the newest-200 the
-  oracle reads is far narrower. The oracle walks Mail's enumeration — measured
+  populated mailbox is read: unordered-first-200 covers a much wider window than the newest-200 the
+  oracle reads. The oracle walks Mail's enumeration — measured
   newest-first at both ends of the enumeration — bounded by
   `if sentIdx > 200 then exit repeat` for needs-response and `resultCount >= max_results` for
   awaiting-reply.

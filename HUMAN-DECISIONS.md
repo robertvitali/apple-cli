@@ -257,7 +257,7 @@ answer arrives before it matters.
 
 - **Status:** **APPLIED 2026-08-19** — all eight ruled (CAL-08 + REM-11 on 2026-08-18; the other six one-at-a-time on 2026-08-19).
 - **Resolution:** CONTACTS-L4 → **delete the claim** (`contacts mcp serve` was never built and is now explicitly out of scope; an MCP server inside the MCP replacement defeats D2). NOTES-M1 → **restore all four wire keys** (`content`/`tags`/`created`/`modified`), accepting the per-hit round-trip: strict parity. NOTES-L4 → **accepted structural divergence** (measured: the 4 resources are URI aliases for commands the CLI already has, the 3 prompts are LLM-client menu text; no capability missing). mail/gap10 → **keep the body opt-in** (the `content` key is always emitted, `""` when suppressed, so a ported caller never KeyErrors; Mail has no body index and the fetch is a slow scan). mail/gap25 → **wire the rule delete action LIVE** (full parity; the CLI can now install standing rules that permanently delete matching mail unattended — preview still warns). mail/extra20 → **open by default** (matches oracle B; `--no-open` suppresses; the command still cannot send anything).
-- **Filed:** 2026-08-02, from the HEAD reconciliation (`the D9 live-audit dump`)
+- **Filed:** 2026-08-02, from the HEAD reconciliation (live-audit dump, since purged)
 - **Category:** product-posture deviations
 
 Eight of the 92 open gaps came back classified as needing you rather than me, because each is a
@@ -288,8 +288,8 @@ apply exactly that.
 
 **Status:** **ANSWERED 2026-08-19 — "B then A", plus redact `main`.** · **Filed:** 2026-08-02 · Superseded in practice by [D9](#d9), which covers the same phone number plus two larger leaks; track the remediation there.
 
-**What I found.** A real phone number is committed in a tracked port spec and in
-`Tests/MessagesKitTests/MessagesKitTests.swift`. It predates the completion loop — I did not
+**What I found.** A real phone number is committed in a tracked port spec and a tracked test
+file. It predates the completion loop — I did not
 introduce it — but it is in the repository's history, and this repository is public.
 
 **Why I am not just fixing it.** Deleting the number from HEAD does not remove it. Git retains
@@ -377,16 +377,15 @@ everywhere instead of asking again.
 ---
 ## D9 — I published your personal data to this PUBLIC repo, twice, and one leak is bigger than the one I set out to fix
 
-**Status:** **APPLIED 2026-08-23 — "B then A", including rewritten `main`.** · **Filed:** 2026-08-03 · **Step B is DONE:** the repo was made **private** on 2026-08-19 (containment). **Step A is DONE:** the verified rewrite was published to `main`; `integration` and the six domain branches were deleted locally and remotely. A same-day value-free rescan of the former `integration` HEAD had found three MORE live leaks the earlier pass missed — the phone "redaction" had been partial rather than complete, alongside two further address leaks; all fixed in `a-fix-commit`, and a standing no-personal-data rule was added to `AGENTS.md`. ·
+**Status:** **APPLIED 2026-08-23 — "B then A", including rewritten `main`.** · **Filed:** 2026-08-03 · **Step B is DONE:** the repo was made **private** on 2026-08-19 (containment). **Step A is DONE:** the verified rewrite was published to `main`; `integration` and the six domain branches were deleted locally and remotely. A same-day value-free rescan of the former `integration` HEAD had found three MORE live leaks the earlier pass missed — the earlier phone "redaction" had been partial rather than complete, so the literal was still effectively real in a number of places, alongside two further address leaks; all fixed, and a standing no-personal-data rule was added to `AGENTS.md`. ·
 **Severity:** the highest-severity entry in this file. I caused both leaks.
 
 **Amendment (2026-08-29):** the pre-1.0 PII gate (Asana `GID-REDACTED`) surfaced residuals the
 2026-08-23 rewrite had missed: two operator-own email addresses quoted in one published commit
 message, three history-only blobs with addresses at real-world domains, one real-shaped phone
 literal in historical test blobs, and — via re-reading the Status paragraph above — the
-area-code-swapped twin literal whose literal survived in historical
-occurrences (8 is the count in post-D9-rewrite reachable history; the Status paragraph's "14
-places" counted the former `integration` HEAD before that rewrite — different scopes, no
+earlier partial phone "redaction", which had left the literal effectively real in a number
+of historical occurrences (counts differed between the pre- and post-rewrite scopes, no
 unaccounted hits). The operator explicitly authorized targeted remediation ("option 2; don't defer any
 PII cleanup"), amending the earlier no-further-rewrite posture for that session only. Three
 targeted `git filter-repo` passes (6+1+1 replacement rules) ran in fresh clones; each verified 128
@@ -399,14 +398,23 @@ the no-rewrite-without-fresh-explicit-instruction posture is restored.
 
 ### What is exposed
 
-**(1) Verbatim iMessage bodies.** A golden table generated from live oracle output over a real store was committed and pushed. Some of that content originated with third parties, so the disclosure was not the operator's alone to forgive. The carrying artifact is deliberately not named here.
+**(1) Verbatim iMessage bodies.** Building a fuzzy-match golden table, I generated test
+fixtures by running the oracle over a sample of the real Messages database, committed the
+result, and pushed it. Some of those bodies were messages other people sent, so the
+disclosure was not only the operator's to forgive.
 
 **(2) A live account dump — worse, and I did not notice it until a reviewer swept for it.**
-A live-audit artifact was tracked and pushed. It was generated by running the CLI against real accounts. It carried substantial personal data of the operator and of third parties. The value classes are deliberately not enumerated here. It had been only partially redacted, which means the data was seen at authoring time and the pass was not finished -- partial redaction is not redaction.
+A tracked live-audit dump, generated by running the CLI against real accounts, containing
+substantial personal data of the operator AND third parties in clear. It had been
+**partially** redacted, which means the PII was seen at authoring time and the pass simply
+was not finished.
 
-**(3) Smaller, also live at HEAD until this commit:** several further real literals across a number of files and spellings, one of them sitting under a comment that declared it synthetic -- the false label being the actual hazard, since that is what a future audit trusts and skips. The specific artifacts are deliberately not enumerated here.
+**(3) Smaller, also live at HEAD until this commit:** the D7 phone number in several
+spellings across tracked files; a real third-party address used as a test fixture; and a real
+vendor email sitting under a comment that declared it synthetic — the label being the actual
+hazard, since that is what a future audit trusts and skips.
 
-**(4) A commit message itself** carried real content that no file-level rewrite reaches.
+**(4) One leak commit's MESSAGE itself** contained a real message body and a real first name.
 This matters for the remediation: a file-level history rewrite (`filter-repo --path`) does **not**
 touch commit messages, so an operator who ran the obvious fix would verify a clean file and still
 be publishing the value. Commit messages render on the commit page and in every clone.
@@ -430,18 +438,20 @@ Everything above is HEAD. **Both leaks remain in the pushed history**, and remov
 rewriting published history and force-pushing — destructive and outward-facing, so I stop here.
 
 **Step zero, and it expires.** Before choosing, capture
-`the repo traffic page` (clones + unique cloners for Aug 2-3)
-and `the repo forks page`. GitHub retains traffic data for
+the repo traffic page (clones + unique cloners for the exposure window)
+and the forks page. GitHub retains traffic data for
 **14 days only**, so the evidence that decides whether this needs escalation is being deleted on a
 rolling clock while this entry sits open. If a fork exists, note that going private **detaches**
 forks rather than deleting them.
 
 **Verified blast radius** (I checked rather than assumed, because my first draft of this entry
-overstated it): both leak commits were confined to a single branch that nothing else tracked -- not `main`, and none of the domain worktrees. Rewriting is a small operation, not a multi-worktree hazard.
+overstated it): the first leak commit was contained by the integration branch **only** — zero of
+the six domain worktrees, and **not `main`**. Same for the second. Rewriting is a small operation on
+one branch nothing else tracks, not a multi-worktree hazard.
 
 | Option | What it costs | What it actually achieves |
 |---|---|---|
-| **A. Rewrite history** (`filter-repo`, force-push `integration`) | SHAs from the earliest bad commit forward change; ~3 doc references go stale | Removes both leaks from this repo. Must ALSO rewrite commit messages, or the leak survives there. Old commits stay viewable at their URL until the host purges cached views, which is a request rather than something automatic |
+| **A. Rewrite history** (`filter-repo`, force-push `integration`) | SHAs from the earliest bad commit forward change; ~3 doc references go stale | Removes both leaks from this repo. Must ALSO rewrite commit messages, or the leak survives there. Old commits stay viewable at their URL until **GitHub Support purges cached views — a documented request, not automatic** |
 | **B. Make the repo private first, rewrite at leisure** | Loses public visibility while private | Closes the window now and makes A unhurried. Does **not** reach an existing fork |
 | **C. Accept it** | Nothing | Not defensible -- the second leak carries third-party data, which is not the operator's alone to accept |
 
@@ -454,15 +464,16 @@ sequencing elegance.
 scrubbed" while the scrub was still uncommitted, and gave the push date as 2026-08-02. Both were
 wrong in the direction of making this look more handled than it was. Corrected above.
 
-**A note on this entry's own risk:** it named coordinates, in a tracked file, on the public
-repo, while the rewrite is pending — which signposts the data. I judged actionability worth more
+**A note on this entry's own risk (historical):** as first written it named SHAs and paths, in a
+tracked file, on the public repo, while the rewrite was pending — which signposted the data
+(those coordinates were condensed out on 2026-08-30). I judged actionability worth more
 than obscurity, since the leak commit was one `git log` from the branch tip either way. Say the word and
 I will land a redacted version and keep the detail out-of-band.
 
 **Related:** **D7** is the same phone number. I mischaracterised it above as "the same history
-problem" — it was not; it was live at HEAD in several places (and still is on `main`, which this
-worktree cannot reach). D7's own recommendation was "B now" — redact at HEAD — and that had never
-been done, in the same file I was editing nearby. This commit does it for `integration`;
+problem" — it was not; it was live at HEAD in several places (and still was on `main`, which that
+worktree could not reach). D7's own recommendation was "B now" — redact at HEAD — and that had never
+been done, in the very file I was editing. This commit does it for `integration`;
 **`main` still carries it**.
 
 **What I need from you:** "B then A", "A now", or "leave it" — and separately, whether to redact
@@ -476,8 +487,8 @@ PII-bearing D9 scratchpad are temporarily retained, then must be re-audited and 
 Asana `GID-REDACTED` before D2. The historical investigation and option analysis above are
 preserved as the audit record but are superseded by this resolution. A history rewrite is
 containment, not erasure: it cannot reach existing clones, forks, or caches.
-Pre-rewrite SHAs cited in the preserved narrative are historical and unreachable from current
-`main`; they may stop resolving when Q30 removes the rollback artifacts.
+Pre-rewrite commit references in the preserved narrative were condensed to generic
+descriptions on 2026-08-30; the underlying commits are unreachable from current `main`.
 (2026-08-29: this paragraph's no-further-rewrite posture and retained-artifact description are
 superseded by the dated Amendment below — Q30 completed, artifacts removed, and the no-rewrite
 default was restored after three further operator-authorized targeted passes.)

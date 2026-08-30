@@ -7,16 +7,16 @@ import Foundation
 @Suite("MailFormat")
 struct MailFormatTests {
     @Test func isoFromUnixIsUTC() {
-        // 1767323045 = 2026-01-02T03:04:05Z
+        // 1767323045 = 2026-01-02T03:04:05Z (invented anchor)
         #expect(MailFormat.iso(fromUnix: 1767323045) == "2026-01-02T03:04:05Z")
         #expect(MailFormat.iso(fromUnix: nil) == nil)
         #expect(MailFormat.iso(fromUnix: 0) == nil)
     }
 
     @Test func isoDateBoundsRoundTrip() {
-        // 2026-01-02T00:00:00Z = 1767312000 (anchored to the known 16:00:45Z = 1767323045).
-        #expect(MailFormat.unix(fromISODate: "2026-07-14") == 1767312000)          // 00:00:00Z
-        #expect(MailFormat.unix(fromISODate: "2026-07-14", endOfDay: true) == 1767398399) // 23:59:59Z
+        // 2026-01-02T00:00:00Z = 1767312000 (anchored to the invented 03:04:05Z = 1767323045).
+        #expect(MailFormat.unix(fromISODate: "2026-01-02") == 1767312000)          // 00:00:00Z
+        #expect(MailFormat.unix(fromISODate: "2026-01-02", endOfDay: true) == 1767398399) // 23:59:59Z
         #expect(MailFormat.unix(fromISODate: "not-a-date") == nil)
     }
 

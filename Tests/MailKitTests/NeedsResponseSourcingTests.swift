@@ -9,12 +9,12 @@ import SQLite3
 /// simply never suppressed anything.
 ///
 /// Measured on a real live store. The one that actually bit was the PRIORITY miss: one
-/// account owned both a near-empty `Sent` (nearly nothing) and a populated
+/// account owned both a near-empty `Sent` and a populated
 /// `Sent Messages`, and the old
 /// `first(where: isSentMailbox)` took the former by ROWID accident — so the whole suppression set
 /// was one stale subject. The ORDERING miss was masked behind it and goes live the moment
-/// priority is fixed: unordered-first-200 of `Sent Messages` spans a much wider window, where the
-/// newest-200 the oracle reads is far narrower.
+/// priority is fixed: unordered-first-200 of `Sent Messages` covers a much wider window than the
+/// newest-200 the oracle reads.
 ///
 /// (An earlier draft of this comment cited a different, wider date window. That number came from a
 /// probe with no mailbox predicate — it measured the whole store, not the Sent mailbox.

@@ -36,7 +36,7 @@ public struct EmlBuilder {
         self.emitBcc = emitBcc
     }
 
-    /// RFC-2822 date, e.g. "Tue, 02 Jan 2026 16:00:45 +0000".
+    /// RFC-2822 date, e.g. "Fri, 02 Jan 2026 03:04:05 +0000".
     static func rfc2822Date(_ date: Date) -> String {
         let f = DateFormatter()
         f.locale = Locale(identifier: "en_US_POSIX")
