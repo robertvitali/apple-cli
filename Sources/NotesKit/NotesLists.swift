@@ -16,7 +16,7 @@ import Foundation
 ///
 ///     <ul><li>a</li><ul><li>b</li></ul><li>c</li></ul>
 ///
-/// Measured over 133 real list-bearing notes from the a live Notes.app store: sibling form 62,
+/// Measured over 133 real list-bearing notes from a live Notes.app store: sibling form 62,
 /// child form **0**. The first corpus here had six nesting rows, ALL in the child form — the shape
 /// Apple never produces — so it certified a parser that dropped bullets on 42% of real notes. On
 /// marker-count-exactness against those 133 notes it scored 77/133 where the regex it replaced

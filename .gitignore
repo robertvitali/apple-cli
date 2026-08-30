@@ -61,3 +61,4 @@ live-dumps/
 # the repo; the generator is committed, its dependency tree is not.
 node_modules/
 package-lock.json
+.omx/

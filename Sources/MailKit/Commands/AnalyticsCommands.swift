@@ -182,14 +182,16 @@ struct AnalyticsNeedsResponse: ParsableCommand {
             //
             //  * WRONG MAILBOX (this is the one that actually bit). `first(where: isSentMailbox)`
             //    took whichever candidate came first in ROWID order, ignoring the oracle's
-            //    fallback PRIORITY. Measured on this store, one account owned BOTH
-            //    `Sent` (near-empty) and `Sent Messages` (populated) — so the live suppression set was a single stale subject. The oracle tries
+            //    fallback PRIORITY. Measured on a live store where one account owned BOTH a
+            //    near-empty `Sent` (nearly nothing) and a populated `Sent Messages`
+            //    — so the live suppression set was one stale subject. The oracle tries
             //    `Sent Messages` → `Sent` → `Sent Items` in that order (smart_inbox.py:274-283).
             //  * WRONG 200, masked behind the above. `analyticsRows` had no ORDER BY, so
             //    `.prefix(200)` kept insertion order. Once the priority fix lands and the real
-            //    populated mailbox is read, that becomes live: unordered-first-200 spans
-            //    a much wider window where the newest-200 is far narrower. The
-            //    oracle walks Mail's enumeration, measured newest-first (checked at both ends) and bounded by `if sentIdx > 200 then exit repeat`.
+            //    populated mailbox is read, that becomes live: unordered-first-200 spans a
+            //    much wider window where the newest-200 is far narrower. The
+            //    oracle walks Mail's enumeration, measured newest-first,
+            //    and bounded by `if sentIdx > 200 then exit repeat`.
             //  * no account filter — correctness hardening rather than the thing that broke this
             //    store. It could NOT leak another account's mail (`resolveMailboxes` skips rows
             //    whose `accountID` differs); it could only pick a name this account lacks, after
@@ -235,9 +237,9 @@ struct AnalyticsAwaitingReply: ParsableCommand {
 
             // Sent messages: the account's Sent mailbox, in the ORACLE'S fallback priority.
             //
-            // The previous `leaf.contains("sent")` had two faults. It ignored priority, so on this
-            // store it selected `Sent` (nearly nothing) over `Sent Messages` (populated) — awaiting-reply was
-            // analysing a single 2020 email. And substring matching also accepts any name containing "sent"
+            // The previous `leaf.contains("sent")` had two faults. It ignored priority, so on a
+            // live store it selected a near-empty `Sent` over the populated `Sent Messages` —
+            // awaiting-reply was analysing a single stale email. And substring matching also accepts any name containing "sent"
             // . Same defect the sibling `needs-response` carried; same helper fixes it.
             let ownPaths = ctx.index.mailboxes.filter { $0.url.accountID == uuid }.map(\.url.path)
             let sentName = Analytics.preferredSentMailbox(ownPaths) ?? "Sent"

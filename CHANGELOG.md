@@ -1350,7 +1350,7 @@ structurally impossible.
 
 This narrows the divergence without closing it, so the limit is stated rather than implied. The
 oracle reads the body live over AppleScript and therefore has one for every message it scores; we
-read Mail's cached preview, which exists for only some. On this store that is a small fraction of all
+read Mail's cached preview, which exists for only some. On this store that is a tiny fraction of all
 messages, but the figures are ratios over different populations and coverage concentrates in the
 recent window these commands score: roughly a third of the messages from the last 7 and last 30 days, and
 well over half of the newest 200 by date — the oracle's own bound. Where
@@ -1412,14 +1412,16 @@ error; both commands returned plausible output and quietly stopped doing their f
 - **Wrong mailbox (the one that actually bit).** Sent selection used
   `first(where: isSentMailbox)` — whichever candidate came first in ROWID order — ignoring the
   oracle's fallback priority `Sent Messages` → `Sent` → `Sent Items` (smart_inbox.py:274-283).
-  Measured on the live store: one account owned BOTH `Sent` (near-empty) and `Sent Messages` (populated). So `needs-response` suppressed against
+  Measured on the live store: one account owned BOTH a near-empty `Sent` (a single years-old
+  message) and a populated `Sent Messages`, and the near-empty mailbox had the lower ROWID, so
+  first-match selection took it. So `needs-response` suppressed against
   a single stale subject, and `awaiting-reply` analysed one sent email. `awaiting-reply`'s
   `leaf.contains("sent")` additionally matched unrelated names merely containing "sent".
 - **Wrong order, masked behind it.** `analyticsRows` had no `ORDER BY`, so `.prefix(200)` and
   `prefix(max)` kept insertion order. This goes live the moment the mailbox fix lands and the real
   populated mailbox is read: unordered-first-200 spans a much wider window where the newest-200 the
   oracle reads is far narrower. The oracle walks Mail's enumeration — measured
-  newest-first (checked at both ends) — bounded by
+  newest-first at both ends of the enumeration — bounded by
   `if sentIdx > 200 then exit repeat` for needs-response and `resultCount >= max_results` for
   awaiting-reply.
 
@@ -1468,8 +1470,7 @@ test that did not have the operator's Mail store.
 Three further defects, all reachable only *because* `--mailbox` now works, were found in review and
 fixed in the same change:
 
-- **`--mailbox all` and `--mailbox All` returned different totals** (thousands of messages apart on the
-  measured account). `EnvelopeIndex.isAllWildcard` is case-insensitive and documents itself as the
+- **`all` and `All` returned different totals** in live verification. `EnvelopeIndex.isAllWildcard` is case-insensitive and documents itself as the
   single authority precisely so callers cannot desync; the new code re-tested the string with `==`,
   so a lowercase spelling took the resolver's every-mailbox branch while the system-folder exclusion
   silently switched off. Now asks `isAllWildcard`.
@@ -2309,7 +2310,7 @@ commands use Mail's native verbs, see "Mail compose is now a real reply/forward"
 above — but the section as a whole was badly understated: the 2026-07-30 re-audit
 found **45 confirmed strict-superset gaps** across compose, rules, templates, reads,
 analytics, and bulk mutation, of which the batches above close 14. The authoritative
-open list lives on the Asana Mail parent (`GID-REDACTED`); it is deliberately not
+open list lives on the Asana Mail parent (tracked outside this repo); it is deliberately not
 duplicated here, so that one source cannot drift from the other.
 
 Mail is therefore NOT a strict superset yet, and per this repo's one rule

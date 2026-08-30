@@ -405,8 +405,8 @@ public final class EnvelopeIndex {
     ///
     /// - Parameter slice: see `RowSlice`. `needs-response` previously took `.prefix(200)` of an
     ///   unordered scan, so it kept an arbitrary 200 rather than the newest 200 the oracle reads.
-    ///   Measured on the populated `Sent Messages` (populated): unordered-first-200 spans
-    ///   a much wider window, the correct newest-200 is far narrower.
+    ///   Measured live on a populated `Sent Messages`: an unordered first-200 spans a
+    ///   much wider window, where the correct newest-200 is far narrower.
     public func analyticsRows(accountUUID: String?, mailboxName: String, sinceUnix: Int?,
                               slice: RowSlice = .all) throws -> [[String: String?]] {
         let resolved = resolveMailboxes(accountUUID: accountUUID, mailboxName: mailboxName)
@@ -460,7 +460,8 @@ public final class EnvelopeIndex {
             // one clock and rank on another. Window on the same expression if that day comes.
             //
             // Mail's own `every message of mailbox` enumeration order is not a documented
-            // guarantee. It is measured newest-first here (checked at both ends), and the ORACLE ITSELF depends on that — `if messageDate < cutoffDate
+            // guarantee. It is measured newest-first here (checked at both ends of the
+            // enumeration), and the ORACLE ITSELF depends on that — `if messageDate < cutoffDate
             // then exit repeat` is only correct on a newest-first walk. So mirroring it mirrors the
             // oracle's own assumption rather than inventing one.
             tail += " ORDER BY COALESCE(NULLIF(m.date_sent, 0), m.date_received) DESC, m.ROWID DESC"

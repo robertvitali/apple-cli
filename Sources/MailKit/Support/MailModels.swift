@@ -31,9 +31,10 @@ public struct MailMailbox: Encodable {
     public let url: String                // raw Envelope Index url
     public let total_count: Int?
     /// Envelope-Index-derived (the local read bit), NOT Mail.app's live `unread count` —
-    /// measured divergence on server-synced accounts (Gmail All Mail divergent index-vs-live counts
-    /// while total_count matched exactly), the same read-bit split MailScript documents for
-    /// unread-counts. For oracle-matching live values use `apple mail unread-counts` (extra9).
+    /// measured divergence on server-synced accounts (Gmail All Mail's index unread count ran
+    /// slightly above the live value while total_count matched exactly), the same read-bit split
+    /// MailScript documents for unread-counts. For oracle-matching live values use
+    /// `apple mail unread-counts` (extra9).
     public let unread_count: Int?
     public let deleted_count: Int?
     public let is_label: Bool             // Gmail label (membership via `labels`, not m.mailbox)

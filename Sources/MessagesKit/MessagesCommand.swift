@@ -10,7 +10,6 @@ import Foundation
 /// (argv, injection-proof) for sends. The MCP's stateful `"contact:N"` selector is
 /// replaced by stateless ranked JSON candidates + an explicit `--handle`.
 ///
-/// Asana parent GID: GID-REDACTED
 public struct MessagesCommand: ParsableCommand {
     public static let configuration = CommandConfiguration(
         commandName: "messages",

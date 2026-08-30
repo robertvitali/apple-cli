@@ -15,7 +15,6 @@ import AppleKit
 /// gzip+protobuf checklist decode, attachments, HTML↔markdown fidelity, dual id/title
 /// addressing. User data always flows to osascript via argv (never interpolated).
 ///
-/// Asana parent GID: GID-REDACTED
 public struct NotesCommand: ParsableCommand {
     public static let configuration = CommandConfiguration(
         commandName: "notes",

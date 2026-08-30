@@ -15,7 +15,6 @@ import AppleKit
 ///   groups {list,members,create,rename,delete,add,remove}
 ///   vcard {export,import} · containers list
 ///
-/// Asana parent GID: GID-REDACTED
 public struct ContactsCommand: ParsableCommand {
     public static let configuration = CommandConfiguration(
         commandName: "contacts",

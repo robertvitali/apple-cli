@@ -401,17 +401,17 @@ public enum Analytics {
     /// well past raw-body character 500, outside the window the oracle actually reads. Both
     /// directions of error are therefore possible; neither is silent about which signal it used.
     ///
-    /// Measured on the live store, naming each population because the figures look
+    /// Measured on a live store, naming each population because the figures look
     /// inconsistent otherwise — they are ratios over different denominators, and coverage
     /// concentrates in exactly the recent window these commands score:
-    ///   * of ALL messages in the store, only a small fraction have a preview;
-    ///   * roughly a third of recent messages;
-    ///   * similarly over the last 30 days;
-    ///   * of the newest 200 by date, which is the oracle's own bound, 129.
+    ///   * of ALL messages in the store, a low single-digit percentage have a preview;
+    ///   * of those received in the last 7 days, roughly a third;
+    ///   * of those received in the last 30 days, roughly a third;
+    ///   * of the newest 200 by date, which is the oracle's own bound, well over half.
     /// Before
-    /// the `summaries` join it was 0% and the body term was dead code; hundreds of messages on that store
-    /// have a body question with no "?" in the subject, and those now score as the oracle scores
-    /// them. Closing the remainder means fetching bodies over AppleScript per message — tracked
+    /// the `summaries` join it was 0% and the body term was dead code; hundreds of messages on that
+    /// store have a body question with no "?" in the subject, and those now score as the oracle
+    /// scores them. Closing the remainder means fetching bodies over AppleScript per message — tracked
     /// separately rather than folded in here, because it is a latency decision, not a defect.
     static func hasQuestion(_ r: Row) -> Bool {
         if r.subject.contains("?") { return true }

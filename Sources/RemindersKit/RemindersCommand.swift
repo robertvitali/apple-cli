@@ -25,7 +25,6 @@ import EventKitCore
 /// markers), byte-compatible with the apple-events MCP — EventKit's public API exposes no
 /// native subtask/parent or tag surface (see RemindersSupport.swift for the full rationale).
 ///
-/// Asana parent GID: GID-REDACTED
 public struct RemindersCommand: ParsableCommand {
     public static let configuration = CommandConfiguration(
         commandName: "reminders",

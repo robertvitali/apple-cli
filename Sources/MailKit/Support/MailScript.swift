@@ -1872,7 +1872,7 @@ public struct MailScript {
     --
     -- HONEST COST: this is still a linear scan (Mail has no message-id index), just of ONE
     -- mailbox instead of all of them. When that mailbox IS "[Gmail]/All Mail" the scan is large —
-    -- on this live store the overwhelming majority of messages live there — so an archived-message reply is
+    -- on a Gmail-backed store the overwhelming majority of messages live there — so an archived-message reply is
     -- SLOW, not free. It is bounded by osascript's Apple-event timeout rather than unbounded, and
     -- the fallback below still applies. The trade is deliberate: a slow reply beats "cannot reply
     -- to archived mail at all", which is what the oracles can do and the CLI could not.

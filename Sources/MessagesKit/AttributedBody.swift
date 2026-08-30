@@ -3,8 +3,8 @@ import Foundation
 /// Decoder for the `message.attributedBody` column — an Apple typedstream
 /// (NSArchiver serialization of `NSMutableAttributedString`). On modern macOS the
 /// plain `text` column is frequently NULL and the body lives ONLY here, so this is
-/// load-bearing for `recent`/`search` parity (the overwhelming majority of rows on the measured live store had NULL
-/// text + non-NULL attributedBody).
+/// load-bearing for `recent`/`search` parity (the overwhelming majority of rows on the
+/// measured live store had NULL text + non-NULL attributedBody).
 ///
 /// Port of `mac_messages_mcp.extract_body_from_attributed`: locate the first
 /// `NSString` class marker, skip a 5-byte header, read a variable-length integer

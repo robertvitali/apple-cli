@@ -112,7 +112,7 @@ struct ReadSnapshotPinTests {
         // This is the only place the tool opens a LIVE store with a real connection, and such an
         // open CREATES a `-shm` beside it — inside ~/Library/Mail/, where a read-only connection
         // cannot remove it again. So the pin is gated on a `-shm` already existing. Everywhere else
-        // the tool is scrupulous about not writing near the live stores; this keeps that true.
+        // the tool is scrupulous about not writing near the real stores; this keeps that true.
         let dir = try scratch.directory()
         let url = dir.appendingPathComponent("rollback.sqlite")
         var db: OpaquePointer?
@@ -127,7 +127,7 @@ struct ReadSnapshotPinTests {
         #expect(ran, "the copy must still happen")
         #expect(!pinned, "and it must report that it did NOT pin")
         #expect(!FileManager.default.fileExists(atPath: url.path + "-shm"),
-                "we must not have created one beside the live store")
+                "we must not have created one beside the real store")
     }
 
     @Test("with a -shm present the pin IS taken and says so")

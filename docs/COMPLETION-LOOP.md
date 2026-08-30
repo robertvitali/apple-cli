@@ -165,8 +165,9 @@ An item is `DONE` when all of:
    recreate them unless directly instructed. Before committing, re-scan the staged diff AND the
    proposed commit message for personal data — on main-only, this commit is the publication event.
 10. **Update §4** (`Status`, plus anything discovered) **in the same commit**.
-11. **Mirror** to Asana: write-model-v2 work → task `GID-REDACTED`; per-domain parity work →
-    that domain's parent (see `AGENTS.md`). Q12 closes the six parents under the closure protocol.
+11. **Mirror** to Asana: write-model-v2 work → its tracker task; per-domain parity work →
+    that domain's tracker parent (recorded in Asana, outside this repo). Q12 closes the six
+    parents under the closure protocol.
 
 ### Standing rules learned the hard way — re-read before each iteration
 
@@ -200,7 +201,8 @@ Product behavior changed under write-model v2; **the driver's own conduct did no
   product-side recipient check** — the allowlist is sandbox-only by design (oracle parity), so on
   the unsandboxed self-send of exception (b) the ONLY safeguard is the driver re-reading the
   recipient string before invoking. Do that, character by character.
-- **This repo is PUBLIC** (`github.com/robertvitali/apple-cli`). Never commit the operator's phone
+- **This repo is publication-bound** (`github.com/robertvitali/apple-cli` — private containment
+  since 2026-08-19, returning to public). Treat every commit as public. Never commit the operator's phone
   number, personal addresses, or **any third party's** contact details. Real values live in
   `APPLE_TEST_RECIPIENTS` and the gitignored `TEST-CLEANUP.md`, never in tracked files. A first
   draft of this file leaked a third party's email address and was caught in review before landing.

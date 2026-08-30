@@ -16,8 +16,11 @@ concurrency:
 jobs:
   build-test:
     # GitHub-hosted macOS runners ship full Xcode, so swift-testing is available here.
-    # This repo is private, so do not assume hosted-runner minutes are free. Uses
+    # Hosted-runner minutes are free only while this repo is public; metered whenever it is private. Uses
     # pull_request, NOT pull_request_target — forked PRs get a read-only token and no secrets.
+    # While public, fork PRs execute untrusted code (Package.swift manifests, test bodies) on these
+    # runners; the read-only token bounds that to compute abuse. Keep "require approval for
+    # outside-contributor runs" enabled in repo Actions settings.
     runs-on: macos-15
     timeout-minutes: 30
     steps:

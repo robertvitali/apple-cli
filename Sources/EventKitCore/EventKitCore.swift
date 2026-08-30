@@ -7,10 +7,6 @@ import Foundation
 /// timezone handling, and permission preflight HERE, once. Verify both domain
 /// surfaces together when this shared engine changes on `main`.
 ///
-/// Asana parent GIDs:
-///   Calendar  — GID-REDACTED
-///   Reminders — GID-REDACTED
-///
 /// Fork/reference base: FradSer/event (MIT) — its Swift models already read the
 /// full surface (attendees/availability/recurrence/alarms/structuredLocation).
 ///

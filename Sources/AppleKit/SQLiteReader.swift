@@ -197,7 +197,7 @@ public final class SQLiteReader {
     /// PASSIVE checkpoint may still backfill frames at or below our mark, which is harmless because
     /// those frames remain in the un-reset WAL we copy.
     ///
-    /// COST, measured on the operator's real few-hundred-MB Envelope Index and chat.db: warm
+    /// COST, measured on a real few-hundred-MB Envelope Index and chat.db: warm
     /// end-to-end A/B showed no measurable difference (42 vs 41 ms, 63 vs 63 ms). The coherent
     /// alternatives were measured and rejected on that basis: `sqlite3_backup` +
     /// `journal_mode=DELETE` costs 337/493 ms and `VACUUM INTO` costs 692/747 ms, either of which

@@ -9,7 +9,6 @@ import AppleKit
 /// send/manage/rules/templates + multipart `.eml` for HTML send. Dual targeting model:
 /// ID-precise (MCP A) AND subject/sender/date `--match` filters (MCP B).
 ///
-/// Asana parent GID: GID-REDACTED
 public struct MailCommand: ParsableCommand {
     public static let configuration = CommandConfiguration(
         commandName: "mail",

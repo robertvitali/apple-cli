@@ -14,14 +14,14 @@ useful ones); capabilities it *drops* are failures.
 The authoritative per-domain capability matrix + port spec lives in
 [`docs/port-specs/`](./docs/port-specs/):
 
-| Domain | Port spec | Replaces (MCP) | Asana parent GID |
-|---|---|---|---|
-| Messages | `messages.md` | `mac_messages_mcp` @ 99388d2 | `GID-REDACTED` |
-| Mail | `mail.md` | `apple-mail-mcp` (s-morgan-jeffries@0.6.0 **+** patrickfreyer@3.1.3) | `GID-REDACTED` |
-| Contacts | `contacts.md` | `apple-contacts-mcp` @ 1cd8789 | `GID-REDACTED` |
-| Notes | `notes.md` | `apple-notes-mcp` @ 2.5.12 | `GID-REDACTED` |
-| Calendar | `calendar-reminders.md` | `mcp-server-apple-events` @ 1.4.0 (calendar half) | `GID-REDACTED` |
-| Reminders | `calendar-reminders.md` | `mcp-server-apple-events` @ 1.4.0 (reminders half) | `GID-REDACTED` |
+| Domain | Port spec | Replaces (MCP) |
+|---|---|---|
+| Messages | `messages.md` | `mac_messages_mcp` @ 99388d2 |
+| Mail | `mail.md` | `apple-mail-mcp` (s-morgan-jeffries@0.6.0 **+** patrickfreyer@3.1.3) |
+| Contacts | `contacts.md` | `apple-contacts-mcp` @ 1cd8789 |
+| Notes | `notes.md` | `apple-notes-mcp` @ 2.5.12 |
+| Calendar | `calendar-reminders.md` | `mcp-server-apple-events` @ 1.4.0 (calendar half) |
+| Reminders | `calendar-reminders.md` | `mcp-server-apple-events` @ 1.4.0 (reminders half) |
 
 ## Parity is verified against the live MCP (the oracle)
 
@@ -63,7 +63,11 @@ on real data is worse than no label** — the label is what the next audit trust
 is required for parity work, and its output is FULL of personal data. Such output is scratch,
 never a commit: keep it in the session scratchpad, never under the repo, and never paste it into a
 test, a doc, an audit JSON, or a commit message. Quote counts, hashes, field names, and
-byte-lengths in write-ups — not values. `.gitignore` matches audit dumps BY CLASS (not by known
+byte-lengths in write-ups — not values. Counts must not be PAIRED with account structure,
+provider mix, mailbox names, or calendar dates in a way that fingerprints a person's store
+(a bare "N rows" is fine; "provider X's mailbox Y, N rows, oldest year Z" is a profile). The operator's name and GitHub handle in LICENSE, README, git author metadata,
+and authorship prose are deliberate public attribution, not a leak — that is the one standing
+exception to the real-names ban. `.gitignore` matches audit dumps BY CLASS (not by known
 filename) because the 2026-08-03 leak was a dump whose name matched none of the enumerated
 patterns.
 
@@ -231,6 +235,13 @@ handoff copy was removed 2026-08-29 as the final step of the now-closed PII gate
   material findings; record `Reviewed-by:` + AI `Co-Authored-By:` trailers.
 - **Re-scan the staged diff and the proposed commit message for personal data immediately before
   every commit.** On the main-only workflow, the commit is the publication event.
+- **No `asana:` trailers and no Asana GIDs in this repo — commits, files, or docs.** Operator
+  ruling 2026-08-30: this repo is publication-bound, so internal-tracker identifiers are banned
+  going forward. The tracked tree was scrubbed at HEAD, and the operator authorized a targeted
+  history rewrite that replaces them in prior blobs and commit messages with `GID-REDACTED`
+  (published history carries no GIDs once that rewrite is pushed). This is an explicit, standing
+  repo-local override of the fleet's `asana:`-trailer convention. Task traceability lives in
+  Asana itself, not in this repo's history.
 - Tests green before any push (both Swift toolchains plus `swift test` + `bats`; use the commands
   in Toolchain + testing above).
 

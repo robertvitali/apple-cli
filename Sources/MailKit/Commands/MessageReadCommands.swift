@@ -574,7 +574,7 @@ struct ThreadCommand: ParsableCommand {
                 // Oracle B applies SKIP_FOLDERS in `_search_mail_records` (tools/search.py:236,
                 // All-only) and analytics, but `get_email_thread` (tools/search.py:595) builds
                 // its own script with no skip. Excluding here dropped the account's own Sent
-                // replies out of their own conversation (measured 34 → 24 on this store). The
+                // replies out of their own conversation (measured 34 → 24 on a live thread). The
                 // struct already defaults true, but leaving that implicit is what let the
                 // regression land silently once — a future default flip must not re-break it.
                 f.includeSystemFolders = true

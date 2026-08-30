@@ -196,7 +196,7 @@ against a historical value (Q12 [1]).
 |---|---|
 | `check_db_access` | 134 tables, message/handle/chat present — match (CLI superset adds `message_count`, `path`, `readable`). |
 | `check_contacts` | **CLI count == oracle count on the verification run**. Sample ordering aligned to the oracle's `ORDER BY ZLASTNAME, ZFIRSTNAME`. |
-| `check_addressbook` | Per-source counts matched CLI==oracle on the verification run (then per-source counts, total <total> — see the point-in-time note above). CLI also reports the top-level `AddressBook-v22.abcddb` the MCP's *diagnostic* omits (its contact loader reads it) — superset, not a drop. |
+| `check_addressbook` | Per-source counts matched CLI==oracle on the verification run, source-for-source and in total (see the point-in-time note above). CLI also reports the top-level `AddressBook-v22.abcddb` the MCP's *diagnostic* omits (its contact loader reads it) — superset, not a drop. |
 | `find_contact` | A common first name → **count 30 == 30**, all 0.95 (exact-token) — scores byte-exact. |
 | `check_imessage_availability` | 2125550142 → `available=true`, recommendation string **byte-identical**. |
 | `get_chats` | **CLI == oracle** on named-chat count (superset fields: guid, room_name, service_name, group_id, style). |
