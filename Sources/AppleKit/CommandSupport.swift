@@ -4,7 +4,7 @@ import ArgumentParser
 /// Single source of truth for the binary version. Keep in lockstep with CHANGELOG +
 /// the git tag at release time (docs/versioning-policy.md drift gate).
 public enum AppleVersion {
-    public static let current = "0.0.0" // release.yml-managed; first tag is v26.0.0 at D2 (platform-keyed — see AGENTS.md "Versioning + releases")
+    public static let current = "26.0.0" // release.yml-managed; first tag is v26.0.0 at D2 (platform-keyed — see AGENTS.md "Versioning + releases")
     public static var schema: Int { Output.schemaVersion }
 }
 

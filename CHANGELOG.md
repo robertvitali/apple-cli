@@ -16,6 +16,8 @@ output are not yet stable and `[Unreleased]` may include `BREAKING:`-flagged cha
 
 ## [Unreleased]
 
+## [26.0.0] - 2026-08-30
+
 ### Added
 
 - **`mail rules` can now create rules with a live `delete` (auto-trash) action.** Previously
