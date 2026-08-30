@@ -511,7 +511,7 @@ JSON output are stable per the versioning policy — breaking changes bump
   exit 133); it is now a typed validation error (64), matching extra6's negative --offset
   precedent.
 - `analyticsRows` computes attachment counts with one grouped join instead of a correlated
-  per-row subquery (measured identical results on all the full account-wide count rows of the live
+  per-row subquery (measured identical results across the full account-wide join on the live
   store; ~3-5x faster on the account-wide sweep and marginally slower — 4ms absolute — on
   LIMIT-bounded slices, where the correlated form deliberately remains in queryMessages)
   (extra31). A fixture pin locks the 0/1/multi attachment counts.
@@ -1073,7 +1073,7 @@ hand-fixing them now would likely be discarded work.
 The installed oracle (2.6.12) defaults `search-notes` to 50 (`DEFAULT_SEARCH_LIMIT`); this port
 passed `limit` straight through, so an absent `--limit` meant *no cap*. Measured on the live
 store: an uncapped CLI search exceeded the oracle's default result limit; both now apply that
-limit. The oracle side of that diff was observed on `query:"e", one account`; review could not re-run it (the live MCP timed out at its own 30s ceiling), which is consistent with the 28.1s measured below sitting right against that ceiling. The equality was real but the comparison is marginal on this store — a narrower query is the reliable way to re-check it.
+limit. The oracle side of that diff was observed on the same single-letter query and account; review could not re-run it (the live MCP timed out at its own 30s ceiling), which is consistent with the 28.1s measured below sitting right against that ceiling. The equality was real but the comparison is marginal on this store — a narrower query is the reliable way to re-check it.
 
 The justification is parity, not performance. An earlier draft of this entry claimed an unbounded
 search "timed out at two minutes"; that was wrong and review caught it against the captured probe.
@@ -1352,8 +1352,7 @@ This narrows the divergence without closing it, so the limit is stated rather th
 oracle reads the body live over AppleScript and therefore has one for every message it scores; we
 read Mail's cached preview, which exists for only some. On this store that is a tiny fraction of all
 messages, but the figures are ratios over different populations and coverage concentrates in the
-recent window these commands score: roughly a third of the messages from the last 7 and last 30 days, and
-well over half of the newest 200 by date — the oracle's own bound. Where
+recent window these commands score: roughly a third of the messages from the last 7 and last 30 days, and well over half of the newest 200 by date — the oracle's own bound. Where
 no preview exists the test falls back to subject-only and can under-score. It can also over-score:
 `summaries` holds a preview Mail generates at index time — whitespace-normalised, boilerplate
 collapsed — not a literal substring of the body, so a `?` at preview character 480 may sit past raw
@@ -1944,8 +1943,7 @@ was one item away from parity were understated.
   when the name itself contains a `/`.
 - **Statistics now match the oracle exactly.** MCP B excludes `SKIP_FOLDERS`
   (Trash/Junk/Junk Email/Deleted Items/Sent*/Drafts/Spam/Deleted Messages) from broad scans; the
-  CLI counted them, so every volume metric diverged. Verified live against the oracle on
-  2026-07-30 (7-day window): the CLI over-counted before the filter and matches exactly after — with unread, read,
+  CLI counted them, so every volume metric diverged. Verified live against the oracle on 2026-07-30 over a 7-day window: the CLI over-counted before the filter and matched the oracle exactly after it — with unread, read,
   flagged and with_attachments all matching too. `--include-system-folders` opts back in.
 - **BREAKING (behavior):** `search --mailbox All` now EXCLUDES the same `SKIP_FOLDERS` set by
   default, matching oracle B's `search_emails`. An `All` sweep that used to surface Trash, Junk,
@@ -1966,12 +1964,12 @@ was one item away from parity were understated.
   scope targets ONE named mailbox (`mailbox_param = escaped_mailbox if mailbox else "INBOX"`).
   The CLI forces `All` for it and filters anyway, so `--mailbox` is silently discarded and
   per-mailbox stats for a system folder are unreachable by any flag combination. Verified live:
-  `--scope mailbox_breakdown --mailbox Trash --days 0` returns every non-system mailbox with no
+  `--scope mailbox_breakdown --mailbox Trash --days 0` returns every non-system mailbox and no
   Trash row.
 - **`thread` deliberately does NOT apply the exclusion.** Oracle B applies `SKIP_FOLDERS` in
   `search_emails` and the analytics tools only — `get_email_thread` has no such filter. Excluding
-  there drops the operator's own `Sent` replies out of their own conversation (measured: 34
-  thread lost a quarter of its messages), which is a correctness loss, not parity.
+  there drops the account's own `Sent` replies out of their own conversation (measured: a
+  thread lost a quarter of its messages, all of them the Sent-side replies), which is a correctness loss, not parity.
 - **Bulk mutations keep the WIDE meaning of `All`, and now say so.** `move`/`mark`/`flag`/`delete`
   resolve `All` across every mailbox INCLUDING the system folders — `delete --permanent` targets
   messages that are in Trash by definition, so narrowing the mutation scope would break it. That
@@ -2380,7 +2378,7 @@ draft's sender identity) + `--cc` / `--bcc`.
   sent. Mail's outgoing store is SHARED with the operator's live compose windows, so the send only
   targets an outgoing message carrying the unique test subject AND re-verifies its recipients before
   dispatch (defense in depth).
-- Live-validated self-only: a draft created with `an explicit non-default --account` (≠ the default
+- Live-validated self-only: a draft created with an explicit non-default `--account` (≠ the default
   send account) + a `--cc` to a second self address was sent, and delivery confirmed `From` the
   --account address to BOTH the `to` and the `cc` mailbox; the draft was consumed. Negative case: a
   draft to a non-self address refused fail-closed before any open.

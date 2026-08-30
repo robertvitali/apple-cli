@@ -1906,9 +1906,8 @@ print(next((m['id'] for m in d if m.get('conversation_id') in multi), ''))")
   echo "$output" | grep -q 'sender_stats'
 }
 
-# SKIP_FOLDERS exclusion: verified against the LIVE oracle on 2026-07-30 — over a 7-day window
-# the oracle and the CLI disagreed counting Trash/Sent/etc, and 17 with the
-# exclusion. This asserts the exclusion is actually applied (totals must differ once the account
+# SKIP_FOLDERS exclusion: verified against the LIVE oracle over a 7-day window — the CLI
+# over-counted (Trash/Sent/etc included) and matches the oracle exactly with the exclusion. This asserts the exclusion is actually applied (totals must differ once the account
 # has any system-folder mail in the window).
 @test "mail analytics stats excludes SKIP_FOLDERS unless --include-system-folders" {
   require_index

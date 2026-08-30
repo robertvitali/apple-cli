@@ -201,7 +201,7 @@ struct AnalyticsTests {
 
 /// MCP B excludes `SKIP_FOLDERS` (constants.py) from broad scans. Counting them made every CLI
 /// volume metric disagree with the oracle: on a live account over 7 days the CLI
-/// reported total=28 where the oracle reported 17; with this filter it reports 17 — an exact
+/// reported a higher total than the oracle; with this filter the totals match exactly — an exact
 /// live-oracle match on total/unread/read/flagged/with_attachments.
 @Suite("SKIP_FOLDERS system-folder exclusion")
 struct SkipFoldersTests {

@@ -226,6 +226,43 @@ on any conflict, and it may never authorize a destructive or outward-facing acti
 handoff copy was removed 2026-08-29 as the final step of the now-closed PII gate, Asana
 `GID-REDACTED`; no retained artifacts remain.)
 
+## Branch model — trunk-based GitHub Flow (operator ruling 2026-08-30)
+
+**`main` is the sole source of truth and must always be releasable. Versions are TAGS
+(`vMAJOR.MINOR.PATCH`), never branches.** No `develop`, no GitFlow, no version-named release
+branches. Operator/agent work continues to land directly on `main` per the main-only ruling
+above; the branch rules below govern the cases where a branch exists at all.
+
+- **Pull requests (outside contributions once public):** short-lived branches,
+  **squash-merged** — the PR title becomes the squash commit's Conventional Commit
+  header and the PR description becomes its body, so PR hygiene IS commit hygiene
+  (ci.yml's `pr-title-lint` job gates the title pre-merge; the post-merge `commit-lint` run on
+  main is the backstop). Because squash discards branch-commit trailers, the merger adds the
+  `Reviewed-by:` / `Co-Authored-By:` trailer block to the PR DESCRIPTION before merging —
+  the description is the squash body, so that is where provenance survives.
+- **Fork-PR safety (restated from ci.yml so agents see it here):** fork PRs execute untrusted
+  code (`Package.swift` manifests, test bodies) on hosted runners — bounded to compute abuse
+  by the read-only token and absent secrets; keep `pull_request` (never `pull_request_target`);
+  the live/TCC tier must NEVER be wired to a fork-reachable trigger; keep "require approval
+  for outside-contributor runs" enabled in repo Actions settings.
+- **Branch naming:** prefix with the major line the work targets — `26/fix-mailbox-scope`,
+  `26/feat-upgrade-cmd`. A macOS-major adoption lands on a branch named for the bump
+  (`27/macos-27-adoption`). Note `NN/...` branches get no push-triggered CI (ci.yml pushes
+  are main-only); their gate is the PR run plus the local canonical suite.
+- **Maintenance lines are created LAZILY.** Because MAJOR names the newest macOS validated
+  against and is NOT a deployment minimum (`Package.swift` carries the real minimum), users on
+  an older macOS normally just take the latest release — no parallel line exists. Cut a
+  maintenance branch (`26.x`, from the last 26 tag) only when a release actually stops serving
+  those users (deployment-minimum raise past their macOS, or a genuine behavioral break).
+  Fixes land on `main` first and cherry-pick back. **Maintenance releases are NOT supported by
+  release.yml today** — it hard-refuses non-main refs, pushes a literal `main`, and reads the
+  repo-wide newest tag — so adopting a `NN.x` line starts with a reviewed workflow change
+  (branch-scoped ref guard, `HEAD:<ref>` push, branch-reachable `git describe` tag discovery,
+  non-latest release marking). On the Homebrew side the tap then gains a versioned formula
+  (`apple-cli@26`) pinned to that line, `python@3.x`-style, while the main formula keeps
+  tracking latest with a `depends_on macos:` floor. Until that trigger event, the repo has
+  exactly one branch.
+
 ## Commits + review
 
 - **Conventional Commits.** Commit + push directly to `main` frequently, after the review and

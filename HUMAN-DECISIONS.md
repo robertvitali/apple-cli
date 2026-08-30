@@ -211,7 +211,7 @@ This file's own rule is *"if it is knowable, the driver goes and knows it instea
 I broke it, so the entry is withdrawn rather than left sitting in your queue.
 
 **Two corrections to the original text, for the record:** the gap is WORSE than I reported
-(re-measured live 2026-08-02: `the probe-term search --hours 72` → oracle **14**, CLI **1**, i.e. 7% recall,
+(re-measured live 2026-08-02: the fixed probe-term search over `--hours 72` → oracle **14**, CLI **1**, i.e. 7% recall,
 not the 16→2 I cited), and `docs/port-specs/messages.md` §8 still understates it as affecting only
 "low-relevance matches at the threshold floor" citing 25→21 — Q5 must fix that text too.
 
@@ -221,7 +221,7 @@ not the 16→2 I cited), and `docs/port-specs/messages.md` §8 still understates
 
 **The finding.** Our `WRatio` port's `partialRatio` slides a fixed `len(shorter)` window;
 rapidfuzz maximizes over variable-length substring alignments. Measured at the default 0.6
-threshold: `the probe-term search --hours 72` → oracle 16 hits, CLI 2. Aggregate over 10 terms × 1500 real
+threshold: the fixed probe-term search over `--hours 72` → oracle 16 hits, CLI 2. Aggregate over 10 terms × 1500 real
 messages: oracle 293, CLI 231 — **78.8% recall, 21% of fuzzy matches dropped.** The port spec
 currently calls this an "accepted behavioral-parity boundary" affecting only "low-relevance matches
 at the threshold floor" and cites 25→21; the measured worst case is 16→2, so **the spec materially
@@ -529,7 +529,7 @@ it twice this week:
 | path | input | measured |
 |---|---|---|
 | `messages search` | 1024-code-point term vs a 10,000-char body | ~3s per `partialRatio`, and `wRatio` runs 5 per candidate over up to 10k rows |
-| `messages find-contact` | 500,000 conjoining-jamo code points vs **200** candidates | **9.95s** — and a real address book is an order of magnitude larger |
+| `messages find-contact` | 500,000 conjoining-jamo code points vs **200** candidates | **9.95s** — and a real address book is thousands of candidates |
 
 Neither number is theoretical and neither path is bounded by anything else. A message body is
 attacker-influenceable (anyone who can iMessage you), and the term is agent-supplied, so a

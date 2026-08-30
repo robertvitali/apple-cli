@@ -1683,8 +1683,8 @@ public struct MailScript {
 
     // MARK: Unread counts (Mail.app live property — matches the MCP oracle)
 
-    /// The Envelope Index `read` bit diverges from server-synced seen-state (observed: index
-    /// far above Mail's live count on one iCloud INBOX). MCP A/B source unread from Mail's live
+    /// The Envelope Index `read` bit diverges from server-synced seen-state (observed: the index count ran
+    /// far above Mail's live count on one server-synced INBOX). MCP A/B source unread from Mail's live
     /// `unread count` property, so we do too for parity.
     /// Internal (not private): UnreadSummaryTests pins the oracle-B arms (Inbox fallback,
     /// -1 sentinel, one-level descent) as source text, since the script only runs live.

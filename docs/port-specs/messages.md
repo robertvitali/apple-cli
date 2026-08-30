@@ -185,8 +185,8 @@ send row below records a validation-evidence limitation, not a live diff result.
 **Every count below is a POINT-IN-TIME measurement from the verification run — the
 live store drifts continuously.** Re-measured twice on 2026-08-18 the per-source
 counts had already moved (and moved AGAIN between two runs minutes apart), while
-the STABLE invariants held both times: the total contact count and the
-top-level `AddressBook-v22.abcddb` diagnostic source. Specific per-source
+the STABLE invariants held both times: the contacts-with-handles total and the presence of
+the top-level `AddressBook-v22.abcddb` source. Specific per-source
 figures are deliberately NOT re-embedded here — they are stale on arrival. The
 parity claim each row records is "CLI == oracle ON THE SAME RUN", not that any
 absolute number still holds; a future re-audit must diff both sides fresh, never
@@ -226,10 +226,10 @@ every full-length window, since the denominator shrinks. `partial_ratio("golf",
 best four-character window reaches only 50.0. A single fixed length cannot see
 that alignment at all, so the missing recall was structural.
 
-**Now measured at parity.** `the probe-term search --hours 72` returns the same 12
+**Now measured at parity.** A fixed probe-term search over `--hours 72` returns the same 12
 messages as `tool_fuzzy_search_messages`, with identical scores in identical
-order. A 60-pair golden table generated from rapidfuzz itself, over real message
-bodies, is asserted in `Tests/MessagesKitTests/PartialRatioParityTests.swift`;
+order. A 60-pair golden table generated from rapidfuzz itself — regenerated WHOLLY SYNTHETIC
+after the D9 scrub (see the test header) — is asserted in `Tests/MessagesKitTests/PartialRatioParityTests.swift`;
 deleting either of the two restored loops fails it.
 
 One deliberate bound remains, and it is not the one this section used to
