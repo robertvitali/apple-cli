@@ -178,8 +178,19 @@ jobs:
           set -euo pipefail
           NEW="${{ steps.ver.outputs.new }}"
           # Notes = this release's CHANGELOG section (curated), NOT --generate-notes, which
-          # would republish every historical commit subject on the first tag.
-          awk -v v="$NEW" '$0 ~ "^## \\["v"\\]"{f=1;next} f&&/^## \[/{exit} f' CHANGELOG.md > release-notes.md
+          # would republish every historical commit subject on the first tag. GitHub caps
+          # release bodies at 125k chars (v26.0.0's full pre-release section blew past it,
+          # HTTP 422) — bound the notes and point at CHANGELOG.md for the remainder.
+          awk -v v="$NEW" '$0 ~ "^## \\["v"\\]"{f=1;next} f&&/^## \[/{exit} f' CHANGELOG.md > release-notes-full.md
+          if [ "$(wc -c < release-notes-full.md)" -gt 120000 ]; then
+            # sed '$d' drops the (possibly mid-line, possibly mid-UTF-8) final cut line so
+            # the truncation lands on a clean line boundary.
+            head -c 118000 release-notes-full.md | sed '$d' > release-notes.md
+            printf '\n\n---\n*Notes truncated — the complete section is [CHANGELOG.md](https://github.com/%s/blob/v%s/CHANGELOG.md).*\n' "$GITHUB_REPOSITORY" "$NEW" >> release-notes.md
+            rm -f release-notes-full.md
+          else
+            mv release-notes-full.md release-notes.md
+          fi
           if gh release view "v${NEW}" >/dev/null 2>&1; then
             echo "release v${NEW} already exists — skipping creation (idempotent re-run)"
           else
