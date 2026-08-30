@@ -141,7 +141,7 @@ Tests/                    swift-testing logic tests (SwiftPM)
 bats/                     bats CLI smoke tests
 docs/port-specs/          per-domain capability matrices + port specs
 docs/DESIGN.md            architecture + output contract + versioning + retirement gate
-docs/versioning-policy.md SemVer + JSON-schema-as-contract policy
+docs/versioning-policy.md platform-keyed versioning + JSON-schema-as-contract policy
 docs/decisions/, docs/learnings/  tiered knowledge base (hot|medium|cold)
 docs/runbooks/, docs/discovery/   operational and discovery knowledge
 docs/README.md             auto-generated knowledge-base index (run `kb-index`)
@@ -229,5 +229,53 @@ handoff copy was removed 2026-08-29 as the final step of the now-closed PII gate
 **JSON is the default** (the machine contract); `--text` (from `GlobalOptions`) is a human
 opt-out and is NOT part of the versioned contract. Property names are the wire keys verbatim
 (no case conversion — name payload fields in snake_case); dates are ISO-8601. Adding optional
-fields = MINOR; removing/renaming/retyping a field, or changing an enum/exit-code, = MAJOR.
-See `docs/versioning-policy.md`.
+fields = MINOR bump. Removing/renaming/retyping a field, or changing an enum/exit-code, is a
+BREAKING contract change: bump the envelope `schema_version`, flag `BREAKING:` in the
+changelog, and release it as (at least) a MINOR — MAJOR is platform-keyed and never signals
+breakage (see "Versioning + releases" below and `docs/versioning-policy.md`).
+
+## Versioning + releases (platform-keyed; operator ruling 2026-08-29)
+
+**Scheme — `MAJOR.MINOR.PATCH` where MAJOR = the supported macOS major.** The first release is
+`26.0.0` (macOS 26); MAJOR moves to 27 only when macOS 27 support is adopted, never for code
+reasons. MAJOR names the newest macOS the release is built and validated against — it is NOT a
+deployment-minimum claim (`Package.swift` keeps its own `.macOS(.vNN)` minimum independently).
+MINOR = feature additions (any `feat:` commit) or any breaking-flagged change. PATCH = bug
+fixes, docs, and small non-feature updates (`fix:`/`docs:`/`chore:`/`test:`/`refactor:`/…
+with no breaking flag). Breaking agent-contract
+changes do NOT bump MAJOR — they bump the JSON envelope's `schema_version` (the machine
+contract agents must key on, via `apple version`) and ride a MINOR release flagged `BREAKING:`
+in the changelog. This supersedes the strict-SemVer MAJOR semantics in
+`docs/versioning-policy.md` §3 (see its 2026-08-29 amendment).
+
+**Single source of truth:** `AppleVersion.current` in `Sources/AppleKit/CommandSupport.swift`
+(`--version` and `apple version` read it). Never hand-bump it, and never hand-edit released
+CHANGELOG headings — the release workflow owns both.
+
+**Release automation:** `.github/workflows/release.yml` (workflow_dispatch). It computes the
+bump from Conventional Commit subjects since the last tag (`feat:` present → MINOR, else
+PATCH; `bump` input can force a level), rewrites `AppleVersion.current`, moves CHANGELOG
+`[Unreleased]` under `## [X.Y.Z] - date`, enforces a drift gate (constant == changelog == tag),
+runs the full build+test suite (aborts on red), verifies the built binary's `--version`, then
+commits `chore(release): vX.Y.Z`, tags, pushes, and publishes a GitHub Release with notes and
+an arm64 binary. The `macos_major` input is the ONLY way to change MAJOR and is required for
+the very first release. Commit-header discipline is CI-enforced (`commit-lint` job) because the
+bump math depends on it.
+
+**When to run it:** only on an explicit operator instruction — a release publishes an
+outward-facing tag + GitHub Release, so agents never trigger it autonomously (this is a
+conduct rule, not a technical control: anyone with repo write access CAN dispatch it, so the
+discipline lives here). Run it when a batch of merged work has accumulated under
+`[Unreleased]` and the operator calls the release: `gh workflow run release.yml` (add
+`-f bump=minor|patch` to override auto, or `-f macos_major=NN` for a macOS adoption release).
+Prerequisites: clean main, suite green, `[Unreleased]` accurately describes the batch (the
+workflow refuses an empty section), and a quick `git log <last-tag>..HEAD --format=%s` review
+since release notes and history are public surfaces. The FIRST release is part of D2
+(operator-present): `gh workflow run release.yml -f macos_major=26` cuts `v26.0.0`.
+
+**Release-commit review posture:** the `chore(release): vX.Y.Z` commit is mechanical, authored
+by the workflow bot, and contains only the version-constant rewrite and the CHANGELOG heading
+move — content already reviewed when the constituent commits landed. Treat it like a git
+auto-generated commit (merge/revert class): no reviewer fan-out and no trailers are expected
+on it. Note the CI/release jobs build with the hosted runner's single Xcode toolchain; the
+canonical two-toolchain suite (swiftly + CLT) remains the LOCAL pre-push gate.

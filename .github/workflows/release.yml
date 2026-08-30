@@ -1,0 +1,189 @@
+# Release workflow — platform-keyed versioning (see AGENTS.md "Versioning + releases").
+#
+# MAJOR = supported macOS major (26 = macOS 26). Never auto-computed: it changes only via
+# the macos_major input when a new macOS release is adopted. MINOR = feature additions
+# (any `feat:` commit since the last tag) OR any breaking-flagged commit (`type!:` /
+# BREAKING CHANGE footer) — breaking contract changes ride at least a MINOR plus a
+# schema_version bump, never MAJOR (docs/versioning-policy.md, 2026-08-29 amendment).
+# PATCH = everything else (fix/docs/chore/...).
+#
+# Operator-instructed only: this workflow publishes a tag + GitHub Release (outward-facing).
+# Run it via the Actions UI or `gh workflow run release.yml [-f bump=...] [-f macos_major=...]`.
+# Before dispatching, review `git log <last-tag>..HEAD --format=%s` — release notes come from
+# the curated CHANGELOG section, but commit subjects are public in the repo either way.
+#
+# Recovery from a partial run: if the version commit+tag pushed but `gh release create`
+# failed, re-running is safe — the release step is idempotent (skips creation if the release
+# exists). If the push itself failed mid-way, `git push --atomic` guarantees commit and tag
+# landed together or not at all; fix the cause and re-dispatch.
+name: Release
+
+on:
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Bump level: auto (feat/breaking => minor, else patch), or force minor/patch"
+        type: choice
+        options: [auto, minor, patch]
+        default: auto
+      macos_major:
+        description: "Set ONLY when adopting a new macOS major (e.g. 27) — produces X.0.0. Required for the very first release (26)."
+        type: string
+        default: ""
+
+permissions:
+  contents: write
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+jobs:
+  release:
+    runs-on: macos-15
+    steps:
+      - name: Refuse non-main refs (loud, not silently skipped)
+        env:
+          REF: ${{ github.ref }}
+        run: |
+          set -euo pipefail
+          [ "$REF" = "refs/heads/main" ] || { echo "Releases cut from main only (got $REF)"; exit 1; }
+
+      # TODO(hardening): pin to a commit SHA + add Dependabot (same posture as ci.yml).
+      # persist-credentials stays on because the push step needs the token; the build steps
+      # between checkout and push run only repo-pinned code (Package.resolved) + brew bats.
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Compute new version
+        id: ver
+        env:
+          MACOS_MAJOR_IN: ${{ github.event.inputs.macos_major }}
+          BUMP_IN: ${{ github.event.inputs.bump }}
+        run: |
+          set -euo pipefail
+          # Highest existing release tag (NOT `git describe`, which returns nearest-reachable).
+          LAST_TAG=$(git tag --list 'v[0-9]*' --sort=-v:refname | head -1)
+          MACOS_MAJOR="$MACOS_MAJOR_IN"
+          BUMP_INPUT="$BUMP_IN"
+          if [ -n "$MACOS_MAJOR" ]; then
+            case "$MACOS_MAJOR" in
+              (0*|*[!0-9]*) echo "macos_major must be a positive integer without leading zeros"; exit 1;;
+            esac
+            if [ -n "$LAST_TAG" ]; then
+              CUR_MAJOR=$(echo "${LAST_TAG#v}" | cut -d. -f1)
+              if [ "$MACOS_MAJOR" -le "$CUR_MAJOR" ]; then
+                echo "macos_major ($MACOS_MAJOR) must exceed current major ($CUR_MAJOR)"; exit 1
+              fi
+            fi
+            NEW="${MACOS_MAJOR}.0.0"
+            BUMP="major (macos_major input)"
+          else
+            if [ -z "$LAST_TAG" ]; then
+              echo "No existing tag: the first release must set macos_major (e.g. 26)."; exit 1
+            fi
+            if [ -z "$(git log --format=%h "${LAST_TAG}..HEAD" | head -1)" ]; then
+              echo "No commits since $LAST_TAG — nothing to release."; exit 1
+            fi
+            BASE="${LAST_TAG#v}"
+            MA=$(echo "$BASE" | cut -d. -f1); MI=$(echo "$BASE" | cut -d. -f2); PA=$(echo "$BASE" | cut -d. -f3)
+            if [ "$BUMP_INPUT" = "auto" ]; then
+              # feat commits OR breaking-flagged commits (type!: header, BREAKING CHANGE/
+              # BREAKING-CHANGE in body) => MINOR; breaking never rides a PATCH.
+              if git log --format='%s' "${LAST_TAG}..HEAD" | grep -qE '^feat(\(|!|:)|^[a-z]+(\([^)]*\))?!:' \
+                 || git log --format='%B' "${LAST_TAG}..HEAD" | grep -qE '^BREAKING[ -]CHANGE'; then
+                BUMP=minor
+              else
+                BUMP=patch
+              fi
+            else
+              BUMP="$BUMP_INPUT"
+            fi
+            if [ "$BUMP" = "minor" ]; then NEW="$MA.$((MI+1)).0"; else NEW="$MA.$MI.$((PA+1))"; fi
+          fi
+          echo "Releasing: v$NEW (bump: $BUMP; last tag: ${LAST_TAG:-none})"
+          echo "new=$NEW" >> "$GITHUB_OUTPUT"
+
+      - name: Guard — CHANGELOG [Unreleased] must not be empty
+        run: |
+          set -euo pipefail
+          # Content between the [Unreleased] heading and the next release heading must contain
+          # at least one bullet — an empty release note means the release was mis-dispatched.
+          # printf, not echo: section text contains backslashes that echo may mangle.
+          awk '/^## \[Unreleased\]/{f=1;next} f&&/^## \[/{exit} f' CHANGELOG.md > "$RUNNER_TEMP/unreleased.txt"
+          grep -q -- '^- ' "$RUNNER_TEMP/unreleased.txt" || { echo "[Unreleased] has no entries — nothing to release."; exit 1; }
+
+      - name: Update version constant + CHANGELOG
+        run: |
+          set -euo pipefail
+          NEW="${{ steps.ver.outputs.new }}"
+          F=Sources/AppleKit/CommandSupport.swift
+          # Rewrite the single source-of-truth constant (line marked in AGENTS.md).
+          sed -i '' -E "s|(public static let current = \")[^\"]+(\")|\1${NEW}\2|" "$F"
+          grep -q "public static let current = \"$NEW\"" "$F"
+          # Move [Unreleased] content under the new release heading; keep an empty [Unreleased].
+          TODAY=$(date -u +%Y-%m-%d)
+          perl -0pi -e "s/^## \\[Unreleased\\]/## [Unreleased]\n\n## [${NEW}] - ${TODAY}/m" CHANGELOG.md
+          grep -q "^## \[$NEW\] - $TODAY" CHANGELOG.md
+
+      - name: Drift gate (constant == changelog == tag-to-be)
+        run: |
+          set -euo pipefail
+          NEW="${{ steps.ver.outputs.new }}"
+          grep -q "public static let current = \"$NEW\"" Sources/AppleKit/CommandSupport.swift
+          grep -q "^## \[$NEW\] " CHANGELOG.md
+          if git rev-parse "v$NEW" >/dev/null 2>&1; then echo "tag v$NEW already exists"; exit 1; fi
+
+      - name: Build + full test suite (tests-green gate)
+        run: |
+          set -euo pipefail
+          swift build -v
+          swift test -v
+          brew install bats-core
+          bats -r bats/
+
+      - name: Release build + runtime version check + checksummed artifact
+        run: |
+          set -euo pipefail
+          NEW="${{ steps.ver.outputs.new }}"
+          [ "$(uname -m)" = "arm64" ] || { echo "expected arm64 runner for the -arm64 asset"; exit 1; }
+          swift build -c release
+          GOT=$(.build/release/apple --version)
+          [ "$GOT" = "$NEW" ] || { echo "runtime --version '$GOT' != '$NEW'"; exit 1; }
+          tar -C .build/release -czf "apple-v${NEW}-macos-arm64.tar.gz" apple
+          shasum -a 256 "apple-v${NEW}-macos-arm64.tar.gz" > "apple-v${NEW}-macos-arm64.tar.gz.sha256"
+
+      - name: Commit, tag, push (atomic)
+        run: |
+          set -euo pipefail
+          NEW="${{ steps.ver.outputs.new }}"
+          # Refuse to publish if main moved under us (concurrency group serializes releases,
+          # not ordinary pushes).
+          git fetch origin main --quiet
+          git merge-base --is-ancestor origin/main HEAD || { echo "origin/main advanced during the run — re-dispatch on the new tip"; exit 1; }
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add Sources/AppleKit/CommandSupport.swift CHANGELOG.md
+          git commit -m "chore(release): v${NEW}" -m "Mechanical release commit created by release.yml (review-exempt per AGENTS.md 'Versioning + releases')."
+          git tag -a "v${NEW}" -m "apple-cli v${NEW}"
+          git push --atomic origin main "v${NEW}"
+
+      - name: Create GitHub Release (idempotent; notes from the curated CHANGELOG section)
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          NEW="${{ steps.ver.outputs.new }}"
+          # Notes = this release's CHANGELOG section (curated), NOT --generate-notes, which
+          # would republish every historical commit subject on the first tag.
+          awk -v v="$NEW" '$0 ~ "^## \\["v"\\]"{f=1;next} f&&/^## \[/{exit} f' CHANGELOG.md > release-notes.md
+          if gh release view "v${NEW}" >/dev/null 2>&1; then
+            echo "release v${NEW} already exists — skipping creation (idempotent re-run)"
+          else
+            gh release create "v${NEW}" \
+              --title "apple-cli v${NEW}" \
+              --notes-file release-notes.md \
+              "apple-v${NEW}-macos-arm64.tar.gz" \
+              "apple-v${NEW}-macos-arm64.tar.gz.sha256"
+          fi

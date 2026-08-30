@@ -68,7 +68,8 @@ The loop halts, and reports, when **any** of:
 
 - **(A) The queue is empty** except items blocked on `OPEN` entries in `HUMAN-DECISIONS.md`.
   Success — produce the §5 go/no-go package.
-- **(B) `D2` (tag 1.0.0 + retire the MCP servers) is reached.** Always halt. Asana
+- **(B) `D2` (cut the first release — `v26.0.0` per the 2026-08-29 platform-keyed ruling — +
+  retire the MCP servers) is reached.** Always halt. Asana
   `GID-REDACTED` (mirrored by Q30) was verified and CLOSED on 2026-08-29; D2's own
   operator-present hard stop still applies in full.
   Retiring the servers destroys the parity oracle every claim here is verified

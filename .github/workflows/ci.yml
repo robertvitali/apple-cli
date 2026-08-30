@@ -40,3 +40,40 @@ jobs:
       # NOTE: the LIVE end-to-end tier (drives EventKit/Contacts/Mail/Notes/Messages against
       # real data under track-and-cleanup) is NOT run in CI — it needs a real Mac with granted
       # TCC permissions. It must NEVER be wired to a pull_request trigger from a fork.
+
+  # The release workflow (release.yml) computes bump levels from Conventional Commit
+  # headers, so malformed headers silently corrupt version math. This job hard-fails
+  # any pushed commit whose subject is not Conventional (git-mechanical forms exempt).
+  commit-lint:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Validate Conventional Commit headers
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          BASE_REF: ${{ github.base_ref }}
+          BEFORE_SHA: ${{ github.event.before }}
+        run: |
+          set -euo pipefail
+          SUBJECTS="$RUNNER_TEMP/subjects.txt"
+          if [ "$EVENT_NAME" = "pull_request" ]; then
+            git fetch origin "$BASE_REF" --quiet
+            git log --format=%s "origin/${BASE_REF}..HEAD" > "$SUBJECTS"
+          elif [ -n "$BEFORE_SHA" ] && ! echo "$BEFORE_SHA" | grep -qE '^0+$' \
+               && git rev-parse --verify --quiet "${BEFORE_SHA}^{commit}" >/dev/null; then
+            git log --format=%s "${BEFORE_SHA}..HEAD" > "$SUBJECTS"
+          else
+            # force-push / initial push: bounded recent window (never a range that can fail)
+            git log --format=%s -n 20 HEAD > "$SUBJECTS"
+          fi
+          BAD=0
+          while IFS= read -r subj; do
+            [ -n "$subj" ] || continue
+            if echo "$subj" | grep -qE '^(Merge |Revert "|fixup!|squash!|amend!|WIP)'; then continue; fi
+            if ! echo "$subj" | grep -qE '^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-z0-9._-]+\))?!?: .{1,}$'; then
+              echo "NOT CONVENTIONAL: $subj"; BAD=1
+            fi
+          done < "$SUBJECTS"
+          [ "$BAD" = "0" ] || { echo "Commit headers must follow Conventional Commits (release.yml depends on them)."; exit 1; }

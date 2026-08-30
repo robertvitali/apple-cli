@@ -5,9 +5,10 @@ Reminders** — on macOS. A single Swift binary (`apple`) with JSON-first output
 built so AI CLIs (and humans) can drive Apple apps from the command line instead
 of a stack of always-on MCP servers.
 
-> Status: **pre-1.0, in active development.** Each domain is being built to a
-> strict superset of the Apple MCP server it replaces. The binary cuts `1.0.0`
-> once all six domains reach verified parity.
+> Status: **pre-release, in active development.** Each domain is built to a
+> strict superset of the Apple MCP server it replaces. Versioning is
+> platform-keyed: the binary cuts `v26.0.0` (macOS 26) as its first release once
+> all six domains reach verified parity; MINOR = features, PATCH = fixes.
 
 ## Domains
 

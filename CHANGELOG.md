@@ -2,13 +2,17 @@
 
 All notable changes to this project will be documented in this file.
 
-The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/),
-and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
+The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
+Versioning is **platform-keyed** (operator ruling 2026-08-29): MAJOR = the supported
+macOS major (first release `26.0.0` for macOS 26), MINOR = feature additions, PATCH =
+fixes/docs/small updates. Breaking agent-contract changes bump the envelope
+`schema_version` and are flagged `BREAKING:` here; they ride a MINOR, never MAJOR.
+See AGENTS.md "Versioning + releases" and docs/versioning-policy.md (2026-08-29
+amendment). Releases are cut by `.github/workflows/release.yml`, which moves
+`[Unreleased]` under a dated heading — do not hand-edit released headings.
 
-Pre-1.0: the CLI surface and JSON output are not yet stable; a MINOR (`0.x`) may
-include breaking changes, which are flagged `BREAKING:` in the notes below. The
-binary cuts `1.0.0` when all six domains reach verified strict-superset parity
-with the Apple MCP servers they replace.
+Pre-release: until the first tag (`v26.0.0`, cut at D2), the CLI surface and JSON
+output are not yet stable and `[Unreleased]` may include `BREAKING:`-flagged changes.
 
 ## [Unreleased]
 

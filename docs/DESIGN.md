@@ -68,19 +68,26 @@ adding a new code for a previously-generic failure = MINOR.
 
 ## Versioning + retirement
 
-Full policy in [`versioning-policy.md`](./versioning-policy.md). Summary:
+Full policy in [`versioning-policy.md`](./versioning-policy.md) (see its 2026-08-29
+platform-keyed amendment) and AGENTS.md "Versioning + releases". Summary:
 
-- One SemVer for the whole binary. Contract = CLI surface + JSON output schema +
-  behavior/exit codes; a bump is the **max** of the three (any break → MAJOR).
-- Pre-1.0 (`0.x`): surface may change; breaking changes flagged `BREAKING:`.
-- **`1.0.0` = all six domains at verified strict-superset MCP parity.**
-- **Retirement gate:** the old Apple MCP servers stay registered until the binary
-  hits `1.0.0` AND agent-driven end-to-end validation proves every domain works;
-  then they're retired together (unregistered from private fleet-config repo
+- One version for the whole binary, **platform-keyed**: MAJOR = the supported macOS
+  major (first release `26.0.0` for macOS 26; MAJOR moves only on macOS adoption),
+  MINOR = feature additions, PATCH = fixes/docs/small updates.
+- Contract = CLI surface + JSON output schema + behavior/exit codes. A breaking
+  change to any of them bumps the envelope `schema_version`, is flagged `BREAKING:`
+  in the changelog, and ships in (at least) a MINOR — never MAJOR.
+- Pre-release (until the first tag): surface may change; breaking changes flagged.
+- **`v26.0.0` (the first release) = all six domains at verified strict-superset MCP
+  parity** — the milestone previously named `1.0.0`.
+- Releases are cut by `.github/workflows/release.yml` (workflow_dispatch,
+  operator-instructed only).
+- **Retirement gate:** the old Apple MCP servers stay registered until the first
+  release (`v26.0.0`) is cut AND agent-driven end-to-end validation proves every
+  domain works; then they're retired together (unregistered from private fleet-config repo
   `.chezmoidata/mcp-servers.yaml`). Do not retire per-domain.
-  **HARD STOP — operator-present only (HUMAN-DECISIONS D2).** No agent may tag
-  `1.0.0` or unregister any MCP server, regardless of the conditions above. This is
-  additionally blocked by the pre-1.0 PII re-audit gate (Asana `GID-REDACTED`).
+  **HARD STOP — operator-present only (HUMAN-DECISIONS D2).** No agent may cut the
+  first release or unregister any MCP server, regardless of the conditions above.
 
 ## Testing
 

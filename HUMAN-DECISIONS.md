@@ -39,7 +39,7 @@ same day under the closure-verification protocol).
 | # | Topic | Status | Ruling |
 |---|---|---|---|
 | D1 | `notes delete-folder` previews by default | **RATIFIED** | Keep the preview default — `--execute` stays required on the only irreversible-and-unrecoverable write |
-| D2 | Tag 1.0.0 + retire the six MCP servers | **OPEN** | **Terminal gate. Yours alone.** The loop stops here by design; go/no-go package is D13 |
+| D2 | Cut the first release + retire the six MCP servers | **OPEN** | **Terminal gate. Yours alone.** The loop stops here by design; go/no-go package is D13. First tag is `v26.0.0` per the 2026-08-29 platform-keyed versioning ruling (was "1.0.0"); cut via `gh workflow run release.yml -f macos_major=26` |
 | D3 | Live-validate `mail send --gui-send` | **APPLIED 2026-08-27** | Live-validated operator-present: one self-addressed send executed and delivered (oracle-verified both sides), test items cleaned by exact id |
 | D4 | Live-validate iMessage group-chat send | **APPLIED 2026-08-23** | Option (b): record "wired + code-inspected, never live-validated" as a port-spec asterisk |
 | D5 | Chasing the Messages fuzzy-search recall gap | WITHDRAWN | Should not have been asked; became ordinary queue work |

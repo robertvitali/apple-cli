@@ -1,5 +1,23 @@
 # Versioning Policy for the MCP → CLI Ports
 
+> **AMENDMENT (2026-08-29, operator ruling) — platform-keyed MAJOR.** This supersedes §3's
+> strict-SemVer MAJOR semantics. The version is `MAJOR.MINOR.PATCH` where **MAJOR = the
+> supported macOS major** (first release `26.0.0` for macOS 26; MAJOR changes only when a new
+> macOS major is adopted, via the release workflow's `macos_major` input). **MINOR** = feature
+> additions (any `feat:` commit since the last tag). **PATCH** = bug fixes, docs, and small
+> non-feature updates. **Breaking agent-contract changes** (removing/renaming/retyping a JSON
+> field, enum/exit-code changes — §5's list still defines "breaking") no longer bump MAJOR:
+> they bump the envelope `schema_version`, are flagged `BREAKING:` in the changelog, and ship
+> in (at least) a MINOR release. `schema_version` + `apple version` remain the machine contract
+> agents key on (§5.4). Everything else in this policy — batched `[Unreleased]` releases,
+> `vX.Y.Z` tags, single source of truth, the drift gate, Keep-a-Changelog — stands, and is now
+> automated by `.github/workflows/release.yml` (see AGENTS.md "Versioning + releases"). The
+> §3–§4 text below is retained as the original rationale record, and §5–§7's procedures are
+> superseded wherever they conflict with the workflow (in particular §7's hand-bump release
+> steps — the workflow owns the bump, the CHANGELOG promotion, the tag, and the Release).
+> §5's "what counts as breaking" list and §5.4's `schema_version` / `apple version` contract
+> remain fully in force.
+
 Scope: a suite of published, macOS-native command-line tools that port existing
 MCP-server capabilities to the command line, consumed primarily by three AI CLIs
 (Claude Code, Codex, Antigravity). Each tool's public contract is **(a)** its
