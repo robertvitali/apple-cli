@@ -107,8 +107,7 @@ can rename a flag = MAJOR; a 900-line diff can be pure internal refactor = PATCH
 
 ## 2. What ollama-marshal defines
 
-ollama-marshal is a published fleet CLI (git repo at
-`~/path/to/local/resource`). It defines a **contract-driven, strict
+The reference fleet CLI is maintained in a separate repository. It defines a **contract-driven, strict
 SemVer 2.0.0** policy — the right model for the ports. Sources:
 `CLAUDE.md` (the "Versioning" + "Bright-line Bug Patterns" sections), `CHANGELOG.md`
 (header), `pyproject.toml` (`version = "0.6.5"`), and git tags
@@ -573,14 +572,14 @@ review/test gates. Run per CLI at each release boundary:
   idempotency (2441), Step 13 CHANGELOG generation, `## [X.Y.Z.W] - YYYY-MM-DD`.
 - gstack's changelog (format reference).
 
-**Local — ollama-marshal** (`~/path/to/local/resource`)
+**Reference fleet CLI** (separate repository)
 - `CLAUDE.md:255-337` — "Versioning" section (SemVer declaration, pre/post-1.0
   table, 1.0.0 commitment, per-PR workflow, "what counts as breaking") + "Bright-line
   Bug Patterns" #13 version-drift and #14 wrong-bump.
 - `CHANGELOG.md:1-8` — Keep-a-Changelog 1.1.0 + SemVer 2.0.0 header + `[Unreleased]`.
 - `pyproject.toml` — `version = "0.6.5"`, `requires-python = ">=3.11"` (single
   source of truth).
-- Git tags `v0.1.0 … v0.6.6` (`git -C ~/path/to/local/resource tag`).
+- Published Git tags: `v0.1.0 … v0.6.6`.
 
 **Local — fleet pin/converge machinery** (private fleet-config repo)
 - `.chezmoidata/skill-repo-pins.yaml` — SHA (`sha`, 40-hex) + `fetch_ref` +

@@ -49,7 +49,7 @@ cross-checks, with zero findings for that stated scope.
 | D6 | Eight parity posture calls | **APPLIED** | CONTACTS-L4 delete claim · NOTES-M1 restore 4 keys · NOTES-L4 structural divergence · gap10 keep opt-in body · **gap25 wire delete-rules live** · extra20 open by default |
 | D7 | Committed phone number in public history | **ANSWERED** | "B then A" — superseded by D9, which covers the same number plus more |
 | D8 | Which Mail oracle wins on a safety limit | RESOLVED | **Safety wins** — stricter limit wins on A/B conflicts; landed in `86728f4` |
-| D9 | Personal data published to a public repo | **REOPENED 2026-08-31** (was APPLIED 2026-08-23, amended 2026-08-29) | Repo private; prior rewrite passes were published and verified against the classes then known. Later audit rounds found additional history and current-tree defects. Current-tree corrections are complete. Remaining work is the approved scoped rewrite, fresh-clone verification, and zero-finding audit. Do NOT publish until one fresh, value-free audit round documents searched classes, engines, commit-message coverage, object/ref/artifact surfaces, and independent cross-checks, with zero findings for that stated scope |
+| D9 | Personal data published to a public repo | **REOPENED 2026-08-31** (was APPLIED 2026-08-23, amended 2026-08-29) | Repo private; prior rewrite passes were published and verified against the classes then known. Later audit rounds found additional history and current-tree defects. Current-tree remediation remains under audit. Remaining work is to finish and recheck those corrections, apply the approved scoped rewrite, verify from a fresh clone, and complete one fresh, value-free audit. Do NOT publish until that complete round covers the corrected current tree and remediated history; documents searched classes, engines, commit-message coverage, object/ref/artifact surfaces, and independent cross-checks; and records zero findings for its stated scope |
 | D10 | Search/find-contact length caps | WITHDRAWN | Should not have been filed |
 | D11 | What `schema_version` tracks | **APPLIED** | **Shape only** — value breaks ride the MAJOR + CHANGELOG; both policy lines rewritten to agree |
 | D12 | `notes save-attachment` can write to `~/.ssh` | **RATIFIED** | Keep strict Notes-oracle parity; residual documented, fleet stays intentionally inconsistent |
@@ -420,19 +420,20 @@ not an all-blob-only rewrite history.
 The durable correction is about the SHAPE of the claim, not the count: "zero hits" is only ever
 true relative to the patterns you searched for, and a closure statement that omits that scope
 reads as a guarantee to the next auditor and invites them to skip. State the scope or state
-nothing. The gate was REOPENED 2026-08-31. Current-tree corrections are complete; the gate remains
-open pending the approved history remediation, fresh-clone verification, and one fresh,
-value-free audit round that documents searched classes,
-engines, commit-message coverage, object/ref/artifact surfaces, and independent cross-checks, with
-zero findings for that stated scope.
+nothing. The gate was REOPENED 2026-08-31. Current-tree remediation remains under audit; the gate
+remains open pending completion and recheck of those corrections, the approved history remediation,
+fresh-clone verification, and one fresh, complete, value-free audit round. That round must cover
+the corrected current tree and remediated history; document searched classes, engines,
+commit-message coverage, object/ref/artifact surfaces, and independent cross-checks; and record
+zero findings for its stated scope. Publication remains blocked until that evidence exists.
 
 ### What is exposed
 
 Two incidents put personal data — the operator's and third parties' — into tracked files and
 into a commit message. Both were remediated at HEAD and, under separate operator authorization,
 in history. Later audit rounds found further residuals beyond those two incidents (see the
-2026-08-31 amendment above); current-tree remediation is complete, while the authorized history
-remediation and verification remain open.
+2026-08-31 amendment above); the broader current-tree remediation remains under audit, while the
+authorized history remediation and verification remain open.
 
 **This entry no longer re-enumerates the full inventory of what was exposed, where, and in
 which artifacts.** Assembling classes and artifacts into one list turns this record into a

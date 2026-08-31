@@ -1097,7 +1097,7 @@ hand-fixing them now would likely be discarded work.
 The installed oracle (2.6.12) defaults `search-notes` to 50 (`DEFAULT_SEARCH_LIMIT`); this port
 passed `limit` straight through, so an absent `--limit` meant *no cap*. Measured on the live
 store: an uncapped CLI search exceeded the oracle's default result limit; both now apply that
-limit. The oracle side of that diff was observed on the same single-letter query and account; review could not re-run it (the live MCP timed out at its own 30s ceiling), which is consistent with the 28.1s measured below sitting right against that ceiling. The equality was real but the comparison is marginal on this store — a narrower query is the reliable way to re-check it.
+limit. A later oracle rerun reached its ceiling, so a narrower query remains the reliable way to re-check the parity conclusion.
 
 The justification is parity, not performance. An earlier draft of this entry claimed an unbounded
 search "timed out at two minutes"; that was wrong and review caught it against the captured probe.
@@ -1454,9 +1454,9 @@ filter that does nothing. `analyticsRows` gained a `slice:` parameter — `.all`
 (bounded but unordered, i.e. the shipped bug) is unrepresentable rather than merely discouraged. A
 non-positive bound now returns no rows instead of silently meaning unlimited.
 
-Also corrected: the account filter added here is correctness-hardening, not the thing that broke
-this store — `resolveMailboxes` already skipped foreign accounts, so a cross-account leak was never
-possible; the unfiltered lookup could only pick a name the account lacked and return nothing. And
+Also corrected: the account filter added here is correctness-hardening, not the source of the
+observed defect — `analyticsRows` already excluded foreign accounts, so the unfiltered lookup
+could only choose a name absent from the target account and return nothing. And
 the doc comments claiming `hasQuestion` covers message bodies were false — `analyticsRows` never
 joins `summaries`, so that branch is dead. The comments now say so; the gap is tracked as Q4e.
 
@@ -1491,13 +1491,14 @@ test that did not have the operator's Mail store.
 Three further defects, all reachable only *because* `--mailbox` now works, were found in review and
 fixed in the same change:
 
-- **`all` and `All` returned different totals** in live verification. `EnvelopeIndex.isAllWildcard` is case-insensitive and documents itself as the
+- **`all` and `All` returned different totals** in live verification. `MailScope` is case-insensitive
+  and documents itself as the
   single authority precisely so callers cannot desync; the new code re-tested the string with `==`,
   so a lowercase spelling took the resolver's every-mailbox branch while the system-folder exclusion
   silently switched off. Now asks `isAllWildcard`.
 - **A named breakdown reported the backing store's path.** Both named scopes could resolve to
-  a backing identifier that named neither request. A named breakdown is now one entry labelled with the
-  mailbox the caller asked for.
+  a backing identifier that named neither request. A named breakdown is now one entry labelled
+  with the mailbox the caller asked for.
 - **An unknown mailbox returned `ok:true, total:0`** where the oracle raises `"Mailbox not found"`
   (analytics.py:362-370). Now a `not_found` error. The check is on mailbox EXISTENCE, not row count,
   so a real-but-empty mailbox still reports zero rather than erroring.
