@@ -8,7 +8,7 @@
 # Never hand-edit files under docs/manual/ -- see AGENTS.md
 # "Documentation — generated, and CI-enforced fresh".
 
-site_name: agent cli
+site_name: apple
 site_description: One CLI for Apple's native apps — Messages, Mail, Contacts, Notes, Calendar, Reminders.
 repo_url: https://github.com/robertvitali/apple-cli
 repo_name: robertvitali/apple-cli

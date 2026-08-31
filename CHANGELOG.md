@@ -17,6 +17,12 @@ JSON output are stable per the versioning policy — breaking changes bump
 
 ## [Unreleased]
 
+### Fixed
+
+- Corrected privacy-remediation status and documentation so publication remains blocked until a
+  fresh audit verifies zero findings for its stated scope.
+- Manual: [apple v26.0.0 command reference](https://github.com/robertvitali/apple-cli/blob/v26.0.0/docs/manual/index.md).
+
 ## [26.0.0] - 2026-08-30
 
 ### Added

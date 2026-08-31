@@ -1,21 +1,21 @@
 ---
 topic: foundational
-last-used: 2026-08-23
+last-used: 2026-08-31
 importance: high
-uses: 1
+uses: 2
 ---
 
 # Foundational decisions
 
 ## 2026-07-15 — Scaffold decisions
 
-### Code review: OMC reviewers only, skip codex
+### Code review: independent review, with provider routing scoped to the active session
 
-This repo uses the OMC reviewers (`oh-my-claudecode:code-reviewer` + `security-reviewer` +
-`critic`) for every review and **deliberately skips codex** — an explicit, standing local
-override of the fleet's global codex-first review gate (HARD-GATE 1), chosen by the operator
-for this project. Re-review per the standard rules (loop until material findings resolved);
-this is not a one-pass exception for the domain builds.
+The original 2026-07-15 scaffold routed every review through one provider and skipped Codex.
+That implementation detail is historical, not a portable repository rule. The durable gate is
+independent code, security, and critic review, repeated until material findings are resolved.
+Provider-specific routing belongs to the active CLI/session; for the 2026-08-31 remediation
+session, the operator explicitly authorized Codex custom-agent reviewers and excluded Claude.
 
 ### Output: JSON by default; property names are the wire keys; ISO-8601 dates
 
@@ -34,7 +34,9 @@ error escapes to a non-JSON stderr/exit-1. Domains throw `AppleError.*`, never h
 ### Safety: track-and-cleanup, not a sandbox
 
 No dedicated sandbox. Live tests + MCP-parity writes go to real stores as clearly-labeled
-(`apple-cli-test*`) test items, logged to `TEST-CLEANUP.md`, deleted via the MCP afterward.
+(`apple-cli-test*`) test items, logged to `TEST-CLEANUP.md`, then deleted by exact ID through the
+`apple` CLI's precise-ID delete surface. Use an MCP only if it still answers on a
+not-yet-converged host.
 `TestMode` provides the write-model-v2 sandbox primitives (`sandboxActive(flag:)`, the
 `truthyEnv` fail-loud env readers); each domain applies its own fail-closed label guard
 (`requireLabeled` / `requireLabeledReminder` / `ContactsLabel.isLabeled`) threaded with

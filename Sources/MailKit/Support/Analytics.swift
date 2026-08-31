@@ -255,17 +255,9 @@ public enum Analytics {
         }
         if scope == "account_overview" || scope == "mailbox_breakdown" {
             if let named = namedMailbox {
-                // A NAMED breakdown is one mailbox's stats, so it is one entry labelled with the
-                // mailbox the caller asked for.
-                //
-                // Labelling by the backing store's path (what the rowid gives) is wrong here on
-                // label-backed accounts: Gmail's INBOX is a label over `[Gmail]/All Mail`, so
-                // `--mailbox INBOX` and `--mailbox Receipts` both reported
-                // `path: "[Gmail]/All Mail"` — correct counts under an identifier that names
-                // neither request and makes the two indistinguishable. Leaf-matching can also
-                // resolve one name to several rowids (`Archive` and `Work/Archive`), which split
-                // into duplicate rows under the same label. Both collapse correctly here.
-                // Unreachable before this change, because the scan was always the `All` sweep.
+                // A named breakdown is reported under the caller-supplied label.
+                // Results are normalized so aliases and nested names do not produce
+                // misleading paths or duplicate entries.
                 breakdown = [MailboxBreakdown(path: named, count: total, percentage: total > 0 ? 100 : 0)]
             } else {
                 var mb: [Int: Int] = [:]
@@ -285,17 +277,18 @@ public enum Analytics {
 
     // MARK: Needs response
 
-    /// Unread, non-automated messages ranked by likelihood of needing a reply ("?" in subject
-    /// + urgent keywords + flagged → HIGH). Mirrors MCP B's `get_needs_response` heuristic.
+    /// Unread, non-automated messages ranked by likelihood of needing a reply
+    /// (question marker in subject + urgent keywords + flagged → HIGH).
+    /// Mirrors the recorded parity heuristic.
     ///
-    /// Two documented deltas vs MCP B: (1) the unread filter uses the Envelope Index read-bit,
-    /// which can diverge from Mail's server-synced seen-state (observed diverging far from Mail's live count on one INBOX),
-    /// so a few items here may already be read in Mail; (2) MCP B's "direct-To-you" boost is not
-    /// yet applied — it needs a per-message recipient join (the account's own address in `To`),
-    /// deferred as a follow-up. The `?`/urgent/flagged ranking is applied.
-    /// Sender patterns MCP B treats as newsletters (`constants.py`). A sender matching any of
-    /// these is dropped from needs-response entirely — without them the CLI surfaced Substack /
-    /// Mailchimp / "weekly digest" blasts as mail awaiting a personal reply.
+    /// The unread filter uses the Envelope Index read bit, which may differ from
+    /// Mail's synchronized seen state. A direct-recipient boost is not yet
+    /// applied because it requires a per-message recipient join; that remains a
+    /// follow-up. Question-marker, urgent, and flagged ranking is applied.
+    ///
+    /// Sender patterns classified as automated or newsletter traffic are
+    /// excluded from needs-response results so bulk notices are not presented
+    /// as messages awaiting a personal reply.
     public static let newsletterPlatformPatterns = [
         "substack.com", "beehiiv.com", "mailchimp", "sendgrid",
         "convertkit", "buttondown", "ghost.io", "revue.co", "mailgun",
@@ -387,32 +380,9 @@ public enum Analytics {
         }
     }
 
-    /// B looks for "?" in the subject OR the message body's first 500 chars.
-    ///
-    /// KNOWN DIVERGENCE, stated in coverage terms because the difference is real but partial. The
-    /// oracle reads `content of aMessage` live over AppleScript, so it sees a body for EVERY message
-    /// it scores. We read the Envelope Index `summaries` preview, which Mail caches for only some
-    /// messages — so where there is no cached preview this silently degrades to a subject-only test
-    /// and can under-score a body-only question. It can also, less often, OVER-score. An earlier
-    /// version of this comment claimed it could not, reasoning that a snippet is a prefix of the
-    /// body — that is wrong and was caught in review. `summaries.summary` is a preview Mail
-    /// GENERATES at index time, whitespace-normalised and with boilerplate collapsed, not a literal
-    /// substring of what `content of aMessage` returns. So a "?" at snippet character 480 can sit
-    /// well past raw-body character 500, outside the window the oracle actually reads. Both
-    /// directions of error are therefore possible; neither is silent about which signal it used.
-    ///
-    /// Measured on a live store, naming each population because the figures look
-    /// inconsistent otherwise — they are ratios over different denominators, and coverage
-    /// concentrates in exactly the recent window these commands score:
-    ///   * of ALL messages in the store, a low single-digit percentage have a preview;
-    ///   * of those received in the last 7 days, roughly a third;
-    ///   * of those received in the last 30 days, roughly a third;
-    ///   * of the newest 200 by date, which is the oracle's own bound, well over half.
-    /// Before
-    /// the `summaries` join it was 0% and the body term was dead code; hundreds of messages on that
-    /// store have a body question with no "?" in the subject, and those now score as the oracle
-    /// scores them. Closing the remainder means fetching bodies over AppleScript per message — tracked
-    /// separately rather than folded in here, because it is a latency decision, not a defect.
+    // Preview text is an index-time signal and may differ from the message body.
+    // Matching can therefore under- or over-score relative to body inspection.
+    // Body retrieval remains a separate latency tradeoff.
     static func hasQuestion(_ r: Row) -> Bool {
         if r.subject.contains("?") { return true }
         return (r.snippet ?? "").prefix(500).contains("?")
@@ -484,13 +454,9 @@ extension Double {
 }
 
 extension Analytics {
-    /// The system folders MCP B excludes from broad scans (`constants.py` `SKIP_FOLDERS`).
-    /// Counting them made every CLI volume metric — totals, read ratios, sender counts —
-    /// disagree with the oracle's for the same account.
-    ///
-    /// Matching is on the mailbox path's LAST component, case-insensitively, so
-    /// "…/[Gmail]/Trash" and "…/Deleted Messages" both match while a user folder merely
-    /// containing the word ("Sent to accountant") does not.
+    // System folders are excluded from broad analytics scans.
+    // Matching uses the final path component case-insensitively so ordinary user
+    // folders are not excluded accidentally.
     public static let skippedSystemFolders: Set<String> = [
         "trash", "junk", "junk email", "deleted items",
         "sent", "sent items", "sent messages", "drafts",
@@ -535,13 +501,9 @@ extension Analytics {
     /// Callers must pass paths already filtered to ONE account — the oracle resolves
     /// `of targetAccount`, and cross-account suppression would silently hide messages using a
     /// different mailbox's replies.
-    /// The oracle's three names come FIRST, in its order. `"sent mail"` is appended as a CLI EXTRA:
-/// Historical Mail provider/account measurement redacted.
-/// Public history must not preserve private store cardinality.
-/// See current docs for value-free behavior notes.
-    /// this change exists to stop a filter silently doing nothing, and leaving it broken on most
-    /// real accounts would fail that intent while technically passing the bar. Additive, so strict
-    /// superset holds.
+    /// The oracle's three names come FIRST, in its order. `"sent mail"` is appended as a CLI EXTRA
+    /// so reply suppression remains active when none of the oracle's preferred names resolves.
+    /// The fallback adds behavior without removing oracle behavior, so strict-superset holds.
     ///
     /// Matching is on the LEAF, so a nested `Work/Sent` matches. That is also a CLI extra —
     /// `mailbox "Sent" of targetAccount` would not resolve a nested mailbox — and is kept because

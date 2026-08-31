@@ -44,9 +44,10 @@ returned (superset — may add more, must not drop any).
 
 ## No personal data in this repo — ever, anywhere
 
-This repo is published. **Every committed byte is public**: source, tests, fixtures, comments,
-docs, JSON artifacts, AND commit messages. Nothing that identifies a real person may be committed —
-not the operator's, and especially not a third party's (theirs is not ours to disclose).
+This repository is publication-bound and remains private during containment. **Treat every
+committed byte as future-public**: source, tests, fixtures, comments, docs, JSON artifacts, AND
+commit messages. Nothing that identifies a real person may be committed — not the operator's,
+and especially not a third party's (theirs is not ours to disclose).
 
 **BANNED in tracked files and in commit messages:** real phone numbers, street addresses,
 geocoordinates, email addresses, real names, message/mail bodies, contact/calendar/reminder
@@ -97,11 +98,15 @@ operator's decision alone — it force-pushes published history and never reache
 existing clones. Never rewrite or force-push without an explicit instruction. The standing record
 of such incidents is `HUMAN-DECISIONS.md` (D7, D9). The repo was made private on 2026-08-19
 (containment); D9 remediation was applied 2026-08-23, and on 2026-08-29 the operator authorized
-three further targeted `filter-repo` passes that removed the residual leaks the pre-1.0 audit
-surfaced (see the D9 entry's 2026-08-29 amendment). The pre-1.0 PII gate (Asana
-`GID-REDACTED`) is CLOSED with zero residual hits; no rollback artifacts remain. The default
-posture is restored: no history rewrite or force-push is authorized without a fresh explicit
-operator instruction. Private status is temporary containment, NOT a licence to relax this rule.
+three further targeted `filter-repo` passes that removed the residual classes then known to the
+pre-1.0 audit (see the D9 entry's amendments). That gate was REOPENED 2026-08-31 after later
+audit rounds found additional classes. Publication remains blocked until the approved private
+remediation is complete and one fresh, value-free audit round documents its searched classes,
+regex engines, commit-message coverage, object/ref/artifact surfaces, and independent
+cross-checks, with zero findings for that stated scope. The operator has authorized only the
+scoped rewrite recorded in D9; any materially different history rewrite or force-push still
+requires fresh explicit instruction. Private status is temporary containment, NOT a licence to
+relax this rule.
 
 ## Safety — product capability vs agent conduct
 
@@ -238,9 +243,9 @@ removed after their verified histories were consolidated onto `main`. This is an
 standing repo-local override of the fleet's worktree-per-Asana-execution-root rule.
 
 `START-HERE.md` is gitignored, unauthenticated scratch context—never authority. Tracked docs win
-on any conflict, and it may never authorize a destructive or outward-facing action. (The D9
-handoff copy was removed 2026-08-29 as the final step of the now-closed PII gate, Asana
-`GID-REDACTED`; no retained artifacts remain.)
+on any conflict, and it may never authorize a destructive or outward-facing action. (The prior D9
+handoff copy was removed 2026-08-29 as the final step of the closure reached that day; D9 was
+REOPENED 2026-08-31, and no retained artifacts from that earlier pass remain.)
 
 **Session-handoff briefs live OUTSIDE the repo, and blanket staging is banned.** `START-HERE.md`
 is the only BRIEF ignored by name, and the sole one permitted in the repo root for that reason; a
@@ -302,9 +307,10 @@ above; the branch rules below govern the cases where a branch exists at all.
 
 - **Conventional Commits.** Commit + push directly to `main` frequently, after the review and
   test gates below pass. Do not recreate the retired integration or domain branches.
-- **Code review: use the OMC reviewers, skip codex.** Before each commit, fan out
-  `oh-my-claudecode:code-reviewer` + `security-reviewer` + `critic`; address
-  material findings; record `Reviewed-by:` + AI `Co-Authored-By:` trailers.
+- **Independent automated review.** Before each commit, run the CLI-specific review gate for the
+  active session; sensitive or large changes need multiple independent perspectives, including
+  code, security, and critic review. Address material findings, then record the actual review
+  provenance with `Reviewed-by:` + AI `Co-Authored-By:` trailers.
 - **Re-scan the staged diff and the proposed commit message for personal data immediately before
   every commit.** On the main-only workflow, the commit is the publication event.
 - **No `asana:` trailers and no Asana GIDs in this repo — commits, files, or docs.** Operator

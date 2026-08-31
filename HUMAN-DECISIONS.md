@@ -30,11 +30,14 @@ it instead of asking.
 
 ---
 
-## LEDGER — every decision at a glance (updated 2026-08-27)
+## LEDGER — every decision at a glance (updated 2026-08-31)
 
-**Still needs you: D2.** Everything else is settled — D3 and D14 were live-validated
+**Still needs you: D2. D9 was REOPENED 2026-08-31.** D3 and D14 were live-validated
 operator-present on 2026-08-27 (evidence on their Asana tasks; the Mail parent closed the
-same day under the closure-verification protocol).
+same day under the closure-verification protocol). Publication remains blocked until D9's
+approved private remediation is complete and one fresh, value-free audit round documents its
+searched classes, engines, commit-message coverage, object/ref/artifact surfaces, and independent
+cross-checks, with zero findings for that stated scope.
 
 | # | Topic | Status | Ruling |
 |---|---|---|---|
@@ -46,7 +49,7 @@ same day under the closure-verification protocol).
 | D6 | Eight parity posture calls | **APPLIED** | CONTACTS-L4 delete claim · NOTES-M1 restore 4 keys · NOTES-L4 structural divergence · gap10 keep opt-in body · **gap25 wire delete-rules live** · extra20 open by default |
 | D7 | Committed phone number in public history | **ANSWERED** | "B then A" — superseded by D9, which covers the same number plus more |
 | D8 | Which Mail oracle wins on a safety limit | RESOLVED | **Safety wins** — stricter limit wins on A/B conflicts; landed in `86728f4` |
-| D9 | Personal data published to a public repo | **REOPENED 2026-08-31** (was APPLIED 2026-08-23, amended 2026-08-29) | Repo private; five rewrite passes published and verified. Gate REOPENED: rounds 5 and 6 found further residuals, incl. a real subject line in a commit message that no file-scoped pass could reach. HEAD findings fixed; a commit-message-scoped pass is pending. Do NOT publish while open |
+| D9 | Personal data published to a public repo | **REOPENED 2026-08-31** (was APPLIED 2026-08-23, amended 2026-08-29) | Repo private; prior rewrite passes were published and verified against the classes then known. Later audit rounds found additional history and current-tree defects. Current-tree corrections are complete. Remaining work is the approved scoped rewrite, fresh-clone verification, and zero-finding audit. Do NOT publish until one fresh, value-free audit round documents searched classes, engines, commit-message coverage, object/ref/artifact surfaces, and independent cross-checks, with zero findings for that stated scope |
 | D10 | Search/find-contact length caps | WITHDRAWN | Should not have been filed |
 | D11 | What `schema_version` tracks | **APPLIED** | **Shape only** — value breaks ride the MAJOR + CHANGELOG; both policy lines rewritten to agree |
 | D12 | `notes save-attachment` can write to `~/.ssh` | **RATIFIED** | Keep strict Notes-oracle parity; residual documented, fleet stays intentionally inconsistent |
@@ -116,9 +119,10 @@ make without argument if you prefer strict parity.
   hosts converge on their next whole-tree apply. (3) REMAINING: fleet deployment of the
   binary + install/upgrade design, deferred by the operator to an operator-present follow-up
   session — D2 and the execution parent close after that lands.
-- **Blocked by:** Asana `GID-REDACTED`, the pre-1.0 PII re-audit and retained-artifact cleanup
-  gate — SATISFIED: verified and closed 2026-08-29. Only this entry's own operator-present hard
-  stop remains.
+- **Blocked by:** D9/Q30 was historically closed on 2026-08-29 for the classes then known, then
+  reopened on 2026-08-31. It again blocks publication until the approved history remediation,
+  fresh-clone verification, and one fresh, value-free zero-finding audit round are complete. This
+  entry's own operator-present hard stop also remains.
 - **Filed:** 2026-08-02 (standing instruction from an earlier session, recorded here so it is not
   lost to context)
 - **Category:** irreversible / outward-facing
@@ -377,13 +381,23 @@ everywhere instead of asking again.
 ---
 ## D9 — I published your personal data to this PUBLIC repo, twice, and one leak is bigger than the one I set out to fix
 
-**Status:** **APPLIED 2026-08-23 — "B then A", including rewritten `main`.** · **Filed:** 2026-08-03 · **Step B is DONE:** the repo was made **private** on 2026-08-19 (containment). **Step A is DONE:** the verified rewrite was published to `main`; the superseded branches were deleted locally and remotely. A same-day value-free rescan found further live leaks the earlier pass had missed — one earlier "redaction" had been partial rather than complete, so the literal was still effectively real in a number of places; all fixed, and a standing no-personal-data rule was added to `AGENTS.md`. ·
+**Current status:** **REOPENED 2026-08-31.** Publication remains blocked until the approved
+private remediation is complete and one fresh, value-free audit round documents searched classes,
+regex engines, commit-message coverage, object/ref/artifact surfaces, and independent
+cross-checks, with zero findings for that stated scope. ·
+**Historical status (2026-08-23):** **APPLIED — "B then A", including rewritten `main`.** ·
+**Filed:** 2026-08-03 · **Step B was DONE:** the repo was made **private** on 2026-08-19
+(containment). **Step A was DONE for the classes then known:** the verified rewrite was published
+to `main`; the superseded branches were deleted locally and remotely. A same-day value-free
+rescan found further live leaks the earlier pass had missed — one earlier "redaction" had been
+partial rather than complete, so the literal was still effectively real in a number of places;
+those findings were fixed, and a standing no-personal-data rule was added to `AGENTS.md`. ·
 **Severity:** the highest-severity entry in this file. I caused both leaks.
 
 **Amendment (2026-08-29):** the pre-1.0 PII gate (Asana `GID-REDACTED`) surfaced residuals the
 2026-08-23 rewrite had missed — some in tracked content, some history-only, and one in a
-published commit message, which is the case a file-scoped rewrite structurally cannot reach.
-This entry does not re-enumerate their classes or locations, per the note below. The
+published commit message. This entry does not re-enumerate their classes or locations, per the
+note below. The
 operator explicitly authorized targeted remediation ("option 2; don't defer any
 PII cleanup"), amending the earlier no-further-rewrite posture for that session only. Targeted
 `git filter-repo` passes ran in fresh clones; each verified all
@@ -395,26 +409,30 @@ reachable blob and commit message: 0 hits **for the literal classes those passes
 which is a narrower claim than it first read as, and the distinction turned out to matter.
 
 **Amendment (2026-08-31) — the gate was REOPENED, and the closure claim above was wrong.**
-Two further audit rounds after it was written found more real personal data, so treat any
-unqualified "zero hits" in this entry as scoped to the classes known at the time. Round 5 found
-13 ancestor-only residuals, 8 of them hybrids where an earlier pass replaced a redacted noun and
-left the identifying clause standing. Round 6 then found what every prior pass structurally could
-not: **a real message subject line living in a commit message with zero copies in any blob**.
-Five passes had all been file-scoped, and a file-scoped rewrite does not touch commit messages —
-which is lesson 3 of this very entry, demonstrated against the entry itself. Round 6 also found a
-real account label still live at HEAD in a tracked test.
+Further audit rounds after it was written found more real personal data, so treat any unqualified
+"zero hits" in this entry as scoped to the classes known at the time. One round found
+ancestor-only residuals, including hybrid clauses left behind by earlier exact-match rules. A
+later round found a value that existed only in a commit message, with no copy in any blob, plus a
+tracked current-tree value. An earlier rewrite did cover commit messages, but its exact-match
+rules did not include the newly discovered value classes; the defect was incomplete rule coverage,
+not an all-blob-only rewrite history.
 
 The durable correction is about the SHAPE of the claim, not the count: "zero hits" is only ever
 true relative to the patterns you searched for, and a closure statement that omits that scope
 reads as a guarantee to the next auditor and invites them to skip. State the scope or state
-nothing. The gate is OPEN pending a rewrite pass that covers commit messages.
+nothing. The gate was REOPENED 2026-08-31. Current-tree corrections are complete; the gate remains
+open pending the approved history remediation, fresh-clone verification, and one fresh,
+value-free audit round that documents searched classes,
+engines, commit-message coverage, object/ref/artifact surfaces, and independent cross-checks, with
+zero findings for that stated scope.
 
 ### What is exposed
 
 Two incidents put personal data — the operator's and third parties' — into tracked files and
 into a commit message. Both were remediated at HEAD and, under separate operator authorization,
 in history. Later audit rounds found further residuals beyond those two incidents (see the
-2026-08-31 amendment above); remediation is ongoing rather than complete.
+2026-08-31 amendment above); current-tree remediation is complete, while the authorized history
+remediation and verification remain open.
 
 **This entry no longer re-enumerates the full inventory of what was exposed, where, and in
 which artifacts.** Assembling classes and artifacts into one list turns this record into a
@@ -548,7 +566,8 @@ question myself, the same week, without asking. Kept the caps; see below.
 **Nothing is required from you on this entry.** It is left in place, withdrawn rather than
 deleted, because the file is append-only and because "the driver escalated instead of deciding"
 is worth keeping. D7, D8 and D9 were genuinely open when this paragraph was written; D8 was later
-resolved and D9 was applied on 2026-08-23.
+resolved, and D9 was historically applied on 2026-08-23 for the classes then known. D9 was
+REOPENED 2026-08-31 and remains open pending the approved remediation and scoped verification.
 
 **Original entry follows, unedited.**
 

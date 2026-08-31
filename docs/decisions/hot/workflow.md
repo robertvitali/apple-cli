@@ -1,8 +1,8 @@
 ---
 topic: workflow
-last-used: 2026-08-23
+last-used: 2026-08-31
 importance: pinned
-uses: 1
+uses: 2
 ---
 
 # Workflow decisions
@@ -19,17 +19,18 @@ This changes only the branch topology. The independent-review, tests-green, Conv
 Commit, Asana-traceability, and frequent-push gates still apply before each direct push to
 `main`.
 
-The `1.0.0` tag and MCP retirement remain a manual operator hard stop (D2). (Audit closed
-2026-08-29 with zero residual hits. D2 parts 1–2 EXECUTED 2026-08-30 on explicit live operator
-instruction: first release cut as `v26.0.0` under the platform-keyed scheme, and the six MCPs
-retired via the private fleet-config repo. Only fleet deployment remains; the hard-stop rule
-itself — operator-present only — is unchanged. The procedure text below is the record of what
-was required.) Before that stop
-can be reached, Asana subtask `GID-REDACTED` must re-audit reachable history and retained
-artifacts for PII. Read its notes in full before executing; they are authoritative and include the
-required verification-script rerun and repeat-the-whole-audit-on-any-hit rule. Clean up only the
-`apple-cli-test` items logged in `TEST-CLEANUP.md`, by exact
-ID, via the MCP oracle—never unlogged or pre-existing real data; independently review the audit;
-then remove the D9 rollback bundle and scratchpad, verify both absent, and remove `START-HERE.md`
-last; re-review the final state and close with value-free evidence. Do not contact GitHub Support;
-the operator declined that escalation.
+The 2026-08-29 audit closure is historical and covered only the classes then known. D9 was
+reopened on 2026-08-31 after later rounds found additional classes. Publication remains blocked
+until the approved private remediation is complete and one fresh, value-free audit round records
+its searched classes, engines, commit-message coverage, object/ref/artifact surfaces, and
+independent cross-checks, with zero findings for that stated scope.
+
+D2 parts 1–2 executed on 2026-08-30 under explicit live operator instruction: the first release
+was cut as `v26.0.0` under the platform-keyed scheme, and the six MCPs were retired through the
+private fleet configuration. Only Homebrew deployment remains, and the operator-present hard-stop
+rule is unchanged. For cleanup, delete only `apple-cli-test` items logged in `TEST-CLEANUP.md`, by
+exact ID, using the `apple` CLI's precise-ID delete surfaces. An MCP may be used only if it still
+answers on a not-yet-converged host. Never delete unlogged or pre-existing real data. Remove D9
+rollback material only after fresh-clone and zero-finding verification, verify it is absent, then
+close with value-free evidence. Do not contact GitHub Support; the operator declined that
+escalation.

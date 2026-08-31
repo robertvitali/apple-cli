@@ -17,10 +17,13 @@
 > local and remote branches and all worktrees were retired by operator direction. Future work is
 > main-only unless the operator explicitly reverses that ruling.
 > The rewrite is containment, not erasure: it cannot reach existing clones, forks, or caches.
-> Update 2026-08-29: the pre-1.0 re-audit and cleanup gate (Asana `GID-REDACTED`) is CLOSED —
-> zero residual hits after three further operator-authorized targeted rewrite passes; all
-> rollback artifacts destroyed and verified absent. Item 4 below is now blocked only by its own
-> operator-present hard stop.
+> Historical update 2026-08-29: the pre-1.0 re-audit and cleanup gate was closed after three
+> further operator-authorized targeted rewrite passes returned zero findings for the classes then
+> known; its rollback artifacts were destroyed and verified absent. Current update 2026-08-31:
+> D9 was REOPENED after later audit rounds found additional classes. Publication remains blocked
+> pending the approved private remediation and one fresh, value-free audit record naming searched
+> classes, engines, commit-message coverage, object/ref/artifact surfaces, and independent
+> cross-checks, with zero findings for that stated scope.
 
 **TL;DR (2026-07-16 snapshot).** All six domains are implemented to strict-superset MCP parity, each
 independently reviewed (3-pass OMC) and verified green, then aggregated onto the
@@ -179,6 +182,10 @@ Ordered. Nothing here is safe to do unattended, which is why it waited.
    (in the private fleet-config repo; hosts converge on their next
    whole-tree apply). Remaining: fleet deployment of the binary +
    install/upgrade design (operator-present follow-up).
+   D9 was REOPENED 2026-08-31, so publication is independently blocked pending a fresh,
+   value-free privacy audit record that names searched classes, engines, commit-message coverage,
+   object/ref/artifact surfaces, and independent cross-checks, with zero findings for that stated
+   scope.
    The rule stands: no agent may cut a release or unregister an MCP server without a
    direct in-session instruction.
 5. **`SQLiteReader immutable=1` (M2).** A Messages-specific perf/PII hardening
