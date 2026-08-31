@@ -138,7 +138,37 @@ jobs:
           # Move [Unreleased] content under the new release heading; keep an empty [Unreleased].
           TODAY=$(date -u +%Y-%m-%d)
           perl -0pi -e "s/^## \\[Unreleased\\]/## [Unreleased]\n\n## [${NEW}] - ${TODAY}/m" CHANGELOG.md
+          NEW="$NEW" python3 - <<'PY'
+          import os
+          import pathlib
+          import re
+          import sys
+
+          path = pathlib.Path("CHANGELOG.md")
+          text = path.read_text()
+          new = os.environ["NEW"]
+          repo = os.environ["GITHUB_REPOSITORY"]
+          placeholder = f"https://github.com/{repo}/blob/main/docs/manual/"
+          target = f"https://github.com/{repo}/blob/v{new}/docs/manual/"
+          match = re.search(rf"^## \[{re.escape(new)}\][^\n]*\n.*?(?=^## |\Z)",
+                            text, re.S | re.M)
+          if not match:
+              print(f"release heading {new} not found", file=sys.stderr)
+              raise SystemExit(1)
+          section = match.group(0)
+          if text.count(placeholder) != 1 or section.count(placeholder) != 1:
+              print("expected exactly one main-branch manual link in the new release section",
+                    file=sys.stderr)
+              raise SystemExit(1)
+          section = section.replace(placeholder, target, 1)
+          if placeholder in section or target not in section:
+              print("failed to rewrite release manual link to the new tag", file=sys.stderr)
+              raise SystemExit(1)
+          path.write_text(text[:match.start()] + section + text[match.end():])
+          PY
           grep -q "^## \[$NEW\] - $TODAY" CHANGELOG.md
+          grep -q "https://github.com/${GITHUB_REPOSITORY}/blob/v${NEW}/docs/manual/" CHANGELOG.md
+          ! grep -q "blob/main/docs/manual/" CHANGELOG.md
 
       - name: Drift gate (constant == changelog == tag-to-be)
         run: |

@@ -182,6 +182,50 @@ private func renderMessage(_ m: ChatDB.Message) -> String {
     var prefix = "[\(m.date_local)]"
     if let g = m.group_name { prefix += " [\(g)]" }
     return "\(prefix) \(m.sender): \(m.body)"
+        + attachmentSuffix(m.attachments, hasAttachments: m.has_attachments, body: m.body)
+}
+
+/// Human-view annotation for attached files. An attachment-only message has an EMPTY body,
+/// so without this `--text` prints a bare "Sender: " and the human loses the only content the
+/// message had. Kept out of the JSON path entirely — `--text` is not the versioned contract.
+func attachmentSuffix(_ atts: [ChatDB.Attachment], hasAttachments: Bool, body: String) -> String {
+    let lead = body.isEmpty ? "" : " "
+    if !atts.isEmpty {
+        let names = atts.map { attachmentName($0.transfer_name) ?? attachmentBasename($0.filename) ?? "attachment" }
+        return "\(lead)[\(names.count) attachment\(names.count == 1 ? "" : "s"): \(names.joined(separator: ", "))]"
+    }
+    // `cache_has_attachments` set but the join gave nothing (pruned row, unreadable table):
+    // still say so rather than render a message that looks empty for no stated reason.
+    return hasAttachments ? "\(lead)[attachment]" : ""
+}
+
+private func nonEmpty(_ value: String?) -> String? {
+    guard let value, !value.isEmpty else { return nil }
+    return value
+}
+
+private func attachmentName(_ value: String?) -> String? {
+    guard let value else { return nil }
+    let scalars = value.unicodeScalars.map { scalar in
+        isUnsafeAttachmentDisplayScalar(scalar)
+            ? " "
+            : String(scalar)
+    }.joined()
+    let collapsed = scalars.split(whereSeparator: { $0.isWhitespace }).joined(separator: " ")
+    return nonEmpty(collapsed)
+}
+
+private func isUnsafeAttachmentDisplayScalar(_ scalar: Unicode.Scalar) -> Bool {
+    CharacterSet.controlCharacters.contains(scalar)
+        // Unicode format controls include bidi overrides/isolates and zero-width joiners.
+        // They are legal filename text, but unsafe in human terminal output because they
+        // can visually hide or reorder the displayed transfer name/extension.
+        || scalar.properties.generalCategory == .format
+}
+
+private func attachmentBasename(_ value: String?) -> String? {
+    guard let cleaned = attachmentName(value) else { return nil }
+    return nonEmpty(URL(fileURLWithPath: cleaned).lastPathComponent)
 }
 
 // MARK: - send (tool_send_message) — GUARDED
@@ -377,6 +421,8 @@ struct Search: ParsableCommand {
                     var prefix = "[\($0.date_local)] (Score: \(String(format: "%.2f", $0.score)))"
                     if let g = $0.group_name { prefix += " [\(g)]" }
                     return "\(prefix) \($0.sender): \($0.body)"
+                        + attachmentSuffix($0.attachments, hasAttachments: $0.has_attachments,
+                                           body: $0.body)
                 }.joined(separator: "\n")
             }
         }

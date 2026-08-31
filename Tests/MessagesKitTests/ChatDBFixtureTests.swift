@@ -3,6 +3,7 @@ import Foundation
 import SQLite3
 @testable import MessagesKit
 import AppleKit
+import TestSupport
 
 private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
 
@@ -11,19 +12,39 @@ private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.sel
 /// layer (where the empty-vs-nil `--contact` privacy bug lived) without touching
 /// the real store. Deleted on deinit.
 final class ChatFixture {
+    private let scratch = ScratchDirs("messages-chatdb-fixture")
     let path: String
+    let homePath: String
+    /// A real file on disk, so `Attachment.exists` has a true case to prove and is not
+    /// vacuously false for every row.
+    let presentAttachmentPath: String
+    let symlinkAttachmentPath: String
     /// Message dates are set relative to `now` so a `hours: 24` query always
     /// includes them regardless of when the test runs.
     let base: Int64
 
-    init() throws {
-        path = NSTemporaryDirectory() + "apple-cli-fixture-\(UUID().uuidString).sqlite"
+    init(includeOptionalAttachmentColumns: Bool = true) throws {
+        let root = try scratch.directory()
+        let home = root.appendingPathComponent("home", isDirectory: true)
+        let attachmentDir = home.appendingPathComponent("Library/Messages/Attachments/zz",
+                                                        isDirectory: true)
+        try FileManager.default.createDirectory(at: attachmentDir, withIntermediateDirectories: true)
+        path = root.appendingPathComponent("chat.sqlite").path
+        homePath = home.path
+        presentAttachmentPath = attachmentDir.appendingPathComponent("apple-cli-present.png").path
+        try Data([1, 2, 3]).write(to: URL(fileURLWithPath: presentAttachmentPath))
+        symlinkAttachmentPath = home.appendingPathComponent("Library/Messages/Attachments/link").path
+        try FileManager.default.createSymbolicLink(atPath: symlinkAttachmentPath,
+                                                   withDestinationPath: "/Volumes/example")
         base = Int64((Date().timeIntervalSince1970 - 3600 - MessageTime.appleUnixOffset) * 1_000_000_000)
 
         var db: OpaquePointer?
         guard sqlite3_open(path, &db) == SQLITE_OK else { throw Err.open }
         defer { sqlite3_close(db) }
 
+        let optionalAttachmentColumns = includeOptionalAttachmentColumns
+            ? ", is_sticker INTEGER, hide_attachment INTEGER"
+            : ""
         exec(db, """
             CREATE TABLE handle(ROWID INTEGER PRIMARY KEY, id TEXT, service TEXT);
             CREATE TABLE chat(ROWID INTEGER PRIMARY KEY, chat_identifier TEXT, display_name TEXT,
@@ -32,6 +53,9 @@ final class ChatFixture {
             CREATE TABLE message(ROWID INTEGER PRIMARY KEY, guid TEXT, text TEXT, attributedBody BLOB,
                 is_from_me INTEGER, handle_id INTEGER, cache_roomnames TEXT, service TEXT,
                 cache_has_attachments INTEGER, date INTEGER, error INTEGER);
+            CREATE TABLE attachment(ROWID INTEGER PRIMARY KEY, guid TEXT, filename TEXT,
+                mime_type TEXT, uti TEXT, transfer_name TEXT, total_bytes INTEGER\(optionalAttachmentColumns));
+            CREATE TABLE message_attachment_join(message_id INTEGER, attachment_id INTEGER);
             """)
 
         exec(db, "INSERT INTO handle VALUES (1,'+12125550100','iMessage'),(2,'+12125550101','SMS');")
@@ -59,24 +83,93 @@ final class ChatFixture {
             + Array("decoded body".utf8)
         var stmt: OpaquePointer?
         sqlite3_prepare_v2(db, "INSERT INTO message (ROWID,guid,attributedBody,is_from_me,handle_id,service,date,error) VALUES (3,'g3',?1,0,1,'iMessage',?2,0)", -1, &stmt, nil)
-        blob.withUnsafeBytes { sqlite3_bind_blob(stmt, 1, $0.baseAddress, Int32(blob.count), SQLITE_TRANSIENT) }
+        _ = blob.withUnsafeBytes { sqlite3_bind_blob(stmt, 1, $0.baseAddress, Int32(blob.count), SQLITE_TRANSIENT) }
         sqlite3_bind_text(stmt, 2, String(base - 200), -1, SQLITE_TRANSIENT)
         sqlite3_step(stmt); sqlite3_finalize(stmt)
+
+        // MSG-6: attachment-only — NULL text AND NULL attributedBody. Before the body-guard
+        // fix this row was dropped outright. MSG-7 keeps the negative case, so the fix cannot
+        // be "achieved" by deleting the guard. MSG-8 has a real join row while the cache flag
+        // is 0, pinning the authoritative source of truth. MSG-11 proves a cache flag alone is
+        // not enough to preserve a bodyless row because there are no file details to return.
+        exec(db, """
+            INSERT INTO message (ROWID,guid,is_from_me,handle_id,service,date,error,cache_has_attachments) VALUES
+            (6,'g6',0,1,'iMessage',\(base - 500),0,1),
+            (7,'g7',0,1,'iMessage',\(base - 600),0,0),
+            (11,'g11',0,1,'iMessage',\(base - 1000),0,1);
+            INSERT INTO message (ROWID,guid,text,is_from_me,handle_id,service,date,error,cache_has_attachments) VALUES
+            (8,'g8','cache miss attachment',0,1,'iMessage',\(base - 700),0,0);
+            INSERT INTO message (ROWID,guid,text,is_from_me,handle_id,service,date,error,cache_has_attachments) VALUES
+            (9,'g9','path semantics attachment',0,1,'iMessage',\(base - 800),0,1);
+            INSERT INTO message (ROWID,guid,text,is_from_me,handle_id,service,date,error,cache_has_attachments) VALUES
+            (10,'g10','null attachment fields',0,1,'iMessage',\(base - 900),0,1);
+            """)
+        // One attachment whose file is really on disk under the injected home (exists → true)
+        // and one that is not, written tilde-relative the way chat.db actually stores them.
+        if includeOptionalAttachmentColumns {
+            exec(db, """
+                INSERT INTO attachment (ROWID,guid,filename,mime_type,uti,transfer_name,total_bytes,is_sticker,hide_attachment) VALUES
+                (10,'a10','~/Library/Messages/Attachments/zz/apple-cli-present.png','image/png','public.png','photo.png',3,0,0),
+                (11,'a11','~/Library/Messages/Attachments/zz/apple-cli-absent.mov','video/quicktime','com.apple.quicktime-movie','clip.mov',99,1,0),
+                (12,'a12','~/Library/Messages/Attachments/zz/apple-cli-doc.pdf','application/pdf','com.adobe.pdf','doc.pdf',42,0,1),
+                (13,'a13','~/Library/Messages/Attachments/zz/apple-cli-cache-miss.png','image/png','public.png','cache-miss.png',8,0,0),
+                (14,'a14','relative/apple-cli.png','image/png','public.png','relative.png',14,0,0),
+                (15,'a15','~/Library/Messages/Attachments/zz/../zz/apple-cli-present.png','image/png','public.png','standardized.png',15,0,0),
+                (16,'a16','/net/example.invalid/apple-cli.png','image/png','public.png','net.png',16,0,0),
+                (17,'a17','/home/example/apple-cli.png','image/png','public.png','home.png',17,0,0),
+                (19,'a19','/Network/Servers/example.invalid/apple-cli.png','image/png','public.png','network.png',19,0,0),
+                (20,'a20','/Volumes/example/apple-cli.png','image/png','public.png','volume.png',20,0,0),
+                (21,'a21','~/Library/Messages/Attachments/link/apple-cli.png','image/png','public.png','symlink.png',21,0,0),
+                (18,NULL,NULL,NULL,NULL,NULL,NULL,NULL,NULL);
+                INSERT INTO message_attachment_join VALUES (6,10),(6,11),(5,12),(8,13),(9,14),(9,15),(9,16),(9,17),(9,19),(9,20),(9,21),(10,18);
+                """)
+        } else {
+            exec(db, """
+                INSERT INTO attachment (ROWID,guid,filename,mime_type,uti,transfer_name,total_bytes) VALUES
+                (10,'a10','~/Library/Messages/Attachments/zz/apple-cli-present.png','image/png','public.png','photo.png',3),
+                (11,'a11','~/Library/Messages/Attachments/zz/apple-cli-absent.mov','video/quicktime','com.apple.quicktime-movie','clip.mov',99),
+                (12,'a12','~/Library/Messages/Attachments/zz/apple-cli-doc.pdf','application/pdf','com.adobe.pdf','doc.pdf',42),
+                (13,'a13','~/Library/Messages/Attachments/zz/apple-cli-cache-miss.png','image/png','public.png','cache-miss.png',8),
+                (14,'a14','relative/apple-cli.png','image/png','public.png','relative.png',14),
+                (15,'a15','~/Library/Messages/Attachments/zz/../zz/apple-cli-present.png','image/png','public.png','standardized.png',15),
+                (16,'a16','/net/example.invalid/apple-cli.png','image/png','public.png','net.png',16),
+                (17,'a17','/home/example/apple-cli.png','image/png','public.png','home.png',17),
+                (19,'a19','/Network/Servers/example.invalid/apple-cli.png','image/png','public.png','network.png',19),
+                (20,'a20','/Volumes/example/apple-cli.png','image/png','public.png','volume.png',20),
+                (21,'a21','~/Library/Messages/Attachments/link/apple-cli.png','image/png','public.png','symlink.png',21),
+                (18,NULL,NULL,NULL,NULL,NULL,NULL);
+                INSERT INTO message_attachment_join VALUES (6,10),(6,11),(5,12),(8,13),(9,14),(9,15),(9,16),(9,17),(9,19),(9,20),(9,21),(10,18);
+                """)
+        }
+        // MSG-5 also carries an attachment: it has real text, so it is reachable by the SEARCH
+        // path, which is where the two message shapes would otherwise silently diverge.
+        exec(db, "UPDATE message SET cache_has_attachments=1 WHERE ROWID=5;")
     }
 
     deinit {
-        try? FileManager.default.removeItem(atPath: path)
         for s in ["-wal", "-shm"] { try? FileManager.default.removeItem(atPath: path + s) }
     }
 
-    enum Err: Error { case open }
+    enum Err: Error { case open, exec(String) }
     private func exec(_ db: OpaquePointer?, _ sql: String) { sqlite3_exec(db, sql, nil, nil, nil) }
+
+    func exec(_ sql: String) throws {
+        var db: OpaquePointer?
+        guard sqlite3_open(path, &db) == SQLITE_OK else { throw Err.open }
+        defer { sqlite3_close(db) }
+        var err: UnsafeMutablePointer<CChar>?
+        let rc = sqlite3_exec(db, sql, nil, nil, &err)
+        defer { sqlite3_free(err) }
+        guard rc == SQLITE_OK else {
+            throw Err.exec(err.map { String(cString: $0) } ?? "unknown sqlite error")
+        }
+    }
 }
 
 @Suite("ChatDB against a seeded fixture")
 struct ChatDBFixtureTests {
     private func makeDB(_ fx: ChatFixture, book: AddressBook) throws -> ChatDB {
-        try ChatDB(path: fx.path, book: book, copyToTemp: false)
+        try ChatDB(path: fx.path, book: book, copyToTemp: false, homeDirectoryForTilde: fx.homePath)
     }
     private let friendBook = AddressBook(contacts: ["12125550100": "Friend Name"])
 
@@ -84,9 +177,10 @@ struct ChatDBFixtureTests {
         let fx = try ChatFixture()
         var db = try makeDB(fx, book: friendBook)
         let msgs = db.recent(hours: 24, handleRowIds: nil, limit: 100)
-        #expect(msgs.count == 5)
+        #expect(msgs.count == 9)
         #expect(msgs.first?.rowid == 1)            // newest first
-        #expect(msgs.map(\.rowid) == [1, 2, 3, 4, 5])
+        // 6 is the attachment-only row; 7 is body-less with nothing attached and stays dropped.
+        #expect(msgs.map(\.rowid) == [1, 2, 3, 4, 5, 6, 8, 9, 10])
     }
 
     /// MSG-2. The oracle keeps '' in chat_mapping and filters at USE (`if group_chat_name:`),
@@ -153,7 +247,225 @@ struct ChatDBFixtureTests {
         let fx = try ChatFixture()
         var db = try makeDB(fx, book: friendBook)
         let msgs = db.recent(hours: 24, handleRowIds: [1], limit: 100)
-        #expect(Set(msgs.map(\.rowid)) == [1, 2, 3, 5]) // handle 1 only (not the group msg)
+        #expect(Set(msgs.map(\.rowid)) == [1, 2, 3, 5, 6, 8, 9, 10]) // handle 1 only (not the group msg)
+    }
+
+    /// The attachment-only row (NULL text, NULL attributedBody) must SURVIVE shaping. It used
+    /// to be dropped by the body guard, so a caller could never see the one class of message
+    /// this metadata exists for.
+    @Test func attachmentOnlyMessageSurvivesWithEmptyBody() throws {
+        let fx = try ChatFixture()
+        var db = try makeDB(fx, book: friendBook)
+        let msgs = db.recent(hours: 24, handleRowIds: nil, limit: 100)
+        let m = msgs.first { $0.rowid == 6 }
+        #expect(m != nil, "attachment-only message must not be dropped")
+        #expect(m?.body == "")
+        #expect(m?.has_attachments == true)
+    }
+
+    /// Negative control for the guard fix: body-less AND nothing attached is still noise and
+    /// stays dropped. Without this, deleting the guard entirely would pass the test above.
+    @Test func bodylessMessageWithNoAttachmentIsStillSkipped() throws {
+        let fx = try ChatFixture()
+        var db = try makeDB(fx, book: friendBook)
+        let msgs = db.recent(hours: 24, handleRowIds: nil, limit: 100)
+        #expect(!msgs.contains { $0.rowid == 7 })
+    }
+
+    @Test func bodylessCacheFlagOnlyMessageIsStillSkipped() throws {
+        let fx = try ChatFixture()
+        var db = try makeDB(fx, book: friendBook)
+        let msgs = db.recent(hours: 24, handleRowIds: nil, limit: 100)
+        #expect(!msgs.contains { $0.rowid == 11 })
+    }
+
+    @Test func attachmentMetadataIsJoinedAndOrdered() throws {
+        let fx = try ChatFixture()
+        var db = try makeDB(fx, book: friendBook)
+        let m = db.recent(hours: 24, handleRowIds: nil, limit: 100).first { $0.rowid == 6 }
+        let atts = try #require(m?.attachments)
+        #expect(atts.count == 2)
+        #expect(atts.map(\.rowid) == [10, 11])              // ORDER BY a.ROWID
+        #expect(atts[0].transfer_name == "photo.png")
+        #expect(atts[0].mime_type == "image/png")
+        #expect(atts[0].uti == "public.png")
+        #expect(atts[0].total_bytes == 3)
+        #expect(atts[0].is_sticker == false)
+        #expect(atts[0].hide_attachment == false)
+        #expect(atts[1].is_sticker == true)
+        #expect(atts[1].hide_attachment == false)
+        #expect(atts[0].exists == true)                     // really on disk
+        #expect(atts[1].exists == false)
+        // Stored tilde-relative; `path` is the usable absolute form, `filename` is verbatim.
+        #expect(atts[0].filename?.hasPrefix("~/") == true)
+        #expect(atts[0].path == fx.presentAttachmentPath)
+        #expect(atts[1].filename?.hasPrefix("~/") == true)
+        #expect(atts[1].path?.hasPrefix("~") == false)
+        #expect(atts[1].path?.hasSuffix("/Library/Messages/Attachments/zz/apple-cli-absent.mov") == true)
+    }
+
+    /// A message with no attachment gets an empty array, not a missing key or a nil.
+    @Test func messageWithoutAttachmentsHasEmptyArray() throws {
+        let fx = try ChatFixture()
+        var db = try makeDB(fx, book: friendBook)
+        let m = db.recent(hours: 24, handleRowIds: nil, limit: 100).first { $0.rowid == 1 }
+        #expect(m?.attachments.isEmpty == true)
+        #expect(m?.has_attachments == false)
+    }
+
+    /// The two message shapes must not diverge: a caller that finds a message by search gets
+    /// the same attachment metadata as one reading it from `recent`.
+    @Test func searchCarriesAttachmentsToo() throws {
+        let fx = try ChatFixture()
+        var db = try makeDB(fx, book: friendBook)
+        // Message 5 has text (so it is reachable by search) AND an attachment.
+        let hit = db.search(term: "error", hours: 24, threshold: 0.6, match: .contains)
+            .matches.first { $0.rowid == 5 }
+        let m = try #require(hit)
+        #expect(m.has_attachments == true)
+        #expect(m.attachments.map(\.rowid) == [12])
+        #expect(m.attachments.first?.transfer_name == "doc.pdf")
+        #expect(m.attachments.first?.total_bytes == 42)
+
+        // Negative side, so this is not just "every search hit reports an attachment".
+        let plain = db.search(term: "hello", hours: 24, threshold: 0.6, match: .contains)
+            .matches.first { $0.rowid == 1 }
+        #expect(plain?.attachments.isEmpty == true)
+        #expect(plain?.has_attachments == false)
+    }
+
+    @Test func joinRowsSetHasAttachmentsEvenWhenCacheFlagIsZero() throws {
+        let fx = try ChatFixture()
+        var db = try makeDB(fx, book: friendBook)
+
+        let recent = try #require(db.recent(hours: 24, handleRowIds: nil, limit: 100)
+            .first { $0.rowid == 8 })
+        #expect(recent.attachments.map(\.rowid) == [13])
+        #expect(recent.has_attachments == true)
+
+        let searched = try #require(db.search(term: "cache miss", hours: 24, threshold: 0.6,
+                                              match: .contains).matches.first { $0.rowid == 8 })
+        #expect(searched.attachments.map(\.rowid) == [13])
+        #expect(searched.has_attachments == true)
+    }
+
+    @Test func attachmentLookupKeepsRowsPastTheFirstChunk() throws {
+        let fx = try ChatFixture()
+        let start = fx.base - 10_000
+        for rowid in 1000..<1605 {
+            try fx.exec("""
+                INSERT INTO message (ROWID,guid,text,is_from_me,handle_id,service,date,error,cache_has_attachments)
+                VALUES (\(rowid),'bulk-\(rowid)','bulk attachment \(rowid)',0,1,'iMessage',\(start - Int64(rowid)),0,1);
+                INSERT INTO attachment (ROWID,guid,filename,mime_type,uti,transfer_name,total_bytes)
+                VALUES (\(rowid),'bulk-att-\(rowid)','/tmp/apple-cli-bulk-\(rowid).png','image/png','public.png','bulk-\(rowid).png',1);
+                INSERT INTO message_attachment_join VALUES (\(rowid),\(rowid));
+                """)
+        }
+
+        var db = try makeDB(fx, book: friendBook)
+        let msgs = db.recent(hours: 24, handleRowIds: nil, limit: 700)
+        let beforeBoundary = try #require(msgs.first { $0.rowid == 1499 })
+        let afterBoundary = try #require(msgs.first { $0.rowid == 1500 })
+        let final = try #require(msgs.first { $0.rowid == 1604 })
+        #expect(beforeBoundary.attachments.map(\.rowid) == [1499])
+        #expect(afterBoundary.attachments.map(\.rowid) == [1500])
+        #expect(final.attachments.map(\.rowid) == [1604])
+    }
+
+    @Test func attachmentPathsAreAbsoluteStandardizedAndSafelyProbed() throws {
+        let fx = try ChatFixture()
+        var db = try makeDB(fx, book: friendBook)
+        let msg = try #require(db.recent(hours: 24, handleRowIds: nil, limit: 100)
+            .first { $0.rowid == 9 })
+        let byRow = Dictionary(uniqueKeysWithValues: msg.attachments.map { ($0.rowid, $0) })
+
+        let relative = try #require(byRow[14])
+        #expect(relative.path == nil)
+        #expect(relative.exists == nil)
+
+        let standardized = try #require(byRow[15])
+        #expect(standardized.path == fx.presentAttachmentPath)
+        #expect(standardized.exists == true)
+
+        let net = try #require(byRow[16])
+        #expect(net.path == "/net/example.invalid/apple-cli.png")
+        #expect(net.exists == nil)
+
+        let home = try #require(byRow[17])
+        #expect(home.path == "/home/example/apple-cli.png")
+        #expect(home.exists == nil)
+
+        let network = try #require(byRow[19])
+        #expect(network.path == "/Network/Servers/example.invalid/apple-cli.png")
+        #expect(network.exists == nil)
+
+        let volume = try #require(byRow[20])
+        #expect(volume.path == "/Volumes/example/apple-cli.png")
+        #expect(volume.exists == nil)
+
+        let symlink = try #require(byRow[21])
+        #expect(symlink.path == fx.symlinkAttachmentPath + "/apple-cli.png")
+        #expect(symlink.exists == nil)
+    }
+
+    @Test func nullAttachmentFieldsSurviveTheSQLPath() throws {
+        let fx = try ChatFixture()
+        var db = try makeDB(fx, book: friendBook)
+        let msg = try #require(db.recent(hours: 24, handleRowIds: nil, limit: 100)
+            .first { $0.rowid == 10 })
+        let att = try #require(msg.attachments.first)
+        #expect(att.rowid == 18)
+        #expect(att.guid == nil)
+        #expect(att.filename == nil)
+        #expect(att.path == nil)
+        #expect(att.exists == nil)
+        #expect(att.mime_type == nil)
+        #expect(att.uti == nil)
+        #expect(att.transfer_name == nil)
+        #expect(att.total_bytes == nil)
+        #expect(att.is_sticker == nil)
+        #expect(att.hide_attachment == nil)
+        #expect(msg.has_attachments == true)
+    }
+
+    @Test func olderAttachmentSchemaStillReturnsJoinedRows() throws {
+        let fx = try ChatFixture(includeOptionalAttachmentColumns: false)
+        var db = try makeDB(fx, book: friendBook)
+        let msg = try #require(db.recent(hours: 24, handleRowIds: nil, limit: 100)
+            .first { $0.rowid == 6 })
+
+        #expect(msg.attachments.map(\.rowid) == [10, 11])
+        #expect(msg.attachments.allSatisfy { $0.is_sticker == nil })
+        #expect(msg.attachments.allSatisfy { $0.hide_attachment == nil })
+    }
+
+    @Test func missingAttachmentMetadataColumnsStillReturnJoinedRows() throws {
+        let fx = try ChatFixture()
+        try fx.exec("""
+            DROP TABLE attachment;
+            CREATE TABLE attachment(ROWID INTEGER PRIMARY KEY);
+            INSERT INTO attachment VALUES (10),(11);
+            """)
+        var db = try makeDB(fx, book: friendBook)
+        let msg = try #require(db.recent(hours: 24, handleRowIds: nil, limit: 100)
+            .first { $0.rowid == 6 })
+
+        #expect(msg.has_attachments == true)
+        #expect(msg.attachments.map(\.rowid) == [10, 11])
+        #expect(msg.attachments.allSatisfy { $0.guid == nil })
+        #expect(msg.attachments.allSatisfy { $0.filename == nil })
+        #expect(msg.attachments.allSatisfy { $0.total_bytes == nil })
+    }
+
+    @Test func missingAttachmentJoinCapabilityReturnsNoMetadata() throws {
+        let fx = try ChatFixture()
+        try fx.exec("DROP TABLE message_attachment_join;")
+        var db = try makeDB(fx, book: friendBook)
+        let msg = try #require(db.recent(hours: 24, handleRowIds: nil, limit: 100)
+            .first { $0.rowid == 5 })
+
+        #expect(msg.has_attachments == true)
+        #expect(msg.attachments.isEmpty)
     }
 
     /// REGRESSION: an empty (non-nil) filter must return NOTHING, not leak all

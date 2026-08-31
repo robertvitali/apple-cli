@@ -17,11 +17,29 @@ JSON output are stable per the versioning policy — breaking changes bump
 
 ## [Unreleased]
 
+### Added
+
+- **`messages recent` and `messages search` now report attachment metadata.** Each
+  message gains an `attachments` array — per file: `rowid`, `guid`, `filename` (verbatim, as
+  chat.db stores it, often `~`-relative), `path` (an absolute standardized path when one can be
+  derived), `exists` (true/false when safely probed, otherwise null), `mime_type`, `uti`,
+  `transfer_name`, `total_bytes`, `is_sticker`, and `hide_attachment`. `messages search` also
+  gains `has_attachments`, matching the recent-message shape. This is additive for tolerant
+  readers: `schema_version` is unchanged at 1 because no existing key is removed, renamed, or
+  retyped, and a message with nothing attached gets an empty array rather than a missing key.
+
 ### Fixed
 
 - Corrected privacy-remediation status and documentation so publication remains blocked until a
   fresh audit verifies zero findings for its stated scope.
-- Manual: [apple v26.0.0 command reference](https://github.com/robertvitali/apple-cli/blob/v26.0.0/docs/manual/index.md).
+- **`messages recent` no longer drops attachment-only messages.** A message consisting solely
+  of a file — no text and no `attributedBody` — was skipped during row shaping, so the one
+  class of message the new metadata exists for could be invisible. Such rows now surface with
+  an empty `body`; body-less messages without joined attachment evidence are still skipped, as
+  before.
+  `--text` annotates attached transfer names, or stored-path basenames when transfer names are
+  unavailable, so those messages do not render as a blank line.
+- Manual: [apple command reference](https://github.com/robertvitali/apple-cli/blob/main/docs/manual/index.md).
 
 ## [26.0.0] - 2026-08-30
 

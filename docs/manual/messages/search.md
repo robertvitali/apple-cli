@@ -8,6 +8,10 @@ Search messages: fuzzy (WRatio) + threshold + time window (or contains/exact).
 apple messages search <term> [flags]
 ```
 
+## Description
+
+Search returns scored message matches and now carries the same attachment shape as `messages recent`: `has_attachments` plus per-file metadata in `attachments`. This is additive under `schema_version` 1 because existing keys keep their names and types.
+
 ## Options
 
 - `<term>`
@@ -33,6 +37,24 @@ apple messages search <term> [flags]
   <br>Emit human-readable text instead of the default JSON output.
 - `--version`
   <br>Show the version.
+
+## Examples
+
+Search recent messages and include attachment metadata
+
+```console
+apple messages search "project file" --hours 720 --match contains
+```
+
+Search all retained message text exactly
+
+```console
+apple messages search "receipt" --hours 0 --match exact
+```
+
+## Notes
+
+`messages search` first filters candidate rows by message text or attributed body, so an attachment-only row with no searchable body can appear in `messages recent` without appearing in search results. When a searched row does have joined attachments, the JSON includes the same metadata fields and conservative path-probe semantics as `messages recent`.
 
 ## Output
 

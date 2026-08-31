@@ -118,7 +118,8 @@ Notable MCP behaviors the port must respect for parity: (a) **stateful `"contact
 - **JSON-RPC 2.0 stdio server** `imsg rpc` (imsg) — single long-running process for agents; effectively an MCP replacement transport we own.
 - **Live stream** `imsg watch` (fs-events + poll, WAL-aware) (imsg) — MCP has no streaming; high value.
 - **Structured message schema** (imsg): `reply_to_guid/text/sender`, `thread_originator_guid`, `url_preview`, `reactions`, per-chat **unread counts** + **read timestamps** — far richer than MCP's flat strings.
-- **Attachment metadata** + optional **CAF→M4A / GIF→PNG** conversion (imsg) — model-consumable media.
+- **Attachment metadata** (implemented as a CLI-only JSON extra) + optional
+  **CAF→M4A / GIF→PNG** conversion (imsg) — model-consumable media.
 - **Explicit service control** `--service imessage|sms|auto` + `--no-sms-fallback` (imsg) — MCP's routing is implicit/uncontrollable.
 - **`send --file`** attachments (imsg) — MCP is text-only.
 - **`stats`** (tz-aware message statistics) + **`scheduled list`** (Send-Later, no bridge) (imsg) — both no-SIP, useful, cheap to keep.
@@ -201,8 +202,28 @@ against a historical value (Q12 [1]).
 | `check_imessage_availability` | 2125550142 → `available=true`, recommendation string **byte-identical**. |
 | `get_chats` | **CLI == oracle** on named-chat count (superset fields: guid, room_name, service_name, group_id, style). |
 | `send_message --group` | Validation-evidence asterisk: the `--group` path accepts the oracle group-chat identifier and dispatches via chat id, but it has never been exercised against a live group. No live group was created or messaged, and no live group send is authorized. This limits validation evidence; it does not mark the capability missing. |
-| `get_recent_messages` | hours=6 cross-chat: every MCP output line reproduced **byte-verbatim** (attributedBody-decoded bodies, group names, sender resolution, timestamps). |
+| `get_recent_messages` | hours=6 cross-chat: every MCP output line reproduced **byte-verbatim** (attributedBody-decoded bodies, group names, sender resolution, timestamps). **This claim is bounded to the pre-attachment build and is deliberately no longer true of `--text`** — see "Attachment metadata" below for the two intentional deviations (an appended `[N attachments: …]` suffix, and a row set that now includes attachment-only messages the oracle drops). The JSON body/group/sender/timestamp shaping the claim was really about is unchanged. |
 | `fuzzy_search_messages` | See the WRatio boundary note below. |
+
+### Attachment metadata
+
+The CLI intentionally adds a read-only attachment metadata extra beyond the MCP
+surface. `messages recent` and `messages search` emit `attachments` arrays; each
+attachment carries row id, stored filename, standardized absolute path when one
+can be derived, tri-state local existence from a conservative local-root probe,
+MIME/UTI hints, transfer name, byte count, sticker state, and
+hidden-attachment state. `messages search` also emits
+`has_attachments`, matching the `recent` shape. This is additive for tolerant
+readers and keeps `schema_version = 1`: no existing key is removed, renamed, or
+retyped, and pre-attachment consumers must ignore unknown keys.
+
+There is one deliberate row-set divergence. `messages recent` now keeps
+attachment-only rows by returning an empty `body` when authoritative join rows
+exist; a cache flag alone still cannot preserve a bodyless row because there are
+no file details to return. `messages search` still cannot discover
+attachment-only rows with no searchable body, because its SQL prefilter is
+text/attributedBody-based before scoring. If such a row is otherwise selected in
+the future, it should use the same attachment shape.
 
 ### WRatio fuzzy-search boundary (behavioral, per §6 / §7)
 

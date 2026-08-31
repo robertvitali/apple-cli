@@ -8,6 +8,10 @@ Recent messages across ALL chats in the last N hours (optionally by contact).
 apple messages recent [flags]
 ```
 
+## Description
+
+Returns recent Messages rows with the same JSON envelope as the rest of the CLI. Each message includes `has_attachments` and an `attachments` array. Attachment paths are derived from chat.db metadata only: `filename` is the stored value, `path` is present only when an absolute standardized path can be derived, and `exists` is true or false only after a conservative local-root probe. When probing is skipped, `exists` is null.
+
 ## Options
 
 - `--contact` `<contact>`
@@ -33,6 +37,24 @@ apple messages recent [flags]
   <br>Emit human-readable text instead of the default JSON output.
 - `--version`
   <br>Show the version.
+
+## Examples
+
+List recent messages with attachment metadata
+
+```console
+apple messages recent --hours 6 --limit 25
+```
+
+Filter to an explicit synthetic handle
+
+```console
+apple messages recent --handle +12125550100 --hours 24
+```
+
+## Notes
+
+`messages recent` can include attachment-only messages that have no text body. Those rows use an empty `body` and carry the file details in `attachments`; a cache flag alone does not preserve a bodyless row when no joined attachment details exist. Attachment paths are not confined to the Messages attachments directory because sent items may point elsewhere on the local machine, but existence probing is limited to conservative local roots and uses symlink-aware traversal. Relative paths are omitted; automount and mounted-volume roots such as `/net`, `/home`, `/Network/Servers`, and `/Volumes` are reported without probing.
 
 ## Output
 

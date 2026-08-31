@@ -49,7 +49,7 @@ let package = Package(
         .target(name: "TestSupport"),
         .testTarget(name: "AppleKitTests", dependencies: ["AppleKit", "TestSupport"]),
         .testTarget(name: "EventKitCoreTests", dependencies: ["EventKitCore", "AppleKit"]),
-        .testTarget(name: "MessagesKitTests", dependencies: ["MessagesKit", "AppleKit"]),
+        .testTarget(name: "MessagesKitTests", dependencies: ["MessagesKit", "AppleKit", "TestSupport"]),
         .testTarget(name: "MailKitTests", dependencies: ["MailKit", "AppleKit", "TestSupport"]),
         .testTarget(name: "ContactsKitTests", dependencies: ["ContactsKit", "AppleKit"]),
         .testTarget(name: "NotesKitTests", dependencies: ["NotesKit", "AppleKit"]),

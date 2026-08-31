@@ -1,5 +1,6 @@
 import Foundation
 import AppleKit
+import Darwin
 
 /// Read layer over `~/Library/Messages/chat.db` (WAL-aware, via the shared
 /// `SQLiteReader` with `copyToTemp` for hot/locked data reads). Ports the SQL +
@@ -13,6 +14,7 @@ public struct ChatDB {
 
     private let reader: SQLiteReader
     private let book: AddressBook
+    private let homeDirectoryForTilde: String
     // Caches for per-invocation sender resolution.
     private var chatDisplayNameCache: [String: String?] = [:]
 
@@ -26,9 +28,11 @@ public struct ChatDB {
     /// shared-core optimization (an `immutable=1` URI open, or `copyToTemp:false` for
     /// the light commands) would remove the copy — but that is a cross-domain
     /// `SQLiteReader` decision, tracked separately, not made here.
-    public init(path: String = ChatDB.defaultPath(), book: AddressBook, copyToTemp: Bool = true) throws {
+    public init(path: String = ChatDB.defaultPath(), book: AddressBook, copyToTemp: Bool = true,
+                homeDirectoryForTilde: String = FileManager.default.homeDirectoryForCurrentUser.path) throws {
         self.reader = try SQLiteReader(path: path, copyToTemp: copyToTemp)
         self.book = book
+        self.homeDirectoryForTilde = homeDirectoryForTilde
     }
 
     // MARK: - Phone/handle resolution (MCP `_get_phone_formats` / `find_handles_by_phone`)
@@ -105,6 +109,68 @@ public struct ChatDB {
 
     // MARK: - Recent (MCP `get_recent_messages`)
 
+    /// One received/sent attachment, joined from `message_attachment_join` + `attachment`.
+    ///
+    /// `has_attachments` alone only tells a caller that something is there; it gives no way
+    /// to identify or open it. Everything here is what an agent needs to actually reach the
+    /// file: the stored `filename` is often `~`-prefixed and not directly openable, so
+    /// `path` carries an absolute, standardized form when one can be derived. `exists` is a
+    /// conservative local filesystem probe: `nil` means the path was not probed, while true/false
+    /// says only whether a symlink-aware local-root check can see an item at that path right now.
+    public struct Attachment: Encodable {
+        public let rowid: Int64
+        public let guid: String?
+        public let filename: String?       // as stored, typically ~-relative
+        public let path: String?           // tilde-expanded absolute path
+        public let exists: Bool?           // nil when the path was not safe to probe
+        public let mime_type: String?
+        public let uti: String?
+        public let transfer_name: String?  // original name as sent
+        public let total_bytes: Int64?
+        public let is_sticker: Bool?
+        public let hide_attachment: Bool?
+
+        enum CodingKeys: String, CodingKey {
+            case rowid, guid, filename, path, exists, mime_type, uti, transfer_name, total_bytes
+            case is_sticker, hide_attachment
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            var container = encoder.container(keyedBy: CodingKeys.self)
+            try container.encode(rowid, forKey: .rowid)
+            if let guid { try container.encode(guid, forKey: .guid) } else { try container.encodeNil(forKey: .guid) }
+            if let filename { try container.encode(filename, forKey: .filename) } else { try container.encodeNil(forKey: .filename) }
+            if let path { try container.encode(path, forKey: .path) } else { try container.encodeNil(forKey: .path) }
+            if let exists {
+                try container.encode(exists, forKey: .exists)
+            } else {
+                try container.encodeNil(forKey: .exists)
+            }
+            if let mime_type { try container.encode(mime_type, forKey: .mime_type) } else { try container.encodeNil(forKey: .mime_type) }
+            if let uti { try container.encode(uti, forKey: .uti) } else { try container.encodeNil(forKey: .uti) }
+            if let transfer_name {
+                try container.encode(transfer_name, forKey: .transfer_name)
+            } else {
+                try container.encodeNil(forKey: .transfer_name)
+            }
+            if let total_bytes {
+                try container.encode(total_bytes, forKey: .total_bytes)
+            } else {
+                try container.encodeNil(forKey: .total_bytes)
+            }
+            if let is_sticker {
+                try container.encode(is_sticker, forKey: .is_sticker)
+            } else {
+                try container.encodeNil(forKey: .is_sticker)
+            }
+            if let hide_attachment {
+                try container.encode(hide_attachment, forKey: .hide_attachment)
+            } else {
+                try container.encodeNil(forKey: .hide_attachment)
+            }
+        }
+    }
+
     public struct Message: Encodable {
         public let rowid: Int64
         public let date: Date          // ISO-8601 in JSON
@@ -117,6 +183,7 @@ public struct ChatDB {
         public let body: String
         public let group_name: String?
         public let has_attachments: Bool
+        public let attachments: [Attachment]
     }
 
     private static let messageSelect = """
@@ -128,8 +195,8 @@ public struct ChatDB {
         """
 
     /// Fetch recent messages across all chats (optionally filtered to handle rowids),
-    /// newest-first, limited. Decodes body from `text` or `attributedBody`; skips
-    /// content-less rows (MCP parity).
+    /// newest-first, limited. Decodes body from `text` or `attributedBody`; body-less
+    /// rows survive only when authoritative attachment rows exist.
     public mutating func recent(hours: Int, handleRowIds: [Int64]?, limit: Int) -> [Message] {
         // Filter semantics are load-bearing for privacy: `nil` = NO filter requested
         // (return all recent messages), but a non-nil EMPTY array = a filter WAS
@@ -150,10 +217,146 @@ public struct ChatDB {
         return shape(rows: rows, mapping: chatMapping())
     }
 
+    /// Attachment metadata for a batch of message rowids, keyed by message rowid.
+    ///
+    /// Chunked defensively: SQLite builds vary in their host-parameter ceiling, and the
+    /// search path can hand us far more rows than conservative limits allow.
+    private func attachmentsByMessage(ids: [Int64]) -> [Int64: [Attachment]] {
+        guard !ids.isEmpty else { return [:] }
+        let columns = attachmentColumnNames()
+        guard attachmentSchemaSupportsJoins(attachmentColumns: columns) else { return [:] }
+        let selectedColumns = [
+            "guid", "filename", "mime_type", "uti", "transfer_name", "total_bytes",
+            "is_sticker", "hide_attachment"
+        ].map { attachmentSelect(column: $0, available: columns) }.joined(separator: ",\n                       ")
+        var out: [Int64: [Attachment]] = [:]
+        for chunk in stride(from: 0, to: ids.count, by: 500).map({
+            Array(ids[$0 ..< min($0 + 500, ids.count)])
+        }) {
+            let placeholders = chunk.indices.map { "?\($0 + 1)" }.joined(separator: ", ")
+            let sql = """
+                SELECT maj.message_id AS message_id, a.ROWID AS rowid,
+                       \(selectedColumns)
+                FROM message_attachment_join maj
+                JOIN attachment a ON a.ROWID = maj.attachment_id
+                WHERE maj.message_id IN (\(placeholders))
+                ORDER BY maj.message_id, a.ROWID
+                """
+            for row in (try? reader.rows(sql, chunk.map(String.init))) ?? [] {
+                guard let mid = row.int("message_id"), let attachmentID = row.int("rowid") else { continue }
+                let raw = row.text("filename")
+                let resolved = attachmentPath(from: raw)
+                out[mid, default: []].append(Attachment(
+                    rowid: attachmentID,
+                    guid: row.text("guid"),
+                    filename: raw,
+                    path: resolved.path,
+                    exists: resolved.exists,
+                    mime_type: row.text("mime_type"),
+                    uti: row.text("uti"),
+                    transfer_name: row.text("transfer_name"),
+                    total_bytes: row.int("total_bytes"),
+                    is_sticker: row.int("is_sticker").map { $0 != 0 },
+                    hide_attachment: row.int("hide_attachment").map { $0 != 0 }
+                ))
+            }
+        }
+        return out
+    }
+
+    private func attachmentSelect(column: String, available columns: Set<String>) -> String {
+        columns.contains(column) ? "a.\(column) AS \(column)" : "NULL AS \(column)"
+    }
+
+    private func attachmentColumnNames() -> Set<String> {
+        tableColumns("attachment")
+    }
+
+    private func attachmentSchemaSupportsJoins(attachmentColumns: Set<String>) -> Bool {
+        guard !attachmentColumns.isEmpty else { return false }
+        let joinColumns = tableColumns("message_attachment_join")
+        return joinColumns.isSuperset(of: ["message_id", "attachment_id"])
+    }
+
+    private func tableColumns(_ table: String) -> Set<String> {
+        let rows = (try? reader.rows("PRAGMA table_info(\(table))")) ?? []
+        return Set(rows.compactMap { $0.text("name") })
+    }
+
+    private func attachmentPath(from raw: String?) -> (path: String?, exists: Bool?) {
+        guard let raw, !raw.isEmpty else { return (nil, nil) }
+        let expanded: String
+        if raw == "~" {
+            expanded = homeDirectoryForTilde
+        } else if raw.hasPrefix("~/") {
+            let suffix = String(raw.dropFirst(2))
+            expanded = URL(fileURLWithPath: homeDirectoryForTilde, isDirectory: true)
+                .appendingPathComponent(suffix)
+                .path
+        } else {
+            expanded = NSString(string: raw).expandingTildeInPath
+        }
+        guard expanded.hasPrefix("/") else { return (nil, nil) }
+        let standardized = URL(fileURLWithPath: expanded).standardizedFileURL.path
+        guard shouldProbeAttachmentPath(standardized) else {
+            return (standardized, nil)
+        }
+        return (standardized, safeLocalExists(atPath: probePath(for: standardized)))
+    }
+
+    private func shouldProbeAttachmentPath(_ standardized: String) -> Bool {
+        let skippedRoots = ["/net", "/home", "/Network/Servers", "/Volumes"]
+        if skippedRoots.contains(where: { root in
+            standardized == root || standardized.hasPrefix(root + "/")
+        }) {
+            return false
+        }
+        let safeRoots = [homeDirectoryForTilde, NSTemporaryDirectory()].flatMap { raw in
+            let url = URL(fileURLWithPath: raw, isDirectory: true)
+            return [url.standardizedFileURL.path, url.resolvingSymlinksInPath().standardizedFileURL.path]
+        }
+        return safeRoots.contains { root in
+            standardized == root || standardized.hasPrefix(root + "/")
+        }
+    }
+
+    private func safeLocalExists(atPath path: String) -> Bool? {
+        var current = ""
+        for component in path.split(separator: "/") {
+            current = current.isEmpty ? "/" + component : current + "/" + component
+            var info = stat()
+            if lstat(current, &info) != 0 {
+                return current == path && errno == ENOENT ? false : nil
+            }
+            if (info.st_mode & S_IFMT) == S_IFLNK {
+                return nil
+            }
+        }
+        return true
+    }
+
+    private func probePath(for standardized: String) -> String {
+        if standardized == "/var" || standardized.hasPrefix("/var/") {
+            return "/private" + standardized
+        }
+        if standardized == "/tmp" || standardized.hasPrefix("/tmp/") {
+            return "/private/tmp" + standardized.dropFirst(4)
+        }
+        return standardized
+    }
+
     private mutating func shape(rows: [SQLiteReader.Row], mapping: [String: String]) -> [Message] {
+        let byMessage = attachmentsByMessage(ids: rows.compactMap { $0.int("rowid") })
         var out: [Message] = []
         for row in rows {
-            guard let body = messageBody(row) else { continue }
+            guard let rowid = row.int("rowid") else { continue }
+            let joined = byMessage[rowid] ?? []
+            let hasAttachments = (row.int("cache_has_attachments") ?? 0) != 0 || !joined.isEmpty
+            // An attachment-only row can have no `text` AND no decodable `attributedBody`.
+            // Skipping it on a nil body drops exactly the messages this feature exists to
+            // surface. A U+FFFC object-replacement placeholder is not a contract to depend on.
+            // Body-less rows WITHOUT joined attachment evidence are still skipped, as before.
+            guard let body = messageBody(row) ?? (joined.isEmpty ? nil : "") else { continue }
             let rawDate = row.int("date") ?? 0
             let date = MessageTime.date(fromRaw: rawDate)
             let isFromMe = (row.int("is_from_me") ?? 0) != 0
@@ -170,7 +373,7 @@ public struct ChatDB {
                 group = name
             }
             out.append(Message(
-                rowid: row.int("rowid") ?? 0,
+                rowid: rowid,
                 date: date,
                 date_local: MessageTime.localString(from: date),
                 timestamp: rawDate,
@@ -180,7 +383,8 @@ public struct ChatDB {
                 service: row.text("service"),
                 body: body,
                 group_name: group,
-                has_attachments: (row.int("cache_has_attachments") ?? 0) != 0
+                has_attachments: hasAttachments,
+                attachments: joined
             ))
         }
         return out
@@ -207,6 +411,11 @@ public struct ChatDB {
         public let service: String?
         public let body: String
         public let group_name: String?
+        // Carried on both message shapes deliberately. A caller that finds a message by
+        // search and one that reads it from `recent` should not have to know that only
+        // one of the two paths can tell it there is a file attached.
+        public let has_attachments: Bool
+        public let attachments: [Attachment]
         public let score: Double
     }
 
@@ -258,8 +467,15 @@ public struct ChatDB {
         // Score desc; deterministic tiebreak by timestamp desc (newest first).
         scored.sort { $0.2 != $1.2 ? $0.2 > $1.2 : (($0.0.int("date") ?? 0) > ($1.0.int("date") ?? 0)) }
 
+        // Fetch for the SCORED rows only, not the whole LIKE pre-filter: that set is capped
+        // at `fuzzySoftCap` (10,000) and is mostly discarded a few lines above.
+        let byMessage = attachmentsByMessage(ids: scored.compactMap { $0.0.int("rowid") })
+
         var matches: [ScoredMessage] = []
         for (row, body, score) in scored {
+            guard let rowid = row.int("rowid") else { continue }
+            let joined = byMessage[rowid] ?? []
+            let hasAttachments = (row.int("cache_has_attachments") ?? 0) != 0 || !joined.isEmpty
             let rawDate = row.int("date") ?? 0
             let date = MessageTime.date(fromRaw: rawDate)
             let isFromMe = (row.int("is_from_me") ?? 0) != 0
@@ -276,9 +492,11 @@ public struct ChatDB {
                 group = name
             }
             matches.append(ScoredMessage(
-                rowid: row.int("rowid") ?? 0, date: date, date_local: MessageTime.localString(from: date),
+                rowid: rowid, date: date, date_local: MessageTime.localString(from: date),
                 timestamp: rawDate, is_from_me: isFromMe, sender: sender, handle: address,
-                service: row.text("service"), body: body, group_name: group, score: score))
+                service: row.text("service"), body: body, group_name: group,
+                has_attachments: hasAttachments,
+                attachments: joined, score: score))
         }
         return SearchResult(matches: matches, scanned: rows.count, truncated: rows.count >= ChatDB.fuzzySoftCap)
     }

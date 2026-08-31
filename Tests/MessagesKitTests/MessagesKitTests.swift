@@ -360,7 +360,12 @@ struct EnvelopeTests {
     @Test func messageEncodesSnakeCaseFields() throws {
         let msg = ChatDB.Message(rowid: 1, date: Date(timeIntervalSince1970: 1_700_000_000),
             date_local: "2023-11-14 15:13:20", timestamp: 12345, is_from_me: true, sender: "You",
-            handle: "+12125550100", service: "iMessage", body: "hi", group_name: nil, has_attachments: false)
+            handle: "+12125550100", service: "iMessage", body: "hi", group_name: nil,
+            has_attachments: true,
+            attachments: [ChatDB.Attachment(rowid: 9, guid: "a9", filename: "~/x/photo.png",
+                path: "/tmp/apple-cli-photo.png", exists: false, mime_type: "image/png",
+                uti: "public.png", transfer_name: "photo.png", total_bytes: 3,
+                is_sticker: false, hide_attachment: false)])
         let data = try Output.encodeSuccess(tool: "messages", data: [msg])
         let json = String(decoding: data, as: UTF8.self)
         #expect(json.contains("\"schema_version\""))
@@ -369,5 +374,120 @@ struct EnvelopeTests {
         #expect(json.contains("\"is_from_me\""))
         #expect(json.contains("\"date_local\""))
         #expect(json.contains("\"has_attachments\""))
+        // Attachment metadata rides the same envelope with verbatim snake_case wire keys.
+        #expect(json.contains("\"attachments\""))
+        #expect(json.contains("\"transfer_name\""))
+        #expect(json.contains("\"mime_type\""))
+        #expect(json.contains("\"total_bytes\""))
+    }
+
+    @Test func scoredMessageEncodesAttachmentShape() throws {
+        let msg = ChatDB.ScoredMessage(rowid: 2, date: Date(timeIntervalSince1970: 1_700_000_001),
+            date_local: "2023-11-14 15:13:21", timestamp: 12346, is_from_me: false,
+            sender: "Alice", handle: "+12125550101", service: "SMS", body: "see file",
+            group_name: nil, has_attachments: true,
+            attachments: [ChatDB.Attachment(rowid: 10, guid: "a10",
+                filename: "~/Library/Messages/Attachments/zz/photo.png",
+                path: "/tmp/apple-cli-home/Library/Messages/Attachments/zz/photo.png",
+                exists: nil, mime_type: "image/png", uti: "public.png",
+                transfer_name: "photo.png", total_bytes: 12, is_sticker: true,
+                hide_attachment: false)],
+            score: 1.0)
+        let data = try Output.encodeSuccess(tool: "messages", data: [msg])
+        let json = String(decoding: data, as: UTF8.self)
+        #expect(json.contains("\"score\""))
+        #expect(json.contains("\"attachments\""))
+        #expect(json.contains("\"has_attachments\""))
+        #expect(json.contains("\"is_sticker\""))
+        #expect(json.contains("\"hide_attachment\""))
+        #expect(json.contains("\"exists\" : null"))
+    }
+
+    @Test func attachmentJSONIncludesNullKeysForMissingMetadata() throws {
+        let msg = ChatDB.Message(rowid: 3, date: Date(timeIntervalSince1970: 1_700_000_002),
+            date_local: "2023-11-14 15:13:22", timestamp: 12347, is_from_me: false,
+            sender: "Alice", handle: nil, service: nil, body: "file", group_name: nil,
+            has_attachments: true,
+            attachments: [ChatDB.Attachment(rowid: 11, guid: nil, filename: nil, path: nil,
+                exists: nil, mime_type: nil, uti: nil, transfer_name: nil, total_bytes: nil,
+                is_sticker: nil, hide_attachment: nil)])
+        let data = try Output.encodeSuccess(tool: "messages", data: [msg])
+        let object = try #require(JSONSerialization.jsonObject(with: data) as? [String: Any])
+        let rows = try #require(object["data"] as? [[String: Any]])
+        let first = try #require(rows.first)
+        let attachments = try #require(first["attachments"] as? [[String: Any]])
+        let attachment = try #require(attachments.first)
+        for key in ["guid", "filename", "path", "exists", "mime_type", "uti", "transfer_name",
+                    "total_bytes", "is_sticker", "hide_attachment"] {
+            #expect(attachment.keys.contains(key))
+            #expect(attachment[key] is NSNull)
+        }
+    }
+}
+
+/// `--text` is not the versioned contract, but an attachment-only message has an EMPTY body,
+/// and without an annotation it renders as a bare "Sender: ". That is the same shape as the
+/// `[] ` group-name defect this file already carries a fix for, so pin it here too.
+@Suite("Text rendering of attachments")
+struct AttachmentSuffixTests {
+    private func att(_ name: String?, filename: String? = "~/x/f.bin") -> ChatDB.Attachment {
+        ChatDB.Attachment(rowid: 1, guid: nil, filename: filename, path: "/x/f.bin",
+                          exists: false, mime_type: nil, uti: nil, transfer_name: name,
+                          total_bytes: nil, is_sticker: nil, hide_attachment: nil)
+    }
+
+    @Test func emptyBodyGetsNoLeadingSpaceButIsNeverBlank() {
+        #expect(attachmentSuffix([att("photo.png")], hasAttachments: true, body: "")
+                == "[1 attachment: photo.png]")
+    }
+
+    @Test func nonEmptyBodyIsSeparatedBySpaceAndPluralised() {
+        #expect(attachmentSuffix([att("a.png"), att("b.mov")], hasAttachments: true, body: "look")
+                == " [2 attachments: a.png, b.mov]")
+    }
+
+    @Test func fallsBackToFilenameWhenTransferNameIsMissing() {
+        #expect(attachmentSuffix([att(nil)], hasAttachments: true, body: "")
+                == "[1 attachment: f.bin]")
+    }
+
+    @Test func fallsBackToFilenameWhenTransferNameIsEmpty() {
+        #expect(attachmentSuffix([att("")], hasAttachments: true, body: "")
+                == "[1 attachment: f.bin]")
+    }
+
+    @Test func filenameFallbackUsesBasenameOnly() {
+        #expect(attachmentSuffix([att(nil, filename: "/tmp/private/path/file.pdf")],
+                                 hasAttachments: true, body: "")
+                == "[1 attachment: file.pdf]")
+    }
+
+    @Test func collapsesControlCharactersInAttachmentNames() {
+        #expect(attachmentSuffix([att("scan\ncopy\tone.png")], hasAttachments: true, body: "")
+                == "[1 attachment: scan copy one.png]")
+    }
+
+    @Test func collapsesBidiFormatControlsInAttachmentNames() {
+        #expect(attachmentSuffix([att("safe\u{202E}gnp.exe")], hasAttachments: true, body: "")
+                == "[1 attachment: safe gnp.exe]")
+    }
+
+    @Test func collapsesZeroWidthFormatControlsInAttachmentNames() {
+        #expect(attachmentSuffix([att("photo\u{200D}.png")], hasAttachments: true, body: "")
+                == "[1 attachment: photo .png]")
+    }
+
+    @Test func missingNamesFallBackToGenericAttachmentLabel() {
+        #expect(attachmentSuffix([att(nil, filename: nil)], hasAttachments: true, body: "")
+                == "[1 attachment: attachment]")
+    }
+
+    /// `cache_has_attachments` set but the join returned nothing: still say something.
+    @Test func flagWithoutJoinedRowsStillAnnotates() {
+        #expect(attachmentSuffix([], hasAttachments: true, body: "") == "[attachment]")
+    }
+
+    @Test func noAttachmentAddsNothing() {
+        #expect(attachmentSuffix([], hasAttachments: false, body: "hi") == "")
     }
 }
