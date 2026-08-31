@@ -1,0 +1,64 @@
+# Documentation site for the `apple` CLI.
+#
+# docs_dir is the GENERATED manual (scripts/gen-manual.py). Nothing here is
+# hand-maintained per-page: with `navigation.tabs`, each top-level directory under
+# docs/manual becomes a top nav tab, so the six domains are the six tabs and new
+# commands appear automatically when the manual is regenerated.
+#
+# Never hand-edit files under docs/manual/ -- see AGENTS.md
+# "Documentation — generated, and CI-enforced fresh".
+
+site_name: agent cli
+site_description: One CLI for Apple's native apps — Messages, Mail, Contacts, Notes, Calendar, Reminders.
+repo_url: https://github.com/robertvitali/apple-cli
+repo_name: robertvitali/apple-cli
+edit_uri: ""            # pages are generated; "edit this page" would invite hand-edits
+
+# Not affiliated with, or endorsed by, Apple Inc. The header mark is a plain apple
+# fruit, deliberately not any company's device mark.
+copyright: >
+  Not affiliated with or endorsed by Apple Inc.
+  Apple, macOS, and the names of the bundled apps are trademarks of Apple Inc.
+
+docs_dir: docs/manual
+
+theme:
+  name: material
+  logo: assets/logo.svg
+  favicon: assets/logo.svg
+  features:
+    - navigation.tabs        # top-level dirs -> top tabs (one per app)
+    - navigation.tabs.sticky
+    - navigation.sections
+    - navigation.top
+    - navigation.instant
+    - search.suggest
+    - search.highlight
+    - content.code.copy
+  palette:
+    - media: "(prefers-color-scheme: light)"
+      scheme: default
+      toggle:
+        icon: material/weather-night
+        name: Switch to dark mode
+    - media: "(prefers-color-scheme: dark)"
+      scheme: slate
+      toggle:
+        icon: material/weather-sunny
+        name: Switch to light mode
+
+markdown_extensions:
+  - admonition
+  - toc:
+      permalink: true
+  - pymdownx.highlight
+  - pymdownx.superfences
+  - tables
+
+plugins:
+  - search
+
+extra:
+  social:
+    - icon: fontawesome/brands/github
+      link: https://github.com/robertvitali/apple-cli

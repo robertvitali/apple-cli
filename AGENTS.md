@@ -391,3 +391,56 @@ move — content already reviewed when the constituent commits landed. Treat it 
 auto-generated commit (merge/revert class): no reviewer fan-out and no trailers are expected
 on it. Note the CI/release jobs build with the hosted runner's single Xcode toolchain; the
 canonical two-toolchain suite (swiftly + CLT) remains the LOCAL pre-push gate.
+
+## Release notes — required contract
+
+**The CHANGELOG `[Unreleased]` section IS the release note.** `release.yml` moves it verbatim
+under a dated heading and publishes it as the GitHub Release body, so it is written for a reader
+who has never seen this repo, not as a diff summary. Enforced by `scripts/check-release-notes.py`,
+which the release workflow runs before it will cut anything.
+
+Every `[Unreleased]` section MUST satisfy all of the following:
+
+1. **At least one Keep-a-Changelog subsection** — `### Added` / `### Changed` / `### Fixed` /
+   `### Removed` / `### Security` / `### Deprecated`. An empty section is a hard failure; a
+   release with nothing to say is a release that should not be cut.
+2. **Every entry states the caller-visible effect, not the diff.** "What breaks or improves for
+   someone running the binary" — a reader cannot see the commit.
+3. **Agent-contract breaks carry a `### BREAKING` subsection** stating the old shape, the new
+   shape, and what happens to `schema_version` — either the new integer, or an explicit statement
+   that it is unchanged and why. Agents branch on that integer via `apple version`, so silence is
+   the failure; deliberate restraint, reasoned out loud, is fine (the `26.0.0` exit-code break is
+   the worked example). Breaking changes ride a MINOR and never bump MAJOR (see "Versioning +
+   releases" above).
+4. **A deployment-minimum line whenever `Package.swift`'s `.macOS(...)` floor moves.** This is the
+   single most confusable fact in the scheme: MAJOR names the newest macOS *validated against* and
+   is NOT a deployment minimum. If the real floor changes, the release note says so in a sentence
+   of its own, or users on older macOS will read the MAJOR and draw the wrong conclusion.
+5. **A link to the manual** for the version being cut, so the notes are navigable from the
+   Releases page into the command reference.
+6. **No personal data.** Release notes are public, permanent, and mirrored into the GitHub Release
+   body where no later rewrite reaches them — the repo-wide rule applies with no exception.
+
+Never hand-edit a released heading or its body; the workflow owns both. To correct a published
+note, add a follow-up entry rather than rewriting history.
+
+## Documentation — generated, and CI-enforced fresh
+
+**`docs/manual/` is GENERATED. Never hand-edit a page under it — your edit will be overwritten.**
+`scripts/gen-manual.py` reads `apple --experimental-dump-help`, so the binary itself is the single
+source of truth for every command, flag, and abstract, and the manual cannot drift from what the
+CLI actually accepts.
+
+- **Curated prose** (descriptions, examples, notes) lives in `docs/manual-prose.json`, keyed by
+  full command path (e.g. `"apple mail send"`), and is merged in at generation time. That is where
+  hand-written content goes, and it survives regeneration.
+- **Regenerate whenever a command name, flag, or abstract changes.** `scripts/gen-manual.py`.
+- **CI enforces freshness**: `scripts/gen-manual.py --check` regenerates into a staging tree and
+  fails the build on any difference, so a stale manual is a red build rather than a follow-up task.
+  **Be precise about what that proves**: it proves `docs/manual/` matches what the generator emits
+  for the current binary. It does NOT prove the generator's rendering is faithful — a rendering bug
+  produces a wrong manual that `--check` calls green. That is not hypothetical: the first version
+  emitted the global inherited-options block on every page, documenting flags 21 commands actually
+  reject, while `--check` passed. Rendering fidelity is a review responsibility, not a CI one.
+- Because flag help text is published verbatim into the manual, **an argument's `help:` string is
+  user-facing documentation** — write it as such in the Swift source.

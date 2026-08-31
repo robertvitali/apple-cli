@@ -3015,9 +3015,18 @@ assert '_export/' not in d['files'][0]"
 # live path (leaf-only `whose` filter); the leaf reduction must make it match.
 @test "mail search --body-live accepts a full nested mailbox path (review H1)" {
   require_index
+  # The account this exercises is operator-specific: a label a person chose, not a
+  # platform default, so it MUST NOT be committed (no-personal-data rule). Point the
+  # test at your own store via the environment instead. Both vars are required —
+  # defaulting either one would put a real name back in the tree the moment someone
+  # copied their local value into a default.
   acct="${APPLE_TEST_NESTED_ACCOUNT:-}"
-  "$BIN" mail mailboxes list --account "$acct" >/dev/null 2>&1 || skip "store lacks the configured test account"
-  run "$BIN" mail search --account "$acct" --mailbox "[Gmail]/Important" --body a --body-live --limit 2 --no-content
+  mbox="${APPLE_TEST_NESTED_MAILBOX:-}"
+  if [ -z "$acct" ] || [ -z "$mbox" ]; then
+    skip "set APPLE_TEST_NESTED_ACCOUNT and APPLE_TEST_NESTED_MAILBOX (a nested path such as <parent>/<child>) to exercise the nested-mailbox case"
+  fi
+  "$BIN" mail mailboxes list --account "$acct" >/dev/null 2>&1 || skip "configured nested-test account is not present on this store"
+  run "$BIN" mail search --account "$acct" --mailbox "$mbox" --body a --body-live --limit 2 --no-content
   [ "$status" -eq 0 ]
   echo "$output" | python3 -c "
 import json,sys;d=json.load(sys.stdin)['data']

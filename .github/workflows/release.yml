@@ -106,14 +106,26 @@ jobs:
           echo "Releasing: v$NEW (bump: $BUMP; last tag: ${LAST_TAG:-none})"
           echo "new=$NEW" >> "$GITHUB_OUTPUT"
 
-      - name: Guard — CHANGELOG [Unreleased] must not be empty
+      - name: Guard — release-notes contract on [Unreleased]
         run: |
           set -euo pipefail
-          # Content between the [Unreleased] heading and the next release heading must contain
-          # at least one bullet — an empty release note means the release was mis-dispatched.
-          # printf, not echo: section text contains backslashes that echo may mangle.
-          awk '/^## \[Unreleased\]/{f=1;next} f&&/^## \[/{exit} f' CHANGELOG.md > "$RUNNER_TEMP/unreleased.txt"
-          grep -q -- '^- ' "$RUNNER_TEMP/unreleased.txt" || { echo "[Unreleased] has no entries — nothing to release."; exit 1; }
+          # The [Unreleased] section is published VERBATIM as the GitHub Release body, so it
+          # is the release note and is gated as one. This subsumes the older "must not be
+          # empty" check and additionally enforces: a recognised non-empty subsection, a
+          # schema_version statement whenever a BREAKING change is declared, a
+          # deployment-minimum line when Package.swift's macOS floor moved, and a PII scan
+          # (the Release body is public, permanent, and unreachable by any history rewrite).
+          # Contract: AGENTS.md "Release notes — required contract".
+          python3 scripts/check-release-notes.py
+
+      - name: Guard — manual matches the binary being released
+        run: |
+          set -euo pipefail
+          # A release that ships docs describing a different command surface than the tagged
+          # binary is worse than no docs. The manual is generated from the binary's own help
+          # dump, so this is a cheap, exact check.
+          swift build
+          python3 scripts/gen-manual.py --check
 
       - name: Update version constant + CHANGELOG
         run: |

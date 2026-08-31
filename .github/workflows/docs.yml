@@ -1,0 +1,92 @@
+name: Docs
+
+# Keeps the manual honest and the site current.
+#
+#  - manual-fresh : the manual is GENERATED from the binary's own help dump, so a
+#                   command/flag/abstract change that is not regenerated makes the
+#                   docs a lie. This turns "the docs match the binary" into a red
+#                   build rather than a follow-up task.
+#  - release-notes: advisory here, BLOCKING in release.yml. An empty [Unreleased]
+#                   is normal between releases, so failing CI on it would be noise.
+#  - pages        : deploys the site. Gated on the PAGES_ENABLED repo variable so it
+#                   stays inert while the repo is private (Pages needs a public repo
+#                   on the Free plan) instead of producing a permanently red job.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    types: [opened, synchronize, reopened]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: docs-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  manual-fresh:
+    runs-on: macos-15
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Build the binary (the manual's source of truth)
+        run: swift build
+
+      - name: Manual matches the binary
+        run: |
+          python3 scripts/gen-manual.py --check || {
+            echo "::error::The manual is stale or has dangling links."
+            echo "Regenerate with: python3 scripts/gen-manual.py"
+            echo "Never hand-edit docs/manual/ — see AGENTS.md."
+            exit 1
+          }
+
+  release-notes:
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0       # macOS-floor comparison needs the last tag
+
+      - name: Release-notes contract (advisory on CI, blocking at release)
+        continue-on-error: true
+        run: python3 scripts/check-release-notes.py
+
+  pages:
+    # Only on main, and only once the operator flips the PAGES_ENABLED variable
+    # (Settings > Secrets and variables > Actions > Variables). Keeps this inert
+    # while the repo is private rather than red.
+    if: github.event_name == 'push' && vars.PAGES_ENABLED == 'true'
+    needs: manual-fresh
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      pages: write
+      id-token: write
+    environment:
+      name: github-pages
+      url: ${{ steps.deploy.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install site toolchain
+        run: pip install mkdocs-material
+
+      - name: Build site
+        run: mkdocs build --strict     # --strict fails on broken nav/links
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: site
+      - id: deploy
+        uses: actions/deploy-pages@v4

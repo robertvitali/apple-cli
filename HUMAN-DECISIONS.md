@@ -46,7 +46,7 @@ same day under the closure-verification protocol).
 | D6 | Eight parity posture calls | **APPLIED** | CONTACTS-L4 delete claim · NOTES-M1 restore 4 keys · NOTES-L4 structural divergence · gap10 keep opt-in body · **gap25 wire delete-rules live** · extra20 open by default |
 | D7 | Committed phone number in public history | **ANSWERED** | "B then A" — superseded by D9, which covers the same number plus more |
 | D8 | Which Mail oracle wins on a safety limit | RESOLVED | **Safety wins** — stricter limit wins on A/B conflicts; landed in `86728f4` |
-| D9 | Personal data published to a public repo | **APPLIED 2026-08-23; amended 2026-08-29** | Repo private; verified rewrite published; pre-1.0 PII gate CLOSED after three operator-authorized targeted rewrite passes removed all audit-surfaced residuals; zero hits remain; no rollback artifacts retained |
+| D9 | Personal data published to a public repo | **REOPENED 2026-08-31** (was APPLIED 2026-08-23, amended 2026-08-29) | Repo private; five rewrite passes published and verified. Gate REOPENED: rounds 5 and 6 found further residuals, incl. a real subject line in a commit message that no file-scoped pass could reach. HEAD findings fixed; a commit-message-scoped pass is pending. Do NOT publish while open |
 | D10 | Search/find-contact length caps | WITHDRAWN | Should not have been filed |
 | D11 | What `schema_version` tracks | **APPLIED** | **Shape only** — value breaks ride the MAJOR + CHANGELOG; both policy lines rewritten to agree |
 | D12 | `notes save-attachment` can write to `~/.ssh` | **RATIFIED** | Keep strict Notes-oracle parity; residual documented, fleet stays intentionally inconsistent |
@@ -391,14 +391,30 @@ commits preserved, HEAD tree byte-identical to the suite-tested tree, zero resid
 was force-pushed after each pass. Local repo reset, codex checkpoint refs deleted, reflogs
 expired, pruned; the fresh backup bundle, clones, and replacement maps were destroyed after
 verification, and the gitignored D9 handoff file was removed last. Final scan across every
-reachable blob and commit message: 0 hits for all remediated literal classes. The gate is CLOSED;
-the no-rewrite-without-fresh-explicit-instruction posture is restored.
+reachable blob and commit message: 0 hits **for the literal classes those passes remediated** —
+which is a narrower claim than it first read as, and the distinction turned out to matter.
+
+**Amendment (2026-08-31) — the gate was REOPENED, and the closure claim above was wrong.**
+Two further audit rounds after it was written found more real personal data, so treat any
+unqualified "zero hits" in this entry as scoped to the classes known at the time. Round 5 found
+13 ancestor-only residuals, 8 of them hybrids where an earlier pass replaced a redacted noun and
+left the identifying clause standing. Round 6 then found what every prior pass structurally could
+not: **a real message subject line living in a commit message with zero copies in any blob**.
+Five passes had all been file-scoped, and a file-scoped rewrite does not touch commit messages —
+which is lesson 3 of this very entry, demonstrated against the entry itself. Round 6 also found a
+real account label still live at HEAD in a tracked test.
+
+The durable correction is about the SHAPE of the claim, not the count: "zero hits" is only ever
+true relative to the patterns you searched for, and a closure statement that omits that scope
+reads as a guarantee to the next auditor and invites them to skip. State the scope or state
+nothing. The gate is OPEN pending a rewrite pass that covers commit messages.
 
 ### What is exposed
 
 Two incidents put personal data — the operator's and third parties' — into tracked files and
 into a commit message. Both were remediated at HEAD and, under separate operator authorization,
-in history; the gate is closed with zero residual hits.
+in history. Later audit rounds found further residuals beyond those two incidents (see the
+2026-08-31 amendment above); remediation is ongoing rather than complete.
 
 **This entry no longer re-enumerates the full inventory of what was exposed, where, and in
 which artifacts.** Assembling classes and artifacts into one list turns this record into a
