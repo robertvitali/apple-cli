@@ -764,6 +764,26 @@ def xunit_output_path(command: Sequence[str]) -> Path:
     return Path(values[0])
 
 
+def xunit_output_candidates(command: Sequence[str]) -> Tuple[Path, Path]:
+    exact_path = xunit_output_path(command)
+    compatibility_path = exact_path.with_name(
+        f"{exact_path.stem}-swift-testing{exact_path.suffix}"
+    )
+    if compatibility_path == exact_path:
+        raise AssertionFailure("swift test stage has an invalid xUnit output path")
+    return exact_path, compatibility_path
+
+
+def resolve_xunit_output_path(command: Sequence[str]) -> Path:
+    candidates = xunit_output_candidates(command)
+    present = tuple(path for path in candidates if os.path.lexists(path))
+    if not present:
+        raise AssertionFailure("swift test did not produce xUnit output")
+    if len(present) != 1:
+        raise AssertionFailure("swift test produced ambiguous xUnit outputs")
+    return present[0]
+
+
 def default_runner(
     stage: Stage,
     command: Tuple[str, ...],
@@ -859,7 +879,7 @@ def _run_quality_request(
                     stderr.append(f"{stage.name} failed with status {result.status}")
                     return QualityResult(result.status, stderr=tuple(stderr))
                 if stage.requires_xunit:
-                    xunit_path = xunit_output_path(command)
+                    xunit_path = resolve_xunit_output_path(command)
                     count = assert_xunit_has_tests(xunit_path)
                     line = f"{stage.name}: {count} executed tests"
                     print(line, file=sys.stderr)

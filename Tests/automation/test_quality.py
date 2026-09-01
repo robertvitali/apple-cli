@@ -1581,6 +1581,32 @@ class QualityDriverTests(unittest.TestCase):
         self.assertEqual(len(seen_paths), 1)
         self.assertFalse(seen_paths[0].exists())
 
+    def test_orchestration_accepts_known_swift_testing_xunit_filename(self) -> None:
+        seen_paths = []
+
+        def runner(stage, command, cwd, timeout, grace, env):
+            if stage.name == "swiftly-test":
+                exact_path = self.quality.xunit_output_path(command)
+                compatibility_path = exact_path.with_name(
+                    f"{exact_path.stem}-swift-testing{exact_path.suffix}"
+                )
+                seen_paths.extend((exact_path, compatibility_path))
+                compatibility_path.write_text(
+                    "<testsuite><testcase name='ok'/></testsuite>",
+                    encoding="utf-8",
+                )
+            return self.quality.CommandResult(status=0)
+
+        result = self.quality.run_quality(
+            ["--mode", "local", "--stage", "swiftly-test"],
+            runner=runner,
+            git_validator=lambda request: None,
+        )
+
+        self.assertEqual(result.status, 0)
+        self.assertEqual(len(seen_paths), 2)
+        self.assertTrue(all(not path.exists() for path in seen_paths))
+
     def test_orchestration_fails_when_successful_swift_test_missing_xunit(self) -> None:
         seen_paths = []
 
@@ -1598,6 +1624,55 @@ class QualityDriverTests(unittest.TestCase):
         self.assertEqual(result.status, 1)
         self.assertEqual(len(seen_paths), 1)
         self.assertFalse(seen_paths[0].exists())
+
+    def test_orchestration_rejects_ambiguous_swift_test_xunit_outputs(self) -> None:
+        seen_paths = []
+
+        def runner(stage, command, cwd, timeout, grace, env):
+            if stage.name == "swiftly-test":
+                candidates = self.quality.xunit_output_candidates(command)
+                seen_paths.extend(candidates)
+                for path in candidates:
+                    path.write_text(
+                        "<testsuite><testcase name='ok'/></testsuite>",
+                        encoding="utf-8",
+                    )
+            return self.quality.CommandResult(status=0)
+
+        result = self.quality.run_quality(
+            ["--mode", "local", "--stage", "swiftly-test"],
+            runner=runner,
+            git_validator=lambda request: None,
+        )
+
+        self.assertEqual(result.status, 1)
+        self.assertEqual(len(seen_paths), 2)
+        self.assertTrue(all(not path.exists() for path in seen_paths))
+
+    def test_orchestration_rejects_compatibility_xunit_symlink(self) -> None:
+        seen_paths = []
+
+        def runner(stage, command, cwd, timeout, grace, env):
+            if stage.name == "swiftly-test":
+                exact_path, compatibility_path = self.quality.xunit_output_candidates(command)
+                target = exact_path.with_name("target.xml")
+                target.write_text(
+                    "<testsuite><testcase name='ok'/></testsuite>",
+                    encoding="utf-8",
+                )
+                compatibility_path.symlink_to(target)
+                seen_paths.extend((exact_path, compatibility_path, target))
+            return self.quality.CommandResult(status=0)
+
+        result = self.quality.run_quality(
+            ["--mode", "local", "--stage", "swiftly-test"],
+            runner=runner,
+            git_validator=lambda request: None,
+        )
+
+        self.assertEqual(result.status, 1)
+        self.assertEqual(len(seen_paths), 3)
+        self.assertTrue(all(not path.exists() for path in seen_paths))
 
     def test_orchestration_child_nonzero_skips_xunit_assertion_and_cleans_tempdir(self) -> None:
         seen_paths = []
