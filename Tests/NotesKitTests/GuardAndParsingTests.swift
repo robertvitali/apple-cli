@@ -34,9 +34,11 @@ struct AttachmentFSTests {
 
     @Test("rejects `..` traversal that escapes the home root")
     func rejectsTraversal() {
-        // home/../../etc/passwd resolves outside home → rejected.
-        let evil = NSHomeDirectory() + "/../../../../etc/passwd"
-        #expect(throws: AttachmentFS.FSError.self) { try AttachmentFS.assertSafeSavePath(evil) }
+        let home = "/apple-cli-test/home"
+        let traversal = home + "/../outside/file.bin"
+        #expect(throws: AttachmentFS.FSError.self) {
+            try AttachmentFS.assertSafeSavePath(traversal, roots: [home])
+        }
     }
 
     @Test("empty path rejected")
