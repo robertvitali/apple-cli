@@ -28,11 +28,13 @@ point, the repository's existing main-only rule remains authoritative.
    changed-line coverage, and non-regressing coverage for every production
    target.
 6. Make tests and documentation growth mandatory when functionality grows.
-7. Set the deployment minimum to macOS 26 and support macOS 26 and newer.
+7. Treat macOS 26 as the current tested and supported baseline, add newer stable
+   majors after validation, and do not block installation on earlier technically
+   compatible macOS versions.
 8. Preserve branch-owned test policy when future macOS product lines appear.
-9. Publish released documentation automatically at `/current/`.
-10. Retain one documentation archive for every previous `MAJOR.MINOR` series,
-    representing that series' highest published patch.
+9. Publish the newest released documentation automatically at `/`.
+10. Retain one documentation archive under `/version/` for every previous
+    `MAJOR.MINOR` series, representing that series' highest published patch.
 11. Enable governed dependency updates for GitHub Actions, SwiftPM when
     empirically supported, and the pinned Python documentation toolchain.
 12. Keep releases, tags, Pages, and distribution blocked on the exact required
@@ -62,13 +64,20 @@ release instruction.
 
 ### 4.1 Platform support
 
-- `Package.swift` will declare macOS 26 as the deployment minimum.
-- The supported runtime set is macOS 26 and newer.
+- macOS 26 is the current tested and supported runtime baseline. A newer macOS
+  major joins the supported set only after its adoption matrix passes.
+- `Package.swift` retains macOS 14 as the technical deployment minimum. This
+  keeps installation possible on macOS 14 through 25 when the binary and used
+  frameworks happen to work there.
+- macOS 14 through 25 are untested and unsupported. Documentation, diagnostics,
+  release notes, and package-manager metadata must say so plainly; compatibility
+  reports from those versions are welcome but do not create a support promise.
+- Distribution metadata must not raise its installation floor to macOS 26 solely
+  to encode the support policy.
 - Product `MAJOR` continues to name the newest macOS major validated by that
   release. It does not encode the deployment minimum.
-- Raising the deployment floor from macOS 14 to macOS 26 is a caller-visible
-  compatibility change and requires an explicit deployment-minimum line in
-  `[Unreleased]` release notes.
+- `[Unreleased]` release notes must state the macOS 26 support baseline while
+  making clear that the technical macOS 14 deployment floor is unchanged.
 - `AppleVersion.current` remains workflow-owned and stays frozen until an
   explicitly authorized release.
 
@@ -81,7 +90,14 @@ release instruction.
   GitHub approval.
 - Outside contributors and Dependabot open pull requests under their native
   identities and require the same operator approval.
-- No authoring identity can approve, merge, deploy, or bypass required checks.
+- Every pull request is squash-merged. Its final PR title becomes the exact
+  Conventional Commit header on `main`, and its final PR description becomes
+  the commit body.
+- A separate repository-scoped merge App performs the mechanical merge only
+  after the operator's approval and every required check apply to the exact
+  head SHA and final title/body pair.
+- No authoring identity can approve, merge, deploy, or bypass required checks;
+  the merge App cannot approve, author changes, deploy, or bypass rules.
 - There is no routine direct-to-`main`, pull-request-only, administrator, App,
   or Dependabot bypass after bootstrap.
 
@@ -107,6 +123,7 @@ satisfy the approval rule.
 |---|---|---|
 | Operator | Review and approve PRs; approve production deployment; administer settings | Self-authored PR approval; routine direct `main` push; unreviewed publication |
 | Authoring App | Open/update proposal PRs for existing same-repository branches | Approve, merge, write repository contents or refs, edit workflows, bypass rules, tag, release, deploy, change settings |
+| Merge App | Squash-merge an approved, checked exact PR head using its final title and body | Author changes or PRs; approve; bypass rules; direct-push; tag; release; deploy; change settings |
 | PR `GITHUB_TOKEN` | Read source; upload non-sensitive checks and artifacts | Write repository contents; receive ordinary secrets; deploy; publish |
 | Publisher | After environment approval, create the exact version tag, draft/release assets, and Pages deployment | Mutate branches; generate new source changes; retarget or delete published tags |
 | Dependabot | Open dependency PRs | Auto-merge, approve, deploy, or access ordinary Actions secrets |
@@ -117,7 +134,7 @@ cannot cryptographically prevent the owner from deliberately removing a rule.
 These controls prevent accidental or routine bypass and provide an auditable
 normal path; they do not claim protection against an owner-account compromise.
 
-## 6. Authoring App
+## 6. Pull-request and merge Apps
 
 ### 6.1 Installation and permissions
 
@@ -152,7 +169,8 @@ operator or trusted agent prepares and pushes a proposal branch
   -> App opens the PR with the repository template
   -> secret-free required CI runs
   -> operator reviews and approves the final diff
-  -> GitHub merges only after every required check succeeds
+  -> merge controller revalidates the exact head, metadata, approval, and checks
+  -> merge App supplies the exact PR title/body to GitHub's squash API
 ```
 
 The App need not push ordinary proposal commits. The operator may push them to
@@ -164,7 +182,48 @@ The design deliberately does not require approval from someone other than the
 latest branch pusher. That GitHub option would deadlock an operator-pushed branch
 when the operator is also the required reviewer.
 
-### 6.3 Release-preparation change
+### 6.3 Merge controller
+
+The merge App is private and installed only on this repository. It receives
+repository metadata read access and repository contents write access, the
+permission GitHub's pull-request merge API requires. The `main` and `v*`
+rulesets grant it no bypass. It has no administration, Actions, checks,
+workflows, environments, deployments, Pages, approval, or cross-repository
+authority. GitHub exposes pull-request merging through repository-contents write
+permission, which also technically authorizes other contents endpoints. That
+unavoidable permission breadth is contained by the no-bypass `main` and `v*`
+rulesets, short-lived tokens minted only inside trusted controller code, and a
+separate publisher identity; it must not be described as endpoint-level least
+privilege that GitHub does not offer.
+
+A trusted default-branch controller, never proposal-branch code, mints the
+short-lived merge token. Immediately before merging, it re-fetches and verifies:
+
+- the pull request is open, non-draft, and targets the expected protected line;
+- the exact current head SHA is strictly up to date;
+- every required check succeeded for that SHA;
+- the current title and description satisfy the metadata contract;
+- the latest valid operator approval applies to that SHA and was submitted
+  after the current metadata-policy check completed;
+- the PR is mergeable without bypassing any ruleset.
+
+The controller then calls GitHub's pull-request merge API with the verified head
+SHA, `merge_method: squash`, the final PR title as `commit_title`, and the final
+PR description as `commit_message`. Supplying the head SHA makes a concurrent
+source update fail rather than merge a different tree. A title or description
+edit reruns metadata policy; the resulting check completes after the old review,
+so the controller requires a new operator approval before merging. The
+controller treats an API response as provisional until it verifies the new
+`main` commit's tree, header, body, PR association, approval, and check
+provenance.
+
+The repository owner remains able to alter settings or deliberately use the
+GitHub merge UI because this is a user-owned repository. That control-plane
+caveat cannot be removed technically. The merge controller is the only supported
+normal merge path, and the protected-branch backstop makes any divergent result
+red and blocks later merges and releases.
+
+### 6.4 Release-preparation change
 
 The trusted release preparer creates and pushes the proposal branch using the
 operator's normal branch credentials. The App only opens the PR. A strict
@@ -210,6 +269,17 @@ Rulesets require:
 - no deletion;
 - no bypass actor.
 
+Repository merge settings permit squash merge only: merge commits and rebase
+merges are disabled. The configured squash title source is `PR_TITLE`, and the
+squash message source is `PR_BODY`; these are defense-in-depth defaults rather
+than the enforcement boundary because GitHub permits editing the proposed merge
+message. A required governance check verifies those settings and the merge-App
+configuration. The merge controller supplies the final title/body explicitly,
+and protected-branch CI verifies that each resulting `main` commit header and
+body equal the merged PR title and description after normalizing Git's terminal
+newline. A mismatch makes `main` red and blocks every later merge and release
+until corrected through the protected PR path.
+
 The repository is user-owned. GitHub merge queues are currently available for
 public organization-owned repositories, not user-owned public repositories.
 Therefore the launch design uses strict up-to-date required checks. The quality
@@ -246,6 +316,11 @@ Hidden HTML comments guide authors without introducing more top-level headings.
 App-created PRs populate the same template explicitly; API-created PRs must not
 omit or replace it.
 
+The completed description is also the future squash-commit body. Its final
+lines carry the contiguous `Reviewed-by:` and applicable `Co-Authored-By:`
+trailer block required by repository policy, with no internal tracker trailer.
+The operator reviews the final title and description before approval.
+
 ### 8.1 Rationale
 
 The author describes:
@@ -263,7 +338,7 @@ The author describes:
 
 - implementation shape and affected domains or commands;
 - CLI, JSON, exit-code, schema, permission, workflow, or dependency impact;
-- compatibility and macOS deployment-floor impact;
+- compatibility, macOS support-baseline, and deployment-floor impact;
 - deliberate non-goals;
 - the reason any checklist item is not applicable.
 
@@ -300,8 +375,8 @@ Every PR author confirms:
 - [ ] Curated manual prose and generated documentation are updated and fresh
       where applicable.
 - [ ] `[Unreleased]` describes every caller-visible change.
-- [ ] Breaking behavior, `schema_version`, and deployment-minimum effects are
-      disclosed.
+- [ ] Breaking behavior, `schema_version`, macOS support-baseline, and
+      deployment-minimum effects are disclosed.
 - [ ] Examples, fixtures, and evidence are synthetic and contain no personal
       data, secrets, private infrastructure details, or internal identifiers.
 - [ ] Dependency changes include their lockfiles, and GitHub Actions remain
@@ -312,10 +387,16 @@ Every PR author confirms:
 - [ ] Every inapplicable item is explained under Details.
 - [ ] The author reviewed the final diff after the latest push.
 
-The metadata job verifies the four headings exist exactly once and in order,
-the PR title follows Conventional Commits, and required template content is not
-left as placeholder text. Checkboxes communicate readiness; they never replace
-the operator approval or required Actions result.
+The metadata job runs for PR creation, synchronization, reopening, and title or
+description edits. It verifies the four headings exist exactly once and in
+order, the PR title is a valid Conventional Commit header of at most 72
+characters, required template content is not left as placeholder text, and the
+description ends in a valid contiguous provenance trailer block. Its result is
+recomputed for the final title/body pair. The merge controller requires the
+operator's approval to be newer than that successful metadata result, binding
+approval to the title and body that will become the commit. Checkboxes
+communicate readiness; they never replace the operator approval or required
+Actions result.
 
 ## 9. Outside-contributor and dependency PR safety
 
@@ -546,8 +627,8 @@ owns its workflow, test driver, action pins, coverage comparison, and runner
 policy. No maintenance workflow references policy from `main`.
 
 Maintenance release tag discovery is branch-reachable, not repository-global.
-Maintenance releases are non-latest. Pages `/current/` remains the numerically
-newest stable release even when an older line receives a later patch.
+Maintenance releases are non-latest. Pages `/` remains the numerically newest
+stable release even when an older line receives a later patch.
 
 ## 13. Manual and Pages sources
 
@@ -588,9 +669,10 @@ candidate. The publisher may not amend it or make a follow-up source commit.
 Protected PRs are squash-merged. Because squash creates a new commit object,
 the trusted listener verifies that the candidate tree exactly equals the final
 approved, up-to-date PR head tree and that the approving review still applied to
-that head. Post-merge quality tests the candidate object itself; the later
-operator environment approval explicitly approves that candidate SHA for
-publication.
+that head. It also verifies that the candidate subject equals the final PR title
+and the candidate body equals the final PR description. Post-merge quality tests
+the candidate object itself; the later operator environment approval explicitly
+approves that candidate SHA for publication.
 
 After exact protected-branch quality succeeds, a trusted default-branch
 listener validates the branch, commit subject, version, and workflow conclusion
@@ -642,7 +724,7 @@ operator environment approval
   -> create or resume draft GitHub Release
   -> upload and verify binary, checksum, and provenance
   -> deploy the complete Pages artifact
-  -> canary /current/, /versions/, archive paths, and manifest
+  -> canary /, /version/, archive paths, and manifest
   -> publish the immutable GitHub Release
   -> trigger the separately governed distribution update
 ```
@@ -653,7 +735,7 @@ Releases, and Pages; idempotent resume rules handle partial state. If the Pages
 canary or Release publication fails after the candidate site is deployed, the
 same approved job automatically restores the prior verified manifest before it
 exits. A failed transaction may leave only the exact tag and draft Release; it
-must not leave `/current/` pointing at an unpublished candidate.
+must not leave `/` pointing at an unpublished candidate.
 
 ## 16. Pages version model
 
@@ -673,19 +755,18 @@ archives = every series_tip except the current series
 Routes:
 
 ```text
-/                              redirect to /current/
-/current/                      newest released documentation
-/versions/                     current + archive index
-/versions/MAJOR.MINOR/         highest patch of each prior series
+/                              newest released documentation
+/version/                      prior-series archive index
+/version/MAJOR.MINOR/          highest patch of each prior series
 /version-manifest.json         machine-readable selection and digests
 ```
 
-A patch release updates `/current/` without creating a patch path. When a newer
+A patch release updates `/` without creating a patch path. When a newer
 minor becomes current, the displaced minor's highest patch becomes its archive.
 A later maintenance patch on an older series replaces that series' stable
-archive path without displacing `/current/`.
+archive path without displacing `/`.
 
-Outside the bounded publication transaction, `/current/` must always match the
+Outside the bounded publication transaction, `/` must always match the
 highest published stable Release. The approved candidate may occupy that route
 only between its successful Pages deployment and immediate Release publication.
 Any failure in that interval triggers restoration of the prior manifest before
@@ -708,7 +789,7 @@ toolchain. It does not execute historical binaries or scripts and does not use
 retention-limited historical Actions artifacts as the archive.
 
 A protected manual reconciliation workflow can rebuild the complete site from
-published releases or select a previously published stable tag as `/current/`
+published releases or select a previously published stable tag as `/`
 for recovery. Release and reconciliation use one shared concurrency group with
 `cancel-in-progress: false`.
 
@@ -752,21 +833,27 @@ The bootstrap proceeds while the repository is private:
    review on every sensitive commit.
 4. Obtain at least one successful private hosted Actions run of every mandatory
    job. A job that never receives a runner is not evidence.
-5. Provision the authoring App with the approved permissions and validate
-   short-lived token handling without printing secrets.
-6. Create an App-authored validation PR and verify operator CODEOWNER approval.
-7. Push another proposal commit and verify the old approval becomes stale.
-8. Verify an intentionally failing required job blocks merge.
-9. Verify strict up-to-date checks and exact protected-branch checks.
-10. Activate the no-bypass `main` rulesets and confirm direct pushes fail for
+5. Provision the authoring and merge Apps with their separate approved
+   permissions and validate short-lived token handling without printing
+   secrets.
+6. Configure squash-only merging with PR title and PR body as the squash commit
+   title and body; disable merge commits and rebase merges.
+7. Create an App-authored validation PR and verify operator CODEOWNER approval.
+8. Push another proposal commit and verify the old approval becomes stale.
+9. Verify an intentionally failing required job blocks merge.
+10. Verify strict up-to-date checks and exact protected-branch checks.
+11. Activate the no-bypass `main` rulesets and confirm direct pushes fail for
     both operator and App.
-11. Activate the `v*` tag ruleset, full-SHA Action policy, and allowed-Action
+12. Have the merge App squash-merge a successful App-authored validation PR and
+    verify the `main` commit title, body, tree, approval, and check provenance
+    exactly. Confirm that a metadata edit after approval requires reapproval.
+13. Activate the `v*` tag ruleset, full-SHA Action policy, and allowed-Action
     policy.
-12. Enable and validate governed Dependabot updates.
-13. Exercise release preparation, publisher preflight, Pages assembly, and
+14. Enable and validate governed Dependabot updates.
+15. Exercise release preparation, publisher preflight, Pages assembly, and
     recovery in non-publishing mode.
-14. Verify the complete Pages artifact without enabling Pages.
-15. Capture private readiness evidence and stop before visibility, Pages,
+16. Verify the complete Pages artifact without enabling Pages.
+17. Capture private readiness evidence and stop before visibility, Pages,
     release, Homebrew, or freeze changes.
 
 Bootstrap release-preparation exercises use an isolated clone or an
@@ -789,6 +876,7 @@ checks that cannot start.
 |---|---|---|
 | App token or proposal failure | No protected-ref change | Mint a new token; retry branch or PR operation |
 | PR CI failure | PR remains open | Fix through proposal branch; stale approval requires re-review |
+| Merge-controller validation or API failure | PR remains open; no protected-ref change | Re-fetch the exact PR state; reapprove or rerun checks as required; retry without bypass |
 | Exact-branch CI failure | No release enqueue | Fix through another approved PR |
 | Publisher preflight failure | No outward write | Correct through PR; retry exact candidate |
 | Operator rejects deployment | No outward write | Run stops rejected |
@@ -812,8 +900,8 @@ Publisher resume refuses:
 
 1. Hosted Actions must successfully allocate runners before required checks are
    activated or claimed as verified.
-2. The authoring App must be provisioned and installed before App-authored PRs
-   can be exercised.
+2. The authoring and merge Apps must be provisioned and installed before the
+   protected PR lifecycle can be exercised.
 3. Swift 6 Dependabot compatibility requires a private empirical check.
 4. A future macOS 27 line requires a stable hosted runner or a separately
    reviewed hardened alternative.
@@ -830,8 +918,10 @@ Publisher resume refuses:
 The private automation program is ready for a later publication decision only
 when:
 
-- the package deployment floor is macOS 26 and its caller-visible effect is in
-  `[Unreleased]`;
+- macOS 26 is documented as the current tested and supported baseline, future
+  majors become supported only after validation, macOS 14 through 25 are
+  documented as untested and unsupported, and the technical package deployment
+  floor remains macOS 14;
 - the PR template contains exactly Rationale, Details, Testing, and Checklist
   as its four top-level sections;
 - every mandatory private hosted job allocates a runner and passes;
@@ -842,11 +932,14 @@ when:
 - hosted-safe CLI tests run in Actions and live/TCC tests remain isolated;
 - App-authored PR creation and sole operator approval are verified;
 - stale approval dismissal is verified;
+- squash is the only enabled merge method, and a merged PR's final title and
+  description exactly become the `main` commit header and body through the
+  exact-SHA merge controller;
 - direct `main` pushes are rejected after bootstrap;
 - the exact release candidate passes the full publisher preflight;
 - bot-triggered, operator-approved environment gating is verified without
   publishing;
-- Pages `/current/`, `/versions/`, prior-series paths, manifest, reconciliation,
+- Pages `/`, `/version/`, prior-series paths, manifest, reconciliation,
   and canaries validate in non-deploying tests;
 - Dependabot works for every enabled ecosystem and never auto-merges;
 - all Actions use full commit SHA references;
@@ -864,6 +957,8 @@ when:
 - [Pull-request review limitations](https://docs.github.com/en/pull-requests/how-tos/review-pull-requests/reviewing-proposed-changes-in-a-pull-request)
 - [GitHub App permissions](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/choosing-permissions-for-a-github-app)
 - [GitHub App installation authentication](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/authenticating-as-a-github-app-installation)
+- [Configuring squash commits](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/configuring-commit-squashing-for-pull-requests)
+- [Pull-request merge API](https://docs.github.com/en/rest/pulls/pulls#merge-a-pull-request)
 - [`GITHUB_TOKEN` event behavior](https://docs.github.com/en/actions/concepts/security/github_token)
 - [Deployment environments](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments)
 - [Custom Pages workflows](https://docs.github.com/en/enterprise-cloud@latest/pages/getting-started-with-github-pages/using-custom-workflows-with-github-pages)
