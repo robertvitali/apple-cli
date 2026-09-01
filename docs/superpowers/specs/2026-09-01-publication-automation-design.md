@@ -7,19 +7,22 @@ not authorized by this document.
 
 Prepare `apple-cli` for a later public launch with enforceable contribution,
 testing, documentation, dependency, and release controls. The system must bind
-the PR-approved content tree to one exact post-merge candidate Git object ID,
-then make the tested commit, tag, released binary, and published manual trace to
-that candidate. The separate deployment approval names that exact candidate.
+the protected-branch content tree to one exact post-merge candidate Git object
+ID, then make the tested commit, tag, released binary, and published manual
+trace to that candidate. The separate deployment approval names that exact
+candidate.
 
-This design replaces the private, owner-operated direct-to-`main` workflow only
-after a private bootstrap proves the replacement works. Until that activation
-point, the repository's existing main-only rule remains authoritative.
+This design makes reviewed pull requests the normal replacement for the private,
+owner-operated direct-to-`main` workflow only after a private bootstrap proves
+the replacement works. It deliberately retains an exact-user operator bypass.
+Until that activation point, the repository's existing main-only rule remains
+authoritative.
 
 ## 2. Goals
 
-1. Require every post-bootstrap `main` change to arrive through a pull request.
-2. Require the repository operator's GitHub approval before every pull request
-   can merge.
+1. Make pull requests the normal path for every post-bootstrap `main` change.
+2. Require one qualified independent GitHub approval on the normal PR path while
+   preserving an explicit exact-user bypass for the repository operator.
 3. Require a second, explicit operator approval before any version is
    published.
 4. Keep outside-contributor and Dependabot workflows secret-free and unable to
@@ -83,32 +86,28 @@ release instruction.
 
 ### 4.2 Contribution model
 
-- After bootstrap activation, every `main` update requires a pull request.
-- A repository-scoped GitHub App opens operator-directed pull requests so the
-  App, rather than the operator, is the pull-request author.
-- The operator is the sole repository-wide CODEOWNER and supplies the required
-  GitHub approval.
-- Outside contributors and Dependabot open pull requests under their native
-  identities and require the same operator approval.
+- After bootstrap activation, pull requests are the normal path to `main`.
+- The operator, outside contributors, and Dependabot open pull requests under
+  their native identities.
+- The normal path requires one approval from a trusted reviewer whose repository
+  permission is sufficient for GitHub to count the review.
+- The operator's exact GitHub user is the sole `always` bypass actor. This lets
+  the operator deliberately merge without approval, push directly, or force
+  push when necessary. No collaborator role, administrator role, App, or
+  Dependabot identity receives bypass authority.
 - Every pull request is squash-merged. Its final PR title becomes the exact
   Conventional Commit header on `main`, and its final PR description becomes
   the commit body.
-- A separate repository-scoped merge App performs the mechanical merge only
-  after the operator's approval and every required check apply to the exact
-  head SHA and final title/body pair.
-- No authoring identity can approve, merge, deploy, or bypass required checks;
-  the merge App cannot approve, author changes, deploy, or bypass rules.
-- There is no routine direct-to-`main`, pull-request-only, administrator, App,
-  or Dependabot bypass after bootstrap.
-
-GitHub does not let a pull-request author approve their own pull request. If an
-operator-directed pull request is accidentally opened under the operator's
-identity, it must be closed and recreated by the authoring App before it can
-satisfy the approval rule.
+- Native repository settings make squash the only enabled merge method and use
+  `PR_TITLE` plus `PR_BODY` as the default commit message. GitHub permits editing
+  that default during merge, so protected-branch CI verifies the result before
+  any release can proceed.
+- No non-operator contributor can bypass the pull-request, review, CI, or
+  force-push rules.
 
 ### 4.3 Deployment model
 
-- Release preparation is an ordinary App-authored pull request.
+- Release preparation is an ordinary protected pull request.
 - The publisher never edits source, creates a new source commit, or pushes a
   branch.
 - A bot, not the operator, initiates the exact-SHA publisher.
@@ -121,9 +120,8 @@ satisfy the approval rule.
 
 | Identity | Allowed | Forbidden |
 |---|---|---|
-| Operator | Review and approve PRs; approve production deployment; administer settings | Self-authored PR approval; routine direct `main` push; unreviewed publication |
-| Authoring App | Open/update proposal PRs for existing same-repository branches | Approve, merge, write repository contents or refs, edit workflows, bypass rules, tag, release, deploy, change settings |
-| Merge App | Squash-merge an approved, checked exact PR head using its final title and body | Author changes or PRs; approve; bypass rules; direct-push; tag; release; deploy; change settings |
+| Operator | Author PRs; review others' PRs; merge; administer settings; bypass branch rules; force push; approve production deployment | Self-approve a PR through GitHub's review UI; unreviewed publication |
+| Trusted maintainer/reviewer | Review and approve PRs; merge only after every normal protection passes; contribute through branches | Bypass rules; direct-push or force-push `main`; deploy; publish |
 | PR `GITHUB_TOKEN` | Read source; upload non-sensitive checks and artifacts | Write repository contents; receive ordinary secrets; deploy; publish |
 | Publisher | After environment approval, create the exact version tag, draft/release assets, and Pages deployment | Mutate branches; generate new source changes; retarget or delete published tags |
 | Dependabot | Open dependency PRs | Auto-merge, approve, deploy, or access ordinary Actions secrets |
@@ -134,123 +132,67 @@ cannot cryptographically prevent the owner from deliberately removing a rule.
 These controls prevent accidental or routine bypass and provide an auditable
 normal path; they do not claim protection against an owner-account compromise.
 
-## 6. Pull-request and merge Apps
+## 6. Native pull-request flow and operator bypass
 
-### 6.1 Installation and permissions
-
-The App is private and installed on this repository only. It receives only:
-
-- repository metadata read access;
-- pull-request write access.
-
-It receives no repository-contents, Actions, checks, workflows, administration,
-environments, deployments, release, Pages, approval, merge, ruleset-bypass,
-visibility, or cross-repository authority. It cannot create or update a branch,
-tag, file, Release, or workflow; its only write surface is pull-request metadata.
-
-The App private key is stored outside the repository behind a trusted
-preparation environment. Each use mints a repository-scoped installation token
-with a one-hour lifetime and the smallest required permission subset. Tokens
-must never be printed, uploaded, cached, or written to the checkout.
-
-### 6.2 Ordinary operator-directed change
-
-The privileged opener runs only trusted default-branch code. Before minting an
-App token, it validates the proposal repository, full ref, and immutable head
-object ID through the API. It treats branch names, titles, and body text as
-untrusted data, constructs the body from the default-branch template, and never
-checks out, sources, interpolates into a shell, or executes proposal-branch
-content while App credentials are available. It passes the short-lived token
-directly to the PR API and never logs, persists, caches, or uploads it.
+### 6.1 Ordinary change
 
 ```text
-operator or trusted agent prepares and pushes a proposal branch
-  -> trusted default-branch PR-opener mints an App token
-  -> App opens the PR with the repository template
+operator or contributor prepares and pushes a proposal branch
+  -> author opens a pull request with the repository template
   -> secret-free required CI runs
-  -> operator reviews and approves the final diff
-  -> merge controller revalidates the exact head, metadata, approval, and checks
-  -> merge App supplies the exact PR title/body to GitHub's squash API
+  -> one qualified independent reviewer approves the final code
+  -> author or maintainer squash-merges with the native GitHub controls
+  -> protected-branch CI verifies the resulting tree and commit metadata
 ```
 
-The App need not push ordinary proposal commits. The operator may push them to
-the proposal branch, because GitHub's self-approval prohibition is based on the
-pull-request author. Stale-review dismissal ensures any later commit removes the
-prior approval and requires the operator to approve again.
+GitHub does not let an author approve their own pull request. An operator-authored
+PR therefore receives its ordinary required approval from another trusted
+collaborator with sufficient repository permission. Outside-contributor and
+Dependabot PRs follow the same review and CI rules.
 
-The design deliberately does not require approval from someone other than the
-latest branch pusher. That GitHub option would deadlock an operator-pushed branch
-when the operator is also the required reviewer.
+A trusted non-owner maintainer may perform the squash merge only after every
+required review, conversation, and check has passed. This is ordinary merge
+authority, not bypass authority. The maintainer cannot merge a deficient PR,
+push directly, or force-push `main`.
 
-### 6.3 Merge controller
+### 6.2 Operator bypass and force-push authority
 
-The merge App is private and installed only on this repository. It receives
-repository metadata read access and repository contents write access, the
-permission GitHub's pull-request merge API requires. The `main` and `v*`
-rulesets grant it no bypass. It has no administration, Actions, checks,
-workflows, environments, deployments, Pages, approval, or cross-repository
-authority. GitHub exposes pull-request merging through repository-contents write
-permission, which also technically authorizes other contents endpoints. That
-unavoidable permission breadth is contained by the no-bypass `main` and `v*`
-rulesets, short-lived tokens minted only inside trusted controller code, and a
-separate publisher identity; it must not be described as endpoint-level least
-privilege that GitHub does not offer.
+The branch ruleset names only the operator's exact GitHub user as an `always`
+bypass actor. It does not grant bypass to the repository-admin role because a
+future admin collaborator would inherit that role. The operator can use the
+bypass to merge without the required approval, push directly, or force push;
+all non-operator contributors remain subject to every rule.
 
-A trusted default-branch controller, never proposal-branch code, mints the
-short-lived merge token. Immediately before merging, it re-fetches and verifies:
+Force-pushing `main` rewrites shared history. It can remove commits, invalidate
+existing clones, and corrupt open pull-request ancestry. It is an explicit
+emergency and history-repair capability, not the routine approval override. A
+routine override uses the operator bypass to merge the PR or push normally. A
+necessary history rewrite uses an exact expected remote object ID and
+`--force-with-lease`, after rechecking the remote ref. Plain force still requires
+a separate operator confirmation explaining why lease protection cannot work.
 
-- the pull request is open, non-draft, and targets the expected protected line;
-- the exact current head SHA is strictly up to date;
-- every required check succeeded for that SHA;
-- the current title and description satisfy the metadata contract;
-- the latest valid operator approval applies to that SHA and was submitted
-  after the current metadata-policy check completed;
-- the PR is mergeable without bypassing any ruleset.
+The repository owner remains the control-plane root and can also edit or delete
+the ruleset. The design prevents accidental and non-owner bypass; it does not
+claim that a personal-repository owner can be made unable to change their own
+settings.
 
-The controller then calls GitHub's pull-request merge API with the verified head
-SHA, `merge_method: squash`, the final PR title as `commit_title`, and the final
-PR description as `commit_message`. Supplying the head SHA makes a concurrent
-source update fail rather than merge a different tree. A title or description
-edit reruns metadata policy; the resulting check completes after the old review,
-so the controller requires a new operator approval before merging. The
-controller treats an API response as provisional until it verifies the new
-`main` commit's tree, header, body, PR association, approval, and check
-provenance.
+### 6.3 Release-preparation change
 
-The repository owner remains able to alter settings or deliberately use the
-GitHub merge UI because this is a user-owned repository. That control-plane
-caveat cannot be removed technically. The merge controller is the only supported
-normal merge path, and the protected-branch backstop makes any divergent result
-red and blocks later merges and releases.
-
-### 6.4 Release-preparation change
-
-The trusted release preparer creates and pushes the proposal branch using the
-operator's normal branch credentials. The App only opens the PR. A strict
-allowlist limits the resulting diff to the version constant, CHANGELOG
-promotion, and version-dependent generated documentation when needed. Any other
-changed path fails preparation before the branch is pushed.
+The trusted release preparer creates and pushes an ordinary proposal branch. A
+strict allowlist limits its diff to the version constant, CHANGELOG promotion,
+and version-dependent generated documentation when needed. Any other changed
+path fails preparation before the branch is pushed.
 
 ## 7. Repository protection
 
-### 7.1 CODEOWNERS
+### 7.1 Reviewer policy
 
-The base branch carries `.github/CODEOWNERS`. The operator is the only owner for
-the full tree. High-authority surfaces are repeated for visibility even though
-the global rule already covers them:
-
-```text
-*                                @robertvitali
-/.github/CODEOWNERS              @robertvitali
-/.github/workflows/              @robertvitali
-/scripts/                        @robertvitali
-/Package.swift                   @robertvitali
-/Package.resolved                @robertvitali
-/docs/manual-prose.json          @robertvitali
-```
-
-Adding another owner to the global rule is a policy change because GitHub
-accepts approval from any matching code owner.
+The normal path requires one approval from a trusted collaborator whose
+repository permission is sufficient for GitHub to count the review. The design
+does not require a repository-wide CODEOWNER approval: that would make an
+operator-authored PR impossible to satisfy without using the bypass on every
+change. The operator chooses which collaborators receive review-capable access
+and does not grant them ruleset bypass.
 
 ### 7.2 `main` and active maintenance lines
 
@@ -258,27 +200,32 @@ Rulesets require:
 
 - a pull request;
 - one approving review;
-- review from CODEOWNERS;
 - dismissal of stale approvals after code changes;
 - conversation resolution;
 - the stable `governance / required` check;
 - the stable `quality / required` check;
 - strict up-to-date status checks before merge;
 - linear history;
-- no force pushes;
+- force pushes blocked for every non-bypass actor;
 - no deletion;
-- no bypass actor.
+- one bypass entry: the operator's exact GitHub user in `always` mode.
+
+No repository role, team, GitHub App, Dependabot identity, deploy key, or other
+user receives bypass. The operator's bypass is deliberately broad enough to
+merge without approval, push directly, and force push. Release automation never
+treats bypass as quality evidence: an exact candidate still must pass the full
+publisher preflight before any outward-facing action.
 
 Repository merge settings permit squash merge only: merge commits and rebase
 merges are disabled. The configured squash title source is `PR_TITLE`, and the
-squash message source is `PR_BODY`; these are defense-in-depth defaults rather
-than the enforcement boundary because GitHub permits editing the proposed merge
-message. A required governance check verifies those settings and the merge-App
-configuration. The merge controller supplies the final title/body explicitly,
-and protected-branch CI verifies that each resulting `main` commit header and
-body equal the merged PR title and description after normalizing Git's terminal
+squash message source is `PR_BODY`. GitHub permits editing the proposed merge
+message, so a required governance check verifies the repository settings and
+protected-branch CI verifies that each resulting `main` commit header and body
+equal the merged PR title and description after normalizing Git's terminal
 newline. A mismatch makes `main` red and blocks every later merge and release
-until corrected through the protected PR path.
+until a corrected candidate passes the protected checks. An operator bypass may
+land a corrective commit or perform an explicitly authorized history repair,
+but it never makes a red or metadata-mismatched candidate eligible to publish.
 
 The repository is user-owned. GitHub merge queues are currently available for
 public organization-owned repositories, not user-owned public repositories.
@@ -313,13 +260,13 @@ exactly four top-level sections, in this order:
 ```
 
 Hidden HTML comments guide authors without introducing more top-level headings.
-App-created PRs populate the same template explicitly; API-created PRs must not
-omit or replace it.
+API-created PRs populate the same template explicitly and must not omit or
+replace it.
 
 The completed description is also the future squash-commit body. Its final
 lines carry the contiguous `Reviewed-by:` and applicable `Co-Authored-By:`
 trailer block required by repository policy, with no internal tracker trailer.
-The operator reviews the final title and description before approval.
+Authors and reviewers inspect the final title and description before merge.
 
 ### 8.1 Rationale
 
@@ -392,11 +339,10 @@ description edits. It verifies the four headings exist exactly once and in
 order, the PR title is a valid Conventional Commit header of at most 72
 characters, required template content is not left as placeholder text, and the
 description ends in a valid contiguous provenance trailer block. Its result is
-recomputed for the final title/body pair. The merge controller requires the
-operator's approval to be newer than that successful metadata result, binding
-approval to the title and body that will become the commit. Checkboxes
-communicate readiness; they never replace the operator approval or required
-Actions result.
+recomputed for the final title/body pair. Checkboxes communicate readiness; they
+never replace the required independent review or Actions result. Because GitHub
+does not make its generated squash message immutable, protected-branch CI
+compares the resulting commit with the final PR metadata before any release.
 
 ## 9. Outside-contributor and dependency PR safety
 
@@ -410,12 +356,12 @@ No workflow may:
 - check out or execute fork code under `pull_request_target`;
 - treat a fork artifact as trusted executable input in a privileged
   `workflow_run`;
-- expose App keys, release credentials, environment secrets, or write tokens;
+- expose release credentials, environment secrets, or write tokens;
 - run fork code on self-hosted, persistent, live-store, or TCC-enabled runners;
 - grant fork code tag, Release, Pages, or distribution authority.
 
 Workflow-file changes are ordinary untrusted code until merged through the
-operator-approved path. Every external Action, including GitHub-authored
+protected review path. Every external Action, including GitHub-authored
 Actions, is pinned to a full commit SHA.
 
 ## 10. Quality architecture
@@ -509,8 +455,8 @@ blobs as untrusted data through the API.
 
 The enforcement control plane includes:
 
-- `.github/workflows/**`, `.github/actions/**`, `.github/CODEOWNERS`, the PR
-  template, and `.github/dependabot.yml`;
+- `.github/workflows/**`, `.github/actions/**`, the PR template, and
+  `.github/dependabot.yml`;
 - the coverage policy, parser, exclusions, target inventory, capability-test
   manifest, and PR metadata validator;
 - every deterministic quality driver, privacy/secret policy, release builder,
@@ -518,25 +464,25 @@ The enforcement control plane includes:
 - the pinned documentation dependency manifests and locks.
 
 An ordinary product, documentation, or dependency PR fails if it changes an
-enforcement-control-plane path. A control-plane change must be an App-authored,
-dedicated policy PR with no product-source, product-documentation, version, or
-release-note change. The current base policy remains the blocking policy for
-that PR; the proposed policy runs separately without secrets as advisory
-evidence. The trusted check rejects a lower aggregate or changed-line floor, a
-lower target baseline, an expanded exclusion without an exact reviewed reason,
-a broader token permission, a newly privileged trigger, a floating Action ref,
-or mixing policy and product changes.
+enforcement-control-plane path. A control-plane change must be a dedicated
+policy PR with no product-source, product-documentation, version, or release-note
+change. The current base policy remains the blocking policy for that PR; the
+proposed policy runs separately without secrets as advisory evidence. The
+trusted check rejects a lower aggregate or changed-line floor, a lower target
+baseline, an expanded exclusion without an exact reviewed reason, a broader
+token permission, a newly privileged trigger, a floating Action ref, or mixing
+policy and product changes.
 
-The only non-App control-plane exception is a Dependabot-authored GitHub Actions
-pin-update PR. It may change only workflow files, and a trusted-base structural
-comparison must prove that the parsed workflows are identical except for
+The only automated control-plane exception is a Dependabot-authored GitHub
+Actions pin-update PR. It may change only workflow files. A trusted-base
+structural comparison must prove that the parsed workflows are identical except for
 allowlisted `uses:` commit SHAs and their adjacent version comments. Every new
 ref must be a verified full commit SHA for the same allowlisted Action; triggers,
 permissions, expressions, inputs, shell commands, and all other nodes must be
 unchanged. The base policy remains blocking, the proposed pins run only in the
-secret-free advisory lane, operator approval is required, and auto-merge is
+secret-free advisory lane, one qualified approval is required, and auto-merge is
 forbidden. Any broader Dependabot workflow diff fails and must be recreated as a
-dedicated App-authored policy PR.
+dedicated human-authored policy PR.
 
 `Package.swift`, `Package.resolved`, and any future executable dependency lock
 are governed execution surfaces rather than policy implementations. A trusted
@@ -654,25 +600,28 @@ before Pages or Dependabot is enabled for it.
 ## 14. Release preparation and exact candidate
 
 The release-preparation workflow calculates the next version from branch-
-reachable Conventional Commit subjects. It creates an App-authored PR whose
-allowed source changes are:
+reachable Conventional Commit subjects. It creates an ordinary PR whose allowed
+source changes are:
 
 - `AppleVersion.current`;
 - moving `[Unreleased]` into the dated version heading;
 - version-dependent generated documentation only when generation proves it is
   necessary.
 
-The PR passes ordinary operator approval and the full required gate. The exact
-commit that lands on the protected target branch becomes the only release
-candidate. The publisher may not amend it or make a follow-up source commit.
+The normal path passes one independent approval and the full required gate. An
+operator bypass is permitted but is not quality evidence. The exact commit that
+lands on the protected target branch becomes the only release candidate, and
+the publisher reruns the full gate on that candidate. The publisher may not
+amend it or make a follow-up source commit.
 
 Protected PRs are squash-merged. Because squash creates a new commit object,
 the trusted listener verifies that the candidate tree exactly equals the final
 approved, up-to-date PR head tree and that the approving review still applied to
-that head. It also verifies that the candidate subject equals the final PR title
-and the candidate body equals the final PR description. Post-merge quality tests
-the candidate object itself; the later operator environment approval explicitly
-approves that candidate SHA for publication.
+that head, or records that the exact operator bypass was used. It also verifies
+that the candidate subject equals the final PR title and the candidate body
+equals the final PR description. Post-merge quality tests the candidate object
+itself; the later operator environment approval explicitly approves that
+candidate SHA for publication.
 
 After exact protected-branch quality succeeds, a trusted default-branch
 listener validates the branch, commit subject, version, and workflow conclusion
@@ -804,7 +753,8 @@ for recovery. Release and reconciliation use one shared concurrency group with
 Minor and patch updates are grouped per ecosystem. Major updates remain
 individual. Open PR counts are bounded, titles remain Conventional Commit-
 compatible, and unattended auto-merge is disabled. Every dependency PR requires
-ordinary secret-free CI and operator approval.
+ordinary secret-free CI and one qualified independent approval unless the
+operator deliberately uses the exact-user bypass.
 
 Before activation:
 
@@ -815,7 +765,7 @@ Before activation:
 
 A `github-actions` Dependabot PR uses only the narrow workflow-pin exception in
 Section 10.5. It cannot change triggers, permissions, commands, inputs, or any
-non-workflow file and never bypasses operator approval.
+non-workflow file and receives no bypass authority.
 
 If native Swift 6 updates fail empirically, Dependabot remains active for
 Actions and documentation while a scheduled read-only Swift dependency
@@ -833,20 +783,20 @@ The bootstrap proceeds while the repository is private:
    review on every sensitive commit.
 4. Obtain at least one successful private hosted Actions run of every mandatory
    job. A job that never receives a runner is not evidence.
-5. Provision the authoring and merge Apps with their separate approved
-   permissions and validate short-lived token handling without printing
-   secrets.
-6. Configure squash-only merging with PR title and PR body as the squash commit
+5. Configure squash-only merging with PR title and PR body as the squash commit
    title and body; disable merge commits and rebase merges.
-7. Create an App-authored validation PR and verify operator CODEOWNER approval.
-8. Push another proposal commit and verify the old approval becomes stale.
-9. Verify an intentionally failing required job blocks merge.
-10. Verify strict up-to-date checks and exact protected-branch checks.
-11. Activate the no-bypass `main` rulesets and confirm direct pushes fail for
-    both operator and App.
-12. Have the merge App squash-merge a successful App-authored validation PR and
-    verify the `main` commit title, body, tree, approval, and check provenance
-    exactly. Confirm that a metadata edit after approval requires reapproval.
+6. Create an operator-authored validation PR and verify that one qualified
+   independent approval satisfies the normal rule.
+7. Push another proposal commit and verify the old approval becomes stale.
+8. Verify an intentionally failing required job blocks a non-bypass merge.
+9. Verify strict up-to-date checks and exact protected-branch checks.
+10. Activate the `main` ruleset with only the operator's exact user in `always`
+    bypass mode. Confirm non-operator direct and force pushes fail.
+11. Exercise the operator bypass on a disposable branch protected by the same
+    rule, including a lease-protected force-push rehearsal. Do not rewrite
+    `main` merely to prove the capability.
+12. Native-squash a successful validation PR and verify the resulting `main`
+    commit title, body, tree, review, and check provenance exactly.
 13. Activate the `v*` tag ruleset, full-SHA Action policy, and allowed-Action
     policy.
 14. Enable and validate governed Dependabot updates.
@@ -856,9 +806,9 @@ The bootstrap proceeds while the repository is private:
 17. Capture private readiness evidence and stop before visibility, Pages,
     release, Homebrew, or freeze changes.
 
-Bootstrap release-preparation exercises use an isolated clone or an
-App-authored proposal PR that is never merged. They may compute and display a
-synthetic candidate in value-free evidence, but they do not change
+Bootstrap release-preparation exercises use an isolated clone or an ordinary
+proposal PR that is never merged. They may compute and display a synthetic
+candidate in value-free evidence, but they do not change
 `AppleVersion.current` on `main`, promote `[Unreleased]`, create a tag, create or
 edit a Release, or deploy Pages. Any validation PR and proposal ref are closed
 and removed after evidence is captured.
@@ -874,9 +824,9 @@ checks that cannot start.
 
 | Failure | Preserved state | Recovery |
 |---|---|---|
-| App token or proposal failure | No protected-ref change | Mint a new token; retry branch or PR operation |
+| Proposal branch or PR creation failure | No protected-ref change | Correct the proposal operation; retry without touching `main` |
 | PR CI failure | PR remains open | Fix through proposal branch; stale approval requires re-review |
-| Merge-controller validation or API failure | PR remains open; no protected-ref change | Re-fetch the exact PR state; reapprove or rerun checks as required; retry without bypass |
+| Native squash metadata mismatch | `main` is red; release remains blocked | Correct through a reviewed PR or an explicit operator history-repair decision |
 | Exact-branch CI failure | No release enqueue | Fix through another approved PR |
 | Publisher preflight failure | No outward write | Correct through PR; retry exact candidate |
 | Operator rejects deployment | No outward write | Run stops rejected |
@@ -900,8 +850,8 @@ Publisher resume refuses:
 
 1. Hosted Actions must successfully allocate runners before required checks are
    activated or claimed as verified.
-2. The authoring and merge Apps must be provisioned and installed before the
-   protected PR lifecycle can be exercised.
+2. At least one trusted collaborator must have enough repository permission for
+   GitHub to count their review before the independent-review path can be proven.
 3. Swift 6 Dependabot compatibility requires a private empirical check.
 4. A future macOS 27 line requires a stable hosted runner or a separately
    reviewed hardened alternative.
@@ -930,12 +880,14 @@ when:
 - every production target is present and non-regressing;
 - new commands and contract surfaces cannot enter without mapped tests;
 - hosted-safe CLI tests run in Actions and live/TCC tests remain isolated;
-- App-authored PR creation and sole operator approval are verified;
+- operator-authored PR creation and qualified independent approval are verified;
 - stale approval dismissal is verified;
 - squash is the only enabled merge method, and a merged PR's final title and
-  description exactly become the `main` commit header and body through the
-  exact-SHA merge controller;
-- direct `main` pushes are rejected after bootstrap;
+  description exactly become the `main` commit header and body;
+- the operator's exact user is the sole always-bypass actor and every
+  non-operator contributor is unable to direct-push or force-push `main`;
+- the operator bypass and lease-protected force-push capability are verified on
+  a disposable protected branch rather than by rewriting `main`;
 - the exact release candidate passes the full publisher preflight;
 - bot-triggered, operator-approved environment gating is verified without
   publishing;
@@ -953,12 +905,10 @@ when:
 - [Secure use of GitHub Actions](https://docs.github.com/en/actions/reference/security/secure-use)
 - [Protected branches](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-protected-branches/about-protected-branches)
 - [Repository rulesets](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/available-rules-for-rulesets)
-- [CODEOWNERS](https://docs.github.com/en/repositories/managing-your-repositorys-settings-and-features/customizing-your-repository/about-code-owners)
 - [Pull-request review limitations](https://docs.github.com/en/pull-requests/how-tos/review-pull-requests/reviewing-proposed-changes-in-a-pull-request)
-- [GitHub App permissions](https://docs.github.com/en/apps/creating-github-apps/registering-a-github-app/choosing-permissions-for-a-github-app)
-- [GitHub App installation authentication](https://docs.github.com/en/apps/creating-github-apps/authenticating-with-a-github-app/authenticating-as-a-github-app-installation)
+- [Creating repository rulesets](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/managing-rulesets/creating-rulesets-for-a-repository)
+- [Rulesets REST API](https://docs.github.com/en/rest/repos/rules)
 - [Configuring squash commits](https://docs.github.com/en/repositories/configuring-branches-and-merges-in-your-repository/configuring-pull-request-merges/configuring-commit-squashing-for-pull-requests)
-- [Pull-request merge API](https://docs.github.com/en/rest/pulls/pulls#merge-a-pull-request)
 - [`GITHUB_TOKEN` event behavior](https://docs.github.com/en/actions/concepts/security/github_token)
 - [Deployment environments](https://docs.github.com/en/actions/reference/workflows-and-actions/deployments-and-environments)
 - [Custom Pages workflows](https://docs.github.com/en/enterprise-cloud@latest/pages/getting-started-with-github-pages/using-custom-workflows-with-github-pages)
