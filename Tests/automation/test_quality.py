@@ -179,11 +179,17 @@ class QualityDriverTests(unittest.TestCase):
         self.assertNotIn("brew install", install_step)
         for setting in (
             "NPM_CONFIG_USERCONFIG: /dev/null",
-            "NPM_CONFIG_GLOBALCONFIG: /dev/null",
+            "NPM_CONFIG_GLOBALCONFIG: ${{ runner.temp }}/npm-globalrc",
             "NPM_CONFIG_REGISTRY: https://registry.npmjs.org/",
             'NPM_CONFIG_IGNORE_SCRIPTS: "true"',
         ):
             self.assertIn(setting, install_step)
+        npm_config_paths = re.findall(
+            r"NPM_CONFIG_(?:USER|GLOBAL)CONFIG: ([^\n]+)",
+            install_step,
+        )
+        self.assertEqual(len(npm_config_paths), 2)
+        self.assertEqual(len(set(npm_config_paths)), 2)
         self.assertIn('cd "$RUNNER_TEMP"', install_step)
 
         policy_step = workflow_named_step(job, "Prepare trusted policy checkout")

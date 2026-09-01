@@ -66,7 +66,7 @@ jobs:
       - name: Install pinned Bats
         env:
           BATS_INTEGRITY: sha512-giSYKGTOcPZyJDbfbTtzAedLcNWdjCLbXYU3/MwPnjyvDXzu6Dgw8d2M+8jHhZXSmsCMSQqCp+YBsJ603UO4vQ==
-          NPM_CONFIG_GLOBALCONFIG: /dev/null
+          NPM_CONFIG_GLOBALCONFIG: ${{ runner.temp }}/npm-globalrc
           NPM_CONFIG_IGNORE_SCRIPTS: "true"
           NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
           NPM_CONFIG_USERCONFIG: /dev/null
