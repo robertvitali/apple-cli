@@ -50,12 +50,31 @@ jobs:
           set -euo pipefail
           [ "$REF" = "refs/heads/main" ] || { echo "Releases cut from main only (got $REF)"; exit 1; }
 
-      # TODO(hardening): pin to a commit SHA + add Dependabot (same posture as ci.yml).
-      # persist-credentials stays on because the push step needs the token; the build steps
-      # between checkout and push run only repo-pinned code (Package.resolved).
-      - uses: actions/checkout@v4
+      # Keep the write token out of git configuration while repository code executes. The
+      # exact publish steps receive it through step-local environment variables below.
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0
+        with:
+          version: "0.11.27"
+          enable-cache: false
+
+      - name: Guard — supply-chain policy and docs lock
+        run: |
+          set -euo pipefail
+          python -m unittest Tests.automation.test_action_pins Tests.automation.test_dependency_policy
+          python scripts/ci/action_pins.py
+          python scripts/ci/dependency_policy.py
+          uv pip compile docs/requirements.in --python-version 3.12 --python-platform x86_64-unknown-linux-gnu --generate-hashes --output-file docs/requirements.txt
+          git diff --exit-code -- docs/requirements.txt
+          python -m pip install --require-hashes -r docs/requirements.txt
 
       - name: Compute new version
         id: ver
@@ -94,9 +113,9 @@ jobs:
               # BREAKING-CHANGE in body) => MINOR; breaking never rides a PATCH.
               if git log --format='%s' "${LAST_TAG}..HEAD" | grep -qE '^feat(\(|!|:)|^[a-z]+(\([^)]*\))?!:' \
                  || git log --format='%B' "${LAST_TAG}..HEAD" | grep -qE '^BREAKING[ -]CHANGE'; then
-                BUMP=minor
+                BUMP="minor"
               else
-                BUMP=patch
+                BUMP="patch"
               fi
             else
               BUMP="$BUMP_INPUT"
@@ -198,20 +217,43 @@ jobs:
           tar -C .build/release -czf "apple-v${NEW}-macos-arm64.tar.gz" apple
           shasum -a 256 "apple-v${NEW}-macos-arm64.tar.gz" > "apple-v${NEW}-macos-arm64.tar.gz.sha256"
 
-      - name: Commit, tag, push (atomic)
+      - name: Commit and tag
         run: |
           set -euo pipefail
           NEW="${{ steps.ver.outputs.new }}"
-          # Refuse to publish if main moved under us (concurrency group serializes releases,
-          # not ordinary pushes).
-          git fetch origin main --quiet
-          git merge-base --is-ancestor origin/main HEAD || { echo "origin/main advanced during the run — re-dispatch on the new tip"; exit 1; }
           git config user.name "github-actions[bot]"
           git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
           git add Sources/AppleKit/CommandSupport.swift CHANGELOG.md
           git commit -m "chore(release): v${NEW}" -m "Mechanical release commit created by release.yml (review-exempt per AGENTS.md 'Versioning + releases')."
           git tag -a "v${NEW}" -m "apple-cli v${NEW}"
-          git push --atomic origin main "v${NEW}"
+
+      - name: Push commit and tag (atomic)
+        env:
+          PUBLISH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          NEW="${{ steps.ver.outputs.new }}"
+          ASKPASS="$RUNNER_TEMP/apple-cli-release-git-askpass"
+          # The generated helper must expand these variables when Git invokes it, not now.
+          # shellcheck disable=SC2016
+          printf '%s\n' \
+            '#!/bin/sh' \
+            'case "$1" in' \
+            '  *Username*) printf "%s\n" "x-access-token" ;;' \
+            '  *Password*) printf "%s\n" "$PUBLISH_TOKEN" ;;' \
+            '  *) exit 1 ;;' \
+            'esac' > "$ASKPASS"
+          chmod 700 "$ASKPASS"
+          export GIT_ASKPASS="$ASKPASS"
+          export GIT_ASKPASS_REQUIRE=force
+          export GIT_TERMINAL_PROMPT=0
+          trap 'rm -f "$ASKPASS"' EXIT
+          REMOTE="https://github.com/${GITHUB_REPOSITORY}.git"
+          # Refuse to publish if main moved under us (concurrency group serializes releases,
+          # not ordinary pushes).
+          git fetch "$REMOTE" main:refs/remotes/origin/main --quiet
+          git merge-base --is-ancestor origin/main HEAD || { echo "origin/main advanced during the run — re-dispatch on the new tip"; exit 1; }
+          git push --atomic "$REMOTE" HEAD:refs/heads/main "refs/tags/v${NEW}:refs/tags/v${NEW}"
 
       - name: Create GitHub Release (idempotent; notes from the curated CHANGELOG section)
         env:
