@@ -1,11 +1,14 @@
 #!/usr/bin/env bats
+
+BATS_SUITE_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd -P)"
+REPO_ROOT="$(cd "$BATS_SUITE_ROOT/.." && pwd -P)"
+HELPERS="$BATS_SUITE_ROOT/helpers"
 # Mail `move --gmail-mode` CLI smoke tests (Gmail copy+delete label semantics; parity with
-# s-morgan move_messages(gmail_mode=True)). CI-safe only: dry-run previews + flag-acceptance
+# s-morgan move_messages(gmail_mode=True)). Local-only: dry-run previews + flag-acceptance
 # equivalence, with the --execute case run SANDBOXED (write-model v2: unsandboxed --execute
 # is a real mutation path, so the sandbox label gate is the backstop when a filter ever
 # matches). NO test asserts a live Mail mutation — the live copy+delete was validated by the
-# operator. Index-dependent cases skip when the Envelope Index is unreadable (CI), exactly
-# like bats/mail.bats.
+# operator. Index-dependent cases skip when the Envelope Index is unreadable.
 
 setup() {
   BIN="$(swift build --show-bin-path)/apple"

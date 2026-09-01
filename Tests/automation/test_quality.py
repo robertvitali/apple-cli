@@ -3,6 +3,7 @@ import io
 import os
 from pathlib import Path
 import math
+import re
 import shutil
 import signal
 import stat
@@ -11,13 +12,20 @@ import sys
 import tempfile
 import textwrap
 import unittest
+from unittest import mock
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 QUALITY_PATH = REPO_ROOT / "scripts" / "ci" / "quality.py"
+CI_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 FULL_SHA = "0123456789abcdef0123456789abcdef01234567"
 BASE_SHA = "89abcdef0123456789abcdef0123456789abcdef"
 OTHER_SHA = "fedcba9876543210fedcba9876543210fedcba98"
+TRUSTED_HOSTED_ENVIRONMENT = {
+    "GITHUB_ACTIONS": "true",
+    "RUNNER_OS": "macOS",
+    "RUNNER_ENVIRONMENT": "github-hosted",
+}
 
 
 def load_quality():
@@ -28,6 +36,26 @@ def load_quality():
     sys.modules["quality"] = module
     spec.loader.exec_module(module)
     return module
+
+
+def workflow_job(source: str, name: str) -> str:
+    match = re.search(
+        rf"(?ms)^  {re.escape(name)}:\n(?P<body>.*?)(?=^  [a-z0-9-]+:\n|\Z)",
+        source,
+    )
+    if match is None:
+        raise AssertionError(f"workflow job is missing: {name}")
+    return match.group("body")
+
+
+def workflow_named_step(job: str, name: str) -> str:
+    match = re.search(
+        rf"(?ms)^      - name: {re.escape(name)}\n(?P<body>.*?)(?=^      - (?:name:|uses:)|\Z)",
+        job,
+    )
+    if match is None:
+        raise AssertionError(f"workflow step is missing: {name}")
+    return match.group("body")
 
 
 def write_executable(path: Path, source: str) -> None:
@@ -98,27 +126,143 @@ class QualityDriverTests(unittest.TestCase):
     def setUp(self) -> None:
         self.quality = load_quality()
 
+    def hosted_request(self, stages):
+        return self.quality.QualityRequest(
+            mode=self.quality.Mode.HOSTED,
+            hosted_context=self.quality.HostedContext.TRUSTED_REF,
+            policy_root=REPO_ROOT,
+            candidate_root=REPO_ROOT,
+            candidate_sha=FULL_SHA,
+            base_sha=None,
+            stages=tuple(stages),
+        )
+
+    def test_ci_runs_the_full_hosted_quality_gate_with_exact_sha_bindings(self) -> None:
+        workflow = CI_WORKFLOW_PATH.read_text(encoding="utf-8")
+        job = workflow_job(workflow, "build-test")
+
+        self.assertIn("\n  pull_request:\n", workflow)
+        self.assertNotIn("pull_request_target", workflow)
+        self.assertRegex(workflow, r"(?m)^permissions:\n  contents: read$")
+        self.assertIn("runs-on: macos-15", job)
+        self.assertNotIn("self-hosted", job)
+        self.assertNotRegex(job, r"\$\{\{\s*secrets\.")
+        self.assertNotRegex(job, r"(?m)^    environment:")
+        self.assertNotIn("bats/local", job)
+        self.assertNotIn("--stage", job)
+        self.assertEqual(job.count("--mode hosted"), 2)
+        checkout = re.search(
+            r"(?ms)^      - uses: actions/checkout@[0-9a-f]{40} # v[0-9.]+\n"
+            r"        with:\n(?P<with>(?:          [^\n]+\n)+)",
+            job,
+        )
+        self.assertIsNotNone(checkout)
+        checkout_settings = checkout.group("with")
+        self.assertIn("fetch-depth: 0", checkout_settings)
+        self.assertIn("persist-credentials: false", checkout_settings)
+        self.assertIn(
+            "ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}",
+            checkout_settings,
+        )
+
+        install_step = workflow_named_step(job, "Install pinned Bats")
+        self.assertIn("npm view bats@1.13.0 dist.integrity", install_step)
+        self.assertIn(
+            "sha512-giSYKGTOcPZyJDbfbTtzAedLcNWdjCLbXYU3/MwPnjyvDXzu6Dgw8d2M+8jHhZXSmsCMSQqCp+YBsJ603UO4vQ==",
+            install_step,
+        )
+        self.assertIn(
+            "npm install --global --ignore-scripts --no-audit --no-fund bats@1.13.0",
+            install_step,
+        )
+        self.assertIn('"$(bats --version)" = "Bats 1.13.0"', install_step)
+        self.assertNotIn("brew install", install_step)
+        for setting in (
+            "NPM_CONFIG_USERCONFIG: /dev/null",
+            "NPM_CONFIG_GLOBALCONFIG: /dev/null",
+            "NPM_CONFIG_REGISTRY: https://registry.npmjs.org/",
+            'NPM_CONFIG_IGNORE_SCRIPTS: "true"',
+        ):
+            self.assertIn(setting, install_step)
+        self.assertIn('cd "$RUNNER_TEMP"', install_step)
+
+        policy_step = workflow_named_step(job, "Prepare trusted policy checkout")
+        self.assertIn("worktree add --detach", policy_step)
+        self.assertIn('"${{ github.event.pull_request.base.sha }}"', policy_step)
+        self.assertIn('"$RUNNER_TEMP/trusted-policy"', policy_step)
+
+        pull_request_step = workflow_named_step(
+            job,
+            "Run hosted quality (pull request)",
+        )
+        pull_request_command = " ".join(
+            line.strip().rstrip("\\") for line in pull_request_step.splitlines()
+        )
+        for required in (
+            'python3 "$RUNNER_TEMP/trusted-policy/scripts/ci/quality.py"',
+            "--mode hosted",
+            "--hosted-context pull-request",
+            '--candidate-root "$GITHUB_WORKSPACE"',
+            '--candidate-sha "${{ github.event.pull_request.head.sha }}"',
+            '--base-sha "${{ github.event.pull_request.base.sha }}"',
+        ):
+            self.assertIn(required, pull_request_command)
+
+        trusted_step = workflow_named_step(job, "Run hosted quality (trusted ref)")
+        trusted_command = " ".join(
+            line.strip().rstrip("\\") for line in trusted_step.splitlines()
+        )
+        for required in (
+            "python3 scripts/ci/quality.py",
+            "--mode hosted",
+            "--hosted-context trusted-ref",
+            '--candidate-root "$GITHUB_WORKSPACE"',
+            '--candidate-sha "${{ github.sha }}"',
+        ):
+            self.assertIn(required, trusted_command)
+        self.assertNotIn("--base-sha", trusted_command)
+
+    def test_ci_commit_lint_uses_full_checkout_without_authenticated_fetch(self) -> None:
+        workflow = CI_WORKFLOW_PATH.read_text(encoding="utf-8")
+        job = workflow_job(workflow, "commit-lint")
+
+        self.assertIn("fetch-depth: 0", job)
+        self.assertIn("persist-credentials: false", job)
+        self.assertIn(
+            "ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}",
+            job,
+        )
+        self.assertNotIn("git fetch", job)
+        self.assertIn(
+            "BASE_SHA: ${{ github.event.pull_request.base.sha }}",
+            job,
+        )
+        self.assertNotIn("BASE_REF:", job)
+        self.assertIn('git log --format=%s "${BASE_SHA}..HEAD"', job)
+
     def test_registry_is_immutable_ordered_and_mode_scoped(self) -> None:
         names = tuple(stage.name for stage in self.quality.STAGES)
 
         self.assertEqual(
             names,
             (
+                "bats-inventory",
                 "swiftly-build",
                 "swiftly-test",
                 "clt-build",
                 "bats-local",
                 "hosted-build",
                 "hosted-test",
+                "bats-hosted",
             ),
         )
         self.assertEqual(
             self.quality.stage_names_for_mode(self.quality.Mode.LOCAL),
-            names[:4],
+            names[:5],
         )
         self.assertEqual(
             self.quality.stage_names_for_mode(self.quality.Mode.HOSTED),
-            names[4:],
+            ("bats-inventory", "hosted-build", "hosted-test", "bats-hosted"),
         )
         with self.assertRaises(Exception):
             self.quality.STAGES[0].name = "mutated"
@@ -162,7 +306,7 @@ class QualityDriverTests(unittest.TestCase):
     def test_default_local_and_hosted_stage_order(self) -> None:
         self.assertEqual(
             self.quality.parse_request(["--mode", "local"]).stages,
-            ("swiftly-build", "swiftly-test", "clt-build", "bats-local"),
+            ("bats-inventory", "swiftly-build", "swiftly-test", "clt-build", "bats-local"),
         )
         self.assertEqual(
             self.quality.parse_request(
@@ -175,7 +319,7 @@ class QualityDriverTests(unittest.TestCase):
                     FULL_SHA,
                 ]
             ).stages,
-            ("hosted-build", "hosted-test"),
+            ("bats-inventory", "hosted-build", "hosted-test", "bats-hosted"),
         )
 
     def test_hosted_context_is_required_for_hosted_runs_and_rejected_for_local(self) -> None:
@@ -215,7 +359,7 @@ class QualityDriverTests(unittest.TestCase):
         self.assertEqual(calls, [])
         self.assertEqual(
             result.stdout,
-            ("swiftly-build", "swiftly-test", "clt-build", "bats-local"),
+            ("bats-inventory", "swiftly-build", "swiftly-test", "clt-build", "bats-local"),
         )
 
     def test_cli_list_stages_prints_names_without_checkout_validation(self) -> None:
@@ -233,7 +377,7 @@ class QualityDriverTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(
             completed.stdout.splitlines(),
-            ["swiftly-build", "swiftly-test", "clt-build", "bats-local"],
+            ["bats-inventory", "swiftly-build", "swiftly-test", "clt-build", "bats-local"],
         )
         self.assertEqual(completed.stderr, "")
 
@@ -285,6 +429,123 @@ class QualityDriverTests(unittest.TestCase):
             with self.subTest(argv=argv):
                 result = self.quality.run_quality(argv, git_validator=lambda request: None)
                 self.assertEqual(result.status, 2)
+
+    def test_hosted_cli_rejects_all_stage_subsets(self) -> None:
+        for stage in self.quality.stage_names_for_mode(self.quality.Mode.HOSTED):
+            with self.subTest(stage=stage):
+                result = self.quality.run_quality(
+                    [
+                        "--mode",
+                        "hosted",
+                        "--hosted-context",
+                        "trusted-ref",
+                        "--candidate-sha",
+                        FULL_SHA,
+                        "--stage",
+                        stage,
+                    ],
+                    runner=lambda *args: self.quality.CommandResult(status=0),
+                    git_validator=lambda request: None,
+                )
+
+                self.assertEqual(result.status, self.quality.POLICY_FAILURE_STATUS)
+
+    def test_hosted_execution_refuses_untrusted_runner_contexts(self) -> None:
+        contexts = (
+            {},
+            {
+                "GITHUB_ACTIONS": "true",
+                "RUNNER_OS": "Linux",
+                "RUNNER_ENVIRONMENT": "github-hosted",
+            },
+            {
+                "GITHUB_ACTIONS": "true",
+                "RUNNER_OS": "macOS",
+                "RUNNER_ENVIRONMENT": "self-hosted",
+            },
+        )
+        for environment in contexts:
+            calls = []
+            with self.subTest(environment=environment), mock.patch.dict(
+                self.quality.os.environ,
+                environment,
+                clear=True,
+            ):
+                result = self.quality.run_quality(
+                    [
+                        "--mode",
+                        "hosted",
+                        "--hosted-context",
+                        "pull-request",
+                        "--candidate-sha",
+                        FULL_SHA,
+                    ],
+                    runner=lambda *args: calls.append(args),
+                    git_validator=lambda request: None,
+                )
+
+            self.assertEqual(result.status, self.quality.POLICY_FAILURE_STATUS)
+            self.assertEqual(calls, [])
+
+    def test_hosted_execution_accepts_trusted_runner_and_isolates_all_candidate_stages(self) -> None:
+        calls = []
+
+        def runner(stage, command, cwd, timeout, grace, env):
+            calls.append((stage.name, dict(env)))
+            if stage.requires_xunit:
+                xunit_path = Path(command[command.index("--xunit-output") + 1])
+                xunit_path.write_text(
+                    "<testsuite><testcase name='synthetic'/></testsuite>",
+                    encoding="utf-8",
+                )
+            return self.quality.CommandResult(status=0)
+
+        inherited = {
+            **TRUSTED_HOSTED_ENVIRONMENT,
+            "HOME": "/synthetic/operator-home",
+            "PATH": "/usr/bin:/bin",
+        }
+        with mock.patch.dict(self.quality.os.environ, inherited, clear=True):
+            result = self.quality.run_quality(
+                [
+                    "--mode",
+                    "hosted",
+                    "--hosted-context",
+                    "pull-request",
+                    "--candidate-sha",
+                    FULL_SHA,
+                ],
+                runner=runner,
+                git_validator=lambda request: None,
+            )
+
+        self.assertEqual(result.status, 0)
+        self.assertEqual(
+            [name for name, _env in calls],
+            ["bats-inventory", "hosted-build", "hosted-test", "bats-inventory", "bats-hosted"],
+        )
+        candidate_environments = {
+            name: environment
+            for name, environment in calls
+            if name in ("hosted-build", "hosted-test", "bats-hosted")
+        }
+        self.assertEqual(set(candidate_environments), {"hosted-build", "hosted-test", "bats-hosted"})
+        isolated_homes = set()
+        for name, environment in candidate_environments.items():
+            with self.subTest(stage=name):
+                self.assertNotEqual(environment["HOME"], inherited["HOME"])
+                self.assertEqual(environment["CFFIXED_USER_HOME"], environment["HOME"])
+                isolated_root = Path(environment["HOME"]).parent
+                isolated_homes.add(environment["HOME"])
+                for variable in (
+                    "HOME",
+                    "TMPDIR",
+                    "XDG_CONFIG_HOME",
+                    "XDG_CACHE_HOME",
+                    "XDG_DATA_HOME",
+                ):
+                    self.assertTrue(Path(environment[variable]).is_relative_to(isolated_root))
+        self.assertEqual(len(isolated_homes), 3)
 
     def test_sha_validation_is_full_lowercase_hex_only(self) -> None:
         for bad_sha in (
@@ -662,11 +923,28 @@ class QualityDriverTests(unittest.TestCase):
         stages = {stage.name: stage for stage in self.quality.STAGES}
         with tempfile.TemporaryDirectory() as temporary_directory:
             xunit_dir = Path(temporary_directory)
-            swiftly_build = stages["swiftly-build"].command(REPO_ROOT, xunit_dir)
-            swiftly_test = stages["swiftly-test"].command(REPO_ROOT, xunit_dir)
-            clt_build = stages["clt-build"].command(REPO_ROOT, xunit_dir)
-            bats_local = stages["bats-local"].command(REPO_ROOT, xunit_dir)
+            inventory = stages["bats-inventory"].command(REPO_ROOT, REPO_ROOT, xunit_dir)
+            swiftly_build = stages["swiftly-build"].command(REPO_ROOT, REPO_ROOT, xunit_dir)
+            swiftly_test = stages["swiftly-test"].command(REPO_ROOT, REPO_ROOT, xunit_dir)
+            clt_build = stages["clt-build"].command(REPO_ROOT, REPO_ROOT, xunit_dir)
+            bats_local = stages["bats-local"].command(REPO_ROOT, REPO_ROOT, xunit_dir)
+            bats_hosted = stages["bats-hosted"].command(REPO_ROOT, REPO_ROOT, xunit_dir)
 
+        self.assertEqual(inventory[0], sys.executable)
+        self.assertEqual(inventory[1], str(REPO_ROOT / "scripts" / "ci" / "bats_inventory.py"))
+        self.assertEqual(
+            inventory[2:],
+            (
+                "--root",
+                str(REPO_ROOT),
+                "--manifest",
+                str(REPO_ROOT / "bats" / "tier-inventory.json"),
+                "--policy-root",
+                str(REPO_ROOT),
+                "--policy-manifest",
+                str(REPO_ROOT / "bats" / "tier-inventory.json"),
+            ),
+        )
         self.assertEqual(swiftly_build[0], str(Path.home() / ".swiftly" / "bin" / "swift"))
         self.assertEqual(swiftly_build[1:], ("build", "--scratch-path", ".build-swiftly", "--disable-automatic-resolution"))
         self.assertEqual(swiftly_test[:5], (str(Path.home() / ".swiftly" / "bin" / "swift"), "test", "--scratch-path", ".build-swiftly", "--disable-automatic-resolution"))
@@ -674,15 +952,95 @@ class QualityDriverTests(unittest.TestCase):
         self.assertEqual(clt_build, ("/usr/bin/swift", "build", "--disable-automatic-resolution"))
         self.assertEqual(bats_local[:3], ("/usr/bin/env", "PATH=/usr/bin:/bin:/usr/sbin:/sbin:" + os.environ.get("PATH", ""), "bats"))
         self.assertEqual(bats_local[-2:], ("-r", "bats/"))
-        for command in (swiftly_build, swiftly_test, clt_build, bats_local):
+        self.assertEqual(bats_hosted[:3], bats_local[:3])
+        self.assertEqual(bats_hosted[-2:], ("-r", "bats/hosted/"))
+        for command in (inventory, swiftly_build, swiftly_test, clt_build, bats_local, bats_hosted):
             self.assertIsInstance(command, tuple)
             self.assertNotIn("&&", command)
+
+    def test_hosted_bats_receives_a_fresh_isolated_home_and_config_roots(self) -> None:
+        captured = {}
+
+        def runner(stage, command, cwd, timeout, grace, env):
+            captured.update(env)
+            captured["directories_exist"] = all(
+                name in env and Path(env[name]).is_dir()
+                for name in (
+                    "HOME",
+                    "TMPDIR",
+                    "XDG_CONFIG_HOME",
+                    "XDG_CACHE_HOME",
+                    "XDG_DATA_HOME",
+                )
+            )
+            return self.quality.CommandResult(status=0)
+
+        result = self.quality._run_quality_request(
+            self.hosted_request(("bats-hosted",)),
+            runner=runner,
+            git_validator=lambda request: None,
+            environment=TRUSTED_HOSTED_ENVIRONMENT,
+        )
+
+        self.assertEqual(result.status, 0)
+        self.assertTrue(captured["directories_exist"])
+        for name in ("CFFIXED_USER_HOME", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME"):
+            self.assertIn(name, captured)
+        self.assertNotEqual(captured["HOME"], os.environ.get("HOME"))
+        self.assertEqual(captured["CFFIXED_USER_HOME"], captured["HOME"])
+        isolated_root = Path(captured["HOME"]).parent
+        for name in ("HOME", "TMPDIR", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_DATA_HOME"):
+            self.assertTrue(Path(captured[name]).is_relative_to(isolated_root))
+
+    def test_pre_bats_gate_revalidates_git_state_after_build(self) -> None:
+        git_checks = []
+        stages = []
+
+        def git_validator(request):
+            git_checks.append(request)
+            if len(git_checks) == 2:
+                raise self.quality.PolicyError("candidate changed after build")
+
+        def runner(stage, command, cwd, timeout, grace, env):
+            stages.append(stage.name)
+            return self.quality.CommandResult(status=0)
+
+        result = self.quality._run_quality_request(
+            self.hosted_request(("hosted-build", "bats-hosted")),
+            runner=runner,
+            git_validator=git_validator,
+            environment=TRUSTED_HOSTED_ENVIRONMENT,
+        )
+
+        self.assertEqual(result.status, 2)
+        self.assertEqual(len(git_checks), 2)
+        self.assertEqual(stages, ["hosted-build"])
+
+    def test_pre_bats_gate_revalidates_inventory_and_fails_before_bats(self) -> None:
+        stages = []
+        git_checks = []
+
+        def runner(stage, command, cwd, timeout, grace, env):
+            stages.append(stage.name)
+            status = 9 if stage.name == "bats-inventory" else 0
+            return self.quality.CommandResult(status=status)
+
+        result = self.quality._run_quality_request(
+            self.hosted_request(("hosted-build", "bats-hosted")),
+            runner=runner,
+            git_validator=lambda request: git_checks.append(request),
+            environment=TRUSTED_HOSTED_ENVIRONMENT,
+        )
+
+        self.assertEqual(result.status, 9)
+        self.assertEqual(len(git_checks), 2)
+        self.assertEqual(stages, ["hosted-build", "bats-inventory"])
 
     def test_git_checks_use_exact_usr_bin_git(self) -> None:
         calls = []
 
         def run(command, **kwargs):
-            calls.append(command)
+            calls.append((command, kwargs))
 
             class Completed:
                 returncode = 0
@@ -698,7 +1056,69 @@ class QualityDriverTests(unittest.TestCase):
         finally:
             self.quality.subprocess.run = original
 
-        self.assertEqual(calls[0][0], "/usr/bin/git")
+        command, kwargs = calls[0]
+        self.assertEqual(command[0], "/usr/bin/git")
+        self.assertIn(("-c", "core.fsmonitor=false"), tuple(zip(command, command[1:])))
+        self.assertIn(("-c", "core.hooksPath=/dev/null"), tuple(zip(command, command[1:])))
+        self.assertIn(("-c", "credential.helper="), tuple(zip(command, command[1:])))
+        self.assertIn(("-c", "credential.interactive=false"), tuple(zip(command, command[1:])))
+        self.assertIn(("-c", "core.askPass="), tuple(zip(command, command[1:])))
+        self.assertEqual(kwargs["timeout"], self.quality.GIT_TIMEOUT_SECONDS)
+        self.assertEqual(
+            kwargs["env"],
+            {
+                "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+                "LC_ALL": "C",
+                "LANG": "C",
+                "GIT_OPTIONAL_LOCKS": "0",
+                "GIT_CONFIG_NOSYSTEM": "1",
+                "GIT_CONFIG_GLOBAL": "/dev/null",
+                "GIT_TERMINAL_PROMPT": "0",
+            },
+        )
+
+    def test_git_checks_disable_repository_fsmonitor_helpers(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            init_repo(root)
+            marker = root / "fsmonitor-ran"
+            helper = root / "fsmonitor-helper.sh"
+            write_executable(
+                helper,
+                "#!/bin/sh\n"
+                f"printf invoked > {str(marker)!r}\n"
+                "printf '\\n'\n",
+            )
+            subprocess.run(
+                ["/usr/bin/git", "config", "core.fsmonitor", str(helper)],
+                cwd=root,
+                check=True,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+            self.quality.git_output(("status", "--porcelain"), root)
+
+            self.assertFalse(marker.exists())
+
+    def test_git_timeout_uses_a_stable_value_free_diagnostic(self) -> None:
+        def run(_command, **_kwargs):
+            raise subprocess.TimeoutExpired(
+                cmd=("synthetic-private-command",),
+                timeout=1,
+                output="private-output",
+                stderr="private-error",
+            )
+
+        original = self.quality.subprocess.run
+        try:
+            self.quality.subprocess.run = run
+            with self.assertRaisesRegex(self.quality.PolicyError, "^git command timed out$"):
+                self.quality.git_output(("status", "--porcelain"), Path("/tmp/repo"))
+        finally:
+            self.quality.subprocess.run = original
 
     def test_runner_does_not_mutate_parent_environment(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -759,6 +1179,86 @@ class QualityDriverTests(unittest.TestCase):
                 self.quality.run_command((str(sleep_script),), root, 0.1, 0.1).status,
                 124,
             )
+
+    def test_bounded_runner_kills_output_bomb_with_fixed_diagnostic(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            pid_file = root / "descendant.pid"
+            bomb = root / "bomb.py"
+            write_executable(
+                bomb,
+                textwrap.dedent(
+                    f"""\
+                    #!/usr/bin/env python3
+                    import pathlib, subprocess, sys, time
+                    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
+                    pathlib.Path({str(pid_file)!r}).write_text(str(child.pid), encoding="utf-8")
+                    sys.stdout.buffer.write(b"x" * 4097)
+                    sys.stdout.buffer.flush()
+                    while True:
+                        time.sleep(1)
+                    """
+                ),
+            )
+            original_limit = getattr(self.quality, "MAX_COMMAND_OUTPUT_BYTES", None)
+            self.quality.MAX_COMMAND_OUTPUT_BYTES = 4096
+            try:
+                result = self.quality.run_command((str(bomb),), root, 2, 0.2)
+            finally:
+                if original_limit is None:
+                    del self.quality.MAX_COMMAND_OUTPUT_BYTES
+                else:
+                    self.quality.MAX_COMMAND_OUTPUT_BYTES = original_limit
+
+            descendant_pid = int(pid_file.read_text(encoding="utf-8"))
+            for _ in range(100):
+                try:
+                    os.kill(descendant_pid, 0)
+                except ProcessLookupError:
+                    break
+                subprocess.run(
+                    ["python3", "-c", "import time; time.sleep(0.02)"],
+                    check=False,
+                    stdin=subprocess.DEVNULL,
+                )
+
+            self.assertEqual(result.status, self.quality.OUTPUT_LIMIT_STATUS)
+            self.assertEqual(result.output, self.quality.OUTPUT_LIMIT_DIAGNOSTIC)
+            with self.assertRaises(ProcessLookupError):
+                os.kill(descendant_pid, 0)
+
+    def test_bounded_runner_accepts_exact_output_limit_across_both_streams(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            writer = root / "writer.py"
+            write_executable(
+                writer,
+                "#!/usr/bin/env python3\n"
+                "import sys\n"
+                "sys.stdout.buffer.write(b'a' * 2048)\n"
+                "sys.stdout.buffer.flush()\n"
+                "sys.stderr.buffer.write(b'b' * 2048)\n"
+                "sys.stderr.buffer.flush()\n",
+            )
+            original_limit = getattr(self.quality, "MAX_COMMAND_OUTPUT_BYTES", None)
+            self.quality.MAX_COMMAND_OUTPUT_BYTES = 4096
+            try:
+                result = self.quality.run_command((str(writer),), root, 2, 0.2)
+            finally:
+                if original_limit is None:
+                    del self.quality.MAX_COMMAND_OUTPUT_BYTES
+                else:
+                    self.quality.MAX_COMMAND_OUTPUT_BYTES = original_limit
+
+            self.assertEqual(result.status, 0)
+            self.assertEqual(len(result.output), 4096)
+            self.assertEqual(result.output.count(b"a"), 2048)
+            self.assertEqual(result.output.count(b"b"), 2048)
+
+    def test_command_runner_never_uses_unbounded_communicate(self) -> None:
+        source = QUALITY_PATH.read_text(encoding="utf-8")
+        runner_source = source[source.index("def drain_output"):source.index("def read_regular_file_no_follow")]
+        self.assertNotIn(".communicate(", runner_source)
 
     def test_bounded_runner_stops_descendants_and_closes_stdin(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

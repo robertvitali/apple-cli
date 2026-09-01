@@ -50,7 +50,7 @@ jobs:
   build-test:
     # GitHub-hosted macOS runners ship full Xcode, so swift-testing is available here.
     # Hosted-runner minutes are free only while this repo is public; metered whenever it is private. Uses
-    # pull_request, NOT pull_request_target — forked PRs get a read-only token and no secrets.
+    # The unprivileged pull-request event gives forked PRs a read-only token and no secrets.
     # While public, fork PRs execute untrusted code (Package.swift manifests, test bodies) on these
     # runners; the read-only token bounds that to compute abuse. Keep "require approval for
     # outside-contributor runs" enabled in repo Actions settings.
@@ -59,24 +59,71 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          fetch-depth: 0
           persist-credentials: false
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
 
-      - name: Swift version
-        run: swift --version
+      - name: Install pinned Bats
+        env:
+          BATS_INTEGRITY: sha512-giSYKGTOcPZyJDbfbTtzAedLcNWdjCLbXYU3/MwPnjyvDXzu6Dgw8d2M+8jHhZXSmsCMSQqCp+YBsJ603UO4vQ==
+          NPM_CONFIG_GLOBALCONFIG: /dev/null
+          NPM_CONFIG_IGNORE_SCRIPTS: "true"
+          NPM_CONFIG_REGISTRY: https://registry.npmjs.org/
+          NPM_CONFIG_USERCONFIG: /dev/null
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP"
+          ACTUAL_INTEGRITY="$(npm view bats@1.13.0 dist.integrity)"
+          if [ "$ACTUAL_INTEGRITY" != "$BATS_INTEGRITY" ]; then
+            echo "Pinned Bats integrity mismatch."
+            exit 1
+          fi
+          sudo npm install --global --ignore-scripts --no-audit --no-fund bats@1.13.0
+          [ "$(bats --version)" = "Bats 1.13.0" ]
 
-      - name: Build
-        run: swift build -v
+      # The pull-request quality driver comes from the exact trusted base commit;
+      # candidate code remains in the original read-only-token checkout.
+      - name: Prepare trusted policy checkout
+        if: github.event_name == 'pull_request'
+        env:
+          GIT_CONFIG_GLOBAL: /dev/null
+          GIT_CONFIG_SYSTEM: /dev/null
+          GIT_OPTIONAL_LOCKS: "0"
+          LC_ALL: C
+        run: |
+          set -euo pipefail
+          /usr/bin/git \
+            -c core.fsmonitor=false \
+            -c core.hooksPath=/dev/null \
+            -c credential.helper= \
+            -c credential.interactive=never \
+            worktree add --detach \
+            "$RUNNER_TEMP/trusted-policy" \
+            "${{ github.event.pull_request.base.sha }}"
 
-      - name: Unit tests (logic tier — swift-testing, no TCC / Apple permissions required)
-        run: swift test -v
+      - name: Run hosted quality (pull request)
+        if: github.event_name == 'pull_request'
+        run: |
+          set -euo pipefail
+          python3 "$RUNNER_TEMP/trusted-policy/scripts/ci/quality.py" \
+            --mode hosted \
+            --hosted-context pull-request \
+            --candidate-root "$GITHUB_WORKSPACE" \
+            --candidate-sha "${{ github.event.pull_request.head.sha }}" \
+            --base-sha "${{ github.event.pull_request.base.sha }}"
 
-      # NOTE: the bats CLI-smoke tier does NOT run on hosted CI (measured 2026-08-30, run
-      # 33288975170): observed failures were Mail tests needing a real Envelope Index (e.g.
-      # mail search --sort exit codes), at ~10s/test (cancelled at 205/445, ~41 min); the
-      # untested remainder (chat.db, AppleScript surfaces) is expected to fail the same way.
-      # bats remains part of the LOCAL canonical pre-push suite (AGENTS.md "Toolchain +
-      # testing") on a real Mac. The LIVE end-to-end tier likewise never runs in CI — it
-      # needs granted TCC — and must NEVER be wired to a pull_request trigger from a fork.
+      - name: Run hosted quality (trusted ref)
+        if: github.event_name == 'push'
+        run: |
+          set -euo pipefail
+          python3 scripts/ci/quality.py \
+            --mode hosted \
+            --hosted-context trusted-ref \
+            --candidate-root "$GITHUB_WORKSPACE" \
+            --candidate-sha "${{ github.sha }}"
+
+      # The base-owned quality driver runs the hosted-safe Bats partition only.
+      # The local and live/TCC tiers remain forbidden on fork-reachable runners.
 
   # The release workflow (release.yml) computes bump levels from Conventional Commit
   # headers, so malformed headers silently corrupt version math. This job hard-fails
@@ -89,17 +136,21 @@ jobs:
         with:
           fetch-depth: 0
           persist-credentials: false
+          ref: ${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha || github.sha }}
       - name: Validate Conventional Commit headers
         env:
           EVENT_NAME: ${{ github.event_name }}
-          BASE_REF: ${{ github.base_ref }}
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
           BEFORE_SHA: ${{ github.event.before }}
         run: |
           set -euo pipefail
           SUBJECTS="$RUNNER_TEMP/subjects.txt"
           if [ "$EVENT_NAME" = "pull_request" ]; then
-            git fetch origin "$BASE_REF" --quiet
-            git log --format=%s "origin/${BASE_REF}..HEAD" > "$SUBJECTS"
+            if [ -z "$BASE_SHA" ] || ! git rev-parse --verify --quiet "${BASE_SHA}^{commit}" >/dev/null; then
+              echo "Exact pull-request base commit is unavailable."
+              exit 1
+            fi
+            git log --format=%s "${BASE_SHA}..HEAD" > "$SUBJECTS"
           elif [ -n "$BEFORE_SHA" ] && ! echo "$BEFORE_SHA" | grep -qE '^0+$' \
                && git rev-parse --verify --quiet "${BEFORE_SHA}^{commit}" >/dev/null; then
             git log --format=%s "${BEFORE_SHA}..HEAD" > "$SUBJECTS"

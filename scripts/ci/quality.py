@@ -11,11 +11,13 @@ import math
 import os
 from pathlib import Path
 import re
+import selectors
 import signal
 import stat
 import subprocess
 import sys
 import tempfile
+import time
 from typing import Callable, Iterable, List, Optional, Sequence, Tuple
 import xml.etree.ElementTree as ET
 
@@ -23,11 +25,36 @@ import xml.etree.ElementTree as ET
 POLICY_ROOT = Path(__file__).resolve().parents[2]
 FULL_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
 MAX_XUNIT_BYTES = 8 * 1024 * 1024
+MAX_COMMAND_OUTPUT_BYTES = 8 * 1024 * 1024
+GIT_TIMEOUT_SECONDS = 30
 TIMEOUT_STATUS = 124
 SPAWN_FAILURE_STATUS = 125
+OUTPUT_LIMIT_STATUS = 126
 POLICY_FAILURE_STATUS = 2
 ASSERTION_FAILURE_STATUS = 1
+OUTPUT_LIMIT_DIAGNOSTIC = b"quality: child output exceeded limit\n"
 CANCELLATION_SIGNALS = (signal.SIGTERM, signal.SIGINT, signal.SIGHUP)
+GIT_CONFIG_OVERRIDES = (
+    "-c",
+    "core.fsmonitor=false",
+    "-c",
+    "core.hooksPath=/dev/null",
+    "-c",
+    "credential.helper=",
+    "-c",
+    "credential.interactive=false",
+    "-c",
+    "core.askPass=",
+)
+GIT_ENVIRONMENT = {
+    "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+    "LC_ALL": "C",
+    "LANG": "C",
+    "GIT_OPTIONAL_LOCKS": "0",
+    "GIT_CONFIG_NOSYSTEM": "1",
+    "GIT_CONFIG_GLOBAL": "/dev/null",
+    "GIT_TERMINAL_PROMPT": "0",
+}
 
 
 class Mode(Enum):
@@ -79,7 +106,7 @@ class QualityRequest:
     list_stages: bool = False
 
 
-CommandBuilder = Callable[[Path, Path], Tuple[str, ...]]
+CommandBuilder = Callable[[Path, Path, Path], Tuple[str, ...]]
 
 
 @dataclass(frozen=True)
@@ -90,9 +117,33 @@ class Stage:
     timeout: float
     grace: float
     requires_xunit: bool = False
+    isolated_home: bool = False
 
 
-def swiftly_build_command(_candidate_root: Path, _xunit_dir: Path) -> Tuple[str, ...]:
+def bats_inventory_command(
+    policy_root: Path,
+    candidate_root: Path,
+    _xunit_dir: Path,
+) -> Tuple[str, ...]:
+    return (
+        sys.executable,
+        str(policy_root / "scripts" / "ci" / "bats_inventory.py"),
+        "--root",
+        str(candidate_root),
+        "--manifest",
+        str(candidate_root / "bats" / "tier-inventory.json"),
+        "--policy-root",
+        str(policy_root),
+        "--policy-manifest",
+        str(policy_root / "bats" / "tier-inventory.json"),
+    )
+
+
+def swiftly_build_command(
+    _policy_root: Path,
+    _candidate_root: Path,
+    _xunit_dir: Path,
+) -> Tuple[str, ...]:
     return (
         str(Path.home() / ".swiftly" / "bin" / "swift"),
         "build",
@@ -102,7 +153,11 @@ def swiftly_build_command(_candidate_root: Path, _xunit_dir: Path) -> Tuple[str,
     )
 
 
-def swiftly_test_command(_candidate_root: Path, xunit_dir: Path) -> Tuple[str, ...]:
+def swiftly_test_command(
+    _policy_root: Path,
+    _candidate_root: Path,
+    xunit_dir: Path,
+) -> Tuple[str, ...]:
     return (
         str(Path.home() / ".swiftly" / "bin" / "swift"),
         "test",
@@ -114,7 +169,11 @@ def swiftly_test_command(_candidate_root: Path, xunit_dir: Path) -> Tuple[str, .
     )
 
 
-def hosted_build_command(_candidate_root: Path, _xunit_dir: Path) -> Tuple[str, ...]:
+def hosted_build_command(
+    _policy_root: Path,
+    _candidate_root: Path,
+    _xunit_dir: Path,
+) -> Tuple[str, ...]:
     return (
         "swift",
         "build",
@@ -122,7 +181,11 @@ def hosted_build_command(_candidate_root: Path, _xunit_dir: Path) -> Tuple[str, 
     )
 
 
-def hosted_test_command(_candidate_root: Path, xunit_dir: Path) -> Tuple[str, ...]:
+def hosted_test_command(
+    _policy_root: Path,
+    _candidate_root: Path,
+    xunit_dir: Path,
+) -> Tuple[str, ...]:
     return (
         "swift",
         "test",
@@ -132,7 +195,11 @@ def hosted_test_command(_candidate_root: Path, xunit_dir: Path) -> Tuple[str, ..
     )
 
 
-def clt_build_command(_candidate_root: Path, _xunit_dir: Path) -> Tuple[str, ...]:
+def clt_build_command(
+    _policy_root: Path,
+    _candidate_root: Path,
+    _xunit_dir: Path,
+) -> Tuple[str, ...]:
     return (
         "/usr/bin/swift",
         "build",
@@ -140,7 +207,11 @@ def clt_build_command(_candidate_root: Path, _xunit_dir: Path) -> Tuple[str, ...
     )
 
 
-def bats_local_command(_candidate_root: Path, _xunit_dir: Path) -> Tuple[str, ...]:
+def bats_local_command(
+    _policy_root: Path,
+    _candidate_root: Path,
+    _xunit_dir: Path,
+) -> Tuple[str, ...]:
     system_first_path = "/usr/bin:/bin:/usr/sbin:/sbin:" + os.environ.get("PATH", "")
     return (
         "/usr/bin/env",
@@ -151,7 +222,29 @@ def bats_local_command(_candidate_root: Path, _xunit_dir: Path) -> Tuple[str, ..
     )
 
 
+def bats_hosted_command(
+    _policy_root: Path,
+    _candidate_root: Path,
+    _xunit_dir: Path,
+) -> Tuple[str, ...]:
+    system_first_path = "/usr/bin:/bin:/usr/sbin:/sbin:" + os.environ.get("PATH", "")
+    return (
+        "/usr/bin/env",
+        f"PATH={system_first_path}",
+        "bats",
+        "-r",
+        "bats/hosted/",
+    )
+
+
 STAGES = (
+    Stage(
+        "bats-inventory",
+        frozenset((Mode.LOCAL, Mode.HOSTED)),
+        bats_inventory_command,
+        60,
+        5,
+    ),
     Stage("swiftly-build", frozenset((Mode.LOCAL,)), swiftly_build_command, 900, 15),
     Stage(
         "swiftly-test",
@@ -163,7 +256,14 @@ STAGES = (
     ),
     Stage("clt-build", frozenset((Mode.LOCAL,)), clt_build_command, 900, 15),
     Stage("bats-local", frozenset((Mode.LOCAL,)), bats_local_command, 1800, 15),
-    Stage("hosted-build", frozenset((Mode.HOSTED,)), hosted_build_command, 900, 15),
+    Stage(
+        "hosted-build",
+        frozenset((Mode.HOSTED,)),
+        hosted_build_command,
+        900,
+        15,
+        isolated_home=True,
+    ),
     Stage(
         "hosted-test",
         frozenset((Mode.HOSTED,)),
@@ -171,6 +271,15 @@ STAGES = (
         1200,
         15,
         requires_xunit=True,
+        isolated_home=True,
+    ),
+    Stage(
+        "bats-hosted",
+        frozenset((Mode.HOSTED,)),
+        bats_hosted_command,
+        1800,
+        15,
+        isolated_home=True,
     ),
 )
 
@@ -235,6 +344,8 @@ def parse_request(argv: Optional[Sequence[str]]) -> QualityRequest:
             if candidate_sha is None:
                 raise PolicyError("hosted mode requires --candidate-sha")
         requested_stages = tuple(args.stage)
+        if mode is Mode.HOSTED and requested_stages:
+            raise PolicyError("hosted mode does not accept --stage")
         if len(set(requested_stages)) != len(requested_stages):
             raise PolicyError("duplicate stage requested")
         unknown = [name for name in requested_stages if name not in STAGE_BY_NAME]
@@ -264,18 +375,22 @@ def parse_request(argv: Optional[Sequence[str]]) -> QualityRequest:
 def git_output(args: Tuple[str, ...], cwd: Path) -> str:
     try:
         completed = subprocess.run(
-            ("/usr/bin/git",) + args,
+            ("/usr/bin/git",) + GIT_CONFIG_OVERRIDES + args,
             cwd=str(cwd),
             check=False,
             stdin=subprocess.DEVNULL,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
             text=True,
+            timeout=GIT_TIMEOUT_SECONDS,
+            env=GIT_ENVIRONMENT,
         )
+    except subprocess.TimeoutExpired as error:
+        raise PolicyError("git command timed out") from error
     except OSError as error:
-        raise PolicyError(f"git failed to start: {error}") from error
+        raise PolicyError("git failed to start") from error
     if completed.returncode != 0:
-        raise PolicyError(f"git {' '.join(args)} failed")
+        raise PolicyError("git command failed")
     return completed.stdout.strip()
 
 
@@ -365,15 +480,13 @@ def close_output(process: subprocess.Popen) -> None:
 
 
 def drain_output(process: subprocess.Popen, grace: float) -> Tuple[Optional[bytes], bool]:
-    if process.stdout is None or process.stdout.closed:
-        reap_leader(process, grace)
-        return None, process.returncode is not None
+    close_output(process)
     try:
-        output, _ = process.communicate(timeout=grace)
-        return output, True
+        process.wait(timeout=grace)
+        return None, True
     except subprocess.TimeoutExpired:
         return None, False
-    except (OSError, ValueError):
+    except OSError:
         reap_leader(process, grace)
         return None, process.returncode is not None
 
@@ -397,6 +510,58 @@ def stop_process_group(process: subprocess.Popen, grace: float, sent_sigkill: Li
     else:
         kill_remaining_group(process, sent_sigkill)
     return output
+
+
+def stream_process_output(
+    process: subprocess.Popen,
+    timeout: float,
+) -> Tuple[bytes, str]:
+    if process.stdout is None:
+        try:
+            process.wait(timeout=timeout)
+            return b"", "complete"
+        except subprocess.TimeoutExpired:
+            return b"", "timeout"
+
+    descriptor = process.stdout.fileno()
+    os.set_blocking(descriptor, False)
+    output = bytearray()
+    deadline = time.monotonic() + timeout
+    selector = selectors.DefaultSelector()
+    selector.register(descriptor, selectors.EVENT_READ)
+    try:
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return bytes(output), "timeout"
+            events = selector.select(remaining)
+            if not events:
+                return bytes(output), "timeout"
+            try:
+                chunk = os.read(
+                    descriptor,
+                    min(65536, MAX_COMMAND_OUTPUT_BYTES - len(output) + 1),
+                )
+            except BlockingIOError:
+                continue
+            if chunk:
+                if len(output) + len(chunk) > MAX_COMMAND_OUTPUT_BYTES:
+                    return b"", "limit"
+                output.extend(chunk)
+                continue
+
+            selector.unregister(descriptor)
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                return bytes(output), "timeout"
+            try:
+                process.wait(timeout=remaining)
+            except subprocess.TimeoutExpired:
+                return bytes(output), "timeout"
+            return bytes(output), "complete"
+    finally:
+        selector.close()
+        close_output(process)
 
 
 def validate_positive_seconds(value: float, label: str) -> None:
@@ -480,7 +645,7 @@ def run_command(
                 cancellation_masked = False
                 signal.pthread_sigmask(signal.SIG_SETMASK, previous_mask)
                 try:
-                    output, _ = process.communicate(timeout=timeout)
+                    output, outcome = stream_process_output(process, timeout)
                 except subprocess.TimeoutExpired:
                     cleanup_process(process, grace)
                     output = None
@@ -489,8 +654,20 @@ def run_command(
                     else:
                         status = TIMEOUT_STATUS
                 else:
-                    status = child_status(process.returncode)
-                    kill_remaining_group(process, cleanup_sent_sigkill)
+                    if outcome == "complete":
+                        status = child_status(process.returncode)
+                        kill_remaining_group(process, cleanup_sent_sigkill)
+                    else:
+                        cleanup_process(process, grace)
+                        if requested_signal[0] is not None:
+                            output = None
+                            status = 128 + requested_signal[0]
+                        elif outcome == "limit":
+                            output = OUTPUT_LIMIT_DIAGNOSTIC
+                            status = OUTPUT_LIMIT_STATUS
+                        else:
+                            output = None
+                            status = TIMEOUT_STATUS
                 signal.pthread_sigmask(signal.SIG_BLOCK, CANCELLATION_SIGNALS)
                 cancellation_masked = True
             except CancellationRequested as cancellation:
@@ -600,35 +777,68 @@ def emit_stage_names(names: Iterable[str]) -> Tuple[str, ...]:
     return captured
 
 
-def run_quality(
-    argv: Optional[Sequence[str]] = None,
+def validate_hosted_runner_context(
+    request: QualityRequest,
+    environment: dict[str, str],
+) -> None:
+    if request.mode is not Mode.HOSTED:
+        return
+    # Workflow governance must keep this required check on a GitHub-hosted macOS
+    # runner. This runtime assertion prevents fork code from reaching an operator,
+    # self-hosted, or TCC-enabled machine if the workflow is miswired later.
+    required = {
+        "GITHUB_ACTIONS": "true",
+        "RUNNER_OS": "macOS",
+        "RUNNER_ENVIRONMENT": "github-hosted",
+    }
+    if any(environment.get(name) != value for name, value in required.items()):
+        raise PolicyError("hosted mode requires a GitHub-hosted macOS runner")
+
+
+def _run_quality_request(
+    request: QualityRequest,
     runner: Callable[[Stage, Tuple[str, ...], Path, float, float, dict[str, str]], CommandResult] = default_runner,
     git_validator: Callable[[QualityRequest], None] = validate_git_checkout,
-    stdout: Callable[[Iterable[str]], object] = tuple,
+    environment: Optional[dict[str, str]] = None,
 ) -> QualityResult:
     stderr: List[str] = []
     try:
-        request = parse_request(argv)
-        if request.list_stages:
-            listed = stage_names_for_mode(request.mode)
-            emitted = stdout(listed)
-            if emitted is None:
-                emitted = listed
-            return QualityResult(0, stdout=listed)
+        base_environment = dict(environment if environment is not None else os.environ)
+        validate_hosted_runner_context(request, base_environment)
         git_validator(request)
         selected = [stage for stage in STAGES if stage.name in request.stages]
         with tempfile.TemporaryDirectory(prefix="apple-cli-quality-") as tempdir:
             xunit_dir = Path(tempdir)
-            env = os.environ.copy()
-            for stage in selected:
-                command = stage.command(request.candidate_root, xunit_dir)
+
+            def execute_stage(stage: Stage) -> Optional[QualityResult]:
+                command = stage.command(
+                    request.policy_root,
+                    request.candidate_root,
+                    xunit_dir,
+                )
+                stage_env = base_environment.copy()
+                if stage.isolated_home:
+                    isolated_root = xunit_dir / stage.name
+                    isolated_paths = {
+                        "HOME": isolated_root / "home",
+                        "TMPDIR": isolated_root / "tmp",
+                        "XDG_CONFIG_HOME": isolated_root / "config",
+                        "XDG_CACHE_HOME": isolated_root / "cache",
+                        "XDG_DATA_HOME": isolated_root / "data",
+                    }
+                    for path in isolated_paths.values():
+                        path.mkdir(parents=True, mode=0o700)
+                    stage_env.update(
+                        {name: str(path) for name, path in isolated_paths.items()}
+                    )
+                    stage_env["CFFIXED_USER_HOME"] = stage_env["HOME"]
                 result = runner(
                     stage,
                     command,
                     request.candidate_root,
                     stage.timeout,
                     stage.grace,
-                    env.copy(),
+                    stage_env,
                 )
                 suppress_output = result.status in (
                     TIMEOUT_STATUS,
@@ -648,6 +858,17 @@ def run_quality(
                     line = f"{stage.name}: {count} executed tests"
                     print(line, file=sys.stderr)
                     stderr.append(line)
+                return None
+
+            for stage in selected:
+                if stage.name in ("bats-local", "bats-hosted"):
+                    git_validator(request)
+                    inventory_failure = execute_stage(STAGE_BY_NAME["bats-inventory"])
+                    if inventory_failure is not None:
+                        return inventory_failure
+                failure = execute_stage(stage)
+                if failure is not None:
+                    return failure
     except PolicyError as error:
         print(f"quality: policy error: {error}", file=sys.stderr)
         return QualityResult(POLICY_FAILURE_STATUS, stderr=(str(error),))
@@ -655,6 +876,31 @@ def run_quality(
         print(f"quality: assertion failed: {error}", file=sys.stderr)
         return QualityResult(ASSERTION_FAILURE_STATUS, stderr=(str(error),))
     return QualityResult(0, stderr=tuple(stderr))
+
+
+def run_quality(
+    argv: Optional[Sequence[str]] = None,
+    runner: Callable[[Stage, Tuple[str, ...], Path, float, float, dict[str, str]], CommandResult] = default_runner,
+    git_validator: Callable[[QualityRequest], None] = validate_git_checkout,
+    stdout: Callable[[Iterable[str]], object] = tuple,
+) -> QualityResult:
+    try:
+        request = parse_request(argv)
+        if request.list_stages:
+            listed = stage_names_for_mode(request.mode)
+            emitted = stdout(listed)
+            if emitted is None:
+                emitted = listed
+            return QualityResult(0, stdout=listed)
+    except PolicyError as error:
+        print(f"quality: policy error: {error}", file=sys.stderr)
+        return QualityResult(POLICY_FAILURE_STATUS, stderr=(str(error),))
+    return _run_quality_request(
+        request,
+        runner=runner,
+        git_validator=git_validator,
+        environment=os.environ.copy(),
+    )
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:

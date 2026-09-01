@@ -1,4 +1,8 @@
 #!/usr/bin/env bats
+
+BATS_SUITE_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd -P)"
+REPO_ROOT="$(cd "$BATS_SUITE_ROOT/.." && pwd -P)"
+HELPERS="$BATS_SUITE_ROOT/helpers"
 # Calendar CLI smoke tests — logic tier, NO TCC. Only exercises paths that never touch the
 # EventKit store: --help, arg-validation error envelopes, DRY-RUN writes (which build the preview
 # without an EKEventStore), and sandbox refusals (the write gate runs before `EventStore()`, so a

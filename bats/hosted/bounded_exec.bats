@@ -1,9 +1,13 @@
 #!/usr/bin/env bats
+
+BATS_SUITE_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd -P)"
+REPO_ROOT="$(cd "$BATS_SUITE_ROOT/.." && pwd -P)"
+HELPERS="$BATS_SUITE_ROOT/helpers"
 # Contract tests for the portable bounded process-group wrapper used by live-tier Bats cases.
 # Fixtures use only synthetic processes and payloads.
 
 @test "bounded_exec preserves child results and restores signal state" {
-  local bounded="$BATS_TEST_DIRNAME/helpers/bounded_exec.py"
+  local bounded="$HELPERS/bounded_exec.py"
 
   # A child that exits before the deadline keeps its status and combined output exactly.
   run /usr/bin/python3 "$bounded" --timeout 10 --grace 0.1 -- \
@@ -85,7 +89,7 @@ assert status == 143, (status, len(block_calls))
 }
 
 @test "bounded_exec cleanup is idempotent and handles signal re-entry" {
-  local bounded="$BATS_TEST_DIRNAME/helpers/bounded_exec.py"
+  local bounded="$HELPERS/bounded_exec.py"
 
   run /usr/bin/python3 -c '
 import importlib.util, os, signal, subprocess, sys
@@ -213,7 +217,7 @@ finally:
 }
 
 @test "bounded_exec deadlines clean process groups during signal re-entry" {
-  local bounded="$BATS_TEST_DIRNAME/helpers/bounded_exec.py"
+  local bounded="$HELPERS/bounded_exec.py"
 
   # Deadline path 1: SIGTERM is enough. The wrapper still returns its own timeout sentinel.
   run /usr/bin/python3 "$bounded" --timeout 0.05 --grace 0.2 -- /bin/sleep 5
@@ -315,7 +319,7 @@ except ProcessLookupError:
 }
 
 @test "bounded_exec bounds detached pipes and removes timed-out descendants" {
-  local bounded="$BATS_TEST_DIRNAME/helpers/bounded_exec.py"
+  local bounded="$HELPERS/bounded_exec.py"
 
   # A detached descendant can outlive the killed child group while retaining its stdout pipe.
   # The helper must bound that post-KILL drain instead of waiting forever for EOF. This outer
@@ -450,7 +454,7 @@ raise SystemExit(1)
 }
 
 @test "bounded_exec cancellation returns signal status and removes descendants" {
-  local bounded="$BATS_TEST_DIRNAME/helpers/bounded_exec.py"
+  local bounded="$HELPERS/bounded_exec.py"
 
   # Deterministically inject SIGTERM after Popen creates the isolated child but before it returns
   # to `run()`. The wrapper must defer delivery until its handler owns the known child group.

@@ -1,9 +1,13 @@
 #!/usr/bin/env bats
+
+BATS_SUITE_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd -P)"
+REPO_ROOT="$(cd "$BATS_SUITE_ROOT/.." && pwd -P)"
+HELPERS="$BATS_SUITE_ROOT/helpers"
 # CLI smoke tests for the Reminders domain — logic tier, NO Apple permissions required.
 #
 # SAFETY: every test here either (a) invokes `--help` (never runs the body), (b) exercises a
 # write preview via an EXPLICIT `--dry-run` (or an `APPLE_DRY_RUN=1` prefix — verified to
-# propagate through bats' `run`), (c) runs `doctor` (non-prompting status only), or (d) triggers a
+# propagate through bats' `run`), or (c) triggers a
 # validation error that fires BEFORE the command reaches `store.requestAccess` — including every
 # sandbox refusal, since the write gate runs before `EventStore()`. NONE of these prompt for TCC
 # or touch the live store, so the suite is safe on CI and on an unattended machine.
@@ -203,16 +207,6 @@ setup() {
   echo "$output" | grep -q '"action" : "update"'
   # present-but-empty tags array signals "clear all"; assert whitespace-insensitively
   echo "$output" | tr -d ' \n' | grep -q '"tags":\[\]'
-}
-
-# --- doctor (read-only, non-prompting) -------------------------------------------------------
-
-@test "reminders doctor reports authorization without prompting (exit 0)" {
-  run "$BIN" reminders doctor
-  [ "$status" -eq 0 ]
-  echo "$output" | grep -q '"reminders_authorization"'
-  echo "$output" | grep -q '"full_disk_access"'
-  echo "$output" | grep -q '"tool" : "reminders"'
 }
 
 # --- Golden JSON snapshot (synthetic, deterministic — no dates, no PII, no store) -------------
