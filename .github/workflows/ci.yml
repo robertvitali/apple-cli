@@ -4,8 +4,6 @@ on:
   push:
     branches: [main]         # repo-local main-only workflow
   pull_request:
-    # `edited` included so pr-title-lint re-runs when a PR title is fixed —
-    # the title becomes the squash commit header (AGENTS.md branch model).
     types: [opened, edited, synchronize, reopened]
 
 # Least privilege: the build/test job needs only read access to repo contents.
@@ -45,23 +43,6 @@ jobs:
       # bats remains part of the LOCAL canonical pre-push suite (AGENTS.md "Toolchain +
       # testing") on a real Mac. The LIVE end-to-end tier likewise never runs in CI — it
       # needs granted TCC — and must NEVER be wired to a pull_request trigger from a fork.
-
-  # Squash-merge makes the PR TITLE the commit header that lands on main (AGENTS.md
-  # branch model), so the title must be Conventional BEFORE merge — the post-merge
-  # commit-lint run on main can only redden trunk after the fact. Runs on the
-  # title-bearing PR events; no checkout needed (the title is event payload).
-  pr-title-lint:
-    if: github.event_name == 'pull_request'
-    runs-on: ubuntu-latest
-    timeout-minutes: 5
-    steps:
-      - name: Validate PR title as the future squash commit header
-        env:
-          TITLE: ${{ github.event.pull_request.title }}
-        run: |
-          set -euo pipefail
-          printf '%s\n' "$TITLE" | grep -qE '^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-z0-9._-]+\))?!?: .{1,}$' \
-            || { printf 'PR title becomes the squash commit header on main; it must be a Conventional Commit header. Got: %s\n' "$TITLE"; exit 1; }
 
   # The release workflow (release.yml) computes bump levels from Conventional Commit
   # headers, so malformed headers silently corrupt version math. This job hard-fails

@@ -276,15 +276,21 @@ above; the branch rules below govern the cases where a branch exists at all.
 - **Pull requests (outside contributions once public):** short-lived branches,
   **squash-merged** — the PR title becomes the squash commit's Conventional Commit
   header and the PR description becomes its body, so PR hygiene IS commit hygiene
-  (ci.yml's `pr-title-lint` job gates the title pre-merge; the post-merge `commit-lint` run on
-  main is the backstop). Because squash discards branch-commit trailers, the merger adds the
-  `Reviewed-by:` / `Co-Authored-By:` trailer block to the PR DESCRIPTION before merging —
-  the description is the squash body, so that is where provenance survives.
-- **Fork-PR safety (restated from ci.yml so agents see it here):** fork PRs execute untrusted
-  code (`Package.swift` manifests, test bodies) on hosted runners — bounded to compute abuse
-  by the read-only token and absent secrets; keep `pull_request` (never `pull_request_target`);
-  the live/TCC tier must NEVER be wired to a fork-reachable trigger; keep "require approval
-  for outside-contributor runs" enabled in repo Actions settings.
+  (`pr-metadata.yml`'s `metadata / required` job gates both pre-merge; the post-merge
+  `commit-lint` run on main is the title backstop). Because squash discards branch-commit
+  trailers, the merger adds the `Reviewed-by:` / `Co-Authored-By:` trailer block to the PR
+  DESCRIPTION before merging — the description is the squash body, so that is where
+  provenance survives.
+- **Fork-PR safety (restated from CI workflows so agents see it here):** fork PRs execute untrusted
+  code (`Package.swift` manifests, test bodies) on hosted runners; ordinary build/test stays
+  on `pull_request` with a read-only token and no secrets. The sole current
+  `pull_request_target` exception is `metadata / required`: its base-owned workflow checks out
+  and executes only the base-owned metadata validator, with `contents: read`, no secrets, and
+  PR title/body inspection only; it must never checkout, execute, download, or cache PR code
+  or artifacts. No other `pull_request_target` use is permitted. This metadata check is not a
+  substitute for the later `governance / required` control-plane gate and must not be used as
+  one before that gate lands. The live/TCC tier must NEVER be wired to a fork-reachable trigger;
+  keep "require approval for outside-contributor runs" enabled in repo Actions settings.
 - **Branch naming:** prefix with the major line the work targets — `26/fix-mailbox-scope`,
   `26/feat-upgrade-cmd`. A macOS-major adoption lands on a branch named for the bump
   (`27/macos-27-adoption`). Note `NN/...` branches get no push-triggered CI (ci.yml pushes
