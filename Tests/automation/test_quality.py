@@ -499,7 +499,7 @@ class QualityDriverTests(unittest.TestCase):
         def runner(stage, command, cwd, timeout, grace, env):
             calls.append((stage.name, dict(env)))
             if stage.requires_xunit:
-                xunit_path = Path(command[command.index("--xunit-output") + 1])
+                xunit_path = self.quality.xunit_output_path(command)
                 xunit_path.write_text(
                     "<testsuite><testcase name='synthetic'/></testsuite>",
                     encoding="utf-8",
@@ -954,7 +954,10 @@ class QualityDriverTests(unittest.TestCase):
         self.assertEqual(swiftly_build[0], str(Path.home() / ".swiftly" / "bin" / "swift"))
         self.assertEqual(swiftly_build[1:], ("build", "--scratch-path", ".build-swiftly", "--disable-automatic-resolution"))
         self.assertEqual(swiftly_test[:5], (str(Path.home() / ".swiftly" / "bin" / "swift"), "test", "--scratch-path", ".build-swiftly", "--disable-automatic-resolution"))
-        self.assertIn("--xunit-output", swiftly_test)
+        xunit_arguments = [argument for argument in swiftly_test if argument.startswith("--xunit-output")]
+        self.assertEqual(len(xunit_arguments), 1)
+        self.assertTrue(xunit_arguments[0].startswith("--xunit-output="))
+        self.assertNotIn("--xunit-output", swiftly_test)
         self.assertEqual(clt_build, ("/usr/bin/swift", "build", "--disable-automatic-resolution"))
         self.assertEqual(bats_local[:3], ("/usr/bin/env", "PATH=/usr/bin:/bin:/usr/sbin:/sbin:" + os.environ.get("PATH", ""), "bats"))
         self.assertEqual(bats_local[-2:], ("-r", "bats/"))
@@ -1395,7 +1398,7 @@ class QualityDriverTests(unittest.TestCase):
                     import quality
 
                     def runner(stage, command, cwd, timeout, grace, env):
-                        xunit = pathlib.Path(command[command.index("--xunit-output") + 1])
+                        xunit = quality.xunit_output_path(command)
                         xunit.write_text("<testsuite><testcase name='ok'/></testsuite>", encoding="utf-8")
                         pathlib.Path({str(xunit_record)!r}).write_text(str(xunit), encoding="utf-8")
                         return quality.run_command(({str(child)!r},), pathlib.Path({str(root)!r}), 30, 0.2, env)
@@ -1563,7 +1566,7 @@ class QualityDriverTests(unittest.TestCase):
 
         def runner(stage, command, cwd, timeout, grace, env):
             if stage.name == "swiftly-test":
-                xunit_path = Path(command[command.index("--xunit-output") + 1])
+                xunit_path = self.quality.xunit_output_path(command)
                 seen_paths.append(xunit_path)
                 xunit_path.write_text("<testsuite><testcase name='ok'/></testsuite>", encoding="utf-8")
             return self.quality.CommandResult(status=0)
@@ -1583,7 +1586,7 @@ class QualityDriverTests(unittest.TestCase):
 
         def runner(stage, command, cwd, timeout, grace, env):
             if stage.name == "swiftly-test":
-                seen_paths.append(Path(command[command.index("--xunit-output") + 1]))
+                seen_paths.append(self.quality.xunit_output_path(command))
             return self.quality.CommandResult(status=0)
 
         result = self.quality.run_quality(
@@ -1600,7 +1603,7 @@ class QualityDriverTests(unittest.TestCase):
         seen_paths = []
 
         def runner(stage, command, cwd, timeout, grace, env):
-            xunit_path = Path(command[command.index("--xunit-output") + 1])
+            xunit_path = self.quality.xunit_output_path(command)
             seen_paths.append(xunit_path)
             xunit_path.write_text("<testsuite><testcase/></testsuite>", encoding="utf-8")
             return self.quality.CommandResult(status=42)
@@ -1619,7 +1622,7 @@ class QualityDriverTests(unittest.TestCase):
         seen_paths = []
 
         def runner(stage, command, cwd, timeout, grace, env):
-            xunit_path = Path(command[command.index("--xunit-output") + 1])
+            xunit_path = self.quality.xunit_output_path(command)
             seen_paths.append(xunit_path)
             xunit_path.write_text("<testsuite><testcase/></testsuite>", encoding="utf-8")
             return self.quality.CommandResult(status=124)

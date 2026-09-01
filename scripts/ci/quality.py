@@ -164,8 +164,7 @@ def swiftly_test_command(
         "--scratch-path",
         ".build-swiftly",
         "--disable-automatic-resolution",
-        "--xunit-output",
-        str(xunit_dir / "swiftly-test.xml"),
+        f"--xunit-output={xunit_dir / 'swiftly-test.xml'}",
     )
 
 
@@ -190,8 +189,7 @@ def hosted_test_command(
         "swift",
         "test",
         "--disable-automatic-resolution",
-        "--xunit-output",
-        str(xunit_dir / "hosted-test.xml"),
+        f"--xunit-output={xunit_dir / 'hosted-test.xml'}",
     )
 
 
@@ -758,6 +756,14 @@ def assert_xunit_has_tests(
     return testcase_count
 
 
+def xunit_output_path(command: Sequence[str]) -> Path:
+    prefix = "--xunit-output="
+    values = [argument[len(prefix):] for argument in command if argument.startswith(prefix)]
+    if len(values) != 1 or not values[0]:
+        raise AssertionFailure("swift test stage has an invalid xUnit output argument")
+    return Path(values[0])
+
+
 def default_runner(
     stage: Stage,
     command: Tuple[str, ...],
@@ -853,7 +859,7 @@ def _run_quality_request(
                     stderr.append(f"{stage.name} failed with status {result.status}")
                     return QualityResult(result.status, stderr=tuple(stderr))
                 if stage.requires_xunit:
-                    xunit_path = Path(command[command.index("--xunit-output") + 1])
+                    xunit_path = xunit_output_path(command)
                     count = assert_xunit_has_tests(xunit_path)
                     line = f"{stage.name}: {count} executed tests"
                     print(line, file=sys.stderr)
