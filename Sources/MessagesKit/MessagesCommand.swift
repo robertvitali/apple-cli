@@ -36,12 +36,45 @@ public struct MessagesCommand: ParsableCommand {
 
 private let tool = "messages"
 
+/// The I/O edges of `apple messages`, bound once per invocation. Production has exactly ONE
+/// value — `.live` — and no flag or environment variable can select another; the seam exists so
+/// the logic tier can drive every command against synthetic SQLite fixtures and fake senders
+/// instead of the real chat.db, AddressBook and `osascript`.
+struct MessagesCommandDependencies: Sendable {
+    var loadAddressBook: @Sendable () -> AddressBook
+    var makeChatDB: @Sendable (AddressBook) throws -> ChatDB
+    var performSend: @Sendable (String, String, Bool) throws -> (ok: Bool, service: String?, error: String?)
+    var dbDiagnostic: @Sendable () -> ChatDB.DBCheck
+    var addressBookDiagnostic: @Sendable () -> AddressBook.Diagnostic
+    var hasFullDiskAccess: @Sendable () -> Bool
+    /// Resolves the write posture (execute-vs-preview, sandbox, sandbox recipient allowlist) for
+    /// `send`. Injected for the same reason `TestMode.sandboxActive(flag:envVar:)` and
+    /// `GlobalOptions.willExecute(defaultDryRun:envVar:)` carry `envVar:` seams: the resolution
+    /// reads THREE process-wide variables (`APPLE_TEST_MODE`, `APPLE_DRY_RUN`,
+    /// `APPLE_TEST_RECIPIENTS`), swift-testing runs suites in parallel, and a send test that
+    /// `setenv`-ed any of them would race every other reader. Production always uses
+    /// `MessagesWriteGuard.resolve` via `.live`.
+    var resolveGate: @Sendable (GlobalOptions) throws -> MessagesWriteGuard.Gate
+
+    static let live = MessagesCommandDependencies(
+        loadAddressBook: AddressBook.load,
+        makeChatDB: { try ChatDB(book: $0) },
+        performSend: Send.perform,
+        dbDiagnostic: { ChatDB.diagnose() },
+        addressBookDiagnostic: AddressBook.diagnose,
+        hasFullDiskAccess: Permissions.hasFullDiskAccess,
+        // Wrapped rather than referenced directly: `resolve` carries a default argument (the
+        // allowlist-reader seam), and a Swift function reference cannot elide one.
+        resolveGate: { try MessagesWriteGuard.resolve($0) }
+    )
+}
+
 /// Emit JSON (default) or a human text rendering (`--text`) on stdout.
 private func emit<T: Encodable>(_ global: GlobalOptions, _ data: T, text: () -> String) throws {
     if global.json {
         try Output.emit(tool: tool, data: data)
     } else {
-        FileHandle.standardOutput.write(Data((TextSanitize.neutralizeForTerminal(text()) + "\n").utf8))
+        Output.printText(text())
     }
 }
 
@@ -53,7 +86,7 @@ private func emitWrite<T: Encodable>(_ global: GlobalOptions, _ data: T, sandbox
         try Output.emit(tool: tool, data: data, sandboxActive: sandboxActive)
     } else {
         let line = (sandboxActive ? "[sandbox] " : "") + text()
-        FileHandle.standardOutput.write(Data((TextSanitize.neutralizeForTerminal(line) + "\n").utf8))
+        Output.printText(line)
     }
 }
 
@@ -62,9 +95,17 @@ private func emitWrite<T: Encodable>(_ global: GlobalOptions, _ data: T, sandbox
 enum MessagesWriteGuard {
     /// The resolved write posture for one messages command. Bound ONCE at the top of the write
     /// `run()` and threaded from there — never re-derived mid-command.
-    struct Gate {
+    /// `Equatable` so a test can pin the `.live` binding by comparing what
+    /// `MessagesCommandDependencies.live.resolveGate` returns against `resolve`'s own result for
+    /// the same options — proving the binding without reading or mutating any environment
+    /// variable of its own.
+    struct Gate: Sendable, Equatable {
         let willExecute: Bool
         let sandboxActive: Bool
+        /// The sandbox recipient allowlist (`APPLE_TEST_RECIPIENTS`), captured HERE rather than
+        /// re-read at the guard, so the whole write posture is bound once — and so the logic tier
+        /// can exercise the sandbox refusal branch without mutating a process-wide variable.
+        let allowedRecipients: [String]
     }
 
     /// Resolve a messages write under write-model v2: **it sends when invoked**, exactly as calling
@@ -86,11 +127,25 @@ enum MessagesWriteGuard {
     /// NO `defaultDryRun` PARAMETER, deliberately — `GlobalOptions.willExecute(defaultDryRun:)`
     /// leaves it non-defaulted on purpose and `send` is the only write surface in this domain, so
     /// the signature offers no choice to get wrong. (Same reasoning as CalendarWriteGuard.)
-    static func resolve(_ global: GlobalOptions) throws -> Gate {
+    /// The process-wide allowlist reader this gate captures. Named here so `resolve`'s seam has a
+    /// production default that is one identifier long and visibly the real thing.
+    static let processAllowedRecipients: @Sendable () -> [String] = { TestMode.allowedRecipients }
+
+    /// `allowedRecipients` is a seam in the same family as `TestMode.sandboxActive(flag:envVar:)`
+    /// and `GlobalOptions.willExecute(defaultDryRun:envVar:)`, but it injects the READER rather
+    /// than a variable NAME: `TestMode.allowedRecipients` is a fixed-name property in AppleKit, so
+    /// a name-parameterized seam would have to fork its comma-split/trim parsing into this target
+    /// — two implementations of one recipient allowlist on a send surface. Production passes
+    /// nothing and goes through `TestMode.allowedRecipients` unchanged; the logic tier injects a
+    /// known list, so the capture is covered without `setenv`-ing `APPLE_TEST_RECIPIENTS`, which
+    /// swift-testing's parallel suites all share.
+    static func resolve(_ global: GlobalOptions,
+                        allowedRecipients: @Sendable () -> [String] = processAllowedRecipients) throws -> Gate {
         try TestMode.validateWriteEnvironment()
         let sandboxActive = try TestMode.sandboxActive(flag: global.testMode)
         let willExecute = try global.willExecute(defaultDryRun: false)
-        return Gate(willExecute: willExecute, sandboxActive: sandboxActive)
+        return Gate(willExecute: willExecute, sandboxActive: sandboxActive,
+                    allowedRecipients: allowedRecipients())
     }
 }
 
@@ -111,6 +166,10 @@ struct Recent: ParsableCommand {
     @Option(name: .long, help: "Explicit handle (phone/email) — stateless replacement for the MCP's contact:N.") var handle: String?
 
     func run() throws {
+        try run(dependencies: .live)
+    }
+
+    func run(dependencies: MessagesCommandDependencies) throws {
         try runGuarded(tool: tool) {
             guard hours >= 0 else { throw AppleError.validation("hours cannot be negative") }
             guard hours <= MessageTime.maxHours else {
@@ -119,8 +178,12 @@ struct Recent: ParsableCommand {
             guard (1...10_000).contains(limit) else {
                 throw AppleError.validation("limit must be between 1 and 10000")
             }
-            let book = AddressBook.load()
-            var db = try ChatDB(book: book)
+            let book = dependencies.loadAddressBook()
+            // EAGER, deliberately. An inaccessible chat.db must produce its upstream error before
+            // any contact-filter branch can return success — making this lazy would let an
+            // unmatched or ambiguous `--contact` exit 0 on a machine where the database cannot be
+            // opened at all, which is a behavior change from the oracle-parity contract.
+            var db = try dependencies.makeChatDB(book)
 
             var rowIds: [Int64]? = nil
             var candidates: [ContactCandidateData]? = nil
@@ -240,10 +303,14 @@ struct Send_: ParsableCommand {
     @Flag(name: [.short, .long], help: "Treat the recipient as a group chat id.") var group = false
 
     func run() throws {
+        try run(dependencies: .live)
+    }
+
+    func run(dependencies: MessagesCommandDependencies) throws {
         try runGuarded(tool: tool) {
             // Bound ONCE, before any resolution work, and threaded from here.
-            let gate = try MessagesWriteGuard.resolve(global)
-            let book = AddressBook.load()
+            let gate = try dependencies.resolveGate(global)
+            let book = dependencies.loadAddressBook()
             switch Send.resolve(recipient: recipient, groupChat: group, book: book) {
             case .notFound(let r):
                 throw AppleError.notFound("Could not find any contact matching '\(r)'")
@@ -259,16 +326,23 @@ struct Send_: ParsableCommand {
                 }
             case .resolved(let handle, let displayName):
                 let plan = group ? "group chat" : "iMessage→SMS auto"
-                // The recipient is argv-derived and already resolved, so the sandbox allowlist is
+                // The recipient is argv-derived and already resolved, so the sandbox restriction is
                 // computable on BOTH paths — run it BEFORE the preview branch so a dry-run refuses
                 // exactly what an execute would. A preview that reported "would send" for a
                 // recipient the execute path will refuse is a lie, and on a SEND surface that lie
-                // is the one most likely to be acted on.
+                // is the one most likely to be acted on. `groupChat:` is threaded in because the
+                // sandbox refuses group send OUTRIGHT (no self-addressed shape) rather than
+                // trusting the allowlist compare to miss a chat id.
                 do {
-                    try Send.assertAllowedRecipient(handle, sandboxActive: gate.sandboxActive)
+                    try Send.assertAllowedRecipient(handle, groupChat: group,
+                                                    sandboxActive: gate.sandboxActive,
+                                                    allowedRecipients: gate.allowedRecipients)
                 } catch {
-                    // assertAllowedRecipient only throws under the sandbox (self-only allowlist), so
-                    // this is a sandbox refusal (Q14): carries error.sandbox, keeps exit 64.
+                    // assertAllowedRecipient only throws under the sandbox — either the structural
+                    // group-chat refusal or the self-only allowlist miss — so this is a sandbox
+                    // refusal (Q14): carries error.sandbox, keeps exit 64. `String(describing:)`
+                    // renders the AllowError case, so the two refusals stay distinguishable to the
+                    // caller instead of collapsing into one message.
                     throw AppleError(type: AppleErrorType.validation,
                         message: "refusing send: \(String(describing: error))",
                         exitCode: AppleExit.usage, sandbox: true)
@@ -284,12 +358,12 @@ struct Send_: ParsableCommand {
                     }
                     return
                 }
-                let result = try Send.perform(handle: handle, message: message, groupChat: group)
+                let result = try dependencies.performSend(handle, message, group)
                 guard result.ok else {
                     // Keep the raw osascript error text OFF the JSON envelope (unstable +
                     // potential info-leak); surface it on stderr (the human channel) only.
                     if let raw = result.error {
-                        FileHandle.standardError.write(Data(("osascript: " + raw + "\n").utf8))
+                        Output.writeError(Data(("osascript: " + raw + "\n").utf8))
                     }
                     throw AppleError.upstream("send failed (Messages returned an error)")
                 }
@@ -316,6 +390,10 @@ struct FindContact: ParsableCommand {
     @Argument(help: "Name to search for.") var name: String
 
     func run() throws {
+        try run(dependencies: .live)
+    }
+
+    func run(dependencies: MessagesCommandDependencies) throws {
         try runGuarded(tool: tool) {
             // Same bound, same unit, as `search` — `matchContacts` runs difflib's O(n*m)
             // matcher per token AND once per full name, for EVERY candidate, so an unbounded
@@ -327,7 +405,7 @@ struct FindContact: ParsableCommand {
             guard name.unicodeScalars.count <= 1024 else {
                 throw AppleError.validation("name too long (max 1024 code points)")
             }
-            let book = AddressBook.load()
+            let book = dependencies.loadAddressBook()
             let matches = book.findByName(name)
             let data = FindContactData(query: name, count: matches.count, contacts: matches.map(candidateData))
             try emit(global, data) {
@@ -350,9 +428,13 @@ struct Chats: ParsableCommand {
     @OptionGroup var global: GlobalOptions
 
     func run() throws {
+        try run(dependencies: .live)
+    }
+
+    func run(dependencies: MessagesCommandDependencies) throws {
         try runGuarded(tool: tool) {
-            let book = AddressBook.load()
-            let db = try ChatDB(book: book)
+            let book = dependencies.loadAddressBook()
+            let db = try dependencies.makeChatDB(book)
             let chats = db.namedChats()
             try emit(global, ChatsData(count: chats.count, chats: chats)) {
                 if chats.isEmpty { return "No named group chats found." }
@@ -378,6 +460,10 @@ struct Search: ParsableCommand {
     @Option(name: .long, help: "Match mode: fuzzy (default) | contains | exact.") var match: String = "fuzzy"
 
     func run() throws {
+        try run(dependencies: .live)
+    }
+
+    func run(dependencies: MessagesCommandDependencies) throws {
         try runGuarded(tool: tool) {
             guard !term.trimmingCharacters(in: .whitespaces).isEmpty else {
                 throw AppleError.validation("search term cannot be empty")
@@ -407,8 +493,8 @@ struct Search: ParsableCommand {
             guard let mode = ChatDB.SearchMatch(rawValue: match) else {
                 throw AppleError.validation("match must be fuzzy, contains, or exact")
             }
-            let book = AddressBook.load()
-            var db = try ChatDB(book: book)
+            let book = dependencies.loadAddressBook()
+            var db = try dependencies.makeChatDB(book)
             let result = db.search(term: term, hours: hours, threshold: threshold, match: mode)
             let data = SearchData(search_term: term, hours: hours, threshold: threshold, match: match,
                 count: result.matches.count, scanned: result.scanned, truncated: result.truncated,
@@ -439,9 +525,13 @@ struct CheckAvailability: ParsableCommand {
     @Argument(help: "Phone or email to check.") var recipient: String
 
     func run() throws {
+        try run(dependencies: .live)
+    }
+
+    func run(dependencies: MessagesCommandDependencies) throws {
         try runGuarded(tool: tool) {
-            let book = AddressBook.load()
-            let db = try ChatDB(book: book)
+            let book = dependencies.loadAddressBook()
+            let db = try dependencies.makeChatDB(book)
             let a = db.availability(recipient: recipient)
             try emit(global, a) { a.recommendation }
         }
@@ -457,8 +547,12 @@ struct CheckDB: ParsableCommand {
     @OptionGroup var global: GlobalOptions
 
     func run() throws {
+        try run(dependencies: .live)
+    }
+
+    func run(dependencies: MessagesCommandDependencies) throws {
         try runGuarded(tool: tool) {
-            let c = ChatDB.diagnose()
+            let c = dependencies.dbDiagnostic()
             try emit(global, c) {
                 """
                 path: \(c.path)
@@ -480,8 +574,12 @@ struct CheckContacts: ParsableCommand {
     @OptionGroup var global: GlobalOptions
 
     func run() throws {
+        try run(dependencies: .live)
+    }
+
+    func run(dependencies: MessagesCommandDependencies) throws {
         try runGuarded(tool: tool) {
-            let book = AddressBook.load()
+            let book = dependencies.loadAddressBook()
             // Order samples by (last name, first name) to match the oracle's SQL
             // `ORDER BY ZLASTNAME, ZFIRSTNAME`. `count` is the contract; this aligns the
             // illustrative "first 10" sample set with the MCP's too (handle-key tiebreak).
@@ -513,8 +611,12 @@ struct CheckAddressBook: ParsableCommand {
     @OptionGroup var global: GlobalOptions
 
     func run() throws {
+        try run(dependencies: .live)
+    }
+
+    func run(dependencies: MessagesCommandDependencies) throws {
         try runGuarded(tool: tool) {
-            let d = AddressBook.diagnose()
+            let d = dependencies.addressBookDiagnostic()
             try emit(global, d) {
                 var lines = ["sources dir: \(d.sources_dir) (exists: \(d.sources_dir_exists))",
                              "databases: \(d.database_count)"]
@@ -537,10 +639,14 @@ struct Doctor: ParsableCommand {
     @OptionGroup var global: GlobalOptions
 
     func run() throws {
+        try run(dependencies: .live)
+    }
+
+    func run(dependencies: MessagesCommandDependencies) throws {
         try runGuarded(tool: tool) {
-            let fda = Permissions.hasFullDiskAccess()
-            let dbCheck = ChatDB.diagnose()
-            let abCheck = AddressBook.diagnose()
+            let fda = dependencies.hasFullDiskAccess()
+            let dbCheck = dependencies.dbDiagnostic()
+            let abCheck = dependencies.addressBookDiagnostic()
             var notes: [String] = []
             if !fda { notes.append("Full Disk Access not detected — grant it to your terminal in System Settings › Privacy & Security › Full Disk Access.") }
             if !dbCheck.connected { notes.append("Messages chat.db not accessible.") }

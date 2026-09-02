@@ -30,6 +30,15 @@ JSON output are stable per the versioning policy — breaking changes bump
 
 ### Fixed
 
+- **`messages send --group` is now always refused while the test sandbox is engaged
+  (`--test-mode` / `APPLE_TEST_MODE`), even when the group's chat id appears in
+  `APPLE_TEST_RECIPIENTS`.** Previously an allowlist entry that matched the chat id let a
+  sandboxed group send through to every participant, which the sandbox exists to prevent — a
+  group has no self-addressed shape. The refusal is now structural: exit 64 with a
+  `validation` error carrying `sandbox: true`, and nothing is sent. Group send outside the
+  sandbox is unchanged. `schema_version` is unchanged: the refusal reuses the existing
+  validation-error envelope — same `error.type`, same `error.sandbox` flag, same exit code — so
+  no field is added, removed, retyped, or given a new enum value.
 - Corrected privacy-remediation status and documentation so publication remains blocked until a
   fresh audit verifies zero findings for its stated scope.
 - **`messages recent` no longer drops attachment-only messages.** A message consisting solely

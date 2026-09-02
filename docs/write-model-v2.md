@@ -87,7 +87,9 @@ because under v2 that key is how a caller distinguishes "previewed" from "done".
 - Mail, Contacts, Calendar, Reminders: `--test-mode` flag AND `APPLE_TEST_MODE=1` (two-factor).
 - Notes: env-only (`guardLiveWrite` checks `TestMode.isEnabled` alone, NotesCommand.swift:92).
 - Messages: the two factors live in two separate guards (MessagesCommand.swift:182 checks the
-  flag; Send.swift:60 `assertAllowedRecipient` checks the env).
+  flag; Send.swift:60 `assertAllowedRecipient` checks the env). *(v1 shape, kept as the historical
+  baseline. Under v2 `assertAllowedRecipient` reads no environment variable at all: the resolved
+  allowlist is captured into the gate and passed in — see "Guards change signature" below.)*
 
 The migration therefore classifies tests per-test, not per-class (see Migration below).
 
@@ -172,7 +174,9 @@ accidental *unsandboxed* writes — each fails safe for its own model).
   parameter and the internal env re-checks were REMOVED (they would defeat the flag-only path):
   each domain's guard takes `sandboxActive` — e.g. `guardLiveWrite(labeledName:sandboxActive:)`
   (Notes), `CalendarSupport.requireLabeled(_:sandboxActive:)`, `requireLabeledReminder(_:sandboxActive:)`,
-  `Send.assertAllowedRecipient(_:sandboxActive:)` (Messages). (No generic
+  `Send.assertAllowedRecipient(_:groupChat:sandboxActive:allowedRecipients:)` (Messages — it also
+  takes the recipient allowlist and the group-chat flag as parameters, so the guard reads nothing
+  from the environment itself; see the Messages row in the chokepoint table below). (No generic
   `requireLabeledTarget(_:sandboxActive:)` landed — the guards are per-domain.)
   `TestMode.sandboxActive(flag:)` — AS LANDED it THROWS and validates the env EAGERLY
   (`let env = try truthyEnv(testModeVar); return flag || env`), so a malformed
@@ -209,7 +213,7 @@ bucket-1 sections):
 | Notes | `guardLiveWrite` (NotesCommand.swift:91-101) + its 15 call sites | NotesWriteCommands (9), NotesCommand (3), NotesBatch (3), NotesOrg (2) |
 | Calendar | `CalendarSupport.swift:355-380` guard enum (NOT EventKitCore — **EventKitCore contains no write guards**; EventStore.swift:170 documents that callers gate) | CalendarSupport (3), EventsCommand (3) |
 | Reminders | `shouldExecute` (RemindersSupport.swift:518) + `requireLabeledReminder` (:581) | RemindersSupport (4), Tasks (5), Subtasks (10), Lists (3) |
-| Messages | `Send.assertAllowedRecipient` (Send.swift:59-65) + the flag check at MessagesCommand.swift:182 — the two factors merge into one `sandboxActive`. Group-chat send is currently unreachable because **the recipient ALLOWLIST refuses a group-chat id** (Send.swift:59-65) — resolution at MessagesCommand.swift:152-153 already precedes both gates, so the ordering is not the blocker. It becomes reachable outside the sandbox: a restored capability, called out in the CHANGELOG — and because it stays unreachable INSIDE the sandbox, no agent can verify it without messaging a real group. It is therefore **operator-verify-only**, recorded exactly like `--gui-send`: wired, gate-code-inspected, live-validated only with the operator present. Ambiguous-name resolution refusals are pre-gate and unchanged. | Send (3), MessagesCommand (1) |
+| Messages | `Send.assertAllowedRecipient(_:groupChat:sandboxActive:allowedRecipients:)` + the flag check at MessagesCommand.swift:182 — the two factors merge into one `sandboxActive`, and the guard now takes the resolved allowlist as a parameter instead of reading `APPLE_TEST_RECIPIENTS` itself (the write posture is bound once, into `MessagesWriteGuard.Gate`). Group-chat send is unreachable inside the sandbox because **the guard refuses `groupChat: true` OUTRIGHT, before it looks at the allowlist at all**. That refusal is structural on purpose: an earlier draft relied on "a chat id never matches a phone/email entry", which was wrong — `Send.resolve` preserves a group id verbatim, `normalizeForAllowlist` strips both sides to digits, and `phonesEquivalent` short-circuits on two equal strings before checking they are digits, so an operator who pasted the chat id into `APPLE_TEST_RECIPIENTS` would have had a sandboxed group send delivered to real people. No allowlist content can reopen it now. Resolution at MessagesCommand.swift:152-153 already precedes both gates, so the ordering is not the blocker. Group send becomes reachable outside the sandbox: a restored capability, called out in the CHANGELOG — and because it stays unreachable INSIDE the sandbox, no agent can verify it without messaging a real group. It is therefore **operator-verify-only**, recorded exactly like `--gui-send`: wired, gate-code-inspected, live-validated only with the operator present. Ambiguous-name resolution refusals are pre-gate and unchanged. | Send (3), MessagesCommand (1) |
 | Mail export | `willExecute` gate at ExportCommands.swift:110 (landed 2026-07-31). Oracle B's `export_emails` executes on call → bucket 3, execute-by-default under v2; the `resolveExportDirectory` path confinement stays bucket 1. `export` and `attachments save` are in the sweep's write-verb list. | ExportCommands (1) |
 
 Calendar + Reminders are **two coordinated edits in two modules**, not one core edit.

@@ -202,9 +202,14 @@ Product behavior changed under write-model v2; **the driver's own conduct did no
   else, ever.
 - **Before ANY send-surface work, set and verify the allowlist:** `APPLE_TEST_RECIPIENTS` must
   contain only the operator's own addresses/number, and `--test-mode` must be engaged so
-  `guardOutbound` / `Send.assertAllowedRecipient` actually consult it. **Unsandboxed, there is NO
-  product-side recipient check** — the allowlist is sandbox-only by design (oracle parity), so on
-  the unsandboxed self-send of exception (b) the ONLY safeguard is the driver re-reading the
+  `guardOutbound` / `Send.assertAllowedRecipient(_:groupChat:sandboxActive:allowedRecipients:)`
+  actually consult it — the Messages guard is handed the resolved allowlist rather than reading
+  the variable itself, so the value must be set before the command runs. **A sandboxed
+  `messages send --group` is refused outright by that guard, before the allowlist is consulted**,
+  so no allowlist entry makes group send agent-verifiable: it stays operator-verify-only.
+  **Unsandboxed, there is NO product-side recipient check** — the allowlist is sandbox-only by
+  design (oracle parity), so on the unsandboxed self-send of exception (b) the ONLY safeguard is
+  the driver re-reading the
   recipient string before invoking. Do that, character by character.
 - **This repo is publication-bound** (`github.com/robertvitali/apple-cli` — private containment
   since 2026-08-19). Publication is blocked until D9 closes after value-free scoped verification.

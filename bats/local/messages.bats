@@ -54,10 +54,17 @@ setup() {
   echo "$output" | grep -qi "not in the test allowlist"
 }
 
-@test "a sandboxed group-chat id can never match the allowlist (D4: unreachable in sandbox)" {
-  run "$BIN" messages send "iMessage;-;chat123456789" --message "must not send" --group --test-mode --dry-run
+# The refusal is STRUCTURAL, not an allowlist miss: the allowlist is seeded with the very chat id
+# being sent to (scoped to this one invocation, so no APPLE_* variable is set for the suite), and
+# the send is still refused. Asserting the group-specific wording — and the absence of the
+# allowlist wording — is what proves the structural guard ran rather than a lucky mismatch.
+@test "sandboxed group send is refused structurally even when the chat id is itself allowlisted" {
+  APPLE_TEST_RECIPIENTS="iMessage;-;chat123456789" run "$BIN" messages send "iMessage;-;chat123456789" --message "must not send" --group --test-mode --dry-run
   [ "$status" -eq 64 ]
-  echo "$output" | grep -qi "not in the test allowlist"
+  echo "$output" | grep -q '"ok" : false'
+  echo "$output" | grep -q '"sandbox" : true'
+  echo "$output" | grep -qi "group-chat send is unavailable"
+  ! echo "$output" | grep -qi "not in the test allowlist"
 }
 
 # --- help + subcommand surface (no TCC) ---

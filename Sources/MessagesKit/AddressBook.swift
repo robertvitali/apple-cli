@@ -6,9 +6,9 @@ import AppleKit
 /// normalized `handle → name` map and the fuzzy contact index. Ports
 /// `get_addressbook_contacts` / `process_contacts` / `find_contact_by_name` /
 /// `get_contact_name` (AddressBook half) / `check_addressbook_access`.
-public struct AddressBook {
+public struct AddressBook: Sendable {
 
-    public struct Details {
+    public struct Details: Sendable {
         public let firstName: String
         public let lastName: String
         public let nickname: String
@@ -73,8 +73,17 @@ public struct AddressBook {
     /// Load + merge every accessible AddressBook source. Inaccessible sources are
     /// skipped (mirrors the MCP's per-source try/except), never fatal.
     public static func load() -> AddressBook {
+        load(paths: databasePaths())
+    }
+
+    /// `warningSink` defaults to the SCOPED stderr (`Output.writeError`), not
+    /// `FileHandle.standardError` — a direct file-handle write bypasses `Output.withStreams`, so
+    /// it would escape a caller's captured stderr and leak onto the real terminal.
+    static func load(paths: [String], warningSink: (String) -> Void = { message in
+        Output.writeError(Data(message.utf8))
+    }) -> AddressBook {
         var book = AddressBook()
-        for path in databasePaths() {
+        for path in paths {
             // FALL BACK, never drop. `.walAware` (mode=ro) is the accurate read — it applies the
             // -wal, which `immutable=1` skips — but it must write the -shm wal-index, so it FAILS
             // where an immutable open succeeded (missing -shm on a non-writable dir, lock
@@ -93,11 +102,9 @@ public struct AddressBook {
             } catch {
                 do {
                     db = try SQLiteReader(path: path, copyToTemp: false, directOpen: .immutable)
-                    FileHandle.standardError.write(Data(
-                        "Warning: \(path) not readable WAL-aware (\(error)); fell back to immutable=1 — counts may be stale\n".utf8))
+                    warningSink("Warning: \(path) not readable WAL-aware (\(error)); fell back to immutable=1 — counts may be stale\n")
                 } catch {
-                    FileHandle.standardError.write(
-                        Data("Warning: Cannot access \(path): \(error)\n".utf8))
+                    warningSink("Warning: Cannot access \(path): \(error)\n")
                     continue
                 }
             }
@@ -144,7 +151,7 @@ public struct AddressBook {
 
     // MARK: Fuzzy find (MCP `find_contact_by_name`)
 
-    public struct Match { public let name: String; public let phone: String; public let score: Double; public let matchedOn: String }
+    public struct Match: Sendable { public let name: String; public let phone: String; public let score: Double; public let matchedOn: String }
 
     /// Fuzzy-match a name/nickname to contacts, dedup by phone (highest score),
     /// sorted desc. Exact port of `find_contact_by_name`.
@@ -197,7 +204,7 @@ public struct AddressBook {
 
     // MARK: Diagnostics
 
-    public struct SourceReport: Encodable {
+    public struct SourceReport: Encodable, Sendable {
         public let path: String
         public let readable: Bool
         public let connected: Bool
@@ -207,7 +214,7 @@ public struct AddressBook {
         public let contact_count: Int?
     }
 
-    public struct Diagnostic: Encodable {
+    public struct Diagnostic: Encodable, Sendable {
         public let sources_dir: String
         public let sources_dir_exists: Bool
         public let database_count: Int
@@ -219,9 +226,19 @@ public struct AddressBook {
     public static func diagnose() -> Diagnostic {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let sourcesDir = home + "/Library/Application Support/AddressBook/Sources"
-        let dirExists = FileManager.default.fileExists(atPath: sourcesDir)
+        return diagnose(paths: databasePaths(), sourcesDir: sourcesDir,
+                        sourcesDirExists: FileManager.default.fileExists(atPath: sourcesDir),
+                        loadBook: load)
+    }
+
+    /// `loadBook` is a CLOSURE, not an already-loaded `AddressBook`, so the seam preserves the
+    /// original evaluation order: the per-source report loop opens and closes every database
+    /// first, and only then is the merged book loaded. An eagerly-evaluated parameter would have
+    /// silently moved that load ahead of the loop.
+    static func diagnose(paths: [String], sourcesDir: String, sourcesDirExists: Bool,
+                         loadBook: () -> AddressBook) -> Diagnostic {
         var reports: [SourceReport] = []
-        for path in databasePaths() {
+        for path in paths {
             let readable = (try? FileHandle(forReadingFrom: URL(fileURLWithPath: path)))
                 .map { try? $0.close(); return true } ?? false
             var connected = false, tableCount: Int? = nil
@@ -244,8 +261,8 @@ public struct AddressBook {
                                         table_count: tableCount, has_zabcdrecord: hasRecord,
                                         has_zabcdphonenumber: hasPhone, contact_count: contactCount))
         }
-        let book = load()
-        return Diagnostic(sources_dir: sourcesDir, sources_dir_exists: dirExists,
+        let book = loadBook()
+        return Diagnostic(sources_dir: sourcesDir, sources_dir_exists: sourcesDirExists,
                           database_count: reports.count, databases: reports,
                           contacts_with_handles: book.contacts.count)
     }

@@ -41,11 +41,15 @@ public enum Send {
 
     public enum AllowError: Error, CustomStringConvertible {
         case notAllowed(String)
+        case groupChatInSandbox
         public var description: String {
             switch self {
             case .notAllowed(let h):
                 return "Sandbox is engaged: recipient '\(h)' is not in the test allowlist "
                     + "(APPLE_TEST_RECIPIENTS)"
+            case .groupChatInSandbox:
+                return "Sandbox is engaged: group-chat send is unavailable — a group has no "
+                    + "self-addressed shape, so every other participant would receive the message"
             }
         }
     }
@@ -69,13 +73,29 @@ public enum Send {
     /// restriction that matters most on a send surface.
     ///
     /// Still fail-closed inside the sandbox: an EMPTY or unset `APPLE_TEST_RECIPIENTS` matches
-    /// nothing, so every recipient is refused rather than every recipient being allowed. A group
-    /// chat id likewise never matches, which is why sandboxed group send is unreachable (see
-    /// HUMAN-DECISIONS.md D4).
-    public static func assertAllowedRecipient(_ handle: String, sandboxActive: Bool) throws {
+    /// nothing, so every recipient is refused rather than every recipient being allowed.
+    ///
+    /// GROUP CHATS ARE REFUSED OUTRIGHT, not left to the allowlist compare. AGENTS.md makes
+    /// group-chat send operator-verify-only precisely because a group has no self-addressed
+    /// shape — the operator cannot be the only recipient. Relying on "a chat id never matches a
+    /// phone/email entry" was WRONG: `resolve` preserves a group id verbatim (see above),
+    /// `normalizeForAllowlist` strips it to digits, and `phonesEquivalent` returns true for two
+    /// equal strings BEFORE it checks they are digits — so an operator who pasted a chat id into
+    /// `APPLE_TEST_RECIPIENTS` would have had a sandboxed group send go through to real people.
+    /// The refusal is now structural, so no allowlist content can reach that path.
+    ///
+    /// `allowedRecipients` is a REQUIRED seam, not a policy knob. It used to default to `nil`
+    /// (read `APPLE_TEST_RECIPIENTS` here); that default went dead once `MessagesWriteGuard.Gate`
+    /// captured the list, and leaving it in place left two sources of truth on the one surface
+    /// that reaches a real human — a future caller omitting the argument would silently get
+    /// different semantics with no compile error. Making it required also keeps the logic tier
+    /// off the process-wide variable that swift-testing's parallel suites share.
+    public static func assertAllowedRecipient(_ handle: String, groupChat: Bool, sandboxActive: Bool,
+                                              allowedRecipients: [String]) throws {
         guard sandboxActive else { return }
+        guard !groupChat else { throw AllowError.groupChatInSandbox }
         let target = normalizeForAllowlist(handle)
-        let allowed = TestMode.allowedRecipients.map(normalizeForAllowlist)
+        let allowed = allowedRecipients.map(normalizeForAllowlist)
         guard allowed.contains(where: { phonesEquivalent($0, target) }) else {
             throw AllowError.notAllowed(handle)
         }

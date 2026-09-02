@@ -269,26 +269,53 @@ struct SendTests {
     /// allowlist is a sandbox-only restriction, and unsandboxed the CLI sends to anyone exactly as
     /// `tool_send_message` does. The fail-closed property survives where it matters — INSIDE the
     /// sandbox — and that is what is pinned here.
+    ///
+    /// Every call passes `allowedRecipients:` EXPLICITLY. The parameter used to default to `nil`
+    /// and read `APPLE_TEST_RECIPIENTS`, which made these assertions depend on the real process
+    /// environment being empty — a dependency the suite's own `cleanEnvironment()` precondition
+    /// did not even cover (it checks APPLE_TEST_MODE and APPLE_DRY_RUN only).
     @Test func allowlistIsSandboxOnlyAndFailsClosedInsideIt() {
         // Unsandboxed: a no-op. A throw here means the v1 gate was silently reinstated, which
         // would make the domain non-parity again.
         #expect(throws: Never.self) {
-            try Send.assertAllowedRecipient("2125550142", sandboxActive: false)
+            try Send.assertAllowedRecipient("2125550142", groupChat: false, sandboxActive: false,
+                                            allowedRecipients: [])
         }
         #expect(throws: Never.self) {
-            try Send.assertAllowedRecipient("+1 (212) 555-0150", sandboxActive: false)
+            try Send.assertAllowedRecipient("+1 (212) 555-0150", groupChat: false,
+                                            sandboxActive: false, allowedRecipients: [])
         }
-        // Sandboxed with an EMPTY/unset APPLE_TEST_RECIPIENTS (the state of this test process):
-        // every recipient is refused, not every recipient allowed. This is THE fail-closed
-        // property — an allowlist that defaults to "permit all" on a send surface would be the
-        // worst possible default.
-        #expect(throws: (any Error).self) {
-            try Send.assertAllowedRecipient("2125550142", sandboxActive: true)
+        // Unsandboxed group send is a no-op too — the group refusal is a SANDBOX restriction, not
+        // a capability drop, so an unsandboxed `--group` must still reach the oracle's behavior.
+        #expect(throws: Never.self) {
+            try Send.assertAllowedRecipient("iMessage;-;chat123456789", groupChat: true,
+                                            sandboxActive: false, allowedRecipients: [])
         }
-        // A group-chat id can never match a phone/email allowlist entry, so sandboxed group send
-        // stays unreachable by construction (HUMAN-DECISIONS.md D4).
+        // Sandboxed with an EMPTY allowlist: every recipient is refused, not every recipient
+        // allowed. This is THE fail-closed property — an allowlist that defaults to "permit all"
+        // on a send surface would be the worst possible default.
         #expect(throws: (any Error).self) {
-            try Send.assertAllowedRecipient("iMessage;-;chat123456789", sandboxActive: true)
+            try Send.assertAllowedRecipient("2125550142", groupChat: false, sandboxActive: true,
+                                            allowedRecipients: [])
+        }
+        // A group-chat id does not match a phone/email allowlist entry…
+        #expect(throws: (any Error).self) {
+            try Send.assertAllowedRecipient("iMessage;-;chat123456789", groupChat: false,
+                                            sandboxActive: true, allowedRecipients: [])
+        }
+        // …but that was never sufficient on its own. With the chat id ITSELF allowlisted, the
+        // normalize-then-compare path returns a match (`phonesEquivalent` short-circuits on
+        // equal strings), so sandboxed group send is refused STRUCTURALLY instead.
+        #expect(throws: (any Error).self) {
+            try Send.assertAllowedRecipient("iMessage;-;chat123456789", groupChat: true,
+                                            sandboxActive: true,
+                                            allowedRecipients: ["iMessage;-;chat123456789"])
+        }
+        // The allowlisted non-group recipient still passes — the refusals above are about the
+        // group flag and an empty list, not a broken comparison.
+        #expect(throws: Never.self) {
+            try Send.assertAllowedRecipient("2125550142", groupChat: false, sandboxActive: true,
+                                            allowedRecipients: ["+1 (212) 555-0142"])
         }
     }
 }
@@ -331,6 +358,41 @@ struct MessagesWriteModelV2Tests {
         let gate = try MessagesWriteGuard.resolve(opts(["--test-mode"]))
         #expect(gate.sandboxActive == true)
         #expect(gate.willExecute == true)
+    }
+
+    /// The Gate's `allowedRecipients` is what the send guard compares against, and the hermetic
+    /// test gate bypasses `resolve` entirely — so without this, a `resolve` that captured the
+    /// wrong source (a hardcoded `[]`, the sandbox PREFIX, the wrong variable) would pass the
+    /// whole suite. Blast radius is fail-closed, but a silently-empty allowlist would make every
+    /// sandboxed send refuse for a reason the operator cannot see.
+    @Test("resolve threads the injected allowlist reader into the Gate verbatim")
+    func capturesInjectedAllowlist() throws {
+        let injected = ["+1 (212) 555-0100", "alice@example.com"]
+        let gate = try MessagesWriteGuard.resolve(opts([]), allowedRecipients: { injected })
+        #expect(gate.allowedRecipients == injected)
+        // Entries are captured verbatim; normalization happens in the guard, not the gate.
+        #expect(try MessagesWriteGuard.resolve(opts(["--test-mode"]),
+                                               allowedRecipients: { [] }).allowedRecipients == [])
+    }
+
+    /// Pins the PRODUCTION binding: `.live.resolveGate` — the only `resolveGate` an `apple
+    /// messages send` invocation can ever reach — must BE `MessagesWriteGuard.resolve` with its
+    /// default allowlist reader, not a hermetic stand-in, a hardcoded posture, or a different
+    /// guard. Deliberately compares two live resolutions rather than asserting values: both sides
+    /// read the same process state at the same moment, so the equality holds whatever
+    /// `APPLE_TEST_MODE` / `APPLE_DRY_RUN` / `APPLE_TEST_RECIPIENTS` happen to contain, and the
+    /// test neither depends on nor mutates the variables swift-testing's parallel suites share.
+    /// Sweeping the flag combinations is what makes it non-vacuous — a constant-returning or
+    /// flag-ignoring binding disagrees on at least one row even in a totally empty environment.
+    @Test("`.live` resolves the write posture through MessagesWriteGuard.resolve")
+    func liveDependenciesResolveThroughTheProductionGuard() throws {
+        for argv in [[], ["--dry-run"], ["--execute"], ["--test-mode"],
+                     ["--test-mode", "--dry-run"], ["--test-mode", "--execute"]] {
+            let global = try opts(argv)
+            #expect(try MessagesCommandDependencies.live.resolveGate(global)
+                    == MessagesWriteGuard.resolve(global),
+                    "live resolveGate diverged from MessagesWriteGuard.resolve for \(argv)")
+        }
     }
 }
 
