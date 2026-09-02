@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
-"""Pin `Apple.toolForParseFailure()` — the helper that puts a value on the stdout MACHINE channel.
+"""Pin `Apple.toolForParseFailure(arguments:)` — the helper that puts a value on stdout.
 
 WHY A SOURCE LINT AND NOT A BEHAVIOURAL TEST. The helper must satisfy three properties, and only
 the first is reachable by any runtime test:
 
-  1. an unknown argv[1] yields the constant "apple"                    — runtime-testable, and tested
-  2. the emitted value is a REGISTERED literal, never argv[1]'s bytes  — not testable in-tree
+  1. an unknown arguments[1] yields the constant "apple"                    — runtime-testable, and tested
+  2. the emitted value is a REGISTERED literal, never arguments[1]'s bytes  — not testable in-tree
   3. the emitted value is the subcommand's PRIMARY name, not an alias  — not testable in-tree
 
 "Not testable IN-TREE" is the precise claim, and it is weaker than "not testable". Review proved 3
@@ -65,8 +65,8 @@ import sys
 # so they are free to change; code is not.
 EXPECTED_BODY = (
     'let fallback = "apple" '
-    'guard CommandLine.arguments.count > 1 else { return fallback } '
-    'let candidate = CommandLine.arguments[1] '
+    'guard arguments.count > 1 else { return fallback } '
+    'let candidate = arguments[1] '
     'let match = configuration.subcommands.first { '
     '$0._commandName == candidate || $0.configuration.aliases.contains(candidate) '
     '} '
@@ -166,13 +166,13 @@ def extract(path, signature, what):
 
 
 def check_ours(path):
-    body, err = extract(path, "static func toolForParseFailure() -> String",
-                        "toolForParseFailure()")
+    body, err = extract(path, "static func toolForParseFailure(arguments: [String]) -> String",
+                        "toolForParseFailure(arguments:)")
     if err:
         return [err]
     got = normalize(body)
     if got != EXPECTED_BODY:
-        return ["toolForParseFailure() is not the pinned implementation.\n"
+        return ["toolForParseFailure(arguments:) is not the pinned implementation.\n"
                 f"    expected: {EXPECTED_BODY}\n"
                 f"    found   : {got}\n"
                 "    This function decides what argv-derived value reaches the stdout MACHINE\n"
@@ -209,7 +209,7 @@ def check_upstream(apple_swift_path, required, explicit_root, resolved):
                 f"    expected: {EXPECTED_MATCHER}\n"
                 f"    found   : {got}\n"
                 f"    source  : {path}\n"
-                "    Re-derive toolForParseFailure() from the new matcher — under-covering it is\n"
+                "    Re-derive toolForParseFailure(arguments:) from the new matcher — under-covering it is\n"
                 "    exactly the bug this helper was written to fix, and it would reappear here\n"
                 "    without anyone editing our source.")
     return problems
@@ -217,30 +217,67 @@ def check_upstream(apple_swift_path, required, explicit_root, resolved):
 
 # Every `Output.emitError` on the pre-dispatch path must take its `tool` FROM the pinned helper.
 # Pinning the helper alone is not enough: review built a caller that used it only as a GATE —
-# `tool: Apple.toolForParseFailure() == "apple" ? "apple" : CommandLine.arguments[1]` — which emits
-# raw argv bytes while the helper itself stays byte-identical to the pin. That mutant passed the
+# `tool: Apple.toolForParseFailure(arguments: arguments) == "apple" ? "apple" : arguments[1]` —
+# which emits raw argv bytes while the helper itself stays byte-identical to the pin. That mutant passed the
 # lint AND all 28 bats tests, and reproduced the exact bug this change exists to fix. The
 # properties are about the value EMITTED, so the emission sites are part of the subject.
-EXPECTED_EMIT = "Output.emitError(tool: Apple.toolForParseFailure(),"
+EXPECTED_EMIT = "Output.emitError(tool: Apple.toolForParseFailure(arguments: arguments),"
+
+
+def _strip_comments(src):
+    """Drop // line comments and /* */ blocks so a pin can never be satisfied by prose."""
+    src = re.sub(r"/\*.*?\*/", "", src, flags=re.S)
+    return re.sub(r"//[^\n]*", "", src)
+
+
+EXPECTED_EMIT_SITES = 2  # the validation path and the unknown-error path in execute()
 
 
 def check_call_sites(path):
     try:
-        src = open(path, encoding="utf-8").read()
+        src = _strip_comments(open(path, encoding="utf-8").read())
     except OSError as e:
         return [f"cannot read {path}: {e}"]
-    sites = re.findall(r"Output\.emitError\(tool:[^,]*,", src)
-    if not sites:
-        return [f"no Output.emitError(tool: …) call sites found in {path} — the lint must not "
-                "pass by failing to find its subject"]
-    bad = [s for s in sites if " ".join(s.split()) != EXPECTED_EMIT]
+    sites = re.findall(r"Output\.emitError\(\s*tool:[^,]*,", src)
+    if len(sites) != src.count("Output.emitError"):
+        return [f"found {len(sites)} pinnable emitError site(s) but {src.count('Output.emitError')} "
+                "occurrence(s) in the file — a site the regex cannot see is a site that is not pinned"]
+    if len(sites) != EXPECTED_EMIT_SITES:
+        return [f"expected exactly {EXPECTED_EMIT_SITES} executable Output.emitError(tool: …) call "
+                f"sites in {path}, found {len(sites)} — the lint must not pass by losing one of "
+                "its subjects (a replaced site would otherwise go unpinned)"]
+    normalized = [re.sub(r"\(\s+", "(", " ".join(s.split())) for s in sites]
+    bad = [s for s in normalized if s != EXPECTED_EMIT]
     if bad:
         return [f"{len(bad)} of {len(sites)} pre-dispatch emitError site(s) do not take `tool` "
                 "from the pinned helper:\n"
-                + "".join(f"    found   : {' '.join(s.split())}\n" for s in bad)
+                + "".join(f"    found   : {s}\n" for s in bad)
                 + f"    expected: {EXPECTED_EMIT}\n"
                 "    A caller can satisfy the helper pin and still emit argv bytes by using the\n"
                 "    helper as a gate rather than as the value. Both emission sites are pinned."]
+    return []
+
+
+EXPECTED_ENTRY = "Foundation.exit(execute(arguments: CommandLine.arguments, streams: .standard))"
+
+
+def check_entry_point(path):
+    """`main()` must feed the REAL process argv into execute(). The emitError pin only proves the
+    sites pass the `arguments` parameter; this proves that parameter is CommandLine.arguments on
+    the one path that ships, so a refactor cannot route another array into domain resolution."""
+    try:
+        src = _strip_comments(open(path, encoding="utf-8").read())
+    except OSError as e:
+        return [f"cannot read {path}: {e}"]
+    sites = re.findall(r"Foundation\.exit\(\s*execute\([^)]*\)\s*\)", src)
+    if len(sites) != 1:
+        return [f"expected exactly one production execute() entry point in {path}, found "
+                f"{len(sites)} — the lint must not pass by failing to find its subject"]
+    found = re.sub(r"\(\s+", "(", " ".join(sites[0].split()))
+    if found != EXPECTED_ENTRY:
+        return ["main() no longer feeds CommandLine.arguments into execute():\n"
+                f"    found   : {found}\n"
+                f"    expected: {EXPECTED_ENTRY}\n"]
     return []
 
 
@@ -257,7 +294,7 @@ def check_no_default_subcommand(path):
     if re.search(r"\bdefaultSubcommand\s*:", src):
         return ["Apple.configuration now sets `defaultSubcommand:`, which dispatches through "
                 "ArgumentParser's firstChild(equalTo:) rather than firstChild(withName:).\n"
-                "    toolForParseFailure() resolves NAME-based dispatch only, so a bare "
+                "    toolForParseFailure(arguments:) resolves NAME-based dispatch only, so a bare "
                 "`apple --bogus`\n"
                 "    would dispatch into the default subcommand and still report \"apple\". "
                 "Re-derive the\n"
@@ -292,6 +329,7 @@ def main(argv):
     resolved = []
     problems = (check_ours(args[0])
                 + check_call_sites(args[0])
+                + check_entry_point(args[0])
                 + check_no_default_subcommand(args[0])
                 + check_upstream(args[0], "--require-upstream" in flags, upstream_root, resolved))
     if problems:
@@ -301,7 +339,7 @@ def main(argv):
     # Name the resolved subject on SUCCESS too. When only failures named it, there was no way to
     # notice the check had silently retargeted a different scratch tree.
     where = ", ".join(resolved) if resolved else "(upstream check skipped)"
-    print("OK: toolForParseFailure() is the pinned implementation, both emitError sites take "
+    print("OK: toolForParseFailure(arguments:) is pinned, both emitError sites take "
           "`tool` from it, no defaultSubcommand is set, and the matcher agrees in: " + where)
     return 0
 

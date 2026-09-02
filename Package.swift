@@ -55,5 +55,6 @@ let package = Package(
         .testTarget(name: "NotesKitTests", dependencies: ["NotesKit", "AppleKit"]),
         .testTarget(name: "CalendarKitTests", dependencies: ["CalendarKit", "EventKitCore", "AppleKit"]),
         .testTarget(name: "RemindersKitTests", dependencies: ["RemindersKit", "EventKitCore", "AppleKit"]),
+        .testTarget(name: "AppleCLITests", dependencies: ["apple", "AppleKit", argparse]),
     ]
 )

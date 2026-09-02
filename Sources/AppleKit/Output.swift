@@ -63,7 +63,35 @@ public enum Output {
     /// (Q12 [17]). The single primitive every hand-written `--text` renderer should use in
     /// place of `print(...)` so a store-derived string can never carry a driving escape.
     public static func printText(_ line: String) {
-        FileHandle.standardOutput.write(Data((TextSanitize.neutralizeForTerminal(line) + "\n").utf8))
+        ScopedCLIStreams.current.stdout.write(
+            Data((TextSanitize.neutralizeForTerminal(line) + "\n").utf8)
+        )
+    }
+
+    /// Run one command with scoped output streams. Task-local scoping keeps concurrent tests
+    /// isolated without mutating process-global file descriptors.
+    public static func withStreams<T>(_ streams: CLIStreams, operation: () throws -> T) rethrows -> T {
+        try ScopedCLIStreams.$current.withValue(streams, operation: operation)
+    }
+
+    /// Async counterpart for command work that creates child tasks. Task-local values flow to
+    /// those children while concurrent command executions keep independent stream pairs.
+    public static func withStreams<T>(
+        _ streams: CLIStreams,
+        operation: () async throws -> T
+    ) async rethrows -> T {
+        try await ScopedCLIStreams.$current.withValue(streams, operation: operation)
+    }
+
+    /// Write diagnostic bytes to the scoped stderr stream without changing them.
+    public static func writeError(_ data: Data) {
+        ScopedCLIStreams.current.stderr.write(data)
+    }
+
+    /// Write pre-rendered bytes to scoped stdout. Used for parser-owned help and version text,
+    /// whose formatting must remain byte-for-byte under ArgumentParser's control.
+    public static func writeOutput(_ data: Data) {
+        ScopedCLIStreams.current.stdout.write(data)
     }
 
     /// One flat pass over the payload's JSON object → `key: value` lines (nested
@@ -190,8 +218,9 @@ public enum Output {
     static func write(_ data: Data) {
         // `try?` so a consumer closing the pipe early (`apple … | head`) yields a clean
         // exit, not an uncatchable EPIPE trap. Pair with signal(SIGPIPE, SIG_IGN) at start.
-        try? FileHandle.standardOutput.write(contentsOf: data)
-        try? FileHandle.standardOutput.write(contentsOf: Data([0x0a])) // trailing newline
+        var framed = data
+        framed.append(0x0a) // trailing newline
+        ScopedCLIStreams.current.stdout.write(framed)
     }
 }
 

@@ -31,7 +31,7 @@ struct Apple: ParsableCommand {
 
     /// The domain a pre-dispatch failure belongs to, or `"apple"` when none resolved.
     ///
-    /// When `argv[1]` is the subcommand token it names the intended domain even though the parse
+    /// When `arguments[1]` is the subcommand token it names the intended domain even though the parse
     /// failed — `apple notes --bogus` is unambiguously a Notes invocation — and the output contract
     /// (AGENTS.md, docs/DESIGN.md) specifies `tool` on the ERROR envelope with no parse-failure
     /// carve-out. It is not always the subcommand token (`apple --text notes --bogus` and
@@ -75,10 +75,10 @@ struct Apple: ParsableCommand {
     /// correctly here and both report "apple" under the old spelling.) `bats/helpers/subcommand_allowlist.py`
     /// pins this body, both `emitError` call sites, and the upstream matcher. Change it
     /// deliberately when you change these lines; never to make the lint pass.
-    static func toolForParseFailure() -> String {
+    static func toolForParseFailure(arguments: [String]) -> String {
         let fallback = "apple"
-        guard CommandLine.arguments.count > 1 else { return fallback }
-        let candidate = CommandLine.arguments[1]
+        guard arguments.count > 1 else { return fallback }
+        let candidate = arguments[1]
         let match = configuration.subcommands.first {
             $0._commandName == candidate || $0.configuration.aliases.contains(candidate)
         }
@@ -89,50 +89,84 @@ struct Apple: ParsableCommand {
     // `apple … | head` — yields a clean exit, not an uncatchable crash) before dispatch.
     static func main() {
         signal(SIGPIPE, SIG_IGN)
-        do {
-            // Rewrite the natural space-separated negative-value form (`--geo-lon -122.4`,
-            // `--alarm -15m`) that ArgumentParser otherwise rejects (CAL-11 / REM-10). Operates
-            // on a local copy; `CommandLine.arguments` is untouched so `toolForParseFailure`'s
-            // `argv[1]` read stays correct.
-            let args = ArgvPreprocess.mergeNegativeValues(Array(CommandLine.arguments.dropFirst()))
-            var command = try parseAsRoot(args)
+        Foundation.exit(execute(arguments: CommandLine.arguments, streams: .standard))
+    }
+
+    /// Parse and execute one explicit argv without terminating the hosting process.
+    static func execute(arguments: [String], streams: CLIStreams) -> Int32 {
+        execute(arguments: arguments, streams: streams) { command in
             try command.run()
-        } catch let code as ExitCode {
-            // A command body already emitted its JSON envelope via `runGuarded`, then signaled
-            // its exit code by throwing ExitCode. Honor it verbatim — the envelope is already
-            // out; re-emitting here would double-print AND clobber the real exit code (64/65/77).
-            Foundation.exit(code.rawValue)
-        } catch {
-            // Not an ExitCode ⇒ an ArgumentParser outcome that never reached a command body.
-            // The envelope's `tool` names the DOMAIN when argv[1] identifies one — see
-            // `toolForParseFailure()`. An earlier version emitted "apple" unconditionally on the
-            // reasoning that a pre-subcommand parse failure is a binary-level event. That reads
-            // well but contradicts the contract: AGENTS.md and docs/DESIGN.md both specify
-            // `"tool": "<domain>"` on the ERROR envelope as well as the ok one, with no
-            // parse-failure carve-out, so a consumer routing on `tool` was misrouted at exactly
-            // the moment something went wrong.
-            let ecode = Apple.exitCode(for: error)
-            if ecode == .success {
-                Apple.exit(withError: error) // --help / --version: prints to stdout, exit 0
-            }
-            // The human-readable detail may echo operator-supplied argv (e.g. "The value 'X' is
-            // invalid for '--flag'"), so it goes to stderr ONLY — never onto the stdout machine
-            // channel an agent captures. The stdout envelope carries a generic message instead.
-            FileHandle.standardError.write(Data((Apple.fullMessage(for: error) + "\n").utf8))
-            if ecode == .validationFailure {
-                // A genuine parse/validation error (bad flag, missing/extra arg, bad value).
-                Output.emitError(tool: Apple.toolForParseFailure(), type: AppleErrorType.validation,
-                                 message: "invalid arguments (see stderr for details)")
-                Foundation.exit(AppleExit.usage) // 64
-            } else {
-                // A non-parse, non-ExitCode error reached main() — e.g. a future command body
-                // not wrapped in runGuarded. Report it as an internal error, not a usage error.
-                Output.emitError(tool: Apple.toolForParseFailure(), type: AppleErrorType.unknown,
-                                 message: "internal error (see stderr for details)")
-                Foundation.exit(AppleExit.unknown) // 70
+        }
+    }
+
+    /// Internal command runner seam for exercising root-level error handling without invoking a
+    /// live Apple store. Production always uses the overload above.
+    static func execute(
+        arguments: [String],
+        streams: CLIStreams,
+        runner: (inout any ParsableCommand) throws -> Void
+    ) -> Int32 {
+        Output.withStreams(streams) {
+            do {
+                // CAL-11 / REM-10: fold a negative numeric value into its option BEFORE
+                // ArgumentParser sees it (`--offset -1` would otherwise parse `-1` as a flag). Works
+                // on a local copy; `arguments` is untouched so `toolForParseFailure`'s `argv[1]`
+                // read stays correct.
+                let args = ArgvPreprocess.mergeNegativeValues(Array(arguments.dropFirst()))
+                var command = try parseAsRoot(args)
+                try runner(&command)
+                return ExitCode.success.rawValue
+            } catch let code as ExitCode {
+                // A command body already emitted its JSON envelope via `runGuarded`, then signaled
+                // its exit code by throwing ExitCode. Honor it verbatim — the envelope is already
+                // out; re-emitting here would double-print AND clobber the real exit code (64/65/77).
+                return code.rawValue
+            } catch {
+                // Not an ExitCode ⇒ an ArgumentParser outcome that never reached a command body.
+                // The envelope's `tool` names the DOMAIN when argv[1] identifies one — see
+                // `toolForParseFailure(arguments:)`. An earlier version emitted "apple"
+                // unconditionally on the reasoning that a pre-subcommand parse failure is a
+                // binary-level event. That reads well but contradicts the contract: AGENTS.md and
+                // docs/DESIGN.md both specify `"tool": "<domain>"` on the ERROR envelope as well as
+                // the ok one, with no parse-failure carve-out, so a consumer routing on `tool` was
+                // misrouted at exactly the moment something went wrong.
+                let ecode = Apple.exitCode(for: error)
+                let message = Apple.fullMessage(for: error)
+                if ecode == .success {
+                    // --help / --version: ArgumentParser's own text, stdout, exit 0.
+                    if !message.isEmpty {
+                        Output.writeOutput(Data((message + "\n").utf8))
+                    }
+                    return ecode.rawValue
+                }
+                // The human-readable detail may echo operator-supplied argv (e.g. "The value 'X' is
+                // invalid for '--flag'"), so it goes to stderr ONLY — never onto the stdout machine
+                // channel an agent captures. The stdout envelope carries a generic message instead.
+                if !message.isEmpty {
+                    Output.writeError(Data((message + "\n").utf8))
+                }
+                if ecode == .validationFailure {
+                    // A genuine parse/validation error (bad flag, missing/extra arg, bad value).
+                    Output.emitError(
+                        tool: Apple.toolForParseFailure(arguments: arguments),
+                        type: AppleErrorType.validation,
+                        message: "invalid arguments (see stderr for details)"
+                    )
+                    return AppleExit.usage
+                } else {
+                    // A non-parse, non-ExitCode error reached the root — e.g. a future command body
+                    // not wrapped in runGuarded. Report it as an internal error, not a usage error.
+                    Output.emitError(
+                        tool: Apple.toolForParseFailure(arguments: arguments),
+                        type: AppleErrorType.unknown,
+                        message: "internal error (see stderr for details)"
+                    )
+                    return AppleExit.unknown
+                }
             }
         }
     }
+
 }
 
 /// `apple version` — machine-readable version + output schema, for runtime capability

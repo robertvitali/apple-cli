@@ -312,7 +312,7 @@ a literal MCP transcription, and why:
   `{"error":{"message":"invalid arguments (see stderr for details)","type":"validation_error"},
   "ok":false,"schema_version":1,"tool":"contacts"}`. The detail stays on stderr because it echoes
   operator argv; the stdout envelope carries a generic message. **`tool` names the DOMAIN**, per
-  AGENTS.md's `tool: "<domain>"` contract — `Apple.toolForParseFailure()` resolves `argv[1]`
+  AGENTS.md's `tool: "<domain>"` contract — `Apple.toolForParseFailure(arguments:)` resolves `argv[1]`
   against the registered subcommand names. This closes CONTACTS-L3(a), which was a genuine
   cross-domain deviation: the binary previously emitted `"apple"` for every pre-dispatch failure,
   so a consumer routing on `tool` was misrouted at exactly the moment something went wrong.

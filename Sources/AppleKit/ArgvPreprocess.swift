@@ -14,9 +14,8 @@ import Foundation
 /// options that legitimately take a negative value, and ONLY when the following token is
 /// unambiguously a negative number / time-offset (`-` then a digit or a dot). No other option,
 /// positional, or already-attached (`=`) form is touched, so the blast radius on the shared
-/// entry point is minimal. Applied to a LOCAL copy of the args passed to `parseAsRoot`;
-/// `CommandLine.arguments` itself is never mutated (so `toolForParseFailure`'s `argv[1]` read
-/// is unaffected).
+/// entry point is minimal. Applied to a LOCAL copy of the explicit args passed to `parseAsRoot`;
+/// the unmodified explicit argv remains available for `toolForParseFailure(arguments:)`.
 public enum ArgvPreprocess {
 
     /// Option long-names (WITHOUT the leading `--`) whose value may be negative:
