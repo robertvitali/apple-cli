@@ -2,12 +2,15 @@ import Testing
 import Foundation
 import SQLite3
 @testable import MailKit
+import TestSupport
 
 /// Hermetic tests against a synthetic Envelope Index fixture (temp SQLite, no real mail, no
 /// TCC). Exercises the query builder + dual mailbox-linkage model end-to-end — the logic the
 /// live-only paths can't cover in CI.
 @Suite("EnvelopeIndex (synthetic fixture)")
 struct EnvelopeIndexTests {
+
+    private let scratch = ScratchDirs("envelope-index")
 
     static let iCloudUUID = "AAAA1111-1111-1111-1111-111111111111"
     static let gmailUUID = "BBBB2222-2222-2222-2222-222222222222"
@@ -17,9 +20,10 @@ struct EnvelopeIndexTests {
     ///    and 11 (subject-less → LEFT JOIN); iCloud Sent (mbox 2) msg 12 (thread partner of 10).
     ///  - Gmail All Mail (mbox 3, direct home) msg 13, labeled into Gmail INBOX (mbox 4, a label
     ///    with source=3) via the `labels` table.
-    static func makeFixture() -> String {
-        let path = FileManager.default.temporaryDirectory
-            .appendingPathComponent("apple-cli-fixture-\(UUID().uuidString).sqlite").path
+    /// `directory` comes from a suite-held `ScratchDirs`, which reclaims the whole tree (fixture,
+    /// `-wal`, `-shm`) when the test instance is released. Callers therefore need no `defer`.
+    static func makeFixture(in directory: URL) -> String {
+        let path = directory.appendingPathComponent("apple-cli-fixture-\(UUID().uuidString).sqlite").path
         var db: OpaquePointer?
         _ = sqlite3_open(path, &db)
         let sql = """
@@ -32,7 +36,7 @@ struct EnvelopeIndexTests {
         CREATE TABLE subjects (ROWID INTEGER PRIMARY KEY, subject TEXT);
         INSERT INTO subjects VALUES (100,'Hello'),(103,'Gmail msg');
         CREATE TABLE addresses (ROWID INTEGER PRIMARY KEY, address TEXT, comment TEXT);
-        INSERT INTO addresses VALUES (1000,'alice@x.io','Alice'),(1001,'me@example.com','Me'),(1002,'bob@y.io','Bob');
+        INSERT INTO addresses VALUES (1000,'alice@example.com','Alice'),(1001,'me@example.com','Me'),(1002,'bob@example.org','Bob');
         CREATE TABLE summaries (ROWID INTEGER PRIMARY KEY, summary TEXT);
         INSERT INTO summaries VALUES (300,'Preview of hello');
         CREATE TABLE message_global_data (ROWID INTEGER PRIMARY KEY, message_id_header TEXT);
@@ -63,17 +67,12 @@ struct EnvelopeIndexTests {
     }
 
     /// `EnvelopeIndex` opens with `copyToTemp: true`, so the fixture is genuinely unneeded once
-    /// `init` returns — delete it. Without this the suite leaked one file per test invocation into
-    /// `$TMPDIR`: 979 files, ~42 MB, on the machine where this was found. Poor form in any suite,
-    /// and worse in the one repo whose current work is "we leak private data into `$TMPDIR`".
+    /// `init` returns. Without cleanup the suite leaked one file per test invocation into `$TMPDIR`:
+    /// 979 files, ~42 MB, on the machine where this was found. Poor form in any suite, and worse in
+    /// the one repo whose current work is "we leak private data into `$TMPDIR`". `ScratchDirs` now
+    /// owns the reclaim, so no `defer` here can be forgotten.
     private func index() throws -> EnvelopeIndex {
-        let path = EnvelopeIndexTests.makeFixture()
-        defer {
-            for p in [path, path + "-wal", path + "-shm"] {
-                try? FileManager.default.removeItem(atPath: p)
-            }
-        }
-        return try EnvelopeIndex(explicitPath: path)
+        return try EnvelopeIndex(explicitPath: EnvelopeIndexTests.makeFixture(in: try scratch.directory()))
     }
 
     @Test func loadsMailboxesAndLinkageTypes() throws {
@@ -136,7 +135,7 @@ struct EnvelopeIndexTests {
         let idx = try index()
         let recips = try idx.recipients(messageRowid: 10)
         #expect(recips.to == ["Me <me@example.com>"])
-        #expect(recips.cc == ["Bob <bob@y.io>"])
+        #expect(recips.cc == ["Bob <bob@example.org>"])
         let atts = try idx.attachments(messageRowid: 10)
         #expect(atts.count == 1)
         #expect(atts.first?.name == "report.pdf")

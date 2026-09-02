@@ -168,7 +168,7 @@ struct TemplateStoreTests {
         #expect(throws: Error.self) { try store.save(name: "x", body: "", subject: "S") }
         #expect(throws: Error.self) { try store.save(name: "x", body: "   \n ", subject: "S") }
         // A newline in the subject would smuggle an extra header line into the file.
-        #expect(throws: Error.self) { try store.save(name: "x", body: "B", subject: "A\nbcc: evil@x.io") }
+        #expect(throws: Error.self) { try store.save(name: "x", body: "B", subject: "A\nbcc: evil@example.com") }
         #expect(throws: Error.self) { try store.save(name: "x", body: "B", subject: "A\rB") }
     }
 

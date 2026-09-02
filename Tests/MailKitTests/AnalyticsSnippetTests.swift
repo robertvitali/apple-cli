@@ -3,6 +3,7 @@ import Foundation
 import SQLite3
 @testable import AppleKit   // the cleanup registry's test accessors are internal, not API
 @testable import MailKit
+import TestSupport
 
 /// The `summaries` join that feeds `Analytics.hasQuestion`'s body test (COMPLETION-LOOP Q4e).
 ///
@@ -17,6 +18,8 @@ import SQLite3
 @Suite("Analytics snippet sourcing")
 struct AnalyticsSnippetTests {
 
+    private let scratch = ScratchDirs("analytics-snippet")
+
     static let acct = "AAAAAAAA-1111-2222-3333-444444444444"
 
     /// A minimal Envelope Index.
@@ -26,9 +29,8 @@ struct AnalyticsSnippetTests {
     /// check entirely still passed, because the degrade fixture had no table either. The mixed
     /// schema (`table: true, column: false`) is the one the second conjunct exists for — on it a
     /// hard-coded join throws `no such column: m.summary`.
-    static func fixture(table: Bool, column: Bool) -> String {
-        let path = FileManager.default.temporaryDirectory
-            .appendingPathComponent("apple-cli-snipfx-\(UUID().uuidString).sqlite").path
+    static func fixture(table: Bool, column: Bool, in directory: URL) -> String {
+        let path = directory.appendingPathComponent("apple-cli-snipfx-\(UUID().uuidString).sqlite").path
         var db: OpaquePointer?
         _ = sqlite3_open(path, &db)
         var sql = """
@@ -37,7 +39,7 @@ struct AnalyticsSnippetTests {
         CREATE TABLE subjects (ROWID INTEGER PRIMARY KEY, subject TEXT);
         INSERT INTO subjects VALUES (100,'Quiet subject'),(101,'Does this work?');
         CREATE TABLE addresses (ROWID INTEGER PRIMARY KEY, address TEXT, comment TEXT);
-        INSERT INTO addresses VALUES (1000,'alice@x.io','Alice');
+        INSERT INTO addresses VALUES (1000,'alice@example.com','Alice');
         CREATE TABLE attachments (ROWID INTEGER PRIMARY KEY, message INT, attachment_id TEXT, name TEXT);
         INSERT INTO attachments VALUES (1,10,'1.1','a.pdf'),(2,10,'1.2','b.png'),(3,11,'2.1','c.txt');
         CREATE TABLE messages (ROWID INTEGER PRIMARY KEY, subject_prefix TEXT, subject INT, \(column ? "summary INT," : "")
@@ -71,9 +73,8 @@ struct AnalyticsSnippetTests {
         return path
     }
 
-    static func index(table: Bool, column: Bool) throws -> EnvelopeIndex {
-        let p = fixture(table: table, column: column)
-        defer { for s in ["", "-wal", "-shm"] { try? FileManager.default.removeItem(atPath: p + s) } }
+    func index(table: Bool, column: Bool) throws -> EnvelopeIndex {
+        let p = Self.fixture(table: table, column: column, in: try scratch.directory())
         return try EnvelopeIndex(explicitPath: p)
     }
 
@@ -91,7 +92,7 @@ struct AnalyticsSnippetTests {
     /// the "measured identical on the real store" claim.
     @Test("analyticsRows attachment_count survives the grouped-join rewrite")
     func attachmentCountsFromGroupedJoin() throws {
-        let rows = try rowsByID(Self.index(table: true, column: true))
+        let rows = try rowsByID(index(table: true, column: true))
         #expect((rows[10]?["attachment_count"] ?? nil) == "2")
         #expect((rows[11]?["attachment_count"] ?? nil) == "1")
         #expect((rows[12]?["attachment_count"] ?? nil) == "0")
@@ -99,7 +100,7 @@ struct AnalyticsSnippetTests {
 
     @Test("analyticsRows sources snippet from the summaries table")
     func joinsSummaries() throws {
-        let rows = try rowsByID(Self.index(table: true, column: true))
+        let rows = try rowsByID(index(table: true, column: true))
         #expect(rows.count == 3, "control: all three messages are returned")
 
         // Without the join every one of these is nil — which is precisely the shipped bug.
@@ -110,11 +111,11 @@ struct AnalyticsSnippetTests {
 
     @Test("a body-only question now scores as a question, as the oracle scores it")
     func bodyOnlyQuestionIsSeen() throws {
-        let rows = try rowsByID(Self.index(table: true, column: true))
+        let rows = try rowsByID(index(table: true, column: true))
 
         func row(_ id: Int) throws -> Analytics.Row {
             let r = try #require(rows[id])
-            return Analytics.Row(rowid: id, senderAddress: "alice@x.io", senderName: "Alice",
+            return Analytics.Row(rowid: id, senderAddress: "alice@example.com", senderName: "Alice",
                                  subject: (r["subject"] ?? nil) ?? "", dateReceived: nil,
                                  read: true, flagged: false, hasAttachment: false, mailboxRowid: 1,
                                  snippet: r["snippet"] ?? nil)
@@ -139,7 +140,7 @@ struct AnalyticsSnippetTests {
         // is Apple's private format and varies by Mail version. A hard-coded join turns every
         // analytics query into an error here — a far worse outcome than the weaker question
         // detection the join exists to improve.
-        let rows = try rowsByID(Self.index(table: false, column: false))
+        let rows = try rowsByID(index(table: false, column: false))
         #expect(rows.count == 3, "the query must still succeed and return every message")
         #expect((rows[10]?["snippet"] ?? nil) == nil)
         #expect((rows[12]?["subject"] ?? nil) == "Does this work?", "and the rest of the row is intact")
@@ -157,7 +158,7 @@ struct AnalyticsSnippetTests {
         // distinguishes the second half. Review caught that deleting the column check entirely left
         // the suite green, because the other degrade fixture has no table either. On this schema a
         // hard-coded join throws `no such column: m.summary`.
-        let rows = try rowsByID(Self.index(table: true, column: false))
+        let rows = try rowsByID(index(table: true, column: false))
         #expect(rows.count == 3, "the query must still succeed on a mixed schema")
         #expect((rows[10]?["snippet"] ?? nil) == nil, "and simply carry no snippet")
     }
@@ -171,9 +172,8 @@ struct AnalyticsSnippetTests {
         // There are TWO truncations and this asserts both SEPARATELY, because with `SUBSTR` in
         // place the snippet reaching Swift is already 500 chars, so `.prefix(500)` is unreachable
         // through the query and an earlier version of this test silently covered only the SQL half.
-        let path = FileManager.default.temporaryDirectory
+        let path = try scratch.directory()
             .appendingPathComponent("apple-cli-snipfx-\(UUID().uuidString).sqlite").path
-        defer { for x in ["", "-wal", "-shm"] { try? FileManager.default.removeItem(atPath: path + x) } }
         var db: OpaquePointer?
         _ = sqlite3_open(path, &db)
         let far = String(repeating: "a", count: 600) + "?"     // the only "?" sits at index 600
@@ -184,7 +184,7 @@ struct AnalyticsSnippetTests {
         CREATE TABLE subjects (ROWID INTEGER PRIMARY KEY, subject TEXT);
         INSERT INTO subjects VALUES (100,'Quiet subject');
         CREATE TABLE addresses (ROWID INTEGER PRIMARY KEY, address TEXT, comment TEXT);
-        INSERT INTO addresses VALUES (1000,'alice@x.io','Alice');
+        INSERT INTO addresses VALUES (1000,'alice@example.com','Alice');
         CREATE TABLE attachments (ROWID INTEGER PRIMARY KEY, message INT, attachment_id TEXT, name TEXT);
         CREATE TABLE summaries (ROWID INTEGER PRIMARY KEY, summary TEXT);
         INSERT INTO summaries VALUES (300,'\(far)'),(301,'\(near)');
@@ -236,16 +236,15 @@ struct AnalyticsSnippetTests {
 @Suite("Generated .eml destination")
 struct EmlDestinationTests {
 
+    private let scratch = ScratchDirs("eml-destination")
+
     func base(_ label: String) throws -> URL {
-        let d = FileManager.default.temporaryDirectory
-            .appendingPathComponent("apple-cli-emlbase-\(label)-\(UUID().uuidString)", isDirectory: true)
-        try FileManager.default.createDirectory(at: d, withIntermediateDirectories: true)
-        return d
+        try scratch.directory()
     }
 
     @Test("with no --out the .eml goes in an owned 0700 directory, not the shared temp root")
     func tempGoesInOwnedDirectory() throws {
-        let b = try base("owned"); defer { try? FileManager.default.removeItem(at: b) }
+        let b = try base("owned")
         let dest = try emlDestURL(out: nil, materialise: true, base: b)
 
         #expect(dest.deletingLastPathComponent().lastPathComponent == "apple-cli-eml",
@@ -261,7 +260,7 @@ struct EmlDestinationTests {
         // A dry-run reaches this to report the planned destination. Before the materialise split it
         // created the directory and unlinked every .eml older than 24h — and could newly exit 69,
         // where the same preview previously could not fail at all.
-        let b = try base("pure"); defer { try? FileManager.default.removeItem(at: b) }
+        let b = try base("pure")
         let dest = try emlDestURL(out: nil, materialise: false, base: b)
 
         #expect(dest.deletingLastPathComponent().lastPathComponent == "apple-cli-eml",
@@ -274,7 +273,7 @@ struct EmlDestinationTests {
 
     @Test("a preview cannot fail on an occupied path where it previously could not fail")
     func dryRunDoesNotAcquireNewFailures() throws {
-        let b = try base("occupied"); defer { try? FileManager.default.removeItem(at: b) }
+        let b = try base("occupied")
         // A plain file squatting the directory name makes `make` throw. A preview must not.
         try Data("x".utf8).write(to: b.appendingPathComponent("apple-cli-eml"))
         _ = try emlDestURL(out: nil, materialise: false, base: b)     // must not throw
@@ -286,7 +285,7 @@ struct EmlDestinationTests {
         // Every other reaper test calls `OwnedTempDir.reapFiles` directly. Nothing asserted that
         // GENERATING a temp .eml reaps anything — delete the reap call from `emlTempDirectory` and
         // the whole suite stayed green, on the one behaviour this change exists for.
-        let b = try base("reap"); defer { try? FileManager.default.removeItem(at: b) }
+        let b = try base("reap")
         let dir = try OwnedTempDir.make("apple-cli-eml", base: b)
         let stale = dir.appendingPathComponent("apple-cli-stale.eml")
         let fresh = dir.appendingPathComponent("apple-cli-fresh.eml")
@@ -304,7 +303,7 @@ struct EmlDestinationTests {
 
     @Test("an explicit --out path is honoured exactly, never relocated")
     func explicitOutIsUntouched() throws {
-        let b = try base("out"); defer { try? FileManager.default.removeItem(at: b) }
+        let b = try base("out")
         let want = b.appendingPathComponent("operator-chose-this.eml")
         let got = try emlDestURL(out: want.path, materialise: true)
         // The operator picked the path; moving it into our private directory would silently break

@@ -91,7 +91,7 @@ TRUSTED_HOSTED_FILE_SHA256 = {
     "bats/hosted/bounded_exec.bats": "13e4976b41a295182873e45c7f33c84dd7712e2ee16399fc6c0fe561056d4c26",
     "bats/hosted/calendar.bats": "66fb10f26f2fd05f957f418f127849c9eda65d3118f69175411166ccba9250db",
     "bats/hosted/contacts.bats": "b8affdec28680ced3fe6c09cf77bbc3a557df6a024b587899f975b5c43c26153",
-    "bats/hosted/mail.bats": "d98f97623ab335f1a67d26004564fc7a12b174d026fa81d438260074c26cb394",
+    "bats/hosted/mail.bats": "d98f0d870cd24fc5113924b309760a3e63289c665602b86f979cc971bb662b03",
     "bats/hosted/messages.bats": "be4463669e7d3eb01d44f3822f1b47665d593ccf1bfeed709b66fffe675467f6",
     "bats/hosted/notes.bats": "d55248916ab5fd73995649417e88a23a46b2bc3f856b963eb0450f187d4ac1f4",
     "bats/hosted/reminders.bats": "3ff5cdcfe390c754795566c865c888abf86cefe2ddabe65a483ce705f8d22fd4",

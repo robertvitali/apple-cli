@@ -161,8 +161,10 @@ struct SendRateLimiterTests {
     /// end-to-end and any CLI-tier test would spend the operator's real send budget.
     @Test("APPLE_SEND_RATELIMIT_STATE redirects the state file for the CLI tier")
     func envOverrideIsHonored() {
-        let real = SendRateLimiter.stateURL()
-        #expect(real.path.hasSuffix(".apple-cli/send-rate-limit.json"))
+        TestEnvironment.withoutRateLimitOverrides {
+            let real = SendRateLimiter.stateURL()
+            #expect(real.path.hasSuffix(".apple-cli/send-rate-limit.json"))
+        }
         // The explicit parameter must still win over the env var (logic tier beats CLI tier).
         let explicit = tmpState("precedence")
         #expect(SendRateLimiter.stateURL(override: explicit) == explicit)

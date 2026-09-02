@@ -237,13 +237,18 @@ struct MoveCommand: ParsableCommand {
     @Flag(name: .long, help: "Gmail label-move handling (copy + delete).") var gmailMode = false
 
     func run() throws {
+        try run(contextFactory: { try MailContext() }, scriptFactory: { MailScript() })
+    }
+
+    func run(contextFactory: () throws -> MailContext,
+             scriptFactory: () -> MailScript) throws {
         try runGuarded(tool: "mail") {
             // Write-model v2 preamble (docs/write-model-v2.md): bind both decisions once.
             try TestMode.validateWriteEnvironment()
             let sandboxActive = try TestMode.sandboxActive(flag: global.testMode)
             let willExecute = try global.willExecute(defaultDryRun: false)
 
-            let ctx = try MailContext()
+            let ctx = try contextFactory()
             let effectiveSource = source ?? "INBOX"
             let (msgs, filterBased, skipNote) = try resolveTargets(ctx: ctx, ids: ids, match: match, account: account, mailbox: effectiveSource, mailboxWasExplicit: source != nil, defaultMax: 50)
             let scopeNote = filterBased ? mailboxScopeNote(effectiveSource) : nil
@@ -258,7 +263,7 @@ struct MoveCommand: ParsableCommand {
             // the SAME executeMessageMutation gate (per-message subject-label check when the sandbox
             // is active, all-or-nothing) — gmail-mode weakens no safety gate, and its `delete` is a
             // recoverable move-to-Trash, the same reversible class as the plain `delete` command.
-            let script = MailScript()
+            let script = scriptFactory()
             let (applied, notFound) = try executeMessageMutation(msgs, sandboxActive: sandboxActive) { imid, acct in
                 if gmailMode {
                     return try script.gmailMove(internetMessageID: imid, accountName: acct, toMailbox: to)
@@ -282,6 +287,11 @@ struct MarkCommand: ParsableCommand {
     @Flag(name: .long) var unread = false
 
     func run() throws {
+        try run(contextFactory: { try MailContext() }, scriptFactory: { MailScript() })
+    }
+
+    func run(contextFactory: () throws -> MailContext,
+             scriptFactory: () -> MailScript) throws {
         try runGuarded(tool: "mail") {
             // Write-model v2 preamble.
             try TestMode.validateWriteEnvironment()
@@ -291,7 +301,7 @@ struct MarkCommand: ParsableCommand {
             let target = try triState(read, unread, "read", "unread")
             guard let markRead = target else { throw AppleError.validation("specify --read or --unread.") }
             try enforceBulkCap(ids, verb: "mark")   // BEFORE MailContext() — see enforceBulkCap
-            let ctx = try MailContext()
+            let ctx = try contextFactory()
             // gap23: seed the ACTION-INVERSE so --max budgets CHANGES (oracle B seeds
             // "read status is false" for mark_read before any other predicate).
             let effectiveMailbox = mailbox ?? "INBOX"
@@ -304,7 +314,7 @@ struct MarkCommand: ParsableCommand {
                     dry_run: true, executed: false, messages: msgs, detail: [:], note: skipNote,
                     applied: nil, not_found: nil, scope_note: scopeNote), text: global.text, sandboxActive: sandboxActive); return
             }
-            let script = MailScript()
+            let script = scriptFactory()
             let (applied, notFound) = try executeMessageMutation(msgs, sandboxActive: sandboxActive) { imid, acct in
                 try script.setRead(internetMessageID: imid, accountName: acct, read: markRead)
             }
@@ -325,6 +335,11 @@ struct FlagCommand: ParsableCommand {
     @Flag(name: .long, help: "Remove the flag.") var unflag = false
 
     func run() throws {
+        try run(contextFactory: { try MailContext() }, scriptFactory: { MailScript() })
+    }
+
+    func run(contextFactory: () throws -> MailContext,
+             scriptFactory: () -> MailScript) throws {
         try runGuarded(tool: "mail") {
             // Write-model v2 preamble.
             try TestMode.validateWriteEnvironment()
@@ -346,7 +361,7 @@ struct FlagCommand: ParsableCommand {
                 throw AppleError.validation("--unflag conflicts with --color \(color); pass --unflag (or --color none) to clear, or --color \(color) alone to set.")
             }
             let clearing = unflag || wantsNone
-            let ctx = try MailContext()
+            let ctx = try contextFactory()
             // gap23: inverse seed — flag targets the unflagged, unflag targets the flagged.
             // EXCEPT recolor (an explicit non-none --color): seeding flagged:false there made
             // recoloring already-flagged mail impossible via the filter path, a capability the
@@ -371,7 +386,7 @@ struct FlagCommand: ParsableCommand {
             // resolved color index (red default).
             let flagged = !clearing
             let colorIndex = flagged ? (MailFlagColor.fromToken(colorName)?.rawValue) : nil
-            let script = MailScript()
+            let script = scriptFactory()
             let (applied, notFound) = try executeMessageMutation(msgs, sandboxActive: sandboxActive) { imid, acct in
                 try script.setFlag(internetMessageID: imid, accountName: acct, flagged: flagged, colorIndex: colorIndex)
             }
@@ -403,6 +418,11 @@ struct DeleteCommand: ParsableCommand {
     static let surfaceDefaultDryRun = true
 
     func run() throws {
+        try run(contextFactory: { try MailContext() }, scriptFactory: { MailScript() })
+    }
+
+    func run(contextFactory: () throws -> MailContext,
+             scriptFactory: () -> MailScript) throws {
         try runGuarded(tool: "mail") {
             // Write-model v2 preamble (see surfaceDefaultDryRun above for the trash carve-out).
             try TestMode.validateWriteEnvironment()
@@ -440,7 +460,7 @@ struct DeleteCommand: ParsableCommand {
                     throw AppleError.mailSafety("permanent delete is IRREVERSIBLE and its subject label is spoofable, so the label alone does not authorize it — refused. An operator must set \(DeleteCommand.operatorEnvVar) (1/true/yes) to allow it.")
                 }
             }
-            let script = MailScript()
+            let script = scriptFactory()
             // Resolve the account's trash mailboxes BEFORE target resolution, because for
             // `--permanent` they determine BOTH where we search and where we may erase. On the
             // execute path this is a hard failure (see below); on a dry-run it is best-effort so
@@ -473,7 +493,7 @@ struct DeleteCommand: ParsableCommand {
             // multi-account case for no safety gain. An explicit --mailbox always wins.
             let effectiveMailbox = mailbox ?? (permanent ? "All" : "INBOX")
             try enforceBulkCap(ids, verb: "delete")   // BEFORE MailContext() — see enforceBulkCap
-            let ctx = try MailContext()
+            let ctx = try contextFactory()
             let (msgs, filterBased, skipNote) = try resolveTargets(ctx: ctx, ids: ids, match: match, account: account, mailbox: effectiveMailbox, mailboxWasExplicit: mailbox != nil, defaultMax: 5)
             let scopeNote = filterBased ? mailboxScopeNote(effectiveMailbox) : nil
             if permanent && willExecute {
@@ -583,6 +603,10 @@ struct TrashEmpty: ParsableCommand {
     static let surfaceDefaultDryRun = true
 
     func run() throws {
+        try run(scriptFactory: { MailScript() })
+    }
+
+    func run(scriptFactory: () -> MailScript) throws {
         try runGuarded(tool: "mail") {
             // Write-model v2 preamble. TRASH SURFACE: dry-run stays the DEFAULT (oracle B
             // manage_trash dry_run=True); --confirm and the operator env var below are
@@ -602,7 +626,7 @@ struct TrashEmpty: ParsableCommand {
             // about a junk value, least of all with the more destructive one being lenient
             // (review-caught: this read used to sit inside the willExecute branch).
             let operatorAllowed = try TestMode.truthyEnv(TrashEmpty.operatorEnvVar)
-            let script = MailScript()
+            let script = scriptFactory()
             // Enumerating trash mailboxes is a pure READ. It is best-effort ONLY on the preview
             // path (so a dry-run still renders, and stays CI-runnable, without Mail); on the
             // execute path a failed read MUST propagate — otherwise an unreadable account would
@@ -851,6 +875,11 @@ struct AttachmentsSave: ParsableCommand {
     }
 
     func run() throws {
+        try run(contextFactory: { try MailContext() }, scriptFactory: { MailScript() })
+    }
+
+    func run(contextFactory: () throws -> MailContext,
+             scriptFactory: () -> MailScript) throws {
         try runGuarded(tool: "mail") {
             // Write-model v2 preamble. attachments save EXECUTES by default (oracle A
             // save_attachments writes to disk on call); path confinement above the dry-run
@@ -920,7 +949,7 @@ struct AttachmentsSave: ParsableCommand {
                 }
             }
 
-            let ctx = try MailContext()
+            let ctx = try contextFactory()
             let row: [String: String?]
             if let id {
                 guard let r = try resolveMessageRow(ctx: ctx, id: id) else { throw AppleError.notFound("no message for id '\(id)'.") }
@@ -950,7 +979,7 @@ struct AttachmentsSave: ParsableCommand {
             let liveNames: [String]?
             if let internetID = msg.internet_message_id {
                 let resolution = Self.resolveLiveAttachmentNames {
-                    try MailScript().listAttachments(
+                    try scriptFactory().listAttachments(
                         internetMessageID: internetID, accountName: msg.account)
                 }
                 liveNames = resolution.names
@@ -1046,7 +1075,7 @@ struct AttachmentsSave: ParsableCommand {
                 try Self.validateDestinationsBeforeSave(
                     destPaths: pairs.map(\.destPath), directory: absDir, outPath: absOut,
                     rawOut: rawOut, allowOutsideHome: allowOutsideHome)
-                guard let saved = try MailScript().saveAttachments(internetMessageID: messageID, accountName: acct, pairs: pairs) else {
+                guard let saved = try scriptFactory().saveAttachments(internetMessageID: messageID, accountName: acct, pairs: pairs) else {
                     throw AppleError.upstream("message '\(rowid)' could not be located in Mail.app to save its attachments; the Mail.app locator skips Gmail '[Gmail]/*' mailboxes (All Mail, Sent, …). Move it to INBOX, or save it from Mail.app.")
                 }
                 savedIndices = saved
@@ -1076,6 +1105,11 @@ struct MailboxesCreate: ParsableCommand {
     @Option(name: .long, help: "Optional parent mailbox for nesting.") var parent: String?
 
     func run() throws {
+        try run(contextFactory: { try MailContext() }, scriptFactory: { MailScript() })
+    }
+
+    func run(contextFactory: () throws -> MailContext,
+             scriptFactory: () -> MailScript) throws {
         try runGuarded(tool: "mail") {
             // Write-model v2 preamble.
             try TestMode.validateWriteEnvironment()
@@ -1131,13 +1165,13 @@ struct MailboxesCreate: ParsableCommand {
             if sandboxActive, !(segments.first ?? "").hasPrefix(TestMode.sandboxPrefix) {
                 throw AppleError.mailSafety("sandbox active: mailbox path '\(segments.joined(separator: "/"))' is not a labeled test item (its first segment must start with \"\(TestMode.sandboxPrefix)\") — refusing.", sandbox: true)
             }
-            let ctx = try MailContext()
+            let ctx = try contextFactory()
             let uuid = try ctx.requireAccountUUID(account)
             let fullPath = segments.joined(separator: "/")
             var executed = false
             let note: String? = nil
             if willExecute {
-                try MailScript().createMailbox(accountName: account, path: fullPath)
+                try scriptFactory().createMailbox(accountName: account, path: fullPath)
                 executed = true
             }
             // `mailbox` + `parent` are oracle A create_mailbox's wire keys and now echo the

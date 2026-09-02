@@ -5,9 +5,9 @@ import Foundation
 @Suite("EmlBuilder")
 struct EmlBuilderTests {
     @Test func plainTextMessage() throws {
-        let eml = try EmlBuilder(from: "me@x.io", to: ["a@y.io"], subject: "Hi", textBody: "Hello there").build()
-        #expect(eml.contains("From: me@x.io"))
-        #expect(eml.contains("To: a@y.io"))
+        let eml = try EmlBuilder(from: "me@example.com", to: ["a@example.org"], subject: "Hi", textBody: "Hello there").build()
+        #expect(eml.contains("From: me@example.com"))
+        #expect(eml.contains("To: a@example.org"))
         #expect(eml.contains("Subject: Hi"))
         #expect(eml.contains("MIME-Version: 1.0"))
         #expect(eml.contains("Content-Type: text/plain; charset=UTF-8"))
@@ -15,7 +15,7 @@ struct EmlBuilderTests {
     }
 
     @Test func htmlMultipartAlternative() throws {
-        let eml = try EmlBuilder(to: ["a@y.io"], subject: "Rich", textBody: "plain", htmlBody: "<b>bold</b>").build()
+        let eml = try EmlBuilder(to: ["a@example.org"], subject: "Rich", textBody: "plain", htmlBody: "<b>bold</b>").build()
         #expect(eml.contains("multipart/alternative"))
         #expect(eml.contains("text/plain"))
         #expect(eml.contains("text/html"))
@@ -25,7 +25,7 @@ struct EmlBuilderTests {
 
     @Test func attachmentsMultipartMixedBase64() throws {
         let att = EmlBuilder.Attachment(filename: "note.txt", mimeType: "text/plain", data: Data("hi".utf8))
-        let eml = try EmlBuilder(to: ["a@y.io"], subject: "See file", textBody: "body", attachments: [att]).build()
+        let eml = try EmlBuilder(to: ["a@example.org"], subject: "See file", textBody: "body", attachments: [att]).build()
         #expect(eml.contains("multipart/mixed"))
         #expect(eml.contains("Content-Disposition: attachment; filename=\"note.txt\""))
         #expect(eml.contains("Content-Transfer-Encoding: base64"))
@@ -41,14 +41,14 @@ struct EmlBuilderTests {
         // Email header injection (CWE-93): a subject/recipient with \r\n must throw, not smuggle
         // a Bcc/From header into the generated .eml.
         #expect(throws: Error.self) {
-            _ = try EmlBuilder(to: ["a@y.io"], subject: "Hi\r\nBcc: attacker@evil.com", textBody: "x").build()
+            _ = try EmlBuilder(to: ["a@example.org"], subject: "Hi\r\nBcc: attacker@evil.com", textBody: "x").build()
         }
         #expect(throws: Error.self) {
-            _ = try EmlBuilder(to: ["victim@x.io\r\nBcc: attacker@evil.com"], subject: "Hi", textBody: "x").build()
+            _ = try EmlBuilder(to: ["victim@example.com\r\nBcc: attacker@evil.com"], subject: "Hi", textBody: "x").build()
         }
         #expect(throws: Error.self) {
             let att = EmlBuilder.Attachment(filename: "a\r\nX-Evil: 1.txt", mimeType: "text/plain", data: Data())
-            _ = try EmlBuilder(to: ["a@y.io"], subject: "s", textBody: "x", attachments: [att]).build()
+            _ = try EmlBuilder(to: ["a@example.org"], subject: "s", textBody: "x", attachments: [att]).build()
         }
     }
 
@@ -68,9 +68,9 @@ struct EmlBuilderTests {
         // X-Unsent:1 is what makes `open`-ing the .eml yield an editable OUTGOING message the
         // send path can deliver, rather than a read-only received-message viewer. Present on
         // every generated .eml (plain, html, and attachment forms).
-        let plain = try EmlBuilder(to: ["a@y.io"], subject: "s", textBody: "b").build()
+        let plain = try EmlBuilder(to: ["a@example.org"], subject: "s", textBody: "b").build()
         #expect(plain.contains("X-Unsent: 1"))
-        let html = try EmlBuilder(to: ["a@y.io"], subject: "s", textBody: "b", htmlBody: "<b>x</b>").build()
+        let html = try EmlBuilder(to: ["a@example.org"], subject: "s", textBody: "b", htmlBody: "<b>x</b>").build()
         #expect(html.contains("X-Unsent: 1"))
     }
 
@@ -85,19 +85,19 @@ struct EmlBuilderTests {
     @Test func bccNeverWrittenAsHeader() throws {
         // DEFAULT (emitBcc: false): a Bcc: header would leak the blind-copy list to every recipient
         // on a wire-sent .eml — it must not appear.
-        let eml = try EmlBuilder(to: ["a@y.io"], bcc: ["secret@z.io"], subject: "s", textBody: "b").build()
+        let eml = try EmlBuilder(to: ["a@example.org"], bcc: ["secret@example.net"], subject: "s", textBody: "b").build()
         #expect(!eml.contains("Bcc:"))
-        #expect(!eml.contains("secret@z.io"))
+        #expect(!eml.contains("secret@example.net"))
     }
 
     @Test func bccEmittedOnlyWhenEmitBccSet() throws {
         // emitBcc:true — used ONLY for a compose-window .eml (Mail moves Bcc to the bcc field and
         // strips the header on send) — DOES emit the Bcc: header so the opened window carries bcc.
-        let opened = try EmlBuilder(to: ["a@y.io"], bcc: ["secret@z.io"], subject: "s", textBody: "b", emitBcc: true).build()
-        #expect(opened.contains("Bcc: secret@z.io"))
+        let opened = try EmlBuilder(to: ["a@example.org"], bcc: ["secret@example.net"], subject: "s", textBody: "b", emitBcc: true).build()
+        #expect(opened.contains("Bcc: secret@example.net"))
         // CRLF injection through bcc is still rejected even when emitting.
         #expect(throws: Error.self) {
-            _ = try EmlBuilder(to: ["a@y.io"], bcc: ["x@z.io\r\nX-Evil: 1"], subject: "s", textBody: "b", emitBcc: true).build()
+            _ = try EmlBuilder(to: ["a@example.org"], bcc: ["x@example.net\r\nX-Evil: 1"], subject: "s", textBody: "b", emitBcc: true).build()
         }
     }
 
@@ -111,7 +111,7 @@ struct EmlBuilderTests {
         // Base64 CONTENT lines must wrap at ≤76 cols (headers/boundaries may be longer).
         let att = EmlBuilder.Attachment(filename: "big.bin", mimeType: "application/octet-stream",
                                         data: Data(repeating: 0x41, count: 200))
-        let eml = try EmlBuilder(to: ["a@y.io"], subject: "s", textBody: "b", attachments: [att]).build()
+        let eml = try EmlBuilder(to: ["a@example.org"], subject: "s", textBody: "b", attachments: [att]).build()
         let b64Lines = eml.components(separatedBy: "\r\n").filter { line in
             line.count > 4 && line.allSatisfy { $0.isLetter || $0.isNumber || $0 == "+" || $0 == "/" || $0 == "=" }
         }

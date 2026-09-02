@@ -29,9 +29,9 @@ struct MailFormatTests {
     }
 
     @Test func personFormatting() {
-        #expect(MailFormat.person(name: "Ada Lovelace", address: "ada@x.io") == "Ada Lovelace <ada@x.io>")
-        #expect(MailFormat.person(name: nil, address: "ada@x.io") == "ada@x.io")
-        #expect(MailFormat.person(name: "", address: "ada@x.io") == "ada@x.io")
+        #expect(MailFormat.person(name: "Ada Lovelace", address: "ada@example.com") == "Ada Lovelace <ada@example.com>")
+        #expect(MailFormat.person(name: nil, address: "ada@example.com") == "ada@example.com")
+        #expect(MailFormat.person(name: "", address: "ada@example.com") == "ada@example.com")
         #expect(MailFormat.person(name: "Ada", address: nil) == "Ada")
     }
 

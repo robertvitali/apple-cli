@@ -1,15 +1,98 @@
 import Foundation
 import AppleKit
 
+/// MailKit-local AppleScript executor surface. Mail needs all three runner modes: ordinary argv,
+/// timed argv, and stdin-backed AppleScriptObjC. Tests inject a fake at this boundary so
+/// command/support coverage never needs Mail.app, TCC, or a live account store — together with
+/// `MailAppOpening`, which is the SECOND half of that boundary: `openEml` reaches Mail through
+/// LaunchServices rather than AppleScript, so a fake runner alone does not make an open path inert.
+///
+/// It REFINES `AppleKit.AppleScriptRunning` rather than restating its `run(_:arguments:)`
+/// requirement, so the repo has ONE declaration of the plain-argv contract: a future hardening of
+/// that shared seam reaches Mail automatically instead of covering only NotesKit. Only the two
+/// modes `AppleScriptRunning` does not model are added here.
+///
+/// SECURITY CONTRACT for any implementer, inherited from `AppleScriptRunner`: every user- or
+/// data-derived value reaches the script through `arguments` (osascript argv) and is NEVER
+/// interpolated into `script` source. AppleScript injection is RCE-class. `MailScriptInjectionTests`
+/// pins this by recording the script source a hostile input produces and asserting it is
+/// byte-identical to the benign one.
+public protocol MailAppleScriptExecuting: AppleScriptRunning {
+    func run(_ script: String, arguments: [String], timeout seconds: TimeInterval) throws -> String
+    func runViaStdin(_ script: String, arguments: [String]) throws -> String
+}
+
+/// Argument-less convenience for the fixed scripts that take no user input. Declared on
+/// `AppleScriptRunning` (not on `MailAppleScriptExecuting`) so `AccountDirectory`, which needs only
+/// the plain-argv mode, can be typed to the narrowest seam it actually uses.
+extension AppleScriptRunning {
+    func run(_ script: String) throws -> String {
+        try run(script, arguments: [])
+    }
+}
+
+extension AppleScriptRunner: MailAppleScriptExecuting {}
+
+/// The OTHER way `MailScript` reaches Mail.app: LaunchServices, not AppleScript. `openEml` shells
+/// out to `/usr/bin/open -a Mail <path>` (see its doc for why the rendered-HTML path has no
+/// AppleScript equivalent), so injecting a fake `runner` alone does NOT make a command path
+/// inert — `--mode open`, the HTML reply fallback, and `draft-rich` without `--no-open` would all
+/// still raise a real compose window on the operator's machine while `neverCalled` stayed true.
+/// This second seam closes that hole: a test injects a recorder to assert the open happened (and
+/// with which path), or a throwing opener to assert a path must NOT reach Mail at all.
+public protocol MailAppOpening {
+    func openEml(path: String) throws
+}
+
+/// The production opener, and the only implementation linked into `apple`. Split out of
+/// `MailScript` verbatim — same `Process`, same argv, same error mapping — so the default behavior
+/// of `MailScript()` is byte-for-byte what it was before the seam existed.
+public struct LaunchServicesMailOpener: MailAppOpening {
+    public init() {}
+
+    public func openEml(path: String) throws {
+        let p = Process()
+        p.executableURL = URL(fileURLWithPath: "/usr/bin/open")
+        p.arguments = ["-a", "Mail", path]
+        p.standardInput = FileHandle.nullDevice
+        let errPipe = Pipe()
+        p.standardError = errPipe
+        do {
+            try p.run()
+        } catch {
+            throw AppleScriptRunner.RunError.launchFailed("open -a Mail: \(error)")
+        }
+        let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
+        p.waitUntilExit()
+        guard p.terminationStatus == 0 else {
+            throw AppleScriptRunner.RunError.scriptFailed(status: p.terminationStatus,
+                stderr: "open -a Mail failed: " + String(decoding: errData, as: UTF8.self))
+        }
+    }
+}
+
 /// AppleScript bridge to Mail.app for operations the Envelope Index can't serve: full message
 /// bodies and the live UI selection (P1), plus the write surface (P2). ALL user/data-derived
 /// values are passed as `arguments:` (osascript argv) — never interpolated into script source
 /// (AppleScript injection is RCE-class; see `AppleScriptRunner`).
 public struct MailScript {
-    /// Intentionally concrete: attachment metadata uses AppleScriptRunner's timed overload.
-    /// Protocol-typing this property would silently remove that overload from the call surface.
-    public let runner: AppleScriptRunner
-    public init(runner: AppleScriptRunner = AppleScriptRunner()) { self.runner = runner }
+    /// Protocol-typed so tests can inject a fake. This property was previously kept CONCRETE with
+    /// the note "protocol-typing it would silently remove `AppleScriptRunner`'s timed overload from
+    /// the call surface" — a real hazard, and the reason `MailAppleScriptExecuting` declares ALL
+    /// THREE modes (plain argv inherited from `AppleScriptRunning`, plus timed and stdin) instead of
+    /// reusing the one-method shared seam. Keep it that way: dropping a mode from the protocol would
+    /// silently reroute a call site onto a different overload rather than failing to compile.
+    public let runner: any MailAppleScriptExecuting
+    /// The LaunchServices half of the Mail.app boundary (see `MailAppOpening`). Separate from
+    /// `runner` because it is a different mechanism, not a fourth AppleScript mode — folding it
+    /// into `MailAppleScriptExecuting` would force every fake runner to grow an `openEml` it has
+    /// no script for. Both default to the live implementation, so `MailScript()` is unchanged.
+    public let opener: any MailAppOpening
+    public init(runner: any MailAppleScriptExecuting = AppleScriptRunner(),
+                opener: any MailAppOpening = LaunchServicesMailOpener()) {
+        self.runner = runner
+        self.opener = opener
+    }
 
     static let RS = String(UnicodeScalar(30)!)   // record separator
     static let US = String(UnicodeScalar(31)!)   // unit separator
@@ -1395,23 +1478,7 @@ public struct MailScript {
     /// `.eml` must stay on disk until Mail reads it, so the caller keeps it (reported as
     /// `eml_path`) rather than deleting immediately.
     public func openEml(path: String) throws {
-        let p = Process()
-        p.executableURL = URL(fileURLWithPath: "/usr/bin/open")
-        p.arguments = ["-a", "Mail", path]
-        p.standardInput = FileHandle.nullDevice
-        let errPipe = Pipe()
-        p.standardError = errPipe
-        do {
-            try p.run()
-        } catch {
-            throw AppleScriptRunner.RunError.launchFailed("open -a Mail: \(error)")
-        }
-        let errData = errPipe.fileHandleForReading.readDataToEndOfFile()
-        p.waitUntilExit()
-        guard p.terminationStatus == 0 else {
-            throw AppleScriptRunner.RunError.scriptFailed(status: p.terminationStatus,
-                stderr: "open -a Mail failed: " + String(decoding: errData, as: UTF8.self))
-        }
+        try opener.openEml(path: path)
     }
 
     /// OPT-IN HTML auto-send (Option A `--gui-send`). Faithful port of patrickfreyer
@@ -3074,10 +3141,10 @@ public struct MailScript {
     /// Pure parse of `readRuleScalarsScript`'s raw US-joined output — split out of
     /// `readRuleScalars` so the field layout (6 fields as of 2026-08-19: enabled/markRead/
     /// markFlagged/matchAll/deleteMessage, then the trailing name) is directly unit-testable
-    /// without a live Mail.app or a runner fake (`MailScript.runner` is the concrete
-    /// `AppleScriptRunner`, not an injectable protocol — see `AppleScriptRunning`'s doc comment
-    /// for why that seam exists on `NotesScript` but not here: this type also calls
-    /// `runViaStdin`, which isn't part of that protocol).
+    /// without a live Mail.app AND without staging a runner fake. `MailScript.runner` IS injectable
+    /// (`MailAppleScriptExecuting`), so a fake is available — the pure split stays worthwhile
+    /// independently of it: the field layout is what regresses, and asserting it on a raw string
+    /// costs one line where the fake path costs a stubbed result sequence.
     static func parseRuleScalars(_ raw: String) throws -> RuleScalars {
         let f = raw.trimmingCharacters(in: .whitespacesAndNewlines).components(separatedBy: MailScript.US)
         guard f.count >= 6 else {

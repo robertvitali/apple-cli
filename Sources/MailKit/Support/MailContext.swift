@@ -9,8 +9,9 @@ public final class MailContext {
     public let index: EnvelopeIndex
     private var _accounts: AccountDirectory?
 
-    public init(explicitPath: String? = nil) throws {
+    public init(explicitPath: String? = nil, accountDirectory: AccountDirectory? = nil) throws {
         index = try EnvelopeIndex(explicitPath: explicitPath)
+        _accounts = accountDirectory
     }
 
     /// Lazy account directory (loads account names/UUIDs from Mail.app on first use).

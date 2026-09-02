@@ -2,6 +2,7 @@ import Testing
 import Foundation
 @testable import MailKit
 import AppleKit
+import TestSupport
 
 // Logic-tier coverage for the Mail WRITE-SAFETY gates under WRITE-MODEL V2
 // (docs/write-model-v2.md): the gates are SANDBOX-PARAMETERIZED pure functions — sandboxActive
@@ -18,14 +19,13 @@ import AppleKit
 struct MailWriteSafetyTests {
 
     /// Set the allowlist/sandbox-prefix env for the duration of `body`, restoring after.
+    ///
+    /// Goes through `TestEnvironment`'s process-wide lock, NOT a local save/restore: the compose
+    /// command suite mutates `APPLE_TEST_RECIPIENTS` too, and `.serialized` orders tests only
+    /// within one suite. Two suites interleaving save → mutate → restore on the self-only outbound
+    /// allowlist is how this suite's refusal assertions end up testing another suite's value.
     private func withEnv(recipients: String?, sandbox: String? = nil, _ body: () -> Void) {
-        func get(_ k: String) -> String? { getenv(k).map { String(cString: $0) } }
-        func set(_ k: String, _ v: String?) { if let v { setenv(k, v, 1) } else { unsetenv(k) } }
-        let prev = (get("APPLE_TEST_RECIPIENTS"), get("APPLE_TEST_SANDBOX"))
-        set("APPLE_TEST_RECIPIENTS", recipients)
-        set("APPLE_TEST_SANDBOX", sandbox)
-        defer { set("APPLE_TEST_RECIPIENTS", prev.0); set("APPLE_TEST_SANDBOX", prev.1) }
-        body()
+        TestEnvironment.with(["APPLE_TEST_RECIPIENTS": recipients, "APPLE_TEST_SANDBOX": sandbox], body)
     }
 
     /// Build a MailMessage with a controllable subject + Message-ID (no store needed).

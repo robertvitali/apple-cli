@@ -408,6 +408,11 @@ struct SendCommand: ParsableCommand {
     }
 
     func run() throws {
+        try run(scriptFactory: { MailScript() }, directoryFactory: { AccountDirectory() })
+    }
+
+    func run(scriptFactory: () -> MailScript,
+             directoryFactory: () -> AccountDirectory) throws {
         try runGuarded(tool: "mail") {
             // Write-model v2 preamble: fail-loud env validation, then bind the two decisions
             // ONCE — every branch below reads these locals, never the env or flags again.
@@ -479,7 +484,7 @@ struct SendCommand: ParsableCommand {
             // require Mail; the dry-run preview `.eml` falls back to the raw --account string below.
             var senderAddress: String?
             if let account, willLiveOutbound {
-                guard let addr = AccountDirectory().sendAddress(for: account) else {
+                guard let addr = directoryFactory().sendAddress(for: account) else {
                     throw AppleError.notFound("account '\(account)' not found or has no send address.")
                 }
                 senderAddress = addr
@@ -573,27 +578,27 @@ struct SendCommand: ParsableCommand {
                 // are handed to Mail by `open -a Mail` and read AFTER we exit, so unlinking one on
                 // Ctrl-C would destroy a live hand-off rather than clean up a leak (Q4k).
                 SignalSafeCleanup.track(htmlTmp.path)
-                try MailScript().sendHtmlViaGui(htmlPath: htmlTmp.path, subject: subject,
+                try scriptFactory().sendHtmlViaGui(htmlPath: htmlTmp.path, subject: subject,
                     to: toL, cc: ccL, bcc: bccL, attachmentPaths: attPaths, sender: senderAddress)
                 executed = true
                 note = "sent via GUI keystroke automation (--gui-send); required Accessibility permission and stole window focus"
             } else if willOpenHtml, let emlPath {
                 // Reliable HTML path: open the rendered .eml as a compose window for review.
-                try MailScript().openEml(path: emlPath)
+                try scriptFactory().openEml(path: emlPath)
                 opened = true
                 note = "HTML rendered in a Mail compose window for review — click Send, or re-run with --gui-send to auto-send (GUI automation; needs Accessibility). The .eml is kept at eml_path."
             } else if willAutoSend {
                 if !attPaths.isEmpty {
                     // Attachments, no HTML: direct AppleScript route (matches send_email_with_attachments).
-                    try MailScript().sendWithAttachments(subject: subject, body: body, to: toL, cc: ccL, bcc: bccL, attachmentPaths: attPaths, sender: senderAddress)
+                    try scriptFactory().sendWithAttachments(subject: subject, body: body, to: toL, cc: ccL, bcc: bccL, attachmentPaths: attPaths, sender: senderAddress)
                 } else {
                     // Plain text.
-                    try MailScript().send(subject: subject, body: body, to: toL, cc: ccL, bcc: bccL, sender: senderAddress)
+                    try scriptFactory().send(subject: subject, body: body, to: toL, cc: ccL, bcc: bccL, sender: senderAddress)
                 }
                 executed = true
             } else if willOpen, let emlPath {
                 // --mode open: render the .eml as a compose window for review (ANY body type). No send.
-                try MailScript().openEml(path: emlPath)
+                try scriptFactory().openEml(path: emlPath)
                 opened = true
                 note = "compose window opened for review (--mode open) — not sent; click Send in Mail if desired. The .eml is kept at eml_path."
             } else if willDraft {
@@ -608,7 +613,7 @@ struct SendCommand: ParsableCommand {
                     drafted = false
                     note = "HTML can't be saved to Drafts headlessly (Mail limitation) — the rendered .eml is at eml_path; open it (`apple mail draft-rich --open`, or `open <eml_path>`) and press Cmd-S to file it in Drafts."
                 } else {
-                    try MailScript().saveDraft(subject: subject, body: body, to: toL, cc: ccL, bcc: bccL,
+                    try scriptFactory().saveDraft(subject: subject, body: body, to: toL, cc: ccL, bcc: bccL,
                                                attachmentPaths: attPaths, sender: senderAddress)
                     drafted = true
                 }
@@ -666,6 +671,14 @@ struct ReplyCommand: ParsableCommand {
     }
 
     func run() throws {
+        try run(contextFactory: { try MailContext() },
+                scriptFactory: { MailScript() },
+                directoryFactory: { AccountDirectory() })
+    }
+
+    func run(contextFactory: () throws -> MailContext,
+             scriptFactory: () -> MailScript,
+             directoryFactory: () -> AccountDirectory) throws {
         try runGuarded(tool: "mail") {
             // Write-model v2 preamble (see SendCommand).
             try TestMode.validateWriteEnvironment()
@@ -698,7 +711,7 @@ struct ReplyCommand: ParsableCommand {
             // twice: they first ran only inside the live block, then only after target
             // resolution — where a not_found target masked them).
             let attachPaths = try attach.map { try resolveAttachmentPath($0) }
-            let ctx = try MailContext()
+            let ctx = try contextFactory()
             // Resolve the target to a full summary (need original sender + subject to compose).
             let row: [String: String?]
             if let id {
@@ -782,7 +795,7 @@ struct ReplyCommand: ParsableCommand {
                 // out FROM this account's address, not Mail's default. Live-path only, so headless
                 // dry-runs never touch Mail; unknown/addressless account is a not_found up front.
                 if let account {
-                    guard let addr = AccountDirectory().sendAddress(for: account) else {
+                    guard let addr = directoryFactory().sendAddress(for: account) else {
                         throw AppleError.notFound("account '\(account)' not found or has no send address.")
                     }
                     senderAddress = addr
@@ -830,7 +843,7 @@ struct ReplyCommand: ParsableCommand {
                     defer { try? FileManager.default.removeItem(at: htmlTmp) }
                     SignalSafeCleanup.track(htmlTmp.path)   // synchronous consumer; see the send path
 
-                    switch try MailScript().nativeReplyHtml(internetMessageID: imid,
+                    switch try scriptFactory().nativeReplyHtml(internetMessageID: imid,
                                                             accountName: target.account.isEmpty ? nil : target.account,
                                                             replyAll: all, sender: senderAddress,
                                                             selfAllowlist: outboundAllowlist(sandboxActive: sandboxActive),
@@ -879,7 +892,7 @@ struct ReplyCommand: ParsableCommand {
                     let dest = try emlDestURL(out: nil, materialise: true)
                     try eml.write(to: dest, atomically: true, encoding: .utf8)
                     OwnedTempDir.restrictToOwner(dest)          // always a temp on this path
-                    try MailScript().openEml(path: dest.path)
+                    try scriptFactory().openEml(path: dest.path)
                     opened = true
                     note = "HTML reply rendered in a compose window for review — click Send, or re-run with --gui-send to auto-send."
                 }
@@ -923,6 +936,14 @@ struct ForwardCommand: ParsableCommand {
     }
 
     func run() throws {
+        try run(contextFactory: { try MailContext() },
+                scriptFactory: { MailScript() },
+                directoryFactory: { AccountDirectory() })
+    }
+
+    func run(contextFactory: () throws -> MailContext,
+             scriptFactory: () -> MailScript,
+             directoryFactory: () -> AccountDirectory) throws {
         try runGuarded(tool: "mail") {
             // Write-model v2 preamble (see SendCommand).
             try TestMode.validateWriteEnvironment()
@@ -950,12 +971,12 @@ struct ForwardCommand: ParsableCommand {
             // not_found even where the index is unreadable.
             var senderAddress: String?
             if willExecute, let account {
-                guard let addr = AccountDirectory().sendAddress(for: account) else {
+                guard let addr = directoryFactory().sendAddress(for: account) else {
                     throw AppleError.notFound("account '\(account)' not found or has no send address.")
                 }
                 senderAddress = addr
             }
-            let ctx = try MailContext()
+            let ctx = try contextFactory()
             let target: MailMessage
             if let id {
                 guard let row = try resolveMessageRow(ctx: ctx, id: id) else { throw AppleError.notFound("no message for id '\(id)'.") }
@@ -1015,7 +1036,7 @@ struct ForwardCommand: ParsableCommand {
                 // Deleted after nativeForward returns (synchronous consumer); the defer is at the
                 // `if willExecute` scope so it fires AFTER the switch, not before the paste reads it.
                 defer { if let f = fwdHtmlTmp { try? FileManager.default.removeItem(at: f) } }
-                switch try MailScript().nativeForward(internetMessageID: imid,
+                switch try scriptFactory().nativeForward(internetMessageID: imid,
                                                       accountName: target.account.isEmpty ? nil : target.account,
                                                       htmlFragmentPath: fwdFragmentPath, to: toL, cc: ccL, bcc: bccL,
                                                       sender: senderAddress,
@@ -1243,6 +1264,11 @@ struct DraftRichCommand: ParsableCommand {
     }
 
     func run() throws {
+        try run(scriptFactory: { MailScript() }, directoryFactory: { AccountDirectory() })
+    }
+
+    func run(scriptFactory: () -> MailScript,
+             directoryFactory: () -> AccountDirectory) throws {
         try runGuarded(tool: "mail") {
             // Write-model v2 preamble (see SendCommand). DraftRich previously wrote the .eml
             // UNCONDITIONALLY (no willExecute branch — the bucket-2 defect the spec names);
@@ -1300,7 +1326,7 @@ struct DraftRichCommand: ParsableCommand {
                 // On the live-open path an unresolvable account stays FAIL-LOUD (deliberate,
                 // stricter than the oracle, which silently omits From).
                 if let account {
-                    guard let addr = AccountDirectory().sendAddress(for: account) else {
+                    guard let addr = directoryFactory().sendAddress(for: account) else {
                         throw AppleError.notFound("account '\(account)' not found or has no send address.")
                     }
                     senderAddress = addr
@@ -1313,7 +1339,7 @@ struct DraftRichCommand: ParsableCommand {
                 // the header, byte-what the oracle writes. Gated on willExecute (review):
                 // AccountDirectory drives Mail via AppleScript, and a dry-run that LAUNCHES
                 // Mail is not a preview — sender_address stays nil in preview, disclosed.
-                senderAddress = AccountDirectory().sendAddress(for: account)
+                senderAddress = directoryFactory().sendAddress(for: account)
             }
             // emitBcc: a draft-rich .eml is only opened / written to disk, never wire-sent, so
             // carrying --bcc into it is safe and required for create_rich_email_draft parity.
@@ -1379,10 +1405,10 @@ struct DraftRichCommand: ParsableCommand {
             var saved: Bool? = nil
             var note: String?
             if willExecute && (openInMail || saveAsDraft) {
-                try MailScript().openEml(path: dest.path)
+                try scriptFactory().openEml(path: dest.path)
                 opened = true
                 if saveAsDraft {
-                    let ok = MailScript().saveOpenDraft(subject: subject)
+                    let ok = scriptFactory().saveOpenDraft(subject: subject)
                     saved = ok
                     note = ok
                         ? "compose window opened and auto-filed to Drafts (oracle save verb)."
@@ -1415,6 +1441,11 @@ struct DraftCommand: ParsableCommand {
     @Option(name: .long, help: "EXACT (case-insensitive) subject of the draft to send/open/delete — not a keyword/substring.") var draftSubject: String?
 
     func run() throws {
+        try run(scriptFactory: { MailScript() }, directoryFactory: { AccountDirectory() })
+    }
+
+    func run(scriptFactory: () -> MailScript,
+             directoryFactory: () -> AccountDirectory) throws {
         try runGuarded(tool: "mail") {
             // Write-model v2 preamble (see SendCommand).
             try TestMode.validateWriteEnvironment()
@@ -1424,7 +1455,7 @@ struct DraftCommand: ParsableCommand {
             guard ["list", "create", "send", "open", "delete"].contains(action) else {
                 throw AppleError.validation("draft action must be list, create, send, open, or delete.")
             }
-            let script = MailScript()
+            let script = scriptFactory()
 
             // list — a live READ of Mail's real Drafts mailbox (no gate).
             if action == "list" {
@@ -1488,7 +1519,7 @@ struct DraftCommand: ParsableCommand {
                     // parity); live path only, strict not_found on an unknown account.
                     var senderAddress: String?
                     if let account {
-                        guard let addr = AccountDirectory().sendAddress(for: account) else {
+                        guard let addr = directoryFactory().sendAddress(for: account) else {
                             throw AppleError.notFound("account '\(account)' not found or has no send address.")
                         }
                         senderAddress = addr

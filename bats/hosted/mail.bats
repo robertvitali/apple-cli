@@ -557,7 +557,7 @@ teardown() {
 
 @test "mail rules create with an UNLABELED name is refused under --execute --test-mode (exit 77)" {
   APPLE_TEST_MODE=1 \
-    run "$BIN" mail rules create --name "real-inbox-rule" --condition "from:contains:boss@x.io" --action "mark_read=true" --execute --test-mode
+    run "$BIN" mail rules create --name "real-inbox-rule" --condition "from:contains:boss@example.com" --action "mark_read=true" --execute --test-mode
   [ "$status" -eq 77 ]
   echo "$output" | grep -q '"type" : "safety_violation"'
 }
@@ -579,7 +579,7 @@ teardown() {
 
 @test "mail rules create with forward_to remains refused at --execute (exit 77, latent auto-send)" {
   APPLE_TEST_MODE=1 \
-    run "$BIN" mail rules create --name "apple-cli-test-b" --condition "subject:contains:apple-cli-test" --action "forward_to=a@x.io" --execute --test-mode
+    run "$BIN" mail rules create --name "apple-cli-test-b" --condition "subject:contains:apple-cli-test" --action "forward_to=a@example.com" --execute --test-mode
   [ "$status" -eq 77 ]
   echo "$output" | grep -q '"type" : "safety_violation"'
 }
@@ -600,7 +600,7 @@ teardown() {
 # no longer does — it is LIVE-WIRED (full oracle-A parity), so it is not a blocker at all; it
 # carries an advisory `warnings` entry instead. See the delete preview test below.
 @test "mail rules create DRY-RUN describes a forward_to rule and names the live blocker" {
-  run "$BIN" mail rules create --dry-run --name "apple-cli-test-b" --condition "subject:contains:apple-cli-test" --action "forward_to=a@x.io"
+  run "$BIN" mail rules create --dry-run --name "apple-cli-test-b" --condition "subject:contains:apple-cli-test" --action "forward_to=a@example.com"
   [ "$status" -eq 0 ]
   echo "$output" | grep -q '"live_blockers"'
   echo "$output" | grep -q 'forward_to'
@@ -682,7 +682,7 @@ assert 'would refuse' not in note, note
 
 # The LIVE refusal is unchanged: describing a rule in a preview must never soften execute.
 @test "mail rules create --execute with forward_to is still refused (exit 77)" {
-  APPLE_TEST_MODE=1 run "$BIN" mail rules create --name "apple-cli-test-b" --condition "subject:contains:apple-cli-test" --action "forward_to=a@x.io" --execute --test-mode
+  APPLE_TEST_MODE=1 run "$BIN" mail rules create --name "apple-cli-test-b" --condition "subject:contains:apple-cli-test" --action "forward_to=a@example.com" --execute --test-mode
   [ "$status" -eq 77 ]
   echo "$output" | grep -q '"type" : "safety_violation"'
 }
@@ -1117,7 +1117,7 @@ PY
 }
 
 @test "mail rules create sandboxed DRY-RUN reports unlabeled-name and self-scoping blockers" {
-  APPLE_TEST_MODE=1 run "$BIN" mail rules create --dry-run --name "quarterly-report-rule" --condition "from:contains:boss@x.io" --action "mark_read=true" --test-mode
+  APPLE_TEST_MODE=1 run "$BIN" mail rules create --dry-run --name "quarterly-report-rule" --condition "from:contains:boss@example.com" --action "mark_read=true" --test-mode
   [ "$status" -eq 0 ]
   echo "$output" | grep -q 'must start with'
   echo "$output" | grep -q 'subject condition bound to'
@@ -1172,21 +1172,38 @@ PY
   run bash -c "grep -o 'enforceBulkCap(ids, verb: \"[a-z]*\")' '$src' | sort -u | wc -l | tr -d ' '"
   [ "$output" -eq 2 ]
 
-  # The cap must be enforced BEFORE MailContext() is built, or it is unreachable on a machine with
-  # no configured Mail account (EnvelopeIndex.init throws exit 69 first) — which is exactly the CI
-  # runner. Assert the ordering per command rather than trusting a comment.
+  # The cap must be enforced BEFORE the mail context is built, or it is unreachable on a machine
+  # with no configured Mail account (EnvelopeIndex.init throws exit 69 first) — which is exactly
+  # the CI runner. Assert the ordering per command rather than trusting a comment. The context is
+  # built either directly (`try MailContext()`) or through the injected seam
+  # (`try contextFactory()`); both spellings count, and the enclosing body is whichever `run(`
+  # overload holds the cap (the public `run()` only forwards a lazy factory closure).
   run python3 - "$src" <<'PYEOF'
 import sys, re
 src = open(sys.argv[1]).read()
 ok = True
+builds = ("try MailContext()", "try contextFactory()")
 for verb in ("mark", "delete"):
     cap = src.index('try enforceBulkCap(ids, verb: "%s")' % verb)
-    # the MailContext() that belongs to this command is the first one after the cap check
-    ctx = src.index("try MailContext()", cap)
-    # ...and there must be no MailContext() between the start of the enclosing run() and the cap.
-    run_start = src.rindex("func run()", 0, cap)
-    if "try MailContext()" in src[run_start:cap]:
-        print("FAIL: %s builds MailContext before the cap check" % verb); ok = False
+    # The enclosing overload is the last `func run(` before the cap; the command ends at the
+    # next `struct` declaration, so every search below is bounded to THIS command's body.
+    run_start = src.rindex("func run(", 0, cap)
+    body_end = src.find("\nstruct ", cap)
+    body_end = len(src) if body_end == -1 else body_end
+    # the context build that belongs to this command is the first one after the cap check
+    after = [i for i in (src.find(b, cap, body_end) for b in builds) if i != -1]
+    if not after:
+        print("FAIL: %s never builds a mail context after the cap check" % verb); ok = False
+    # ...and there must be no context build between the start of the enclosing run(...) and the cap.
+    if any(b in src[run_start:cap] for b in builds):
+        print("FAIL: %s builds the mail context before the cap check" % verb); ok = False
+    # ...and the zero-argument forwarder above the overload must be a PURE forward: its body is
+    # exactly one `try run(` call, so nothing (not even an eager MailContext()) runs before the cap.
+    fwd = src.rindex("func run() throws {", 0, run_start)
+    fwd_body = src[fwd + len("func run() throws {"):run_start]
+    stmts = [line.strip() for line in fwd_body.splitlines() if line.strip() and line.strip() != "}"]
+    if not (len(stmts) == 1 and stmts[0].startswith("try run(")):
+        print("FAIL: %s forwarder is not a pure `try run(` forward: %r" % (verb, stmts)); ok = False
 print("OK" if ok else "BAD")
 PYEOF
   [ "$status" -eq 0 ]

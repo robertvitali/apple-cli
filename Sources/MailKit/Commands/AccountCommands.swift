@@ -18,8 +18,12 @@ struct AccountsList: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "list", abstract: "List all Mail accounts (UUID, name, emails, type, enabled).")
     @OptionGroup var global: GlobalOptions
     func run() throws {
+        try run(directoryFactory: { AccountDirectory() })
+    }
+
+    func run(directoryFactory: () -> AccountDirectory) throws {
         try runGuarded(tool: "mail") {
-            let dir = AccountDirectory()
+            let dir = directoryFactory()
             guard dir.isLoaded else {
                 throw AppleError.upstream("could not read Mail accounts — is Mail.app available and automation permitted?")
             }
@@ -51,8 +55,12 @@ struct MailboxesList: ParsableCommand {
     @Flag(name: .long, inversion: .prefixedNo, help: "Include per-mailbox message counts (default: on).") var counts = true
 
     func run() throws {
+        try run(contextFactory: { try MailContext() })
+    }
+
+    func run(contextFactory: () throws -> MailContext) throws {
         try runGuarded(tool: "mail") {
-            let ctx = try MailContext()
+            let ctx = try contextFactory()
             var accountUUID: String?
             if let account { accountUUID = try ctx.requireAccountUUID(account) }
             let dir = ctx.accounts()
@@ -93,13 +101,20 @@ struct UnreadCountsCommand: ParsableCommand {
     @Flag(name: .long, help: "Include mailboxes with zero unread.") var includeZero = false
 
     func run() throws {
+        try run(scriptFactory: { MailScript() }, directoryFactory: { AccountDirectory() })
+    }
+
+    // Dependency order across every seam in MailKit is context → script → directory → store.
+    // This overload used to declare (directory, script), the reverse of `SendCommand` and friends.
+    func run(scriptFactory: () -> MailScript,
+             directoryFactory: () -> AccountDirectory) throws {
         try runGuarded(tool: "mail") {
             // Sourced from Mail.app's live `unread count` (matches the MCP oracle; the
             // Envelope Index read-bit diverges from server-synced seen-state).
             // The AppleScript matches accounts by NAME, so map a UUID selector to its name first.
             var accountFilter = account
             if let account {
-                let dir = AccountDirectory()
+                let dir = directoryFactory()
                 guard let name = dir.displayName(for: account) else {
                     let known = dir.accounts.map(\.name).joined(separator: ", ")
                     throw AppleError.notFound("unknown account '\(account)'.\(known.isEmpty ? "" : " Known accounts: \(known).")")
@@ -108,7 +123,7 @@ struct UnreadCountsCommand: ParsableCommand {
             }
             let rows: [MailScript.UnreadRow]
             do {
-                rows = try MailScript().unreadCounts(summary: summary, includeZero: includeZero, accountFilter: accountFilter)
+                rows = try scriptFactory().unreadCounts(summary: summary, includeZero: includeZero, accountFilter: accountFilter)
             } catch {
                 throw AppleError.upstream("could not read unread counts — is Mail.app running with automation permitted? (\(error))")
             }
@@ -155,13 +170,23 @@ struct MailDoctor: ParsableCommand {
     }
 
     func run() throws {
+        try run(contextFactory: { try MailContext() },
+                directoryFactory: { AccountDirectory() },
+                preflightFactory: { Permissions.preflight() },
+                locateDBFactory: { EnvelopeIndex.locateDB() })
+    }
+
+    func run(contextFactory: () throws -> MailContext,
+             directoryFactory: () -> AccountDirectory,
+             preflightFactory: () -> Permissions.Preflight,
+             locateDBFactory: () -> String?) throws {
         try runGuarded(tool: "mail") {
-            let pre = Permissions.preflight()
+            let pre = preflightFactory()
             var notes = pre.notes
-            let dbPath = EnvelopeIndex.locateDB()
+            let dbPath = locateDBFactory()
             var mailboxCount = 0
             var readable = false
-            if let ctx = try? MailContext() {
+            if let ctx = try? contextFactory() {
                 readable = true
                 mailboxCount = ctx.index.mailboxes.count
             } else if dbPath != nil {
@@ -169,7 +194,7 @@ struct MailDoctor: ParsableCommand {
             } else {
                 notes.append("No Envelope Index under ~/Library/Mail/V*/MailData/.")
             }
-            let dir = AccountDirectory()
+            let dir = directoryFactory()
             if !dir.isLoaded { notes.append("Mail automation unavailable — account names and live reads (get content, selected) will be limited.") }
             let report = Report(
                 full_disk_access: pre.full_disk_access,

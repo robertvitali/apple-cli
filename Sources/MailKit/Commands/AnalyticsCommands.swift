@@ -68,11 +68,15 @@ struct AnalyticsTopSenders: ParsableCommand {
     @Flag(name: .long, help: "Group by sender domain instead of address.") var byDomain = false
 
     func run() throws {
+        try run(contextFactory: { try MailContext() })
+    }
+
+    func run(contextFactory: () throws -> MailContext) throws {
         try runGuarded(tool: "mail") {
             // Review H5 class: a negative bound reached Swift's `.prefix` and TRAPPED — no JSON
             // envelope, exit 133. Typed 64 mirrors extra6's negative --offset precedent.
             guard topN >= 0 else { throw AppleError.validation("--top-n must be >= 0.") }
-            let ctx = try MailContext()
+            let ctx = try contextFactory()
             let uuid = try ctx.requireAccountUUID(account)
             try requireMailboxExists(ctx: ctx, uuid: uuid, mailbox: mailbox, account: account)
             let rows = try ctx.index.analyticsRows(accountUUID: uuid, mailboxName: mailbox, sinceUnix: sinceUnix(daysBack: days)).map(analyticsRow)
@@ -95,6 +99,10 @@ struct AnalyticsStats: ParsableCommand {
     @Flag(name: .long, help: "Include Trash/Junk/Sent/Drafts/Spam in the totals (MCP B excludes them; CLI extra).") var includeSystemFolders = false
 
     func run() throws {
+        try run(contextFactory: { try MailContext() })
+    }
+
+    func run(contextFactory: () throws -> MailContext) throws {
         try runGuarded(tool: "mail") {
             // Oracle B validates both, returning "Error: Invalid scope '<s>'. Use: …" and
             // "Error: 'sender' parameter required for sender_stats scope" (tools/analytics.py).
@@ -108,7 +116,7 @@ struct AnalyticsStats: ParsableCommand {
             if scope == "sender_stats", sender?.trimmingCharacters(in: .whitespaces).isEmpty ?? true {
                 throw AppleError.validation("--sender is required for --scope sender_stats.")
             }
-            let ctx = try MailContext()
+            let ctx = try contextFactory()
             let uuid = try ctx.requireAccountUUID(account)
             // Oracle B scans differently for EVERY scope (mailbox / skip-folders / days_back all
             // vary — see `Analytics.scopePlan` for the table and the analytics.py line refs). That
@@ -167,9 +175,13 @@ struct AnalyticsNeedsResponse: ParsableCommand {
     struct Result: Encodable { let account: String; let mailbox: String; let days_back: Int; let sent_mailbox: String?; let items: [Analytics.NeedsResponseItem]; let count: Int }
 
     func run() throws {
+        try run(contextFactory: { try MailContext() })
+    }
+
+    func run(contextFactory: () throws -> MailContext) throws {
         try runGuarded(tool: "mail") {
             guard max >= 0 else { throw AppleError.validation("--max must be >= 0.") }
-            let ctx = try MailContext()
+            let ctx = try contextFactory()
             let uuid = try ctx.requireAccountUUID(account)
             try requireMailboxExists(ctx: ctx, uuid: uuid, mailbox: mailbox, account: account)
             let rows = try ctx.index.analyticsRows(accountUUID: uuid, mailboxName: mailbox, sinceUnix: sinceUnix(daysBack: days)).map(analyticsRow)
@@ -229,9 +241,13 @@ struct AnalyticsAwaitingReply: ParsableCommand {
     struct Result: Encodable { let account: String; let days_back: Int; let sent_mailbox: String?; let items: [Analytics.AwaitingReplyItem]; let count: Int }
 
     func run() throws {
+        try run(contextFactory: { try MailContext() })
+    }
+
+    func run(contextFactory: () throws -> MailContext) throws {
         try runGuarded(tool: "mail") {
             guard max >= 0 else { throw AppleError.validation("--max must be >= 0.") }
-            let ctx = try MailContext()
+            let ctx = try contextFactory()
             let uuid = try ctx.requireAccountUUID(account)
             let since = sinceUnix(daysBack: days)
 
@@ -313,12 +329,17 @@ struct AnalyticsOverview: ParsableCommand {
     }
 
     func run() throws {
+        try run(contextFactory: { try MailContext() }, scriptFactory: { MailScript() })
+    }
+
+    func run(contextFactory: () throws -> MailContext,
+             scriptFactory: () -> MailScript) throws {
         try runGuarded(tool: "mail") {
-            let ctx = try MailContext()
+            let ctx = try contextFactory()
             // Unread per account from Mail's live counts (matches the oracle).
             var accounts: [AccountUnread] = []
             var total = 0
-            if let unread = try? MailScript().unreadCounts(summary: true, includeZero: true, accountFilter: nil) {
+            if let unread = try? scriptFactory().unreadCounts(summary: true, includeZero: true, accountFilter: nil) {
                 for u in unread {
                     let totalMsgs = ctx.index.mailboxes.first(where: {
                         ctx.accounts().name(forUUID: $0.url.accountID) == u.account && $0.url.leaf.caseInsensitiveCompare("INBOX") == .orderedSame

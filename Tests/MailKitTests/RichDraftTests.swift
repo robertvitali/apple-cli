@@ -95,9 +95,9 @@ struct RichDraftTests {
         // Python isspace's full set: VT / FF / the C0 separators / NEL / LINE SEPARATOR all
         // strip to empty (oracle-measured divergence classes, review M1).
         for ws in ["\u{0B}", "\u{0C}", "\u{1C}", "\u{1D}", "\u{1E}", "\u{1F}", "\u{85}", "\u{2028}"] {
-            #expect(RichDraft.missingDetails(subject: ws, to: ["a@x.io"], bodyMissing: []) == ["subject"], Comment(rawValue: ws))
+            #expect(RichDraft.missingDetails(subject: ws, to: ["a@example.com"], bodyMissing: []) == ["subject"], Comment(rawValue: ws))
         }
-        #expect(RichDraft.missingDetails(subject: "S", to: ["a@x.io"], bodyMissing: []).isEmpty)
+        #expect(RichDraft.missingDetails(subject: "S", to: ["a@example.com"], bodyMissing: []).isEmpty)
         #expect(RichDraft.missingDetails(subject: "S", to: [], bodyMissing: []) == ["to"])
     }
 

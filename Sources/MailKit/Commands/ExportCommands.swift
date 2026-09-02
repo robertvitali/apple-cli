@@ -14,6 +14,11 @@ struct AnalyticsDashboard: ParsableCommand {
     struct Result: Encodable { let path: String; let total_unread: Int; let accounts: Int; let dry_run: Bool }
 
     func run() throws {
+        try run(contextFactory: { try MailContext() }, scriptFactory: { MailScript() })
+    }
+
+    func run(contextFactory: () throws -> MailContext,
+             scriptFactory: () -> MailScript) throws {
         try runGuarded(tool: "mail") {
             // Write-model v2 preamble. This command was review-caught with NO willExecute branch
             // (wrote HTML despite --dry-run) and a bare unconfined `--out` — an operator-supplied
@@ -27,8 +32,8 @@ struct AnalyticsDashboard: ParsableCommand {
 
             try refuseRawFinalLeafSymlink(out, action: "write the dashboard HTML to")
             let url = try confineWriteDestination(out, action: "write the dashboard HTML to", allowOutsideHome: true)
-            let ctx = try MailContext()
-            let unread = (try? MailScript().unreadCounts(summary: true, includeZero: true, accountFilter: nil)) ?? []
+            let ctx = try contextFactory()
+            let unread = (try? scriptFactory().unreadCounts(summary: true, includeZero: true, accountFilter: nil)) ?? []
             let total = unread.reduce(0) { $0 + $1.unread }
             var f = EnvelopeIndex.MessageFilters(); f.mailboxName = "INBOX"; f.limit = 15
             let recent = try ctx.index.queryMessages(f).map { ctx.decodeSummary($0) }
@@ -117,6 +122,11 @@ struct ExportCommand: ParsableCommand {
     }
 
     func run() throws {
+        try run(contextFactory: { try MailContext() }, scriptFactory: { MailScript() })
+    }
+
+    func run(contextFactory: () throws -> MailContext,
+             scriptFactory: () -> MailScript) throws {
         try runGuarded(tool: "mail") {
             // Write-model v2 preamble. Export EXECUTES by default (oracle B export_emails
             // writes on call); resolveExportDirectory path confinement is bucket 1, unchanged.
@@ -148,7 +158,7 @@ struct ExportCommand: ParsableCommand {
                     throw AppleError.validation("single_email scope requires a non-empty --subject.")
                 }
             }
-            let ctx = try MailContext()
+            let ctx = try contextFactory()
             let uuid = try ctx.requireAccountUUID(account)
             // An unknown --mailbox previously surfaced as "no messages matched" — the oracle
             // raises "Mailbox not found" (security L3 / oracle parity, same guard as search).
@@ -176,7 +186,7 @@ struct ExportCommand: ParsableCommand {
             if scope == "single_email", let iid = messages[0].internet_message_id, !iid.isEmpty {
                 if !willExecute {
                     bodySource = "full_body"
-                } else if let body = try? MailScript().body(internetMessageID: iid, accountName: messages[0].account) {
+                } else if let body = try? scriptFactory().body(internetMessageID: iid, accountName: messages[0].account) {
                     messages[0].content = body
                     bodySource = "full_body"
                 }

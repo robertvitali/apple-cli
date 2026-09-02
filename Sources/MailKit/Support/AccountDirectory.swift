@@ -21,7 +21,7 @@ public final class AccountDirectory {
     /// report the real upstream cause instead of a misleading "unknown account" not_found.
     public private(set) var loadError: Error?
 
-    public init(runner: AppleScriptRunner = AppleScriptRunner()) {
+    public init(runner: any AppleScriptRunning = AppleScriptRunner()) {
         do {
             let fetched = try AccountDirectory.fetch(runner: runner)
             accounts = fetched
@@ -97,7 +97,7 @@ public final class AccountDirectory {
     end tell
     """
 
-    static func fetch(runner: AppleScriptRunner) throws -> [MailAccount] {
+    static func fetch(runner: any AppleScriptRunning) throws -> [MailAccount] {
         let raw = try runner.run(listScript)
         let rs = String(UnicodeScalar(30)!), us = String(UnicodeScalar(31)!)
         var result: [MailAccount] = []

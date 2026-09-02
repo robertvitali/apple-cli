@@ -30,6 +30,10 @@ JSON output are stable per the versioning policy — breaking changes bump
 
 ### Fixed
 
+- **`mail rules create` / `update` now quote a placeholder domain in the condition-format
+  validation message** (`from:contains:boss@example.com`). Only the example text of that error
+  changed; the condition grammar, exit code, and error type are unchanged, and `schema_version`
+  is unchanged.
 - **`messages send --group` is now always refused while the test sandbox is engaged
   (`--test-mode` / `APPLE_TEST_MODE`), even when the group's chat id appears in
   `APPLE_TEST_RECIPIENTS`.** Previously an allowlist entry that matched the chat id let a

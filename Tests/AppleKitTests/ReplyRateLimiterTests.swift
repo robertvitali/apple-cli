@@ -55,9 +55,13 @@ struct ReplyRateLimiterTests {
     /// the send cap (which is the hole D8 closes), but nor should replies steal the send budget.
     @Test("the reply window is a SEPARATE state file from the send window")
     func separateStateFileFromSend() {
-        #expect(ReplyRateLimiter.stateURL().path.hasSuffix(".apple-cli/reply-rate-limit.json"))
-        #expect(SendRateLimiter.stateURL().path.hasSuffix(".apple-cli/send-rate-limit.json"))
-        #expect(ReplyRateLimiter.stateURL() != SendRateLimiter.stateURL())
+        // Ambient-path readers pin the redirects absent (see TestEnvironment); a concurrent
+        // compose test's scratch redirect must never become this assertion's input.
+        TestEnvironment.withoutRateLimitOverrides {
+            #expect(ReplyRateLimiter.stateURL().path.hasSuffix(".apple-cli/reply-rate-limit.json"))
+            #expect(SendRateLimiter.stateURL().path.hasSuffix(".apple-cli/send-rate-limit.json"))
+            #expect(ReplyRateLimiter.stateURL() != SendRateLimiter.stateURL())
+        }
         // Exhaust the reply window; a fresh SEND window is untouched.
         let replyState = tmpState("reply-only")
         let t0 = Date()
@@ -68,7 +72,9 @@ struct ReplyRateLimiterTests {
 
     @Test("APPLE_REPLY_RATELIMIT_STATE redirects the file; the explicit param still wins")
     func envOverrideIsHonored() {
-        #expect(ReplyRateLimiter.stateURL().path.hasSuffix(".apple-cli/reply-rate-limit.json"))
+        TestEnvironment.withoutRateLimitOverrides {
+            #expect(ReplyRateLimiter.stateURL().path.hasSuffix(".apple-cli/reply-rate-limit.json"))
+        }
         let explicit = tmpState("precedence")
         #expect(ReplyRateLimiter.stateURL(override: explicit) == explicit)
     }

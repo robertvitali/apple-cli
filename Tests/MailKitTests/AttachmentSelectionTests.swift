@@ -98,9 +98,33 @@ struct AttachmentSelectionTests {
         #expect(throws: Never.self) { try requireSingleForOut(out: "/tmp/x", selectedCount: 1) }
     }
 
+    @Test("a one-attachment selection without --out is also fine")
+    func singleCheckAllowsOneWithoutOut() {
+        #expect(throws: Never.self) { try requireSingleForOut(out: nil, selectedCount: 1) }
+    }
+
     @Test("the exactly-one check is skipped entirely when --out wasn't given")
     func outCheckSkippedWhenNotGiven() {
         #expect(throws: Never.self) { try requireSingleForOut(out: nil, selectedCount: 5) }
+    }
+
+    // MARK: date parsing helpers
+
+    @Test("required ISO dates parse start and end of day boundaries")
+    func requireISODateParsesBoundaries() throws {
+        let start = try requireISODate("2026-09-01", name: "from-date")
+        let end = try requireISODate("2026-09-01", name: "to-date", endOfDay: true)
+
+        #expect(end - start == 86_399)
+    }
+
+    @Test("required ISO dates reject malformed input with the option name")
+    func requireISODateRejectsMalformedInput() {
+        let err = #expect(throws: AppleError.self) {
+            _ = try requireISODate("09/01/2026", name: "from-date")
+        }
+        #expect(err?.exitCode == 64)
+        #expect(err?.message.contains("--from-date") == true)
     }
 
     // MARK: safeAttachmentBasename

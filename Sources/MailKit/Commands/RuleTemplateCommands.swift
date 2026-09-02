@@ -20,9 +20,13 @@ struct RulesList: ParsableCommand {
     struct RuleInfo: Encodable { let index: Int; let name: String; let enabled: Bool }
     struct Result: Encodable { let rules: [RuleInfo]; let count: Int }
     func run() throws {
+        try run(scriptFactory: { MailScript() })
+    }
+
+    func run(scriptFactory: () -> MailScript) throws {
         try runGuarded(tool: "mail") {
             let rules: [MailScript.ScriptRule]
-            do { rules = try MailScript().listRules() }
+            do { rules = try scriptFactory().listRules() }
             catch { throw AppleError.upstream("could not read Mail rules — is Mail.app available with automation permitted? (\(error))") }
             let infos = rules.map { RuleInfo(index: $0.index, name: $0.name, enabled: $0.enabled) }
             let result = Result(rules: infos, count: infos.count)
@@ -42,6 +46,10 @@ struct RulesCreate: ParsableCommand {
     @Flag(name: .long, help: "Create the rule disabled.") var disabled = false
 
     func run() throws {
+        try run(scriptFactory: { MailScript() })
+    }
+
+    func run(scriptFactory: () -> MailScript) throws {
         try runGuarded(tool: "mail") {
             // Write-model v2 preamble.
             try TestMode.validateWriteEnvironment()
@@ -123,7 +131,7 @@ struct RulesCreate: ParsableCommand {
             let conds = conditions.map { (type: $0.field, op: $0.operator, value: $0.value, header: $0.header_name ?? "") }
             let createEnabled = sandboxActive ? false : !disabled
             let createMatchAll = sandboxActive ? true : (match == "all")
-            let script = MailScript()
+            let script = scriptFactory()
             // Refuse a DUPLICATE NAME up front, in both modes. Mail's `make new rule` with an
             // already-taken name silently mangles the NEW rule's conditions (documented at the
             // recreate path below) — and worse, the post-create verification resolves by name, so
@@ -221,11 +229,17 @@ struct RulesUpdate: ParsableCommand {
     struct Patch: Encodable { let index: Int; let name: String?; let conditions: [RuleSchema.Condition]?; let actions: RuleSchema.Action?; let match_logic: String?; let enabled: Bool? }
 
     func run() throws {
+        try run(scriptFactory: { MailScript() })
+    }
+
+    func run(scriptFactory: () -> MailScript) throws {
         try runGuarded(tool: "mail") {
-            // Write-model v2 preamble.
+            // Write-model v2 preamble. It stays FIRST: fail-loud env validation must run before any
+            // dependency is constructed, so a future factory with side effects cannot outrun it.
             try TestMode.validateWriteEnvironment()
             let sandboxActive = try TestMode.sandboxActive(flag: global.testMode)
             let willExecute = try global.willExecute(defaultDryRun: false)
+            let script = scriptFactory()
 
             if let match, match != "all", match != "any" { throw AppleError.validation("--match must be 'all' or 'any'.") }
             let conds = condition.isEmpty ? nil : try condition.map { try RuleSchema.parseCondition($0) }
@@ -320,12 +334,12 @@ struct RulesUpdate: ParsableCommand {
             try RuleLiveGuards.requireNoControlChars(name: name, conditions: conds ?? [])
             let plan = try acts.map { try RuleLiveGuards.liveActionPlan($0) }
             // ---- Live. Inside the sandbox the target must be a labeled test rule. ----
-            let target = try requireLabeledRule(index: index, sandboxActive: sandboxActive)
+            let target = try requireLabeledRule(index: index, sandboxActive: sandboxActive, scriptFactory: { script })
             // Mirror the oracle's `_check_supported_actions`: refuse to touch a rule whose EXISTING
             // actions include something the CLI can't model (run-script/redirect/reply-text/etc.).
             // In place we'd silently preserve+misrepresent them; on recreate we'd silently drop them.
             // Gates BOTH update paths (matching the oracle's unconditional check in update_rule).
-            try MailScript().checkSupportedActions(index: target.index)
+            try script.checkSupportedActions(index: target.index)
 
             guard let conds else {
                 // ---- Metadata-only patch → modify IN PLACE (reliable; preserves rule position). ----
@@ -367,14 +381,14 @@ struct RulesUpdate: ParsableCommand {
                 // `RuleLiveGuards.realDeleteEnableRefusal`); this is the metadata-only-update half
                 // of that same fix. Runs BEFORE any mutation applies, so a sandboxed refusal here
                 // leaves the rule untouched. Only read back when ARMING (`enabled == true`).
-                let realDeleteMessage = (enabled == true) ? try MailScript().readRuleScalars(index: target.index).deleteMessage : false
+                let realDeleteMessage = (enabled == true) ? try script.readRuleScalars(index: target.index).deleteMessage : false
                 let realDeleteWarnings = try realDeleteEnableWarnings(target: target, realDeleteMessage: realDeleteMessage,
                                                                        enabling: enabled == true, sandboxActive: sandboxActive)
                 // `map` so `--match any` actually applies (false = set OR). The old
                 // `match == "all" ? true : nil` collapsed "any" to nil = "don't change" — a
                 // silent no-op reported as executed:true once the sandbox-only refusal stopped
                 // covering the unsandboxed path (review-caught).
-                try MailScript().updateRuleMeta(index: target.index, name: name, enabled: enabled,
+                try script.updateRuleMeta(index: target.index, name: name, enabled: enabled,
                                                 matchAll: match.map { $0 == "all" }, plan: plan)
                 // When --action is given, the supported action set is RESET then reapplied
                 // (wholesale replace, matching the oracle) — the `patch.actions` ARE the rule's
@@ -421,7 +435,7 @@ struct RulesUpdate: ParsableCommand {
             // flags once `readRuleScalars` started reading `delete message` back) — a move_to/
             // copy_to/flag_color action set manually in Mail.app is still NOT preserved
             // (readRuleScalars doesn't read those back). ----
-            let old = try MailScript().readRuleScalars(index: target.index)
+            let old = try script.readRuleScalars(index: target.index)
             let mergedName = name ?? old.name
             if sandboxActive { try RuleLiveGuards.requireLabeledName(mergedName) }  // sandboxed: preserved/renamed name stays labeled
             let mergedEnabled = enabled ?? old.enabled
@@ -457,25 +471,25 @@ struct RulesUpdate: ParsableCommand {
             let condTriples = conds.map { (type: $0.field, op: $0.operator, value: $0.value, header: $0.header_name ?? "") }
             // Refuse if a DIFFERENT rule already carries the target name (the recreate would trigger
             // the duplicate-name condition-mangling). Checked BEFORE the old rule is deleted.
-            if try MailScript().listRules().contains(where: { $0.index != target.index && $0.name == mergedName }) {
+            if try script.listRules().contains(where: { $0.index != target.index && $0.name == mergedName }) {
                 throw AppleError.validation("another rule is already named '\(mergedName)' — recreate would collide; pick a different --name.")
             }
             // Delete-old-first is forced by the duplicate-name bug, so if the create then fails the old
             // rule is GONE — surface the spec needed to rebuild it by hand in every failure path.
             let recovery = "name='\(mergedName)' match=\(mergedMatchAll ? "all" : "any") enabled=\(mergedEnabled) conditions=[\(condTriples.map { "\($0.type):\($0.op):\($0.value)" }.joined(separator: ", "))] actions=[\(mergedPlan.tokens.joined(separator: ", "))]"
-            try MailScript().deleteRule(index: target.index)                                // 1) old gone → name unique
+            try script.deleteRule(index: target.index)                                // 1) old gone → name unique
             do {
-                try MailScript().createRule(name: mergedName, enabled: false, matchAll: mergedMatchAll,   // 2) create DISABLED
+                try script.createRule(name: mergedName, enabled: false, matchAll: mergedMatchAll,   // 2) create DISABLED
                                             conditions: condTriples, plan: mergedPlan)
             } catch {
                 throw AppleError.upstream("rule recreate FAILED to create the replacement AFTER deleting the old rule — the rule is GONE. Recreate it in Mail.app: \(recovery). (underlying: \(error))")
             }
-            guard let created = try MailScript().listRules().first(where: { $0.name == mergedName }) else {
+            guard let created = try script.listRules().first(where: { $0.name == mergedName }) else {
                 throw AppleError.upstream("rule recreate failed — '\(mergedName)' is missing after create; the old rule was already deleted. Recreate in Mail.app: \(recovery)")
             }
-            let attached = try MailScript().ruleConditionCount(index: created.index)         // 3) VERIFY conditions
+            let attached = try script.ruleConditionCount(index: created.index)         // 3) VERIFY conditions
             guard attached == condTriples.count else {
-                try? MailScript().deleteRule(index: created.index)                           //    remove the malformed rule
+                try? script.deleteRule(index: created.index)                           //    remove the malformed rule
                 throw AppleError.upstream("rule recreate dropped conditions (\(attached)/\(condTriples.count) attached) — removed the malformed rule and did NOT enable it (a 0-condition rule matches ALL mail). Recreate in Mail.app: \(recovery)")
             }
             // MATCH-LOGIC VERIFICATION (review-caught 2026-08-19) — same rationale + fail-safe
@@ -485,19 +499,19 @@ struct RulesUpdate: ParsableCommand {
             // constrains the rebuilt rule) — it needs the same readback confirmation.
             let matchLogicReadback: Bool
             do {
-                matchLogicReadback = try MailScript().readRuleScalars(index: created.index).matchAll
+                matchLogicReadback = try script.readRuleScalars(index: created.index).matchAll
             } catch {
-                try? MailScript().deleteRule(index: created.index)
+                try? script.deleteRule(index: created.index)
                 throw AppleError.upstream("rule recreate could not verify its match-all/any logic after creation (\(error)) — removed the malformed rule and did NOT enable it. Recreate in Mail.app: \(recovery)")
             }
             if let mismatch = RuleLiveGuards.matchLogicMismatch(requested: mergedMatchAll, readback: matchLogicReadback) {
-                try? MailScript().deleteRule(index: created.index)
+                try? script.deleteRule(index: created.index)
                 throw AppleError.upstream(mismatch + " Recreate in Mail.app: \(recovery)")
             }
             if mergedEnabled {                                                              // 4) re-enable only once verified
-                try MailScript().updateRuleMeta(index: created.index, name: nil, enabled: true, matchAll: nil, plan: nil)
+                try script.updateRuleMeta(index: created.index, name: nil, enabled: true, matchAll: nil, plan: nil)
             }
-            let newIndex = (try? MailScript().listRules())?.first(where: { $0.name == mergedName })?.index ?? created.index
+            let newIndex = (try? script.listRules())?.first(where: { $0.name == mergedName })?.index ?? created.index
             try Output.emit(tool: "mail", data: [
                 "updated_rule_index": AnyEncodableBox(newIndex),
                 // Oracle A wire names (`rule_index` / `name`) alongside the CLI's originals.
@@ -526,18 +540,24 @@ struct RulesDelete: ParsableCommand {
     @OptionGroup var global: GlobalOptions
     @Argument(help: "1-based rule index.") var index: Int
     func run() throws {
+        try run(scriptFactory: { MailScript() })
+    }
+
+    func run(scriptFactory: () -> MailScript) throws {
         try runGuarded(tool: "mail") {
-            // Write-model v2 preamble.
+            // Write-model v2 preamble. It stays FIRST: fail-loud env validation must run before any
+            // dependency is constructed, so a future factory with side effects cannot outrun it.
             try TestMode.validateWriteEnvironment()
             let sandboxActive = try TestMode.sandboxActive(flag: global.testMode)
             let willExecute = try global.willExecute(defaultDryRun: false)
+            let script = scriptFactory()
 
             guard willExecute else {
                 try Output.emit(tool: "mail", data: ["would_delete_rule_index": AnyEncodableBox(index), "dry_run": AnyEncodableBox(true), "note": AnyEncodableBox(Optional<String>.none)], text: global.text, sandboxActive: sandboxActive)
                 return
             }
-            let r = try requireLabeledRule(index: index, sandboxActive: sandboxActive)
-            try MailScript().deleteRule(index: r.index)
+            let r = try requireLabeledRule(index: index, sandboxActive: sandboxActive, scriptFactory: { script })
+            try script.deleteRule(index: r.index)
             try Output.emit(tool: "mail", data: ["deleted_rule_index": AnyEncodableBox(index), "rule_name": AnyEncodableBox(r.name),
              // `rule_index` + `deleted_name` are oracle A delete_rule's wire names.
              "rule_index": AnyEncodableBox(index), "deleted_name": AnyEncodableBox(r.name),
@@ -550,21 +570,23 @@ struct RulesEnable: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "enable", abstract: "Enable a rule by index (EXECUTES by default; --dry-run previews).")
     @OptionGroup var global: GlobalOptions
     @Argument var index: Int
-    func run() throws { try setEnabled(index: index, enabled: true, global: global) }
+    func run() throws { try run(scriptFactory: { MailScript() }) }
+    func run(scriptFactory: () -> MailScript) throws { try setEnabled(index: index, enabled: true, global: global, scriptFactory: scriptFactory) }
 }
 struct RulesDisable: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "disable", abstract: "Disable a rule by index (EXECUTES by default; --dry-run previews).")
     @OptionGroup var global: GlobalOptions
     @Argument var index: Int
-    func run() throws { try setEnabled(index: index, enabled: false, global: global) }
+    func run() throws { try run(scriptFactory: { MailScript() }) }
+    func run(scriptFactory: () -> MailScript) throws { try setEnabled(index: index, enabled: false, global: global, scriptFactory: scriptFactory) }
 }
 
 /// Resolve a rule by 1-based index (write-model v2). Inside the sandbox the rule's name must
 /// be a labeled `apple-cli-test…` item — an agent run can only toggle/delete rules it created,
 /// never a pre-existing real rule. Outside the sandbox, any rule resolves (the oracle's rule
 /// ops operate on any rule on call).
-func requireLabeledRule(index: Int, sandboxActive: Bool) throws -> MailScript.ScriptRule {
-    let rules = try MailScript().listRules()
+func requireLabeledRule(index: Int, sandboxActive: Bool, scriptFactory: () -> MailScript) throws -> MailScript.ScriptRule {
+    let rules = try scriptFactory().listRules()
     guard let r = rules.first(where: { $0.index == index }) else {
         // Oracle A raises MailRuleNotFoundError → `error_type: "rule_not_found"` on every rule op.
         // Emitting the generic `not_found` left a consumer unable to tell "no such rule index"
@@ -605,18 +627,23 @@ func realDeleteEnableWarnings(target: MailScript.ScriptRule, realDeleteMessage: 
     return [RuleLiveGuards.deleteActionWarning]
 }
 
-private func setEnabled(index: Int, enabled: Bool, global: GlobalOptions) throws {
+/// Shared body behind `rules enable` / `rules disable`. Internal (not `private`) and taking a
+/// REQUIRED `scriptFactory`, matching `requireLabeledRule`: a production default here would let a
+/// future caller omit the argument and silently drive live Mail.app from a test.
+func setEnabled(index: Int, enabled: Bool, global: GlobalOptions,
+                scriptFactory: () -> MailScript) throws {
     try runGuarded(tool: "mail") {
-        // Write-model v2 preamble.
+        // Write-model v2 preamble. It stays FIRST — see the note in `RulesUpdate.run`.
         try TestMode.validateWriteEnvironment()
         let sandboxActive = try TestMode.sandboxActive(flag: global.testMode)
         let willExecute = try global.willExecute(defaultDryRun: false)
+        let script = scriptFactory()
 
         guard willExecute else {
             try Output.emit(tool: "mail", data: ["rule_index": AnyEncodableBox(index), "would_set_enabled": AnyEncodableBox(enabled), "dry_run": AnyEncodableBox(true), "note": AnyEncodableBox(Optional<String>.none)], text: global.text, sandboxActive: sandboxActive)
             return
         }
-        let r = try requireLabeledRule(index: index, sandboxActive: sandboxActive)
+        let r = try requireLabeledRule(index: index, sandboxActive: sandboxActive, scriptFactory: { script })
         // ARMING GATE (review-caught 2026-08-19; closes the two-command bypass — see
         // `realDeleteEnableWarnings` + `RuleLiveGuards.realDeleteEnableRefusal`). This command is
         // the ARMING MOMENT for any rule the sandboxed `rules create` path leaves disabled (its
@@ -626,10 +653,10 @@ private func setEnabled(index: Int, enabled: Bool, global: GlobalOptions) throws
         // off anything passed in this command — `rules enable` takes no --action at all. Only
         // read back when ARMING (`enabled`): disabling never needs it (`realDeleteEnableWarnings`
         // is a no-op there anyway, but skipping the read avoids a pointless AppleScript round trip).
-        let realDeleteMessage = enabled ? try MailScript().readRuleScalars(index: r.index).deleteMessage : false
+        let realDeleteMessage = enabled ? try script.readRuleScalars(index: r.index).deleteMessage : false
         let warnings = try realDeleteEnableWarnings(target: r, realDeleteMessage: realDeleteMessage,
                                                      enabling: enabled, sandboxActive: sandboxActive)
-        try MailScript().setRuleEnabled(index: r.index, enabled: enabled)
+        try script.setRuleEnabled(index: r.index, enabled: enabled)
         try Output.emit(tool: "mail", data: ["rule_index": AnyEncodableBox(index), "rule_name": AnyEncodableBox(r.name), "set_enabled": AnyEncodableBox(enabled),
          // `name` + `enabled` are oracle A set_rule_enabled's wire names; `rule_name` +
          // `set_enabled` are the CLI's original keys, kept for existing consumers.
@@ -685,8 +712,12 @@ struct TemplatesList: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "list", abstract: "List stored templates.")
     @OptionGroup var global: GlobalOptions
     func run() throws {
+        try run(storeFactory: { TemplateStore() })
+    }
+
+    func run(storeFactory: () -> TemplateStore) throws {
         try runGuarded(tool: "mail") {
-            let list = try TemplateStore().list()
+            let list = try storeFactory().list()
             if global.json {
                 try Output.emit(tool: "mail", data: TemplateStore.TemplatesResult(templates: list, count: list.count))
             } else {
@@ -701,8 +732,12 @@ struct TemplatesGet: ParsableCommand {
     @OptionGroup var global: GlobalOptions
     @Argument var name: String
     func run() throws {
+        try run(storeFactory: { TemplateStore() })
+    }
+
+    func run(storeFactory: () -> TemplateStore) throws {
         try runGuarded(tool: "mail") {
-            let tpl = try TemplateStore().get(name)
+            let tpl = try storeFactory().get(name)
             if global.json { try Output.emit(tool: "mail", data: tpl) }
             else {
                 if let subj = tpl.subject { Output.printText("subject: \(subj)") }
@@ -719,6 +754,10 @@ struct TemplatesSave: ParsableCommand {
     @Option(name: .long, help: "Template body (may contain {placeholder} tokens).") var body: String
     @Option(name: .long, help: "Optional subject template.") var subject: String?
     func run() throws {
+        try run(storeFactory: { TemplateStore() })
+    }
+
+    func run(storeFactory: () -> TemplateStore) throws {
         try runGuarded(tool: "mail") {
             // Write-model v2 preamble. This command was the spec's named bucket-2 defect: it had
             // NO willExecute branch and wrote despite --dry-run. It now previews faithfully; the
@@ -737,7 +776,7 @@ struct TemplatesSave: ParsableCommand {
                     "has_subject": AnyEncodableBox(subject != nil), "dry_run": AnyEncodableBox(true)], text: global.text, sandboxActive: sandboxActive)
                 return
             }
-            let tpl = try TemplateStore().save(name: name, body: body, subject: subject)
+            let tpl = try storeFactory().save(name: name, body: body, subject: subject)
             // Q12: the execute envelope stamps `dry_run: false` (additive) — the template
             // object's own fields are unchanged; "original shape" no longer trumps the v2
             // execute-envelope rule the other 20 Mail writes follow.
@@ -752,6 +791,10 @@ struct TemplatesDelete: ParsableCommand {
     @OptionGroup var global: GlobalOptions
     @Argument var name: String
     func run() throws {
+        try run(storeFactory: { TemplateStore() })
+    }
+
+    func run(storeFactory: () -> TemplateStore) throws {
         try runGuarded(tool: "mail") {
             // Write-model v2 preamble. Oracle A wraps delete_template in MCP elicitation; a CLI
             // has no elicitation channel — the explicit invocation is the accept (documented
@@ -760,7 +803,7 @@ struct TemplatesDelete: ParsableCommand {
             let sandboxActive = try TestMode.sandboxActive(flag: global.testMode)
             let willExecute = try global.willExecute(defaultDryRun: false)
 
-            let store = TemplateStore()
+            let store = storeFactory()
             _ = try store.get(name)   // 404 if missing
             if willExecute {
                 try store.delete(name)
@@ -785,10 +828,15 @@ struct TemplatesRender: ParsableCommand {
     @Option(name: .long, help: "Variable override 'key=value' (repeatable).") var `var`: [String] = []
 
     func run() throws {
+        try run(storeFactory: { TemplateStore() }, contextFactory: { try MailContext() })
+    }
+
+    func run(storeFactory: () -> TemplateStore,
+             contextFactory: () throws -> MailContext) throws {
         try runGuarded(tool: "mail") {
             var autoVars = ["today": TemplateStore.todayString()]
             if let messageId {
-                let ctx = try MailContext()
+                let ctx = try contextFactory()
                 // Oracle parity: an unresolvable message_id is an ERROR (oracle A's
                 // `auto_template_vars` calls get_message, which raises MailMessageNotFoundError →
                 // error_type `message_not_found`). Silently rendering with only `today` used to
@@ -814,7 +862,7 @@ struct TemplatesRender: ParsableCommand {
                 guard let eq = kv.firstIndex(of: "=") else { throw AppleError.validation("--var must be 'key=value'; got '\(kv)'.") }
                 userVars[String(kv[kv.startIndex..<eq])] = String(kv[kv.index(after: eq)...])
             }
-            let result = try TemplateStore().render(name: name, autoVars: autoVars, userVars: userVars)
+            let result = try storeFactory().render(name: name, autoVars: autoVars, userVars: userVars)
             if global.json { try Output.emit(tool: "mail", data: result) }
             else {
                 if let subj = result.subject { Output.printText("subject: \(subj)") }

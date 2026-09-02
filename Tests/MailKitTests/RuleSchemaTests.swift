@@ -1,14 +1,15 @@
 import Testing
 import AppleKit
 @testable import MailKit
+import TestSupport
 
 @Suite("RuleSchema")
 struct RuleSchemaTests {
     @Test func parsesValidCondition() throws {
-        let c = try RuleSchema.parseCondition("from:contains:boss@x.io")
+        let c = try RuleSchema.parseCondition("from:contains:boss@example.com")
         #expect(c.field == "from")
         #expect(c.operator == "contains")
-        #expect(c.value == "boss@x.io")
+        #expect(c.value == "boss@example.com")
     }
 
     @Test func headerNameConditionRequiresHeader() throws {
@@ -44,17 +45,17 @@ struct RuleSchemaTests {
     }
 
     @Test func parsesActions() throws {
-        let a = try RuleSchema.parseActions(["move_to=Gmail/Archive", "mark_read=true", "flag_color=red", "forward_to=a@x.io,b@y.io"])
+        let a = try RuleSchema.parseActions(["move_to=Gmail/Archive", "mark_read=true", "flag_color=red", "forward_to=a@example.com,b@example.org"])
         #expect(a.move_to == "Gmail/Archive")
         #expect(a.mark_read == true)
         #expect(a.flag_color == "red")
-        #expect(a.forward_to == ["a@x.io", "b@y.io"])
+        #expect(a.forward_to == ["a@example.com", "b@example.org"])
     }
 
     @Test func refusesUnsupportedActions() {
         // The update_rule unsupported-action refusal (run-AppleScript/redirect/reply/sound/color).
         #expect(throws: Error.self) { _ = try RuleSchema.parseActions(["run_applescript=/x.scpt"]) }
-        #expect(throws: Error.self) { _ = try RuleSchema.parseActions(["redirect=a@x.io"]) }
+        #expect(throws: Error.self) { _ = try RuleSchema.parseActions(["redirect=a@example.com"]) }
         #expect(throws: Error.self) { _ = try RuleSchema.parseActions(["reply=hi"]) }
     }
 
@@ -70,25 +71,37 @@ struct RuleSchemaTests {
 /// test rule, so the AppleScript path can never be handed a rule that would act on real mail.
 @Suite("RuleLiveGuards (live rule safety invariant)")
 struct RuleLiveGuardsTests {
-    let label = TestMode.sandboxPrefix
+    /// The CANONICAL constant, not `TestMode.sandboxPrefix`. The live read happens twice on
+    /// different clocks — once here at suite-instance init, and again inside `RuleLiveGuards` at
+    /// call time — so a concurrent `APPLE_TEST_SANDBOX` window opening or closing between them made
+    /// the fixture and the gate disagree and the guard throw. Pinning the constant fixes the
+    /// fixture half; the `withoutSandboxOverrides` window in each test fixes the product half by
+    /// making the live read resolve to this same value.
+    let label = TestMode.canonicalSandboxPrefix
 
     @Test func labeledNameGate() throws {
-        try RuleLiveGuards.requireLabeledName(label + "-rule")            // labeled → passes
-        #expect(throws: Error.self) { try RuleLiveGuards.requireLabeledName("real-inbox-rule") }
+        try TestEnvironment.withoutSandboxOverrides {
+            try RuleLiveGuards.requireLabeledName(label + "-rule")            // labeled → passes
+            #expect(throws: Error.self) { try RuleLiveGuards.requireLabeledName("real-inbox-rule") }
+        }
     }
 
     @Test func controlCharGate() throws {
-        #expect(throws: Error.self) { try RuleLiveGuards.requireNoControlChars(name: "x\u{1f}y", conditions: []) }
-        let clean = try RuleSchema.parseCondition("subject:contains:\(label)")
-        try RuleLiveGuards.requireNoControlChars(name: label, conditions: [clean])   // clean → passes
+        try TestEnvironment.withoutSandboxOverrides {
+            #expect(throws: Error.self) { try RuleLiveGuards.requireNoControlChars(name: "x\u{1f}y", conditions: []) }
+            let clean = try RuleSchema.parseCondition("subject:contains:\(label)")
+            try RuleLiveGuards.requireNoControlChars(name: label, conditions: [clean])   // clean → passes
+        }
     }
 
     @Test func selfScopedRequiresMatchAllAndLabelCondition() throws {
-        let labeled = try RuleSchema.parseCondition("subject:contains:\(label)")
-        let unlabeled = try RuleSchema.parseCondition("from:contains:boss@x.io")
-        #expect(throws: Error.self) { try RuleLiveGuards.requireSelfScoped(conditions: [labeled], match: "any") }    // any → refused
-        #expect(throws: Error.self) { try RuleLiveGuards.requireSelfScoped(conditions: [unlabeled], match: "all") }  // no label cond → refused
-        try RuleLiveGuards.requireSelfScoped(conditions: [labeled, unlabeled], match: "all")                         // labeled+all → passes
+        try TestEnvironment.withoutSandboxOverrides {
+            let labeled = try RuleSchema.parseCondition("subject:contains:\(label)")
+            let unlabeled = try RuleSchema.parseCondition("from:contains:boss@example.com")
+            #expect(throws: Error.self) { try RuleLiveGuards.requireSelfScoped(conditions: [labeled], match: "any") }    // any → refused
+            #expect(throws: Error.self) { try RuleLiveGuards.requireSelfScoped(conditions: [unlabeled], match: "all") }  // no label cond → refused
+            try RuleLiveGuards.requireSelfScoped(conditions: [labeled, unlabeled], match: "all")                         // labeled+all → passes
+        }
     }
 
     /// header_name is now WIRED for live mutation (Mail.sdef RuleType `header key` + the rule
@@ -97,13 +110,15 @@ struct RuleLiveGuardsTests {
     /// safe: the rule is still an AND-rule carrying the test-label subject condition, so a header
     /// condition can only NARROW what it matches, never widen it.
     @Test func selfScopedAllowsHeaderNameAlongsideTheLabelCondition() throws {
-        let labeled = try RuleSchema.parseCondition("subject:contains:\(label)")
-        let hdr = try RuleSchema.parseCondition("header_name:contains:x:X-Test")
-        try RuleLiveGuards.requireSelfScoped(conditions: [labeled, hdr], match: "all")
-        // ...but a header condition does NOT substitute for the label condition.
-        #expect(throws: Error.self) { try RuleLiveGuards.requireSelfScoped(conditions: [hdr], match: "all") }
-        // ...and it does not unlock an OR-rule, where the label would stop constraining.
-        #expect(throws: Error.self) { try RuleLiveGuards.requireSelfScoped(conditions: [labeled, hdr], match: "any") }
+        try TestEnvironment.withoutSandboxOverrides {
+            let labeled = try RuleSchema.parseCondition("subject:contains:\(label)")
+            let hdr = try RuleSchema.parseCondition("header_name:contains:x:X-Test")
+            try RuleLiveGuards.requireSelfScoped(conditions: [labeled, hdr], match: "all")
+            // ...but a header condition does NOT substitute for the label condition.
+            #expect(throws: Error.self) { try RuleLiveGuards.requireSelfScoped(conditions: [hdr], match: "all") }
+            // ...and it does not unlock an OR-rule, where the label would stop constraining.
+            #expect(throws: Error.self) { try RuleLiveGuards.requireSelfScoped(conditions: [labeled, hdr], match: "any") }
+        }
     }
 
     /// Previews describe what the live path would refuse rather than refusing outright, so
@@ -155,7 +170,7 @@ struct RuleLiveGuardsTests {
 
     @Test func liveActionPlanRefusesForward() throws {
         // forward_to (auto-send to others) remains refused — latent exfil surface.
-        #expect(throws: Error.self) { _ = try RuleLiveGuards.liveActionPlan(RuleSchema.parseActions(["forward_to=a@x.io"])) }
+        #expect(throws: Error.self) { _ = try RuleLiveGuards.liveActionPlan(RuleSchema.parseActions(["forward_to=a@example.com"])) }
     }
 
     /// delete (auto-trash) is now LIVE-WIRED (operator-ruled full parity with oracle A,
@@ -223,27 +238,31 @@ struct PreviewRefusalParityTests {
     private let label = TestMode.canonicalSandboxPrefix
 
     @Test func isSelfScopedMatchesWhatRequireSelfScopedThrowsOn() throws {
-        let labeled = try RuleSchema.parseCondition("subject:contains:\(label)-x")
-        let unlabeled = try RuleSchema.parseCondition("from:contains:boss@example.com")
+        try TestEnvironment.withoutSandboxOverrides {
+            let labeled = try RuleSchema.parseCondition("subject:contains:\(label)-x")
+            let unlabeled = try RuleSchema.parseCondition("from:contains:boss@example.com")
 
-        // Agreement in BOTH directions is the point: the preview predicate must be true exactly
-        // when the execute check passes.
-        #expect(RuleLiveGuards.isSelfScoped([labeled, unlabeled]))
-        try RuleLiveGuards.requireSelfScoped(conditions: [labeled, unlabeled], match: "all")
+            // Agreement in BOTH directions is the point: the preview predicate must be true exactly
+            // when the execute check passes.
+            #expect(RuleLiveGuards.isSelfScoped([labeled, unlabeled]))
+            try RuleLiveGuards.requireSelfScoped(conditions: [labeled, unlabeled], match: "all")
 
-        #expect(RuleLiveGuards.isSelfScoped([unlabeled]) == false)
-        #expect(throws: Error.self) { try RuleLiveGuards.requireSelfScoped(conditions: [unlabeled], match: "all") }
+            #expect(RuleLiveGuards.isSelfScoped([unlabeled]) == false)
+            #expect(throws: Error.self) { try RuleLiveGuards.requireSelfScoped(conditions: [unlabeled], match: "all") }
 
-        #expect(RuleLiveGuards.isSelfScoped([]) == false)
+            #expect(RuleLiveGuards.isSelfScoped([]) == false)
+        }
     }
 
     /// Only subject conditions with a containment-style operator bind the label; a label appearing
     /// in some OTHER field must not count as self-scoping.
     @Test func onlySubjectContainmentConditionsCountAsSelfScoping() throws {
-        let inSender = try RuleSchema.parseCondition("from:contains:\(label)@x.io")
-        #expect(RuleLiveGuards.isSelfScoped([inSender]) == false)
-        let wrongOp = try RuleSchema.parseCondition("subject:does_not_contain:\(label)")
-        #expect(RuleLiveGuards.isSelfScoped([wrongOp]) == false)
+        try TestEnvironment.withoutSandboxOverrides {
+            let inSender = try RuleSchema.parseCondition("from:contains:\(label)@example.com")
+            #expect(RuleLiveGuards.isSelfScoped([inSender]) == false)
+            let wrongOp = try RuleSchema.parseCondition("subject:does_not_contain:\(label)")
+            #expect(RuleLiveGuards.isSelfScoped([wrongOp]) == false)
+        }
     }
 
     /// Oracle A rejects an empty condition value; an empty `contains` matches EVERY message.

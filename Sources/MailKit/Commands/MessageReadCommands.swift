@@ -92,6 +92,11 @@ struct SearchCommand: ParsableCommand {
     }
 
     func run() throws {
+        try run(contextFactory: { try MailContext() }, scriptFactory: { MailScript() })
+    }
+
+    func run(contextFactory: () throws -> MailContext,
+             scriptFactory: () -> MailScript) throws {
         try runGuarded(tool: "mail") {
             if let maxContentLength, maxContentLength < 0 {
                 throw AppleError.validation("--max-content-length must be >= 0 (0 = unlimited).")
@@ -126,7 +131,7 @@ struct SearchCommand: ParsableCommand {
                     }
                 }
             }
-            let ctx = try MailContext()
+            let ctx = try contextFactory()
             var f = EnvelopeIndex.MessageFilters()
             if let account { f.accountUUID = try ctx.requireAccountUUID(account) }
             f.mailboxName = mailbox
@@ -185,7 +190,7 @@ struct SearchCommand: ParsableCommand {
                 // collectLimit, search.py:393-421): collect offset+limit+1 matches, drop the
                 // offset, keep limit, and the +1 leftover is the has_more signal.
                 let collectLimit = LiveBodyPage.collectLimit(offset: offset, limit: limit)
-                var liveIDs = try MailScript().bodySearch(
+                var liveIDs = try scriptFactory().bodySearch(
                     needle: body, subjectTerms: subject, sender: sender,
                     readStatus: f.readStatus, flagged: f.flagged,
                     fromUnix: f.dateFromUnix, toUnix: f.dateToUnix,
@@ -318,12 +323,16 @@ struct ListCommand: ParsableCommand {
     }
 
     func run() throws {
+        try run(contextFactory: { try MailContext() })
+    }
+
+    func run(contextFactory: () throws -> MailContext) throws {
         try runGuarded(tool: "mail") {
             guard limit >= 0 else { throw AppleError.validation("--limit must be >= 0 (0 = all).") }
             if let limitPerAccount, limitPerAccount < 0 {
                 throw AppleError.validation("--limit-per-account must be >= 0 (0 = no per-account cap).")
             }
-            let ctx = try MailContext()
+            let ctx = try contextFactory()
             var f = EnvelopeIndex.MessageFilters()
             if let account { f.accountUUID = try ctx.requireAccountUUID(account) }
             f.mailboxName = "INBOX"
@@ -386,8 +395,13 @@ struct GetCommand: ParsableCommand {
     @Flag(name: .long, help: "Alias/compat: never fetch the full body (default behavior).") var noContent = false
 
     func run() throws {
+        try run(contextFactory: { try MailContext() }, scriptFactory: { MailScript() })
+    }
+
+    func run(contextFactory: () throws -> MailContext,
+             scriptFactory: () -> MailScript) throws {
         try runGuarded(tool: "mail") {
-            let ctx = try MailContext()
+            let ctx = try contextFactory()
             guard let row = try resolveMessageRow(ctx: ctx, id: id) else {
                 throw AppleError.notFound("no message for id '\(id)'.")
             }
@@ -429,7 +443,7 @@ struct GetCommand: ParsableCommand {
             // Full body is opt-in: the AppleScript scan is slow (Mail has no body index,
             // mirroring MCP A's own slow-path caveat). The indexed `snippet` covers the fast case.
             if content && !noContent && !headersOnly, let internetID = msg.internet_message_id {
-                msg.content = try MailScript().body(internetMessageID: internetID, accountName: msg.account)
+                msg.content = try scriptFactory().body(internetMessageID: internetID, accountName: msg.account)
             }
             // Oracle A ALWAYS emits the `content` key, "" when suppressed (mail_connector.py
             // msgContent) — a caller ported from A KeyErrors when the key is dropped. nil here
@@ -451,11 +465,16 @@ struct SelectedCommand: ParsableCommand {
     @Flag(name: .long, help: "Do not include body content.") var noContent = false
 
     func run() throws {
+        try run(contextFactory: { try MailContext() }, scriptFactory: { MailScript() })
+    }
+
+    func run(contextFactory: () throws -> MailContext,
+             scriptFactory: () -> MailScript) throws {
         try runGuarded(tool: "mail") {
-            let ctx = try? MailContext()   // used to enrich from the index when possible
+            let ctx = try? contextFactory()   // used to enrich from the index when possible
             let selections: [MailScript.ScriptSelection]
             do {
-                selections = try MailScript().selectedMessages(includeContent: !noContent)
+                selections = try scriptFactory().selectedMessages(includeContent: !noContent)
             } catch {
                 throw AppleError.upstream("could not read Mail selection — is Mail.app running with automation permitted? (\(error))")
             }
@@ -511,8 +530,12 @@ struct ThreadCommand: ParsableCommand {
     @Flag(name: .long, help: "Thread by RFC References/In-Reply-To headers (MCP A get_thread) instead of Apple's conversation grouping.") var references = false
 
     func run() throws {
+        try run(contextFactory: { try MailContext() })
+    }
+
+    func run(contextFactory: () throws -> MailContext) throws {
         try runGuarded(tool: "mail") {
-            let ctx = try MailContext()
+            let ctx = try contextFactory()
             var messages: [MailMessage] = []
             var matchedBy = ""
             var total: Int? = nil
@@ -693,14 +716,14 @@ struct AttachmentsList: ParsableCommand {
     /// index fallback), so a row's POSITION here equals save's selection position on the happy
     /// path — `save_index` remains the honest pointer for the degraded/index views.
     private func attachmentRows(ctx: MailContext, row: [String: String?], rowid: Int,
-                                live: Bool) throws
+                                live: Bool, scriptFactory: () -> MailScript) throws
         -> (rows: [MailAttachment], degraded: Bool) {
         let indexRows = try ctx.index.attachments(messageRowid: rowid)
         let msg = ctx.decodeSummary(row)
         var liveMetas: [MailScript.AttachmentMeta]? = nil
         if live, let internetID = msg.internet_message_id {
             liveMetas = Self.liveAttachmentMetadataOrNil {
-                try MailScript().listAttachments(
+                try scriptFactory().listAttachments(
                     internetMessageID: internetID, accountName: msg.account)
             }
         }
@@ -709,8 +732,13 @@ struct AttachmentsList: ParsableCommand {
     }
 
     func run() throws {
+        try run(contextFactory: { try MailContext() }, scriptFactory: { MailScript() })
+    }
+
+    func run(contextFactory: () throws -> MailContext,
+             scriptFactory: () -> MailScript) throws {
         try runGuarded(tool: "mail") {
-            let ctx = try MailContext()
+            let ctx = try contextFactory()
             var atts: [MailAttachment] = []
             var matchedBy = ""
             var emails: [MailAttachmentEmail]? = nil
@@ -742,7 +770,8 @@ struct AttachmentsList: ParsableCommand {
                     }
                 }
                 let rowid = intVal(row["rowid"]) ?? 0
-                (atts, degraded) = try attachmentRows(ctx: ctx, row: row, rowid: rowid, live: !noLive)
+                (atts, degraded) = try attachmentRows(
+                    ctx: ctx, row: row, rowid: rowid, live: !noLive, scriptFactory: scriptFactory)
             } else if let subject {
                 matchedBy = "subject_keyword"
                 var f = EnvelopeIndex.MessageFilters()
@@ -762,7 +791,8 @@ struct AttachmentsList: ParsableCommand {
                 for row in rows {
                     let rowid = intVal(row["rowid"]) ?? 0
                     let msg = ctx.decodeSummary(row)
-                    let (rowsForMsg, deg) = try attachmentRows(ctx: ctx, row: row, rowid: rowid, live: !noLive)
+                    let (rowsForMsg, deg) = try attachmentRows(
+                        ctx: ctx, row: row, rowid: rowid, live: !noLive, scriptFactory: scriptFactory)
                     degraded = degraded || deg
                     atts += rowsForMsg
                     grouped.append(MailAttachmentEmail(

@@ -2,6 +2,7 @@ import Testing
 import Foundation
 import SQLite3
 @testable import MailKit
+import TestSupport
 
 /// Where `needs-response` gets its "already replied" suppression set.
 ///
@@ -24,6 +25,8 @@ import SQLite3
 /// happen to coincide would pass under the bug — which is exactly how this shipped.
 @Suite("needs-response suppression sourcing")
 struct NeedsResponseSourcingTests {
+
+    private let scratch = ScratchDirs("needs-response-sourcing")
     static let acctA = "AAAA1111-1111-1111-1111-111111111111"
     static let acctB = "BBBB2222-2222-2222-2222-222222222222"
 
@@ -41,9 +44,8 @@ struct NeedsResponseSourcingTests {
     /// | 12    | middle    | 3000           | 3rd          |
     /// | 13    | recv-only | 4000 (date_sent 0 → date_received) | 2nd |
     /// | 14    | second-oldest | 2000       | 4th          |
-    static func fixture() -> String {
-        let path = FileManager.default.temporaryDirectory
-            .appendingPathComponent("apple-cli-nr-\(UUID().uuidString).sqlite").path
+    static func fixture(in directory: URL) -> String {
+        let path = directory.appendingPathComponent("apple-cli-nr-\(UUID().uuidString).sqlite").path
         var db: OpaquePointer?
         #expect(sqlite3_open(path, &db) == SQLITE_OK, "fixture open failed")
         let sql = """
@@ -87,8 +89,7 @@ struct NeedsResponseSourcingTests {
     /// can be unlinked immediately — otherwise every `swift test` run strands one SQLite file per
     /// test in `$TMPDIR` (review-caught: 170 had already accumulated).
     func index() throws -> EnvelopeIndex {
-        let path = Self.fixture()
-        defer { try? FileManager.default.removeItem(atPath: path) }
+        let path = Self.fixture(in: try scratch.directory())
         return try EnvelopeIndex(explicitPath: path)
     }
 

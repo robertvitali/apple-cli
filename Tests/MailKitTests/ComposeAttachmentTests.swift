@@ -28,9 +28,10 @@ struct ComposeAttachmentTests {
     }
 
     @Test("resolveAttachmentPath rejects a missing file as not_found (exit 65)")
-    func rejectsMissingFile() {
-        let missing = FileManager.default.temporaryDirectory
-            .appendingPathComponent("apple-cli-test-\(UUID().uuidString)/nope.txt").path
+    func rejectsMissingFile() throws {
+        // A never-created child of an OWNED scratch directory — the parent exists, the file does
+        // not, and nothing is left in the shared temp root.
+        let missing = try scratch.directory().appendingPathComponent("nope.txt").path
         let err = #expect(throws: AppleError.self) { _ = try resolveAttachmentPath(missing) }
         #expect(err?.exitCode == 65)
     }
