@@ -34,8 +34,12 @@ public struct EventsRead: ParsableCommand {
     public init() {}
 
     public func run() throws {
+        try run(storeFactory: { EventStore() })
+    }
+
+    func run(storeFactory: () -> any CalendarEventStore) throws {
         try runGuarded(tool: "calendar") {
-            let store = EventStore()
+            let store = storeFactory()
             try store.requestAccess(to: .event, mode: .read)
 
             if let id {
@@ -127,6 +131,10 @@ public struct EventsCreate: ParsableCommand {
     public init() {}
 
     public func run() throws {
+        try run(storeFactory: { EventStore() })
+    }
+
+    func run(storeFactory: () -> any CalendarEventStore) throws {
         try runGuarded(tool: "calendar") {
             let startParsed = try DateArg.parse(start)
             let endParsed = try DateArg.parse(end)
@@ -160,7 +168,7 @@ public struct EventsCreate: ParsableCommand {
                 return
             }
 
-            let store = EventStore()
+            let store = storeFactory()
             try store.requestAccess(to: .event, mode: .write)
             guard let cal = resolveCalendar(store: store, name: targetCalendar) else {
                 throw AppleError.notFound("no calendar named or id '\(targetCalendar ?? "")' and no default calendar")
@@ -180,7 +188,7 @@ public struct EventsCreate: ParsableCommand {
             if !alarms.isEmpty { event.alarms = try alarms.map { try AlarmMapping.ekAlarm(from: $0) } }
             if !rules.isEmpty { event.recurrenceRules = try rules.map { try RecurrenceMapping.ekRule(from: $0) } }
 
-            try store.save(event, span: .thisEvent)
+            try store.save(event, span: .thisEvent, commit: true)
             // Q12 [7]: create/update omitted the execute-path `dry_run: false` discriminator
             // that delete already carried (AGENTS.md wiring rule); ExecutedWrite stamps it
             // flat without polluting the shared read-path Event model.
@@ -188,7 +196,7 @@ public struct EventsCreate: ParsableCommand {
         }
     }
 
-    func resolveCalendar(store: EventStore, name: String?) -> EKCalendar? {
+    func resolveCalendar(store: any CalendarEventStore, name: String?) -> EKCalendar? {
         // CAL-07: nil OR EMPTY both mean the default calendar (oracle `findCalendar`).
         if let name, !name.isEmpty { return store.calendar(matching: name, entity: .event) }
         return store.defaultCalendarForEvents
@@ -227,6 +235,10 @@ public struct EventsUpdate: ParsableCommand {
     public init() {}
 
     public func run() throws {
+        try run(storeFactory: { EventStore() })
+    }
+
+    func run(storeFactory: () -> any CalendarEventStore) throws {
         try runGuarded(tool: "calendar") {
             // Reject contradictory clear+set flags rather than silently letting "clear" win.
             if clearAlarms && !alarm.isEmpty { throw AppleError.validation("--clear-alarms conflicts with --alarm") }
@@ -277,7 +289,7 @@ public struct EventsUpdate: ParsableCommand {
                 return
             }
 
-            let store = EventStore()
+            let store = storeFactory()
             try store.requestAccess(to: .event, mode: .write)
             guard let event = store.event(withIdentifier: id) else {
                 throw AppleError.notFound("no event with id '\(id)'")
@@ -322,7 +334,7 @@ public struct EventsUpdate: ParsableCommand {
             if clearRecurrence { event.recurrenceRules = [] }
             else if !rules.isEmpty { event.recurrenceRules = try rules.map { try RecurrenceMapping.ekRule(from: $0) } }
 
-            try store.save(event, span: ekSpan)
+            try store.save(event, span: ekSpan, commit: true)
             // Q12 [7]: create/update omitted the execute-path `dry_run: false` discriminator
             // that delete already carried (AGENTS.md wiring rule); ExecutedWrite stamps it
             // flat without polluting the shared read-path Event model.
@@ -356,6 +368,10 @@ public struct EventsDelete: ParsableCommand {
     public init() {}
 
     public func run() throws {
+        try run(storeFactory: { EventStore() })
+    }
+
+    func run(storeFactory: () -> any CalendarEventStore) throws {
         try runGuarded(tool: "calendar") {
             let (ekSpan, spanLabel) = try resolveSpan()
 
@@ -368,7 +384,7 @@ public struct EventsDelete: ParsableCommand {
                 return
             }
 
-            let store = EventStore()
+            let store = storeFactory()
             try store.requestAccess(to: .event, mode: .write)
             guard let event = store.event(withIdentifier: id) else {
                 throw AppleError.notFound("no event with id '\(id)'")
@@ -378,7 +394,7 @@ public struct EventsDelete: ParsableCommand {
             // straight to `deleteEvent(id)` with no gate, and v2 says we match it.
             try CalendarWriteGuard.requireLabeled(event.title ?? "", sandboxActive: gate.sandboxActive)
 
-            try store.remove(event, span: ekSpan)
+            try store.remove(event, span: ekSpan, commit: true)
             try emitCalendarWrite(DeleteData(id: id, deleted: true, span: spanLabel), gate: gate)
         }
     }

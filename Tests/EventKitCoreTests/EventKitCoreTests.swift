@@ -4,9 +4,12 @@ import EventKit
 import AppleKit
 @testable import EventKitCore
 
-// Logic-tier tests for the shared EventKit engine — NO EKEventStore / TCC required.
-// EKRecurrenceRule, EKAlarm, and EKStructuredLocation are plain value objects constructible
-// in-memory, so the EK⇄model round-trips run in CI without Calendar/Reminders permission.
+// Logic-tier tests for the shared EventKit engine. These are TCC-free, not EventKit-free: the
+// honest invariant is that an `EKEventStore` is constructed ONLY as an inert object factory for
+// `EKEvent` / `EKReminder` / `EKCalendar` (see `FakeEventKitBackend.store` below), and that
+// access/fetch/save/remove/commit is NEVER called on it — every such call routes through a fake.
+// Construction alone neither prompts nor reads TCC. EKRecurrenceRule, EKAlarm, and
+// EKStructuredLocation are plain value objects, so the EK⇄model round-trips need no permission.
 //
 //     PATH="$HOME/.swiftly/bin:$PATH" swift test
 
@@ -83,6 +86,470 @@ struct DateParsingTests {
         #expect(DateParsing.bareDateString(parsed.date, timeZone: utc) == "2026-07-15")
     }
 
+}
+
+/// Carries a non-Sendable EventKit payload into the background queue the asynchronous fetch
+/// fake calls back on. Exactly one writer (construction) then one reader — never concurrent.
+final class UncheckedBox<T>: @unchecked Sendable {
+    let value: T
+    init(_ value: T) { self.value = value }
+}
+
+final class FakeEventKitBackend: EventKitStoreBackend {
+    /// INERT OBJECT FACTORY ONLY. `EKEvent(eventStore:)` / `EKReminder(eventStore:)` /
+    /// `EKCalendar(for:eventStore:)` all require a store instance and there is no in-memory
+    /// substitute, so one is constructed here — but no access/fetch/save/remove/commit is ever
+    /// issued against it. Construction neither prompts nor reads TCC.
+    let store = EKEventStore()
+    /// nil → call the fetch completion synchronously on the caller's thread (the default).
+    /// Non-nil → complete asynchronously on that queue, like the real EventKit fetch.
+    var fetchCompletionQueue: DispatchQueue?
+    /// Same knob for the ACCESS-request bridge. That bridge's `sem.wait()` is deliberately
+    /// unbounded (it waits on the system dialog), so a signalling-order mistake there deadlocks
+    /// the CLI rather than timing out — it is the bridge that most needs cross-thread coverage.
+    var promptCompletionQueue: DispatchQueue?
+    var status: EventStore.AuthStatus = .fullAccess
+    var statusAfterPrompt: EventStore.AuthStatus?
+    var promptResult: (Bool, Error?) = (true, nil)
+    var promptEntities: [EventStore.Entity] = []
+    var calendarsByEntity: [EventStore.Entity: [EKCalendar]] = [:]
+    var calendarsById: [String: EKCalendar] = [:]
+    var sources: [EKSource] = []
+    var defaultCalendarForNewEvents: EKCalendar?
+    var defaultReminderList: EKCalendar?
+    var eventRows: [EKEvent] = []
+    var eventsById: [String: EKEvent] = [:]
+    var remindersById: [String: EKReminder] = [:]
+    var reminderRows: [EKReminder]? = []
+    var savedEvents: [(EKEvent, EKSpan, Bool)] = []
+    var removedEvents: [(EKEvent, EKSpan, Bool)] = []
+    var savedReminders: [(EKReminder, Bool)] = []
+    var removedReminders: [(EKReminder, Bool)] = []
+    var savedCalendars: [(EKCalendar, Bool)] = []
+    var removedCalendars: [(EKCalendar, Bool)] = []
+    var committed = false
+    var thrownError: Error?
+
+    func authorizationStatus(for entity: EventStore.Entity) -> EventStore.AuthStatus {
+        if let statusAfterPrompt, promptEntities.contains(entity) { return statusAfterPrompt }
+        return status
+    }
+
+    func requestFullAccessToEvents(completion: @escaping @Sendable (Bool, Error?) -> Void) {
+        promptEntities.append(.event)
+        deliverPrompt(completion)
+    }
+
+    func requestFullAccessToReminders(completion: @escaping @Sendable (Bool, Error?) -> Void) {
+        promptEntities.append(.reminder)
+        deliverPrompt(completion)
+    }
+
+    /// Real EventKit answers the access prompt on its own queue, well after the call returns.
+    /// With `promptCompletionQueue` set this reproduces that, so `EventStore.requestFullAccess`'s
+    /// `Box` + semaphore pair is genuinely crossed rather than re-entered synchronously.
+    private func deliverPrompt(_ completion: @escaping @Sendable (Bool, Error?) -> Void) {
+        let result = UncheckedBox(promptResult)
+        guard let queue = promptCompletionQueue else {
+            completion(result.value.0, result.value.1)
+            return
+        }
+        queue.asyncAfter(deadline: .now() + .milliseconds(20)) {
+            completion(result.value.0, result.value.1)
+        }
+    }
+
+    func calendars(for entity: EventStore.Entity) -> [EKCalendar] {
+        calendarsByEntity[entity] ?? []
+    }
+
+    func calendar(withIdentifier id: String) -> EKCalendar? {
+        calendarsById[id]
+    }
+
+    func defaultCalendarForNewReminders() -> EKCalendar? {
+        defaultReminderList
+    }
+
+    func predicateForEvents(withStart start: Date, end: Date, calendars: [EKCalendar]?) -> NSPredicate {
+        NSPredicate(value: true)
+    }
+
+    func events(matching predicate: NSPredicate) -> [EKEvent] {
+        eventRows
+    }
+
+    func event(withIdentifier id: String) -> EKEvent? {
+        eventsById[id]
+    }
+
+    func save(_ event: EKEvent, span: EKSpan, commit: Bool) throws {
+        if let thrownError { throw thrownError }
+        savedEvents.append((event, span, commit))
+    }
+
+    func remove(_ event: EKEvent, span: EKSpan, commit: Bool) throws {
+        if let thrownError { throw thrownError }
+        removedEvents.append((event, span, commit))
+    }
+
+    func calendarItem(withIdentifier id: String) -> EKCalendarItem? {
+        remindersById[id]
+    }
+
+    func fetchReminders(matching predicate: NSPredicate, completion: @escaping @Sendable ([EKReminder]?) -> Void) {
+        let rows = UncheckedBox(reminderRows)
+        guard let queue = fetchCompletionQueue else {
+            completion(rows.value)
+            return
+        }
+        // EventKit is free to call back on its own queue; this reproduces that so the
+        // `Box` + semaphore bridge in `EventStore.reminders(matching:)` is exercised
+        // across threads rather than re-entered synchronously.
+        queue.asyncAfter(deadline: .now() + .milliseconds(20)) { completion(rows.value) }
+    }
+
+    /// Identity-checkable: the wrapper must hand back THIS instance, and record the lists it was
+    /// asked about, so delegation is proved by identity rather than by the fake's own constant.
+    let reminderPredicate = NSPredicate(format: "SELF == nil")
+    var reminderPredicateLists: [[EKCalendar]?] = []
+
+    func predicateForReminders(in lists: [EKCalendar]?) -> NSPredicate {
+        reminderPredicateLists.append(lists)
+        return reminderPredicate
+    }
+
+    func save(_ reminder: EKReminder, commit: Bool) throws {
+        if let thrownError { throw thrownError }
+        savedReminders.append((reminder, commit))
+    }
+
+    func remove(_ reminder: EKReminder, commit: Bool) throws {
+        if let thrownError { throw thrownError }
+        removedReminders.append((reminder, commit))
+    }
+
+    func saveCalendar(_ calendar: EKCalendar, commit: Bool) throws {
+        if let thrownError { throw thrownError }
+        savedCalendars.append((calendar, commit))
+    }
+
+    func removeCalendar(_ calendar: EKCalendar, commit: Bool) throws {
+        if let thrownError { throw thrownError }
+        removedCalendars.append((calendar, commit))
+    }
+
+    func commit() throws {
+        if let thrownError { throw thrownError }
+        committed = true
+    }
+}
+
+@Suite("EventStore backend seam")
+struct EventStoreBackendTests {
+    func calendar(_ title: String, entity: EKEntityType, store: EKEventStore) -> EKCalendar {
+        let calendar = EKCalendar(for: entity, eventStore: store)
+        calendar.title = title
+        return calendar
+    }
+
+    func event(_ title: String, start: TimeInterval, store: EKEventStore) -> EKEvent {
+        let event = EKEvent(eventStore: store)
+        event.title = title
+        event.startDate = Date(timeIntervalSince1970: start)
+        event.endDate = Date(timeIntervalSince1970: start + 3_600)
+        return event
+    }
+
+    func reminder(_ title: String, store: EKEventStore) -> EKReminder {
+        let reminder = EKReminder(eventStore: store)
+        reminder.title = title
+        return reminder
+    }
+
+    @Test("requestAccess accepts existing full and event write-only grants")
+    func requestAccessExistingGrant() throws {
+        let full = FakeEventKitBackend()
+        try EventStore(backend: full).requestAccess(to: .reminder, mode: .read)
+        #expect(full.promptEntities.isEmpty)
+
+        let writeOnly = FakeEventKitBackend()
+        writeOnly.status = .writeOnly
+        try EventStore(backend: writeOnly).requestAccess(to: .event, mode: .write)
+        #expect(writeOnly.promptEntities.isEmpty)
+        #expect(throws: AppleError.self) {
+            try EventStore(backend: writeOnly).requestAccess(to: .event, mode: .read)
+        }
+    }
+
+    @Test("requestAccess prompts notDetermined and maps denial or prompt errors")
+    func requestAccessPromptOutcomes() throws {
+        let granted = FakeEventKitBackend()
+        granted.status = .notDetermined
+        granted.statusAfterPrompt = .fullAccess
+        try EventStore(backend: granted).requestAccess(to: .event, mode: .read)
+        #expect(granted.promptEntities == [.event])
+
+        let deniedAfterPrompt = FakeEventKitBackend()
+        deniedAfterPrompt.status = .notDetermined
+        deniedAfterPrompt.statusAfterPrompt = .denied
+        #expect(throws: AppleError.self) {
+            try EventStore(backend: deniedAfterPrompt).requestAccess(to: .reminder, mode: .read)
+        }
+
+        let promptError = FakeEventKitBackend()
+        promptError.status = .notDetermined
+        promptError.promptResult = (false, NSError(domain: "synthetic", code: 1))
+        #expect(throws: AppleError.self) {
+            try EventStore(backend: promptError).requestAccess(to: .event, mode: .read)
+        }
+
+        let denied = FakeEventKitBackend()
+        denied.status = .denied
+        #expect(throws: AppleError.self) {
+            try EventStore(backend: denied).requestAccess(to: .event, mode: .read)
+        }
+
+        let restricted = FakeEventKitBackend()
+        restricted.status = .restricted
+        #expect(throws: AppleError.self) {
+            try EventStore(backend: restricted).requestAccess(to: .reminder, mode: .read)
+        }
+    }
+
+    @Test("calendar lookup rejects wrong entity ids and falls back to case-insensitive title")
+    func calendarMatching() throws {
+        let fake = FakeEventKitBackend()
+        let events = calendar("apple-cli-test Events", entity: .event, store: fake.store)
+        let reminders = calendar("apple-cli-test Reminders", entity: .reminder, store: fake.store)
+        fake.calendarsByEntity = [.event: [events], .reminder: [reminders]]
+        fake.calendarsById = ["event-id": events, "reminder-id": reminders]
+        let store = EventStore(backend: fake)
+
+        #expect(store.calendar(matching: "APPLE-CLI-TEST EVENTS", entity: .event) === events)
+        #expect(store.calendar(matching: "reminder-id", entity: .event) == nil)
+    }
+
+    @Test("events are fetched through the backend and sorted by start date")
+    func eventsSorted() {
+        let fake = FakeEventKitBackend()
+        fake.eventRows = [
+            event("apple-cli-test later", start: 200, store: fake.store),
+            event("apple-cli-test earlier", start: 100, store: fake.store),
+        ]
+
+        let rows = EventStore(backend: fake).events(
+            start: Date(timeIntervalSince1970: 0),
+            end: Date(timeIntervalSince1970: 300),
+            calendars: nil)
+
+        #expect(rows.map(\.title) == ["apple-cli-test earlier", "apple-cli-test later"])
+    }
+
+    @Test("reminder fetch bridges nil callback rows to an empty array")
+    func remindersNilCallbackIsEmpty() throws {
+        let fake = FakeEventKitBackend()
+        fake.reminderRows = nil
+        let rows = try EventStore(backend: fake).reminders(matching: NSPredicate(value: true))
+        #expect(rows.isEmpty)
+    }
+
+    @Test("mutators delegate commit flags and map backend errors")
+    func mutatorsDelegateAndMapErrors() throws {
+        let fake = FakeEventKitBackend()
+        let store = EventStore(backend: fake)
+        let event = event("apple-cli-test event", start: 100, store: fake.store)
+        let reminder = reminder("apple-cli-test reminder", store: fake.store)
+        let list = calendar("apple-cli-test list", entity: .reminder, store: fake.store)
+
+        try store.save(event, span: .futureEvents, commit: false)
+        try store.remove(event, span: .thisEvent, commit: false)
+        try store.save(reminder, commit: false)
+        try store.remove(reminder, commit: false)
+        try store.saveCalendar(list, commit: false)
+        try store.removeCalendar(list, commit: false)
+        try store.commit()
+
+        #expect(fake.savedEvents.first?.1 == .futureEvents)
+        #expect(fake.savedEvents.first?.2 == false)
+        #expect(fake.removedEvents.first?.2 == false)
+        #expect(fake.savedReminders.first?.1 == false)
+        #expect(fake.removedReminders.first?.1 == false)
+        #expect(fake.savedCalendars.first?.1 == false)
+        #expect(fake.removedCalendars.first?.1 == false)
+        #expect(fake.committed)
+
+        fake.thrownError = NSError(domain: "synthetic", code: 2)
+        #expect(throws: AppleError.self) {
+            try store.save(event, span: .thisEvent, commit: true)
+        }
+    }
+
+    @Test("event, reminder, and calendar constructors remain bound to the live EK store")
+    func constructorsAndLookups() throws {
+        let fake = FakeEventKitBackend()
+        let events = calendar("apple-cli-test events", entity: .event, store: fake.store)
+        let reminders = calendar("apple-cli-test reminders", entity: .reminder, store: fake.store)
+        let reminder = reminder("apple-cli-test reminder", store: fake.store)
+        fake.defaultCalendarForNewEvents = events
+        fake.defaultReminderList = reminders
+        fake.eventsById = ["event-1": event("apple-cli-test event", start: 100, store: fake.store)]
+        fake.remindersById = ["reminder-1": reminder]
+        let store = EventStore(backend: fake)
+
+        #expect(store.defaultCalendarForEvents === events)
+        #expect(store.defaultCalendarForReminders === reminders)
+        #expect(store.event(withIdentifier: "event-1")?.title == "apple-cli-test event")
+        #expect(store.reminder(withIdentifier: "reminder-1") === reminder)
+        #expect(store.newEvent().title == "")
+        #expect(store.newReminder(in: reminders).calendar === reminders)
+        #expect(store.newCalendar(for: .event) == nil)
+    }
+
+    @Test("direct wrapper lookups delegate to the backend")
+    func directWrapperLookups() throws {
+        let fake = FakeEventKitBackend()
+        let events = calendar("apple-cli-test events", entity: .event, store: fake.store)
+        let reminders = calendar("apple-cli-test reminders", entity: .reminder, store: fake.store)
+        let reminder = reminder("apple-cli-test reminder", store: fake.store)
+        fake.calendarsByEntity = [.event: [events], .reminder: [reminders]]
+        fake.calendarsById = ["calendar-1": events]
+        fake.reminderRows = [reminder]
+
+        let store = EventStore(backend: fake)
+        #expect(store.calendars(for: .event).first === events)
+        #expect(store.calendar(withIdentifier: "calendar-1") === events)
+        #expect(store.preferredSource(for: .event) == nil)
+        // Identity, not the fake's own constant: the wrapper must hand back the backend's
+        // predicate object and forward the list argument verbatim.
+        #expect(store.predicateForReminders(in: [reminders]) === fake.reminderPredicate)
+        #expect(fake.reminderPredicateLists.count == 1)
+        #expect(fake.reminderPredicateLists.first??.first === reminders)
+        #expect(try store.reminders(matching: NSPredicate(value: true)).first === reminder)
+    }
+
+    @Test("calendar lookup returns the identifier hit when the entity type matches")
+    func calendarMatchingByIdentifier() {
+        let fake = FakeEventKitBackend()
+        let events = calendar("apple-cli-test events", entity: .event, store: fake.store)
+        let reminders = calendar("apple-cli-test reminders", entity: .reminder, store: fake.store)
+        fake.calendarsById = ["event-id": events, "reminder-id": reminders]
+        // Deliberately EMPTY, so a title fallback cannot rescue the lookup: only the
+        // identifier branch can return a calendar here.
+        fake.calendarsByEntity = [:]
+        let store = EventStore(backend: fake)
+
+        #expect(store.calendar(matching: "event-id", entity: .event) === events)
+        #expect(store.calendar(matching: "reminder-id", entity: .reminder) === reminders)
+        // Right id, wrong entity — rejected rather than silently returned.
+        #expect(store.calendar(matching: "reminder-id", entity: .event) == nil)
+        #expect(store.calendar(matching: "event-id", entity: .reminder) == nil)
+    }
+
+    @Test("newCalendar binds a writable source, and returns nil when none exists")
+    func newCalendarSourceResolution() {
+        let sourceless = FakeEventKitBackend()
+        #expect(EventStore(backend: sourceless).newCalendar(for: .reminder) == nil)
+
+        let withSource = FakeEventKitBackend()
+        let source = EKSource()
+        withSource.sources = [source]
+        let created = EventStore(backend: withSource).newCalendar(for: .reminder)
+        #expect(created != nil)
+        #expect(created?.source === source)
+        #expect(created?.allowedEntityTypes.contains(.reminder) == true)
+    }
+
+    @Test("an EKError code outside the validation set maps to upstream, not validation")
+    func unmappedEKErrorIsUpstream() {
+        // `internalFailure` is deliberately absent from `mapError`'s bad-input list, so it must
+        // fall through to `.upstream` (exit 69) rather than `.validation` (exit 64).
+        let internalFailure = EKError(_nsError: NSError(domain: EKErrorDomain,
+                                                        code: EKError.Code.internalFailure.rawValue))
+        let mapped = EventStore.mapError(internalFailure)
+        #expect(mapped.type == AppleErrorType.upstream)
+        #expect(mapped.exitCode == AppleExit.upstream)
+
+        // A code that IS in the list stays validation — the two branches must not collapse.
+        let notMutable = EKError(_nsError: NSError(domain: EKErrorDomain,
+                                                   code: EKError.Code.eventNotMutable.rawValue))
+        #expect(EventStore.mapError(notMutable).type == AppleErrorType.validation)
+        #expect(EventStore.mapError(notMutable).exitCode == AppleExit.usage)
+
+        // Authorization failures keep their own type + exit 77.
+        let unauthorized = EKError(_nsError: NSError(domain: EKErrorDomain,
+                                                     code: EKError.Code.eventStoreNotAuthorized.rawValue))
+        #expect(EventStore.mapError(unauthorized).type == AppleErrorType.permissionDenied)
+        #expect(EventStore.mapError(unauthorized).exitCode == AppleExit.permissionDenied)
+
+        // An AppleError thrown by a mapper passes through untouched.
+        #expect(EventStore.mapError(AppleError.validation("synthetic")).type == AppleErrorType.validation)
+    }
+
+    @Test("the access-request bridge returns grant, denial, and prompt errors delivered off-thread")
+    func asyncAuthorizationCrossesTheSemaphoreBridge() throws {
+        let queue = DispatchQueue(label: "apple-cli-test.prompt")
+
+        // Grant: notDetermined → prompt answered on another thread → fullAccess.
+        let granted = FakeEventKitBackend()
+        granted.status = .notDetermined
+        granted.statusAfterPrompt = .fullAccess
+        granted.promptCompletionQueue = queue
+        try EventStore(backend: granted).requestAccess(to: .event, mode: .read)
+        #expect(granted.promptEntities == [.event])
+
+        // Denial: the prompt completes (off-thread) with granted == false.
+        let denied = FakeEventKitBackend()
+        denied.status = .notDetermined
+        denied.statusAfterPrompt = .denied
+        denied.promptResult = (false, nil)
+        denied.promptCompletionQueue = queue
+        #expect(throws: AppleError.self) {
+            try EventStore(backend: denied).requestAccess(to: .reminder, mode: .read)
+        }
+        #expect(denied.promptEntities == [.reminder])
+
+        // Prompt error: the handler carries an Error across the bridge, which must surface as
+        // permissionDenied (exit 77) rather than being lost with the crossing.
+        let failed = FakeEventKitBackend()
+        failed.status = .notDetermined
+        failed.promptResult = (false, NSError(domain: "synthetic", code: 1))
+        failed.promptCompletionQueue = queue
+        var thrown: AppleError?
+        #expect(throws: AppleError.self) {
+            do { try EventStore(backend: failed).requestAccess(to: .event, mode: .write) }
+            catch let error as AppleError { thrown = error; throw error }
+        }
+        #expect(thrown?.exitCode == AppleExit.permissionDenied)
+        #expect(thrown?.message.contains("EventKit access request failed") == true)
+    }
+
+    @Test("the reminder fetch bridge returns rows delivered on another thread")
+    func asyncFetchCrossesTheSemaphoreBridge() throws {
+        // `EventKitCore.makeStore()` / `EventStore()` are deliberately NOT exercised here: they
+        // construct the live backend, which belongs to the live tier, not the logic tier.
+        let fake = FakeEventKitBackend()
+        let rows = [reminder("apple-cli-test one", store: fake.store),
+                    reminder("apple-cli-test two", store: fake.store)]
+        fake.reminderRows = rows
+        fake.fetchCompletionQueue = DispatchQueue(label: "apple-cli-test.fetch")
+
+        let store = EventStore(backend: fake)
+        let fetched = try store.reminders(matching: NSPredicate(value: true))
+
+        #expect(fetched.count == 2)
+        #expect(fetched.map { $0.title } == ["apple-cli-test one", "apple-cli-test two"])
+    }
+
+    @Test("a nil reminder fetch result becomes an empty array")
+    func asyncFetchNilBecomesEmpty() throws {
+        let fake = FakeEventKitBackend()
+        fake.reminderRows = nil
+        fake.fetchCompletionQueue = DispatchQueue(label: "apple-cli-test.fetch-nil")
+
+        let store = EventStore(backend: fake)
+        #expect(try store.reminders(matching: NSPredicate(value: true)).isEmpty)
+    }
 }
 
 // MARK: - Recurrence round-trips + validation
@@ -335,6 +802,43 @@ struct EKEnumTests {
         #expect(EKEnum.priorityWord(from: 2) == "high")
         #expect(EKEnum.priorityWord(from: 0) == "none")
     }
+
+    @Test("read-only participant, calendar, and source enums map every public case")
+    func readOnlyEnumStrings() {
+        #expect(EKEnum.participantStatusString(.unknown) == "unknown")
+        #expect(EKEnum.participantStatusString(.pending) == "pending")
+        #expect(EKEnum.participantStatusString(.accepted) == "accepted")
+        #expect(EKEnum.participantStatusString(.declined) == "declined")
+        #expect(EKEnum.participantStatusString(.tentative) == "tentative")
+        #expect(EKEnum.participantStatusString(.delegated) == "delegated")
+        #expect(EKEnum.participantStatusString(.completed) == "completed")
+        #expect(EKEnum.participantStatusString(.inProcess) == "in-process")
+
+        #expect(EKEnum.participantRoleString(.unknown) == "unknown")
+        #expect(EKEnum.participantRoleString(.required) == "required")
+        #expect(EKEnum.participantRoleString(.optional) == "optional")
+        #expect(EKEnum.participantRoleString(.chair) == "chair")
+        #expect(EKEnum.participantRoleString(.nonParticipant) == "non-participant")
+
+        #expect(EKEnum.participantTypeString(.unknown) == "unknown")
+        #expect(EKEnum.participantTypeString(.person) == "person")
+        #expect(EKEnum.participantTypeString(.room) == "room")
+        #expect(EKEnum.participantTypeString(.resource) == "resource")
+        #expect(EKEnum.participantTypeString(.group) == "group")
+
+        #expect(EKEnum.calendarTypeString(.local) == "local")
+        #expect(EKEnum.calendarTypeString(.calDAV) == "caldav")
+        #expect(EKEnum.calendarTypeString(.exchange) == "exchange")
+        #expect(EKEnum.calendarTypeString(.subscription) == "subscription")
+        #expect(EKEnum.calendarTypeString(.birthday) == "birthday")
+
+        #expect(EKEnum.sourceTypeString(.local) == "local")
+        #expect(EKEnum.sourceTypeString(.exchange) == "exchange")
+        #expect(EKEnum.sourceTypeString(.calDAV) == "caldav")
+        #expect(EKEnum.sourceTypeString(.mobileMe) == "mobileme")
+        #expect(EKEnum.sourceTypeString(.subscribed) == "subscribed")
+        #expect(EKEnum.sourceTypeString(.birthdays) == "birthdays")
+    }
 }
 
 @Suite("Color + finite helpers")
@@ -351,6 +855,13 @@ struct ColorHelperTests {
         #expect(ReadMapping.cgColor(fromHex: "#FFF") == nil)   // must be 6 digits
         #expect(ReadMapping.cgColor(fromHex: "nothex") == nil)
         #expect(ReadMapping.cgColor(fromHex: "#GG0000") == nil)
+    }
+
+    @Test("grayscale CGColor maps through the two-component path")
+    func grayscaleHex() {
+        let gray = CGColor(gray: 0.5, alpha: 1)
+        #expect(ReadMapping.hexColor(from: gray) == "#929292")
+        #expect(ReadMapping.hexColor(from: nil) == nil)
     }
 
     @Test("non-finite doubles are coerced so encoding stays total")
@@ -533,6 +1044,62 @@ struct StructuredLocationMappingTests {
         #expect(ReadMapping.structuredLocation(from: pos).radius == 42)
         let json = try String(data: JSONEncoder().encode(ReadMapping.structuredLocation(from: zero)), encoding: .utf8)!
         #expect(!json.contains("radius"))
+    }
+
+    /// The WRITE half of the same mapping (`events create/update --geo-*` builds its
+    /// `EKStructuredLocation` through this). It was reachable only from the live-store path
+    /// before the injected-store tests, so nothing pinned the nil-absorption: a nil title must
+    /// become `""` (not crash the non-optional initializer), a coordinate pair must be set only
+    /// when BOTH halves are present, and a nil radius must land as EventKit's own 0 sentinel —
+    /// which `structuredLocation(from:)` then omits again on the way out.
+    @Test("write mapping absorbs nil title/coords/radius into EventKit's own sentinels")
+    func writeMappingAbsorbsNils() throws {
+        let full = ReadMapping.ekStructuredLocation(from: StructuredLocation(
+            title: "Office", latitude: 12.5, longitude: -34.25, radius: 150))
+        #expect(full.title == "Office")
+        #expect(full.radius == 150)
+        let coordinate = try #require(full.geoLocation?.coordinate)
+        #expect(abs(coordinate.latitude - 12.5) < 1e-9)
+        #expect(abs(coordinate.longitude + 34.25) < 1e-9)
+
+        let bare = ReadMapping.ekStructuredLocation(from: StructuredLocation(
+            title: nil, latitude: nil, longitude: nil, radius: nil))
+        #expect(bare.title == "")
+        #expect(bare.geoLocation == nil)
+        #expect(bare.radius == 0)
+        // Round-trip: a radius-less write reads back with the key omitted (Q12 [14]).
+        #expect(ReadMapping.structuredLocation(from: bare).radius == nil)
+
+        // A half-supplied coordinate pair is NOT a location — latitude alone must not invent one.
+        let halfCoord = ReadMapping.ekStructuredLocation(from: StructuredLocation(
+            title: "Half", latitude: 1, longitude: nil, radius: 10))
+        #expect(halfCoord.geoLocation == nil)
+        #expect(halfCoord.radius == 10)
+    }
+}
+
+// MARK: - Zone-pinned calendar helper
+
+@Suite("Calendar.currentWithZone")
+struct CalendarZoneHelperTests {
+    /// DISCLOSURE: `Calendar.currentWithZone(_:)` has NO production caller today (grep over
+    /// `Sources/` finds only its definition) — it is a helper kept alongside `DateParsing` for
+    /// zone-pinned arithmetic. It is pinned here so its contract (Gregorian, the given zone, and
+    /// no mutation of `Calendar.current`) is stated rather than assumed if a caller appears.
+    @Test("returns a Gregorian calendar pinned to the given zone without touching Calendar.current")
+    func pinsZoneWithoutMutatingCurrent() throws {
+        let tokyo = try #require(TimeZone(identifier: "Asia/Tokyo"))
+        let before = Calendar.current.timeZone
+        let pinned = Calendar.currentWithZone(tokyo)
+        #expect(pinned.identifier == .gregorian)
+        #expect(pinned.timeZone == tokyo)
+        #expect(Calendar.current.timeZone == before)
+
+        // Zone-pinned arithmetic actually differs from a UTC-pinned one for the same instant.
+        let utc = try #require(TimeZone(identifier: "UTC"))
+        let instant = Date(timeIntervalSince1970: 1_784_116_800)   // 2026-07-15T12:00:00Z
+        #expect(Calendar.currentWithZone(tokyo).component(.hour, from: instant) == 21)
+        #expect(Calendar.currentWithZone(utc).component(.hour, from: instant) == 12)
     }
 }
 

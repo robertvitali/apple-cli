@@ -20,25 +20,45 @@ public struct RemindersDoctor: ParsableCommand {
         let reminders_ready: Bool
         let full_disk_access: Bool
         let notes: [String]
-    }
 
-    public func run() throws {
-        try runGuarded(tool: "reminders") {
-            let remStatus = EventStore.authorizationStatus(for: .reminder)
-            let calStatus = EventStore.authorizationStatus(for: .event)
-            let pre = Permissions.preflight()
-            var notes = pre.notes
+        static func build(remStatus: EventStore.AuthStatus,
+                          calStatus: EventStore.AuthStatus,
+                          fullDiskAccess: Bool,
+                          notes preflightNotes: [String]) -> Health {
+            var notes = preflightNotes
             let ready = remStatus == .fullAccess || remStatus == .authorized
             if !ready {
                 notes.append("Reminders access is '\(remStatus.rawValue)' — grant Full Access in "
                              + "System Settings › Privacy & Security › Reminders (first live run will prompt).")
             }
-            try Output.emit(tool: "reminders", data: Health(
+            return Health(
                 reminders_authorization: remStatus.rawValue,
                 calendar_authorization: calStatus.rawValue,
                 reminders_ready: ready,
-                full_disk_access: pre.full_disk_access,
-                notes: notes), text: global.text)
+                full_disk_access: fullDiskAccess,
+                notes: notes)
+        }
+    }
+
+    public func run() throws {
+        try run(authorizationStatus: EventStore.authorizationStatus(for:),
+                preflight: Permissions.preflight)
+    }
+
+    /// Test seam. The public `run()` binds the real EventKit status probe and the real Full
+    /// Disk Access preflight; logic tests bind pure stand-ins so no test reads host TCC state
+    /// or opens a protected path. Neither injected dependency prompts.
+    func run(authorizationStatus: (EventStore.Entity) -> EventStore.AuthStatus,
+             preflight: () -> Permissions.Preflight) throws {
+        try runGuarded(tool: "reminders") {
+            let remStatus = authorizationStatus(.reminder)
+            let calStatus = authorizationStatus(.event)
+            let pre = preflight()
+            try Output.emit(tool: "reminders", data: Health.build(
+                remStatus: remStatus,
+                calStatus: calStatus,
+                fullDiskAccess: pre.full_disk_access,
+                notes: pre.notes), text: global.text)
         }
     }
 }

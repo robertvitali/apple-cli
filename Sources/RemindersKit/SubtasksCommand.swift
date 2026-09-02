@@ -42,8 +42,12 @@ public struct SubtasksRead: ParsableCommand {
     public init() {}
 
     public func run() throws {
+        try run(storeFactory: { EventStore() })
+    }
+
+    func run(storeFactory: () -> any ReminderStore) throws {
         try runGuarded(tool: "reminders") {
-            let store = EventStore()
+            let store = storeFactory()
             try store.requestAccess(to: .reminder, mode: .read)
             let reminder = try fetchReminder(store, reminderId)
             let subs = ReminderSubtasks.parse(reminder.notes)
@@ -67,6 +71,10 @@ public struct SubtasksCreate: ParsableCommand {
     public init() {}
 
     public func run() throws {
+        try run(storeFactory: { EventStore() })
+    }
+
+    func run(storeFactory: () -> any ReminderStore) throws {
         try runGuarded(tool: "reminders") {
             let gate = try ReminderWriteGuard.resolve(global)
 
@@ -76,13 +84,13 @@ public struct SubtasksCreate: ParsableCommand {
                     sandbox_target_unchecked: gate.sandboxActive ? true : nil), gate: gate)
                 return
             }
-            let store = EventStore()
+            let store = storeFactory()
             try store.requestAccess(to: .reminder, mode: .write)
             let reminder = try fetchReminder(store, reminderId)
             try requireLabeledReminder(reminder, sandboxActive: gate.sandboxActive)
             let (newNotes, created) = try ReminderSubtasks.add(title: title, notes: reminder.notes)
             reminder.notes = newNotes
-            try store.save(reminder)
+            try store.save(reminder, commit: true)
             let subs = ReminderSubtasks.parse(newNotes)
             try emitRemindersExecutedWrite(SubtasksData(
                 reminder_id: reminderId, reminder_title: reminder.title,
@@ -106,6 +114,10 @@ public struct SubtasksUpdate: ParsableCommand {
     public init() {}
 
     public func run() throws {
+        try run(storeFactory: { EventStore() })
+    }
+
+    func run(storeFactory: () -> any ReminderStore) throws {
         try runGuarded(tool: "reminders") {
             try ReminderSubtasks.validateId(subtaskId)
             let gate = try ReminderWriteGuard.resolve(global)
@@ -117,13 +129,13 @@ public struct SubtasksUpdate: ParsableCommand {
                     sandbox_target_unchecked: gate.sandboxActive ? true : nil), gate: gate)
                 return
             }
-            let store = EventStore()
+            let store = storeFactory()
             try store.requestAccess(to: .reminder, mode: .write)
             let reminder = try fetchReminder(store, reminderId)
             try requireLabeledReminder(reminder, sandboxActive: gate.sandboxActive)
             let (newNotes, updated) = try ReminderSubtasks.update(id: subtaskId, title: title, completed: completed, notes: reminder.notes)
             reminder.notes = newNotes
-            try store.save(reminder)
+            try store.save(reminder, commit: true)
             let subs = ReminderSubtasks.parse(newNotes)
             try emitRemindersExecutedWrite(SubtasksData(
                 reminder_id: reminderId, reminder_title: reminder.title,
@@ -145,6 +157,10 @@ public struct SubtasksDelete: ParsableCommand {
     public init() {}
 
     public func run() throws {
+        try run(storeFactory: { EventStore() })
+    }
+
+    func run(storeFactory: () -> any ReminderStore) throws {
         try runGuarded(tool: "reminders") {
             try ReminderSubtasks.validateId(subtaskId)
             let gate = try ReminderWriteGuard.resolve(global)
@@ -155,13 +171,13 @@ public struct SubtasksDelete: ParsableCommand {
                     sandbox_target_unchecked: gate.sandboxActive ? true : nil), gate: gate)
                 return
             }
-            let store = EventStore()
+            let store = storeFactory()
             try store.requestAccess(to: .reminder, mode: .write)
             let reminder = try fetchReminder(store, reminderId)
             try requireLabeledReminder(reminder, sandboxActive: gate.sandboxActive)
             let newNotes = try ReminderSubtasks.remove(id: subtaskId, notes: reminder.notes)
             reminder.notes = newNotes
-            try store.save(reminder)
+            try store.save(reminder, commit: true)
             let subs = ReminderSubtasks.parse(newNotes)
             try emitRemindersExecutedWrite(SubtasksData(
                 reminder_id: reminderId, reminder_title: reminder.title,
@@ -183,6 +199,10 @@ public struct SubtasksToggle: ParsableCommand {
     public init() {}
 
     public func run() throws {
+        try run(storeFactory: { EventStore() })
+    }
+
+    func run(storeFactory: () -> any ReminderStore) throws {
         try runGuarded(tool: "reminders") {
             try ReminderSubtasks.validateId(subtaskId)
             let gate = try ReminderWriteGuard.resolve(global)
@@ -193,13 +213,13 @@ public struct SubtasksToggle: ParsableCommand {
                     sandbox_target_unchecked: gate.sandboxActive ? true : nil), gate: gate)
                 return
             }
-            let store = EventStore()
+            let store = storeFactory()
             try store.requestAccess(to: .reminder, mode: .write)
             let reminder = try fetchReminder(store, reminderId)
             try requireLabeledReminder(reminder, sandboxActive: gate.sandboxActive)
             let (newNotes, toggled) = try ReminderSubtasks.toggle(id: subtaskId, notes: reminder.notes)
             reminder.notes = newNotes
-            try store.save(reminder)
+            try store.save(reminder, commit: true)
             let subs = ReminderSubtasks.parse(newNotes)
             try emitRemindersExecutedWrite(SubtasksData(
                 reminder_id: reminderId, reminder_title: reminder.title,
@@ -221,6 +241,10 @@ public struct SubtasksReorder: ParsableCommand {
     public init() {}
 
     public func run() throws {
+        try run(storeFactory: { EventStore() })
+    }
+
+    func run(storeFactory: () -> any ReminderStore) throws {
         try runGuarded(tool: "reminders") {
             guard !order.isEmpty else { throw AppleError.validation("reorder needs at least one --order <subtask-id>") }
             for oid in order { try ReminderSubtasks.validateId(oid) }
@@ -232,13 +256,13 @@ public struct SubtasksReorder: ParsableCommand {
                     sandbox_target_unchecked: gate.sandboxActive ? true : nil), gate: gate)
                 return
             }
-            let store = EventStore()
+            let store = storeFactory()
             try store.requestAccess(to: .reminder, mode: .write)
             let reminder = try fetchReminder(store, reminderId)
             try requireLabeledReminder(reminder, sandboxActive: gate.sandboxActive)
             let (newNotes, reordered) = try ReminderSubtasks.reorder(order: order, notes: reminder.notes)
             reminder.notes = newNotes
-            try store.save(reminder)
+            try store.save(reminder, commit: true)
             try emitRemindersExecutedWrite(SubtasksData(
                 reminder_id: reminderId, reminder_title: reminder.title,
                 progress: ReminderSubtasks.progress(reordered), subtasks: reordered), gate: gate)

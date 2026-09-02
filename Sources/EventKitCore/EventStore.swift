@@ -11,15 +11,146 @@ private final class Box<T>: @unchecked Sendable {
     init(_ v: T) { self.value = v }
 }
 
-/// The shared EventKit engine for Calendar + Reminders. Wraps one `EKEventStore`, bridges its
-/// async access/fetch APIs to synchronous CLI calls, and centralizes auth + error mapping so
-/// both domains behave identically. RemindersKit imports this UNCHANGED — keep the public API
-/// stable.
+/// The EventKit surface `EventStore` actually touches, extracted so logic tests can bind a
+/// pure in-memory stand-in. `LiveEventKitStoreBackend` below is the ONLY production
+/// implementation and is `private` to this file, so no flag, env var, or public initializer can
+/// swap it — `EventStore()` always talks to the real `EKEventStore`.
+///
+/// Every completion handler here is `@escaping @Sendable`: each one is bridged to a synchronous
+/// call through a `DispatchSemaphore`, and EventKit is free to invoke it on an arbitrary queue,
+/// so the callback must be safe to run off the calling thread. `EKEventStore`'s own parameters
+/// are not `@Sendable`, which is fine — a `@Sendable` closure converts to a plain one, so the
+/// live backend still forwards each handler unchanged.
+protocol EventKitStoreBackend {
+    var store: EKEventStore { get }
+    var sources: [EKSource] { get }
+    var defaultCalendarForNewEvents: EKCalendar? { get }
+
+    func authorizationStatus(for entity: EventStore.Entity) -> EventStore.AuthStatus
+    func requestFullAccessToEvents(completion: @escaping @Sendable (Bool, Error?) -> Void)
+    func requestFullAccessToReminders(completion: @escaping @Sendable (Bool, Error?) -> Void)
+    func calendars(for entity: EventStore.Entity) -> [EKCalendar]
+    func calendar(withIdentifier id: String) -> EKCalendar?
+    func defaultCalendarForNewReminders() -> EKCalendar?
+    func predicateForEvents(withStart start: Date, end: Date, calendars: [EKCalendar]?) -> NSPredicate
+    func events(matching predicate: NSPredicate) -> [EKEvent]
+    func event(withIdentifier id: String) -> EKEvent?
+    func save(_ event: EKEvent, span: EKSpan, commit: Bool) throws
+    func remove(_ event: EKEvent, span: EKSpan, commit: Bool) throws
+    func calendarItem(withIdentifier id: String) -> EKCalendarItem?
+    func fetchReminders(matching predicate: NSPredicate, completion: @escaping @Sendable ([EKReminder]?) -> Void)
+    func predicateForReminders(in lists: [EKCalendar]?) -> NSPredicate
+    func save(_ reminder: EKReminder, commit: Bool) throws
+    func remove(_ reminder: EKReminder, commit: Bool) throws
+    func saveCalendar(_ calendar: EKCalendar, commit: Bool) throws
+    func removeCalendar(_ calendar: EKCalendar, commit: Bool) throws
+    func commit() throws
+}
+
+private final class LiveEventKitStoreBackend: EventKitStoreBackend {
+    let store = EKEventStore()
+
+    var sources: [EKSource] { store.sources }
+    var defaultCalendarForNewEvents: EKCalendar? { store.defaultCalendarForNewEvents }
+
+    func authorizationStatus(for entity: EventStore.Entity) -> EventStore.AuthStatus {
+        EventStore.authorizationStatus(for: entity)
+    }
+
+    func requestFullAccessToEvents(completion: @escaping @Sendable (Bool, Error?) -> Void) {
+        store.requestFullAccessToEvents(completion: completion)
+    }
+
+    func requestFullAccessToReminders(completion: @escaping @Sendable (Bool, Error?) -> Void) {
+        store.requestFullAccessToReminders(completion: completion)
+    }
+
+    func calendars(for entity: EventStore.Entity) -> [EKCalendar] {
+        store.calendars(for: entity.ekType)
+    }
+
+    func calendar(withIdentifier id: String) -> EKCalendar? {
+        store.calendar(withIdentifier: id)
+    }
+
+    func defaultCalendarForNewReminders() -> EKCalendar? {
+        store.defaultCalendarForNewReminders()
+    }
+
+    func predicateForEvents(withStart start: Date, end: Date, calendars: [EKCalendar]?) -> NSPredicate {
+        store.predicateForEvents(withStart: start, end: end, calendars: calendars)
+    }
+
+    func events(matching predicate: NSPredicate) -> [EKEvent] {
+        store.events(matching: predicate)
+    }
+
+    func event(withIdentifier id: String) -> EKEvent? {
+        store.event(withIdentifier: id)
+    }
+
+    func save(_ event: EKEvent, span: EKSpan, commit: Bool) throws {
+        try store.save(event, span: span, commit: commit)
+    }
+
+    func remove(_ event: EKEvent, span: EKSpan, commit: Bool) throws {
+        try store.remove(event, span: span, commit: commit)
+    }
+
+    func calendarItem(withIdentifier id: String) -> EKCalendarItem? {
+        store.calendarItem(withIdentifier: id)
+    }
+
+    func fetchReminders(matching predicate: NSPredicate, completion: @escaping @Sendable ([EKReminder]?) -> Void) {
+        store.fetchReminders(matching: predicate, completion: completion)
+    }
+
+    func predicateForReminders(in lists: [EKCalendar]?) -> NSPredicate {
+        store.predicateForReminders(in: lists)
+    }
+
+    func save(_ reminder: EKReminder, commit: Bool) throws {
+        try store.save(reminder, commit: commit)
+    }
+
+    func remove(_ reminder: EKReminder, commit: Bool) throws {
+        try store.remove(reminder, commit: commit)
+    }
+
+    func saveCalendar(_ calendar: EKCalendar, commit: Bool) throws {
+        try store.saveCalendar(calendar, commit: commit)
+    }
+
+    func removeCalendar(_ calendar: EKCalendar, commit: Bool) throws {
+        try store.removeCalendar(calendar, commit: commit)
+    }
+
+    func commit() throws {
+        try store.commit()
+    }
+}
+
+/// The shared EventKit engine for Calendar + Reminders. Every EventKit call goes through an
+/// `EventKitStoreBackend` — in production always the file-private `LiveEventKitStoreBackend`,
+/// which owns the one `EKEventStore` this type exposes as `store` for object construction
+/// (`EKEvent(eventStore:)` and friends). It bridges EventKit's async access/fetch APIs to
+/// synchronous CLI calls and centralizes auth + error mapping so both domains behave
+/// identically. RemindersKit imports this UNCHANGED — keep the public API stable.
 public final class EventStore {
     public let store: EKEventStore
+    private let backend: any EventKitStoreBackend
 
     public init() {
-        self.store = EKEventStore()
+        let backend = LiveEventKitStoreBackend()
+        self.store = backend.store
+        self.backend = backend
+    }
+
+    /// Test-only seam. Internal (and the protocol is internal), so no other module — and no
+    /// flag or env var — can reach it; `EventStore()` is the only production path.
+    init(backend: any EventKitStoreBackend) {
+        self.store = backend.store
+        self.backend = backend
     }
 
     // MARK: Entities + auth
@@ -62,7 +193,7 @@ public final class EventStore {
     /// call BLOCKS on the system permission dialog until the user responds. This is expected and
     /// unavoidable for EventKit; pure logic tests never reach this path.
     public func requestAccess(to entity: Entity, mode: AccessMode = .read) throws {
-        let status = Self.authorizationStatus(for: entity)
+        let status = backend.authorizationStatus(for: entity)
         if Self.satisfies(status, mode: mode, entity: entity) { return }
 
         switch status {
@@ -70,7 +201,7 @@ public final class EventStore {
             throw AppleError.permissionDenied(deniedMessage(entity))
         case .notDetermined:
             let granted = try requestFullAccess(to: entity)
-            let after = Self.authorizationStatus(for: entity)
+            let after = backend.authorizationStatus(for: entity)
             if granted && Self.satisfies(after, mode: mode, entity: entity) { return }
             throw AppleError.permissionDenied(deniedMessage(entity))
         default:
@@ -107,8 +238,8 @@ public final class EventStore {
             sem.signal()
         }
         switch entity {
-        case .event: store.requestFullAccessToEvents(completion: handler)
-        case .reminder: store.requestFullAccessToReminders(completion: handler)
+        case .event: backend.requestFullAccessToEvents(completion: handler)
+        case .reminder: backend.requestFullAccessToReminders(completion: handler)
         }
         sem.wait()
         let (granted, err) = box.value
@@ -119,11 +250,11 @@ public final class EventStore {
     // MARK: Calendars / lists
 
     public func calendars(for entity: Entity) -> [EKCalendar] {
-        store.calendars(for: entity.ekType)
+        backend.calendars(for: entity)
     }
 
     public func calendar(withIdentifier id: String) -> EKCalendar? {
-        store.calendar(withIdentifier: id)
+        backend.calendar(withIdentifier: id)
     }
 
     /// Resolve a calendar by identifier first, then by case-insensitive title, within an entity.
@@ -131,7 +262,7 @@ public final class EventStore {
     /// the WRONG entity type is rejected (returns nil) rather than silently returning a
     /// mismatched calendar that would fail later at `save` with a murkier error.
     public func calendar(matching nameOrId: String, entity: Entity) -> EKCalendar? {
-        if let byId = store.calendar(withIdentifier: nameOrId),
+        if let byId = backend.calendar(withIdentifier: nameOrId),
            byId.allowedEntityTypes.contains(entity == .event ? .event : .reminder) {
             return byId
         }
@@ -139,15 +270,15 @@ public final class EventStore {
         return calendars(for: entity).first { $0.title.lowercased() == lowered }
     }
 
-    public var defaultCalendarForEvents: EKCalendar? { store.defaultCalendarForNewEvents }
-    public var defaultCalendarForReminders: EKCalendar? { store.defaultCalendarForNewReminders() }
+    public var defaultCalendarForEvents: EKCalendar? { backend.defaultCalendarForNewEvents }
+    public var defaultCalendarForReminders: EKCalendar? { backend.defaultCalendarForNewReminders() }
 
     /// EKSource resolution for creating a new calendar/list (prefers a writable local/cloud source).
     public func preferredSource(for entity: Entity) -> EKSource? {
-        if entity == .event, let s = store.defaultCalendarForNewEvents?.source { return s }
-        if entity == .reminder, let s = store.defaultCalendarForNewReminders()?.source { return s }
+        if entity == .event, let s = backend.defaultCalendarForNewEvents?.source { return s }
+        if entity == .reminder, let s = backend.defaultCalendarForNewReminders()?.source { return s }
         // Fall back to a local source, else any source.
-        return store.sources.first { $0.sourceType == .local } ?? store.sources.first
+        return backend.sources.first { $0.sourceType == .local } ?? backend.sources.first
     }
 
     // MARK: Events
@@ -156,12 +287,12 @@ public final class EventStore {
     public func newEvent() -> EKEvent { EKEvent(eventStore: store) }
 
     public func event(withIdentifier id: String) -> EKEvent? {
-        store.event(withIdentifier: id)
+        backend.event(withIdentifier: id)
     }
 
     public func events(start: Date, end: Date, calendars: [EKCalendar]?) -> [EKEvent] {
-        let predicate = store.predicateForEvents(withStart: start, end: end, calendars: calendars)
-        return store.events(matching: predicate).sorted { ($0.startDate ?? .distantPast) < ($1.startDate ?? .distantPast) }
+        let predicate = backend.predicateForEvents(withStart: start, end: end, calendars: calendars)
+        return backend.events(matching: predicate).sorted { ($0.startDate ?? .distantPast) < ($1.startDate ?? .distantPast) }
     }
 
     // WRITE-GUARD CONTRACT (applies to every mutator below — save/remove/saveCalendar/
@@ -184,7 +315,7 @@ public final class EventStore {
     // flagless invocation and the deletion; never wire a new command path to them without it.
 
     public func save(_ event: EKEvent, span: EKSpan, commit: Bool = true) throws {
-        do { try store.save(event, span: span, commit: commit) }
+        do { try backend.save(event, span: span, commit: commit) }
         catch { throw Self.mapError(error) }
     }
 
@@ -192,7 +323,7 @@ public final class EventStore {
     /// write-guard contract above; the caller must have branched on `gate.willExecute` and, when
     /// `gate.sandboxActive`, checked the label.
     public func remove(_ event: EKEvent, span: EKSpan, commit: Bool = true) throws {
-        do { try store.remove(event, span: span, commit: commit) }
+        do { try backend.remove(event, span: span, commit: commit) }
         catch { throw Self.mapError(error) }
     }
 
@@ -207,20 +338,24 @@ public final class EventStore {
 
     /// Look up a single reminder by identifier (via the generic calendar-item lookup).
     public func reminder(withIdentifier id: String) -> EKReminder? {
-        store.calendarItem(withIdentifier: id) as? EKReminder
+        backend.calendarItem(withIdentifier: id) as? EKReminder
     }
 
     /// Fetch reminders matching a predicate, bridging EventKit's async fetch to a sync call.
     /// Bounded at 30s: unlike the interactive access prompt (which legitimately waits on the
     /// user), a fetch that never calls back is a stall, so it throws `.upstream` rather than
     /// hanging the CLI forever.
+    ///
+    /// EventKit may invoke the handler on any queue, so it is `@Sendable` and communicates back
+    /// only through the `Box` + semaphore pair (one write, then one read after `wait()`).
     public func reminders(matching predicate: NSPredicate) throws -> [EKReminder] {
         let box = Box<[EKReminder]>([])
         let sem = DispatchSemaphore(value: 0)
-        store.fetchReminders(matching: predicate) { reminders in
+        let handler: @Sendable ([EKReminder]?) -> Void = { reminders in
             box.value = reminders ?? []
             sem.signal()
         }
+        backend.fetchReminders(matching: predicate, completion: handler)
         if sem.wait(timeout: .now() + 30) == .timedOut {
             throw AppleError.upstream("EventKit reminder fetch timed out after 30s")
         }
@@ -228,16 +363,16 @@ public final class EventStore {
     }
 
     public func predicateForReminders(in lists: [EKCalendar]?) -> NSPredicate {
-        store.predicateForReminders(in: lists)
+        backend.predicateForReminders(in: lists)
     }
 
     public func save(_ reminder: EKReminder, commit: Bool = true) throws {
-        do { try store.save(reminder, commit: commit) }
+        do { try backend.save(reminder, commit: commit) }
         catch { throw Self.mapError(error) }
     }
 
     public func remove(_ reminder: EKReminder, commit: Bool = true) throws {
-        do { try store.remove(reminder, commit: commit) }
+        do { try backend.remove(reminder, commit: commit) }
         catch { throw Self.mapError(error) }
     }
 
@@ -253,7 +388,7 @@ public final class EventStore {
     }
 
     public func saveCalendar(_ calendar: EKCalendar, commit: Bool = true) throws {
-        do { try store.saveCalendar(calendar, commit: commit) }
+        do { try backend.saveCalendar(calendar, commit: commit) }
         catch { throw Self.mapError(error) }
     }
 
@@ -261,12 +396,12 @@ public final class EventStore {
     /// write-guard contract above; the caller must have branched on `gate.willExecute` and, when
     /// `gate.sandboxActive`, checked the label.
     public func removeCalendar(_ calendar: EKCalendar, commit: Bool = true) throws {
-        do { try store.removeCalendar(calendar, commit: commit) }
+        do { try backend.removeCalendar(calendar, commit: commit) }
         catch { throw Self.mapError(error) }
     }
 
     public func commit() throws {
-        do { try store.commit() }
+        do { try backend.commit() }
         catch { throw Self.mapError(error) }
     }
 
@@ -299,3 +434,33 @@ public final class EventStore {
         return .upstream("EventKit error: \(error.localizedDescription)")
     }
 }
+
+public protocol CalendarEventStore {
+    func requestAccess(to entity: EventStore.Entity, mode: EventStore.AccessMode) throws
+    func calendars(for entity: EventStore.Entity) -> [EKCalendar]
+    func calendar(matching nameOrId: String, entity: EventStore.Entity) -> EKCalendar?
+    var defaultCalendarForEvents: EKCalendar? { get }
+    func event(withIdentifier id: String) -> EKEvent?
+    func events(start: Date, end: Date, calendars: [EKCalendar]?) -> [EKEvent]
+    func newEvent() -> EKEvent
+    func save(_ event: EKEvent, span: EKSpan, commit: Bool) throws
+    func remove(_ event: EKEvent, span: EKSpan, commit: Bool) throws
+}
+
+public protocol ReminderStore {
+    func requestAccess(to entity: EventStore.Entity, mode: EventStore.AccessMode) throws
+    func calendars(for entity: EventStore.Entity) -> [EKCalendar]
+    func calendar(matching nameOrId: String, entity: EventStore.Entity) -> EKCalendar?
+    var defaultCalendarForReminders: EKCalendar? { get }
+    func reminder(withIdentifier id: String) -> EKReminder?
+    func reminders(matching predicate: NSPredicate) throws -> [EKReminder]
+    func predicateForReminders(in lists: [EKCalendar]?) -> NSPredicate
+    func newReminder(in list: EKCalendar) -> EKReminder
+    func newCalendar(for entity: EventStore.Entity) -> EKCalendar?
+    func save(_ reminder: EKReminder, commit: Bool) throws
+    func remove(_ reminder: EKReminder, commit: Bool) throws
+    func saveCalendar(_ calendar: EKCalendar, commit: Bool) throws
+    func removeCalendar(_ calendar: EKCalendar, commit: Bool) throws
+}
+
+extension EventStore: CalendarEventStore, ReminderStore {}

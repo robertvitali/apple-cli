@@ -26,8 +26,12 @@ public struct CalendarsList: ParsableCommand {
     public init() {}
 
     public func run() throws {
+        try run(storeFactory: { EventStore() })
+    }
+
+    func run(storeFactory: () -> any CalendarEventStore) throws {
         try runGuarded(tool: "calendar") {
-            let store = EventStore()
+            let store = storeFactory()
             try store.requestAccess(to: .event, mode: .read)
             var collections = store.calendars(for: .event)
             if let account {

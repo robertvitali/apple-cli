@@ -27,8 +27,12 @@ public struct ListsRead: ParsableCommand {
     public init() {}
 
     public func run() throws {
+        try run(storeFactory: { EventStore() })
+    }
+
+    func run(storeFactory: () -> any ReminderStore) throws {
         try runGuarded(tool: "reminders") {
-            let store = EventStore()
+            let store = storeFactory()
             try store.requestAccess(to: .reminder, mode: .read)
             let lists = store.calendars(for: .reminder)
                 .map { ReadMapping.reminderList(from: $0) }
@@ -51,6 +55,10 @@ public struct ListsCreate: ParsableCommand {
     public init() {}
 
     public func run() throws {
+        try run(storeFactory: { EventStore() })
+    }
+
+    func run(storeFactory: () -> any ReminderStore) throws {
         try runGuarded(tool: "reminders") {
             let cg = try color.map { hex -> CGColorBox in
                 guard let c = ReadMapping.cgColor(fromHex: hex) else {
@@ -68,14 +76,14 @@ public struct ListsCreate: ParsableCommand {
                 return
             }
 
-            let store = EventStore()
+            let store = storeFactory()
             try store.requestAccess(to: .reminder, mode: .write)
             guard let list = store.newCalendar(for: .reminder) else {
                 throw AppleError.upstream("no writable reminders source available to create a list")
             }
             list.title = name
             if let cg { list.cgColor = cg.value }
-            try store.saveCalendar(list)
+            try store.saveCalendar(list, commit: true)
             try emitRemindersExecutedWrite(ReadMapping.reminderList(from: list), gate: gate)
         }
     }
@@ -96,6 +104,10 @@ public struct ListsUpdate: ParsableCommand {
     public init() {}
 
     public func run() throws {
+        try run(storeFactory: { EventStore() })
+    }
+
+    func run(storeFactory: () -> any ReminderStore) throws {
         try runGuarded(tool: "reminders") {
             guard newName != nil || color != nil else {
                 throw AppleError.validation("nothing to update — provide --new-name and/or --color")
@@ -126,7 +138,7 @@ public struct ListsUpdate: ParsableCommand {
                 return
             }
 
-            let store = EventStore()
+            let store = storeFactory()
             try store.requestAccess(to: .reminder, mode: .write)
             guard let list = store.calendar(matching: name, entity: .reminder) else {
                 throw AppleError.notFound("no reminder list named or id '\(name)'")
@@ -134,7 +146,7 @@ public struct ListsUpdate: ParsableCommand {
             try requireLabeledList(list, what: "list", sandboxActive: gate.sandboxActive)
             if let newName, !newName.isEmpty { list.title = newName }
             if let cg { list.cgColor = cg.value }
-            try store.saveCalendar(list)
+            try store.saveCalendar(list, commit: true)
             try emitRemindersExecutedWrite(ReadMapping.reminderList(from: list), gate: gate)
         }
     }
@@ -153,6 +165,10 @@ public struct ListsDelete: ParsableCommand {
     public init() {}
 
     public func run() throws {
+        try run(storeFactory: { EventStore() })
+    }
+
+    func run(storeFactory: () -> any ReminderStore) throws {
         try runGuarded(tool: "reminders") {
             let gate = try ReminderWriteGuard.resolve(global)
             // name-OR-id: deferred to the resolved title, exactly as `lists update` — see there.
@@ -165,7 +181,7 @@ public struct ListsDelete: ParsableCommand {
                     sandbox_target_unchecked: subjectDeferred ? true : nil), gate: gate)
                 return
             }
-            let store = EventStore()
+            let store = storeFactory()
             try store.requestAccess(to: .reminder, mode: .write)
             guard let list = store.calendar(matching: name, entity: .reminder) else {
                 throw AppleError.notFound("no reminder list named or id '\(name)'")
@@ -173,7 +189,7 @@ public struct ListsDelete: ParsableCommand {
             // Post-resolution subject check — `removeCalendar` destroys the list AND every
             // reminder in it, so this is the last line before an irreversible bulk delete.
             try requireLabeledList(list, what: "list", sandboxActive: gate.sandboxActive)
-            try store.removeCalendar(list)
+            try store.removeCalendar(list, commit: true)
             try emitRemindersWrite(ListDeleteData(name: name, deleted: true), gate: gate)
         }
     }

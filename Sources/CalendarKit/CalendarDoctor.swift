@@ -20,25 +20,45 @@ public struct CalendarDoctor: ParsableCommand {
         let calendar_ready: Bool
         let full_disk_access: Bool
         let notes: [String]
-    }
 
-    public func run() throws {
-        try runGuarded(tool: "calendar") {
-            let calStatus = EventStore.authorizationStatus(for: .event)
-            let remStatus = EventStore.authorizationStatus(for: .reminder)
-            let pre = Permissions.preflight()
-            var notes = pre.notes
+        static func build(calStatus: EventStore.AuthStatus,
+                          remStatus: EventStore.AuthStatus,
+                          fullDiskAccess: Bool,
+                          notes preflightNotes: [String]) -> Health {
+            var notes = preflightNotes
             let ready = calStatus == .fullAccess || calStatus == .authorized
             if !ready {
                 notes.append("Calendar access is '\(calStatus.rawValue)' — grant Full Access in "
                              + "System Settings › Privacy & Security › Calendars (first live run will prompt).")
             }
-            try Output.emit(tool: "calendar", data: Health(
+            return Health(
                 calendar_authorization: calStatus.rawValue,
                 reminders_authorization: remStatus.rawValue,
                 calendar_ready: ready,
-                full_disk_access: pre.full_disk_access,
-                notes: notes), text: global.text)
+                full_disk_access: fullDiskAccess,
+                notes: notes)
+        }
+    }
+
+    public func run() throws {
+        try run(authorizationStatus: EventStore.authorizationStatus(for:),
+                preflight: Permissions.preflight)
+    }
+
+    /// Test seam. The public `run()` binds the real EventKit status probe and the real Full
+    /// Disk Access preflight; logic tests bind pure stand-ins so no test reads host TCC state
+    /// or opens a protected path. Neither injected dependency prompts.
+    func run(authorizationStatus: (EventStore.Entity) -> EventStore.AuthStatus,
+             preflight: () -> Permissions.Preflight) throws {
+        try runGuarded(tool: "calendar") {
+            let calStatus = authorizationStatus(.event)
+            let remStatus = authorizationStatus(.reminder)
+            let pre = preflight()
+            try Output.emit(tool: "calendar", data: Health.build(
+                calStatus: calStatus,
+                remStatus: remStatus,
+                fullDiskAccess: pre.full_disk_access,
+                notes: pre.notes), text: global.text)
         }
     }
 }

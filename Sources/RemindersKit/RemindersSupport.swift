@@ -676,7 +676,7 @@ public enum ReminderRead {
 }
 
 /// Fetch a reminder by id or throw `.notFound`.
-func fetchReminder(_ store: EventStore, _ id: String) throws -> EKReminder {
+func fetchReminder(_ store: any ReminderStore, _ id: String) throws -> EKReminder {
     guard let r = store.reminder(withIdentifier: id) else {
         throw AppleError.notFound("no reminder with id '\(id)'")
     }

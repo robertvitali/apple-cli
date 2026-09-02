@@ -36,11 +36,15 @@ public struct TasksRead: ParsableCommand {
     public init() {}
 
     public func run() throws {
+        try run(storeFactory: { EventStore() })
+    }
+
+    func run(storeFactory: () -> any ReminderStore) throws {
         try runGuarded(tool: "reminders") {
             if let dueWithin { try DueWithin.validate(dueWithin) }
             let priorityFilterValue = try filterPriority.map { try ReminderPriority.filterValue($0) }
 
-            let store = EventStore()
+            let store = storeFactory()
             try store.requestAccess(to: .reminder, mode: .read)
 
             if let id {
@@ -114,6 +118,10 @@ public struct TasksCreate: ParsableCommand {
     public init() {}
 
     public func run() throws {
+        try run(storeFactory: { EventStore() })
+    }
+
+    func run(storeFactory: () -> any ReminderStore) throws {
         try runGuarded(tool: "reminders") {
             guard !title.trimmingCharacters(in: .whitespaces).isEmpty else {
                 throw AppleError.validation("reminder title cannot be empty")
@@ -156,7 +164,7 @@ public struct TasksCreate: ParsableCommand {
                 return
             }
 
-            let store = EventStore()
+            let store = storeFactory()
             try store.requestAccess(to: .reminder, mode: .write)
             guard let list = resolveList(store: store, name: targetList) else {
                 throw AppleError.notFound("no list named or id '\(targetList ?? "")' and no default reminders list")
@@ -201,7 +209,7 @@ public struct TasksCreate: ParsableCommand {
             }
             for rule in rules { reminder.addRecurrenceRule(try RecurrenceMapping.ekRule(from: rule)) }
 
-            try store.save(reminder)
+            try store.save(reminder, commit: true)
             try emitRemindersExecutedWrite(ReminderRead.enrich(ReminderMapping.reminder(from: reminder)), gate: gate)
         }
     }
@@ -218,7 +226,7 @@ public struct TasksCreate: ParsableCommand {
         return LocationTrigger(title: geoTitle, latitude: lat, longitude: lon, radius: geoRadius ?? 100, proximity: prox)
     }
 
-    func resolveList(store: EventStore, name: String?) -> EKCalendar? {
+    func resolveList(store: any ReminderStore, name: String?) -> EKCalendar? {
         if let name { return store.calendar(matching: name, entity: .reminder) }
         return store.defaultCalendarForReminders
     }
@@ -263,6 +271,10 @@ public struct TasksUpdate: ParsableCommand {
     public init() {}
 
     public func run() throws {
+        try run(storeFactory: { EventStore() })
+    }
+
+    func run(storeFactory: () -> any ReminderStore) throws {
         try runGuarded(tool: "reminders") {
             if let title, title.trimmingCharacters(in: .whitespaces).isEmpty {
                 throw AppleError.validation("reminder title cannot be empty")
@@ -330,7 +342,7 @@ public struct TasksUpdate: ParsableCommand {
                 return
             }
 
-            let store = EventStore()
+            let store = storeFactory()
             try store.requestAccess(to: .reminder, mode: .write)
             let reminder = try fetchReminder(store, id)
             // Sandbox-only post-fetch check on the EXISTING title (the by-id target).
@@ -394,7 +406,7 @@ public struct TasksUpdate: ParsableCommand {
                 reminder.calendar = list
             }
 
-            try store.save(reminder)
+            try store.save(reminder, commit: true)
             try emitRemindersExecutedWrite(ReminderRead.enrich(ReminderMapping.reminder(from: reminder)), gate: gate)
         }
     }
@@ -425,6 +437,10 @@ public struct TasksDelete: ParsableCommand {
     public init() {}
 
     public func run() throws {
+        try run(storeFactory: { EventStore() })
+    }
+
+    func run(storeFactory: () -> any ReminderStore) throws {
         try runGuarded(tool: "reminders") {
             let gate = try ReminderWriteGuard.resolve(global)
 
@@ -434,12 +450,12 @@ public struct TasksDelete: ParsableCommand {
                     sandbox_target_unchecked: gate.sandboxActive ? true : nil), gate: gate)
                 return
             }
-            let store = EventStore()
+            let store = storeFactory()
             try store.requestAccess(to: .reminder, mode: .write)
             let reminder = try fetchReminder(store, id)
             // Sandbox-only post-fetch check: only delete a labeled test item inside the sandbox.
             try requireLabeledReminder(reminder, sandboxActive: gate.sandboxActive)
-            try store.remove(reminder)
+            try store.remove(reminder, commit: true)
             try emitRemindersWrite(ReminderDeleteData(id: id, deleted: true), gate: gate)
         }
     }
