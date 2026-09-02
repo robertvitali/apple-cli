@@ -83,6 +83,12 @@ struct CreateCommand: ParsableCommand {
     @Option(name: .long, help: "Create in this container id (default: the default container).") var container: String?
 
     func run() throws {
+        try run(storeFactory: { ContactsStore() })
+    }
+
+    /// Test seam (see AGENTS.md / the EventKit lane): the live `ContactsStore` is bound by the
+    /// public `run()` above and nowhere else, so no flag or env var can substitute a backend.
+    func run(storeFactory: () -> ContactsStore) throws {
         try runGuarded(tool: "contacts") {
             var fields: ContactFields
             if let json {
@@ -110,7 +116,7 @@ struct CreateCommand: ParsableCommand {
                     sandboxActive: gate.sandboxActive)
                 return
             }
-            let store = ContactsStore()
+            let store = storeFactory()
             try store.requireAuthorization()
             if gate.sandboxActive, let group { try store.requireLabeledGroupTarget(group, prefix: TestMode.sandboxPrefix) }
             let id = try store.createContact(fields: fields, groupIdentifier: group, containerIdentifier: container)
@@ -143,6 +149,12 @@ struct UpdateCommand: ParsableCommand {
     var group: String?
 
     func run() throws {
+        try run(storeFactory: { ContactsStore() })
+    }
+
+    /// Test seam (see AGENTS.md / the EventKit lane): the live `ContactsStore` is bound by the
+    /// public `run()` above and nowhere else, so no flag or env var can substitute a backend.
+    func run(storeFactory: () -> ContactsStore) throws {
         try runGuarded(tool: "contacts") {
             let fields = try buildUpdateFields()
             try validateUpdateInput(identifier: identifier, fields)
@@ -155,7 +167,7 @@ struct UpdateCommand: ParsableCommand {
                     sandboxActive: gate.sandboxActive)
                 return
             }
-            let store = ContactsStore()
+            let store = storeFactory()
             try store.requireAuthorization()
             if gate.sandboxActive { try store.requireLabeledContactTarget(identifier, prefix: TestMode.sandboxPrefix) }
             let id = try store.updateContact(identifier: identifier, fields: fields)
@@ -211,6 +223,13 @@ struct DeleteCommand: ParsableCommand {
     @Option(name: .long, help: "Group assertion; accepted and echoed for MCP parity, not enforced.")
     var group: String?
     func run() throws {
+        try run(storeFactory: { ContactsStore() })
+    }
+
+    /// Test seam (see AGENTS.md / the EventKit lane): the live `ContactsStore` is bound by the
+    /// public `run()` above and nowhere else, so no flag or env var can substitute a backend.
+    func run(storeFactory: () -> ContactsStore,
+             deleteEnvVar: String = TestMode.testModeVar) throws {
         try runGuarded(tool: "contacts") {
             if identifier.trimmingCharacters(in: .whitespaces).isEmpty {
                 throw AppleError.validation("identifier must be a non-empty string")
@@ -218,7 +237,7 @@ struct DeleteCommand: ParsableCommand {
             let gate = try resolveWrite(global)
             // Read the operator affordance BEFORE any store work, so the preview and the
             // execute path decide from the same value.
-            let envGranted = contactsDeleteEnvGranted
+            let envGranted = contactsDeleteEnvGranted(deleteEnvVar)
             guard gate.willExecute else {
                 try emitContactsWrite(global, DryRunPreview(
                     operation: "delete_contact", identifier: identifier, group_id: group,
@@ -229,7 +248,7 @@ struct DeleteCommand: ParsableCommand {
                 return
             }
             guard envGranted else { throw AppleError.safetyViolation(contactsDeleteGateMessage("delete_contact")) }
-            let store = ContactsStore()
+            let store = storeFactory()
             try store.requireAuthorization()
             // The env gate above implies the sandbox is engaged (sandboxActive = flag || env),
             // so this label check always runs here; the condition documents the dependency
@@ -264,6 +283,12 @@ struct NoteSetCommand: ParsableCommand {
     @Option(name: .long, help: "Group assertion; accepted and echoed for MCP parity, not enforced.")
     var group: String?
     func run() throws {
+        try run(storeFactory: { ContactsStore() })
+    }
+
+    /// Test seam (see AGENTS.md / the EventKit lane): the live `ContactsStore` is bound by the
+    /// public `run()` above and nowhere else, so no flag or env var can substitute a backend.
+    func run(storeFactory: () -> ContactsStore) throws {
         try runGuarded(tool: "contacts") {
             if identifier.trimmingCharacters(in: .whitespaces).isEmpty {
                 throw AppleError.validation("identifier must be a non-empty string")
@@ -277,7 +302,7 @@ struct NoteSetCommand: ParsableCommand {
                     sandboxActive: gate.sandboxActive)
                 return
             }
-            let store = ContactsStore()
+            let store = storeFactory()
             try store.requireAuthorization()
             if gate.sandboxActive { try store.requireLabeledContactTarget(identifier, prefix: TestMode.sandboxPrefix) }
             try store.writeNote(identifier, note: noteText)
@@ -317,6 +342,12 @@ struct PhotoSetCommand: ParsableCommand {
     @Option(name: .long, help: "Group assertion; accepted and echoed for MCP parity, not enforced.")
     var group: String?
     func run() throws {
+        try run(storeFactory: { ContactsStore() })
+    }
+
+    /// Test seam (see AGENTS.md / the EventKit lane): the live `ContactsStore` is bound by the
+    /// public `run()` above and nowhere else, so no flag or env var can substitute a backend.
+    func run(storeFactory: () -> ContactsStore) throws {
         try runGuarded(tool: "contacts") {
             if identifier.trimmingCharacters(in: .whitespaces).isEmpty {
                 throw AppleError.validation("identifier must be a non-empty string")
@@ -330,7 +361,7 @@ struct PhotoSetCommand: ParsableCommand {
                     sandboxActive: gate.sandboxActive)
                 return
             }
-            let store = ContactsStore()
+            let store = storeFactory()
             try store.requireAuthorization()
             if gate.sandboxActive { try store.requireLabeledContactTarget(identifier, prefix: TestMode.sandboxPrefix) }
             let id = try store.writePhoto(identifier: identifier, imageData: imageData)
@@ -366,6 +397,12 @@ struct VCardImportCommand: ParsableCommand {
     @Option(name: .long, help: "vCard text inline.") var vcard: String?
     @Option(name: .long, help: "Add every imported contact to this group id.") var group: String?
     func run() throws {
+        try run(storeFactory: { ContactsStore() })
+    }
+
+    /// Test seam (see AGENTS.md / the EventKit lane): the live `ContactsStore` is bound by the
+    /// public `run()` above and nowhere else, so no flag or env var can substitute a backend.
+    func run(storeFactory: () -> ContactsStore) throws {
         try runGuarded(tool: "contacts") {
             let vcardText = try resolveVCardText()
             if vcardText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
@@ -397,7 +434,7 @@ struct VCardImportCommand: ParsableCommand {
                     sandboxActive: gate.sandboxActive)
                 return
             }
-            let store = ContactsStore()
+            let store = storeFactory()
             try store.requireAuthorization()
             // A --group target must itself be a labeled test group: never add to a real one.
             if gate.sandboxActive, let group { try store.requireLabeledGroupTarget(group, prefix: TestMode.sandboxPrefix) }
@@ -436,6 +473,12 @@ struct GroupsCreateCommand: ParsableCommand {
     @Option(name: .long, help: "Group assertion; accepted and echoed for MCP parity, not enforced.")
     var group: String?
     func run() throws {
+        try run(storeFactory: { ContactsStore() })
+    }
+
+    /// Test seam (see AGENTS.md / the EventKit lane): the live `ContactsStore` is bound by the
+    /// public `run()` above and nowhere else, so no flag or env var can substitute a backend.
+    func run(storeFactory: () -> ContactsStore) throws {
         try runGuarded(tool: "contacts") {
             if name.trimmingCharacters(in: .whitespaces).isEmpty {
                 throw AppleError.validation("name must be a non-empty string")
@@ -447,7 +490,7 @@ struct GroupsCreateCommand: ParsableCommand {
                     sandboxActive: gate.sandboxActive)
                 return
             }
-            let store = ContactsStore()
+            let store = storeFactory()
             try store.requireAuthorization()
             let g = try store.createGroup(name: name, containerIdentifier: container)
             try emitContactsWrite(global, GroupResult(group: g), sandboxActive: gate.sandboxActive)
@@ -475,6 +518,12 @@ struct GroupsRenameCommand: ParsableCommand {
     @Option(name: .long, help: "Group assertion; accepted and echoed for MCP parity, not enforced.")
     var group: String?
     func run() throws {
+        try run(storeFactory: { ContactsStore() })
+    }
+
+    /// Test seam (see AGENTS.md / the EventKit lane): the live `ContactsStore` is bound by the
+    /// public `run()` above and nowhere else, so no flag or env var can substitute a backend.
+    func run(storeFactory: () -> ContactsStore) throws {
         try runGuarded(tool: "contacts") {
             if identifier.trimmingCharacters(in: .whitespaces).isEmpty {
                 throw AppleError.validation("identifier must be a non-empty string")
@@ -500,7 +549,7 @@ struct GroupsRenameCommand: ParsableCommand {
                     sandboxActive: gate.sandboxActive)
                 return
             }
-            let store = ContactsStore()
+            let store = storeFactory()
             try store.requireAuthorization()
             if gate.sandboxActive { try store.requireLabeledGroupTarget(identifier, prefix: TestMode.sandboxPrefix) }
             let g = try store.renameGroup(identifier: identifier, newName: newName)
@@ -528,12 +577,19 @@ struct GroupsDeleteCommand: ParsableCommand {
     @Option(name: .long, help: "Group assertion; accepted and echoed for MCP parity, not enforced.")
     var group: String?
     func run() throws {
+        try run(storeFactory: { ContactsStore() })
+    }
+
+    /// Test seam (see AGENTS.md / the EventKit lane): the live `ContactsStore` is bound by the
+    /// public `run()` above and nowhere else, so no flag or env var can substitute a backend.
+    func run(storeFactory: () -> ContactsStore,
+             deleteEnvVar: String = TestMode.testModeVar) throws {
         try runGuarded(tool: "contacts") {
             if identifier.trimmingCharacters(in: .whitespaces).isEmpty {
                 throw AppleError.validation("identifier must be a non-empty string")
             }
             let gate = try resolveWrite(global)
-            let envGranted = contactsDeleteEnvGranted
+            let envGranted = contactsDeleteEnvGranted(deleteEnvVar)
             guard gate.willExecute else {
                 try emitContactsWrite(global, DryRunPreview(
                     operation: "delete_group", identifier: identifier, group_id: group,
@@ -544,7 +600,7 @@ struct GroupsDeleteCommand: ParsableCommand {
                 return
             }
             guard envGranted else { throw AppleError.safetyViolation(contactsDeleteGateMessage("delete_group")) }
-            let store = ContactsStore()
+            let store = storeFactory()
             try store.requireAuthorization()
             if gate.sandboxActive { try store.requireLabeledGroupTarget(identifier, prefix: TestMode.sandboxPrefix) }
             let id = try store.deleteGroup(identifier: identifier)
@@ -563,6 +619,12 @@ struct GroupsAddCommand: ParsableCommand {
     @Argument(help: "The contact's CN identifier.") var contactId: String
     @Argument(help: "The group's CN identifier.") var groupId: String
     func run() throws {
+        try run(storeFactory: { ContactsStore() })
+    }
+
+    /// Test seam (see AGENTS.md / the EventKit lane): the live `ContactsStore` is bound by the
+    /// public `run()` above and nowhere else, so no flag or env var can substitute a backend.
+    func run(storeFactory: () -> ContactsStore) throws {
         try runGuarded(tool: "contacts") {
             try requireNonEmptyPair(contactId, groupId)
             let gate = try resolveWrite(global)
@@ -574,7 +636,7 @@ struct GroupsAddCommand: ParsableCommand {
                     sandboxActive: gate.sandboxActive)
                 return
             }
-            let store = ContactsStore()
+            let store = storeFactory()
             try store.requireAuthorization()
             if gate.sandboxActive {
                 try store.requireLabeledGroupTarget(groupId, prefix: TestMode.sandboxPrefix)
@@ -599,6 +661,12 @@ struct GroupsRemoveCommand: ParsableCommand {
     @Argument(help: "The contact's CN identifier.") var contactId: String
     @Argument(help: "The group's CN identifier.") var groupId: String
     func run() throws {
+        try run(storeFactory: { ContactsStore() })
+    }
+
+    /// Test seam (see AGENTS.md / the EventKit lane): the live `ContactsStore` is bound by the
+    /// public `run()` above and nowhere else, so no flag or env var can substitute a backend.
+    func run(storeFactory: () -> ContactsStore) throws {
         try runGuarded(tool: "contacts") {
             try requireNonEmptyPair(contactId, groupId)
             let gate = try resolveWrite(global)
@@ -609,7 +677,7 @@ struct GroupsRemoveCommand: ParsableCommand {
                     sandboxActive: gate.sandboxActive)
                 return
             }
-            let store = ContactsStore()
+            let store = storeFactory()
             try store.requireAuthorization()
             if gate.sandboxActive { try store.requireLabeledGroupTarget(groupId, prefix: TestMode.sandboxPrefix) }
             try store.removeContactFromGroup(contactIdentifier: contactId, groupIdentifier: groupId)

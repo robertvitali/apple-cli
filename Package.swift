@@ -51,10 +51,10 @@ let package = Package(
         .testTarget(name: "EventKitCoreTests", dependencies: ["EventKitCore", "AppleKit"]),
         .testTarget(name: "MessagesKitTests", dependencies: ["MessagesKit", "AppleKit", "TestSupport"]),
         .testTarget(name: "MailKitTests", dependencies: ["MailKit", "AppleKit", "TestSupport"]),
-        .testTarget(name: "ContactsKitTests", dependencies: ["ContactsKit", "AppleKit"]),
-        .testTarget(name: "NotesKitTests", dependencies: ["NotesKit", "AppleKit"]),
-        .testTarget(name: "CalendarKitTests", dependencies: ["CalendarKit", "EventKitCore", "AppleKit"]),
-        .testTarget(name: "RemindersKitTests", dependencies: ["RemindersKit", "EventKitCore", "AppleKit"]),
+        .testTarget(name: "ContactsKitTests", dependencies: ["ContactsKit", "AppleKit", "TestSupport"]),
+        .testTarget(name: "NotesKitTests", dependencies: ["NotesKit", "AppleKit", "TestSupport"]),
+        .testTarget(name: "CalendarKitTests", dependencies: ["CalendarKit", "EventKitCore", "AppleKit", "TestSupport"]),
+        .testTarget(name: "RemindersKitTests", dependencies: ["RemindersKit", "EventKitCore", "AppleKit", "TestSupport"]),
         .testTarget(name: "AppleCLITests", dependencies: ["apple", "AppleKit", argparse]),
     ]
 )

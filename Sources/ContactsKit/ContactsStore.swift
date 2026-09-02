@@ -2,10 +2,12 @@ import Foundation
 import Contacts
 import AppleKit
 
-// CNContactStore engine — the shipping mechanism for every operation except the two
+// Contacts engine — the shipping mechanism for every operation except the two
 // entitlement-gated ones (contact NOTES and group REMOVE-member), which fall back to
 // AppleScript exactly as apple-contacts-mcp @ 1cd8789 (v0.3.0) does. Mirrors
-// contacts_connector.py + the server-layer error dispatch.
+// contacts_connector.py + the server-layer error dispatch. Every framework call goes
+// through a `ContactsStoreBackend`; in production that is always the file-private
+// `LiveContactsStoreBackend`, which owns the one `CNContactStore` + `AppleScriptRunner`.
 //
 // SECURITY: the AppleScript fallbacks bind user/CN data via osascript ARGV
 // (`on run argv`), never string-interpolated into the script source — strictly safer
@@ -17,12 +19,92 @@ struct PhotoData {
     let bytes: Data
 }
 
-public final class ContactsStore {
+/// The `CNContactStore` + `osascript` surface `ContactsStore` actually touches, extracted so
+/// logic tests can bind a pure in-memory stand-in. `LiveContactsStoreBackend` below is the ONLY
+/// production implementation and is `private` to this file, so no flag, env var, or public
+/// initializer can swap it — `ContactsStore()` always talks to the real `CNContactStore`.
+///
+/// `requestAccess`'s handler is `@escaping @Sendable`: it is bridged to a synchronous call
+/// through a `DispatchSemaphore`, and Contacts is free to invoke it on an arbitrary queue.
+/// `enumerateContacts`'s block is deliberately NON-escaping, matching `CNContactStore`, so the
+/// caller can keep accumulating into local vars.
+protocol ContactsStoreBackend {
+    /// `CNContactStore.authorizationStatus(for: .contacts).rawValue` — the raw value, not the
+    /// enum, because the mapping deliberately avoids SDK case-availability differences.
+    var authorizationStatusRawValue: Int { get }
+    func requestAccess(completion: @escaping @Sendable (Bool, Error?) -> Void)
+    func enumerateContacts(with request: CNContactFetchRequest,
+                           usingBlock block: (CNContact, UnsafeMutablePointer<ObjCBool>) -> Void) throws
+    func unifiedContact(withIdentifier identifier: String, keysToFetch keys: [CNKeyDescriptor]) throws -> CNContact
+    func unifiedContacts(matching predicate: NSPredicate, keysToFetch keys: [CNKeyDescriptor]) throws -> [CNContact]
+    func groups(matching predicate: NSPredicate?) throws -> [CNGroup]
+    func containers(matching predicate: NSPredicate?) throws -> [CNContainer]
+    func defaultContainerIdentifier() -> String
+    func execute(_ request: CNSaveRequest) throws
+    /// The osascript fallback used by the two entitlement-gated ops. `arguments` are opaque
+    /// argv — never interpolated into the script source.
+    func runScript(_ script: String, arguments: [String]) throws -> String
+}
+
+private final class LiveContactsStoreBackend: ContactsStoreBackend {
     private let store = CNContactStore()
     private let runner = AppleScriptRunner()
+
+    var authorizationStatusRawValue: Int {
+        CNContactStore.authorizationStatus(for: .contacts).rawValue
+    }
+
+    func requestAccess(completion: @escaping @Sendable (Bool, Error?) -> Void) {
+        store.requestAccess(for: .contacts, completionHandler: completion)
+    }
+
+    func enumerateContacts(with request: CNContactFetchRequest,
+                           usingBlock block: (CNContact, UnsafeMutablePointer<ObjCBool>) -> Void) throws {
+        try store.enumerateContacts(with: request, usingBlock: block)
+    }
+
+    func unifiedContact(withIdentifier identifier: String, keysToFetch keys: [CNKeyDescriptor]) throws -> CNContact {
+        try store.unifiedContact(withIdentifier: identifier, keysToFetch: keys)
+    }
+
+    func unifiedContacts(matching predicate: NSPredicate, keysToFetch keys: [CNKeyDescriptor]) throws -> [CNContact] {
+        try store.unifiedContacts(matching: predicate, keysToFetch: keys)
+    }
+
+    func groups(matching predicate: NSPredicate?) throws -> [CNGroup] {
+        try store.groups(matching: predicate)
+    }
+
+    func containers(matching predicate: NSPredicate?) throws -> [CNContainer] {
+        try store.containers(matching: predicate)
+    }
+
+    func defaultContainerIdentifier() -> String {
+        store.defaultContainerIdentifier()
+    }
+
+    func execute(_ request: CNSaveRequest) throws {
+        try store.execute(request)
+    }
+
+    func runScript(_ script: String, arguments: [String]) throws -> String {
+        try runner.run(script, arguments: arguments)
+    }
+}
+
+public final class ContactsStore {
+    private let backend: any ContactsStoreBackend
     private let requestTimeout: TimeInterval
 
     public init(requestTimeout: TimeInterval = 10) {
+        self.backend = LiveContactsStoreBackend()
+        self.requestTimeout = requestTimeout
+    }
+
+    /// Test-only seam. Internal (and the protocol is internal), so no other module — and no
+    /// flag or env var — can reach it; `ContactsStore()` is the only production path.
+    init(backend: any ContactsStoreBackend, requestTimeout: TimeInterval = 10) {
+        self.backend = backend
         self.requestTimeout = requestTimeout
     }
 
@@ -32,7 +114,7 @@ public final class ContactsStore {
     /// the MCP's `_CN_AUTHORIZATION_STATUS` (0..4). Switching on rawValue avoids SDK
     /// enum-case availability differences for `.limited`.
     public func authorizationStatus() -> String {
-        switch CNContactStore.authorizationStatus(for: .contacts).rawValue {
+        switch backend.authorizationStatusRawValue {
         case 0: return "notDetermined"
         case 1: return "restricted"
         case 2: return "denied"
@@ -60,22 +142,37 @@ public final class ContactsStore {
         }
     }
 
-    /// Bridge CN's async access request to a synchronous call with a timeout (mirror
-    /// `_run_cn_request_access`). Only invoked on `notDetermined`.
-    /// Externally-synchronized (via the semaphore) result box so the CN completion
-    /// handler can write results without a captured-var data race under Swift 6.
+    /// Result box for the CN access-request bridge.
+    ///
+    /// `@unchecked Sendable` is carried by the explicit `NSLock` below, NOT by call-order
+    /// discipline. The semaphore alone orders only the HAPPY path: on the TIMEOUT path
+    /// `requestAccess` returns while Contacts' completion handler is still in flight on its own
+    /// queue, so that handler's write and a later read of this box genuinely can overlap. The
+    /// lock is what makes the overlap benign; the previous "externally-synchronized via the
+    /// semaphore" claim did not hold for the timeout case.
     private final class AccessResult: @unchecked Sendable {
-        var granted = false
-        var error: Error?
+        private let lock = NSLock()
+        private var granted = false
+        private var error: Error?
+
+        func complete(granted: Bool, error: Error?) {
+            lock.lock(); defer { lock.unlock() }
+            self.granted = granted
+            self.error = error
+        }
+
+        var value: (granted: Bool, error: Error?) {
+            lock.lock(); defer { lock.unlock() }
+            return (granted, error)
+        }
     }
 
     @discardableResult
     private func requestAccess() throws -> Bool {
         let sema = DispatchSemaphore(value: 0)
         let result = AccessResult()
-        store.requestAccess(for: .contacts) { ok, err in
-            result.granted = ok
-            result.error = err
+        backend.requestAccess { ok, err in
+            result.complete(granted: ok, error: err)
             sema.signal()
         }
         if sema.wait(timeout: .now() + requestTimeout) == .timedOut {
@@ -89,10 +186,11 @@ public final class ContactsStore {
                 + "system dialog and retry.",
                 status: "notDetermined")
         }
-        if let err = result.error {
+        let outcome = result.value
+        if let err = outcome.error {
             throw AppleError.permissionDenied("Contacts authorization error: \(err.localizedDescription)")
         }
-        return result.granted
+        return outcome.granted
     }
 
     /// Gate every data command (mirror `_require_contacts_authorization`): request on
@@ -144,7 +242,7 @@ public final class ContactsStore {
         var out: [ContactSummary] = []
         var skipped = 0
         do {
-            try store.enumerateContacts(with: req) { contact, stop in
+            try backend.enumerateContacts(with: req) { contact, stop in
                 if skipped < offset { skipped += 1; return }
                 if out.count >= limit { stop.pointee = true; return }
                 out.append(serializeSummary(contact))
@@ -159,7 +257,7 @@ public final class ContactsStore {
     public func unifiedContact(_ identifier: String, includeNiche: Bool) -> Contact? {
         var keys = Self.p1Keys
         if includeNiche { keys += Self.nicheKeys }
-        guard let c = try? store.unifiedContact(withIdentifier: identifier, keysToFetch: keys) else {
+        guard let c = try? backend.unifiedContact(withIdentifier: identifier, keysToFetch: keys) else {
             return nil
         }
         return serializeContact(c, includeNiche: includeNiche)
@@ -186,7 +284,7 @@ public final class ContactsStore {
         }
         let results: [CNContact]
         do {
-            results = try store.unifiedContacts(matching: predicate, keysToFetch: keys)
+            results = try backend.unifiedContacts(matching: predicate, keysToFetch: keys)
         } catch {
             throw AppleError.unknown("Search failed: \(error.localizedDescription)")
         }
@@ -200,7 +298,7 @@ public final class ContactsStore {
         let pred = CNGroup.predicateForGroups(withIdentifiers: [identifier])
         let results: [CNGroup]
         do {
-            results = try store.groups(matching: pred)
+            results = try backend.groups(matching: pred)
         } catch {
             throw AppleError.unknown("CN group fetch failed: \(error.localizedDescription)")
         }
@@ -247,7 +345,7 @@ public final class ContactsStore {
 
     private func resolveContainerId(forGroup groupIdentifier: String) -> String {
         let pred = CNContainer.predicateForContainerOfGroup(withIdentifier: groupIdentifier)
-        guard let containers = try? store.containers(matching: pred), let first = containers.first else {
+        guard let containers = try? backend.containers(matching: pred), let first = containers.first else {
             return ""
         }
         return first.identifier
@@ -256,7 +354,7 @@ public final class ContactsStore {
     public func listGroups() throws -> [Group] {
         let groups: [CNGroup]
         do {
-            groups = try store.groups(matching: nil)
+            groups = try backend.groups(matching: nil)
         } catch {
             throw AppleError.unknown("list_groups failed: \(error.localizedDescription)")
         }
@@ -269,7 +367,7 @@ public final class ContactsStore {
         let pred = CNContact.predicateForContactsInGroup(withIdentifier: groupId)
         let results: [CNContact]
         do {
-            results = try store.unifiedContacts(matching: pred, keysToFetch: Self.summaryKeys)
+            results = try backend.unifiedContacts(matching: pred, keysToFetch: Self.summaryKeys)
         } catch {
             throw AppleError.unknown("get_contacts_in_group failed: \(error.localizedDescription)")
         }
@@ -279,18 +377,20 @@ public final class ContactsStore {
     public func listContainers() throws -> [Container] {
         let containers: [CNContainer]
         do {
-            containers = try store.containers(matching: nil)
+            containers = try backend.containers(matching: nil)
         } catch {
             throw AppleError.unknown("list_containers failed: \(error.localizedDescription)")
         }
-        let defaultId = store.defaultContainerIdentifier()
+        let defaultId = backend.defaultContainerIdentifier()
         return containers.map { c in
             Container(id: c.identifier, name: c.name, type: Self.containerType(c.type),
                       is_default: c.identifier == defaultId)
         }
     }
 
-    private static func containerType(_ type: CNContainerType) -> String {
+    /// Internal (not private) so the logic tier can pin all four branches directly: `CNContainer`
+    /// has no initializer that sets `type`, so a fake backend cannot vend one of each kind.
+    static func containerType(_ type: CNContainerType) -> String {
         switch type.rawValue {
         case 1: return "local"
         case 2: return "exchange"
@@ -305,7 +405,7 @@ public final class ContactsStore {
         let descriptor = CNContactVCardSerialization.descriptorForRequiredKeys()
         var contacts: [CNContact] = []
         for ident in identifiers {
-            guard let c = try? store.unifiedContact(withIdentifier: ident, keysToFetch: [descriptor]) else {
+            guard let c = try? backend.unifiedContact(withIdentifier: ident, keysToFetch: [descriptor]) else {
                 throw AppleError.notFound("Contact not found: '\(ident)'")
             }
             contacts.append(c)
@@ -322,7 +422,7 @@ public final class ContactsStore {
 
     func readPhoto(_ identifier: String) -> PhotoData? {
         let keys = [CNContactImageDataKey, CNContactImageDataAvailableKey] as [CNKeyDescriptor]
-        guard let c = try? store.unifiedContact(withIdentifier: identifier, keysToFetch: keys) else {
+        guard let c = try? backend.unifiedContact(withIdentifier: identifier, keysToFetch: keys) else {
             return nil
         }
         if !c.imageDataAvailable { return PhotoData(available: false, bytes: Data()) }
@@ -346,7 +446,7 @@ public final class ContactsStore {
         end run
         """
         do {
-            return try runner.run(script, arguments: [identifier])
+            return try backend.runScript(script, arguments: [identifier])
         } catch let e as AppleScriptRunner.RunError {
             throw Self.mapAppleScriptError(e, notFoundMessage: "Contact not found: '\(identifier)'",
                                            genericPrefix: "read_note failed")
@@ -366,7 +466,7 @@ public final class ContactsStore {
         end run
         """
         do {
-            _ = try runner.run(script, arguments: [identifier, note])
+            _ = try backend.runScript(script, arguments: [identifier, note])
         } catch let e as AppleScriptRunner.RunError {
             throw Self.mapAppleScriptError(e, notFoundMessage: "Contact not found: '\(identifier)'",
                                            genericPrefix: "write_note failed")
@@ -386,7 +486,7 @@ public final class ContactsStore {
         save.add(mutable, toContainerWithIdentifier: containerIdentifier)
         if let group { save.addMember(mutable, to: group) }
         do {
-            try store.execute(save)
+            try backend.execute(save)
         } catch {
             throw AppleError.unknown("Create failed: \(error.localizedDescription)")
         }
@@ -396,7 +496,7 @@ public final class ContactsStore {
     public func updateContact(identifier: String, fields: ContactFields) throws -> String {
         var keys = Self.p1Keys
         keys += Self.nicheKeys
-        guard let contact = try? store.unifiedContact(withIdentifier: identifier, keysToFetch: keys),
+        guard let contact = try? backend.unifiedContact(withIdentifier: identifier, keysToFetch: keys),
               let mutable = contact.mutableCopy() as? CNMutableContact else {
             throw AppleError.notFound("Contact not found: '\(identifier)'")
         }
@@ -404,7 +504,7 @@ public final class ContactsStore {
         let save = CNSaveRequest()
         save.update(mutable)
         do {
-            try store.execute(save)
+            try backend.execute(save)
         } catch {
             throw AppleError.unknown("Update failed: \(error.localizedDescription)")
         }
@@ -413,14 +513,14 @@ public final class ContactsStore {
 
     public func deleteContact(identifier: String) throws -> String {
         let keys = [CNContactIdentifierKey] as [CNKeyDescriptor]
-        guard let contact = try? store.unifiedContact(withIdentifier: identifier, keysToFetch: keys),
+        guard let contact = try? backend.unifiedContact(withIdentifier: identifier, keysToFetch: keys),
               let mutable = contact.mutableCopy() as? CNMutableContact else {
             throw AppleError.notFound("Contact not found: '\(identifier)'")
         }
         let save = CNSaveRequest()
         save.delete(mutable)
         do {
-            try store.execute(save)
+            try backend.execute(save)
         } catch {
             throw AppleError.unknown("Delete failed: \(error.localizedDescription)")
         }
@@ -461,7 +561,7 @@ public final class ContactsStore {
             mutables.append(m)
         }
         do {
-            try store.execute(save)
+            try backend.execute(save)
         } catch {
             throw AppleError.unknown("import_vcard failed: \(error.localizedDescription)")
         }
@@ -473,7 +573,7 @@ public final class ContactsStore {
         let save = CNSaveRequest()
         save.addMember(mutable, to: group)
         do {
-            try store.execute(save)
+            try backend.execute(save)
         } catch {
             throw AppleError.unknown("add_contact_to_group failed: \(error.localizedDescription)")
         }
@@ -496,7 +596,7 @@ public final class ContactsStore {
         end run
         """
         do {
-            _ = try runner.run(script, arguments: [contactIdentifier, groupIdentifier])
+            _ = try backend.runScript(script, arguments: [contactIdentifier, groupIdentifier])
         } catch let e as AppleScriptRunner.RunError {
             throw Self.mapAppleScriptError(
                 e,
@@ -507,7 +607,7 @@ public final class ContactsStore {
 
     private func loadContactAndGroup(_ contactIdentifier: String, _ groupIdentifier: String) throws -> (CNMutableContact, CNGroup) {
         let keys = [CNContactIdentifierKey] as [CNKeyDescriptor]
-        guard let contact = try? store.unifiedContact(withIdentifier: contactIdentifier, keysToFetch: keys),
+        guard let contact = try? backend.unifiedContact(withIdentifier: contactIdentifier, keysToFetch: keys),
               let mutable = contact.mutableCopy() as? CNMutableContact else {
             throw AppleError.notFound("Contact not found: '\(contactIdentifier)'")
         }
@@ -519,7 +619,7 @@ public final class ContactsStore {
 
     public func writePhoto(identifier: String, imageData: Data?) throws -> String {
         let keys = [CNContactImageDataKey] as [CNKeyDescriptor]
-        guard let contact = try? store.unifiedContact(withIdentifier: identifier, keysToFetch: keys),
+        guard let contact = try? backend.unifiedContact(withIdentifier: identifier, keysToFetch: keys),
               let mutable = contact.mutableCopy() as? CNMutableContact else {
             throw AppleError.notFound("Contact not found: '\(identifier)'")
         }
@@ -527,7 +627,7 @@ public final class ContactsStore {
         let save = CNSaveRequest()
         save.update(mutable)
         do {
-            try store.execute(save)
+            try backend.execute(save)
         } catch {
             throw AppleError.unknown("write_photo failed: \(error.localizedDescription)")
         }
@@ -540,7 +640,7 @@ public final class ContactsStore {
         let save = CNSaveRequest()
         save.add(mutable, toContainerWithIdentifier: containerIdentifier)
         do {
-            try store.execute(save)
+            try backend.execute(save)
         } catch {
             throw AppleError.unknown("create_group failed: \(error.localizedDescription)")
         }
@@ -556,7 +656,7 @@ public final class ContactsStore {
         let save = CNSaveRequest()
         save.update(mutable)
         do {
-            try store.execute(save)
+            try backend.execute(save)
         } catch {
             throw AppleError.unknown("rename_group failed: \(error.localizedDescription)")
         }
@@ -570,7 +670,7 @@ public final class ContactsStore {
         let save = CNSaveRequest()
         save.delete(mutable)
         do {
-            try store.execute(save)
+            try backend.execute(save)
         } catch {
             throw AppleError.unknown("delete_group failed: \(error.localizedDescription)")
         }

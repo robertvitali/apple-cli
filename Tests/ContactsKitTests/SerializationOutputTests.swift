@@ -18,23 +18,23 @@ private func dataObject<T: Encodable>(_ v: T) throws -> [String: Any] {
 struct ContactSerializationTests {
     private func sampleFields() -> ContactFields {
         var f = ContactFields()
-        f.given_name = "Ada"; f.family_name = "Lovelace"; f.organization = "Analytical"
+        f.given_name = "Jane"; f.family_name = "Doe"; f.organization = "Example Org"
         f.phones = [ScalarInput(label: "mobile", value: "+1-555-0100")]
-        f.emails = [ScalarInput(label: "work", value: "ada@example.com")]
+        f.emails = [ScalarInput(label: "work", value: "jane@example.com")]
         return f
     }
 
     @Test("labeled values carry label_raw (Apple token) + localized label + value") func labeled() {
         let c = buildMutableContact(from: sampleFields())
         let out = serializeContact(c, includeNiche: false)
-        #expect(out.given_name == "Ada")
-        #expect(out.family_name == "Lovelace")
+        #expect(out.given_name == "Jane")
+        #expect(out.family_name == "Doe")
         #expect(out.phones.count == 1)
         #expect(out.phones[0].label_raw == "_$!<Mobile>!$_")
         #expect(out.phones[0].label == "mobile")        // localizedStringForLabel round-trip
         #expect(out.phones[0].value == "+1-555-0100")
         #expect(out.emails[0].label_raw == "_$!<Work>!$_")
-        #expect(out.emails[0].value == "ada@example.com")
+        #expect(out.emails[0].value == "jane@example.com")
     }
 
     @Test("birthday key ALWAYS present — null when unset") func birthdayNull() throws {
@@ -86,10 +86,10 @@ struct BirthdayPartsTests {
 struct UpdateSemanticsTests {
     @Test("nil skips, \"\" clears, value sets; lists REST-PUT replace") func semantics() {
         var base = ContactFields()
-        base.given_name = "Ada"; base.family_name = "Old"
+        base.given_name = "Jane"; base.family_name = "Old"
         base.phones = [ScalarInput(label: "mobile", value: "+1")]
         let c = buildMutableContact(from: base)
-        #expect(c.givenName == "Ada")
+        #expect(c.givenName == "Jane")
         #expect(c.phoneNumbers.count == 1)
 
         var upd = ContactFields()
@@ -111,27 +111,27 @@ struct UpdateSemanticsTests {
 @Suite("vCard parse (3.0 and 4.0 input) + export")
 struct VCardTests {
     @Test("parse vCard 3.0") func parse30() throws {
-        let vcard = ["BEGIN:VCARD", "VERSION:3.0", "N:Lovelace;Ada;;;", "FN:Ada Lovelace",
+        let vcard = ["BEGIN:VCARD", "VERSION:3.0", "N:Doe;Jane;;;", "FN:Jane Doe",
                      "TEL;type=CELL:+1-555-0100", "END:VCARD", ""].joined(separator: "\r\n")
         let parsed = try CNContactVCardSerialization.contacts(with: Data(vcard.utf8))
         #expect(parsed.count == 1)
         let out = serializeContact(parsed[0], includeNiche: false)
-        #expect(out.given_name == "Ada")
-        #expect(out.family_name == "Lovelace")
+        #expect(out.given_name == "Jane")
+        #expect(out.family_name == "Doe")
         #expect(out.phones.first?.value == "+1-555-0100")
     }
     @Test("parse vCard 4.0") func parse40() throws {
-        let vcard = ["BEGIN:VCARD", "VERSION:4.0", "N:Turing;Alan;;;", "FN:Alan Turing",
-                     "EMAIL:alan@example.com", "END:VCARD", ""].joined(separator: "\r\n")
+        let vcard = ["BEGIN:VCARD", "VERSION:4.0", "N:Roe;Alice;;;", "FN:Alice Roe",
+                     "EMAIL:alice@example.com", "END:VCARD", ""].joined(separator: "\r\n")
         let parsed = try CNContactVCardSerialization.contacts(with: Data(vcard.utf8))
         #expect(parsed.count == 1)
         let out = serializeContact(parsed[0], includeNiche: false)
-        #expect(out.given_name == "Alan")
-        #expect(out.family_name == "Turing")
-        #expect(out.emails.first?.value == "alan@example.com")
+        #expect(out.given_name == "Alice")
+        #expect(out.family_name == "Roe")
+        #expect(out.emails.first?.value == "alice@example.com")
     }
     @Test("export emits vCard 3.0") func export30() throws {
-        var f = ContactFields(); f.given_name = "Grace"; f.family_name = "Hopper"
+        var f = ContactFields(); f.given_name = "Bob"; f.family_name = "Poe"
         let c = buildMutableContact(from: f)
         let data = try CNContactVCardSerialization.data(with: [c])
         let text = String(decoding: data, as: UTF8.self)

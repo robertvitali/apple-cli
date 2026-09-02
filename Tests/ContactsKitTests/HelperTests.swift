@@ -24,13 +24,13 @@ struct EffectiveLimitTests {
 struct UnionDedupTests {
     @Test("dedupes by id, preserves first-seen order") func dedupOrder() {
         let lists = [
-            [summary("a", "Ada"), summary("b", "Bob")],
+            [summary("a", "Alice"), summary("b", "Bob")],
             [summary("b", "Bob2"), summary("c", "Cy")],   // b duplicate (first wins)
-            [summary("a", "Ada2"), summary("d", "Dee")],
+            [summary("a", "Alice2"), summary("d", "Dee")],
         ]
         let out = unionSummariesByID(lists, cap: 200)
         #expect(out.map(\.id) == ["a", "b", "c", "d"])
-        #expect(out.first?.given_name == "Ada")  // first-seen 'a' kept, not "Ada2"
+        #expect(out.first?.given_name == "Alice")  // first-seen 'a' kept, not "Alice2"
     }
     @Test("honors the cap") func cap() {
         let lists = [(0..<300).map { summary("id\($0)") }]
@@ -46,7 +46,7 @@ struct UnionDedupTests {
 @Suite("vCard dry-run validation (ContactsStore.validateVCard)")
 struct VCardValidateTests {
     @Test("valid 3.0 → parsed count") func valid() throws {
-        let vcard = ["BEGIN:VCARD", "VERSION:3.0", "N:Test;Ada;;;", "FN:Ada Test", "END:VCARD", ""]
+        let vcard = ["BEGIN:VCARD", "VERSION:3.0", "N:Doe;Jane;;;", "FN:Jane Doe", "END:VCARD", ""]
             .joined(separator: "\r\n")
         #expect(try ContactsStore.validateVCard(text: vcard) == 1)
     }

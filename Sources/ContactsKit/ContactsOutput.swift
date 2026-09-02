@@ -134,7 +134,14 @@ func resolveWrite(_ global: GlobalOptions, labeledName: String? = nil,
 /// it spawns, so env-vs-flag is not a trust boundary here. (The `APPLE_ALLOW_*` variables on
 /// Mail's irreversible ops carry the same caveat; their value is that they are absent by
 /// default and must be added deliberately, not that they are unreachable.)
-var contactsDeleteEnvGranted: Bool { TestMode.isTruthyEnv(TestMode.testModeVar) }
+/// `envVar` is a seam for the logic tier, matching the ones `TestMode.sandboxActive(flag:envVar:)`
+/// and `GlobalOptions.willExecute(defaultDryRun:envVar:)` already carry, and it exists for the same
+/// reason: a test that needs the env-GRANTED branch must own a UNIQUE variable rather than
+/// `setenv`-ing the real `APPLE_TEST_MODE`, which swift-testing's parallel suites read
+/// concurrently. Production callers never pass it — the default IS the oracle-mirrored key.
+func contactsDeleteEnvGranted(_ envVar: String = TestMode.testModeVar) -> Bool {
+    TestMode.isTruthyEnv(envVar)
+}
 
 /// The refusal text for an ungranted delete — shared by the execute path (thrown) and the
 /// preview (reported in `gate_note`), so a preview can never claim clean for a call the

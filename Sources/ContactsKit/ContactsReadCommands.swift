@@ -17,8 +17,14 @@ struct AuthCommand: ParsableCommand {
         abstract: "Report Contacts TCC authorization status (never prompts). → check_authorization")
     @OptionGroup var global: GlobalOptions
     func run() throws {
+        try run(storeFactory: { ContactsStore() })
+    }
+
+    /// Test seam (see AGENTS.md / the EventKit lane): the live `ContactsStore` is bound by the
+    /// public `run()` above and nowhere else, so no flag or env var can substitute a backend.
+    func run(storeFactory: () -> ContactsStore) throws {
         try runGuarded(tool: "contacts") {
-            let store = ContactsStore()
+            let store = storeFactory()
             let status = store.authorizationStatus()
             let rem = (status == "authorized" || status == "limited") ? nil : ContactsStore.remediation(for: status)
             try emitContacts(global, AuthResult(status: status, remediation: rem))
@@ -36,11 +42,17 @@ struct ListCommand: ParsableCommand {
     @Option(name: .long, help: "Number of contacts to skip (>= 0).") var offset = 0
     @Option(name: .long, help: "Max contacts to return (default 50, capped at 200).") var limit = 50
     func run() throws {
+        try run(storeFactory: { ContactsStore() })
+    }
+
+    /// Test seam (see AGENTS.md / the EventKit lane): the live `ContactsStore` is bound by the
+    /// public `run()` above and nowhere else, so no flag or env var can substitute a backend.
+    func run(storeFactory: () -> ContactsStore) throws {
         try runGuarded(tool: "contacts") {
             if offset < 0 { throw AppleError.validation("offset must be >= 0") }
             if limit < 1 { throw AppleError.validation("limit must be >= 1") }
             let effective = effectiveLimit(limit, cap: contactsCap)
-            let store = ContactsStore()
+            let store = storeFactory()
             try store.requireAuthorization()
             let contacts = try store.enumerateContacts(offset: offset, limit: effective)
             try emitContacts(global, ListContactsResult(
@@ -60,11 +72,17 @@ struct GetCommand: ParsableCommand {
     @Flag(name: .long, help: "Also fetch niche families (dates, social_profiles, relations, instant_messages).")
     var niche = false
     func run() throws {
+        try run(storeFactory: { ContactsStore() })
+    }
+
+    /// Test seam (see AGENTS.md / the EventKit lane): the live `ContactsStore` is bound by the
+    /// public `run()` above and nowhere else, so no flag or env var can substitute a backend.
+    func run(storeFactory: () -> ContactsStore) throws {
         try runGuarded(tool: "contacts") {
             if identifier.trimmingCharacters(in: .whitespaces).isEmpty {
                 throw AppleError.validation("identifier must be a non-empty string")
             }
-            let store = ContactsStore()
+            let store = storeFactory()
             try store.requireAuthorization()
             guard let contact = store.unifiedContact(identifier, includeNiche: niche) else {
                 throw AppleError.notFound("No contact found with identifier '\(identifier)'")
@@ -90,10 +108,16 @@ struct SearchCommand: ParsableCommand {
     var deep = false
 
     func run() throws {
+        try run(storeFactory: { ContactsStore() })
+    }
+
+    /// Test seam (see AGENTS.md / the EventKit lane): the live `ContactsStore` is bound by the
+    /// public `run()` above and nowhere else, so no flag or env var can substitute a backend.
+    func run(storeFactory: () -> ContactsStore) throws {
         try runGuarded(tool: "contacts") {
             let (field, value) = try resolveSearchSelection(
                 name: name, phone: phone, email: email, organization: organization)
-            let store = ContactsStore()
+            let store = storeFactory()
             try store.requireAuthorization()
 
             let contacts: [ContactSummary]
@@ -121,8 +145,14 @@ struct ContainersListCommand: ParsableCommand {
         abstract: "List all contact containers (accounts). → list_containers")
     @OptionGroup var global: GlobalOptions
     func run() throws {
+        try run(storeFactory: { ContactsStore() })
+    }
+
+    /// Test seam (see AGENTS.md / the EventKit lane): the live `ContactsStore` is bound by the
+    /// public `run()` above and nowhere else, so no flag or env var can substitute a backend.
+    func run(storeFactory: () -> ContactsStore) throws {
         try runGuarded(tool: "contacts") {
-            let store = ContactsStore()
+            let store = storeFactory()
             try store.requireAuthorization()
             let all = try store.listContainers()
             let capped = Array(all.prefix(containersCap))
@@ -140,8 +170,14 @@ struct GroupsListCommand: ParsableCommand {
         abstract: "List all contact groups across all containers. → list_groups")
     @OptionGroup var global: GlobalOptions
     func run() throws {
+        try run(storeFactory: { ContactsStore() })
+    }
+
+    /// Test seam (see AGENTS.md / the EventKit lane): the live `ContactsStore` is bound by the
+    /// public `run()` above and nowhere else, so no flag or env var can substitute a backend.
+    func run(storeFactory: () -> ContactsStore) throws {
         try runGuarded(tool: "contacts") {
-            let store = ContactsStore()
+            let store = storeFactory()
             try store.requireAuthorization()
             let all = try store.listGroups()
             let capped = Array(all.prefix(groupsCap))
@@ -159,11 +195,17 @@ struct GroupsMembersCommand: ParsableCommand {
     @OptionGroup var global: GlobalOptions
     @Argument(help: "The group's CN identifier.") var identifier: String
     func run() throws {
+        try run(storeFactory: { ContactsStore() })
+    }
+
+    /// Test seam (see AGENTS.md / the EventKit lane): the live `ContactsStore` is bound by the
+    /// public `run()` above and nowhere else, so no flag or env var can substitute a backend.
+    func run(storeFactory: () -> ContactsStore) throws {
         try runGuarded(tool: "contacts") {
             if identifier.trimmingCharacters(in: .whitespaces).isEmpty {
                 throw AppleError.validation("identifier must be a non-empty string")
             }
-            let store = ContactsStore()
+            let store = storeFactory()
             try store.requireAuthorization()
             guard try store.fetchGroup(identifier) != nil else {
                 throw AppleError.notFound("No group found with identifier '\(identifier)'")
@@ -185,6 +227,12 @@ struct VCardExportCommand: ParsableCommand {
     @Argument(help: "One or more contact CN identifiers.") var identifiers: [String] = []
     @Option(name: .long, help: "Extra: also write the vCard text to this file path.") var out: String?
     func run() throws {
+        try run(storeFactory: { ContactsStore() })
+    }
+
+    /// Test seam (see AGENTS.md / the EventKit lane): the live `ContactsStore` is bound by the
+    /// public `run()` above and nowhere else, so no flag or env var can substitute a backend.
+    func run(storeFactory: () -> ContactsStore) throws {
         try runGuarded(tool: "contacts") {
             if identifiers.isEmpty {
                 throw AppleError.validation("identifiers must be a non-empty list of strings")
@@ -201,7 +249,7 @@ struct VCardExportCommand: ParsableCommand {
                 try refuseRawFinalLeafSymlink($0, action: "write the vCard to")
                 return try confineWriteDestination($0, action: "write the vCard to", allowOutsideHome: true).path
             }
-            let store = ContactsStore()
+            let store = storeFactory()
             try store.requireAuthorization()
             let vcard = try store.exportVCard(identifiers)
             var writtenTo: String?
@@ -233,11 +281,17 @@ struct NoteGetCommand: ParsableCommand {
     @OptionGroup var global: GlobalOptions
     @Argument(help: "The contact's full CN identifier including the :ABPerson suffix.") var identifier: String
     func run() throws {
+        try run(storeFactory: { ContactsStore() })
+    }
+
+    /// Test seam (see AGENTS.md / the EventKit lane): the live `ContactsStore` is bound by the
+    /// public `run()` above and nowhere else, so no flag or env var can substitute a backend.
+    func run(storeFactory: () -> ContactsStore) throws {
         try runGuarded(tool: "contacts") {
             if identifier.trimmingCharacters(in: .whitespaces).isEmpty {
                 throw AppleError.validation("identifier must be a non-empty string")
             }
-            let store = ContactsStore()
+            let store = storeFactory()
             try store.requireAuthorization()
             let note = try store.readNote(identifier)
             try emitContacts(global, ReadNoteResult(identifier: identifier, note: note))
@@ -255,6 +309,12 @@ struct PhotoGetCommand: ParsableCommand {
     @Argument(help: "The contact's CN identifier.") var identifier: String
     @Option(name: .long, help: "Extra: write the raw photo bytes to this file path.") var out: String?
     func run() throws {
+        try run(storeFactory: { ContactsStore() })
+    }
+
+    /// Test seam (see AGENTS.md / the EventKit lane): the live `ContactsStore` is bound by the
+    /// public `run()` above and nowhere else, so no flag or env var can substitute a backend.
+    func run(storeFactory: () -> ContactsStore) throws {
         try runGuarded(tool: "contacts") {
             if identifier.trimmingCharacters(in: .whitespaces).isEmpty {
                 throw AppleError.validation("identifier must be a non-empty string")
@@ -267,7 +327,7 @@ struct PhotoGetCommand: ParsableCommand {
                 try refuseRawFinalLeafSymlink($0, action: "write the photo to")
                 return try confineWriteDestination($0, action: "write the photo to", allowOutsideHome: true).path
             }
-            let store = ContactsStore()
+            let store = storeFactory()
             try store.requireAuthorization()
             guard let photo = store.readPhoto(identifier) else {
                 throw AppleError.notFound("Contact not found: '\(identifier)'")

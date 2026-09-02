@@ -94,9 +94,9 @@ struct SearchSelectionTests {
         }
     }
     @Test("exactly one → (field, trimmed value)") func one() throws {
-        let (f, v) = try resolveSearchSelection(name: "  Ada  ", phone: nil, email: nil, organization: nil)
+        let (f, v) = try resolveSearchSelection(name: "  Jane  ", phone: nil, email: nil, organization: nil)
         #expect(f == "name")
-        #expect(v == "Ada")
+        #expect(v == "Jane")
         let (f2, v2) = try resolveSearchSelection(name: nil, phone: nil, email: nil, organization: "Acme")
         #expect(f2 == "organization")
         #expect(v2 == "Acme")
