@@ -7,6 +7,34 @@ import Foundation
 //
 // Test-only: no product target depends on this target, so none of it is linked into `apple`.
 
+/// The process environment as it was on FIRST TOUCH, before any `TestEnvironment` window has been
+/// opened — the operator's shell, as the test process inherited it.
+///
+/// WHY A SNAPSHOT AND NOT `getenv`. Once the suite pins its variables (`withoutWriteModeOverrides`
+/// and friends), a live read inside a window observes the PIN, not the operator. That is exactly
+/// what the pins are for, and it is also why the pins destroyed the old "is the ambient
+/// environment clean?" assertion: any reader a window can reach is a reader a window can MASK. A
+/// value captured before the first window exists cannot be masked by any window, so it is the one
+/// place an operator's `APPLE_DRY_RUN=1` export stays visible for the whole run.
+///
+/// `TestEnvironment.with` forces this capture on its very first call (`_ = atStartup`, before it
+/// takes the lock), so the snapshot is never taken lazily from inside somebody's open window —
+/// which would freeze that window's pinned values and report them as the operator's.
+///
+/// It is deliberately NEVER rewritten. `TestEnvironment` mutates the real environment table and
+/// restores it; it does not touch this. Read it only to ASSERT about the ambient process, never to
+/// decide behavior — production code must keep reading the live environment.
+///
+/// THE INVARIANT THIS SNAPSHOT'S FIDELITY IS EXACTLY EQUAL TO: no test may `setenv` or `unsetenv`
+/// any of `TestEnvironment.writeModeVariables` outside a `TestEnvironment` window. A window saves
+/// and restores, so it can never make the snapshot disagree with the shell the process started in;
+/// a raw `setenv` that outlives its test permanently changes the live table while this snapshot
+/// keeps reporting the operator's original value, and the canary that reads it silently stops
+/// describing the running process. Route every such mutation through `TestEnvironment.with`.
+public enum AmbientEnvironment {
+    public static let atStartup: [String: String] = ProcessInfo.processInfo.environment
+}
+
 /// Process-wide serialization for tests that must mutate REAL environment variables.
 ///
 /// WHY THIS EXISTS. `setenv`/`unsetenv` mutate one process-global table, and several MailKit
@@ -62,6 +90,22 @@ public enum TestEnvironment {
         try with(Dictionary(uniqueKeysWithValues: sandboxVariables.map { ($0, String?.none) }), body)
     }
 
+    /// The variables that move a command's WRITE POSTURE: the sandbox set above plus
+    /// `APPLE_DRY_RUN`. `APPLE_DRY_RUN` is deliberately not one of `sandboxVariables` — it moves
+    /// `willExecute`, not `sandboxActive` — but a test asserting on a resolved write gate depends
+    /// on all four, so the pair is named once here rather than re-spelled per suite (the four
+    /// Calendar/Reminders helpers each had their own copy, and a fifth variable would have had to
+    /// be added in four places).
+    public static let writeModeVariables = sandboxVariables + ["APPLE_DRY_RUN"]
+
+    /// Run `body` with every write-posture variable pinned ABSENT, so the gate under test resolves
+    /// from the FLAGS the command parsed and nothing else — not an operator's exported
+    /// `APPLE_TEST_MODE=1`/`APPLE_DRY_RUN=1`, and not a concurrent suite's open window.
+    @discardableResult
+    public static func withoutWriteModeOverrides<T>(_ body: () throws -> T) rethrows -> T {
+        try with(Dictionary(uniqueKeysWithValues: writeModeVariables.map { ($0, String?.none) }), body)
+    }
+
     /// The two rate-limiter state-file redirects. A test that asserts on the AMBIENT
     /// `stateURL()` must pin these absent for the duration, or a concurrent compose test's
     /// scratch redirect (opened under the same lock) becomes its accidental input.
@@ -80,6 +124,13 @@ public enum TestEnvironment {
     /// (including absence) afterwards. Serialized process-wide against every other caller.
     @discardableResult
     public static func with<T>(_ values: [String: String?], _ body: () throws -> T) rethrows -> T {
+        // Force the ambient snapshot BEFORE the first window can open. `AmbientEnvironment` is a
+        // lazily-initialized global, so without this touch its capture would happen at whatever
+        // moment the first canary test READ it — which could be inside some other suite's open
+        // window, freezing that window's pinned values as if they were the operator's. Touching it
+        // here, outside the lock and before any mutation, makes the snapshot unmaskable by
+        // construction rather than by test-ordering luck.
+        _ = AmbientEnvironment.atStartup
         lock.lock()
         // `updateValue`, not `previous[key] = …`: on a `[String: String?]` the subscript treats a
         // nil value as REMOVE, so a variable that was unset would silently drop out of the restore

@@ -9,12 +9,18 @@ import TestSupport
 // gate on an irreversible operation. That trait only orders tests WITHIN this suite; the
 // cross-suite half of the invariant is `TestEnvironment`'s process-wide lock.
 //
-// EVERY test here also runs inside `TestEnvironment.withoutSandboxOverrides`, because the lock
+// EVERY test here also runs inside `TestEnvironment.withoutWriteModeOverrides`, because the lock
 // orders MUTATORS and these tests are READERS: the mutation commands consult
 // `TestMode.sandboxActive` / `sandboxPrefix` from the process environment, so a test outside a
 // window asserts against whatever another suite's window — or the operator's shell — holds.
-// Uniform, not case-by-case, so the invariant is greppable: one `withoutSandboxOverrides` per
+// Uniform, not case-by-case, so the invariant is greppable: one `withoutWriteModeOverrides` per
 // `@Test`.
+//
+// The pin covers `APPLE_DRY_RUN` as well as the sandbox trio, because every write command here
+// first runs `TestMode.validateWriteEnvironment()`, which REFUSES a non-truthy `APPLE_DRY_RUN`
+// with exit 64 — so an operator's `APPLE_DRY_RUN=junk` export failed these tests on a validation
+// error before they reached the branch under test, and a truthy `APPLE_DRY_RUN=1` would have
+// silently turned every `--execute` assertion into a preview.
 @Suite("Mail manage commands with injected dependencies", .serialized)
 struct MailManageCommandInjectionTests {
     private let scratch = ScratchDirs("mail-manage-cmd")
@@ -69,7 +75,7 @@ struct MailManageCommandInjectionTests {
     }
 
     @Test func previewSandboxValidationAllowsLabeledSyntheticTargets() throws {
-        try TestEnvironment.withoutSandboxOverrides {
+        try TestEnvironment.withoutWriteModeOverrides {
             #expect(throws: Never.self) {
                 try previewValidateSandboxTargets([message(subject: "apple-cli-test synthetic")], sandboxActive: true)
             }
@@ -77,7 +83,7 @@ struct MailManageCommandInjectionTests {
     }
 
     @Test func previewSandboxValidationRefusesUnlabeledSyntheticTargets() throws {
-        try TestEnvironment.withoutSandboxOverrides {
+        try TestEnvironment.withoutWriteModeOverrides {
             let err = #expect(throws: AppleError.self) {
                 try previewValidateSandboxTargets([message(subject: "ordinary synthetic")], sandboxActive: true)
             }
@@ -87,7 +93,7 @@ struct MailManageCommandInjectionTests {
     }
 
     @Test func requireMailboxKnownRejectsUnknownMailboxInSyntheticContext() throws {
-        try TestEnvironment.withoutSandboxOverrides {
+        try TestEnvironment.withoutWriteModeOverrides {
             let ctx = try context()
             let err = #expect(throws: AppleError.self) {
                 try requireMailboxKnown(ctx: ctx, name: "Missing", accountUUID: nil)
@@ -98,7 +104,7 @@ struct MailManageCommandInjectionTests {
     }
 
     @Test func resolveMessageRowRejectsEmptyAndDecodesMessageLinks() throws {
-        try TestEnvironment.withoutSandboxOverrides {
+        try TestEnvironment.withoutWriteModeOverrides {
             let ctx = try context()
 
             let err = #expect(throws: AppleError.self) {
@@ -112,7 +118,7 @@ struct MailManageCommandInjectionTests {
     }
 
     @Test func emitMessagesTextPrintsRowsAndPaginationHints() throws {
-        try TestEnvironment.withoutSandboxOverrides {
+        try TestEnvironment.withoutWriteModeOverrides {
             let message = MailMessage(
                 id: "10",
                 message_id: "10",
@@ -160,7 +166,7 @@ struct MailManageCommandInjectionTests {
     }
 
     @Test func moveMarkFlagAndDeletePreviewsUseInjectedContext() throws {
-        try TestEnvironment.withoutSandboxOverrides {
+        try TestEnvironment.withoutWriteModeOverrides {
             let commands: [(String, () throws -> Void)] = [
                 ("move", {
                     let command = try MoveCommand.parse([
@@ -227,7 +233,7 @@ struct MailManageCommandInjectionTests {
     }
 
     @Test func moveMarkFlagAndDeleteExecuteUseInjectedScriptWithoutLiveMail() throws {
-        try TestEnvironment.withoutSandboxOverrides {
+        try TestEnvironment.withoutWriteModeOverrides {
             let commands: [(String, () throws -> Void)] = [
                 ("move", {
                     let fake = MailScriptInjectionTests.FakeMailRunner()
@@ -298,7 +304,7 @@ struct MailManageCommandInjectionTests {
     }
 
     @Test func permanentDeletePreviewDisclosesOperatorAndCanonicalLabelGates() throws {
-        try TestEnvironment.withoutSandboxOverrides {
+        try TestEnvironment.withoutWriteModeOverrides {
             let fake = MailScriptInjectionTests.FakeMailRunner()
             fake.untimedResults = [
                 "Deleted Messages\(MailScript.US)1\(MailScript.RS)",
@@ -327,7 +333,7 @@ struct MailManageCommandInjectionTests {
     }
 
     @Test func attachmentsSaveDryRunUsesInjectedContextAndLiveAttachmentList() throws {
-        try TestEnvironment.withoutSandboxOverrides {
+        try TestEnvironment.withoutWriteModeOverrides {
             let dir = try scratch.directory()
             let fake = MailScriptInjectionTests.FakeMailRunner()
             fake.timedResults = [
@@ -358,7 +364,7 @@ struct MailManageCommandInjectionTests {
     }
 
     @Test func attachmentsSaveExecuteUsesInjectedScriptAndReportsSavedPaths() throws {
-        try TestEnvironment.withoutSandboxOverrides {
+        try TestEnvironment.withoutWriteModeOverrides {
             let dir = try scratch.directory()
             let fake = MailScriptInjectionTests.FakeMailRunner()
             fake.timedResults = [
@@ -391,7 +397,7 @@ struct MailManageCommandInjectionTests {
     }
 
     @Test func trashEmptyPreviewUsesInjectedScriptWithoutDestructiveGate() throws {
-        try TestEnvironment.withoutSandboxOverrides {
+        try TestEnvironment.withoutWriteModeOverrides {
             let fake = MailScriptInjectionTests.FakeMailRunner()
             fake.untimedResults = [
                 ["Deleted Messages", "3"].joined(separator: MailScript.US) + MailScript.RS,
@@ -416,7 +422,7 @@ struct MailManageCommandInjectionTests {
     }
 
     @Test func trashEmptyExecuteUsesInjectedScriptAndReportsStalledErase() throws {
-        try TestEnvironment.withoutSandboxOverrides {
+        try TestEnvironment.withoutWriteModeOverrides {
             let fake = MailScriptInjectionTests.FakeMailRunner()
             fake.untimedResults = [
                 "INBOX\(MailScript.US)1\(MailScript.RS)Deleted Messages\(MailScript.US)3\(MailScript.RS)",
@@ -448,7 +454,7 @@ struct MailManageCommandInjectionTests {
     }
 
     @Test func mailboxesCreatePreviewUsesInjectedContext() throws {
-        try TestEnvironment.withoutSandboxOverrides {
+        try TestEnvironment.withoutWriteModeOverrides {
             let command = try MailboxesCreate.parse([
                 "--account", "Example Account",
                 "--parent", "apple-cli-test Parent",

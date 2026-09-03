@@ -74,19 +74,20 @@ struct ContactsWriteSafetyTests {
 struct ContactsWriteModelV2Tests {
     func opts(_ args: [String]) throws -> GlobalOptions { try GlobalOptions.parse(args) }
 
-    /// Pin every variable this suite's gates read: the sandbox trio plus `APPLE_DRY_RUN`.
-    /// `withoutSandboxOverrides` covers the first three; the nested window adds the fourth.
+    /// Pin every variable this suite's gates read: the sandbox trio plus `APPLE_DRY_RUN`, which is
+    /// exactly `TestEnvironment.writeModeVariables`. Named once in `TestSupport` rather than
+    /// re-spelled here as a `withoutSandboxOverrides` + nested `APPLE_DRY_RUN` window: the two
+    /// shapes pin the same four variables, and the hand-rolled one had to be edited in step with
+    /// every other domain's copy whenever the set moved.
     func withPinnedWriteEnv<T>(_ body: () throws -> T) rethrows -> T {
-        try TestEnvironment.withoutSandboxOverrides {
-            try TestEnvironment.with([TestMode.dryRunVar: String?.none], body)
-        }
+        try TestEnvironment.withoutWriteModeOverrides(body)
     }
 
     @Test("the pin actually clears the variables every gate below depends on")
     func pinnedEnvironmentIsClean() {
         withPinnedWriteEnv {
             let env = ProcessInfo.processInfo.environment
-            for key in ["APPLE_TEST_MODE", "APPLE_DRY_RUN", "APPLE_TEST_SANDBOX", "APPLE_TEST_RECIPIENTS"] {
+            for key in TestEnvironment.writeModeVariables {
                 #expect(env[key] == nil, "\(key) must be pinned absent inside the window")
             }
             // Inside the pin the label prefix is deterministically the built-in constant.

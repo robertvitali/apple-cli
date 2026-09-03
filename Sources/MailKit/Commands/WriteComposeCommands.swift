@@ -554,7 +554,7 @@ struct SendCommand: ParsableCommand {
                 let rl = SendRateLimiter.consume()
                 guard rl.allowed else { throw AppleError.validation(SendRateLimiter.refusal(rl)) }
                 if rl.degraded {
-                    FileHandle.standardError.write(Data(
+                    Output.writeError(Data(
                         ("warning: send rate-limit state is unwritable — the oracle's 3-sends/60s cap "
                          + "is NOT being enforced for this call (failing open).\n").utf8))
                 }
@@ -810,7 +810,7 @@ struct ReplyCommand: ParsableCommand {
                 let rl = ReplyRateLimiter.consume()
                 guard rl.allowed else { throw AppleError.validation(ReplyRateLimiter.refusal(rl)) }
                 if rl.degraded {
-                    FileHandle.standardError.write(Data(
+                    Output.writeError(Data(
                         ("warning: reply rate-limit state is unwritable — the oracle's 20-replies/60s "
                          + "(expensive_ops) cap is NOT being enforced for this call (failing open).\n").utf8))
                 }
@@ -1012,7 +1012,7 @@ struct ForwardCommand: ParsableCommand {
                 let rl = SendRateLimiter.consume()
                 guard rl.allowed else { throw AppleError.validation(SendRateLimiter.refusal(rl)) }
                 if rl.degraded {
-                    FileHandle.standardError.write(Data(
+                    Output.writeError(Data(
                         ("warning: send rate-limit state is unwritable — the oracle's 3-sends/60s cap "
                          + "is NOT being enforced for this call (failing open).\n").utf8))
                 }
@@ -1552,7 +1552,7 @@ struct DraftCommand: ParsableCommand {
                     let rl = SendRateLimiter.consume()
                     guard rl.allowed else { throw AppleError.validation(SendRateLimiter.refusal(rl)) }
                     if rl.degraded {
-                        FileHandle.standardError.write(Data(
+                        Output.writeError(Data(
                             ("warning: send rate-limit state is unwritable — the oracle's 3-sends/60s cap "
                              + "is NOT being enforced for this call (failing open).\n").utf8))
                     }

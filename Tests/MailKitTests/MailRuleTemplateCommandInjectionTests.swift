@@ -5,14 +5,22 @@ import ArgumentParser
 import AppleKit
 import TestSupport
 
-// EVERY test in this suite runs inside `TestEnvironment.withoutSandboxOverrides`. These commands
+// EVERY test in this suite runs inside `TestEnvironment.withoutWriteModeOverrides`. These commands
 // consult the sandbox through the process environment (`TestMode.sandboxActive` /
 // `TestMode.sandboxPrefix` / `TestMode.allowedRecipients`), so a test standing outside a window
 // asserts against whatever another suite's open window — or the operator's shell — happens to
 // hold. That is not hypothetical: this suite failed 17 of 20 full runs against
 // `MailWriteSafetyTests`'s `APPLE_TEST_SANDBOX=qa-fixture` window. Uniform, not case-by-case, so
-// the invariant is greppable: one `withoutSandboxOverrides` per `@Test`.
-@Suite("Mail rule/template commands with injected dependencies")
+// the invariant is greppable: one `withoutWriteModeOverrides` per `@Test`.
+//
+// The pin covers `APPLE_DRY_RUN` as well as the sandbox trio, because every write command here
+// first runs `TestMode.validateWriteEnvironment()`, which REFUSES a non-truthy `APPLE_DRY_RUN`
+// with exit 64 — so an operator's `APPLE_DRY_RUN=junk` export failed these tests on a validation
+// error before they reached the branch under test, and a truthy `APPLE_DRY_RUN=1` would have
+// silently turned every `--execute` assertion into a preview.
+// `.serialized` pairs with those windows: `TestEnvironment`'s process-wide lock makes each window
+// atomic against OTHER suites, and `.serialized` keeps this suite from queueing on itself.
+@Suite("Mail rule/template commands with injected dependencies", .serialized)
 struct MailRuleTemplateCommandInjectionTests {
     private let scratch = ScratchDirs("mail-rule-template-cmd")
     private func streams() -> (CLIStreams, MemoryOutputSink) {
@@ -59,7 +67,7 @@ struct MailRuleTemplateCommandInjectionTests {
     }
 
     @Test func rulesListUsesInjectedScript() throws {
-        try TestEnvironment.withoutSandboxOverrides {
+        try TestEnvironment.withoutWriteModeOverrides {
             let command = try RulesList.parse([])
             let (streams, stdout) = streams()
 
@@ -75,7 +83,7 @@ struct MailRuleTemplateCommandInjectionTests {
     }
 
     @Test func rulesCreateDryRunDoesNotReadLiveRules() throws {
-        try TestEnvironment.withoutSandboxOverrides {
+        try TestEnvironment.withoutWriteModeOverrides {
             let command = try RulesCreate.parse([
                 "--name", "apple-cli-test-rule",
                 "--condition", "subject:contains:apple-cli-test",
@@ -97,7 +105,7 @@ struct MailRuleTemplateCommandInjectionTests {
     }
 
     @Test func rulesCreateExecuteUsesInjectedScriptAndVerifiesDisabledRule() throws {
-        try TestEnvironment.withoutSandboxOverrides {
+        try TestEnvironment.withoutWriteModeOverrides {
             let fake = MailScriptInjectionTests.FakeMailRunner()
             fake.untimedResults = [
                 "",
@@ -131,7 +139,7 @@ struct MailRuleTemplateCommandInjectionTests {
     }
 
     @Test func rulesCreateDryRunReportsSandboxBlockers() throws {
-        try TestEnvironment.withoutSandboxOverrides {
+        try TestEnvironment.withoutWriteModeOverrides {
             let command = try RulesCreate.parse([
                 "--name", "real-rule",
                 "--condition", "from:contains:sender@example.com",
@@ -156,7 +164,7 @@ struct MailRuleTemplateCommandInjectionTests {
     }
 
     @Test func templateCommandsUseInjectedStore() throws {
-        try TestEnvironment.withoutSandboxOverrides {
+        try TestEnvironment.withoutWriteModeOverrides {
             let store = try templateStore()
             let save = try TemplatesSave.parse([
                 "reply",
@@ -187,7 +195,7 @@ struct MailRuleTemplateCommandInjectionTests {
     }
 
     @Test func rulesUpdateExecuteMetadataPathUsesInjectedScript() throws {
-        try TestEnvironment.withoutSandboxOverrides {
+        try TestEnvironment.withoutWriteModeOverrides {
             let fake = MailScriptInjectionTests.FakeMailRunner()
             fake.untimedResults = [
                 ruleList(),
@@ -217,7 +225,7 @@ struct MailRuleTemplateCommandInjectionTests {
     }
 
     @Test func rulesUpdateExecuteConditionRecreateUsesInjectedScript() throws {
-        try TestEnvironment.withoutSandboxOverrides {
+        try TestEnvironment.withoutWriteModeOverrides {
             let fake = MailScriptInjectionTests.FakeMailRunner()
             fake.untimedResults = [
                 ruleList(),
@@ -254,7 +262,7 @@ struct MailRuleTemplateCommandInjectionTests {
     }
 
     @Test func rulesUpdateDryRunReportsRecreateBlockersAndWarningsWithoutLiveMail() throws {
-        try TestEnvironment.withoutSandboxOverrides {
+        try TestEnvironment.withoutWriteModeOverrides {
             let command = try RulesUpdate.parse([
                 "1",
                 "--name", "real-rule",
@@ -287,7 +295,7 @@ struct MailRuleTemplateCommandInjectionTests {
     }
 
     @Test func rulesUpdateDryRunTextReportsInPlaceWithoutLiveMail() throws {
-        try TestEnvironment.withoutSandboxOverrides {
+        try TestEnvironment.withoutWriteModeOverrides {
             let command = try RulesUpdate.parse([
                 "1",
                 "--name", "apple-cli-test-renamed",
@@ -308,7 +316,7 @@ struct MailRuleTemplateCommandInjectionTests {
     }
 
     @Test func rulesDeleteExecuteUsesInjectedScript() throws {
-        try TestEnvironment.withoutSandboxOverrides {
+        try TestEnvironment.withoutWriteModeOverrides {
             let fake = MailScriptInjectionTests.FakeMailRunner()
             fake.untimedResults = [
                 ruleList(),
@@ -329,7 +337,7 @@ struct MailRuleTemplateCommandInjectionTests {
     }
 
     @Test func templatesDeleteExecuteUsesInjectedStore() throws {
-        try TestEnvironment.withoutSandboxOverrides {
+        try TestEnvironment.withoutWriteModeOverrides {
             let store = try templateStore()
             _ = try store.save(name: "cleanup", body: "Body", subject: nil)
             let command = try TemplatesDelete.parse(["cleanup", "--execute"])
@@ -348,7 +356,7 @@ struct MailRuleTemplateCommandInjectionTests {
     }
 
     @Test func rulesEnableDisableExecuteUseInjectedScript() throws {
-        try TestEnvironment.withoutSandboxOverrides {
+        try TestEnvironment.withoutWriteModeOverrides {
             let enableRunner = MailScriptInjectionTests.FakeMailRunner()
             enableRunner.untimedResults = [
                 ruleList(),

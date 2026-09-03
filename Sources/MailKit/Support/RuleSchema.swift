@@ -35,7 +35,7 @@ public enum RuleSchema {
         // Split ONLY field + operator off the front; keep the rest (value) intact.
         let parts = raw.split(separator: ":", maxSplits: 2, omittingEmptySubsequences: false).map(String.init)
         guard parts.count == 3 else {
-            throw AppleError.validation("condition must be 'field:operator:value' (e.g. 'from:contains:boss@x.io'); got '\(raw)'.")
+            throw AppleError.validation("condition must be 'field:operator:value' (e.g. 'from:contains:boss@example.com'); got '\(raw)'.")
         }
         let field = parts[0], op = parts[1]
         guard conditionFields.contains(field) else {

@@ -15,9 +15,14 @@ import TestSupport
 @Suite("Mail compose commands with injected dependencies", .serialized)
 struct MailComposeCommandInjectionTests {
     private let scratch = ScratchDirs("mail-compose-cmd")
-    private func streams() -> (CLIStreams, MemoryOutputSink) {
+    /// Scoped streams plus BOTH sinks. Returning the stderr sink is what makes a warning these
+    /// commands write assertable at all — including the degraded-rate-limit warnings below, whose
+    /// entire contract is "on stderr, not stdout". Most tests ignore it (`_`); those tests are the
+    /// reason it is returned.
+    private func streams() -> (CLIStreams, MemoryOutputSink, MemoryOutputSink) {
         let stdout = MemoryOutputSink()
-        return (CLIStreams(stdout: stdout, stderr: MemoryOutputSink()), stdout)
+        let stderr = MemoryOutputSink()
+        return (CLIStreams(stdout: stdout, stderr: stderr), stdout, stderr)
     }
 
     private func payload(from stdout: MemoryOutputSink) throws -> [String: Any] {
@@ -83,7 +88,13 @@ struct MailComposeCommandInjectionTests {
     /// mkdir-p's the parent, so nothing needs creating here.
     private func pinnedEnvironment<T>(_ body: () throws -> T) throws -> T {
         let dir = try scratch.directory().appendingPathComponent(".apple-cli", isDirectory: true)
-        return try TestEnvironment.withoutSandboxOverrides {
+        // `withoutWriteModeOverrides`, not `withoutSandboxOverrides`: it adds `APPLE_DRY_RUN` to
+        // the same pin. Every command here runs `TestMode.validateWriteEnvironment()` first, which
+        // REFUSES a non-truthy `APPLE_DRY_RUN` (exit 64) — so with an operator's
+        // `APPLE_DRY_RUN=junk` exported, all 20 tests failed on a validation error before reaching
+        // the branch under test, and a truthy `APPLE_DRY_RUN=1` would have silently turned every
+        // `--execute` assertion into a preview.
+        return try TestEnvironment.withoutWriteModeOverrides {
             try TestEnvironment.with([
                 "APPLE_SEND_RATELIMIT_STATE": dir.appendingPathComponent("send-rate-limit.json").path,
                 "APPLE_REPLY_RATELIMIT_STATE": dir.appendingPathComponent("reply-rate-limit.json").path,
@@ -111,7 +122,7 @@ struct MailComposeCommandInjectionTests {
                 "--out", out,
                 "--dry-run",
             ])
-            let (streams, stdout) = streams()
+            let (streams, stdout, _) = streams()
             // Fail-closed on BOTH halves of the Mail.app boundary: the runner THROWS if AppleScript is
             // touched, and the opener THROWS if LaunchServices would raise a compose window. A fake
             // runner alone would not have caught the latter — `openEml` does not route through it.
@@ -150,7 +161,7 @@ struct MailComposeCommandInjectionTests {
                 "--out", out,
                 "--execute",
             ])
-            let (streams, stdout) = streams()
+            let (streams, stdout, _) = streams()
             let noScript = MailScriptInjectionTests.ThrowingMailRunner()
             let opener = MailScriptInjectionTests.FakeMailOpener()
 
@@ -178,7 +189,7 @@ struct MailComposeCommandInjectionTests {
                 "--body", "Synthetic body",
                 "--execute",
             ])
-            let (streams, stdout) = streams()
+            let (streams, stdout, _) = streams()
 
             try Output.withStreams(streams) {
                 try command.run(scriptFactory: { MailScript(runner: fake) },
@@ -205,7 +216,7 @@ struct MailComposeCommandInjectionTests {
                 "--attach", file.path,
                 "--execute",
             ])
-            let (streams, stdout) = streams()
+            let (streams, stdout, _) = streams()
 
             try Output.withStreams(streams) {
                 try command.run(scriptFactory: { MailScript(runner: fake) },
@@ -232,7 +243,7 @@ struct MailComposeCommandInjectionTests {
                 "--execute",
                 "--test-mode",
             ])
-            let (streams, stdout) = streams()
+            let (streams, stdout, _) = streams()
 
             try withTestRecipients("recipient@example.com") {
                 try Output.withStreams(streams) {
@@ -262,7 +273,7 @@ struct MailComposeCommandInjectionTests {
                 "--execute",
                 "--test-mode",
             ])
-            let (streams, stdout) = streams()
+            let (streams, stdout, _) = streams()
 
             try Output.withStreams(streams) {
                 try command.run(scriptFactory: { MailScript(runner: fake) },
@@ -287,7 +298,7 @@ struct MailComposeCommandInjectionTests {
                 "--execute",
                 "--test-mode",
             ])
-            let (streams, stdout) = streams()
+            let (streams, stdout, _) = streams()
             let noScript = MailScriptInjectionTests.ThrowingMailRunner()
             let noOpen = MailScriptInjectionTests.ThrowingMailOpener()
 
@@ -315,7 +326,7 @@ struct MailComposeCommandInjectionTests {
                 "--all",
                 "--dry-run",
             ])
-            let (streams, stdout) = streams()
+            let (streams, stdout, _) = streams()
             let noScript = MailScriptInjectionTests.ThrowingMailRunner()
 
             try Output.withStreams(streams) {
@@ -347,7 +358,7 @@ struct MailComposeCommandInjectionTests {
                 "--body", "Synthetic reply",
                 "--execute",
             ])
-            let (streams, stdout) = streams()
+            let (streams, stdout, _) = streams()
 
             try Output.withStreams(streams) {
                 try command.run(contextFactory: { try context() },
@@ -372,7 +383,7 @@ struct MailComposeCommandInjectionTests {
                 "--cc", "copy@example.com",
                 "--dry-run",
             ])
-            let (streams, stdout) = streams()
+            let (streams, stdout, _) = streams()
             let noScript = MailScriptInjectionTests.ThrowingMailRunner()
 
             try Output.withStreams(streams) {
@@ -404,7 +415,7 @@ struct MailComposeCommandInjectionTests {
                 "--body", "Synthetic prepend",
                 "--execute",
             ])
-            let (streams, stdout) = streams()
+            let (streams, stdout, _) = streams()
 
             try Output.withStreams(streams) {
                 try command.run(contextFactory: { try context() },
@@ -429,7 +440,7 @@ struct MailComposeCommandInjectionTests {
                 "--no-open",
                 "--dry-run",
             ])
-            let (streams, stdout) = streams()
+            let (streams, stdout, _) = streams()
             let noScript = MailScriptInjectionTests.ThrowingMailRunner()
             let noOpen = MailScriptInjectionTests.ThrowingMailOpener()
 
@@ -466,7 +477,7 @@ struct MailComposeCommandInjectionTests {
                 "--no-open",
                 "--execute",
             ])
-            let (streams, stdout) = streams()
+            let (streams, stdout, _) = streams()
             let noOpen = MailScriptInjectionTests.ThrowingMailOpener()
 
             try Output.withStreams(streams) {
@@ -509,7 +520,7 @@ struct MailComposeCommandInjectionTests {
                 "--save-as-draft",
                 "--execute",
             ])
-            let (streams, stdout) = streams()
+            let (streams, stdout, _) = streams()
 
             try Output.withStreams(streams) {
                 try command.run(scriptFactory: { MailScript(runner: fake, opener: opener) },
@@ -537,7 +548,7 @@ struct MailComposeCommandInjectionTests {
                 "--no-clobber",
                 "--execute",
             ])
-            let (streams, stdout) = streams()
+            let (streams, stdout, _) = streams()
             let noScript = MailScriptInjectionTests.ThrowingMailRunner()
             let noOpen = MailScriptInjectionTests.ThrowingMailOpener()
 
@@ -577,7 +588,7 @@ struct MailComposeCommandInjectionTests {
             let script = MailScript(runner: fake)
 
             let list = try DraftCommand.parse(["list"])
-            let (listStreams, listStdout) = streams()
+            let (listStreams, listStdout, _) = streams()
             try Output.withStreams(listStreams) {
                 try list.run(scriptFactory: { script }, directoryFactory: { directory() })
             }
@@ -592,7 +603,7 @@ struct MailComposeCommandInjectionTests {
                 "--execute",
                 "--test-mode",
             ])
-            let (createStreams, createStdout) = streams()
+            let (createStreams, createStdout, _) = streams()
             try Output.withStreams(createStreams) {
                 try create.run(scriptFactory: { script }, directoryFactory: { directory() })
             }
@@ -605,13 +616,248 @@ struct MailComposeCommandInjectionTests {
                 "--execute",
                 "--test-mode",
             ])
-            let (deleteStreams, deleteStdout) = streams()
+            let (deleteStreams, deleteStdout, _) = streams()
             try Output.withStreams(deleteStreams) {
                 try delete.run(scriptFactory: { script }, directoryFactory: { directory() })
             }
             let deleteData = try #require(try payload(from: deleteStdout)["data"] as? [String: Any])
             #expect(deleteData["executed"] as? Bool == true)
             #expect((deleteData["note"] as? String)?.contains("deleted 2 draft") == true)
+        }
+    }
+
+    // MARK: - Degraded rate limiter warns on stderr, and only on stderr
+    //
+    // `SendRateLimiter`/`ReplyRateLimiter` FAIL OPEN: when their state file cannot be read or
+    // written they permit the call and set `degraded`, and each of the four compose call sites
+    // (send, reply, forward, draft send) is then responsible for saying so. That warning is the
+    // ONLY signal the operator gets that a runaway-loop cap silently stopped applying, and it has
+    // two halves that are equally load-bearing: it must be EMITTED, and it must go to stderr —
+    // stdout is the versioned JSON contract, and a warning line prepended there turns every
+    // machine consumer's parse into a syntax error. Both halves are asserted below, per call site:
+    // deleting an `if rl.degraded` block or swapping its `Output.writeError` for `Output.write`
+    // fails these tests and nothing else.
+
+    /// A rate-limit state path whose parent can never be created: a regular FILE with further path
+    /// components appended, so the limiter's `mkdir -p` of the parent fails with `ENOTDIR`. That is
+    /// `RateLimitStore.load`'s `.unreadable` branch — allow, `degraded`. The write is never
+    /// attempted: `load` returns `.unreadable` the moment `createDirectory` throws, and `consume`
+    /// returns straight from that case.
+    ///
+    /// A path under `/dev/null` also produces this today, but it rests on how this OS treats a
+    /// path below a character device; "a component of the path is a regular file" is plain POSIX
+    /// and stays true if that ever changes.
+    private func unwritableStatePath(_ label: String) throws -> String {
+        try scratchFile("ratelimit-\(label)")
+            .appendingPathComponent("x", isDirectory: true)
+            .appendingPathComponent("state.json").path
+    }
+
+    /// Nest inside `pinnedEnvironment`, which already redirects both limiters to writable scratch
+    /// files: this re-points ONE of them at an unwritable path for the duration. The restore is the
+    /// outer window's value, not the operator's — so a degraded window can never leak into the
+    /// operator's real `~/.apple-cli` state.
+    private func degraded<T>(_ variable: String, _ label: String, _ body: () throws -> T) throws -> T {
+        try TestEnvironment.with([variable: try unwritableStatePath(label)], body)
+    }
+
+    private static let sendWarning =
+        "warning: send rate-limit state is unwritable — the oracle's 3-sends/60s cap "
+        + "is NOT being enforced for this call (failing open).\n"
+    private static let replyWarning =
+        "warning: reply rate-limit state is unwritable — the oracle's 20-replies/60s "
+        + "(expensive_ops) cap is NOT being enforced for this call (failing open).\n"
+
+    /// The LaunchServices half of the Mail.app boundary, fail-closed. `openEml` does not route
+    /// through the AppleScript runner, so a fake runner alone leaves the real
+    /// `LaunchServicesMailOpener()` default live and a stray `--mode open` regression would raise a
+    /// compose window on the operator's desktop mid-test. Every `MailScript` these degraded-warning
+    /// tests build takes one, and asserts it was never called.
+    private func noMailApp() -> MailScriptInjectionTests.ThrowingMailOpener {
+        MailScriptInjectionTests.ThrowingMailOpener()
+    }
+
+    /// Assert the two halves at once: `expected` is exactly what stderr carries, and stdout parses
+    /// as a single JSON envelope that contains no part of it. Parsing is the strict half — a
+    /// warning written to stdout would sit in front of the envelope and make this throw.
+    private func expectWarning(_ expected: String, stdout: MemoryOutputSink,
+                               stderr: MemoryOutputSink) throws -> [String: Any] {
+        #expect(String(decoding: stderr.data, as: UTF8.self) == expected)
+        let rendered = String(decoding: stdout.data, as: UTF8.self)
+        #expect(!rendered.contains("rate-limit state is unwritable"),
+                "the warning must not reach the JSON contract stream")
+        let payload = try payload(from: stdout)
+        #expect(payload["ok"] as? Bool == true, "the limiter fails OPEN — the call still succeeds")
+        return try #require(payload["data"] as? [String: Any])
+    }
+
+    @Test func sendExecuteWarnsOnStderrWhenTheSendRateLimitStateIsUnwritable() throws {
+        try pinnedEnvironment {
+            try degraded("APPLE_SEND_RATELIMIT_STATE", "send") {
+                let fake = MailScriptInjectionTests.FakeMailRunner()
+                fake.untimedResults = ["sent"]
+                let noOpen = noMailApp()
+                let command = try SendCommand.parse([
+                    "--to", "recipient@example.com",
+                    "--subject", "Synthetic subject",
+                    "--body", "Synthetic body",
+                    "--execute",
+                ])
+                let (streams, stdout, stderr) = streams()
+
+                try Output.withStreams(streams) {
+                    try command.run(scriptFactory: { MailScript(runner: fake, opener: noOpen) },
+                                    directoryFactory: { directory() })
+                }
+
+                let data = try expectWarning(Self.sendWarning, stdout: stdout, stderr: stderr)
+                #expect(data["executed"] as? Bool == true, "failing open means the send still happens")
+                #expect(noOpen.neverCalled)
+            }
+        }
+    }
+
+    /// `forward` consumes the SAME `sends` bucket as `send`, but through its own `consume` +
+    /// `if rl.degraded` block — so it needs its own test: deleting the block at one call site
+    /// leaves the other's test green.
+    @Test func forwardExecuteWarnsOnStderrWhenTheSendRateLimitStateIsUnwritable() throws {
+        try pinnedEnvironment {
+            try degraded("APPLE_SEND_RATELIMIT_STATE", "forward") {
+                let fake = MailScriptInjectionTests.FakeMailRunner()
+                fake.stdinResults = [
+                    "ok\(MailScript.US)new-forward\(MailScript.US)recipient@example.com\(MailScript.RS)",
+                ]
+                let noOpen = noMailApp()
+                let command = try ForwardCommand.parse([
+                    "10",
+                    "--to", "recipient@example.com",
+                    "--execute",
+                ])
+                let (streams, stdout, stderr) = streams()
+
+                try Output.withStreams(streams) {
+                    try command.run(contextFactory: { try context() },
+                                    scriptFactory: { MailScript(runner: fake, opener: noOpen) },
+                                    directoryFactory: { directory() })
+                }
+
+                let data = try expectWarning(Self.sendWarning, stdout: stdout, stderr: stderr)
+                #expect(data["executed"] as? Bool == true)
+                #expect(noOpen.neverCalled)
+            }
+        }
+    }
+
+    /// `reply` is on the SEPARATE `expensive_ops` window with its own state file and its own
+    /// wording (20/60s, not 3/60s). Pinning the send file unwritable must not warn here, and this
+    /// asserts the reply text verbatim, so the two warnings cannot be transposed.
+    @Test func replyExecuteWarnsOnStderrWhenTheReplyRateLimitStateIsUnwritable() throws {
+        try pinnedEnvironment {
+            try degraded("APPLE_REPLY_RATELIMIT_STATE", "reply") {
+                let fake = MailScriptInjectionTests.FakeMailRunner()
+                fake.stdinResults = [
+                    "ok\(MailScript.US)new-reply\(MailScript.US)alice@example.com\(MailScript.RS)",
+                ]
+                let noOpen = noMailApp()
+                let command = try ReplyCommand.parse([
+                    "10",
+                    "--body", "Synthetic reply",
+                    "--execute",
+                ])
+                let (streams, stdout, stderr) = streams()
+
+                try Output.withStreams(streams) {
+                    try command.run(contextFactory: { try context() },
+                                    scriptFactory: { MailScript(runner: fake, opener: noOpen) },
+                                    directoryFactory: { directory() })
+                }
+
+                let data = try expectWarning(Self.replyWarning, stdout: stdout, stderr: stderr)
+                #expect(data["executed"] as? Bool == true)
+                #expect(noOpen.neverCalled)
+            }
+        }
+    }
+
+    /// `draft send` delivers real mail from an existing Drafts item, so it consumes the `sends`
+    /// bucket like `send`/`forward` — the fourth and most easily forgotten call site.
+    @Test func draftSendWarnsOnStderrWhenTheSendRateLimitStateIsUnwritable() throws {
+        try pinnedEnvironment {
+            try degraded("APPLE_SEND_RATELIMIT_STATE", "draft-send") {
+                let fake = MailScriptInjectionTests.FakeMailRunner()
+                fake.untimedResults = ["sent"]
+                let noOpen = noMailApp()
+                let command = try DraftCommand.parse([
+                    "send",
+                    "--subject", "apple-cli-test draft",
+                    "--execute",
+                    "--test-mode",
+                ])
+                let (streams, stdout, stderr) = streams()
+
+                try withTestRecipients("recipient@example.com") {
+                    try Output.withStreams(streams) {
+                        try command.run(scriptFactory: { MailScript(runner: fake, opener: noOpen) },
+                                        directoryFactory: { directory() })
+                    }
+                }
+
+                let data = try expectWarning(Self.sendWarning, stdout: stdout, stderr: stderr)
+                #expect(data["executed"] as? Bool == true)
+                #expect(noOpen.neverCalled)
+            }
+        }
+    }
+
+    /// The SECOND way a call site sees `degraded`, and the one the fixtures above cannot reach.
+    /// `RateLimitStore.load` has two degrading arms: `.unreadable` (the state file cannot be read
+    /// at all — what every test above pins) and `.corrupt` (the file IS readable but does not
+    /// decode as a `[TimeInterval]`, so the window silently resets to empty). The corrupt arm is
+    /// the more dangerous of the two: a persistently-unparseable file resets the cap to zero on
+    /// EVERY call, so without the warning a runaway loop would face no cap at all and nothing on
+    /// any stream would say so.
+    ///
+    /// The remaining `degraded` sources are deliberately not fixtured here:
+    ///
+    /// * `!wrote` on the allowed path (the state file loads fine but the save fails) needs a
+    ///   readable state file inside an unwritable directory — a combination neither fixture above
+    ///   can produce, since an unwritable parent makes `load` return `.unreadable` first. Its
+    ///   observable outcome at the call site is byte-identical to both arms that ARE covered
+    ///   (allowed + degraded + this same warning), so the extra chmod fixture would exercise no
+    ///   new line of the command.
+    /// * `degraded` on the REFUSAL path is unreachable as a warning by construction: every call
+    ///   site is `guard rl.allowed else { throw … }` FOLLOWED by `if rl.degraded { warn }`, so a
+    ///   degraded refusal leaves as a validation error and never reaches the warning block.
+    @Test func sendExecuteWarnsOnStderrWhenTheSendRateLimitStateIsCorrupt() throws {
+        try pinnedEnvironment {
+            // Readable, decodable as UTF-8, and NOT a JSON array of numbers — the torn-write /
+            // hand-edited shape `load` classifies `.corrupt` rather than `.unreadable`.
+            let corrupt = try scratchFile("ratelimit-corrupt", contents: "{not a window}")
+            try TestEnvironment.with(["APPLE_SEND_RATELIMIT_STATE": corrupt.path]) {
+                let fake = MailScriptInjectionTests.FakeMailRunner()
+                fake.untimedResults = ["sent"]
+                let noOpen = noMailApp()
+                let command = try SendCommand.parse([
+                    "--to", "recipient@example.com",
+                    "--subject", "Synthetic subject",
+                    "--body", "Synthetic body",
+                    "--execute",
+                ])
+                let (streams, stdout, stderr) = streams()
+
+                try Output.withStreams(streams) {
+                    try command.run(scriptFactory: { MailScript(runner: fake, opener: noOpen) },
+                                    directoryFactory: { directory() })
+                }
+
+                let data = try expectWarning(Self.sendWarning, stdout: stdout, stderr: stderr)
+                #expect(data["executed"] as? Bool == true, "the limiter fails open on a corrupt file")
+                #expect(noOpen.neverCalled)
+                // The corrupt file is REPLACED by a valid one-stamp window, which is what makes the
+                // reset silent without the warning: the next call reads a clean, plausible state.
+                let rewritten = try Data(contentsOf: corrupt)
+                #expect((try? JSONDecoder().decode([TimeInterval].self, from: rewritten))?.count == 1)
+            }
         }
     }
 }

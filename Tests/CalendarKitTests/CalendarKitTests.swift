@@ -4,6 +4,7 @@ import ArgumentParser
 import EventKit
 import AppleKit
 import EventKitCore
+import TestSupport
 @testable import CalendarKit
 
 // Logic-tier tests for the Calendar command surface — flag/spec parsers, the read-window
@@ -179,38 +180,71 @@ struct ReadWindowTests {
 /// precedence chain, not that THIS domain opted into it. A silent revert to dry-run-by-default (or
 /// a re-tightening of the lifted label gate) fails here and only here.
 ///
-/// These read the real process environment and assume `APPLE_TEST_MODE` / `APPLE_DRY_RUN` are
-/// unset — asserted below so a polluted env fails legibly instead of mysteriously.
-@Suite("Calendar write-model v2 posture")
+/// Each pin below resolves the gate from the REAL process environment, where an operator's
+/// `APPLE_TEST_MODE` / `APPLE_DRY_RUN` export — or a concurrent suite's own window — would flip
+/// the verdict. Every one therefore runs inside `pinned`, which forces those variables absent for
+/// its duration, so each verdict is a property of the FLAGS alone.
+@Suite("Calendar write-model v2 posture", .serialized)
 struct CalendarWriteModelV2Tests {
     func opts(_ args: [String]) throws -> GlobalOptions { try GlobalOptions.parse(args) }
 
-    @Test("the test environment is clean (precondition for every pin below)")
-    func cleanEnvironment() {
-        let env = ProcessInfo.processInfo.environment
-        #expect(env["APPLE_TEST_MODE"] == nil || env["APPLE_TEST_MODE"]!.isEmpty)
-        #expect(env["APPLE_DRY_RUN"] == nil || env["APPLE_DRY_RUN"]!.isEmpty)
+    /// The window every pin below rests on: `TestEnvironment.writeModeVariables` — the three
+    /// sandbox-engaging variables plus `APPLE_DRY_RUN` — forced absent for its duration. Routing
+    /// through `TestEnvironment` rather than a local save/restore is what serializes the window
+    /// against every other suite mutating the same process-global table.
+    @discardableResult
+    func pinned<T>(_ body: () throws -> T) rethrows -> T {
+        try TestEnvironment.withoutWriteModeOverrides(body)
     }
+
+    /// Asserts the window itself: inside `pinned`, every write-posture variable reads back absent,
+    /// which is the property each gate pin below rests on. Read via `getenv` rather than
+    /// `ProcessInfo.processInfo.environment` — the same primitive `TestEnvironment` writes with, so
+    /// there is no question of observing a snapshot taken before the window opened.
+    @Test("the pinned window forces the posture-relevant variables absent")
+    func pinnedWindowIsClean() {
+        pinned {
+            for key in TestEnvironment.writeModeVariables {
+                #expect(getenv(key) == nil, "\(key) should be pinned absent inside the window")
+            }
+        }
+    }
+
+    // The operator-shell detector — "did the shell running the tests export a write-posture
+    // variable?" — asserts a property of the PROCESS, not of Calendar, so it lives once in
+    // `AppleKitTests/AmbientEnvironmentCanaryTests.swift`. The pins above are what make this suite
+    // independent of that answer.
 
     @Test("DEFAULT PIN: a flagless calendar write EXECUTES and is unsandboxed")
     func defaultsToExecute() throws {
-        let gate = try CalendarWriteGuard.resolve(opts([]))
-        #expect(gate.willExecute == true)
-        #expect(gate.sandboxActive == false)
+        try pinned {
+            let gate = try CalendarWriteGuard.resolve(opts([]))
+            #expect(gate.willExecute == true)
+            #expect(gate.sandboxActive == false)
+        }
     }
 
     @Test("--dry-run previews; --execute is redundant; --dry-run wins over --execute")
     func dryRunPrecedence() throws {
-        #expect(try CalendarWriteGuard.resolve(opts(["--dry-run"])).willExecute == false)
-        #expect(try CalendarWriteGuard.resolve(opts(["--execute"])).willExecute == true)
-        #expect(try CalendarWriteGuard.resolve(opts(["--dry-run", "--execute"])).willExecute == false)
+        // Resolved OUTSIDE the `#expect`s: the macro wraps its argument in a call the closure's
+        // throwing-ness cannot be inferred through, so `try` has to sit in a plain statement.
+        let (preview, execute, both) = try pinned {
+            (try CalendarWriteGuard.resolve(opts(["--dry-run"])),
+             try CalendarWriteGuard.resolve(opts(["--execute"])),
+             try CalendarWriteGuard.resolve(opts(["--dry-run", "--execute"])))
+        }
+        #expect(preview.willExecute == false)
+        #expect(execute.willExecute == true)
+        #expect(both.willExecute == false)
     }
 
     @Test("--test-mode alone engages the sandbox without forcing a preview")
     func flagEngagesSandbox() throws {
-        let gate = try CalendarWriteGuard.resolve(opts(["--test-mode"]))
-        #expect(gate.sandboxActive == true)
-        #expect(gate.willExecute == true)
+        try pinned {
+            let gate = try CalendarWriteGuard.resolve(opts(["--test-mode"]))
+            #expect(gate.sandboxActive == true)
+            #expect(gate.willExecute == true)
+        }
     }
 
     /// Pinned via the `prefix:` seam — `TestMode.sandboxPrefix` is env-backed and MailKitTests
@@ -488,21 +522,54 @@ final class FakeCalendarEventStore: CalendarEventStore {
     }
 }
 
-@Suite("Calendar command execution with injected store")
+// `.serialized` per `TestEnvironment`'s own instruction: every test here runs inside a
+// `TestEnvironment` window (`runPinned`), and the process-wide lock makes each window atomic
+// against other SUITES while `.serialized` keeps this suite from queueing on itself.
+@Suite("Calendar command execution with injected store", .serialized)
 struct CalendarCommandExecutionTests {
-    func streams() -> (CLIStreams, MemoryOutputSink) {
+    /// Scoped streams plus BOTH sinks. Returning the stderr sink is what lets a test assert on
+    /// anything a command writes there — a warning, or (as the execute paths below assert) the
+    /// absence of one. Most tests ignore it (`_`).
+    func streams() -> (CLIStreams, MemoryOutputSink, MemoryOutputSink) {
         let stdout = MemoryOutputSink()
-        return (CLIStreams(stdout: stdout, stderr: MemoryOutputSink()), stdout)
+        let stderr = MemoryOutputSink()
+        return (CLIStreams(stdout: stdout, stderr: stderr), stdout, stderr)
+    }
+
+    func envelope(from stdout: MemoryOutputSink) throws -> [String: Any] {
+        try #require(JSONSerialization.jsonObject(with: stdout.data) as? [String: Any])
     }
 
     func payload(from stdout: MemoryOutputSink) throws -> [String: Any] {
-        let root = try #require(JSONSerialization.jsonObject(with: stdout.data) as? [String: Any])
-        return try #require(root["data"] as? [String: Any])
+        try #require(try envelope(from: stdout)["data"] as? [String: Any])
     }
 
     func errorPayload(from stdout: MemoryOutputSink) throws -> [String: Any] {
-        let root = try #require(JSONSerialization.jsonObject(with: stdout.data) as? [String: Any])
-        return try #require(root["error"] as? [String: Any])
+        try #require(try envelope(from: stdout)["error"] as? [String: Any])
+    }
+
+    /// Run a command with the sandbox-engaging variables pinned ABSENT, so the write posture it
+    /// resolves is a property of the FLAGS it parsed and nothing else. Without this, an operator
+    /// with `APPLE_TEST_MODE=1` exported — or a concurrent suite's own `TestEnvironment` window —
+    /// silently engages the sandbox for a flagless command, changing both the emitted envelope and
+    /// which safety gates fire — and an exported `APPLE_DRY_RUN=1` would turn every execute
+    /// assertion below into a preview and pass the wrong branch. `TestEnvironment`'s process-wide
+    /// lock orders that window against every other mutator; a local save/restore would not.
+    ///
+    /// `body` MUST stay synchronous: the process-wide recursive lock is held for the whole command
+    /// run, so an `await` inside it would suspend the thread while every other suite's window is
+    /// still blocked on the lock this one holds.
+    ///
+    /// `RemindersCommandExecutionTests.runPinned` is the byte-for-byte twin of this, as are
+    /// `streams`/`envelope`/`payload`/`errorPayload`. They are NOT shared because the natural home
+    /// — the `TestSupport` target — does not depend on `AppleKit`, and giving it one is an edit to
+    /// `Package.swift`, the single shared-contention file this repo coordinates changes to. The
+    /// duplication is the cheaper side of that trade until a `Package.swift` change is warranted on
+    /// its own merits.
+    func runPinned(_ streams: CLIStreams, _ body: () throws -> Void) throws {
+        try TestEnvironment.withoutWriteModeOverrides {
+            try Output.withStreams(streams) { try body() }
+        }
     }
 
     /// Run a command that must FAIL, and pin BOTH halves of the contract `runGuarded` binds
@@ -510,18 +577,27 @@ struct CalendarCommandExecutionTests {
     /// ExitCode.self)` on its own passes for any failure whatsoever, so a branch that started
     /// throwing `.notFound` where it owes `.validation` (exit 65 vs 64 — a discriminator agents
     /// actually branch on) would stay green. Asserting the pair is the exit-code matrix.
-    func expectFailure(exit: Int32, type: String,
+    ///
+    /// `sandbox` opts into a third assertion on the error object's own `sandbox` marker — the key
+    /// that tells a consumer the refusal came from the write sandbox rather than from ordinary
+    /// input validation, which the shared `type`/`exitCode` pair (both plain validation/64) cannot
+    /// distinguish. Left nil, the marker is not asserted either way. Mirrors the Reminders twin.
+    func expectFailure(exit: Int32, type: String, sandbox: Bool? = nil,
                        sourceLocation: SourceLocation = SourceLocation(
                         fileID: #fileID, filePath: #filePath, line: #line, column: #column),
                        _ body: (CLIStreams) throws -> Void) throws {
-        let (cliStreams, stdout) = streams()
+        let (cliStreams, stdout, _) = streams()
         var thrown: Error?
-        do { try Output.withStreams(cliStreams) { try body(cliStreams) } } catch { thrown = error }
+        do { try runPinned(cliStreams) { try body(cliStreams) } } catch { thrown = error }
         #expect((thrown as? ExitCode)?.rawValue == exit,
                 "expected exit \(exit), got \(String(describing: thrown))",
                 sourceLocation: sourceLocation)
         #expect((try errorPayload(from: stdout))["type"] as? String == type,
                 sourceLocation: sourceLocation)
+        if let sandbox {
+            #expect((try errorPayload(from: stdout))["sandbox"] as? Bool == sandbox,
+                    sourceLocation: sourceLocation)
+        }
     }
 
     func event(id: String = "event-1", title: String = "apple-cli-test standup",
@@ -545,9 +621,9 @@ struct CalendarCommandExecutionTests {
     func calendarsList() throws {
         let fake = FakeCalendarEventStore()
         let command = try CalendarsList.parse([])
-        let (streams, stdout) = streams()
+        let (streams, stdout, _) = streams()
 
-        try Output.withStreams(streams) {
+        try runPinned(streams) {
             try command.run(storeFactory: { fake })
         }
 
@@ -563,9 +639,9 @@ struct CalendarCommandExecutionTests {
         let row = event(calendar: fake.collections[0], store: fake.ekStore)
         fake.eventsById["event-1"] = row
         let command = try EventsRead.parse(["--id", "event-1"])
-        let (streams, stdout) = streams()
+        let (streams, stdout, _) = streams()
 
-        try Output.withStreams(streams) {
+        try runPinned(streams) {
             try command.run(storeFactory: { fake })
         }
 
@@ -591,9 +667,9 @@ struct CalendarCommandExecutionTests {
             "--end", "2026-07-16T00:00:00Z",
             "--search", "plan",
         ])
-        let (searchStreams, stdout) = streams()
+        let (searchStreams, stdout, _) = streams()
 
-        try Output.withStreams(searchStreams) {
+        try runPinned(searchStreams) {
             try command.run(storeFactory: { fake })
         }
 
@@ -612,8 +688,8 @@ struct CalendarCommandExecutionTests {
                 "--end", "2026-07-16T00:00:00Z",
                 "--search", term,
             ])
-            let (fieldStreams, fieldOut) = streams()
-            try Output.withStreams(fieldStreams) {
+            let (fieldStreams, fieldOut, _) = streams()
+            try runPinned(fieldStreams) {
                 try byField.run(storeFactory: { fake })
             }
             #expect((try payload(from: fieldOut)["events"] as? [[String: Any]])?.count == expected,
@@ -634,8 +710,8 @@ struct CalendarCommandExecutionTests {
             "--end", "2026-07-16T00:00:00Z",
             "--calendar", "apple-cli-test calendar",
         ])
-        let (windowStreams, _) = streams()
-        try Output.withStreams(windowStreams) {
+        let (windowStreams, _, _) = streams()
+        try runPinned(windowStreams) {
             try command.run(storeFactory: { fake })
         }
 
@@ -648,8 +724,8 @@ struct CalendarCommandExecutionTests {
 
         // CAL-07: `--calendar ""` resolves to the DEFAULT calendar rather than 404ing.
         let empty = try EventsRead.parse(["--calendar", ""])
-        let (emptyStreams, _) = streams()
-        try Output.withStreams(emptyStreams) {
+        let (emptyStreams, _, _) = streams()
+        try runPinned(emptyStreams) {
             try empty.run(storeFactory: { fake })
         }
         #expect(fake.eventsQueries.count == 2)
@@ -683,8 +759,8 @@ struct CalendarCommandExecutionTests {
             "--start", "2026-07-15T00:00:00Z", "--end", "2026-07-16T00:00:00Z",
             "--availability", "not-supported",
         ])
-        let (matchStreams, matchOut) = streams()
-        try Output.withStreams(matchStreams) {
+        let (matchStreams, matchOut, _) = streams()
+        try runPinned(matchStreams) {
             try matching.run(storeFactory: { fake })
         }
         let matched = try #require(try payload(from: matchOut)["events"] as? [[String: Any]])
@@ -695,8 +771,8 @@ struct CalendarCommandExecutionTests {
             "--start", "2026-07-15T00:00:00Z", "--end", "2026-07-16T00:00:00Z",
             "--availability", "busy",
         ])
-        let (busyStreams, busyOut) = streams()
-        try Output.withStreams(busyStreams) {
+        let (busyStreams, busyOut, _) = streams()
+        try runPinned(busyStreams) {
             try nonMatching.run(storeFactory: { fake })
         }
         #expect((try payload(from: busyOut)["events"] as? [[String: Any]])?.isEmpty == true)
@@ -721,9 +797,9 @@ struct CalendarCommandExecutionTests {
             "--geo-radius", "150",
             "--geo-title", "Office",
         ])
-        let (streams, stdout) = streams()
+        let (streams, stdout, _) = streams()
 
-        try Output.withStreams(streams) {
+        try runPinned(streams) {
             try command.run(storeFactory: { fake })
         }
 
@@ -778,8 +854,8 @@ struct CalendarCommandExecutionTests {
             "--end", "2026-07-15T10:00:00Z",
             "--availability", "not-supported",
         ])
-        let (createStreams, _) = streams()
-        try Output.withStreams(createStreams) {
+        let (createStreams, _, _) = streams()
+        try runPinned(createStreams) {
             try create.run(storeFactory: { fake })
         }
         #expect(fake.saved.count == 1, "create currently ACCEPTS not-supported (documented, not endorsed)")
@@ -787,8 +863,8 @@ struct CalendarCommandExecutionTests {
         let row = event(calendar: fake.collections[0], store: fake.ekStore)
         fake.eventsById["event-1"] = row
         let update = try EventsUpdate.parse(["--id", "event-1", "--availability", "notsupported"])
-        let (updateStreams, _) = streams()
-        try Output.withStreams(updateStreams) {
+        let (updateStreams, _, _) = streams()
+        try runPinned(updateStreams) {
             try update.run(storeFactory: { fake })
         }
         #expect(fake.saved.count == 2, "update currently ACCEPTS notsupported (documented, not endorsed)")
@@ -801,9 +877,9 @@ struct CalendarCommandExecutionTests {
             "--end", "2026-07-15T10:00:00Z",
             "--availability", "away",
         ])
-        let (rejectedStreams, rejectedOut) = streams()
+        let (rejectedStreams, rejectedOut, _) = streams()
         #expect(throws: ExitCode(AppleExit.usage)) {
-            try Output.withStreams(rejectedStreams) {
+            try runPinned(rejectedStreams) {
                 try rejected.run(storeFactory: { fake })
             }
         }
@@ -824,9 +900,9 @@ struct CalendarCommandExecutionTests {
             "--clear-recurrence",
             "--span", "future-events",
         ])
-        let (streams, stdout) = streams()
+        let (streams, stdout, _) = streams()
 
-        try Output.withStreams(streams) {
+        try runPinned(streams) {
             try command.run(storeFactory: { fake })
         }
 
@@ -842,9 +918,9 @@ struct CalendarCommandExecutionTests {
         let row = event(calendar: fake.collections[0], store: fake.ekStore)
         fake.eventsById["event-1"] = row
         let command = try EventsDelete.parse(["--id", "event-1", "--span", "all"])
-        let (streams, stdout) = streams()
+        let (streams, stdout, stderr) = streams()
 
-        try Output.withStreams(streams) {
+        try runPinned(streams) {
             try command.run(storeFactory: { fake })
         }
 
@@ -856,6 +932,86 @@ struct CalendarCommandExecutionTests {
         // `all` and `future` resolve to the SAME EKSpan, so the emitted label is the only thing
         // that distinguishes them — and it is part of the JSON contract.
         #expect(deleteData["span"] as? String == "all")
+        // The JSON path owes stderr NOTHING. `--json` is the default and stdout is the versioned
+        // contract; a human-readable line leaking onto the other stream is how a caller that merges
+        // the two ends up with an unparseable blob. Asserting the scoped sink is empty is the only
+        // way to see that — a dropped sink would send it to the terminal and pass.
+        #expect(stderr.data.isEmpty, "the JSON execute path must write nothing to stderr")
+    }
+
+    /// THE post-fetch sandbox gates, driven end to end through the commands. `EventsDelete` and
+    /// `EventsUpdate` address an event by opaque id — a target no argv check can vet — and the ONLY
+    /// thing standing between a sandboxed run and a real calendar event is the post-fetch
+    /// `CalendarWriteGuard.requireLabeled(event.title ?? "", sandboxActive:)` call each makes in
+    /// `EventsCommand.swift`.
+    ///
+    /// MEASURED: deleting BOTH of those lines leaves the whole suite green without this test. The
+    /// `requireLabeled` helper is exercised in isolation by the posture suite, so it stays green
+    /// when the CALL disappears; and every other write fixture here is already
+    /// `apple-cli-test`-labeled, so the gate never had anything to refuse.
+    ///
+    /// `--title` is deliberately NOT passed to the update: `EventsUpdate` has a SECOND, pre-fetch
+    /// `requireLabeled` on the incoming title, and passing one would let that earlier gate produce
+    /// the refusal and leave the post-fetch call untested. Both halves of the contract are
+    /// asserted, because the gate runs post-fetch: the exact exit value + `error.type` + `sandbox`
+    /// marker of the refusal, AND that no removal or save was ever issued.
+    @Test("events delete/update refuse an UNLABELED target inside the sandbox and mutate nothing")
+    func eventWritesRefuseUnlabeledTargetInSandbox() throws {
+        try TestEnvironment.withoutWriteModeOverrides {
+            let fake = FakeCalendarEventStore()
+            // The fixture IS the test: an unlabeled title is exactly the real user's event the
+            // sandbox exists to protect. Pinning `APPLE_TEST_SANDBOX` absent keeps the required
+            // prefix canonical, so a concurrent suite's window cannot redefine what "labeled" is.
+            let unlabeled = event(title: "Quarterly review", calendar: fake.collections[0], store: fake.ekStore)
+            fake.eventsById["event-1"] = unlabeled
+
+            // `--test-mode` engages the sandbox via the FLAG half of `TestMode.sandboxActive`, so
+            // this holds regardless of the environment; `--execute` reaches the execute branch
+            // (a preview returns before the fetch and never touches the gate).
+            let delete = try EventsDelete.parse(["--test-mode", "--execute", "--id", "event-1"])
+            // Sandbox refusal (Q14): validation / exit 64 — NOT a 404, and not a permission error.
+            // `sandbox: true` is asserted too: type and exit alone are indistinguishable from an
+            // ordinary bad-argument refusal, so that key is the only thing in the envelope saying
+            // the sandbox is what stopped the write.
+            try expectFailure(exit: AppleExit.usage, type: AppleErrorType.validation, sandbox: true) { _ in
+                try delete.run(storeFactory: { fake })
+            }
+            #expect(fake.removed.isEmpty, "the sandbox refusal must precede any removal")
+
+            let update = try EventsUpdate.parse([
+                "--test-mode", "--execute", "--id", "event-1", "--note", "synthetic edit",
+            ])
+            try expectFailure(exit: AppleExit.usage, type: AppleErrorType.validation, sandbox: true) { _ in
+                try update.run(storeFactory: { fake })
+            }
+            #expect(fake.saved.isEmpty, "the sandbox refusal must precede any save")
+            // The in-memory row is untouched too: the gate has to fire before the field writes, or
+            // a caller's edit lands on a real event even though nothing was committed.
+            #expect(unlabeled.notes == "synthetic notes")
+
+            // Control: the SAME commands against a labeled target pass the gate, so the refusals
+            // above came from the label check and not from the fixture being unusable.
+            let labeled = event(calendar: fake.collections[0], store: fake.ekStore)
+            fake.eventsById["event-2"] = labeled
+            let allowedUpdate = try EventsUpdate.parse([
+                "--test-mode", "--execute", "--id", "event-2", "--note", "synthetic edit",
+            ])
+            let (updateStreams, updateOut, _) = streams()
+            try runPinned(updateStreams) { try allowedUpdate.run(storeFactory: { fake }) }
+            #expect(labeled.notes == "synthetic edit")
+            #expect(fake.saved.count == 1)
+            #expect((try payload(from: updateOut))["dry_run"] as? Bool == false)
+
+            let allowedDelete = try EventsDelete.parse(["--test-mode", "--execute", "--id", "event-2"])
+            let (deleteStreams, deleteOut, _) = streams()
+            try runPinned(deleteStreams) { try allowedDelete.run(storeFactory: { fake }) }
+            #expect(fake.removed.count == 1)
+            #expect((try payload(from: deleteOut))["deleted"] as? Bool == true)
+            // The SUCCESS envelope carries the root sandbox marker too — a sandboxed run has to
+            // announce itself whether it refused or proceeded, or a consumer cannot tell a
+            // sandbox-scoped delete from an unrestricted one.
+            #expect((try envelope(from: deleteOut))["sandbox"] as? Bool == true)
+        }
     }
 
     @Test("events create dry-run emits preview without opening the store")
@@ -872,20 +1028,22 @@ struct CalendarCommandExecutionTests {
             "--alarm", "15m",
             "--recurrence", "freq=daily;count=2",
         ])
-        let (streams, stdout) = streams()
+        let (streams, stdout, _) = streams()
 
         // The factory is what OPENS the store, and in production it is `{ EventStore() }` — so
         // "the dry run never touched the store" is only actually proved by the factory never
         // being CALLED. Inspecting the fake's method arrays cannot show that: the fake exists
         // before the run either way.
         var factoryCalls = 0
-        try Output.withStreams(streams) {
-            try command.run(storeFactory: { factoryCalls += 1; return fake })
-        }
+        try runPinned(streams) { try command.run(storeFactory: { factoryCalls += 1; return fake }) }
 
         let data = try payload(from: stdout)
         #expect(data["action"] as? String == "create")
         #expect(data["dry_run"] as? Bool == true)
+        // No `--test-mode`: the envelope must carry NO sandbox marker (the key is omitted, never
+        // emitted false). This is the assertion `runPinned` earns — without the pin an ambient
+        // `APPLE_TEST_MODE=1` engages the sandbox and the key appears.
+        #expect((try envelope(from: stdout))["sandbox"] == nil)
         #expect(factoryCalls == 0)
         #expect(fake.requestedAccess.isEmpty)
         #expect(fake.saved.isEmpty)
@@ -904,29 +1062,32 @@ struct CalendarCommandExecutionTests {
             "--clear-recurrence",
             "--span", "this-event",
         ])
-        let (updateStreams, updateOut) = streams()
+        let (updateStreams, updateOut, _) = streams()
 
         var factoryCalls = 0
-        try Output.withStreams(updateStreams) {
-            try update.run(storeFactory: { factoryCalls += 1; return fake })
-        }
+        try runPinned(updateStreams) { try update.run(storeFactory: { factoryCalls += 1; return fake }) }
 
         let updateData = try payload(from: updateOut)
         #expect(updateData["action"] as? String == "update")
         #expect(updateData["dry_run"] as? Bool == true)
         #expect(updateData["sandbox_target_unchecked"] as? Bool == true)
+        // The ROOT marker, not just the payload's deferral note. `sandbox_target_unchecked` says
+        // "the label check was deferred"; `sandbox: true` at the envelope root is the separate,
+        // machine-facing claim that this run is sandboxed at all — the counterpart to the
+        // `["sandbox"] == nil` pin on the flagless create above, and the half a consumer branches
+        // on. Emitting one without the other is a contract defect neither assertion alone catches.
+        #expect((try envelope(from: updateOut))["sandbox"] as? Bool == true)
         #expect(factoryCalls == 0)
 
         let delete = try EventsDelete.parse(["--dry-run", "--test-mode", "--id", "event-1", "--span", "future"])
-        let (deleteStreams, deleteOut) = streams()
-        try Output.withStreams(deleteStreams) {
-            try delete.run(storeFactory: { factoryCalls += 1; return fake })
-        }
+        let (deleteStreams, deleteOut, _) = streams()
+        try runPinned(deleteStreams) { try delete.run(storeFactory: { factoryCalls += 1; return fake }) }
 
         let deleteData = try payload(from: deleteOut)
         #expect(deleteData["action"] as? String == "delete")
         #expect(deleteData["span"] as? String == "future-events")
         #expect(deleteData["sandbox_target_unchecked"] as? Bool == true)
+        #expect((try envelope(from: deleteOut))["sandbox"] as? Bool == true)
         #expect(factoryCalls == 0)
         #expect(fake.requestedAccess.isEmpty)
         #expect(fake.saved.isEmpty)
@@ -960,9 +1121,9 @@ struct CalendarCommandExecutionTests {
         // logic tier.
         let command = try CalendarDoctor.parse([])
 
-        let (blockedStreams, blockedOut) = streams()
+        let (blockedStreams, blockedOut, _) = streams()
         var probed: [EventStore.Entity] = []
-        try Output.withStreams(blockedStreams) {
+        try runPinned(blockedStreams) {
             try command.run(
                 authorizationStatus: { entity in
                     probed.append(entity)
@@ -981,8 +1142,8 @@ struct CalendarCommandExecutionTests {
         #expect(blockedNotes.count == 2)   // preflight note + the not-ready note
         #expect(probed == [.event, .reminder])
 
-        let (readyStreams, readyOut) = streams()
-        try Output.withStreams(readyStreams) {
+        let (readyStreams, readyOut, _) = streams()
+        try runPinned(readyStreams) {
             try command.run(authorizationStatus: { _ in .fullAccess },
                             preflight: { Permissions.Preflight(full_disk_access: true) })
         }

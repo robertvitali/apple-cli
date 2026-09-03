@@ -4,6 +4,7 @@ import EventKit
 @testable import RemindersKit
 import EventKitCore
 import AppleKit
+import TestSupport
 
 // Write-safety + read-enrichment tests. These use in-memory EKReminder objects (constructing an
 // EKEventStore / EKReminder does NOT touch the store or trigger TCC — authorization is only
@@ -61,36 +62,66 @@ struct RequireLabeledReminderTests {
 /// `reminders tasks create` executes" without writing to the operator's real Reminders store, and
 /// the AppleKit core tier only proves the precedence chain — not that THIS domain opted in. A
 /// silent revert to dry-run-by-default fails here and only here.
-@Suite("Reminders write-model v2 posture")
+@Suite("Reminders write-model v2 posture", .serialized)
 struct RemindersWriteModelV2Tests {
     func opts(_ args: [String]) throws -> GlobalOptions { try GlobalOptions.parse(args) }
 
-    @Test("the test environment is clean (precondition for every pin below)")
-    func cleanEnvironment() {
-        let env = ProcessInfo.processInfo.environment
-        #expect(env["APPLE_TEST_MODE"] == nil || env["APPLE_TEST_MODE"]!.isEmpty)
-        #expect(env["APPLE_DRY_RUN"] == nil || env["APPLE_DRY_RUN"]!.isEmpty)
+    /// Twin of `CalendarWriteModelV2Tests.pinned` — see there for the rationale. Each pin below
+    /// resolves the gate from the REAL process environment, where an operator's exported
+    /// `APPLE_TEST_MODE=1` (or a concurrent suite's own window) would flip the verdict, so all of
+    /// them run inside this window: `TestEnvironment.writeModeVariables` forced absent.
+    @discardableResult
+    func pinned<T>(_ body: () throws -> T) rethrows -> T {
+        try TestEnvironment.withoutWriteModeOverrides(body)
     }
+
+    /// Asserts the window itself: inside `pinned`, every write-posture variable reads back absent,
+    /// which is the property each gate pin below rests on. Read via `getenv` — the same primitive
+    /// `TestEnvironment` writes with, so no snapshot taken before the window can be observed.
+    @Test("the pinned window forces the posture-relevant variables absent")
+    func pinnedWindowIsClean() {
+        pinned {
+            for key in TestEnvironment.writeModeVariables {
+                #expect(getenv(key) == nil, "\(key) should be pinned absent inside the window")
+            }
+        }
+    }
+
+    // The operator-shell detector — "did the shell running the tests export a write-posture
+    // variable?" — asserts a property of the PROCESS, not of Reminders, so it lives once in
+    // `AppleKitTests/AmbientEnvironmentCanaryTests.swift`. The pins above are what make this suite
+    // independent of that answer.
 
     @Test("DEFAULT PIN: a flagless reminders write EXECUTES and is unsandboxed")
     func defaultsToExecute() throws {
-        let gate = try ReminderWriteGuard.resolve(opts([]))
-        #expect(gate.willExecute == true)
-        #expect(gate.sandboxActive == false)
+        try pinned {
+            let gate = try ReminderWriteGuard.resolve(opts([]))
+            #expect(gate.willExecute == true)
+            #expect(gate.sandboxActive == false)
+        }
     }
 
     @Test("--dry-run previews; --execute is redundant; --dry-run wins over --execute")
     func dryRunPrecedence() throws {
-        #expect(try ReminderWriteGuard.resolve(opts(["--dry-run"])).willExecute == false)
-        #expect(try ReminderWriteGuard.resolve(opts(["--execute"])).willExecute == true)
-        #expect(try ReminderWriteGuard.resolve(opts(["--dry-run", "--execute"])).willExecute == false)
+        // Resolved OUTSIDE the `#expect`s: the macro wraps its argument in a call the closure's
+        // throwing-ness cannot be inferred through, so `try` has to sit in a plain statement.
+        let (preview, execute, both) = try pinned {
+            (try ReminderWriteGuard.resolve(opts(["--dry-run"])),
+             try ReminderWriteGuard.resolve(opts(["--execute"])),
+             try ReminderWriteGuard.resolve(opts(["--dry-run", "--execute"])))
+        }
+        #expect(preview.willExecute == false)
+        #expect(execute.willExecute == true)
+        #expect(both.willExecute == false)
     }
 
     @Test("--test-mode alone engages the sandbox without forcing a preview")
     func flagEngagesSandbox() throws {
-        let gate = try ReminderWriteGuard.resolve(opts(["--test-mode"]))
-        #expect(gate.sandboxActive == true)
-        #expect(gate.willExecute == true)
+        try pinned {
+            let gate = try ReminderWriteGuard.resolve(opts(["--test-mode"]))
+            #expect(gate.sandboxActive == true)
+            #expect(gate.willExecute == true)
+        }
     }
 
     /// Pinned via the `prefix:` seam — see CalendarWriteModelV2Tests for the env-race rationale.

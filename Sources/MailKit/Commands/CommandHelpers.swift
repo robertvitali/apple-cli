@@ -281,14 +281,14 @@ func emitMessages(_ result: MailMessagesResult, json: Bool) throws {
     if json { try Output.emit(tool: "mail", data: result); return }
     for m in result.messages { printMessageText(m, full: false) }
     if let hasMore = result.has_more, hasMore, let next = result.next_offset {
-        FileHandle.standardError.write(Data("… more (next --offset \(next))\n".utf8))
+        Output.writeError(Data("… more (next --offset \(next))\n".utf8))
     }
     // A human reading --text gets the same silent-filtering problem `system_folders_excluded`
     // was added to remove for JSON callers: a short list is indistinguishable from a sparse
     // store. --text is outside the versioned contract, so this goes to stderr next to the
     // pagination hint rather than into the payload.
     if result.system_folders_excluded == true {
-        FileHandle.standardError.write(Data(
+        Output.writeError(Data(
             "(system mailboxes excluded — pass --include-system-folders to include Trash/Junk/Sent/Drafts/Spam)\n".utf8))
     }
 }

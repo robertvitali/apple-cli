@@ -2,6 +2,7 @@ import Testing
 import Foundation
 @testable import MessagesKit
 import AppleKit
+import TestSupport
 
 // Reference values were computed from the parity oracle: Python `difflib.
 // SequenceMatcher.ratio`, the MCP `fuzzy_match` token rules, and the MCP
@@ -270,10 +271,12 @@ struct SendTests {
     /// `tool_send_message` does. The fail-closed property survives where it matters — INSIDE the
     /// sandbox — and that is what is pinned here.
     ///
-    /// Every call passes `allowedRecipients:` EXPLICITLY. The parameter used to default to `nil`
-    /// and read `APPLE_TEST_RECIPIENTS`, which made these assertions depend on the real process
-    /// environment being empty — a dependency the suite's own `cleanEnvironment()` precondition
-    /// did not even cover (it checks APPLE_TEST_MODE and APPLE_DRY_RUN only).
+    /// Every call passes `allowedRecipients:` EXPLICITLY, so nothing asserted here reads
+    /// `APPLE_TEST_RECIPIENTS` — or any other process-global — at all. The parameter used to
+    /// default to `nil` and read the variable, which made these assertions depend on the ambient
+    /// process environment being empty. An injected seam beats a pinned window wherever one
+    /// exists: `MessagesWriteModelV2Tests.pinned` is the fallback for the gates that have no seam,
+    /// and this suite needs none precisely because the argument is explicit.
     @Test func allowlistIsSandboxOnlyAndFailsClosedInsideIt() {
         // Unsandboxed: a no-op. A throw here means the v1 gate was silently reinstated, which
         // would make the domain non-parity again.
@@ -328,36 +331,73 @@ struct SendTests {
 ///
 /// Messages is the highest-stakes flip in the rollout — after it, a flagless `apple messages send`
 /// reaches a real human — so the default is pinned explicitly rather than left implied.
-@Suite("Messages write-model v2 posture")
+///
+/// Each pin below resolves the gate from the REAL process environment, where an operator's
+/// `APPLE_TEST_MODE` / `APPLE_DRY_RUN` export — or a concurrent suite's own window — would flip the
+/// verdict. Every one therefore runs inside `pinned`, which forces those variables absent for its
+/// duration, so each verdict is a property of the FLAGS alone. `.serialized` keeps the suite from
+/// queueing on itself while `TestEnvironment`'s process-wide lock orders it against other suites.
+@Suite("Messages write-model v2 posture", .serialized)
 struct MessagesWriteModelV2Tests {
     func opts(_ args: [String]) throws -> GlobalOptions { try GlobalOptions.parse(args) }
 
-    @Test("the test environment is clean (precondition for every pin below)")
-    func cleanEnvironment() {
-        let env = ProcessInfo.processInfo.environment
-        #expect(env["APPLE_TEST_MODE"] == nil || env["APPLE_TEST_MODE"]!.isEmpty)
-        #expect(env["APPLE_DRY_RUN"] == nil || env["APPLE_DRY_RUN"]!.isEmpty)
+    /// The window every pin below rests on: `TestEnvironment.writeModeVariables` — the three
+    /// sandbox-engaging variables plus `APPLE_DRY_RUN` — forced absent for its duration. Routing
+    /// through `TestEnvironment` rather than a local save/restore is what serializes the window
+    /// against every other suite mutating the same process-global table.
+    @discardableResult
+    func pinned<T>(_ body: () throws -> T) rethrows -> T {
+        try TestEnvironment.withoutWriteModeOverrides(body)
     }
+
+    /// Asserts the window itself: inside `pinned`, every write-posture variable reads back absent,
+    /// which is the property each gate pin below rests on. Read via `getenv` rather than
+    /// `ProcessInfo.processInfo.environment` — the same primitive `TestEnvironment` writes with, so
+    /// there is no question of observing a snapshot taken before the window opened.
+    @Test("the pinned window forces the posture-relevant variables absent")
+    func pinnedWindowIsClean() {
+        pinned {
+            for key in TestEnvironment.writeModeVariables {
+                #expect(getenv(key) == nil, "\(key) should be pinned absent inside the window")
+            }
+        }
+    }
+
+    // The operator-shell detector — "did the shell running the tests export a write-posture
+    // variable?" — asserts a property of the PROCESS, not of Messages, so it lives once in
+    // `AppleKitTests/AmbientEnvironmentCanaryTests.swift`. The pins above are what make this suite
+    // independent of that answer.
 
     @Test("DEFAULT PIN: a flagless send EXECUTES and is unsandboxed")
     func defaultsToExecute() throws {
-        let gate = try MessagesWriteGuard.resolve(opts([]))
-        #expect(gate.willExecute == true)
-        #expect(gate.sandboxActive == false)
+        try pinned {
+            let gate = try MessagesWriteGuard.resolve(opts([]))
+            #expect(gate.willExecute == true)
+            #expect(gate.sandboxActive == false)
+        }
     }
 
     @Test("--dry-run previews; --execute is redundant; --dry-run wins over --execute")
     func dryRunPrecedence() throws {
-        #expect(try MessagesWriteGuard.resolve(opts(["--dry-run"])).willExecute == false)
-        #expect(try MessagesWriteGuard.resolve(opts(["--execute"])).willExecute == true)
-        #expect(try MessagesWriteGuard.resolve(opts(["--dry-run", "--execute"])).willExecute == false)
+        // Resolved OUTSIDE the `#expect`s: the macro wraps its argument in a call the closure's
+        // throwing-ness cannot be inferred through, so `try` has to sit in a plain statement.
+        let (preview, execute, both) = try pinned {
+            (try MessagesWriteGuard.resolve(opts(["--dry-run"])),
+             try MessagesWriteGuard.resolve(opts(["--execute"])),
+             try MessagesWriteGuard.resolve(opts(["--dry-run", "--execute"])))
+        }
+        #expect(preview.willExecute == false)
+        #expect(execute.willExecute == true)
+        #expect(both.willExecute == false)
     }
 
     @Test("--test-mode alone engages the sandbox without forcing a preview")
     func flagEngagesSandbox() throws {
-        let gate = try MessagesWriteGuard.resolve(opts(["--test-mode"]))
-        #expect(gate.sandboxActive == true)
-        #expect(gate.willExecute == true)
+        try pinned {
+            let gate = try MessagesWriteGuard.resolve(opts(["--test-mode"]))
+            #expect(gate.sandboxActive == true)
+            #expect(gate.willExecute == true)
+        }
     }
 
     /// The Gate's `allowedRecipients` is what the send guard compares against, and the hermetic
@@ -367,31 +407,58 @@ struct MessagesWriteModelV2Tests {
     /// sandboxed send refuse for a reason the operator cannot see.
     @Test("resolve threads the injected allowlist reader into the Gate verbatim")
     func capturesInjectedAllowlist() throws {
-        let injected = ["+1 (212) 555-0100", "alice@example.com"]
-        let gate = try MessagesWriteGuard.resolve(opts([]), allowedRecipients: { injected })
+        // Pinned like every other resolution here: `allowedRecipients` is injected, but `resolve`
+        // still reads `APPLE_DRY_RUN` on the way, and `TestMode`'s reader is fail-LOUD — a
+        // non-truthy value (`APPLE_DRY_RUN=junk`) makes it throw before the allowlist is captured.
+        let (injected, gate, emptied) = try pinned { () -> ([String], MessagesWriteGuard.Gate, [String]) in
+            let injected = ["+1 (212) 555-0100", "alice@example.com"]
+            return (injected,
+                    try MessagesWriteGuard.resolve(opts([]), allowedRecipients: { injected }),
+                    try MessagesWriteGuard.resolve(opts(["--test-mode"]),
+                                                   allowedRecipients: { [] }).allowedRecipients)
+        }
         #expect(gate.allowedRecipients == injected)
         // Entries are captured verbatim; normalization happens in the guard, not the gate.
-        #expect(try MessagesWriteGuard.resolve(opts(["--test-mode"]),
-                                               allowedRecipients: { [] }).allowedRecipients == [])
+        #expect(emptied == [])
     }
 
     /// Pins the PRODUCTION binding: `.live.resolveGate` — the only `resolveGate` an `apple
     /// messages send` invocation can ever reach — must BE `MessagesWriteGuard.resolve` with its
     /// default allowlist reader, not a hermetic stand-in, a hardcoded posture, or a different
-    /// guard. Deliberately compares two live resolutions rather than asserting values: both sides
-    /// read the same process state at the same moment, so the equality holds whatever
-    /// `APPLE_TEST_MODE` / `APPLE_DRY_RUN` / `APPLE_TEST_RECIPIENTS` happen to contain, and the
-    /// test neither depends on nor mutates the variables swift-testing's parallel suites share.
-    /// Sweeping the flag combinations is what makes it non-vacuous — a constant-returning or
-    /// flag-ignoring binding disagrees on at least one row even in a totally empty environment.
+    /// guard. Compares two live resolutions rather than asserting values: both sides read the same
+    /// process state at the same moment, so the equality is a statement about the BINDING and not
+    /// about any particular posture. Sweeping the flag combinations is what makes it non-vacuous —
+    /// a constant-returning or flag-ignoring binding disagrees on at least one row even in a
+    /// totally empty environment.
+    ///
+    /// It runs inside `pinned` all the same. Equality is robust to the environment, but REACHING it
+    /// is not: `resolve` reads `APPLE_DRY_RUN` through `TestMode`'s fail-loud reader, so an
+    /// operator's `APPLE_DRY_RUN=junk` (or another suite's window closing mid-sweep) makes the call
+    /// THROW and the comparison never happens. Observed as an intermittent failure of exactly this
+    /// test under an exported `APPLE_DRY_RUN=junk`.
+    /// The `APPLE_TEST_RECIPIENTS` sweep is what keeps the "with its DEFAULT allowlist reader"
+    /// half of that claim verifiable. Pinned absent, every row's allowlist is empty on both sides
+    /// and a stand-in that read some other variable — or none — would agree throughout; the
+    /// non-nil row is where such a stand-in diverges, because only a reader of THIS variable
+    /// reproduces these entries. Nested inside `pinned` so the pin remains the baseline and the
+    /// inner window restores to "absent", not to whatever the operator exported.
     @Test("`.live` resolves the write posture through MessagesWriteGuard.resolve")
     func liveDependenciesResolveThroughTheProductionGuard() throws {
-        for argv in [[], ["--dry-run"], ["--execute"], ["--test-mode"],
-                     ["--test-mode", "--dry-run"], ["--test-mode", "--execute"]] {
-            let global = try opts(argv)
-            #expect(try MessagesCommandDependencies.live.resolveGate(global)
-                    == MessagesWriteGuard.resolve(global),
-                    "live resolveGate diverged from MessagesWriteGuard.resolve for \(argv)")
+        try pinned {
+            for recipients: String? in [nil, "+1 555-0100,alice@example.com"] {
+                try TestEnvironment.with(["APPLE_TEST_RECIPIENTS": recipients]) {
+                    for argv in [[], ["--dry-run"], ["--execute"], ["--test-mode"],
+                                 ["--test-mode", "--dry-run"], ["--test-mode", "--execute"]] {
+                        let global = try opts(argv)
+                        #expect(try MessagesCommandDependencies.live.resolveGate(global)
+                                == MessagesWriteGuard.resolve(global),
+                                """
+                                live resolveGate diverged from MessagesWriteGuard.resolve for \
+                                \(argv) with APPLE_TEST_RECIPIENTS=\(recipients ?? "<unset>")
+                                """)
+                    }
+                }
+            }
         }
     }
 }

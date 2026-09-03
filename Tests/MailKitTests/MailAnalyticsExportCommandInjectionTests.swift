@@ -5,7 +5,10 @@ import ArgumentParser
 import AppleKit
 import TestSupport
 
-@Suite("Mail analytics/export commands with injected dependencies")
+// `.serialized`: these commands read process-global `APPLE_*` state through `TestMode`, so the
+// suite pairs `TestEnvironment` windows (atomic against other suites, via its process-wide lock)
+// with a trait that keeps the suite from queueing on itself.
+@Suite("Mail analytics/export commands with injected dependencies", .serialized)
 struct MailAnalyticsExportCommandInjectionTests {
     private let scratch = ScratchDirs("mail-analytics-cmd")
     /// `mail export` refuses a destination outside the home directory, so its scratch root has to
@@ -157,7 +160,7 @@ struct MailAnalyticsExportCommandInjectionTests {
     }
 
     @Test func dashboardDryRunUsesInjectedContextAndScriptWithoutWriting() throws {
-        try TestEnvironment.withoutSandboxOverrides {
+        try TestEnvironment.withoutWriteModeOverrides {
             let out = try scratch.directory().appendingPathComponent("dashboard.html").path
             let command = try AnalyticsDashboard.parse(["--out", out, "--dry-run"])
             let (streams, stdout) = streams()
@@ -174,7 +177,7 @@ struct MailAnalyticsExportCommandInjectionTests {
     }
 
     @Test func dashboardExecuteUsesInjectedContextAndWritesSyntheticHtml() throws {
-        try TestEnvironment.withoutSandboxOverrides {
+        try TestEnvironment.withoutWriteModeOverrides {
             let out = try scratch.directory().appendingPathComponent("dashboard.html")
             let command = try AnalyticsDashboard.parse(["--out", out.path, "--execute"])
             let (streams, stdout) = streams()
@@ -193,7 +196,7 @@ struct MailAnalyticsExportCommandInjectionTests {
     }
 
     @Test func exportDryRunUsesInjectedContextWithoutFetchingBodyOrWriting() throws {
-        try TestEnvironment.withoutSandboxOverrides {
+        try TestEnvironment.withoutWriteModeOverrides {
             // A not-yet-created child of an owned scratch directory: the assertion below is that the
             // dry-run creates NOTHING, and it used to be checked against a path in the repo working
             // tree — where a regressed gate would have deposited an untracked, unignored artifact.
@@ -224,7 +227,7 @@ struct MailAnalyticsExportCommandInjectionTests {
     }
 
     @Test func exportExecuteFetchesFullBodyAndWritesSyntheticSingleEmail() throws {
-        try TestEnvironment.withoutSandboxOverrides {
+        try TestEnvironment.withoutWriteModeOverrides {
             let outDir = try homeScratch.directory().appendingPathComponent("export")
             let fake = MailScriptInjectionTests.FakeMailRunner()
             fake.untimedResults = ["Full synthetic body"]
@@ -259,7 +262,7 @@ struct MailAnalyticsExportCommandInjectionTests {
     }
 
     @Test func exportExecuteWritesSyntheticEntireMailboxExport() throws {
-        try TestEnvironment.withoutSandboxOverrides {
+        try TestEnvironment.withoutWriteModeOverrides {
             let outDir = try homeScratch.directory().appendingPathComponent("export")
             let command = try ExportCommand.parse([
                 "--account", "Example Account",

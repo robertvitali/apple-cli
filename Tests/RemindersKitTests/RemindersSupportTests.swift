@@ -5,6 +5,7 @@ import ArgumentParser
 import EventKitCore
 import AppleKit
 import EventKit
+import TestSupport
 
 // Logic-tier tests for the Reminders domain. These are TCC-free, not EventKit-free: an
 // `EKEventStore` is constructed ONLY as an inert object factory for `EKReminder` / `EKCalendar`
@@ -643,21 +644,48 @@ final class FakeReminderStore: ReminderStore {
     }
 }
 
-@Suite("Reminders command execution with injected store")
+// `.serialized` per `TestEnvironment`'s own instruction: every test here runs inside a
+// `TestEnvironment` window (`runPinned`), and the process-wide lock makes each window atomic
+// against other SUITES while `.serialized` keeps this suite from queueing on itself.
+@Suite("Reminders command execution with injected store", .serialized)
 struct RemindersCommandExecutionTests {
-    func streams() -> (CLIStreams, MemoryOutputSink) {
+    /// Scoped streams plus BOTH sinks. Returning the stderr sink is what lets a test assert on
+    /// anything a command writes there — a warning, or (as the execute paths below assert) the
+    /// absence of one. Most tests ignore it (`_`).
+    func streams() -> (CLIStreams, MemoryOutputSink, MemoryOutputSink) {
         let stdout = MemoryOutputSink()
-        return (CLIStreams(stdout: stdout, stderr: MemoryOutputSink()), stdout)
+        let stderr = MemoryOutputSink()
+        return (CLIStreams(stdout: stdout, stderr: stderr), stdout, stderr)
+    }
+
+    func envelope(from stdout: MemoryOutputSink) throws -> [String: Any] {
+        try #require(JSONSerialization.jsonObject(with: stdout.data) as? [String: Any])
     }
 
     func payload(from stdout: MemoryOutputSink) throws -> [String: Any] {
-        let root = try #require(JSONSerialization.jsonObject(with: stdout.data) as? [String: Any])
-        return try #require(root["data"] as? [String: Any])
+        try #require(try envelope(from: stdout)["data"] as? [String: Any])
     }
 
     func errorPayload(from stdout: MemoryOutputSink) throws -> [String: Any] {
-        let root = try #require(JSONSerialization.jsonObject(with: stdout.data) as? [String: Any])
-        return try #require(root["error"] as? [String: Any])
+        try #require(try envelope(from: stdout)["error"] as? [String: Any])
+    }
+
+    /// Run a command with the sandbox-engaging variables pinned ABSENT, so the write posture it
+    /// resolves is a property of the FLAGS it parsed and nothing else. Without this, an operator
+    /// with `APPLE_TEST_MODE=1` exported — or a concurrent suite's own `TestEnvironment` window —
+    /// silently engages the sandbox for a flagless command, which changes both the emitted
+    /// envelope and which safety gates fire — and an exported `APPLE_DRY_RUN=1` would turn every
+    /// execute assertion below into a preview and pass the wrong branch. `TestEnvironment`'s
+    /// process-wide lock is what orders the window against every other mutator; a local
+    /// save/restore would not.
+    ///
+    /// `body` MUST stay synchronous: the process-wide recursive lock is held for the whole command
+    /// run, so an `await` inside it would suspend the thread while every other suite's window is
+    /// still blocked on the lock this one holds.
+    func runPinned(_ streams: CLIStreams, _ body: () throws -> Void) throws {
+        try TestEnvironment.withoutWriteModeOverrides {
+            try Output.withStreams(streams) { try body() }
+        }
     }
 
     /// Run a command that must FAIL, and pin BOTH halves of the contract `runGuarded` binds
@@ -665,18 +693,27 @@ struct RemindersCommandExecutionTests {
     /// ExitCode.self)` on its own passes for any failure at all, so a branch that started
     /// throwing `.notFound` where it owes `.validation` (65 vs 64 — a discriminator agents
     /// branch on) would stay green. Asserting the pair is the exit-code matrix.
-    func expectFailure(exit: Int32, type: String,
+    ///
+    /// `sandbox` opts into a third assertion on the error object's own `sandbox` marker — the key
+    /// that tells a consumer the refusal came from the write sandbox rather than from ordinary
+    /// input validation, which the shared `type`/`exitCode` pair (both plain validation/64) cannot
+    /// distinguish. Left nil, the marker is not asserted either way.
+    func expectFailure(exit: Int32, type: String, sandbox: Bool? = nil,
                        sourceLocation: SourceLocation = SourceLocation(
                         fileID: #fileID, filePath: #filePath, line: #line, column: #column),
                        _ body: () throws -> Void) throws {
-        let (cliStreams, stdout) = streams()
+        let (cliStreams, stdout, _) = streams()
         var thrown: Error?
-        do { try Output.withStreams(cliStreams) { try body() } } catch { thrown = error }
+        do { try runPinned(cliStreams) { try body() } } catch { thrown = error }
         #expect((thrown as? ExitCode)?.rawValue == exit,
                 "expected exit \(exit), got \(String(describing: thrown))",
                 sourceLocation: sourceLocation)
         #expect((try errorPayload(from: stdout))["type"] as? String == type,
                 sourceLocation: sourceLocation)
+        if let sandbox {
+            #expect((try errorPayload(from: stdout))["sandbox"] as? Bool == sandbox,
+                    sourceLocation: sourceLocation)
+        }
     }
 
     func reminder(title: String = "apple-cli-test task", list: EKCalendar, store: EKEventStore) -> EKReminder {
@@ -692,9 +729,9 @@ struct RemindersCommandExecutionTests {
     func listsRead() throws {
         let fake = FakeReminderStore()
         let command = try ListsRead.parse([])
-        let (streams, stdout) = streams()
+        let (streams, stdout, _) = streams()
 
-        try Output.withStreams(streams) {
+        try runPinned(streams) {
             try command.run(storeFactory: { fake })
         }
 
@@ -707,9 +744,9 @@ struct RemindersCommandExecutionTests {
     func listsCreateExecute() throws {
         let fake = FakeReminderStore()
         let command = try ListsCreate.parse(["--name", "apple-cli-test new", "--color", "#336699"])
-        let (streams, stdout) = streams()
+        let (streams, stdout, stderr) = streams()
 
-        try Output.withStreams(streams) {
+        try runPinned(streams) {
             try command.run(storeFactory: { fake })
         }
 
@@ -720,6 +757,11 @@ struct RemindersCommandExecutionTests {
         #expect(data["dry_run"] as? Bool == false)
         // The `--color` argument must reach `list.cgColor`; the emitted hex is the round-trip.
         #expect(data["color"] as? String == "#336699")
+        // The JSON path owes stderr NOTHING. `--json` is the default and stdout is the versioned
+        // contract; a human-readable line leaking onto the other stream is how a caller that merges
+        // the two ends up with an unparseable blob. Asserting the scoped sink is empty is the only
+        // way to see that — a dropped sink would send it to the terminal and pass.
+        #expect(stderr.data.isEmpty, "the JSON execute path must write nothing to stderr")
     }
 
     @Test("lists create surfaces the no-writable-source branch as upstream, not a crash")
@@ -745,9 +787,9 @@ struct RemindersCommandExecutionTests {
             "--new-name", "apple-cli-test renamed",
             "--color", "#663399",
         ])
-        let (updateStreams, updateOut) = streams()
+        let (updateStreams, updateOut, _) = streams()
 
-        try Output.withStreams(updateStreams) {
+        try runPinned(updateStreams) {
             try update.run(storeFactory: { fake })
         }
 
@@ -757,8 +799,8 @@ struct RemindersCommandExecutionTests {
         #expect((try payload(from: updateOut))["dry_run"] as? Bool == false)
 
         let delete = try ListsDelete.parse(["--name", "apple-cli-test renamed"])
-        let (deleteStreams, deleteOut) = streams()
-        try Output.withStreams(deleteStreams) {
+        let (deleteStreams, deleteOut, _) = streams()
+        try runPinned(deleteStreams) {
             try delete.run(storeFactory: { fake })
         }
 
@@ -775,9 +817,9 @@ struct RemindersCommandExecutionTests {
         let row = reminder(list: fake.lists[0], store: fake.ekStore)
         fake.remindersById["task-1"] = row
         let command = try TasksRead.parse(["--id", "task-1"])
-        let (streams, stdout) = streams()
+        let (streams, stdout, _) = streams()
 
-        try Output.withStreams(streams) {
+        try runPinned(streams) {
             try command.run(storeFactory: { fake })
         }
 
@@ -791,8 +833,8 @@ struct RemindersCommandExecutionTests {
     func readTitles(_ args: [String], rows: [EKReminder], store fake: FakeReminderStore) throws -> [String] {
         fake.reminderRows = rows
         let command = try TasksRead.parse(args)
-        let (readStreams, out) = streams()
-        try Output.withStreams(readStreams) {
+        let (readStreams, out, _) = streams()
+        try runPinned(readStreams) {
             try command.run(storeFactory: { fake })
         }
         let emitted = try #require(try payload(from: out)["reminders"] as? [[String: Any]])
@@ -886,6 +928,51 @@ struct RemindersCommandExecutionTests {
         #expect(kept == ["apple-cli-test search hit"])
     }
 
+    /// `--due-within` is the one `tasks read` filter absent from `tasksReadSingleFilter`, because
+    /// its fixture needs a due DATE rather than a flag — and it had no wiring test at all. The
+    /// `DueWithin` suite covers the window MATH against injected `now`/`calendar` values, and
+    /// `taskErrorBranches` covers only the bad-window rejection; neither touches
+    /// `TasksCommand.swift`'s `DueWithin.matches(due:filter:now:)` call. Hard-wiring that call to
+    /// `false` (drop everything) or `true` (drop nothing) survives both, and fails here.
+    ///
+    /// `overdue` is chosen deliberately: its boundary is `startOfToday`, so fixtures at now ± 3
+    /// days land on the same side of it whatever the time of day or host zone. A `today` /
+    /// `tomorrow` fixture would be a midnight-rollover flake.
+    @Test("tasks read: --due-within selects on the due date alone")
+    func tasksReadDueWithinFilter() throws {
+        let fake = FakeReminderStore()
+        let calendar = Calendar.current
+        func dueComponents(daysFromNow: Double) -> DateComponents {
+            let date = Date().addingTimeInterval(daysFromNow * 86_400)
+            var parts = calendar.dateComponents([.year, .month, .day, .hour, .minute, .second], from: date)
+            parts.calendar = calendar
+            parts.timeZone = calendar.timeZone
+            return parts
+        }
+
+        let overdue = reminder(title: "apple-cli-test overdue", list: fake.lists[0], store: fake.ekStore)
+        overdue.dueDateComponents = dueComponents(daysFromNow: -3)
+        let upcoming = reminder(title: "apple-cli-test upcoming", list: fake.lists[0], store: fake.ekStore)
+        upcoming.dueDateComponents = dueComponents(daysFromNow: 3)
+        let undated = reminder(title: "apple-cli-test undated", list: fake.lists[0], store: fake.ekStore)
+
+        // Precondition: the fixtures really do carry a resolvable due date, so a failure below is
+        // the WIRING and not an EKReminder that quietly dropped the components.
+        #expect(overdue.dueDateComponents?.date != nil)
+        #expect(upcoming.dueDateComponents?.date != nil)
+        #expect(undated.dueDateComponents == nil)
+
+        #expect(try readTitles(["--due-within", "overdue"], rows: [upcoming, overdue, undated], store: fake)
+                == ["apple-cli-test overdue"])
+        // The complement pins the other direction: a call hard-wired to `true` would keep all
+        // three rows in BOTH assertions, and one hard-wired to `false` would keep none.
+        #expect(try readTitles(["--due-within", "no-date"], rows: [upcoming, overdue, undated], store: fake)
+                == ["apple-cli-test undated"])
+        // Control: without the flag every row survives, so the exclusions above came from the
+        // filter rather than from a malformed fixture.
+        #expect(try readTitles([], rows: [upcoming, overdue, undated], store: fake).count == 3)
+    }
+
     @Test("tasks create executes through the injected store")
     func tasksCreateExecute() throws {
         let fake = FakeReminderStore()
@@ -903,9 +990,9 @@ struct RemindersCommandExecutionTests {
             "--geo-lon", "2",
             "--geo-title", "Office",
         ])
-        let (streams, stdout) = streams()
+        let (streams, stdout, _) = streams()
 
-        try Output.withStreams(streams) {
+        try runPinned(streams) {
             try command.run(storeFactory: { fake })
         }
 
@@ -934,9 +1021,9 @@ struct RemindersCommandExecutionTests {
             "--clear-alarms",
             "--clear-recurrence",
         ])
-        let (updateStreams, updateOut) = streams()
+        let (updateStreams, updateOut, _) = streams()
 
-        try Output.withStreams(updateStreams) {
+        try runPinned(updateStreams) {
             try update.run(storeFactory: { fake })
         }
 
@@ -948,14 +1035,66 @@ struct RemindersCommandExecutionTests {
         #expect((try payload(from: updateOut))["dry_run"] as? Bool == false)
 
         let delete = try TasksDelete.parse(["--id", "task-1"])
-        let (deleteStreams, deleteOut) = streams()
-        try Output.withStreams(deleteStreams) {
+        let (deleteStreams, deleteOut, _) = streams()
+        try runPinned(deleteStreams) {
             try delete.run(storeFactory: { fake })
         }
 
         #expect(fake.removedReminders.count == 1)
         #expect(fake.removedReminders[0].1 == true)
         #expect((try payload(from: deleteOut))["deleted"] as? Bool == true)
+    }
+
+    /// THE by-id delete gate, driven end to end through the command. `TasksDelete` fetches a
+    /// reminder by opaque id — a target no argv check can vet — and the ONLY thing standing
+    /// between a sandboxed run and a real reminder is the post-fetch
+    /// `requireLabeledReminder(reminder, sandboxActive:)` call in `TasksCommand.swift`.
+    ///
+    /// MEASURED: deleting that one line leaves the whole suite green without this test. The
+    /// `RequireLabeledReminderTests` suite exercises the helper in isolation, so it stays green
+    /// when the CALL disappears; and every other delete-path fixture here is already
+    /// `apple-cli-test`-labeled, so the gate never had anything to refuse.
+    ///
+    /// Both halves of the contract are asserted, because the gate runs POST-fetch: the exact
+    /// exit value + `error.type` of the refusal, AND that no removal was ever issued.
+    @Test("tasks delete refuses an UNLABELED target inside the sandbox and removes nothing")
+    func tasksDeleteRefusesUnlabeledTargetInSandbox() throws {
+        try TestEnvironment.withoutWriteModeOverrides {
+            let fake = FakeReminderStore()
+            // The fixture IS the test: an unlabeled title is exactly the real user's reminder the
+            // sandbox exists to protect. Pinning `APPLE_TEST_SANDBOX` absent keeps the required
+            // prefix canonical, so a concurrent suite's window cannot redefine what "labeled" is.
+            let unlabeled = reminder(title: "Quarterly review", list: fake.lists[0], store: fake.ekStore)
+            fake.remindersById["task-1"] = unlabeled
+
+            // `--test-mode` engages the sandbox via the FLAG half of `TestMode.sandboxActive`, so
+            // this holds regardless of the environment; `--execute` reaches the execute branch
+            // (a preview would return before the fetch and never touch the gate).
+            let delete = try TasksDelete.parse(["--test-mode", "--execute", "--id", "task-1"])
+            // Sandbox refusal (Q14): validation / exit 64 — NOT a 404, and not a permission error.
+            // The `sandbox: true` marker is asserted too: type and exit alone are indistinguishable
+            // from an ordinary bad-argument refusal, so that key is the only thing in the envelope
+            // saying the sandbox is what stopped the delete.
+            try expectFailure(exit: AppleExit.usage, type: AppleErrorType.validation, sandbox: true) {
+                try delete.run(storeFactory: { fake })
+            }
+            #expect(fake.removedReminders.isEmpty, "the sandbox refusal must precede any removal")
+            #expect(fake.savedReminders.isEmpty)
+
+            // Control: the SAME command against a labeled target passes the gate and deletes, so
+            // the refusal above came from the label check and not from the fixture being unusable.
+            let labeled = reminder(title: "apple-cli-test task", list: fake.lists[0], store: fake.ekStore)
+            fake.remindersById["task-2"] = labeled
+            let allowed = try TasksDelete.parse(["--test-mode", "--execute", "--id", "task-2"])
+            let (allowedStreams, allowedOut, _) = streams()
+            try runPinned(allowedStreams) { try allowed.run(storeFactory: { fake }) }
+            #expect(fake.removedReminders.count == 1)
+            #expect((try payload(from: allowedOut))["deleted"] as? Bool == true)
+            // The SUCCESS envelope carries the root sandbox marker too — a sandboxed run has to
+            // announce itself whether it refused or proceeded, or a consumer cannot tell a
+            // sandbox-scoped delete from an unrestricted one.
+            #expect((try envelope(from: allowedOut))["sandbox"] as? Bool == true)
+        }
     }
 
     @Test("subtasks read and mutating operations execute through the injected store")
@@ -965,14 +1104,14 @@ struct RemindersCommandExecutionTests {
         fake.remindersById["task-1"] = row
 
         let read = try SubtasksRead.parse(["--reminder-id", "task-1"])
-        let (readStreams, readOut) = streams()
-        try Output.withStreams(readStreams) {
+        let (readStreams, readOut, _) = streams()
+        try runPinned(readStreams) {
             try read.run(storeFactory: { fake })
         }
         #expect((try payload(from: readOut))["reminder_title"] as? String == "apple-cli-test task")
 
         let create = try SubtasksCreate.parse(["--reminder-id", "task-1", "--title", "Review"])
-        try Output.withStreams(streams().0) { try create.run(storeFactory: { fake }) }
+        try runPinned(streams().0) { try create.run(storeFactory: { fake }) }
         #expect(row.notes?.contains("Review") == true)
 
         let createdId = try #require(ReminderSubtasks.parse(row.notes).last?.id)
@@ -982,19 +1121,19 @@ struct RemindersCommandExecutionTests {
             "--title", "Review updated",
             "--completed",
         ])
-        try Output.withStreams(streams().0) { try update.run(storeFactory: { fake }) }
+        try runPinned(streams().0) { try update.run(storeFactory: { fake }) }
         #expect(row.notes?.contains("Review updated") == true)
 
         let toggle = try SubtasksToggle.parse(["--reminder-id", "task-1", "--subtask-id", createdId])
-        try Output.withStreams(streams().0) { try toggle.run(storeFactory: { fake }) }
+        try runPinned(streams().0) { try toggle.run(storeFactory: { fake }) }
 
         let ids = ReminderSubtasks.parse(row.notes).map(\.id)
         let reversedOrder = Array(ids.reversed()).flatMap { ["--order", $0] }
         let reorder = try SubtasksReorder.parse(["--reminder-id", "task-1"] + reversedOrder)
-        try Output.withStreams(streams().0) { try reorder.run(storeFactory: { fake }) }
+        try runPinned(streams().0) { try reorder.run(storeFactory: { fake }) }
 
         let delete = try SubtasksDelete.parse(["--reminder-id", "task-1", "--subtask-id", createdId])
-        try Output.withStreams(streams().0) { try delete.run(storeFactory: { fake }) }
+        try runPinned(streams().0) { try delete.run(storeFactory: { fake }) }
 
         #expect(fake.savedReminders.count == 5)
         // Subtasks are persisted by REWRITING the parent reminder's notes, so every one of the
@@ -1012,11 +1151,13 @@ struct RemindersCommandExecutionTests {
         // before the run either way.
         var factoryCalls = 0
         let create = try ListsCreate.parse(["--dry-run", "--name", "apple-cli-test preview", "--color", "#336699"])
-        let (createStreams, createOut) = streams()
-        try Output.withStreams(createStreams) {
-            try create.run(storeFactory: { factoryCalls += 1; return fake })
-        }
+        let (createStreams, createOut, _) = streams()
+        try runPinned(createStreams) { try create.run(storeFactory: { factoryCalls += 1; return fake }) }
         #expect((try payload(from: createOut))["action"] as? String == "create")
+        // No `--test-mode`, so the envelope must carry NO sandbox marker (the key is omitted
+        // entirely rather than emitted false). This is the assertion `runPinned` earns: without
+        // the pin an ambient `APPLE_TEST_MODE=1` engages the sandbox and the key appears.
+        #expect((try envelope(from: createOut))["sandbox"] == nil)
 
         let update = try ListsUpdate.parse([
             "--dry-run",
@@ -1024,19 +1165,16 @@ struct RemindersCommandExecutionTests {
             "--new-name", "apple-cli-test renamed",
             "--color", "#663399",
         ])
-        let (updateStreams, updateOut) = streams()
-        try Output.withStreams(updateStreams) {
-            try update.run(storeFactory: { factoryCalls += 1; return fake })
-        }
+        let (updateStreams, updateOut, _) = streams()
+        try runPinned(updateStreams) { try update.run(storeFactory: { factoryCalls += 1; return fake }) }
         let updateData = try payload(from: updateOut)
         #expect(updateData["action"] as? String == "update")
         #expect(updateData["dry_run"] as? Bool == true)
+        #expect(updateData["sandbox_target_unchecked"] == nil)
 
         let delete = try ListsDelete.parse(["--dry-run", "--test-mode", "--name", "list-id"])
-        let (deleteStreams, deleteOut) = streams()
-        try Output.withStreams(deleteStreams) {
-            try delete.run(storeFactory: { factoryCalls += 1; return fake })
-        }
+        let (deleteStreams, deleteOut, _) = streams()
+        try runPinned(deleteStreams) { try delete.run(storeFactory: { factoryCalls += 1; return fake }) }
         let deleteData = try payload(from: deleteOut)
         #expect(deleteData["action"] as? String == "delete")
         #expect(deleteData["sandbox_target_unchecked"] as? Bool == true)
@@ -1061,13 +1199,15 @@ struct RemindersCommandExecutionTests {
             "--tag", "work",
             "--subtask", "Draft",
         ])
-        let (createStreams, createOut) = streams()
-        try Output.withStreams(createStreams) {
-            try create.run(storeFactory: { factoryCalls += 1; return fake })
-        }
+        let (createStreams, createOut, _) = streams()
+        try runPinned(createStreams) { try create.run(storeFactory: { factoryCalls += 1; return fake }) }
         let createData = try payload(from: createOut)
         #expect(createData["action"] as? String == "create")
         #expect(createData["dry_run"] as? Bool == true)
+        // No `--test-mode`: the envelope must carry NO sandbox marker (the key is omitted, never
+        // emitted false). This is the assertion `runPinned` earns — without the pin an ambient
+        // `APPLE_TEST_MODE=1` engages the sandbox and the key appears.
+        #expect((try envelope(from: createOut))["sandbox"] == nil)
 
         let update = try TasksUpdate.parse([
             "--dry-run",
@@ -1078,22 +1218,25 @@ struct RemindersCommandExecutionTests {
             "--clear-recurrence",
             "--clear-tags",
         ])
-        let (updateStreams, updateOut) = streams()
-        try Output.withStreams(updateStreams) {
-            try update.run(storeFactory: { factoryCalls += 1; return fake })
-        }
+        let (updateStreams, updateOut, _) = streams()
+        try runPinned(updateStreams) { try update.run(storeFactory: { factoryCalls += 1; return fake }) }
         let updateData = try payload(from: updateOut)
         #expect(updateData["action"] as? String == "update")
         #expect(updateData["sandbox_target_unchecked"] as? Bool == true)
+        // The ROOT marker, not just the payload's deferral note. `sandbox_target_unchecked` says
+        // "the label check was deferred"; `sandbox: true` at the envelope root is the separate,
+        // machine-facing claim that this run is sandboxed at all — the counterpart to the
+        // `["sandbox"] == nil` pin on the flagless create above, and the half a consumer branches
+        // on. Emitting one without the other is a contract defect neither assertion alone catches.
+        #expect((try envelope(from: updateOut))["sandbox"] as? Bool == true)
 
         let delete = try TasksDelete.parse(["--dry-run", "--test-mode", "--id", "task-1"])
-        let (deleteStreams, deleteOut) = streams()
-        try Output.withStreams(deleteStreams) {
-            try delete.run(storeFactory: { factoryCalls += 1; return fake })
-        }
+        let (deleteStreams, deleteOut, _) = streams()
+        try runPinned(deleteStreams) { try delete.run(storeFactory: { factoryCalls += 1; return fake }) }
         let deleteData = try payload(from: deleteOut)
         #expect(deleteData["action"] as? String == "delete")
         #expect(deleteData["sandbox_target_unchecked"] as? Bool == true)
+        #expect((try envelope(from: deleteOut))["sandbox"] as? Bool == true)
         #expect(factoryCalls == 0)
         #expect(fake.requestedAccess.isEmpty)
         #expect(fake.savedReminders.isEmpty)
@@ -1111,10 +1254,8 @@ struct RemindersCommandExecutionTests {
         var factoryCalls = 0
 
         let create = try SubtasksCreate.parse(["--dry-run", "--reminder-id", "task-1", "--title", "Review"])
-        let (createStreams, createOut) = streams()
-        try Output.withStreams(createStreams) {
-            try create.run(storeFactory: { factoryCalls += 1; return fake })
-        }
+        let (createStreams, createOut, _) = streams()
+        try runPinned(createStreams) { try create.run(storeFactory: { factoryCalls += 1; return fake }) }
         #expect((try payload(from: createOut))["action"] as? String == "create")
 
         let update = try SubtasksUpdate.parse([
@@ -1124,24 +1265,18 @@ struct RemindersCommandExecutionTests {
             "--title", "Review updated",
             "--completed",
         ])
-        let (updateStreams, updateOut) = streams()
-        try Output.withStreams(updateStreams) {
-            try update.run(storeFactory: { factoryCalls += 1; return fake })
-        }
+        let (updateStreams, updateOut, _) = streams()
+        try runPinned(updateStreams) { try update.run(storeFactory: { factoryCalls += 1; return fake }) }
         #expect((try payload(from: updateOut))["action"] as? String == "update")
 
         let toggle = try SubtasksToggle.parse(["--dry-run", "--reminder-id", "task-1", "--subtask-id", existingId])
-        let (toggleStreams, toggleOut) = streams()
-        try Output.withStreams(toggleStreams) {
-            try toggle.run(storeFactory: { factoryCalls += 1; return fake })
-        }
+        let (toggleStreams, toggleOut, _) = streams()
+        try runPinned(toggleStreams) { try toggle.run(storeFactory: { factoryCalls += 1; return fake }) }
         #expect((try payload(from: toggleOut))["action"] as? String == "toggle")
 
         let delete = try SubtasksDelete.parse(["--dry-run", "--reminder-id", "task-1", "--subtask-id", existingId])
-        let (deleteStreams, deleteOut) = streams()
-        try Output.withStreams(deleteStreams) {
-            try delete.run(storeFactory: { factoryCalls += 1; return fake })
-        }
+        let (deleteStreams, deleteOut, _) = streams()
+        try runPinned(deleteStreams) { try delete.run(storeFactory: { factoryCalls += 1; return fake }) }
         #expect((try payload(from: deleteOut))["action"] as? String == "delete")
         #expect(factoryCalls == 0)
         #expect(fake.requestedAccess.isEmpty)
@@ -1177,9 +1312,9 @@ struct RemindersCommandExecutionTests {
         // logic tier.
         let command = try RemindersDoctor.parse([])
 
-        let (blockedStreams, blockedOut) = streams()
+        let (blockedStreams, blockedOut, _) = streams()
         var probed: [EventStore.Entity] = []
-        try Output.withStreams(blockedStreams) {
+        try runPinned(blockedStreams) {
             try command.run(
                 authorizationStatus: { entity in
                     probed.append(entity)
@@ -1198,8 +1333,8 @@ struct RemindersCommandExecutionTests {
         #expect(blockedNotes.count == 2)   // preflight note + the not-ready note
         #expect(probed == [.reminder, .event])
 
-        let (readyStreams, readyOut) = streams()
-        try Output.withStreams(readyStreams) {
+        let (readyStreams, readyOut, _) = streams()
+        try runPinned(readyStreams) {
             try command.run(authorizationStatus: { _ in .fullAccess },
                             preflight: { Permissions.Preflight(full_disk_access: true) })
         }

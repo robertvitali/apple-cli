@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import AppleKit
 @testable import MailKit
 
 // Pure-function tests for the Mail domain — no TCC, no live data (synthetic rows only).
@@ -201,5 +202,101 @@ struct SelectionDateTests {
         #expect(MailScript.utcFromLocalComponents("", timeZone: ny) == nil)
         #expect(MailScript.utcFromLocalComponents("not a date", timeZone: ny) == nil)
         #expect(MailScript.utcFromLocalComponents("2026-01-24", timeZone: ny) == nil)
+    }
+}
+
+// MARK: - Diagnostics reach the SCOPED stderr
+
+/// `emitMessages`'s two `--text` diagnostics — the pagination hint and the
+/// system-mailbox-exclusion disclosure — must go through the SCOPED stderr, never a direct
+/// `FileHandle.standardError.write`. A direct file-handle write bypasses `Output.withStreams`
+/// entirely, which is the defect `AddressBook.load`'s `warningSink` documents: the bytes escape a
+/// caller's captured stderr and land on the real terminal, so a test cannot see them and a caller
+/// cannot redirect them.
+///
+/// This pins the SINK: both lines must arrive on the scoped stderr, byte-for-byte unchanged, and
+/// never on stdout — `--text` renders the rows there through `Output.printText`, and stdout is the
+/// stream a caller parses.
+@Suite("emitMessages diagnostics")
+struct EmitMessagesDiagnosticsTests {
+    /// One synthetic row, entirely placeholder-valued (RFC-reserved `example.com`, an invented
+    /// name), so the rendered `--text` output the assertions match on contains no real data.
+    private func row() -> MailMessage {
+        MailMessage(
+            id: "1",
+            message_id: "1",
+            rowid: 1,
+            subject: "apple-cli-test synthetic subject",
+            sender: "Jane Doe <jane@example.com>",
+            mailbox: "INBOX",
+            account: "Example Account",
+            read_status: true,
+            is_read: true,
+            flagged: false,
+            has_attachments: false,
+            attachment_count: 0)
+    }
+
+    @Test("the --text pagination and exclusion notes go to the scoped stderr, not the process one")
+    func textDiagnosticsUseTheScopedStream() throws {
+        // A ROW is present deliberately. With an empty `messages` array, "the notes are not on
+        // stdout" is vacuous — stdout is empty either way — so a mutant that wrote both notes to
+        // stdout via `Output.printText` would still pass. The row makes stdout non-empty and gives
+        // the split a witness: rendered row THERE, notes NOT there.
+        var result = MailMessagesResult(
+            account: nil, mailbox: "All", messages: [row()], count: 1,
+            offset: 0, limit: 25, has_more: true, next_offset: 25, sort: nil)
+        result.system_folders_excluded = true
+
+        let stdout = MemoryOutputSink()
+        let stderr = MemoryOutputSink()
+        try Output.withStreams(CLIStreams(stdout: stdout, stderr: stderr)) {
+            try emitMessages(result, json: false)
+        }
+
+        let diagnostics = String(decoding: stderr.data, as: UTF8.self)
+        #expect(diagnostics == "… more (next --offset 25)\n"
+                + "(system mailboxes excluded — pass --include-system-folders to include "
+                + "Trash/Junk/Sent/Drafts/Spam)\n")
+        let rendered = String(decoding: stdout.data, as: UTF8.self)
+        #expect(rendered.contains("apple-cli-test synthetic subject"),
+                "the row belongs on stdout — it is the --text rendering of the payload")
+        #expect(!rendered.contains("next --offset"), "the pagination hint must not reach stdout")
+        #expect(!rendered.contains("system mailboxes excluded"),
+                "the exclusion disclosure must not reach stdout")
+
+        // …and the JSON path emits neither note, since both are outside the versioned contract.
+        let jsonOut = MemoryOutputSink()
+        let jsonErr = MemoryOutputSink()
+        try Output.withStreams(CLIStreams(stdout: jsonOut, stderr: jsonErr)) {
+            try emitMessages(result, json: true)
+        }
+        #expect(jsonErr.data.isEmpty)
+        #expect(!jsonOut.data.isEmpty)
+    }
+
+    /// The COMPLEMENT, and the half that kills a widened guard. The positive case above proves the
+    /// notes appear when both conditions hold; only this proves they appear ONLY then. Drop
+    /// `hasMore`/`== true` from either `if` in `emitMessages` and the notes fire unconditionally —
+    /// a change the positive case cannot see, because its result satisfies both conditions.
+    @Test("a single-page result with nothing excluded emits no diagnostics at all")
+    func noDiagnosticsWhenNeitherConditionHolds() throws {
+        // `has_more: false`, `next_offset: nil`, `system_folders_excluded` left nil — the ordinary
+        // shape of a complete, unfiltered page.
+        let result = MailMessagesResult(
+            account: nil, mailbox: "INBOX", messages: [row()], count: 1,
+            offset: 0, limit: 25, has_more: false, next_offset: nil, sort: nil)
+
+        let stdout = MemoryOutputSink()
+        let stderr = MemoryOutputSink()
+        try Output.withStreams(CLIStreams(stdout: stdout, stderr: stderr)) {
+            try emitMessages(result, json: false)
+        }
+
+        #expect(stderr.data.isEmpty, "neither diagnostic condition holds, so stderr must be silent")
+        let rendered = String(decoding: stdout.data, as: UTF8.self)
+        #expect(rendered.contains("apple-cli-test synthetic subject"))
+        #expect(!rendered.contains("next --offset"))
+        #expect(!rendered.contains("system mailboxes excluded"))
     }
 }

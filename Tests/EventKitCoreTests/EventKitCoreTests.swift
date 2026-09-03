@@ -346,6 +346,36 @@ struct EventStoreBackendTests {
         #expect(rows.map(\.title) == ["apple-cli-test earlier", "apple-cli-test later"])
     }
 
+    /// The other half of that sort: its key coalesces a missing `startDate` to `.distantPast`.
+    /// EventKit really can hand back an event with no start date, and `eventsSorted` above never
+    /// supplies one — so the `?? .distantPast` branch was unexecuted, and changing it (to
+    /// `.distantFuture`, or to a force-unwrap) stayed green. This pins that such a row sorts
+    /// FIRST and, more importantly, that the comparator survives it at all.
+    @Test("an event with no start date sorts first through the distantPast coalescing")
+    func eventsSortedWithMissingStartDate() {
+        let fake = FakeEventKitBackend()
+        let undated = EKEvent(eventStore: fake.store)
+        undated.title = "apple-cli-test undated"
+        // Precondition: a freshly-constructed EKEvent really does report a nil start date, so a
+        // failure below is the comparator and not a fixture that quietly acquired one.
+        #expect(undated.startDate == nil)
+
+        fake.eventRows = [
+            event("apple-cli-test later", start: 200, store: fake.store),
+            undated,
+            event("apple-cli-test earlier", start: 100, store: fake.store),
+        ]
+
+        let rows = EventStore(backend: fake).events(
+            start: Date(timeIntervalSince1970: 0),
+            end: Date(timeIntervalSince1970: 300),
+            calendars: nil)
+
+        #expect(rows.map(\.title) == ["apple-cli-test undated",
+                                      "apple-cli-test earlier",
+                                      "apple-cli-test later"])
+    }
+
     @Test("reminder fetch bridges nil callback rows to an empty array")
     func remindersNilCallbackIsEmpty() throws {
         let fake = FakeEventKitBackend()
@@ -382,6 +412,73 @@ struct EventStoreBackendTests {
         fake.thrownError = NSError(domain: "synthetic", code: 2)
         #expect(throws: AppleError.self) {
             try store.save(event, span: .thisEvent, commit: true)
+        }
+    }
+
+    /// EVERY `catch { throw Self.mapError(error) }` arm on the wrapper, one case per arm, each
+    /// asserting the MAPPED type + exit code rather than merely that something was thrown.
+    ///
+    /// `mutatorsDelegateAndMapErrors` above covers exactly one of the seven, and only with
+    /// `#expect(throws: AppleError.self)` — which cannot distinguish a mapped error from a raw
+    /// rethrow, and says nothing about the other six. Deleting any single `catch` line hands the
+    /// bare `NSError`/`EKError` to `runGuarded`, which has no contractual type or exit code for
+    /// it; that is the defect this pins, per arm.
+    ///
+    /// Three error kinds per arm, deliberately: a bad-input `EKError` (→ validation / 64), an
+    /// `EKError` the mapper treats as an authorization failure (→ authorization_denied / 77), and
+    /// an unrelated `NSError` (→ upstream / 69). Any one alone would still pass an arm that threw a
+    /// hardcoded error; the SET is what proves the backend's value actually flows through
+    /// `mapError` — and the 77 case is the one an operator acts on differently from the other two
+    /// (grant TCC, not fix the input), so an arm that flattened it would misroute a real user.
+    /// `MapErrorTests` covers the classification itself — this covers the wiring.
+    @Test("every mutator arm maps a backend error through mapError rather than rethrowing it raw",
+          arguments: ["save event", "remove event", "save reminder", "remove reminder",
+                      "saveCalendar", "removeCalendar", "commit"])
+    func mutatorArmsMapBackendErrors(arm: String) throws {
+        let cases: [(Error, String, Int32)] = [
+            (EKError(_nsError: NSError(domain: EKErrorDomain,
+                                       code: EKError.Code.eventNotMutable.rawValue)),
+             AppleErrorType.validation, AppleExit.usage),
+            (EKError(_nsError: NSError(domain: EKErrorDomain,
+                                       code: EKError.Code.eventStoreNotAuthorized.rawValue)),
+             AppleErrorType.permissionDenied, AppleExit.permissionDenied),
+            (NSError(domain: "apple-cli-test.synthetic", code: 7),
+             AppleErrorType.upstream, AppleExit.upstream),
+        ]
+
+        for (backendError, expectedType, expectedExit) in cases {
+            let fake = FakeEventKitBackend()
+            fake.thrownError = backendError
+            let store = EventStore(backend: fake)
+            let event = event("apple-cli-test event", start: 100, store: fake.store)
+            let reminder = reminder("apple-cli-test reminder", store: fake.store)
+            let list = calendar("apple-cli-test list", entity: .reminder, store: fake.store)
+
+            let call: () throws -> Void
+            switch arm {
+            case "save event":      call = { try store.save(event, span: .thisEvent, commit: true) }
+            case "remove event":    call = { try store.remove(event, span: .thisEvent, commit: true) }
+            case "save reminder":   call = { try store.save(reminder, commit: true) }
+            case "remove reminder": call = { try store.remove(reminder, commit: true) }
+            case "saveCalendar":    call = { try store.saveCalendar(list, commit: true) }
+            case "removeCalendar":  call = { try store.removeCalendar(list, commit: true) }
+            case "commit":          call = { try store.commit() }
+            default:
+                // A `default:` that ran `commit()` silently re-tested the commit arm for any
+                // typo'd or newly-added argument, so an arm could be renamed in the `arguments:`
+                // list above and still report seven green cases while its real call site went
+                // untested. Fail loudly instead.
+                Issue.record("unhandled arm '\(arm)' — add it to the switch or fix the arguments list")
+                return
+            }
+
+            var thrown: Error?
+            do { try call() } catch { thrown = error }
+            let mapped = try #require(
+                thrown as? AppleError,
+                "\(arm): expected a mapped AppleError, got \(String(describing: thrown))")
+            #expect(mapped.type == expectedType, "\(arm) (\(expectedType))")
+            #expect(mapped.exitCode == expectedExit, "\(arm) (\(expectedExit))")
         }
     }
 

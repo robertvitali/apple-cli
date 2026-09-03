@@ -227,6 +227,15 @@ fresh suite instance per test, so its `deinit` reclaims them. Hand-rolled helper
 `apple-cli-*` files accumulated in the shared temp root, growing 25 per `swift test`, in the very
 repo whose product bug was leaking into that same directory.
 
+**Exporting `APPLE_TEST_MODE` / `APPLE_DRY_RUN` / `APPLE_TEST_SANDBOX` / `APPLE_TEST_RECIPIENTS`
+session-wide turns the logic tier's ambient-environment canary red by design — prefix individual
+commands (`APPLE_TEST_MODE=1 apple …`) instead of exporting. That canary is
+`AmbientEnvironmentCanaryTests` in `Tests/AppleKitTests`, and as of this writing it is the only test
+that reports such an export (every write-posture suite currently pins the variables absent — an
+invariant kept by convention, not enforced, so a new write-posture suite added without a pin would
+become a second reporter). It fires on any run that includes `AppleKitTests`; a `--filter`ed lane
+that excludes that target goes green with the export still in place.**
+
 Three test tiers: **logic** (swift-testing, pure — CI + local), **CLI smoke** (bats,
 invokes the binary — LOCAL ONLY: measured 2026-08-30, hosted runners lack the real
 Apple state many tests exercise, failing environment-dependently and crawling at
