@@ -11,13 +11,14 @@ private let maxBatchIds = 500
 
 /// In execute mode, resolve every id and confirm its title is a labeled test target. Any real
 /// (unlabeled) or unresolvable target aborts the whole batch before a single mutation runs.
-private func verifyBatchTargetsLabeled(_ ids: [String], _ script: NotesScript, sandboxActive: Bool) throws {
+private func verifyBatchTargetsLabeled(_ ids: [String], _ script: NotesScript, sandboxActive: Bool,
+                                       prefix: String? = nil) throws {
     guard sandboxActive else { return }
     for id in ids {
         guard let note = try script.getNoteById(id: id) else {
             throw AppleError.notFound("Batch aborted: note id \"\(id)\" not found (cannot verify it is test data).")
         }
-        try guardLiveWrite(labeledName: note.title, sandboxActive: sandboxActive)
+        try guardLiveWrite(labeledName: note.title, sandboxActive: sandboxActive, prefix: prefix)
     }
 }
 
@@ -94,19 +95,27 @@ struct BatchDeleteCmd: ParsableCommand {
     @Option(name: .long, parsing: .upToNextOption, help: "Note ids to delete.") var ids: [String]
 
     func run() throws {
+        try run(scriptFactory: { NotesScript(store: LiveNotesStore()) })
+    }
+
+    /// Dependency-injection seam. `run()` above binds the live boundaries and is the ONLY
+    /// binding production uses — no flag or environment variable can select another. See
+    /// `NotesStoreReading` for why the seam exists.
+    func run(scriptFactory: () -> NotesScript,
+             env: NotesWriteEnv = .live) throws {
         try runGuarded(tool: notesTool) {
             guard !ids.isEmpty else { throw AppleError.validation("No note ids provided (--ids).") }
             guard ids.count <= maxBatchIds else { throw AppleError.validation("Too many ids (max \(maxBatchIds)).") }
-            let gate = try resolveNotesWrite(global, defaultDryRun: false)
+            let gate = try resolveNotesWrite(global, defaultDryRun: false, env: env)
             guard gate.willExecute else {
-                let extra = gate.sandboxActive ? sandboxTargetUncheckedDetail() : ""
+                let extra = gate.sandboxActive ? sandboxTargetUncheckedDetail(prefix: env.sandboxPrefix) : ""
                 try emitNotesWrite(DryRunPreview("batch-delete-notes", "Would delete \(ids.count) note(s) (Notes.app moves them to Recently Deleted, where they stay recoverable). Re-run without --dry-run.\(extra)"),
                                    json: global.json, sandboxActive: gate.sandboxActive,
                                    human: "[dry-run] would delete \(ids.count) note(s).")
                 return
             }
-            let script = NotesScript()
-            try verifyBatchTargetsLabeled(ids, script, sandboxActive: gate.sandboxActive)
+            let script = scriptFactory()
+            try verifyBatchTargetsLabeled(ids, script, sandboxActive: gate.sandboxActive, prefix: env.sandboxPrefix)
             let results = script.batchDeleteNotes(ids: ids)
             try requireAnyBatchSuccess(results, verb: "delete")
             let succeeded = results.filter { $0.success }.count
@@ -129,24 +138,33 @@ struct BatchMoveCmd: ParsableCommand {
     @Option(name: .long, help: "Account (defaults to iCloud).") var account: String?
 
     func run() throws {
+        try run(scriptFactory: { NotesScript(store: LiveNotesStore()) })
+    }
+
+    /// Dependency-injection seam. `run()` above binds the live boundaries and is the ONLY
+    /// binding production uses — no flag or environment variable can select another. See
+    /// `NotesStoreReading` for why the seam exists.
+    func run(scriptFactory: () -> NotesScript,
+             env: NotesWriteEnv = .live) throws {
         try runGuarded(tool: notesTool) {
             guard !ids.isEmpty else { throw AppleError.validation("No note ids provided (--ids).") }
             guard ids.count <= maxBatchIds else { throw AppleError.validation("Too many ids (max \(maxBatchIds)).") }
             try requireNonEmptyFolderName(folder)
-            let gate = try resolveNotesWrite(global, defaultDryRun: false)
+            let gate = try resolveNotesWrite(global, defaultDryRun: false, env: env)
             // The destination folder comes from argv, so its label check is computable here and
             // runs on BOTH paths — a sandboxed preview refuses a real destination exactly as
             // execute would, without touching Notes.app.
-            try guardLiveWrite(labeledName: folder, sandboxActive: gate.sandboxActive)
+            // Per COMPONENT: `apple-cli-test parent/Real Folder` names an unlabeled destination.
+            try guardLiveFolderPath(folder, sandboxActive: gate.sandboxActive, prefix: env.sandboxPrefix)
             guard gate.willExecute else {
-                let extra = gate.sandboxActive ? sandboxTargetUncheckedDetail() : ""
+                let extra = gate.sandboxActive ? sandboxTargetUncheckedDetail(prefix: env.sandboxPrefix) : ""
                 try emitNotesWrite(DryRunPreview("batch-move-notes", "Would move \(ids.count) note(s) to \"\(folder)\". Re-run without --dry-run.\(extra)"),
                                    json: global.json, sandboxActive: gate.sandboxActive,
                                    human: "[dry-run] would move \(ids.count) note(s) to \(folder).")
                 return
             }
-            let script = NotesScript()
-            try verifyBatchTargetsLabeled(ids, script, sandboxActive: gate.sandboxActive)
+            let script = scriptFactory()
+            try verifyBatchTargetsLabeled(ids, script, sandboxActive: gate.sandboxActive, prefix: env.sandboxPrefix)
             let results = script.batchMoveNotes(ids: ids, folder: folder, account: account)
             try requireAnyBatchSuccess(results, verb: "move", folder: folder)
             let succeeded = results.filter { $0.success }.count

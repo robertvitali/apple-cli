@@ -318,7 +318,7 @@ extension NotesScript {
         if html.isEmpty { return "" }
         var md = try NotesText.htmlToMarkdown(html)
         if let note = try? getNoteDetails(title: title, account: account) {
-            let result = NotesStore.checklistItems(noteId: note.id)
+            let result = store.checklistItems(noteId: note.id)
             if let items = result.items { md = NotesText.enrichMarkdownWithChecklists(md, items: items) }
         }
         return md
@@ -328,7 +328,7 @@ extension NotesScript {
         let html = try getNoteContentById(id: id)
         if html.isEmpty { return "" }
         var md = try NotesText.htmlToMarkdown(html)
-        let result = NotesStore.checklistItems(noteId: id)
+        let result = store.checklistItems(noteId: id)
         if let items = result.items { md = NotesText.enrichMarkdownWithChecklists(md, items: items) }
         return md
     }

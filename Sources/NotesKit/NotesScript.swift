@@ -13,13 +13,32 @@ import AppleKit
 /// embedded, and only after Swift-side validation.
 struct NotesScript {
     let runner: AppleScriptRunning
+    /// The `NoteStore.sqlite` reader used by the ONE wrapper pair that mixes the two boundaries:
+    /// `getNoteMarkdown`/`getNoteMarkdownById` annotate the AppleScript-derived markdown with
+    /// checklist done-state, which only the store can supply. Holding it here (rather than
+    /// reaching for the `NotesStore` statics) is what lets a markdown test run without opening
+    /// the operator's real Notes database.
+    let store: any NotesStoreReading
     let defaultAccount: String
 
-    /// Defaults preserve every existing `NotesScript()` / `NotesScript(...)` call site unchanged;
     /// `runner` is injectable so tests can pin the retry policy (see `AppleScriptRunning`) without
-    /// a live Notes.app.
-    init(runner: AppleScriptRunning = AppleScriptRunner(), defaultAccount: String = "iCloud") {
+    /// a live Notes.app, and `store` for the same reason on the SQLite side.
+    ///
+    /// `store` has NO DEFAULT, deliberately. `NotesStoreReading` claims that the ONLY way a live
+    /// `NoteStore.sqlite` binding is constructed is a production `run()` shim; a
+    /// `store: any NotesStoreReading = LiveNotesStore()` default here contradicted that — it was a
+    /// second construction site, reached by every bare `NotesScript()`, so the seam was
+    /// conventional rather than structural and a test that forgot the argument would have silently
+    /// opened the operator's real Notes database. Requiring it makes the claim true by
+    /// construction: production shims say `NotesScript(store: LiveNotesStore())` in so many words,
+    /// and a test that omits it does not compile. `runner` keeps its default because
+    /// `AppleScriptRunner` makes no such claim — it is stateless until a script actually runs, and
+    /// every command test binds a fake anyway.
+    init(runner: AppleScriptRunning = AppleScriptRunner(),
+         store: any NotesStoreReading,
+         defaultAccount: String = "iCloud") {
         self.runner = runner
+        self.store = store
         self.defaultAccount = defaultAccount
     }
 

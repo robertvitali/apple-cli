@@ -52,6 +52,89 @@ JSON output are stable per the versioning policy — breaking changes bump
   before.
   `--text` annotates attached transfer names, or stored-path basenames when transfer names are
   unavailable, so those messages do not render as a blank line.
+- **In the Notes test sandbox, `notes delete-folder` now refuses unless every folder and every
+  note the erase would destroy carries the `apple-cli-test` label.** The sandbox
+  (`--test-mode` / `APPLE_TEST_MODE`) checked only the name the caller typed, and checked it as
+  one string, while Notes resolves a path segment by segment and the delete then cascades over
+  everything inside the resolved folder. Two ways real data was destroyed by a command reporting
+  itself sandbox-confined: `notes delete-folder "apple-cli-test parent/Real Folder"` passed the
+  whole-string check and erased the *unlabeled child*; and `notes delete-folder
+  "apple-cli-test parent"` passed every check while erasing whatever unlabeled notes and
+  sub-folders that folder happened to contain. Cascaded notes do **not** go to Recently Deleted,
+  so both were irrecoverable. `notes delete-folder` now enumerates the cascade set Notes.app will
+  report — the target path component by component, every descendant folder, and every note in the
+  target and in those descendants — and refuses if any member is unlabeled, on the preview path as
+  well as on execute. The cascade is resolved the way Notes resolves it: folder names are matched
+  case-insensitively, so a typed `apple-cli-test parent` that lands on a real folder named
+  `Apple-CLI-Test Parent` is checked against the name Notes actually holds, and that folder's
+  descendants are found rather than skipped. If the typed path matches no folder exactly but does
+  match one loosely — a difference in accents or character width, which Notes may still resolve —
+  the delete is refused rather than narrowed, because the set it would destroy cannot be
+  established. It also checks against the built-in `apple-cli-test`
+  label and ignores an `APPLE_TEST_SANDBOX` override, so widening the label cannot widen what an
+  erase may touch. The per-component half of the rule also now applies to the other folder-path
+  surfaces: `notes create --folder`, `notes move --folder`, `notes batch-move --folder` and
+  `notes create-folder`. A fully-labeled folder tree is still deletable and unlabeled folders
+  elsewhere in the account do not block it. **The check is a snapshot taken immediately before the
+  erase**: enumeration and deletion are separate calls to Notes.app, which offers no transactional
+  delete, so an iCloud sync landing between them could still add an unlabeled item to the subtree.
+  The per-note enumeration is also best-effort — a note whose name or id Notes.app cannot report is
+  omitted from the check, and the cascade still destroys it. Folder-path reconstruction shares the
+  same best-effort property: a folder whose parent Notes.app does not report in the same listing is
+  rendered by its bare name (ancestry stripped), so it can fail the descendant match and go
+  unchecked while the cascade still destroys it.
+  **New cost inside the sandbox**: a `notes delete-folder` preview now reads Notes.app — one folder
+  listing for the account plus one note listing per folder in the cascade, unbounded in the size of
+  the subtree — so a sandboxed preview can now fail where it previously reached nothing and could
+  not fail at all: `upstream_error` (exit 69) if Notes.app is unreachable, `authorization_denied`
+  (exit 77) if Automation is not granted, and `not_found` (exit 65) if the folder does not exist —
+  the last of which makes a sandboxed preview of a not-yet-created folder an error rather than a
+  preview. Outside the sandbox nothing changes: no
+  enumeration runs, the preview still reaches nothing, and an execute reaches Notes.app exactly
+  once. Refusals reuse the existing sandbox refusal — exit 64, a `validation` error with
+  `sandbox: true` — naming the offending folder or note, so `schema_version` is unchanged at 1.
+- **Notes writes addressed by `--title` now act on the note they actually resolved, and in the
+  sandbox they check that note's real name rather than the title you typed.** Two defects, on
+  overlapping sets of commands. First, the label gate, which affected **four** — `notes update`,
+  `append`, `delete` and `move`: Notes matches titles case-insensitively, so a sandboxed
+  `notes update --title "apple-cli-test x"` could resolve a real note actually named
+  `Apple-CLI-Test X`, whose name fails the label check — the typed spelling passed the gate and
+  the real note was overwritten. All four now check the fetched name. Second, affecting **three** —
+  `notes update`, `append` and `delete`, and outside the sandbox too: they looked the note up by
+  title to check it and then addressed the mutation **by title again**, a second lookup that can
+  resolve a different note when two notes share a title or one is renamed between the two calls —
+  so `append` could concatenate one note's body onto another, and `delete` could destroy a note
+  that was never checked. Those three now mutate the note id the first lookup resolved; `notes
+  move` was already addressing the resolved id, which is why only its label check needed fixing.
+  Byte-for-byte the same content is written and the same JSON is emitted — a
+  title-addressed response still omits `id` — so no field is added, removed or retyped and
+  `schema_version` is unchanged at 1. Sandbox refusals reuse the existing refusal: exit 64, a
+  `validation` error with `sandbox: true`, naming the resolved note. A `--dry-run` of a
+  `--title` write checks the typed name on the preview path — that name is argv-supplied, so the
+  label check genuinely runs there — but the execute path additionally re-checks the note's FETCHED
+  name (a case-insensitive `--title` lookup can resolve a real note whose actual name is spelled
+  differently within the prefix), so a preview can read clean and the execute still refuse. Only
+  `--id` previews, which have no name to check without reading Notes.app, disclose an unchecked
+  gate. One ordering change on the same flip:
+  `notes save-attachment` now validates the write environment before the destination path, so an
+  invocation carrying both a malformed `APPLE_TEST_MODE` and an unwritable `--path` reports the
+  environment problem rather than the path one — both are a `validation` error with exit 64, so
+  only the message differs.
+- **AppleScript-backed commands no longer hang when the targeted app writes a large volume to
+  `osascript`'s standard error.** Every domain reaches Apple's apps through one `osascript`
+  runner, and that runner read the child's standard output all the way to end-of-file before it
+  read standard error at all. A child that filled its ~64 KiB stderr pipe first therefore stopped
+  and waited for room the runner would not make until the child exited — and the child could not
+  exit — so the command hung indefinitely with no output, no error, and no timeout on the forms
+  that carry no deadline. Neither stream's size is under this tool's control: `osascript` relays
+  whatever the targeted app hands back, on either stream. Both streams are now drained
+  concurrently, and both before the process is reaped, so the exit status and both captures stay
+  exact. The same ordering fix applies to the stdin-delivered form (`use framework` scripts),
+  which additionally now starts draining before it writes the script, and reports a child that
+  exits without reading it as a normal launch error instead of dying on `SIGPIPE`. `schema_version`
+  is unchanged at 1 and no field, error type, or exit code is redefined; commands that already
+  completed behave identically. The two failures this fixes previously produced a hang or a signal
+  death with no envelope at all, and now surface as the ordinary `upstream_error` envelope.
 - Manual: [apple command reference](https://github.com/robertvitali/apple-cli/blob/main/docs/manual/index.md).
 
 ## [26.0.0] - 2026-08-30

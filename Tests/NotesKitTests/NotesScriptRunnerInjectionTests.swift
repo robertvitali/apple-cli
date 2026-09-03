@@ -54,7 +54,7 @@ struct NotesScriptRunnerRetryPolicyTests {
     @Test("READ policy (default maxAttempts) retries once on a transient failure, then succeeds")
     func readRetriesOnceThenSucceeds() throws {
         let fake = FakeRunner(failCount: 1, failureStderr: "AppleEvent timed out", successValue: "ok")
-        let out = try NotesScript(runner: fake).run("return \"ok\"", args: [])
+        let out = try quietScript(fake).run("return \"ok\"", args: [])
         #expect(out == "ok")
         #expect(fake.invocationCount == 2)
     }
@@ -64,7 +64,7 @@ struct NotesScriptRunnerRetryPolicyTests {
         // Same failure shape as the read-retry case above (would succeed on a 2nd attempt) —
         // driven through the mutation attempt budget to prove the retry never happens.
         let fake = FakeRunner(failCount: 1, failureStderr: "Notes is busy", successValue: "ok")
-        let script = NotesScript(runner: fake)
+        let script = quietScript(fake)
         #expect(throws: AppleError.self) {
             try script.run("delete note id (item 1 of argv)", args: ["x"],
                            maxAttempts: NotesScript.maxMutationAttempts)
@@ -76,7 +76,7 @@ struct NotesScriptRunnerRetryPolicyTests {
     func nonTransientFailureFastFailsUnderReadPolicy() {
         let fake = FakeRunner(failCount: 5, failureStderr: "Notes got an error: Can\u{2019}t get note \"x\". (-1728)",
                               successValue: "ok")
-        let script = NotesScript(runner: fake)
+        let script = quietScript(fake)
         #expect(throws: AppleError.self) {
             try script.run("return body of note (item 1 of argv)", args: ["x"])
         }
@@ -93,7 +93,7 @@ struct NotesScriptMutationCallSitePinTests {
     @Test("createNote never retries")
     func createNoteNeverRetries() {
         let fake = AlwaysFailingRunner()
-        let script = NotesScript(runner: fake)
+        let script = quietScript(fake)
         #expect(throws: AppleError.self) {
             try script.createNote(title: "t", content: "c", folder: nil, account: nil, html: false)
         }
@@ -103,7 +103,7 @@ struct NotesScriptMutationCallSitePinTests {
     @Test("updateNoteById never retries")
     func updateNoteByIdNeverRetries() {
         let fake = AlwaysFailingRunner()
-        let script = NotesScript(runner: fake)
+        let script = quietScript(fake)
         #expect(throws: AppleError.self) {
             // html: true so the write never first reads the existing title (a separate call) —
             // isolates this test to the single mutation call site under pin.
@@ -115,7 +115,7 @@ struct NotesScriptMutationCallSitePinTests {
     @Test("updateNote (by title) never retries")
     func updateNoteByTitleNeverRetries() {
         let fake = AlwaysFailingRunner()
-        let script = NotesScript(runner: fake)
+        let script = quietScript(fake)
         #expect(throws: AppleError.self) {
             try script.updateNote(title: "t", newTitle: nil, newContent: "<p>c</p>", account: nil, html: true)
         }
@@ -125,7 +125,7 @@ struct NotesScriptMutationCallSitePinTests {
     @Test("deleteNoteById never retries")
     func deleteNoteByIdNeverRetries() {
         let fake = AlwaysFailingRunner()
-        let script = NotesScript(runner: fake)
+        let script = quietScript(fake)
         #expect(throws: AppleError.self) {
             try script.deleteNoteById(id: validNoteId)
         }
@@ -135,7 +135,7 @@ struct NotesScriptMutationCallSitePinTests {
     @Test("deleteNote (by title) never retries")
     func deleteNoteByTitleNeverRetries() {
         let fake = AlwaysFailingRunner()
-        let script = NotesScript(runner: fake)
+        let script = quietScript(fake)
         #expect(throws: AppleError.self) {
             try script.deleteNote(title: "t", account: nil)
         }
@@ -145,7 +145,7 @@ struct NotesScriptMutationCallSitePinTests {
     @Test("moveNoteById never retries")
     func moveNoteByIdNeverRetries() {
         let fake = AlwaysFailingRunner()
-        let script = NotesScript(runner: fake)
+        let script = quietScript(fake)
         #expect(throws: AppleError.self) {
             try script.moveNoteById(id: validNoteId, folder: "Work", account: nil)
         }
@@ -155,7 +155,7 @@ struct NotesScriptMutationCallSitePinTests {
     @Test("deleteFolder never retries")
     func deleteFolderNeverRetries() {
         let fake = AlwaysFailingRunner()
-        let script = NotesScript(runner: fake)
+        let script = quietScript(fake)
         #expect(throws: AppleError.self) {
             try script.deleteFolder(name: "Work", account: nil)
         }
@@ -167,7 +167,7 @@ struct NotesScriptMutationCallSitePinTests {
     @Test("batchDeleteNotes never retries; the AppleScript call attempts exactly once")
     func batchDeleteNeverRetries() {
         let fake = AlwaysFailingRunner()
-        let script = NotesScript(runner: fake)
+        let script = quietScript(fake)
         let results = script.batchDeleteNotes(ids: [validNoteId])
         #expect(results.count == 1)
         #expect(results.first?.success == false)
@@ -177,7 +177,7 @@ struct NotesScriptMutationCallSitePinTests {
     @Test("batchMoveNotes never retries; the AppleScript call attempts exactly once")
     func batchMoveNeverRetries() {
         let fake = AlwaysFailingRunner()
-        let script = NotesScript(runner: fake)
+        let script = quietScript(fake)
         let results = script.batchMoveNotes(ids: [validNoteId], folder: "Work", account: nil)
         #expect(results.count == 1)
         #expect(results.first?.success == false)

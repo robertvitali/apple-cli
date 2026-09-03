@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import TestSupport
 @testable import NotesKit
 @testable import AppleKit
 
@@ -174,10 +175,15 @@ struct ScriptParsingTests {
 /// opted into it. Review of the flip found the whole change was pinned by no test in either
 /// tier — flipping `defaultDryRun` back to `true` left every suite green. This is that pin.
 ///
-/// These read the real process environment and assume `APPLE_TEST_MODE` / `APPLE_DRY_RUN` are
-/// unset (asserted below, so a polluted env fails legibly). The env-SET branches belong to the
-/// AppleKit core tier, which owns the `envVar:` seams — mutating process env here would race the
-/// parallel suites, which is exactly the 6-in-12 flake the Contacts flip had to fix.
+/// `resolveNotesWrite` reads `APPLE_TEST_MODE` / `APPLE_DRY_RUN` from the PROCESS environment when
+/// no seam overrides them, so every pin below runs inside `pinnedEnv` — a window holding the whole
+/// write-posture set absent. Previously these read the ambient environment with no window at all
+/// and merely ASSERTED it was clean, which left two ways to get a wrong verdict: an operator with
+/// `APPLE_DRY_RUN=1` exported turned the default-execute pin red for the wrong reason, and a
+/// concurrent suite's open `setenv` window (swift-testing runs these suites in parallel over one
+/// process environment) could flip a value mid-assertion, where the clean-env test might not even
+/// be the one that observed it. The env-SET branches still belong to the AppleKit core tier, which
+/// owns the `envVar:` seams; this window is about making the UNSET branch deterministic here.
 @Suite("Notes write-model v2 posture")
 struct NotesWriteModelV2Tests {
     func opts(_ args: [String]) throws -> GlobalOptions { try GlobalOptions.parse(args) }
@@ -185,32 +191,57 @@ struct NotesWriteModelV2Tests {
     /// which MailKitTests setenv()s in parallel inside this same process.
     let P = TestMode.canonicalSandboxPrefix
 
+    /// The whole write-posture set pinned absent: `withoutSandboxOverrides` covers
+    /// `APPLE_TEST_SANDBOX` / `APPLE_TEST_MODE` / `APPLE_TEST_RECIPIENTS`, and the nested window
+    /// adds `APPLE_DRY_RUN` (which moves `willExecute`, not `sandboxActive`, so it is not one of
+    /// the sandbox variables). The lock is recursive and process-wide, so the nesting is safe and
+    /// the window serializes against every other suite's.
+    func pinnedEnv<T>(_ body: () throws -> T) rethrows -> T {
+        try TestEnvironment.withoutSandboxOverrides {
+            try TestEnvironment.with(["APPLE_DRY_RUN": String?.none], body)
+        }
+    }
+
     @Test("the test environment is clean (precondition for every pin below)")
     func cleanEnvironment() {
-        let env = ProcessInfo.processInfo.environment
-        #expect(env["APPLE_TEST_MODE"] == nil || env["APPLE_TEST_MODE"]!.isEmpty)
-        #expect(env["APPLE_DRY_RUN"] == nil || env["APPLE_DRY_RUN"]!.isEmpty)
+        // Same assertion, now made INSIDE the window the other pins run in: it checks that the
+        // window actually delivers an unset pair, rather than hoping the ambient process
+        // environment happened to have one.
+        pinnedEnv {
+            let env = ProcessInfo.processInfo.environment
+            #expect(env["APPLE_TEST_MODE"] == nil || env["APPLE_TEST_MODE"]!.isEmpty)
+            #expect(env["APPLE_DRY_RUN"] == nil || env["APPLE_DRY_RUN"]!.isEmpty)
+        }
     }
 
     @Test("DEFAULT PIN: a flagless notes write EXECUTES and is unsandboxed")
     func defaultsToExecute() throws {
-        let gate = try resolveNotesWrite(opts([]), defaultDryRun: false)
-        #expect(gate.willExecute == true)
-        #expect(gate.sandboxActive == false)
+        try pinnedEnv {
+            let gate = try resolveNotesWrite(opts([]), defaultDryRun: false)
+            #expect(gate.willExecute == true)
+            #expect(gate.sandboxActive == false)
+        }
     }
 
     @Test("--dry-run previews; --execute is redundant; --dry-run wins over --execute")
     func dryRunPrecedence() throws {
-        #expect(try resolveNotesWrite(opts(["--dry-run"]), defaultDryRun: false).willExecute == false)
-        #expect(try resolveNotesWrite(opts(["--execute"]), defaultDryRun: false).willExecute == true)
-        #expect(try resolveNotesWrite(opts(["--dry-run", "--execute"]), defaultDryRun: false).willExecute == false)
+        try pinnedEnv {
+            let preview = try resolveNotesWrite(opts(["--dry-run"]), defaultDryRun: false)
+            let execute = try resolveNotesWrite(opts(["--execute"]), defaultDryRun: false)
+            let both = try resolveNotesWrite(opts(["--dry-run", "--execute"]), defaultDryRun: false)
+            #expect(preview.willExecute == false)
+            #expect(execute.willExecute == true)
+            #expect(both.willExecute == false)
+        }
     }
 
     @Test("--test-mode alone engages the sandbox without forcing a preview")
     func flagEngagesSandbox() throws {
-        let gate = try resolveNotesWrite(opts(["--test-mode"]), defaultDryRun: false)
-        #expect(gate.sandboxActive == true)
-        #expect(gate.willExecute == true)
+        try pinnedEnv {
+            let gate = try resolveNotesWrite(opts(["--test-mode"]), defaultDryRun: false)
+            #expect(gate.sandboxActive == true)
+            #expect(gate.willExecute == true)
+        }
     }
 
     @Test("LIFT PIN: guardLiveWrite confines ONLY inside the sandbox")
@@ -241,15 +272,23 @@ struct NotesWriteModelV2Tests {
         // The unsandboxed no-op path never throws, so there is no error to (wrongly) mark there.
     }
 
-    @Test("--title addressing is checked from argv; --id addressing defers to the execute path")
+    @Test("only --id defers the target check; a typed --title settles it from argv")
     func selectorGuardSplit() throws {
-        // A --title write is fully argv-checkable, so it refuses in the sandbox with nothing
-        // left to disclose — and must NOT claim it skipped a check.
+        // A --title write IS argv-checkable, so an obviously-unlabeled name refuses immediately on
+        // both paths…
         #expect(throws: AppleError.self) {
             _ = try applyArgvSelectorGuard(.title("Zz A Real Note"), sandboxActive: true, prefix: P)
         }
+        // …and a LABELED one has had the gate RUN, not skipped, so the preview discloses nothing.
+        // Claiming a skipped check on the one selector that settles it from argv would be a false
+        // excuse (pinned end-to-end in `bats/hosted/notes.bats`). The execute path's re-check of the
+        // FETCHED title — AppleScript's by-name lookup is case-insensitive, so a labeled spelling
+        // can resolve a real note whose actual title fails the case-sensitive check — is a separate,
+        // unconditional guard and does not depend on this return value.
         #expect(try applyArgvSelectorGuard(.title(P + " n"), sandboxActive: true, prefix: P) == false)
-        // --id addressing genuinely cannot be checked without Notes.app, so the preview says so.
+        // Outside the sandbox there is no check to miss either.
+        #expect(try applyArgvSelectorGuard(.title(P + " n"), sandboxActive: false, prefix: P) == false)
+        // --id addressing cannot be checked at all without Notes.app, so the preview says so.
         #expect(try applyArgvSelectorGuard(.id("x-coredata://A/ICNote/p1"), sandboxActive: true) == true)
         // ...but only when the sandbox is engaged; otherwise there is no check to miss.
         #expect(try applyArgvSelectorGuard(.id("x-coredata://A/ICNote/p1"), sandboxActive: false) == false)

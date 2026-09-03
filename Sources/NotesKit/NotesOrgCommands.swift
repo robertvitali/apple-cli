@@ -13,9 +13,18 @@ struct FoldersCmd: ParsableCommand {
     @Option(name: .long, help: "Account to list folders from.") var account: String?
 
     func run() throws {
+        try run(scriptFactory: { NotesScript(store: LiveNotesStore()) }, storeFactory: { LiveNotesStore() })
+    }
+
+    /// Dependency-injection seam. `run()` above binds the live boundaries and is the ONLY
+    /// binding production uses — no flag or environment variable can select another. See
+    /// `NotesStoreReading` for why the seam exists.
+    func run(scriptFactory: () -> NotesScript,
+             storeFactory: () -> any NotesStoreReading) throws {
         try runGuarded(tool: notesTool) {
-            let folders = try NotesScript().listFolders(account: account)
-            try emitNotes(FolderList(folders: folders, count: folders.count, sync_warning: currentSyncWarning()),
+            let store = storeFactory()
+            let folders = try scriptFactory().listFolders(account: account)
+            try emitNotes(FolderList(folders: folders, count: folders.count, sync_warning: currentSyncWarning(store)),
                 json: global.json,
                 human: folders.isEmpty ? "No folders." : folders.map { "  - \($0.name)" }.joined(separator: "\n"))
         }
@@ -32,20 +41,29 @@ struct CreateFolderCmd: ParsableCommand {
     @Option(name: .long, help: "Account (defaults to iCloud).") var account: String?
 
     func run() throws {
+        try run(scriptFactory: { NotesScript(store: LiveNotesStore()) })
+    }
+
+    /// Dependency-injection seam. `run()` above binds the live boundaries and is the ONLY
+    /// binding production uses — no flag or environment variable can select another. See
+    /// `NotesStoreReading` for why the seam exists.
+    func run(scriptFactory: () -> NotesScript,
+             env: NotesWriteEnv = .live) throws {
         try runGuarded(tool: notesTool) {
             try validateBounds(folder: name, account: account)
             try requireNonEmptyFolderName(name)
-            let gate = try resolveNotesWrite(global, defaultDryRun: false)
+            let gate = try resolveNotesWrite(global, defaultDryRun: false, env: env)
             // The folder name is argv-supplied, so the sandbox label check is computable here
             // and runs on BOTH paths — no store read, and the preview refuses what execute does.
-            try guardLiveWrite(labeledName: name, sandboxActive: gate.sandboxActive)
+            // Per COMPONENT: a nested path creates each segment, and only the first one was checked.
+            try guardLiveFolderPath(name, sandboxActive: gate.sandboxActive, prefix: env.sandboxPrefix)
             guard gate.willExecute else {
                 try emitNotesWrite(DryRunPreview("create-folder", "Would create folder \"\(name)\". Re-run without --dry-run."),
                                    json: global.json, sandboxActive: gate.sandboxActive,
                                    human: "[dry-run] would create folder \"\(name)\".")
                 return
             }
-            let folder = try NotesScript().createFolder(name: name, account: account)
+            let folder = try scriptFactory().createFolder(name: name, account: account)
             try emitNotesExecutedWrite(CreatedFolder(ok: true, folder: folder.name), json: global.json,
                                sandboxActive: gate.sandboxActive,
                                human: "Created folder \"\(folder.name)\".")
@@ -73,18 +91,49 @@ struct DeleteFolderCmd: ParsableCommand {
     @Option(name: .long, help: "Account (defaults to iCloud).") var account: String?
 
     func run() throws {
+        try run(scriptFactory: { NotesScript(store: LiveNotesStore()) })
+    }
+
+    /// Dependency-injection seam. `run()` above binds the live boundaries and is the ONLY
+    /// binding production uses — no flag or environment variable can select another. See
+    /// `NotesStoreReading` for why the seam exists.
+    func run(scriptFactory: () -> NotesScript,
+             env: NotesWriteEnv = .live) throws {
         try runGuarded(tool: notesTool) {
             try validateBounds(folder: name, account: account)
             try requireNonEmptyFolderName(name)
-            let gate = try resolveNotesWrite(global, defaultDryRun: Self.surfaceDefaultDryRun)
-            try guardLiveWrite(labeledName: name, sandboxActive: gate.sandboxActive)
+            let gate = try resolveNotesWrite(global, defaultDryRun: Self.surfaceDefaultDryRun, env: env)
+            // Bound ONCE, above the preview branch, because the sandbox gate below enumerates the
+            // cascade through it on both paths — two `scriptFactory()` calls would be two different
+            // boundaries for one invocation.
+            let script = scriptFactory()
+            // The WHOLE CASCADE, every component, against the CANONICAL label — the three strictest
+            // forms this gate has, because this is the one Notes op that destroys unbounded real
+            // data irreversibly.
+            //
+            // Whole cascade: `deleteFolder` emits a bare `delete <folderRef>` and Notes cascades it
+            // over the entire subtree, so checking only the typed path cleared the container while
+            // the unlabeled notes and sub-folders INSIDE it were erased anyway. Every descendant
+            // folder and every note in the subtree must carry the label too.
+            //
+            // Per component: `splitFolderPath` resolves the specifier, so a whole-string `hasPrefix`
+            // let `apple-cli-test parent/Real Folder` through and the cascade then permanently
+            // erased the unlabeled child and every note in it.
+            //
+            // Canonical, not `env.sandboxPrefix`: `APPLE_TEST_SANDBOX` is caller-redefinable, and
+            // AppleKit's own rule (`TestMode.canonicalSandboxPrefix`) is that widening the override
+            // must not widen what an IRREVERSIBLE op may touch. Every other Notes write is
+            // recoverable and keeps the overridable prefix.
+            try guardLiveFolderCascade(name, account: account, script: script,
+                                       sandboxActive: gate.sandboxActive,
+                                       prefix: TestMode.canonicalSandboxPrefix)
             guard gate.willExecute else {
                 try emitNotesWrite(DryRunPreview("delete-folder", "Would delete folder \"\(name)\" AND EVERY NOTE IN IT. Measured: this cascades, and the cascaded notes do NOT go to Recently Deleted — they are destroyed permanently. Pass --execute to perform it."),
                                    json: global.json, sandboxActive: gate.sandboxActive,
                                    human: "[dry-run] would delete folder \"\(name)\".")
                 return
             }
-            try NotesScript().deleteFolder(name: name, account: account)
+            try script.deleteFolder(name: name, account: account)
             try emitNotesExecutedWrite(CreatedFolder(ok: true, folder: name), json: global.json,
                                sandboxActive: gate.sandboxActive,
                                human: "Deleted folder \"\(name)\".")
@@ -100,8 +149,15 @@ struct AccountsCmd: ParsableCommand {
     @OptionGroup var global: GlobalOptions
 
     func run() throws {
+        try run(scriptFactory: { NotesScript(store: LiveNotesStore()) })
+    }
+
+    /// Dependency-injection seam. `run()` above binds the live boundaries and is the ONLY
+    /// binding production uses — no flag or environment variable can select another. See
+    /// `NotesStoreReading` for why the seam exists.
+    func run(scriptFactory: () -> NotesScript) throws {
         try runGuarded(tool: notesTool) {
-            let accounts = try NotesScript().listAccounts()
+            let accounts = try scriptFactory().listAccounts()
             try emitNotes(AccountList(accounts: accounts, count: accounts.count), json: global.json,
                 human: accounts.isEmpty ? "No accounts." : accounts.map { "  - \($0.name)" }.joined(separator: "\n"))
         }
@@ -116,8 +172,15 @@ struct DefaultLocationCmd: ParsableCommand {
     @OptionGroup var global: GlobalOptions
 
     func run() throws {
+        try run(scriptFactory: { NotesScript(store: LiveNotesStore()) })
+    }
+
+    /// Dependency-injection seam. `run()` above binds the live boundaries and is the ONLY
+    /// binding production uses — no flag or environment variable can select another. See
+    /// `NotesStoreReading` for why the seam exists.
+    func run(scriptFactory: () -> NotesScript) throws {
         try runGuarded(tool: notesTool) {
-            let loc = try NotesScript().getDefaultLocation()
+            let loc = try scriptFactory().getDefaultLocation()
             try emitNotes(loc, json: global.json,
                           human: "Default account: \(loc.account.name)\nDefault folder: \(loc.folder.name)")
         }
@@ -132,8 +195,15 @@ struct SharedCmd: ParsableCommand {
     @OptionGroup var global: GlobalOptions
 
     func run() throws {
+        try run(scriptFactory: { NotesScript(store: LiveNotesStore()) })
+    }
+
+    /// Dependency-injection seam. `run()` above binds the live boundaries and is the ONLY
+    /// binding production uses — no flag or environment variable can select another. See
+    /// `NotesStoreReading` for why the seam exists.
+    func run(scriptFactory: () -> NotesScript) throws {
         try runGuarded(tool: notesTool) {
-            let notes = try NotesScript().listSharedNotes()
+            let notes = try scriptFactory().listSharedNotes()
             try emitNotes(SharedNoteList(notes: notes, count: notes.count), json: global.json,
                 human: notes.isEmpty ? "No shared notes." : notes.map { "  - \($0.title) [\($0.id)]" }.joined(separator: "\n"))
         }

@@ -101,19 +101,29 @@ struct CreateCmd: ParsableCommand {
     @Option(name: .long, help: "Echo-only tags (NOT persisted by Notes).") var tags: [String] = []
 
     func run() throws {
+        try run(scriptFactory: { NotesScript(store: LiveNotesStore()) })
+    }
+
+    /// Dependency-injection seam. `run()` above binds the live boundaries and is the ONLY
+    /// binding production uses — no flag or environment variable can select another. See
+    /// `NotesStoreReading` for why the seam exists.
+    func run(scriptFactory: () -> NotesScript,
+             env: NotesWriteEnv = .live) throws {
         try runGuarded(tool: notesTool) {
             let html = try validateFormat(format)
             try validateBounds(title: title, content: content, folder: folder, account: account)
             if let folder { try requireNonEmptyFolderName(folder) }
-            let gate = try resolveNotesWrite(global, defaultDryRun: false)
+            let gate = try resolveNotesWrite(global, defaultDryRun: false, env: env)
             // The new note's title comes from argv, so the sandbox label check is computable
             // here and runs on BOTH paths — a sandboxed preview refuses exactly what execute
             // refuses, at the same exit code, without touching Notes.app.
-            try guardLiveWrite(labeledName: title, sandboxActive: gate.sandboxActive)
+            try guardLiveWrite(labeledName: title, sandboxActive: gate.sandboxActive, prefix: env.sandboxPrefix)
             // ...and so does the DESTINATION. move/batch-move gained this check in the previous
             // review round and create was missed, so a sandboxed create still wrote into a REAL
             // folder while the identical move was refused.
-            if let folder { try guardLiveWrite(labeledName: folder, sandboxActive: gate.sandboxActive) }
+            // Per COMPONENT, not per string: a folder path's later segments are separate folders,
+            // so `apple-cli-test parent/Real Folder` must not pass on its first segment alone.
+            if let folder { try guardLiveFolderPath(folder, sandboxActive: gate.sandboxActive, prefix: env.sandboxPrefix) }
             guard gate.willExecute else {
                 let folderInfo = folder.map { " in \($0)" } ?? ""
                 try emitNotesWrite(DryRunPreview("create-note", "Would create \"\(title)\"\(folderInfo) (format: \(format)). Re-run without --dry-run."),
@@ -121,7 +131,7 @@ struct CreateCmd: ParsableCommand {
                                    human: "[dry-run] would create \"\(title)\".")
                 return
             }
-            let id = try NotesScript().createNote(title: title, content: content, folder: folder, account: account, html: html)
+            let id = try scriptFactory().createNote(title: title, content: content, folder: folder, account: account, html: html)
             // Oracle appends a checklist warning to the response on create and both update paths. A
             // checklist cannot be made via AppleScript, so without it the caller gets ok:true and a
             // note that silently is not a checklist. Built in NotesText so the wiring is testable.
@@ -147,30 +157,38 @@ struct UpdateCmd: ParsableCommand {
     @Option(name: .long, help: "Account (title path only).") var account: String?
 
     func run() throws {
+        try run(scriptFactory: { NotesScript(store: LiveNotesStore()) })
+    }
+
+    /// Dependency-injection seam. `run()` above binds the live boundaries and is the ONLY
+    /// binding production uses — no flag or environment variable can select another. See
+    /// `NotesStoreReading` for why the seam exists.
+    func run(scriptFactory: () -> NotesScript,
+             env: NotesWriteEnv = .live) throws {
         try runGuarded(tool: notesTool) {
             let html = try validateFormat(format)
             try validateBounds(title: newTitle, content: newContent, account: account)
             let selector = try requireIdOrTitle(id: id, title: title)
-            let gate = try resolveNotesWrite(global, defaultDryRun: false)
+            let gate = try resolveNotesWrite(global, defaultDryRun: false, env: env)
             // A rename must land on a labeled name too, and --new-title is argv-computable, so
             // that half of the check runs on both paths.
             if let newTitle, !newTitle.isEmpty {
-                try guardLiveWrite(labeledName: newTitle, sandboxActive: gate.sandboxActive)
+                try guardLiveWrite(labeledName: newTitle, sandboxActive: gate.sandboxActive, prefix: env.sandboxPrefix)
             }
-            let undisclosed = try applyArgvSelectorGuard(selector, sandboxActive: gate.sandboxActive)
+            let undisclosed = try applyArgvSelectorGuard(selector, sandboxActive: gate.sandboxActive, prefix: env.sandboxPrefix)
             guard gate.willExecute else {
-                let extra = undisclosed ? sandboxTargetUncheckedDetail() : ""
+                let extra = undisclosed ? sandboxTargetUncheckedDetail(prefix: env.sandboxPrefix) : ""
                 try emitNotesWrite(DryRunPreview("update-note", "Would REPLACE the body of the target note (format: \(format)). Re-run without --dry-run.\(extra)"),
                                    json: global.json, sandboxActive: gate.sandboxActive,
                                    human: "[dry-run] would replace body.")
                 return
             }
-            let script = NotesScript()
+            let script = scriptFactory()
             switch selector {
             case .id(let noteId):
                 guard let note = try script.getNoteById(id: noteId) else { throw AppleError.notFound("Note with id \"\(noteId)\" not found.") }
                 if note.passwordProtected { throw AppleError.validation("Note is password-protected. Unlock it in Notes.app first.") }
-                try guardLiveWrite(labeledName: note.title, sandboxActive: gate.sandboxActive)
+                try guardLiveWrite(labeledName: note.title, sandboxActive: gate.sandboxActive, prefix: env.sandboxPrefix)
                 try script.updateNoteById(id: noteId, newTitle: newTitle, newContent: newContent, html: html)
                 // Oracle `resolveUpdateResponseTitle`: in html format the reported title is DERIVED
                 // from the new body (first visible line) and newTitle is ignored; plaintext keeps
@@ -185,8 +203,32 @@ struct UpdateCmd: ParsableCommand {
             case .title(let noteTitle):
                 guard let note = try script.getNoteDetails(title: noteTitle, account: account) else { throw AppleError.notFound("Note \"\(noteTitle)\" not found.") }
                 if note.passwordProtected { throw AppleError.validation("Note is password-protected. Unlock it in Notes.app first.") }
-                try guardLiveWrite(labeledName: noteTitle, sandboxActive: gate.sandboxActive)
-                try script.updateNote(title: noteTitle, newTitle: newTitle, newContent: newContent, account: account, html: html)
+                // The FETCHED title, not the typed one: AppleScript's by-name lookup is
+                // case-insensitive, so a labeled `--title` can resolve a real note whose actual
+                // name fails the case-sensitive label check.
+                try guardLiveWrite(labeledName: note.title, sandboxActive: gate.sandboxActive, prefix: env.sandboxPrefix)
+                // Write through the RESOLVED id, not the title again. The guard above checked ONE
+                // fetched note; a second by-title resolution is a second lookup that can land on a
+                // different note — duplicate titles across folders, or a rename between the two
+                // calls — so the note guarded and the note mutated were not necessarily the same
+                // one. `move` already addressed by the fetched id; this closes the same gap on the
+                // other three title paths.
+                //
+                // `effectiveNewTitle` reproduces `updateNote`'s own title resolution
+                // (`newTitle` when non-empty, else the TYPED title) so the body bytes written are
+                // identical to before; passing it explicitly also keeps `updateNoteById` from
+                // spending an extra lookup on its empty-title fallback. Under `html` both wrappers
+                // ignore it and use "".
+                //
+                // Why the byte-for-byte claim holds on the OTHER side of this expression too: it
+                // falls back to `noteTitle`, the TYPED string, and `noteTitle` can never be empty
+                // here. This branch is reached only through `requireIdOrTitle`, which treats an
+                // empty `--title` as absent and throws `Either --id or --title is required` — so
+                // `--title ""` never arrives, and the fallback cannot degrade to the empty title
+                // that would make `updateNoteById` resolve a name of its own.
+                let effectiveNewTitle = newTitle?.isEmpty == false ? newTitle : noteTitle
+                try script.updateNoteById(id: note.id, newTitle: effectiveNewTitle,
+                                          newContent: newContent, html: html)
                 // The FETCHED title, not the user's --title argument: AppleScript's by-name
                 // lookup is case-insensitive, so `--title "hello"` against a note named "Hello"
                 // reported "hello" where the oracle reports "Hello". Same class as 644ffdb.
@@ -231,6 +273,14 @@ struct AppendCmd: ParsableCommand {
     @Option(name: .long, help: "Account (title path only).") var account: String?
 
     func run() throws {
+        try run(scriptFactory: { NotesScript(store: LiveNotesStore()) })
+    }
+
+    /// Dependency-injection seam. `run()` above binds the live boundaries and is the ONLY
+    /// binding production uses — no flag or environment variable can select another. See
+    /// `NotesStoreReading` for why the seam exists.
+    func run(scriptFactory: () -> NotesScript,
+             env: NotesWriteEnv = .live) throws {
         try runGuarded(tool: notesTool) {
             let html = try validateFormat(format)
             let prepend = try Self.validatePosition(position)
@@ -243,10 +293,10 @@ struct AppendCmd: ParsableCommand {
             }
             try validateBounds(content: content, account: account)
             let selector = try requireIdOrTitle(id: id, title: title)
-            let gate = try resolveNotesWrite(global, defaultDryRun: false)
-            let undisclosed = try applyArgvSelectorGuard(selector, sandboxActive: gate.sandboxActive)
+            let gate = try resolveNotesWrite(global, defaultDryRun: false, env: env)
+            let undisclosed = try applyArgvSelectorGuard(selector, sandboxActive: gate.sandboxActive, prefix: env.sandboxPrefix)
             guard gate.willExecute else {
-                let extra = undisclosed ? sandboxTargetUncheckedDetail() : ""
+                let extra = undisclosed ? sandboxTargetUncheckedDetail(prefix: env.sandboxPrefix) : ""
                 // Disclose position + separator: a preview that says only "would append" cannot
                 // tell the caller that --position before is about to PREPEND instead.
                 let where_ = prepend ? "prepend before" : "append after"
@@ -256,12 +306,12 @@ struct AppendCmd: ParsableCommand {
                                    human: "[dry-run] would append.")
                 return
             }
-            let script = NotesScript()
+            let script = scriptFactory()
             switch selector {
             case .id(let noteId):
                 guard let note = try script.getNoteById(id: noteId) else { throw AppleError.notFound("Note with id \"\(noteId)\" not found.") }
                 if note.passwordProtected { throw AppleError.validation("Note is password-protected. Unlock it in Notes.app first.") }
-                try guardLiveWrite(labeledName: note.title, sandboxActive: gate.sandboxActive)
+                try guardLiveWrite(labeledName: note.title, sandboxActive: gate.sandboxActive, prefix: env.sandboxPrefix)
                 let current = try script.getNoteContentById(id: noteId)
                 let combined = NotesText.assembleAppend(existingHtml: current, content: content,
                                                         separator: separator, prepend: prepend, html: html)
@@ -272,11 +322,20 @@ struct AppendCmd: ParsableCommand {
             case .title(let noteTitle):
                 guard let note = try script.getNoteDetails(title: noteTitle, account: account) else { throw AppleError.notFound("Note \"\(noteTitle)\" not found.") }
                 if note.passwordProtected { throw AppleError.validation("Note is password-protected. Unlock it in Notes.app first.") }
-                try guardLiveWrite(labeledName: noteTitle, sandboxActive: gate.sandboxActive)
-                let current = try script.getNoteContent(title: noteTitle, account: account)
+                // The FETCHED title, not the typed one: AppleScript's by-name lookup is
+                // case-insensitive, so a labeled `--title` can resolve a real note whose actual
+                // name fails the case-sensitive label check.
+                try guardLiveWrite(labeledName: note.title, sandboxActive: gate.sandboxActive, prefix: env.sandboxPrefix)
+                // Read AND write through the RESOLVED id, not the title again. Append is the worst
+                // case of the by-title re-resolution gap: it reads a body, concatenates, and writes
+                // the WHOLE body back, so two lookups landing on different notes (duplicate titles,
+                // or a rename between calls) would overwrite one note with another's content.
+                // `html: true` here as before, so `updateNoteById` derives the title from the body
+                // and the bytes written are unchanged.
+                let current = try script.getNoteContentById(id: note.id)
                 let combined = NotesText.assembleAppend(existingHtml: current, content: content,
                                                         separator: separator, prepend: prepend, html: html)
-                try script.updateNote(title: noteTitle, newTitle: nil, newContent: combined, account: account, html: true)
+                try script.updateNoteById(id: note.id, newTitle: nil, newContent: combined, html: true)
                 try emitNotesExecutedWrite(UpdatedNote(ok: true, id: nil, title: noteTitle, shared: note.shared, warning: nil),
                               json: global.json, sandboxActive: gate.sandboxActive,
                               human: "Appended to \"\(noteTitle)\".")
@@ -296,30 +355,44 @@ struct DeleteCmd: ParsableCommand {
     @Option(name: .long, help: "Account (title path only).") var account: String?
 
     func run() throws {
+        try run(scriptFactory: { NotesScript(store: LiveNotesStore()) })
+    }
+
+    /// Dependency-injection seam. `run()` above binds the live boundaries and is the ONLY
+    /// binding production uses — no flag or environment variable can select another. See
+    /// `NotesStoreReading` for why the seam exists.
+    func run(scriptFactory: () -> NotesScript,
+             env: NotesWriteEnv = .live) throws {
         try runGuarded(tool: notesTool) {
             let selector = try requireIdOrTitle(id: id, title: title)
-            let gate = try resolveNotesWrite(global, defaultDryRun: false)
-            let undisclosed = try applyArgvSelectorGuard(selector, sandboxActive: gate.sandboxActive)
+            let gate = try resolveNotesWrite(global, defaultDryRun: false, env: env)
+            let undisclosed = try applyArgvSelectorGuard(selector, sandboxActive: gate.sandboxActive, prefix: env.sandboxPrefix)
             guard gate.willExecute else {
-                let extra = undisclosed ? sandboxTargetUncheckedDetail() : ""
+                let extra = undisclosed ? sandboxTargetUncheckedDetail(prefix: env.sandboxPrefix) : ""
                 try emitNotesWrite(DryRunPreview("delete-note", "Would delete the target note (Notes.app moves it to Recently Deleted, where it stays recoverable). Re-run without --dry-run.\(extra)"),
                                    json: global.json, sandboxActive: gate.sandboxActive,
                                    human: "[dry-run] would delete.")
                 return
             }
-            let script = NotesScript()
+            let script = scriptFactory()
             switch selector {
             case .id(let noteId):
                 guard let note = try script.getNoteById(id: noteId) else { throw AppleError.notFound("Note with id \"\(noteId)\" not found.") }
-                try guardLiveWrite(labeledName: note.title, sandboxActive: gate.sandboxActive)
+                try guardLiveWrite(labeledName: note.title, sandboxActive: gate.sandboxActive, prefix: env.sandboxPrefix)
                 try script.deleteNoteById(id: noteId)
                 try emitNotesExecutedWrite(DeletedNote(ok: true, id: noteId, title: note.title, was_shared: note.shared),
                               json: global.json, sandboxActive: gate.sandboxActive,
                               human: "Deleted \"\(note.title)\".")
             case .title(let noteTitle):
                 guard let note = try script.getNoteDetails(title: noteTitle, account: account) else { throw AppleError.notFound("Note \"\(noteTitle)\" not found.") }
-                try guardLiveWrite(labeledName: noteTitle, sandboxActive: gate.sandboxActive)
-                try script.deleteNote(title: noteTitle, account: account)
+                // The FETCHED title, not the typed one: AppleScript's by-name lookup is
+                // case-insensitive, so a labeled `--title` can resolve a real note whose actual
+                // name fails the case-sensitive label check.
+                try guardLiveWrite(labeledName: note.title, sandboxActive: gate.sandboxActive, prefix: env.sandboxPrefix)
+                // Delete the RESOLVED id, not the title again — a second by-title resolution can
+                // land on a different note than the one just guarded (duplicate titles, or a rename
+                // between the two calls), and this one is destructive.
+                try script.deleteNoteById(id: note.id)
                 try emitNotesExecutedWrite(DeletedNote(ok: true, id: nil, title: noteTitle, was_shared: note.shared),
                               json: global.json, sandboxActive: gate.sandboxActive,
                               human: "Deleted \"\(noteTitle)\".")
@@ -340,34 +413,45 @@ struct MoveCmd: ParsableCommand {
     @Option(name: .long, help: "Account (title path only).") var account: String?
 
     func run() throws {
+        try run(scriptFactory: { NotesScript(store: LiveNotesStore()) })
+    }
+
+    /// Dependency-injection seam. `run()` above binds the live boundaries and is the ONLY
+    /// binding production uses — no flag or environment variable can select another. See
+    /// `NotesStoreReading` for why the seam exists.
+    func run(scriptFactory: () -> NotesScript,
+             env: NotesWriteEnv = .live) throws {
         try runGuarded(tool: notesTool) {
             let selector = try requireIdOrTitle(id: id, title: title)
-            let gate = try resolveNotesWrite(global, defaultDryRun: false)
+            let gate = try resolveNotesWrite(global, defaultDryRun: false, env: env)
             try requireNonEmptyFolderName(folder)
             // The DESTINATION is argv-supplied, so it is checked on both paths — batch-move
             // already did this and single move did not, which let a sandboxed move drop a
             // labeled test note into a REAL folder.
-            try guardLiveWrite(labeledName: folder, sandboxActive: gate.sandboxActive)
-            let undisclosed = try applyArgvSelectorGuard(selector, sandboxActive: gate.sandboxActive)
+            try guardLiveFolderPath(folder, sandboxActive: gate.sandboxActive, prefix: env.sandboxPrefix)
+            let undisclosed = try applyArgvSelectorGuard(selector, sandboxActive: gate.sandboxActive, prefix: env.sandboxPrefix)
             guard gate.willExecute else {
-                let extra = undisclosed ? sandboxTargetUncheckedDetail() : ""
+                let extra = undisclosed ? sandboxTargetUncheckedDetail(prefix: env.sandboxPrefix) : ""
                 try emitNotesWrite(DryRunPreview("move-note", "Would move the target note to \"\(folder)\". Re-run without --dry-run.\(extra)"),
                                    json: global.json, sandboxActive: gate.sandboxActive,
                                    human: "[dry-run] would move to \(folder).")
                 return
             }
-            let script = NotesScript()
+            let script = scriptFactory()
             switch selector {
             case .id(let noteId):
                 guard let note = try script.getNoteById(id: noteId) else { throw AppleError.notFound("Note with id \"\(noteId)\" not found.") }
-                try guardLiveWrite(labeledName: note.title, sandboxActive: gate.sandboxActive)
+                try guardLiveWrite(labeledName: note.title, sandboxActive: gate.sandboxActive, prefix: env.sandboxPrefix)
                 try script.moveNoteById(id: noteId, folder: folder, account: account)
                 try emitNotesExecutedWrite(MovedNote(ok: true, id: noteId, title: note.title, folder: folder),
                               json: global.json, sandboxActive: gate.sandboxActive,
                               human: "Moved \"\(note.title)\" -> \(folder).")
             case .title(let noteTitle):
                 guard let note = try script.getNoteDetails(title: noteTitle, account: account) else { throw AppleError.notFound("Note \"\(noteTitle)\" not found.") }
-                try guardLiveWrite(labeledName: noteTitle, sandboxActive: gate.sandboxActive)
+                // The FETCHED title, not the typed one: AppleScript's by-name lookup is
+                // case-insensitive, so a labeled `--title` can resolve a real note whose actual
+                // name fails the case-sensitive label check.
+                try guardLiveWrite(labeledName: note.title, sandboxActive: gate.sandboxActive, prefix: env.sandboxPrefix)
                 try script.moveNoteById(id: note.id, folder: folder, account: account)
                 try emitNotesExecutedWrite(MovedNote(ok: true, id: nil, title: noteTitle, folder: folder),
                               json: global.json, sandboxActive: gate.sandboxActive,

@@ -17,7 +17,16 @@ public enum NotesStore {
     }
     static var walPath: String { dbPath + "-wal" }
 
-    static var dbExists: Bool { FileManager.default.fileExists(atPath: dbPath) }
+    static var dbExists: Bool { exists(at: dbPath) }
+
+    /// The WAL sidecar SQLite maintains next to `path`. Same rule at any path, so the live
+    /// `walPath` above and a fixture store both derive it the same way.
+    static func walPath(for path: String) -> String { path + "-wal" }
+
+    /// Whether a store file is present at `path`. Split out from `dbExists` so the
+    /// path-parameterized read cores below can ask the question about the store they were
+    /// handed rather than about the operator's live one.
+    static func exists(at path: String) -> Bool { FileManager.default.fileExists(atPath: path) }
 
     /// Extract the Core Data primary key from a note id. Notes ids are
     /// `x-coredata://<store-uuid>/ICNote/p<PK>`; only the trailing `p<PK>` is load-bearing
@@ -39,7 +48,14 @@ public enum NotesStore {
     /// or any SQLite error. The oracle logs and returns null there, and the caller falls back to
     /// AppleScript, so a throw here would turn a recoverable miss into a hard failure.
     public static func noteLink(noteId: String) -> String? {
-        guard let pk = primaryKey(from: noteId), dbExists else { return nil }
+        noteLink(noteId: noteId, dbPath: dbPath)
+    }
+
+    /// Path-parameterized core of `noteLink`. Production reads the live store through the
+    /// wrapper above; the `dbPath` argument exists so the logic tier can drive this exact query
+    /// against a synthetic fixture store instead of the operator's real Notes database.
+    static func noteLink(noteId: String, dbPath: String) -> String? {
+        guard let pk = primaryKey(from: noteId), exists(at: dbPath) else { return nil }
         do {
             let reader = try SQLiteReader(path: dbPath, copyToTemp: true)
             let rows = try reader.query(
@@ -87,11 +103,17 @@ public enum NotesStore {
     /// Mirrors the reference `getChecklistItems`: query → gunzip → protobuf-walk. Errors are
     /// returned (never thrown) so the command layer can map them to the right envelope.
     public static func checklistItems(noteId: String) -> ChecklistOutcome {
+        checklistItems(noteId: noteId, dbPath: dbPath)
+    }
+
+    /// Path-parameterized core of `checklistItems` — see `noteLink(noteId:dbPath:)` for why the
+    /// seam exists.
+    static func checklistItems(noteId: String, dbPath: String) -> ChecklistOutcome {
         guard let pk = primaryKey(from: noteId) else {
             return ChecklistOutcome(items: nil, error: .invalidId,
                 message: "Invalid note ID format: \"\(noteId)\". Expected format: x-coredata://UUID/ICNote/pNNN")
         }
-        guard dbExists else {
+        guard exists(at: dbPath) else {
             return ChecklistOutcome(items: nil, error: .noFDA, message: fdaChecklistMessage)
         }
         let hex: String
@@ -221,11 +243,17 @@ public enum NotesStore {
     /// release) via `PRAGMA table_info`. Only present, non-null columns are returned — a
     /// missing column is silently skipped, matching the reference's BETA contract.
     public static func metadata(noteId: String) -> MetadataOutcome {
+        metadata(noteId: noteId, dbPath: dbPath)
+    }
+
+    /// Path-parameterized core of `metadata` — see `noteLink(noteId:dbPath:)` for why the seam
+    /// exists.
+    static func metadata(noteId: String, dbPath: String) -> MetadataOutcome {
         guard let pk = primaryKey(from: noteId) else {
             return MetadataOutcome(metadata: nil, error: .invalidId,
                 message: "Invalid note ID format: \"\(noteId)\". Expected format: x-coredata://UUID/ICNote/pNNN")
         }
-        guard dbExists else {
+        guard exists(at: dbPath) else {
             return MetadataOutcome(metadata: nil, error: .noFDA, message: fdaMetadataMessage)
         }
         do {
@@ -276,12 +304,18 @@ public enum NotesStore {
     /// and a `ZICCLOUDSTATE` pending-upload count. Port of `getSyncStatus`. Never throws; a
     /// query failure degrades to `pendingUpload = 0` while still reporting WAL activity.
     public static func syncStatus() -> NotesSyncStatus {
+        syncStatus(dbPath: dbPath)
+    }
+
+    /// Path-parameterized core of `syncStatus` — see `noteLink(noteId:dbPath:)` for why the seam
+    /// exists.
+    static func syncStatus(dbPath: String) -> NotesSyncStatus {
         var status = NotesSyncStatus()
-        guard dbExists else {
+        guard exists(at: dbPath) else {
             status.error = "Notes database not found"
             return status
         }
-        if let attrs = try? FileManager.default.attributesOfItem(atPath: walPath),
+        if let attrs = try? FileManager.default.attributesOfItem(atPath: walPath(for: dbPath)),
            let mtime = attrs[.modificationDate] as? Date {
             let secondsAgo = Date().timeIntervalSince(mtime)
             status.seconds_since_last_change = Int(secondsAgo.rounded())
@@ -307,4 +341,59 @@ public enum NotesStore {
         }
         return status
     }
+}
+
+// MARK: - Store-read seam
+
+/// The `NotesStore` surface the Notes command layer actually depends on.
+///
+/// `NotesStore`'s reads are static and resolve the operator's live `NoteStore.sqlite` from
+/// `homeDirectoryForCurrentUser`, so a command that called them directly could only be exercised
+/// against real personal data. This protocol is the seam that removes that coupling — the same
+/// role `AppleScriptRunning` already plays for the Notes.app boundary. Production always binds
+/// `LiveNotesStore()`; nothing in the CLI can select a different implementation, because the only
+/// way to supply one is the internal `run(…)` overloads' `storeFactory` argument, which no flag
+/// or environment variable reaches.
+///
+/// That claim is STRUCTURAL, not conventional: neither `currentSyncWarning` nor `NotesScript.init`
+/// defaults this parameter, so `LiveNotesStore()` appears nowhere but a production `run()` shim
+/// and code that omits it does not compile. (`NotesScript` did carry such a default; it was the
+/// one remaining place a live store could be constructed outside a shim, and every bare
+/// `NotesScript()` reached it.)
+protocol NotesStoreReading {
+    func metadata(noteId: String) -> NotesStore.MetadataOutcome
+    func checklistItems(noteId: String) -> NotesStore.ChecklistOutcome
+    func noteLink(noteId: String) -> String?
+    func syncStatus() -> NotesSyncStatus
+    /// Whether the store file is present at all — `get-link` classifies its failure by this
+    /// (absent ⇒ authorization_denied, present ⇒ upstream).
+    var dbExists: Bool { get }
+    /// Whether the store is present AND readable, i.e. Full Disk Access is effectively granted.
+    func hasFDA() -> Bool
+}
+
+/// The production binding: every call forwards to the `NotesStore` static of the same name.
+///
+/// `dbPath` defaults to the live store and is a parameter only so the logic tier can point the
+/// REAL query code at a synthetic fixture database. It is not reachable from argv or the
+/// environment.
+struct LiveNotesStore: NotesStoreReading {
+    let dbPath: String
+
+    init(dbPath: String = NotesStore.dbPath) { self.dbPath = dbPath }
+
+    func metadata(noteId: String) -> NotesStore.MetadataOutcome {
+        NotesStore.metadata(noteId: noteId, dbPath: dbPath)
+    }
+    func checklistItems(noteId: String) -> NotesStore.ChecklistOutcome {
+        NotesStore.checklistItems(noteId: noteId, dbPath: dbPath)
+    }
+    func noteLink(noteId: String) -> String? {
+        NotesStore.noteLink(noteId: noteId, dbPath: dbPath)
+    }
+    func syncStatus() -> NotesSyncStatus {
+        NotesStore.syncStatus(dbPath: dbPath)
+    }
+    var dbExists: Bool { NotesStore.exists(at: dbPath) }
+    func hasFDA() -> Bool { NotesStore.hasFDA(dbPath: dbPath) }
 }

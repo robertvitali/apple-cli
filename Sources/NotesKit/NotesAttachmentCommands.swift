@@ -16,8 +16,15 @@ struct AttachmentsCmd: ParsableCommand {
     @Option(name: .long, help: "Account (title path only).") var account: String?
 
     func run() throws {
+        try run(scriptFactory: { NotesScript(store: LiveNotesStore()) })
+    }
+
+    /// Dependency-injection seam. `run()` above binds the live boundaries and is the ONLY
+    /// binding production uses — no flag or environment variable can select another. See
+    /// `NotesStoreReading` for why the seam exists.
+    func run(scriptFactory: () -> NotesScript) throws {
         try runGuarded(tool: notesTool) {
-            let script = NotesScript()
+            let script = scriptFactory()
             let selector = try requireIdOrTitle(id: id, title: title)
             let attachments: [Attachment]
             switch selector {
@@ -45,6 +52,14 @@ struct SaveAttachmentCmd: ParsableCommand {
     @Option(name: .long, help: "Absolute destination path.") var path: String
 
     func run() throws {
+        try run(scriptFactory: { NotesScript(store: LiveNotesStore()) })
+    }
+
+    /// Dependency-injection seam. `run()` above binds the live boundaries and is the ONLY
+    /// binding production uses — no flag or environment variable can select another. See
+    /// `NotesStoreReading` for why the seam exists.
+    func run(scriptFactory: () -> NotesScript,
+             env: NotesWriteEnv = .live) throws {
         try runGuarded(tool: notesTool) {
             // Bucket-2 obligation (docs/write-model-v2.md): `--dry-run` must actually work on
             // every mutating subcommand. This one mutates the FILESYSTEM rather than Notes.app —
@@ -64,20 +79,26 @@ struct SaveAttachmentCmd: ParsableCommand {
             // as the catch-all `unknown`. Running it here also makes preview and execute agree
             // on the class — the inner call in `saveAttachmentById` stays as defense in depth
             // for the post-mkdir symlink re-check.
+            //
+            // ORDER: the gate resolves FIRST. `resolveNotesWrite`'s contract is that BOTH v2
+            // variables are validated eagerly before any work, so a typo'd `APPLE_TEST_MODE`
+            // refuses the command whatever else is wrong with the invocation. Running the path
+            // check ahead of it made this the one write surface where a malformed environment
+            // could be masked by a second problem in the same command line.
+            let gate = try resolveNotesWrite(global, defaultDryRun: false, env: env)
             do {
                 _ = try AttachmentFS.assertSafeSavePath(path)
                 try refuseRawFinalLeafSymlink(path, action: "write the attachment to")
             } catch let e as AttachmentFS.FSError {
                 throw AppleError.validation(e.description)
             }
-            let gate = try resolveNotesWrite(global, defaultDryRun: false)
             guard gate.willExecute else {
                 try emitNotesWrite(DryRunPreview("save-attachment", "Would write attachment \"\(attachmentId)\" of note \"\(noteId)\" to \"\(path)\". Re-run without --dry-run."),
                                    json: global.json, sandboxActive: gate.sandboxActive,
                                    human: "[dry-run] would save attachment to \(path).")
                 return
             }
-            let r = try NotesScript().saveAttachmentById(noteId: noteId, attachmentId: attachmentId, savePath: path)
+            let r = try scriptFactory().saveAttachmentById(noteId: noteId, attachmentId: attachmentId, savePath: path)
             guard r.ok, let savedPath = r.savedPath else {
                 throw AppleError.upstream("Failed to save attachment: \(r.error ?? "unknown error")")
             }
@@ -98,8 +119,15 @@ struct FetchAttachmentCmd: ParsableCommand {
     @Option(name: .customLong("attachment-id"), help: "Attachment id (from `attachments`).") var attachmentId: String
 
     func run() throws {
+        try run(scriptFactory: { NotesScript(store: LiveNotesStore()) })
+    }
+
+    /// Dependency-injection seam. `run()` above binds the live boundaries and is the ONLY
+    /// binding production uses — no flag or environment variable can select another. See
+    /// `NotesStoreReading` for why the seam exists.
+    func run(scriptFactory: () -> NotesScript) throws {
         try runGuarded(tool: notesTool) {
-            let r = try NotesScript().fetchAttachmentBase64(noteId: noteId, attachmentId: attachmentId)
+            let r = try scriptFactory().fetchAttachmentBase64(noteId: noteId, attachmentId: attachmentId)
             guard r.ok, let base64 = r.base64 else {
                 throw AppleError.upstream("Failed to fetch attachment: \(r.error ?? "unknown error")")
             }
@@ -120,8 +148,15 @@ struct ShowAttachmentCmd: ParsableCommand {
     @Flag(name: .long, help: "Open in a separate window.") var separately = false
 
     func run() throws {
+        try run(scriptFactory: { NotesScript(store: LiveNotesStore()) })
+    }
+
+    /// Dependency-injection seam. `run()` above binds the live boundaries and is the ONLY
+    /// binding production uses — no flag or environment variable can select another. See
+    /// `NotesStoreReading` for why the seam exists.
+    func run(scriptFactory: () -> NotesScript) throws {
         try runGuarded(tool: notesTool) {
-            try NotesScript().showAttachment(noteId: noteId, attachmentId: attachmentId, separately: separately)
+            try scriptFactory().showAttachment(noteId: noteId, attachmentId: attachmentId, separately: separately)
             try emitNotes(ShownAttachment(note_id: noteId, attachment_id: attachmentId, separately: separately),
                           json: global.json, human: "Shown attachment \"\(attachmentId)\".")
         }

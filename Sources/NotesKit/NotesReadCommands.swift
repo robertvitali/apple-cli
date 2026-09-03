@@ -14,15 +14,23 @@ struct GetChecklistCmd: ParsableCommand {
     @Option(name: .long, help: "Note id (x-coredata://…/ICNote/pNNN).") var id: String
 
     func run() throws {
+        try run(storeFactory: { LiveNotesStore() })
+    }
+
+    /// Dependency-injection seam. `run()` above binds the live boundaries and is the ONLY
+    /// binding production uses — no flag or environment variable can select another. See
+    /// `NotesStoreReading` for why the seam exists.
+    func run(storeFactory: () -> any NotesStoreReading) throws {
         try runGuarded(tool: notesTool) {
+            let store = storeFactory()
             // SQLite-only path (a strict-superset improvement over the reference, which first
             // does an AppleScript existence guard that fails on trashed/slow notes). We still
             // honor the password-protected refusal, resolved from SQLite metadata.
-            let meta = NotesStore.metadata(noteId: id)
+            let meta = store.metadata(noteId: id)
             if meta.metadata?.password_protected == true {
                 throw AppleError.validation("Note is password-protected and cannot be read. Unlock it in Notes.app first.")
             }
-            let outcome = NotesStore.checklistItems(noteId: id)
+            let outcome = store.checklistItems(noteId: id)
             guard let items = outcome.items else {
                 switch outcome.error {
                 case .invalidId: throw AppleError.validation(outcome.message ?? "Invalid note id.")
@@ -49,8 +57,16 @@ struct GetMetadataCmd: ParsableCommand {
     @Option(name: .long, help: "Note id (x-coredata://…/ICNote/pNNN).") var id: String
 
     func run() throws {
+        try run(storeFactory: { LiveNotesStore() })
+    }
+
+    /// Dependency-injection seam. `run()` above binds the live boundaries and is the ONLY
+    /// binding production uses — no flag or environment variable can select another. See
+    /// `NotesStoreReading` for why the seam exists.
+    func run(storeFactory: () -> any NotesStoreReading) throws {
         try runGuarded(tool: notesTool) {
-            let outcome = NotesStore.metadata(noteId: id)
+            let store = storeFactory()
+            let outcome = store.metadata(noteId: id)
             guard let metadata = outcome.metadata else {
                 switch outcome.error {
                 case .invalidId: throw AppleError.validation(outcome.message ?? "Invalid note id.")
@@ -73,8 +89,15 @@ struct GetByIdCmd: ParsableCommand {
     @Option(name: .long, help: "Note id.") var id: String
 
     func run() throws {
+        try run(scriptFactory: { NotesScript(store: LiveNotesStore()) })
+    }
+
+    /// Dependency-injection seam. `run()` above binds the live boundaries and is the ONLY
+    /// binding production uses — no flag or environment variable can select another. See
+    /// `NotesStoreReading` for why the seam exists.
+    func run(scriptFactory: () -> NotesScript) throws {
         try runGuarded(tool: notesTool) {
-            guard let note = try NotesScript().getNoteById(id: id) else {
+            guard let note = try scriptFactory().getNoteById(id: id) else {
                 throw AppleError.notFound("Note with id \"\(id)\" not found.")
             }
             let data = NoteMetaByLookup(id: note.id, title: note.title, created: note.created,
@@ -113,8 +136,10 @@ struct GetNoteLinkCmd: ParsableCommand {
     /// error.type could not route it to the FDA remediation path. Sibling commands in this file
     /// already classify a missing store as authorization_denied/77 and other store failures as
     /// upstream/69; match them rather than inventing a third answer.
-    static func linkFailureError(_ name: String) -> AppleError {
-        NotesStore.dbExists ? .upstream(linkFailure(name)) : .permissionDenied(linkFailure(name))
+    /// `store` is the injection seam (see `NotesStoreReading`) — `dbExists` is what picks the
+    /// classification, so it has to be asked of the SAME store the lookup used.
+    static func linkFailureError(_ name: String, store: any NotesStoreReading) -> AppleError {
+        store.dbExists ? .upstream(linkFailure(name)) : .permissionDenied(linkFailure(name))
     }
 
     /// Oracle `getNoteLinkById`: SQLite, then AppleScript. Returns nil rather than throwing so
@@ -126,8 +151,8 @@ struct GetNoteLinkCmd: ParsableCommand {
     /// oracle keeps it for macOS 12–15, where it IS reachable; without FDA on macOS 26 the only
     /// outcome is the link-failure error, which is why its classification (authorization_denied
     /// when the store is unreadable, not `unknown`) matters more here than the prose suggests.
-    static func resolveLink(_ script: NotesScript, id: String) -> String? {
-        if let fromDB = NotesStore.noteLink(noteId: id) { return fromDB }
+    static func resolveLink(_ script: NotesScript, store: any NotesStoreReading, id: String) -> String? {
+        if let fromDB = store.noteLink(noteId: id) { return fromDB }
         guard let out = try? script.noteLinkById(id: id) else { return nil }
         let trimmed = out.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
@@ -154,8 +179,17 @@ struct GetNoteLinkCmd: ParsableCommand {
     }
 
     func run() throws {
+        try run(scriptFactory: { NotesScript(store: LiveNotesStore()) }, storeFactory: { LiveNotesStore() })
+    }
+
+    /// Dependency-injection seam. `run()` above binds the live boundaries and is the ONLY
+    /// binding production uses — no flag or environment variable can select another. See
+    /// `NotesStoreReading` for why the seam exists.
+    func run(scriptFactory: () -> NotesScript,
+             storeFactory: () -> any NotesStoreReading) throws {
         try runGuarded(tool: notesTool) {
-            let script = NotesScript()
+            let store = storeFactory()
+            let script = scriptFactory()
             switch try Self.requireSelector(id: id, title: title) {
             case .id(let id):
                 // The lookup THROWS a generic not_found rather than returning nil (AppleScript
@@ -170,8 +204,8 @@ struct GetNoteLinkCmd: ParsableCommand {
                 if note.passwordProtected {
                     throw AppleError.validation("Note \"\(note.title)\" is password-protected. Unlock it in Notes.app first.")
                 }
-                guard let url = Self.resolveLink(script, id: id) else {
-                    throw Self.linkFailureError(note.title)
+                guard let url = Self.resolveLink(script, store: store, id: id) else {
+                    throw Self.linkFailureError(note.title, store: store)
                 }
                 try emitNotes(NoteLinkResult(id: id, title: note.title, url: url),
                               json: global.json, human: url)
@@ -185,8 +219,8 @@ struct GetNoteLinkCmd: ParsableCommand {
                 if note.passwordProtected {
                     throw AppleError.validation("Note \"\(title)\" is password-protected. Unlock it in Notes.app first.")
                 }
-                guard let url = Self.resolveLink(script, id: note.id) else {
-                    throw Self.linkFailureError(title)
+                guard let url = Self.resolveLink(script, store: store, id: note.id) else {
+                    throw Self.linkFailureError(title, store: store)
                 }
                 // No `id` key on this path — the oracle omits it here.
                 try emitNotes(NoteLinkResult(id: nil, title: title, url: url),
@@ -204,13 +238,24 @@ struct GetDetailsCmd: ParsableCommand {
     @Option(name: .long, help: "Account (defaults to iCloud).") var account: String?
 
     func run() throws {
+        try run(scriptFactory: { NotesScript(store: LiveNotesStore()) })
+    }
+
+    /// Dependency-injection seam. `run()` above binds the live boundaries and is the ONLY
+    /// binding production uses — no flag or environment variable can select another. See
+    /// `NotesStoreReading` for why the seam exists.
+    func run(scriptFactory: () -> NotesScript) throws {
         try runGuarded(tool: notesTool) {
-            guard let note = try NotesScript().getNoteDetails(title: title, account: account) else {
+            // Bound ONCE, like every other command here: two `scriptFactory()` calls would split
+            // an injected fake's recorded argv across two objects and silently under-assert.
+            // Production is byte-equivalent either way (a `NotesScript` is stateless).
+            let script = scriptFactory()
+            guard let note = try script.getNoteDetails(title: title, account: account) else {
                 throw AppleError.notFound("Note \"\(title)\" not found.")
             }
             let data = NoteMetaByLookup(id: note.id, title: note.title, created: note.created,
                 modified: note.modified, shared: note.shared, password_protected: note.passwordProtected,
-                account: NotesScript().resolveAccount(account))
+                account: script.resolveAccount(account))
             try emitNotes(data, json: global.json, human: "\(note.title) [\(note.id)]")
         }
     }
@@ -227,8 +272,15 @@ struct GetCmd: ParsableCommand {
     @Option(name: .long, help: "Account (title path only).") var account: String?
 
     func run() throws {
+        try run(scriptFactory: { NotesScript(store: LiveNotesStore()) })
+    }
+
+    /// Dependency-injection seam. `run()` above binds the live boundaries and is the ONLY
+    /// binding production uses — no flag or environment variable can select another. See
+    /// `NotesStoreReading` for why the seam exists.
+    func run(scriptFactory: () -> NotesScript) throws {
         try runGuarded(tool: notesTool) {
-            let script = NotesScript()
+            let script = scriptFactory()
             let selector = try requireIdOrTitle(id: id, title: title)
             let (resolvedTitle, rawContent) = try resolveContent(script, selector)
             let stripped = NotesText.stripLargeInlineImages(rawContent)
@@ -267,8 +319,15 @@ struct GetPlaintextCmd: ParsableCommand {
     @Option(name: .long, help: "Account (title path only).") var account: String?
 
     func run() throws {
+        try run(scriptFactory: { NotesScript(store: LiveNotesStore()) })
+    }
+
+    /// Dependency-injection seam. `run()` above binds the live boundaries and is the ONLY
+    /// binding production uses — no flag or environment variable can select another. See
+    /// `NotesStoreReading` for why the seam exists.
+    func run(scriptFactory: () -> NotesScript) throws {
         try runGuarded(tool: notesTool) {
-            let script = NotesScript()
+            let script = scriptFactory()
             let selector = try requireIdOrTitle(id: id, title: title)
             let resolvedTitle: String
             let plaintext: String
@@ -301,8 +360,15 @@ struct GetMarkdownCmd: ParsableCommand {
     @Option(name: .long, help: "Account (title path only).") var account: String?
 
     func run() throws {
+        try run(scriptFactory: { NotesScript(store: LiveNotesStore()) })
+    }
+
+    /// Dependency-injection seam. `run()` above binds the live boundaries and is the ONLY
+    /// binding production uses — no flag or environment variable can select another. See
+    /// `NotesStoreReading` for why the seam exists.
+    func run(scriptFactory: () -> NotesScript) throws {
         try runGuarded(tool: notesTool) {
-            let script = NotesScript()
+            let script = scriptFactory()
             let selector = try requireIdOrTitle(id: id, title: title)
             let markdown: String
             switch selector {
@@ -327,13 +393,22 @@ struct ListCmd: ParsableCommand {
     @Option(name: .long, help: "Max results.") var limit: Int?
 
     func run() throws {
+        try run(scriptFactory: { NotesScript(store: LiveNotesStore()) }, storeFactory: { LiveNotesStore() })
+    }
+
+    /// Dependency-injection seam. `run()` above binds the live boundaries and is the ONLY
+    /// binding production uses — no flag or environment variable can select another. See
+    /// `NotesStoreReading` for why the seam exists.
+    func run(scriptFactory: () -> NotesScript,
+             storeFactory: () -> any NotesStoreReading) throws {
         try runGuarded(tool: notesTool) {
+            let store = storeFactory()
             // exclusiveMinimum 0, same as search. NO default here: verified `resolveSearchLimit`
             // is absent from the oracle's list-notes handler, so unbounded list IS the parity.
             try validateSearchLimit(limit)
             let since = try parseISODateOrThrow(modifiedSince)
-            let titles = try NotesScript().listNotes(account: account, folder: folder, modifiedSince: since, limit: limit)
-            try emitNotes(NoteTitleList(notes: titles, count: titles.count, sync_warning: currentSyncWarning(),
+            let titles = try scriptFactory().listNotes(account: account, folder: folder, modifiedSince: since, limit: limit)
+            try emitNotes(NoteTitleList(notes: titles, count: titles.count, sync_warning: currentSyncWarning(store),
                                         applied_limit: limit),
                 json: global.json,
                 // Oracle list-notes renders ` (limit: N)` when a limit was passed. Appended only
@@ -361,7 +436,16 @@ struct SearchCmd: ParsableCommand {
     var all = false
 
     func run() throws {
+        try run(scriptFactory: { NotesScript(store: LiveNotesStore()) }, storeFactory: { LiveNotesStore() })
+    }
+
+    /// Dependency-injection seam. `run()` above binds the live boundaries and is the ONLY
+    /// binding production uses — no flag or environment variable can select another. See
+    /// `NotesStoreReading` for why the seam exists.
+    func run(scriptFactory: () -> NotesScript,
+             storeFactory: () -> any NotesStoreReading) throws {
         try runGuarded(tool: notesTool) {
+            let store = storeFactory()
             // Oracle schema: query is minLength 1 AND maxLength 2000; limit is exclusiveMinimum 0.
             if query.isEmpty { throw AppleError.validation("Search query is required.") }
             if query.count > NotesLimits.query {
@@ -378,7 +462,7 @@ struct SearchCmd: ParsableCommand {
             // properties per match over AppleScript and can time out, which is the reason the
             // oracle's own schema gives for the default.
             let (effective, wasDefault) = SearchLimit.resolve(limit, all: all)
-            let notes = try NotesScript().searchNotes(query: query, searchContent: content, account: account,
+            let notes = try scriptFactory().searchNotes(query: query, searchContent: content, account: account,
                 folder: folder, modifiedSince: since, limit: effective)
             let note = SearchLimit.truncationNote(count: notes.count, effective: effective, wasDefault: wasDefault)
             // The oracle renders ` (limit: N[, default])` on EVERY non-empty response, not only
@@ -388,7 +472,7 @@ struct SearchCmd: ParsableCommand {
             let limitInfo = notes.isEmpty ? ""
                 : (effective.map { " (limit: \($0)\(wasDefault ? ", default" : ""))" } ?? " (no limit)")
             let suffix = limitInfo + (note.map { "\n  … " + $0 } ?? "")
-            try emitNotes(NoteList(notes: notes, count: notes.count, sync_warning: currentSyncWarning(),
+            try emitNotes(NoteList(notes: notes, count: notes.count, sync_warning: currentSyncWarning(store),
                                    applied_limit: effective, limit_reached: note != nil,
                                    limit_was_default: wasDefault),
                 json: global.json,
@@ -405,8 +489,15 @@ struct SelectedCmd: ParsableCommand {
     @OptionGroup var global: GlobalOptions
 
     func run() throws {
+        try run(scriptFactory: { NotesScript(store: LiveNotesStore()) })
+    }
+
+    /// Dependency-injection seam. `run()` above binds the live boundaries and is the ONLY
+    /// binding production uses — no flag or environment variable can select another. See
+    /// `NotesStoreReading` for why the seam exists.
+    func run(scriptFactory: () -> NotesScript) throws {
         try runGuarded(tool: notesTool) {
-            let notes = try NotesScript().getSelectedNotes()
+            let notes = try scriptFactory().getSelectedNotes()
             try emitNotes(SelectedNoteList(notes: notes, count: notes.count), json: global.json,
                 human: notes.isEmpty ? "No notes selected." : notes.map { "  - \($0.title) [\($0.id)]" }.joined(separator: "\n"))
         }

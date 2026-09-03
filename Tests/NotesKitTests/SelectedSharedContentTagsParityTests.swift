@@ -21,7 +21,7 @@ struct SelectedSharedContentTagsParityTests {
         let row = ["x-coredata://ABC/p42", "Selected note", "2024-3-9-14-30-5", "2025-12-31-23-59-59",
                    "false", "false", "Work", "iCloud"].joined(separator: us)
         let fake = FakeRunner(failCount: 0, failureStderr: "", successValue: row)
-        let notes = try NotesScript(runner: fake).getSelectedNotes()
+        let notes = try quietScript(fake).getSelectedNotes()
         let n = try #require(notes.first)
         #expect(n.content == "")
         #expect(n.tags == [])
@@ -56,7 +56,7 @@ struct SelectedSharedContentTagsParityTests {
         let sharedRow = ["Shared note", "x-coredata://ABC/p99", "2024-3-9-14-30-5", "2025-12-31-23-59-59",
                          "true", "false"].joined(separator: us)
         let fake = QueuedRunner(values: [accountRow, sharedRow])
-        let notes = try NotesScript(runner: fake).listSharedNotes()
+        let notes = try quietScript(fake).listSharedNotes()
         let n = try #require(notes.first)
         #expect(n.content == "")
         #expect(n.tags == [])

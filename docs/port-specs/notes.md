@@ -269,6 +269,16 @@ The MCP emits camelCase keys; apple-cli emits snake_case per `docs/DESIGN.md` ("
     `update --new-title`, `create-folder`/`delete-folder` name, `batch-move` AND `move`
     destinations, and any `--title`-addressed target. Only `--id` addressing needs Automation to
     learn the target's title, and only there does a sandboxed preview disclose an unchecked gate.
+  - **`delete-folder` is the exception to "a preview reaches nothing"**: inside the sandbox its
+    preview enumerates the cascade through Notes.app on EVERY addressing form (one folder listing
+    for the account, one note listing per folder in the cascade), because a preview that reports
+    clean for a cascade the execute path would refuse is the same false-clean signal one
+    invocation earlier. Outside the sandbox no enumeration runs and the preview still reaches
+    nothing.
+  - **The folder-path label check is PER-COMPONENT**, not one `hasPrefix` over the whole string —
+    `apple-cli-test parent/Real Folder` names an unlabeled child. It applies to every surface
+    that takes a folder path: `create --folder`, `move --folder`, `batch-move --folder`,
+    `create-folder`, and `delete-folder`.
   - `save-attachment` writes to the filesystem and honours `--dry-run` like any other write.
     Raw final-leaf symlink refusal returns `safety_violation` / 77 on dry-run and execute before
     Notes access; the final execute recheck propagates the same class instead of reclassifying it
