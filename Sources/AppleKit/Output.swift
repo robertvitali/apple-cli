@@ -160,20 +160,34 @@ public enum Output {
                                        applied: applied, sandbox: sandbox) {
             write(data)
         } else {
-            // Never leave stdout empty on an error path: hand-roll a minimal valid envelope,
-            // JSON-escaping every interpolated string (RFC 8259) so this last-ditch path can
-            // never itself emit malformed JSON — a raw ", \, or control char in `message`
-            // would otherwise break the very parse the fallback exists to guarantee.
-            // The fallback carries status/remediation/applied too. If it dropped them, the one path
-            // that exists BECAUSE encoding failed would also be the one that silently violates the
-            // contract those fields establish.
-            let appliedJSON = applied.map { "[" + $0.map(jsonString).joined(separator: ",") + "]" }
-            let extra = (status.map { #","status":\#(jsonString($0))"# } ?? "")
-                      + (remediation.map { #","remediation":\#(jsonString($0))"# } ?? "")
-                      + (appliedJSON.map { #","applied":\#($0)"# } ?? "")
-                      + ((sandbox == true) ? #","sandbox":true"# : "")
-            write(Data(#"{"schema_version":\#(schemaVersion),"tool":\#(jsonString(tool)),"ok":false,"error":{"type":\#(jsonString(type)),"message":\#(jsonString(message))\#(extra)}}"#.utf8))
+            write(fallbackErrorJSON(tool: tool, type: type, message: message,
+                                    status: status, remediation: remediation,
+                                    applied: applied, sandbox: sandbox))
         }
+    }
+
+    /// The last-ditch envelope, for when `JSONEncoder` itself failed.
+    ///
+    /// Never leave stdout empty on an error path: hand-roll a minimal valid envelope,
+    /// JSON-escaping every interpolated string (RFC 8259) so this path can never itself emit
+    /// malformed JSON — a raw ", \, or control char in `message` would otherwise break the very
+    /// parse the fallback exists to guarantee. It carries status/remediation/applied too: if it
+    /// dropped them, the one path that exists BECAUSE encoding failed would also be the one that
+    /// silently violates the contract those fields establish.
+    ///
+    /// A named function rather than an `else` block because the branch is unreachable from
+    /// `emitError` by construction (the envelope is Strings and Bools, so `JSONEncoder` cannot
+    /// fail on it) — which left the one path that must never be wrong as the one path no test
+    /// could reach. `sandbox` arrives already normalized to `true`/`nil` by the caller.
+    static func fallbackErrorJSON(tool: String, type: String, message: String,
+                                  status: String?, remediation: String?,
+                                  applied: [String]?, sandbox: Bool?) -> Data {
+        let appliedJSON = applied.map { "[" + $0.map(jsonString).joined(separator: ",") + "]" }
+        let extra = (status.map { #","status":\#(jsonString($0))"# } ?? "")
+                  + (remediation.map { #","remediation":\#(jsonString($0))"# } ?? "")
+                  + (appliedJSON.map { #","applied":\#($0)"# } ?? "")
+                  + ((sandbox == true) ? #","sandbox":true"# : "")
+        return Data(#"{"schema_version":\#(schemaVersion),"tool":\#(jsonString(tool)),"ok":false,"error":{"type":\#(jsonString(type)),"message":\#(jsonString(message))\#(extra)}}"#.utf8)
     }
 
     /// Minimal RFC-8259 JSON string encoder (returns the value WITH surrounding quotes).

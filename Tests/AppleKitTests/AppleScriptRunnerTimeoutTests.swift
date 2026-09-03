@@ -2,36 +2,27 @@ import Foundation
 import Testing
 @testable import AppleKit
 
+/// One test, and deliberately only one. The four that ran the REAL `/usr/bin/osascript` here are
+/// covered hermetically in `ScriptLauncherTests.swift`: `timedFormBuildsTheSameArgv` +
+/// `deadlineFormSuccess`, `deadlineTerminatesAStalledChild` +
+/// `deadlineEscalatesPastAnIgnoredTerminate`, `invalidDeadlineNeverReachesTheLauncher`,
+/// `deadlineBoundary`, and `AppleScriptOutcomeTests.timeoutDescription` for the fractional
+/// "osascript timed out after 0.5s" rendering.
+///
+/// What a fake cannot show is that the PUBLIC `AppleScriptRunner()` — which binds
+/// `OsascriptLauncher`, unlike the `init(launcher:)` every hermetic test uses — validates a
+/// deadline before it can launch. The refusal is observable; that nothing spawned is not directly
+/// assertable, but a validation moved after the launch would hang here rather than pass, since
+/// `.infinity` never expires.
 @Suite("AppleScript runner deadlines")
 struct AppleScriptRunnerTimeoutTests {
-    @Test func fastScriptCompletesThroughTimedAPI() throws {
-        let out = try AppleScriptRunner().run("return \"ok\"", timeout: 10)
-        #expect(out == "ok")
-    }
 
-    @Test func deadlineTerminatesStalledOsaScript() throws {
-        let started = Date()
-        let error = #expect(throws: AppleScriptRunner.TimeoutError.self) {
-            _ = try AppleScriptRunner().run("delay 5\nreturn \"late\"", timeout: 0.05)
-        }
-        let timeout = try #require(error)
-        #expect(timeout.seconds == 0.05)
-        #expect(Date().timeIntervalSince(started) < 4)
-        #expect(timeout.description == "osascript timed out after 0.05s")
-    }
-
-    @Test func invalidDeadlineFailsBeforeLaunchWithoutDescriptionTrap() throws {
+    @Test("the production initializer refuses an invalid deadline without launching anything")
+    func productionRunnerRefusesAnInvalidDeadline() throws {
         let error = #expect(throws: AppleScriptRunner.InvalidTimeoutError.self) {
             _ = try AppleScriptRunner().run("return \"never\"", timeout: .infinity)
         }
-        let invalid = try #require(error)
-        #expect(invalid.description == "invalid osascript timeout: inf")
-    }
-
-    @Test func overRangeFiniteDeadlineFailsBeforeLaunch() throws {
-        let error = #expect(throws: AppleScriptRunner.InvalidTimeoutError.self) {
-            _ = try AppleScriptRunner().run("return \"never\"", timeout: 10_000_000_000)
-        }
-        #expect(try #require(error).seconds == 10_000_000_000)
+        #expect(try #require(error).seconds == .infinity)
+        #expect(try #require(error).description == "invalid osascript timeout: inf")
     }
 }

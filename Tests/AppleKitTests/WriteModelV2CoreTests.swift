@@ -1,12 +1,22 @@
 import Testing
 import Foundation
 import ArgumentParser
+import TestSupport
 @testable import AppleKit
 
-/// Write-model v2 core machinery (docs/write-model-v2.md). These tests exercise the PURE
-/// cores (`parseTruthy`, `resolveExecute`, `encodeSuccess`) so no test mutates process env —
-/// the env-reading wrappers are one-line `ProcessInfo` reads over these.
-@Suite("Write-model v2 core — fail-loud env, execute precedence, sandbox envelope")
+/// Write-model v2 core machinery (docs/write-model-v2.md). Most of this exercises the PURE cores
+/// (`parseTruthy`, `resolveExecute`, `encodeSuccess`); the handful of tests that must prove the
+/// env-reading wrappers really read the environment do it through `TestEnvironment` windows.
+///
+/// Raw `setenv`/`unsetenv` is banned here, even on a test-owned variable name. It escapes the
+/// process-wide lock every other suite's window takes, so a mutation lands mid-window elsewhere
+/// and the restore is not atomic against it. The reader that took the ambient value — rather than
+/// a pinned one — is also why `defaultEnvVarIsTheRealOne` used to fail outright when the operator
+/// had `APPLE_DRY_RUN` exported: it asserted on the live variable with nothing holding it.
+///
+/// `.serialized` per `TestEnvironment`'s own instruction: these windows mutate the real
+/// environment table, and serializing the suite keeps each one atomic within it.
+@Suite("Write-model v2 core — fail-loud env, execute precedence, sandbox envelope", .serialized)
 struct WriteModelV2CoreTests {
 
     // MARK: fail-loud truthy env parsing
@@ -116,13 +126,18 @@ struct WriteModelV2CoreTests {
     @Test("truthyEnv reads the live environment: unset false, truthy true, junk throws")
     func truthyEnvLive() throws {
         let name = "APPLE_CLI_TEST_TRUTHY_UNIQ" // unique to this test — no parallel-suite races
-        unsetenv(name)
-        #expect(try TestMode.truthyEnv(name) == false)
-        setenv(name, "yes", 1)
-        #expect(try TestMode.truthyEnv(name) == true)
-        setenv(name, "maybe", 1)
-        #expect(throws: AppleError.self) { _ = try TestMode.truthyEnv(name) }
-        unsetenv(name)
+        // The reads are hoisted OUT of the windows because `#expect`'s expansion cannot carry a
+        // `try` across a closure boundary the compiler infers as non-throwing. Each window still
+        // encloses the whole read; only the assertion happens after it closes.
+        #expect(try TestEnvironment.with([name: String?.none]) {
+            try TestMode.truthyEnv(name)
+        } == false)
+        #expect(try TestEnvironment.with([name: "yes"]) {
+            try TestMode.truthyEnv(name)
+        } == true)
+        TestEnvironment.with([name: "maybe"]) {
+            #expect(throws: AppleError.self) { _ = try TestMode.truthyEnv(name) }
+        }
     }
 
     @Test("willExecute(defaultDryRun:) THROWS on an unparseable APPLE_DRY_RUN — never silent-execute")
@@ -136,30 +151,44 @@ struct WriteModelV2CoreTests {
         // full parallel run. Every future domain flip adds another reader, so the seam (not a
         // comment asserting exclusivity) is what keeps this correct.
         let name = "APPLE_CLI_TEST_DRYRUN_UNIQ"
-        defer { unsetenv(name) }
         let g = try GlobalOptions.parse([])
-        unsetenv(name)
-        #expect(try g.willExecute(defaultDryRun: false, envVar: name) == true)
-        setenv(name, "1", 1)
-        #expect(try g.willExecute(defaultDryRun: false, envVar: name) == false)
-        setenv(name, "ture", 1)
-        #expect(throws: AppleError.self) { _ = try g.willExecute(defaultDryRun: false, envVar: name) }
-        // --execute with junk env still throws (validation precedes precedence).
         let e = try GlobalOptions.parse(["--execute"])
-        #expect(throws: AppleError.self) { _ = try e.willExecute(defaultDryRun: false, envVar: name) }
+        #expect(try TestEnvironment.with([name: String?.none]) {
+            try g.willExecute(defaultDryRun: false, envVar: name)
+        } == true)
+        #expect(try TestEnvironment.with([name: "1"]) {
+            try g.willExecute(defaultDryRun: false, envVar: name)
+        } == false)
+        TestEnvironment.with([name: "ture"]) {
+            #expect(throws: AppleError.self) {
+                _ = try g.willExecute(defaultDryRun: false, envVar: name)
+            }
+            // --execute with junk env still throws (validation precedes precedence).
+            #expect(throws: AppleError.self) {
+                _ = try e.willExecute(defaultDryRun: false, envVar: name)
+            }
+        }
     }
 
     @Test("the default envVar IS the real APPLE_DRY_RUN (the seam cannot silently re-point production)")
     func defaultEnvVarIsTheRealOne() throws {
         // The seam above is only safe if the DEFAULT still reads the documented variable —
-        // otherwise every production caller would silently consult a test-only name. Asserted
-        // without mutating anything: with APPLE_DRY_RUN unset (the suite precondition), an
-        // explicit `envVar: TestMode.dryRunVar` and the defaulted call must agree, and
-        // TestMode.dryRunVar must be the documented spelling.
+        // otherwise every production caller would silently consult a test-only name. An explicit
+        // `envVar: TestMode.dryRunVar` and the defaulted call must agree, and TestMode.dryRunVar
+        // must be the documented spelling.
+        //
+        // Inside a window rather than against the ambient environment: this used to rely on
+        // APPLE_DRY_RUN happening to be unset, so an operator who exported `APPLE_DRY_RUN=junk`
+        // made both calls throw and the test fail deterministically, and any exported value at
+        // all left it at the mercy of a concurrent suite's window closing mid-comparison. Pinning
+        // the write-posture set absent is what makes the agreement a statement about the seam.
         #expect(TestMode.dryRunVar == "APPLE_DRY_RUN")
         let g = try GlobalOptions.parse([])
-        #expect(try g.willExecute(defaultDryRun: false)
-                == g.willExecute(defaultDryRun: false, envVar: TestMode.dryRunVar))
+        let pair = try TestEnvironment.withoutWriteModeOverrides {
+            (try g.willExecute(defaultDryRun: false),
+             try g.willExecute(defaultDryRun: false, envVar: TestMode.dryRunVar))
+        }
+        #expect(pair.0 == pair.1)
     }
 
     @Test("sandboxActive: flag OR truthy env; junk env throws on EVERY path, even with the flag")
@@ -168,17 +197,25 @@ struct WriteModelV2CoreTests {
         // 15 v1 gate sites across sibling suites running in parallel, so setting it truthy
         // here could flip a concurrent write-safety assertion (review-caught race).
         let name = "APPLE_CLI_TEST_SANDBOX_UNIQ"
-        defer { unsetenv(name) }
-        unsetenv(name)
-        #expect(try TestMode.sandboxActive(flag: true, envVar: name) == true)
-        #expect(try TestMode.sandboxActive(flag: false, envVar: name) == false)
-        setenv(name, "true", 1)
-        #expect(try TestMode.sandboxActive(flag: false, envVar: name) == true)
-        setenv(name, "sandbox", 1)
-        #expect(throws: AppleError.self) { _ = try TestMode.sandboxActive(flag: false, envVar: name) }
-        // Validation is EAGER (no || short-circuit): a malformed value refuses even when
-        // --test-mode was passed — the fail-loud contract has no flag-shaped hole.
-        #expect(throws: AppleError.self) { _ = try TestMode.sandboxActive(flag: true, envVar: name) }
+        let unset = try TestEnvironment.with([name: String?.none]) {
+            (try TestMode.sandboxActive(flag: true, envVar: name),
+             try TestMode.sandboxActive(flag: false, envVar: name))
+        }
+        #expect(unset.0 == true)
+        #expect(unset.1 == false)
+        #expect(try TestEnvironment.with([name: "true"]) {
+            try TestMode.sandboxActive(flag: false, envVar: name)
+        } == true)
+        TestEnvironment.with([name: "sandbox"]) {
+            #expect(throws: AppleError.self) {
+                _ = try TestMode.sandboxActive(flag: false, envVar: name)
+            }
+            // Validation is EAGER (no || short-circuit): a malformed value refuses even when
+            // --test-mode was passed — the fail-loud contract has no flag-shaped hole.
+            #expect(throws: AppleError.self) {
+                _ = try TestMode.sandboxActive(flag: true, envVar: name)
+            }
+        }
     }
 
     @Test("isTruthyEnv is the ONE documented fail-open reader: junk reads false, never throws")
@@ -188,9 +225,9 @@ struct WriteModelV2CoreTests {
         // unparseable value refuses the command. This test pins the boundary so a future
         // refactor can't silently widen the fail-open surface without touching a test.
         let name = "APPLE_CLI_TEST_TRUTHY_UNIQ2"
-        setenv(name, "junk-value", 1)
-        #expect(TestMode.isTruthyEnv(name) == false)
-        unsetenv(name)
+        TestEnvironment.with([name: "junk-value"]) {
+            #expect(TestMode.isTruthyEnv(name) == false)
+        }
     }
 
 }
