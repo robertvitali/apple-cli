@@ -7,7 +7,7 @@ HELPERS="$BATS_SUITE_ROOT/helpers"
 # Envelope Index and Mail automation access.
 
 setup() {
-  BIN="$(swift build --show-bin-path)/apple"
+  BIN="${APPLE_CLI_TEST_BINARY:-$(swift build --show-bin-path)/apple}"
   export APPLE_MAIL_MCP_HOME="$BATS_TEST_TMPDIR/template-text"
 }
 

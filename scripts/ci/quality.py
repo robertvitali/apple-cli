@@ -103,6 +103,7 @@ class QualityRequest:
     candidate_sha: Optional[str]
     base_sha: Optional[str]
     stages: Tuple[str, ...]
+    hosted_phase: str = "all"
     list_stages: bool = False
 
 
@@ -205,6 +206,22 @@ def clt_build_command(
     )
 
 
+def bats_executable() -> str:
+    override = os.environ.get("BATS_EXECUTABLE")
+    if override is None or override == "":
+        return "bats"
+    path = Path(override)
+    if not path.is_absolute():
+        raise PolicyError("Bats executable override must be absolute")
+    try:
+        metadata = path.stat()
+    except OSError:
+        raise PolicyError("Bats executable override is unavailable") from None
+    if not stat.S_ISREG(metadata.st_mode) or not os.access(path, os.X_OK):
+        raise PolicyError("Bats executable override is unavailable")
+    return str(path)
+
+
 def bats_local_command(
     _policy_root: Path,
     _candidate_root: Path,
@@ -214,7 +231,7 @@ def bats_local_command(
     return (
         "/usr/bin/env",
         f"PATH={system_first_path}",
-        "bats",
+        bats_executable(),
         "-r",
         "bats/",
     )
@@ -229,7 +246,7 @@ def bats_hosted_command(
     return (
         "/usr/bin/env",
         f"PATH={system_first_path}",
-        "bats",
+        bats_executable(),
         "-r",
         "bats/hosted/",
     )
@@ -325,6 +342,11 @@ def parse_request(argv: Optional[Sequence[str]]) -> QualityRequest:
         choices=[context.value for context in HostedContext],
     )
     parser.add_argument("--stage", action="append", default=[])
+    parser.add_argument(
+        "--hosted-phase",
+        choices=("all", "swift", "build", "bats"),
+        default="all",
+    )
     parser.add_argument("--list-stages", action="store_true")
     try:
         args = parser.parse_args(argv)
@@ -344,6 +366,8 @@ def parse_request(argv: Optional[Sequence[str]]) -> QualityRequest:
         requested_stages = tuple(args.stage)
         if mode is Mode.HOSTED and requested_stages:
             raise PolicyError("hosted mode does not accept --stage")
+        if mode is Mode.LOCAL and args.hosted_phase != "all":
+            raise PolicyError("local mode must not set --hosted-phase")
         if len(set(requested_stages)) != len(requested_stages):
             raise PolicyError("duplicate stage requested")
         unknown = [name for name in requested_stages if name not in STAGE_BY_NAME]
@@ -357,7 +381,16 @@ def parse_request(argv: Optional[Sequence[str]]) -> QualityRequest:
     except SystemExit as error:
         raise PolicyError(f"invalid arguments: {error.code}") from None
 
-    selected = requested_stages or stage_names_for_mode(mode)
+    if requested_stages:
+        selected = requested_stages
+    elif mode is Mode.HOSTED and args.hosted_phase == "swift":
+        selected = ("hosted-build", "hosted-test")
+    elif mode is Mode.HOSTED and args.hosted_phase == "build":
+        selected = ("hosted-build",)
+    elif mode is Mode.HOSTED and args.hosted_phase == "bats":
+        selected = ("bats-inventory", "bats-hosted")
+    else:
+        selected = stage_names_for_mode(mode)
     return QualityRequest(
         mode=mode,
         hosted_context=hosted_context,
@@ -366,6 +399,7 @@ def parse_request(argv: Optional[Sequence[str]]) -> QualityRequest:
         candidate_sha=candidate_sha,
         base_sha=base_sha,
         stages=selected,
+        hosted_phase=args.hosted_phase,
         list_stages=args.list_stages,
     )
 

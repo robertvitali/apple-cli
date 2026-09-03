@@ -69,7 +69,7 @@ jobs:
       - name: Guard — supply-chain policy and docs lock
         run: |
           set -euo pipefail
-          python -m unittest Tests.automation.test_action_pins Tests.automation.test_dependency_policy
+          python -m unittest discover -s Tests/automation -p 'test_*.py'
           python scripts/ci/action_pins.py
           python scripts/ci/dependency_policy.py
           uv pip compile docs/requirements.in --python-version 3.12 --python-platform x86_64-unknown-linux-gnu --generate-hashes --output-file docs/requirements.txt

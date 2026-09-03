@@ -18,6 +18,7 @@ from unittest import mock
 REPO_ROOT = Path(__file__).resolve().parents[2]
 QUALITY_PATH = REPO_ROOT / "scripts" / "ci" / "quality.py"
 CI_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+RELEASE_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "release.yml"
 FULL_SHA = "0123456789abcdef0123456789abcdef01234567"
 BASE_SHA = "89abcdef0123456789abcdef0123456789abcdef"
 OTHER_SHA = "fedcba9876543210fedcba9876543210fedcba98"
@@ -56,6 +57,91 @@ def workflow_named_step(job: str, name: str) -> str:
     if match is None:
         raise AssertionError(f"workflow step is missing: {name}")
     return match.group("body")
+
+
+def assert_pinned_bats_install(testcase: unittest.TestCase, install_step: str) -> None:
+    testcase.assertIn(
+        "sha512-giSYKGTOcPZyJDbfbTtzAedLcNWdjCLbXYU3/MwPnjyvDXzu6Dgw8d2M+8jHhZXSmsCMSQqCp+YBsJ603UO4vQ==",
+        install_step,
+    )
+    testcase.assertIn(
+        'tarball="$RUNNER_TEMP/bats-1.13.0.tgz"',
+        install_step,
+    )
+    testcase.assertIn(
+        'npm pack bats@1.13.0 --pack-destination "$RUNNER_TEMP" --ignore-scripts >/dev/null',
+        install_step,
+    )
+    testcase.assertIn(
+        '[ -f "$tarball" ] || { echo "Pinned Bats tarball was not downloaded."; exit 1; }',
+        install_step,
+    )
+    testcase.assertIn(
+        'ACTUAL_INTEGRITY="sha512-$(openssl dgst -sha512 -binary "$tarball" | openssl base64 -A)"',
+        install_step,
+    )
+    testcase.assertIn(
+        'if [ "$ACTUAL_INTEGRITY" != "$BATS_INTEGRITY" ]; then',
+        install_step,
+    )
+    testcase.assertIn(
+        "npm install --ignore-scripts --no-audit --no-fund \"$tarball\"",
+        install_step,
+    )
+    testcase.assertIn(
+        'echo "$RUNNER_TEMP/node_modules/.bin" >> "$GITHUB_PATH"',
+        install_step,
+    )
+    testcase.assertIn(
+        'echo "BATS_EXECUTABLE=$RUNNER_TEMP/node_modules/.bin/bats" >> "$GITHUB_ENV"',
+        install_step,
+    )
+    testcase.assertIn(
+        '[ "$("$RUNNER_TEMP/node_modules/.bin/bats" --version)" = "Bats 1.13.0" ]',
+        install_step,
+    )
+    testcase.assertNotIn("brew install", install_step)
+    testcase.assertNotIn("sudo", install_step)
+    testcase.assertNotIn("--global", install_step)
+    for setting in (
+        "NPM_CONFIG_USERCONFIG: /dev/null",
+        "NPM_CONFIG_REGISTRY: https://registry.npmjs.org/",
+        'NPM_CONFIG_IGNORE_SCRIPTS: "true"',
+    ):
+        testcase.assertIn(setting, install_step)
+    testcase.assertNotRegex(
+        install_step,
+        r"(?m)^          NPM_CONFIG_GLOBALCONFIG:",
+    )
+    testcase.assertIn(
+        'npm_global_config="$(mktemp "$RUNNER_TEMP/npm-globalrc.XXXXXX")"',
+        install_step,
+    )
+    testcase.assertIn('chmod 400 "$npm_global_config"', install_step)
+    testcase.assertIn("trap 'rm -f \"$npm_global_config\"' EXIT", install_step)
+    testcase.assertIn(
+        'export NPM_CONFIG_GLOBALCONFIG="$npm_global_config"',
+        install_step,
+    )
+    ordered_markers = (
+        'npm_global_config="$(mktemp "$RUNNER_TEMP/npm-globalrc.XXXXXX")"',
+        'chmod 400 "$npm_global_config"',
+        "trap 'rm -f \"$npm_global_config\"' EXIT",
+        'export NPM_CONFIG_GLOBALCONFIG="$npm_global_config"',
+        'cd "$RUNNER_TEMP"',
+        'tarball="$RUNNER_TEMP/bats-1.13.0.tgz"',
+        'npm pack bats@1.13.0 --pack-destination "$RUNNER_TEMP" --ignore-scripts >/dev/null',
+        '[ -f "$tarball" ] || { echo "Pinned Bats tarball was not downloaded."; exit 1; }',
+        'ACTUAL_INTEGRITY="sha512-$(openssl dgst -sha512 -binary "$tarball" | openssl base64 -A)"',
+        'if [ "$ACTUAL_INTEGRITY" != "$BATS_INTEGRITY" ]; then',
+        'npm install --ignore-scripts --no-audit --no-fund "$tarball"',
+        'echo "$RUNNER_TEMP/node_modules/.bin" >> "$GITHUB_PATH"',
+        'echo "BATS_EXECUTABLE=$RUNNER_TEMP/node_modules/.bin/bats" >> "$GITHUB_ENV"',
+        '[ "$("$RUNNER_TEMP/node_modules/.bin/bats" --version)" = "Bats 1.13.0" ]',
+    )
+    marker_offsets = [install_step.index(marker) for marker in ordered_markers]
+    testcase.assertEqual(marker_offsets, sorted(marker_offsets))
+    testcase.assertIn('cd "$RUNNER_TEMP"', install_step)
 
 
 def write_executable(path: Path, source: str) -> None:
@@ -140,17 +226,23 @@ class QualityDriverTests(unittest.TestCase):
     def test_ci_runs_the_full_hosted_quality_gate_with_exact_sha_bindings(self) -> None:
         workflow = CI_WORKFLOW_PATH.read_text(encoding="utf-8")
         job = workflow_job(workflow, "build-test")
+        bats_build_job = workflow_job(workflow, "hosted-bats-build")
+        bats_job = workflow_job(workflow, "hosted-bats")
 
         self.assertIn("\n  pull_request:\n", workflow)
         self.assertNotIn("pull_request_target", workflow)
         self.assertRegex(workflow, r"(?m)^permissions:\n  contents: read$")
-        self.assertIn("runs-on: macos-15", job)
-        self.assertNotIn("self-hosted", job)
-        self.assertNotRegex(job, r"\$\{\{\s*secrets\.")
-        self.assertNotRegex(job, r"(?m)^    environment:")
-        self.assertNotIn("bats/local", job)
-        self.assertNotIn("--stage", job)
-        self.assertEqual(job.count("--mode hosted"), 2)
+        for hosted_job in (job, bats_build_job, bats_job):
+            self.assertIn("runs-on: macos-15", hosted_job)
+            self.assertNotIn("self-hosted", hosted_job)
+            self.assertNotRegex(hosted_job, r"\$\{\{\s*secrets\.")
+            self.assertNotRegex(hosted_job, r"(?m)^    environment:")
+            self.assertNotIn("bats/local", hosted_job)
+            self.assertNotIn("--stage", hosted_job)
+            self.assertEqual(
+                hosted_job.count("--mode hosted"),
+                2,
+            )
         checkout = re.search(
             r"(?ms)^      - uses: actions/checkout@[0-9a-f]{40} # v[0-9.]+\n"
             r"        with:\n(?P<with>(?:          [^\n]+\n)+)",
@@ -165,37 +257,121 @@ class QualityDriverTests(unittest.TestCase):
             checkout_settings,
         )
 
-        install_step = workflow_named_step(job, "Install pinned Bats")
-        self.assertIn("npm view bats@1.13.0 dist.integrity", install_step)
-        self.assertIn(
-            "sha512-giSYKGTOcPZyJDbfbTtzAedLcNWdjCLbXYU3/MwPnjyvDXzu6Dgw8d2M+8jHhZXSmsCMSQqCp+YBsJ603UO4vQ==",
-            install_step,
-        )
-        self.assertIn(
-            "npm install --global --ignore-scripts --no-audit --no-fund bats@1.13.0",
-            install_step,
-        )
-        self.assertIn('"$(bats --version)" = "Bats 1.13.0"', install_step)
-        self.assertNotIn("brew install", install_step)
-        for setting in (
-            "NPM_CONFIG_USERCONFIG: /dev/null",
-            "NPM_CONFIG_GLOBALCONFIG: ${{ runner.temp }}/npm-globalrc",
-            "NPM_CONFIG_REGISTRY: https://registry.npmjs.org/",
-            'NPM_CONFIG_IGNORE_SCRIPTS: "true"',
-        ):
-            self.assertIn(setting, install_step)
-        npm_config_paths = re.findall(
-            r"NPM_CONFIG_(?:USER|GLOBAL)CONFIG: ([^\n]+)",
-            install_step,
-        )
-        self.assertEqual(len(npm_config_paths), 2)
-        self.assertEqual(len(set(npm_config_paths)), 2)
-        self.assertIn('cd "$RUNNER_TEMP"', install_step)
+        self.assertNotIn("Install pinned Bats", job)
+        self.assertNotIn("Install pinned Bats", bats_build_job)
+        self.assertIn("needs: hosted-bats-build", bats_job)
+        assert_pinned_bats_install(self, workflow_named_step(bats_job, "Install pinned Bats"))
 
         policy_step = workflow_named_step(job, "Prepare trusted policy checkout")
         self.assertIn("worktree add --detach", policy_step)
         self.assertIn('"${{ github.event.pull_request.base.sha }}"', policy_step)
         self.assertIn('"$RUNNER_TEMP/trusted-policy"', policy_step)
+        bats_build_policy_step = workflow_named_step(
+            bats_build_job,
+            "Prepare trusted policy checkout",
+        )
+        self.assertIn("worktree add --detach", bats_build_policy_step)
+        self.assertIn('"${{ github.event.pull_request.base.sha }}"', bats_build_policy_step)
+        self.assertIn('"$RUNNER_TEMP/trusted-policy"', bats_build_policy_step)
+        bats_policy_step = workflow_named_step(bats_job, "Prepare trusted policy checkout")
+        self.assertIn("worktree add --detach", bats_policy_step)
+        self.assertIn('"${{ github.event.pull_request.base.sha }}"', bats_policy_step)
+        self.assertIn('"$RUNNER_TEMP/trusted-policy"', bats_policy_step)
+
+        bats_pull_request_build_step = workflow_named_step(
+            bats_build_job,
+            "Build candidate for hosted Bats (pull request)",
+        )
+        bats_pull_request_build_command = " ".join(
+            line.strip().rstrip("\\") for line in bats_pull_request_build_step.splitlines()
+        )
+        for required in (
+            'python3 "$RUNNER_TEMP/trusted-policy/scripts/ci/quality.py"',
+            "--mode hosted",
+            "--hosted-context pull-request",
+            "--hosted-phase build",
+            '--candidate-root "$GITHUB_WORKSPACE"',
+            '--candidate-sha "${{ github.event.pull_request.head.sha }}"',
+            '--base-sha "${{ github.event.pull_request.base.sha }}"',
+        ):
+            self.assertIn(required, bats_pull_request_build_command)
+
+        bats_trusted_build_step = workflow_named_step(
+            bats_build_job,
+            "Build candidate for hosted Bats (trusted ref)",
+        )
+        bats_trusted_build_command = " ".join(
+            line.strip().rstrip("\\") for line in bats_trusted_build_step.splitlines()
+        )
+        for required in (
+            "python3 scripts/ci/quality.py",
+            "--mode hosted",
+            "--hosted-context trusted-ref",
+            "--hosted-phase build",
+            '--candidate-root "$GITHUB_WORKSPACE"',
+            '--candidate-sha "${{ github.sha }}"',
+        ):
+            self.assertIn(required, bats_trusted_build_command)
+        self.assertNotIn("--base-sha", bats_trusted_build_command)
+        self.assertNotIn("--hosted-phase bats", bats_build_job)
+        self.assertNotIn("--hosted-phase build", bats_job)
+        self.assertIn(
+            "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1",
+            bats_build_job,
+        )
+        self.assertIn(
+            "name: hosted-bats-apple-${{ github.run_id }}-${{ github.run_attempt }}",
+            bats_build_job,
+        )
+        package_step = workflow_named_step(bats_build_job, "Package hosted Bats binary artifact")
+        for required in (
+            'artifact_dir="$RUNNER_TEMP/hosted-bats-artifact"',
+            'binary_path="$(swift build --show-bin-path)/apple"',
+            '[ -x "$binary_path" ] || { echo "Built apple binary is unavailable."; exit 1; }',
+            'upstream_root="$(cd "$(dirname "$binary_path")/../.." && pwd -P)"',
+            'upstream_matcher="$upstream_root/checkouts/swift-argument-parser/Sources/ArgumentParser/Utilities/Tree.swift"',
+            '[ -f "$upstream_matcher" ] || { echo "Swift ArgumentParser matcher source is unavailable."; exit 1; }',
+            'cp "$binary_path" "$artifact_dir/apple"',
+            'chmod 755 "$artifact_dir/apple"',
+            'mkdir -p "$artifact_dir/upstream-root/checkouts/swift-argument-parser/Sources/ArgumentParser/Utilities"',
+            'cp "$upstream_matcher" "$artifact_dir/upstream-root/checkouts/swift-argument-parser/Sources/ArgumentParser/Utilities/Tree.swift"',
+            '(cd "$artifact_dir" && shasum -a 256 apple upstream-root/checkouts/swift-argument-parser/Sources/ArgumentParser/Utilities/Tree.swift > apple.sha256)',
+        ):
+            self.assertIn(required, package_step)
+        self.assertIn("path: ${{ runner.temp }}/hosted-bats-artifact/", bats_build_job)
+        self.assertIn("if-no-files-found: error", bats_build_job)
+        self.assertIn(
+            "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1",
+            bats_job,
+        )
+        self.assertIn(
+            "name: hosted-bats-apple-${{ github.run_id }}-${{ github.run_attempt }}",
+            bats_job,
+        )
+        install_artifact_step = workflow_named_step(
+            bats_job,
+            "Validate hosted Bats binary artifact",
+        )
+        for required in (
+            'cd "$RUNNER_TEMP/hosted-bats-bin"',
+            "shasum -a 256 -c apple.sha256",
+            "chmod 755 apple",
+            'echo "APPLE_CLI_TEST_BINARY=$RUNNER_TEMP/hosted-bats-bin/apple" >> "$GITHUB_ENV"',
+            'echo "APPLE_CLI_UPSTREAM_ROOT=$RUNNER_TEMP/hosted-bats-bin/upstream-root" >> "$GITHUB_ENV"',
+        ):
+            self.assertIn(required, install_artifact_step)
+        self.assertLess(
+            bats_job.index("- name: Install pinned Bats"),
+            bats_job.index("actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1"),
+        )
+        self.assertLess(
+            bats_job.index("actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1"),
+            bats_job.index("- name: Validate hosted Bats binary artifact"),
+        )
+        self.assertLess(
+            bats_job.index("- name: Validate hosted Bats binary artifact"),
+            bats_job.index("- name: Run hosted Bats quality (trusted ref)"),
+        )
 
         pull_request_step = workflow_named_step(
             job,
@@ -208,6 +384,7 @@ class QualityDriverTests(unittest.TestCase):
             'python3 "$RUNNER_TEMP/trusted-policy/scripts/ci/quality.py"',
             "--mode hosted",
             "--hosted-context pull-request",
+            "--hosted-phase swift",
             '--candidate-root "$GITHUB_WORKSPACE"',
             '--candidate-sha "${{ github.event.pull_request.head.sha }}"',
             '--base-sha "${{ github.event.pull_request.base.sha }}"',
@@ -222,11 +399,93 @@ class QualityDriverTests(unittest.TestCase):
             "python3 scripts/ci/quality.py",
             "--mode hosted",
             "--hosted-context trusted-ref",
+            "--hosted-phase swift",
             '--candidate-root "$GITHUB_WORKSPACE"',
             '--candidate-sha "${{ github.sha }}"',
         ):
             self.assertIn(required, trusted_command)
         self.assertNotIn("--base-sha", trusted_command)
+
+        bats_pull_request_step = workflow_named_step(
+            bats_job,
+            "Run hosted Bats quality (pull request)",
+        )
+        bats_pull_request_command = " ".join(
+            line.strip().rstrip("\\") for line in bats_pull_request_step.splitlines()
+        )
+        for required in (
+            'python3 "$RUNNER_TEMP/trusted-policy/scripts/ci/quality.py"',
+            "--mode hosted",
+            "--hosted-context pull-request",
+            "--hosted-phase bats",
+            '--candidate-root "$GITHUB_WORKSPACE"',
+            '--candidate-sha "${{ github.event.pull_request.head.sha }}"',
+            '--base-sha "${{ github.event.pull_request.base.sha }}"',
+        ):
+            self.assertIn(required, bats_pull_request_command)
+
+        bats_trusted_step = workflow_named_step(
+            bats_job,
+            "Run hosted Bats quality (trusted ref)",
+        )
+        bats_trusted_command = " ".join(
+            line.strip().rstrip("\\") for line in bats_trusted_step.splitlines()
+        )
+        for required in (
+            "python3 scripts/ci/quality.py",
+            "--mode hosted",
+            "--hosted-context trusted-ref",
+            "--hosted-phase bats",
+            '--candidate-root "$GITHUB_WORKSPACE"',
+            '--candidate-sha "${{ github.sha }}"',
+        ):
+            self.assertIn(required, bats_trusted_command)
+        self.assertNotIn("--base-sha", bats_trusted_command)
+
+        aggregate_job = workflow_job(workflow, "quality-required")
+        self.assertIn("name: quality / required", aggregate_job)
+        self.assertIn("if: always()", aggregate_job)
+        for dependency in (
+            "- supply-chain-policy",
+            "- build-test",
+            "- hosted-bats-build",
+            "- hosted-bats",
+            "- commit-lint",
+        ):
+            self.assertIn(dependency, aggregate_job)
+        for result in (
+            'SUPPLY_CHAIN_POLICY_RESULT: ${{ needs.supply-chain-policy.result }}',
+            'BUILD_TEST_RESULT: ${{ needs.build-test.result }}',
+            'HOSTED_BATS_BUILD_RESULT: ${{ needs.hosted-bats-build.result }}',
+            'HOSTED_BATS_RESULT: ${{ needs.hosted-bats.result }}',
+            'COMMIT_LINT_RESULT: ${{ needs.commit-lint.result }}',
+        ):
+            self.assertIn(result, aggregate_job)
+        for check in (
+            '[ "$SUPPLY_CHAIN_POLICY_RESULT" = "success" ]',
+            '[ "$BUILD_TEST_RESULT" = "success" ]',
+            '[ "$HOSTED_BATS_BUILD_RESULT" = "success" ]',
+            '[ "$HOSTED_BATS_RESULT" = "success" ]',
+            '[ "$COMMIT_LINT_RESULT" = "success" ]',
+        ):
+            self.assertIn(check, aggregate_job)
+
+    def test_only_hosted_bats_job_installs_pinned_bats(self) -> None:
+        ci_workflow = CI_WORKFLOW_PATH.read_text(encoding="utf-8")
+        release_workflow = RELEASE_WORKFLOW_PATH.read_text(encoding="utf-8")
+
+        ci_policy_job = workflow_job(ci_workflow, "supply-chain-policy")
+        ci_bats_job = workflow_job(ci_workflow, "hosted-bats")
+        release_job = workflow_job(release_workflow, "release")
+
+        assert_pinned_bats_install(
+            self,
+            workflow_named_step(ci_bats_job, "Install pinned Bats"),
+        )
+        self.assertNotIn("Install pinned Bats", ci_policy_job)
+        self.assertNotIn("BATS_INTEGRITY", ci_policy_job)
+        self.assertNotIn("Install pinned Bats", release_job)
+        self.assertNotIn("BATS_INTEGRITY", release_job)
 
     def test_ci_commit_lint_uses_full_checkout_without_authenticated_fetch(self) -> None:
         workflow = CI_WORKFLOW_PATH.read_text(encoding="utf-8")
@@ -326,6 +585,82 @@ class QualityDriverTests(unittest.TestCase):
                 ]
             ).stages,
             ("bats-inventory", "hosted-build", "hosted-test", "bats-hosted"),
+        )
+        self.assertEqual(
+            self.quality.parse_request(
+                [
+                    "--mode",
+                    "hosted",
+                    "--hosted-context",
+                    "trusted-ref",
+                    "--hosted-phase",
+                    "build",
+                    "--candidate-sha",
+                    FULL_SHA,
+                ]
+            ).stages,
+            ("hosted-build",),
+        )
+        self.assertEqual(
+            self.quality.parse_request(
+                [
+                    "--mode",
+                    "hosted",
+                    "--hosted-context",
+                    "trusted-ref",
+                    "--hosted-phase",
+                    "swift",
+                    "--candidate-sha",
+                    FULL_SHA,
+                ]
+            ).stages,
+            ("hosted-build", "hosted-test"),
+        )
+        self.assertEqual(
+            self.quality.parse_request(
+                [
+                    "--mode",
+                    "hosted",
+                    "--hosted-context",
+                    "trusted-ref",
+                    "--hosted-phase",
+                    "bats",
+                    "--candidate-sha",
+                    FULL_SHA,
+                ]
+            ).stages,
+            ("bats-inventory", "bats-hosted"),
+        )
+
+    def test_hosted_phase_union_matches_complete_hosted_registry(self) -> None:
+        def hosted_phase(phase: str) -> tuple[str, ...]:
+            return self.quality.parse_request(
+                [
+                    "--mode",
+                    "hosted",
+                    "--hosted-context",
+                    "trusted-ref",
+                    "--hosted-phase",
+                    phase,
+                    "--candidate-sha",
+                    FULL_SHA,
+                ]
+            ).stages
+
+        build = hosted_phase("build")
+        swift = hosted_phase("swift")
+        bats = hosted_phase("bats")
+        all_hosted = hosted_phase("all")
+
+        self.assertEqual(build, ("hosted-build",))
+        self.assertEqual(swift, ("hosted-build", "hosted-test"))
+        self.assertEqual(bats, ("bats-inventory", "bats-hosted"))
+        self.assertEqual(all_hosted, self.quality.stage_names_for_mode(self.quality.Mode.HOSTED))
+        self.assertEqual(set(swift).union(bats), set(all_hosted))
+        self.assertEqual(
+            set(swift).intersection(bats),
+            set(),
+            "published hosted phases must be disjoint so aggregate jobs cannot double-count a stage",
         )
 
     def test_hosted_context_is_required_for_hosted_runs_and_rejected_for_local(self) -> None:
@@ -927,7 +1262,11 @@ class QualityDriverTests(unittest.TestCase):
 
     def test_stage_commands_are_shell_free_and_deterministic(self) -> None:
         stages = {stage.name: stage for stage in self.quality.STAGES}
-        with tempfile.TemporaryDirectory() as temporary_directory:
+        with tempfile.TemporaryDirectory() as temporary_directory, mock.patch.dict(
+            self.quality.os.environ,
+            {"PATH": os.environ.get("PATH", "")},
+            clear=True,
+        ):
             xunit_dir = Path(temporary_directory)
             inventory = stages["bats-inventory"].command(REPO_ROOT, REPO_ROOT, xunit_dir)
             swiftly_build = stages["swiftly-build"].command(REPO_ROOT, REPO_ROOT, xunit_dir)
@@ -966,6 +1305,56 @@ class QualityDriverTests(unittest.TestCase):
         for command in (inventory, swiftly_build, swiftly_test, clt_build, bats_local, bats_hosted):
             self.assertIsInstance(command, tuple)
             self.assertNotIn("&&", command)
+
+    def test_hosted_bats_command_uses_absolute_executable_override(self) -> None:
+        stages = {stage.name: stage for stage in self.quality.STAGES}
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            fake_bats = Path(temporary_directory) / "synthetic-bats"
+            write_executable(fake_bats, "#!/bin/sh\nexit 0\n")
+            xunit_dir = Path(temporary_directory)
+            with mock.patch.dict(
+                self.quality.os.environ,
+                {"PATH": "/synthetic/bin", "BATS_EXECUTABLE": str(fake_bats)},
+                clear=True,
+            ):
+                command = stages["bats-hosted"].command(REPO_ROOT, REPO_ROOT, xunit_dir)
+
+        self.assertEqual(
+            command[:3],
+            (
+                "/usr/bin/env",
+                "PATH=/usr/bin:/bin:/usr/sbin:/sbin:/synthetic/bin",
+                str(fake_bats),
+            ),
+        )
+
+    def test_hosted_bats_command_rejects_relative_executable_override(self) -> None:
+        stages = {stage.name: stage for stage in self.quality.STAGES}
+        with tempfile.TemporaryDirectory() as temporary_directory, mock.patch.dict(
+            self.quality.os.environ,
+            {"BATS_EXECUTABLE": "relative-bats"},
+            clear=True,
+        ):
+            xunit_dir = Path(temporary_directory)
+            with self.assertRaisesRegex(
+                self.quality.PolicyError,
+                "^Bats executable override must be absolute$",
+            ):
+                stages["bats-hosted"].command(REPO_ROOT, REPO_ROOT, xunit_dir)
+
+    def test_bats_command_rejects_unavailable_executable_override(self) -> None:
+        stages = {stage.name: stage for stage in self.quality.STAGES}
+        with tempfile.TemporaryDirectory() as temporary_directory, mock.patch.dict(
+            self.quality.os.environ,
+            {"BATS_EXECUTABLE": str(Path(temporary_directory) / "missing-bats")},
+            clear=True,
+        ):
+            xunit_dir = Path(temporary_directory)
+            with self.assertRaisesRegex(
+                self.quality.PolicyError,
+                "^Bats executable override is unavailable$",
+            ):
+                stages["bats-local"].command(REPO_ROOT, REPO_ROOT, xunit_dir)
 
     def test_hosted_bats_receives_a_fresh_isolated_home_and_config_roots(self) -> None:
         captured = {}
@@ -1252,7 +1641,7 @@ class QualityDriverTests(unittest.TestCase):
             original_limit = getattr(self.quality, "MAX_COMMAND_OUTPUT_BYTES", None)
             self.quality.MAX_COMMAND_OUTPUT_BYTES = 4096
             try:
-                result = self.quality.run_command((str(writer),), root, 2, 0.2)
+                result = self.quality.run_command((str(writer),), root, 30, 0.2)
             finally:
                 if original_limit is None:
                     del self.quality.MAX_COMMAND_OUTPUT_BYTES
@@ -1299,7 +1688,7 @@ class QualityDriverTests(unittest.TestCase):
                 0,
             )
             self.assertEqual(
-                self.quality.run_command((str(stubborn_script),), root, 0.5, 0.1).status,
+                self.quality.run_command((str(stubborn_script),), root, 2, 0.1).status,
                 124,
             )
             self.assertTrue(marker.is_file())

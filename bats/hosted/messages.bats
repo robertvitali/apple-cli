@@ -8,7 +8,7 @@ HELPERS="$BATS_SUITE_ROOT/helpers"
 
 setup() {
   export PATH="$HOME/.swiftly/bin:$PATH"
-  BIN="$(swift build --show-bin-path)/apple"
+  BIN="${APPLE_CLI_TEST_BINARY:-$(swift build --show-bin-path)/apple}"
 }
 
 # --- help + subcommand surface (no TCC) ---

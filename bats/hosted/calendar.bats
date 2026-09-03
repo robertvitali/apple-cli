@@ -15,7 +15,7 @@ HELPERS="$BATS_SUITE_ROOT/helpers"
 # reason, not migrated. `bats/smoke.bats`'s flagless-write lint enforces it — do not add one.
 
 setup() {
-  BIN="$(swift build --show-bin-path)/apple"
+  BIN="${APPLE_CLI_TEST_BINARY:-$(swift build --show-bin-path)/apple}"
 }
 
 # --- QC gate: EVERY leaf subcommand --help must exit 0 -----------------------------------

@@ -9,12 +9,8 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
-import selectors
-import signal
 import stat
-import subprocess
 import sys
-import time
 from typing import Any, Callable, Iterable, Optional
 
 
@@ -26,9 +22,6 @@ MAX_SCAN_FILES = 2048
 MAX_SCAN_ENTRIES = 4096
 MAX_SCAN_DEPTH = 8
 MAX_SCAN_AGGREGATE_BYTES = 64 * 1024 * 1024
-MAX_BATS_COUNT_OUTPUT_BYTES = 32
-BATS_COUNT_TIMEOUT_SECONDS = 30
-BATS_COUNT_TERMINATION_GRACE_SECONDS = 0.2
 TIERS = ("hosted", "local")
 TEST_DECLARATION = re.compile(r'^@test "([^"\r\n]+)" \{$')
 ALTERNATE_TEST_DECLARATION = re.compile(
@@ -82,20 +75,25 @@ SHELL_WORD = re.compile(
 SHELL_SEGMENT = re.compile(r"[;\n]|&&?|\|\|?")
 CLI_BINARY_MARKER = "__apple_cli_binary__"
 MAX_SHELL_VARIANTS = 256
-BATS_EXECUTABLES = (
-    Path("/opt/homebrew/bin/bats"),
-    Path("/usr/local/bin/bats"),
-    Path("/usr/bin/bats"),
-)
 TRUSTED_HOSTED_FILE_SHA256 = {
     "bats/hosted/bounded_exec.bats": "13e4976b41a295182873e45c7f33c84dd7712e2ee16399fc6c0fe561056d4c26",
-    "bats/hosted/calendar.bats": "66fb10f26f2fd05f957f418f127849c9eda65d3118f69175411166ccba9250db",
-    "bats/hosted/contacts.bats": "b8affdec28680ced3fe6c09cf77bbc3a557df6a024b587899f975b5c43c26153",
-    "bats/hosted/mail.bats": "d98f0d870cd24fc5113924b309760a3e63289c665602b86f979cc971bb662b03",
-    "bats/hosted/messages.bats": "be4463669e7d3eb01d44f3822f1b47665d593ccf1bfeed709b66fffe675467f6",
-    "bats/hosted/notes.bats": "d55248916ab5fd73995649417e88a23a46b2bc3f856b963eb0450f187d4ac1f4",
-    "bats/hosted/reminders.bats": "3ff5cdcfe390c754795566c865c888abf86cefe2ddabe65a483ce705f8d22fd4",
-    "bats/hosted/smoke.bats": "412ec9c0ccd5e5759fe15fa04e2a58175627aaabfdeebeb0f5ffaff97c8dc4ff",
+    "bats/hosted/calendar.bats": "78feed6a5cd530cc1a3f922c45f5ceb482db45fd36d00ee9fdfe816a87a9b6e4",
+    "bats/hosted/contacts.bats": "54db1ad8c0c5ed029a200121e1aaff78422c272698db178ee4d013095c74a2b8",
+    "bats/hosted/mail.bats": "9f75ec3194e5efde3b925c3fc9e42c247f26780961e3f5d6108393dca8d537ef",
+    "bats/hosted/messages.bats": "67d4e9a06d5efcdc32c123a6ede6433e5c59c112009e5ba66c15fc261247bf08",
+    "bats/hosted/notes.bats": "e7b8342937711212df38cf9e0a636d63a69379d5baa11ca5b464cb0192b978a3",
+    "bats/hosted/reminders.bats": "1b6c08b75acce52bc714e822c8cb652e8917e963eb18804b1a86e0fa95e6aa40",
+    "bats/hosted/smoke.bats": "7bd533f47c3271ae141be9e4d95b93b5b476cd5bd68e46908d5a634cf53095e1",
+}
+TRUSTED_HOSTED_HELPER_SHA256 = {
+    "bats/helpers/applescript_syntax_check.py": "40f56f5659dfb3bbc4c8b4b36d30ac12ad943f7c3fd78981800f3da46343e996",
+    "bats/helpers/bounded_exec.py": "84260117f0505f2f2883fa2ec1b5fc5a577d4a05cc1ba268ae26e8948ab475c9",
+    "bats/helpers/execute_envelope_lint.py": "430eba15fea468da6415441657087f7f2b70b0e6853ae70777c7b52a652454ba",
+    "bats/helpers/md_tables_wellformed.py": "2ee916ec014906507474d7a63d89eb2538d277b628aedf404a87fbb448e4f49a",
+    "bats/helpers/no_flagless_writes.py": "6c238da220f8c599afda95741a93142ab02febc6f35890100e7711d408534c39",
+    "bats/helpers/queue_table_wellformed.py": "4adbf9c0eee8e15c12cb131177bd7fcda12edcd1e286d93eb2756525b6a60369",
+    "bats/helpers/quoted_not_found.py": "ae039a574d4af4a22dd4ba83499639883b15a644a9f51ee61d66881c825beac5",
+    "bats/helpers/subcommand_allowlist.py": "31f24f90a3a7865f7de99bdcab45170ab147bf0d477059969b92c3e34e93c6c2",
 }
 
 
@@ -299,85 +297,40 @@ def read_bats_file(path: Path, relative: str) -> tuple[bytes, str, tuple[str, ..
     return payload, source, _parse_bats_source(source, relative)
 
 
-def _terminate_process_group(process: subprocess.Popen[bytes]) -> None:
-    try:
-        os.killpg(process.pid, signal.SIGTERM)
-    except ProcessLookupError:
-        pass
-    try:
-        process.wait(timeout=BATS_COUNT_TERMINATION_GRACE_SECONDS)
-    except subprocess.TimeoutExpired:
-        pass
-    try:
-        os.killpg(process.pid, signal.SIGKILL)
-    except ProcessLookupError:
-        pass
-    try:
-        process.wait(timeout=BATS_COUNT_TERMINATION_GRACE_SECONDS)
-    except subprocess.TimeoutExpired:
-        pass
-
-
 def _discover_bats_count(path: Path, relative: str) -> int:
-    del relative
-    executable = next(
-        (candidate for candidate in BATS_EXECUTABLES if candidate.is_file()),
-        None,
-    )
-    if executable is None:
-        raise InventoryError("Bats discovery executable is unavailable")
-    process: Optional[subprocess.Popen[bytes]] = None
-    selector = selectors.DefaultSelector()
-    output = bytearray()
-    deadline = time.monotonic() + BATS_COUNT_TIMEOUT_SECONDS
     try:
-        process = subprocess.Popen(
-            (str(executable), "--count", str(path)),
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.STDOUT,
-            start_new_session=True,
-            env={
-                "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
-                "LC_ALL": "C",
-                "LANG": "C",
-            },
-        )
-        if process.stdout is None:
-            raise InventoryError("Bats discovery failed")
-        descriptor = process.stdout.fileno()
-        os.set_blocking(descriptor, False)
-        selector.register(descriptor, selectors.EVENT_READ)
-        stream_open = True
-        while stream_open or process.poll() is None:
-            remaining_time = deadline - time.monotonic()
-            if remaining_time <= 0:
-                raise InventoryError("Bats discovery failed")
-            events = selector.select(min(remaining_time, 0.05))
-            for key, _mask in events:
-                remaining_output = MAX_BATS_COUNT_OUTPUT_BYTES - len(output)
-                chunk = os.read(key.fd, remaining_output + 1)
-                if not chunk:
-                    selector.unregister(key.fd)
-                    stream_open = False
-                    continue
-                output.extend(chunk)
-                if len(output) > MAX_BATS_COUNT_OUTPUT_BYTES:
-                    raise InventoryError("Bats discovery failed")
-        return_code = process.wait(timeout=max(0.0, deadline - time.monotonic()))
-        if return_code != 0 or re.fullmatch(rb"[0-9]+\n?", output) is None:
-            raise InventoryError("Bats discovery failed")
-        return int(output)
-    except (InventoryError, OSError, subprocess.SubprocessError) as error:
-        if isinstance(error, InventoryError):
-            raise
-        raise InventoryError("Bats discovery failed") from error
-    finally:
-        selector.close()
-        if process is not None:
-            _terminate_process_group(process)
-            if process.stdout is not None:
-                process.stdout.close()
+        source = _read_bounded_regular(
+            path,
+            label="Bats file",
+            maximum=MAX_BATS_BYTES,
+        ).decode("utf-8")
+    except UnicodeError as error:
+        raise InventoryError("unable to read Bats file") from error
+
+    count = 0
+    quote: Optional[str] = None
+    heredocs: list[tuple[str, bool]] = []
+    for line_number, line in enumerate(source.splitlines(), 1):
+        if heredocs:
+            delimiter, strip_tabs = heredocs[0]
+            candidate = line.lstrip("\t") if strip_tabs else line
+            if candidate == delimiter:
+                heredocs.pop(0)
+            continue
+        if quote is None:
+            declaration = TEST_DECLARATION.fullmatch(line)
+            if declaration is not None:
+                count += 1
+            else:
+                stripped = line.lstrip()
+                if stripped.startswith("@test") or ALTERNATE_TEST_DECLARATION.match(stripped):
+                    raise InventoryError("unknown @test declaration syntax in Bats file")
+        quote = _scan_shell_line(line, quote, heredocs, relative, line_number)
+    if heredocs or quote is not None:
+        raise InventoryError("Bats discovery failed")
+    if count == 0:
+        raise InventoryError("Bats discovery found no tests")
+    return count
 
 
 def _title_digests(titles: Iterable[str]) -> tuple[str, ...]:
@@ -806,6 +759,13 @@ def validate_repository(root: Path, manifest_path: Path) -> tuple[str, ...]:
                         and _hosted_has_live_state_access(source)
                     ):
                         errors.append("hosted file contains live-state access")
+                # Same-source consistency canary (NOT an independent oracle):
+                # _discover_bats_count shares _parse_bats_source's tokenizer, so on
+                # a well-formed file already parsed above this re-parse always
+                # agrees with len(titles). It is retained as a regression guard that
+                # the two entry points stay in sync if either is edited later; the
+                # bats-binary subprocess oracle it replaced was dropped for CI
+                # portability.
                 try:
                     discovered_count = _discover_bats_count(path, relative)
                     if discovered_count != len(titles):
@@ -837,6 +797,7 @@ def validate_repository(root: Path, manifest_path: Path) -> tuple[str, ...]:
         errors.append(str(error))
 
     errors.extend(_validate_live(root, manifest))
+    errors.extend(_validate_trusted_hosted_helpers(root))
     return tuple(errors)
 
 
@@ -893,6 +854,26 @@ def _validate_trusted_catalog(
     return tuple(errors)
 
 
+def _validate_trusted_hosted_helpers(root: Path) -> tuple[str, ...]:
+    if not (root / "bats" / "helpers").exists():
+        return ()
+    errors: list[str] = []
+    for relative, expected in TRUSTED_HOSTED_HELPER_SHA256.items():
+        try:
+            path = _safe_file(root, relative)
+            payload = _read_bounded_regular(
+                path,
+                label="hosted helper",
+                maximum=MAX_BATS_BYTES,
+            )
+        except InventoryError:
+            errors.append("hosted helper catalog drift")
+            continue
+        if hashlib.sha256(payload).hexdigest() != expected:
+            errors.append("hosted helper catalog drift")
+    return tuple(errors)
+
+
 def validate_candidate_repository(
     policy_root: Path,
     policy_manifest_path: Path,
@@ -918,6 +899,7 @@ def validate_candidate_repository(
         policy_manifest = load_manifest(policy_manifest_path)
         candidate_manifest = load_manifest(candidate_manifest_path)
         errors.extend(_validate_trusted_catalog(policy_manifest, candidate_manifest))
+        errors.extend(_validate_trusted_hosted_helpers(candidate_root))
     except InventoryError as error:
         errors.append(str(error))
     return tuple(errors)

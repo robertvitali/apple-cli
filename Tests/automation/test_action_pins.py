@@ -14,9 +14,11 @@ CHECKER_PATH = REPO_ROOT / "scripts" / "ci" / "action_pins.py"
 WORKFLOWS_ROOT = REPO_ROOT / ".github" / "workflows"
 
 EXPECTED_ACTION_COUNTS = {
-    "actions/checkout": 8,
+    "actions/checkout": 10,
     "actions/setup-python": 3,
     "astral-sh/setup-uv": 2,
+    "actions/upload-artifact": 1,
+    "actions/download-artifact": 1,
     "actions/configure-pages": 1,
     "actions/upload-pages-artifact": 1,
     "actions/deploy-pages": 1,
@@ -26,6 +28,8 @@ EXPECTED_ACTION_PINS = {
     "actions/checkout": ("3d3c42e5aac5ba805825da76410c181273ba90b1", "v7.0.1"),
     "actions/setup-python": ("5fda3b95a4ea91299a34e894583c3862153e4b97", "v7.0.0"),
     "astral-sh/setup-uv": ("c771a70e6277c0a99b617c7a806ffedaca235ff9", "v9.0.0"),
+    "actions/upload-artifact": ("043fb46d1a93c77aae656e7c1c64a875d1fc6a0a", "v7.0.1"),
+    "actions/download-artifact": ("3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c", "v8.0.1"),
     "actions/configure-pages": ("45bfe0192ca1faeb007ade9deae92b16b8254a0d", "v6.0.0"),
     "actions/upload-pages-artifact": ("fc324d3547104276b827a68afc52ff2a11cc49c9", "v5.0.0"),
     "actions/deploy-pages": ("cd2ce8fcbc39b97be8ca5fce6e763baed58fa128", "v5.0.0"),
@@ -46,6 +50,26 @@ def write_workflow(root: Path, relative: str, body: str) -> Path:
     path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(body, encoding="utf-8")
     return path
+
+
+def workflow_job(source: str, name: str) -> str:
+    match = re.search(
+        rf"(?ms)^  {re.escape(name)}:\n(?P<body>.*?)(?=^  [a-z0-9-]+:\n|\Z)",
+        source,
+    )
+    if match is None:
+        raise AssertionError(f"workflow job is missing: {name}")
+    return match.group("body")
+
+
+def workflow_named_step(job: str, name: str) -> str:
+    match = re.search(
+        rf"(?ms)^      - name: {re.escape(name)}\n(?P<body>.*?)(?=^      - (?:name:|uses:)|\Z)",
+        job,
+    )
+    if match is None:
+        raise AssertionError(f"workflow step is missing: {name}")
+    return match.group("body")
 
 
 class ActionPinPolicyTests(unittest.TestCase):
@@ -342,7 +366,7 @@ class RepositoryActionInventoryTests(unittest.TestCase):
         references = checker.collect_references(REPO_ROOT)
         remote = [reference for reference in references if reference.kind == "remote"]
 
-        self.assertEqual(len(remote), 16)
+        self.assertEqual(len(remote), 20)
         counts = {}
         for reference in remote:
             counts[reference.name] = counts.get(reference.name, 0) + 1
@@ -368,7 +392,7 @@ class RepositoryActionInventoryTests(unittest.TestCase):
                 workflows[workflow_name],
             )
             expected_count = {
-                "ci.yml": 3,
+                "ci.yml": 5,
                 "docs.yml": 3,
                 "pr-metadata.yml": 1,
                 "release.yml": 1,
@@ -412,12 +436,25 @@ class RepositoryActionInventoryTests(unittest.TestCase):
 
     def test_ci_blocks_on_supply_chain_policy_and_exact_lock_regeneration(self) -> None:
         workflow = (WORKFLOWS_ROOT / "ci.yml").read_text(encoding="utf-8")
+        job = workflow_job(workflow, "supply-chain-policy")
+        validation_step = workflow_named_step(job, "Validate supply-chain policy")
+        docs_step = workflow_named_step(job, "Prove documentation lock closure")
+        aggregate_job = workflow_job(workflow, "quality-required")
 
         self.assertIn("  supply-chain-policy:\n", workflow)
         self.assertIn("name: Supply-chain policy", workflow)
+        self.assertIn("name: quality / required", aggregate_job)
+        self.assertIn("if: always()", aggregate_job)
+        for dependency in (
+            "- supply-chain-policy",
+            "- build-test",
+            "- hosted-bats",
+            "- commit-lint",
+        ):
+            self.assertIn(dependency, aggregate_job)
         self.assertIn(
             "uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0",
-            workflow,
+            job,
         )
         setup_uv_block = re.compile(
             r"(?m)^\s*- uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9\.0\.0\n"
@@ -427,17 +464,22 @@ class RepositoryActionInventoryTests(unittest.TestCase):
         )
         self.assertEqual(len(setup_uv_block.findall(workflow)), 1)
         for command in (
-            "python -m unittest Tests.automation.test_action_pins Tests.automation.test_dependency_policy",
+            "python -m unittest discover -s Tests/automation -p 'test_*.py'",
             "python scripts/ci/action_pins.py",
             "python scripts/ci/dependency_policy.py",
+        ):
+            self.assertIn(command, validation_step)
+        for command in (
             "uv pip compile docs/requirements.in --python-version 3.12 --python-platform x86_64-unknown-linux-gnu --generate-hashes --output-file docs/requirements.txt",
             "git diff --exit-code -- docs/requirements.txt",
             "python -m pip install --require-hashes -r docs/requirements.txt",
         ):
-            self.assertIn(command, workflow)
+            self.assertIn(command, docs_step)
 
     def test_release_runs_equivalent_supply_chain_guard_before_mutation(self) -> None:
         workflow = (WORKFLOWS_ROOT / "release.yml").read_text(encoding="utf-8")
+        job = workflow_job(workflow, "release")
+        guard_step = workflow_named_step(job, "Guard — supply-chain policy and docs lock")
 
         guard = workflow.index("- name: Guard — supply-chain policy and docs lock")
         mutation = workflow.index("- name: Update version constant + CHANGELOG")
@@ -450,14 +492,14 @@ class RepositoryActionInventoryTests(unittest.TestCase):
         )
         self.assertEqual(len(setup_uv_block.findall(workflow)), 1)
         for command in (
-            "python -m unittest Tests.automation.test_action_pins Tests.automation.test_dependency_policy",
+            "python -m unittest discover -s Tests/automation -p 'test_*.py'",
             "python scripts/ci/action_pins.py",
             "python scripts/ci/dependency_policy.py",
             "uv pip compile docs/requirements.in --python-version 3.12 --python-platform x86_64-unknown-linux-gnu --generate-hashes --output-file docs/requirements.txt",
             "git diff --exit-code -- docs/requirements.txt",
             "python -m pip install --require-hashes -r docs/requirements.txt",
         ):
-            self.assertIn(command, workflow[guard:mutation])
+            self.assertIn(command, guard_step)
 
 
 if __name__ == "__main__":

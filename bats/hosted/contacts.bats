@@ -25,7 +25,7 @@ HELPERS="$BATS_SUITE_ROOT/helpers"
 # absence from a preview is asserted positively instead, via the `gate_note` disclosure.
 
 setup() {
-  BIN="$(swift build --show-bin-path)/apple"
+  BIN="${APPLE_CLI_TEST_BINARY:-$(swift build --show-bin-path)/apple}"
 }
 
 @test "contacts --help lists all subcommands" {

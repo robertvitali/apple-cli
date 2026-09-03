@@ -8,7 +8,7 @@ HELPERS="$BATS_SUITE_ROOT/helpers"
 # the built binary.
 
 setup() {
-  BIN="$(swift build --show-bin-path)/apple"
+  BIN="${APPLE_CLI_TEST_BINARY:-$(swift build --show-bin-path)/apple}"
 }
 
 @test "apple --version prints a version" {
@@ -509,8 +509,12 @@ for s in walk(json.load(sys.stdin)):
   # `/`, any throwaway `.build-<label>/` outranked the real `.build/` — the subject actually
   # changed mid-review when a sibling process created one. A stale tree that still matches masks a
   # real dependency bump; an unrelated one red-flags a correct repo.
+  local upstream_root="${APPLE_CLI_UPSTREAM_ROOT:-}"
+  if [ -z "$upstream_root" ]; then
+    upstream_root="$(swift build --show-bin-path)/../.."
+  fi
   run python3 "$HELPERS/subcommand_allowlist.py" --require-upstream \
-      --upstream-root "$(swift build --show-bin-path)/../.." \
+      --upstream-root "$upstream_root" \
       "$REPO_ROOT/Sources/apple/Apple.swift"
   [ "$status" -eq 0 ]
   echo "$output" | grep -q "^OK: "

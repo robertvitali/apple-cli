@@ -2,14 +2,11 @@ import hashlib
 import importlib.util
 import io
 import json
-import os
 from pathlib import Path
-import signal
 import subprocess
 import sys
 import tempfile
 import textwrap
-import time
 from types import ModuleType
 from typing import Optional
 import unittest
@@ -236,66 +233,47 @@ class BatsInventoryTests(unittest.TestCase):
             errors,
         )
 
-    def test_bats_discovery_bounds_output_and_kills_descendants(self) -> None:
+    def test_static_bats_discovery_counts_without_external_bats(self) -> None:
         checker = load_checker()
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
-            fake_bats = root / "fake-bats.py"
-            pid_file = root / "descendant.pid"
-            fake_bats.write_text(
+            observed_path = root / "observed.txt"
+            candidate = root / "sample.bats"
+            candidate.write_text(
                 textwrap.dedent(
                     f"""\
-                    #!{sys.executable}
-                    import pathlib, subprocess, sys, time
-                    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(30)"])
-                    pathlib.Path({str(pid_file)!r}).write_text(str(child.pid), encoding="utf-8")
-                    sys.stdout.buffer.write(b"x" * 33)
-                    sys.stdout.buffer.flush()
-                    while True:
-                        time.sleep(1)
+                    #!/usr/bin/env bats
+                    touch {observed_path}
+
+                    @test "sample" {{
+                      true
+                    }}
                     """
                 ),
                 encoding="utf-8",
             )
-            fake_bats.chmod(0o700)
-            candidate = root / "sample.bats"
-            candidate.write_text(bats_source("sample"), encoding="utf-8")
-            original_executables = checker.BATS_EXECUTABLES
-            original_timeout = checker.BATS_COUNT_TIMEOUT_SECONDS
-            checker.BATS_EXECUTABLES = (fake_bats,)
-            checker.BATS_COUNT_TIMEOUT_SECONDS = 0.5
-            started = time.monotonic()
-            try:
-                with self.assertRaisesRegex(
-                    checker.InventoryError,
-                    "^Bats discovery failed$",
-                ):
-                    checker._discover_bats_count(candidate, "private-candidate-path")
-            finally:
-                checker.BATS_EXECUTABLES = original_executables
-                checker.BATS_COUNT_TIMEOUT_SECONDS = original_timeout
 
-            self.assertLess(time.monotonic() - started, 2)
-            descendant_pid = int(pid_file.read_text(encoding="utf-8"))
-            for _ in range(100):
-                try:
-                    os.kill(descendant_pid, 0)
-                except ProcessLookupError:
-                    break
-                subprocess.run(
-                    [sys.executable, "-c", "import time; time.sleep(0.02)"],
-                    check=False,
-                    stdin=subprocess.DEVNULL,
-                    stdout=subprocess.DEVNULL,
-                    stderr=subprocess.DEVNULL,
-                )
-            try:
-                os.kill(descendant_pid, 0)
-            except ProcessLookupError:
-                pass
-            else:
-                os.kill(descendant_pid, signal.SIGKILL)
-                self.fail("Bats discovery left a descendant running")
+            self.assertEqual(
+                checker._discover_bats_count(candidate, "private-candidate-path"),
+                1,
+            )
+            self.assertFalse(observed_path.exists())
+
+    def test_static_bats_discovery_uses_same_syntax_rejections(self) -> None:
+        checker = load_checker()
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            candidate = root / "sample.bats"
+            candidate.write_text(
+                "#!/usr/bin/env bats\n\n@test unquoted_title {\n  true\n}\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                checker.InventoryError,
+                "^unknown @test declaration syntax in Bats file$",
+            ):
+                checker._discover_bats_count(candidate, "private-candidate-path")
 
     def test_rejects_unknown_test_declaration_syntax(self) -> None:
         checker = load_checker()
@@ -774,6 +752,39 @@ class BatsInventoryTests(unittest.TestCase):
                     any(expected in error for error in errors),
                     errors,
                 )
+
+    def test_trusted_catalog_rejects_hosted_helper_changes(self) -> None:
+        checker = load_checker()
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            policy_root = root / "policy"
+            candidate_root = root / "candidate"
+            policy_manifest = write_fixture_manifest(policy_root)
+            candidate_manifest = write_fixture_manifest(candidate_root)
+            helper = candidate_root / "bats" / "helpers" / "helper.py"
+            helper.parent.mkdir(parents=True)
+            helper.write_text("# helper v1\n", encoding="utf-8")
+            expected = hashlib.sha256(helper.read_bytes()).hexdigest()
+            original_catalog = checker.TRUSTED_HOSTED_HELPER_SHA256
+            checker.TRUSTED_HOSTED_HELPER_SHA256 = {
+                "bats/helpers/helper.py": expected,
+            }
+            try:
+                helper.write_text("# helper v2\n", encoding="utf-8")
+
+                errors = checker.validate_candidate_repository(
+                    policy_root,
+                    policy_manifest,
+                    candidate_root,
+                    candidate_manifest,
+                )
+            finally:
+                checker.TRUSTED_HOSTED_HELPER_SHA256 = original_catalog
+
+            self.assertTrue(
+                any("hosted helper catalog drift" in error for error in errors),
+                errors,
+            )
 
     def test_trusted_catalog_allows_self_consistent_new_local_files(self) -> None:
         checker = load_checker()

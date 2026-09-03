@@ -21,7 +21,7 @@ HELPERS="$BATS_SUITE_ROOT/helpers"
 # live tier. A sandboxed preview discloses that it skipped them rather than implying they passed.
 
 setup() {
-  BIN="$(swift build --show-bin-path)/apple"
+  BIN="${APPLE_CLI_TEST_BINARY:-$(swift build --show-bin-path)/apple}"
 }
 
 # Pure NOTES-H1 error classifiers shared by the hosted synthetic classifier tests.

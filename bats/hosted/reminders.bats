@@ -18,7 +18,7 @@ HELPERS="$BATS_SUITE_ROOT/helpers"
 # Live reads/writes are the live tier.
 
 setup() {
-  BIN="$(swift build --show-bin-path)/apple"
+  BIN="${APPLE_CLI_TEST_BINARY:-$(swift build --show-bin-path)/apple}"
 }
 
 # --- Flag-collision guard: every leaf subcommand's --help must exit 0 -------------------------
