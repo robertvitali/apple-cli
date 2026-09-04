@@ -10,10 +10,37 @@ setup() {
   BIN="$(swift build --show-bin-path)/apple"
 }
 
+# These lifecycle checks require chat.db snapshots. Probe the database independently of the CLI
+# under test: only a missing database or an explicit permission denial may skip.
+require_messages_database() {
+  local xtrace_was_on=0 probe_status
+  case "$-" in
+    *x*) xtrace_was_on=1; set +x ;;
+  esac
+
+  run /usr/bin/python3 "$HELPERS/messages_db_probe.py"
+  probe_status="$status"
+  output=""
+  lines=()
+
+  if [ "$probe_status" -eq 77 ]; then
+    [ "$xtrace_was_on" -eq 0 ] || set -x
+    skip "Messages database is missing or unreadable; Full Disk Access may be required"
+  fi
+  if [ "$probe_status" -ne 0 ]; then
+    [ "$xtrace_was_on" -eq 0 ] || set -x
+    echo "Messages database preflight failed unexpectedly" >&2
+    return 1
+  fi
+  [ "$xtrace_was_on" -eq 0 ] || set -x
+}
+
 @test "a snapshot-backed run cleans up after itself and reaps dead sessions" {
   BIN="$(swift build --show-bin-path)/apple"
   ROOT="${TMPDIR%/}/apple-cli-snapshots"
   TAG="batstest-$$-$RANDOM"
+
+  require_messages_database
 
   # Plant a DEAD session (a .lock nobody holds) and a foreign directory that must survive.
   mkdir -p "$ROOT/s-999999-$TAG" "$ROOT/keepme-$TAG"
@@ -149,8 +176,9 @@ require_no_stale_session_for() {
   # retire the other three, but zero legs means nothing was asserted — and the two ways that happens
   # need telling apart. The version this replaced conflated them and printed a cause that was false.
   if [ "$ran" -eq 0 ]; then
+    require_messages_database
     "$BIN" messages chats >/dev/null 2>&1 \
-      || skip "\`messages chats\` cannot run on this machine (Full Disk Access?), so no snapshot appears"
+      || { echo "messages chats failed despite a readable Messages database"; false; }
     echo "the command runs here, yet no leg ever became observable"; false
   fi
   [ "$ran" -eq 4 ] || { echo "only $ran/4 signal legs ran; the rest never became observable"; false; }
@@ -170,6 +198,8 @@ require_no_stale_session_for() {
   ROOT="${TMPDIR%/}/apple-cli-snapshots"
   ran=0
 
+  require_messages_database
+
   for pair in INT:2 HUP:1; do
     sig="${pair%%:*}"; num="${pair##*:}"
     sh -c "trap '' $sig; exec '$BIN' messages chats >/dev/null 2>&1" &
@@ -188,7 +218,7 @@ require_no_stale_session_for() {
 
   if [ "$ran" -eq 0 ]; then
     "$BIN" messages chats >/dev/null 2>&1 \
-      || skip "\`messages chats\` cannot run on this machine (Full Disk Access?), so no snapshot appears"
+      || { echo "messages chats failed after a successful database preflight"; false; }
     echo "the command runs here, yet no leg ever became observable"; false
   fi
 }

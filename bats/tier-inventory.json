@@ -237,7 +237,7 @@
           "test_count": 124
         },
         {
-          "file_sha256": "67d4e9a06d5efcdc32c123a6ede6433e5c59c112009e5ba66c15fc261247bf08",
+          "file_sha256": "23a087ee666d59ad74899ca98186feebd5b20f2db24b0804c5a5c456b8c5cf40",
           "ordered_title_sha256": [
             "870c68fa8ee2d8122f86c0dc014553e8a91898052d0d8e2c28f6370eb238ee4e",
             "14b64d1228d9cf37902a03de8b5d86abd671bcbbec37dcaeecf83c3ccaee489b",
@@ -247,11 +247,12 @@
             "5c011267119981e9b0018228ff13babc63df39af24e6671f064fc46fde084626",
             "5087e502339caa5fb51f2952759515543e0e575414234b9d89746aef7770eee3",
             "af6285e031f8d79023b684862e0663b6353ccec1c22e384d46ee3a687fbbd98e",
+            "8daff29ad7fe883002254dce63649c49ec442ad345a1a75f6e02bfd6de369e9f",
             "cf082fe9a59be2d1d5b17342401317f442121fd06954b6d430c4fb316d5c50a1",
             "dc03f1d11aed222d8cb724eda1e2618fcb0aa80d9fba57512ae9252b85b02524"
           ],
           "path": "bats/hosted/messages.bats",
-          "test_count": 10
+          "test_count": 11
         },
         {
           "file_sha256": "e7b8342937711212df38cf9e0a636d63a69379d5baa11ca5b464cb0192b978a3",
@@ -378,7 +379,7 @@
           "test_count": 26
         }
       ],
-      "test_count": 311
+      "test_count": 312
     },
     "local": {
       "files": [
@@ -514,7 +515,7 @@
           "test_count": 104
         },
         {
-          "file_sha256": "6f6ac3c2e1c7bd791d0fef66c0431d30951033d704d92a799ea410d23732a262",
+          "file_sha256": "8a4acedf261afa5a8fe355030e06494ca527af4dd96769c3edff2b984b5fa19b",
           "ordered_title_sha256": [
             "421694f4437d54b99621e748fcfa13bb607fd447cd34a3b2ece072e134441eda",
             "b499aa91a70ed2b30272e113eaf0ce4421b6a2055a65cd3eef3a0732221c781f",
@@ -530,11 +531,10 @@
             "69b0c8d8e04192f43a9678ec5b7d6c5acc93a648f0ebd4417b19a1896d744d76",
             "1758f77465623dd28ab43540c190501a534edeadd3f4337d3a58e2c390736892",
             "11bf9daa7f64966fd8023a5f392690503e714cae2191865ff08ad85fb65e422d",
-            "8daff29ad7fe883002254dce63649c49ec442ad345a1a75f6e02bfd6de369e9f",
             "032a59cfd99fa9bf29a9b5cb07e8562267e118806e16d89ee1513cc9e7437535"
           ],
           "path": "bats/local/messages.bats",
-          "test_count": 16
+          "test_count": 15
         },
         {
           "file_sha256": "05d08d3604da9a0540cbcdf2b875d7a49db6ce9619ed9aa8ab0e106eb3a5b8ca",
@@ -557,7 +557,7 @@
           "test_count": 1
         },
         {
-          "file_sha256": "f3335621e244d15cd1a24a0832012581a41f1a6f8236111c6757f9ada1cfa175",
+          "file_sha256": "88c5f31946bb55e18f9ae53c01f368ce6b4042af57a26f1feb6dd1cd3152f0fa",
           "ordered_title_sha256": [
             "2f4f413eae3e3ad337285731d828096b80f9f0a61e8e77be2d5d5cd4374d5950",
             "5e695a20e7eeeb9388be3105249285d0673dbc0f15b63f2717c89c465344862b",
@@ -567,7 +567,7 @@
           "test_count": 3
         }
       ],
-      "test_count": 135
+      "test_count": 134
     }
   }
 }

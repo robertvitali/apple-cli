@@ -23,7 +23,7 @@ EXPECTED_FILES = {
         "bats/hosted/calendar.bats": 20,
         "bats/hosted/contacts.bats": 49,
         "bats/hosted/mail.bats": 124,
-        "bats/hosted/messages.bats": 10,
+        "bats/hosted/messages.bats": 11,
         "bats/hosted/notes.bats": 39,
         "bats/hosted/reminders.bats": 38,
         "bats/hosted/smoke.bats": 26,
@@ -32,7 +32,7 @@ EXPECTED_FILES = {
         "bats/local/contacts.bats": 4,
         "bats/local/mail.bats": 104,
         "bats/local/mail-move-gmail.bats": 2,
-        "bats/local/messages.bats": 16,
+        "bats/local/messages.bats": 15,
         "bats/local/notes.bats": 5,
         "bats/local/reminders.bats": 1,
         "bats/local/smoke.bats": 3,
@@ -135,7 +135,7 @@ class BatsInventoryTests(unittest.TestCase):
         self.assertEqual(manifest["test_count"], 446)
         self.assertEqual(
             {tier: manifest["tiers"][tier]["test_count"] for tier in ("hosted", "local")},
-            {"hosted": 311, "local": 135},
+            {"hosted": 312, "local": 134},
         )
         self.assertEqual(
             {
@@ -159,6 +159,11 @@ class BatsInventoryTests(unittest.TestCase):
         self.assertEqual(
             checker.validate_repository(REPO_ROOT, MANIFEST_PATH),
             (),
+        )
+        probe_path = "bats/helpers/messages_db_probe.py"
+        self.assertEqual(
+            checker.TRUSTED_HOSTED_HELPER_SHA256.get(probe_path),
+            hashlib.sha256((REPO_ROOT / probe_path).read_bytes()).hexdigest(),
         )
 
     def test_partition_does_not_overwrite_bats_internal_root(self) -> None:
@@ -753,7 +758,7 @@ class BatsInventoryTests(unittest.TestCase):
                     errors,
                 )
 
-    def test_trusted_catalog_rejects_hosted_helper_changes(self) -> None:
+    def test_trusted_catalog_rejects_messages_database_probe_changes(self) -> None:
         checker = load_checker()
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -761,13 +766,13 @@ class BatsInventoryTests(unittest.TestCase):
             candidate_root = root / "candidate"
             policy_manifest = write_fixture_manifest(policy_root)
             candidate_manifest = write_fixture_manifest(candidate_root)
-            helper = candidate_root / "bats" / "helpers" / "helper.py"
+            helper = candidate_root / "bats" / "helpers" / "messages_db_probe.py"
             helper.parent.mkdir(parents=True)
             helper.write_text("# helper v1\n", encoding="utf-8")
             expected = hashlib.sha256(helper.read_bytes()).hexdigest()
             original_catalog = checker.TRUSTED_HOSTED_HELPER_SHA256
             checker.TRUSTED_HOSTED_HELPER_SHA256 = {
-                "bats/helpers/helper.py": expected,
+                "bats/helpers/messages_db_probe.py": expected,
             }
             try:
                 helper.write_text("# helper v2\n", encoding="utf-8")

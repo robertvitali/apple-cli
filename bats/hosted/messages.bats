@@ -87,6 +87,18 @@ setup() {
   [ "$xtrace_was_on" -eq 0 ] || set -x
 }
 
+@test "search term under the cap in BOTH units is still accepted" {
+  # Intentionally tests the current validation sequence: the same 200 clusters / 800 code points
+  # must pass the term guard before the later invalid --hours value fails. The separate over-cap
+  # tests above pin the production guard itself; this control stays hermetic by stopping later.
+  ok=$(python3 -c "print(('a'+'\u0301'*3)*200)")
+  run "$BIN" messages search "$ok" --hours -1
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q '"type" : "validation_error"'
+  echo "$output" | grep -qi "hours cannot be negative"
+  ! echo "$output" | grep -qi "too long"
+}
+
 @test "find-contact query is length-bounded, in code points (Q5d)" {
   # matchContacts runs difflib per token AND per full name, per candidate, so an unbounded
   # query hangs harder here than on search. Measured: 500k jamo scalars vs 200 candidates
