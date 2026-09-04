@@ -33,8 +33,10 @@ LIVE_ONLY_HELPERS = (
     "count_sys_folder_rows",
     "load_live_attachment_list",
     "require_index",
+    "require_message_id",
     "require_no_stale_session_for",
     "require_osascript_mail_automation",
+    "require_unlabeled_message_id",
     "select_live_attachment_fixture",
     "signal_midflight",
 )

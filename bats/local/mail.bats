@@ -28,6 +28,63 @@ require_index() {
   [ -n "$found" ] || skip "Mail Envelope Index not readable (no FDA / no Mail)"
 }
 
+# Resolve a REAL message ROWID for --dry-run previews that must see an existing target.
+# `resolveTargets` runs BEFORE the preview's sandbox check, so a missing id is not_found/65
+# before any other gate fires — a hardcoded id only ever passed on the one mailbox it was
+# written against. `MID` is the first message the index returns; `UNLABELED_MID` is the first
+# whose subject does not carry the sandbox label (the sandbox ADMITS labeled targets, so a
+# refusal assertion needs an unlabeled one). Both resolve THROUGH the CLI under test, which is
+# exactly what the automation probe below forbids for itself — so they must never green-skip:
+# once require_index has passed, a failed search or a malformed envelope is a HARD failure, and
+# only a genuinely empty result set skips. Ids are session-local scratch: never echo them into
+# assertions or logs.
+_search_page() {  # $1 offset, $2 limit → envelope JSON on stdout
+  "$BIN" mail search --mailbox All --limit "$2" --offset "$1" --no-content 2>/dev/null
+}
+# stdin: envelope JSON; $1: "any" | "unlabeled"; $2: page size. Prints an id, "" (none on a full
+# page — keep paging), or EXHAUSTED (short page — the result set ended). Non-zero on a malformed
+# envelope so the caller fails instead of skipping.
+_pick_message_id() {
+  APPLE_CLI_PICK_MODE="$1" APPLE_CLI_PICK_LIMIT="$2" python3 -c '
+import json, os, sys
+env = json.load(sys.stdin)
+assert env.get("ok") is True, "search returned an error envelope"
+rows = env["data"]["messages"]
+prefix = (os.environ.get("APPLE_TEST_SANDBOX") or "").strip() or "apple-cli-test"
+want = os.environ["APPLE_CLI_PICK_MODE"]
+hit = next((m["id"] for m in rows
+            if want == "any" or not (m.get("subject") or "").startswith(prefix)), "")
+print(hit if hit else ("" if len(rows) == int(os.environ["APPLE_CLI_PICK_LIMIT"]) else "EXHAUSTED"))'
+}
+require_message_id() {
+  case "$-" in *x*) set +x ;; esac   # a --trace run must not print the id or the search JSON
+  require_index
+  local page
+  page="$(_search_page 0 1)" || { echo "mail search failed while resolving a preview target" >&2; return 1; }
+  MID="$(printf '%s' "$page" | _pick_message_id any 1)" || { echo "mail search returned a malformed envelope" >&2; return 1; }
+  [ "$MID" = EXHAUSTED ] && MID=""
+  [ -n "$MID" ] || skip "no messages in store"
+  [[ "$MID" =~ ^[0-9]+$ ]] || { echo "resolved id is not a ROWID shape" >&2; return 1; }
+}
+require_unlabeled_message_id() {
+  case "$-" in *x*) set +x ;; esac   # a --trace run must not print the id or the search JSON
+  require_index
+  # Paginate (review P2): a fixed window could skip this refusal test on a store whose newest
+  # messages are all labeled fixtures. Bounded at 10 pages x 50 so an unexpected store shape
+  # cannot turn a skip into a crawl; a short page means the result set is exhausted.
+  local offset=0 page
+  UNLABELED_MID=""
+  while [ "$offset" -lt 500 ]; do
+    page="$(_search_page "$offset" 50)" || { echo "mail search failed while resolving an unlabeled preview target" >&2; return 1; }
+    UNLABELED_MID="$(printf '%s' "$page" | _pick_message_id unlabeled 50)" || { echo "mail search returned a malformed envelope" >&2; return 1; }
+    [ -z "$UNLABELED_MID" ] || break
+    offset=$((offset + 50))
+  done
+  [ "$UNLABELED_MID" = EXHAUSTED ] && UNLABELED_MID=""
+  [ -n "$UNLABELED_MID" ] || skip "no unlabeled messages among the newest $offset in the store"
+  [[ "$UNLABELED_MID" =~ ^[0-9]+$ ]] || { echo "resolved id is not a ROWID shape" >&2; return 1; }
+}
+
 # Probe the Apple Events client used by the fixture itself. This must not route through the CLI
 # under test: a CLI regression may fail, but it must never green-skip its own live wiring pin.
 require_osascript_mail_automation() {
@@ -388,10 +445,6 @@ if len(attachments) != int(sys.argv[1]):
   [ "$status" -eq 64 ]
   run env -u APPLE_ALLOW_PERMANENT_DELETE "$BIN" mail delete 1 --permanent --dry-run --account " "
   [ "$status" -eq 64 ]
-  # Sandboxed bulk preview refuses an unlabeled target exactly as execute would (round 5).
-  APPLE_TEST_MODE=1 run "$BIN" mail flag --dry-run 12345 --color red --test-mode
-  [ "$status" -eq 77 ]
-  echo "$output" | grep -q 'sandbox active'
   # templates save: the preview runs the same pure validations the write does (round 7).
   export APPLE_MAIL_MCP_HOME="$BATS_TEST_TMPDIR/preview-validate"
   run "$BIN" mail templates save --dry-run "../evil" --body x
@@ -427,6 +480,19 @@ if len(attachments) != int(sys.argv[1]):
   [ "$status" -eq 64 ]
   run "$BIN" mail send --dry-run --to me@self.test --subject "apple-cli-test x" --body y --mode open --out "$HOME/.ssh/apple-cli-test-x.eml"
   [ "$status" -eq 77 ]
+}
+
+# Sandboxed bulk preview refuses an unlabeled target exactly as execute would (round 5). Its own
+# test because the refusal is reached only AFTER the target resolves, so it needs a real
+# unlabeled message and must skip (not drag a whole multi-assertion test down) when none exists.
+@test "mail flag sandboxed preview refuses an unlabeled target exactly as execute would" {
+  # Pin the CANONICAL label on both sides (the helper's "unlabeled" and the CLI's refusal): an
+  # ambient APPLE_TEST_SANDBOX override must not be able to shift what this test proves.
+  unset APPLE_TEST_SANDBOX
+  require_unlabeled_message_id
+  APPLE_TEST_MODE=1 run "$BIN" mail flag --dry-run "$UNLABELED_MID" --color red --test-mode
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q 'sandbox active'
 }
 
 @test "mail analytics dashboard --dry-run writes nothing; a credential-dir --out refuses even in preview (77)" {
@@ -628,9 +694,12 @@ if len(attachments) != int(sys.argv[1]):
   [ ! -f "$OUT" ]
 }
 
+# The three previews below assert the UNSANDBOXED preview shape on a real (unlabeled) message, so
+# they pin APPLE_TEST_MODE absent: an ambient export would turn the 0 into a 77 refusal. Previews
+# never write — this is not an agent disarming its sandbox.
 @test "mail flag --color none previews as unflag (oracle flag_color=none parity)" {
-  require_index
-  run "$BIN" mail flag --dry-run 12345 --color none
+  require_message_id
+  run env -u APPLE_TEST_MODE "$BIN" mail flag --dry-run "$MID" --color none
   [ "$status" -eq 0 ]
   echo "$output" | grep -q '"action" *: *"unflag"'
 }
@@ -638,8 +707,8 @@ if len(attachments) != int(sys.argv[1]):
 # `flag_color` is oracle A's wire name for the color; `color` is this CLI's original key. Both
 # are emitted (additive), so an oracle-shaped consumer finds the key it expects.
 @test "mail flag emits both color and flag_color in detail" {
-  require_index
-  run "$BIN" mail flag --dry-run 12345 --color red
+  require_message_id
+  run env -u APPLE_TEST_MODE "$BIN" mail flag --dry-run "$MID" --color red
   [ "$status" -eq 0 ]
   echo "$output" | grep -q '"flag_color" *: *"red"'
   echo "$output" | grep -q '"color" *: *"red"'
@@ -648,8 +717,8 @@ if len(attachments) != int(sys.argv[1]):
 
 # `--unflag` keeps working unchanged (it is the same clearing path as --color none).
 @test "mail flag --unflag still previews as unflag" {
-  require_index
-  run "$BIN" mail flag --dry-run 12345 --unflag
+  require_message_id
+  run env -u APPLE_TEST_MODE "$BIN" mail flag --dry-run "$MID" --unflag
   [ "$status" -eq 0 ]
   echo "$output" | grep -q '"action" *: *"unflag"'
 }
