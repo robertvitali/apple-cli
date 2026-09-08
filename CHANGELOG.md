@@ -30,6 +30,16 @@ JSON output are stable per the versioning policy — breaking changes bump
 
 ### Fixed
 
+- **`notes save-attachment --dry-run` no longer refuses a valid destination that does not exist
+  yet under a `/private` alias.** The lexical path guard normalized the allowed roots to their
+  short spellings (`/tmp/…`, `/var/…`) but left an absent destination spelled with a
+  `/private/…` prefix in its long form, so a caller-supplied `/private/tmp/…` or
+  `/private/var/…` destination whose file did not exist yet was rejected as outside the allowed
+  locations (`validation`, exit 64) before Notes was ever invoked — an ordinary `/tmp/…`
+  spelling was never affected. The guard now normalizes both sides lexically and independently
+  of whether the path exists; tilde expansion, `..` escapes, disallowed roots, and the
+  symlink-aware parent check are unchanged. `schema_version` is unchanged: same error envelope,
+  exit code, and error type.
 - **`mail rules create` / `update` now quote a placeholder domain in the condition-format
   validation message** (`from:contains:boss@example.com`). Only the example text of that error
   changed; the condition grammar, exit code, and error type are unchanged, and `schema_version`

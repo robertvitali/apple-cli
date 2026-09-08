@@ -35,13 +35,56 @@ enum AttachmentFS {
         ]
     }
 
-    /// Standardize + resolve `.`/`..` without requiring the path to exist.
+    /// Existence-INDEPENDENT lexical normalization. Expands a leading tilde (`~` / `~user`), collapses
+    /// repeated slashes, resolves `.` and `..` component-wise without ever escaping `/`, drops a
+    /// trailing slash, and canonicalizes the macOS `/private` aliases the allowed roots use
+    /// (`/private/tmp`, `/private/var`) to their short spellings so both sides of the guard compare
+    /// in ONE form.
+    ///
+    /// Deliberately not `NSString.standardizingPath`: that strips a leading `/private` only when the
+    /// stripped path EXISTS, so an existing `/private/tmp/dir` compared as `/tmp/dir` while an absent
+    /// `/private/tmp/dir/new.bin` kept the long form and fell outside every (short-form) root — a
+    /// valid `save-attachment --dry-run` destination was refused (exit 64) purely because the leaf
+    /// did not exist yet. This function never consults the filesystem. Symlink resolution is NOT
+    /// done here by design; `assertResolvedParentContained` does that once the parent exists.
+    /// Tilde expansion is kept on purpose: `NSString.isAbsolutePath` (the caller's precheck) accepts
+    /// `~…` spellings, which `standardizingPath` used to expand, so dropping it would silently turn
+    /// `~/…` destinations into refusals (and half-reverse D12's `~/.ssh` parity). CONTRACT: callers
+    /// MUST reject relative input before calling (`assertSafeSavePath` does, via `isAbsolutePath`) —
+    /// this function silently anchors a relative path at `/`, which is NOT fail-closed: `tmp/x`
+    /// would come back as `/tmp/x` and pass the root check.
     static func resolvedPath(_ p: String) -> String {
-        var s = (p as NSString).standardizingPath
-        // standardizingPath may leave a trailing slash on roots; normalize (except bare "/").
-        if s.count > 1 && s.hasSuffix("/") { s.removeLast() }
+        let expanded = (p as NSString).expandingTildeInPath
+        // Split on the U+002F SCALAR, never on Characters: a `/` followed by a combining mark forms
+        // one grapheme cluster that a Character-level split does not treat as a separator, so
+        // `/tmp/../<U+0301>/x` would keep its `..` inside a single bogus component, read as still
+        // under `/tmp`, and escape under the kernel's byte-wise interpretation.
+        var components: [String] = []
+        for part in expanded.unicodeScalars.split(separator: "/", omittingEmptySubsequences: true) {
+            let comp = String(part)
+            switch comp {
+            case ".": continue
+            case "..": if !components.isEmpty { components.removeLast() }
+            default: components.append(comp)
+            }
+        }
+        var s = "/" + components.joined(separator: "/")
+        for alias in privateAliases {
+            let short = String(alias.dropFirst("/private".count))
+            if s == alias { s = short; break }
+            if s.hasPrefix(alias + "/") { s = short + String(s.dropFirst(alias.count)); break }
+        }
         return s
     }
+
+    /// The `/private` symlink aliases the allowed roots actually use. `/tmp` → `/private/tmp` and
+    /// `/var` → `/private/var` are real symlinks on macOS, so folding is an equivalence, not a guess.
+    /// `standardizingPath` folds these only when the target exists; here they fold unconditionally so
+    /// absent and existing paths compare alike. Deliberately NOT `/private/etc`: no allowed root is
+    /// under `/etc`, so it changes no decision today, and folding it would silently extend reach if a
+    /// future caller injected such a root. The fold is exact-case on purpose (as before): a
+    /// case-variant spelling such as `/PRIVATE/TMP` is not folded and is refused — the safe direction.
+    private static let privateAliases = ["/private/tmp", "/private/var"]
 
     /// Fail-closed path guard: absolute + resolved must be exactly a root or nested under one.
     @discardableResult
@@ -49,7 +92,12 @@ enum AttachmentFS {
         let trimmed = p.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { throw FSError.pathRequired }
         guard (trimmed as NSString).isAbsolutePath else { throw FSError.notAbsolute(p) }
-        let abs = resolvedPath(trimmed)
+        // `isAbsolutePath` admits `~…`; expand it here so an unknown `~user` (which
+        // `expandingTildeInPath` returns unchanged) is refused as not-absolute rather than being
+        // anchored at `/` by the lexical normalizer.
+        let expanded = (trimmed as NSString).expandingTildeInPath
+        guard expanded.hasPrefix("/") else { throw FSError.notAbsolute(p) }
+        let abs = resolvedPath(expanded)
         let allowed = roots ?? allowedSaveRoots()
         let ok = allowed.contains { root in
             let r = resolvedPath(root)

@@ -6,6 +6,8 @@ import TestSupport
 
 @Suite("AttachmentFS — path-traversal guard")
 struct AttachmentFSTests {
+    private let scratch = ScratchDirs("attachmentfs")
+
     @Test("accepts paths under home and temp")
     func accepts() throws {
         let home = NSHomeDirectory()
@@ -73,6 +75,136 @@ struct AttachmentFSTests {
         defer { try? fm.removeItem(atPath: dir) }
         // A real (non-symlinked) dir under temp resolves within an allowed root → no throw.
         try AttachmentFS.assertResolvedParentContained(dir + "/file.bin")
+    }
+
+    // --- existence-independent alias normalization ---------------------------------------------
+    // `NSString.standardizingPath` strips a leading `/private` ONLY when the stripped path exists,
+    // so an EXISTING `/private/var/...` (or `/private/tmp/...`) path compared in the short form
+    // while an ABSENT leaf under the same directory kept the long form and fell outside every root
+    // — a valid `save-attachment --dry-run` destination was refused (exit 64) purely because the
+    // file did not exist yet. The lexical guard must compare both sides in one form regardless of
+    // existence; symlink resolution stays with `assertResolvedParentContained`.
+
+    @Test("an absent leaf under a /private alias is accepted exactly like an existing one")
+    func absentLeafUnderPrivateAliasMatchesExisting() throws {
+        // ScratchDirs vends under $TMPDIR (`/var/folders/...`), which is itself the `/private/var`
+        // alias — the same mechanism as `/private/tmp`, with no fixed-path dependence.
+        // $TMPDIR may already be spelled in the long form (e.g. `/private/tmp/...`), so derive
+        // the pair from whichever spelling ScratchDirs vended rather than blindly prepending.
+        let dir = try scratch.directory().path
+        let (short, long) = dir.hasPrefix("/private/")
+            ? (String(dir.dropFirst("/private".count)), dir)
+            : (dir, "/private" + dir)
+        let absent = long + "/absent-\(UUID().uuidString).bin"   // absent leaf, long spelling
+        // Existing directory in the long spelling against the short-spelled root: accepted before
+        // the fix too (standardizingPath stripped /private because the target existed).
+        #expect(throws: Never.self) { try AttachmentFS.assertSafeSavePath(long, roots: [short]) }
+        // Absent leaf under the SAME directory: must be accepted just the same.
+        #expect(throws: Never.self) { try AttachmentFS.assertSafeSavePath(absent, roots: [short]) }
+    }
+
+    @Test("an absent /private/tmp destination is inside a /tmp root")
+    func absentPrivateTmpLeafInsideTmpRoot() {
+        let absent = "/private/tmp/apple-cli-test-\(UUID().uuidString)/absent.bin"
+        #expect(throws: Never.self) { try AttachmentFS.assertSafeSavePath(absent, roots: ["/tmp"]) }
+    }
+
+    @Test("absent /private/tmp and /private/var/folders destinations pass the DEFAULT roots")
+    func absentPrivateLeavesPassDefaultRoots() {
+        // Production calls with `roots: nil` → allowedSaveRoots(); the bug was an interaction with
+        // that exact list, so it must be pinned at the real call shape, not only via injection.
+        let id = UUID().uuidString
+        #expect(throws: Never.self) {
+            try AttachmentFS.assertSafeSavePath("/private/tmp/apple-cli-test-\(id)/absent.bin")
+        }
+        #expect(throws: Never.self) {
+            try AttachmentFS.assertSafeSavePath("/private/var/folders/apple-cli-test-\(id)/absent.bin")
+        }
+    }
+
+    @Test("both alias spellings of an absent path canonicalize to the same accepted string")
+    func aliasSpellingsCanonicalizeIdentically() throws {
+        let leaf = "apple-cli-test-\(UUID().uuidString)/absent.bin"
+        let long = try AttachmentFS.assertSafeSavePath("/private/tmp/" + leaf, roots: ["/tmp"])
+        let short = try AttachmentFS.assertSafeSavePath("/tmp/" + leaf, roots: ["/tmp"])
+        #expect(long == short)
+        #expect(long == "/tmp/" + leaf)
+    }
+
+    @Test("a trailing slash on an injected root does not change containment")
+    func trailingSlashRootIsNormalized() {
+        let absent = "/private/tmp/apple-cli-test-\(UUID().uuidString)/absent.bin"
+        #expect(throws: Never.self) { try AttachmentFS.assertSafeSavePath(absent, roots: ["/tmp/"]) }
+    }
+
+    @Test("a tilde destination still expands to the home directory (keeps D12's `~/.ssh` parity)")
+    func tildeDestinationExpandsToHome() throws {
+        // `NSString.isAbsolutePath` accepts `~…`, and the old normalizer expanded it; the lexical
+        // normalizer must keep doing so or every `~/…` destination silently becomes a refusal.
+        let leaf = "apple-cli-test-\(UUID().uuidString)/x.bin"
+        let viaTilde = try AttachmentFS.assertSafeSavePath("~/" + leaf)
+        #expect(viaTilde == AttachmentFS.resolvedPath(NSHomeDirectory()) + "/" + leaf)
+    }
+
+    @Test("the alias fold applies only at a path-component boundary (`/private/tmpX` is not `/tmpX`)")
+    func aliasFoldRequiresComponentBoundary() {
+        // Pins the fold's own boundary check, independent of the root-prefix check: a refactor to
+        // `hasPrefix(alias)` would fold `/private/tmpX` → `/tmpX` with every other test still green.
+        #expect(throws: AttachmentFS.FSError.self) {
+            try AttachmentFS.assertSafeSavePath("/private/tmpX/apple-cli-test/a.bin", roots: ["/tmp"])
+        }
+        #expect(throws: AttachmentFS.FSError.self) {
+            try AttachmentFS.assertSafeSavePath("/private/varX/folders/apple-cli-test/a.bin", roots: ["/var/folders"])
+        }
+    }
+
+    @Test("a `/` followed by a combining mark is still a separator, so `..` cannot hide behind it")
+    func combiningMarkAfterSlashDoesNotHideTraversal() {
+        // `/tmp/../<U+0301>/out.bin`: at the Character level `/` + U+0301 is ONE grapheme that is
+        // not equal to "/", so a Character-level split would keep `..` inside a single component
+        // and the path would read as still under /tmp. The kernel splits on the byte, and the real
+        // target is `/<U+0301>/out.bin` — outside every root. Must be refused.
+        let escape = "/tmp/../\u{0301}/out.bin"
+        #expect(throws: AttachmentFS.FSError.self) {
+            try AttachmentFS.assertSafeSavePath(escape, roots: ["/tmp"])
+        }
+        #expect(AttachmentFS.resolvedPath(escape) == "/\u{0301}/out.bin")
+    }
+
+    @Test("an unknown `~user` spelling is refused as not-absolute, never anchored at `/`")
+    func unknownTildeUserIsNotAbsolute() {
+        // `expandingTildeInPath` returns an unknown `~user/…` unchanged; `isAbsolutePath` admits it.
+        #expect(throws: AttachmentFS.FSError.self) {
+            try AttachmentFS.assertSafeSavePath("~apple-cli-test-nosuchuser/x.bin")
+        }
+    }
+
+    @Test("a case-variant /private alias spelling is not folded and stays fail-closed")
+    func caseVariantAliasIsNotFolded() {
+        // Exact-case fold on purpose (as before): on a case-insensitive volume this names the same
+        // directory, but refusing it is the safe direction and matches the old behavior.
+        #expect(throws: AttachmentFS.FSError.self) {
+            try AttachmentFS.assertSafeSavePath("/PRIVATE/TMP/apple-cli-test/x.bin", roots: ["/tmp"])
+        }
+    }
+
+    @Test("`..` traversal through a /private alias still escapes and is rejected")
+    func aliasTraversalStillRejected() {
+        #expect(throws: AttachmentFS.FSError.self) {
+            try AttachmentFS.assertSafeSavePath("/private/tmp/../etc/passwd", roots: ["/tmp"])
+        }
+        #expect(throws: AttachmentFS.FSError.self) {
+            try AttachmentFS.assertSafeSavePath("/tmp/x/../../etc/passwd", roots: ["/tmp"])
+        }
+    }
+
+    @Test("a root is a prefix only at a path-component boundary")
+    func rootPrefixRequiresComponentBoundary() {
+        let root = "/apple-cli-test/root"
+        #expect(throws: Never.self) { try AttachmentFS.assertSafeSavePath(root + "/sub/file.bin", roots: [root]) }
+        #expect(throws: AttachmentFS.FSError.self) {
+            try AttachmentFS.assertSafeSavePath("/apple-cli-test/rootX/file.bin", roots: [root])
+        }
     }
 }
 
