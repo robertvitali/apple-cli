@@ -3,6 +3,7 @@
 BATS_SUITE_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd -P)"
 REPO_ROOT="$(cd "$BATS_SUITE_ROOT/.." && pwd -P)"
 HELPERS="$BATS_SUITE_ROOT/helpers"
+load "$HELPERS/app_lifecycle"
 # Local read-only capability tests for the `reminders` domain. Authorization diagnostics probe
 # protected local paths and therefore cannot run in the hosted tier.
 

@@ -3,6 +3,7 @@
 BATS_SUITE_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd -P)"
 REPO_ROOT="$(cd "$BATS_SUITE_ROOT/.." && pwd -P)"
 HELPERS="$BATS_SUITE_ROOT/helpers"
+load "$HELPERS/app_lifecycle"
 # Mail CLI smoke tests. Help/usage/error-envelope checks run anywhere; live reads
 # (Envelope Index + Mail automation) are guarded and skip when unavailable (CI).
 
@@ -555,8 +556,10 @@ if len(attachments) != int(sys.argv[1]):
 
 @test "mail export --dry-run writes nothing and reports the cap" {
   require_index
-  target="$HOME/apple-cli-test-export-drynothing"
-  rm -rf "$target"
+  # Export is HOME-confined. Use a run-unique absent path; never delete a collision.
+  target="$HOME/apple-cli-test-export-drynothing-${BATS_RUN_TMPDIR##*/}-$BATS_TEST_NUMBER"
+  [ ! -e "$target" ]
+  [ ! -L "$target" ]
   run "$BIN" mail export --dry-run --account iCloud --scope entire_mailbox --mailbox INBOX --dir "$target" --max 2
   [ "$status" -eq 0 ]
   echo "$output" | grep -q '"dry_run" *: *true'
@@ -2238,6 +2241,67 @@ import json,sys;m=json.load(sys.stdin)['data']['messages'];print(m[0]['id'] if m
   echo "$output" | python3 -c "
 import json,sys;d=json.load(sys.stdin)['data']
 assert d['recipients'] == ['me@self.test'], d"
+}
+
+# ---- Live-tier Mail trash previews and terminology-coupled compilation ----
+# Mail trash preview performs a best-effort live mailbox read even though it does not mutate or
+# empty trash, so every test that reaches that preview belongs in the local tier. The full
+# osacompile sweep is local as a precaution because Mail.app terminology may be consulted while
+# compiling; this classification does not claim that the sweep is proven to launch Mail.app.
+
+@test "mail: sandbox:true is carried by rules-preview and trash-empty envelopes too (no forgotten emit site)" {
+  # Output.emit's sandboxActive parameter is DEFAULTED, so a forgotten call site silently
+  # under-reports as unsandboxed — review round 1 caught exactly that on these two surfaces.
+  APPLE_TEST_MODE=1 run "$BIN" mail rules create --dry-run --name "apple-cli-test-x" --condition "subject:contains:apple-cli-test" --action "mark_read=true" --test-mode
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"sandbox" : true'
+  # The sandboxed preview also predicts the force-disable execute performs (preview honesty).
+  echo "$output" | grep -q '"enabled" : false'
+  APPLE_TEST_MODE=1 run "$BIN" mail trash empty --dry-run --account "Any" --test-mode
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"sandbox" : true'
+}
+
+@test "v2 default: the flagless trash surface stays a dry-run preview (trash empty)" {
+  run "$BIN" mail trash empty --account "Any"  # flagless-on-purpose
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"dry_run" : true'
+  echo "$output" | grep -q '"executed" : false'
+}
+
+@test "mail trash empty dry-run previews without emptying trash (exit 0)" {
+  run "$BIN" mail trash empty --dry-run --account "Any"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"action" : "empty_trash"'
+  echo "$output" | grep -q '"dry_run" : true'
+  echo "$output" | grep -q '"executed" : false'
+}
+
+@test "every AppleScript embedded in MailScript.swift compiles (osacompile)" {
+  run python3 "$HELPERS/applescript_syntax_check.py"
+  [ "$status" -eq 0 ]
+  # Sentinels proving the helper really ran over the compose + mutation script sets. The plain
+  # nativeReplyScript was DELETED by decision-5 (2026-08-19) — plain replies route through
+  # nativeReplyHtmlScript now — so that is the reply-side sentinel.
+  echo "$output" | grep -q "ok - nativeReplyHtmlScript"
+  echo "$output" | grep -q "ok - emptyTrashScript"
+  # The RULE scripts are the least exercisable of the lot: `delete` went live-wired on 2026-08-19
+  # (gap25), so a syntax slip in either of these now surfaces as a botched LIVE rule mutation —
+  # and no agent may live-verify a delete rule (docs/port-specs/mail.md op 27), which makes
+  # osacompile the only automated coverage they will ever get. Pin both by name so a helper change
+  # that stops assembling them cannot pass silently.
+  echo "$output" | grep -q "ok - createRuleScript"
+  echo "$output" | grep -q "ok - updateRuleMetaScript"
+  ! echo "$output" | grep -q "^FAIL"
+}
+
+@test "mail trash empty --dry-run --text is HONORED (renders text, not JSON) (Q12 [10])" {
+  # --dry-run hits the same `guard willExecute else` preview branch as the surface's default
+  # (trash defaults to dry-run); the explicit flag satisfies the no-flagless-writes lint.
+  run "$BIN" mail trash empty --account "apple-cli-test-noaccount" --dry-run --text
+  [ "$status" -eq 0 ]
+  echo "${lines[0]}" | grep -qv '{'
+  echo "$output" | grep -q '^action: empty_trash'
 }
 
 # gap19: with nothing supplied, the preview reports the oracle's missing_details in the

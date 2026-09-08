@@ -243,6 +243,25 @@ Apple state many tests exercise, failing environment-dependently and crawling at
 against the sandbox — real Mac with granted TCC, not CI). Add golden-JSON
 snapshot tests + an exit-code matrix per domain, and MCP-diff parity tests.
 
+Each local Bats file uses targeted LaunchServices bundle-only and exact name-plus-bundle queries
+to snapshot Mail, Notes, Messages, Contacts, Calendar, and Reminders, then terminates only apps that
+the file launched. Teardown captures each candidate's LaunchServices ASN, exact PID, and stable
+check-in identity when observing it; termination and escalation revalidate all three. Escalation
+uses LaunchServices `kill -hard` against the original ASN, never a numeric app PID or `-force`,
+then verifies stopped state. Setup and teardown each have a 120-second checkpoint-enforced
+deadline; active LaunchServices children are stopped on expiry, while synchronous local
+Python/file operations are checked when they return.
+A bounded quiet-period rescan catches delayed launches;
+an app that reappears after cleanup fails teardown instead of being targeted again. The Bats shell
+owns the bounded LaunchServices children and deadline timers;
+Python only validates private 0600 state/output files and computes a fixed allowlisted restore
+plan. Set `APPLE_CLI_BATS_PRESERVE_APPS=1` (`true`/`yes` also accepted) to preserve all apps. The
+snapshot cannot distinguish a test launch from an operator launch during the same file, so do not
+launch those apps while local Bats is running. Recursive Bats is sequential; parallel local-file
+execution is unsupported because independent snapshots can race.
+Name-only queries are deliberately excluded: LaunchServices may resolve an app's helper process
+for the shared display name even when the canonical app bundle is not running.
+
 ## Main-only workflow
 
 **Operator ruling, 2026-08-23:** all apple-cli work happens directly in the primary checkout on

@@ -3,6 +3,7 @@ import importlib.util
 import io
 import json
 from pathlib import Path
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -22,7 +23,7 @@ EXPECTED_FILES = {
         "bats/hosted/bounded_exec.bats": 5,
         "bats/hosted/calendar.bats": 20,
         "bats/hosted/contacts.bats": 49,
-        "bats/hosted/mail.bats": 124,
+        "bats/hosted/mail.bats": 119,
         "bats/hosted/messages.bats": 11,
         "bats/hosted/notes.bats": 39,
         "bats/hosted/reminders.bats": 38,
@@ -30,7 +31,7 @@ EXPECTED_FILES = {
     },
     "local": {
         "bats/local/contacts.bats": 4,
-        "bats/local/mail.bats": 104,
+        "bats/local/mail.bats": 109,
         "bats/local/mail-move-gmail.bats": 2,
         "bats/local/messages.bats": 15,
         "bats/local/notes.bats": 5,
@@ -59,12 +60,13 @@ def title_digest(title: str) -> str:
     return hashlib.sha256(title.encode("utf-8")).hexdigest()
 
 
-def bats_source(*titles: str) -> str:
+def bats_source(*titles: str, lifecycle: bool = False) -> str:
     tests = "\n\n".join(
         f'@test "{title}" {{\n  true\n}}' for title in titles
     )
     contract = "\n".join(ROOT_CONTRACT)
-    return f"#!/usr/bin/env bats\n\n{contract}\n\n{tests}\n"
+    hook = '\nload "$HELPERS/app_lifecycle"' if lifecycle else ""
+    return f"#!/usr/bin/env bats\n\n{contract}{hook}\n\n{tests}\n"
 
 
 def manifest_entry(root: Path, path: str, titles: list[str]) -> dict:
@@ -90,8 +92,12 @@ def write_fixture_manifest(
     hosted_path.parent.mkdir(parents=True)
     local_path.parent.mkdir(parents=True)
     live_path.parent.mkdir(parents=True)
+    for relative in load_checker().TRUSTED_HOSTED_HELPER_SHA256:
+        destination = root / relative
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes((REPO_ROOT / relative).read_bytes())
     hosted_path.write_text(bats_source(*hosted_titles), encoding="utf-8")
-    local_path.write_text(bats_source(*local_titles), encoding="utf-8")
+    local_path.write_text(bats_source(*local_titles, lifecycle=True), encoding="utf-8")
     live_path.write_text("#!/bin/sh\nexit 0\n", encoding="utf-8")
     manifest = {
         "schema_version": 1,
@@ -135,7 +141,7 @@ class BatsInventoryTests(unittest.TestCase):
         self.assertEqual(manifest["test_count"], 446)
         self.assertEqual(
             {tier: manifest["tiers"][tier]["test_count"] for tier in ("hosted", "local")},
-            {"hosted": 312, "local": 134},
+            {"hosted": 307, "local": 139},
         )
         self.assertEqual(
             {
@@ -156,6 +162,24 @@ class BatsInventoryTests(unittest.TestCase):
             local_messages["ordered_title_sha256"][-1],
             title_digest("messages send --dry-run --text neutralizes ANSI (Q12 [17])"),
         )
+        moved_mail_titles = (
+            "mail: sandbox:true is carried by rules-preview and trash-empty envelopes too (no forgotten emit site)",
+            "v2 default: the flagless trash surface stays a dry-run preview (trash empty)",
+            "mail trash empty dry-run previews without emptying trash (exit 0)",
+            "every AppleScript embedded in MailScript.swift compiles (osacompile)",
+            "mail trash empty --dry-run --text is HONORED (renders text, not JSON) (Q12 [10])",
+        )
+        hosted_mail_titles = checker.read_bats_file(
+            REPO_ROOT / "bats" / "hosted" / "mail.bats",
+            "bats/hosted/mail.bats",
+        )[2]
+        local_mail_titles = checker.read_bats_file(
+            REPO_ROOT / "bats" / "local" / "mail.bats",
+            "bats/local/mail.bats",
+        )[2]
+        for title in moved_mail_titles:
+            self.assertNotIn(title, hosted_mail_titles)
+            self.assertIn(title, local_mail_titles)
         self.assertEqual(
             checker.validate_repository(REPO_ROOT, MANIFEST_PATH),
             (),
@@ -165,6 +189,226 @@ class BatsInventoryTests(unittest.TestCase):
             checker.TRUSTED_HOSTED_HELPER_SHA256.get(probe_path),
             hashlib.sha256((REPO_ROOT / probe_path).read_bytes()).hexdigest(),
         )
+        for lifecycle_path in (
+            "bats/helpers/app_lifecycle.py",
+            "bats/helpers/app_lifecycle.bash",
+        ):
+            self.assertEqual(
+                checker.TRUSTED_HOSTED_HELPER_SHA256.get(lifecycle_path),
+                hashlib.sha256((REPO_ROOT / lifecycle_path).read_bytes()).hexdigest(),
+            )
+
+    def test_export_preview_uses_a_unique_absent_target_without_deleting_it(self) -> None:
+        source = (REPO_ROOT / "bats/local/mail.bats").read_text(encoding="utf-8")
+        body = source.split(
+            '@test "mail export --dry-run writes nothing and reports the cap" {', 1
+        )[1].split("\n}", 1)[0]
+        preparation = body.split('run "$BIN"', 1)[0]
+        self.assertNotIn("rm ", body)
+        self.assertIn("${BATS_RUN_TMPDIR##*/}", preparation)
+        self.assertIn("$BATS_TEST_NUMBER", preparation)
+        self.assertIn('[ ! -e "$target" ]', preparation)
+        self.assertIn('[ ! -L "$target" ]', preparation)
+
+    def test_app_lifecycle_hook_is_local_only_and_loaded_by_every_local_file(self) -> None:
+        local_files = sorted((REPO_ROOT / "bats" / "local").glob("*.bats"))
+        hosted_files = sorted((REPO_ROOT / "bats" / "hosted").glob("*.bats"))
+        hook_load = 'load "$HELPERS/app_lifecycle"'
+
+        self.assertEqual(len(local_files), 7)
+        for path in local_files:
+            with self.subTest(path=path.relative_to(REPO_ROOT).as_posix()):
+                self.assertIn(hook_load, path.read_text(encoding="utf-8"))
+        for path in hosted_files:
+            with self.subTest(path=path.relative_to(REPO_ROOT).as_posix()):
+                self.assertNotIn("app_lifecycle", path.read_text(encoding="utf-8"))
+
+    def test_rejects_non_executable_local_lifecycle_loads_end_to_end(self) -> None:
+        checker = load_checker()
+        disguised_loads = (
+            "cat <<'PAYLOAD' >/dev/null\n"
+            'load "$HELPERS/app_lifecycle"\n'
+            "PAYLOAD",
+            '@test "local example" {\n'
+            'load "$HELPERS/app_lifecycle"\n'
+            "  true\n"
+            "}",
+            "if false; then\n"
+            'load "$HELPERS/app_lifecycle"\n'
+            "fi",
+            "false && \\\n"
+            'load "$HELPERS/app_lifecycle"',
+        )
+        for disguised_load in disguised_loads:
+            with self.subTest(disguised_load=disguised_load), tempfile.TemporaryDirectory() as temporary_directory:
+                root = Path(temporary_directory)
+                manifest_path = write_fixture_manifest(root)
+                local = root / "bats" / "local" / "sample.bats"
+                source = bats_source("local example")
+                if disguised_load.startswith("@test"):
+                    source = source.replace(
+                        '@test "local example" {\n  true\n}',
+                        disguised_load,
+                    )
+                else:
+                    source = source.replace("\n\n@test", f"\n{disguised_load}\n\n@test")
+                local.write_text(source, encoding="utf-8")
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                manifest["tiers"]["local"]["files"][0]["file_sha256"] = hashlib.sha256(
+                    local.read_bytes()
+                ).hexdigest()
+                manifest_path.write_text(
+                    json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+
+                errors = checker.validate_repository(root, manifest_path)
+
+            self.assertTrue(
+                any("executable top-level app lifecycle hook" in error for error in errors),
+                errors,
+            )
+
+    def test_rejects_local_lifecycle_load_before_ordered_header_end_to_end(self) -> None:
+        checker = load_checker()
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            manifest_path = write_fixture_manifest(root)
+            local = root / "bats" / "local" / "sample.bats"
+            local.write_text(
+                "#!/usr/bin/env bats\n\n"
+                'load "$HELPERS/app_lifecycle"\n'
+                + "\n".join(ROOT_CONTRACT)
+                + '\n\n@test "local example" {\n  true\n}\n',
+                encoding="utf-8",
+            )
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["tiers"]["local"]["files"][0]["file_sha256"] = hashlib.sha256(
+                local.read_bytes()
+            ).hexdigest()
+            manifest_path.write_text(
+                json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+            errors = checker.validate_repository(root, manifest_path)
+
+        self.assertTrue(
+            any("ordered header" in error for error in errors),
+            errors,
+        )
+
+    def test_rejects_local_lifecycle_hook_overrides_end_to_end(self) -> None:
+        checker = load_checker()
+        definitions = (
+            "setup_file() {\n  true\n}",
+            "teardown_file() {\n  true\n}",
+            "setup_file()\n{ true; }",
+            "setup_file \\\n() {\n  true\n}",
+            "setup_file()\n# synthetic comment\n{ true; }",
+        )
+        for definition in definitions:
+            with self.subTest(definition=definition), tempfile.TemporaryDirectory() as temporary_directory:
+                root = Path(temporary_directory)
+                manifest_path = write_fixture_manifest(root)
+                local = root / "bats" / "local" / "sample.bats"
+                local.write_text(
+                    bats_source("local example", lifecycle=True)
+                    + f"\n{definition}\n",
+                    encoding="utf-8",
+                )
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                manifest["tiers"]["local"]["files"][0]["file_sha256"] = hashlib.sha256(
+                    local.read_bytes()
+                ).hexdigest()
+                manifest_path.write_text(
+                    json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+                    encoding="utf-8",
+                )
+
+                errors = checker.validate_repository(root, manifest_path)
+
+            self.assertTrue(
+                any("overrides app lifecycle hook" in error for error in errors),
+                errors,
+            )
+
+    def test_app_lifecycle_helper_mutation_is_rejected(self) -> None:
+        checker = load_checker()
+        for relative in (
+            "bats/helpers/app_lifecycle.py",
+            "bats/helpers/app_lifecycle.bash",
+        ):
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory() as temporary_directory:
+                expected = checker.TRUSTED_HOSTED_HELPER_SHA256[relative]
+                root = Path(temporary_directory)
+                helper = root / relative
+                helper.parent.mkdir(parents=True)
+                helper.write_bytes((REPO_ROOT / relative).read_bytes() + b"\n# mutation\n")
+                original_catalog = checker.TRUSTED_HOSTED_HELPER_SHA256
+                checker.TRUSTED_HOSTED_HELPER_SHA256 = {relative: expected}
+                try:
+                    errors = checker._validate_trusted_hosted_helpers(root)
+                finally:
+                    checker.TRUSTED_HOSTED_HELPER_SHA256 = original_catalog
+
+            self.assertTrue(any("hosted helper catalog drift" in error for error in errors), errors)
+
+    def test_missing_lifecycle_helpers_are_rejected_end_to_end(self) -> None:
+        checker = load_checker()
+        for relative in (
+            "bats/helpers/app_lifecycle.py",
+            "bats/helpers/app_lifecycle.bash",
+        ):
+            with self.subTest(relative=relative), tempfile.TemporaryDirectory() as temporary_directory:
+                root = Path(temporary_directory)
+                repository_root = root / "repository"
+                repository_manifest = write_fixture_manifest(repository_root)
+                (repository_root / relative).unlink()
+                repository_errors = checker.validate_repository(
+                    repository_root,
+                    repository_manifest,
+                )
+
+                policy_root = root / "policy"
+                candidate_root = root / "candidate"
+                policy_manifest = write_fixture_manifest(policy_root)
+                candidate_manifest = write_fixture_manifest(candidate_root)
+                (candidate_root / relative).unlink()
+                candidate_errors = checker.validate_candidate_repository(
+                    policy_root,
+                    policy_manifest,
+                    candidate_root,
+                    candidate_manifest,
+                )
+
+            self.assertTrue(any("hosted helper catalog drift" in error for error in repository_errors))
+            self.assertTrue(any("hosted helper catalog drift" in error for error in candidate_errors))
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            repository_root = root / "repository"
+            repository_manifest = write_fixture_manifest(repository_root)
+            shutil.rmtree(repository_root / "bats" / "helpers")
+            repository_errors = checker.validate_repository(
+                repository_root,
+                repository_manifest,
+            )
+
+            policy_root = root / "policy"
+            candidate_root = root / "candidate"
+            policy_manifest = write_fixture_manifest(policy_root)
+            candidate_manifest = write_fixture_manifest(candidate_root)
+            shutil.rmtree(candidate_root / "bats" / "helpers")
+            candidate_errors = checker.validate_candidate_repository(
+                policy_root,
+                policy_manifest,
+                candidate_root,
+                candidate_manifest,
+            )
+
+        self.assertTrue(any("hosted helper catalog drift" in error for error in repository_errors))
+        self.assertTrue(any("hosted helper catalog drift" in error for error in candidate_errors))
 
     def test_partition_does_not_overwrite_bats_internal_root(self) -> None:
         for path in sorted((REPO_ROOT / "bats").glob("*/*.bats")):
@@ -767,7 +1011,7 @@ class BatsInventoryTests(unittest.TestCase):
             policy_manifest = write_fixture_manifest(policy_root)
             candidate_manifest = write_fixture_manifest(candidate_root)
             helper = candidate_root / "bats" / "helpers" / "messages_db_probe.py"
-            helper.parent.mkdir(parents=True)
+            helper.parent.mkdir(parents=True, exist_ok=True)
             helper.write_text("# helper v1\n", encoding="utf-8")
             expected = hashlib.sha256(helper.read_bytes()).hexdigest()
             original_catalog = checker.TRUSTED_HOSTED_HELPER_SHA256
@@ -802,7 +1046,7 @@ class BatsInventoryTests(unittest.TestCase):
             addition_path = candidate_root / "bats" / "local" / "addition.bats"
             addition_titles = ["new local example"]
             addition_path.write_text(
-                bats_source(*addition_titles),
+                bats_source(*addition_titles, lifecycle=True),
                 encoding="utf-8",
             )
             manifest = json.loads(candidate_manifest.read_text(encoding="utf-8"))

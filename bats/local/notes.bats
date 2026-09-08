@@ -3,6 +3,7 @@
 BATS_SUITE_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd -P)"
 REPO_ROOT="$(cd "$BATS_SUITE_ROOT/.." && pwd -P)"
 HELPERS="$BATS_SUITE_ROOT/helpers"
+load "$HELPERS/app_lifecycle"
 # CLI smoke tests for the `notes` domain — invoke the built binary. No real note data is used.
 # Most assertions avoid Apple automation. The one NOTES-H1 title-fallthrough assertion is an
 # explicit `APPLE_LIVE_NOTES=1` live-tier opt-in and skips before its helper/AppleEvents otherwise.

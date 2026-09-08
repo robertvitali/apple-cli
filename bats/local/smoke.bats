@@ -3,6 +3,7 @@
 BATS_SUITE_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd -P)"
 REPO_ROOT="$(cd "$BATS_SUITE_ROOT/.." && pwd -P)"
 HELPERS="$BATS_SUITE_ROOT/helpers"
+load "$HELPERS/app_lifecycle"
 # Local process-lifecycle tests. They exercise snapshot cleanup through read-only Messages
 # commands and therefore stay out of hosted and fork-reachable CI.
 

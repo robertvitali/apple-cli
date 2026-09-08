@@ -3,6 +3,7 @@
 BATS_SUITE_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd -P)"
 REPO_ROOT="$(cd "$BATS_SUITE_ROOT/.." && pwd -P)"
 HELPERS="$BATS_SUITE_ROOT/helpers"
+load "$HELPERS/app_lifecycle"
 # Local Contacts capability tests. Refusal cases may query the real store only for an exact
 # synthetic miss after the write is blocked; they never emit live values or perform a mutation.
 # Do not run this tier on hosted or fork-reachable CI.

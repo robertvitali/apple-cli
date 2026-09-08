@@ -3,6 +3,7 @@
 BATS_SUITE_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd -P)"
 REPO_ROOT="$(cd "$BATS_SUITE_ROOT/.." && pwd -P)"
 HELPERS="$BATS_SUITE_ROOT/helpers"
+load "$HELPERS/app_lifecycle"
 # Mail `move --gmail-mode` CLI smoke tests (Gmail copy+delete label semantics; parity with
 # s-morgan move_messages(gmail_mode=True)). Local-only: dry-run previews + flag-acceptance
 # equivalence, with the --execute case run SANDBOXED (write-model v2: unsandboxed --execute

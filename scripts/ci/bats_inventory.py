@@ -29,6 +29,7 @@ ALTERNATE_TEST_DECLARATION = re.compile(
 )
 DIGEST = re.compile(r"^[0-9a-f]{64}$")
 LIVE_ONLY_HELPERS = (
+    "app_lifecycle",
     "assert_live_attachment_enriched",
     "count_sys_folder_rows",
     "load_live_attachment_list",
@@ -40,6 +41,8 @@ LIVE_ONLY_HELPERS = (
     "select_live_attachment_fixture",
     "signal_midflight",
 )
+APP_LIFECYCLE_LOAD = 'load "$HELPERS/app_lifecycle"'
+APP_LIFECYCLE_HOOK_IDENTIFIER = re.compile(r"\b(?:setup_file|teardown_file)\b")
 LIVE_ONLY_HELPER_PATTERN = re.compile(
     r"\b(?:" + "|".join(re.escape(item) for item in LIVE_ONLY_HELPERS) + r")\b"
 )
@@ -81,13 +84,15 @@ TRUSTED_HOSTED_FILE_SHA256 = {
     "bats/hosted/bounded_exec.bats": "13e4976b41a295182873e45c7f33c84dd7712e2ee16399fc6c0fe561056d4c26",
     "bats/hosted/calendar.bats": "78feed6a5cd530cc1a3f922c45f5ceb482db45fd36d00ee9fdfe816a87a9b6e4",
     "bats/hosted/contacts.bats": "54db1ad8c0c5ed029a200121e1aaff78422c272698db178ee4d013095c74a2b8",
-    "bats/hosted/mail.bats": "9f75ec3194e5efde3b925c3fc9e42c247f26780961e3f5d6108393dca8d537ef",
+    "bats/hosted/mail.bats": "6ac159e10bb29894eef8c0b8a07f83ae92280c0054f32d94e4b44c1fb25cb1da",
     "bats/hosted/messages.bats": "23a087ee666d59ad74899ca98186feebd5b20f2db24b0804c5a5c456b8c5cf40",
     "bats/hosted/notes.bats": "e7b8342937711212df38cf9e0a636d63a69379d5baa11ca5b464cb0192b978a3",
     "bats/hosted/reminders.bats": "1b6c08b75acce52bc714e822c8cb652e8917e963eb18804b1a86e0fa95e6aa40",
     "bats/hosted/smoke.bats": "7bd533f47c3271ae141be9e4d95b93b5b476cd5bd68e46908d5a634cf53095e1",
 }
 TRUSTED_HOSTED_HELPER_SHA256 = {
+    "bats/helpers/app_lifecycle.bash": "9220dc72afd40b42977a970e6adc9adddc9223d8674029477d7aeb6543ffad9e",
+    "bats/helpers/app_lifecycle.py": "5b2a022dbe18b010e71afd30d344802202e19b13306690991acfd43547bc945c",
     "bats/helpers/applescript_syntax_check.py": "40f56f5659dfb3bbc4c8b4b36d30ac12ad943f7c3fd78981800f3da46343e996",
     "bats/helpers/bounded_exec.py": "84260117f0505f2f2883fa2ec1b5fc5a577d4a05cc1ba268ae26e8948ab475c9",
     "bats/helpers/execute_envelope_lint.py": "430eba15fea468da6415441657087f7f2b70b0e6853ae70777c7b52a652454ba",
@@ -196,23 +201,32 @@ def _scan_shell_line(
     heredocs: list[tuple[str, bool]],
     relative: str,
     line_number: int,
+    code: Optional[list[str]] = None,
 ) -> Optional[str]:
     index = 0
     while index < len(line):
         character = line[index]
         if quote is not None:
+            if code is not None:
+                code.append(" ")
             if character == quote:
                 quote = None
             elif character == "\\" and quote != "'":
+                if code is not None and index + 1 < len(line):
+                    code.append(" ")
                 index += 1
             index += 1
             continue
 
         if character in ("'", '"', "`"):
+            if code is not None:
+                code.append(" ")
             quote = character
             index += 1
             continue
         if character == "\\":
+            if code is not None:
+                code.extend("  ")
             index += 2
             continue
         if character == "#" and (
@@ -248,8 +262,12 @@ def _scan_shell_line(
                 delimiter = match.group(0)
                 cursor += len(delimiter)
             heredocs.append((delimiter, strip_tabs))
+            if code is not None:
+                code.extend(" " * (cursor - index))
             index = cursor
             continue
+        if code is not None:
+            code.append(character)
         index += 1
     return quote
 
@@ -285,6 +303,66 @@ def _parse_bats_source(source: str, relative: str) -> tuple[str, ...]:
     if len(titles) != len(set(titles)):
         raise InventoryError("inventory file contains a duplicate test title")
     return tuple(titles)
+
+
+def _local_lifecycle_errors(source: str, relative: str) -> tuple[str, ...]:
+    quote: Optional[str] = None
+    heredocs: list[tuple[str, bool]] = []
+    prologue_valid = True
+    header_index = 0
+    has_top_level_load = False
+    executable_lines: list[str] = []
+
+    for line_number, line in enumerate(source.splitlines(), 1):
+        if heredocs:
+            delimiter, strip_tabs = heredocs[0]
+            candidate = line.lstrip("\t") if strip_tabs else line
+            if candidate == delimiter:
+                heredocs.pop(0)
+            continue
+
+        if not has_top_level_load:
+            if (
+                line == APP_LIFECYCLE_LOAD
+                and prologue_valid
+                and quote is None
+                and header_index == len(SHARED_ROOT_CONTRACT)
+            ):
+                has_top_level_load = True
+            elif (
+                line.strip() == ""
+                or line.lstrip().startswith("#")
+            ):
+                pass
+            elif (
+                prologue_valid
+                and header_index < len(SHARED_ROOT_CONTRACT)
+                and line == SHARED_ROOT_CONTRACT[header_index]
+            ):
+                header_index += 1
+            else:
+                prologue_valid = False
+
+        code: list[str] = []
+        quote = _scan_shell_line(
+            line,
+            quote,
+            heredocs,
+            relative,
+            line_number,
+            code,
+        )
+        executable_lines.append("".join(code))
+
+    errors: list[str] = []
+    if not has_top_level_load:
+        errors.append(
+            "local file does not load executable top-level app lifecycle hook "
+            "after ordered header"
+        )
+    if APP_LIFECYCLE_HOOK_IDENTIFIER.search("\n".join(executable_lines)):
+        errors.append("local file overrides app lifecycle hook")
+    return tuple(errors)
 
 
 def read_bats_file(path: Path, relative: str) -> tuple[bytes, str, tuple[str, ...]]:
@@ -762,6 +840,8 @@ def validate_repository(root: Path, manifest_path: Path) -> tuple[str, ...]:
                         and _hosted_has_live_state_access(source)
                     ):
                         errors.append("hosted file contains live-state access")
+                else:
+                    errors.extend(_local_lifecycle_errors(source, relative))
                 # Same-source consistency canary (NOT an independent oracle):
                 # _discover_bats_count shares _parse_bats_source's tokenizer, so on
                 # a well-formed file already parsed above this re-parse always
@@ -858,8 +938,6 @@ def _validate_trusted_catalog(
 
 
 def _validate_trusted_hosted_helpers(root: Path) -> tuple[str, ...]:
-    if not (root / "bats" / "helpers").exists():
-        return ()
     errors: list[str] = []
     for relative, expected in TRUSTED_HOSTED_HELPER_SHA256.items():
         try:
