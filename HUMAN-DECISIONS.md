@@ -26,18 +26,20 @@ it instead of asking.
 
 **Status values:** `OPEN` (waiting on the operator) · `ANSWERED` (decided, being applied) ·
 `APPLIED` (decision is in the code/repo) · `RATIFIED` (decided, no code change needed) ·
-`WITHDRAWN` (should not have been asked) · `SUPERSEDED`.
+`WITHDRAWN` (should not have been asked) · `SUPERSEDED` · `CLOSED` (an incident gate closed on
+recorded, scoped evidence).
 
 ---
 
-## LEDGER — every decision at a glance (updated 2026-08-31)
+## LEDGER — every decision at a glance (updated 2026-09-07)
 
-**Still needs you: D2. D9 was REOPENED 2026-08-31.** D3 and D14 were live-validated
+**Still needs you: D2.** D9 was reopened 2026-08-31 and finally closed the same day (recorded
+CLOSED — see D9). D15 and D16 were ratified 2026-09-07. D3 and D14 were live-validated
 operator-present on 2026-08-27 (evidence on their Asana tasks; the Mail parent closed the
-same day under the closure-verification protocol). Publication remains blocked until D9's
-approved private remediation is complete and one fresh, value-free audit round documents its
-searched classes, engines, commit-message coverage, object/ref/artifact surfaces, and independent
-cross-checks, with zero findings for that stated scope.
+same day under the closure-verification protocol). Publication remains blocked — independently
+of D9 — until every readiness gate passes and a separate fresh pre-publication privacy audit over
+the then-current tree, history, commit messages, objects, refs, and artifacts records zero
+findings for its stated scope; the repo stays private until then.
 
 | # | Topic | Status | Ruling |
 |---|---|---|---|
@@ -49,12 +51,14 @@ cross-checks, with zero findings for that stated scope.
 | D6 | Eight parity posture calls | **APPLIED** | CONTACTS-L4 delete claim · NOTES-M1 restore 4 keys · NOTES-L4 structural divergence · gap10 keep opt-in body · **gap25 wire delete-rules live** · extra20 open by default |
 | D7 | Committed phone number in public history | **ANSWERED** | "B then A" — superseded by D9, which covers the same number plus more |
 | D8 | Which Mail oracle wins on a safety limit | RESOLVED | **Safety wins** — stricter limit wins on A/B conflicts; landed in `86728f4` |
-| D9 | Personal data published to a public repo | **REOPENED 2026-08-31** (was APPLIED 2026-08-23, amended 2026-08-29) | Repo private; prior rewrite passes were published and verified against the classes then known. Later audit rounds found additional history and current-tree defects. Current-tree remediation remains under audit. Remaining work is to finish and recheck those corrections, apply the approved scoped rewrite, verify from a fresh clone, and complete one fresh, value-free audit. Do NOT publish until that complete round covers the corrected current tree and remediated history; documents searched classes, engines, commit-message coverage, object/ref/artifact surfaces, and independent cross-checks; and records zero findings for its stated scope |
+| D9 | Personal data published to a public repo | **CLOSED 2026-08-31** (APPLIED 2026-08-23, amended 2026-08-29, REOPENED 2026-08-31, then finally closed the same day) | Repo private. Prior rewrite passes were verified against the classes then known; a 2026-08-31 round found further history and current-tree defects and the gate was reopened. The approved scoped remediation was completed the same day — history rewrite in a fresh clone, fresh-clone verification, rollback/audit scratch removed and absent-verified — and one complete, independently challenged, value-free audit round returned zero findings for its stated scope (an earlier same-day closure attempt was recorded invalid and reversed first). Rewritten main `c794d7e` is an ancestor of current main; `v26.0.0` peels to `0f617eb`. This closure covers its stated scope only and does NOT authorize publication: the repo stays private until every readiness gate passes and a separate fresh pre-publication privacy audit records zero findings for the then-current tree, history, commit messages, objects, refs, and artifacts |
 | D10 | Search/find-contact length caps | WITHDRAWN | Should not have been filed |
 | D11 | What `schema_version` tracks | **APPLIED** | **Shape only** — value breaks ride the MAJOR + CHANGELOG; both policy lines rewritten to agree |
 | D12 | `notes save-attachment` can write to `~/.ssh` | **RATIFIED** | Keep strict Notes-oracle parity; residual documented, fleet stays intentionally inconsistent |
 | D13 | Strict-superset go/no-go package | **APPLIED** | All scoped items landed; D4 keeps its permanent never-live-exercised asterisk; D3 and D14 were live-validated 2026-08-27 |
 | D14 | Live-exercise `mail rules` delete | **APPLIED 2026-08-27** | First live exercise done operator-present: labeled disabled test rule deleted by index, readback matched, 3 real rules untouched |
+| D15 | Extend the public-attribution exception to `.github/CODEOWNERS` | **RATIFIED 2026-09-07** | The operator's exact GitHub user may appear in `.github/CODEOWNERS` for every enforcement-control-plane path, as deliberate public attribution alongside LICENSE, README, and git author metadata. Sequence is fixed: the `AGENTS.md` exception extension lands first as its own reviewed commit, the CODEOWNERS commit lands second with its own fresh privacy scan, then GitHub's code-owners errors API confirms it parses. Trade-off recorded per the design: from that step until public launch no release can be cut; the release freeze's urgent-fix clause is satisfiable only by a reviewed, operator-authorized, temporary restoration of a write-capable release workflow, recorded as an explicit exception and removed again afterwards |
+| D16 | Narrow main-only reversal for disposable rehearsal refs | **RATIFIED 2026-09-07** | Three disposable ref classes, and only these, may be created for the publication-automation rehearsals (design §18 steps 8–14, removal at step 18): the uniquely named disposable target ref, the proposal head refs of the validation PRs (which target that ref, never `main`), and the Dependabot-created head refs of step 13; never for feature work; never merged into `main`; deleted after the rehearsal, including on abort; does not reverse the ruling for ordinary work. The `AGENTS.md` reversal commit lands under the private main-only gate when the rehearsal step begins, after an in-session re-confirmation and before the first branch is cut. The later full reversal that activates the `main` ruleset is a SEPARATE future operator instruction and is not granted here |
 
 ---
 
@@ -117,12 +121,16 @@ make without argument if you prefer strict parity.
   a notes-length 422, and the workflow was fixed. (2) The six MCPs RETIRED (operator: "you
   can sunset the apple MCPs") — the private fleet-config repo moves them to `retiredServers`;
   hosts converge on their next whole-tree apply. (3) REMAINING: fleet deployment of the
-  binary + install/upgrade design, deferred by the operator to an operator-present follow-up
-  session — D2 and the execution parent close after that lands.
-- **Blocked by:** D9/Q30 was historically closed on 2026-08-29 for the classes then known, then
-  reopened on 2026-08-31. It again blocks publication until the approved history remediation,
-  fresh-clone verification, and one fresh, value-free zero-finding audit round are complete. This
-  entry's own operator-present hard stop also remains.
+  binary via a Homebrew tap ONLY — operator ruling 2026-08-30: the previously-scoped install
+  script and `apple upgrade` self-update are CANCELLED; `brew install` / `brew upgrade` is the
+  whole story. The tap requires the repo to be public, so it waits on the publication gates
+  below, and a RELEASE FREEZE holds until the tap actually serves `brew install apple-cli`. D2
+  and the execution parent close after that lands.
+- **Blocked by:** publication readiness, not D9. D9/Q30 was closed 2026-08-29 for the classes
+  then known, reopened 2026-08-31, and finally closed the same day (see D9). Publication — and
+  therefore the Homebrew tap that completes this entry — remains blocked until every readiness
+  gate passes and a separate fresh pre-publication privacy audit records zero findings for its
+  stated scope. This entry's own operator-present hard stop also remains.
 - **Filed:** 2026-08-02 (standing instruction from an earlier session, recorded here so it is not
   lost to context)
 - **Category:** irreversible / outward-facing
@@ -381,10 +389,11 @@ everywhere instead of asking again.
 ---
 ## D9 — I published your personal data to this PUBLIC repo, twice, and one leak is bigger than the one I set out to fix
 
-**Current status:** **REOPENED 2026-08-31.** Publication remains blocked until the approved
-private remediation is complete and one fresh, value-free audit round documents searched classes,
-regex engines, commit-message coverage, object/ref/artifact surfaces, and independent
-cross-checks, with zero findings for that stated scope. ·
+**Current status:** **CLOSED 2026-08-31** — reopened earlier that day (amendment below), then
+finally closed on scoped remediation, fresh value-free verification, independent review, and
+cleanup (final-closure amendment below). Publication remains blocked by a separate gate: the repo
+stays private until every readiness gate passes and a fresh pre-publication privacy audit records
+zero findings for its stated scope. ·
 **Historical status (2026-08-23):** **APPLIED — "B then A", including rewritten `main`.** ·
 **Filed:** 2026-08-03 · **Step B was DONE:** the repo was made **private** on 2026-08-19
 (containment). **Step A was DONE for the classes then known:** the verified rewrite was published
@@ -426,6 +435,29 @@ fresh-clone verification, and one fresh, complete, value-free audit round. That 
 the corrected current tree and remediated history; document searched classes, engines,
 commit-message coverage, object/ref/artifact surfaces, and independent cross-checks; and record
 zero findings for its stated scope. Publication remains blocked until that evidence exists.
+[Superseded by the 2026-08-31 final-closure amendment immediately below.]
+
+**Amendment (2026-08-31, final closure) — the gate was closed the same day it was reopened**
+(dates per the tracker's UTC timestamps: reopened 04:18, finally closed 19:12).
+After the reopening above, the remaining historical private-locator content within the
+already-authorized rule family was remediated in a fresh clone and the rewritten history was
+force-pushed to `origin` under the existing authorization (a rewrite never reaches existing
+clones, forks, or caches), the primary local-history cleanup completed, and retained
+rewrite/rollback/audit scratch was removed and absent-verified. An earlier same-day
+closure attempt was recorded INVALID and reversed: a verification pass had exceeded its read-only
+assignment and closed the gate while that round was not yet clean. The final closure superseded
+it after one complete, independently challenged, value-free audit round — covering the current
+tree, all reachable historical blobs, commit messages, refs, tag payloads, local artifact
+surfaces, and fresh-clone verification — returned zero findings for its stated scope, with
+independent code, security, critic, and adversarial-verifier review recording no material
+findings. Evidence: rewritten main `c794d7e` is an ancestor of `origin/main` and of the local
+main; `v26.0.0` remains annotated and peels to `0f617eb`; the full canonical suite passed on the
+rewritten SHA (982 Swift
+tests / 162 suites; Bats 445/445). The scope rule above stands unchanged: this closure proves
+zero findings for the classes and surfaces it searched, not the absence of unsearched classes —
+which is exactly why a separate fresh pre-publication privacy audit over the then-current tree,
+history, commit messages, objects, refs, and artifacts remains a mandatory launch gate, and the
+repo stays private until it and every readiness gate pass.
 
 ### What is exposed
 
@@ -433,7 +465,10 @@ Two incidents put personal data — the operator's and third parties' — into t
 into a commit message. Both were remediated at HEAD and, under separate operator authorization,
 in history. Later audit rounds found further residuals beyond those two incidents (see the
 2026-08-31 amendment above); the broader current-tree remediation remains under audit, while the
-authorized history remediation and verification remain open.
+authorized history remediation and verification remain open. [Superseded by the 2026-08-31
+final-closure amendment above: those within the already-authorized rule family were remediated
+and verified for that closure's stated scope; the separate fresh pre-publication audit remains the
+pending gate for everything outside it.]
 
 **This entry no longer re-enumerates the full inventory of what was exposed, where, and in
 which artifacts.** Assembling classes and artifacts into one list turns this record into a
@@ -569,6 +604,8 @@ deleted, because the file is append-only and because "the driver escalated inste
 is worth keeping. D7, D8 and D9 were genuinely open when this paragraph was written; D8 was later
 resolved, and D9 was historically applied on 2026-08-23 for the classes then known. D9 was
 REOPENED 2026-08-31 and remains open pending the approved remediation and scoped verification.
+[Superseded: D9 was finally closed 2026-08-31 after scoped remediation and verification; the repo
+stays private pending readiness and a separate fresh pre-publication audit.]
 
 **Original entry follows, unedited.**
 
@@ -891,5 +928,68 @@ clean up only the precisely logged test IDs through the known-good MCP oracle.
 Never target existing real mail, use bulk or fuzzy deletion, empty trash, or perform permanent
 deletion. D14 evidence is required before the Mail parent and Q30 can close. (Both closed:
 Mail parent 2026-08-27, Q30 2026-08-29.)
+
+---
+
+## D15 — Extend the public-attribution exception to `.github/CODEOWNERS`
+
+- **Status:** **RATIFIED 2026-09-07** — the operator authorized the extension in-session.
+- **Resolution:** The operator's exact GitHub user may appear in `.github/CODEOWNERS`, naming
+  the operator for every enforcement-control-plane path of the publication-automation design,
+  as deliberate public attribution alongside LICENSE, README, git author metadata, and
+  authorship prose. The marginal disclosure is nil (the handle is already public in those
+  places), but the no-personal-data rule is bright-line, so the exception is recorded here
+  before the identifier lands anywhere new. Sequence is fixed: (1) a distinct reviewed commit
+  extends the exception in `AGENTS.md` first; (2) the CODEOWNERS commit lands second with its
+  own fresh privacy scan; (3) GitHub's code-owners errors API confirms the file parses. Until
+  that `AGENTS.md` commit lands, `AGENTS.md`'s bright-line text governs and the handle goes
+  nowhere new.
+- **Filed:** 2026-09-07 (raised by the design's step 5, which says an agent cannot make the
+  design compliant by a policy PR alone)
+- **Category:** public attribution / control-plane governance
+
+**Why it needed you.** CODEOWNERS is how control-plane changes (workflows, actions, the PR
+template, dependabot, the Actions allowlist, the coverage policy, and the manifests) merge only
+on your code-owner approval or your sole bypass. GitHub CODEOWNERS requires a user or team, so
+the design cannot work without an identifier in a tracked file, and only you can ratify that.
+
+**Trade-off recorded, per the design:** from this step until public launch **no release can be
+cut** — the legacy publisher is already removed — so the release freeze's urgent-fix clause is
+satisfiable only by a reviewed, operator-authorized, TEMPORARY restoration of a write-capable
+release workflow, recorded as an explicit exception and removed again afterwards. Control-plane
+changes likewise merge only on your code-owner approval or sole bypass.
+
+**Blocking?** It unblocks the governance step. Nothing else waits on it.
+
+---
+
+## D16 — Narrow main-only reversal for disposable rehearsal refs
+
+- **Status:** **RATIFIED 2026-09-07** — narrow reversal authorized; the `AGENTS.md` commit
+  that records it lands when the rehearsal step begins.
+- **Resolution:** Three classes of DISPOSABLE ref, and only these, may be created for the
+  publication-automation rehearsals (design §18 steps 8–14; removal at step 18): (1) the
+  uniquely named disposable target ref; (2) the proposal head refs the validation pull requests
+  need — every such PR targets the disposable ref, never `main`; (3) the Dependabot-created head
+  refs of the design's step 13. Scope limits: never for feature work; never merged into `main`;
+  never `main` itself; deleted after the rehearsal, including when a rehearsal aborts. This does
+  not reverse the ruling for ordinary work. The
+  `AGENTS.md` reversal commit lands under the private main-only gate when the rehearsal step
+  actually begins, after an in-session re-confirmation and before the first branch is cut,
+  because a policy pull request cannot carry the reversal (it would need the head branch the
+  ruling forbids). Until that commit lands, the standing main-only ruling of 2026-08-23 governs
+  in full.
+- **Explicitly NOT granted here:** the later full reversal that activates the `main` ruleset
+  and native-squashes one real policy pull request. That is a separate, operator-gated,
+  in-session instruction at that step; nothing in this entry pre-authorizes it.
+- **Filed:** 2026-09-07 (raised by the design's rehearsal steps, which require a disposable
+  branch the main-only ruling forbids)
+- **Category:** branch topology / rehearsal authorization
+
+**Why it needed you.** The main-only ruling is yours and repo-local; only you can carve out
+an exception, and the design insists the carve-out be narrow and explicitly recorded before any
+branch exists.
+
+**Blocking?** It unblocks the rehearsal steps when they are reached. Nothing else waits on it.
 
 ---

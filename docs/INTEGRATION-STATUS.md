@@ -19,11 +19,13 @@
 > The rewrite is containment, not erasure: it cannot reach existing clones, forks, or caches.
 > Historical update 2026-08-29: the pre-1.0 re-audit and cleanup gate was closed after three
 > further operator-authorized targeted rewrite passes returned zero findings for the classes then
-> known; its rollback artifacts were destroyed and verified absent. Current update 2026-08-31:
-> D9 was REOPENED after later audit rounds found additional classes. Publication remains blocked
-> pending the approved private remediation and one fresh, value-free audit record naming searched
-> classes, engines, commit-message coverage, object/ref/artifact surfaces, and independent
-> cross-checks, with zero findings for that stated scope.
+> known; its rollback artifacts were destroyed and verified absent. Update 2026-08-31: D9 was
+> REOPENED after later audit rounds found additional classes, then finally closed the same day
+> with scoped remediation and fresh value-free verification (recorded CLOSED in HUMAN-DECISIONS
+> D9). The repo stays private and publication still awaits a separate fresh pre-publication
+> privacy audit record naming searched classes, engines, commit-message coverage,
+> object/ref/artifact surfaces, and independent cross-checks, with zero findings for its stated
+> scope.
 
 **TL;DR (2026-07-16 snapshot).** All six domains are implemented to strict-superset MCP parity, each
 independently reviewed (3-pass OMC) and verified green, then aggregated onto the
@@ -180,12 +182,12 @@ Ordered. Nothing here is safe to do unattended, which is why it waited.
 4. **HARD STOP — D2, operator-present only. 2 of 3 parts EXECUTED 2026-08-30** on explicit
    live operator instruction: `v26.0.0` released, and the six MCPs retired
    (in the private fleet-config repo; hosts converge on their next
-   whole-tree apply). Remaining: fleet deployment of the binary +
-   install/upgrade design (operator-present follow-up).
-   D9 was REOPENED 2026-08-31, so publication is independently blocked pending a fresh,
-   value-free privacy audit record that names searched classes, engines, commit-message coverage,
-   object/ref/artifact surfaces, and independent cross-checks, with zero findings for that stated
-   scope.
+   whole-tree apply). Remaining: fleet deployment of the binary via a Homebrew tap only (the
+   install script and self-update were cancelled by operator ruling 2026-08-30).
+   D9 was reopened and closed 2026-08-31; publication is still independently blocked pending a
+   separate fresh, value-free privacy audit record that names searched classes, engines,
+   commit-message coverage, object/ref/artifact surfaces, and independent cross-checks, with zero
+   findings for that stated scope, and the repo stays private until then.
    The rule stands: no agent may cut a release or unregister an MCP server without a
    direct in-session instruction.
 5. **`SQLiteReader immutable=1` (M2).** A Messages-specific perf/PII hardening

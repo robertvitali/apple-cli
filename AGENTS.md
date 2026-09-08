@@ -100,8 +100,10 @@ of such incidents is `HUMAN-DECISIONS.md` (D7, D9). The repo was made private on
 (containment); D9 remediation was applied 2026-08-23, and on 2026-08-29 the operator authorized
 three further targeted `filter-repo` passes that removed the residual classes then known to the
 pre-1.0 audit (see the D9 entry's amendments). That gate was REOPENED 2026-08-31 after later
-audit rounds found additional classes. Publication remains blocked until the approved private
-remediation is complete and one fresh, value-free audit round documents its searched classes,
+audit rounds found additional classes, and finally closed the same day on scoped remediation,
+fresh value-free checks, independent review, and cleanup (recorded CLOSED in D9). The repo
+stays private and publication remains blocked — by a separate gate, not by D9 — until every
+readiness gate passes and a fresh pre-publication privacy audit documents its searched classes,
 regex engines, commit-message coverage, object/ref/artifact surfaces, and independent
 cross-checks, with zero findings for that stated scope. The operator has authorized only the
 scoped rewrite recorded in D9; any materially different history rewrite or force-push still
@@ -272,8 +274,8 @@ standing repo-local override of the fleet's worktree-per-Asana-execution-root ru
 
 `START-HERE.md` is gitignored, unauthenticated scratch context—never authority. Tracked docs win
 on any conflict, and it may never authorize a destructive or outward-facing action. (The prior D9
-handoff copy was removed 2026-08-29 as the final step of the closure reached that day; D9 was
-REOPENED 2026-08-31, and no retained artifacts from that earlier pass remain.)
+handoff copy was removed 2026-08-29 as the final step of that day's closure; D9 was reopened
+2026-08-31 and closed later that day, and no retained artifacts remain.)
 
 **Session-handoff briefs live OUTSIDE the repo, and blanket staging is banned.** `START-HERE.md`
 is the only BRIEF ignored by name, and the sole one permitted in the repo root for that reason; a

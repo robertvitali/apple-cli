@@ -1017,9 +1017,10 @@ it privately. Three hard preconditions apply: the `main` ruleset of Section 18
 step 20 must be active and read back through the API before the visibility
 change, the publisher credentials, the listener, or any environment exist
 (otherwise a write-capable collaborator could push directly to `main` while
-publication controls are being provisioned); the reopened privacy audit gate
-recorded in `AGENTS.md` and `HUMAN-DECISIONS.md` (one fresh value-free audit
-round with zero findings for its stated scope) must be closed, and a separate
+publication controls are being provisioned); the fresh pre-publication privacy
+audit gate recorded in `AGENTS.md` and `HUMAN-DECISIONS.md` (distinct from the
+D9 closure; one fresh value-free audit round with zero findings for its stated
+scope) must be closed, and a separate
 launch specification, reviewed under the same gates as this one, must define an
 operator-only privacy incident runbook for the published surfaces (Pages
 containment, Release and asset takedown, tag and history remediation under the
@@ -1989,9 +1990,9 @@ ready" is stricter: it requires every governance criterion (independent
 approval, stale dismissal, non-bypass enforcement, forged-status rejection) to
 have been verified rather than recorded as absent, because Goals 2 and 3 are
 not met while they are unverified. "Publication-decision ready" additionally
-requires the reopened privacy audit gate of Section 15 to be closed, with
-value-free evidence of the fresh audit round (searched classes, engines,
-commit-message coverage, zero findings for the stated scope) recorded, and
+requires the fresh pre-publication privacy audit gate of Section 15 to be
+closed, with value-free evidence of that fresh audit round (searched classes,
+engines, commit-message coverage, zero findings for the stated scope) recorded, and
 requires the code-owner refusal of Section 18 step 11 to have been verified
 rather than recorded as absent, and requires that no distribution writer exists
 until the launch specification defining it is approved; this level is therefore
