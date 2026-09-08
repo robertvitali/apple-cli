@@ -14,14 +14,11 @@ CHECKER_PATH = REPO_ROOT / "scripts" / "ci" / "action_pins.py"
 WORKFLOWS_ROOT = REPO_ROOT / ".github" / "workflows"
 
 EXPECTED_ACTION_COUNTS = {
-    "actions/checkout": 10,
-    "actions/setup-python": 3,
-    "astral-sh/setup-uv": 2,
+    "actions/checkout": 8,
+    "actions/setup-python": 1,
+    "astral-sh/setup-uv": 1,
     "actions/upload-artifact": 1,
     "actions/download-artifact": 1,
-    "actions/configure-pages": 1,
-    "actions/upload-pages-artifact": 1,
-    "actions/deploy-pages": 1,
 }
 
 EXPECTED_ACTION_PINS = {
@@ -30,9 +27,6 @@ EXPECTED_ACTION_PINS = {
     "astral-sh/setup-uv": ("c771a70e6277c0a99b617c7a806ffedaca235ff9", "v9.0.0"),
     "actions/upload-artifact": ("043fb46d1a93c77aae656e7c1c64a875d1fc6a0a", "v7.0.1"),
     "actions/download-artifact": ("3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c", "v8.0.1"),
-    "actions/configure-pages": ("45bfe0192ca1faeb007ade9deae92b16b8254a0d", "v6.0.0"),
-    "actions/upload-pages-artifact": ("fc324d3547104276b827a68afc52ff2a11cc49c9", "v5.0.0"),
-    "actions/deploy-pages": ("cd2ce8fcbc39b97be8ca5fce6e763baed58fa128", "v5.0.0"),
 }
 
 
@@ -73,6 +67,44 @@ def workflow_named_step(job: str, name: str) -> str:
 
 
 class ActionPinPolicyTests(unittest.TestCase):
+    def test_bootstrap_has_no_release_workflow(self) -> None:
+        self.assertFalse((WORKFLOWS_ROOT / "release.yml").exists())
+        self.assertFalse((WORKFLOWS_ROOT / "release.yaml").exists())
+
+    def test_bootstrap_workflows_are_read_only_and_have_no_publishers(self) -> None:
+        workflows = {
+            path.name: path.read_text(encoding="utf-8")
+            for suffix in ("*.yml", "*.yaml")
+            for path in WORKFLOWS_ROOT.glob(suffix)
+        }
+        combined = "\n".join(workflows.values())
+        forbidden_patterns = {
+            "manual dispatch": r"(?m)^\s*workflow_dispatch\s*:",
+            "write permission": r"(?m)^\s*[^#\s][^:]*:\s*write(?:\s*(?:#.*)?)?$",
+            "write-all permissions": r"(?m)^\s*permissions\s*:\s*write-all(?:\s*(?:#.*)?)?$",
+            "deployment environment": r"(?m)^\s*environment\s*:",
+            "Pages action": r"(?m)^\s*(?:-\s+)?uses:\s*actions/(?:configure-pages|upload-pages-artifact|deploy-pages)@",
+            "git publisher": r"\bgit\s+(?:commit|push|tag)\b",
+            "GitHub release publisher": r"\bgh\s+release\s+(?:create|edit|delete|upload)\b",
+            "GitHub workflow token": r"\$\{\{\s*github\.token\s*\}\}",
+        }
+        for publisher, pattern in forbidden_patterns.items():
+            with self.subTest(publisher=publisher):
+                self.assertNotRegex(combined, pattern)
+
+    def test_bootstrap_docs_retains_only_read_only_advisory_jobs(self) -> None:
+        docs = (WORKFLOWS_ROOT / "docs.yml").read_text(encoding="utf-8")
+        jobs = docs.split("\njobs:\n", 1)[1]
+        self.assertEqual(
+            re.findall(r"(?m)^  ([a-z0-9-]+):\s*$", jobs),
+            ["manual-fresh", "release-notes"],
+        )
+        self.assertEqual(
+            re.findall(r"(?m)^permissions:\n(?:  [^\n]+\n?)+", docs),
+            ["permissions:\n  contents: read\n"],
+        )
+        self.assertNotRegex(docs, r"(?i)\bpages\b|\bPAGES_ENABLED\b")
+
     def test_missing_workflow_directory_is_a_hard_failure(self) -> None:
         checker = load_checker()
         with tempfile.TemporaryDirectory() as directory:
@@ -366,7 +398,7 @@ class RepositoryActionInventoryTests(unittest.TestCase):
         references = checker.collect_references(REPO_ROOT)
         remote = [reference for reference in references if reference.kind == "remote"]
 
-        self.assertEqual(len(remote), 20)
+        self.assertEqual(len(remote), 12)
         counts = {}
         for reference in remote:
             counts[reference.name] = counts.get(reference.name, 0) + 1
@@ -386,53 +418,18 @@ class RepositoryActionInventoryTests(unittest.TestCase):
             r"# v[0-9]+\.[0-9]+\.[0-9]+"
         )
 
-        for workflow_name in ("ci.yml", "docs.yml", "pr-metadata.yml", "release.yml"):
+        for workflow_name in ("ci.yml", "docs.yml", "pr-metadata.yml"):
             blocks = re.findall(
                 rf"(?m)^\s*- {checkout_line}\n(?P<with>\s+with:\n(?:\s{{10,}}[^\n]*\n)*)",
                 workflows[workflow_name],
             )
             expected_count = {
                 "ci.yml": 5,
-                "docs.yml": 3,
+                "docs.yml": 2,
                 "pr-metadata.yml": 1,
-                "release.yml": 1,
             }[workflow_name]
             self.assertEqual(len(blocks), expected_count)
             self.assertTrue(all("persist-credentials: false" in block for block in blocks))
-
-    def test_release_token_is_explicit_only_in_publish_steps(self) -> None:
-        workflow = (WORKFLOWS_ROOT / "release.yml").read_text(encoding="utf-8")
-        named_steps = re.findall(
-            r"(?ms)^      - name: (?P<name>[^\n]+)\n(?P<body>.*?)(?=^      - (?:name:|uses:)|\Z)",
-            workflow,
-        )
-        token_steps = {
-            name: body for name, body in named_steps if "${{ github.token }}" in body
-        }
-
-        self.assertEqual(
-            set(token_steps),
-            {
-                "Push commit and tag (atomic)",
-                "Create GitHub Release (idempotent; notes from the curated CHANGELOG section)",
-            },
-        )
-        publish_step = token_steps["Push commit and tag (atomic)"]
-        release_step = next(
-            body
-            for name, body in token_steps.items()
-            if name.startswith("Create GitHub Release")
-        )
-        self.assertIn("PUBLISH_TOKEN: ${{ github.token }}", publish_step)
-        self.assertIn("GIT_ASKPASS", publish_step)
-        self.assertNotIn("git commit", publish_step)
-        self.assertIn(
-            'git push --atomic "$REMOTE" HEAD:refs/heads/main "refs/tags/v${NEW}:refs/tags/v${NEW}"',
-            publish_step,
-        )
-        self.assertNotIn("git push --atomic origin", workflow)
-        self.assertIn("GH_TOKEN: ${{ github.token }}", release_step)
-        self.assertEqual(workflow.count("${{ github.token }}"), 2)
 
     def test_ci_blocks_on_supply_chain_policy_and_exact_lock_regeneration(self) -> None:
         workflow = (WORKFLOWS_ROOT / "ci.yml").read_text(encoding="utf-8")
@@ -475,32 +472,6 @@ class RepositoryActionInventoryTests(unittest.TestCase):
             "python -m pip install --require-hashes -r docs/requirements.txt",
         ):
             self.assertIn(command, docs_step)
-
-    def test_release_runs_equivalent_supply_chain_guard_before_mutation(self) -> None:
-        workflow = (WORKFLOWS_ROOT / "release.yml").read_text(encoding="utf-8")
-        job = workflow_job(workflow, "release")
-        guard_step = workflow_named_step(job, "Guard — supply-chain policy and docs lock")
-
-        guard = workflow.index("- name: Guard — supply-chain policy and docs lock")
-        mutation = workflow.index("- name: Update version constant + CHANGELOG")
-        self.assertLess(guard, mutation)
-        setup_uv_block = re.compile(
-            r"(?m)^\s*- uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9\.0\.0\n"
-            r"\s+with:\n"
-            r'\s+version: "0\.11\.27"\n'
-            r"\s+enable-cache: false$"
-        )
-        self.assertEqual(len(setup_uv_block.findall(workflow)), 1)
-        for command in (
-            "python -m unittest discover -s Tests/automation -p 'test_*.py'",
-            "python scripts/ci/action_pins.py",
-            "python scripts/ci/dependency_policy.py",
-            "uv pip compile docs/requirements.in --python-version 3.12 --python-platform x86_64-unknown-linux-gnu --generate-hashes --output-file docs/requirements.txt",
-            "git diff --exit-code -- docs/requirements.txt",
-            "python -m pip install --require-hashes -r docs/requirements.txt",
-        ):
-            self.assertIn(command, guard_step)
-
 
 if __name__ == "__main__":
     unittest.main()

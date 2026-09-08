@@ -1,16 +1,13 @@
 name: Docs
 
-# Keeps the manual honest and the site current.
+# Keeps the manual honest and release notes inspected.
 #
 #  - manual-fresh : the manual is GENERATED from the binary's own help dump, so a
 #                   command/flag/abstract change that is not regenerated makes the
 #                   docs a lie. This turns "the docs match the binary" into a red
 #                   build rather than a follow-up task.
-#  - release-notes: advisory here, BLOCKING in release.yml. An empty [Unreleased]
-#                   is normal between releases, so failing CI on it would be noise.
-#  - pages        : deploys the site. Gated on the PAGES_ENABLED repo variable so it
-#                   stays inert while the repo is private (Pages needs a public repo
-#                   on the Free plan) instead of producing a permanently red job.
+#  - release-notes: advisory because an empty [Unreleased] is normal between
+#                   releases, so failing CI on it would be noise.
 
 on:
   push:
@@ -55,43 +52,6 @@ jobs:
           fetch-depth: 0       # macOS-floor comparison needs the last tag
           persist-credentials: false
 
-      - name: Release-notes contract (advisory on CI, blocking at release)
+      - name: Release-notes contract (advisory)
         continue-on-error: true
         run: python3 scripts/check-release-notes.py
-
-  pages:
-    # Only on main, and only once the operator flips the PAGES_ENABLED variable
-    # (Settings > Secrets and variables > Actions > Variables). Keeps this inert
-    # while the repo is private rather than red.
-    if: github.event_name == 'push' && vars.PAGES_ENABLED == 'true'
-    needs: manual-fresh
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
-    permissions:
-      contents: read
-      pages: write
-      id-token: write
-    environment:
-      name: github-pages
-      url: ${{ steps.deploy.outputs.page_url }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-
-      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
-        with:
-          python-version: "3.12"
-
-      - name: Install site toolchain
-        run: python -m pip install --require-hashes -r docs/requirements.txt
-
-      - name: Build site
-        run: mkdocs build --strict     # --strict fails on broken nav/links
-
-      - uses: actions/configure-pages@45bfe0192ca1faeb007ade9deae92b16b8254a0d # v6.0.0
-      - uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
-        with:
-          path: site
-      - id: deploy
-        uses: actions/deploy-pages@cd2ce8fcbc39b97be8ca5fce6e763baed58fa128 # v5.0.0

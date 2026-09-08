@@ -18,7 +18,6 @@ from unittest import mock
 REPO_ROOT = Path(__file__).resolve().parents[2]
 QUALITY_PATH = REPO_ROOT / "scripts" / "ci" / "quality.py"
 CI_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "ci.yml"
-RELEASE_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "release.yml"
 FULL_SHA = "0123456789abcdef0123456789abcdef01234567"
 BASE_SHA = "89abcdef0123456789abcdef0123456789abcdef"
 OTHER_SHA = "fedcba9876543210fedcba9876543210fedcba98"
@@ -472,11 +471,9 @@ class QualityDriverTests(unittest.TestCase):
 
     def test_only_hosted_bats_job_installs_pinned_bats(self) -> None:
         ci_workflow = CI_WORKFLOW_PATH.read_text(encoding="utf-8")
-        release_workflow = RELEASE_WORKFLOW_PATH.read_text(encoding="utf-8")
 
         ci_policy_job = workflow_job(ci_workflow, "supply-chain-policy")
         ci_bats_job = workflow_job(ci_workflow, "hosted-bats")
-        release_job = workflow_job(release_workflow, "release")
 
         assert_pinned_bats_install(
             self,
@@ -484,8 +481,6 @@ class QualityDriverTests(unittest.TestCase):
         )
         self.assertNotIn("Install pinned Bats", ci_policy_job)
         self.assertNotIn("BATS_INTEGRITY", ci_policy_job)
-        self.assertNotIn("Install pinned Bats", release_job)
-        self.assertNotIn("BATS_INTEGRITY", release_job)
 
     def test_ci_commit_lint_uses_full_checkout_without_authenticated_fetch(self) -> None:
         workflow = CI_WORKFLOW_PATH.read_text(encoding="utf-8")

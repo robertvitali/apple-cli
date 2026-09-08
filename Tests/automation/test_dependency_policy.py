@@ -14,6 +14,7 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 CHECKER_PATH = REPO_ROOT / "scripts" / "ci" / "dependency_policy.py"
 DEPENDABOT_PATH = REPO_ROOT / ".github" / "dependabot.yml"
 DOCS_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "docs.yml"
+CI_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "ci.yml"
 REQUIREMENTS_IN_PATH = REPO_ROOT / "docs" / "requirements.in"
 REQUIREMENTS_LOCK_PATH = REPO_ROOT / "docs" / "requirements.txt"
 
@@ -141,22 +142,24 @@ class DocsDependencyPolicyTests(unittest.TestCase):
 
             self.assertNotEqual(result.returncode, 0)
 
-    def test_docs_workflow_installs_only_from_hash_locked_file(self) -> None:
-        workflow = DOCS_WORKFLOW_PATH.read_text(encoding="utf-8")
+    def test_workflows_install_docs_dependencies_only_from_hash_locked_file(self) -> None:
+        docs_workflow = DOCS_WORKFLOW_PATH.read_text(encoding="utf-8")
+        ci_workflow = CI_WORKFLOW_PATH.read_text(encoding="utf-8")
         approved_command = (
             "python -m pip install --require-hashes -r docs/requirements.txt"
         )
 
-        self.assertIn(approved_command, workflow)
-        self.assertNotIn("pip install mkdocs-material", workflow)
-        self.assertNotIn("python -m pip install mkdocs-material", workflow)
+        self.assertNotIn("pip install", docs_workflow)
+        self.assertIn(approved_command, ci_workflow)
+        self.assertNotIn("pip install mkdocs-material", ci_workflow)
+        self.assertNotIn("python -m pip install mkdocs-material", ci_workflow)
 
         install_lines = []
         for path in sorted((REPO_ROOT / ".github" / "workflows").rglob("*.yml")):
             for line in path.read_text(encoding="utf-8").splitlines():
                 if re.search(r"\bpip +install\b", line):
                     install_lines.append(line.strip())
-        self.assertEqual(len(install_lines), 3)
+        self.assertEqual(len(install_lines), 1)
         self.assertTrue(
             all(
                 line in {approved_command, f"run: {approved_command}"}
