@@ -333,11 +333,22 @@ if not isinstance(attachments, list) or any(not isinstance(a, dict) for a in att
     raise SystemExit(22)
 if not attachments:
     raise SystemExit(12)
-if any("size" not in attachment for attachment in attachments):
+# MessageReadCommands emits the degraded disclosure as Result.note -> data.note. The fixture
+# step already had the osascript ORACLE (not the CLI) confirm this message is live-locatable
+# with attachments, so classify a missing size by whether that fallback note is present:
+#   note present -> the CLI degraded to Envelope-Index rows on an oracle-locatable message
+#                   (enrichment did not reach the wire: regression / locator gap / timeout);
+#   no note      -> live enrichment succeeded but an attachment reported no size.
+# BOTH are hard failures — a disclosed fallback must never green-skip this wiring pin — but
+# keeping them distinct lets the next real occurrence self-classify. Match "note" exactly so a
+# future unrelated nested note field does not become a false regression.
+size_missing = any("size" not in attachment for attachment in attachments)
+note_present = "note" in data
+if size_missing and note_present:
+    raise SystemExit(14)
+if size_missing:
     raise SystemExit(10)
-# MessageReadCommands emits the degraded disclosure as Result.note -> data.note. Keep this
-# assertion exact so a future unrelated nested note field does not become a false regression.
-if "note" in data:
+if note_present:
     raise SystemExit(11)
 if len(attachments) != int(sys.argv[1]):
     raise SystemExit(13)
@@ -347,7 +358,13 @@ if len(attachments) != int(sys.argv[1]):
     10)
       unset LIVE_ATTACHMENT_ACCOUNT_ID LIVE_ATTACHMENT_ID LIVE_ATTACHMENT_ORACLE_COUNT \
         LIVE_ATTACHMENT_LIST_JSON
-      printf '%s\n' "live attachment metadata size is missing from a successful response" >&2
+      printf '%s\n' "live attachment enrichment succeeded but an attachment reported no size (no degraded fallback note)" >&2
+      false
+      ;;
+    14)
+      unset LIVE_ATTACHMENT_ACCOUNT_ID LIVE_ATTACHMENT_ID LIVE_ATTACHMENT_ORACLE_COUNT \
+        LIVE_ATTACHMENT_LIST_JSON
+      printf '%s\n' "live attachment enrichment returned the degraded fallback note on an oracle-confirmed message — enrichment did not reach the wire" >&2
       false
       ;;
     11)
@@ -1290,6 +1307,45 @@ print(next((m['id'] for m in d if m.get('conversation_id') in multi), ''))")
   unset LIVE_ATTACHMENT_ACCOUNT_ID LIVE_ATTACHMENT_ID LIVE_ATTACHMENT_ORACLE_COUNT \
     LIVE_ATTACHMENT_LIST_JSON
   # Skips/failures exit this isolated Bats test process, so xtrace cannot leak to another test.
+  [ "$xtrace_was_on" -eq 0 ] || set -x
+}
+
+# gap1 CLASSIFY: the size-missing failure has two causes that the pin must not conflate. The
+# fixture step (select_live_attachment_fixture) already made the osascript ORACLE — not the CLI —
+# confirm this message is live-locatable with >0 attachments, so a degraded fallback here means
+# the CLI failed to enrich a message the oracle reached: a wiring regression, NOT general
+# automation unavailability. These no-live probes inject the product envelope directly so the two
+# causes stay deterministically distinguishable without a live Mail dependency. Both remain hard
+# failures (a disclosed fallback must never green-skip this pin); only the message differs.
+@test "assert_live_attachment_enriched distinguishes the degraded fallback (gap1 classify Path A)" {
+  local xtrace_was_on=0
+  case "$-" in *x*) xtrace_was_on=1; set +x ;; esac
+  LIVE_ATTACHMENT_ORACLE_COUNT=1
+  LIVE_ATTACHMENT_LIST_JSON='{"schema_version":1,"tool":"mail","ok":true,"data":{"note":"live Mail.app enrichment unavailable — rows are Envelope-Index only (mime_type/size/downloaded omitted)","attachments":[{"name":"apple-cli-test.pdf"}]}}'
+  run assert_live_attachment_enriched
+  [ "$status" -ne 0 ]
+  echo "$output" | grep -q "enrichment did not reach the wire"
+  [ "$xtrace_was_on" -eq 0 ] || set -x
+}
+
+@test "assert_live_attachment_enriched flags live-success size loss distinctly (gap1 classify Path B)" {
+  local xtrace_was_on=0
+  case "$-" in *x*) xtrace_was_on=1; set +x ;; esac
+  LIVE_ATTACHMENT_ORACLE_COUNT=1
+  LIVE_ATTACHMENT_LIST_JSON='{"schema_version":1,"tool":"mail","ok":true,"data":{"attachments":[{"name":"apple-cli-test.pdf"}]}}'
+  run assert_live_attachment_enriched
+  [ "$status" -ne 0 ]
+  echo "$output" | grep -q "no degraded fallback note"
+  [ "$xtrace_was_on" -eq 0 ] || set -x
+}
+
+@test "assert_live_attachment_enriched accepts a fully live-enriched response (gap1 classify happy)" {
+  local xtrace_was_on=0
+  case "$-" in *x*) xtrace_was_on=1; set +x ;; esac
+  LIVE_ATTACHMENT_ORACLE_COUNT=1
+  LIVE_ATTACHMENT_LIST_JSON='{"schema_version":1,"tool":"mail","ok":true,"data":{"attachments":[{"name":"apple-cli-test.pdf","size":123}]}}'
+  run assert_live_attachment_enriched
+  [ "$status" -eq 0 ]
   [ "$xtrace_was_on" -eq 0 ] || set -x
 }
 

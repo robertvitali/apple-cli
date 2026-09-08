@@ -6,7 +6,7 @@
     "test_count": 0
   },
   "schema_version": 1,
-  "test_count": 446,
+  "test_count": 449,
   "tiers": {
     "hosted": {
       "files": [
@@ -399,7 +399,7 @@
           "test_count": 2
         },
         {
-          "file_sha256": "312cd6fce10804770b16aeebd26be306020ffcb3e8ee5ff092d139192b3dc72e",
+          "file_sha256": "a440eed3ec318214d1517f1be4bd9c26125aaaa4b958e1a02b1597830c2dcd1d",
           "ordered_title_sha256": [
             "c174bac7b44c807824eb66bf31559996b7e78245ff4878420e4e80264d6eb41e",
             "fe2e7fdcbc5dd214c839964d9772d4edea28d688ce5053b2bd937fa2a7ce2ba4",
@@ -470,6 +470,9 @@
             "66d39c46100a2d0ce7c52f08d53d0a2d7403976ecae1c82cd7ae69f9894ddeed",
             "a60d4c587db22de0129ab00c1b3ee0777a3197aca52f233244328bbfb154bbdc",
             "8def1ad6601ea8a895f291fb6814aaa866d534b640cdbabc497dc8894884295d",
+            "a387135515c59dec44a641bad26c32327a6b722a0683ec294e3b9e4f2e1eb666",
+            "7acb053376de4bea69b7a5bc89286e92a5dcd46405ab99302e93a4a56175d0c5",
+            "6c0e615c41a446315bf61982bc8a12761f80b94cdb38044038ce68c05d5f3bfa",
             "ac081cb13cb14a3a809f775448b601646d9260c32f29dd6d23cda873f6bf7a83",
             "b8cde9996818a586b7e2edc3a2a7c6ce83e007021478c4dfd046294f25b10132",
             "41e33b89a4b62e9c76522696d63f67ca7dd3ce0c179fe027d0b57422553d5d75",
@@ -512,7 +515,7 @@
             "d23a8b1725eb3e1ce60ab04d3dba085b28466941bf34c36fff579ca16cc4a14c"
           ],
           "path": "bats/local/mail.bats",
-          "test_count": 109
+          "test_count": 112
         },
         {
           "file_sha256": "f7a70749f36f6f05f7dbc1c579d94e834819cb1bbe94664ebd0c806f0ee6eaa6",
@@ -567,7 +570,7 @@
           "test_count": 3
         }
       ],
-      "test_count": 139
+      "test_count": 142
     }
   }
 }
