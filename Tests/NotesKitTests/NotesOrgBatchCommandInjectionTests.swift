@@ -23,11 +23,42 @@ struct NotesOrgCommandTests {
     /// the very shape each test is trying to vary. `notes` is keyed by the resolved folder PATH,
     /// which the enumeration passes as the leading argv items (`folderRefExpr`) with the account
     /// last, so the key is reconstructed the same way the specifier is built.
-    private func cascadeRunner(folderRows: [String], notes: [String: [String]]) -> FakeNotesRunner {
+    /// `unreadable` is the per-folder count of notes Notes.app could not report — the first row
+    /// of the cascade enumeration's output (`listCascadeNotes`), zero unless a test says
+    /// otherwise. `notes` stays keyed by rendered PATH for readability; the enumeration itself
+    /// asks by folder ID (or by typed components when nothing matched), so the fake resolves an
+    /// id back to its path through `folderRows`' parent links. `listNotes`'s own script
+    /// (`set seenIds to {}`) is still answered for the callers that use it; the gate no longer
+    /// does. The folder listing carries Notes.app's count as its leading row.
+    private func cascadeRunner(folderRows: [String], notes: [String: [String]],
+                               unreadable: [String: Int] = [:]) -> FakeNotesRunner {
+        let parsed = folderRows.map { $0.components(separatedBy: US) }
+        let byId = Dictionary(parsed.map { ($0[0], $0) }, uniquingKeysWith: { a, _ in a })
+        func pathOf(_ id: String) -> String? {
+            guard let row = byId[id] else { return nil }
+            let parent = row[2]
+            if parent.isEmpty { return row[1] }
+            return pathOf(parent).map { $0 + "/" + row[1] } ?? row[1]
+        }
         let runner = FakeNotesRunner()
         runner.handler = { script, args in
             if script.contains("set allFolders to every folder") {
-                return folderRows.isEmpty ? "" : folderRows.joined(separator: RS) + RS
+                return String(folderRows.count) + RS + folderRows.joined(separator: RS) + (folderRows.isEmpty ? "" : RS)
+            }
+            if script.contains("set unreadable to 0") {
+                let path: String
+                if script.contains("folder id (item 1 of argv)"), let byIdPath = pathOf(args[0]) {
+                    path = byIdPath
+                } else {
+                    path = args.dropLast().joined(separator: "/")
+                }
+                let titles = notes[path] ?? []
+                let rows = titles.enumerated().map { index, title in
+                    [title, fixtureNoteID(900 + index)].joined(separator: US)
+                }.joined(separator: RS)
+                let unread = unreadable[path] ?? 0
+                // Notes.app's own count: readable + unreadable, as a consistent store reports.
+                return String(unread) + RS + String(titles.count + unread) + RS + rows
             }
             if script.contains("set seenIds to {}") {
                 let path = args.dropLast().joined(separator: "/")
@@ -419,10 +450,13 @@ struct NotesOrgCommandTests {
 
         #expect(data["ok"] as? Bool == true)
         #expect(performedTheCascade(runner))
-        // Enumerated under the fetched paths: two `listNotes` calls, one per resolved folder. A
-        // gate that had fallen back to the typed path would have asked for `apple-cli-test parent`.
-        #expect(runner.allArguments.contains("apple-cli-test Parent"))
-        #expect(runner.allArguments.contains("apple-cli-test Child"))
+        // Enumerated by the resolved folders' IDS: two cascade enumerations, one per resolved
+        // folder. A gate that had fallen back to the typed path would have asked by name for
+        // `apple-cli-test parent` instead.
+        #expect(runner.allArguments.contains("F1"))
+        #expect(runner.allArguments.contains("F2"))
+        // The typed name still reaches argv once: the delete sink's own specifier.
+        #expect(runner.allArguments.filter { $0 == "apple-cli-test parent" }.count == 1)
     }
 
     // MARK: delete-folder — what happens when the typed path resolves to NOTHING exactly
@@ -455,51 +489,60 @@ struct NotesOrgCommandTests {
             let message = (failure.error["message"] as? String) ?? ""
             #expect(message.contains("apple-cli-test pàrent"),
                     "the refusal names the ambiguous fetched folder, for \(extra)")
-            #expect(message.contains("ambiguously"), "the refusal says WHY it refused, for \(extra)")
+            #expect(message.contains("only loosely"), "the refusal says WHY it refused, for \(extra)")
             #expect(!performedTheCascade(runner), "nothing may be deleted on \(extra)")
         }
     }
 
-    @Test func deleteFolderStillEnumeratesTheTypedPathWhenNothingMatchesEvenLoosely() throws {
-        // The other half of the same branch, and the reason it is not simply "refuse when the
-        // exact match misses": a folder that does not exist at all is not ambiguous. Nothing in the
-        // account matches even under the loose fold, so the gate falls back to the typed path,
-        // still enumerates ITS notes, and lets the delete fail upstream as `not_found` — the
-        // pre-resolution behavior, kept deliberately. Here that fallback enumeration is what
-        // catches the unlabeled note.
+    @Test func deleteFolderRefusesATypedPathNotesAppBindsButDoesNotList() throws {
+        // Nothing in the listing matches, yet Notes.app answers the typed specifier: that is a
+        // folder the listing does not report — measured live, a deleted folder lingers under its
+        // name and is still bindable, even shadowing a live folder of the same name. Its
+        // sub-folders are not in the listing, so the cascade cannot be verified: refuse, whether
+        // its own notes look clean or not. Both paths.
+        for (extra, notes) in [("--execute", ["Real Note"]), ("--dry-run", [] as [String])] {
+            let runner = cascadeRunner(
+                folderRows: [folderRow(id: "F1", name: "Real Elsewhere")],
+                notes: ["apple-cli-test hidden": notes])
+            let command = try DeleteFolderCmd.parse(["apple-cli-test hidden", "--test-mode", extra])
+
+            let failure = try captureNotesFailure {
+                try command.run(scriptFactory: { quietScript(runner) }, env: pinnedWriteEnv())
+            }
+
+            #expect(failure.code == AppleExit.usage, "exit for \(extra)")
+            #expect(failure.error["sandbox"] as? Bool == true)
+            #expect((failure.error["message"] as? String)?.contains("does not report") == true,
+                    "the refusal names the unlisted-folder cause, for \(extra)")
+            #expect(runner.allArguments.contains("apple-cli-test hidden"),
+                    "the gate asked Notes.app about the TYPED path to tell absent from hidden")
+            #expect(!performedTheCascade(runner), "nothing may be deleted on \(extra)")
+        }
+    }
+
+    @Test func deleteFolderOfAGenuinelyAbsentFolderFailsAsNotFoundBeforeTheDelete() throws {
+        // The control: a folder that does not exist at all is not "hidden" — Notes.app cannot
+        // enumerate it, and that `not_found` is the answer, one call before the delete would have
+        // said the same. Nothing is deleted.
         let runner = cascadeRunner(
             folderRows: [folderRow(id: "F1", name: "Real Elsewhere")],
-            notes: ["apple-cli-test ghost": ["Real Note"]])
-        let command = try DeleteFolderCmd.parse(["apple-cli-test ghost", "--test-mode", "--execute"])
+            notes: ["Real Elsewhere": ["Real Note"]])
+        runner.handler = { [previous = runner.handler] script, args in
+            if script.contains("set unreadable to 0"), args.first == "apple-cli-test absent" {
+                throw AppleScriptRunner.RunError.scriptFailed(
+                    status: 1, stderr: "Notes got an error: Can\u{2019}t get folder \"apple-cli-test absent\". (-1728)")
+            }
+            return try previous?(script, args)
+        }
+        let command = try DeleteFolderCmd.parse(["apple-cli-test absent", "--test-mode", "--execute"])
 
         let failure = try captureNotesFailure {
             try command.run(scriptFactory: { quietScript(runner) }, env: pinnedWriteEnv())
         }
 
-        #expect(failure.error["sandbox"] as? Bool == true)
-        #expect((failure.error["message"] as? String)?.contains("Real Note") == true,
-                "the typed-path fallback still enumerates notes rather than checking nothing")
-        #expect(runner.allArguments.contains("apple-cli-test ghost"),
-                "the fallback asks Notes.app about the TYPED path")
+        #expect(failure.code == AppleExit.notFound)
+        #expect(failure.error["type"] as? String == AppleErrorType.notFound)
         #expect(!performedTheCascade(runner))
-    }
-
-    @Test func deleteFolderProceedsWhenTheTypedPathIsAbsentAndTheCascadeIsClean() throws {
-        // The control for the two above: an absent folder whose typed-path enumeration comes back
-        // clean must still reach the delete. Without this, "refuse on a loose match" could be
-        // satisfied by refusing everything that does not match exactly — which would make a
-        // sandboxed `delete-folder` of a not-yet-created folder impossible.
-        let runner = cascadeRunner(
-            folderRows: [folderRow(id: "F1", name: "Real Elsewhere")],
-            notes: ["Real Elsewhere": ["Real Note"]])
-        let command = try DeleteFolderCmd.parse(["apple-cli-test ghost", "--test-mode", "--execute"])
-
-        let data = try notesData(try captureNotesEnvelope {
-            try command.run(scriptFactory: { quietScript(runner) }, env: pinnedWriteEnv())
-        })
-
-        #expect(data["ok"] as? Bool == true)
-        #expect(performedTheCascade(runner))
     }
 
     @Test func deleteFolderRefusesWhenTwoFoldersResolveToTheSameTypedPath() throws {
@@ -521,6 +564,618 @@ struct NotesOrgCommandTests {
         #expect((failure.error["message"] as? String)?.contains("APPLE-CLI-TEST x") == true,
                 "an ambiguous resolution refuses on the unlabeled sibling, it does not pick one")
         #expect(!performedTheCascade(runner))
+    }
+
+    // MARK: delete-folder — the cascade fails CLOSED on anything it cannot verify
+
+    @Test func deleteFolderSandboxGateRefusesWhenANoteInTheCascadeCannotBeRead() throws {
+        // A note whose name or id Notes.app cannot report used to vanish from the enumeration —
+        // never label-checked, still erased. The cascade enumeration now COUNTS it, and the gate
+        // refuses on a non-zero count: an unreadable member is a member that cannot be proven
+        // labeled, and the erase is irreversible. Both paths, as every cascade refusal.
+        for extra in ["--execute", "--dry-run"] {
+            let runner = cascadeRunner(
+                folderRows: [folderRow(id: "F1", name: "apple-cli-test parent")],
+                notes: ["apple-cli-test parent": ["apple-cli-test kept"]],
+                unreadable: ["apple-cli-test parent": 2])
+            let command = try DeleteFolderCmd.parse(["apple-cli-test parent", "--test-mode", extra])
+
+            let failure = try captureNotesFailure {
+                try command.run(scriptFactory: { quietScript(runner) }, env: pinnedWriteEnv())
+            }
+
+            #expect(failure.code == AppleExit.usage, "exit for \(extra)")
+            #expect(failure.error["type"] as? String == AppleErrorType.validation)
+            #expect(failure.error["sandbox"] as? Bool == true)
+            let message = failure.error["message"] as? String ?? ""
+            #expect(message.contains("2 note(s)") && message.contains("could not be read"),
+                    "the refusal says how many members could not be verified, for \(extra): \(message)")
+            #expect(!performedTheCascade(runner), "nothing may be deleted on \(extra)")
+        }
+    }
+
+    @Test func deleteFolderSandboxGateRefusesABlankTitledNote() throws {
+        // `listNotes` drops a row whose title trims to empty; the cascade enumeration keeps it,
+        // and a blank title carries no label, so the ordinary label check refuses it.
+        let runner = cascadeRunner(
+            folderRows: [folderRow(id: "F1", name: "apple-cli-test parent")],
+            notes: ["apple-cli-test parent": ["apple-cli-test kept", ""]])
+        let command = try DeleteFolderCmd.parse(["apple-cli-test parent", "--test-mode", "--execute"])
+
+        let failure = try captureNotesFailure {
+            try command.run(scriptFactory: { quietScript(runner) }, env: pinnedWriteEnv())
+        }
+
+        #expect(failure.code == AppleExit.usage)
+        #expect(failure.error["sandbox"] as? Bool == true)
+        #expect((failure.error["message"] as? String)?.contains("refusing to write to \"\"") == true,
+                "the blank title is named as the unlabeled member")
+        #expect(!performedTheCascade(runner))
+    }
+
+    @Test func deleteFolderSandboxGateLabelChecksTheUntrimmedNoteTitle() throws {
+        // A note literally titled `" apple-cli-test x"` (leading space) is NOT labeled: `hasPrefix`
+        // is right to refuse it, and only a trim before the check would let it pass. The gate
+        // checks the exact string Notes.app reports, so it refuses whether or not Notes.app ever
+        // preserves such a title — no dependence on Notes.app's title normalization.
+        let runner = cascadeRunner(
+            folderRows: [folderRow(id: "F1", name: "apple-cli-test parent")],
+            notes: ["apple-cli-test parent": [" apple-cli-test leading-space"]])
+        let command = try DeleteFolderCmd.parse(["apple-cli-test parent", "--test-mode", "--execute"])
+
+        let failure = try captureNotesFailure {
+            try command.run(scriptFactory: { quietScript(runner) }, env: pinnedWriteEnv())
+        }
+
+        #expect(failure.code == AppleExit.usage)
+        #expect(failure.error["sandbox"] as? Bool == true)
+        #expect((failure.error["message"] as? String)?.contains("\" apple-cli-test leading-space\"") == true,
+                "the refusal names the title exactly as Notes.app holds it, leading space included")
+        #expect(!performedTheCascade(runner))
+    }
+
+    @Test func deleteFolderSandboxGateLabelChecksTheUntrimmedDescendantFolderName() throws {
+        // Same rule for folders: `folders` renders names trimmed, the cascade listing does not.
+        let runner = cascadeRunner(
+            folderRows: [folderRow(id: "F1", name: "apple-cli-test parent"),
+                         folderRow(id: "F2", name: " apple-cli-test child", parent: "F1")],
+            notes: [:])
+        let command = try DeleteFolderCmd.parse(["apple-cli-test parent", "--test-mode", "--execute"])
+
+        let failure = try captureNotesFailure {
+            try command.run(scriptFactory: { quietScript(runner) }, env: pinnedWriteEnv())
+        }
+
+        #expect(failure.code == AppleExit.usage)
+        #expect(failure.error["sandbox"] as? Bool == true)
+        #expect((failure.error["message"] as? String)?.contains(" apple-cli-test child") == true)
+        #expect(!performedTheCascade(runner))
+    }
+
+    @Test func deleteFolderSandboxGateTreatsADetachedGhostAsARootOutsideOtherCascades() throws {
+        // The ghost a cascade delete leaves behind: still enumerated, container unreadable. It has
+        // no live parent, so it is not inside THIS cascade — a labeled cleanup elsewhere must
+        // still proceed, or every sandboxed delete in the account would be refused for as long as
+        // Notes.app keeps the ghost — and neither is its grandchild, which is a descendant of the
+        // ghost, not an unplaced folder. Contrast the unplaced-folder refusal below: that one is
+        // a parent id Notes.app DID report but did not list, which is unknowable.
+        let runner = cascadeRunner(
+            folderRows: [folderRow(id: "F1", name: "apple-cli-test parent"),
+                         folderRow(id: "F7", name: "Real ghost", parent: NotesScript.detachedParentMarker),
+                         folderRow(id: "F8", name: "Real ghost child", parent: "F7"),
+                         folderRow(id: "F9", name: "Real ghost grandchild", parent: "F8")],
+            notes: ["apple-cli-test parent": ["apple-cli-test kept"]])
+        let command = try DeleteFolderCmd.parse(["apple-cli-test parent", "--test-mode", "--execute"])
+
+        let envelope = try captureNotesEnvelope {
+            try command.run(scriptFactory: { quietScript(runner) }, env: pinnedWriteEnv())
+        }
+
+        #expect(envelope["ok"] as? Bool == true)
+        #expect(performedTheCascade(runner))
+        // Only the target was enumerated (by id): the ghost subtree is not in this cascade.
+        #expect(runner.arguments.filter { ["F1", "F7", "F8", "F9"].contains($0.first ?? "") }.map { $0.first! } == ["F1"])
+    }
+
+    @Test func deleteFolderSandboxGateChecksTheSubtreeOfADetachedGhostDeletedByName() throws {
+        // The live cleanup path: a bare name specifier binds the ghost, and `delete` cascades over
+        // its children. The ghost is the root of its own chain, so typing its name resolves it,
+        // its child enters the cascade, and the unlabeled child refuses — the ghost's subtree is
+        // not erased unchecked.
+        let runner = cascadeRunner(
+            folderRows: [folderRow(id: "F7", name: "apple-cli-test ghost", parent: NotesScript.detachedParentMarker),
+                         folderRow(id: "F8", name: "Real ghost child", parent: "F7")],
+            notes: [:])
+        let command = try DeleteFolderCmd.parse(["apple-cli-test ghost", "--test-mode", "--execute"])
+
+        let failure = try captureNotesFailure {
+            try command.run(scriptFactory: { quietScript(runner) }, env: pinnedWriteEnv())
+        }
+
+        #expect(failure.code == AppleExit.usage)
+        #expect(failure.error["sandbox"] as? Bool == true)
+        #expect((failure.error["message"] as? String)?.contains("Real ghost child") == true)
+        #expect(!performedTheCascade(runner))
+
+        // …and a ghost Notes.app holds under a spelling the typed name only folds to is caught
+        // like any resolved target — refused on its FETCHED, unlabeled name — not fallen through
+        // to a bare specifier that would bind it unchecked.
+        let folded = cascadeRunner(
+            folderRows: [folderRow(id: "F7", name: "APPLE-CLI-TEST ghost", parent: NotesScript.detachedParentMarker)],
+            notes: [:])
+        let typed = try DeleteFolderCmd.parse(["apple-cli-test ghost", "--test-mode", "--execute"])
+        let refused = try captureNotesFailure {
+            try typed.run(scriptFactory: { quietScript(folded) }, env: pinnedWriteEnv())
+        }
+        #expect(refused.error["sandbox"] as? Bool == true)
+        #expect((refused.error["message"] as? String)?.contains("APPLE-CLI-TEST ghost") == true)
+        #expect(!performedTheCascade(folded))
+    }
+
+    @Test func deleteFolderSandboxGateRefusesWhenAFolderCannotBePlacedInTheTree() throws {
+        // A folder whose parent id Notes.app reports but which is absent from the same listing
+        // used to be rendered by its bare name — ancestry stripped — so it could never match as a
+        // descendant and went unchecked while the erase still reached it. Now it is a refusal,
+        // and a refusal wherever it sits in the account: a folder that cannot be placed in the
+        // tree cannot be proven outside the cascade either.
+        for extra in ["--execute", "--dry-run"] {
+            let runner = cascadeRunner(
+                folderRows: [folderRow(id: "F1", name: "apple-cli-test parent"),
+                             folderRow(id: "F9", name: "Orphan", parent: "MISSING")],
+                notes: ["apple-cli-test parent": ["apple-cli-test kept"]])
+            let command = try DeleteFolderCmd.parse(["apple-cli-test parent", "--test-mode", extra])
+
+            let failure = try captureNotesFailure {
+                try command.run(scriptFactory: { quietScript(runner) }, env: pinnedWriteEnv())
+            }
+
+            #expect(failure.code == AppleExit.usage, "exit for \(extra)")
+            #expect(failure.error["type"] as? String == AppleErrorType.validation)
+            #expect(failure.error["sandbox"] as? Bool == true)
+            let message = failure.error["message"] as? String ?? ""
+            #expect(message.contains("\"Orphan\"") && message.contains("could not be placed"),
+                    "the refusal names the folder it could not place, for \(extra): \(message)")
+            #expect(!performedTheCascade(runner), "nothing may be deleted on \(extra)")
+        }
+    }
+
+    @Test func listCascadeNotesCountsUnreadableAndKeepsBlankTitles() throws {
+        // The enumeration's contract, pinned directly: row 1 = unreadable count, row 2 = the
+        // folder's total, then rows; blank titles survive; EVERY reported title is kept (no
+        // folding by id — a fold would skip a label check); an empty folder yields no titles.
+        let runner = FakeNotesRunner(results: [
+            "3" + RS + "6" + RS + [" lead", fixtureNoteID(1)].joined(separator: US)
+                + RS + ["", fixtureNoteID(2)].joined(separator: US)
+                + RS + ["dup", fixtureNoteID(1)].joined(separator: US),
+            "0" + RS + "0" + RS,
+        ])
+        let script = quietScript(runner)
+        let first = try script.listCascadeNotes(account: nil, target: .components(["apple-cli-test parent"]))
+        #expect(first.unreadable == 3)
+        #expect(first.titles == [" lead", "", "dup"])
+        let empty = try script.listCascadeNotes(account: nil, target: .components(["apple-cli-test parent"]))
+        #expect(empty.unreadable == 0)
+        #expect(empty.titles.isEmpty)
+        // The folder path travels as argv (the specifier), never as source.
+        #expect(runner.arguments.allSatisfy { $0.first == "apple-cli-test parent" })
+        #expect(runner.scripts.allSatisfy { !$0.contains("apple-cli-test parent") })
+    }
+
+    @Test func listCascadeNotesRefusesEveryShapeItCannotVerify() throws {
+        // Each malformed output is refused as upstream, never read as "nothing there" — and in
+        // particular a title carrying an RS or US byte, which re-parses as extra or short rows: an
+        // RS-split fragment that starts with the label would pass `hasPrefix` while the real,
+        // unlabeled note is destroyed. The total row is the independent cross-check.
+        let shapes: [(String, String)] = [
+            ("not a count", "no count rows"),
+            ("0", "only one count row"),
+            ("0" + RS + "1" + RS + "Real client notes" + RS
+                + ["apple-cli-test", fixtureNoteID(1)].joined(separator: US),
+             "an RS inside a title split it into a short row"),
+            ("0" + RS + "1" + RS + ["Real", "apple-cli-test", fixtureNoteID(1)].joined(separator: US),
+             "a US inside a title made a three-field row"),
+            ("0" + RS + "2" + RS + ["apple-cli-test only", fixtureNoteID(1)].joined(separator: US),
+             "fewer rows than the folder's total"),
+            ("1" + RS + "1" + RS + ["apple-cli-test extra", fixtureNoteID(1)].joined(separator: US),
+             "more rows plus unreadable than the folder's total"),
+            ("0" + RS + "1" + RS + "" + RS + ["apple-cli-test hidden", fixtureNoteID(1)].joined(separator: US),
+             "a leading RS in a title made an empty fragment before a labeled-looking row"),
+            ("0" + RS + "1" + RS + ["apple-cli-test hidden", fixtureNoteID(1)].joined(separator: US) + RS,
+             "a trailing RS in a title made an empty fragment after a labeled-looking row"),
+            ("2" + RS + "1" + RS,
+             "more unreadable than the folder's total"),
+            (String(Int.max) + RS + String(Int.max) + RS + ["apple-cli-test t", fixtureNoteID(1)].joined(separator: US),
+             "counts at Int.max must be refused, never overflow"),
+        ]
+        for (output, why) in shapes {
+            let runner = FakeNotesRunner(results: [output])
+            let error = #expect(throws: AppleError.self, Comment(rawValue: why)) {
+                _ = try quietScript(runner).listCascadeNotes(account: nil, target: .components(["apple-cli-test parent"]))
+            }
+            #expect(try #require(error).exitCode == AppleExit.upstream, Comment(rawValue: why))
+            #expect(try #require(error).message.contains("cannot be verified"), Comment(rawValue: why))
+        }
+    }
+
+    @Test func cascadeGateRefusesAPathWithNoComponentsOnItsOwn() throws {
+        // `/` splits to no components. The command's front door (`requireNonEmptyFolderName`)
+        // refuses it first in production, so this pins the GATE directly: it must refuse on its
+        // own, with the sandbox envelope, before reaching Notes.app — a fail-closed gate does not
+        // lean on a caller's precheck.
+        let runner = ThrowingNotesRunner()
+        let error = #expect(throws: AppleError.self) {
+            try guardLiveFolderCascade("/", account: nil, script: quietScript(runner),
+                                       sandboxActive: true, prefix: TestMode.canonicalSandboxPrefix)
+        }
+        #expect(try #require(error).exitCode == AppleExit.usage)
+        #expect(try #require(error).message == "Invalid folder name: \"/\"")
+        #expect(try #require(error).sandbox == true)
+        #expect(runner.neverCalled)
+    }
+
+    private func listing(_ rows: [String]) -> String {
+        String(rows.count) + RS + rows.joined(separator: RS)
+    }
+
+    @Test func buildCascadeFoldersReturnsChainsReportsUnplacedFoldersAndRefusesMalformedRows() throws {
+        let rows = [folderRow(id: "F1", name: " apple-cli-test parent "),
+                    folderRow(id: "F2", name: "child", parent: "F1"),
+                    folderRow(id: "F9", name: "Orphan", parent: "MISSING")]
+        let parsed = try NotesScript.buildCascadeFolders(listing(rows))
+        // Untrimmed names, as component chains — never a rendered path.
+        #expect(parsed.folders.map(\.components) == [[" apple-cli-test parent "], [" apple-cli-test parent ", "child"]])
+        #expect(parsed.unresolvedAncestry == ["Orphan"])
+        // The listing surface still trims and renders paths, and skips the count row.
+        #expect(NotesScript.buildFolderPaths(listing(rows), account: "A").map(\.name)
+                == ["apple-cli-test parent", "apple-cli-test parent/child", "Orphan"])
+        // An unplaced folder AND each of its descendants are named (the operator sees the leaf),
+        // once each by id; a parent chain that loops is an unresolved ancestry, not a recursion —
+        // for the gate AND for the listing, which must not crash on it.
+        let looped = [folderRow(id: "F1", name: "A", parent: "F2"),
+                      folderRow(id: "F2", name: "B", parent: "F1"),
+                      folderRow(id: "F9", name: "Orphan", parent: "MISSING"),
+                      folderRow(id: "F10", name: "OrphanChild", parent: "F9"),
+                      folderRow(id: "F11", name: "OrphanGrandchild", parent: "F10")]
+        let cyclic = try NotesScript.buildCascadeFolders(listing(looped))
+        #expect(Set(cyclic.unresolvedAncestry) == ["A", "B", "Orphan", "OrphanChild", "OrphanGrandchild"])
+        #expect(cyclic.folders.isEmpty)
+        #expect(NotesScript.buildFolderPaths(listing(looped), account: "A").count == 5)
+        // A folder whose container read FAILED (the listing's detached marker) has no live parent:
+        // it is the ROOT of its own chain, its descendants chain through it at any depth, and
+        // nothing about it is an unresolved ancestry.
+        let detached = [folderRow(id: "F1", name: "apple-cli-test parent"),
+                        folderRow(id: "F7", name: "apple-cli-test ghost", parent: NotesScript.detachedParentMarker),
+                        folderRow(id: "F8", name: "ghost child", parent: "F7"),
+                        folderRow(id: "F9", name: "ghost grandchild", parent: "F8")]
+        let ghosted = try NotesScript.buildCascadeFolders(listing(detached))
+        #expect(ghosted.folders.map(\.components) == [["apple-cli-test parent"], ["apple-cli-test ghost"],
+                                                       ["apple-cli-test ghost", "ghost child"],
+                                                       ["apple-cli-test ghost", "ghost child", "ghost grandchild"]])
+        #expect(ghosted.unresolvedAncestry.isEmpty)
+        // …and the listing surface renders it by its bare name rather than failing.
+        #expect(NotesScript.buildFolderPaths(listing(detached), account: "A").map(\.name)
+                == ["apple-cli-test parent", "apple-cli-test ghost", "apple-cli-test ghost/ghost child",
+                    "apple-cli-test ghost/ghost child/ghost grandchild"])
+        // A name the script withheld (framing byte) is an unresolved ancestry under the
+        // placeholder for the gate, and the placeholder for the listing.
+        let withheld = [folderRow(id: "F1", name: "apple-cli-test parent"),
+                        folderRow(id: "F5", name: "", parent: NotesScript.unreadableNameMarker)]
+        #expect(try NotesScript.buildCascadeFolders(listing(withheld)).unresolvedAncestry
+                == [NotesScript.unreadableNamePlaceholder])
+        #expect(NotesScript.buildFolderPaths(listing(withheld), account: "A").map(\.name)
+                == ["apple-cli-test parent", NotesScript.unreadableNamePlaceholder])
+        // A name containing `/` stays ONE component; the listing's `\/` rendering is not involved.
+        let slashed = [folderRow(id: "F1", name: "apple-cli-test a/b"),
+                       folderRow(id: "F2", name: "apple-cli-test c", parent: "F1")]
+        #expect(try NotesScript.buildCascadeFolders(listing(slashed)).folders.map(\.components)
+                == [["apple-cli-test a/b"], ["apple-cli-test a/b", "apple-cli-test c"]])
+        // Every shape the strict parser refuses, as upstream: no count row; a row that is not
+        // exactly four fields; a repeated id (a first-wins lookup would shadow descendants);
+        // a count that does not match the rows (a forged row would change it).
+        let bad: [(String, String)] = [
+            (folderRow(id: "F1", name: "x"), "no count row"),
+            (listing(["F1" + US + "only-two"]), "two fields"),
+            (listing([folderRow(id: "F1", name: "x") + US + "extra"]), "five fields"),
+            (listing([folderRow(id: "F1", name: "x"), folderRow(id: "F1", name: "y")]), "repeated id"),
+            ("2" + RS + folderRow(id: "F1", name: "x"), "fewer rows than the count"),
+            ("1" + RS + folderRow(id: "F1", name: "x") + RS + folderRow(id: "F2", name: "y"), "more rows than the count"),
+        ]
+        for (out, why) in bad {
+            let error = #expect(throws: AppleError.self, Comment(rawValue: why)) { _ = try NotesScript.buildCascadeFolders(out) }
+            #expect(try #require(error).exitCode == AppleExit.upstream, Comment(rawValue: why))
+        }
+    }
+
+    @Test func deleteFolderEnumeratesCaseVariantSiblingsByIdNotByName() throws {
+        // Two sibling folders whose names differ only in case fold to the SAME chain. A name-bound
+        // specifier would enumerate whichever AppleScript picks — twice — and the other never,
+        // while the cascade destroys both. Enumerating by id reaches each exactly once, so the
+        // unlabeled note in the second sibling is found and refuses.
+        let runner = cascadeRunner(
+            folderRows: [folderRow(id: "F1", name: "apple-cli-test parent"),
+                         folderRow(id: "F2", name: "apple-cli-test a", parent: "F1"),
+                         folderRow(id: "F3", name: "apple-cli-test A", parent: "F1")],
+            notes: ["apple-cli-test parent/apple-cli-test a": ["apple-cli-test fine"],
+                    "apple-cli-test parent/apple-cli-test A": ["Real note in the other sibling"]])
+        let command = try DeleteFolderCmd.parse(["apple-cli-test parent", "--test-mode", "--execute"])
+
+        let failure = try captureNotesFailure {
+            try command.run(scriptFactory: { quietScript(runner) }, env: pinnedWriteEnv())
+        }
+
+        #expect(failure.code == AppleExit.usage)
+        #expect((failure.error["message"] as? String)?.contains("Real note in the other sibling") == true)
+        // Each cascade folder was asked for BY ID, and each id exactly once.
+        let idQueries = runner.arguments.filter { ["F1", "F2", "F3"].contains($0.first ?? "") }.map { $0.first! }
+        #expect(Set(idQueries) == ["F1", "F2", "F3"])
+        #expect(idQueries.count == 3)
+        #expect(!performedTheCascade(runner))
+    }
+
+    @Test func deleteFolderSandboxGateFindsANestedRootBoundByItsBareName() throws {
+        // Measured 2026-09-09: under `tell account`, a bare `folder "x"` binds a folder named x at
+        // ANY depth. A typed `apple-cli-test child` therefore binds `apple-cli-test parent/
+        // apple-cli-test child`, and the delete cascades over the grandchild. A gate matching from
+        // the account root never saw the nested root, fell to the typed-specifier fallback, and
+        // checked only the child's own notes — the grandchild was erased unchecked. The chain is
+        // now matched end-anchored, so the nested root and its subtree enter the cascade.
+        let rows = [folderRow(id: "F1", name: "apple-cli-test parent"),
+                    folderRow(id: "F2", name: "apple-cli-test child", parent: "F1"),
+                    folderRow(id: "F3", name: "Real grandchild", parent: "F2")]
+        for mode in ["--execute", "--dry-run"] {
+            let runner = cascadeRunner(folderRows: rows, notes: [:])
+            let command = try DeleteFolderCmd.parse(["apple-cli-test child", "--test-mode", mode])
+
+            let failure = try captureNotesFailure {
+                try command.run(scriptFactory: { quietScript(runner) }, env: pinnedWriteEnv())
+            }
+
+            #expect(failure.code == AppleExit.usage, Comment(rawValue: mode))
+            #expect(failure.error["sandbox"] as? Bool == true)
+            #expect((failure.error["message"] as? String)?.contains("Real grandchild") == true, Comment(rawValue: mode))
+            #expect(!performedTheCascade(runner))
+        }
+
+        // Fully labeled: the nested root and its subtree are enumerated by id — and the parent
+        // ABOVE the root is not, because the erase does not reach it.
+        let labeled = [folderRow(id: "F1", name: "apple-cli-test parent"),
+                       folderRow(id: "F2", name: "apple-cli-test child", parent: "F1"),
+                       folderRow(id: "F3", name: "apple-cli-test grandchild", parent: "F2")]
+        let runner = cascadeRunner(folderRows: labeled, notes: [:])
+        let command = try DeleteFolderCmd.parse(["apple-cli-test child", "--test-mode", "--execute"])
+
+        let envelope = try captureNotesEnvelope {
+            try command.run(scriptFactory: { quietScript(runner) }, env: pinnedWriteEnv())
+        }
+
+        #expect(envelope["ok"] as? Bool == true)
+        #expect(performedTheCascade(runner))
+        let idQueries = runner.arguments.filter { ["F1", "F2", "F3"].contains($0.first ?? "") }.map { $0.first! }
+        #expect(Set(idQueries) == ["F2", "F3"])
+        #expect(idQueries.count == 2)
+    }
+
+    @Test func deleteFolderSandboxGateChecksEveryFolderTheTypedPathCouldBind() throws {
+        // A top-level `apple-cli-test x` AND a nested `apple-cli-test parent/apple-cli-test x`.
+        // The gate cannot know which one `folder "apple-cli-test x"` binds, so both are roots and
+        // both subtrees are checked; the unlabeled note under the nested one refuses.
+        let runner = cascadeRunner(
+            folderRows: [folderRow(id: "F1", name: "apple-cli-test x"),
+                         folderRow(id: "F2", name: "apple-cli-test parent"),
+                         folderRow(id: "F3", name: "apple-cli-test x", parent: "F2")],
+            notes: ["apple-cli-test x": ["apple-cli-test fine"],
+                    "apple-cli-test parent/apple-cli-test x": ["Real note under the nested namesake"]])
+        let command = try DeleteFolderCmd.parse(["apple-cli-test x", "--test-mode", "--execute"])
+
+        let failure = try captureNotesFailure {
+            try command.run(scriptFactory: { quietScript(runner) }, env: pinnedWriteEnv())
+        }
+
+        #expect(failure.code == AppleExit.usage)
+        #expect((failure.error["message"] as? String)?.contains("Real note under the nested namesake") == true)
+        let idQueries = runner.arguments.filter { ["F1", "F2", "F3"].contains($0.first ?? "") }.map { $0.first! }
+        #expect(Set(idQueries) == ["F1", "F3"])
+        #expect(!performedTheCascade(runner))
+
+        // A nested root under an UNLABELED real parent: the typed name binds it all the same, and
+        // the parent's fetched name refuses before any note is read.
+        let unlabeledAncestor = cascadeRunner(
+            folderRows: [folderRow(id: "F2", name: "Real parent"),
+                         folderRow(id: "F3", name: "apple-cli-test x", parent: "F2")],
+            notes: [:])
+        let ancestorFailure = try captureNotesFailure {
+            try command.run(scriptFactory: { quietScript(unlabeledAncestor) }, env: pinnedWriteEnv())
+        }
+        #expect((ancestorFailure.error["message"] as? String)?.contains("Real parent") == true)
+        #expect(!performedTheCascade(unlabeledAncestor))
+    }
+
+    @Test func deleteFolderSandboxGateDoesNotLetAMultiComponentPathSkipALevel() throws {
+        // Measured 2026-09-09: `folder "b" of folder "a"` binds only a DIRECT child of a (skipping
+        // a level is -1728). So a typed `apple-cli-test a/apple-cli-test b` must not treat
+        // `apple-cli-test a/Real q/apple-cli-test b` as a root — the window is contiguous. Nothing
+        // in the listing ends with the typed chain, nothing matches loosely, so the gate asks
+        // Notes.app for the typed specifier. The measured answer is -1728, which is `not_found`
+        // — the same thing the delete would have said — and no listed folder is enumerated.
+        let rows = [folderRow(id: "F1", name: "apple-cli-test a"),
+                    folderRow(id: "F2", name: "Real q", parent: "F1"),
+                    folderRow(id: "F3", name: "apple-cli-test b", parent: "F2")]
+        let runner = cascadeRunner(folderRows: rows, notes: [:])
+        runner.handler = { [previous = runner.handler] script, args in
+            if script.contains("set unreadable to 0"), !script.contains("folder id (item 1 of argv)") {
+                throw AppleScriptRunner.RunError.scriptFailed(
+                    status: 1, stderr: "Notes got an error: Can\u{2019}t get folder \"apple-cli-test b\". (-1728)")
+            }
+            return try previous?(script, args)
+        }
+        let command = try DeleteFolderCmd.parse(["apple-cli-test a/apple-cli-test b", "--test-mode", "--execute"])
+
+        let failure = try captureNotesFailure {
+            try command.run(scriptFactory: { quietScript(runner) }, env: pinnedWriteEnv())
+        }
+
+        #expect(failure.code == AppleExit.notFound)
+        #expect(failure.error["type"] as? String == AppleErrorType.notFound)
+        #expect(runner.arguments.filter { ["F1", "F2", "F3"].contains($0.first ?? "") }.isEmpty)
+        #expect(!performedTheCascade(runner))
+
+        // Were Notes.app ever to bind it anyway (a hidden deleted folder under that name), the
+        // bindable-but-unlisted refusal applies, exactly as for a single component.
+        let bindable = cascadeRunner(folderRows: rows, notes: [:])
+        let refusal = try captureNotesFailure {
+            try command.run(scriptFactory: { quietScript(bindable) }, env: pinnedWriteEnv())
+        }
+        #expect(refusal.code == AppleExit.usage)
+        #expect(refusal.error["sandbox"] as? Bool == true)
+        #expect((refusal.error["message"] as? String)?.contains("does not report") == true)
+        #expect(!performedTheCascade(bindable))
+    }
+
+    @Test func deleteFolderSandboxGateRefusesAFolderWhoseNameWasWithheld() throws {
+        // The listing withholds a name carrying a framing byte and marks the row; the gate
+        // refuses under the placeholder, wherever the folder sits, because a name it cannot read
+        // is a name it cannot prove labeled.
+        let runner = cascadeRunner(
+            folderRows: [folderRow(id: "F1", name: "apple-cli-test parent"),
+                         folderRow(id: "F5", name: "", parent: NotesScript.unreadableNameMarker)],
+            notes: ["apple-cli-test parent": []])
+        let command = try DeleteFolderCmd.parse(["apple-cli-test parent", "--test-mode", "--dry-run"])
+
+        let failure = try captureNotesFailure {
+            try command.run(scriptFactory: { quietScript(runner) }, env: pinnedWriteEnv())
+        }
+
+        #expect(failure.code == AppleExit.usage)
+        #expect(failure.error["sandbox"] as? Bool == true)
+        #expect((failure.error["message"] as? String)?.contains(NotesScript.unreadableNamePlaceholder) == true)
+        #expect(!performedTheCascade(runner))
+    }
+
+    @Test func deleteFolderSandboxGateChecksTheChildOfABackslashTerminatedTarget() throws {
+        // The rendered-path trap: `folders` renders `apple-cli-test parent\` + `/Real Child` as
+        // `apple-cli-test parent\/Real Child`, which `splitFolderPath` reads back as ONE component
+        // (the `\/` escape), so the child never matched as a descendant and the cascade erased it
+        // unchecked. The gate now matches component chains built from parent ids, so the child
+        // is inside the cascade and refuses.
+        for extra in ["--execute", "--dry-run"] {
+            let runner = cascadeRunner(
+                folderRows: [folderRow(id: "F1", name: "apple-cli-test parent\\"),
+                             folderRow(id: "F2", name: "Real Child", parent: "F1")],
+                notes: [:])
+            let command = try DeleteFolderCmd.parse(["apple-cli-test parent\\", "--test-mode", extra])
+
+            let failure = try captureNotesFailure {
+                try command.run(scriptFactory: { quietScript(runner) }, env: pinnedWriteEnv())
+            }
+
+            #expect(failure.code == AppleExit.usage, "exit for \(extra)")
+            #expect(failure.error["sandbox"] as? Bool == true)
+            #expect((failure.error["message"] as? String)?.contains("Real Child") == true,
+                    "the child of a backslash-terminated target is in the cascade, for \(extra)")
+            #expect(!performedTheCascade(runner), "nothing may be deleted on \(extra)")
+        }
+    }
+
+    @Test func deleteFolderRefusesWhenTheTypedPathMatchesOnlyUpToSurroundingWhitespace() throws {
+        // Fetched names are untrimmed now, so a folder Notes.app holds as `" apple-cli-test parent"`
+        // no longer matches the typed `apple-cli-test parent` exactly. It must then be caught by
+        // the LOOSE fold as ambiguous — not fall through to the typed path and drop its
+        // descendants from the check.
+        let runner = cascadeRunner(
+            folderRows: [folderRow(id: "F1", name: " apple-cli-test parent"),
+                         folderRow(id: "F2", name: "Real Child", parent: "F1")],
+            notes: [:])
+        let command = try DeleteFolderCmd.parse(["apple-cli-test parent", "--test-mode", "--execute"])
+
+        let failure = try captureNotesFailure {
+            try command.run(scriptFactory: { quietScript(runner) }, env: pinnedWriteEnv())
+        }
+
+        #expect(failure.code == AppleExit.usage)
+        #expect(failure.error["sandbox"] as? Bool == true)
+        #expect((failure.error["message"] as? String)?.contains("matches it only loosely") == true)
+        #expect(!performedTheCascade(runner))
+    }
+
+    @Test func deleteFolderSandboxGateHandlesRootsThatArePrefixesOfOneAnother() throws {
+        // `apple-cli-test x` and `apple-cli-test x/apple-cli-test x` both end with the typed
+        // chain, so both are roots; the nested one is also a descendant of the outer one. It must
+        // enter the cascade exactly once, and the matching must be component-wise — a string
+        // suffix would also admit `Real yapple-cli-test x`, which shares no component.
+        let runner = cascadeRunner(
+            folderRows: [folderRow(id: "F1", name: "apple-cli-test x"),
+                         folderRow(id: "F2", name: "apple-cli-test x", parent: "F1"),
+                         folderRow(id: "F3", name: "apple-cli-test x", parent: "F2"),
+                         folderRow(id: "F4", name: "Real yapple-cli-test x")],
+            notes: [:])
+        let command = try DeleteFolderCmd.parse(["apple-cli-test x", "--test-mode", "--execute"])
+
+        let envelope = try captureNotesEnvelope {
+            try command.run(scriptFactory: { quietScript(runner) }, env: pinnedWriteEnv())
+        }
+
+        #expect(envelope["ok"] as? Bool == true)
+        let idQueries = runner.arguments.filter { ["F1", "F2", "F3", "F4"].contains($0.first ?? "") }.map { $0.first! }
+        #expect(idQueries.sorted() == ["F1", "F2", "F3"])
+    }
+
+    @Test func deleteFolderSandboxGateRefusesALooseNamesakeEvenWhenAnExactRootExists() throws {
+        // An exact root (`apple-cli-test x`) AND a nested folder that matches only under the
+        // loose fold (a diacritic variant). The gate cannot tell which one the specifier binds,
+        // so the loose-only namesake refuses the delete — it is not skipped just because an exact
+        // match was found. Used to be checked only when nothing matched exactly.
+        let runner = cascadeRunner(
+            folderRows: [folderRow(id: "F1", name: "apple-cli-test x"),
+                         folderRow(id: "F2", name: "Real parent"),
+                         folderRow(id: "F3", name: "apple-cli-test \u{78}\u{301}", parent: "F2")],
+            notes: ["apple-cli-test x": ["apple-cli-test fine"]])
+        let command = try DeleteFolderCmd.parse(["apple-cli-test x", "--test-mode", "--execute"])
+
+        let failure = try captureNotesFailure {
+            try command.run(scriptFactory: { quietScript(runner) }, env: pinnedWriteEnv())
+        }
+
+        #expect(failure.code == AppleExit.usage)
+        #expect(failure.error["sandbox"] as? Bool == true)
+        #expect((failure.error["message"] as? String)?.contains("matches it only loosely") == true)
+        #expect(!performedTheCascade(runner))
+    }
+
+    // MARK: delete-folder — a sandboxed PREVIEW can now fail upstream, with the documented codes
+
+    @Test func deleteFolderSandboxedPreviewSurfacesTheDocumentedExitCodes() throws {
+        // A CHARACTERIZATION pin, not a regression test: the CHANGELOG promises three codes for a
+        // sandboxed `--dry-run` whose cascade enumeration reaches Notes.app and fails, and the
+        // mapping (`NotesScript.mapError`) was verified by reading but never pinned end-to-end
+        // through the command. This drives each stderr shape through the real command and asserts
+        // the envelope — and that nothing was deleted, since a preview that failed to enumerate
+        // must not fall through to the erase.
+        let cases: [(stderr: String, code: Int32, type: String)] = [
+            ("Notes got an error: Not authorized to send Apple events to Notes.",
+             AppleExit.permissionDenied, AppleErrorType.permissionDenied),
+            ("Notes got an error: Can\u{2019}t get folder \"apple-cli-test parent\". (-1728)",
+             AppleExit.notFound, AppleErrorType.notFound),
+            ("Notes got an error: Application isn\u{2019}t running. (-600)",
+             AppleExit.upstream, AppleErrorType.upstream),
+        ]
+        for (stderr, code, type) in cases {
+            let runner = FakeNotesRunner()
+            runner.handler = { script, _ in
+                if script.contains("set allFolders to every folder") {
+                    throw AppleScriptRunner.RunError.scriptFailed(status: 1, stderr: stderr)
+                }
+                return nil
+            }
+            let command = try DeleteFolderCmd.parse(["apple-cli-test parent", "--test-mode", "--dry-run"])
+
+            let failure = try captureNotesFailure {
+                try command.run(scriptFactory: { quietScript(runner) }, env: pinnedWriteEnv())
+            }
+
+            #expect(failure.code == code, "exit for stderr \(stderr)")
+            #expect(failure.error["type"] as? String == type, "type for stderr \(stderr)")
+            #expect(!performedTheCascade(runner))
+        }
     }
 
     @Test func deleteFolderOutsideTheSandboxEnumeratesNothing() throws {

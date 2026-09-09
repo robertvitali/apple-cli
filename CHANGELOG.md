@@ -51,6 +51,23 @@ JSON output are stable per the versioning policy — breaking changes bump
 
 ### Fixed
 
+- **`notes folders` no longer fails with `not_found` when one folder's parent cannot be
+  resolved.** Notes.app keeps enumerating a sub-folder after its parent was deleted (measured:
+  a `delete-folder` of a parent left the child folder listed, with its container unreadable), and
+  the listing read every folder's container without a guard, so one such ghost took the whole
+  `folders` listing down. The ghost is now listed by its bare name, the way a folder without a
+  known parent always was. A folder whose name contains a record-separator byte, which used to
+  corrupt the listing's rows, or whose name Notes.app cannot report at all, is listed as
+  `(unreadable name)`; a parent chain that loops no longer recurses without bound.
+- **`notes save-attachment --dry-run` now previews the path the write will actually take, and a
+  symlink at that path is refused.** The preview echoed the destination as typed (`~/…`,
+  `dir/./x`, `/private/tmp/…`) while `--execute` wrote to the normalized spelling, so the two
+  could disagree; the preview now shows the normalized path. The final-leaf symlink refusal
+  (`safety_violation`, exit 77) also runs on that normalized path, not only on the spelling as
+  typed — `dir/absent/../link.bin` does not exist as spelled, so the raw check saw no link while
+  the write would have followed the symlink at `dir/link.bin`. Both paths, preview and execute.
+  Notes only in this change; the Contacts and Mail export surfaces run the same raw-leaf check
+  and are tracked for the same second check separately.
 - **`notes save-attachment --dry-run` no longer refuses a valid destination that does not exist
   yet under a `/private` alias.** The lexical path guard normalized the allowed roots to their
   short spellings (`/tmp/…`, `/var/…`) but left an absent destination spelled with a
@@ -98,22 +115,55 @@ JSON output are stable per the versioning policy — breaking changes bump
   well as on execute. The cascade is resolved the way Notes resolves it: folder names are matched
   case-insensitively, so a typed `apple-cli-test parent` that lands on a real folder named
   `Apple-CLI-Test Parent` is checked against the name Notes actually holds, and that folder's
-  descendants are found rather than skipped. If the typed path matches no folder exactly but does
+  descendants are found rather than skipped. Notes resolves the first segment of a typed path
+  against every folder in the account at any depth (a typed `apple-cli-test child` binds
+  `apple-cli-test parent/apple-cli-test child`; measured) and each further segment against
+  direct children only, so the typed path is matched against the end of every folder's path:
+  every folder it could bind, nested or top-level, is checked along with everything inside it,
+  because the CLI cannot know which one Notes will pick. If the typed path matches no folder exactly but does
   match one loosely — a difference in accents or character width, which Notes may still resolve —
   the delete is refused rather than narrowed, because the set it would destroy cannot be
   established. It also checks against the built-in `apple-cli-test`
   label and ignores an `APPLE_TEST_SANDBOX` override, so widening the label cannot widen what an
   erase may touch. The per-component half of the rule also now applies to the other folder-path
   surfaces: `notes create --folder`, `notes move --folder`, `notes batch-move --folder` and
-  `notes create-folder`. A fully-labeled folder tree is still deletable and unlabeled folders
-  elsewhere in the account do not block it. **The check is a snapshot taken immediately before the
+  `notes create-folder`. A fully-labeled folder tree is still deletable, and unlabeled folders
+  elsewhere in the account do not block it; the one exception is an unlabeled folder ABOVE a
+  nested target, because a typed name that lands under a real folder is refused by that
+  folder's name. A folder that matches the typed name only loosely and is not already in the
+  cascade refuses the delete even when an exact match exists, since the CLI cannot tell which of
+  the two Notes would bind. **The check is a snapshot taken immediately before the
   erase**: enumeration and deletion are separate calls to Notes.app, which offers no transactional
   delete, so an iCloud sync landing between them could still add an unlabeled item to the subtree.
-  The per-note enumeration is also best-effort — a note whose name or id Notes.app cannot report is
-  omitted from the check, and the cascade still destroys it. Folder-path reconstruction shares the
-  same best-effort property: a folder whose parent Notes.app does not report in the same listing is
-  rendered by its bare name (ancestry stripped), so it can fail the descendant match and go
-  unchecked while the cascade still destroys it.
+  Every member Notes.app reports is checked, and a member it reports but cannot read is a refusal,
+  not a gap: a note in the cascade whose name or id Notes.app cannot report or whose title carries
+  a record-separator byte, a note whose title is blank, a folder whose name carries such a byte,
+  and a folder anywhere in the account that Notes.app cannot place in its folder tree (its parent
+  is missing from the listing) each refuse the delete with the same `validation` / exit 64 /
+  `sandbox: true` error, naming the member — the erase is irreversible, so an unverifiable member
+  is treated as unlabeled. A listing whose shape the CLI cannot parse at all (a row with the wrong
+  number of fields, a repeated folder id, a count that does not match the rows) is a different
+  failure: `upstream_error`, exit 69, with no `sandbox` flag, because it is Notes.app's answer
+  that is unusable rather than a member that failed the label rule; the delete is refused either
+  way. A folder whose parent Notes.app itself can no longer resolve (the ghost a cascade delete
+  leaves behind, see the `notes folders` fix below) has no live parent, so it is treated as a
+  top-level folder of its own. It does not block a labeled cleanup elsewhere, and deleting the
+  ghost itself checks the ghost's own subtree.
+  A typed folder name that matches nothing in the listing but that Notes.app still binds — a
+  deleted folder lingers under its name and can even shadow a live folder of the same name — is
+  refused, because what it would cascade over cannot be listed; a name Notes.app cannot bind at
+  all is still `not_found`. Inside the sandbox this means a folder can only be deleted while the
+  listing reports it. Sub-folders are matched by Notes.app's own parent links rather than by
+  rendered `parent/child` paths, so a folder name ending in a backslash no longer hides its
+  children from the check. Each sub-folder's notes are enumerated by its id, so two sibling
+  folders whose names differ only in case are each checked once rather than one twice and the
+  other never. Names are checked exactly as
+  Notes.app holds them (untrimmed), so a folder or note titled with a leading space is not read as
+  labeled. What the check still cannot see is a member Notes.app never reports at all — in
+  particular a deleted folder that lingers hidden under the same name as a listed one, which the
+  by-name delete may bind instead of the folder that was checked (the listed folder then
+  survives, so the miss is visible); the remaining known window is the snapshot itself. The cost is that a fully-labeled tree Notes.app
+  misreports must be deleted in Notes.app by hand.
   **New cost inside the sandbox**: a `notes delete-folder` preview now reads Notes.app — one folder
   listing for the account plus one note listing per folder in the cascade, unbounded in the size of
   the subtree — so a sandboxed preview can now fail where it previously reached nothing and could
@@ -122,8 +172,9 @@ JSON output are stable per the versioning policy — breaking changes bump
   the last of which makes a sandboxed preview of a not-yet-created folder an error rather than a
   preview. Outside the sandbox nothing changes: no
   enumeration runs, the preview still reaches nothing, and an execute reaches Notes.app exactly
-  once. Refusals reuse the existing sandbox refusal — exit 64, a `validation` error with
-  `sandbox: true` — naming the offending folder or note, so `schema_version` is unchanged at 1.
+  once. Label refusals reuse the existing sandbox refusal — exit 64, a `validation` error with
+  `sandbox: true` — naming the offending folder or note, and an unparseable listing is the
+  existing `upstream_error` (exit 69), so `schema_version` is unchanged at 1.
 - **Notes writes addressed by `--title` now act on the note they actually resolved, and in the
   sandbox they check that note's real name rather than the title you typed.** Two defects, on
   overlapping sets of commands. First, the label gate, which affected **four** — `notes update`,

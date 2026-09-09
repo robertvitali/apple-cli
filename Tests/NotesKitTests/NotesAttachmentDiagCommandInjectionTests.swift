@@ -132,9 +132,59 @@ struct NotesAttachmentCommandTests {
         })
 
         #expect(data["operation"] as? String == "save-attachment")
-        #expect((data["detail"] as? String)?.contains(destination) == true)
+        // The preview names the path the write would actually land on — the normalized spelling
+        // `saveAttachmentById` writes — not the raw string. For an already-canonical destination
+        // the two coincide; the tilde case below is where they differ.
+        #expect((data["detail"] as? String)?.contains(AttachmentFS.resolvedPath(destination)) == true)
         #expect(runner.neverCalled)
         #expect(AttachmentFS.fileExists(destination) == false, "a preview must not write the file")
+    }
+
+    @Test func saveAttachmentPreviewShowsTheNormalizedDestination() throws {
+        // `--dry-run` used to echo the raw argument while `--execute` wrote the normalized path,
+        // so a tilde-spelled destination previewed as `~/…` and landed somewhere else-looking.
+        // The preview now shows the path the write will take. Preview only: nothing is written.
+        let runner = ThrowingNotesRunner()
+        let command = try SaveAttachmentCmd.parse([
+            "--note-id", fixtureNoteID(21), "--attachment-id", "ATT21",
+            "--path", "~/apple-cli-test-preview-only.png", "--dry-run",
+        ])
+
+        let data = try notesData(try captureNotesEnvelope {
+            try command.run(scriptFactory: { quietScript(runner) }, env: pinnedWriteEnv())
+        })
+
+        let expected = AttachmentFS.resolvedPath(NSHomeDirectory()) + "/apple-cli-test-preview-only.png"
+        #expect((data["detail"] as? String)?.contains(expected) == true)
+        #expect((data["detail"] as? String)?.contains("~/") == false)
+        #expect(runner.neverCalled)
+    }
+
+    @Test func saveAttachmentRefusesASymlinkAtTheNormalizedLeafOnBothPaths() throws {
+        // The raw-leaf symlink check inspects the operator's spelling; the write goes to the
+        // NORMALIZED path, and the two can name different leaves. `dir/absent/../link.bin` is
+        // ENOENT as spelled (the kernel resolves `absent` before `..`), so the raw check sees no
+        // link — while the normalized `dir/link.bin` IS a symlink that would redirect the bytes.
+        // Both leaves are checked now; both paths refuse with the shared final-leaf refusal.
+        let dir = try scratch.directory()
+        let link = dir.appendingPathComponent("link.bin")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: dir.appendingPathComponent("elsewhere.bin"))
+        let spelled = dir.appendingPathComponent("absent").appendingPathComponent("..").appendingPathComponent("link.bin").path
+        for extra in ["--execute", "--dry-run"] {
+            let runner = ThrowingNotesRunner()
+            let command = try SaveAttachmentCmd.parse([
+                "--note-id", fixtureNoteID(22), "--attachment-id", "ATT22", "--path", spelled, extra,
+            ])
+
+            let failure = try captureNotesFailure {
+                try command.run(scriptFactory: { quietScript(runner) }, env: pinnedWriteEnv())
+            }
+
+            #expect(failure.code == AppleExit.permissionDenied, "exit for \(extra)")
+            #expect(failure.error["type"] as? String == AppleErrorType.safetyViolation)
+            #expect((failure.error["message"] as? String)?.contains("symlink") == true)
+            #expect(runner.neverCalled)
+        }
     }
 
     @Test func saveAttachmentRefusesAnOutOfRootsDestinationOnBothPaths() throws {

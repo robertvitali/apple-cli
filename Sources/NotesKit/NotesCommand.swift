@@ -335,8 +335,9 @@ func guardLiveFolderPath(_ path: String, sandboxActive: Bool, prefix: String? = 
 /// the label:
 ///   1. the target path, component by component (the `guardLiveFolderPath` rule) — a cheap
 ///      fail-fast on an obviously-unlabeled TYPED name, before anything reaches Notes.app;
-///   2. the RESOLVED target — every fetched folder whose components case-INSENSITIVELY equal the
-///      typed ones. AppleScript resolves a folder name case-insensitively, so a sandboxed
+///   2. the RESOLVED target — every fetched folder whose chain ENDS with components that
+///      case-INSENSITIVELY equal the typed ones (a typed `x` can bind a nested `p/x`; see WHERE
+///      THE TYPED PATH BINDS below). AppleScript resolves a folder name case-insensitively, so a sandboxed
 ///      `delete-folder "apple-cli-test x"` can resolve a real folder actually named
 ///      `Apple-CLI-Test x`, whose fetched name fails the case-SENSITIVE label check while the
 ///      typed spelling sailed through step 1. Same defect class as the by-title note writes.
@@ -348,37 +349,67 @@ func guardLiveFolderPath(_ path: String, sandboxActive: Bool, prefix: String? = 
 ///      way `splitFolderPath` resolves them rather than by raw-string prefix. Without the fold a
 ///      descendant of `Apple-CLI-Test x` did not match the typed `apple-cli-test x` at all and
 ///      was never checked — the cascade destroyed it unexamined;
-///   4. every NOTE in the resolved target and in each descendant.
-/// One precision note on steps 2–3: `buildFolderPaths` renders each fetched component through
-/// `.trimmingCharacters(in: .whitespaces)`, so the "fetched name" these steps check is the TRIMMED
-/// string Notes.app holds. A folder literally named `" apple-cli-test x"` (leading space) is not
-/// labeled by `hasPrefix` but passes after trimming. Reachable only as a descendant — the typed
-/// target would not resolve to it — and pre-existing in the rendering every folder-path surface
-/// shares, not introduced here.
-/// Steps 2–4 label-check the FETCHED name, never the typed one: the fetched name is what
-/// Notes.app actually holds and what the erase actually destroys. The first unlabeled member
-/// refuses through `guardLiveWrite`, so the refusal is the SAME envelope the other sandbox gates
-/// emit (`validation`, exit 64, `sandbox: true`) and names the offending item.
+///   4. every NOTE in the resolved target and in each descendant;
+///   5. every ANCESTOR above a nested resolved target. It is not erased, but a typed name that
+///      binds somewhere under an unlabeled real folder is the shape the sandbox exists to refuse.
+/// Steps 2–4 label-check the FETCHED name, never the typed one — and the fetched name UNTRIMMED,
+/// exactly as Notes.app holds it. The listing surfaces (`folders`, `listNotes`) trim names for
+/// display; a gate that trimmed would pass a folder or note literally named `" apple-cli-test x"`
+/// (leading space) that `hasPrefix` rightly refuses. Whether Notes.app ever preserves such a
+/// title is deliberately NOT relied on: the check is on the exact string either way. The first
+/// unlabeled member refuses through `guardLiveWrite`, so the refusal is the SAME envelope the
+/// other sandbox gates emit (`validation`, exit 64, `sandbox: true`) and names the offending item.
 ///
-/// BEST-EFFORT ENUMERATION (accepted, disclosed): the set enumerated here is the set Notes.app
-/// REPORTS, which is not provably the set the erase takes. `listNotes` wraps each note in a bare
-/// `try … end try` and the Swift side drops a row whose title trims to empty, so a note whose name
-/// or id Notes.app cannot report produces no row at all — it is never label-checked, and the
-/// cascade still destroys it. Folder-path reconstruction (`buildFolderPaths`) shares the property:
-/// a folder whose parent is absent from the same account listing is rendered by its bare name with
-/// ancestry stripped, so it can fail the component-wise descendant match here and go unchecked
-/// while the erase still reaches it. That is strictly narrower than the pre-gate state (which
-/// enumerated nothing) but it is why this gate claims "the cascade set Notes.app will report"
-/// rather than "the complete cascade set". The CHANGELOG entry carries the same wording.
+/// FAIL-CLOSED ENUMERATION: every member Notes.app REPORTS is label-checked, and any member it
+/// reports but cannot read — or reports in a shape this gate cannot parse — is a refusal, never a
+/// gap. What the gate cannot do is see a member Notes.app never reports at all (a `notes of` or
+/// `every folder` that omits an item); that residual is stated in the CHANGELOG rather than
+/// papered over. The ways the tolerant listing surfaces fell short, and what replaces them:
+///   * `listNotes` wraps each note in a bare `try … end try` and drops blank titles, so a note
+///     whose name or id Notes.app cannot report simply vanished from the list. `listCascadeNotes`
+///     COUNTS those, keeps blank titles (unlabeled, so refused by the label check), cross-checks
+///     its rows against Notes.app's own `count of notes`, checks EVERY reported title (no folding
+///     by id), and refuses a row that does not carry exactly a name and an id — a title carrying an
+///     RS/US byte would otherwise re-parse as rows of its own, one of which could start with the
+///     label. This gate refuses when the unreadable count is non-zero.
+///   * `buildFolderPaths` renders a folder whose parent is absent from the same listing by its
+///     bare name, ancestry stripped, so it fell out of the descendant match. Worse, a rendered
+///     `a/b` path cannot be trusted for matching at all: a name ending in a backslash defeats the
+///     `\/` escape on the way back. `listFoldersForCascade` returns COMPONENT CHAINS built from
+///     parent ids instead, reports folders whose ancestry cannot be resolved (a parent id that is
+///     missing from the listing, or a looping chain), and refuses a malformed row; this gate
+///     refuses when any such folder exists in the account, because a folder that cannot be placed
+///     in the tree cannot be proven OUTSIDE the cascade either. A folder whose `container`
+///     Notes.app itself cannot resolve (error -1728 only) is different: it has no live parent,
+///     so it is the ROOT of its own chain — no live folder's cascade reaches it, so it does not
+///     block a delete elsewhere, and when it is the target its whole subtree is matched and
+///     enumerated by id like any other (measured 2026-09-09: the product's own cascade delete
+///     leaves such a ghost child behind, still bindable by name).
+/// The cost is a refusal of a legitimate, fully-labeled cleanup on the rare occasion Notes.app
+/// misreports a member; the operator then deletes in Notes.app by hand. That is the right side to
+/// err on for the one Notes op that destroys unbounded data irreversibly. (Operator decision
+/// 2026-09-09, superseding the earlier accepted-as-disclosed best-effort posture.)
 ///
-/// UNRESOLVED TARGET: if nothing fetched matches the typed path EXACTLY under the fold, the gate
+/// WHERE THE TYPED PATH BINDS (measured 2026-09-09): Notes.app resolves the FIRST typed component
+/// against every folder in the account at any depth, and each further component against direct
+/// children only. So the typed chain is matched as an END-ANCHORED window against each folder's
+/// chain — a typed `child` can be `parent/child`, and a typed `a/b` can be `p/a/b` — and every
+/// folder whose chain ends that way is a possible root: the gate checks all of them and all
+/// their descendants, since it cannot know which one the delete's specifier will bind.
+///
+/// LOOSE NAMESAKES: the same folder list is also matched under a LOOSER fold (surrounding
+/// whitespace, case, diacritic and width insensitive). A folder that matches only loosely and is
+/// not already in the cascade means Notes.app may bind the specifier to a folder this gate cannot
+/// name exactly — whether or not an exact root exists too — so the cascade set is unknowable and
+/// the delete is REFUSED (`validation`, exit 64, `sandbox: true`).
+///
+/// UNRESOLVED TARGET: if nothing fetched ends with the typed path EXACTLY under the fold, the gate
 /// does not fall through to a typed-path-only check — that dropped every descendant while still
-/// reporting the subtree clean. It re-asks the same folder list under a LOOSER fold (case,
-/// diacritic and width insensitive): a loose hit means Notes.app may bind the specifier to a folder
-/// this gate cannot name exactly, so the cascade set is unknowable and the delete is REFUSED
-/// (`validation`, exit 64, `sandbox: true`). Only when nothing matches even loosely does it fall
-/// back to the typed path — the folder is genuinely absent, and the delete fails upstream as
-/// `not_found` instead.
+/// reporting the subtree clean. When nothing matches even loosely,
+/// the gate asks Notes.app for the typed specifier's notes once: a genuinely absent folder fails
+/// there as `not_found` (what the delete itself would have said), and a folder Notes.app binds
+/// but does not list — a deleted folder lingering under its name, measured — is refused, because
+/// its sub-folders are not in the listing and the cascade set is unknowable.
 ///
 /// Enumeration reaches Notes.app, which is why it is a `NotesScript` parameter rather than a
 /// live binding, and why the caller supplies an already-bound script: the check runs on the
@@ -397,14 +428,16 @@ func guardLiveFolderPath(_ path: String, sandboxActive: Bool, prefix: String? = 
 /// erase, which narrows the exposure from "anything in the subtree" to "whatever arrived in the
 /// last few hundred milliseconds"; that residual race is accepted.
 ///
-/// PATH AMBIGUITY (pre-existing, sandbox-only): `buildFolderPaths` renders the parent chain by
-/// joining names with `/` and escaping a literal `/` inside a name as `\/`, which
-/// `splitFolderPath` reverses — so a folder whose own name contains a slash round-trips only
-/// while that escaping holds. A name the escape misses would be indistinguishable from a nesting
-/// level here, and the fold above would compare the wrong components. This is the rendering
-/// semantics every folder-path surface already shares (`folders`, `create-folder`, `--folder`
-/// filters), not something this gate introduces; it is noted because this gate is the one place
-/// where a mis-split decides what an irreversible erase may touch.
+/// FRAMING, NOT PATHS: this gate never matches on a rendered `a/b` path. `folders` renders the
+/// parent chain by joining names with `/` and escaping a literal `/` inside a name as `\/`, which
+/// `splitFolderPath` reverses — a round trip a name ending in a backslash defeats (`x\` + `/child`
+/// reads back as the single component `x/child`), which is exactly a descendant dropping out of
+/// the match. `listFoldersForCascade` therefore hands this gate component CHAINS built from the
+/// parent ids Notes.app reports, and the RS/US bytes that frame the listing itself are guarded in
+/// the script (a name carrying one is withheld and refused) and cross-checked against Notes.app's
+/// own counts, so no name can forge a row. The typed path is still split by `splitFolderPath`,
+/// because that is what builds the delete's own specifier — gate and sink agree on what a typed
+/// `a/b` names.
 ///
 /// Both wrappers are read-only and pass every user value as argv (see `listFolders`/`listNotes`),
 /// so widening the gate does not widen the injection surface.
@@ -413,7 +446,13 @@ func guardLiveFolderCascade(_ path: String, account: String?, script: NotesScrip
     guard sandboxActive else { return }
     try guardLiveFolderPath(path, sandboxActive: sandboxActive, prefix: prefix)
     let targetComponents = NotesScript.splitFolderPath(path)
-    guard !targetComponents.isEmpty else { return }
+    // A path with no components (`""`, `/`) names nothing this gate can enumerate. `deleteFolder`'s
+    // sink guard refuses it too; refusing HERE keeps the gate fail-closed in its own right rather
+    // than returning clean and relying on the sink.
+    guard !targetComponents.isEmpty else {
+        throw AppleError(type: AppleErrorType.validation, message: "Invalid folder name: \"\(path)\"",
+                         exitCode: AppleExit.usage, sandbox: true)
+    }
     // The fold AppleScript itself applies when it resolves the specifier. Compared component-wise,
     // not as one string, for the same reason step 1 checks components: `splitFolderPath` is what
     // decides which folder the specifier names.
@@ -430,59 +469,125 @@ func guardLiveFolderCascade(_ path: String, account: String?, script: NotesScrip
 
     // ONE folder listing for the whole gate: the exact pass below and the loose ambiguity re-check
     // both read it, so a sandboxed `delete-folder` enumerates the account's folders once.
-    let fetchedFolders = try script.listFolders(account: account)
+    let listing = try script.listFoldersForCascade(account: account)
+    if let unplaced = listing.unresolvedAncestry.first {
+        throw AppleError(type: AppleErrorType.validation,
+            message: "Sandbox is engaged: refusing to delete \"\(path)\" — folder \"\(unplaced)\" could not "
+                   + "be placed in the account's folder tree (Notes.app did not report its parent), so "
+                   + "the cascade this erase would take cannot be verified.",
+            exitCode: AppleExit.usage, sandbox: true)
+    }
+    /// A chain rendered for a MESSAGE only — never re-split.
+    func rendered(_ components: [String]) -> String { components.joined(separator: "/") }
+
+    // WHERE A TYPED PATH CAN BIND (measured 2026-09-09 on a three-deep labeled tree p/c/g, the
+    // bare names of both c and g binding their nested folders, ids compared): under
+    // `tell account`, a bare `folder "x"` binds a folder named x at ANY depth — the account's
+    // folder set is flat, and by-name lookup searches all of it — while `folder "y" of folder "x"`
+    // binds only a DIRECT child of x (skipping a level is -1728). So the typed components can
+    // land as a contiguous window at any offset in a folder's chain, anchored at its END: a typed
+    // `child` binds `parent/child`, and a typed `a/b` binds `p/a/b` but never `a/q/b`. Every
+    // folder whose chain ends with the typed chain is therefore a possible root of the erase; the
+    // gate cannot know which one Notes.app will pick, so it checks ALL of them and every
+    // descendant of each. Matching from the account root only would leave a nested root's
+    // subtree unchecked, or check a top-level namesake while the delete bound the nested one.
+    func endsWith(_ chain: [String], _ tail: [String]) -> Bool {
+        chain.count >= tail.count && Array(chain.suffix(tail.count)) == tail
+    }
+    func startsWith(_ chain: [String], _ head: [String]) -> Bool {
+        chain.count >= head.count && Array(chain.prefix(head.count)) == head
+    }
 
     // Folders first: an unlabeled resolved target or sub-folder is refused before any note
-    // enumeration runs.
-    var cascade: [String] = []
-    var resolvedTheTarget = false
-    for folder in fetchedFolders {
-        let folded = NotesScript.splitFolderPath(folder.name).map(exactFold)
-        guard folded.count >= foldedTarget.count,
-              Array(folded.prefix(foldedTarget.count)) == foldedTarget else { continue }
-        // The FETCHED name — the string Notes.app holds, which is what the erase destroys.
-        try guardLiveFolderPath(folder.name, sandboxActive: sandboxActive, prefix: prefix)
-        if folded.count == foldedTarget.count { resolvedTheTarget = true }
-        cascade.append(folder.name)
+    // enumeration runs. Matching is chain-against-chain, component by component. Every folder
+    // that enters the cascade is enumerated later BY ID (`CascadeTarget.id`), never by its name
+    // chain: two sibling folders whose names differ only in case fold to the same chain, and a
+    // name-bound specifier would enumerate one of them twice and the other never.
+    let roots = listing.folders.map { $0.components.map(exactFold) }.filter { endsWith($0, foldedTarget) }
+    var cascade: [(target: NotesScript.CascadeTarget, label: String)] = []
+    // Ids are unique by construction (`buildCascadeFolders` refuses a repeated id), so a folder
+    // enters the cascade once even when several roots' chains prefix it.
+    var cascadeIds = Set<String>()
+    for folder in listing.folders {
+        let folded = folder.components.map(exactFold)
+        // A descendant of ANY possible root. Descent is decided on the folded chain, so a folder
+        // under a case-variant namesake root is taken too — wider, never narrower.
+        guard roots.contains(where: { startsWith(folded, $0) }) else { continue }
+        cascadeIds.insert(folder.id)
+        // The FETCHED names — the strings Notes.app holds, which is what the erase destroys.
+        // Every component, the target's own ancestors included: the typed path already had to
+        // be labeled component-wise (step 1), so an ancestor that fails here is one Notes.app
+        // holds under a spelling the typed one only folds to — the same over-refusal the
+        // case-differing resolved target gets, deliberately. Ancestors ABOVE a nested root are
+        // checked too: they are not erased, but a typed name binding somewhere under an
+        // unlabeled real folder is exactly the shape the sandbox exists to refuse.
+        for component in folder.components {
+            try guardLiveWrite(labeledName: component, sandboxActive: sandboxActive, prefix: prefix)
+        }
+        cascade.append((.id(folder.id), rendered(folder.components)))
     }
-    if !resolvedTheTarget {
-        // Nothing fetched matched the typed path EXACTLY. Falling through to a typed-path-only
+    // A LOOSER fold — surrounding whitespace, case, diacritics and width — is the set of names
+    // Notes.app might plausibly bind to the typed specifier but this gate cannot name exactly.
+    // Whitespace is in it because the fetched names are UNTRIMMED here: a folder Notes.app holds
+    // as `" apple-cli-test x"` must not slip past both folds and drop its descendants from the
+    // check. A folder that matches ONLY loosely and is not already in the cascade makes the
+    // cascade set unknowable — whether or not an exact root was also found, since the gate
+    // cannot tell which of the two the specifier binds — so REFUSE rather than silently drop
+    // descendant coverage. Same end-anchored window as the exact pass: a loose namesake nested
+    // anywhere is as bindable as a top-level one.
+    let looseFold = { (component: String) in
+        component.trimmingCharacters(in: .whitespacesAndNewlines)
+            .folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive],
+                     locale: nil)
+    }
+    let looseTarget = targetComponents.map(looseFold)
+    let looseOnly = listing.folders.first {
+        !cascadeIds.contains($0.id) && endsWith($0.components.map(looseFold), looseTarget)
+    }
+    if let looseOnly {
+        throw AppleError(type: AppleErrorType.validation,
+            message: "Sandbox is engaged: refusing to delete \"\(path)\" — \"\(rendered(looseOnly.components))\" "
+                   + "matches it only loosely, so which folder the erase would bind, and the cascade it "
+                   + "would take, cannot be verified.",
+            exitCode: AppleExit.usage, sandbox: true)
+    }
+    if roots.isEmpty {
+        // Nothing fetched matched the typed path, even loosely. Falling through to a typed-path
         // check here is what the gate used to do, and it fails OPEN: no descendant folder is
         // label-checked at all, while `deleteFolder` still emits a bare `delete <folderRef>` that
         // Notes cascades over whatever the specifier does bind. So separate the two reasons the
-        // exact match can miss.
-        //
-        // A LOOSER fold — case, diacritics and width — is the set of names Notes.app might
-        // plausibly bind to the typed specifier but this gate cannot name exactly. If one exists,
-        // the cascade set is unknowable, so REFUSE rather than silently drop descendant coverage.
-        let looseFold = { (component: String) in
-            component.folding(options: [.caseInsensitive, .diacriticInsensitive, .widthInsensitive],
-                              locale: nil)
-        }
-        let looseTarget = targetComponents.map(looseFold)
-        let ambiguous = fetchedFolders.first { folder in
-            let folded = NotesScript.splitFolderPath(folder.name).map(looseFold)
-            return folded.count >= looseTarget.count
-                && Array(folded.prefix(looseTarget.count)) == looseTarget
-        }
-        if let ambiguous {
-            throw AppleError(type: AppleErrorType.validation,
-                message: "Sandbox is engaged: refusing to delete \"\(path)\" — it does not match any "
-                       + "folder exactly, but \"\(ambiguous.name)\" resolves ambiguously against it, so "
-                       + "the cascade this erase would take cannot be verified.",
-                exitCode: AppleExit.usage, sandbox: true)
-        }
-        // Nothing matched even loosely: the folder is genuinely absent (the delete fails upstream
-        // as `not_found`) or the account's listing was empty. Fall back to the typed path so the
-        // note enumeration below still runs.
-        cascade.append(path)
+        // match can miss.
+        // Nothing matched even loosely, at any depth. Two very different folders can be behind
+        // that, and the only way to tell them apart is to ask Notes.app for the typed
+        // specifier's notes:
+        //   * a folder that does not exist — the enumeration fails as `not_found`, which is the
+        //     right answer and exactly what the delete itself would have said;
+        //   * a folder Notes.app BINDS to the name but does not report in `every folder`.
+        //     Measured 2026-09-09: a deleted folder lingers hidden, still bindable by its name,
+        //     and even shadows a live folder of the same name (a `delete folder "x"` removed the
+        //     hidden one and left the visible one). Its sub-folders are not in the listing, so
+        //     the cascade set is unknowable — REFUSE, whatever its own notes look like.
+        _ = try script.listCascadeNotes(account: account, target: .components(targetComponents))
+        throw AppleError(type: AppleErrorType.validation,
+            message: "Sandbox is engaged: refusing to delete \"\(path)\" — Notes.app binds that name to a "
+                   + "folder the account's folder listing does not report (a deleted folder can linger "
+                   + "under its name), so the cascade this erase would take cannot be verified.",
+            exitCode: AppleExit.usage, sandbox: true)
     }
 
-    // …then every note the erase would take with those folders. `listNotes` returns the titles
-    // Notes.app actually holds, so this is the FETCHED name, not a caller-supplied string.
-    for folderPath in cascade {
-        for title in try script.listNotes(account: account, folder: folderPath,
-                                          modifiedSince: nil, limit: nil) {
+    // …then every note the erase would take with those folders. `listCascadeNotes` returns the
+    // titles Notes.app actually holds — untrimmed, blanks kept — so this is the FETCHED name, not
+    // a caller-supplied string, and it counts the notes it could not read.
+    for entry in cascade {
+        let notes = try script.listCascadeNotes(account: account, target: entry.target)
+        if notes.unreadable > 0 {
+            throw AppleError(type: AppleErrorType.validation,
+                message: "Sandbox is engaged: refusing to delete \"\(path)\" — \(notes.unreadable) note(s) in "
+                       + "\"\(entry.label)\" could not be read from Notes.app, so the cascade this "
+                       + "erase would take cannot be verified.",
+                exitCode: AppleExit.usage, sandbox: true)
+        }
+        for title in notes.titles {
             try guardLiveWrite(labeledName: title, sandboxActive: sandboxActive, prefix: prefix)
         }
     }

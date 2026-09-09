@@ -579,6 +579,116 @@ struct NotesScript {
         return titles
     }
 
+    /// What the sandboxed `delete-folder` cascade guard sees of one folder's notes.
+    struct CascadeNotes {
+        /// Every note title Notes.app reported, UNTRIMMED and with blank titles kept — the guard
+        /// label-checks the exact string Notes.app holds, so a title such as `" apple-cli-test x"`
+        /// (leading space) is judged as spelled, not after a trim that would make it pass.
+        let titles: [String]
+        /// Notes in the folder whose name or id Notes.app could NOT report. `listNotes` skips
+        /// those silently; here they are counted, because the cascade still destroys them.
+        let unreadable: Int
+    }
+
+    /// How the cascade enumeration names a folder. `.id` is the form the gate uses for every
+    /// folder in the listing — `folder id "<x-coredata://…>"` under `tell account` binds the
+    /// folder directly (measured 2026-09-09), so two folders whose names fold together are each
+    /// reached exactly once. `.components` is the typed specifier, used only when no listed
+    /// folder's chain ends with the typed path, to tell an absent folder (`not_found`) from one
+    /// Notes.app binds but does not list (refused).
+    enum CascadeTarget {
+        case id(String)
+        case components([String])
+    }
+
+    /// The cascade view of one folder's notes, for `guardLiveFolderCascade` and nothing else.
+    ///
+    /// `listNotes` is a READ surface tuned to tolerate a store that misreports: a note whose
+    /// name or id fails to read is skipped by a bare `try … end try`, and a blank title is
+    /// dropped on the Swift side. Fine for a listing; wrong for a gate that decides what an
+    /// IRREVERSIBLE erase may touch, where a member that cannot be read is a member that cannot
+    /// be proven labeled. So this enumeration COUNTS the failures instead of skipping them and
+    /// keeps every title exactly as reported, and the gate fails closed on either. Whether
+    /// `notes of <folder>` is recursive is not relied on: the gate enumerates every descendant
+    /// folder itself, so a recursive answer only re-checks notes it checks anyway, and the
+    /// `count of notes` cross-check holds either way.
+    ///
+    /// Output shape: the first RS-row is the unreadable count, the second is Notes.app's own
+    /// `count of notes` for the folder, then one `name US id` row per readable note. Anything
+    /// else is refused as upstream rather than read as "nothing there" — including a row that
+    /// does not split into exactly two fields, and an empty row anywhere but as the sole row of
+    /// an empty list. A title carrying an RS or US framing byte is never emitted at all: the
+    /// SCRIPT counts it as unreadable, because once emitted it would re-parse as rows of its own
+    /// and no Swift-side check can recover the framing (a leading RS yields an empty fragment plus
+    /// a labeled-looking remainder that satisfies every count). The count row is an independent
+    /// check on the same thing: readable rows + unreadable must equal what Notes.app says is
+    /// there. Rows are NOT de-duplicated — every reported title is checked.
+    func listCascadeNotes(account: String?, target: CascadeTarget) throws -> CascadeNotes {
+        var args: [String] = []
+        let expr: String
+        switch target {
+        case .id(let id):
+            args.append(id)
+            expr = "folder id (item 1 of argv)"
+        case .components(let comps):
+            let (built, fargs) = Self.folderRefExpr(comps, startIndex: args.count + 1)
+            args.append(contentsOf: fargs)
+            expr = built
+        }
+        let body = """
+        set resultList to {}
+        set unreadable to 0
+        set target to \(expr)
+        set total to count of notes of target
+        repeat with n in notes of target
+          try
+            set noteName to name of n
+            set noteId to id of n
+            if noteName contains \(Self.asRS) or noteName contains \(Self.asUS) ¬
+               or noteId contains \(Self.asRS) or noteId contains \(Self.asUS) then
+              set unreadable to unreadable + 1
+            else
+              set end of resultList to noteName & \(Self.asUS) & noteId
+            end if
+          on error
+            set unreadable to unreadable + 1
+          end try
+        end repeat
+        set AppleScript's text item delimiters to \(Self.asRS)
+        return (unreadable as text) & \(Self.asRS) & (total as text) & \(Self.asRS) & (resultList as text)
+        """
+        let acctIndex = accountArgIndex(&args, account)
+        let out = try run(body, args: args, tellAccount: acctIndex)
+        func unverifiable(_ why: String) -> AppleError {
+            AppleError.upstream("Notes.app returned an unexpected shape while enumerating the "
+                                + "folder's notes (\(why)); the cascade cannot be verified.")
+        }
+        // NOT `splitRows`: that drops whitespace-only rows, and a note whose title is blank must
+        // reach the gate (it is unlabeled, and the erase still takes it).
+        var rows = out.components(separatedBy: Self.RS)
+        guard rows.count >= 2,
+              let unreadable = Int(rows[0].trimmingCharacters(in: .whitespaces)), unreadable >= 0,
+              let total = Int(rows[1].trimmingCharacters(in: .whitespaces)), total >= unreadable else {
+            throw unverifiable("missing or inconsistent count rows")
+        }
+        rows.removeFirst(2)
+        var titles: [String] = []
+        if rows != [""] {
+            // `[""]` is the one legitimate empty row: `resultList as text` of an EMPTY list.
+            for row in rows {
+                let f = Self.splitFields(row)
+                guard !row.isEmpty, f.count == 2 else {
+                    throw unverifiable("a row did not carry exactly a name and an id")
+                }
+                titles.append(f[0])
+            }
+        }
+        guard titles.count == total - unreadable else {
+            throw unverifiable("\(total) note(s) reported, \(titles.count) readable and \(unreadable) unreadable accounted for")
+        }
+        return CascadeNotes(titles: titles, unreadable: unreadable)
+    }
+
     /// Append the resolved account to args and return its 1-based argv index (for `tellAccount`).
     private func accountArgIndex(_ args: inout [String], _ account: String?) -> Int {
         args.append(resolveAccount(account))
@@ -690,48 +800,211 @@ struct NotesScript {
 
     // MARK: - Folders
 
-    func listFolders(account: String?) throws -> [Folder] {
-        let acct = resolveAccount(account)
-        let body = """
+    /// One folder listing body for `listFolders` and `listFoldersForCascade`, so the two can never
+    /// enumerate different sets.
+    ///
+    /// Output: a leading row with Notes.app's own `count of every folder`, then one
+    /// `id US name US parentId US shared` row per folder. The count lets the cascade parser
+    /// cross-check that the rows it split are the rows Notes.app emitted (the listing parser
+    /// skips it).
+    ///
+    /// Two guards inside the loop, both in the SCRIPT because Swift cannot recover the framing
+    /// after the fact:
+    ///   * `container` is read under `try`, and ONLY error -1728 ("Can't get folder id …", the
+    ///     object is gone) is caught. Notes.app keeps enumerating a sub-folder whose parent was
+    ///     deleted out from under it (measured 2026-09-09 — a cascade delete of a parent left its
+    ///     child listed, with `container` raising exactly that), and an unguarded read there took
+    ///     the WHOLE listing down as `not_found`. Such a folder reports `detachedParentMarker` as
+    ///     its parent: the listing renders it by its bare name, the cascade gate treats it as the
+    ///     root of its own chain. Any OTHER error (a timeout, a lost connection) is re-raised and
+    ///     fails the listing: it does not prove detachment, and a live child misread as detached
+    ///     would leave its parent's cascade unchecked.
+    ///   * A name containing the RS or US framing byte is NOT emitted — it would re-parse as
+    ///     rows of its own, and the cascade parser could be handed a self-consistent forgery
+    ///     (four-field rows placing the real folder elsewhere). Such a folder is emitted with an
+    ///     empty name and `unreadableNameMarker` as its parent: the listing renders a placeholder,
+    ///     the cascade gate refuses (a name it cannot read is a name it cannot prove labeled).
+    private static let folderListingBody = """
         set folderList to {}
         set allFolders to every folder
         repeat with f in allFolders
           set fRef to contents of f
-          set cRef to container of fRef
           set parentId to ""
-          if class of cRef is folder then
-            set parentId to id of cRef
+          try
+            set cRef to container of fRef
+            if class of cRef is folder then
+              set parentId to id of cRef
+            end if
+          on error errMsg number errNum
+            -- -1728 (errAENoSuchObject) is the one error that PROVES the parent is gone. Any
+            -- other failure (a timeout, a lost connection) says nothing about the tree, and a
+            -- live child misread as detached would drop out of its parent's cascade unchecked,
+            -- so it fails the whole listing instead.
+            if errNum is -1728 then
+              set parentId to "\(Self.detachedParentMarker)"
+            else
+              error errMsg number errNum
+            end if
+          end try
+          -- A name Notes.app cannot report, or one carrying a framing byte, is withheld and the
+          -- row marked; the read surface renders the placeholder and the cascade gate refuses.
+          set fName to ""
+          try
+            set fName to name of fRef
+          on error
+            set parentId to "\(Self.unreadableNameMarker)"
+          end try
+          if fName contains \(Self.asRS) or fName contains \(Self.asUS) then
+            set fName to ""
+            set parentId to "\(Self.unreadableNameMarker)"
           end if
           set sharedFlag to shared of fRef as text
-          set end of folderList to (id of fRef) & \(Self.asUS) & (name of fRef) & \(Self.asUS) & parentId & \(Self.asUS) & sharedFlag
+          set end of folderList to (id of fRef) & \(Self.asUS) & fName & \(Self.asUS) & parentId & \(Self.asUS) & sharedFlag
         end repeat
         set AppleScript's text item delimiters to \(Self.asRS)
-        return folderList as text
+        return ((count of allFolders) as text) & \(Self.asRS) & (folderList as text)
         """
-        let out = try run(body, args: [acct], tellAccount: 1)
+
+    /// The parent-id value the listing emits for a folder whose `container` Notes.app cannot
+    /// resolve. Not a shape a real CoreData id can take (`x-coredata://…`), so it cannot collide.
+    static let detachedParentMarker = "?"
+    /// The parent-id value the listing emits for a folder whose NAME carries a framing byte and
+    /// was therefore withheld. Same non-colliding property.
+    static let unreadableNameMarker = "!"
+    /// What the listing shows in place of a withheld name.
+    static let unreadableNamePlaceholder = "(unreadable name)"
+
+    func listFolders(account: String?) throws -> [Folder] {
+        let acct = resolveAccount(account)
+        let out = try run(Self.folderListingBody, args: [acct], tellAccount: 1)
         return Self.buildFolderPaths(out, account: acct)
     }
 
     struct RawFolder { let id: String; let name: String; let parentId: String; let shared: Bool }
 
     static func buildFolderPaths(_ out: String, account: String) -> [Folder] {
+        var rows = splitRows(out)
+        // The listing's leading count row; tolerated absent so a hand-built fixture still parses.
+        if let first = rows.first, Int(first.trimmingCharacters(in: .whitespaces)) != nil {
+            rows.removeFirst()
+        }
         var raw: [RawFolder] = []
-        for row in splitRows(out) {
+        for row in rows {
             let f = splitFields(row)
+            let parentId = (f.count > 2 ? f[2] : "").trimmingCharacters(in: .whitespaces)
+            let name = (f.count > 1 ? f[1] : "").trimmingCharacters(in: .whitespaces)
             raw.append(RawFolder(
                 id: (f.count > 0 ? f[0] : "").trimmingCharacters(in: .whitespaces),
-                name: (f.count > 1 ? f[1] : "").trimmingCharacters(in: .whitespaces),
-                parentId: (f.count > 2 ? f[2] : "").trimmingCharacters(in: .whitespaces),
+                name: parentId == unreadableNameMarker ? unreadableNamePlaceholder : name,
+                parentId: parentId,
                 shared: (f.count > 3 ? f[3] : "").trimmingCharacters(in: .whitespaces).lowercased() == "true"))
         }
         let byId = Dictionary(raw.map { ($0.id, $0) }, uniquingKeysWith: { a, _ in a })
-        func path(_ entry: RawFolder) -> String {
+        // A parent chain that loops back on itself (Notes.app should never report one) renders
+        // the bare name rather than recursing without bound — this is a read surface, and a
+        // crash on a listing is never the right answer.
+        func path(_ entry: RawFolder, visited: Set<String>) -> String {
             let safe = entry.name.replacingOccurrences(of: "/", with: "\\/")
-            if entry.parentId.isEmpty { return safe }
-            if let parent = byId[entry.parentId] { return path(parent) + "/" + safe }
+            if entry.parentId.isEmpty || visited.contains(entry.id) { return safe }
+            if let parent = byId[entry.parentId] {
+                return path(parent, visited: visited.union([entry.id])) + "/" + safe
+            }
             return safe
         }
-        return raw.map { Folder(id: $0.id, name: path($0), account: account, shared: $0.shared) }
+        return raw.map { Folder(id: $0.id, name: path($0, visited: []), account: account, shared: $0.shared) }
+    }
+
+    /// One folder as the sandboxed `delete-folder` cascade gate sees it: its id and the chain of
+    /// names from the account root down, built from the parent ids Notes.app reports. NEVER a
+    /// rendered `a/b` path: that rendering escapes a `/` inside a name as `\/`, and a name that
+    /// ENDS in a backslash defeats the escape on the way back (`x\` + `/child` reads as the single
+    /// component `x/child`), so the child would fall out of the descendant match while the erase
+    /// still takes it. Component arrays have no such round trip. Names are untrimmed.
+    struct CascadeFolder {
+        let id: String
+        let components: [String]
+    }
+
+    /// The cascade gate's folder listing: every folder as a component chain, plus the names of
+    /// those whose ancestry could NOT be resolved — a parent id Notes.app reported but did not
+    /// list, a parent chain that loops, or a name the listing withheld because it carried a
+    /// framing byte (`unreadableNameMarker`). Such a folder cannot be placed in the tree (or
+    /// cannot be read), so the gate cannot prove it outside the cascade and refuses.
+    ///
+    /// A folder whose `container` read FAILED (`detachedParentMarker`) is a ROOT of its own
+    /// chain, not a refusal and not an exclusion. Notes.app has no live parent for it, so no
+    /// live folder's cascade reaches it from above — but a bare name specifier still binds it
+    /// (measured 2026-09-09: the product's own cascade delete left such a ghost behind, and the
+    /// sandboxed CLI then deleted it by name), so it and everything under it must stay
+    /// matchable and enumerable exactly like a top-level folder. Excluding it would drop its
+    /// descendants from the check while a delete of the ghost still erased them, and marking it
+    /// unresolved would refuse every sandboxed delete in the account for as long as Notes kept it.
+    ///
+    /// Parsed STRICTLY, every failure `upstream`: the leading count row must be present and
+    /// must equal the number of rows; every row must carry exactly four fields; no two rows may
+    /// share an id (a first-wins lookup would let one shadow the other's descendants out of the
+    /// match). Together with the in-script name guard, no name can forge the framing.
+    static func buildCascadeFolders(_ out: String) throws -> (folders: [CascadeFolder], unresolvedAncestry: [String]) {
+        func unverifiable(_ why: String) -> AppleError {
+            AppleError.upstream("Notes.app returned an unexpected shape while listing folders "
+                                + "(\(why)); the cascade cannot be verified.")
+        }
+        var rows = out.components(separatedBy: RS)
+        guard let header = rows.first, let total = Int(header.trimmingCharacters(in: .whitespaces)),
+              total >= 0 else {
+            throw unverifiable("missing count row")
+        }
+        rows.removeFirst()
+        var raw: [RawFolder] = []
+        var ids = Set<String>()
+        for row in rows {
+            if row.isEmpty { continue }
+            let f = splitFields(row)
+            guard f.count == 4 else { throw unverifiable("a row did not carry exactly four fields") }
+            let id = f[0].trimmingCharacters(in: .whitespaces)
+            guard !id.isEmpty, ids.insert(id).inserted else { throw unverifiable("a folder id was empty or repeated") }
+            raw.append(RawFolder(id: id, name: f[1], parentId: f[2].trimmingCharacters(in: .whitespaces),
+                                 shared: f[3].trimmingCharacters(in: .whitespaces).lowercased() == "true"))
+        }
+        guard raw.count == total else { throw unverifiable("\(total) folder(s) reported, \(raw.count) parsed") }
+        let byId = Dictionary(uniqueKeysWithValues: raw.map { ($0.id, $0) })
+        var unresolvedIds = Set<String>()
+        var unresolved: [String] = []
+        func markUnresolved(_ entry: RawFolder) {
+            // Reported once per FOLDER, by id: two unplaced folders sharing a name both appear.
+            if unresolvedIds.insert(entry.id).inserted {
+                unresolved.append(entry.parentId == unreadableNameMarker ? unreadableNamePlaceholder : entry.name)
+            }
+        }
+        /// `nil` when the chain cannot be completed; every folder on the failing path is marked,
+        /// so the refusal can name the one the operator actually sees, not only its ancestor.
+        func chain(_ entry: RawFolder, visited: Set<String>) -> [String]? {
+            if entry.parentId == unreadableNameMarker { markUnresolved(entry); return nil }
+            // Top-level, or detached — both are roots (see the type doc).
+            if entry.parentId.isEmpty || entry.parentId == detachedParentMarker { return [entry.name] }
+            if visited.contains(entry.id) { markUnresolved(entry); return nil }
+            guard let parent = byId[entry.parentId] else { markUnresolved(entry); return nil }
+            guard let above = chain(parent, visited: visited.union([entry.id])) else {
+                markUnresolved(entry)
+                return nil
+            }
+            return above + [entry.name]
+        }
+        var folders: [CascadeFolder] = []
+        for entry in raw {
+            if let components = chain(entry, visited: []) {
+                folders.append(CascadeFolder(id: entry.id, components: components))
+            }
+        }
+        return (folders, unresolved)
+    }
+
+    /// `listFolders` for the cascade gate — the same listing script, parsed strictly and into
+    /// component chains (see `buildCascadeFolders`).
+    func listFoldersForCascade(account: String?) throws -> (folders: [CascadeFolder], unresolvedAncestry: [String]) {
+        let acct = resolveAccount(account)
+        let out = try run(Self.folderListingBody, args: [acct], tellAccount: 1)
+        return try Self.buildCascadeFolders(out)
     }
 
     /// Create a folder path, creating intermediate segments and skipping existing ones (port of
@@ -1021,6 +1294,9 @@ struct NotesScript {
             try AttachmentFS.ensureParentDir(abs)
             try AttachmentFS.assertResolvedParentContained(abs) // symlink-aware re-check post-mkdir
             try refuseRawFinalLeafSymlink(savePath, action: "write the attachment to")
+            // The normalized leaf too: it is the path the `save` below is handed, and it can
+            // differ from the raw leaf (see `SaveAttachmentCmd`).
+            try refuseRawFinalLeafSymlink(abs, action: "write the attachment to")
         } catch let e as AppleError {
             // The AttachmentFS calls above throw only FSError/Foundation errors; this typed branch
             // preserves the shared final-leaf refusal as `safety_violation` / 77.

@@ -86,16 +86,24 @@ struct SaveAttachmentCmd: ParsableCommand {
             // check ahead of it made this the one write surface where a malformed environment
             // could be masked by a second problem in the same command line.
             let gate = try resolveNotesWrite(global, defaultDryRun: false, env: env)
+            // The path the write will actually land on: `assertSafeSavePath` returns the
+            // normalized spelling (tilde expanded, `.`/`..` resolved, `/private` aliases folded)
+            // and `saveAttachmentById` writes THAT, so it is what the preview shows and what the
+            // final-leaf symlink check inspects — alongside the raw spelling, because the two can
+            // name different leaves (`dir/absent/../leaf` is ENOENT raw, `dir/leaf` normalized)
+            // and a symlink planted at either would redirect the bytes.
+            let abs: String
             do {
-                _ = try AttachmentFS.assertSafeSavePath(path)
+                abs = try AttachmentFS.assertSafeSavePath(path)
                 try refuseRawFinalLeafSymlink(path, action: "write the attachment to")
+                try refuseRawFinalLeafSymlink(abs, action: "write the attachment to")
             } catch let e as AttachmentFS.FSError {
                 throw AppleError.validation(e.description)
             }
             guard gate.willExecute else {
-                try emitNotesWrite(DryRunPreview("save-attachment", "Would write attachment \"\(attachmentId)\" of note \"\(noteId)\" to \"\(path)\". Re-run without --dry-run."),
+                try emitNotesWrite(DryRunPreview("save-attachment", "Would write attachment \"\(attachmentId)\" of note \"\(noteId)\" to \"\(abs)\". Re-run without --dry-run."),
                                    json: global.json, sandboxActive: gate.sandboxActive,
-                                   human: "[dry-run] would save attachment to \(path).")
+                                   human: "[dry-run] would save attachment to \(abs).")
                 return
             }
             let r = try scriptFactory().saveAttachmentById(noteId: noteId, attachmentId: attachmentId, savePath: path)
