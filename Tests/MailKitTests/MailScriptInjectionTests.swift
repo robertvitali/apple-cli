@@ -34,6 +34,12 @@ struct MailScriptInjectionTests {
         var untimedArguments: [[String]] = []
         var timedCalls: [TimedCall] = []
         var stdinArguments: [[String]] = []
+        /// The deadline each stdin call carried, in call order. The seam offers only the bounded
+        /// stdin form, so this always pairs one-to-one with `stdinArguments`.
+        private(set) var stdinTimeouts: [TimeInterval] = []
+        /// Thrown by the next bounded stdin call instead of consuming a result — how a test
+        /// stands in for a runner whose deadline expired.
+        var stdinFailure: (any Error)?
         private(set) var untimedScripts: [String] = []
         private(set) var timedScripts: [String] = []
         private(set) var stdinScripts: [String] = []
@@ -84,9 +90,12 @@ struct MailScriptInjectionTests {
             return try next(&timedResults, mode: "timed")
         }
 
-        func runViaStdin(_ script: String, arguments: [String]) throws -> String {
+        func runViaStdin(_ script: String, arguments: [String],
+                         timeout seconds: TimeInterval) throws -> String {
             stdinScripts.append(script)
             stdinArguments.append(arguments)
+            stdinTimeouts.append(seconds)
+            if let stdinFailure { throw stdinFailure }
             return try next(&stdinResults, mode: "stdin")
         }
     }
@@ -142,7 +151,10 @@ struct MailScriptInjectionTests {
             try refuse(arguments)
         }
 
-        func runViaStdin(_ script: String, arguments: [String]) throws -> String { try refuse(arguments) }
+        func runViaStdin(_ script: String, arguments: [String],
+                         timeout seconds: TimeInterval) throws -> String {
+            try refuse(arguments)
+        }
     }
 
     /// An AppleScript-hostile string: a quote-break into `do shell script`, plus a backslash, a
@@ -314,6 +326,117 @@ struct MailScriptInjectionTests {
         #expect(fake.stdinArguments.count == 2)
         #expect(fake.stdinArguments[0].first == "<message@example.com>")
         #expect(fake.stdinArguments[1].first == "<message@example.com>")
+    }
+
+    @Test("every GUI compose script runs under the 300-second host deadline")
+    func guiComposeScriptsAreBounded() throws {
+        // The three AppleScriptObjC scripts that drive Mail's GUI — auto-send, threaded HTML
+        // reply, native forward — are the only stdin-form callers in production, and the only
+        // ones with no per-event timeout to fall back on. The seam offers only the bounded
+        // stdin form (structural), and this pins the VALUE each caller passes: the shared
+        // 300-second deadline, not a per-caller number that could drift.
+        let fake = FakeMailRunner()
+        fake.stdinResults = [
+            "sent",
+            "ok\(MailScript.US)new-reply\(MailScript.US)to@example.com\(MailScript.RS)",
+            "drafted\(MailScript.US)new-forward\(MailScript.US)to@example.com\(MailScript.RS)",
+        ]
+        let script = MailScript(runner: fake)
+        try script.sendHtmlViaGui(htmlPath: "/tmp/synthetic.html", subject: "Synthetic subject",
+                                  to: ["recipient@example.com"], cc: [], bcc: [],
+                                  attachmentPaths: [], sender: nil)
+        _ = try script.nativeReplyHtml(internetMessageID: "message@example.com", accountName: nil,
+                                       replyAll: false, sender: nil, selfAllowlist: ["to@example.com"],
+                                       mode: "send", htmlFragmentPath: "/tmp/reply.html")
+        _ = try script.nativeForward(internetMessageID: "message@example.com", accountName: nil,
+                                     htmlFragmentPath: "", to: ["to@example.com"], cc: [], bcc: [],
+                                     sender: nil, selfAllowlist: ["to@example.com"])
+        #expect(fake.stdinArguments.count == 3)
+        #expect(fake.stdinTimeouts == [300, 300, 300])
+        #expect(MailScript.guiComposeHostTimeoutSeconds == 300)
+    }
+
+    @Test("a GUI compose that blows the host deadline is reported as unconfirmed, not unsent")
+    func guiComposeTimeoutIsMappedPessimistically() throws {
+        // The interpreter was ended mid-flight: the Send keystroke may already have fired, and
+        // a nonce-titled compose window may remain. The mapped error must say so, must be the
+        // `upstream` class the other GUI failures use, and — for the located forms — must abort
+        // BEFORE the alternate id spelling spends a second 300-second deadline.
+        let fake = FakeMailRunner()
+        fake.stdinFailure = AppleScriptRunner.TimeoutError(seconds: 300)
+        let script = MailScript(runner: fake)
+
+        let send = #expect(throws: AppleError.self) {
+            try script.sendHtmlViaGui(htmlPath: "/tmp/synthetic.html", subject: "Synthetic subject",
+                                      to: ["recipient@example.com"], cc: [], bcc: [],
+                                      attachmentPaths: [], sender: nil)
+        }
+        let expected = MailScript.guiComposeTimedOutError(mode: "send")
+        #expect(try #require(send).message == expected.message)
+        #expect(try #require(send).exitCode == expected.exitCode)
+        #expect(expected.message.contains("did not finish within 300 seconds"))
+        #expect(expected.message.contains("delivery was not confirmed"))
+        #expect(expected.message.contains("Check Sent and Outbox"))
+        #expect(expected.message.contains("clipboard"))
+        #expect(!expected.message.lowercased().contains("not sent"))
+
+        let reply = #expect(throws: AppleError.self) {
+            _ = try script.nativeReplyHtml(internetMessageID: "message@example.com", accountName: nil,
+                                           replyAll: false, sender: nil, selfAllowlist: ["to@example.com"],
+                                           mode: "send", htmlFragmentPath: "/tmp/reply.html")
+        }
+        #expect(try #require(reply).message == expected.message)
+        // One send attempt + ONE reply attempt: the bracketed spelling timed out and the bare
+        // spelling was never tried.
+        #expect(fake.stdinArguments.count == 2)
+        #expect(fake.stdinArguments[1].first == "<message@example.com>")
+    }
+
+    @Test("the two message-id spellings of a GUI reply share one 300-second budget")
+    func guiComposeSpellingsShareOneBudget() throws {
+        // A `notfound` on the bracketed spelling must not buy the bare spelling a fresh 300
+        // seconds: the second attempt runs on what the first left. With a fake that answers at
+        // once the remainder is a hair under the budget — strictly less, never a second full
+        // bound — and the first attempt carries the budget verbatim.
+        let fake = FakeMailRunner()
+        fake.stdinResults = [
+            "notfound",
+            "ok\(MailScript.US)new-reply\(MailScript.US)to@example.com\(MailScript.RS)",
+        ]
+        let reply = try MailScript(runner: fake).nativeReplyHtml(
+            internetMessageID: "message@example.com", accountName: nil,
+            replyAll: false, sender: nil, selfAllowlist: ["to@example.com"],
+            mode: "send", htmlFragmentPath: "/tmp/reply.html")
+        #expect(reply == .sent(newMessageID: "new-reply", recipients: ["to@example.com"]))
+        #expect(fake.stdinTimeouts.count == 2)
+        #expect(fake.stdinTimeouts[0] == MailScript.guiComposeHostTimeoutSeconds)
+        #expect(fake.stdinTimeouts[1] < MailScript.guiComposeHostTimeoutSeconds)
+        #expect(fake.stdinTimeouts[1] > MailScript.guiComposeHostTimeoutSeconds - 60)
+    }
+
+    @Test("a timed-out reply in draft or open mode is not told to look in Sent")
+    func guiComposeTimeoutWordingFollowsTheMode() throws {
+        // `mail reply --draft` / `--open` never send. Telling that user "check Sent and Outbox"
+        // sends them hunting for a message that cannot exist; the wording has to follow the
+        // mode the script was actually running in.
+        for mode in ["draft", "open"] {
+            let fake = FakeMailRunner()
+            fake.stdinFailure = AppleScriptRunner.TimeoutError(seconds: 300)
+            let error = #expect(throws: AppleError.self) {
+                _ = try MailScript(runner: fake).nativeReplyHtml(
+                    internetMessageID: "message@example.com", accountName: nil,
+                    replyAll: false, sender: nil, selfAllowlist: ["to@example.com"],
+                    mode: mode, htmlFragmentPath: "/tmp/reply.html")
+            }
+            let message = try #require(error).message
+            #expect(message == MailScript.guiComposeTimedOutError(mode: mode).message)
+            #expect(message.contains("nothing is sent in \(mode) mode"))
+            #expect(!message.contains("Sent and Outbox"))
+            #expect(message.contains("clipboard"))
+        }
+        // The send wording is the default for any mode the runner does not name.
+        #expect(MailScript.guiComposeTimedOutError(mode: "send").message
+                == MailScript.guiComposeTimedOutError(mode: "unexpected").message)
     }
 
     @Test func mailScriptMailboxTrashAttachmentAndDraftWrappersUseInjectedRunner() throws {

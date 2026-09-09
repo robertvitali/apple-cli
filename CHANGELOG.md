@@ -28,6 +28,27 @@ JSON output are stable per the versioning policy — breaking changes bump
   readers: `schema_version` is unchanged at 1 because no existing key is removed, renamed, or
   retyped, and a message with nothing attached gets an empty array rather than a missing key.
 
+### Changed
+
+- **Mail's GUI-driven composes are now bounded by a 300-second host deadline.** `mail send
+  --gui-send`, the threaded HTML reply, and the native forward drive Mail through an
+  AppleScriptObjC script that previously had no wall-clock limit, so a Mail dialog, a lost
+  compose window, or a wedged keystroke could hang the command indefinitely. Each script run now
+  stops after 300 seconds with an `upstream` error (exit code unchanged). In send mode the error
+  reports delivery as **unconfirmed** — the Send keystroke may already have fired — and says to
+  check Sent and Outbox; a reply run with `--draft` or `--open` says nothing was sent in that
+  mode instead. Either way it says to inspect any remaining compose window and that the clipboard
+  may still hold the composed HTML. The reply and forward forms look a message up by two
+  message-id spellings; both share the one 300-second budget (the second attempt gets whatever
+  the first left), and a timeout aborts the whole operation, so the worst case is 300 seconds in
+  total plus the few seconds it takes to stop the script. The bound covers the script's delivery, its run, and the read of its
+  output; a helper process the script itself left behind holding that output is reported as a
+  timeout but is not ended. Composes that finish inside five minutes are unaffected. **Scope:**
+  only these three GUI-driven paths are bounded; ordinary `mail send` (no `--gui-send`) and the
+  other Mail commands still run Mail's AppleScript without a host deadline, as before.
+  `schema_version` is unchanged: no key, enum, or exit code changed; this is new message text on
+  an existing error class.
+
 ### Fixed
 
 - **`notes save-attachment --dry-run` no longer refuses a valid destination that does not exist

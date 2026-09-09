@@ -126,6 +126,42 @@ struct AppleScriptArgvTests {
         #expect(!invocation.arguments.contains("--"))
     }
 
+    @Test("the timed stdin form keeps the same argv shape and carries the deadline")
+    func timedStdinFormKeepsSourceOutOfArgv() throws {
+        // The bounded overload must change NOTHING about where user data travels: source on
+        // stdin, `-` plus the data in argv, no `--`. Only the delivery gains the deadline.
+        let launcher = RecordingLauncher(out: Data("ok".utf8))
+        _ = try AppleScriptRunner(launcher: launcher).runViaStdin(Self.script,
+                                                                  arguments: Self.hostile,
+                                                                  timeout: 12)
+        let invocation = try #require(launcher.only)
+        #expect(invocation.executablePath == AppleScriptRunner.osascriptPath)
+        #expect(invocation.delivery == .timedStdin(script: Self.script, seconds: 12))
+        #expect(invocation.arguments == ["-"] + Self.hostile)
+        #expect(!invocation.arguments.contains("--"))
+        #expect(!invocation.arguments.contains(Self.script), "source must not reach argv")
+    }
+
+    @Test("the timed stdin form applies the same deadline validation, before launching")
+    func invalidStdinDeadlineNeverReachesTheLauncher() throws {
+        let launcher = RecordingLauncher()
+        let runner = AppleScriptRunner(launcher: launcher)
+        for bad: TimeInterval in [0, -1, .nan, .infinity,
+                                  AppleScriptRunner.maximumTimeoutSeconds + 1] {
+            let error = #expect(throws: AppleScriptRunner.InvalidTimeoutError.self) {
+                _ = try runner.runViaStdin("return 1", timeout: bad)
+            }
+            let reported = try #require(error).seconds
+            // `==` is false for NaN against itself, so NaN is compared by kind.
+            #expect(bad.isNaN ? reported.isNaN : reported == bad)
+        }
+        #expect(launcher.invocations.isEmpty, "nothing may be started on an invalid deadline")
+        _ = try runner.runViaStdin("return 1", timeout: AppleScriptRunner.maximumTimeoutSeconds)
+        #expect(try #require(launcher.only).delivery
+                == .timedStdin(script: "return 1",
+                               seconds: AppleScriptRunner.maximumTimeoutSeconds))
+    }
+
     @Test("an invalid deadline is refused before anything is launched")
     func invalidDeadlineNeverReachesTheLauncher() throws {
         let launcher = RecordingLauncher()
@@ -356,6 +392,76 @@ struct OsascriptLauncherTests {
         #expect(Date().timeIntervalSince(started) < 10, "the deadline must not become a new wait")
     }
 
+    @Test("the timed stdin form delivers the script and returns within the deadline")
+    func timedStdinFormSuccess() throws {
+        let script = "line one\nline two\n"
+        let outcome = try launcher.launch(ScriptInvocation(
+            executablePath: "/bin/cat", arguments: [],
+            delivery: .timedStdin(script: script, seconds: 30)))
+        #expect(outcome.terminationStatus == 0)
+        #expect(String(decoding: outcome.standardOutput, as: UTF8.self) == script)
+    }
+
+    @Test("the timed stdin form still surfaces a non-zero status")
+    func timedStdinFormFailure() throws {
+        let outcome = try launcher.launch(ScriptInvocation(
+            executablePath: "/bin/sh", arguments: ["-c", "cat >/dev/null; exit 1"],
+            delivery: .timedStdin(script: "x", seconds: 30)))
+        #expect(outcome.terminationStatus == 1)
+    }
+
+    @Test("a child that reads the script and then never exits is ended at the deadline")
+    func timedStdinFormTerminatesAStalledChild() throws {
+        // THE production hazard: a GUI-driving script that Mail reads whole and then stalls on
+        // (a dialog, a lost window). The unbounded form waits forever here; the timed form must
+        // end the child and throw, and the child must actually be gone.
+        // Through `launchBounded`: a regression that removed the bound would otherwise hang
+        // this thread before the elapsed-time assertion below could ever run. 2s rather than
+        // 0.5s so a loaded machine gets the pid file written before the child is ended.
+        let pidFile = try scratch.directory().appendingPathComponent("pid")
+        defer { reapIfLeaked(pidFile) }
+        let started = Date()
+        let error = #expect(throws: AppleScriptRunner.TimeoutError.self) {
+            _ = try launchBounded(ScriptInvocation(
+                executablePath: "/bin/sh",
+                arguments: ["-c", #"echo $$ > "$0"; cat >/dev/null; sleep 30"#, pidFile.path],
+                delivery: .timedStdin(script: "read whole, then stall", seconds: 2)),
+                                  pidFile: pidFile, seconds: 20)
+        }
+        #expect(try #require(error).seconds == 2)
+        #expect(Date().timeIntervalSince(started) < 10, "the deadline must not become a new wait")
+        let pid = try #require(publishedPid(at: pidFile), "the child never published its pid")
+        #expect(hasExited(pid), "the stalled child outlived the deadline")
+    }
+
+    @Test("the deadline fires even while the stdin write is blocked on a child that reads nothing")
+    func timedStdinFormDeadlineCoversABlockedWrite() throws {
+        // A script four times the pipe buffer against a child that never reads it: the write
+        // blocks. If the deadline were waited on from the writing thread it could never expire,
+        // and this would be an unbounded hang dressed as a timed call. The child also ignores
+        // SIGTERM, so the escalation has to reach SIGKILL for the write to be released.
+        let pidFile = try scratch.directory().appendingPathComponent("pid")
+        defer { reapIfLeaked(pidFile) }
+        let started = Date()
+        let error = #expect(throws: AppleScriptRunner.TimeoutError.self) {
+            _ = try launchBounded(ScriptInvocation(
+                executablePath: "/bin/sh",
+                arguments: ["-c", #"trap '' TERM; echo $$ > "$0"; while :; do sleep 0.2; done"#,
+                            pidFile.path],
+                delivery: .timedStdin(script: String(repeating: "a", count: 256 * 1024),
+                                      seconds: 2)),
+                                  pidFile: pidFile, seconds: 20)
+        }
+        // TimeoutError, NOT launchFailed: the deadline is the diagnosis here. The write's EPIPE
+        // arrives only because the deadline killed the child, and reporting it instead would
+        // hide the bound that actually fired.
+        #expect(try #require(error).seconds == 2)
+        // 2s deadline, then at most two one-second escalation waits.
+        #expect(Date().timeIntervalSince(started) < 10)
+        let pid = try #require(publishedPid(at: pidFile), "the child never published its pid")
+        #expect(hasExited(pid), "the TERM-ignoring child is still alive after the deadline")
+    }
+
     @Test("the stdin form fails to launch a missing interpreter")
     func stdinFormLaunchFailure() throws {
         let error = #expect(throws: AppleScriptRunner.RunError.self) {
@@ -466,6 +572,17 @@ struct OsascriptLauncherTests {
         var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PID, pid]
         guard sysctl(&mib, 4, &info, &size, nil, 0) == 0, size > 0 else { return false }
         return info.kp_eproc.e_ppid == getpid()
+    }
+
+    /// Ends a test-owned child that a FAILING assertion path would otherwise leave running: the
+    /// pid it published, if it is still a direct child of this process (`isOwnChild` — the same
+    /// recycled-pid guard `launchBounded` applies). A child the launcher ended correctly has
+    /// been reaped and is no longer anyone's child, so this signals nothing on a green run.
+    private func reapIfLeaked(_ pidFile: URL) {
+        guard let pid = publishedPid(at: pidFile, within: 0.2), pid > 1, isOwnChild(pid) else {
+            return
+        }
+        _ = Darwin.kill(pid, SIGKILL)
     }
 
     /// Whether `pid` is gone. `kill(pid, 0)` asks the kernel about liveness without sending a
@@ -656,6 +773,122 @@ struct OsascriptLauncherTests {
                 "the failed delivery waited on the child instead of ending it")
         let pid = try #require(publishedPid(at: pidFile), "the child never published its pid")
         #expect(hasExited(pid), "the child outlived the failure it caused")
+    }
+
+    /// `closesStdinThenLingers`, but deaf to SIGTERM — the child the failed-delivery teardown's
+    /// SIGKILL branch exists for. `exec 0<&-` closes stdin so the parent's write takes EPIPE
+    /// while the child is alive; the loop keeps `sh` from exec'ing away its own trap.
+    private static let closesStdinIgnoresTermAndLingers = #"""
+        trap '' TERM; echo $$ > "$0"; exec 0<&-; while :; do sleep 0.2; done
+        """#
+
+    @Test("a failed delivery escalates to SIGKILL when the lingering child ignores SIGTERM")
+    func stdinFormEscalatesPastAnIgnoredTerminateAfterAFailedDelivery() throws {
+        // `stdinFormEndsAChildThatOutlivesTheFailedDelivery` proves the teardown runs, but its
+        // child dies on SIGTERM, so the SIGKILL branch of that teardown never executed under
+        // test. Delete the escalation and that test stays green while this child lives on
+        // forever, reparented to launchd, still holding both output pipes.
+        let pidFile = try scratch.directory().appendingPathComponent("pid")
+        // If the escalation IS missing, the launcher returns (launchFailed after its graces)
+        // with the TERM-deaf child still alive — `launchBounded` only reaps on a hang. Reap it
+        // here so a red run does not leak a forever-looping shell into the rest of the suite.
+        defer { reapIfLeaked(pidFile) }
+        let started = Date()
+        let error = #expect(throws: AppleScriptRunner.RunError.self) {
+            _ = try launchBounded(ScriptInvocation(
+                executablePath: "/bin/sh",
+                arguments: ["-c", Self.closesStdinIgnoresTermAndLingers, pidFile.path],
+                delivery: .stdin(script: String(repeating: "a", count: 256 * 1024))),
+                                  pidFile: pidFile, seconds: 20)
+        }
+        guard case .launchFailed = try #require(error) else {
+            Issue.record("expected launchFailed"); return
+        }
+        // Bounded by the ladder: 0.05s initial, 0.5s after SIGTERM, 1s after SIGKILL.
+        #expect(Date().timeIntervalSince(started) < 15,
+                "the failed delivery waited on the child instead of ending it")
+        let pid = try #require(publishedPid(at: pidFile), "the child never published its pid")
+        #expect(hasExited(pid), "the TERM-ignoring child outlived the failed delivery")
+    }
+
+    @Test("under a deadline, a failed delivery is still reported at once — not as a timeout")
+    func timedStdinFormReportsAFailedDeliveryImmediately() throws {
+        // The mirror of the blocked-write case. The child closes stdin at t≈0 and lingers; the
+        // write takes EPIPE at once. A launcher that consulted the delivery only after the
+        // deadline would sit out the full 30s here and then call it a TIMEOUT — and a Mail
+        // caller would tell the user to go hunting in Sent for a script the interpreter never
+        // saw. It must be `launchFailed`, and it must be fast.
+        let pidFile = try scratch.directory().appendingPathComponent("pid")
+        defer { reapIfLeaked(pidFile) }
+        let started = Date()
+        let error = #expect(throws: AppleScriptRunner.RunError.self) {
+            _ = try launchBounded(ScriptInvocation(
+                executablePath: "/bin/sh",
+                arguments: ["-c", Self.closesStdinThenLingers, pidFile.path],
+                delivery: .timedStdin(script: String(repeating: "a", count: 256 * 1024),
+                                      seconds: 30)),
+                                  pidFile: pidFile, seconds: 20)
+        }
+        guard case .launchFailed = try #require(error) else {
+            Issue.record("expected launchFailed, not a timeout"); return
+        }
+        #expect(Date().timeIntervalSince(started) < 10,
+                "the delivery failure waited for the deadline instead of being reported")
+        let pid = try #require(publishedPid(at: pidFile), "the child never published its pid")
+        #expect(hasExited(pid), "the child outlived the failure it caused")
+    }
+
+    @Test("the bound covers the output drain: a descendant holding the pipe past exit is a timeout")
+    func timedStdinFormBoundsTheDrainAfterExit() throws {
+        // Child exit is not EOF. This child reads the script, backgrounds a `sleep` that
+        // inherits stdout and stderr, and exits 0 at once. A bound that covered only the wait
+        // for termination would now sit in `collected()` until the descendant let go — six
+        // seconds here, unbounded for a real `do shell script` daemon. The deadline must
+        // expire in the DRAIN and surface as `TimeoutError`, well before the descendant exits.
+        // 2s rather than 0.5s so the child reliably reaches `exit 0` inside the bound on a
+        // loaded machine — a deadline that expires in the wake loop instead would throw the
+        // same error from the wrong place and prove nothing about the drain.
+        // The descendant publishes its own pid (`$!` → `$1`) and is short-lived on purpose; the
+        // test then waits for it to be gone, so nothing — neither it nor the drain workers
+        // still holding the pipe — outlives the test.
+        let dir = try scratch.directory()
+        let pidFile = dir.appendingPathComponent("pid")
+        let descendantPidFile = dir.appendingPathComponent("descendant-pid")
+        let started = Date()
+        let error = #expect(throws: AppleScriptRunner.TimeoutError.self) {
+            _ = try launchBounded(ScriptInvocation(
+                executablePath: "/bin/sh",
+                arguments: ["-c", #"echo $$ > "$0"; cat >/dev/null; sleep 6 & echo $! > "$1"; exit 0"#,
+                            pidFile.path, descendantPidFile.path],
+                delivery: .timedStdin(script: "x", seconds: 2)),
+                                  pidFile: pidFile, seconds: 20)
+        }
+        #expect(try #require(error).seconds == 2)
+        #expect(Date().timeIntervalSince(started) < 4,
+                "the drain waited for the descendant instead of honouring the deadline")
+        let descendant = try #require(publishedPid(at: descendantPidFile),
+                                      "the child never published its descendant's pid")
+        #expect(hasExited(descendant, within: 10), "the descendant should have run out on its own")
+    }
+
+    @Test("a drain whose read fails reports the failure instead of aborting the process")
+    func drainSurfacesAFailedReadAsAnError() throws {
+        // The read side of the pipe handling used `readDataToEndOfFile()`, which reports EIO /
+        // EBADF by raising an Objective-C exception Swift cannot catch — on the drain's
+        // background queue, that took the whole process down. A handle that cannot be read
+        // (the WRITE end of a pipe) provokes the failure without a child: the drain must hand
+        // it back through `collected()` as the launcher's own error type.
+        let pipe = Pipe()
+        let drain = PipeDrain(pipe.fileHandleForWriting, label: "unreadable")
+        let error = #expect(throws: AppleScriptRunner.RunError.self) {
+            _ = try drain.collected()
+        }
+        guard case .launchFailed(let message) = try #require(error) else {
+            Issue.record("expected launchFailed"); return
+        }
+        #expect(message.hasPrefix("could not read osascript unreadable:"))
+        // Still reachable afterwards: a second collect must not trap or block.
+        #expect(throws: AppleScriptRunner.RunError.self) { _ = try drain.collected() }
     }
 
     @Test("a script larger than the pipe buffer is delivered whole, not truncated")

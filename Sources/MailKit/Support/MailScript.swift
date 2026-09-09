@@ -19,7 +19,13 @@ import AppleKit
 /// byte-identical to the benign one.
 public protocol MailAppleScriptExecuting: AppleScriptRunning {
     func run(_ script: String, arguments: [String], timeout seconds: TimeInterval) throws -> String
-    func runViaStdin(_ script: String, arguments: [String]) throws -> String
+    /// See `AppleScriptRunner.runViaStdin(_:arguments:timeout:)`. The GUI-driving compose
+    /// scripts run through this bounded form; a `TimeoutError` from it is mapped by
+    /// `MailScript.boundedGuiCompose`. Deliberately the ONLY stdin spelling this seam offers:
+    /// the unbounded `runViaStdin(_:arguments:)` stays on `AppleScriptRunner` but is not a
+    /// requirement here, so no Mail script can reach the interpreter on stdin without a host
+    /// deadline — the invariant is structural, not pinned by a test of today's call sites.
+    func runViaStdin(_ script: String, arguments: [String], timeout seconds: TimeInterval) throws -> String
 }
 
 /// Argument-less convenience for the fixed scripts that take no user input. Declared on
@@ -1351,18 +1357,87 @@ public struct MailScript {
         case opened(newMessageID: String, recipients: [String])
     }
 
+    /// Host-side wall-clock bound on the three GUI-driving compose scripts (`sendHtmlGuiScript`,
+    /// `nativeReplyHtmlScript`, `nativeForwardScript`), which run via stdin (AppleScriptObjC)
+    /// and can stall indefinitely on a Mail dialog, a lost compose window, or a wedged System
+    /// Events keystroke — with no per-event timeout to fall back on. The scripts already cap
+    /// their own window wait at 30 seconds, so 300 is an order of magnitude past any observed
+    /// legitimate send while still turning a hang into a bounded, diagnosable failure.
+    static let guiComposeHostTimeoutSeconds: TimeInterval = 300
+
+    /// The error a GUI compose that blew `guiComposeHostTimeoutSeconds` surfaces. Deliberately
+    /// PESSIMISTIC, like the `ui-error` arm of `sendHtmlGuiError`: the interpreter was ended
+    /// mid-flight, so in `send` mode the Send keystroke may or may not have fired, a compose
+    /// window may remain with the per-call nonce still on its subject (bracketed `[apple-cli-…]`
+    /// for auto-send, bare `apple-cli-…` for reply and forward — hence the unbracketed wording
+    /// below, which matches both), and the clipboard may still hold the composed HTML (the
+    /// scripts restore it only on the paths they finish).
+    /// Never "not sent". `mode` is the compose's `send` / `draft` / `open` (the reply surface's
+    /// choice; auto-send and forward are always `send`): a compose that was never going to send
+    /// must not send the user to Sent and Outbox.
+    static func guiComposeTimedOutError(mode: String) -> AppleError {
+        let seconds = Int(exactly: guiComposeHostTimeoutSeconds).map(String.init)
+            ?? String(guiComposeHostTimeoutSeconds)
+        let outcome: String
+        switch mode {
+        case "draft":
+            outcome = "the draft was not confirmed saved; nothing is sent in draft mode."
+        case "open":
+            outcome = "the compose window was not confirmed; nothing is sent in open mode."
+        default:
+            outcome = "delivery was not confirmed. Check Sent and Outbox before retrying."
+        }
+        return AppleError.upstream(
+            "Mail GUI automation did not finish within \(seconds) seconds and was stopped; \(outcome) If a compose remains, its body may be empty and its subject restore was not verified; confirm its subject does not carry an apple-cli-… marker before using it, or close it. The clipboard may still hold the composed HTML.")
+    }
+
+    /// Runs one GUI compose script under a host deadline (`guiComposeHostTimeoutSeconds` unless
+    /// a caller is spending what is left of a shared budget), mapping the deadline's own error
+    /// to `guiComposeTimedOutError(mode:)`. Every other error passes through untouched.
+    private func boundedGuiCompose(_ script: String, arguments: [String], mode: String,
+                                   timeout: TimeInterval = MailScript.guiComposeHostTimeoutSeconds)
+        throws -> String {
+        do {
+            return try runner.runViaStdin(script, arguments: arguments, timeout: timeout)
+        } catch is AppleScriptRunner.TimeoutError {
+            throw MailScript.guiComposeTimedOutError(mode: mode)
+        }
+    }
+
     /// Like `mutateLocated`, but returns the script's raw output (for scripts that report a
     /// value, e.g. the new message id) instead of a Bool. nil == "notfound" on BOTH id forms.
+    ///
+    /// `viaStdin` selects the bounded GUI-compose form (`guiMode` names the compose's
+    /// send/draft/open for the timeout's wording). BOTH id spellings share ONE
+    /// `guiComposeHostTimeoutSeconds` budget: the second attempt is given only what the first
+    /// left, and a budget already spent is the timeout error without a second launch. A
+    /// deadline inside either attempt aborts the whole lookup (the error propagates out of the
+    /// loop). So the caller-visible worst case is one bound in total — not one per spelling,
+    /// which a `notfound` returned just under the bound would otherwise turn into two.
     private func runLocated(_ body: String, id: String, account: String?, extra: [String],
-                            viaStdin: Bool = false) throws -> String? {
+                            viaStdin: Bool = false, guiMode: String = "send") throws -> String? {
         let script = body + "\n" + MailScript.locator + "\n" + MailScript.hintedLocator
             + "\n" + MailScript.outboundGuardHelpers
             + "\n" + MailScript.addressGuardHelpers + "\n" + MailScript.mailboxPathResolver
         let bare = MailFormat.stripAngleBrackets(id) ?? id
-        for candidate in ["<\(bare)>", bare] {
-            let out = viaStdin
-                ? try runner.runViaStdin(script, arguments: [candidate, account ?? ""] + extra)
-                : try runner.run(script, arguments: [candidate, account ?? ""] + extra)
+        let budget = MailScript.guiComposeHostTimeoutSeconds
+        // Monotonic, not `Date()`: a wall clock stepped backwards between attempts would hand
+        // the second spelling more than the first left, and the budget exists to cap the total.
+        let started = DispatchTime.now()
+        for (attempt, candidate) in ["<\(bare)>", bare].enumerated() {
+            let out: String
+            if viaStdin {
+                // The first attempt gets the whole budget verbatim (no clock read, so the value
+                // a test observes is exact); later attempts get the remainder.
+                let elapsed = TimeInterval(DispatchTime.now().uptimeNanoseconds
+                                           &- started.uptimeNanoseconds) / 1_000_000_000
+                let remaining = attempt == 0 ? budget : budget - elapsed
+                guard remaining > 0 else { throw MailScript.guiComposeTimedOutError(mode: guiMode) }
+                out = try boundedGuiCompose(script, arguments: [candidate, account ?? ""] + extra,
+                                            mode: guiMode, timeout: remaining)
+            } else {
+                out = try runner.run(script, arguments: [candidate, account ?? ""] + extra)
+            }
             if out != "notfound" { return out }
         }
         return nil
@@ -1434,7 +1509,7 @@ public struct MailScript {
                                                                                           selfAllowlist: selfAllowlist, attachmentPaths: attachmentPaths,
                                                                                           cc: cc, bcc: bcc, mailboxHint: mailboxHint, mode: mode)
                                                                    + [htmlFragmentPath],
-                                                            viaStdin: true))
+                                                            viaStdin: true, guiMode: mode))
     }
 
     /// Internal for the logic tier: source pins on the assembled compose scripts.
@@ -1738,11 +1813,11 @@ public struct MailScript {
         // window (v2 subjects are real ones like "Re: Quarterly numbers"). Bracketed + UUID so
         // it is unmistakable if a failure ever leaves it visible in Mail.
         let nonce = "[apple-cli-\(UUID().uuidString.prefix(8))]"
-        let out = try runner.runViaStdin(MailScript.sendHtmlGuiScript, arguments: [
+        let out = try boundedGuiCompose(MailScript.sendHtmlGuiScript, arguments: [
             htmlPath, subject,
             to.joined(separator: US), cc.joined(separator: US), bcc.joined(separator: US),
             attachmentPaths.joined(separator: US), sender ?? "", nonce,
-        ])
+        ], mode: "send")
         guard out == "sent" else {
             throw MailScript.sendHtmlGuiError(for: out)
         }
