@@ -1090,13 +1090,14 @@ struct NotesWriteGateTests {
     /// shim calls `run(scriptFactory:)` and names no env, and every other test in this file passes
     /// `pinnedWriteEnv()` explicitly — so the default itself is unobserved unless a test omits it.
     /// This one omits it, and therefore reads the REAL variables; that is the point, and it is why
-    /// this is the one place that pins all three of them through `TestEnvironment`'s process-wide
-    /// lock rather than through the seam.
+    /// this is the one place that pins the whole write-posture set through `TestEnvironment`'s
+    /// process-wide lock rather than through the seam — the shared `withoutWriteModeOverrides`
+    /// window (never a hand-spelled subset), with `APPLE_TEST_MODE` then SET inside it.
     @Test func aWriteCommandOmittingTheEnvArgumentGetsTheLiveEnvironment() throws {
         let command = try CreateCmd.parse(["ordinary note", "--content", "c", "--execute"])
-        let engageSandbox: [String: String?] = [TestMode.testModeVar: "1", TestMode.dryRunVar: nil]
+        let engageSandbox: [String: String?] = [TestMode.testModeVar: "1"]
 
-        try TestEnvironment.withoutSandboxOverrides {
+        try TestEnvironment.withoutWriteModeOverrides {
             try TestEnvironment.with(engageSandbox) {
                 // The default argument resolves to the same gate `.live` does, for the same options.
                 #expect(try resolveNotesWrite(command.global, defaultDryRun: false)

@@ -1097,6 +1097,70 @@ struct RemindersCommandExecutionTests {
         }
     }
 
+    /// The SAME post-fetch gate, at every other by-id mutator. `tasksDeleteRefusesUnlabeled…`
+    /// above pins one of seven call sites; the other six (`TasksUpdate` and the five subtask
+    /// mutators, which persist by REWRITING the parent reminder's notes) were exercised against
+    /// labeled fixtures only, so deleting any one of their `requireLabeledReminder` lines left the
+    /// suite green. One case per mutator, each asserting both halves: the sandbox refusal envelope
+    /// (validation / 64 / `sandbox: true`) AND that the store saw no save — the gate runs after
+    /// the fetch, so "refused" alone would not prove the reminder was left untouched.
+    @Test("every by-id mutator refuses an UNLABELED target inside the sandbox and saves nothing",
+          arguments: [
+            "tasks update", "subtasks create", "subtasks update", "subtasks delete",
+            "subtasks toggle", "subtasks reorder",
+          ])
+    func byIdMutatorsRefuseUnlabeledTargetInSandbox(mutator: String) throws {
+        try TestEnvironment.withoutWriteModeOverrides {
+            let fake = FakeReminderStore()
+            let unlabeled = reminder(title: "Quarterly review", list: fake.lists[0], store: fake.ekStore)
+            fake.remindersById["task-1"] = unlabeled
+            let notesBefore = unlabeled.notes
+            // `aaaa1111` is the subtask id the shared fixture's notes carry.
+            let flags = ["--test-mode", "--execute"]
+            let run: () throws -> Void
+            switch mutator {
+            case "tasks update":
+                let c = try TasksUpdate.parse(flags + ["--id", "task-1", "--title", "apple-cli-test renamed"])
+                run = { try c.run(storeFactory: { fake }) }
+            case "subtasks create":
+                let c = try SubtasksCreate.parse(flags + ["--reminder-id", "task-1", "--title", "Review"])
+                run = { try c.run(storeFactory: { fake }) }
+            case "subtasks update":
+                let c = try SubtasksUpdate.parse(flags + ["--reminder-id", "task-1", "--subtask-id", "aaaa1111",
+                                                          "--title", "Review updated"])
+                run = { try c.run(storeFactory: { fake }) }
+            case "subtasks delete":
+                let c = try SubtasksDelete.parse(flags + ["--reminder-id", "task-1", "--subtask-id", "aaaa1111"])
+                run = { try c.run(storeFactory: { fake }) }
+            case "subtasks toggle":
+                let c = try SubtasksToggle.parse(flags + ["--reminder-id", "task-1", "--subtask-id", "aaaa1111"])
+                run = { try c.run(storeFactory: { fake }) }
+            case "subtasks reorder":
+                let c = try SubtasksReorder.parse(flags + ["--reminder-id", "task-1", "--order", "aaaa1111"])
+                run = { try c.run(storeFactory: { fake }) }
+            default:
+                Issue.record("unknown mutator \(mutator)")
+                return
+            }
+
+            let (cliStreams, stdout, _) = streams()
+            var thrown: Error?
+            do { try runPinned(cliStreams) { try run() } } catch { thrown = error }
+            #expect((thrown as? ExitCode)?.rawValue == AppleExit.usage, "\(mutator)")
+            let error = try errorPayload(from: stdout)
+            #expect(error["type"] as? String == AppleErrorType.validation)
+            #expect(error["sandbox"] as? Bool == true)
+            // The refusal's IDENTITY: the post-fetch label gate's own text, not just "some
+            // sandbox refusal" — a typed-argument check failing earlier would also be 64/validation.
+            #expect((error["message"] as? String)?.contains("it is not a labeled test item") == true,
+                    "\(mutator): \(error["message"] ?? "")")
+            #expect(fake.savedReminders.isEmpty, "\(mutator): the refusal must precede any save")
+            #expect(fake.removedReminders.isEmpty)
+            #expect(unlabeled.notes == notesBefore, "\(mutator): the notes were rewritten despite the refusal")
+            #expect(unlabeled.title == "Quarterly review")
+        }
+    }
+
     @Test("subtasks read and mutating operations execute through the injected store")
     func subtasksExecute() throws {
         let fake = FakeReminderStore()

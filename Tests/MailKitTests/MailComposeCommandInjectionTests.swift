@@ -809,6 +809,182 @@ struct MailComposeCommandInjectionTests {
         }
     }
 
+    // MARK: - Rate-limit REFUSAL: the guard itself, at each of the four call sites
+    //
+    // Every test above drives the limiter fail-OPEN (`allowed == true`), so deleting a
+    // `guard rl.allowed else { throw … }` at any call site left the suite green — the cap's
+    // warning was tested and the cap itself was not. These drive `allowed == false` by handing
+    // each call site a state file whose window is already FULL, and pin three things: the refusal
+    // is the `validation` error (exit 64, not a silent no-op), nothing reached the AppleScript
+    // runner or LaunchServices (the refusal precedes the send), and the refusal text names the
+    // tier's cap, so the operator can tell a rate-limit refusal from any other validation error.
+
+    /// Point `variable` at a scratch state file already holding `calls` stamps inside the window,
+    /// so the NEXT `consume` refuses. Nests inside `pinnedEnvironment` like `degraded` does, and
+    /// the stamps are `now` — the far edge of the window, so a slow test cannot age them out.
+    private func exhausted<T>(_ variable: String, _ label: String, calls: Int,
+                              _ body: () throws -> T) throws -> T {
+        let file = try scratch.directory().appendingPathComponent("exhausted-\(label).json")
+        let stamps = Array(repeating: Date().timeIntervalSince1970, count: calls)
+        try JSONEncoder().encode(stamps).write(to: file)
+        return try TestEnvironment.with([variable: file.path], body)
+    }
+
+    /// Run a compose command expected to be REFUSED by its rate limiter. `runGuarded` converts the
+    /// thrown `AppleError` into the error envelope on stdout plus an `ExitCode`, so both halves
+    /// are read back from there: exit 64 and `error.type == validation`, with a message that names
+    /// the tier's cap.
+    private func expectRateLimitRefusal(tier: String, stdout: MemoryOutputSink,
+                                        _ body: () throws -> Void) throws {
+        var exit: ExitCode?
+        do { try body() } catch let code as ExitCode { exit = code }
+        #expect(try #require(exit, "the call site must refuse").rawValue == AppleExit.usage)
+        let envelope = try payload(from: stdout)
+        #expect(envelope["ok"] as? Bool == false)
+        let error = try #require(envelope["error"] as? [String: Any])
+        #expect(error["type"] as? String == AppleErrorType.validation)
+        let message = error["message"] as? String ?? ""
+        #expect(message.contains("Rate limit exceeded"), Comment(rawValue: message))
+        #expect(message.contains(tier), Comment(rawValue: message))
+    }
+
+    @Test func sendExecuteIsRefusedWhenTheSendWindowIsFull() throws {
+        try pinnedEnvironment {
+            try exhausted("APPLE_SEND_RATELIMIT_STATE", "send", calls: SendRateLimiter.maxCalls) {
+                let fake = MailScriptInjectionTests.FakeMailRunner()
+                fake.untimedResults = ["sent"]
+                let noOpen = noMailApp()
+                let command = try SendCommand.parse([
+                    "--to", "recipient@example.com",
+                    "--subject", "Synthetic subject",
+                    "--body", "Synthetic body",
+                    "--execute",
+                ])
+                let (streams, stdout, _) = streams()
+
+                try expectRateLimitRefusal(tier: "sends", stdout: stdout) {
+                    try Output.withStreams(streams) {
+                        try command.run(scriptFactory: { MailScript(runner: fake, opener: noOpen) },
+                                        directoryFactory: { directory() })
+                    }
+                }
+                #expect(fake.neverCalled, "the refusal must precede the send")
+                #expect(noOpen.neverCalled)
+            }
+        }
+    }
+
+    @Test func forwardExecuteIsRefusedWhenTheSendWindowIsFull() throws {
+        try pinnedEnvironment {
+            try exhausted("APPLE_SEND_RATELIMIT_STATE", "forward", calls: SendRateLimiter.maxCalls) {
+                let fake = MailScriptInjectionTests.FakeMailRunner()
+                fake.stdinResults = [
+                    "ok\(MailScript.US)new-forward\(MailScript.US)recipient@example.com\(MailScript.RS)",
+                ]
+                let noOpen = noMailApp()
+                let command = try ForwardCommand.parse([
+                    "10",
+                    "--to", "recipient@example.com",
+                    "--body", "Synthetic prepend",
+                    "--execute",
+                ])
+                let (streams, stdout, _) = streams()
+
+                try expectRateLimitRefusal(tier: "sends", stdout: stdout) {
+                    try Output.withStreams(streams) {
+                        try command.run(contextFactory: { try context() },
+                                        scriptFactory: { MailScript(runner: fake, opener: noOpen) },
+                                        directoryFactory: { directory() })
+                    }
+                }
+                #expect(fake.neverCalled)
+                #expect(noOpen.neverCalled)
+            }
+        }
+    }
+
+    @Test func replyExecuteIsRefusedWhenTheReplyWindowIsFull() throws {
+        try pinnedEnvironment {
+            try exhausted("APPLE_REPLY_RATELIMIT_STATE", "reply", calls: ReplyRateLimiter.maxCalls) {
+                let fake = MailScriptInjectionTests.FakeMailRunner()
+                fake.stdinResults = [
+                    "ok\(MailScript.US)new-reply\(MailScript.US)alice@example.com\(MailScript.RS)",
+                ]
+                let noOpen = noMailApp()
+                let command = try ReplyCommand.parse([
+                    "10",
+                    "--body", "Synthetic reply",
+                    "--execute",
+                ])
+                let (streams, stdout, _) = streams()
+
+                try expectRateLimitRefusal(tier: "expensive_ops", stdout: stdout) {
+                    try Output.withStreams(streams) {
+                        try command.run(contextFactory: { try context() },
+                                        scriptFactory: { MailScript(runner: fake, opener: noOpen) },
+                                        directoryFactory: { directory() })
+                    }
+                }
+                #expect(fake.neverCalled)
+                #expect(noOpen.neverCalled)
+            }
+        }
+    }
+
+    @Test func draftSendIsRefusedWhenTheSendWindowIsFull() throws {
+        try pinnedEnvironment {
+            try exhausted("APPLE_SEND_RATELIMIT_STATE", "draft-send", calls: SendRateLimiter.maxCalls) {
+                let fake = MailScriptInjectionTests.FakeMailRunner()
+                fake.untimedResults = ["sent"]
+                let noOpen = noMailApp()
+                let command = try DraftCommand.parse([
+                    "send",
+                    "--subject", "apple-cli-test draft",
+                    "--execute",
+                    "--test-mode",
+                ])
+                let (streams, stdout, _) = streams()
+
+                try expectRateLimitRefusal(tier: "sends", stdout: stdout) {
+                    try withTestRecipients("recipient@example.com") {
+                        try Output.withStreams(streams) {
+                            try command.run(scriptFactory: { MailScript(runner: fake, opener: noOpen) },
+                                            directoryFactory: { directory() })
+                        }
+                    }
+                }
+                #expect(fake.neverCalled)
+                #expect(noOpen.neverCalled)
+            }
+        }
+    }
+
+    /// A window one short of full still ALLOWS — so the four refusals above come from the cap,
+    /// not from the exhausted-state fixture being unusable. One control for the shared fixture.
+    @Test func sendExecuteIsAllowedWhenTheSendWindowHasOneSlotLeft() throws {
+        try pinnedEnvironment {
+            try exhausted("APPLE_SEND_RATELIMIT_STATE", "send-control", calls: SendRateLimiter.maxCalls - 1) {
+                let fake = MailScriptInjectionTests.FakeMailRunner()
+                fake.untimedResults = ["sent"]
+                let noOpen = noMailApp()
+                let command = try SendCommand.parse([
+                    "--to", "recipient@example.com",
+                    "--subject", "Synthetic subject",
+                    "--body", "Synthetic body",
+                    "--execute",
+                ])
+                let (streams, stdout, _) = streams()
+                try Output.withStreams(streams) {
+                    try command.run(scriptFactory: { MailScript(runner: fake, opener: noOpen) },
+                                    directoryFactory: { directory() })
+                }
+                let data = try #require(try payload(from: stdout)["data"] as? [String: Any])
+                #expect(data["executed"] as? Bool == true)
+                #expect(noOpen.neverCalled)
+            }
+        }
+    }
+
     /// The SECOND way a call site sees `degraded`, and the one the fixtures above cannot reach.
     /// `RateLimitStore.load` has two degrading arms: `.unreadable` (the state file cannot be read
     /// at all — what every test above pins) and `.corrupt` (the file IS readable but does not

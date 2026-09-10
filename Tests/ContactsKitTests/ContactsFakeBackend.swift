@@ -243,14 +243,17 @@ func fakeVCard(given: String, family: String) -> String {
 ///
 /// Putting the pin in the three shared runners below — which every command test in this target
 /// goes through — makes it impossible to forget when a new test is added, which per-test
-/// wrapping is not. All four variables are pinned ABSENT under the test process's single
+/// wrapping is not. Every write-posture variable is pinned ABSENT under the test process's single
 /// recursive lock, so a test that wants one SET nests its own `TestEnvironment.with` window
 /// (the delete-grant tests do exactly that, with a test-owned variable name).
+///
+/// The set is `TestEnvironment.writeModeVariables`, named ONCE in TestSupport — not re-spelled
+/// here. This pin used to compose `withoutSandboxOverrides` with its own `APPLE_DRY_RUN` entry,
+/// which pinned all four correctly on the day it was written and would have silently
+/// under-pinned the day a fifth write-posture variable was added to the shared list.
 @discardableResult
 func pinnedGates<T>(_ body: () throws -> T) rethrows -> T {
-    try TestEnvironment.withoutSandboxOverrides {
-        try TestEnvironment.with([TestMode.dryRunVar: String?.none], body)
-    }
+    try TestEnvironment.withoutWriteModeOverrides(body)
 }
 
 func contactsStreams() -> (CLIStreams, MemoryOutputSink) {

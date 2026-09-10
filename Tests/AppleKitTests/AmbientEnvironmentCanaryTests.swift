@@ -40,10 +40,11 @@ import TestSupport
 ///
 /// The assertion below is `== nil`, NOT "nil or empty", deliberately. All four variables are inert
 /// when exported empty, so an empty export is not a behavior defect — but it is still a shell
-/// POSTURE the operator is carrying, one `export` away from a value, and the remedy each advice
-/// branch prints (unset it, or prefix the individual command) resolves the empty case exactly as it
-/// resolves the set one. Keep the strict form; loosening it to `?.isEmpty != false` would make the
-/// canary silent for half the shapes it exists to report.
+/// POSTURE the operator is carrying, one `export` away from a value. The empty case gets its own
+/// diagnosis (this variable is inert by itself; unset it) rather than the set case's ("silently
+/// previewing"), which would be false for it — and it says nothing about the other variables,
+/// each of which gets its own line. Keep the strict form; loosening it to `?.isEmpty != false` would make the canary
+/// silent for half the shapes it exists to report.
 @Suite("Ambient write-posture canary")
 struct AmbientEnvironmentCanaryTests {
     /// Where the advice sends the reader for the standing rule. Appended to every branch so no
@@ -61,6 +62,10 @@ struct AmbientEnvironmentCanaryTests {
         switch key {
         case "APPLE_TEST_SANDBOX": return "APPLE_TEST_MODE=1 APPLE_TEST_SANDBOX=<prefix> apple …"
         case "APPLE_TEST_RECIPIENTS": return "APPLE_TEST_MODE=1 APPLE_TEST_RECIPIENTS=<list> apple …"
+        // A preview example, never a sandbox one: `APPLE_TEST_MODE=1` restricts WHAT a write may
+        // touch while the write still executes, which is the opposite of what a reader carrying
+        // an `APPLE_DRY_RUN` posture means.
+        case "APPLE_DRY_RUN": return "APPLE_DRY_RUN=1 apple …"
         default: return "APPLE_TEST_MODE=1 apple …"
         }
     }
@@ -73,7 +78,22 @@ struct AmbientEnvironmentCanaryTests {
     /// The sandbox trio is different again: the sandbox is the default posture every agent is told
     /// to work in, so the advice is to keep engaging it, just per command rather than by export.
     /// Never tell an agent to disarm its sandbox.
-    private func advice(for key: String) -> String {
+    private func advice(for key: String, value: String) -> String {
+        // An EMPTY export is inert: `TestMode.truthyEnv` treats `""` as unset, so THIS variable
+        // changes nothing. The posture is still reported (see the suite doc), but the diagnosis
+        // must claim only what the empty value does — telling an agent that writes are "silently
+        // previewing" when they may be executing live is the inverse of the truth. It also must
+        // not claim what the OTHER variables are doing: with `APPLE_DRY_RUN=` and
+        // `APPLE_TEST_MODE=1` both exported, the sandbox IS engaged; each variable gets its own
+        // report line, so the empty one speaks for itself alone.
+        if value.isEmpty {
+            return "\(key) is exported EMPTY in the shell running the tests. An empty value is "
+                + "inert — `apple` treats \(key) as unset, so this variable has no effect by itself "
+                + "— but it is a shell posture one `export` away from a value. Unset it "
+                + "(`unset \(key)`) and set the variable per command when you mean it "
+                + "(`\(perCommandExample(for: key))`)"
+                + Self.seeAgents
+        }
         if key == "APPLE_DRY_RUN" {
             return "APPLE_DRY_RUN is exported in the shell running the tests. The pins make the "
                 + "suite immune to it, but your real `apple` runs are NOT — every write you issue "
@@ -92,8 +112,36 @@ struct AmbientEnvironmentCanaryTests {
     @Test("ambient canary: the operator's shell exported no write-posture variable")
     func ambientEnvironmentCarriesNoWritePostureOverride() {
         for key in TestEnvironment.writeModeVariables {
-            #expect(AmbientEnvironment.atStartup[key] == nil,
-                    Comment(rawValue: advice(for: key)))
+            let value = AmbientEnvironment.atStartup[key]
+            #expect(value == nil, Comment(rawValue: advice(for: key, value: value ?? "")))
         }
+    }
+
+    /// The three diagnoses are distinct claims about the operator's shell, and each must say
+    /// only what is true of its case: an empty export is inert (not "previewing"), a set
+    /// `APPLE_DRY_RUN` is a preview posture an agent must REPORT rather than unset, and a set
+    /// sandbox variable is a per-command shape. Pinned here because the advice is the payload —
+    /// the assertion above never fails on a clean shell, so nothing else reads these strings.
+    @Test("the advice names the case it diagnoses: empty is inert, set is previewing")
+    func adviceMatchesTheExportedShape() {
+        let empty = advice(for: "APPLE_DRY_RUN", value: "")
+        #expect(empty.contains("exported EMPTY"))
+        #expect(empty.contains("no effect by itself"))
+        #expect(!empty.contains("previewing"), "the empty case says nothing about previewing")
+        #expect(empty.contains("unset APPLE_DRY_RUN"))
+        // The per-command example for a dry-run posture is a PREVIEW, never a sandbox execute.
+        #expect(empty.contains("APPLE_DRY_RUN=1 apple"))
+        #expect(!empty.contains("APPLE_TEST_MODE=1"))
+
+        let set = advice(for: "APPLE_DRY_RUN", value: "1")
+        #expect(set.contains("silently previewing"))
+        #expect(set.contains("do not unset it"))
+
+        let sandbox = advice(for: "APPLE_TEST_SANDBOX", value: "x")
+        #expect(sandbox.contains("APPLE_TEST_MODE=1 APPLE_TEST_SANDBOX=<prefix> apple"))
+        let emptySandbox = advice(for: "APPLE_TEST_SANDBOX", value: "")
+        #expect(emptySandbox.contains("no effect by itself"))
+        // …and it does not speak for the other variables (APPLE_TEST_MODE=1 may be exported too).
+        #expect(!emptySandbox.contains("NOT engaged"))
     }
 }

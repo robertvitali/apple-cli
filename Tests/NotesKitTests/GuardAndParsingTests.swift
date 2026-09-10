@@ -323,15 +323,12 @@ struct NotesWriteModelV2Tests {
     /// which MailKitTests setenv()s in parallel inside this same process.
     let P = TestMode.canonicalSandboxPrefix
 
-    /// The whole write-posture set pinned absent: `withoutSandboxOverrides` covers
-    /// `APPLE_TEST_SANDBOX` / `APPLE_TEST_MODE` / `APPLE_TEST_RECIPIENTS`, and the nested window
-    /// adds `APPLE_DRY_RUN` (which moves `willExecute`, not `sandboxActive`, so it is not one of
-    /// the sandbox variables). The lock is recursive and process-wide, so the nesting is safe and
-    /// the window serializes against every other suite's.
+    /// The whole write-posture set pinned absent — `TestEnvironment.writeModeVariables`, named
+    /// once in TestSupport rather than re-spelled here (a hand-rolled sandbox-trio-plus-
+    /// `APPLE_DRY_RUN` pin would under-pin the day a fifth variable joins the shared list). The
+    /// lock is recursive and process-wide, so the window serializes against every other suite's.
     func pinnedEnv<T>(_ body: () throws -> T) rethrows -> T {
-        try TestEnvironment.withoutSandboxOverrides {
-            try TestEnvironment.with(["APPLE_DRY_RUN": String?.none], body)
-        }
+        try TestEnvironment.withoutWriteModeOverrides(body)
     }
 
     @Test("the test environment is clean (precondition for every pin below)")
