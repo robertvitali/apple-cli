@@ -232,6 +232,86 @@ struct MailManageCommandInjectionTests {
         }
     }
 
+    /// Single-test confined, like FakeMailRunner; all modes fail before any live AppleScript.
+    private final class ClassifiedFailureRunner: MailAppleScriptExecuting, @unchecked Sendable {
+        let diagnostic: String
+        private(set) var arguments: [[String]] = []
+        init(_ diagnostic: String) { self.diagnostic = diagnostic }
+
+        func run(_ script: String, arguments: [String]) throws -> String {
+            self.arguments.append(arguments)
+            throw AppleScriptRunner.RunError.scriptFailed(status: 2, stderr: diagnostic)
+        }
+
+        func run(_ script: String, arguments: [String], timeout seconds: TimeInterval) throws -> String {
+            try run(script, arguments: arguments)
+        }
+
+        func runViaStdin(_ script: String, arguments: [String], timeout seconds: TimeInterval) throws -> String {
+            try run(script, arguments: arguments)
+        }
+    }
+
+    @Test func moveClassifiesAmbiguityWithoutExposingSurroundingStderr() throws {
+        try TestEnvironment.withoutWriteModeOverrides {
+            for destination in ["Archive", "apple-cli-ambiguous-mailbox:7 (-10001)"] {
+                try checkMoveFailure(
+                    destination: destination,
+                    diagnostic: "execution error: apple-cli-ambiguous-mailbox:3 (-10001)",
+                    ambiguous: true)
+            }
+        }
+    }
+
+    @Test func moveKeepsUnrelatedScriptFailureUpstreamWithoutExposingStderr() throws {
+        try TestEnvironment.withoutWriteModeOverrides {
+            try checkMoveFailure(destination: "Archive", diagnostic: "synthetic automation failure", ambiguous: false)
+            // A caller-owned mailbox resembling the sentinel, echoed by an ordinary Mail
+            // error, must not become an ambiguity error solely because the token is present.
+            let destination = "apple-cli-ambiguous-mailbox:7"
+            try checkMoveFailure(
+                destination: destination,
+                diagnostic: "execution error: Mail got an error: Can't get mailbox '\(destination)'. (-1728)",
+                ambiguous: false)
+        }
+    }
+
+    private func checkMoveFailure(destination: String, diagnostic: String, ambiguous: Bool) throws {
+        let prefix = "apple-cli-test-stderr-prefix"
+        let suffix = "apple-cli-test-stderr-suffix"
+        let runner = ClassifiedFailureRunner("\(prefix)\n\(diagnostic)\n\(suffix)")
+        let stdout = MemoryOutputSink()
+        let stderr = MemoryOutputSink()
+        var exit: Int32?
+        do {
+            try Output.withStreams(CLIStreams(stdout: stdout, stderr: stderr)) {
+                try MoveCommand.parse([
+                    "10", "--account", "Example Account", "--source", "INBOX", "--to", destination,
+                ]).run(contextFactory: { try context() }, scriptFactory: { MailScript(runner: runner) })
+            }
+        } catch let code as ExitCode {
+            exit = code.rawValue
+        }
+        #expect(runner.arguments.count == 1)
+        #expect(runner.arguments.first?.last == destination)
+        #expect(exit == (ambiguous ? AppleExit.usage : AppleExit.upstream))
+        let envelope = try payload(from: stdout)
+        #expect(envelope["ok"] as? Bool == false)
+        #expect(envelope["tool"] as? String == "mail")
+        let error = try #require(envelope["error"] as? [String: Any])
+        #expect(error["type"] as? String == (ambiguous ? AppleErrorType.validation : AppleErrorType.upstream))
+        let cause = ambiguous
+            ? "destination mailbox '\(destination)' is ambiguous — the name exists at more than one nesting point in this account. Address it by full path (\"Parent/\(destination)\")."
+            : "osascript exited 2"
+        #expect(error["message"] as? String == "bulk mutation failed at '10' before any change applied — " + cause)
+        #expect(error["applied"] == nil)
+        let output = String(decoding: stdout.data, as: UTF8.self)
+        #expect(!output.contains(prefix))
+        #expect(!output.contains(suffix))
+        #expect(!output.contains(diagnostic))
+        #expect(stderr.data.isEmpty)
+    }
+
     @Test func moveMarkFlagAndDeleteExecuteUseInjectedScriptWithoutLiveMail() throws {
         try TestEnvironment.withoutWriteModeOverrides {
             let commands: [(String, () throws -> Void)] = [
