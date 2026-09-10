@@ -2033,15 +2033,14 @@ public struct MailScript {
                     set accts to hitsA
                 end if
                 repeat with a in accts
-                    -- The bare `try` DELIBERATELY swallows resolveMailboxPath's ambiguity
-                    -- sentinel here (review L2): this is a READ-side locator HINT, not a
-                    -- mutation destination — an ambiguous hint just means "the hint didn't
-                    -- disambiguate", and the correct behavior is the blind findMsg fallback
-                    -- below, which locates by message-id alone. Only the MUTATION path
-                    -- (moveLocated) surfaces the sentinel as a typed refusal.
+                    -- Only a found mailbox can narrow this read-side hint. Missing or
+                    -- ambiguous hints continue to the blind findMsg fallback below, as do
+                    -- lookup errors swallowed by this try. Destination refusals belong to
+                    -- the mutation path, never to the reply/forward hint.
                     try
-                        set mb to my resolveMailboxPath(a, mbxName)
-                        if mb is not missing value then
+                        set mailboxResult to my resolveMailboxPath(a, mbxName)
+                        if (item 1 of mailboxResult) is "found" then
+                            set mb to item 2 of mailboxResult
                             set ms to (messages of mb whose message id is targetID)
                             if (count of ms) > 0 then return item 1 of ms
                         end if
@@ -2118,7 +2117,8 @@ public struct MailScript {
     /// Mail really does have mailboxes whose own name contains a slash — Gmail's
     /// "[Gmail]/All Mail" is exactly that — and oracle B splits unconditionally, so it can never
     /// address them. Exact-first addresses both shapes; only a name that does NOT exist flat is
-    /// re-read as a nesting. Returns `missing value` when nothing resolves (caller → "nodest").
+    /// re-read as a nesting. The resolver returns a tagged mailbox reference, missing result,
+    /// or ambiguity result; only the move scripts serialize these as fixed stdout tokens.
     /// Move variant of `mutateLocated`: also appends the nested-mailbox resolver, and maps the
     /// script's "nodest" token to a precise `not_found` instead of the opaque AppleScript error a
     /// bare `first mailbox … whose name is` raised before.
@@ -2126,37 +2126,24 @@ public struct MailScript {
         let script = body + "\n" + MailScript.locator + "\n" + MailScript.mailboxPathResolver
         let bare = MailFormat.stripAngleBrackets(id) ?? id
         for candidate in ["<\(bare)>", bare] {
-            let out: String
-            do {
-                out = try runner.run(script, arguments: [candidate, account ?? "", toMailbox])
-            } catch let e as AppleScriptRunner.RunError {
-                // The resolver raises the typed ambiguity sentinel (extra23): a bare leaf name
-                // matching several nesting points must refuse, never pick item 1 arbitrarily
-                // as a mutation destination.
-                if case .scriptFailed(_, let stderr) = e, MailScript.isAmbiguousMailboxError(stderr) {
-                    throw AppleError.validation("destination mailbox '\(toMailbox)' is ambiguous — the name exists at more than one nesting point in this account. Address it by full path (\"Parent/\(toMailbox)\").")
-                }
-                throw e
-            }
-            if out == "ok" { return true }
-            if out == "nodest" {
+            // Human diagnostics can echo caller-owned mailbox text, including a complete
+            // forged sentinel line. Classify only controlled stdout results; runner failures
+            // retain their sanitized upstream mapping at the command boundary.
+            let out = try runner.run(script, arguments: [candidate, account ?? "", toMailbox])
+            switch out {
+            case "ok":
+                return true
+            case "notfound":
+                continue
+            case "nodest":
                 throw AppleError.notFound("destination mailbox '\(toMailbox)' not found in the message's account (for a nested mailbox use \"Parent/Child\").")
+            case "apple-cli-ambiguous-mailbox":
+                throw AppleError.validation("destination mailbox '\(toMailbox)' is ambiguous — the name exists at more than one nesting point in this account. Address it by full path (\"Parent/\(toMailbox)\").")
+            default:
+                throw AppleError.upstream("unexpected Mail move result")
             }
         }
         return false
-    }
-
-    /// Internal for the logic tier: the typed ambiguity sentinel the resolver raises when a
-    /// bare leaf (or a segment) matches more than one mailbox — mapped to a validation error
-    /// instead of an arbitrary item-1 pick (extra23).
-    static func isAmbiguousMailboxError(_ stderr: String) -> Bool {
-        // Anchored (security review M1): require BOTH the -10001 error number the sentinel is
-        // raised with AND osascript's `execution error:` framing, so unrelated stderr that
-        // merely CONTAINS the token (e.g. an operator-named mailbox echoed by a different
-        // Mail error) cannot masquerade as ambiguity and downgrade an upstream error class.
-        stderr.contains("(-10001)")
-            && stderr.range(of: #"execution error:.*apple-cli-ambiguous-mailbox:\d+"#,
-                            options: .regularExpression) != nil
     }
 
     /// Internal for the logic tier: pins the resolver's ambiguity guards as source text (the
@@ -2180,17 +2167,18 @@ public struct MailScript {
             -- review round): oracle A's own reference form `mailbox "X" of acct` resolves
             -- TOP-LEVEL ONLY and errors -1728 on a nested leaf (probed live: 1 nested hit,
             -- direct reference still errors). So on >1 hits: a top-level match wins exactly
-            -- as the oracle would resolve it; otherwise raise the typed sentinel the Swift
-            -- side maps to a validation error naming the full-path fix (the oracle would
-            -- have errored -1728 there too — our refusal names the remedy).
+            -- as the oracle would resolve it; otherwise return an ambiguity tag. Keep
+            -- mailbox references inside the script: only the move handlers serialize the
+            -- fixed ambiguity token, never caller-owned names or human diagnostics.
             if (count of hits) > 1 then
                 try
-                    return mailbox pathRaw of acct
+                    set topLevelMailbox to get mailbox pathRaw of acct
+                    return {"found", topLevelMailbox}
                 on error
-                    error "apple-cli-ambiguous-mailbox:" & (count of hits) number -10001
+                    return {"ambiguous", missing value}
                 end try
             end if
-            if (count of hits) > 0 then return (item 1 of hits)
+            if (count of hits) > 0 then return {"found", item 1 of hits}
             set AppleScript's text item delimiters to "/"
             set parts to text items of pathRaw
             set AppleScript's text item delimiters to ""
@@ -2205,17 +2193,18 @@ public struct MailScript {
                             set segHits to (mailboxes of mbx whose name is seg)
                         end if
                     on error
-                        return missing value
+                        return {"missing", missing value}
                     end try
-                    if (count of segHits) is 0 then return missing value
+                    if (count of segHits) is 0 then return {"missing", missing value}
                     -- Same ambiguity rule per segment: `mailboxes of mbx` is also a flattened
                     -- descendant view, so a segment name occurring at several depths under the
                     -- current parent is ambiguous, not first-match.
-                    if (count of segHits) > 1 then error "apple-cli-ambiguous-mailbox:" & (count of segHits) number -10001
+                    if (count of segHits) > 1 then return {"ambiguous", missing value}
                     set mbx to (item 1 of segHits)
                 end if
             end repeat
-            return mbx
+            if mbx is missing value then return {"missing", missing value}
+            return {"found", mbx}
         end tell
     end resolveMailboxPath
     """
@@ -2227,8 +2216,10 @@ public struct MailScript {
         set mbxName to item 3 of argv
         tell application "Mail"
             set acctOfMsg to account of (mailbox of msg)
-            set destMbx to my resolveMailboxPath(acctOfMsg, mbxName)
-            if destMbx is missing value then return "nodest"
+            set mailboxResult to my resolveMailboxPath(acctOfMsg, mbxName)
+            if (item 1 of mailboxResult) is "ambiguous" then return "apple-cli-ambiguous-mailbox"
+            if (item 1 of mailboxResult) is "missing" then return "nodest"
+            set destMbx to item 2 of mailboxResult
             set mailbox of msg to destMbx
         end tell
         return "ok"
@@ -2247,8 +2238,10 @@ public struct MailScript {
         set mbxName to item 3 of argv
         tell application "Mail"
             set acctOfMsg to account of (mailbox of msg)
-            set destMbx to my resolveMailboxPath(acctOfMsg, mbxName)
-            if destMbx is missing value then return "nodest"
+            set mailboxResult to my resolveMailboxPath(acctOfMsg, mbxName)
+            if (item 1 of mailboxResult) is "ambiguous" then return "apple-cli-ambiguous-mailbox"
+            if (item 1 of mailboxResult) is "missing" then return "nodest"
+            set destMbx to item 2 of mailboxResult
             duplicate msg to destMbx
             delete msg
         end tell
@@ -2261,7 +2254,7 @@ public struct MailScript {
     /// instead. `delete msg` targets the ORIGINAL reference (which, after `duplicate`, still points
     /// at the SOURCE message) and moves it to Trash — the SAME recoverable move-to-Trash as
     /// `deleteToTrash`, never a permanent delete. Destination is resolved WITHIN the message's own
-    /// account, exactly like `move`. Reuses the shared `findMsg` locator via `mutateLocated`.
+    /// account, exactly like `move`. Reuses the shared `findMsg` locator via `moveLocated`.
     @discardableResult
     public func gmailMove(internetMessageID: String, accountName: String?, toMailbox: String) throws -> Bool {
         try moveLocated(MailScript.gmailMoveScript, id: internetMessageID, account: accountName, toMailbox: toMailbox)

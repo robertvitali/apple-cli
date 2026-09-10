@@ -51,6 +51,13 @@ JSON output are stable per the versioning policy — breaking changes bump
 
 ### Fixed
 
+- **Mail move errors cannot be mistaken for mailbox ambiguity because of the mailbox name.**
+  Ordinary AppleScript failures remain sanitized upstream errors even when caller-supplied
+  mailbox text contains the old ambiguity marker or a forged diagnostic line. Genuine
+  ambiguity retains its existing validation error for both ordinary and Gmail-mode moves.
+  An unrecognized script result now stops with an upstream error instead of trying another
+  message-ID spelling after an operation whose outcome is unknown.
+
 - **Contacts and Mail reject output-file symlinks hidden behind path normalization.**
   Paths such as `dir/absent/../link` now return `safety_violation` (exit 77) before account
   or store access for Contacts vCard/photo exports and Mail dashboard, generated/rich `.eml`,

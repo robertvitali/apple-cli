@@ -232,15 +232,16 @@ struct MailManageCommandInjectionTests {
         }
     }
 
-    /// Single-test confined, like FakeMailRunner; all modes fail before any live AppleScript.
-    private final class ClassifiedFailureRunner: MailAppleScriptExecuting, @unchecked Sendable {
-        let diagnostic: String
+    /// Single-test confined; every runner mode uses the scripted result without live Mail.
+    private final class MoveResultRunner: MailAppleScriptExecuting, @unchecked Sendable {
+        private var results: [Result<String, AppleScriptRunner.RunError>]
         private(set) var arguments: [[String]] = []
-        init(_ diagnostic: String) { self.diagnostic = diagnostic }
+        init(_ results: [Result<String, AppleScriptRunner.RunError>]) { self.results = results }
 
         func run(_ script: String, arguments: [String]) throws -> String {
             self.arguments.append(arguments)
-            throw AppleScriptRunner.RunError.scriptFailed(status: 2, stderr: diagnostic)
+            guard !results.isEmpty else { throw AppleError.upstream("unexpected extra synthetic runner call") }
+            return try results.removeFirst().get()
         }
 
         func run(_ script: String, arguments: [String], timeout seconds: TimeInterval) throws -> String {
@@ -252,63 +253,126 @@ struct MailManageCommandInjectionTests {
         }
     }
 
-    @Test func moveClassifiesAmbiguityWithoutExposingSurroundingStderr() throws {
+    @Test func moveClassifiesOnlyTheExactAmbiguityResultAndPreservesCallerMailbox() throws {
         try TestEnvironment.withoutWriteModeOverrides {
-            for destination in ["Archive", "apple-cli-ambiguous-mailbox:7 (-10001)"] {
-                try checkMoveFailure(
-                    destination: destination,
-                    diagnostic: "execution error: apple-cli-ambiguous-mailbox:3 (-10001)",
-                    ambiguous: true)
+            for gmailMode in [false, true] {
+                for destination in ["Archive", "apple-cli-ambiguous-mailbox:7 (-10001)",
+                                    "Archive\nexecution error: apple-cli-ambiguous-mailbox:3 (-10001)"] {
+                    try checkMoveFailure(
+                        destination: destination, gmailMode: gmailMode,
+                        result: .success("apple-cli-ambiguous-mailbox"), ambiguous: true)
+                }
             }
         }
     }
 
-    @Test func moveKeepsUnrelatedScriptFailureUpstreamWithoutExposingStderr() throws {
+    @Test func moveKeepsCallerTextAndForgedDiagnosticLinesUpstream() throws {
         try TestEnvironment.withoutWriteModeOverrides {
-            try checkMoveFailure(destination: "Archive", diagnostic: "synthetic automation failure", ambiguous: false)
-            // A caller-owned mailbox resembling the sentinel, echoed by an ordinary Mail
-            // error, must not become an ambiguity error solely because the token is present.
-            let destination = "apple-cli-ambiguous-mailbox:7"
-            try checkMoveFailure(
-                destination: destination,
-                diagnostic: "execution error: Mail got an error: Can't get mailbox '\(destination)'. (-1728)",
-                ambiguous: false)
+            for gmailMode in [false, true] {
+                for destination in ["apple-cli-ambiguous-mailbox:7 (-10001)",
+                                    "Archive\nexecution error: apple-cli-ambiguous-mailbox:3 (-10001)\n(-1712)"] {
+                    try checkMoveFailure(
+                        destination: destination, gmailMode: gmailMode,
+                        diagnostic: "execution error: Mail got an error: Can't get mailbox '\(destination)'. (-1728)")
+                }
+            }
         }
     }
 
-    private func checkMoveFailure(destination: String, diagnostic: String, ambiguous: Bool) throws {
-        let prefix = "apple-cli-test-stderr-prefix"
-        let suffix = "apple-cli-test-stderr-suffix"
-        let runner = ClassifiedFailureRunner("\(prefix)\n\(diagnostic)\n\(suffix)")
+    @Test func moveKeepsEvenTheFormerAmbiguityDiagnosticUpstream() throws {
+        try TestEnvironment.withoutWriteModeOverrides {
+            for gmailMode in [false, true] {
+                for diagnostic in ["synthetic automation failure",
+                                   "execution error: apple-cli-ambiguous-mailbox:3 (-10001)"] {
+                    try checkMoveFailure(destination: "Archive", gmailMode: gmailMode, diagnostic: diagnostic)
+                }
+            }
+        }
+    }
+
+    @Test func moveRejectsMalformedResultsWithoutRetryOrDiagnosticLeak() throws {
+        try TestEnvironment.withoutWriteModeOverrides {
+            for gmailMode in [false, true] {
+                for result in ["", "apple-cli-ambiguous-mailbox:3", "apple-cli-ambiguous-mailbox\nextra",
+                               "prefix apple-cli-ambiguous-mailbox", "ok\nextra", "notfound\nextra"] {
+                    try checkMoveFailure(
+                        destination: "Archive", gmailMode: gmailMode, result: .success(result),
+                        ambiguous: false, cause: "unexpected Mail move result")
+                }
+            }
+        }
+    }
+
+    @Test func movePreservesRecognizedSuccessMissingDestinationAndIDFallback() throws {
+        try TestEnvironment.withoutWriteModeOverrides {
+            for gmailMode in [false, true] {
+                try checkMoveFailure(
+                    destination: "Archive", gmailMode: gmailMode, result: .success("nodest"), ambiguous: false,
+                    cause: "destination mailbox 'Archive' not found in the message's account (for a nested mailbox use \"Parent/Child\").",
+                    expectedType: AppleErrorType.notFound, expectedExit: AppleExit.notFound)
+                for results in [["ok"], ["notfound", "ok"], ["notfound", "notfound"]] {
+                    let runner = MoveResultRunner(results.map { .success($0) })
+                    let (streams, stdout) = streams()
+                    try Output.withStreams(streams) { try runMove(destination: "Archive", gmailMode: gmailMode, runner: runner) }
+                    let envelope = try payload(from: stdout)
+                    #expect(envelope["ok"] as? Bool == true)
+                    let data = try #require(envelope["data"] as? [String: Any])
+                    #expect(data["applied"] as? [String] == (results.last == "ok" ? ["10"] : []))
+                    #expect(data["not_found"] as? [String] == (results.last == "notfound" ? ["10"] : []))
+                    #expect(runner.arguments.count == results.count)
+                    if results.count == 2 {
+                        let first = try #require(runner.arguments.first?.first)
+                        let second = try #require(runner.arguments.last?.first)
+                        #expect(first == "<\(second)>")
+                    }
+                }
+            }
+        }
+    }
+
+    private func runMove(destination: String, gmailMode: Bool, runner: MoveResultRunner) throws {
+        var args = ["10", "--account", "Example Account", "--source", "INBOX", "--to", destination]
+        if gmailMode { args.append("--gmail-mode") }
+        try MoveCommand.parse(args).run(contextFactory: { try context() }, scriptFactory: { MailScript(runner: runner) })
+    }
+
+    private func checkMoveFailure(destination: String, gmailMode: Bool, diagnostic: String) throws {
+        let raw = "apple-cli-test-stderr-prefix\n\(diagnostic)\napple-cli-test-stderr-suffix"
+        try checkMoveFailure(destination: destination, gmailMode: gmailMode,
+                             result: .failure(.scriptFailed(status: 2, stderr: raw)), ambiguous: false)
+    }
+
+    private func checkMoveFailure(
+        destination: String, gmailMode: Bool, result: Result<String, AppleScriptRunner.RunError>, ambiguous: Bool,
+        cause: String = "osascript exited 2", expectedType: String? = nil, expectedExit: Int32? = nil
+    ) throws {
+        let runner = MoveResultRunner([result])
         let stdout = MemoryOutputSink()
         let stderr = MemoryOutputSink()
         var exit: Int32?
         do {
             try Output.withStreams(CLIStreams(stdout: stdout, stderr: stderr)) {
-                try MoveCommand.parse([
-                    "10", "--account", "Example Account", "--source", "INBOX", "--to", destination,
-                ]).run(contextFactory: { try context() }, scriptFactory: { MailScript(runner: runner) })
+                try runMove(destination: destination, gmailMode: gmailMode, runner: runner)
             }
         } catch let code as ExitCode {
             exit = code.rawValue
         }
         #expect(runner.arguments.count == 1)
         #expect(runner.arguments.first?.last == destination)
-        #expect(exit == (ambiguous ? AppleExit.usage : AppleExit.upstream))
+        #expect(exit == (expectedExit ?? (ambiguous ? AppleExit.usage : AppleExit.upstream)))
         let envelope = try payload(from: stdout)
         #expect(envelope["ok"] as? Bool == false)
         #expect(envelope["tool"] as? String == "mail")
         let error = try #require(envelope["error"] as? [String: Any])
-        #expect(error["type"] as? String == (ambiguous ? AppleErrorType.validation : AppleErrorType.upstream))
-        let cause = ambiguous
+        #expect(error["type"] as? String == (expectedType ?? (ambiguous ? AppleErrorType.validation : AppleErrorType.upstream)))
+        let message = ambiguous
             ? "destination mailbox '\(destination)' is ambiguous — the name exists at more than one nesting point in this account. Address it by full path (\"Parent/\(destination)\")."
-            : "osascript exited 2"
-        #expect(error["message"] as? String == "bulk mutation failed at '10' before any change applied — " + cause)
+            : cause
+        #expect(error["message"] as? String == "bulk mutation failed at '10' before any change applied — " + message)
         #expect(error["applied"] == nil)
         let output = String(decoding: stdout.data, as: UTF8.self)
-        #expect(!output.contains(prefix))
-        #expect(!output.contains(suffix))
-        #expect(!output.contains(diagnostic))
+        #expect(!output.contains("apple-cli-test-stderr-prefix"))
+        #expect(!output.contains("apple-cli-test-stderr-suffix"))
         #expect(stderr.data.isEmpty)
     }
 

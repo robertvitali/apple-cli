@@ -9,45 +9,101 @@ import AppleKit
 @Suite("Bulk targeting (Q11-D)")
 struct BulkTargetingTests {
 
-    /// extra23: the resolver must carry BOTH ambiguity guards — the flat-name branch and the
-    /// per-segment branch — raising the typed sentinel instead of `item 1` arbitrary picks.
-    /// Source-text pin: the script only executes against live Mail, and executing a move in
-    /// the logic tier would mutate real mail.
-    @Test func resolverCarriesAmbiguityGuards() {
+    /// Source pins supplement the injected command tests: those exercise Swift result
+    /// classification, while these check the resolver's AppleScript decisions and consumers.
+    /// They do not establish live Mail lookup semantics.
+    @Test func resolverCarriesTaggedAmbiguityGuards() throws {
         let src = MailScript.mailboxPathResolverSource
-        let guards = src.components(separatedBy: "apple-cli-ambiguous-mailbox").count - 1
-        #expect(guards == 2)
+        #expect(src.components(separatedBy: #"return {"ambiguous", missing value}"#).count - 1 == 2)
         #expect(src.contains("(count of hits) > 1"))
-        #expect(src.contains("(count of segHits) > 1"))
-        // MEASURED top-level preference: `mailbox X of acct` (oracle A's own reference form)
-        // resolves top-level-only and errors -1728 on a nested leaf, so on >1 flat hits a
-        // top-level match must win BEFORE the sentinel refusal — dropping it would refuse a
-        // move the oracle performs.
-        #expect(src.contains("return mailbox pathRaw of acct"))
-        // Placement (review B3): the segment-loop sentinel must sit OUTSIDE the `try…end try`
-        // that wraps the segHits lookup — inside it, the loop's own `on error` handler would
-        // swallow the sentinel into `return missing value` ("nodest"), silently disabling the
-        // guard. Pin: the segment guard appears AFTER the last `end try` in the source.
-        let lastEndTry = src.range(of: "end try", options: .backwards)
-        let segGuard = src.range(of: "(count of segHits) > 1")
-        #expect(lastEndTry != nil && segGuard != nil
-            && lastEndTry!.upperBound <= segGuard!.lowerBound)
+        #expect(src.contains(#"if (count of segHits) > 1 then return {"ambiguous", missing value}"#))
+        #expect(!src.contains("apple-cli-ambiguous-mailbox"))
+        #expect(!src.contains("number -10001"))
+
+        // Force the existing top-level preference to resolve inside its try before tagging
+        // the mailbox reference. A lazy reference inside a list could hide lookup failure.
+        let topLevel = try #require(src.range(of: "set topLevelMailbox to get mailbox pathRaw of acct"))
+        let foundTopLevel = try #require(src.range(of: #"return {"found", topLevelMailbox}"#))
+        let ambiguous = try #require(src.range(of: #"return {"ambiguous", missing value}"#))
+        #expect(topLevel.upperBound <= foundTopLevel.lowerBound)
+        #expect(foundTopLevel.upperBound <= ambiguous.lowerBound)
+
+        // An exact flat name, including a slash-containing one, wins before path splitting.
+        let exact = try #require(src.range(of: #"if (count of hits) > 0 then return {"found", item 1 of hits}"#))
+        let split = try #require(src.range(of: #"set AppleScript's text item delimiters to "/""#))
+        #expect(exact.upperBound <= split.lowerBound)
+        #expect(src.contains(#"if (count of segHits) is 0 then return {"missing", missing value}"#))
+        #expect(src.contains(#"if mbx is missing value then return {"missing", missing value}"#))
+        #expect(src.contains(#"return {"found", mbx}"#))
     }
 
-    /// extra23: the sentinel classifier — anything else in stderr is NOT ambiguity (a generic
-    /// AppleScript failure must keep its upstream error class, never masquerade as validation).
-    /// Anchored (security review M1): BOTH the `-10001` sentinel error number AND osascript's
-    /// `execution error:` framing are required, so stderr that merely CONTAINS the token
-    /// (e.g. an operator-named mailbox echoed inside a different Mail error) never matches.
-    @Test func ambiguitySentinelClassification() {
-        #expect(MailScript.isAmbiguousMailboxError("execution error: apple-cli-ambiguous-mailbox:3 (-10001)"))
-        #expect(!MailScript.isAmbiguousMailboxError("execution error: Mail got an error: AppleEvent timed out. (-1712)"))
-        #expect(!MailScript.isAmbiguousMailboxError(""))
-        // Token WITHOUT the sentinel's error number (an unrelated error echoing the name).
-        #expect(!MailScript.isAmbiguousMailboxError(
-            #"execution error: Mail got an error: Can't get mailbox "apple-cli-ambiguous-mailbox:3". (-1728)"#))
-        // Token + number but no `execution error:` framing (not an osascript failure line).
-        #expect(!MailScript.isAmbiguousMailboxError("apple-cli-ambiguous-mailbox:3 (-10001)"))
+    @Test func bothMoveScriptsReturnAmbiguityBeforeTheirFirstMutation() throws {
+        for gmailMode in [false, true] {
+            let runner = MailScriptInjectionTests.FakeMailRunner()
+            runner.untimedResults = ["ok"]
+            let script = MailScript(runner: runner)
+            if gmailMode {
+                _ = try script.gmailMove(internetMessageID: "message@example.com", accountName: "Example Account", toMailbox: "Parent/Archive")
+            } else {
+                _ = try script.move(internetMessageID: "message@example.com", accountName: "Example Account", toMailbox: "Parent/Archive")
+            }
+            let assembled = try #require(runner.allScripts.first)
+            let body = try #require(assembled.components(separatedBy: "end run").first)
+            let resolve = try #require(body.range(of: "set mailboxResult to my resolveMailboxPath(acctOfMsg, mbxName)"))
+            let ambiguity = try #require(body.range(of: #"if (item 1 of mailboxResult) is "ambiguous" then return "apple-cli-ambiguous-mailbox""#))
+            let missing = try #require(body.range(of: #"if (item 1 of mailboxResult) is "missing" then return "nodest""#))
+            let reference = try #require(body.range(of: "set destMbx to item 2 of mailboxResult"))
+            let mutation = try #require(body.range(of: gmailMode ? "duplicate msg to destMbx" : "set mailbox of msg to destMbx"))
+            #expect(resolve.upperBound <= ambiguity.lowerBound)
+            #expect(ambiguity.upperBound <= missing.lowerBound)
+            #expect(missing.upperBound <= reference.lowerBound)
+            #expect(reference.upperBound <= mutation.lowerBound)
+            if gmailMode {
+                let delete = try #require(body.range(of: "delete msg"))
+                #expect(mutation.upperBound <= delete.lowerBound)
+            }
+            #expect(assembled.contains(MailScript.mailboxPathResolverSource))
+            #expect(runner.untimedArguments.first?.last == "Parent/Archive")
+            #expect(!assembled.contains("Parent/Archive"))
+        }
+    }
+
+    @Test func replyAndForwardHintsUseOnlyFoundTagsAndKeepTheBlindFallback() throws {
+        let runner = MailScriptInjectionTests.FakeMailRunner()
+        runner.stdinResults = [
+            "ok\(MailScript.US)synthetic-reply\(MailScript.US)to@example.com\(MailScript.RS)",
+            "drafted\(MailScript.US)synthetic-forward\(MailScript.US)to@example.com\(MailScript.RS)",
+        ]
+        let script = MailScript(runner: runner)
+        _ = try script.nativeReplyHtml(
+            internetMessageID: "message@example.com", accountName: "Example Account", replyAll: false,
+            sender: nil, selfAllowlist: ["to@example.com"], mailboxHint: "Parent/Archive",
+            mode: "send", htmlFragmentPath: "/tmp/synthetic-reply.html")
+        _ = try script.nativeForward(
+            internetMessageID: "message@example.com", accountName: "Example Account", htmlFragmentPath: "",
+            to: ["to@example.com"], cc: [], bcc: [], sender: nil,
+            selfAllowlist: ["to@example.com"], mailboxHint: "Parent/Archive")
+        #expect(runner.allScripts.count == 2)
+        for assembled in runner.allScripts {
+            let start = try #require(assembled.range(of: "on findMsgHinted(targetID, acctName, mbxName)"))
+            let end = try #require(assembled.range(of: "end findMsgHinted"))
+            let hint = String(assembled[start.lowerBound..<end.upperBound])
+            #expect(hint.contains("set mailboxResult to my resolveMailboxPath(a, mbxName)"))
+            let lines = hint.components(separatedBy: "\n")
+                .map { $0.trimmingCharacters(in: .whitespaces) }.joined(separator: "\n")
+            #expect(lines.contains([
+                #"if (item 1 of mailboxResult) is "found" then"#,
+                "set mb to item 2 of mailboxResult",
+                "set ms to (messages of mb whose message id is targetID)",
+                "if (count of ms) > 0 then return item 1 of ms",
+                "end if", "end try",
+            ].joined(separator: "\n")))
+            #expect(lines.contains([
+                "end tell", "end if", "return my findMsg(targetID, acctName)",
+            ].joined(separator: "\n")))
+            #expect(!hint.contains("apple-cli-ambiguous-mailbox"))
+            #expect(assembled.contains(MailScript.mailboxPathResolverSource))
+        }
     }
 
     /// extra32: the master-selection decision for `attachments save`, pinned pure. The live
