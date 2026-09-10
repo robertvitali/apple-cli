@@ -7,30 +7,23 @@ import Foundation
 //
 // Test-only: no product target depends on this target, so none of it is linked into `apple`.
 
-/// The process environment as it was on FIRST TOUCH, before any `TestEnvironment` window has been
-/// opened — the operator's shell, as the test process inherited it.
+/// A lazy first-touch snapshot of this test process's environment. Despite the historical
+/// `atStartup` name, this is not a capture made at OS process startup. It represents the inherited
+/// shell only if no raw environment mutation occurred before first touch.
 ///
-/// WHY A SNAPSHOT AND NOT `getenv`. Once the suite pins its variables (`withoutWriteModeOverrides`
-/// and friends), a live read inside a window observes the PIN, not the operator. That is exactly
-/// what the pins are for, and it is also why the pins destroyed the old "is the ambient
-/// environment clean?" assertion: any reader a window can reach is a reader a window can MASK. A
-/// value captured before the first window exists cannot be masked by any window, so it is the one
-/// place an operator's `APPLE_DRY_RUN=1` export stays visible for the whole run.
+/// WHY A SNAPSHOT AND NOT `getenv`. Live reads inside a `TestEnvironment` window observe its
+/// pinned values, which can mask an operator export. `TestEnvironment.with` forces this snapshot
+/// before opening its first window; subsequent managed windows cannot change the captured values.
+/// The canary reads the snapshot only to report ambient posture. Product behavior must continue
+/// to read the live environment.
 ///
-/// `TestEnvironment.with` forces this capture on its very first call (`_ = atStartup`, before it
-/// takes the lock), so the snapshot is never taken lazily from inside somebody's open window —
-/// which would freeze that window's pinned values and report them as the operator's.
+/// Route test mutations through `TestEnvironment.with`. Raw mutation before first touch corrupts
+/// inherited-shell fidelity; raw mutation afterward can make the live table disagree with this
+/// immutable snapshot. Managed windows save and restore their enclosing state.
 ///
-/// It is deliberately NEVER rewritten. `TestEnvironment` mutates the real environment table and
-/// restores it; it does not touch this. Read it only to ASSERT about the ambient process, never to
-/// decide behavior — production code must keep reading the live environment.
-///
-/// THE INVARIANT THIS SNAPSHOT'S FIDELITY IS EXACTLY EQUAL TO: no test may `setenv` or `unsetenv`
-/// any of `TestEnvironment.writeModeVariables` outside a `TestEnvironment` window. A window saves
-/// and restores, so it can never make the snapshot disagree with the shell the process started in;
-/// a raw `setenv` that outlives its test permanently changes the live table while this snapshot
-/// keeps reporting the operator's original value, and the canary that reads it silently stops
-/// describing the running process. Route every such mutation through `TestEnvironment.with`.
+/// The snapshot and recursive lock each belong to ONE process. Sharded test workers have separate
+/// snapshots and locks; a worker excluding AppleKitTests has no canary. A sole-reporter result in
+/// one process cannot certify the environments or pin coverage of other workers.
 public enum AmbientEnvironment {
     public static let atStartup: [String: String] = ProcessInfo.processInfo.environment
 }
@@ -124,12 +117,9 @@ public enum TestEnvironment {
     /// (including absence) afterwards. Serialized process-wide against every other caller.
     @discardableResult
     public static func with<T>(_ values: [String: String?], _ body: () throws -> T) rethrows -> T {
-        // Force the ambient snapshot BEFORE the first window can open. `AmbientEnvironment` is a
-        // lazily-initialized global, so without this touch its capture would happen at whatever
-        // moment the first canary test READ it — which could be inside some other suite's open
-        // window, freezing that window's pinned values as if they were the operator's. Touching it
-        // here, outside the lock and before any mutation, makes the snapshot unmaskable by
-        // construction rather than by test-ordering luck.
+        // Force the lazy snapshot before this process's first managed window can mutate the
+        // table. This prevents capturing a pin as ambient state; it cannot recover the inherited
+        // shell if raw mutation already occurred before first touch.
         _ = AmbientEnvironment.atStartup
         lock.lock()
         // `updateValue`, not `previous[key] = …`: on a `[String: String?]` the subscript treats a

@@ -4,16 +4,17 @@ import TestSupport
 
 // MARK: - The operator-shell detector
 
-/// THE ambient write-posture canary for the whole test process — one copy, here, because the
-/// property it asserts belongs to the PROCESS and not to any domain.
+/// The ambient write-posture canary for one test process. Each sharded worker has its own
+/// snapshot and lock; workers that exclude AppleKitTests have no canary. A sole-reporter result
+/// in one process says nothing about other workers' environments or pin coverage.
 ///
 /// Every write-posture assertion in the tree (Calendar, Reminders, Mail, Messages) now runs inside
 /// a `TestEnvironment` window that pins `APPLE_TEST_MODE` / `APPLE_TEST_SANDBOX` /
 /// `APPLE_TEST_RECIPIENTS` / `APPLE_DRY_RUN` absent, so none of those suites depends on a clean
 /// ambient environment any more. That robustness has a cost: with `APPLE_DRY_RUN=1` exported the
 /// whole tree goes green while the operator's real `apple` invocations preview instead of
-/// executing, and nothing says so. This test is that missing signal — a report on the shell the
-/// tests were run from, not a dependency of any pin.
+/// executing, and nothing says so. This test reports the first-touch ambient snapshot; its
+/// fidelity to the inherited shell requires no raw mutation before that capture.
 ///
 /// It lives in `AppleKitTests` rather than being duplicated per domain because the assertion is
 /// byte-identical wherever it sits: a per-domain copy is N places to update and N failures for one
@@ -22,13 +23,15 @@ import TestSupport
 /// It reads `AmbientEnvironment.atStartup`, NEVER `getenv`. A `getenv` canary is unmaskable only
 /// when it happens to run outside every window, which no test can guarantee in a concurrent suite
 /// — inside a window it would read the PIN and pass no matter what the operator exported, i.e. the
-/// check would quietly stop checking. The snapshot is captured before any window can exist
-/// (`TestEnvironment.with` forces it), so no window can mask it.
+/// check would quietly stop checking. Despite its name, `atStartup` initializes lazily on first
+/// touch, not at OS process startup. `TestEnvironment.with` forces it before this process's first
+/// managed window opens, so those windows cannot mask it. Raw mutation before first touch can
+/// already have replaced inherited values; raw mutation afterward can desynchronize the live table.
 ///
 /// Expected to FAIL under `APPLE_DRY_RUN=1 swift test`, and — measured on the full unfiltered
 /// tree, under both `APPLE_DRY_RUN=1` and the fail-loud `APPLE_DRY_RUN=junk` — to be the ONLY
-/// failure: every suite that resolves a write posture does so inside a pin, so the pins absorb the
-/// export and this canary alone reports it.
+/// failure in that process: the measured suites' pins absorb the export and this canary reports
+/// it. That observation does not prove future tests or separately filtered/sharded workers are pinned.
 ///
 /// Two readers used to fail alongside it and no longer do, which is worth knowing because a
 /// regression in either would look like this canary "gaining" a companion rather than like a lost

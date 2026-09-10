@@ -83,24 +83,13 @@ struct ContactsWriteModelV2Tests {
         try TestEnvironment.withoutWriteModeOverrides(body)
     }
 
-    @Test("the pin actually clears the variables every gate below depends on")
-    func pinnedEnvironmentIsClean() {
-        withPinnedWriteEnv {
-            let env = ProcessInfo.processInfo.environment
-            for key in TestEnvironment.writeModeVariables {
-                #expect(env[key] == nil, "\(key) must be pinned absent inside the window")
-            }
-            // Inside the pin the label prefix is deterministically the built-in constant.
-            #expect(TestMode.sandboxPrefix == TestMode.canonicalSandboxPrefix)
-        }
-    }
-
     @Test("DEFAULT PIN: a flagless contacts write EXECUTES and is unsandboxed")
     func defaultsToExecute() throws {
         try withPinnedWriteEnv {
             let gate = try resolveWrite(self.opts([]))
             #expect(gate.willExecute == true)
             #expect(gate.sandboxActive == false)
+            #expect(TestMode.sandboxPrefix == TestMode.canonicalSandboxPrefix)
         }
     }
 

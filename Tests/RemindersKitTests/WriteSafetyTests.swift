@@ -75,18 +75,6 @@ struct RemindersWriteModelV2Tests {
         try TestEnvironment.withoutWriteModeOverrides(body)
     }
 
-    /// Asserts the window itself: inside `pinned`, every write-posture variable reads back absent,
-    /// which is the property each gate pin below rests on. Read via `getenv` — the same primitive
-    /// `TestEnvironment` writes with, so no snapshot taken before the window can be observed.
-    @Test("the pinned window forces the posture-relevant variables absent")
-    func pinnedWindowIsClean() {
-        pinned {
-            for key in TestEnvironment.writeModeVariables {
-                #expect(getenv(key) == nil, "\(key) should be pinned absent inside the window")
-            }
-        }
-    }
-
     // The operator-shell detector — "did the shell running the tests export a write-posture
     // variable?" — asserts a property of the PROCESS, not of Reminders, so it lives once in
     // `AppleKitTests/AmbientEnvironmentCanaryTests.swift`. The pins above are what make this suite

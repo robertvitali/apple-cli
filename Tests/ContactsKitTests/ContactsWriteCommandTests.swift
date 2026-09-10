@@ -870,11 +870,11 @@ struct ContactsGroupMembershipCommandTests {
 
 /// The sandbox branches reachable only with a name matching the LIVE `TestMode.sandboxPrefix`.
 ///
-/// Every test here runs inside `TestEnvironment.withoutSandboxOverrides`, which pins
-/// `APPLE_TEST_SANDBOX` / `APPLE_TEST_MODE` / `APPLE_TEST_RECIPIENTS` ABSENT under the test
-/// process's single recursive lock. That makes the live prefix deterministically
-/// `TestMode.canonicalSandboxPrefix` for the duration, so a concurrent MailKit window writing
-/// `APPLE_TEST_SANDBOX=qa-fixture` cannot flip these assertions.
+/// Every test here runs inside `pinnedGates`, which delegates to the shared
+/// `TestEnvironment.withoutWriteModeOverrides` window. All of `TestEnvironment.writeModeVariables`,
+/// including `APPLE_DRY_RUN`, are absent under this test process's recursive lock. The live prefix
+/// is therefore `TestMode.canonicalSandboxPrefix`, and execute assertions cannot silently become
+/// previews because of an operator export or another suite's managed window.
 ///
 /// Division of labour with the suites above: those stay prefix-agnostic and pin the sandbox
 /// REFUSALS (safety-relevant, race-immune under any prefix); this one pins the ACCEPTANCES, which
