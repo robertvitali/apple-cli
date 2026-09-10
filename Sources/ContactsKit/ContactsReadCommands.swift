@@ -246,7 +246,7 @@ struct VCardExportCommand: ParsableCommand {
             // TCC). `allowOutsideHome` — this `--out` is a CLI extra (the MCP returns the text
             // inline), so /tmp and external volumes stay legitimate, matching Mail's attachments save.
             let dest = try out.map {
-                try refuseRawFinalLeafSymlink($0, action: "write the vCard to")
+                try refuseFinalLeafSymlink($0, action: "write the vCard to")
                 return try confineWriteDestination($0, action: "write the vCard to", allowOutsideHome: true).path
             }
             let store = storeFactory()
@@ -255,7 +255,8 @@ struct VCardExportCommand: ParsableCommand {
             var writtenTo: String?
             if let dest {
                 do {
-                    if let out { try refuseRawFinalLeafSymlink(out, action: "write the vCard to") }
+                    if let out { try refuseFinalLeafSymlink(out, action: "write the vCard to") }
+                    try refuseFinalLeafSymlink(dest, action: "write the vCard to")
                     try vcard.write(toFile: dest, atomically: true, encoding: .utf8); writtenTo = dest
                 }
                 catch let e as AppleError { throw e }
@@ -324,7 +325,7 @@ struct PhotoGetCommand: ParsableCommand {
             // before the store touch (fail fast, testable without TCC). CLI-extra path, so
             // allowOutsideHome (the MCP returns bytes inline).
             let dest = try out.map {
-                try refuseRawFinalLeafSymlink($0, action: "write the photo to")
+                try refuseFinalLeafSymlink($0, action: "write the photo to")
                 return try confineWriteDestination($0, action: "write the photo to", allowOutsideHome: true).path
             }
             let store = storeFactory()
@@ -340,8 +341,11 @@ struct PhotoGetCommand: ParsableCommand {
             var writtenTo: String?
             if let dest {
                 do {
-                    if let out { try refuseRawFinalLeafSymlink(out, action: "write the photo to") }
-                    try photo.bytes.write(to: URL(fileURLWithPath: dest)); writtenTo = dest
+                    if let out { try refuseFinalLeafSymlink(out, action: "write the photo to") }
+                    try refuseFinalLeafSymlink(dest, action: "write the photo to")
+                    // `.atomic` renames over the destination, so a link planted after the checks above is
+                    // replaced rather than followed — the same posture as the vCard write.
+                    try photo.bytes.write(to: URL(fileURLWithPath: dest), options: .atomic); writtenTo = dest
                 }
                 catch let e as AppleError { throw e }
                 catch { throw AppleError.unknown("failed to write photo to \(dest): \(error.localizedDescription)") }

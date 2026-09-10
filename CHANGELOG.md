@@ -51,6 +51,17 @@ JSON output are stable per the versioning policy — breaking changes bump
 
 ### Fixed
 
+- **Contacts and Mail reject output-file symlinks hidden behind path normalization.**
+  Paths such as `dir/absent/../link` now return `safety_violation` (exit 77) before account
+  or store access for Contacts vCard/photo exports and Mail dashboard, generated/rich `.eml`,
+  and attachment `--out` writes, including Mail previews. Writes recheck the operator path
+  and captured destination; ordinary files and symlinked parent directories remain permitted
+  (a symlinked parent followed by `..` selects the physical leaf when an absolute spelling
+  names something that already exists and the lexical leaf otherwise — a relative spelling always takes the
+  lexical leaf — exactly as Foundation resolves the write). The Contacts photo export
+  now writes atomically, so a link planted between the final check and the write is replaced
+  rather than followed. `schema_version` is unchanged because the existing safety error
+  contract is unchanged.
 - **`notes folders` no longer fails with `not_found` when one folder's parent cannot be
   resolved.** Notes.app keeps enumerating a sub-folder after its parent was deleted (measured:
   a `delete-folder` of a parent left the child folder listed, with its container unreadable), and

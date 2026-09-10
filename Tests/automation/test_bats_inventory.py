@@ -22,8 +22,8 @@ EXPECTED_FILES = {
     "hosted": {
         "bats/hosted/bounded_exec.bats": 5,
         "bats/hosted/calendar.bats": 20,
-        "bats/hosted/contacts.bats": 49,
-        "bats/hosted/mail.bats": 119,
+        "bats/hosted/contacts.bats": 50,
+        "bats/hosted/mail.bats": 120,
         "bats/hosted/messages.bats": 11,
         "bats/hosted/notes.bats": 39,
         "bats/hosted/reminders.bats": 38,
@@ -138,10 +138,10 @@ class BatsInventoryTests(unittest.TestCase):
         manifest = checker.load_manifest(MANIFEST_PATH)
 
         self.assertEqual(manifest["schema_version"], 1)
-        self.assertEqual(manifest["test_count"], 449)
+        self.assertEqual(manifest["test_count"], 451)
         self.assertEqual(
             {tier: manifest["tiers"][tier]["test_count"] for tier in ("hosted", "local")},
-            {"hosted": 307, "local": 142},
+            {"hosted": 309, "local": 142},
         )
         self.assertEqual(
             {

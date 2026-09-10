@@ -83,8 +83,8 @@ MAX_SHELL_VARIANTS = 256
 TRUSTED_HOSTED_FILE_SHA256 = {
     "bats/hosted/bounded_exec.bats": "13e4976b41a295182873e45c7f33c84dd7712e2ee16399fc6c0fe561056d4c26",
     "bats/hosted/calendar.bats": "78feed6a5cd530cc1a3f922c45f5ceb482db45fd36d00ee9fdfe816a87a9b6e4",
-    "bats/hosted/contacts.bats": "54db1ad8c0c5ed029a200121e1aaff78422c272698db178ee4d013095c74a2b8",
-    "bats/hosted/mail.bats": "6ac159e10bb29894eef8c0b8a07f83ae92280c0054f32d94e4b44c1fb25cb1da",
+    "bats/hosted/contacts.bats": "1409f8be307f75364f8738a9943b994b63f61e92ed3c03f8113d9a749ad90c68",
+    "bats/hosted/mail.bats": "07d33ba13fc8fe9101398ae7517c5728ff51d0039c97c3a7ca09a3cdf3d29955",
     "bats/hosted/messages.bats": "23a087ee666d59ad74899ca98186feebd5b20f2db24b0804c5a5c456b8c5cf40",
     "bats/hosted/notes.bats": "e7b8342937711212df38cf9e0a636d63a69379d5baa11ca5b464cb0192b978a3",
     "bats/hosted/reminders.bats": "1b6c08b75acce52bc714e822c8cb652e8917e963eb18804b1a86e0fa95e6aa40",

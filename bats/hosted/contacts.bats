@@ -461,6 +461,28 @@ END:VCARD"
   [ "$(cat "$target")" = "synthetic-before" ]
 }
 
+# A link hidden behind an absent `..` component is the normalized-leaf spelling the raw probe
+# alone cannot see; the same refusal must fire for both --out surfaces before Contacts access.
+@test "contacts --out refuses a final-leaf symlink hidden by absent/.. normalization" {
+  target="$BATS_TEST_TMPDIR/normalized-target.bin"
+  link="$BATS_TEST_TMPDIR/normalized-link.bin"
+  printf '%s' "synthetic-before" >"$target"
+  ln -s "$target" "$link"
+  hidden="$BATS_TEST_TMPDIR/absent/../normalized-link.bin"
+
+  run "$BIN" contacts vcard export apple-cli-test-x --out "$hidden"
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q '"type" : "safety_violation"'
+  echo "$output" | grep -q 'is a symlink'
+  [ "$(cat "$target")" = "synthetic-before" ]
+
+  run "$BIN" contacts photo get apple-cli-test-x --out "$hidden"
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q '"type" : "safety_violation"'
+  echo "$output" | grep -q 'is a symlink'
+  [ "$(cat "$target")" = "synthetic-before" ]
+}
+
 # Q14: a sandbox-policy refusal (unlabeled target in --test-mode) carries error.sandbox=true — the
 # error-envelope counterpart of the success envelope's sandbox:true. Fires before the store touch
 # (CI-safe). Revert-red: drop `sandbox: true` at the resolveWrite gate → the key disappears.

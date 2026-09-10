@@ -6,7 +6,7 @@
     "test_count": 0
   },
   "schema_version": 1,
-  "test_count": 449,
+  "test_count": 451,
   "tiers": {
     "hosted": {
       "files": [
@@ -50,7 +50,7 @@
           "test_count": 20
         },
         {
-          "file_sha256": "54db1ad8c0c5ed029a200121e1aaff78422c272698db178ee4d013095c74a2b8",
+          "file_sha256": "1409f8be307f75364f8738a9943b994b63f61e92ed3c03f8113d9a749ad90c68",
           "ordered_title_sha256": [
             "16297f96d8af0fc50bd6530b0ff6eeced34dd4ee8ad26ce2c290dd9a5f5b9b1b",
             "52adfea3c64aacc9ae591005eea0ac846bbeeaa7a880a3da4e4513c1c18ee7f4",
@@ -100,13 +100,14 @@
             "21e1145b8827ca5eda295170dc7aeecd5b317e7d26b13a305a0df03cffabb6db",
             "9be4cb8626c4c6ded977c8570695dec5bcac97492ac04c488513d4ff05586ccc",
             "9994b6b598f55d47a2fb3aa8b77ef3ac9d1f119cd189c2452f1baaaaa16b7c02",
+            "d9c15ab2916a5ed0612fe9b1bbe0d6f93eb4760440292441c28b4c0537d5c8cc",
             "d30ade5ddcf1394541b98dc6b28dfa0acc954e750371748846895b95439fecd3"
           ],
           "path": "bats/hosted/contacts.bats",
-          "test_count": 49
+          "test_count": 50
         },
         {
-          "file_sha256": "6ac159e10bb29894eef8c0b8a07f83ae92280c0054f32d94e4b44c1fb25cb1da",
+          "file_sha256": "07d33ba13fc8fe9101398ae7517c5728ff51d0039c97c3a7ca09a3cdf3d29955",
           "ordered_title_sha256": [
             "b5529b25872523d187fedf63e11144d586e2e1b988581b642cc0036ffe5fa774",
             "0c782eabd1e1661fa408d5370063840b2bcd6e1b91a3e1e52e2431174dc30635",
@@ -122,6 +123,7 @@
             "f75b938916b79f0095b91f094db117eb4ee765aa1f063aa8b353e75885dbb045",
             "88ae85b759720d9cda09cf38dd5491c4f905793b828ef841cb36d25c94b4fe59",
             "c33d1df432fe8a3ba2b9d4f31502d6481331555320c5e3b0ea3b92314fc62723",
+            "9ec892c5bf56a0a55c33a1f14945b39fe2ce1bfd3ad774410702a1de5b92dd97",
             "aacf2e7ab003b388c00e4f0d2ddef9c28e0d2e2c43265fda985da7141d5dd02a",
             "995e5d39cca5636d7188e1d7c348a35989ceafa6770e4ea9571585cf2c665595",
             "07ef814924585a9633d92a37ac093f24326a2b9bb7615307339e576d1a08440b",
@@ -229,7 +231,7 @@
             "925e6baef7654ab66b50a83468c0045158c15df955f2d23abed40bf0545fd3a0"
           ],
           "path": "bats/hosted/mail.bats",
-          "test_count": 119
+          "test_count": 120
         },
         {
           "file_sha256": "23a087ee666d59ad74899ca98186feebd5b20f2db24b0804c5a5c456b8c5cf40",
@@ -374,7 +376,7 @@
           "test_count": 26
         }
       ],
-      "test_count": 307
+      "test_count": 309
     },
     "local": {
       "files": [

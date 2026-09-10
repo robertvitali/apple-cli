@@ -22,6 +22,121 @@ private final class StoreFactory {
     }
 }
 
+@Suite("Contacts output final-leaf destinations")
+struct ContactsOutFinalLeafTests {
+    private let scratch = ScratchDirs("contacts-out-leaf")
+
+    @Test func refusesNormalizedLinksBeforeStoreAccess() throws {
+        for photo in [false, true] {
+            for dangling in [false, true] {
+                let root = try scratch.directory()
+                let target = root.appendingPathComponent("sentinel")
+                if !dangling { try Data("synthetic sentinel".utf8).write(to: target) }
+                let link = root.appendingPathComponent("link")
+                try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+                let raw = root.path + "/absent/../link"
+                let factory = StoreFactory()
+                try expectContactsFailure(exit: AppleExit.permissionDenied, type: AppleErrorType.safetyViolation) {
+                    if photo {
+                        try PhotoGetCommand.parse(["c1", "--out", raw]).run(storeFactory: factory.make)
+                    } else {
+                        try VCardExportCommand.parse(["c1", "--out", raw]).run(storeFactory: factory.make)
+                    }
+                }
+                #expect(factory.built == 0)
+                if dangling {
+                    #expect(!FileManager.default.fileExists(atPath: target.path))
+                } else {
+                    #expect(try Data(contentsOf: target) == Data("synthetic sentinel".utf8))
+                }
+            }
+        }
+    }
+
+    @Test func rechecksRawAndCapturedLeavesAfterStoreAccess() throws {
+        for photo in [false, true] {
+            for plantCaptured in [false, true] {
+                let root = try scratch.directory()
+                let first = root.appendingPathComponent("first")
+                let second = root.appendingPathComponent("second")
+                try FileManager.default.createDirectory(at: first, withIntermediateDirectories: false)
+                try FileManager.default.createDirectory(at: second, withIntermediateDirectories: false)
+                let alias = root.appendingPathComponent("alias")
+                try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: first)
+                let sentinel = root.appendingPathComponent("sentinel")
+                let original = Data("synthetic sentinel".utf8)
+                try original.write(to: sentinel)
+                let captured = first.appendingPathComponent("leaf")
+                try Data("synthetic existing output".utf8).write(to: captured)
+                let planted = (plantCaptured ? first : second).appendingPathComponent("leaf")
+                let raw = alias.path + "/leaf"
+                let factory = StoreFactory()
+                let contact = fakeContact(given: "Jane", family: "Doe")
+                contact.imageData = Data([0xFF, 0xD8, 0xFF, 0xE0])
+                factory.backend.contactsByIdentifier["c1"] = contact
+                let make: () -> ContactsStore = {
+                    do {
+                        try FileManager.default.removeItem(at: alias)
+                        try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: second)
+                        if plantCaptured { try FileManager.default.removeItem(at: captured) }
+                        try FileManager.default.createSymbolicLink(at: planted, withDestinationURL: sentinel)
+                    } catch { Issue.record(error) }
+                    return factory.make()
+                }
+                try expectContactsFailure(exit: AppleExit.permissionDenied, type: AppleErrorType.safetyViolation) {
+                    if photo {
+                        try PhotoGetCommand.parse(["c1", "--out", raw]).run(storeFactory: make)
+                    } else {
+                        try VCardExportCommand.parse(["c1", "--out", raw]).run(storeFactory: make)
+                    }
+                }
+                #expect(factory.built == 1)
+                #expect(try Data(contentsOf: sentinel) == original)
+                #expect((try? FileManager.default.destinationOfSymbolicLink(atPath: planted.path)) != nil)
+            }
+        }
+    }
+
+    @Test func acceptsNormalizedOrdinaryLeavesAndPhysicalParentTraversal() throws {
+        for photo in [false, true] {
+            for throughAlias in [false, true] {
+                let root = try scratch.directory()
+                let parent = root.appendingPathComponent("outer/inner")
+                try FileManager.default.createDirectory(at: parent, withIntermediateDirectories: true)
+                let alias = root.appendingPathComponent("alias")
+                try FileManager.default.createSymbolicLink(at: alias, withDestinationURL: parent)
+                let sentinel = root.appendingPathComponent("sentinel")
+                try Data("synthetic sentinel".utf8).write(to: sentinel)
+                if throughAlias {
+                    // A purely lexical guard would see this unrelated link and wrongly refuse.
+                    try FileManager.default.createSymbolicLink(
+                        at: root.appendingPathComponent("leaf"), withDestinationURL: sentinel)
+                    // Full-path existence selects Foundation's physical traversal branch.
+                    try Data("synthetic existing output".utf8).write(to: root.appendingPathComponent("outer/leaf"))
+                }
+                let raw = throughAlias ? alias.path + "/../leaf" : root.path + "/absent/../leaf"
+                let destination = try confineWriteDestination(raw, action: "write", allowOutsideHome: true)
+                let factory = StoreFactory()
+                let contact = fakeContact(given: "Jane", family: "Doe")
+                let bytes = Data([0xFF, 0xD8, 0xFF, 0xE0])
+                contact.imageData = bytes
+                factory.backend.contactsByIdentifier["c1"] = contact
+                let data = try runContacts {
+                    if photo {
+                        try PhotoGetCommand.parse(["c1", "--out", raw]).run(storeFactory: factory.make)
+                    } else {
+                        try VCardExportCommand.parse(["c1", "--out", raw]).run(storeFactory: factory.make)
+                    }
+                }
+                #expect(data["written_to"] as? String == destination.path)
+                #expect(try Data(contentsOf: sentinel) == Data("synthetic sentinel".utf8))
+                if photo { #expect(try Data(contentsOf: destination) == bytes) }
+                else { #expect(try String(contentsOf: destination, encoding: .utf8) == data["vcard"] as? String) }
+            }
+        }
+    }
+}
+
 @Suite("contacts auth")
 struct ContactsAuthCommandTests {
     @Test("an authorized status reports no remediation and never prompts")

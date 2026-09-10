@@ -196,6 +196,41 @@ teardown() {
   [ "$(cat "$target")" = "synthetic-before" ]
 }
 
+# A link hidden behind an absent `..` component is the normalized-leaf spelling the raw probe
+# alone cannot see. Every Mail --out surface must refuse it before Mail access, preview included.
+@test "mail --out surfaces refuse a final-leaf symlink hidden by absent/.. normalization" {
+  target="$BATS_TEST_TMPDIR/normalized-target.eml"
+  link="$BATS_TEST_TMPDIR/normalized-link.eml"
+  printf '%s' "synthetic-before" >"$target"
+  ln -s "$target" "$link"
+  hidden="$BATS_TEST_TMPDIR/absent/../normalized-link.eml"
+
+  run "$BIN" mail send --dry-run --to alice@example.com --subject "apple-cli-test hidden out" \
+    --html "<p>synthetic</p>" --out "$hidden"
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q '"type" : "safety_violation"'
+  echo "$output" | grep -q 'is a symlink'
+
+  run "$BIN" mail draft-rich --dry-run --no-open --subject "apple-cli-test hidden out" \
+    --text-body "synthetic" --out "$hidden"
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q '"type" : "safety_violation"'
+  echo "$output" | grep -q 'is a symlink'
+
+  run "$BIN" mail analytics dashboard --dry-run --out "$hidden"
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q '"type" : "safety_violation"'
+  echo "$output" | grep -q 'is a symlink'
+
+  run "$BIN" mail attachments save --dry-run apple-cli-test-missing-message \
+    --allow-outside-home --out "$hidden"
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q '"type" : "safety_violation"'
+  echo "$output" | grep -q 'is a symlink'
+
+  [ "$(cat "$target")" = "synthetic-before" ]
+}
+
 # The two per-surface DEFAULTS, pinned with deliberately flagless invocations (markers): the
 # general surface EXECUTES flagless (temp-store-confined here), the trash surface previews.
 # Nothing else in the suite locks the defaultDryRun arguments — every other invocation carries

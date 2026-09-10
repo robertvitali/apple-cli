@@ -67,11 +67,45 @@ public func rawFinalLeafPath(_ raw: String) -> String {
 /// `destinationOfSymbolicLink` errors are deliberately treated as "not a link": an inaccessible
 /// parent cannot be written by the later write path, while ENOENT is required for legitimate new
 /// leaves. Do not widen this helper into an errno-specific filesystem policy check.
+///
+/// "Raw" names the probe (an lstat of exactly the string given, no normalization), not the
+/// caller's spelling: `refuseFinalLeafSymlink` also feeds it Foundation's constructed and
+/// resolved spellings, and some callers pass an already-resolved destination.
 public func refuseRawFinalLeafSymlink(_ raw: String, action: String) throws {
     let path = rawFinalLeafPath(raw)
     if (try? FileManager.default.destinationOfSymbolicLink(atPath: path)) != nil {
         throw AppleError.safetyViolation("cannot \(action) raw destination '\(path)' because it is a symlink — refusing.")
     }
+}
+
+/// Refuse a final-leaf symlink at the spelling Foundation actually selects for the write.
+///
+/// `confineWriteDestination` constructs `URL(fileURLWithPath:)` and calls
+/// `resolvingSymlinksInPath()`. Measured on macOS 26: resolution is PHYSICAL only when every
+/// component of the constructed path, the leaf included, exists (`fileExists(atPath:)` is exactly
+/// that predicate — it follows links, so a dangling leaf or an absent component fails it);
+/// otherwise Foundation falls back to the LEXICAL collapse of the constructed path. So:
+///
+/// - on the physical branch, lstat the constructed path: the kernel resolves a symlinked parent
+///   before `..`, matching Foundation, and an existing final-leaf link is what the write would
+///   follow (resolution already replaced it with its target, so the resolved path cannot show it);
+/// - on both branches, lstat the resolved path: on the lexical branch it is the destination
+///   itself, which a missing component before `..` hid from the constructed spelling, and a
+///   dangling leaf link survives resolution there.
+///
+/// The operator's raw spelling is deliberately NOT probed: for a relative path, URL construction
+/// collapses `..` lexically before any link is consulted, and for an absolute path whose physical
+/// leaf is absent or dangling Foundation writes the lexical leaf — in both cases a kernel lstat of
+/// the raw spelling reaches an unrelated `physical/leaf` and would refuse a write Foundation never
+/// makes there. `refuseRawFinalLeafSymlink` remains for callers that already hold the exact
+/// spelling a later write or AppleScript receives.
+public func refuseFinalLeafSymlink(_ raw: String, action: String) throws {
+    let expanded = (raw as NSString).expandingTildeInPath
+    let destination = URL(fileURLWithPath: expanded)
+    if FileManager.default.fileExists(atPath: destination.path) {
+        try refuseRawFinalLeafSymlink(destination.path, action: action)
+    }
+    try refuseRawFinalLeafSymlink(destination.resolvingSymlinksInPath().path, action: action)
 }
 
 /// Resolve and confine an operator-supplied write path, or throw `AppleError.safetyViolation`

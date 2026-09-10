@@ -845,13 +845,16 @@ struct AttachmentsSave: ParsableCommand {
                 throw AppleError.mailSafety(
                     "raw --out destination is unavailable for final symlink validation — refusing.")
             }
-            try refuseRawFinalLeafSymlink(rawOut, action: "save an attachment to")
+            try refuseFinalLeafSymlink(rawOut, action: "save an attachment to")
         }
 
         for destPath in destPaths {
             try validateStableDestinationParent(
                 destPath: destPath, expectedDirectory: expectedParent,
                 action: action, allowOutsideHome: allowOutsideHome)
+            // Deliberately the RAW helper: `destPath` is already the resolution-derived spelling
+            // Mail.app receives, so lstat of exactly that string is the captured-destination
+            // recheck. Keep this probe on the captured spelling rather than normalizing it again.
             try refuseRawFinalLeafSymlink(destPath, action: "save an attachment to")
             if directory != nil, FileManager.default.fileExists(atPath: destPath) {
                 throw AppleError.mailSafety(
@@ -916,7 +919,7 @@ struct AttachmentsSave: ParsableCommand {
             // repeats this immediately before composing the live save as a TOCTOU backstop.
             let rawOut = out.map(Self.lexicalDestinationPath)
             if let rawOut {
-                try refuseRawFinalLeafSymlink(rawOut, action: "save an attachment to")
+                try refuseFinalLeafSymlink(rawOut, action: "save an attachment to")
             }
             let absOut = try out.map {
                 Self.normalizeDestinationPath(try confineWriteDestination(
