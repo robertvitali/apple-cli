@@ -1902,6 +1902,34 @@ struct NotesBatchCommandTests {
         }
     }
 
+    @Test func batchMoveSandboxGateRefusesAnUnlabeledComponentBeforeReachingNotes() throws {
+        // A labeled first component must not admit the unlabeled child. Both preview and
+        // execution refuse before constructing the script or fetching/moving any notes.
+        for extra in ["--execute", "--dry-run"] {
+            let runner = ThrowingNotesRunner()
+            var factoryCalls = 0
+            let command = try BatchMoveCmd.parse([
+                "--ids", fixtureNoteID(1), "--folder", "apple-cli-test parent/Real Child",
+                "--test-mode", extra,
+            ])
+
+            let failure = try captureNotesFailure {
+                try command.run(scriptFactory: {
+                    factoryCalls += 1
+                    return quietScript(runner)
+                }, env: pinnedWriteEnv())
+            }
+
+            #expect(failure.code == AppleExit.usage, "exit for \(extra)")
+            #expect(failure.error["type"] as? String == AppleErrorType.validation, "type for \(extra)")
+            #expect(failure.error["sandbox"] as? Bool == true, "sandbox for \(extra)")
+            #expect((failure.error["message"] as? String)?.contains("\"Real Child\"") == true,
+                    "the refused component for \(extra)")
+            #expect(factoryCalls == 0, "no script construction for \(extra)")
+            #expect(runner.neverCalled, "no Notes calls for \(extra)")
+        }
+    }
+
     @Test func aWholeScriptFailureStampsEveryItemWithTheUpstreamMessage() throws {
         let runner = FakeNotesRunner()
         runner.handler = { _, _ in throw AppleError.upstream("Notes.app is not running.") }
