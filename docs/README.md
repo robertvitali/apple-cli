@@ -31,4 +31,4 @@
 
 ## discovery
 
-- _(empty)_
+- [owned-process-cleanup](discovery/owned-process-cleanup.md)
