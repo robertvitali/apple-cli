@@ -19,6 +19,30 @@ JSON output are stable per the versioning policy — breaking changes bump
 
 ### Added
 
+- **`messages send` can now pick a service and carry file attachments.** `--service
+  auto|imessage|sms` chooses how a one-to-one send is routed: `auto` is the default and is
+  unchanged behaviour (iMessage first, then SMS for a phone number), `imessage` uses iMessage
+  only and fails instead of quietly falling back to SMS, and `sms` uses the enabled SMS account
+  only. An unrecognized value is a `validation_error` (exit 64). The flag is accepted with
+  `--group` and has no effect there — a chat id already names the chat's own service — and is
+  echoed back so a caller can see it was ignored rather than honoured. `--file <path>` attaches a
+  file and may be repeated: the message body goes out first, then each file in the order given,
+  all in one Messages run. `--message` is now optional, and a send with neither a message nor a
+  file is refused instead of dispatching a send that delivers nothing. Every `--file` path is
+  checked before anything is sent — it must be an existing, readable, regular file, resolved to
+  an absolute path — so a typo is a refusal rather than a message delivered with the attachment
+  missing. A send is not atomic, though: if an attachment fails partway through, the failure is
+  an `upstream_error` that names which file failed, how many had already gone out, and (in
+  `error.applied`) the paths already delivered, which a retry must exclude because a resend is a
+  second message rather than an update. For the same reason `auto` will not fall back to SMS once
+  any part of a send has been delivered. JSON gains `service_requested` and `files` on both the
+  dry-run and the execute envelope and `files_sent` on the execute envelope; `service_plan` gains
+  the values `iMessage only` and `SMS only`; a file-only send reports no `message`. The
+  `--test-mode` sandbox is unchanged: recipients are still confined to `APPLE_TEST_RECIPIENTS`
+  and group sends are still refused. `schema_version` is unchanged at 1 — every new key is
+  additive, no existing key is removed, renamed, or retyped, and every previously valid
+  invocation behaves exactly as before.
+
 - **AppleScript capture can now have an opt-in byte limit.** Set
   `APPLE_SCRIPT_MAX_OUTPUT_BYTES` to a positive decimal byte count, or pass
   `maximumOutputBytes` when constructing `AppleScriptRunner`. The allowance combines

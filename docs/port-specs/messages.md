@@ -120,8 +120,8 @@ Notable MCP behaviors the port must respect for parity: (a) **stateful `"contact
 - **Structured message schema** (imsg): `reply_to_guid/text/sender`, `thread_originator_guid`, `url_preview`, `reactions`, per-chat **unread counts** + **read timestamps** — far richer than MCP's flat strings.
 - **Attachment metadata** (implemented as a CLI-only JSON extra) + optional
   **CAF→M4A / GIF→PNG** conversion (imsg) — model-consumable media.
-- **Explicit service control** `--service imessage|sms|auto` + `--no-sms-fallback` (imsg) — MCP's routing is implicit/uncontrollable.
-- **`send --file`** attachments (imsg) — MCP is text-only.
+- **Explicit service control** `--service imessage|sms|auto` + `--no-sms-fallback` (imsg) — MCP's routing is implicit/uncontrollable. **BUILT** as `apple messages send --service auto|imessage|sms` (see §8 "Send service control and attachments"). `--no-sms-fallback` was NOT ported as a separate flag: it is `--service imessage`, and two spellings of one routing decision is a second place to declare it.
+- **`send --file`** attachments (imsg) — MCP is text-only. **BUILT** as a repeatable `apple messages send --file <path>` (see §8).
 - **`stats`** (tz-aware message statistics) + **`scheduled list`** (Send-Later, no bridge) (imsg) — both no-SIP, useful, cheap to keep.
 - **Standard tapbacks** `react` (imsg) — no-SIP, useful.
 - **`completions llm`** (imsg) — in-context CLI help for agents.
@@ -204,6 +204,52 @@ against a historical value (Q12 [1]).
 | `send_message --group` | Validation-evidence asterisk: the `--group` path accepts the oracle group-chat identifier and dispatches via chat id, but it has never been exercised against a live group. No live group was created or messaged, and no live group send is authorized. This limits validation evidence; it does not mark the capability missing. |
 | `get_recent_messages` | hours=6 cross-chat: every MCP output line reproduced **byte-verbatim** (attributedBody-decoded bodies, group names, sender resolution, timestamps). **This claim is bounded to the pre-attachment build and is deliberately no longer true of `--text`** — see "Attachment metadata" below for the two intentional deviations (an appended `[N attachments: …]` suffix, and a row set that now includes attachment-only messages the oracle drops). The JSON body/group/sender/timestamp shaping the claim was really about is unchanged. |
 | `fuzzy_search_messages` | See the WRatio boundary note below. |
+
+### Send service control and attachments
+
+Two CLI-only extras on the send path, both listed as WORTH-INCLUDING in §5. Neither
+narrows the parity floor: the defaults are the ported `tool_send_message` behaviour
+exactly, so a caller that passes neither flag gets what the oracle gave.
+
+**`--service auto|imessage|sms`** (default `auto`). `auto` is the ported
+`_send_message_direct` routing verbatim — iMessage first, then the enabled SMS account,
+and only when the recipient contains a digit (the oracle refuses to fall back for an
+email address, and so does this). `imessage` and `sms` are single-service: the send is
+attempted on that service alone and a failure is a failure, which is the point of asking
+for one. The flag governs 1:1 sends. It is **accepted and inert on `--group`** — a chat
+id already names the chat's own service and Messages offers no choice — and is echoed
+back as `service_requested` so a caller can see it was ignored rather than honoured.
+
+**`--file <path>`, repeatable.** The body (when there is one) is sent first, then each
+attachment in the order given, **in one `osascript` run**: splitting them across runs
+would mean a second Messages automation prompt mid-batch and a partial batch no single
+result line could describe. `--message` is therefore optional, and a send with neither a
+body nor a file is a `validation_error`. Paths reach osascript as **argv**, never
+interpolated into the script source — the same contract the recipient and body already
+had; only the SHAPE of a send (has a body, which service) varies the emitted source, and
+that shape comes from the CLI's own flags. Each path is resolved to an absolute
+standardized path and must be an existing, readable, regular file; the whole batch is
+validated before any of it is dispatched, because Messages fails on a bad path only
+AFTER the body has gone out.
+
+**A multi-part send is not atomic**, and the CLI says so rather than pretending
+otherwise. Body and attachments are separate transfers, so a mid-batch failure is an
+`upstream_error` naming which attachment failed, how many preceded it, and — in
+`error.applied`, the field a partial bulk Mail mutation already uses — the exact paths
+already delivered, which a retry must exclude. The same fact bounds the `auto` fallback:
+it may only re-run a batch of which NOTHING was delivered, or the recipient would receive
+the delivered part twice.
+
+**JSON (additive, `schema_version` unchanged at 1):** `service_requested` and `files` on
+both the dry-run and the execute envelope, `files_sent` on the execute envelope, and
+`service_plan` gains the values `iMessage only` / `SMS only` alongside the existing
+`iMessage→SMS auto` / `group chat`. `message` is absent on a file-only send — a shape
+that could not previously exist, because `--message` was required.
+
+**No live-send validation.** Like the `--group` row above, this is a validation-evidence
+limitation, not a capability gap: the AppleScript for all eight emitted shapes is
+compile-checked with `osacompile`, and the routing, ordering and failure reporting are
+pinned in the logic tier, but no attachment has been sent to a live recipient.
 
 ### Attachment metadata
 

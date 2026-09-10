@@ -43,7 +43,10 @@ private let tool = "messages"
 struct MessagesCommandDependencies: Sendable {
     var loadAddressBook: @Sendable () -> AddressBook
     var makeChatDB: @Sendable (AddressBook) throws -> ChatDB
-    var performSend: @Sendable (String, String, Bool) throws -> (ok: Bool, service: String?, error: String?)
+    /// One send, whole: body and every attachment in a single osascript run. The argument is a
+    /// `Send.Request` rather than five positionals because handle/message and groupChat/service
+    /// are otherwise adjacent same-typed parameters on the one surface that reaches a real human.
+    var performSend: @Sendable (Send.Request) throws -> Send.Outcome
     var dbDiagnostic: @Sendable () -> ChatDB.DBCheck
     var addressBookDiagnostic: @Sendable () -> AddressBook.Diagnostic
     var hasFullDiskAccess: @Sendable () -> Bool
@@ -291,6 +294,42 @@ private func attachmentBasename(_ value: String?) -> String? {
     return nonEmpty(URL(fileURLWithPath: cleaned).lastPathComponent)
 }
 
+/// The `--text` rendering of what a send carries: the body, then the attachment count and paths.
+/// Both halves are optional, so a file-only send reads as `[2 file(s): …]` rather than as a blank.
+private func sendBodyDescription(message: String?, files: [String]) -> String {
+    var parts: [String] = []
+    if let message { parts.append(message) }
+    if !files.isEmpty {
+        parts.append("[\(files.count) file(s): \(files.joined(separator: ", "))]")
+    }
+    return parts.joined(separator: " ")
+}
+
+/// Turn a failed send into the `upstream_error` a caller can act on.
+///
+/// A multi-part send is not atomic: Messages accepts the body and each attachment as separate
+/// transfers, so a failure at attachment 3 leaves the body and attachments 1–2 DELIVERED. The
+/// error therefore names which attachment failed, how many went out before it, and — in
+/// `error.applied`, the same field a partial bulk Mail mutation uses — the exact paths already
+/// delivered, because a retry that includes them sends them a second time rather than updating
+/// anything.
+///
+/// When the failure was not during a file send (the body failed, or the recipient could not be
+/// resolved on the requested service) nothing was delivered and the generic message stands.
+private func sendFailure(_ outcome: Send.Outcome, files: [String]) -> AppleError {
+    guard let failed = outcome.failedFile, files.indices.contains(failed - 1) else {
+        return AppleError.upstream("send failed (Messages returned an error)")
+    }
+    let delivered = Array(files.prefix(outcome.filesSent))
+    return AppleError(
+        type: AppleErrorType.upstream,
+        message: "send failed on attachment \(failed) of \(files.count) ('\(files[failed - 1])') — "
+            + "files_sent=\(outcome.filesSent). Anything already delivered is listed in `applied`; "
+            + "EXCLUDE it from a retry, because a resend is a second message, not an update.",
+        exitCode: AppleExit.upstream,
+        applied: delivered.isEmpty ? nil : delivered)
+}
+
 // MARK: - send (tool_send_message) — GUARDED
 
 struct Send_: ParsableCommand {
@@ -299,8 +338,16 @@ struct Send_: ParsableCommand {
         abstract: "Send an iMessage/SMS (sends on call, like the MCP; --dry-run previews).")
     @OptionGroup var global: GlobalOptions
     @Argument(help: "Recipient: phone, email, contact name, or (with --group) a chat id.") var recipient: String
-    @Option(name: [.short, .long], help: "Message body.") var message: String
+    @Option(name: [.short, .long],
+            help: "Message body. Optional when --file is given; a send needs a body, a file, or both.")
+    var message: String?
     @Flag(name: [.short, .long], help: "Treat the recipient as a group chat id.") var group = false
+    @Option(name: .long,
+            help: "Which service a one-to-one send may use: auto (default — iMessage first, then SMS for a phone number), imessage (iMessage only, no fallback), or sms (SMS only). Accepted but ignored with --group: a chat id already names the chat's own service.")
+    var service: String = Send.Service.auto.rawValue
+    @Option(name: .long,
+            help: "Path to a file to send as an attachment. Repeat to send several; each is sent after the message body, in the order given.")
+    var file: [String] = []
 
     func run() throws {
         try run(dependencies: .live)
@@ -310,6 +357,20 @@ struct Send_: ParsableCommand {
         try runGuarded(tool: tool) {
             // Bound ONCE, before any resolution work, and threaded from here.
             let gate = try dependencies.resolveGate(global)
+            guard let serviceMode = Send.Service(rawValue: service) else {
+                throw AppleError.validation("service must be one of: \(Send.Service.allNames)")
+            }
+            // `--message` is optional now, so a send with NEITHER a body nor a file would
+            // otherwise dispatch an osascript run that delivers nothing and reports success.
+            // The test is on PRESENCE, not emptiness: `--message ""` still means "send this
+            // (empty) body", exactly as it did when `--message` was mandatory.
+            guard message != nil || !file.isEmpty else {
+                throw AppleError.validation("nothing to send: pass --message, --file, or both")
+            }
+            // EVERY attachment is validated before ANY of them is dispatched. Validating lazily
+            // would let a typo in the third path surface only after the body and two files had
+            // already been delivered — an unrecoverable half-send for a free-to-catch mistake.
+            let files = try file.map { try Send.resolveAttachment($0) }
             let book = dependencies.loadAddressBook()
             switch Send.resolve(recipient: recipient, groupChat: group, book: book) {
             case .notFound(let r):
@@ -325,7 +386,9 @@ struct Send_: ParsableCommand {
                         .joined(separator: "\n")
                 }
             case .resolved(let handle, let displayName):
-                let plan = group ? "group chat" : "iMessage→SMS auto"
+                // A group send's service is the chat's own; `--service` is accepted there (so one
+                // flag set works for both shapes) and has no effect.
+                let plan = group ? "group chat" : serviceMode.plan
                 // The recipient is argv-derived and already resolved, so the sandbox restriction is
                 // computable on BOTH paths — run it BEFORE the preview branch so a dry-run refuses
                 // exactly what an execute would. A preview that reported "would send" for a
@@ -351,29 +414,35 @@ struct Send_: ParsableCommand {
                 guard gate.willExecute else {
                     let preview = SendPreview(action: "send", executed: false, dry_run: true,
                         group_chat: group, recipient: recipient, resolved_handle: handle,
-                        display_name: displayName, service_plan: plan, message: message,
+                        display_name: displayName, service_plan: plan,
+                        service_requested: serviceMode.rawValue, message: message, files: files,
                         note: "Dry run — nothing sent. Re-run without --dry-run to send.")
                     try emitWrite(global, preview, sandboxActive: gate.sandboxActive) {
-                        "[dry-run] would send to \(displayName ?? handle) (\(handle)) via \(plan): \(message)"
+                        "[dry-run] would send to \(displayName ?? handle) (\(handle)) via \(plan): "
+                            + sendBodyDescription(message: message, files: files)
                     }
                     return
                 }
-                let result = try dependencies.performSend(handle, message, group)
+                let result = try dependencies.performSend(
+                    Send.Request(handle: handle, message: message, files: files,
+                                 groupChat: group, service: serviceMode))
                 guard result.ok else {
                     // Keep the raw osascript error text OFF the JSON envelope (unstable +
                     // potential info-leak); surface it on stderr (the human channel) only.
                     if let raw = result.error {
                         Output.writeError(Data(("osascript: " + raw + "\n").utf8))
                     }
-                    throw AppleError.upstream("send failed (Messages returned an error)")
+                    throw sendFailure(result, files: files)
                 }
                 let data = SendResult(action: "send", executed: true, ok: true, group_chat: group,
                     recipient: recipient, resolved_handle: handle, display_name: displayName,
-                    service_used: result.service, message: message)
+                    service_used: result.service, service_requested: serviceMode.rawValue,
+                    message: message, files: files, files_sent: result.filesSent)
                 // Q12: the execute envelope carries the v2 `dry_run: false` discriminator like
                 // every other domain (SendPreview already carries dry_run: true).
                 try emitWrite(global, ExecutedWrite(data), sandboxActive: gate.sandboxActive) {
                     "Message sent successfully via \(result.service ?? "Messages") to \(displayName ?? handle)"
+                        + (files.isEmpty ? "" : " (\(result.filesSent) of \(files.count) file(s) sent)")
                 }
             }
         }

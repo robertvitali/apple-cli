@@ -234,18 +234,50 @@ struct SendTests {
         } else { Issue.record("expected notFound for unknown name in empty book") }
     }
 
+    /// The result grammar is `success:<service>:<filesSent>` /
+    /// `error:<filesSent>:<failedFile>:<text>`. Both counters are integers, so an error message
+    /// carrying colons of its own still parses whole.
     @Test func interpretResults() {
-        #expect(Send.interpret("success:iMessage") == (true, "iMessage", nil))
-        #expect(Send.interpret("success:SMS").service == "SMS")
-        #expect(Send.interpret("error:boom").ok == false)
-        #expect(Send.interpret("error:boom").error == "boom")
+        #expect(Send.interpret("success:iMessage:0")
+            == Send.Outcome(ok: true, service: "iMessage", filesSent: 0, failedFile: nil, error: nil))
+        #expect(Send.interpret("success:SMS:2").service == "SMS")
+        #expect(Send.interpret("success:SMS:2").filesSent == 2)
+        // A group chat reports no service — Messages does not name the chat's own.
+        #expect(Send.interpret("success::1").service == nil)
+        #expect(Send.interpret("error:0:0:boom").ok == false)
+        #expect(Send.interpret("error:0:0:boom").error == "boom")
+        #expect(Send.interpret("error:1:2:boom: -1728").error == "boom: -1728")
+        #expect(Send.interpret("error:1:2:boom").filesSent == 1)
+        #expect(Send.interpret("error:1:2:boom").failedFile == 2)
+        // `failedFile` 0 means "not during a file send", surfaced as nil rather than index 0.
+        #expect(Send.interpret("error:0:0:boom").failedFile == nil)
+    }
+
+    /// FAIL-CLOSED PIN. Anything outside the grammar — including whatever osascript itself prints
+    /// when it never reaches a `return` — must read as a FAILURE. On a surface that reaches a real
+    /// human, a parser that shrugged and called an unrecognized line a success would report a
+    /// delivery that never happened.
+    @Test func interpretRejectsAnythingOutsideTheGrammar() {
+        for line in ["success", "success:iMessage", "success:iMessage:x", "error:boom",
+                     "error:0:boom", "", "0:0:0", "succeeded:iMessage:0"] {
+            let outcome = Send.interpret(line)
+            #expect(outcome.ok == false, "\(line) must not read as a success")
+            #expect(outcome.error?.hasPrefix("Unknown result:") == true)
+        }
     }
 
     @Test func scriptsAreArgvDriven() {
-        // Security: recipient/body arrive via `on run argv`, never interpolated.
-        #expect(Send.directScript().contains("on run argv"))
-        #expect(Send.directScript().contains("item 1 of argv"))
-        #expect(Send.groupScript().contains("chat id chatId"))
+        // Security: recipient/body/attachment paths arrive via `on run argv`, never interpolated.
+        for service in Send.Service.allCases {
+            for includeMessage in [true, false] {
+                let script = Send.directScript(service: service, includeMessage: includeMessage)
+                #expect(script.contains("on run argv"))
+                #expect(script.contains("set targetRecipient to item 1 of argv"))
+                #expect(script.contains("set end of fileList to POSIX file (item fileIndex of argv)"))
+            }
+        }
+        #expect(Send.groupScript(includeMessage: true).contains("chat id chatId"))
+        #expect(Send.groupScript(includeMessage: false).contains("on run argv"))
     }
 
     // [L3] Allowlist footgun fix: normalize BOTH sides before comparing.
@@ -319,6 +351,193 @@ struct SendTests {
         #expect(throws: Never.self) {
             try Send.assertAllowedRecipient("2125550142", groupChat: false, sandboxActive: true,
                                             allowedRecipients: ["+1 (212) 555-0142"])
+        }
+    }
+}
+
+// MARK: - Service selection + attachments (CLI extras over the MCP surface)
+
+/// The two send extras port-spec §5 listed as WORTH-INCLUDING: explicit service control and file
+/// attachments. Every assertion here is on the PURE builders — the emitted AppleScript source and
+/// the path resolver — because nothing else can see them: the script bodies are Swift string
+/// literals that `swift build` never parses as AppleScript, and the only tier that would execute
+/// them sends to a real human.
+@Suite("Send service + attachments")
+struct SendServiceAndAttachmentTests {
+    private let scratch = ScratchDirs("messages-send-attachments")
+
+    @Test func serviceNamesRoundTrip() {
+        #expect(Send.Service(rawValue: "auto") == .auto)
+        #expect(Send.Service(rawValue: "imessage") == .imessage)
+        #expect(Send.Service(rawValue: "sms") == .sms)
+        // The validation message, the help text and the manual all derive from this one list, so
+        // a fourth service can only be a new case.
+        #expect(Send.Service.allNames == "auto, imessage, sms")
+        // Anything else is rejected here rather than reaching Messages as a routing surprise.
+        for bad in ["iMessage", "SMS", "rcs", "", "auto ", "imessage,sms"] {
+            #expect(Send.Service(rawValue: bad) == nil, "\(bad) must not parse as a service")
+        }
+    }
+
+    /// `service_plan` is what a dry run PROMISES the execute path will do, so each mode must have
+    /// its own wording — a shared string would let a preview say "iMessage→SMS auto" for a send
+    /// that will never try SMS.
+    @Test func servicePlansAreDistinct() {
+        #expect(Send.Service.auto.plan == "iMessage→SMS auto")
+        #expect(Send.Service.imessage.plan == "iMessage only")
+        #expect(Send.Service.sms.plan == "SMS only")
+        #expect(Set(Send.Service.allCases.map(\.plan)).count == Send.Service.allCases.count)
+    }
+
+    /// `auto` keeps the ported `_send_message_direct` routing verbatim: iMessage first, then the
+    /// SMS account, and only for a recipient that contains a digit.
+    @Test func autoScriptKeepsTheiMessageThenSMSFallback() {
+        let script = Send.directScript(service: .auto, includeMessage: true)
+        #expect(script.contains("set targetService to 1st service whose service type = iMessage"))
+        #expect(script.contains("set smsService to first account whose service type = SMS and enabled is true"))
+        #expect(script.contains("targetRecipient contains \"0\""))
+        #expect(script.contains("targetRecipient contains \"9\""))
+        #expect(script.contains("SMS not available for email addresses"))
+        #expect(script.contains("return \"success:iMessage:\" & filesSent"))
+        #expect(script.contains("return \"success:SMS:\" & filesSent"))
+    }
+
+    /// EXPLICIT MEANS EXPLICIT. `--service imessage` must not silently reach SMS and
+    /// `--service sms` must not silently reach iMessage — a fallback the caller ruled out is the
+    /// one thing these modes exist to prevent, and it would be invisible from the outside.
+    @Test func singleServiceScriptsHaveNoFallback() {
+        let iMessageOnly = Send.directScript(service: .imessage, includeMessage: true)
+        #expect(iMessageOnly.contains("set targetService to 1st service whose service type = iMessage"))
+        #expect(!iMessageOnly.contains("service type = SMS"))
+        #expect(!iMessageOnly.contains("success:SMS"))
+
+        let smsOnly = Send.directScript(service: .sms, includeMessage: true)
+        #expect(smsOnly.contains("set smsService to first account whose service type = SMS and enabled is true"))
+        #expect(!smsOnly.contains("service type = iMessage"))
+        #expect(!smsOnly.contains("success:iMessage"))
+    }
+
+    /// The `auto` fallback may only re-run a batch of which NOTHING was delivered. Without the
+    /// `firstDelivered` latch, an iMessage run that placed the body and one attachment before
+    /// failing would be replayed whole over SMS and the recipient would get both twice.
+    @Test func autoScriptRefusesToFallBackAfterAnythingWasDelivered() {
+        let script = Send.directScript(service: .auto, includeMessage: true)
+        #expect(script.contains("set firstDelivered to false"))
+        #expect(script.contains("if firstDelivered then"))
+        #expect(script.contains("iMessage send failed after part of it was already delivered"))
+    }
+
+    /// A file-only send carries NO body argument, so the script must neither read argv item 2 as
+    /// a body nor emit a `send messageText` — and the attachment loop has to start one item
+    /// earlier. Getting this wrong sends the first attachment path as a text message.
+    @Test func bodylessScriptsReadNoMessageAndStartFilesEarlier() {
+        for service in Send.Service.allCases {
+            let withBody = Send.directScript(service: service, includeMessage: true)
+            let bodyless = Send.directScript(service: service, includeMessage: false)
+            #expect(withBody.contains("set messageText to item 2 of argv"))
+            #expect(withBody.contains("repeat with fileIndex from 3 to (count of argv)"))
+            #expect(!bodyless.contains("messageText"))
+            #expect(bodyless.contains("repeat with fileIndex from 2 to (count of argv)"))
+        }
+        #expect(!Send.groupScript(includeMessage: false).contains("messageText"))
+        #expect(Send.groupScript(includeMessage: true).contains("send messageText to targetChat"))
+    }
+
+    /// Order is part of the contract: the body goes out first, then each attachment in the order
+    /// the operator listed them.
+    @Test func everyScriptSendsTheBodyBeforeTheAttachments() {
+        var scripts = Send.Service.allCases.map { Send.directScript(service: $0, includeMessage: true) }
+        scripts.append(Send.groupScript(includeMessage: true))
+        for script in scripts {
+            guard let body = script.range(of: "send messageText to"),
+                  let files = script.range(of: "repeat with fileIndex from 1 to (count of fileList)")
+            else {
+                Issue.record("script is missing the body or the attachment loop")
+                continue
+            }
+            #expect(body.lowerBound < files.lowerBound)
+        }
+    }
+
+    /// `POSIX file` is coerced OUTSIDE the `tell application "Messages"` block. Inside a tell it
+    /// can resolve against the target application's terminology instead of AppleScript's own.
+    @Test func attachmentPathsAreCoercedOutsideTheTellBlock() {
+        for script in [Send.directScript(service: .auto, includeMessage: true),
+                       Send.groupScript(includeMessage: true)] {
+            guard let coercion = script.range(of: "POSIX file (item fileIndex of argv)"),
+                  let tell = script.range(of: "tell application \"Messages\"")
+            else {
+                Issue.record("script is missing the POSIX coercion or the tell block")
+                continue
+            }
+            #expect(coercion.lowerBound < tell.lowerBound)
+        }
+    }
+
+    // MARK: resolveAttachment
+
+    @Test func resolvesAnExistingFileToAnAbsoluteStandardizedPath() throws {
+        let dir = try scratch.directory()
+        let file = dir.appendingPathComponent("apple-cli-test-note.txt")
+        try "synthetic".write(to: file, atomically: true, encoding: .utf8)
+
+        let resolved = try Send.resolveAttachment(file.path)
+        #expect(resolved.hasPrefix("/"))
+        #expect(resolved == file.standardizedFileURL.path)
+
+        // A `..` hop resolves to the same file rather than being handed to AppleScript verbatim.
+        let indirect = dir.appendingPathComponent("sub/../apple-cli-test-note.txt").path
+        #expect(try Send.resolveAttachment(indirect) == resolved)
+    }
+
+    @Test func rejectsAMissingFile() throws {
+        let missing = try scratch.directory().appendingPathComponent("no-such-file.txt").path
+        #expect(throws: AppleError.self) { try Send.resolveAttachment(missing) }
+        #expect(validationExit(try Send.resolveAttachment(missing)) == AppleExit.usage)
+    }
+
+    /// A directory is the near-miss worth pinning: Messages fails on one only AFTER the body has
+    /// gone out, so catching it here is the difference between a refusal and a half-send.
+    @Test func rejectsADirectory() throws {
+        let dir = try scratch.directory().path
+        #expect(throws: AppleError.self) { try Send.resolveAttachment(dir) }
+        #expect(validationExit(try Send.resolveAttachment(dir)) == AppleExit.usage)
+    }
+
+    @Test func rejectsAnUnreadableFile() throws {
+        let file = try scratch.directory().appendingPathComponent("apple-cli-test-locked.txt")
+        try "synthetic".write(to: file, atomically: true, encoding: .utf8)
+        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: file.path)
+        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path) }
+        // Running as root would make every file readable and make this assertion meaningless.
+        try #require(getuid() != 0)
+        #expect(throws: AppleError.self) { try Send.resolveAttachment(file.path) }
+    }
+
+    @Test func rejectsAnEmptyPath() {
+        #expect(throws: AppleError.self) { try Send.resolveAttachment("") }
+        #expect(throws: AppleError.self) { try Send.resolveAttachment("   ") }
+    }
+
+    /// argv reaches `osascript` as C strings, so a NUL would TRUNCATE the path between the check
+    /// here and the send that uses it — validating one file and attaching another.
+    @Test func rejectsAPathCarryingANULByte() throws {
+        let file = try scratch.directory().appendingPathComponent("apple-cli-test-nul.txt")
+        try "synthetic".write(to: file, atomically: true, encoding: .utf8)
+        #expect(throws: AppleError.self) { try Send.resolveAttachment(file.path + "\u{0}/elsewhere") }
+    }
+
+    /// Every refusal is a `validation_error` at exit 64 — a bad argument, not an upstream failure,
+    /// so a caller can tell "fix your command line" from "Messages broke".
+    private func validationExit(_ body: @autoclosure () throws -> String) -> Int32? {
+        do {
+            _ = try body()
+            return nil
+        } catch let error as AppleError {
+            #expect(error.type == AppleErrorType.validation)
+            return error.exitCode
+        } catch {
+            return nil
         }
     }
 }
