@@ -50,6 +50,7 @@ final class ChatFixture {
             CREATE TABLE chat(ROWID INTEGER PRIMARY KEY, chat_identifier TEXT, display_name TEXT,
                 room_name TEXT, guid TEXT, service_name TEXT, group_id TEXT, style INTEGER);
             CREATE TABLE chat_handle_join(chat_id INTEGER, handle_id INTEGER);
+            CREATE TABLE chat_message_join(chat_id INTEGER, message_id INTEGER);
             CREATE TABLE message(ROWID INTEGER PRIMARY KEY, guid TEXT, text TEXT, attributedBody BLOB,
                 is_from_me INTEGER, handle_id INTEGER, cache_roomnames TEXT, service TEXT,
                 cache_has_attachments INTEGER, date INTEGER, error INTEGER);
@@ -58,13 +59,27 @@ final class ChatFixture {
             CREATE TABLE message_attachment_join(message_id INTEGER, attachment_id INTEGER);
             """)
 
-        exec(db, "INSERT INTO handle VALUES (1,'+12125550100','iMessage'),(2,'+12125550101','SMS');")
+        // Handle 3 exists only to give the group chat a second participant; it sends no
+        // messages, so no message-shaping expectation depends on it.
+        exec(db, """
+            INSERT INTO handle VALUES
+            (1,'+12125550100','iMessage'),(2,'+12125550101','SMS'),(3,'+12125550102','iMessage');
+            """)
+        // Chat 3 is the 1:1 conversation with handle 1 (style 45, no display_name — exactly how
+        // chat.db stores a direct conversation), so `is_group` has a real false case that still
+        // carries an identifier and guid. Chat 4 is a named group with NO messages and no
+        // participants, giving `last_activity` a null case and `--name`/`--limit` a second row.
         exec(db, """
             INSERT INTO chat VALUES
             (1,'chat999','Test Group','chat999','iMessage;+;chat999','iMessage','G1',43),
-            (2,'chatEMPTY','','chatEMPTY','iMessage;+;chatEMPTY','iMessage','G2',43);
+            (2,'chatEMPTY','','chatEMPTY','iMessage;+;chatEMPTY','iMessage','G2',43),
+            (3,'+12125550100',NULL,NULL,'iMessage;-;+12125550100','iMessage',NULL,45),
+            (4,'chat888','Other Group','chat888','iMessage;+;chat888','iMessage','G4',43);
             """)
-        exec(db, "INSERT INTO chat_handle_join VALUES (1,2);")
+        // (1,2) and (1,3): the group's two participants. (3,1): the 1:1 chat's single member —
+        // it is handle 1's ONLY chat_handle_join row, so the `chatDisplayName` fallback still
+        // resolves deterministically (chat 3 has no display_name, exactly as before).
+        exec(db, "INSERT INTO chat_handle_join VALUES (1,2),(1,3),(3,1);")
 
         // Text messages (bind via exec — no blobs).
         exec(db, """
@@ -104,6 +119,16 @@ final class ChatFixture {
             INSERT INTO message (ROWID,guid,text,is_from_me,handle_id,service,date,error,cache_has_attachments) VALUES
             (10,'g10','null attachment fields',0,1,'iMessage',\(base - 900),0,1);
             """)
+        // Which chat each message belongs to. Message 3 is deliberately joined to NO chat, so
+        // the "no chat row → nulls, is_group false" case is real rather than assumed. Message 4
+        // is in BOTH the group (chat ROWID 1) and the 1:1 chat (ROWID 3), pinning the
+        // first-by-chat-ROWID rule; messages 7 and 11 are shaped away but are joined anyway so
+        // the fixture matches how chat.db actually looks.
+        exec(db, """
+            INSERT INTO chat_message_join (chat_id, message_id) VALUES
+            (3,1),(3,2),(1,4),(3,4),(2,5),(3,6),(3,7),(3,8),(3,9),(3,10),(3,11);
+            """)
+
         // One attachment whose file is really on disk under the injected home (exists → true)
         // and one that is not, written tilde-relative the way chat.db actually stores them.
         if includeOptionalAttachmentColumns {
@@ -510,9 +535,164 @@ struct ChatDBFixtureTests {
         let fx = try ChatFixture()
         let db = try makeDB(fx, book: friendBook)
         let chats = db.namedChats()
-        #expect(chats.count == 1)
-        #expect(chats.first?.display_name == "Test Group")
+        // Chat 2's display_name is '' and chat 3 (the 1:1) has none, so only the two named
+        // groups are listed — in chat-ROWID order, which the filters must not disturb.
+        #expect(chats.map(\.display_name) == ["Test Group", "Other Group"])
         #expect(chats.first?.chat_identifier == "chat999")
+    }
+
+    // MARK: - Chat identity
+
+    /// Every message says which chat it came from. The three cases that matter are a 1:1
+    /// conversation (identifier + guid, `is_group` false), a group (`style` 43 → `is_group`
+    /// true), and a message joined to no chat at all (nulls, and still NOT a group).
+    @Test func recentCarriesChatIdentity() throws {
+        let fx = try ChatFixture()
+        var db = try makeDB(fx, book: friendBook)
+        let msgs = db.recent(hours: 24, handleRowIds: nil, limit: 100)
+
+        let direct = try #require(msgs.first { $0.rowid == 1 })
+        #expect(direct.chat_identifier == "+12125550100")
+        #expect(direct.chat_guid == "iMessage;-;+12125550100")
+        #expect(direct.is_group == false)
+
+        // Message 4 is joined to the group (chat ROWID 1) AND the 1:1 chat (ROWID 3); the
+        // lowest chat ROWID wins, so a multi-chat row cannot report the wrong conversation.
+        let group = try #require(msgs.first { $0.rowid == 4 })
+        #expect(group.chat_identifier == "chat999")
+        #expect(group.chat_guid == "iMessage;+;chat999")
+        #expect(group.is_group == true)
+
+        let orphan = try #require(msgs.first { $0.rowid == 3 })
+        #expect(orphan.chat_identifier == nil)
+        #expect(orphan.chat_guid == nil)
+        #expect(orphan.is_group == false)
+    }
+
+    /// The two message shapes must not diverge — the same reasoning as `searchCarriesAttachmentsToo`.
+    @Test func searchCarriesChatIdentity() throws {
+        let fx = try ChatFixture()
+        var db = try makeDB(fx, book: friendBook)
+
+        // Message 5 sits in the '' -display-name group: `group_name` stays absent (the oracle's
+        // shape) while `is_group` still reports the truth, which is the point of the new field.
+        let grouped = try #require(db.search(term: "error", hours: 24, threshold: 0.6, match: .contains)
+            .matches.first { $0.rowid == 5 })
+        #expect(grouped.is_group == true)
+        #expect(grouped.chat_identifier == "chatEMPTY")
+        #expect(grouped.chat_guid == "iMessage;+;chatEMPTY")
+        #expect(grouped.group_name == nil)
+
+        let direct = try #require(db.search(term: "hello", hours: 24, threshold: 0.6, match: .contains)
+            .matches.first { $0.rowid == 1 })
+        #expect(direct.is_group == false)
+        #expect(direct.chat_identifier == "+12125550100")
+    }
+
+    /// A chat.db that cannot answer "which chat is this message in?" degrades to nulls rather
+    /// than failing the read outright — the posture the attachment join already takes.
+    @Test func missingChatJoinYieldsNullChatIdentity() throws {
+        let fx = try ChatFixture()
+        try fx.exec("DROP TABLE chat_message_join;")
+        var db = try makeDB(fx, book: friendBook)
+        let msgs = db.recent(hours: 24, handleRowIds: nil, limit: 100)
+
+        #expect(msgs.count == 9, "the read still succeeds")
+        #expect(msgs.allSatisfy { $0.chat_identifier == nil && $0.chat_guid == nil && !$0.is_group })
+        // …and `--direct-only` cannot silently swallow the whole store when the schema is the
+        // thing that is missing: nothing is KNOWN to be a group, so nothing is excluded.
+        #expect(db.recent(hours: 24, handleRowIds: nil, limit: 100, directOnly: true).count == 9)
+    }
+
+    // MARK: - --direct-only
+
+    @Test func recentDirectOnlyExcludesGroupChatMessages() throws {
+        let fx = try ChatFixture()
+        var db = try makeDB(fx, book: friendBook)
+        let all = db.recent(hours: 24, handleRowIds: nil, limit: 100).map(\.rowid)
+        let direct = db.recent(hours: 24, handleRowIds: nil, limit: 100, directOnly: true).map(\.rowid)
+
+        #expect(all == [1, 2, 3, 4, 5, 6, 8, 9, 10])
+        // 4 and 5 are the two group-chat messages; 3 has no chat row and is NOT a group, so it
+        // survives — the filter drops group chats, not "everything it cannot classify".
+        #expect(direct == [1, 2, 3, 6, 8, 9, 10])
+    }
+
+    /// The filter runs in SQL, before `LIMIT`, so a caller asking for N direct messages gets N —
+    /// not N minus however many group messages happened to be newer.
+    @Test func recentDirectOnlyFillsTheRequestedLimit() throws {
+        let fx = try ChatFixture()
+        var db = try makeDB(fx, book: friendBook)
+        #expect(db.recent(hours: 24, handleRowIds: nil, limit: 4, directOnly: true).map(\.rowid)
+            == [1, 2, 3, 6])
+        // Same limit unfiltered stops at 4, proving the group rows really were in the way.
+        #expect(db.recent(hours: 24, handleRowIds: nil, limit: 4).map(\.rowid) == [1, 2, 3, 4])
+    }
+
+    /// `--direct-only` composes with the handle filter rather than replacing it. The two
+    /// clauses are built into one WHERE, and the handle filter is the one carrying positional
+    /// binds — so a mistake here shows up as wrong rows, not as a compile error.
+    @Test func recentDirectOnlyComposesWithTheHandleFilter() throws {
+        let fx = try ChatFixture()
+        var db = try makeDB(fx, book: friendBook)
+        // Handle 2's only message is the group one, so the two filters together match nothing…
+        #expect(db.recent(hours: 24, handleRowIds: [2], limit: 100).map(\.rowid) == [4])
+        #expect(db.recent(hours: 24, handleRowIds: [2], limit: 100, directOnly: true).isEmpty)
+        // …while handle 1's messages are all 1:1 and survive both.
+        #expect(db.recent(hours: 24, handleRowIds: [1], limit: 100, directOnly: true).map(\.rowid)
+            == [1, 2, 3, 6, 8, 9, 10])
+    }
+
+    @Test func searchDirectOnlyExcludesGroupChatMessages() throws {
+        let fx = try ChatFixture()
+        var db = try makeDB(fx, book: friendBook)
+        #expect(db.search(term: "error", hours: 24, threshold: 0.6, match: .contains)
+            .matches.contains { $0.rowid == 5 })
+        #expect(db.search(term: "error", hours: 24, threshold: 0.6, match: .contains, directOnly: true)
+            .matches.isEmpty)
+        // Positive control: a 1:1 hit is untouched by the flag.
+        #expect(db.search(term: "hello", hours: 24, threshold: 0.6, match: .contains, directOnly: true)
+            .matches.map(\.rowid) == [1])
+    }
+
+    // MARK: - chats: activity, participants, filters
+
+    @Test func namedChatsCarryLastActivityAndParticipants() throws {
+        let fx = try ChatFixture()
+        let db = try makeDB(fx, book: friendBook)
+        let chats = db.namedChats()
+
+        let group = try #require(chats.first { $0.chat_identifier == "chat999" })
+        // Message 4 is the group's only message, so it is the newest one.
+        #expect(group.last_activity_timestamp == fx.base - 300)
+        #expect(group.last_activity == MessageTime.date(fromRaw: fx.base - 300))
+        #expect(group.participants == ["+12125550101", "+12125550102"])  // handle-ROWID order
+
+        // A named chat with no messages and no recorded members: nulls and an EMPTY array,
+        // never a missing value.
+        let quiet = try #require(chats.first { $0.chat_identifier == "chat888" })
+        #expect(quiet.last_activity == nil)
+        #expect(quiet.last_activity_timestamp == nil)
+        #expect(quiet.participants.isEmpty)
+    }
+
+    @Test func namedChatsNameFilterIsCaseInsensitiveSubstring() throws {
+        let fx = try ChatFixture()
+        let db = try makeDB(fx, book: friendBook)
+        #expect(db.namedChats(nameFilter: "oTHer").map(\.display_name) == ["Other Group"])
+        #expect(db.namedChats(nameFilter: "group").map(\.display_name) == ["Test Group", "Other Group"])
+        #expect(db.namedChats(nameFilter: "nothing-matches-this").isEmpty)
+        // An empty filter is not a filter — it must not silently match nothing.
+        #expect(db.namedChats(nameFilter: "").count == 2)
+    }
+
+    @Test func namedChatsLimitCapsResultsWithoutReordering() throws {
+        let fx = try ChatFixture()
+        let db = try makeDB(fx, book: friendBook)
+        #expect(db.namedChats(limit: 1).map(\.display_name) == ["Test Group"])
+        #expect(db.namedChats(limit: 10).count == 2)
+        // The limit applies AFTER the name filter, not to the pre-filter row set.
+        #expect(db.namedChats(nameFilter: "group", limit: 1).map(\.display_name) == ["Test Group"])
     }
 
     @Test func handleRowIdLookupTriesPhoneVariants() throws {

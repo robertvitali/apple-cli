@@ -164,6 +164,7 @@ struct Recent: ParsableCommand {
     @Option(name: .long, help: "Max messages (default 100).") var limit: Int = 100
     @Option(name: .long, help: "Filter by contact name, phone, or email.") var contact: String?
     @Option(name: .long, help: "Explicit handle (phone/email) — stateless replacement for the MCP's contact:N.") var handle: String?
+    @Flag(name: .long, help: "Only 1:1 conversations — exclude messages sent in a group chat.") var directOnly = false
 
     func run() throws {
         try run(dependencies: .live)
@@ -203,7 +204,7 @@ struct Recent: ParsableCommand {
                         note = "No contacts found matching '\(filter)'."
                         try emit(global, RecentData(hours: hours, limit: limit, contact: filter,
                             resolved_handle_rowids: nil, ambiguous: false, candidates: nil,
-                            note: note, count: 0, messages: [])) { note! }
+                            note: note, direct_only: directOnly, count: 0, messages: [])) { note! }
                         return
                     } else if matches.count == 1 {
                         // A single fuzzy match may resolve to an email handle, not a
@@ -216,7 +217,7 @@ struct Recent: ParsableCommand {
                         try emit(global, RecentData(hours: hours, limit: limit, contact: filter,
                             resolved_handle_rowids: nil, ambiguous: true, candidates: candidates,
                             note: "Multiple contacts matched; re-run with --handle <phone/email>.",
-                            count: 0, messages: [])) {
+                            direct_only: directOnly, count: 0, messages: [])) {
                                 "Multiple contacts found matching '\(filter)':\n" +
                                 matches.enumerated().prefix(10)
                                     .map { "\($0.offset + 1). \($0.element.name) (\($0.element.phone)) - confidence \(String(format: "%.2f", $0.element.score))" }
@@ -227,13 +228,14 @@ struct Recent: ParsableCommand {
                 }
             }
 
-            let messages = db.recent(hours: hours, handleRowIds: rowIds, limit: limit)
+            let messages = db.recent(hours: hours, handleRowIds: rowIds, limit: limit,
+                                     directOnly: directOnly)
             // Echo the effective filter (contact OR handle) so a `--handle`-only
             // invocation yields a self-describing envelope instead of contact:null.
             try emit(global, RecentData(hours: hours, limit: limit, contact: filter,
                 resolved_handle_rowids: rowIds, ambiguous: false, candidates: nil,
                 note: messages.isEmpty ? (note ?? "No messages found in the specified time period.") : note,
-                count: messages.count, messages: messages)) {
+                direct_only: directOnly, count: messages.count, messages: messages)) {
                     messages.isEmpty ? "No messages found in the specified time period."
                                      : messages.map(renderMessage).joined(separator: "\n")
                 }
@@ -424,8 +426,10 @@ struct FindContact: ParsableCommand {
 struct Chats: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "chats",
-        abstract: "List named group chats (chat_identifier + display_name).")
+        abstract: "List named group chats (chat_identifier, display_name, last activity, participants).")
     @OptionGroup var global: GlobalOptions
+    @Option(name: .long, help: "Keep only chats whose display name contains this text (case-insensitive).") var name: String?
+    @Option(name: .long, help: "Max chats to return (default: all).") var limit: Int?
 
     func run() throws {
         try run(dependencies: .live)
@@ -433,18 +437,40 @@ struct Chats: ParsableCommand {
 
     func run(dependencies: MessagesCommandDependencies) throws {
         try runGuarded(tool: tool) {
+            // Same bound as `recent --limit`, so the two read surfaces reject the same input.
+            if let limit, !(1...10_000).contains(limit) {
+                throw AppleError.validation("limit must be between 1 and 10000")
+            }
             let book = dependencies.loadAddressBook()
             let db = try dependencies.makeChatDB(book)
-            let chats = db.namedChats()
-            try emit(global, ChatsData(count: chats.count, chats: chats)) {
-                if chats.isEmpty { return "No named group chats found." }
-                return "Available group chats:\n" +
-                    chats.enumerated()
-                        .map { "\($0.offset + 1). \($0.element.display_name) (ID: \($0.element.chat_identifier))" }
-                        .joined(separator: "\n")
+            let chats = db.namedChats(nameFilter: name, limit: limit)
+            try emit(global, ChatsData(count: chats.count, name_filter: name, chats: chats)) {
+                if chats.isEmpty {
+                    return name.map { "No named group chats matching '\($0)'." }
+                        ?? "No named group chats found."
+                }
+                let header = name.map { "Available group chats matching '\($0)':" }
+                    ?? "Available group chats:"
+                return header + "\n" + chats.enumerated().map { renderChat($0.offset + 1, $0.element) }
+                    .joined(separator: "\n")
             }
         }
     }
+}
+
+/// One `chats --text` line. The annotations are appended only when the store has them, so a
+/// chat with no messages and no recorded participants renders exactly as it always did.
+private func renderChat(_ index: Int, _ chat: ChatDB.Chat) -> String {
+    var line = "\(index). \(chat.display_name) (ID: \(chat.chat_identifier))"
+    var extras: [String] = []
+    if let last = chat.last_activity {
+        extras.append("last activity \(MessageTime.localString(from: last))")
+    }
+    if !chat.participants.isEmpty {
+        extras.append("participants: \(chat.participants.joined(separator: ", "))")
+    }
+    if !extras.isEmpty { line += " — " + extras.joined(separator: "; ") }
+    return line
 }
 
 // MARK: - search (tool_fuzzy_search_messages)
@@ -458,6 +484,7 @@ struct Search: ParsableCommand {
     @Option(name: .long, help: "Hours to look back (default 720 = 30 days; 0 = all time).") var hours: Int = 720
     @Option(name: .long, help: "Fuzzy threshold 0.0–1.0 (default 0.6).") var threshold: Double = 0.6
     @Option(name: .long, help: "Match mode: fuzzy (default) | contains | exact.") var match: String = "fuzzy"
+    @Flag(name: .long, help: "Only 1:1 conversations — exclude messages sent in a group chat.") var directOnly = false
 
     func run() throws {
         try run(dependencies: .live)
@@ -495,10 +522,11 @@ struct Search: ParsableCommand {
             }
             let book = dependencies.loadAddressBook()
             var db = try dependencies.makeChatDB(book)
-            let result = db.search(term: term, hours: hours, threshold: threshold, match: mode)
+            let result = db.search(term: term, hours: hours, threshold: threshold, match: mode,
+                                   directOnly: directOnly)
             let data = SearchData(search_term: term, hours: hours, threshold: threshold, match: match,
-                count: result.matches.count, scanned: result.scanned, truncated: result.truncated,
-                messages: result.matches)
+                direct_only: directOnly, count: result.matches.count, scanned: result.scanned,
+                truncated: result.truncated, messages: result.matches)
             try emit(global, data) {
                 if result.matches.isEmpty { return "No messages found matching '\(term)'." }
                 var header = "Found \(result.matches.count) messages matching '\(term)':\n"

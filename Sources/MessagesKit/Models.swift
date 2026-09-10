@@ -22,6 +22,9 @@ struct RecentData: Encodable {
     let ambiguous: Bool
     let candidates: [ContactCandidateData]?
     let note: String?
+    /// Echoes `--direct-only`, so a caller can tell a filtered read from an unfiltered one
+    /// without re-deriving it from the messages.
+    let direct_only: Bool
     let count: Int
     let messages: [ChatDB.Message]
 }
@@ -34,7 +37,18 @@ struct FindContactData: Encodable {
 
 struct ChatsData: Encodable {
     let count: Int
+    /// Echoes `--name`; ALWAYS present, null when no filter was given.
+    let name_filter: String?
     let chats: [ChatDB.Chat]
+
+    enum CodingKeys: String, CodingKey { case count, name_filter, chats }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(count, forKey: .count)
+        try encodeOrNull(&c, name_filter, .name_filter)
+        try c.encode(chats, forKey: .chats)
+    }
 }
 
 struct SearchData: Encodable {
@@ -42,6 +56,8 @@ struct SearchData: Encodable {
     let hours: Int
     let threshold: Double
     let match: String
+    /// Echoes `--direct-only`, matching the `recent` payload.
+    let direct_only: Bool
     let count: Int
     let scanned: Int
     let truncated: Bool

@@ -2,6 +2,18 @@ import Foundation
 import AppleKit
 import Darwin
 
+/// Encode an optional as its value or an explicit JSON `null` — never omitting the key.
+///
+/// Swift's SYNTHESIZED `Encodable` omits a nil optional entirely (measured, not assumed), which
+/// is the shape every optional in this module shipped with. Fields whose contract is documented
+/// as `<type>|null` must be present either way, so a caller can distinguish "no value here" from
+/// "an older binary that did not emit this key"; those go through this helper.
+func encodeOrNull<K: CodingKey, V: Encodable>(
+    _ c: inout KeyedEncodingContainer<K>, _ value: V?, _ key: K
+) throws {
+    if let value { try c.encode(value, forKey: key) } else { try c.encodeNil(forKey: key) }
+}
+
 /// Read layer over `~/Library/Messages/chat.db` (WAL-aware, via the shared
 /// `SQLiteReader` with `copyToTemp` for hot/locked data reads). Ports the SQL +
 /// row-shaping of `mac_messages_mcp`'s `get_recent_messages`, `fuzzy_search_messages`,
@@ -182,8 +194,42 @@ public struct ChatDB {
         public let service: String?
         public let body: String
         public let group_name: String?
+        public let chat_identifier: String?  // ALWAYS present (null when no chat row)
+        public let chat_guid: String?        // ALWAYS present (null when no chat row)
+        public let is_group: Bool            // chat.style == 43
         public let has_attachments: Bool
         public let attachments: [Attachment]
+
+        enum CodingKeys: String, CodingKey {
+            case rowid, date, date_local, timestamp, is_from_me, sender, handle, service, body
+            case group_name, chat_identifier, chat_guid, is_group, has_attachments, attachments
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encode(rowid, forKey: .rowid)
+            try c.encode(date, forKey: .date)
+            try c.encode(date_local, forKey: .date_local)
+            try c.encode(timestamp, forKey: .timestamp)
+            try c.encode(is_from_me, forKey: .is_from_me)
+            try c.encode(sender, forKey: .sender)
+            // `handle`, `service` and `group_name` keep the OMIT-WHEN-NIL shape the synthesized
+            // encoder gave them before this struct grew a hand-written one. `group_name` in
+            // particular is the oracle's two-state absent-or-name field (see `shape`), and turning
+            // its absence into an explicit null would hand consumers a third state to misread.
+            try c.encodeIfPresent(handle, forKey: .handle)
+            try c.encodeIfPresent(service, forKey: .service)
+            try c.encode(body, forKey: .body)
+            try c.encodeIfPresent(group_name, forKey: .group_name)
+            // The chat-identity keys are contract-documented as `string|null` and are ALWAYS
+            // present, so that "this message is in no chat" is distinguishable from an older
+            // binary that never emitted the key at all.
+            try encodeOrNull(&c, chat_identifier, .chat_identifier)
+            try encodeOrNull(&c, chat_guid, .chat_guid)
+            try c.encode(is_group, forKey: .is_group)
+            try c.encode(has_attachments, forKey: .has_attachments)
+            try c.encode(attachments, forKey: .attachments)
+        }
     }
 
     private static let messageSelect = """
@@ -194,10 +240,81 @@ public struct ChatDB {
         LEFT JOIN handle h ON m.handle_id = h.ROWID
         """
 
+    // MARK: - Chat identity (`chat_message_join` → `chat`)
+
+    /// `chat.style` for a group chat. Apple's other value (45) is a 1:1 conversation.
+    public static let groupChatStyle: Int64 = 43
+
+    /// Which chat a message belongs to. `identifier`/`guid` are nil when the chat row
+    /// carries none; the whole record is absent when the message maps to no chat at all.
+    struct ChatIdentity {
+        let identifier: String?
+        let guid: String?
+        let isGroup: Bool
+    }
+
+    /// SQL predicate excluding messages whose chat is a group.
+    ///
+    /// It picks the FIRST chat by chat ROWID — the same row `chat_identifier`, `chat_guid` and
+    /// `is_group` are taken from — so the flag can never disagree with the fields it filters on.
+    /// That promise is why both are gated on the SAME `chatIdentityAvailable()` check rather
+    /// than on whatever each one minimally needs: a schema that could answer the filter but not
+    /// the fields would drop rows while reporting every survivor as `is_group: false`.
+    /// Applied in SQL rather than after shaping so `--limit N` still returns up to N direct
+    /// messages instead of N-minus-the-groups. `COALESCE(..., 0)` keeps a message with no chat
+    /// row: it has no style, and a message in no chat is not in a group chat.
+    private static let directOnlyPredicate = """
+        COALESCE((SELECT c.style FROM chat_message_join cmj JOIN chat c ON c.ROWID = cmj.chat_id \
+        WHERE cmj.message_id = m.ROWID ORDER BY c.ROWID LIMIT 1), 0) != \(groupChatStyle)
+        """
+
+    private func chatMessageJoinAvailable() -> Bool {
+        tableColumns("chat_message_join").isSuperset(of: ["message_id", "chat_id"])
+    }
+
+    /// Whether this store can answer "which chat is this message in?". A chat.db old or
+    /// pruned enough to lack the join (or the `chat` columns) yields nulls and `is_group:false`
+    /// rather than failing the whole read — the same posture the attachment join takes.
+    private func chatIdentityAvailable() -> Bool {
+        chatMessageJoinAvailable()
+            && tableColumns("chat").isSuperset(of: ["chat_identifier", "guid", "style"])
+    }
+
+    /// Chat identity for a batch of message rowids, keyed by message rowid. Chunked for the
+    /// same host-parameter-ceiling reason `attachmentsByMessage` is.
+    private func chatIdentities(ids: [Int64]) -> [Int64: ChatIdentity] {
+        guard !ids.isEmpty, chatIdentityAvailable() else { return [:] }
+        var out: [Int64: ChatIdentity] = [:]
+        for chunk in stride(from: 0, to: ids.count, by: 500).map({
+            Array(ids[$0 ..< min($0 + 500, ids.count)])
+        }) {
+            let placeholders = chunk.indices.map { "?\($0 + 1)" }.joined(separator: ", ")
+            let sql = """
+                SELECT cmj.message_id AS message_id, c.chat_identifier AS chat_identifier,
+                       c.guid AS chat_guid, c.style AS style
+                FROM chat_message_join cmj
+                JOIN chat c ON c.ROWID = cmj.chat_id
+                WHERE cmj.message_id IN (\(placeholders))
+                ORDER BY cmj.message_id, c.ROWID
+                """
+            for row in (try? reader.rows(sql, chunk.map(String.init))) ?? [] {
+                // `ORDER BY … c.ROWID` + first-wins: a message joined to several chats reports
+                // the lowest-ROWID one, matching `directOnlyPredicate`'s LIMIT 1.
+                guard let mid = row.int("message_id"), out[mid] == nil else { continue }
+                out[mid] = ChatIdentity(identifier: row.text("chat_identifier"),
+                                        guid: row.text("chat_guid"),
+                                        isGroup: row.int("style") == ChatDB.groupChatStyle)
+            }
+        }
+        return out
+    }
+
     /// Fetch recent messages across all chats (optionally filtered to handle rowids),
     /// newest-first, limited. Decodes body from `text` or `attributedBody`; body-less
-    /// rows survive only when authoritative attachment rows exist.
-    public mutating func recent(hours: Int, handleRowIds: [Int64]?, limit: Int) -> [Message] {
+    /// rows survive only when authoritative attachment rows exist. `directOnly` drops
+    /// group-chat messages.
+    public mutating func recent(hours: Int, handleRowIds: [Int64]?, limit: Int,
+                                directOnly: Bool = false) -> [Message] {
         // Filter semantics are load-bearing for privacy: `nil` = NO filter requested
         // (return all recent messages), but a non-nil EMPTY array = a filter WAS
         // requested and matched zero handles → return NOTHING. Without this guard the
@@ -211,6 +328,9 @@ public struct ChatDB {
             let placeholders = ids.enumerated().map { "?\($0.offset + 2)" }.joined(separator: ", ")
             sql += "AND m.handle_id IN (\(placeholders)) "
             binds.append(contentsOf: ids.map(String.init))
+        }
+        if directOnly, chatIdentityAvailable() {
+            sql += "AND \(ChatDB.directOnlyPredicate) "
         }
         sql += "ORDER BY m.date DESC LIMIT \(max(0, limit))"
         let rows = (try? reader.rows(sql, binds)) ?? []
@@ -346,7 +466,9 @@ public struct ChatDB {
     }
 
     private mutating func shape(rows: [SQLiteReader.Row], mapping: [String: String]) -> [Message] {
-        let byMessage = attachmentsByMessage(ids: rows.compactMap { $0.int("rowid") })
+        let ids = rows.compactMap { $0.int("rowid") }
+        let byMessage = attachmentsByMessage(ids: ids)
+        let identities = chatIdentities(ids: ids)
         var out: [Message] = []
         for row in rows {
             guard let rowid = row.int("rowid") else { continue }
@@ -372,6 +494,7 @@ public struct ChatDB {
             if let room = row.text("cache_roomnames"), let name = mapping[room], !name.isEmpty {
                 group = name
             }
+            let identity = identities[rowid]
             out.append(Message(
                 rowid: rowid,
                 date: date,
@@ -383,6 +506,9 @@ public struct ChatDB {
                 service: row.text("service"),
                 body: body,
                 group_name: group,
+                chat_identifier: identity?.identifier,
+                chat_guid: identity?.guid,
+                is_group: identity?.isGroup ?? false,
                 has_attachments: hasAttachments,
                 attachments: joined
             ))
@@ -413,10 +539,41 @@ public struct ChatDB {
         public let group_name: String?
         // Carried on both message shapes deliberately. A caller that finds a message by
         // search and one that reads it from `recent` should not have to know that only
-        // one of the two paths can tell it there is a file attached.
+        // one of the two paths can tell it there is a file attached — or which chat it
+        // came from.
+        public let chat_identifier: String?
+        public let chat_guid: String?
+        public let is_group: Bool
         public let has_attachments: Bool
         public let attachments: [Attachment]
         public let score: Double
+
+        enum CodingKeys: String, CodingKey {
+            case rowid, date, date_local, timestamp, is_from_me, sender, handle, service, body
+            case group_name, chat_identifier, chat_guid, is_group, has_attachments, attachments
+            case score
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encode(rowid, forKey: .rowid)
+            try c.encode(date, forKey: .date)
+            try c.encode(date_local, forKey: .date_local)
+            try c.encode(timestamp, forKey: .timestamp)
+            try c.encode(is_from_me, forKey: .is_from_me)
+            try c.encode(sender, forKey: .sender)
+            // Same omit-when-nil preservation as `Message` — see the note there.
+            try c.encodeIfPresent(handle, forKey: .handle)
+            try c.encodeIfPresent(service, forKey: .service)
+            try c.encode(body, forKey: .body)
+            try c.encodeIfPresent(group_name, forKey: .group_name)
+            try encodeOrNull(&c, chat_identifier, .chat_identifier)
+            try encodeOrNull(&c, chat_guid, .chat_guid)
+            try c.encode(is_group, forKey: .is_group)
+            try c.encode(has_attachments, forKey: .has_attachments)
+            try c.encode(attachments, forKey: .attachments)
+            try c.encode(score, forKey: .score)
+        }
     }
 
     public struct SearchResult { public let matches: [ScoredMessage]; public let scanned: Int; public let truncated: Bool }
@@ -426,7 +583,9 @@ public struct ChatDB {
     /// Two-pass search: SQL LIKE pre-filter (+ all attributedBody-only rows) →
     /// exact-substring (score 1.0) or WRatio ≥ threshold. `hours == 0` = all time.
     /// `match`: `.fuzzy` (default, WRatio), `.contains` (substring), `.exact`.
-    public mutating func search(term: String, hours: Int, threshold: Double, match: SearchMatch) -> SearchResult {
+    /// `directOnly` drops group-chat messages, exactly as on the `recent` path.
+    public mutating func search(term: String, hours: Int, threshold: Double, match: SearchMatch,
+                                directOnly: Bool = false) -> SearchResult {
         let likeParam = "%" + escapeLike(term) + "%"
         var where_ = "(m.text LIKE ?1 ESCAPE '\\' OR (m.text IS NULL AND m.attributedBody IS NOT NULL))"
         var binds = [likeParam]
@@ -434,6 +593,11 @@ public struct ChatDB {
             let threshold = MessageTime.thresholdNanos(hoursAgo: hours)
             where_ = "m.date > ?2 AND " + where_
             binds.append(String(threshold))
+        }
+        // Prepended, not appended: the predicate carries no host parameters, so it cannot
+        // disturb the ?1/?2 numbering the two clauses above depend on.
+        if directOnly, chatIdentityAvailable() {
+            where_ = "\(ChatDB.directOnlyPredicate) AND " + where_
         }
         let sql = ChatDB.messageSelect + "\nWHERE \(where_)\nORDER BY m.date DESC LIMIT \(ChatDB.fuzzySoftCap)"
         let rows = (try? reader.rows(sql, binds)) ?? []
@@ -469,7 +633,9 @@ public struct ChatDB {
 
         // Fetch for the SCORED rows only, not the whole LIKE pre-filter: that set is capped
         // at `fuzzySoftCap` (10,000) and is mostly discarded a few lines above.
-        let byMessage = attachmentsByMessage(ids: scored.compactMap { $0.0.int("rowid") })
+        let scoredIds = scored.compactMap { $0.0.int("rowid") }
+        let byMessage = attachmentsByMessage(ids: scoredIds)
+        let identities = chatIdentities(ids: scoredIds)
 
         var matches: [ScoredMessage] = []
         for (row, body, score) in scored {
@@ -491,10 +657,13 @@ public struct ChatDB {
             if let room = row.text("cache_roomnames"), let name = mapping[room], !name.isEmpty {
                 group = name
             }
+            let identity = identities[rowid]
             matches.append(ScoredMessage(
                 rowid: rowid, date: date, date_local: MessageTime.localString(from: date),
                 timestamp: rawDate, is_from_me: isFromMe, sender: sender, handle: address,
                 service: row.text("service"), body: body, group_name: group,
+                chat_identifier: identity?.identifier, chat_guid: identity?.guid,
+                is_group: identity?.isGroup ?? false,
                 has_attachments: hasAttachments,
                 attachments: joined, score: score))
         }
@@ -519,20 +688,99 @@ public struct ChatDB {
         public let service_name: String?
         public let group_id: String?
         public let style: Int64?
+        /// Newest message in this chat — ISO-8601 in JSON. ALWAYS present (null when the
+        /// chat holds no messages, or the store cannot answer).
+        public let last_activity: Date?
+        /// The same instant as the raw Apple-epoch nanosecond value `chat.db` stores.
+        public let last_activity_timestamp: Int64?
+        /// Handle ids from `chat_handle_join` → `handle.id`; possibly empty.
+        public let participants: [String]
+
+        enum CodingKeys: String, CodingKey {
+            case chat_identifier, display_name, guid, room_name, service_name, group_id, style
+            case last_activity, last_activity_timestamp, participants
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encode(chat_identifier, forKey: .chat_identifier)
+            try c.encode(display_name, forKey: .display_name)
+            // The pre-existing optionals keep their omit-when-nil shape (see `Message`).
+            try c.encodeIfPresent(guid, forKey: .guid)
+            try c.encodeIfPresent(room_name, forKey: .room_name)
+            try c.encodeIfPresent(service_name, forKey: .service_name)
+            try c.encodeIfPresent(group_id, forKey: .group_id)
+            try c.encodeIfPresent(style, forKey: .style)
+            try encodeOrNull(&c, last_activity, .last_activity)
+            try encodeOrNull(&c, last_activity_timestamp, .last_activity_timestamp)
+            try c.encode(participants, forKey: .participants)
+        }
     }
 
-    public func namedChats() -> [Chat] {
+    /// Named chats, oldest chat ROWID first (the `chat` table's own order — unchanged).
+    /// `nameFilter` keeps only chats whose `display_name` contains it, case-insensitively;
+    /// `limit` caps the result. Both default to "no filter", so the historical call
+    /// `namedChats()` behaves exactly as it did.
+    public func namedChats(nameFilter: String? = nil, limit: Int? = nil) -> [Chat] {
+        if let limit, limit <= 0 { return [] }
         let sql = """
-            SELECT chat_identifier, display_name, guid, room_name, service_name, group_id, style
+            SELECT ROWID AS rowid, chat_identifier, display_name, guid, room_name, service_name,
+                   group_id, style
             FROM chat WHERE display_name IS NOT NULL AND display_name != ''
             """
         let rows = (try? reader.rows(sql)) ?? []
-        return rows.compactMap { row in
-            guard let id = row.text("chat_identifier"), let name = row.text("display_name") else { return nil }
-            return Chat(chat_identifier: id, display_name: name, guid: row.text("guid"),
-                        room_name: row.text("room_name"), service_name: row.text("service_name"),
-                        group_id: row.text("group_id"), style: row.int("style"))
+        let activity = chatLastActivity()
+        let participants = chatParticipants()
+        var out: [Chat] = []
+        for row in rows {
+            guard let id = row.text("chat_identifier"), let name = row.text("display_name") else { continue }
+            if let nameFilter, !nameFilter.isEmpty,
+               name.range(of: nameFilter, options: .caseInsensitive) == nil { continue }
+            if let limit, out.count >= limit { break }
+            let chatRowId = row.int("rowid")
+            let last = chatRowId.flatMap { activity[$0] }
+            out.append(Chat(chat_identifier: id, display_name: name, guid: row.text("guid"),
+                            room_name: row.text("room_name"), service_name: row.text("service_name"),
+                            group_id: row.text("group_id"), style: row.int("style"),
+                            last_activity: last.map(MessageTime.date(fromRaw:)),
+                            last_activity_timestamp: last,
+                            participants: chatRowId.flatMap { participants[$0] } ?? []))
         }
+        return out
+    }
+
+    /// chat ROWID → raw Apple-ns date of its newest message. Chats with no messages are absent.
+    private func chatLastActivity() -> [Int64: Int64] {
+        guard chatMessageJoinAvailable() else { return [:] }
+        let sql = """
+            SELECT cmj.chat_id AS chat_id, MAX(m.date) AS last_date
+            FROM chat_message_join cmj
+            JOIN message m ON m.ROWID = cmj.message_id
+            GROUP BY cmj.chat_id
+            """
+        var out: [Int64: Int64] = [:]
+        for row in (try? reader.rows(sql)) ?? [] {
+            guard let chatId = row.int("chat_id"), let last = row.int("last_date") else { continue }
+            out[chatId] = last
+        }
+        return out
+    }
+
+    /// chat ROWID → participant handle ids, in handle-ROWID order so the array is stable
+    /// across invocations rather than following SQLite's scan order.
+    private func chatParticipants() -> [Int64: [String]] {
+        let sql = """
+            SELECT chj.chat_id AS chat_id, h.id AS handle
+            FROM chat_handle_join chj
+            JOIN handle h ON h.ROWID = chj.handle_id
+            ORDER BY chj.chat_id, h.ROWID
+            """
+        var out: [Int64: [String]] = [:]
+        for row in (try? reader.rows(sql)) ?? [] {
+            guard let chatId = row.int("chat_id"), let handle = row.text("handle") else { continue }
+            out[chatId, default: []].append(handle)
+        }
+        return out
     }
 
     // MARK: - iMessage availability (MCP `_check_imessage_availability`)

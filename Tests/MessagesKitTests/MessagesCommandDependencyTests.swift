@@ -491,9 +491,118 @@ struct MessagesCommandDependencyTests {
         }
 
         let data = try payload(from: output)
-        #expect(data["count"] as? Int == 1)
+        #expect(data["count"] as? Int == 2)
+        #expect(data["name_filter"] is NSNull)
         let chats = try #require(data["chats"] as? [[String: Any]])
         #expect(chats.first?["display_name"] as? String == "Test Group")
+    }
+
+    /// The chat-identity keys are contract-documented as `string|null`, so they must be PRESENT
+    /// and null for a message in no chat — Swift's synthesized encoder would have omitted them,
+    /// which is the shape a consumer cannot tell apart from an older binary.
+    @Test func recentEmitsChatIdentityWithExplicitNulls() throws {
+        let command = try Recent.parse(["--hours", "24", "--limit", "100"])
+        let output = try captureStdout {
+            try command.run(dependencies: fixtureDependencies(chat))
+        }
+
+        let data = try payload(from: output)
+        #expect(data["direct_only"] as? Bool == false)
+        let messages = try #require(data["messages"] as? [[String: Any]])
+        let byRow = Dictionary(uniqueKeysWithValues: messages.compactMap { m -> (Int, [String: Any])? in
+            (m["rowid"] as? Int).map { ($0, m) }
+        })
+
+        let group = try #require(byRow[4])
+        #expect(group["chat_identifier"] as? String == "chat999")
+        #expect(group["chat_guid"] as? String == "iMessage;+;chat999")
+        #expect(group["is_group"] as? Bool == true)
+
+        let orphan = try #require(byRow[3])
+        #expect(orphan["chat_identifier"] is NSNull)
+        #expect(orphan["chat_guid"] is NSNull)
+        #expect(orphan["is_group"] as? Bool == false)
+        // `group_name` keeps its pre-existing omit-when-absent shape; only the new keys are nulls.
+        #expect(orphan["group_name"] == nil)
+    }
+
+    @Test func recentDirectOnlyFiltersAndIsEchoed() throws {
+        let command = try Recent.parse(["--hours", "24", "--limit", "100", "--direct-only"])
+        let output = try captureStdout {
+            try command.run(dependencies: fixtureDependencies(chat))
+        }
+
+        let data = try payload(from: output)
+        #expect(data["direct_only"] as? Bool == true)
+        let messages = try #require(data["messages"] as? [[String: Any]])
+        #expect(messages.compactMap { $0["rowid"] as? Int } == [1, 2, 3, 6, 8, 9, 10])
+        #expect(messages.allSatisfy { $0["is_group"] as? Bool == false })
+    }
+
+    @Test func searchDirectOnlyFiltersAndIsEchoed() throws {
+        let deps = fixtureDependencies(chat)
+
+        let all = try payload(from: captureStdout {
+            try Search.parse(["error", "--hours", "24", "--match", "contains"]).run(dependencies: deps)
+        })
+        #expect(all["direct_only"] as? Bool == false)
+        #expect(all["count"] as? Int == 1)
+
+        let direct = try payload(from: captureStdout {
+            try Search.parse(["error", "--hours", "24", "--match", "contains", "--direct-only"])
+                .run(dependencies: deps)
+        })
+        #expect(direct["direct_only"] as? Bool == true)
+        #expect(direct["count"] as? Int == 0)
+    }
+
+    @Test func chatsReportActivityParticipantsAndFilters() throws {
+        let deps = fixtureDependencies(chat)
+
+        let unfiltered = try payload(from: captureStdout {
+            try Chats.parse([]).run(dependencies: deps)
+        })
+        let chats = try #require(unfiltered["chats"] as? [[String: Any]])
+        let group = try #require(chats.first)
+        #expect(group["last_activity"] as? String != nil)
+        #expect(group["last_activity_timestamp"] as? Int == Int(chat.base - 300))
+        #expect(group["participants"] as? [String] == ["+12125550101", "+12125550102"])
+        let quiet = try #require(chats.last)
+        #expect(quiet["display_name"] as? String == "Other Group")
+        #expect(quiet["last_activity"] is NSNull)
+        #expect(quiet["last_activity_timestamp"] is NSNull)
+        #expect((quiet["participants"] as? [String])?.isEmpty == true)
+
+        let filtered = try payload(from: captureStdout {
+            try Chats.parse(["--name", "oTHer"]).run(dependencies: deps)
+        })
+        #expect(filtered["count"] as? Int == 1)
+        #expect(filtered["name_filter"] as? String == "oTHer")
+        #expect((filtered["chats"] as? [[String: Any]])?.first?["display_name"] as? String == "Other Group")
+
+        let limited = try payload(from: captureStdout {
+            try Chats.parse(["--limit", "1"]).run(dependencies: deps)
+        })
+        #expect(limited["count"] as? Int == 1)
+        #expect(limited["name_filter"] is NSNull)
+        #expect((limited["chats"] as? [[String: Any]])?.first?["display_name"] as? String == "Test Group")
+    }
+
+    @Test func chatsTextRendererShowsActivityAndParticipants() throws {
+        let deps = fixtureDependencies(chat)
+
+        let listing = try captureStdout {
+            try Chats.parse(["--text", "--name", "test"]).run(dependencies: deps)
+        }
+        #expect(listing.contains("Available group chats matching 'test':"))
+        #expect(listing.contains("1. Test Group (ID: chat999)"))
+        #expect(listing.contains("last activity "))
+        #expect(listing.contains("participants: +12125550101, +12125550102"))
+
+        let empty = try captureStdout {
+            try Chats.parse(["--text", "--name", "no-such-chat"]).run(dependencies: deps)
+        }
+        #expect(empty.contains("No named group chats matching 'no-such-chat'."))
     }
 
     @Test func searchUsesInjectedChatDB() throws {
@@ -792,6 +901,12 @@ struct MessagesCommandDependencyTests {
                                   run: { try $0.run(dependencies: .fixture()) })
         try expectValidationError(try Search.parse([String(repeating: "a", count: 1025)]),
                                   run: { try $0.run(dependencies: .fixture()) })
+        // `chats --limit` takes the same bound as `recent --limit`, and rejects it before the
+        // fail-closed fixture would throw `upstream` instead.
+        try expectValidationError(try Chats.parse(["--limit", "0"]),
+                                  run: { try $0.run(dependencies: .fixture()) })
+        try expectValidationError(try Chats.parse(["--limit", "10001"]),
+                                  run: { try $0.run(dependencies: .fixture()) })
     }
 
     @Test("send preserves marked output-limit errors and identical unmarked errors")
@@ -1026,6 +1141,7 @@ struct MessagesCommandDependencyTests {
             CREATE TABLE chat(ROWID INTEGER PRIMARY KEY, chat_identifier TEXT, display_name TEXT,
                 room_name TEXT, guid TEXT, service_name TEXT, group_id TEXT, style INTEGER);
             CREATE TABLE chat_handle_join(chat_id INTEGER, handle_id INTEGER);
+            CREATE TABLE chat_message_join(chat_id INTEGER, message_id INTEGER);
             CREATE TABLE message(ROWID INTEGER PRIMARY KEY, guid TEXT, text TEXT, attributedBody BLOB,
                 is_from_me INTEGER, handle_id INTEGER, cache_roomnames TEXT, service TEXT,
                 cache_has_attachments INTEGER, date INTEGER, error INTEGER);
@@ -1051,6 +1167,7 @@ struct MessagesCommandDependencyTests {
             CREATE TABLE chat(ROWID INTEGER PRIMARY KEY, chat_identifier TEXT, display_name TEXT,
                 room_name TEXT, guid TEXT, service_name TEXT, group_id TEXT, style INTEGER);
             CREATE TABLE chat_handle_join(chat_id INTEGER, handle_id INTEGER);
+            CREATE TABLE chat_message_join(chat_id INTEGER, message_id INTEGER);
             CREATE TABLE message(ROWID INTEGER PRIMARY KEY, guid TEXT, text TEXT, attributedBody BLOB,
                 is_from_me INTEGER, handle_id INTEGER, cache_roomnames TEXT, service TEXT,
                 cache_has_attachments INTEGER, date INTEGER, error INTEGER);

@@ -477,6 +477,7 @@ struct EnvelopeTests {
         let msg = ChatDB.Message(rowid: 1, date: Date(timeIntervalSince1970: 1_700_000_000),
             date_local: "2023-11-14 15:13:20", timestamp: 12345, is_from_me: true, sender: "You",
             handle: "+12125550100", service: "iMessage", body: "hi", group_name: nil,
+            chat_identifier: "chat999", chat_guid: "iMessage;+;chat999", is_group: true,
             has_attachments: true,
             attachments: [ChatDB.Attachment(rowid: 9, guid: "a9", filename: "~/x/photo.png",
                 path: "/tmp/apple-cli-photo.png", exists: false, mime_type: "image/png",
@@ -495,13 +496,18 @@ struct EnvelopeTests {
         #expect(json.contains("\"transfer_name\""))
         #expect(json.contains("\"mime_type\""))
         #expect(json.contains("\"total_bytes\""))
+        // Chat identity rides the same envelope, with the same verbatim snake_case wire keys.
+        #expect(json.contains("\"chat_identifier\" : \"chat999\""))
+        #expect(json.contains("\"chat_guid\" : \"iMessage;+;chat999\""))
+        #expect(json.contains("\"is_group\" : true"))
     }
 
     @Test func scoredMessageEncodesAttachmentShape() throws {
         let msg = ChatDB.ScoredMessage(rowid: 2, date: Date(timeIntervalSince1970: 1_700_000_001),
             date_local: "2023-11-14 15:13:21", timestamp: 12346, is_from_me: false,
             sender: "Alice", handle: "+12125550101", service: "SMS", body: "see file",
-            group_name: nil, has_attachments: true,
+            group_name: nil, chat_identifier: "+12125550101",
+            chat_guid: "iMessage;-;+12125550101", is_group: false, has_attachments: true,
             attachments: [ChatDB.Attachment(rowid: 10, guid: "a10",
                 filename: "~/Library/Messages/Attachments/zz/photo.png",
                 path: "/tmp/apple-cli-home/Library/Messages/Attachments/zz/photo.png",
@@ -517,12 +523,15 @@ struct EnvelopeTests {
         #expect(json.contains("\"is_sticker\""))
         #expect(json.contains("\"hide_attachment\""))
         #expect(json.contains("\"exists\" : null"))
+        #expect(json.contains("\"chat_identifier\" : \"+12125550101\""))
+        #expect(json.contains("\"is_group\" : false"))
     }
 
     @Test func attachmentJSONIncludesNullKeysForMissingMetadata() throws {
         let msg = ChatDB.Message(rowid: 3, date: Date(timeIntervalSince1970: 1_700_000_002),
             date_local: "2023-11-14 15:13:22", timestamp: 12347, is_from_me: false,
             sender: "Alice", handle: nil, service: nil, body: "file", group_name: nil,
+            chat_identifier: nil, chat_guid: nil, is_group: false,
             has_attachments: true,
             attachments: [ChatDB.Attachment(rowid: 11, guid: nil, filename: nil, path: nil,
                 exists: nil, mime_type: nil, uti: nil, transfer_name: nil, total_bytes: nil,
@@ -537,6 +546,17 @@ struct EnvelopeTests {
                     "total_bytes", "is_sticker", "hide_attachment"] {
             #expect(attachment.keys.contains(key))
             #expect(attachment[key] is NSNull)
+        }
+        // Chat identity is `string|null`: the keys are PRESENT and null for a message in no
+        // chat, so a consumer can tell "no chat" from "a binary that predates the field".
+        for key in ["chat_identifier", "chat_guid"] {
+            #expect(first.keys.contains(key))
+            #expect(first[key] is NSNull)
+        }
+        #expect(first["is_group"] as? Bool == false)
+        // …while `handle`, `service` and `group_name` keep their omit-when-nil shape.
+        for key in ["handle", "service", "group_name"] {
+            #expect(!first.keys.contains(key))
         }
     }
 }

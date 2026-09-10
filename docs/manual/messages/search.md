@@ -10,12 +10,14 @@ apple messages search <term> [flags]
 
 ## Description
 
-Search returns scored message matches and now carries the same attachment shape as `messages recent`: `has_attachments` plus per-file metadata in `attachments`. This is additive under `schema_version` 1 because existing keys keep their names and types.
+Search returns scored message matches and carries the same chat identity and attachment shape as `messages recent`: `chat_identifier`, `chat_guid`, `is_group`, `has_attachments`, and per-file metadata in `attachments`. `--direct-only` drops group-chat hits, and `direct_only` echoes the flag. This is additive under `schema_version` 1 because existing keys keep their names and types.
 
 ## Options
 
 - `<term>`
   <br>Search term.
+- `--direct-only`
+  <br>Only 1:1 conversations — exclude messages sent in a group chat.
 - `--hours` `<hours>`
   <br>Hours to look back (default 720 = 30 days; 0 = all time).
 - `--match` `<match>`
@@ -50,6 +52,12 @@ Search all retained message text exactly
 
 ```console
 apple messages search "receipt" --hours 0 --match exact
+```
+
+Search 1:1 conversations only
+
+```console
+apple messages search "receipt" --hours 720 --direct-only
 ```
 
 ## Notes

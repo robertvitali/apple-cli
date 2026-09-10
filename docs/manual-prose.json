@@ -1,6 +1,6 @@
 {
   "apple messages recent": {
-    "description": "Returns recent Messages rows with the same JSON envelope as the rest of the CLI. Each message includes `has_attachments` and an `attachments` array. Attachment paths are derived from chat.db metadata only: `filename` is the stored value, `path` is present only when an absolute standardized path can be derived, and `exists` is true or false only after a conservative local-root probe. When probing is skipped, `exists` is null.",
+    "description": "Returns recent Messages rows with the same JSON envelope as the rest of the CLI. Each message says which conversation it came from — `chat_identifier` and `chat_guid` (both `string|null`: null when the message maps to no chat row) and `is_group` (true when that chat's `style` is 43). A message joined to several chats reports the one with the lowest chat row id. `--direct-only` keeps 1:1 conversations only, dropping every group-chat message; the filter runs in SQL, before `--limit`, so a request for N messages still returns up to N. The `direct_only` field echoes the flag back. Each message also includes `has_attachments` and an `attachments` array. Attachment paths are derived from chat.db metadata only: `filename` is the stored value, `path` is present only when an absolute standardized path can be derived, and `exists` is true or false only after a conservative local-root probe. When probing is skipped, `exists` is null.",
     "examples": [
       {
         "title": "List recent messages with attachment metadata",
@@ -9,12 +9,16 @@
       {
         "title": "Filter to an explicit synthetic handle",
         "command": "apple messages recent --handle +12125550100 --hours 24"
+      },
+      {
+        "title": "Read only 1:1 conversations, skipping group chats",
+        "command": "apple messages recent --hours 24 --direct-only"
       }
     ],
-    "notes": "`messages recent` can include attachment-only messages that have no text body. Those rows use an empty `body` and carry the file details in `attachments`; a cache flag alone does not preserve a bodyless row when no joined attachment details exist. Attachment paths are not confined to the Messages attachments directory because sent items may point elsewhere on the local machine, but existence probing is limited to conservative local roots and uses symlink-aware traversal. Relative paths are omitted; automount and mounted-volume roots such as `/net`, `/home`, `/Network/Servers`, and `/Volumes` are reported without probing."
+    "notes": "`messages recent` can include attachment-only messages that have no text body. Those rows use an empty `body` and carry the file details in `attachments`; a cache flag alone does not preserve a bodyless row when no joined attachment details exist. Attachment paths are not confined to the Messages attachments directory because sent items may point elsewhere on the local machine, but existence probing is limited to conservative local roots and uses symlink-aware traversal. Relative paths are omitted; automount and mounted-volume roots such as `/net`, `/home`, `/Network/Servers`, and `/Volumes` are reported without probing.\n\n`group_name` and `chat_identifier` answer different questions and are not interchangeable: `group_name` is the chat's display name and is absent both for a 1:1 conversation and for a group that was never named, whereas `is_group` reports the chat's style directly, so an unnamed group still reads as a group. A store old or pruned enough to lack `chat_message_join` reports null identifiers and `is_group: false` rather than failing the read, and `--direct-only` then excludes nothing, because nothing is known to be a group."
   },
   "apple messages search": {
-    "description": "Search returns scored message matches and now carries the same attachment shape as `messages recent`: `has_attachments` plus per-file metadata in `attachments`. This is additive under `schema_version` 1 because existing keys keep their names and types.",
+    "description": "Search returns scored message matches and carries the same chat identity and attachment shape as `messages recent`: `chat_identifier`, `chat_guid`, `is_group`, `has_attachments`, and per-file metadata in `attachments`. `--direct-only` drops group-chat hits, and `direct_only` echoes the flag. This is additive under `schema_version` 1 because existing keys keep their names and types.",
     "examples": [
       {
         "title": "Search recent messages and include attachment metadata",
@@ -23,8 +27,30 @@
       {
         "title": "Search all retained message text exactly",
         "command": "apple messages search \"receipt\" --hours 0 --match exact"
+      },
+      {
+        "title": "Search 1:1 conversations only",
+        "command": "apple messages search \"receipt\" --hours 720 --direct-only"
       }
     ],
     "notes": "`messages search` first filters candidate rows by message text or attributed body, so an attachment-only row with no searchable body can appear in `messages recent` without appearing in search results. When a searched row does have joined attachments, the JSON includes the same metadata fields and conservative path-probe semantics as `messages recent`."
+  },
+  "apple messages chats": {
+    "description": "Lists named chats with the id needed to send to them, plus how recently each was active and who is in it. `last_activity` is the ISO-8601 UTC date of the newest message in the chat and `last_activity_timestamp` the same instant as chat.db's raw Apple-epoch nanoseconds; both are null for a chat with no messages. `participants` is the chat's handle ids (phone numbers or email addresses), possibly empty. `--name` keeps only chats whose display name contains the given text, case-insensitively, and is echoed back as `name_filter` (null when no filter was given); `--limit` caps how many are returned. Without either flag the listing is exactly what it always was: named chats only, in chat row order.",
+    "examples": [
+      {
+        "title": "List every named chat with its activity and members",
+        "command": "apple messages chats"
+      },
+      {
+        "title": "Find a chat by part of its name",
+        "command": "apple messages chats --name \"book club\""
+      },
+      {
+        "title": "The first five named chats",
+        "command": "apple messages chats --limit 5"
+      }
+    ],
+    "notes": "Only NAMED chats are listed — a chat whose `display_name` is empty or absent (every 1:1 conversation, and any group nobody has named) does not appear, which is the behavior this command has always had. Ordering follows the chat table's own row order and `--name` and `--limit` do not change it: the filter is applied first, then the limit, so `--name X --limit 1` is the first chat matching X and not the first chat overall. A store that cannot be joined to its messages reports null activity rather than failing."
   }
 }

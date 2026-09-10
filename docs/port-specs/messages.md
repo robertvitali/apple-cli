@@ -225,6 +225,45 @@ attachment-only rows with no searchable body, because its SQL prefilter is
 text/attributedBody-based before scoring. If such a row is otherwise selected in
 the future, it should use the same attachment shape.
 
+### Chat identity
+
+A second read-only extra beyond the MCP surface. Every message emitted by
+`messages recent` and `messages search` now carries `chat_identifier`
+(`string|null`), `chat_guid` (`string|null`) and `is_group` (bool), derived by
+joining `chat_message_join` → `chat`; `is_group` is `chat.style == 43`. A message
+joined to several chats reports the LOWEST chat ROWID, and a message joined to no
+chat reports nulls with `is_group: false`. `--direct-only` on both commands
+excludes group-chat messages using that same first-chat-by-ROWID rule, applied in
+SQL so `--limit N` still yields up to N direct messages; `direct_only` echoes the
+flag in the `RecentData`/`SearchData` payloads.
+
+`messages chats` gains `last_activity` (ISO-8601 UTC of the chat's newest
+message, or null), `last_activity_timestamp` (the same instant as chat.db's raw
+Apple-epoch nanoseconds, or null) and `participants` (handle ids from
+`chat_handle_join` → `handle.id`, possibly empty), alongside a `--name` substring
+filter (case-insensitive, echoed as `name_filter`) and `--limit`. With neither
+flag the listing and its ordering are unchanged, so the §8 `get_chats` parity row
+still holds.
+
+This is additive and keeps `schema_version = 1`: no existing key is removed,
+renamed, or retyped. Two shapes are deliberate and worth stating, because they
+differ. The new nullable keys are ALWAYS PRESENT with an explicit JSON `null` —
+Swift's synthesized encoder omits a nil optional entirely, so present-and-null is
+what lets a consumer distinguish "this message is in no chat" from "a binary that
+predates the field". The PRE-EXISTING optionals (`group_name`, `handle`,
+`service`, and the `chat` row's `guid`/`room_name`/`service_name`/`group_id`/
+`style`) keep their omit-when-nil shape unchanged; `group_name` in particular is
+the oracle's deliberate two-state absent-or-name field (see §8's `get_recent_messages`
+row and the MSG-2 note in `ChatDB.swift`), and giving it a third state would
+re-introduce exactly the defect that was fixed there.
+
+`group_name` and `is_group` are not the same fact: `group_name` is a display name
+and is absent for an unnamed group, while `is_group` reads `chat.style` and so
+still reports such a chat as a group. A chat.db lacking `chat_message_join`
+degrades to null identifiers and `is_group: false` rather than failing the read —
+the posture the attachment join already takes — and `--direct-only` then excludes
+nothing, since nothing is known to be a group.
+
 ### WRatio fuzzy-search boundary (behavioral, per §6 / §7)
 
 The message fuzzy scorer is `thefuzz.WRatio` (rapidfuzz-backed). This port

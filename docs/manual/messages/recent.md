@@ -10,12 +10,14 @@ apple messages recent [flags]
 
 ## Description
 
-Returns recent Messages rows with the same JSON envelope as the rest of the CLI. Each message includes `has_attachments` and an `attachments` array. Attachment paths are derived from chat.db metadata only: `filename` is the stored value, `path` is present only when an absolute standardized path can be derived, and `exists` is true or false only after a conservative local-root probe. When probing is skipped, `exists` is null.
+Returns recent Messages rows with the same JSON envelope as the rest of the CLI. Each message says which conversation it came from — `chat_identifier` and `chat_guid` (both `string|null`: null when the message maps to no chat row) and `is_group` (true when that chat's `style` is 43). A message joined to several chats reports the one with the lowest chat row id. `--direct-only` keeps 1:1 conversations only, dropping every group-chat message; the filter runs in SQL, before `--limit`, so a request for N messages still returns up to N. The `direct_only` field echoes the flag back. Each message also includes `has_attachments` and an `attachments` array. Attachment paths are derived from chat.db metadata only: `filename` is the stored value, `path` is present only when an absolute standardized path can be derived, and `exists` is true or false only after a conservative local-root probe. When probing is skipped, `exists` is null.
 
 ## Options
 
 - `--contact` `<contact>`
   <br>Filter by contact name, phone, or email.
+- `--direct-only`
+  <br>Only 1:1 conversations — exclude messages sent in a group chat.
 - `--handle` `<handle>`
   <br>Explicit handle (phone/email) — stateless replacement for the MCP's contact:N.
 - `--hours` `<hours>`
@@ -52,9 +54,17 @@ Filter to an explicit synthetic handle
 apple messages recent --handle +12125550100 --hours 24
 ```
 
+Read only 1:1 conversations, skipping group chats
+
+```console
+apple messages recent --hours 24 --direct-only
+```
+
 ## Notes
 
 `messages recent` can include attachment-only messages that have no text body. Those rows use an empty `body` and carry the file details in `attachments`; a cache flag alone does not preserve a bodyless row when no joined attachment details exist. Attachment paths are not confined to the Messages attachments directory because sent items may point elsewhere on the local machine, but existence probing is limited to conservative local roots and uses symlink-aware traversal. Relative paths are omitted; automount and mounted-volume roots such as `/net`, `/home`, `/Network/Servers`, and `/Volumes` are reported without probing.
+
+`group_name` and `chat_identifier` answer different questions and are not interchangeable: `group_name` is the chat's display name and is absent both for a 1:1 conversation and for a group that was never named, whereas `is_group` reports the chat's style directly, so an unnamed group still reads as a group. A store old or pruned enough to lack `chat_message_join` reports null identifiers and `is_group: false` rather than failing the read, and `--direct-only` then excludes nothing, because nothing is known to be a group.
 
 ## Output
 

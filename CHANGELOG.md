@@ -31,6 +31,30 @@ JSON output are stable per the versioning policy — breaking changes bump
   retained nonthrowing Mail library APIs keep their best-effort behavior. Existing
   output fields and `schema_version` are unchanged.
 
+- **Messages reads now say which conversation a message came from.** Every message returned by
+  `messages recent` and `messages search` gains `chat_identifier` and `chat_guid` (the chat's id
+  and guid, or `null` when the message belongs to no chat) and `is_group` (true when that chat is
+  a group). A message that lives in more than one chat reports the first of them. This answers a
+  question the previous output could not: `group_name` is only a chat's DISPLAY NAME, so a group
+  nobody ever named looked exactly like a 1:1 conversation, and there was no id to send a reply
+  back to. Both commands also take a new `--direct-only` flag that drops group-chat messages
+  entirely, so a caller can read just their 1:1 conversations; the filter is applied before
+  `--limit`, so asking for 100 messages still returns up to 100 rather than 100-minus-the-groups,
+  and the payload echoes `direct_only`. A Messages database too old to record which chat a message
+  is in reports nulls and `is_group: false` instead of failing, and `--direct-only` then filters
+  nothing out.
+- **`messages chats` now reports when each chat was last active and who is in it.** Each chat
+  gains `last_activity` (the date of the newest message in it, or `null` if it has none),
+  `last_activity_timestamp` (the same instant in the raw form Messages stores) and `participants`
+  (the phone numbers and email addresses in the chat, possibly empty) — enough to pick the right
+  chat without a second command. Two new flags narrow the listing: `--name <text>` keeps only
+  chats whose name contains that text, case-insensitively (echoed back as `name_filter`), and
+  `--limit <N>` caps how many come back. With neither flag the output and its order are exactly
+  what they were before.
+- These additions keep `schema_version` at 1: no existing key is removed, renamed, or retyped, and
+  the new nullable keys are always present with an explicit `null` so a caller can tell "no value"
+  from "an older binary". `group_name`, `handle`, `service` and the chat row's existing optional
+  fields keep their present-only-when-set shape unchanged.
 - **`messages recent` and `messages search` now report attachment metadata.** Each
   message gains an `attachments` array — per file: `rowid`, `guid`, `filename` (verbatim, as
   chat.db stores it, often `~`-relative), `path` (an absolute standardized path when one can be
