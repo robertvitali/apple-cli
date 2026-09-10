@@ -604,6 +604,37 @@ struct ChatDBFixtureTests {
         #expect(db.recent(hours: 24, handleRowIds: nil, limit: 100, directOnly: true).count == 9)
     }
 
+    /// The guard both `--direct-only` and the identity fields hang off must be the SAME one.
+    ///
+    /// `missingChatJoinYieldsNullChatIdentity` above cannot prove this: it drops the whole
+    /// `chat_message_join` table, which every candidate guard rejects identically. This case
+    /// keeps the join table and removes only `chat.style`, which is exactly where the two guards
+    /// disagree — and under the weaker one `directOnlyPredicate` referenced a column that no
+    /// longer exists, SQLite failed the whole statement, `try?` swallowed it, and
+    /// `recent(directOnly:)` returned ZERO rows while reporting nothing wrong.
+    @Test func directOnlyIsGatedOnTheSameCapabilityAsTheIdentityFields() throws {
+        let fx = try ChatFixture()
+        try fx.exec("""
+            DROP TABLE chat;
+            CREATE TABLE chat(ROWID INTEGER PRIMARY KEY, chat_identifier TEXT, display_name TEXT,
+                room_name TEXT, guid TEXT, service_name TEXT, group_id TEXT);
+            INSERT INTO chat (ROWID, chat_identifier, display_name, room_name, guid, service_name, group_id)
+            VALUES (1,'chat999','Test Group','chat999','iMessage;+;chat999','iMessage','G1');
+            """)
+        var db = try makeDB(fx, book: friendBook)
+
+        let unfiltered = db.recent(hours: 24, handleRowIds: nil, limit: 100).map(\.rowid)
+        #expect(unfiltered == [1, 2, 3, 4, 5, 6, 8, 9, 10], "precondition: the read still works")
+        // The store cannot classify a chat, so nothing is KNOWN to be a group and nothing is
+        // excluded. Returning [] here is the regression this pins.
+        #expect(db.recent(hours: 24, handleRowIds: nil, limit: 100, directOnly: true).map(\.rowid)
+            == unfiltered)
+        #expect(db.canIdentifyChats() == false)
+        // …and the fields degrade in step with the filter, rather than one working alone.
+        #expect(db.recent(hours: 24, handleRowIds: nil, limit: 100)
+            .allSatisfy { $0.chat_identifier == nil && !$0.is_group })
+    }
+
     // MARK: - --direct-only
 
     @Test func recentDirectOnlyExcludesGroupChatMessages() throws {

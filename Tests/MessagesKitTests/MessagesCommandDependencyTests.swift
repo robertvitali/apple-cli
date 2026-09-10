@@ -539,6 +539,48 @@ struct MessagesCommandDependencyTests {
         #expect(messages.allSatisfy { $0["is_group"] as? Bool == false })
     }
 
+    /// A `--direct-only` the store cannot honor must SAY so. The caller asked to exclude group
+    /// chats and is getting them back, so silence here is a filter failing open — the shape this
+    /// module already has a scar from (see the privacy note in `ChatDB.recent`).
+    ///
+    /// The text assertions are not padding: the warning goes to a terminal verbatim, which
+    /// AGENTS.md treats as user-facing documentation, and this string was FIRST WRITTEN with a
+    /// nine-space gap in the middle of the sentence — a wrapped source line rejoined without
+    /// dropping its continuation indent. Reading the Swift source did not show it; rendering it
+    /// did. So the rendering is what gets asserted.
+    @Test func directOnlyWarnsOnStderrWhenTheStoreCannotClassifyChats() throws {
+        try chat.exec("""
+            DROP TABLE chat;
+            CREATE TABLE chat(ROWID INTEGER PRIMARY KEY, chat_identifier TEXT, display_name TEXT,
+                room_name TEXT, guid TEXT, service_name TEXT, group_id TEXT);
+            """)
+        let result = try captureCommand {
+            try Recent.parse(["--hours", "24", "--direct-only"])
+                .run(dependencies: fixtureDependencies(chat))
+        }
+
+        #expect(result.stderr.contains("warning: --direct-only was not applied."))
+        #expect(result.stderr.contains("cannot report which chat a message belongs to"))
+        #expect(!result.stderr.contains("  "), "no run of spaces: \(result.stderr.debugDescription)")
+        #expect(result.stderr.hasSuffix("excluded.\n"))
+        // The read itself still succeeds and excludes nothing — the warning explains the rows,
+        // it does not replace them.
+        let data = try payload(from: result.stdout)
+        #expect(data["direct_only"] as? Bool == true)
+        #expect((data["messages"] as? [[String: Any]])?.count == 9)
+    }
+
+    /// Negative control: a store that CAN classify chats must stay quiet, or the warning would
+    /// be noise on every ordinary run and get tuned out.
+    @Test func directOnlyIsSilentWhenTheFilterActuallyApplies() throws {
+        let result = try captureCommand {
+            try Recent.parse(["--hours", "24", "--direct-only"])
+                .run(dependencies: fixtureDependencies(chat))
+        }
+        #expect(result.stderr.isEmpty)
+        #expect((try payload(from: result.stdout)["messages"] as? [[String: Any]])?.count == 7)
+    }
+
     @Test func searchDirectOnlyFiltersAndIsEchoed() throws {
         let deps = fixtureDependencies(chat)
 
@@ -564,7 +606,11 @@ struct MessagesCommandDependencyTests {
         })
         let chats = try #require(unfiltered["chats"] as? [[String: Any]])
         let group = try #require(chats.first)
-        #expect(group["last_activity"] as? String != nil)
+        // Assert the RENDERING, not merely that a string is there: the docs promise ISO-8601,
+        // and a change of `dateEncodingStrategy` away from `.iso8601` would keep a
+        // string-is-non-nil check green while breaking the documented contract.
+        let expected = ISO8601DateFormatter().string(from: MessageTime.date(fromRaw: chat.base - 300))
+        #expect(group["last_activity"] as? String == expected)
         #expect(group["last_activity_timestamp"] as? Int == Int(chat.base - 300))
         #expect(group["participants"] as? [String] == ["+12125550101", "+12125550102"])
         let quiet = try #require(chats.last)

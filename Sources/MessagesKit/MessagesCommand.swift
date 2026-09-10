@@ -228,6 +228,7 @@ struct Recent: ParsableCommand {
                 }
             }
 
+            warnIfDirectOnlyUnavailable(directOnly, db)
             let messages = db.recent(hours: hours, handleRowIds: rowIds, limit: limit,
                                      directOnly: directOnly)
             // Echo the effective filter (contact OR handle) so a `--handle`-only
@@ -241,6 +242,23 @@ struct Recent: ParsableCommand {
                 }
         }
     }
+}
+
+/// Warn — on stderr, the human channel — when `--direct-only` was asked for but the store cannot
+/// say which chat a message is in, so the filter excluded nothing.
+///
+/// Silence here is the bad option: the caller asked to exclude group chats, got group-chat
+/// content back, and the envelope still says `direct_only: true`. This module already carries a
+/// scar from a filter that failed open (see the privacy note in `ChatDB.recent`). It goes to
+/// stderr rather than into the payload because `--text`/stderr is explicitly NOT the versioned
+/// contract, so saying this costs no schema surface.
+private func warnIfDirectOnlyUnavailable(_ directOnly: Bool, _ db: ChatDB) {
+    guard directOnly, !db.canIdentifyChats() else { return }
+    Output.writeError(Data("""
+        warning: --direct-only was not applied. This Messages database cannot report which \
+        chat a message belongs to, so no group-chat messages were excluded.
+
+        """.utf8))
 }
 
 private func renderMessage(_ m: ChatDB.Message) -> String {
@@ -522,6 +540,7 @@ struct Search: ParsableCommand {
             }
             let book = dependencies.loadAddressBook()
             var db = try dependencies.makeChatDB(book)
+            warnIfDirectOnlyUnavailable(directOnly, db)
             let result = db.search(term: term, hours: hours, threshold: threshold, match: mode,
                                    directOnly: directOnly)
             let data = SearchData(search_term: term, hours: hours, threshold: threshold, match: match,

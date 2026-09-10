@@ -257,12 +257,26 @@ the oracle's deliberate two-state absent-or-name field (see §8's `get_recent_me
 row and the MSG-2 note in `ChatDB.swift`), and giving it a third state would
 re-introduce exactly the defect that was fixed there.
 
+`messages chats` resolves activity and participants for the chats it is actually
+returning, not for the whole store: the `--name`/`--limit` selection runs first
+and the two lookups are keyed on that chat-ROWID set. The one-pass shape it
+replaced grouped over every message row on every invocation — measured on a
+596k-message store, 3.91s whole-store versus 0.139s restricted to the 124 named
+chats and 0.019s for a `--limit 5` call. The listing's `ORDER BY ROWID` is
+stated in SQL rather than left to a bare SELECT's incidental scan order, because
+`--limit` makes the ordering decide WHICH chats a caller receives.
+
 `group_name` and `is_group` are not the same fact: `group_name` is a display name
 and is absent for an unnamed group, while `is_group` reads `chat.style` and so
 still reports such a chat as a group. A chat.db lacking `chat_message_join`
 degrades to null identifiers and `is_group: false` rather than failing the read —
 the posture the attachment join already takes — and `--direct-only` then excludes
-nothing, since nothing is known to be a group.
+nothing, since nothing is known to be a group. The filter and the fields are
+gated on the IDENTICAL capability check for that reason: a schema that could
+answer one but not the other would drop rows while reporting every survivor as
+`is_group: false`. When the filter cannot be applied the commands say so on
+stderr, so it never fails open silently; the payload shape is unchanged, since
+stderr is not part of the versioned contract.
 
 ### WRatio fuzzy-search boundary (behavioral, per §6 / §7)
 

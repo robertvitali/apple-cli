@@ -7,6 +7,19 @@ import Foundation
 /// structured extras.
 enum MessagesModels {}
 
+/// Encode an optional as its value or an explicit JSON `null` — never omitting the key.
+///
+/// Swift's SYNTHESIZED `Encodable` omits a nil optional entirely (measured, not assumed), which
+/// is the shape every optional in this module shipped with and must keep. Fields whose contract
+/// is documented as `<type>|null` have to be present either way, so a caller can distinguish
+/// "no value here" from "an older binary that did not emit this key"; those go through this
+/// helper. Used by the payloads below and by the row shapes in `ChatDB.swift`.
+func encodeOrNull<K: CodingKey, V: Encodable>(
+    _ c: inout KeyedEncodingContainer<K>, _ value: V?, _ key: K
+) throws {
+    if let value { try c.encode(value, forKey: key) } else { try c.encodeNil(forKey: key) }
+}
+
 struct ContactCandidateData: Encodable {
     let name: String
     let phone: String

@@ -2,18 +2,6 @@ import Foundation
 import AppleKit
 import Darwin
 
-/// Encode an optional as its value or an explicit JSON `null` — never omitting the key.
-///
-/// Swift's SYNTHESIZED `Encodable` omits a nil optional entirely (measured, not assumed), which
-/// is the shape every optional in this module shipped with. Fields whose contract is documented
-/// as `<type>|null` must be present either way, so a caller can distinguish "no value here" from
-/// "an older binary that did not emit this key"; those go through this helper.
-func encodeOrNull<K: CodingKey, V: Encodable>(
-    _ c: inout KeyedEncodingContainer<K>, _ value: V?, _ key: K
-) throws {
-    if let value { try c.encode(value, forKey: key) } else { try c.encodeNil(forKey: key) }
-}
-
 /// Read layer over `~/Library/Messages/chat.db` (WAL-aware, via the shared
 /// `SQLiteReader` with `copyToTemp` for hot/locked data reads). Ports the SQL +
 /// row-shaping of `mac_messages_mcp`'s `get_recent_messages`, `fuzzy_search_messages`,
@@ -268,6 +256,13 @@ public struct ChatDB {
         WHERE cmj.message_id = m.ROWID ORDER BY c.ROWID LIMIT 1), 0) != \(groupChatStyle)
         """
 
+    /// Split ids into batches small enough for any SQLite build's host-parameter ceiling —
+    /// the same defensive bound `attachmentsByMessage` applies, shared by the three id-keyed
+    /// lookups below.
+    private static func idChunks(_ ids: [Int64]) -> [[Int64]] {
+        stride(from: 0, to: ids.count, by: 500).map { Array(ids[$0 ..< min($0 + 500, ids.count)]) }
+    }
+
     private func chatMessageJoinAvailable() -> Bool {
         tableColumns("chat_message_join").isSuperset(of: ["message_id", "chat_id"])
     }
@@ -280,14 +275,16 @@ public struct ChatDB {
             && tableColumns("chat").isSuperset(of: ["chat_identifier", "guid", "style"])
     }
 
-    /// Chat identity for a batch of message rowids, keyed by message rowid. Chunked for the
-    /// same host-parameter-ceiling reason `attachmentsByMessage` is.
+    /// Whether this store can honor `directOnly` and populate the chat-identity fields.
+    /// Public so a command can TELL the caller when the filter it asked for was not applied,
+    /// rather than handing back group-chat content under a `direct_only: true` envelope.
+    public func canIdentifyChats() -> Bool { chatIdentityAvailable() }
+
+    /// Chat identity for a batch of message rowids, keyed by message rowid.
     private func chatIdentities(ids: [Int64]) -> [Int64: ChatIdentity] {
         guard !ids.isEmpty, chatIdentityAvailable() else { return [:] }
         var out: [Int64: ChatIdentity] = [:]
-        for chunk in stride(from: 0, to: ids.count, by: 500).map({
-            Array(ids[$0 ..< min($0 + 500, ids.count)])
-        }) {
+        for chunk in ChatDB.idChunks(ids) {
             let placeholders = chunk.indices.map { "?\($0 + 1)" }.joined(separator: ", ")
             let sql = """
                 SELECT cmj.message_id AS message_id, c.chat_identifier AS chat_identifier,
@@ -590,9 +587,11 @@ public struct ChatDB {
         var where_ = "(m.text LIKE ?1 ESCAPE '\\' OR (m.text IS NULL AND m.attributedBody IS NOT NULL))"
         var binds = [likeParam]
         if hours != 0 {
-            let threshold = MessageTime.thresholdNanos(hoursAgo: hours)
+            // NOT `threshold` — that is this function's Double score parameter, and shadowing it
+            // here made the `binds.append` below read like a bug.
+            let dateThreshold = MessageTime.thresholdNanos(hoursAgo: hours)
             where_ = "m.date > ?2 AND " + where_
-            binds.append(String(threshold))
+            binds.append(String(dateThreshold))
         }
         // Prepended, not appended: the predicate carries no host parameters, so it cannot
         // disturb the ?1/?2 numbering the two clauses above depend on.
@@ -717,68 +716,102 @@ public struct ChatDB {
         }
     }
 
-    /// Named chats, oldest chat ROWID first (the `chat` table's own order — unchanged).
-    /// `nameFilter` keeps only chats whose `display_name` contains it, case-insensitively;
-    /// `limit` caps the result. Both default to "no filter", so the historical call
-    /// `namedChats()` behaves exactly as it did.
+    /// Named chats, oldest chat ROWID first. `nameFilter` keeps only chats whose `display_name`
+    /// contains it, case-insensitively; `limit` caps the result. Both default to "no filter",
+    /// so the historical call `namedChats()` behaves exactly as it did.
     public func namedChats(nameFilter: String? = nil, limit: Int? = nil) -> [Chat] {
         if let limit, limit <= 0 { return [] }
+        // ORDER BY ROWID is stated in SQL, not merely relied upon. A bare SELECT happens to
+        // come back in rowid order today, but `--limit` turned the ordering from cosmetic into
+        // the thing that decides WHICH chats a caller receives, and the doc, the manual and the
+        // port spec all promise it.
         let sql = """
             SELECT ROWID AS rowid, chat_identifier, display_name, guid, room_name, service_name,
                    group_id, style
             FROM chat WHERE display_name IS NOT NULL AND display_name != ''
+            ORDER BY ROWID
             """
         let rows = (try? reader.rows(sql)) ?? []
-        let activity = chatLastActivity()
-        let participants = chatParticipants()
-        var out: [Chat] = []
+
+        // TWO PASSES, deliberately: choose the rows FIRST, then look up activity and
+        // participants for only those chats. Doing it the other way round made every
+        // invocation — `chats --name x --limit 1` included — pay for a GROUP BY across every
+        // message row in the store. Measured on a 596k-message store: 3.91s for the whole-store
+        // grouping, 0.139s restricted to the named chats, 0.019s for a `--limit 5` call.
+        var selected: [SQLiteReader.Row] = []
         for row in rows {
-            guard let id = row.text("chat_identifier"), let name = row.text("display_name") else { continue }
+            guard row.text("chat_identifier") != nil, let name = row.text("display_name") else { continue }
             if let nameFilter, !nameFilter.isEmpty,
                name.range(of: nameFilter, options: .caseInsensitive) == nil { continue }
-            if let limit, out.count >= limit { break }
-            let chatRowId = row.int("rowid")
-            let last = chatRowId.flatMap { activity[$0] }
-            out.append(Chat(chat_identifier: id, display_name: name, guid: row.text("guid"),
-                            room_name: row.text("room_name"), service_name: row.text("service_name"),
-                            group_id: row.text("group_id"), style: row.int("style"),
-                            last_activity: last.map(MessageTime.date(fromRaw:)),
-                            last_activity_timestamp: last,
-                            participants: chatRowId.flatMap { participants[$0] } ?? []))
+            if let limit, selected.count >= limit { break }
+            selected.append(row)
         }
-        return out
+
+        let chatIds = selected.compactMap { $0.int("rowid") }
+        let activity = chatLastActivity(chatIds: chatIds)
+        let participants = chatParticipants(chatIds: chatIds)
+        return selected.compactMap { row in
+            guard let id = row.text("chat_identifier"), let name = row.text("display_name") else { return nil }
+            let last = row.int("rowid").flatMap { activity[$0] }
+            return Chat(chat_identifier: id, display_name: name, guid: row.text("guid"),
+                        room_name: row.text("room_name"), service_name: row.text("service_name"),
+                        group_id: row.text("group_id"), style: row.int("style"),
+                        last_activity: last.map(MessageTime.date(fromRaw:)),
+                        last_activity_timestamp: last,
+                        participants: row.int("rowid").flatMap { participants[$0] } ?? [])
+        }
     }
 
-    /// chat ROWID → raw Apple-ns date of its newest message. Chats with no messages are absent.
-    private func chatLastActivity() -> [Int64: Int64] {
-        guard chatMessageJoinAvailable() else { return [:] }
-        let sql = """
-            SELECT cmj.chat_id AS chat_id, MAX(m.date) AS last_date
-            FROM chat_message_join cmj
-            JOIN message m ON m.ROWID = cmj.message_id
-            GROUP BY cmj.chat_id
-            """
+    /// chat ROWID → raw date of its newest message, for the given chats. Chats with no messages
+    /// are absent.
+    ///
+    /// MAX runs on the RAW column, which `MessageTime.date(fromRaw:)` exists because is bi-modal:
+    /// seconds since 2001 on legacy rows, nanoseconds on modern ones. That is safe here and the
+    /// reasoning is worth not re-deriving — a nanosecond value (~7.8e17) always exceeds a seconds
+    /// value (~7.8e8), and the ns rows are always the newer ones, so the numeric maximum IS the
+    /// chronological maximum. Converting per row before comparing would give the same answer at
+    /// much greater cost.
+    ///
+    /// Like `chatParticipants`, this leans on `try?` to absorb a store that has no
+    /// `chat_message_join` at all, rather than pre-checking the schema: one posture for both.
+    private func chatLastActivity(chatIds: [Int64]) -> [Int64: Int64] {
+        guard !chatIds.isEmpty else { return [:] }
         var out: [Int64: Int64] = [:]
-        for row in (try? reader.rows(sql)) ?? [] {
-            guard let chatId = row.int("chat_id"), let last = row.int("last_date") else { continue }
-            out[chatId] = last
+        for chunk in ChatDB.idChunks(chatIds) {
+            let placeholders = chunk.indices.map { "?\($0 + 1)" }.joined(separator: ", ")
+            let sql = """
+                SELECT cmj.chat_id AS chat_id, MAX(m.date) AS last_date
+                FROM chat_message_join cmj
+                JOIN message m ON m.ROWID = cmj.message_id
+                WHERE cmj.chat_id IN (\(placeholders))
+                GROUP BY cmj.chat_id
+                """
+            for row in (try? reader.rows(sql, chunk.map(String.init))) ?? [] {
+                guard let chatId = row.int("chat_id"), let last = row.int("last_date") else { continue }
+                out[chatId] = last
+            }
         }
         return out
     }
 
     /// chat ROWID → participant handle ids, in handle-ROWID order so the array is stable
     /// across invocations rather than following SQLite's scan order.
-    private func chatParticipants() -> [Int64: [String]] {
-        let sql = """
-            SELECT chj.chat_id AS chat_id, h.id AS handle
-            FROM chat_handle_join chj
-            JOIN handle h ON h.ROWID = chj.handle_id
-            ORDER BY chj.chat_id, h.ROWID
-            """
+    private func chatParticipants(chatIds: [Int64]) -> [Int64: [String]] {
+        guard !chatIds.isEmpty else { return [:] }
         var out: [Int64: [String]] = [:]
-        for row in (try? reader.rows(sql)) ?? [] {
-            guard let chatId = row.int("chat_id"), let handle = row.text("handle") else { continue }
-            out[chatId, default: []].append(handle)
+        for chunk in ChatDB.idChunks(chatIds) {
+            let placeholders = chunk.indices.map { "?\($0 + 1)" }.joined(separator: ", ")
+            let sql = """
+                SELECT chj.chat_id AS chat_id, h.id AS handle
+                FROM chat_handle_join chj
+                JOIN handle h ON h.ROWID = chj.handle_id
+                WHERE chj.chat_id IN (\(placeholders))
+                ORDER BY chj.chat_id, h.ROWID
+                """
+            for row in (try? reader.rows(sql, chunk.map(String.init))) ?? [] {
+                guard let chatId = row.int("chat_id"), let handle = row.text("handle") else { continue }
+                out[chatId, default: []].append(handle)
+            }
         }
         return out
     }

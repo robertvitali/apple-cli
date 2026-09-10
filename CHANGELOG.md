@@ -42,7 +42,8 @@ JSON output are stable per the versioning policy — breaking changes bump
   `--limit`, so asking for 100 messages still returns up to 100 rather than 100-minus-the-groups,
   and the payload echoes `direct_only`. A Messages database too old to record which chat a message
   is in reports nulls and `is_group: false` instead of failing, and `--direct-only` then filters
-  nothing out.
+  nothing out — saying so on stderr rather than quietly handing back the group messages you asked
+  to exclude.
 - **`messages chats` now reports when each chat was last active and who is in it.** Each chat
   gains `last_activity` (the date of the newest message in it, or `null` if it has none),
   `last_activity_timestamp` (the same instant in the raw form Messages stores) and `participants`
