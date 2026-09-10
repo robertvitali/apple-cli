@@ -47,7 +47,9 @@ let package = Package(
         // into `apple`; it exists so the suites share ONE scratch-directory implementation instead
         // of each growing its own that forgets to clean up (see Sources/TestSupport/ScratchDirs).
         .target(name: "TestSupport"),
-        .testTarget(name: "AppleKitTests", dependencies: ["AppleKit", "TestSupport"]),
+        // Test-only pre-runtime descriptor observer; no public product or library linkage.
+        .executableTarget(name: "LauncherFDProbe", path: "Tests/LauncherFDProbe"),
+        .testTarget(name: "AppleKitTests", dependencies: ["AppleKit", "TestSupport", "LauncherFDProbe"]),
         .testTarget(name: "EventKitCoreTests", dependencies: ["EventKitCore", "AppleKit"]),
         .testTarget(name: "MessagesKitTests", dependencies: ["MessagesKit", "AppleKit", "TestSupport"]),
         .testTarget(name: "MailKitTests", dependencies: ["MailKit", "AppleKit", "TestSupport"]),

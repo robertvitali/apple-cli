@@ -1,9 +1,10 @@
 # Owned process cleanup and deterministic I/O completion
 
-Date: 2026-09-10. Status: accepted implementation plan; implementation and its
-verification remain pending. Scope is internal to
-`Sources/AppleKit/AppleScriptRunner.swift`, with focused coverage in
-`Tests/AppleKitTests/ScriptLauncherTests.swift`.
+Date: 2026-09-10. Status: accepted implementation plan. The internal implementation
+is in `Sources/AppleKit/OwnedScriptProcess.swift`, called by
+`Sources/AppleKit/AppleScriptRunner.swift`. Focused lifecycle, resource and isolated
+descriptor tests are in `Tests/AppleKitTests/`, with the descriptor observer in
+`Tests/LauncherFDProbe/`. The verification criteria below govern acceptance.
 
 ## Problem and compatibility contract
 
@@ -23,6 +24,12 @@ Timed-inline capture read failures currently propagate the underlying `FileHandl
 error. Preserve that error through cleanup without wrapping it in
 `RunError.launchFailed`; piped output read failures retain their existing
 `launchFailed` classification.
+
+For explicit-offset capture syscalls, construct a Cocoa read error with the actual
+underlying POSIX errno. A live pipe-seek comparison verifies the Cocoa/POSIX domain
+and code structure for ESPIPE; injected errors separately verify identity through
+cleanup. This preserves the raw capture-error family, not a universal equivalence
+with every platform-specific FileHandle errno mapping or rendered message.
 
 A completed nonzero `ScriptOutcome` still returns from the launcher for
 `result(of:)` to interpret. Its status alone does not authorize group cancellation.

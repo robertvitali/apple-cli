@@ -42,14 +42,23 @@ JSON output are stable per the versioning policy — breaking changes bump
   message-id spellings; both share the one 300-second budget (the second attempt gets whatever
   the first left), and a timeout aborts the whole operation, so the worst case is 300 seconds in
   total plus the few seconds it takes to stop the script. The bound covers the script's delivery, its run, and the read of its
-  output; a helper process the script itself left behind holding that output is reported as a
-  timeout but is not ended. Composes that finish inside five minutes are unaffected. **Scope:**
+  output; on timeout, cleanup also stops helpers that remain in the script's owned process
+  group. Composes that finish inside five minutes are unaffected. **Scope:**
   only these three GUI-driven paths are bounded; ordinary `mail send` (no `--gui-send`) and the
   other Mail commands still run Mail's AppleScript without a host deadline, as before.
   `schema_version` is unchanged: no key, enum, or exit code changed; this is new message text on
   an existing error class.
 
 ### Fixed
+
+- **Timed-out AppleScript runs now clean up helpers in their owned process group.** A helper
+  holding script output open no longer survives ordinary timeout cleanup just because the
+  direct child exited first. Delivery and output-read failures use the same bounded cleanup,
+  and launcher-owned input/output descriptors close before the error returns. Successful
+  background work, including a completed nonzero script result, remains permitted. Detached
+  helpers and Apple applications reached through AppleEvents are outside this cleanup;
+  uninterruptible kernel work can outlive it. Existing error types, exit codes, output fields,
+  and `schema_version` are unchanged.
 
 - **Bulk Mail failures no longer claim that a failed item was unchanged.** The error identifies
   earlier confirmed changes in `applied` and asks callers to verify the failed item's state

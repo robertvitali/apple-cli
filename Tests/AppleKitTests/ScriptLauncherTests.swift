@@ -703,10 +703,9 @@ struct OsascriptLauncherTests {
         #expect(outcome.standardError.count == 256 * 1024)
     }
 
-    @Test("the stdin form drains stdout BEFORE writing, so a big script cannot wedge the write")
+    @Test("the stdin form interleaves output and delivery so a big script cannot wedge either pipe")
     func stdinFormDrainsBeforeWriting() throws {
-        // The ordering invariant `launchWithScriptOnStdin` documents, and which nothing pinned:
-        // both drains start before the stdin write. 256 KiB of script — four times the pipe
+        // Input and output must make progress together in the launcher. 256 KiB of script — four times the pipe
         // buffer — against a child that answers with 256 KiB of its own before it reads any of
         // it. Write-then-drain deadlocks here; drain-then-write completes.
         let pidFile = try scratch.directory().appendingPathComponent("pid")
@@ -849,8 +848,7 @@ struct OsascriptLauncherTests {
         // loaded machine — a deadline that expires in the wake loop instead would throw the
         // same error from the wrong place and prove nothing about the drain.
         // The descendant publishes its own pid (`$!` → `$1`) and is short-lived on purpose; the
-        // test then waits for it to be gone, so nothing — neither it nor the drain workers
-        // still holding the pipe — outlives the test.
+        // test then waits for it to be gone, so it cannot outlive the test even if group cleanup regresses.
         let dir = try scratch.directory()
         let pidFile = dir.appendingPathComponent("pid")
         let descendantPidFile = dir.appendingPathComponent("descendant-pid")
@@ -868,28 +866,11 @@ struct OsascriptLauncherTests {
                 "the drain waited for the descendant instead of honouring the deadline")
         let descendant = try #require(publishedPid(at: descendantPidFile),
                                       "the child never published its descendant's pid")
-        #expect(hasExited(descendant, within: 10), "the descendant should have run out on its own")
+        #expect(hasExited(descendant, within: 10), "the bounded descendant should have stopped")
     }
 
-    @Test("a drain whose read fails reports the failure instead of aborting the process")
-    func drainSurfacesAFailedReadAsAnError() throws {
-        // The read side of the pipe handling used `readDataToEndOfFile()`, which reports EIO /
-        // EBADF by raising an Objective-C exception Swift cannot catch — on the drain's
-        // background queue, that took the whole process down. A handle that cannot be read
-        // (the WRITE end of a pipe) provokes the failure without a child: the drain must hand
-        // it back through `collected()` as the launcher's own error type.
-        let pipe = Pipe()
-        let drain = PipeDrain(pipe.fileHandleForWriting, label: "unreadable")
-        let error = #expect(throws: AppleScriptRunner.RunError.self) {
-            _ = try drain.collected()
-        }
-        guard case .launchFailed(let message) = try #require(error) else {
-            Issue.record("expected launchFailed"); return
-        }
-        #expect(message.hasPrefix("could not read osascript unreadable:"))
-        // Still reachable afterwards: a second collect must not trap or block.
-        #expect(throws: AppleScriptRunner.RunError.self) { _ = try drain.collected() }
-    }
+    // Catchable read failures and post-failure usability are exercised at the actual I/O
+    // boundary by ProcessResourceTests.readFailureClosesResources. No worker helper remains.
 
     @Test("a script larger than the pipe buffer is delivered whole, not truncated")
     func stdinFormDeliversAScriptLargerThanThePipeBuffer() throws {
