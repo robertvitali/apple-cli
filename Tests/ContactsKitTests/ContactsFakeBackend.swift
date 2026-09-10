@@ -1,4 +1,5 @@
 import Foundation
+import Darwin
 import Testing
 import Contacts
 import ArgumentParser
@@ -70,12 +71,9 @@ final class FakeContactsBackend: ContactsStoreBackend {
     /// `nil` ⇒ the handler is never invoked, which drives the request-timeout branch.
     var accessGrant: (Bool, Error?)? = (true, nil)
     var accessRequests = 0
-    /// When set, the completion is delivered ASYNCHRONOUSLY on this queue instead of re-entered
-    /// synchronously — the realistic shape, since Contacts invokes the handler on a queue of its
-    /// own choosing. This is what actually crosses `ContactsStore`'s lock + semaphore bridge;
-    /// a synchronous re-entry never exercises it. Mirrors `promptCompletionQueue` in
-    /// Tests/EventKitCoreTests.
-    var accessCompletionQueue: DispatchQueue?
+    /// A prestarted test thread delivers callbacks independently of Dispatch's shared worker
+    /// pool. The test owns readiness, release, completion, and bounded thread shutdown.
+    var accessCompletionWorker: ContactsCompletionWorker?
 
     // Enumeration (list_contacts)
     var contactRows: [CNContact] = []
@@ -130,11 +128,11 @@ final class FakeContactsBackend: ContactsStoreBackend {
         accessRequests += 1
         guard let accessGrant else { return }   // never calls back → timeout branch
         let boxed = UncheckedSendableBox(accessGrant)
-        guard let accessCompletionQueue else {
+        guard let accessCompletionWorker else {
             completion(boxed.value.0, boxed.value.1)
             return
         }
-        accessCompletionQueue.asyncAfter(deadline: .now() + .milliseconds(20)) {
+        accessCompletionWorker.submit {
             completion(boxed.value.0, boxed.value.1)
         }
     }
@@ -314,4 +312,133 @@ func expectContactsFailure(exit: Int32, type: String,
     let payload = try contactsErrorPayload(stdout)
     #expect(payload["type"] as? String == type, sourceLocation: sourceLocation)
     return payload
+}
+
+/// One finite callback thread, already waiting for work before the authorization deadline starts.
+/// No timer or dispatch-pool capacity determines when the callback may run. A held worker is
+/// released explicitly by the late-completion test after the real authorization call times out.
+final class ContactsCompletionWorker {
+    struct Snapshot {
+        let submissions: Int
+        let completions: Int
+        let callerThread: UInt64
+        let callbackThread: UInt64
+        let failure: String?
+    }
+
+    private final class State: @unchecked Sendable {
+        let condition = NSCondition()
+        var ready = false
+        var released: Bool
+        var cancelled = false
+        var finished = false
+        var job: (@Sendable () -> Void)?
+        var submissions = 0
+        var completions = 0
+        var callerThread: UInt64 = 0
+        var callbackThread: UInt64 = 0
+        var failure: String?
+
+        init(held: Bool) { released = !held }
+
+        static func threadID() -> UInt64 {
+            var value: UInt64 = 0
+            guard pthread_threadid_np(nil, &value) == 0 else { return 0 }
+            return value
+        }
+
+        func run() {
+            condition.lock()
+            ready = true
+            condition.broadcast()
+            let deadline = Date().addingTimeInterval(10)
+            while !cancelled && (job == nil || !released) {
+                if !condition.wait(until: deadline) {
+                    failure = "callback job was not released before the fixture deadline"
+                    cancelled = true
+                }
+            }
+            guard !cancelled, let callback = job else {
+                job = nil
+                finished = true
+                condition.broadcast()
+                condition.unlock()
+                return
+            }
+            job = nil
+            callbackThread = Self.threadID()
+            condition.unlock()
+            callback()
+            condition.lock()
+            completions += 1
+            finished = true
+            condition.broadcast()
+            condition.unlock()
+        }
+
+        func wait(until predicate: () -> Bool) -> Bool {
+            condition.lock()
+            defer { condition.unlock() }
+            let deadline = Date().addingTimeInterval(10)
+            while !predicate() {
+                if finished { return false }
+                if !condition.wait(until: deadline) { return predicate() }
+            }
+            return true
+        }
+    }
+
+    private let state: State
+    private let thread: Thread
+
+    init(held: Bool = false) {
+        let state = State(held: held)
+        self.state = state
+        thread = Thread { state.run() }
+        thread.name = "apple-cli-test.contacts.completion"
+        thread.start()
+    }
+
+    func waitUntilReady() -> Bool { state.wait { state.ready } }
+    func waitUntilCompleted() -> Bool { state.wait { state.completions == 1 } }
+
+    func submit(_ callback: @escaping @Sendable () -> Void) {
+        state.condition.lock()
+        defer { state.condition.unlock() }
+        state.submissions += 1
+        guard state.submissions == 1, !state.cancelled, !state.finished else {
+            state.failure = "completion worker received an unexpected request"
+            return
+        }
+        state.callerThread = State.threadID()
+        state.job = callback
+        state.condition.broadcast()
+    }
+
+    func release() {
+        state.condition.lock()
+        state.released = true
+        state.condition.broadcast()
+        state.condition.unlock()
+    }
+
+    var snapshot: Snapshot {
+        state.condition.lock()
+        defer { state.condition.unlock() }
+        return Snapshot(submissions: state.submissions, completions: state.completions,
+                        callerThread: state.callerThread, callbackThread: state.callbackThread,
+                        failure: state.failure)
+    }
+
+    /// Cancel an unsubmitted/held job and observe actual Thread completion. Call from test defer,
+    /// including failed readiness/assertion paths; no callback worker is intentionally abandoned.
+    func finish() -> Bool {
+        state.condition.lock()
+        state.cancelled = true
+        state.condition.broadcast()
+        state.condition.unlock()
+        let deadline = Date().addingTimeInterval(10)
+        while !thread.isFinished && Date() < deadline { usleep(1_000) }
+        return thread.isFinished
+    }
 }

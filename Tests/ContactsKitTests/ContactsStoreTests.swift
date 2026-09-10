@@ -128,59 +128,84 @@ struct ContactsStoreAuthTests {
         }
     }
 
-    @Test("the prompt is bridged correctly when Contacts answers on ANOTHER queue")
+    @Test("the prompt is bridged correctly when Contacts answers on another thread")
     func promptDeliveredOffThread() throws {
-        // The realistic shape: Contacts invokes the completion on a queue of its own choosing, so
-        // the handler's write and this thread's read genuinely cross. A synchronous re-entry never
-        // exercises `ContactsStore.AccessResult`'s lock or the semaphore hand-off at all.
-        let queue = DispatchQueue(label: "apple-cli-test.contacts.prompt", attributes: .concurrent)
-
-        let granted = FakeContactsBackend()
-        granted.statuses = [0, 3]                    // notDetermined → (prompt) → authorized
-        granted.accessCompletionQueue = queue
-        try store(granted).requireAuthorization()
-        #expect(granted.accessRequests == 1)
-
-        let denied = FakeContactsBackend()
-        denied.statuses = [0, 2]
-        denied.accessGrant = (false, nil)
-        denied.accessCompletionQueue = queue
-        expectAppleError("authorization_denied") { try store(denied).requireAuthorization() }
-        #expect(denied.accessRequests == 1)
-
-        let failed = FakeContactsBackend()
-        failed.statuses = [0]
-        failed.accessGrant = (false, FakeContactsFailure("prompt exploded"))
-        failed.accessCompletionQueue = queue
-        do {
-            try store(failed).requireAuthorization()
-            Issue.record("expected authorization_denied")
-        } catch let e as AppleError {
-            #expect(e.type == "authorization_denied")
-            #expect(e.message.contains("Contacts authorization error"))
-        } catch {
-            Issue.record("expected AppleError, got \(error)")
+        // Prestart the callback thread before entering the store's deadline. The old fake used
+        // asyncAfter(20 ms), which could wait seconds for shared dispatch capacity in a full run.
+        // Completion before the semaphore wait is valid; actual thread identity pins the bridge.
+        for outcome in ["granted", "denied", "error"] {
+            let worker = ContactsCompletionWorker()
+            defer { #expect(worker.finish(), "the callback thread must finish") }
+            try #require(worker.waitUntilReady())
+            let backend = FakeContactsBackend()
+            backend.accessCompletionWorker = worker
+            switch outcome {
+            case "granted": backend.statuses = [0, 3]
+            case "denied":
+                backend.statuses = [0, 2]
+                backend.accessGrant = (false, nil)
+            default:
+                backend.statuses = [0]
+                backend.accessGrant = (false, FakeContactsFailure("prompt exploded"))
+            }
+            do {
+                try store(backend).requireAuthorization()
+                #expect(outcome == "granted", "denial/error must not become success")
+            } catch let error as AppleError {
+                #expect(outcome != "granted", "a granted completion must not time out")
+                #expect(error.type == "authorization_denied")
+                #expect(error.exitCode == AppleExit.permissionDenied)
+                if outcome == "denied" {
+                    #expect(error.status == "denied")
+                    #expect(error.remediation == ContactsStore.remediation(for: "denied"))
+                    #expect(error.message == "Contacts access not granted (status=denied).")
+                } else if outcome == "error" {
+                    #expect(error.status == nil)
+                    #expect(error.remediation == nil)
+                    #expect(error.message == "Contacts authorization error: prompt exploded")
+                }
+            }
+            try assertOffThreadCompletion(worker)
+            #expect(backend.accessRequests == 1)
         }
     }
 
-    @Test("an off-thread prompt that arrives AFTER the timeout cannot corrupt the refusal")
-    func promptArrivesAfterTimeout() {
-        // The timeout path returns while the handler is still in flight — the case the semaphore
-        // alone does not order, and the reason `AccessResult` carries an explicit lock.
+    @Test("an off-thread prompt released AFTER the timeout cannot corrupt the refusal")
+    func promptArrivesAfterTimeout() throws {
+        let worker = ContactsCompletionWorker(held: true)
+        defer { #expect(worker.finish(), "the late callback thread must finish") }
+        try #require(worker.waitUntilReady())
         let backend = FakeContactsBackend()
         backend.statuses = [0]
         backend.accessGrant = (true, nil)
-        backend.accessCompletionQueue = DispatchQueue(label: "apple-cli-test.contacts.late")
+        backend.accessCompletionWorker = worker
+        var refusal: AppleError?
         do {
             try store(backend, timeout: 0.001).requireAuthorization()
             Issue.record("expected the timeout branch to throw")
-        } catch let e as AppleError {
-            #expect(e.type == "authorization_denied")
-            #expect(e.status == "notDetermined")
-            #expect(e.message.contains("awaiting your response"))
-        } catch {
-            Issue.record("expected AppleError, got \(error)")
+        } catch let error as AppleError {
+            refusal = error
         }
+        #expect(worker.snapshot.submissions == 1)
+        #expect(worker.snapshot.completions == 0)
+        worker.release()
+        try assertOffThreadCompletion(worker)
+        #expect(backend.accessRequests == 1)
+        let error = try #require(refusal)
+        #expect(error.type == "authorization_denied")
+        #expect(error.status == "notDetermined")
+        #expect(error.remediation == nil)
+        #expect(error.message == "Contacts permission prompt is awaiting your response. Grant access in the system dialog and retry.")
+    }
+
+    private func assertOffThreadCompletion(_ worker: ContactsCompletionWorker) throws {
+        try #require(worker.waitUntilCompleted(), "the callback must complete")
+        let observed = worker.snapshot
+        #expect(observed.failure == nil)
+        #expect(observed.submissions == 1)
+        #expect(observed.completions == 1)
+        #expect(observed.callerThread != 0 && observed.callbackThread != 0)
+        #expect(observed.callerThread != observed.callbackThread)
     }
 
     @Test("an empty status fixture degrades to notDetermined instead of trapping")
