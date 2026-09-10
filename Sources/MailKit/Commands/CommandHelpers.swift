@@ -91,11 +91,10 @@ func executeMessageMutation(_ msgs: [MailMessage], sandboxActive: Bool,
     //  * only `applied` is carried on the abort, NOT the partial `not_found` accumulated so far —
     //    a not-found id was never mutated, so there is nothing to exclude from a retry; the
     //    retry-safety contract is strictly about ids that CHANGED.
-    //  * this reports the ids applied in PRIOR iterations, not `failedID` — so it is correct only
-    //    while each `op` is mutate-or-throw (it throws BEFORE any state change, never after). The
-    //    Mail ops satisfy this (e.g. `moveLocated` returns true only on "ok" and throws first); an
-    //    op that mutated then threw would leave `failedID` changed-but-excluded, re-opening the
-    //    double-mutation hazard for that one id. Keep new ops mutate-or-throw.
+    //  * `applied` records confirmed successes in PRIOR iterations, never `failedID`. An op may
+    //    change its item and then throw (a later script step or outcome delivery can fail).
+    //    The error therefore tells callers to verify the failed item's state before retrying;
+    //    its absence from `applied` does not establish that it was unchanged.
     var applied: [String] = [], notFound: [String] = []
     for t in validated {
         do {

@@ -51,6 +51,12 @@ JSON output are stable per the versioning policy — breaking changes bump
 
 ### Fixed
 
+- **Bulk Mail failures no longer claim that a failed item was unchanged.** The error identifies
+  earlier confirmed changes in `applied` and asks callers to verify the failed item's state
+  before retrying, since an operation can change it before reporting an error. When the first
+  operation fails, `applied` remains omitted. Error fields, types, exit codes, and
+  `schema_version` are unchanged; this corrects the retry guidance in the existing message.
+
 - **Mail move errors cannot be mistaken for mailbox ambiguity because of the mailbox name.**
   Ordinary AppleScript failures remain sanitized upstream errors even when caller-supplied
   mailbox text contains the old ambiguity marker or a forged diagnostic line. Genuine

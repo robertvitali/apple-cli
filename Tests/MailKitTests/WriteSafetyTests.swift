@@ -200,34 +200,51 @@ struct MailWriteSafetyTests {
                                         readStatus: false, flagged: false, dateReceived: nil, content: nil))
     }
 
-    @Test("a hard op failure mid-batch aborts but reports the ids already applied (extra33)")
-    func bulkPartialFailureCarriesApplied() {
-        withEnv(recipients: nil) {
-            // op applies "a", then hard-fails on "b" (an AppleScript-class error); "c" never runs.
-            let err = #expect(throws: AppleError.self) {
+    @Test("a failed operation may have changed its item; only earlier successes are confirmed", arguments: ["a", "b"])
+    func bulkFailureAfterSideEffectPreservesCertaintyAndMetadata(_ failedID: String) throws {
+        try TestEnvironment.withoutWriteModeOverrides {
+            let failure = AppleError(
+                type: AppleErrorType.permissionDenied, message: "synthetic failure after side effect",
+                exitCode: AppleExit.permissionDenied, status: "denied",
+                remediation: "synthetic remediation", sandbox: true)
+            var visited: [String] = []
+            var changed: [String] = []
+            let thrown = #expect(throws: AppleError.self) {
                 _ = try executeMessageMutation([idMsg("a"), idMsg("b"), idMsg("c")], sandboxActive: false) { imid, _ in
-                    if imid == "im-b" { throw AppleError.upstream("Mail returned an error for \(imid)") }
+                    visited.append(imid)
+                    changed.append(imid) // Simulate a mutation before a later step fails.
+                    if imid == "im-\(failedID)" { throw failure }
                     return true
                 }
             }
-            #expect(err?.applied == ["a"])                       // "a" was already mutated
-            #expect(err?.message.contains("'b'") == true)        // names the failing id
-            #expect(err?.message.contains("EXCLUDE") == true)    // retry guidance present
-            #expect(err?.type == AppleErrorType.upstream)        // underlying classification preserved
-            #expect(err?.exitCode == AppleExit.upstream)         // and its exit code — abort unchanged
-        }
-    }
+            let error = try #require(thrown)
+            let expectedVisited = failedID == "a" ? ["im-a"] : ["im-a", "im-b"]
+            #expect(visited == expectedVisited) // No later operation ran after the throw.
+            #expect(changed == expectedVisited) // The failed item changed too.
+            #expect(error.applied == (failedID == "a" ? nil : ["a"]))
+            let expectedMessage = failedID == "a"
+                ? "bulk mutation failed at 'a'; no earlier changes were confirmed. The failed item may have changed; verify its state before retrying — synthetic failure after side effect"
+                : "bulk mutation failed at 'b' after 1 earlier message(s) were confirmed changed; EXCLUDE the ids in `applied` from a retry. The failed item may have changed; verify its state before retrying — synthetic failure after side effect"
+            #expect(error.message == expectedMessage)
+            #expect(error.type == failure.type)
+            #expect(error.exitCode == failure.exitCode)
+            #expect(error.status == failure.status)
+            #expect(error.remediation == failure.remediation)
+            #expect(error.sandbox == failure.sandbox)
 
-    @Test("a failure on the FIRST id reports no applied ids (nothing to exclude on retry)")
-    func bulkFailureOnFirstIdHasNilApplied() {
-        withEnv(recipients: nil) {
-            let err = #expect(throws: AppleError.self) {
-                _ = try executeMessageMutation([idMsg("a"), idMsg("b")], sandboxActive: false) { _, _ in
-                    throw AppleError.upstream("fail immediately")
-                }
+            let encoded = try Output.encodeError(tool: "mail", from: error)
+            let envelope = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+            let wireError = try #require(envelope["error"] as? [String: Any])
+            #expect(wireError["message"] as? String == expectedMessage)
+            #expect(wireError["type"] as? String == failure.type)
+            #expect(wireError["status"] as? String == failure.status)
+            #expect(wireError["remediation"] as? String == failure.remediation)
+            #expect(wireError["sandbox"] as? Bool == failure.sandbox)
+            if failedID == "a" {
+                #expect(!wireError.keys.contains("applied")) // Omitted, never an empty/null promise.
+            } else {
+                #expect(wireError["applied"] as? [String] == ["a"])
             }
-            #expect(err?.applied == nil)                         // nothing mutated → key omitted
-            #expect(err?.message.contains("before any change applied") == true)
         }
     }
 

@@ -368,7 +368,7 @@ struct MailManageCommandInjectionTests {
         let message = ambiguous
             ? "destination mailbox '\(destination)' is ambiguous — the name exists at more than one nesting point in this account. Address it by full path (\"Parent/\(destination)\")."
             : cause
-        #expect(error["message"] as? String == "bulk mutation failed at '10' before any change applied — " + message)
+        #expect(error["message"] as? String == "bulk mutation failed at '10'; no earlier changes were confirmed. The failed item may have changed; verify its state before retrying — " + message)
         #expect(error["applied"] == nil)
         let output = String(decoding: stdout.data, as: UTF8.self)
         #expect(!output.contains("apple-cli-test-stderr-prefix"))

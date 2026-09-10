@@ -134,7 +134,7 @@ struct AuthErrorFieldsTests {
     }
 
     /// `error.applied` (extra33 / SEC-M2): a bulk mutation that aborts mid-loop surfaces the ids it
-    /// already changed so a retry can exclude them (move/delete are not idempotent). Same
+    /// confirmed changed before the failed operation, so a retry can exclude them. Same
     /// encodeIfPresent discipline as status/remediation — present as its own array key when set,
     /// ABSENT (not null) on every other error, and forwarded by the `AppleError` → envelope mapping.
     @Test("error.applied is rendered as an array key when a bulk op reports partial mutation")
@@ -146,7 +146,7 @@ struct AuthErrorFieldsTests {
         #expect(e.exitCode == AppleExit.upstream)           // and exit code — abort semantics unchanged
         let err = try errorObject(try Output.encodeError(tool: "mail", from: e))
         #expect(err["applied"] as? [String] == ["a", "b"])
-        #expect((err["message"] as? String)?.contains("EXCLUDE") == true)
+        #expect(err["message"] as? String == "bulk mutation failed at 'c' after 2 earlier message(s) were confirmed changed; EXCLUDE the ids in `applied` from a retry. The failed item may have changed; verify its state before retrying — Mail returned an error for 'c'.")
     }
 
     @Test("errors with no partial-mutation dimension omit the applied key entirely")
@@ -155,8 +155,9 @@ struct AuthErrorFieldsTests {
         let plain = try errorObject(try Output.encodeError(tool: "notes", from: .validation("bad")))
         #expect(plain.keys.contains("applied") == false, "applied must be omitted, not null")
         let firstIdFail = AppleError.upstream("boom").addingBulkContext(applied: [], failedID: "a")
-        #expect(firstIdFail.applied == nil)                 // nothing mutated → no list
+        #expect(firstIdFail.applied == nil)                 // no earlier successes confirmed → no list
         let err = try errorObject(try Output.encodeError(tool: "mail", from: firstIdFail))
+        #expect(err["message"] as? String == "bulk mutation failed at 'a'; no earlier changes were confirmed. The failed item may have changed; verify its state before retrying — boom")
         #expect(err.keys.contains("applied") == false)
         let raw = String(data: try Output.encodeError(tool: "mail", from: firstIdFail), encoding: .utf8) ?? ""
         #expect(raw.contains("null") == false)

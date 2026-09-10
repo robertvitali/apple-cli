@@ -48,18 +48,19 @@ public struct AppleError: Error {
         self.sandbox = sandbox
     }
 
-    /// Re-wrap this error with the bulk partial-mutation context: the ids already applied plus a
+    /// Re-wrap this error with the bulk partial-mutation context: earlier confirmed ids plus a
     /// message naming the failing id. Preserves `type` / `exitCode` / `status` / `remediation` so
     /// the underlying failure's classification and exit code are unchanged — this only ADDS the
     /// applied list and prepends an explanatory sentence. `applied` stays nil when empty (the
-    /// first id failed, nothing was mutated, nothing to exclude on retry).
+    /// first id failed, so no earlier changes were confirmed). The failed operation may have
+    /// changed its item before throwing; callers must verify that item before retrying it.
     public func addingBulkContext(applied: [String], failedID: String) -> AppleError {
         let note = applied.isEmpty
-            ? "bulk mutation failed at '\(failedID)' before any change applied — "
-            : "bulk mutation failed at '\(failedID)' after mutating \(applied.count) message(s); "
-              + "the ids in `applied` were already changed, so EXCLUDE them from a retry "
-              + "(move/delete are not idempotent) — "
-        return AppleError(type: type, message: note + message, exitCode: exitCode,
+            ? "bulk mutation failed at '\(failedID)'; no earlier changes were confirmed. "
+            : "bulk mutation failed at '\(failedID)' after \(applied.count) earlier message(s) were confirmed changed; "
+              + "EXCLUDE the ids in `applied` from a retry. "
+        let uncertainty = "The failed item may have changed; verify its state before retrying — "
+        return AppleError(type: type, message: note + uncertainty + message, exitCode: exitCode,
                           status: status, remediation: remediation,
                           applied: applied.isEmpty ? nil : applied, sandbox: sandbox)
     }
