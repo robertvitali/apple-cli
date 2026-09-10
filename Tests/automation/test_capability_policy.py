@@ -19,14 +19,16 @@ SCHEMA_PATH = REPO_ROOT / "scripts" / "ci" / "capability_schema.py"
 POLICY_PATH = REPO_ROOT / "scripts" / "ci" / "capability_policy.py"
 
 
-def load_module(path: Path, name: str) -> ModuleType:
+def load_module(
+    path: Path, name: str, *, synthetic_runtime: bool = True
+) -> ModuleType:
     spec = importlib.util.spec_from_file_location(name, path)
     if spec is None or spec.loader is None:
         raise RuntimeError("unable to load capability module")
     module = importlib.util.module_from_spec(spec)
     sys.modules[name] = module
     spec.loader.exec_module(module)
-    if path == POLICY_PATH and "synthetic_runner" in globals():
+    if synthetic_runtime and path == POLICY_PATH and "synthetic_runner" in globals():
         module._default_runtime_runner = synthetic_runner
     return module
 

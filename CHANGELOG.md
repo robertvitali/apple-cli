@@ -51,6 +51,11 @@ JSON output are stable per the versioning policy — breaking changes bump
 
 ### Fixed
 
+- **Capability checks accept escaped quotes in ordinary multiline Swift test literals.**
+  Literal contents remain excluded from test discovery. xUnit evidence now requires UTF-8
+  and rejects document/entity declarations before XML parsing, including declarations hidden
+  by UTF-16 or UTF-32 byte encoding. Public CLI output fields and `schema_version` are unchanged.
+
 - **Mail attachment previews check the destination selected by the original path spelling.**
   Trailing `/.` forms now reject a selected final-leaf symlink before Mail access and avoid
   refusing an unrelated leaf. Execute retains its captured-destination and parent checks;

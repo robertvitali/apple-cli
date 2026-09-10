@@ -935,7 +935,7 @@ def _swift_code_mask(source: str) -> str:
                         masked[offset] = " "
                     cursor += len(delimiter)
                     break
-                if hashes == 0 and not triple and source[cursor] == "\\":
+                if hashes == 0 and source[cursor] == "\\":
                     masked[cursor] = " "
                     cursor += 1
                     if cursor < length:
@@ -1509,11 +1509,17 @@ def _runtime_id_matches_symbol(runtime_id: str, symbol: str) -> bool:
 
 
 def _passed_xunit_ids(payload: bytes) -> FrozenSet[str]:
-    lowered = payload.lower()
-    if b"<!doctype" in lowered or b"<!entity" in lowered:
+    # Swift emits UTF-8 xUnit. Decode before checking declarations so XML's own
+    # encoding detection cannot turn interleaved UTF-16/32 bytes into a hidden DTD.
+    try:
+        source = payload.decode("utf-8")
+    except UnicodeDecodeError as error:
+        raise PolicyError("runtime-xunit-invalid") from error
+    lowered = source.lower()
+    if "\x00" in source or "<!doctype" in lowered or "<!entity" in lowered:
         raise PolicyError("runtime-xunit-invalid")
     try:
-        root = ElementTree.fromstring(payload)
+        root = ElementTree.fromstring(source)
     except ElementTree.ParseError as error:
         raise PolicyError("runtime-xunit-invalid") from error
     passed: Set[str] = set()
