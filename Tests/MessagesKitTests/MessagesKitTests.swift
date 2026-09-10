@@ -474,6 +474,32 @@ struct SendServiceAndAttachmentTests {
         }
     }
 
+    /// The `auto` fallback runs after the iMessage half died, possibly mid-batch, and the SMS
+    /// ACCOUNT LOOKUP can fail on its own (no enabled SMS account). Its error handler reports
+    /// `currentFile`, so unless the counter is cleared first it still names the attachment the
+    /// iMessage half was on — telling the caller "send failed on attachment 1" for a run that
+    /// transferred nothing at all. Asserted as "the reset lies between the fallback's entry and
+    /// the account lookup", which is the invariant, not the line number.
+    @Test func autoFallbackClearsTheInFlightAttachmentBeforeResolvingSMS() {
+        for includeMessage in [true, false] {
+            let script = Send.directScript(service: .auto, includeMessage: includeMessage)
+            guard let fallback = script.range(of: "on error iMessageErr"),
+                  let lookup = script.range(of: "set smsService to first account")
+            else {
+                Issue.record("auto script is missing the fallback or the SMS account lookup")
+                continue
+            }
+            #expect(script[fallback.upperBound..<lookup.lowerBound].contains("set currentFile to 0"))
+        }
+        // …and the line that reset reaches: nothing transferred reads as no failed attachment,
+        // never as attachment 0 or attachment 1.
+        let outcome = Send.interpret("error:0:0:Both iMessage and SMS failed - iMessage: x SMS: y")
+        #expect(outcome.ok == false)
+        #expect(outcome.filesSent == 0)
+        #expect(outcome.failedFile == nil)
+        #expect(outcome.error == "Both iMessage and SMS failed - iMessage: x SMS: y")
+    }
+
     // MARK: resolveAttachment
 
     @Test func resolvesAnExistingFileToAnAbsoluteStandardizedPath() throws {
@@ -488,6 +514,38 @@ struct SendServiceAndAttachmentTests {
         // A `..` hop resolves to the same file rather than being handed to AppleScript verbatim.
         let indirect = dir.appendingPathComponent("sub/../apple-cli-test-note.txt").path
         #expect(try Send.resolveAttachment(indirect) == resolved)
+    }
+
+    /// NO TRIMMING. `report ` (one trailing space) is a legal macOS filename, so trimming the
+    /// argument would make `--file "…/report "` stat, resolve and SEND `…/report` instead — a
+    /// different file, silently substituted, with the envelope reporting the path the CLI picked
+    /// rather than the one asked for. The fixture pair is what proves it: both files exist, so a
+    /// trimming implementation still passes every existence check and simply sends the wrong one.
+    @Test func aTrailingSpaceSelectsTheTrailingSpaceFile() throws {
+        let dir = try scratch.directory()
+        let plain = dir.path + "/apple-cli-test-report"
+        let spaced = dir.path + "/apple-cli-test-report "
+        try "plain".write(toFile: plain, atomically: true, encoding: .utf8)
+        try "spaced".write(toFile: spaced, atomically: true, encoding: .utf8)
+
+        let resolved = try Send.resolveAttachment(spaced)
+        #expect(resolved.hasSuffix("apple-cli-test-report "))
+        #expect(try String(contentsOfFile: resolved, encoding: .utf8) == "spaced")
+        // The neighbour still resolves to itself — the two are distinguishable in both directions.
+        #expect(try String(contentsOfFile: Send.resolveAttachment(plain), encoding: .utf8) == "plain")
+    }
+
+    /// A leading space is a filename too, and `expandingTildeInPath` must not be handed a trimmed
+    /// spelling either.
+    @Test func aLeadingSpaceIsPartOfTheFilename() throws {
+        let dir = try scratch.directory()
+        let spaced = dir.path + "/ apple-cli-test-leading"
+        try "leading".write(toFile: spaced, atomically: true, encoding: .utf8)
+        #expect(try Send.resolveAttachment(spaced).hasSuffix("/ apple-cli-test-leading"))
+        // Trimmed, this names nothing — so a trimming implementation would refuse a real file.
+        #expect(throws: AppleError.self) {
+            try Send.resolveAttachment(dir.path + "/apple-cli-test-leading")
+        }
     }
 
     @Test func rejectsAMissingFile() throws {

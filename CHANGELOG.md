@@ -37,11 +37,24 @@ JSON output are stable per the versioning policy — breaking changes bump
   second message rather than an update. For the same reason `auto` will not fall back to SMS once
   any part of a send has been delivered. JSON gains `service_requested` and `files` on both the
   dry-run and the execute envelope and `files_sent` on the execute envelope; `service_plan` gains
-  the values `iMessage only` and `SMS only`; a file-only send reports no `message`. The
-  `--test-mode` sandbox is unchanged: recipients are still confined to `APPLE_TEST_RECIPIENTS`
-  and group sends are still refused. `schema_version` is unchanged at 1 — every new key is
-  additive, no existing key is removed, renamed, or retyped, and every previously valid
-  invocation behaves exactly as before.
+  the values `iMessage only` and `SMS only`; a file-only send reports no `message`. Attachment
+  paths are reported standardized but NOT symlink-resolved — `.`/`..` are removed, a symlink is
+  left as you spelled it — so a path you pass is a path you get back. The `--test-mode` sandbox
+  is unchanged: recipients are still confined to `APPLE_TEST_RECIPIENTS` and group sends are
+  still refused.
+
+  **`schema_version` stays 1, including for the two changes that look like contract breaks.**
+  The rule this repo works to is that changing an enum or retyping a field IS breaking, so both
+  are stated rather than assumed. (1) `service_plan` gains the values `iMessage only` and
+  `SMS only`, but an existing invocation cannot produce either: the new values are reachable
+  ONLY by passing `--service imessage`/`--service sms`, a flag that did not exist, so every
+  command line that worked before this release still emits `iMessage→SMS auto` or `group chat`
+  and its payload is byte-identical. A consumer that switches exhaustively on `service_plan`
+  sees a new value only once it starts asking for one. (2) `message` becomes omissible, but only
+  on a file-only send — a shape that could not previously exist, because `--message` was
+  required. Wherever `message` was present before, it is present now, with the same type and
+  value. No key is removed, renamed, or retyped, and no exit code changed, so agents keyed on
+  `schema_version` via `apple version` have nothing to branch on.
 
 - **AppleScript capture can now have an opt-in byte limit.** Set
   `APPLE_SCRIPT_MAX_OUTPUT_BYTES` to a positive decimal byte count, or pass

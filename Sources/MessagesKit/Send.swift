@@ -174,16 +174,31 @@ public enum Send {
     /// The one character rejected is NUL: `argv` reaches `osascript` as C strings, so a path
     /// carrying a NUL would be TRUNCATED between the `stat` that validated it here and the send
     /// that used it — a different file than the one that passed this check. Every other byte a
-    /// filesystem accepts in a name is accepted here.
+    /// filesystem accepts in a name is accepted here, VERBATIM.
+    ///
+    /// In particular the argument is NOT trimmed. `report ` (one trailing space) is a legal macOS
+    /// filename, and trimming would have `--file "…/report "` stat, resolve and SEND `…/report` —
+    /// a different, silently-substituted file, with the envelope reporting the path it chose
+    /// rather than the one asked for. Whitespace-only and empty arguments still fail, at the
+    /// existence check, which is where a path that names nothing belongs.
+    ///
+    /// The returned path is STANDARDIZED, NOT SYMLINK-RESOLVED: `.` and `..` are removed and a
+    /// leading `/private` is dropped where that still names the same file, but a symlink is left
+    /// as the operator spelled it. That is deliberate — the path is echoed back in `files` and in
+    /// `error.applied`, and resolving it would report a location the caller never named (and, for
+    /// a link into someone else's tree, one they may not have meant to disclose). Messages
+    /// resolves the link itself when it reads the file, so the bytes sent are the same either way.
     public static func resolveAttachment(_ raw: String) throws -> String {
         guard !raw.unicodeScalars.contains(where: { $0.value == 0 }) else {
             throw AppleError.validation("attachment path contains a NUL byte — refusing.")
         }
-        let trimmed = raw.trimmingCharacters(in: .whitespaces)
-        guard !trimmed.isEmpty else {
+        // Guarded rather than left to the existence check below because `URL(fileURLWithPath:)`
+        // treats an empty path as the current directory, which would turn "" into a
+        // "is a directory" refusal naming a path the caller never typed.
+        guard !raw.isEmpty else {
             throw AppleError.validation("attachment path cannot be empty")
         }
-        let expanded = (trimmed as NSString).expandingTildeInPath
+        let expanded = (raw as NSString).expandingTildeInPath
         let path = URL(fileURLWithPath: expanded).standardizedFileURL.path
         var isDirectory: ObjCBool = false
         guard FileManager.default.fileExists(atPath: path, isDirectory: &isDirectory) else {
@@ -356,6 +371,12 @@ public enum Send {
             lines.append("\t\t\t\t" + errorReturn("iMessageErr",
                 note: "iMessage send failed after part of it was already delivered - "))
             lines.append("\t\t\tend if")
+            // Nothing was delivered, so nothing is in flight. Reset BEFORE the SMS account
+            // lookup: that lookup can fail on its own (no enabled SMS account), and its error
+            // handler reads `currentFile` — which still names the attachment the iMessage half
+            // died on. Without this the caller is told "send failed on attachment 1" for a run
+            // that transferred nothing at all.
+            lines.append("\t\t\tset currentFile to 0")
             lines.append("\t\t\ttry")
             lines.append("\t\t\t\tif \(recipientHasDigit) then")
             lines.append(contentsOf: resolveSMSBuddy(indent: "\t\t\t\t\t"))

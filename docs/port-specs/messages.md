@@ -240,16 +240,38 @@ already delivered, which a retry must exclude. The same fact bounds the `auto` f
 it may only re-run a batch of which NOTHING was delivered, or the recipient would receive
 the delivered part twice.
 
-**JSON (additive, `schema_version` unchanged at 1):** `service_requested` and `files` on
-both the dry-run and the execute envelope, `files_sent` on the execute envelope, and
-`service_plan` gains the values `iMessage only` / `SMS only` alongside the existing
-`iMessage→SMS auto` / `group chat`. `message` is absent on a file-only send — a shape
-that could not previously exist, because `--message` was required.
+**Attachment paths are standardized, NOT symlink-resolved.** `.` and `..` are removed and
+a leading `/private` is dropped where that still names the same file, but a symlink is
+left exactly as the operator spelled it. These paths are echoed back in `files` and in
+`error.applied`; resolving them would report a location the caller never named, and for a
+link into another tree, one they may not have meant to disclose. Messages resolves the
+link itself when it reads the file, so the bytes sent are identical either way. The
+argument is also NOT trimmed: `report ` (one trailing space) is a legal macOS filename,
+and trimming would silently substitute a neighbouring `report` that also exists.
 
-**No live-send validation.** Like the `--group` row above, this is a validation-evidence
-limitation, not a capability gap: the AppleScript for all eight emitted shapes is
-compile-checked with `osacompile`, and the routing, ordering and failure reporting are
-pinned in the logic tier, but no attachment has been sent to a live recipient.
+**`schema_version` stays 1, and the two changes that resemble contract breaks are stated
+rather than assumed** (this repo treats an enum change or a retype as BREAKING, so
+silence would be the failure). `service_plan` gains `iMessage only` / `SMS only`, but
+those values are reachable ONLY through `--service imessage` / `--service sms` — a flag
+that did not exist before. Every command line that was valid before this change still
+produces `iMessage→SMS auto` or `group chat`, and its payload is byte-identical, so a
+consumer switching exhaustively on `service_plan` meets a new value only once it starts
+requesting one. `message` becomes omissible, but only on a file-only send, a shape that
+could not previously exist because `--message` was required; wherever `message` appeared
+before it appears now, same type, same value. `service_requested` and `files` are new
+keys on both envelopes and `files_sent` a new key on the execute envelope — additive for
+a tolerant reader. Nothing is removed, renamed, retyped, and no exit code moved.
+
+**Verification, and its bound.** All eight emitted shapes (3 services x with/without a
+body, group x with/without a body) are compile-checked against `/usr/bin/osacompile` by
+`Tests/MessagesKitTests/SendScriptCompilationTests.swift` — the Messages counterpart of
+Mail's `bats/helpers/applescript_syntax_check.py`, placed in the Swift tier because
+`bats/` files are frozen against branch work by the trusted-catalog gate in
+`scripts/ci/bats_inventory.py`. That test COMPILES and never executes: the same script
+under `osascript` would drive Messages.app and reach a real person. Routing, ordering,
+validation and failure reporting are pinned in the logic tier. Like the `--group` row
+above, what remains is a validation-evidence limitation rather than a capability gap: no
+attachment has been sent to a live recipient, and no live send is authorized.
 
 ### Attachment metadata
 

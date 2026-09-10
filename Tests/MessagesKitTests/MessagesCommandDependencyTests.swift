@@ -741,6 +741,28 @@ struct MessagesCommandDependencyTests {
         #expect(error["applied"] == nil)
     }
 
+    /// The reviewer's case, end to end: a FILE-ONLY send where the iMessage half died on the one
+    /// attachment and no SMS account exists. The script clears the in-flight counter before the
+    /// account lookup, so the outcome carries no failed attachment — and the CLI must then report
+    /// the generic failure rather than claiming attachment 1 of 1 went wrong when nothing was
+    /// transferred at all.
+    @Test func aFallbackThatTransferredNothingDoesNotBlameAnAttachment() throws {
+        let file = try scratch.directory().appendingPathComponent("apple-cli-test-a.txt")
+        try "synthetic".write(to: file, atomically: true, encoding: .utf8)
+        let command = try Send_.parse(["+1 (212) 555-0100", "--file", file.path])
+        let result = try captureCommand {
+            try command.run(dependencies: .fixture(performSend: { _ in
+                .failed(error: "Both iMessage and SMS failed", filesSent: 0, failedFile: nil)
+            }))
+        }
+
+        #expect(result.exitCode == AppleExit.upstream)
+        let error = try errorPayload(from: result.stdout)
+        #expect(error["message"] as? String == "send failed (Messages returned an error)")
+        #expect(error["applied"] == nil)
+        #expect((error["message"] as? String)?.contains("attachment") == false)
+    }
+
     /// `--text` has to describe an attachment-bearing send too, or a file-only send renders as a
     /// blank line after "would send … via …:".
     @Test func textOutputDescribesAttachments() throws {
