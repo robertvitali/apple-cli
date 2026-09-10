@@ -91,8 +91,8 @@ TRUSTED_HOSTED_FILE_SHA256 = {
     "bats/hosted/smoke.bats": "7bd533f47c3271ae141be9e4d95b93b5b476cd5bd68e46908d5a634cf53095e1",
 }
 TRUSTED_HOSTED_HELPER_SHA256 = {
-    "bats/helpers/app_lifecycle.bash": "9220dc72afd40b42977a970e6adc9adddc9223d8674029477d7aeb6543ffad9e",
-    "bats/helpers/app_lifecycle.py": "5b2a022dbe18b010e71afd30d344802202e19b13306690991acfd43547bc945c",
+    "bats/helpers/app_lifecycle.bash": "17b45350a679bf21b5ffb464e67dcf5ea5200aca4c46005fd5bf13534cc3caba",
+    "bats/helpers/app_lifecycle.py": "f7be5974baa030e3768832f2b09b41e74043bcd8ce8d8f97c8bd32b528f390d3",
     "bats/helpers/applescript_syntax_check.py": "40f56f5659dfb3bbc4c8b4b36d30ac12ad943f7c3fd78981800f3da46343e996",
     "bats/helpers/bounded_exec.py": "84260117f0505f2f2883fa2ec1b5fc5a577d4a05cc1ba268ae26e8948ab475c9",
     "bats/helpers/execute_envelope_lint.py": "430eba15fea468da6415441657087f7f2b70b0e6853ae70777c7b52a652454ba",

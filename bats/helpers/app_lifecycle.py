@@ -33,7 +33,15 @@ GENERIC_ERROR = "app lifecycle operation failed"
 
 
 class LifecycleError(RuntimeError):
-    """Lifecycle state could not be processed safely."""
+    """Lifecycle state could not be processed safely.
+
+    `code` is a fixed, value-free reason token (never any byte of the input) so a failing run
+    can say WHICH check refused without echoing process names, timestamps, or file contents.
+    """
+
+    def __init__(self, message: str = GENERIC_ERROR, code: str = "") -> None:
+        super().__init__(message)
+        self.code = code
 
 
 class LifecycleArgumentParser(argparse.ArgumentParser):
@@ -143,17 +151,17 @@ def _parse_find_file(path: Path, expected_name: str) -> str | None:
         return None
     lines = payload.splitlines()
     if len(lines) != 1 or not lines[0]:
-        raise LifecycleError(GENERIC_ERROR)
+        raise LifecycleError(GENERIC_ERROR, "find-multiple")
     line = lines[0]
     match = ASN_PATTERN.fullmatch(line[:-1]) if line.endswith(":") else None
     if match is not None:
         return match.group(0)
     suffix = f'-"{expected_name}":'
     if not line.endswith(suffix):
-        raise LifecycleError(GENERIC_ERROR)
+        raise LifecycleError(GENERIC_ERROR, "find-name")
     base = line[: -len(suffix)]
     if ASN_PATTERN.fullmatch(base) is None:
-        raise LifecycleError(GENERIC_ERROR)
+        raise LifecycleError(GENERIC_ERROR, "find-asn")
     return base
 
 
@@ -167,7 +175,7 @@ def parse_find_outputs(key: str, bundle_path: Path, exact_path: Path) -> str:
         return "NONE"
     if values[0] is not None and values[0] == values[1]:
         return values[0]
-    raise LifecycleError(GENERIC_ERROR)
+    raise LifecycleError(GENERIC_ERROR, "find-bundle-exact-disagree")
 
 
 def _parse_info_fields(path: Path) -> dict[str, str]:
@@ -179,19 +187,20 @@ def _parse_info_fields(path: Path) -> dict[str, str]:
     allowed = {"LSDisplayName", "pid", "CFBundleIdentifier", "LSCheckInTime*"}
     for line in payload.splitlines():
         if "=" not in line:
-            raise LifecycleError(GENERIC_ERROR)
+            raise LifecycleError(GENERIC_ERROR, "info-line-shape")
         raw_key, value = line.split("=", 1)
         value = value.strip(" \t")
         key = raw_key[1:-1] if len(raw_key) >= 2 and raw_key[0] == raw_key[-1] == '"' else raw_key
         if key not in allowed or key in fields or value == "":
-            raise LifecycleError(GENERIC_ERROR)
+            raise LifecycleError(GENERIC_ERROR, "info-field")
         fields[key] = value
     if set(fields) != allowed:
-        raise LifecycleError(GENERIC_ERROR)
+        raise LifecycleError(GENERIC_ERROR, "info-fields-missing")
     return fields
 
 
 def _strict_pid(value: str) -> str:
+    """Reject anything but a plain positive 32-bit pid rendering."""
     if (
         not value.isascii()
         or not value.isdecimal()
@@ -199,7 +208,7 @@ def _strict_pid(value: str) -> str:
         or int(value) <= 1
         or int(value) > 2147483647
     ):
-        raise LifecycleError(GENERIC_ERROR)
+        raise LifecycleError(GENERIC_ERROR, "info-pid")
     return value
 
 
@@ -213,11 +222,11 @@ def parse_info_output(key: str, asn: str, output_path: Path) -> str:
     if values == (stopped_value, stopped_value, stopped_value, stopped_value):
         return "STOPPED"
     if stopped_value in values:
-        raise LifecycleError(GENERIC_ERROR)
+        raise LifecycleError(GENERIC_ERROR, "info-partial-null")
     if fields["LSDisplayName"] != f'"{expected_name}"':
-        raise LifecycleError(GENERIC_ERROR)
+        raise LifecycleError(GENERIC_ERROR, "info-name-mismatch")
     if fields["CFBundleIdentifier"] != f'"{expected_bundle}"':
-        raise LifecycleError(GENERIC_ERROR)
+        raise LifecycleError(GENERIC_ERROR, "info-bundle-mismatch")
     pid = _strict_pid(fields["pid"])
     checkin = fields["LSCheckInTime*"]
     if (
@@ -226,7 +235,7 @@ def parse_info_output(key: str, asn: str, output_path: Path) -> str:
         or not all(0x20 <= ord(character) <= 0x7E for character in checkin)
         or len(checkin.encode("ascii")) > MAX_CHECKIN_BYTES
     ):
-        raise LifecycleError(GENERIC_ERROR)
+        raise LifecycleError(GENERIC_ERROR, "info-checkin")
     match = CHECKIN_DISPLAY_PATTERN.fullmatch(checkin)
     stable_checkin = (
         next(value for value in match.groups() if value)
@@ -351,8 +360,9 @@ def run(argv: list[str]) -> int:
     except KeyboardInterrupt:
         print("app lifecycle interrupted", file=sys.stderr)
         return 130
-    except LifecycleError:
-        print(GENERIC_ERROR, file=sys.stderr)
+    except LifecycleError as error:
+        # The code is a fixed token from this file, never derived from the input.
+        print(f"{GENERIC_ERROR}: {error.code}" if error.code else GENERIC_ERROR, file=sys.stderr)
         return 1
     return 0
 

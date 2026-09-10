@@ -275,6 +275,17 @@ class AppLifecyclePlannerTests(unittest.TestCase):
                 ])
             self.assertEqual(status, 1)
             self.assertEqual(stderr.getvalue(), "app lifecycle operation failed\n")
+            # A record that PARSES far enough to be refused by a named check carries that
+            # check's fixed reason code — and still not one byte of the record itself.
+            self.write_private(path, "LSDisplayName=\"private-name\"\npid=42\nCFBundleIdentifier=\"private.bundle\"\nLSCheckInTime*=2026/01/01 00:00:00\n")
+            coded = io.StringIO()
+            with redirect_stderr(coded):
+                status = self.engine.run([
+                    "parse-info", "--app", "mail", "--asn", "ASN:0x0-0x1", "--output", str(path)
+                ])
+            self.assertEqual(status, 1)
+            self.assertEqual(coded.getvalue(), "app lifecycle operation failed: info-name-mismatch\n")
+            self.assertNotIn("private", coded.getvalue())
 
 
 class AppLifecycleShellTests(unittest.TestCase):
@@ -284,6 +295,118 @@ class AppLifecycleShellTests(unittest.TestCase):
         if env:
             merged.update(env)
         return subprocess.run(["/bin/bash", "-c", script], capture_output=True, text=True, env=merged, timeout=timeout)
+
+    def test_python_wrapper_rejects_unexpected_stderr_without_echoing_it(self):
+        fixtures = (
+            b"/private/example/secret-value.py: unable to open file\n",
+            b'Traceback (most recent call last):\n  File "/private/example/secret-value.py", line 1\nValueError: private-value\n',
+            b"private alphabetic value\n",
+            b"app lifecycle operation failed: private-value\n",
+            b"app lifecycle operation failed: info-field\nprivate-value\n",
+            b"app lifecycle operation failed: info-field\n\n",
+            b"app lifecycle operation failed: info-field\x00\n",
+            b"app lifecycle operation failed: info-field",
+            b"",
+        )
+        for payload in fixtures:
+            with self.subTest(payload=payload), tempfile.TemporaryDirectory() as directory:
+                helper = Path(directory) / "app_lifecycle.py"
+                helper.write_text(f"import sys\nsys.stderr.buffer.write({payload!r})\nraise SystemExit(1)\n")
+                completed = self.run_shell(f"""\
+                    HELPERS={quote(directory)}
+                    app_lifecycle_python {quote(Path(directory) / 'error')}; status=$?
+                    printf 'STATUS:%s\\n' "$status"
+                    app_lifecycle_error "$APPLE_CLI_BATS_APP_LAST_REASON"
+                """)
+                self.assertEqual(completed.stdout, "STATUS:1\n")
+                self.assertEqual(completed.stderr, "app lifecycle operation failed: python:unexpected-error\n")
+
+    def test_python_wrapper_accepts_only_complete_fixed_diagnostics(self):
+        codes = (
+            "", "find-multiple", "find-name", "find-asn", "find-bundle-exact-disagree",
+            "info-line-shape", "info-field", "info-fields-missing", "info-pid",
+            "info-partial-null", "info-name-mismatch", "info-bundle-mismatch", "info-checkin",
+        )
+        diagnostics = [(1, "app lifecycle operation failed" + (f": {code}" if code else "")) for code in codes]
+        diagnostics.append((130, "app lifecycle interrupted"))
+        for status, diagnostic in diagnostics:
+            with self.subTest(diagnostic=diagnostic), tempfile.TemporaryDirectory() as directory:
+                helper = Path(directory) / "app_lifecycle.py"
+                helper.write_text(f"import sys\nprint({diagnostic!r}, file=sys.stderr)\nraise SystemExit({status})\n")
+                completed = self.run_shell(f"""\
+                    HELPERS={quote(directory)}
+                    app_lifecycle_python {quote(Path(directory) / 'error')}; status=$?
+                    printf 'STATUS:%s\\n' "$status"
+                    app_lifecycle_error "$APPLE_CLI_BATS_APP_LAST_REASON"
+                """)
+                self.assertEqual(completed.stdout, f"STATUS:{status}\n")
+                self.assertEqual(completed.stderr, f"app lifecycle operation failed: python:{diagnostic}\n")
+
+    def test_python_wrapper_rejects_invalid_error_destinations_without_leaks(self):
+        for kind in ("missing-parent", "directory", "fifo", "symlink", "dangling-symlink"):
+            with self.subTest(kind=kind), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                marker = root / "executed"
+                target = root / "preserved"
+                target.write_text("preserve-me")
+                target.chmod(0o644)
+                error = root / "private-error"
+                if kind == "missing-parent":
+                    error = root / "private-missing" / "error"
+                elif kind == "directory":
+                    error.mkdir()
+                elif kind == "fifo":
+                    os.mkfifo(error, 0o600)
+                else:
+                    error.symlink_to(target if kind == "symlink" else root / "absent")
+                (root / "app_lifecycle.py").write_text(
+                    f"from pathlib import Path\nimport sys\nPath({str(marker)!r}).touch()\n"
+                    "print('private-value', file=sys.stderr)\nraise SystemExit(1)\n"
+                )
+                completed = self.run_shell(f"""\
+                    HELPERS={quote(root)}
+                    APPLE_CLI_BATS_APP_LAST_REASON=stale-reason
+                    app_lifecycle_python {quote(error)}; status=$?
+                    printf 'STATUS:%s\\n' "$status"
+                    app_lifecycle_error "$APPLE_CLI_BATS_APP_LAST_REASON"
+                """)
+                self.assertEqual(completed.stdout, "STATUS:1\n")
+                self.assertEqual(completed.stderr, "app lifecycle operation failed: python:unexpected-error\n")
+                self.assertFalse(marker.exists())
+                self.assertEqual(target.read_text(), "preserve-me")
+                self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o644)
+                self.assertFalse((root / "absent").exists())
+
+    def test_python_wrapper_recreates_reused_capture_privately_before_writing(self):
+        for linked in (False, True):
+            with self.subTest(linked=linked), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                error = root / "error"
+                target = root / "preserved"
+                target.write_text("preserve-me")
+                target.chmod(0o644)
+                if linked:
+                    os.link(target, error)
+                else:
+                    error.write_text("old-output")
+                    error.chmod(0o644)
+                (root / "app_lifecycle.py").write_text(
+                    "import os, stat, sys\n"
+                    "print('MODE:%o' % stat.S_IMODE(os.fstat(2).st_mode))\n"
+                    "print('private-value', file=sys.stderr)\nraise SystemExit(1)\n"
+                )
+                completed = self.run_shell(f"""\
+                    HELPERS={quote(root)}
+                    app_lifecycle_python {quote(error)}; status=$?
+                    printf 'STATUS:%s\\n' "$status"
+                    app_lifecycle_error "$APPLE_CLI_BATS_APP_LAST_REASON"
+                """)
+                self.assertEqual(completed.stdout, "MODE:600\nSTATUS:1\n")
+                self.assertEqual(completed.stderr, "app lifecycle operation failed: python:unexpected-error\n")
+                self.assertEqual(error.read_text(), "private-value\n")
+                self.assertEqual(stat.S_IMODE(error.stat().st_mode), 0o600)
+                self.assertEqual(target.read_text(), "preserve-me")
+                self.assertEqual(stat.S_IMODE(target.stat().st_mode), 0o644)
 
     def test_shell_uses_only_targeted_launchservices_calls(self):
         source = HOOK_PATH.read_text(encoding="utf-8")
@@ -577,7 +700,7 @@ class AppLifecycleShellTests(unittest.TestCase):
         """)
         completed = self.run_shell(body)
         self.assertEqual(completed.stdout, "1:0:false:1\nINVALID:1\n", completed.stderr)
-        self.assertEqual(completed.stderr, "app lifecycle operation failed\napp lifecycle operation failed\n")
+        self.assertEqual(completed.stderr, "app lifecycle operation failed: setup:observe:1:\napp lifecycle operation failed: setup:opt-out-invalid\n")
 
     def test_teardown_continues_after_one_restore_failure_and_preserves_state(self):
         body = textwrap.dedent(f"""\
@@ -597,7 +720,31 @@ class AppLifecycleShellTests(unittest.TestCase):
         """)
         completed = self.run_shell(body)
         self.assertEqual(completed.stdout.splitlines(), ["STATUS:1 STATE:0", "mail", "notes"])
-        self.assertEqual(completed.stderr, "app lifecycle operation failed\n")
+        self.assertEqual(completed.stderr, "app lifecycle operation failed: teardown:restore-status=1:mail:round=0:\n")
+
+    def test_teardown_does_not_reuse_reason_from_previous_restore_failure(self):
+        body = textwrap.dedent(f"""\
+            tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
+            BATS_FILE_TMPDIR="$tmp"; HELPERS={quote(HOOK_PATH.parent)}
+            /usr/bin/python3 "$HELPERS/app_lifecycle.py" write-snapshot --state "$tmp/apple-cli-app-state.json" --running 000000
+            APPLE_CLI_BATS_APP_SNAPSHOT_READY=true
+            app_lifecycle_observe() {{
+              APPLE_CLI_BATS_APP_RESULT=110000
+              APPLE_CLI_BATS_APP_OBSERVED_MAIL=mail-identity
+              APPLE_CLI_BATS_APP_OBSERVED_NOTES=notes-identity
+            }}
+            app_lifecycle_restore_one() {{
+              printf '%s\\n' "$1" >> "$tmp/calls"
+              if [ "$1" = mail ]; then APPLE_CLI_BATS_APP_LAST_REASON=validate:mail:mismatch; return 1; fi
+              return 2
+            }}
+            app_lifecycle_teardown_file_impl; status=$?
+            printf 'STATUS:%s STATE:%s\\n' "$status" "$(test -e "$tmp/apple-cli-app-state.json"; printf '%s' $?)"
+            cat "$tmp/calls"
+        """)
+        completed = self.run_shell(body)
+        self.assertEqual(completed.stdout.splitlines(), ["STATUS:1 STATE:0", "mail", "notes"])
+        self.assertEqual(completed.stderr, "app lifecycle operation failed: teardown:restore-status=2:notes:round=0:\n")
 
     def test_teardown_rescans_and_restores_late_registration(self):
         body = textwrap.dedent(f"""\
@@ -665,7 +812,7 @@ class AppLifecycleShellTests(unittest.TestCase):
         """)
         completed = self.run_shell(body)
         self.assertEqual(completed.stdout, "STATUS:1 STATE:0 OBSERVES:2\n")
-        self.assertEqual(completed.stderr, "app lifecycle operation failed\n")
+        self.assertEqual(completed.stderr, "app lifecycle operation failed: teardown:quiescence-timeout:rounds=1\n")
 
     def test_teardown_preserves_preexisting_apps_through_quiet_window(self):
         body = textwrap.dedent(f"""\
@@ -717,7 +864,7 @@ class AppLifecycleShellTests(unittest.TestCase):
             completed.stdout.splitlines(),
             ["STATUS:1 STATE:0 OBSERVES:2 RESTORES:1", "ASN:0x0-0x1\t42\tfirst"],
         )
-        self.assertEqual(completed.stderr, "app lifecycle operation failed\n")
+        self.assertEqual(completed.stderr, "app lifecycle operation failed: teardown:reappeared:mail:round=1\n")
 
     def test_restore_validates_observed_identity_without_refinding_replacement(self):
         body = textwrap.dedent(f"""\
@@ -810,7 +957,7 @@ class AppLifecycleShellTests(unittest.TestCase):
             ["STATUS:1 STATE:0", "TERM:mail", "TERM:notes"],
             completed.stderr,
         )
-        self.assertEqual(completed.stderr, "app lifecycle operation failed\n")
+        self.assertEqual(completed.stderr, "app lifecycle operation failed: teardown:restore-status=1:mail:round=0:\n")
 
     def test_setup_aggregate_timeout_spans_individually_fast_observations(self):
         body = textwrap.dedent(f"""\
@@ -841,7 +988,7 @@ class AppLifecycleShellTests(unittest.TestCase):
             "STATUS:124 READY:false CHILD: TIMER: STATE:1 CALLS:2\n",
             completed.stderr,
         )
-        self.assertEqual(completed.stderr, "app lifecycle operation failed\n")
+        self.assertEqual(completed.stderr, "app lifecycle operation failed: setup:observe:124:\n")
 
     def test_teardown_aggregate_timeout_spans_rescan_and_preserves_state(self):
         body = textwrap.dedent(f"""\
@@ -860,7 +1007,7 @@ class AppLifecycleShellTests(unittest.TestCase):
         """)
         completed = self.run_shell(body)
         self.assertEqual(completed.stdout, "STATUS:124 TIMER: STATE:0\n", completed.stderr)
-        self.assertEqual(completed.stderr, "app lifecycle operation failed\n")
+        self.assertEqual(completed.stderr, "app lifecycle operation failed: teardown:phase-timer:round=0:124\n")
 
     def test_phase_timer_is_cancelled_and_reaped_after_normal_success(self):
         body = textwrap.dedent(f"""\
@@ -973,7 +1120,7 @@ class AppLifecycleShellTests(unittest.TestCase):
                 "STATUS:124 READY:false TIMER: JOBS:0\n",
                 completed.stderr,
             )
-            self.assertEqual(completed.stderr, "app lifecycle operation failed\n")
+            self.assertEqual(completed.stderr, "app lifecycle operation failed: setup:phase-timer-after:124\n")
 
     def test_timer_natural_exit_after_final_check_fails_closed(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -991,7 +1138,7 @@ class AppLifecycleShellTests(unittest.TestCase):
             """)
             completed = self.run_shell(body)
             self.assertEqual(completed.stdout, "STATUS:124 READY:false TIMER:\n", completed.stderr)
-            self.assertEqual(completed.stderr, "app lifecycle operation failed\n")
+            self.assertEqual(completed.stderr, "app lifecycle operation failed: cleanup:interrupt:124\n")
 
     def test_timer_unexpected_exit_after_final_check_fails_closed(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1010,7 +1157,7 @@ class AppLifecycleShellTests(unittest.TestCase):
             """)
             completed = self.run_shell(body)
             self.assertEqual(completed.stdout, "STATUS:124 READY:false TIMER:\n", completed.stderr)
-            self.assertEqual(completed.stderr, "app lifecycle operation failed\n")
+            self.assertEqual(completed.stderr, "app lifecycle operation failed: cleanup:interrupt:124\n")
 
     def test_phase_timer_and_current_ls_child_are_cleaned_after_cancellation(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -1034,7 +1181,7 @@ class AppLifecycleShellTests(unittest.TestCase):
                 "STATUS:143 READY:false CHILD: TIMER: JOBS:0\n",
                 completed.stderr,
             )
-            self.assertEqual(completed.stderr, "app lifecycle operation failed\n")
+            self.assertEqual(completed.stderr, "app lifecycle operation failed: setup:observe:143:\n")
 
     def test_setup_and_teardown_restore_atypical_caller_umask_after_success(self):
         for wrapper in ("setup", "teardown"):
@@ -1124,7 +1271,7 @@ class AppLifecycleShellTests(unittest.TestCase):
         """)
         completed = self.run_shell(body)
         self.assertEqual(completed.stdout.splitlines(), ["STATUS:143 STATE:0", "mail"])
-        self.assertEqual(completed.stderr, "app lifecycle operation failed\n")
+        self.assertEqual(completed.stderr, "app lifecycle operation failed: teardown:interrupt:mail:143\n")
 
 
 if __name__ == "__main__":

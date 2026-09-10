@@ -22,7 +22,50 @@ APPLE_CLI_BATS_APP_OBSERVED_CONTACTS=""
 APPLE_CLI_BATS_APP_OBSERVED_CALENDAR=""
 APPLE_CLI_BATS_APP_OBSERVED_REMINDERS=""
 
-app_lifecycle_error() { printf '%s\n' "app lifecycle operation failed" >&2; }
+# The failure line names WHICH step refused — an app key, a state token, a status, or the Python
+# helper's fixed reason code — never a process name, timestamp, or file byte, so the diagnosis
+# stays as value-free as the generic line it extends.
+APPLE_CLI_BATS_APP_LAST_REASON=""
+app_lifecycle_error() {
+  if [ -n "${1:-}" ]; then printf '%s: %s\n' "app lifecycle operation failed" "$1" >&2
+  else printf '%s\n' "app lifecycle operation failed" >&2; fi
+}
+# Run the Python helper with its stderr kept in a private file. Only complete, fixed
+# diagnostics can reach the error line; interpreter errors and tracebacks remain private.
+app_lifecycle_python() {
+  local err="$1" status code diagnostic; shift
+  APPLE_CLI_BATS_APP_LAST_REASON="python:unexpected-error"
+  umask 077
+  # Capture paths belong to the private Bats temp directory. Replace reused regular
+  # files so stale permissions or hardlinks cannot expose or overwrite other contents.
+  [ ! -L "$err" ] && { [ ! -e "$err" ] || [ -f "$err" ]; } || return 1
+  if [ -e "$err" ]; then /bin/rm -- "$err" 2>/dev/null || return 1; fi
+  (
+    set -o noclobber
+    # Suppress preparation errors outside the pathname redirection, and give Python
+    # the opened descriptor so there is no second pathname open before it writes.
+    { /usr/bin/python3 "$HELPERS/app_lifecycle.py" "$@" 2>&3; } 3> "$err"
+  ) 2>/dev/null
+  status=$?
+  if [ "$status" -ne 0 ]; then
+    if [ "$status" -eq 1 ]; then
+      for code in "" find-multiple find-name find-asn find-bundle-exact-disagree \
+        info-line-shape info-field info-fields-missing info-pid info-partial-null \
+        info-name-mismatch info-bundle-mismatch info-checkin; do
+        diagnostic="app lifecycle operation failed${code:+: $code}"
+        if /usr/bin/cmp -s "$err" <(printf '%s\n' "$diagnostic"); then
+          APPLE_CLI_BATS_APP_LAST_REASON="python:$diagnostic"
+          break
+        fi
+      done
+    elif [ "$status" -eq 130 ] && /usr/bin/cmp -s "$err" <(printf '%s\n' 'app lifecycle interrupted'); then
+      APPLE_CLI_BATS_APP_LAST_REASON="python:app lifecycle interrupted"
+    fi
+  else
+    APPLE_CLI_BATS_APP_LAST_REASON=""
+  fi
+  return "$status"
+}
 app_lifecycle_lsappinfo_exec() { exec /usr/bin/lsappinfo "$@"; }
 app_lifecycle_signal_job() { local signal_name="$1" pid="$2"; kill "-$signal_name" -- "$pid"; }
 
@@ -257,9 +300,9 @@ app_lifecycle_target_find() {
   app_lifecycle_run_lsappinfo "${prefix}.exact" find "name=$APP_LIFECYCLE_NAME" "bundleid=$APP_LIFECYCLE_BUNDLE"
   status=$?; [ "$status" -eq 0 ] || return "$status"
   umask 077
-  if ! /usr/bin/python3 "$HELPERS/app_lifecycle.py" parse-find --app "$key" \
+  if ! app_lifecycle_python "${prefix}.err" parse-find --app "$key" \
       --bundle-output "${prefix}.bundle" \
-      --exact-output "${prefix}.exact" > "${prefix}.parsed" 2>/dev/null; then return 1; fi
+      --exact-output "${prefix}.exact" > "${prefix}.parsed"; then return 1; fi
   app_lifecycle_read_output "${prefix}.parsed"
 }
 
@@ -297,8 +340,8 @@ app_lifecycle_info() {
     -only bundleID -only kLSCheckInTimeKey -app "$asn"
   status=$?; [ "$status" -eq 0 ] || return "$status"
   umask 077
-  if ! /usr/bin/python3 "$HELPERS/app_lifecycle.py" parse-info --app "$key" \
-      --asn "$asn" --output "${prefix}.info" > "${prefix}.parsed" 2>/dev/null; then return 1; fi
+  if ! app_lifecycle_python "${prefix}.err" parse-info --app "$key" \
+      --asn "$asn" --output "${prefix}.info" > "${prefix}.parsed"; then return 1; fi
   app_lifecycle_read_output "${prefix}.parsed"
 }
 
@@ -323,6 +366,7 @@ app_lifecycle_validate_instance() {
     APPLE_CLI_BATS_APP_RESULT=MATCH; return 0
   fi
   APPLE_CLI_BATS_APP_RESULT=MISMATCH
+  APPLE_CLI_BATS_APP_LAST_REASON="validate:${key}:mismatch"
   return 1
 }
 
@@ -338,6 +382,7 @@ app_lifecycle_hard_terminate_instance() {
 
 app_lifecycle_restore_one() {
   local key="$1" identity="$2" prefix="$3" status asn pid token state ticks=0
+  APPLE_CLI_BATS_APP_LAST_REASON=""
   [ "$APPLE_CLI_BATS_APP_INTERRUPT_STATUS" -eq 0 ] || return "$APPLE_CLI_BATS_APP_INTERRUPT_STATUS"
   app_lifecycle_split_identity "$identity" || return 1
   asn="$APP_LIFECYCLE_ASN"
@@ -352,13 +397,15 @@ app_lifecycle_restore_one() {
     [ "$APPLE_CLI_BATS_APP_INTERRUPT_STATUS" -eq 0 ] || return "$APPLE_CLI_BATS_APP_INTERRUPT_STATUS"
     app_lifecycle_validate_instance "$key" "$asn" "$pid" "$token" "${prefix}.validate"
     status=$?; [ "$status" -eq 0 ] || return "$status"
-    state="$APPLE_CLI_BATS_APP_RESULT"; [ "$state" = STOPPED ] && return 0; [ "$state" = MATCH ] || return 1
+    state="$APPLE_CLI_BATS_APP_RESULT"; [ "$state" = STOPPED ] && return 0
+    if [ "$state" != MATCH ]; then APPLE_CLI_BATS_APP_LAST_REASON="restore:${key}:${state}"; return 1; fi
     /bin/sleep "$APPLE_CLI_BATS_APP_POLL_SECONDS"; ticks=$((ticks + 1))
   done
   [ "$APPLE_CLI_BATS_APP_INTERRUPT_STATUS" -eq 0 ] || return "$APPLE_CLI_BATS_APP_INTERRUPT_STATUS"
   app_lifecycle_validate_instance "$key" "$asn" "$pid" "$token" "${prefix}.validate"
   status=$?; [ "$status" -eq 0 ] || return "$status"
-  state="$APPLE_CLI_BATS_APP_RESULT"; [ "$state" = STOPPED ] && return 0; [ "$state" = MATCH ] || return 1
+  state="$APPLE_CLI_BATS_APP_RESULT"; [ "$state" = STOPPED ] && return 0
+  if [ "$state" != MATCH ]; then APPLE_CLI_BATS_APP_LAST_REASON="restore:${key}:${state}"; return 1; fi
   app_lifecycle_check_phase_timer || return "$APPLE_CLI_BATS_APP_INTERRUPT_STATUS"
   [ "$APPLE_CLI_BATS_APP_INTERRUPT_STATUS" -eq 0 ] || return "$APPLE_CLI_BATS_APP_INTERRUPT_STATUS"
   app_lifecycle_hard_terminate_instance "$asn" "$prefix" || return $?
@@ -368,74 +415,76 @@ app_lifecycle_restore_one() {
     [ "$APPLE_CLI_BATS_APP_INTERRUPT_STATUS" -eq 0 ] || return "$APPLE_CLI_BATS_APP_INTERRUPT_STATUS"
     app_lifecycle_validate_instance "$key" "$asn" "$pid" "$token" "${prefix}.validate"
     status=$?; [ "$status" -eq 0 ] || return "$status"
-    state="$APPLE_CLI_BATS_APP_RESULT"; [ "$state" = STOPPED ] && return 0; [ "$state" = MATCH ] || return 1
+    state="$APPLE_CLI_BATS_APP_RESULT"; [ "$state" = STOPPED ] && return 0
+    if [ "$state" != MATCH ]; then APPLE_CLI_BATS_APP_LAST_REASON="restore:${key}:${state}"; return 1; fi
     /bin/sleep "$APPLE_CLI_BATS_APP_POLL_SECONDS"; ticks=$((ticks + 1))
   done
   app_lifecycle_validate_instance "$key" "$asn" "$pid" "$token" "${prefix}.validate"
   status=$?; [ "$status" -eq 0 ] || return "$status"
-  [ "$APPLE_CLI_BATS_APP_RESULT" = STOPPED ]
+  if [ "$APPLE_CLI_BATS_APP_RESULT" != STOPPED ]; then APPLE_CLI_BATS_APP_LAST_REASON="restore:${key}:still-running-after-hard-kill"; return 1; fi
 }
 
 app_lifecycle_setup_file_impl() {
   local state="$BATS_FILE_TMPDIR/apple-cli-app-state.json" running preserve=false status
   APPLE_CLI_BATS_APP_SNAPSHOT_READY=false; APPLE_CLI_BATS_APP_PRESERVE=false
   case "${APPLE_CLI_BATS_PRESERVE_APPS+x}:${APPLE_CLI_BATS_PRESERVE_APPS:-}" in
-    :) ;; x:1|x:true|x:yes) preserve=true ;; *) app_lifecycle_error; return 1 ;;
+    :) ;; x:1|x:true|x:yes) preserve=true ;; *) app_lifecycle_error "setup:opt-out-invalid"; return 1 ;;
   esac
   if [ "$preserve" = true ]; then
     APPLE_CLI_BATS_APP_PRESERVE=true; running=000000
-    if ! /usr/bin/python3 "$HELPERS/app_lifecycle.py" write-snapshot --state "$state" --running "$running" --disabled 2>/dev/null; then app_lifecycle_error; return 1; fi
+    if ! app_lifecycle_python "$BATS_FILE_TMPDIR/apple-cli-app-python.err" write-snapshot --state "$state" --running "$running" --disabled; then app_lifecycle_error "setup:snapshot:$APPLE_CLI_BATS_APP_LAST_REASON"; return 1; fi
   else
     app_lifecycle_observe "$BATS_FILE_TMPDIR/apple-cli-app-snapshot"
-    status=$?; if [ "$status" -ne 0 ]; then app_lifecycle_error; return "$status"; fi
-    if ! app_lifecycle_check_phase_timer; then app_lifecycle_error; return "$APPLE_CLI_BATS_APP_INTERRUPT_STATUS"; fi
+    status=$?; if [ "$status" -ne 0 ]; then app_lifecycle_error "setup:observe:$status:$APPLE_CLI_BATS_APP_LAST_REASON"; return "$status"; fi
+    if ! app_lifecycle_check_phase_timer; then app_lifecycle_error "setup:phase-timer:$APPLE_CLI_BATS_APP_INTERRUPT_STATUS"; return "$APPLE_CLI_BATS_APP_INTERRUPT_STATUS"; fi
     running="$APPLE_CLI_BATS_APP_RESULT"
-    if ! /usr/bin/python3 "$HELPERS/app_lifecycle.py" write-snapshot --state "$state" --running "$running" 2>/dev/null; then app_lifecycle_error; return 1; fi
+    if ! app_lifecycle_python "$BATS_FILE_TMPDIR/apple-cli-app-python.err" write-snapshot --state "$state" --running "$running"; then app_lifecycle_error "setup:snapshot:$APPLE_CLI_BATS_APP_LAST_REASON"; return 1; fi
   fi
   APPLE_CLI_BATS_APP_SNAPSHOT_READY=true
 }
 
 app_lifecycle_teardown_file_impl() {
   local state="$BATS_FILE_TMPDIR/apple-cli-app-state.json" plan_file="$BATS_FILE_TMPDIR/apple-cli-app-plan.txt"
-  local current key identity status round=0 quiet_ticks=0 settle_ticks=0 processed="|" planned failed
+  local current key identity status round=0 quiet_ticks=0 settle_ticks=0 processed="|" planned failed failure_reason
   [ "$APPLE_CLI_BATS_APP_SNAPSHOT_READY" = true ] || return 0
   if [ "$APPLE_CLI_BATS_APP_PRESERVE" = true ]; then
-    if ! /usr/bin/python3 "$HELPERS/app_lifecycle.py" finish-restore --state "$state" 2>/dev/null; then app_lifecycle_error; return 1; fi
+    if ! app_lifecycle_python "$BATS_FILE_TMPDIR/apple-cli-app-python.err" finish-restore --state "$state"; then app_lifecycle_error "teardown:finish:$APPLE_CLI_BATS_APP_LAST_REASON"; return 1; fi
     return 0
   fi
   umask 077
   while [ "$settle_ticks" -le "$APPLE_CLI_BATS_APP_SETTLE_TICKS" ]; do
-    if ! app_lifecycle_check_phase_timer; then app_lifecycle_error; return "$APPLE_CLI_BATS_APP_INTERRUPT_STATUS"; fi
+    if ! app_lifecycle_check_phase_timer; then app_lifecycle_error "teardown:phase-timer:round=$round:$APPLE_CLI_BATS_APP_INTERRUPT_STATUS"; return "$APPLE_CLI_BATS_APP_INTERRUPT_STATUS"; fi
     app_lifecycle_observe "$BATS_FILE_TMPDIR/apple-cli-app-current.$round" true
-    status=$?; if [ "$status" -ne 0 ]; then app_lifecycle_error; return "$status"; fi
-    if ! app_lifecycle_check_phase_timer; then app_lifecycle_error; return "$APPLE_CLI_BATS_APP_INTERRUPT_STATUS"; fi
+    status=$?; if [ "$status" -ne 0 ]; then app_lifecycle_error "teardown:observe:round=$round:$status:$APPLE_CLI_BATS_APP_LAST_REASON"; return "$status"; fi
+    if ! app_lifecycle_check_phase_timer; then app_lifecycle_error "teardown:phase-timer:round=$round:$APPLE_CLI_BATS_APP_INTERRUPT_STATUS"; return "$APPLE_CLI_BATS_APP_INTERRUPT_STATUS"; fi
     current="$APPLE_CLI_BATS_APP_RESULT"
-    if ! /usr/bin/python3 "$HELPERS/app_lifecycle.py" restore-plan --state "$state" --current "$current" > "$plan_file" 2>/dev/null; then app_lifecycle_error; return 1; fi
-    planned=false; failed=false
+    if ! app_lifecycle_python "$BATS_FILE_TMPDIR/apple-cli-app-python.err" restore-plan --state "$state" --current "$current" > "$plan_file"; then app_lifecycle_error "teardown:plan:round=$round:$APPLE_CLI_BATS_APP_LAST_REASON"; return 1; fi
+    planned=false; failed=false; failure_reason=""
     while IFS= read -r key; do
       [ -n "$key" ] || continue
       planned=true
-      case "$processed" in *"|$key|"*) failed=true; continue ;; esac
-      if ! app_lifecycle_observed_identity "$key"; then failed=true; continue; fi
+      APPLE_CLI_BATS_APP_LAST_REASON=""
+      case "$processed" in *"|$key|"*) failed=true; failure_reason="reappeared:${key}:round=$round"; continue ;; esac
+      if ! app_lifecycle_observed_identity "$key"; then failed=true; failure_reason="identity-missing:${key}"; continue; fi
       identity="$APPLE_CLI_BATS_APP_RESULT"
       processed="${processed}${key}|"
       app_lifecycle_restore_one "$key" "$identity" "$BATS_FILE_TMPDIR/apple-cli-app-restore.$round.$key"; status=$?
-      if [ "$APPLE_CLI_BATS_APP_INTERRUPT_STATUS" -ne 0 ]; then app_lifecycle_error; return "$APPLE_CLI_BATS_APP_INTERRUPT_STATUS"; fi
-      [ "$status" -eq 0 ] || failed=true
+      if [ "$APPLE_CLI_BATS_APP_INTERRUPT_STATUS" -ne 0 ]; then app_lifecycle_error "teardown:interrupt:${key}:$APPLE_CLI_BATS_APP_INTERRUPT_STATUS"; return "$APPLE_CLI_BATS_APP_INTERRUPT_STATUS"; fi
+      if [ "$status" -ne 0 ]; then failed=true; failure_reason="restore-status=${status}:${key}:round=$round:$APPLE_CLI_BATS_APP_LAST_REASON"; fi
     done < "$plan_file"
-    if [ "$failed" = true ]; then app_lifecycle_error; return 1; fi
+    if [ "$failed" = true ]; then app_lifecycle_error "teardown:$failure_reason"; return 1; fi
     if [ "$planned" = true ]; then quiet_ticks=0
     elif [ "$quiet_ticks" -ge "$APPLE_CLI_BATS_APP_QUIET_TICKS" ]; then
-      if ! /usr/bin/python3 "$HELPERS/app_lifecycle.py" finish-restore --state "$state" 2>/dev/null; then app_lifecycle_error; return 1; fi
+      if ! app_lifecycle_python "$BATS_FILE_TMPDIR/apple-cli-app-python.err" finish-restore --state "$state"; then app_lifecycle_error "teardown:finish:$APPLE_CLI_BATS_APP_LAST_REASON"; return 1; fi
       return 0
     else quiet_ticks=$((quiet_ticks + 1))
     fi
     [ "$settle_ticks" -lt "$APPLE_CLI_BATS_APP_SETTLE_TICKS" ] || break
     /bin/sleep "$APPLE_CLI_BATS_APP_POLL_SECONDS"
-    if ! app_lifecycle_check_phase_timer; then app_lifecycle_error; return "$APPLE_CLI_BATS_APP_INTERRUPT_STATUS"; fi
+    if ! app_lifecycle_check_phase_timer; then app_lifecycle_error "teardown:phase-timer:round=$round:$APPLE_CLI_BATS_APP_INTERRUPT_STATUS"; return "$APPLE_CLI_BATS_APP_INTERRUPT_STATUS"; fi
     settle_ticks=$((settle_ticks + 1)); round=$((round + 1))
   done
-  app_lifecycle_error
+  app_lifecycle_error "teardown:quiescence-timeout:rounds=$round"
   return 1
 }
 
@@ -446,13 +495,13 @@ setup_file() {
   app_lifecycle_install_latch_traps
   if app_lifecycle_start_phase_timer "$APPLE_CLI_BATS_APP_SETUP_TIMEOUT_SECONDS"; then
     app_lifecycle_setup_file_impl; status=$?
-    if [ "$status" -eq 0 ] && ! app_lifecycle_check_phase_timer; then status="$APPLE_CLI_BATS_APP_INTERRUPT_STATUS"; app_lifecycle_error; fi
+    if [ "$status" -eq 0 ] && ! app_lifecycle_check_phase_timer; then status="$APPLE_CLI_BATS_APP_INTERRUPT_STATUS"; app_lifecycle_error "setup:phase-timer-after:$status"; fi
   else status=1
   fi
   cleanup_interrupt="$APPLE_CLI_BATS_APP_INTERRUPT_STATUS"
   app_lifecycle_cleanup_child
   app_lifecycle_cleanup_phase_timer
-  if [ "$cleanup_interrupt" -eq 0 ] && [ "$APPLE_CLI_BATS_APP_INTERRUPT_STATUS" -ne 0 ]; then app_lifecycle_error; fi
+  if [ "$cleanup_interrupt" -eq 0 ] && [ "$APPLE_CLI_BATS_APP_INTERRUPT_STATUS" -ne 0 ]; then app_lifecycle_error "cleanup:interrupt:$APPLE_CLI_BATS_APP_INTERRUPT_STATUS"; fi
   if [ "$APPLE_CLI_BATS_APP_INTERRUPT_STATUS" -ne 0 ]; then status="$APPLE_CLI_BATS_APP_INTERRUPT_STATUS"; fi
   [ "$status" -eq 0 ] || APPLE_CLI_BATS_APP_SNAPSHOT_READY=false
   app_lifecycle_restore_latch_traps
@@ -466,13 +515,13 @@ teardown_file() {
   app_lifecycle_install_latch_traps
   if app_lifecycle_start_phase_timer "$APPLE_CLI_BATS_APP_TEARDOWN_TIMEOUT_SECONDS"; then
     app_lifecycle_teardown_file_impl; status=$?
-    if [ "$status" -eq 0 ] && ! app_lifecycle_check_phase_timer; then status="$APPLE_CLI_BATS_APP_INTERRUPT_STATUS"; app_lifecycle_error; fi
+    if [ "$status" -eq 0 ] && ! app_lifecycle_check_phase_timer; then status="$APPLE_CLI_BATS_APP_INTERRUPT_STATUS"; app_lifecycle_error "teardown:phase-timer-after:$status"; fi
   else status=1
   fi
   cleanup_interrupt="$APPLE_CLI_BATS_APP_INTERRUPT_STATUS"
   app_lifecycle_cleanup_child
   app_lifecycle_cleanup_phase_timer
-  if [ "$cleanup_interrupt" -eq 0 ] && [ "$APPLE_CLI_BATS_APP_INTERRUPT_STATUS" -ne 0 ]; then app_lifecycle_error; fi
+  if [ "$cleanup_interrupt" -eq 0 ] && [ "$APPLE_CLI_BATS_APP_INTERRUPT_STATUS" -ne 0 ]; then app_lifecycle_error "cleanup:interrupt:$APPLE_CLI_BATS_APP_INTERRUPT_STATUS"; fi
   if [ "$APPLE_CLI_BATS_APP_INTERRUPT_STATUS" -ne 0 ]; then status="$APPLE_CLI_BATS_APP_INTERRUPT_STATUS"; fi
   app_lifecycle_restore_latch_traps
   umask "$saved_umask"
