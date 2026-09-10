@@ -347,6 +347,21 @@ struct NotesArgvInvarianceTests {
             return runner
         })
 
+        rows.append(ArgvCase(command: "notes recent", markers: [
+            "PWNDRECENTFOLDER", "PWNDRECENTACCOUNT",
+        ]) {
+            let runner = FakeNotesRunner(results: [""]) // no notes in scope
+            let command = try RecentCmd.parse([
+                "--folder", hostilePayload("PWNDRECENTFOLDER"),
+                "--account", hostilePayload("PWNDRECENTACCOUNT"),
+            ])
+            _ = try captureNotesEnvelope {
+                try command.run(scriptFactory: { quietScript(runner) },
+                                storeFactory: { StubNotesStore.quiet() })
+            }
+            return runner
+        })
+
         rows.append(ArgvCase(command: "notes folders", markers: ["PWNDFOLDERSACCOUNT"]) {
             let runner = FakeNotesRunner(results: [""]) // no folders
             let command = try FoldersCmd.parse(["--account", hostilePayload("PWNDFOLDERSACCOUNT")])
@@ -457,7 +472,7 @@ struct NotesArgvInvarianceTests {
         // be deleted while still passing — which is the exact failure this line exists to prevent.
         // EXACT, therefore: adding or removing a command from the matrix must be a deliberate edit
         // here, made alongside the exclusion list in this file's header.
-        #expect(rows.count == 24, "the matrix must not change size without a deliberate edit")
+        #expect(rows.count == 25, "the matrix must not change size without a deliberate edit")
         for row in rows {
             let runner = try row.exercise()
             #expect(!runner.neverCalled, "\(row.command): the case must actually reach a script")

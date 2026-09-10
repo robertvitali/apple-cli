@@ -40,6 +40,7 @@ Safety: reads the existing body, concatenates, then writes the WHOLE body back; 
 - [`health`](./health.md) — Quick pass/fail: Notes.app reachable + Full Disk Access for checklist features.
 - [`list`](./list.md) — List note titles in an account/folder (supports --modified-since, --limit).
 - [`move`](./move.md) — Move ONE note to a folder, by --id or --title (EXECUTES; --dry-run previews).
+- [`recent`](./recent.md) — Notes by modification date, newest first (default 10). CLI-only superset.
 - [`save-attachment`](./save-attachment.md) — Write one attachment to disk, path must be under home/temp/Volumes (EXECUTES; --dry-run previews).
 - [`search`](./search.md) — Search notes by title (or body with --content); returns id/title/folder.
 - [`selected`](./selected.md) — Notes currently selected in the Notes.app UI.

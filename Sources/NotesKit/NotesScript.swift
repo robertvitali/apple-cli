@@ -446,6 +446,12 @@ struct NotesScript {
     /// fixed `item N of argv` where-clauses). User text must NEVER be passed in any of them;
     /// it reaches the script only as osascript argv (see the type-level SECURITY note above).
     ///
+    /// `whereClause: nil` enumerates `notesSource` WHOLE — the shape `recentNotes` needs, since
+    /// "most recently modified" is a ranking over every note in scope, not a filter. It is a
+    /// parameter rather than a second body because the per-hit reads are the load-bearing part:
+    /// the two-step container binding below and the numeric date reads are exactly what a
+    /// hand-rolled `every note` traversal gets wrong (see `recentNotes`).
+    ///
     /// Container binding is TWO-STEP, and load-bearing: the chained
     /// `set noteFolder to name of container of n` ALWAYS errors at runtime ("Can't make name of
     /// «class cntr» of «class note» ... into type Unicode text"), so the on-error fallback fired
@@ -458,9 +464,10 @@ struct NotesScript {
     /// independent try-blocks, `""` on a failed date read): the oracle returns the note's REAL
     /// dates on every search hit, so a 3-field row would drop two fields the MCP emits.
     static func searchBody(dateSetup: String, notesSource: String,
-                           whereClause: String, limitCheck: String) -> String {
-        """
-        \(dateSetup)set matchingNotes to \(notesSource) where \(whereClause)
+                           whereClause: String?, limitCheck: String) -> String {
+        let matchSource = whereClause.map { "\(notesSource) where \($0)" } ?? notesSource
+        return """
+        \(dateSetup)set matchingNotes to \(matchSource)
         set resultList to {}
         set seenIds to {}
         repeat with n in matchingNotes
@@ -519,6 +526,71 @@ struct NotesScript {
                                       account: account, created: created, modified: modified))
         }
         return result
+    }
+
+    /// One `recent` hit, plus whether Notes.app actually REPORTED its modification date.
+    ///
+    /// `parseDate` maps an unreadable date (the script's `on error set modifiedParts to ""`
+    /// branch) to `Date()` — the oracle's own now-fallback, and harmless on `search`, where
+    /// nothing orders by it. On `recent` it is the ranking key, and "now" is the newest value
+    /// there is: an unreadable note would take the top of the list and could fill the whole
+    /// default window, hiding the genuinely newest notes. So the flag travels with the hit and
+    /// `recent` ranks the unreadable ones LAST.
+    struct RecentHit {
+        let note: NoteSummary
+        let modifiedReadable: Bool
+    }
+
+    /// The ids whose modification-date field came back EMPTY, i.e. the rows whose `modified`
+    /// value in `parseSummaries` is the now-fallback rather than a real date.
+    static func unreadableModifiedIds(_ out: String) -> Set<String> {
+        var ids: Set<String> = []
+        for row in splitRows(out) {
+            let f = splitFields(row)
+            guard f.count > 1 else { continue }
+            let modified = f.count > 4 ? f[4].trimmingCharacters(in: .whitespaces) : ""
+            if modified.isEmpty { ids.insert(f[1].trimmingCharacters(in: .whitespaces)) }
+        }
+        return ids
+    }
+
+    /// Every note in scope, carrying the SAME per-hit fields a search hit does — for `recent`,
+    /// which ranks by modification date and therefore has to see all of them before it can cut.
+    ///
+    /// No `limitCheck` is emitted on purpose: an `exit repeat` here would cut in Notes.app's own
+    /// enumeration order, which is NOT modification order, so the newest note could be the one
+    /// dropped. `recent` sorts and truncates in Swift instead.
+    ///
+    /// This reuses `searchBody` rather than writing a fresh `every note` traversal, and that is
+    /// the whole point: reading a note's folder as `name of container of nt` off a bare
+    /// traversal raises `-1728`, and the two-step container binding (plus the `"Notes"`
+    /// on-error fallback) inside `searchBody` is the mechanism that already survives it. The
+    /// dates come back in the same numeric `y-mo-d-h-mi-s` parts `parseSummaries` expects, so
+    /// no locale-dependent date string is ever parsed.
+    func recentNotes(account: String?, folder: String?) throws -> [RecentHit] {
+        var args: [String] = []
+        var notesSource = "notes"
+        if let folder, !folder.isEmpty {
+            // `splitFolderPath` drops empty components, so a path of nothing but separators
+            // ("///") yields NO components and `folderRefExpr` would return an empty expression —
+            // emitting the literal `notes of `, which fails to compile and surfaces as
+            // "Internal error. Please report this issue." for what is plain bad input.
+            try requireNonEmptyFolderName(folder)
+            let comps = Self.splitFolderPath(folder)
+            let (expr, fargs) = Self.folderRefExpr(comps, startIndex: args.count + 1)
+            notesSource = "notes of \(expr)"
+            args.append(contentsOf: fargs)
+        }
+        let body = Self.searchBody(dateSetup: "", notesSource: notesSource,
+                                   whereClause: nil, limitCheck: "")
+        // Index computed on its own line — same inout-evaluation-order reason as `searchNotes`.
+        let acctIndex = accountArgIndex(&args, account)
+        let resolvedAccount = args[acctIndex - 1] // the account we just appended (1-based index)
+        let out = try run(body, args: args, tellAccount: acctIndex)
+        let unreadable = Self.unreadableModifiedIds(out)
+        return Self.parseSummaries(out, account: resolvedAccount).map {
+            RecentHit(note: $0, modifiedReadable: !unreadable.contains($0.id))
+        }
     }
 
     func listNotes(account: String?, folder: String?, modifiedSince: Date?, limit: Int?) throws -> [String] {

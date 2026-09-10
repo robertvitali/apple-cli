@@ -31,6 +31,27 @@ JSON output are stable per the versioning policy — breaking changes bump
   retained nonthrowing Mail library APIs keep their best-effort behavior. Existing
   output fields and `schema_version` are unchanged.
 
+- **`apple notes recent` answers "what did I just work on".** A new read command returns the
+  notes in an account or folder ordered by modification date, newest first —
+  `apple notes recent [--limit <N>] [--account <a>] [--folder <f>]`, default 10. Until now the
+  only ways to enumerate notes were `notes list`, which returns titles in Notes.app's own
+  enumeration order, and `notes search`, which needs a query, so recency had no answer. Each hit
+  is the same object `notes search` returns — `id`, `title`, `content`, `tags`, `folder`,
+  `account`, `created`, `modified` — so a caller already reading search results reads these
+  unchanged; the payload carries `notes`, `count`, `applied_limit`, and the same `sync_warning`
+  the other enumerating reads emit when an iCloud sync is in progress. `--folder` takes a nested
+  path (`Parent/Child`), and `--text` prints one line per note as `modified  title  (folder)`.
+  A `--limit` of zero or less, or a `--folder` naming no path component, is a `validation_error`,
+  exit 64, raised before Notes.app is contacted. The ranking is computed after the whole scope has
+  been enumerated rather than by stopping early, so the newest note is never the one dropped, and
+  a `count` below `applied_limit` means the scope was exhausted; notes sharing a modification
+  date are ordered by id so repeated runs agree, and a note whose modification date Notes.app
+  cannot report is ranked last rather than treated as just-modified. The cost tracks the size of
+  the scope rather than `--limit` — measured 20.6s over a roughly 210-note scope, against the
+  45-second timeout every Notes command shares — so on a large library `--folder` or `--account`
+  is what keeps it inside that budget. `schema_version` is unchanged at 1: this adds a command and
+  removes, renames, and retypes nothing.
+  Manual: [`apple notes recent`](https://github.com/robertvitali/apple-cli/blob/main/docs/manual/notes/recent.md).
 - **`messages recent` and `messages search` now report attachment metadata.** Each
   message gains an `attachments` array — per file: `rowid`, `guid`, `filename` (verbatim, as
   chat.db stores it, often `~`-relative), `path` (an absolute standardized path when one can be

@@ -26,5 +26,23 @@
       }
     ],
     "notes": "`messages search` first filters candidate rows by message text or attributed body, so an attachment-only row with no searchable body can appear in `messages recent` without appearing in search results. When a searched row does have joined attachments, the JSON includes the same metadata fields and conservative path-probe semantics as `messages recent`."
+  },
+  "apple notes recent": {
+    "description": "Returns the notes in scope ordered by modification date, newest first, cut to `--limit` (default 10). Each hit is the same `NoteSummary` shape `apple notes search` emits — `id`, `title`, `content` (always `\"\"`), `tags` (always `[]`), `folder`, `account`, `created`, `modified` — so anything that already consumes a search hit consumes a recent hit unchanged. The envelope carries `notes`, `count`, `applied_limit`, and `sync_warning` when an iCloud sync is in progress. `--account` and `--folder` scope the enumeration the way `apple notes list` does; `--folder` accepts a nested path (`Parent/Child`, with `\\/` escaping a literal slash in a folder name).",
+    "examples": [
+      {
+        "title": "The ten most recently modified notes",
+        "command": "apple notes recent"
+      },
+      {
+        "title": "The last three changes inside one nested folder",
+        "command": "apple notes recent --limit 3 --folder 'Projects/Drafts'"
+      },
+      {
+        "title": "Scope to one account and read it as text",
+        "command": "apple notes recent --account 'iCloud' --text"
+      }
+    ],
+    "notes": "Ranking is done after every note in scope has been enumerated, so `--limit` is a cut of a sorted list rather than a point where the search stopped — the newest note is never the one dropped, and `count` below `applied_limit` means the scope was exhausted. That also makes the command's cost proportional to the size of the scope rather than to `--limit`: measured 20.6s over a ~210-note scope, against the 45-second AppleScript timeout every Notes command shares, so on a large library `--folder` or `--account` is what keeps it inside that budget. Notes with the same modification date — second granularity makes ties ordinary — are ordered by `id`, so repeated runs return the same list; a note whose modification date Notes.app cannot report is ranked last rather than treated as just-modified. `--limit` must be greater than 0, and `--folder` must name at least one path component; either failure is a `validation_error`, exit 64, raised before Notes.app is contacted. `--text` renders one line per note as `modified  title  (folder)` with an ISO-8601 timestamp; the folder is omitted on a note whose container Notes.app cannot report."
   }
 }

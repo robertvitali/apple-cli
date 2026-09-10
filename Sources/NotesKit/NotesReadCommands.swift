@@ -487,6 +487,78 @@ struct SearchCmd: ParsableCommand {
     }
 }
 
+// MARK: recent
+
+/// `recent` — the notes touched most recently, newest first. CLI-only superset: the oracle has
+/// no recency operation at all (`list-notes` returns titles in Notes.app's own enumeration order
+/// and `search-notes` needs a query), so "what did I just work on" had no answer here.
+///
+/// The hit shape is `search`'s NoteSummary verbatim — same eight keys, same `content:""`/`tags:[]`
+/// placeholders — so a caller can hand a `recent` hit to anything that already consumes a search
+/// hit. The envelope adds `applied_limit` (always present: this surface always cuts) and the
+/// `sync_warning` the other enumerating reads carry; `limit_reached`/`limit_was_default` stay
+/// absent, because the cut here is a ranking of a fully-enumerated scope rather than the oracle's
+/// "we stopped looking" disclosure.
+struct RecentCmd: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "recent",
+        abstract: "Notes by modification date, newest first (default 10). CLI-only superset.")
+    @OptionGroup var global: GlobalOptions
+    @Option(name: .long, help: "Account to enumerate.") var account: String?
+    @Option(name: .long, help: "Limit to a folder (nested paths ok).") var folder: String?
+    @Option(name: .long, help: "Max notes to return (default 10).") var limit: Int?
+
+    func run() throws {
+        try run(scriptFactory: { NotesScript(store: LiveNotesStore()) }, storeFactory: { LiveNotesStore() })
+    }
+
+    /// Dependency-injection seam. `run()` above binds the live boundaries and is the ONLY
+    /// binding production uses — no flag or environment variable can select another. See
+    /// `NotesStoreReading` for why the seam exists.
+    func run(scriptFactory: () -> NotesScript,
+             storeFactory: () -> any NotesStoreReading) throws {
+        try runGuarded(tool: notesTool) {
+            let store = storeFactory()
+            // Same exclusiveMinimum-0 rule search and list enforce, so `--limit 0` is a
+            // validation error rather than a silently-empty (or silently-1) result.
+            try validateSearchLimit(limit)
+            let effective = limit ?? NotesLimits.defaultRecentLimit
+            // Sort in Swift, not AppleScript: `notes whose …` cannot order, and cutting inside
+            // the enumeration loop would drop by traversal order, not by recency.
+            let notes = Array(try scriptFactory().recentNotes(account: account, folder: folder)
+                .sorted(by: RecentCmd.newestFirst)
+                .prefix(effective)
+                .map(\.note))
+            // ISO-8601, like the JSON encoder's dates: a locale-formatted stamp would render
+            // differently per machine for the same note.
+            let stamp = ISO8601DateFormatter()
+            try emitNotes(NoteList(notes: notes, count: notes.count,
+                                   sync_warning: currentSyncWarning(store), applied_limit: effective),
+                json: global.json,
+                human: notes.isEmpty ? "No notes found."
+                    : notes.map { n in
+                        // The folder is omitted, not defaulted, when Notes.app could not report
+                        // the note's container — `search` leaves it absent for the same reason.
+                        let container = n.folder.map { "  (\($0))" } ?? ""
+                        return "\(stamp.string(from: n.modified))  \(n.title)\(container)"
+                    }.joined(separator: "\n"))
+        }
+    }
+
+    /// The ranking, as a TOTAL order — `Sequence.sorted` is not stable, and Notes dates arrive at
+    /// one-second granularity, so ties are ordinary (a bulk import, a sync landing, a scripted
+    /// create loop). Without a tie-break, which of two equally-modified notes survives `--limit`
+    /// would be arbitrary and could differ between runs and toolchains.
+    ///
+    /// Notes whose modification date Notes.app could not report rank LAST regardless of the date
+    /// carried: that date is `parseDate`'s now-fallback, and ranking a hole as "just modified"
+    /// would put it above every real note. See `NotesScript.RecentHit`.
+    static func newestFirst(_ a: NotesScript.RecentHit, _ b: NotesScript.RecentHit) -> Bool {
+        if a.modifiedReadable != b.modifiedReadable { return a.modifiedReadable }
+        if a.note.modified != b.note.modified { return a.note.modified > b.note.modified }
+        return a.note.id < b.note.id
+    }
+}
+
 // MARK: selected
 
 struct SelectedCmd: ParsableCommand {

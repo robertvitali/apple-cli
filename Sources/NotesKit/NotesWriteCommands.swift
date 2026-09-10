@@ -29,6 +29,9 @@ enum NotesLimits {
     /// Oracle `DEFAULT_SEARCH_LIMIT = 50`. SEARCH ONLY — verified `resolveSearchLimit` is not
     /// called from the oracle's list-notes handler, so the CLI's unbounded `list` is correct.
     static let defaultSearchLimit = 50
+    /// `recent`'s default cut. CLI-only surface, so there is no oracle constant to mirror: 10 is
+    /// the "what did I touch last" answer a caller reads without paging, and `--limit` raises it.
+    static let defaultRecentLimit = 10
     /// Oracle `MAX.QUERY: 2e3` on `search-notes`. The `.min(1)` half of that same zod line was
     /// ported and the `.max()` half was not — exactly the case this enum's header exists for.
     static let query = 2000

@@ -241,6 +241,37 @@ The MCP emits camelCase keys; apple-cli emits snake_case per `docs/DESIGN.md` ("
 - Optional fields are omitted (not `null`) when absent — matching the MCP's "field absent when unavailable" for `get-metadata` (schema-drift columns), attachment `url`, etc.
 
 ### Superset improvements (capabilities BEYOND the MCP)
+- **`notes recent`** — the notes touched most recently, newest first (`--limit`, default 10;
+  `--account` / `--folder` scope it the way `list` does). No oracle counterpart exists: `list-notes`
+  returns titles in Notes.app's own enumeration order and `search-notes` requires a query, so the
+  MCP has no way to answer "what did I just work on". Hits are the SAME `NoteSummary` shape
+  `search-notes` emits — eight keys including the oracle's hardcoded `content:""` / `tags:[]`
+  placeholders — so a consumer of a search hit reads a recent hit unchanged; the envelope adds
+  `count`, `applied_limit`, and the `sync_warning` the other enumerating reads carry.
+  `limit_reached` / `limit_was_default` are deliberately ABSENT — and the reason is NOT that the
+  fact is unknowable. `recent` enumerates the whole scope, so it knows exactly whether it cut;
+  the fields are omitted to keep the hit-and-envelope shape a caller already handles, and
+  `count < applied_limit` proves the scope was exhausted (only `count == applied_limit` leaves
+  the question open). **Cost, measured 2026-09-09 on the reference library: 20.6s over a
+  ~210-note scope**, against `NotesScript.timeoutSeconds = 45` — five property reads per note,
+  and `--limit` bounds none of them by design (see below). So a scope roughly twice that size
+  reaches the cap, and because the read-retry wrapper treats a timeout as transient
+  (`maxReadAttempts = 2`), the caller waits ~2×45s plus backoff before an `upstream`/69. Scoping
+  with `--folder` / `--account` is the caller's control; a cheaper two-pass script (id +
+  modification date first, full reads for the surviving N) is the obvious next move if that
+  proves insufficient and has NOT been done. Two more mechanism notes, both load-bearing: the AppleScript
+  reuses `searchBody` with no `where` clause — reading a hit's folder as `name of container of nt`
+  off a bare `every note` traversal raises `-1728`, and that body's two-step container binding is
+  the mechanism that survives it — and the ranking happens in **Swift**, because an `exit repeat`
+  cut inside the enumeration would drop by traversal order rather than by recency. Dates come back
+  in the same numeric `y-mo-d-h-mi-s` parts the search loop emits, so no locale-dependent date
+  string is ever parsed. The ranking is a TOTAL order — `modified` descending, then `id`
+  ascending, because `sorted` is not stable and Notes dates are second-granular, so ties are
+  ordinary — and a note whose modification date Notes.app could not report ranks LAST rather
+  than where `parseDate`'s now-fallback would put it (first, and potentially filling the whole
+  default window). `--limit` is `exclusiveMinimum: 0`, matching search and list; a `--folder`
+  path with no components after `splitFolderPath` (`"///"`) is refused as `validation_error`
+  rather than emitting the un-compilable `notes of ` that `search`/`list` still emit.
 - **`get-checklist` / `get-metadata` are SQLite-only** — they do NOT require the MCP's AppleScript existence-guard, so they resolve notes AppleScript can't (trashed, or when Notes.app automation is slow/unavailable). Verified live: the MCP oracle failed `get-checklist-state` on a real note whose checklist apple-cli read correctly.
 - **`sync_warning`** — a structured field on `search`/`list`/`folders` (the MCP's `withSyncAwareness` warning was text-only).
 - **Write model (v2 — behaves like the MCP; see `docs/write-model-v2.md`)**: every write
