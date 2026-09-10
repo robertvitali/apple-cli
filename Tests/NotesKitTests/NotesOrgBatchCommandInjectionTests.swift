@@ -31,11 +31,13 @@ struct NotesOrgCommandTests {
     /// (`set seenIds to {}`) is still answered for the callers that use it; the gate no longer
     /// does. The folder listing carries Notes.app's count as its leading row.
     private func cascadeRunner(folderRows: [String], notes: [String: [String]],
-                               unreadable: [String: Int] = [:]) -> FakeNotesRunner {
+                               unreadable: [String: Int] = [:],
+                               selectedID: String? = nil,
+                               selectionOutput: String? = nil) -> FakeNotesRunner {
         let parsed = folderRows.map { $0.components(separatedBy: US) }
-        let byId = Dictionary(parsed.map { ($0[0], $0) }, uniquingKeysWith: { a, _ in a })
+        let byId = Dictionary(parsed.map { (Array($0[0].utf8), $0) }, uniquingKeysWith: { a, _ in a })
         func pathOf(_ id: String) -> String? {
-            guard let row = byId[id] else { return nil }
+            guard let row = byId[Array(id.utf8)] else { return nil }
             let parent = row[2]
             if parent.isEmpty { return row[1] }
             return pathOf(parent).map { $0 + "/" + row[1] } ?? row[1]
@@ -67,15 +69,71 @@ struct NotesOrgCommandTests {
                     [title, fixtureNoteID(900 + index)].joined(separator: US)
                 }.joined(separator: RS)
             }
-            if script.contains("delete folder (item") { return "" }
+            if Self.isFolderSelection(script) {
+                // Adversarial selections are independent of the listing/name matcher. Default
+                // fixtures merely choose an ordinary namesake; they do not model Notes Unicode.
+                let selected: String
+                if let selectedID {
+                    selected = selectedID
+                } else {
+                    let typed = args.dropLast().map { $0.lowercased() }
+                    selected = parsed.first { row in
+                        guard let path = pathOf(row[0]) else { return false }
+                        let parts = path.components(separatedBy: "/").map { $0.lowercased() }
+                        return parts.count >= typed.count && Array(parts.suffix(typed.count)) == typed
+                    }?.first ?? "UNLISTED"
+                }
+                // Model what the observed script requests. Otherwise removing framing in
+                // production would still get a framed fake response and falsely pass.
+                let emitted = Self.requestsFramedFolderSelection(script) ? Self.frameSelectedID(selected) : selected
+                let response = selectionOutput ?? emitted
+                // Exercise the actual shared stdout decoder. A direct fake String bypasses its
+                // trimming and can falsely certify rejection of ID-edge control characters.
+                return try AppleScriptRunner.result(of: ScriptOutcome(
+                    terminationStatus: 0, standardOutput: Data((response + "\n").utf8),
+                    standardError: Data()))
+            }
+            if Self.isFolderDelete(script) { return "" }
             return nil
         }
         return runner
     }
 
-    /// Did the cascade actually reach the irreversible `delete`?
+    private static let selectedIDPrefix = "APPLE_CLI_FOLDER_ID_BEGIN:"
+    private static let selectedIDSuffix = ":APPLE_CLI_FOLDER_ID_END"
+
+    private static func frameSelectedID(_ id: String) -> String {
+        selectedIDPrefix + id + selectedIDSuffix
+    }
+
+    private static func requestsFramedFolderSelection(_ script: String) -> Bool {
+        script.contains("return \"\(selectedIDPrefix)\" & (id of ")
+            && script.contains(") & \"\(selectedIDSuffix)\"")
+    }
+
+    private static func isFolderSelection(_ script: String) -> Bool {
+        (script.contains("return id of") || script.contains(selectedIDPrefix)) && !isFolderDelete(script)
+    }
+
+    private static func isFolderDelete(_ script: String) -> Bool {
+        script.contains("delete folder (item") || script.contains("delete folder id (item")
+    }
+
+    private func selectionArguments(_ runner: FakeNotesRunner) -> [[String]] {
+        zip(runner.scripts, runner.arguments).filter { Self.isFolderSelection($0.0) }.map { $0.1 }
+    }
+
+    private func deletionArguments(_ runner: FakeNotesRunner) -> [[String]] {
+        zip(runner.scripts, runner.arguments).filter { Self.isFolderDelete($0.0) }.map { $0.1 }
+    }
+
+    private func cascadeEnumerationArguments(_ runner: FakeNotesRunner) -> [[String]] {
+        zip(runner.scripts, runner.arguments).filter { $0.0.contains("set unreadable to 0") }.map { $0.1 }
+    }
+
+    /// Count either sink: checking only by-name syntax would miss an unauthorized ID delete.
     private func performedTheCascade(_ runner: FakeNotesRunner) -> Bool {
-        runner.scripts.contains { $0.contains("delete folder (item") }
+        runner.scripts.contains(where: Self.isFolderDelete)
     }
 
     // MARK: folders (list)
@@ -455,7 +513,7 @@ struct NotesOrgCommandTests {
         // `apple-cli-test parent` instead.
         #expect(runner.allArguments.contains("F1"))
         #expect(runner.allArguments.contains("F2"))
-        // The typed name still reaches argv once: the delete sink's own specifier.
+        // The typed name reaches argv once: selection in sandbox, never the ID delete.
         #expect(runner.allArguments.filter { $0 == "apple-cli-test parent" }.count == 1)
     }
 
@@ -566,6 +624,305 @@ struct NotesOrgCommandTests {
         #expect(!performedTheCascade(runner))
     }
 
+    // MARK: delete-folder — bind the mutation to the verified selected root
+
+    @Test func deleteFolderUsesTheSelectedVerifiedRootRatherThanTheFirstRoot() throws {
+        let name = "apple-cli-test selected"
+        let account = "Synthetic Account"
+        for mode in ["--dry-run", "--execute"] {
+            let runner = cascadeRunner(
+                folderRows: [folderRow(id: "F1", name: name),
+                             folderRow(id: "F2", name: name)],
+                notes: [name: ["apple-cli-test note"]], selectedID: "F2")
+            let command = try DeleteFolderCmd.parse([name, "--account", account, "--test-mode", mode])
+            let data = try notesData(try captureNotesEnvelope {
+                try command.run(scriptFactory: { quietScript(runner) }, env: pinnedWriteEnv())
+            })
+
+            #expect(selectionArguments(runner) == [[name, account]])
+            let selectionScript = try #require(runner.scripts.first(where: Self.isFolderSelection))
+            #expect(Self.requestsFramedFolderSelection(selectionScript))
+            let enumerated = cascadeEnumerationArguments(runner).compactMap { $0.first }
+            #expect(Set(enumerated) == ["F1", "F2"])
+            #expect(enumerated.count == 2)
+            #expect(data["dry_run"] as? Bool == (mode == "--dry-run"))
+            #expect(deletionArguments(runner) == (mode == "--execute" ? [["F2", account]] : []))
+            #expect(!runner.scripts.contains { $0.contains("delete folder (item") })
+            if mode == "--execute" {
+                let selection = try #require(runner.scripts.firstIndex(where: Self.isFolderSelection))
+                let deletion = try #require(runner.scripts.firstIndex(where: Self.isFolderDelete))
+                #expect(selection < deletion)
+                #expect(runner.scripts[deletion].contains("folder id (item 1 of argv)"))
+            }
+        }
+    }
+
+    @Test func deleteFolderPreservesAnOpaqueVerifiedIDExactly() throws {
+        let name = "apple-cli-test selected"
+        let selected = " synthetic folder id with spaces "
+        let account = "Synthetic Account"
+        // IDs are opaque. Membership, rather than a guessed CoreData grammar or substring
+        // extraction, establishes whether this exact selected scalar was verified.
+        for mode in ["--dry-run", "--execute"] {
+            let runner = cascadeRunner(folderRows: [folderRow(id: selected, name: name)],
+                                       notes: [:], selectedID: selected)
+            let command = try DeleteFolderCmd.parse([name, "--account", account, "--test-mode", mode])
+            _ = try captureNotesEnvelope {
+                try command.run(scriptFactory: { quietScript(runner) }, env: pinnedWriteEnv())
+            }
+
+            #expect(selectionArguments(runner) == [[name, account]])
+            #expect(cascadeEnumerationArguments(runner).first?.first == selected)
+            #expect(deletionArguments(runner) == (mode == "--execute" ? [[selected, account]] : []))
+            #expect(!runner.scripts.contains { $0.contains("delete folder (item") })
+            #expect(!runner.scripts.contains { $0.contains(selected) })
+        }
+    }
+
+    @Test func deleteFolderPreservesAnOpaqueIDBeginningWithACombiningScalar() throws {
+        let name = "apple-cli-test selected"
+        let selected = "\u{301}opaque-id"
+        // The mark can combine with the frame prefix's final colon. Delimiter removal must use
+        // bytes, not Character counts that could consume the first scalar of the verified ID.
+        let runner = cascadeRunner(folderRows: [folderRow(id: selected, name: name)],
+                                   notes: [:], selectedID: selected)
+        let command = try DeleteFolderCmd.parse([name, "--test-mode", "--execute"])
+        _ = try captureNotesEnvelope {
+            try command.run(scriptFactory: { quietScript(runner) }, env: pinnedWriteEnv())
+        }
+        let deleted = try #require(deletionArguments(runner).first?.first)
+        #expect(deleted.utf8.elementsEqual(selected.utf8))
+        #expect(selectionArguments(runner).count == 1)
+    }
+
+    @Test func deleteFolderRefusesAnActualSelectionOutsideTheVerifiedRootIDs() throws {
+        let name = "apple-cli-test selected"
+        // F1 is an exact, fully verified root in EVERY case. F2 is checked as a descendant,
+        // F3 is listed outside both matching folds, and HIDDEN is absent from the listing.
+        // The selected ID is supplied independently: no fixture fold can certify itself.
+        let rows = [folderRow(id: "F1", name: name),
+                    folderRow(id: "F2", name: "apple-cli-test child", parent: "F1"),
+                    folderRow(id: "F3", name: "apple-cli-test unrelated"),
+                    folderRow(id: "ID-caf\u{e9}", name: name)]
+        for selected in ["HIDDEN", "F3", "F2", "f1", "folder id F1", "prefix folder id F1 suffix",
+                         "ID-cafe\u{301}"] {
+            for mode in ["--dry-run", "--execute"] {
+                let runner = cascadeRunner(folderRows: rows, notes: [:], selectedID: selected)
+                let command = try DeleteFolderCmd.parse([name, "--test-mode", mode])
+                let failure = try captureNotesFailure {
+                    try command.run(scriptFactory: { quietScript(runner) }, env: pinnedWriteEnv())
+                }
+
+                #expect(failure.code == AppleExit.usage)
+                #expect(failure.error["type"] as? String == AppleErrorType.validation)
+                #expect(failure.error["sandbox"] as? Bool == true)
+                #expect(selectionArguments(runner).count == 1)
+                #expect(!performedTheCascade(runner))
+                #expect(!(failure.error["message"] as? String ?? "").contains("prefix folder id F1 suffix"))
+                if selected == "F2" {
+                    #expect(cascadeEnumerationArguments(runner).contains { $0.first == "F2" },
+                            "being checked as a descendant must not authorize it as a selected root")
+                }
+            }
+        }
+    }
+
+    @Test func deleteFolderRefusesMalformedSelectedIDScalars() throws {
+        let name = "apple-cli-test selected"
+        let invalid = ["", " ", "F1\nF2", "F1\rF2", "F1" + RS + "F2",
+                       "F1" + US + "F2", "F1\u{0}", "\tF1", "F1\t", "\nF1", "F1\n",
+                       "F1\u{2028}", "\rF1"]
+        for selected in invalid {
+            for mode in ["--dry-run", "--execute"] {
+                let runner = cascadeRunner(folderRows: [folderRow(id: "F1", name: name)],
+                                           notes: [:], selectedID: selected)
+                let command = try DeleteFolderCmd.parse([name, "--test-mode", mode])
+                let failure = try captureNotesFailure {
+                    try command.run(scriptFactory: { quietScript(runner) }, env: pinnedWriteEnv())
+                }
+
+                #expect(failure.code == AppleExit.upstream)
+                #expect(failure.error["type"] as? String == AppleErrorType.upstream)
+                #expect(selectionArguments(runner).count == 1)
+                #expect(!performedTheCascade(runner))
+            }
+        }
+    }
+
+    @Test func deleteFolderRejectsMalformedSelectedIDFramesAfterTransportDecoding() throws {
+        let name = "apple-cli-test selected"
+        let good = Self.frameSelectedID("F1")
+        let outputs = ["F1", Self.selectedIDPrefix + "F1", "F1" + Self.selectedIDSuffix,
+                       "unexpected" + good, good + "unexpected"]
+        for output in outputs {
+            for mode in ["--dry-run", "--execute"] {
+                let runner = cascadeRunner(folderRows: [folderRow(id: "F1", name: name)],
+                                           notes: [:], selectedID: "F1", selectionOutput: output)
+                let command = try DeleteFolderCmd.parse([name, "--test-mode", mode])
+                let failure = try captureNotesFailure {
+                    try command.run(scriptFactory: { quietScript(runner) }, env: pinnedWriteEnv())
+                }
+
+                #expect(failure.code == AppleExit.upstream)
+                #expect(failure.error["type"] as? String == AppleErrorType.upstream)
+                #expect(selectionArguments(runner).count == 1)
+                #expect(!performedTheCascade(runner))
+            }
+        }
+    }
+
+    @Test func deleteFolderKeepsOpaqueEdgeSpacesThroughRootAndChildAncestry() throws {
+        let root = " root id "
+        let child = " child id "
+        let name = "apple-cli-test selected"
+        for mode in ["--dry-run", "--execute"] {
+            let runner = cascadeRunner(
+                folderRows: [folderRow(id: root, name: name),
+                             folderRow(id: child, name: "apple-cli-test child", parent: root)],
+                notes: [:], selectedID: root)
+            let command = try DeleteFolderCmd.parse([name, "--test-mode", mode])
+            _ = try captureNotesEnvelope {
+                try command.run(scriptFactory: { quietScript(runner) }, env: pinnedWriteEnv())
+            }
+
+            let enumerated = cascadeEnumerationArguments(runner).compactMap { $0.first }
+            #expect(enumerated.map { Array($0.utf8) } == [Array(root.utf8), Array(child.utf8)])
+            #expect(selectionArguments(runner).count == 1)
+            if mode == "--execute" {
+                let deleted = try #require(deletionArguments(runner).first?.first)
+                #expect(deleted.utf8.elementsEqual(root.utf8))
+            } else {
+                #expect(!performedTheCascade(runner))
+            }
+        }
+    }
+
+    @Test func deleteFolderRefusesCanonicallyEquivalentButByteDistinctParentIDs() throws {
+        let name = "apple-cli-test selected"
+        let listedRoot = "ID-caf\u{e9}"
+        let missingParent = "ID-cafe\u{301}"
+        #expect(listedRoot == missingParent, "Swift String considers these canonically equivalent")
+        #expect(!listedRoot.utf8.elementsEqual(missingParent.utf8))
+        for mode in ["--dry-run", "--execute"] {
+            let runner = cascadeRunner(
+                folderRows: [folderRow(id: listedRoot, name: name),
+                             folderRow(id: "CHILD", name: "apple-cli-test child", parent: missingParent)],
+                notes: [:], selectedID: listedRoot)
+            let command = try DeleteFolderCmd.parse([name, "--test-mode", mode])
+            let failure = try captureNotesFailure {
+                try command.run(scriptFactory: { quietScript(runner) }, env: pinnedWriteEnv())
+            }
+
+            #expect(failure.code == AppleExit.usage)
+            #expect(failure.error["sandbox"] as? Bool == true)
+            #expect((failure.error["message"] as? String)?.contains("could not be placed") == true)
+            #expect(!performedTheCascade(runner))
+        }
+    }
+
+    @Test func cascadeFolderIDsRejectBlankControlsAndCanonicalDuplicates() throws {
+        let invalidIDs = ["", " ", "\tF1", "F1\n", "F1" + RS, "F1" + US, "F1\u{0}"]
+        for id in invalidIDs {
+            let output = "1" + RS + folderRow(id: id, name: "apple-cli-test selected") + RS
+            #expect(throws: AppleError.self) { try NotesScript.buildCascadeFolders(output) }
+        }
+        for parent in [" ", "\tROOT", "ROOT\n", "ROOT\u{0}"] {
+            let output = "1" + RS + folderRow(id: "CHILD", name: "apple-cli-test child", parent: parent) + RS
+            #expect(throws: AppleError.self) { try NotesScript.buildCascadeFolders(output) }
+        }
+        // String-keyed ancestry remains safe only if its potentially aliasing listed keys fail
+        // closed. A sole byte-distinct missing parent is separately pinned above.
+        let duplicates = "2" + RS + [
+            folderRow(id: "ID-caf\u{e9}", name: "apple-cli-test first"),
+            folderRow(id: "ID-cafe\u{301}", name: "apple-cli-test second"),
+        ].joined(separator: RS) + RS
+        #expect(throws: AppleError.self) { try NotesScript.buildCascadeFolders(duplicates) }
+    }
+
+    @Test func deleteFolderSelectedIDPreservesNestedEscapedPathAndAccountArgv() throws {
+        let parent = "apple-cli-test parent/segment"
+        let child = "apple-cli-test child \"quote\""
+        let typed = "apple-cli-test parent\\/segment/" + child
+        let account = "Synthetic \"Account\""
+        for mode in ["--dry-run", "--execute"] {
+            let runner = cascadeRunner(
+                folderRows: [folderRow(id: "F1", name: parent),
+                             folderRow(id: "F2", name: child, parent: "F1")],
+                notes: [:], selectedID: "F2")
+            let command = try DeleteFolderCmd.parse([typed, "--account", account, "--test-mode", mode])
+            _ = try captureNotesEnvelope {
+                try command.run(scriptFactory: { quietScript(runner) }, env: pinnedWriteEnv())
+            }
+
+            #expect(selectionArguments(runner) == [[parent, child, account]])
+            let selection = try #require(runner.scripts.first(where: Self.isFolderSelection))
+            #expect(selection.contains("folder (item 2 of argv) of folder (item 1 of argv)"))
+            #expect(selection.contains("tell account (item 3 of argv)"))
+            #expect(deletionArguments(runner) == (mode == "--execute" ? [["F2", account]] : []))
+            for script in runner.scripts {
+                #expect(!script.contains(parent))
+                #expect(!script.contains(child))
+                #expect(!script.contains(account))
+            }
+        }
+    }
+
+    @Test func deleteFolderSelectedIDReadFailuresNeverReachEitherDeleteSink() throws {
+        let cases: [(String, Int32, String)] = [
+            ("Notes got an error: Not authorized to send Apple events to Notes.",
+             AppleExit.permissionDenied, AppleErrorType.permissionDenied),
+            ("Notes got an error: Can’t get folder \"apple-cli-test selected\". (-1728)",
+             AppleExit.notFound, AppleErrorType.notFound),
+            ("Notes got an error: Application isn’t running. (-600)",
+             AppleExit.upstream, AppleErrorType.upstream),
+        ]
+        for (stderr, code, type) in cases {
+            for mode in ["--dry-run", "--execute"] {
+                let runner = cascadeRunner(
+                    folderRows: [folderRow(id: "F1", name: "apple-cli-test selected")],
+                    notes: [:], selectedID: "F1")
+                runner.handler = { [previous = runner.handler] script, args in
+                    if Self.isFolderSelection(script) {
+                        throw AppleScriptRunner.RunError.scriptFailed(status: 1, stderr: stderr)
+                    }
+                    return try previous?(script, args)
+                }
+                let command = try DeleteFolderCmd.parse(["apple-cli-test selected", "--test-mode", mode])
+                let failure = try captureNotesFailure {
+                    try command.run(scriptFactory: { quietScript(runner) }, env: pinnedWriteEnv())
+                }
+
+                #expect(failure.code == code)
+                #expect(failure.error["type"] as? String == type)
+                #expect(selectionArguments(runner).count == 1)
+                #expect(!performedTheCascade(runner))
+            }
+        }
+    }
+
+    @Test func deleteFolderSelectedIDMutationNeverRetriesOrFallsBackToName() throws {
+        let name = "apple-cli-test selected"
+        let runner = cascadeRunner(folderRows: [folderRow(id: "F1", name: name)],
+                                   notes: [:], selectedID: "F1")
+        runner.handler = { [previous = runner.handler] script, args in
+            if script.contains("delete folder id (item") {
+                // Retrying a mutation can duplicate a write already applied before this timeout.
+                throw AppleScriptRunner.RunError.scriptFailed(status: 1, stderr: "Notes timed out (-1712)")
+            }
+            return try previous?(script, args)
+        }
+        let command = try DeleteFolderCmd.parse([name, "--test-mode", "--execute"])
+        let failure = try captureNotesFailure {
+            try command.run(scriptFactory: { quietScript(runner) }, env: pinnedWriteEnv())
+        }
+
+        #expect(failure.code == AppleExit.upstream)
+        #expect(selectionArguments(runner).count == 1)
+        #expect(deletionArguments(runner).count == 1)
+        #expect(deletionArguments(runner).first?.first == "F1")
+        #expect(!runner.scripts.contains { $0.contains("delete folder (item") })
+    }
+
     // MARK: delete-folder — the cascade fails CLOSED on anything it cannot verify
 
     @Test func deleteFolderSandboxGateRefusesWhenANoteInTheCascadeCannotBeRead() throws {
@@ -674,7 +1031,7 @@ struct NotesOrgCommandTests {
         #expect(envelope["ok"] as? Bool == true)
         #expect(performedTheCascade(runner))
         // Only the target was enumerated (by id): the ghost subtree is not in this cascade.
-        #expect(runner.arguments.filter { ["F1", "F7", "F8", "F9"].contains($0.first ?? "") }.map { $0.first! } == ["F1"])
+        #expect(cascadeEnumerationArguments(runner).filter { ["F1", "F7", "F8", "F9"].contains($0.first ?? "") }.map { $0.first! } == ["F1"])
     }
 
     @Test func deleteFolderSandboxGateChecksTheSubtreeOfADetachedGhostDeletedByName() throws {
@@ -906,7 +1263,7 @@ struct NotesOrgCommandTests {
         #expect(failure.code == AppleExit.usage)
         #expect((failure.error["message"] as? String)?.contains("Real note in the other sibling") == true)
         // Each cascade folder was asked for BY ID, and each id exactly once.
-        let idQueries = runner.arguments.filter { ["F1", "F2", "F3"].contains($0.first ?? "") }.map { $0.first! }
+        let idQueries = cascadeEnumerationArguments(runner).filter { ["F1", "F2", "F3"].contains($0.first ?? "") }.map { $0.first! }
         #expect(Set(idQueries) == ["F1", "F2", "F3"])
         #expect(idQueries.count == 3)
         #expect(!performedTheCascade(runner))
@@ -950,7 +1307,7 @@ struct NotesOrgCommandTests {
 
         #expect(envelope["ok"] as? Bool == true)
         #expect(performedTheCascade(runner))
-        let idQueries = runner.arguments.filter { ["F1", "F2", "F3"].contains($0.first ?? "") }.map { $0.first! }
+        let idQueries = cascadeEnumerationArguments(runner).filter { ["F1", "F2", "F3"].contains($0.first ?? "") }.map { $0.first! }
         #expect(Set(idQueries) == ["F2", "F3"])
         #expect(idQueries.count == 2)
     }
@@ -973,7 +1330,7 @@ struct NotesOrgCommandTests {
 
         #expect(failure.code == AppleExit.usage)
         #expect((failure.error["message"] as? String)?.contains("Real note under the nested namesake") == true)
-        let idQueries = runner.arguments.filter { ["F1", "F2", "F3"].contains($0.first ?? "") }.map { $0.first! }
+        let idQueries = cascadeEnumerationArguments(runner).filter { ["F1", "F2", "F3"].contains($0.first ?? "") }.map { $0.first! }
         #expect(Set(idQueries) == ["F1", "F3"])
         #expect(!performedTheCascade(runner))
 
@@ -1016,7 +1373,7 @@ struct NotesOrgCommandTests {
 
         #expect(failure.code == AppleExit.notFound)
         #expect(failure.error["type"] as? String == AppleErrorType.notFound)
-        #expect(runner.arguments.filter { ["F1", "F2", "F3"].contains($0.first ?? "") }.isEmpty)
+        #expect(cascadeEnumerationArguments(runner).filter { ["F1", "F2", "F3"].contains($0.first ?? "") }.isEmpty)
         #expect(!performedTheCascade(runner))
 
         // Were Notes.app ever to bind it anyway (a hidden deleted folder under that name), the
@@ -1115,7 +1472,7 @@ struct NotesOrgCommandTests {
         }
 
         #expect(envelope["ok"] as? Bool == true)
-        let idQueries = runner.arguments.filter { ["F1", "F2", "F3", "F4"].contains($0.first ?? "") }.map { $0.first! }
+        let idQueries = cascadeEnumerationArguments(runner).filter { ["F1", "F2", "F3", "F4"].contains($0.first ?? "") }.map { $0.first! }
         #expect(idQueries.sorted() == ["F1", "F2", "F3"])
     }
 
@@ -1191,6 +1548,9 @@ struct NotesOrgCommandTests {
         #expect(data["ok"] as? Bool == true)
         #expect(runner.invocationCount == 1, "no folder or note enumeration outside the sandbox")
         #expect(performedTheCascade(runner))
+        #expect(selectionArguments(runner).isEmpty)
+        #expect(runner.scripts[0].contains("delete folder (item"))
+        #expect(deletionArguments(runner).first?.first == "Real Folder")
     }
 
     @Test func deleteFolderLabelChecksAgainstTheCanonicalPrefixNotTheOverridableOne() throws {

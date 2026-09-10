@@ -271,10 +271,20 @@ The MCP emits camelCase keys; apple-cli emits snake_case per `docs/DESIGN.md` ("
     learn the target's title, and only there does a sandboxed preview disclose an unchecked gate.
   - **`delete-folder` is the exception to "a preview reaches nothing"**: inside the sandbox its
     preview enumerates the cascade through Notes.app on EVERY addressing form (one folder listing
-    for the account, one note listing per folder in the cascade), because a preview that reports
-    clean for a cascade the execute path would refuse is the same false-clean signal one
-    invocation earlier. Outside the sandbox no enumeration runs and the preview still reaches
-    nothing.
+    for the account, one note listing per folder in the cascade), then reads the ID of the folder
+    Notes actually selects for the typed path. Its ID bytes must match one of the verified ROOTS;
+    being a checked descendant is insufficient. All conservative matching, ambiguity, ancestry,
+    and label checks remain in place. Execute deletes the selected root by ID, with no second
+    name lookup, no name-based fallback, and no mutation retry. Preview performs the same
+    read-only selection and membership check. An unlisted selected ID is refused even if a
+    listed folder shares its name, closing the hidden-namesake gap. IDs are opaque: a nonempty
+    printable ID outside the verified roots is a sandbox `validation` refusal (exit 64), while
+    blank or control-containing selected IDs and malformed ID responses use `upstream_error` (exit 69).
+    Enumeration, selection, and deletion are separate calls; the snapshot cannot prevent sync
+    or another client from changing the subtree afterward, or reveal descendants Notes never
+    reports. This ID-binding change has not been validated against a live deletion.
+    Outside the sandbox the existing name-based delete is unchanged: no enumeration or ID
+    selection runs, the preview reaches nothing, and execute makes one mutation call.
   - **The folder-path label check is PER-COMPONENT**, not one `hasPrefix` over the whole string —
     `apple-cli-test parent/Real Folder` names an unlabeled child. It applies to every surface
     that takes a folder path: `create --folder`, `move --folder`, `batch-move --folder`,

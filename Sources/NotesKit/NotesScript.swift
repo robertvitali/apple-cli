@@ -961,9 +961,17 @@ struct NotesScript {
             if row.isEmpty { continue }
             let f = splitFields(row)
             guard f.count == 4 else { throw unverifiable("a row did not carry exactly four fields") }
-            let id = f[0].trimmingCharacters(in: .whitespaces)
-            guard !id.isEmpty, ids.insert(id).inserted else { throw unverifiable("a folder id was empty or repeated") }
-            raw.append(RawFolder(id: id, name: f[1], parentId: f[2].trimmingCharacters(in: .whitespaces),
+            // ID fields are already framed by US separators. Preserve their exact bytes;
+            // trimming them could bind an opaque ID to a different listed folder.
+            let id = f[0]
+            let parentId = f[2]
+            guard Self.isFolderIDScalar(id), ids.insert(id).inserted else {
+                throw unverifiable("a folder id was malformed, repeated, or canonically ambiguous")
+            }
+            guard parentId.isEmpty || Self.isFolderIDScalar(parentId) else {
+                throw unverifiable("a parent folder id was malformed")
+            }
+            raw.append(RawFolder(id: id, name: f[1], parentId: parentId,
                                  shared: f[3].trimmingCharacters(in: .whitespaces).lowercased() == "true"))
         }
         guard raw.count == total else { throw unverifiable("\(total) folder(s) reported, \(raw.count) parsed") }
@@ -983,7 +991,14 @@ struct NotesScript {
             // Top-level, or detached — both are roots (see the type doc).
             if entry.parentId.isEmpty || entry.parentId == detachedParentMarker { return [entry.name] }
             if visited.contains(entry.id) { markUnresolved(entry); return nil }
-            guard let parent = byId[entry.parentId] else { markUnresolved(entry); return nil }
+            guard let parent = byId[entry.parentId],
+                  parent.id.utf8.elementsEqual(entry.parentId.utf8) else {
+                // Swift String dictionary keys compare canonical Unicode equivalents as equal.
+                // A differently spelled opaque parent ID is still missing, never an alias. The
+                // duplicate-ID guard above likewise refuses canonically ambiguous listed IDs.
+                markUnresolved(entry)
+                return nil
+            }
             guard let above = chain(parent, visited: visited.union([entry.id])) else {
                 markUnresolved(entry)
                 return nil
@@ -1045,6 +1060,58 @@ struct NotesScript {
         let idAcctIdx = accountArgIndex(&idArgs, acct)
         let idOut = (try? run("return id of \(fullExpr)", args: idArgs, tellAccount: idAcctIdx)) ?? ""
         return Folder(id: Self.extractId(idOut, prefix: "folder") ?? "", name: name, account: acct, shared: false)
+    }
+
+    // Non-whitespace sentinels preserve ID-edge spaces and controls across AppleScriptRunner's
+    // stdout trimming. These delimiters are private protocol constants, never user input.
+    private static let folderIDPrefix = "APPLE_CLI_FOLDER_ID_BEGIN:"
+    private static let folderIDSuffix = ":APPLE_CLI_FOLDER_ID_END"
+
+    /// Resolve exactly the by-name specifier the ordinary delete uses, without mutating it.
+    /// The sandbox compares this ID with its fully verified roots before choosing the ID sink.
+    func resolveFolderID(name: String, account: String?) throws -> String {
+        let comps = Self.splitFolderPath(name)
+        guard !comps.isEmpty else { throw AppleError.validation("Invalid folder name: \"\(name)\"") }
+        let (expr, fargs) = Self.folderRefExpr(comps, startIndex: 1)
+        var args = fargs
+        let acctIndex = accountArgIndex(&args, resolveAccount(account))
+        let body = "return \"\(Self.folderIDPrefix)\" & (id of \(expr)) & \"\(Self.folderIDSuffix)\""
+        let output = try run(body, args: args, tellAccount: acctIndex)
+        let bytes = Array(output.utf8)
+        let prefix = Array(Self.folderIDPrefix.utf8)
+        let suffix = Array(Self.folderIDSuffix.utf8)
+        guard bytes.count >= prefix.count + suffix.count,
+              bytes.starts(with: prefix), bytes.suffix(suffix.count).elementsEqual(suffix) else {
+            throw AppleError.upstream("Notes.app returned an unexpected folder ID response; the selected folder cannot be verified.")
+        }
+        // Byte framing also preserves a leading combining scalar that would form one Character
+        // with the prefix's final punctuation if sliced using String character counts.
+        let selectedID = String(decoding: bytes.dropFirst(prefix.count).dropLast(suffix.count), as: UTF8.self)
+        try Self.requireFolderIDScalar(selectedID)
+        return selectedID
+    }
+
+    /// IDs are opaque scalars, not object-descriptor text. Preserve printable spaces exactly;
+    /// never extract an apparent ID from surrounding text or invent a CoreData-only grammar.
+    private static func isFolderIDScalar(_ id: String) -> Bool {
+        !id.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+            && id.rangeOfCharacter(from: .controlCharacters.union(.newlines)) == nil
+    }
+
+    private static func requireFolderIDScalar(_ id: String) throws {
+        guard Self.isFolderIDScalar(id) else {
+            throw AppleError.upstream("Notes.app returned an unexpected folder ID; the selected folder cannot be verified.")
+        }
+    }
+
+    /// Delete the exact ID already selected and verified by the sandbox. Never retry a mutation
+    /// or fall back to a by-name lookup if this folder disappears between verification and delete.
+    func deleteFolder(id: String, account: String?) throws {
+        try Self.requireFolderIDScalar(id)
+        var args = [id]
+        let acctIndex = accountArgIndex(&args, resolveAccount(account))
+        _ = try run("delete folder id (item 1 of argv)", args: args, tellAccount: acctIndex,
+                    maxAttempts: Self.maxMutationAttempts)
     }
 
     func deleteFolder(name: String, account: String?) throws {

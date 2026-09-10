@@ -124,16 +124,25 @@ struct DeleteFolderCmd: ParsableCommand {
             // AppleKit's own rule (`TestMode.canonicalSandboxPrefix`) is that widening the override
             // must not widen what an IRREVERSIBLE op may touch. Every other Notes write is
             // recoverable and keeps the overridable prefix.
-            try guardLiveFolderCascade(name, account: account, script: script,
-                                       sandboxActive: gate.sandboxActive,
-                                       prefix: TestMode.canonicalSandboxPrefix)
+            let verifiedRootID = try guardLiveFolderCascade(name, account: account, script: script,
+                                                           sandboxActive: gate.sandboxActive,
+                                                           prefix: TestMode.canonicalSandboxPrefix)
             guard gate.willExecute else {
                 try emitNotesWrite(DryRunPreview("delete-folder", "Would delete folder \"\(name)\" AND EVERY NOTE IN IT. Measured: this cascades, and the cascaded notes do NOT go to Recently Deleted — they are destroyed permanently. Pass --execute to perform it."),
                                    json: global.json, sandboxActive: gate.sandboxActive,
                                    human: "[dry-run] would delete folder \"\(name)\".")
                 return
             }
-            try script.deleteFolder(name: name, account: account)
+            if gate.sandboxActive {
+                // No by-name fallback inside the sandbox: its read-only selection was checked
+                // against the fully verified root IDs on both preview and execution paths.
+                guard let verifiedRootID else {
+                    throw AppleError.upstream("Sandboxed folder deletion has no verified target.")
+                }
+                try script.deleteFolder(id: verifiedRootID, account: account)
+            } else {
+                try script.deleteFolder(name: name, account: account)
+            }
             try emitNotesExecutedWrite(CreatedFolder(ok: true, folder: name), json: global.json,
                                sandboxActive: gate.sandboxActive,
                                human: "Deleted folder \"\(name)\".")

@@ -418,15 +418,15 @@ func guardLiveFolderPath(_ path: String, sandboxActive: Bool, prefix: String? = 
 /// only OUTSIDE the sandbox, where this returns before touching anything.
 ///
 /// KNOWN WINDOW (TOCTOU, accepted — reviewed and kept, not overlooked): this validation and the
-/// erase are two separate AppleScript calls, so the check is a SNAPSHOT taken immediately before
-/// the delete, and an iCloud sync landing in between could add an unlabeled note or sub-folder that
+/// erase span separate AppleScript calls, so the check is a SNAPSHOT. An iCloud sync landing
+/// between enumeration and deletion could add an unlabeled note or sub-folder that
 /// the cascade then destroys. Notes.app exposes no transactional delete and no way to hold a
 /// subtree, so the window cannot be closed from here — the only "fix" available is refusing
 /// sandboxed `delete-folder` outright, which would remove the operator's only sandboxed cleanup
 /// path for a folder tree AND drop a capability the MCP oracle has (parity is a strict superset,
-/// so a refusal is a parity break, not a hardening). The snapshot is taken immediately before the
-/// erase, which narrows the exposure from "anything in the subtree" to "whatever arrived in the
-/// last few hundred milliseconds"; that residual race is accepted.
+/// so a refusal is a parity break, not a hardening). Enumeration, selected-ID resolution, and
+/// deletion are separate calls with no transactional boundary or fixed timing bound. Members can
+/// change during that interval; verifying the selected ID does not close that accepted race.
 ///
 /// FRAMING, NOT PATHS: this gate never matches on a rendered `a/b` path. `folders` renders the
 /// parent chain by joining names with `/` and escaping a literal `/` inside a name as `\/`, which
@@ -439,11 +439,16 @@ func guardLiveFolderPath(_ path: String, sandboxActive: Bool, prefix: String? = 
 /// because that is what builds the delete's own specifier — gate and sink agree on what a typed
 /// `a/b` names.
 ///
-/// Both wrappers are read-only and pass every user value as argv (see `listFolders`/`listNotes`),
-/// so widening the gate does not widen the injection surface.
+/// After every candidate cascade is verified, resolve the actual by-name selection and require
+/// its opaque ID to belong to the verified ROOT set. The folded candidate search need not be a
+/// universal superset of Notes' Unicode lookup: an unexpected selection fails membership rather
+/// than reaching an unchecked delete. Descendants are checked but are not automatically roots.
+/// Return the selected ID for the sandboxed mutation; nil means the sandbox is inactive. Preview
+/// performs the same read-only membership check. Every user value remains an argv argument.
+@discardableResult
 func guardLiveFolderCascade(_ path: String, account: String?, script: NotesScript,
-                            sandboxActive: Bool, prefix: String? = nil) throws {
-    guard sandboxActive else { return }
+                            sandboxActive: Bool, prefix: String? = nil) throws -> String? {
+    guard sandboxActive else { return nil }
     try guardLiveFolderPath(path, sandboxActive: sandboxActive, prefix: prefix)
     let targetComponents = NotesScript.splitFolderPath(path)
     // A path with no components (`""`, `/`) names nothing this gate can enumerate. `deleteFolder`'s
@@ -453,9 +458,9 @@ func guardLiveFolderCascade(_ path: String, account: String?, script: NotesScrip
         throw AppleError(type: AppleErrorType.validation, message: "Invalid folder name: \"\(path)\"",
                          exitCode: AppleExit.usage, sandbox: true)
     }
-    // The fold AppleScript itself applies when it resolves the specifier. Compared component-wise,
-    // not as one string, for the same reason step 1 checks components: `splitFolderPath` is what
-    // decides which folder the specifier names.
+    // A conservative candidate fold, compared component-wise. It need not model every Notes
+    // lookup rule: the actual selected ID must pass root membership after cascade verification.
+    // `splitFolderPath` also builds the read-only by-name specifier used for that selection.
     //
     // `folding(options: [.caseInsensitive])` rather than `lowercased()`: it is the analogue of
     // Foundation's `caseInsensitiveCompare` and folds strictly MORE than simple lowercasing
@@ -503,7 +508,11 @@ func guardLiveFolderCascade(_ path: String, account: String?, script: NotesScrip
     // that enters the cascade is enumerated later BY ID (`CascadeTarget.id`), never by its name
     // chain: two sibling folders whose names differ only in case fold to the same chain, and a
     // name-bound specifier would enumerate one of them twice and the other never.
-    let roots = listing.folders.map { $0.components.map(exactFold) }.filter { endsWith($0, foldedTarget) }
+    let rootFolders = listing.folders.filter { endsWith($0.components.map(exactFold), foldedTarget) }
+    let roots = rootFolders.map { $0.components.map(exactFold) }
+    // Opaque IDs are compared by bytes, never by the name folds or Unicode equivalence. Keep
+    // this set separate from cascadeIds: a checked descendant is not necessarily a valid root.
+    let rootIDs = Set(rootFolders.map { Array($0.id.utf8) })
     var cascade: [(target: NotesScript.CascadeTarget, label: String)] = []
     // Ids are unique by construction (`buildCascadeFolders` refuses a repeated id), so a folder
     // enters the cascade once even when several roots' chains prefix it.
@@ -591,4 +600,14 @@ func guardLiveFolderCascade(_ path: String, account: String?, script: NotesScrip
             try guardLiveWrite(labeledName: title, sandboxActive: sandboxActive, prefix: prefix)
         }
     }
+
+    let selectedID = try script.resolveFolderID(name: path, account: account)
+    guard rootIDs.contains(Array(selectedID.utf8)) else {
+        throw AppleError(type: AppleErrorType.validation,
+            message: "Sandbox is engaged: refusing to delete \"\(path)\" — Notes.app selected a folder "
+                   + "outside the verified deletion roots, so the cascade this erase would take "
+                   + "cannot be verified.",
+            exitCode: AppleExit.usage, sandbox: true)
+    }
+    return selectedID
 }
