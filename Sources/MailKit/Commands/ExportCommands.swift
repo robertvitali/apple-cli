@@ -219,6 +219,11 @@ struct ExportCommand: ParsableCommand {
             let reportedDir = names.first.flatMap { n -> String? in
                 n.contains("/") ? outDir.appendingPathComponent(String(n.split(separator: "/")[0])).path : nil
             } ?? outDir.path
+            // These are the composed write spellings. Inspect their final leaves without
+            // resolving away a link, on preview and execute before any export file is written.
+            for destination in planned {
+                try refuseRawFinalLeafSymlink(destination, action: "export a message to")
+            }
             // `--dry-run` was ADVERTISED in --help and silently ignored: the command mkdir -p'd
             // and wrote one file per message regardless. On a command that writes message bodies
             // to disk that is the worst kind of ignored parameter, so the preview now returns
@@ -246,6 +251,10 @@ struct ExportCommand: ParsableCommand {
                 guard realParent == realOut || realParent.hasPrefix(realOut + "/") else {
                     throw AppleError.mailSafety("export subdirectory '\(parent.path)' resolves outside '\(realOut)' — refusing to write through it.")
                 }
+                let content = (format == "html") ? MailExport.html(m) : MailExport.text(m)
+                // Recheck after parent validation and rendering, before no-clobber can classify
+                // a link as an ordinary collision. Safety refusals must escape the write catch.
+                try refuseRawFinalLeafSymlink(url.path, action: "export a message to")
                 // Oracle B OVERWRITES an existing file of the same name (`set eof of fileRef
                 // to 0`) — kept as the parity default; --no-clobber opts out fail-loud (M3).
                 // NOTE (review L6): under the oracle naming the single_email file carries no
@@ -255,7 +264,6 @@ struct ExportCommand: ParsableCommand {
                 if noClobber, FileManager.default.fileExists(atPath: url.path) {
                     throw AppleError.mailSafety("refusing to overwrite existing file '\(url.path)' (--no-clobber).")
                 }
-                let content = (format == "html") ? MailExport.html(m) : MailExport.text(m)
                 do {
                     try content.write(to: url, atomically: true, encoding: .utf8)
                     files.append(url.path)

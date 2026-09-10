@@ -51,6 +51,16 @@ JSON output are stable per the versioning policy — breaking changes bump
 
 ### Fixed
 
+- **Mail attachment previews check the destination selected by the original path spelling.**
+  Trailing `/.` forms now reject a selected final-leaf symlink before Mail access and avoid
+  refusing an unrelated leaf. Execute retains its captured-destination and parent checks;
+  output paths, error types, and `schema_version` are unchanged.
+
+- **Mail directory exports refuse symlinks at generated output filenames.** Both preview and
+  execution reject existing and dangling final-leaf links with `safety_violation` (exit 77).
+  Ordinary files retain the default overwrite behavior and the `--no-clobber` option; permitted
+  symlinked parent directories remain usable. Output fields and `schema_version` are unchanged.
+
 - **Timed-out AppleScript runs now clean up helpers in their owned process group.** A helper
   holding script output open no longer survives ordinary timeout cleanup just because the
   direct child exited first. Delivery and output-read failures use the same bounded cleanup,

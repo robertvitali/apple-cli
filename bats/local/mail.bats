@@ -2370,3 +2370,13 @@ assert d['recipients'] == ['me@self.test'], d"
 # missing_details. That attempt "fixed" the red by rewriting this test onto --no-open, hiding
 # the regression behind the flag; review caught it. Keep the bare form: it is what pins the
 # oracle-default path.
+
+# Uses host-index planning because the CLI has no fixture-index flag; all exports
+# are previews, with only synthetic links/targets in a private HOME scratch root.
+@test "mail export preview refuses existing and dangling composed-leaf symlinks" {
+  case "$-" in *x*) set +x ;; esac
+  require_index
+  run python3 "$HELPERS/mail_export_leaf_probe.py" "$BIN"
+  [ "$status" -ne 3 ] || skip "no messages in store"
+  [ "$status" -eq 0 ]
+}

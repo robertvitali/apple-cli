@@ -31,7 +31,7 @@ EXPECTED_FILES = {
     },
     "local": {
         "bats/local/contacts.bats": 4,
-        "bats/local/mail.bats": 112,
+        "bats/local/mail.bats": 113,
         "bats/local/mail-move-gmail.bats": 2,
         "bats/local/messages.bats": 15,
         "bats/local/notes.bats": 5,
@@ -138,10 +138,10 @@ class BatsInventoryTests(unittest.TestCase):
         manifest = checker.load_manifest(MANIFEST_PATH)
 
         self.assertEqual(manifest["schema_version"], 1)
-        self.assertEqual(manifest["test_count"], 451)
+        self.assertEqual(manifest["test_count"], 452)
         self.assertEqual(
             {tier: manifest["tiers"][tier]["test_count"] for tier in ("hosted", "local")},
-            {"hosted": 309, "local": 142},
+            {"hosted": 309, "local": 143},
         )
         self.assertEqual(
             {

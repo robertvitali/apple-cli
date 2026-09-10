@@ -914,10 +914,11 @@ struct AttachmentsSave: ParsableCommand {
                 Self.normalizeDestinationPath(try confineWriteDestination(
                     $0, action: "save attachments into", allowOutsideHome: allowOutsideHome).path)
             }
-            // Test the RAW operator path: confineWriteDestination resolves an existing symlink
-            // away, so checking only absOut would miss the planted-link case. The execute path
-            // repeats this immediately before composing the live save as a TOCTOU backstop.
-            let rawOut = out.map(Self.lexicalDestinationPath)
+            // Give the guard the same original spelling as confinement below. Removing terminal
+            // /. can switch Foundation from a lexical destination to an unrelated physical leaf
+            // through a symlinked parent and .., either missing or falsely refusing a leaf link.
+            // Keep this spelling for the late guard; absOut remains the captured save destination.
+            let rawOut = out
             if let rawOut {
                 try refuseFinalLeafSymlink(rawOut, action: "save an attachment to")
             }

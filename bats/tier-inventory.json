@@ -6,7 +6,7 @@
     "test_count": 0
   },
   "schema_version": 1,
-  "test_count": 451,
+  "test_count": 452,
   "tiers": {
     "hosted": {
       "files": [
@@ -401,7 +401,7 @@
           "test_count": 2
         },
         {
-          "file_sha256": "a440eed3ec318214d1517f1be4bd9c26125aaaa4b958e1a02b1597830c2dcd1d",
+          "file_sha256": "2a616ce02f151d66058b948d05ce2683d965098b0dcfb7b2c0e540c33d1e739d",
           "ordered_title_sha256": [
             "c174bac7b44c807824eb66bf31559996b7e78245ff4878420e4e80264d6eb41e",
             "fe2e7fdcbc5dd214c839964d9772d4edea28d688ce5053b2bd937fa2a7ce2ba4",
@@ -514,10 +514,11 @@
             "2ebc35bb0ae9d724932cc81fe74ecf23a983e8da2c9014b950c87bb56ff729be",
             "b6f6d92259eca389a5897e85bd7f429fbe99b811ca6de76477541f8bd77d6791",
             "0b1ae0090e6bfa2bced7d8af7435c64d36c700290c9d7606459dacc8f1108b88",
-            "d23a8b1725eb3e1ce60ab04d3dba085b28466941bf34c36fff579ca16cc4a14c"
+            "d23a8b1725eb3e1ce60ab04d3dba085b28466941bf34c36fff579ca16cc4a14c",
+            "e1deec6c6227a687b4bdb8f6464e222cc64b4bada9ffa6ee67a7373595896f29"
           ],
           "path": "bats/local/mail.bats",
-          "test_count": 112
+          "test_count": 113
         },
         {
           "file_sha256": "f7a70749f36f6f05f7dbc1c579d94e834819cb1bbe94664ebd0c806f0ee6eaa6",
@@ -572,7 +573,7 @@
           "test_count": 3
         }
       ],
-      "test_count": 142
+      "test_count": 143
     }
   }
 }

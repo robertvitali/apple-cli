@@ -840,6 +840,15 @@ readiness evidence. `macos-latest` is not used as a compatibility claim. A
 macOS 27 adoption cannot complete while only preview tooling exists; it
 requires a stable hosted image or a separately reviewed, hardened alternative.
 
+Before accepting macOS 27, first run the full path-confinement test file
+(`Tests/AppleKitTests/PathConfinementTests.swift`) on that stable environment,
+including `acceptsSymlinkedParentDotDotWhenFoundationSelectsTheLexicalLeaf`.
+That canary asserts which destination Foundation selects through a symlinked
+parent and `..`; the guard's `fileExists` branch predicate is measured macOS 26
+behavior, not a cross-version API guarantee. Record any changed destination or
+refusal behavior and review the guard before accepting the new major. Carry
+this check into the macOS 27 adoption checklist when that checklist is created.
+
 `main` remains the newest product line. Adopting macOS 27 while continuing to
 support macOS 26 does not automatically create `26.x`. A maintenance branch is
 created lazily only after real runtime or behavior divergence. Each active line
