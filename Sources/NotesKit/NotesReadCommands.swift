@@ -524,10 +524,16 @@ struct RecentCmd: ParsableCommand {
             let effective = limit ?? NotesLimits.defaultRecentLimit
             // Sort in Swift, not AppleScript: `notes whose …` cannot order, and cutting inside
             // the enumeration loop would drop by traversal order, not by recency.
-            let notes = Array(try scriptFactory().recentNotes(account: account, folder: folder)
-                .sorted(by: RecentCmd.newestFirst)
-                .prefix(effective)
-                .map(\.note))
+            let script = scriptFactory()
+            // Pass 1 ranks the whole scope from two cheap fields; pass 2 pays the five-field
+            // per-hit cost only for the survivors. See `NotesScript.RecentKey` for the numbers.
+            let ranked = try script.recentKeys(account: account, folder: folder)
+            let winners = Array(ranked.sorted(by: RecentCmd.newestFirst).prefix(effective))
+            // Pass 2 returns rows in whatever order Notes.app resolved them and may drop a note
+            // deleted between the passes, so the RANK decides the output order, not the fetch.
+            let rank = Dictionary(uniqueKeysWithValues: winners.enumerated().map { ($1.id, $0) })
+            let notes = try script.recentDetails(ids: winners.map(\.id), account: account)
+                .sorted { (rank[$0.id] ?? .max, $0.id) < (rank[$1.id] ?? .max, $1.id) }
             // ISO-8601, like the JSON encoder's dates: a locale-formatted stamp would render
             // differently per machine for the same note.
             let stamp = ISO8601DateFormatter()
@@ -549,13 +555,16 @@ struct RecentCmd: ParsableCommand {
     /// create loop). Without a tie-break, which of two equally-modified notes survives `--limit`
     /// would be arbitrary and could differ between runs and toolchains.
     ///
-    /// Notes whose modification date Notes.app could not report rank LAST regardless of the date
-    /// carried: that date is `parseDate`'s now-fallback, and ranking a hole as "just modified"
-    /// would put it above every real note. See `NotesScript.RecentHit`.
-    static func newestFirst(_ a: NotesScript.RecentHit, _ b: NotesScript.RecentHit) -> Bool {
-        if a.modifiedReadable != b.modifiedReadable { return a.modifiedReadable }
-        if a.note.modified != b.note.modified { return a.note.modified > b.note.modified }
-        return a.note.id < b.note.id
+    /// A note whose modification date Notes.app could not report ranks LAST: there is no date to
+    /// rank it by, and `parseDate`'s now-fallback would put a hole above every real note. See
+    /// `NotesScript.RecentKey`.
+    static func newestFirst(_ a: NotesScript.RecentKey, _ b: NotesScript.RecentKey) -> Bool {
+        switch (a.modified, b.modified) {
+        case let (x?, y?) where x != y: return x > y
+        case (nil, .some): return false
+        case (.some, nil): return true
+        default: return a.id < b.id
+        }
     }
 }
 

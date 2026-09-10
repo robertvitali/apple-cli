@@ -46,11 +46,12 @@ JSON output are stable per the versioning policy — breaking changes bump
   been enumerated rather than by stopping early, so the newest note is never the one dropped, and
   a `count` below `applied_limit` means the scope was exhausted; notes sharing a modification
   date are ordered by id so repeated runs agree, and a note whose modification date Notes.app
-  cannot report is ranked last rather than treated as just-modified. The cost tracks the size of
-  the scope rather than `--limit` — measured 20.6s over a roughly 210-note scope, against the
-  45-second timeout every Notes command shares — so on a large library `--folder` or `--account`
-  is what keeps it inside that budget. `schema_version` is unchanged at 1: this adds a command and
-  removes, renames, and retypes nothing.
+  cannot report is ranked last rather than treated as just-modified. The cost tracks `--limit`
+  rather than the size of the library — the whole scope is ranked from one bulk read of every
+  note's id and modification date, and only the notes that survive the cut are read in full;
+  measured on a roughly 210-note account, 1.1s at `--limit 5`, 1.7s at the default 10, and 6.4s
+  at `--limit 50`, against the 45-second timeout every Notes command shares. `schema_version` is
+  unchanged at 1: this adds a command and removes, renames, and retypes nothing.
   Manual: [`apple notes recent`](https://github.com/robertvitali/apple-cli/blob/main/docs/manual/notes/recent.md).
 - **`messages recent` and `messages search` now report attachment metadata.** Each
   message gains an `attachments` array — per file: `rowid`, `guid`, `filename` (verbatim, as

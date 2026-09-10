@@ -257,16 +257,22 @@ struct NotesScript {
 
     /// Parse an AppleScript numeric date string `y-mo-d-h-mi-s` (from `asDatePartsExpr`). Falls
     /// back to `Date()` on a malformed value (matches the reference's tolerant parser).
-    static func parseDate(_ raw: String) -> Date {
+    /// The FALLIBLE half of `parseDate`: nil means Notes.app did not give us a usable date —
+    /// either the script's `on error` branch emitted `""`, or the value is present but does not
+    /// parse. Both are the same fact to a caller that ORDERS by the date, and they must be told
+    /// apart from a real one; `parseDate` below is this plus the oracle's now-fallback.
+    static func parseDateIfReadable(_ raw: String) -> Date? {
         let s = raw.trimmingCharacters(in: .whitespaces)
         let parts = s.split(separator: "-").map { Int($0) }
-        if parts.count == 6, parts.allSatisfy({ $0 != nil }) {
-            var c = DateComponents()
-            c.year = parts[0]; c.month = parts[1]; c.day = parts[2]
-            c.hour = parts[3]; c.minute = parts[4]; c.second = parts[5]
-            if let d = Self.gregorian.date(from: c) { return d }
-        }
-        return Date()
+        guard parts.count == 6, parts.allSatisfy({ $0 != nil }) else { return nil }
+        var c = DateComponents()
+        c.year = parts[0]; c.month = parts[1]; c.day = parts[2]
+        c.hour = parts[3]; c.minute = parts[4]; c.second = parts[5]
+        return Self.gregorian.date(from: c)
+    }
+
+    static func parseDate(_ raw: String) -> Date {
+        parseDateIfReadable(raw) ?? Date()
     }
 
     /// AppleScript dates are ALWAYS Gregorian (as is the oracle's JS `Date`), so both directions
@@ -424,7 +430,7 @@ struct NotesScript {
             args.append(contentsOf: fargs)
         }
         let limitCheck = (limit.map { "\n          if (count of resultList) >= \($0) then exit repeat" }) ?? ""
-        let body = Self.searchBody(dateSetup: dateSetup, notesSource: notesSource,
+        let body = Self.searchBody(preamble: dateSetup, notesSource: notesSource,
                                    whereClause: whereParts.joined(separator: " and "),
                                    limitCheck: limitCheck)
         // Index computed on its own line: Swift evaluates the `args:` argument BEFORE the
@@ -446,11 +452,15 @@ struct NotesScript {
     /// fixed `item N of argv` where-clauses). User text must NEVER be passed in any of them;
     /// it reaches the script only as osascript argv (see the type-level SECURITY note above).
     ///
-    /// `whereClause: nil` enumerates `notesSource` WHOLE — the shape `recentNotes` needs, since
-    /// "most recently modified" is a ranking over every note in scope, not a filter. It is a
-    /// parameter rather than a second body because the per-hit reads are the load-bearing part:
-    /// the two-step container binding below and the numeric date reads are exactly what a
-    /// hand-rolled `every note` traversal gets wrong (see `recentNotes`).
+    /// `whereClause: nil` enumerates `notesSource` WHOLE — the shape `recentDetails` needs,
+    /// since it has already chosen its notes and only wants their fields. It is a parameter
+    /// rather than a second body because the per-hit reads are the load-bearing part: the
+    /// two-step container binding below and the numeric date reads are exactly what a
+    /// hand-rolled traversal gets wrong (see `recentDetails`).
+    ///
+    /// `preamble` is any statements that must run BEFORE the source expression is evaluated —
+    /// `searchNotes`'s `--modified-since` date variable, or `recentDetails`'s id-resolution
+    /// loop. Same trust contract as the rest: model-derived fragments only.
     ///
     /// Container binding is TWO-STEP, and load-bearing: the chained
     /// `set noteFolder to name of container of n` ALWAYS errors at runtime ("Can't make name of
@@ -463,11 +473,11 @@ struct NotesScript {
     /// The per-note `created`/`modified` reads mirror the oracle's search loop exactly (three
     /// independent try-blocks, `""` on a failed date read): the oracle returns the note's REAL
     /// dates on every search hit, so a 3-field row would drop two fields the MCP emits.
-    static func searchBody(dateSetup: String, notesSource: String,
+    static func searchBody(preamble: String, notesSource: String,
                            whereClause: String?, limitCheck: String) -> String {
         let matchSource = whereClause.map { "\(notesSource) where \($0)" } ?? notesSource
         return """
-        \(dateSetup)set matchingNotes to \(matchSource)
+        \(preamble)set matchingNotes to \(matchSource)
         set resultList to {}
         set seenIds to {}
         repeat with n in matchingNotes
@@ -528,69 +538,128 @@ struct NotesScript {
         return result
     }
 
-    /// One `recent` hit, plus whether Notes.app actually REPORTED its modification date.
+    // MARK: - Notes: recent (two-pass)
+
+    /// One note's modification date, and nothing else — what pass 1 of `recent` reads.
     ///
-    /// `parseDate` maps an unreadable date (the script's `on error set modifiedParts to ""`
-    /// branch) to `Date()` — the oracle's own now-fallback, and harmless on `search`, where
-    /// nothing orders by it. On `recent` it is the ranking key, and "now" is the newest value
-    /// there is: an unreadable note would take the top of the list and could fill the whole
-    /// default window, hiding the genuinely newest notes. So the flag travels with the hit and
-    /// `recent` ranks the unreadable ones LAST.
-    struct RecentHit {
-        let note: NoteSummary
-        let modifiedReadable: Bool
+    /// `recent` runs in TWO passes, and the split is what makes it affordable. Ranking by
+    /// modification date needs every note in scope, but the RANKING only needs two fields. The
+    /// first cut of this command read all five per-hit fields over the whole scope and cost
+    /// **20.6s at ~210 notes** against `timeoutSeconds` 45 — and since a timeout is retried
+    /// (`maxReadAttempts` 2), a library roughly twice that size would have hung ~91s and then
+    /// failed, on the bare default invocation, with `--limit` bounding none of it.
+    ///
+    /// So pass 1 (`recentKeys`) reads `id of every note` and `modification date of every note` —
+    /// **two Apple events for the whole scope, whatever its size** — and the loop that renders
+    /// the dates walks two in-process AppleScript lists, costing no further events. Pass 2
+    /// (`recentDetails`) does the expensive five-field per-hit reads only for the N notes that
+    /// survived the cut. Measured on the same library: **0.24s + 1.29s**.
+    ///
+    /// `modified` is nil when Notes.app gave us no usable value — the script's `on error`
+    /// branch, or a value that does not parse. That distinction is load-bearing here in a way it
+    /// never is on `search`: `parseDate`'s now-fallback would make an unreadable note the NEWEST
+    /// thing in the library and let it fill the whole default window, so `recent` ranks these
+    /// last instead.
+    struct RecentKey {
+        let id: String
+        let modified: Date?
     }
 
-    /// The ids whose modification-date field came back EMPTY, i.e. the rows whose `modified`
-    /// value in `parseSummaries` is the now-fallback rather than a real date.
-    static func unreadableModifiedIds(_ out: String) -> Set<String> {
-        var ids: Set<String> = []
+    /// The pass-1 script body: two bulk property reads, then an in-process render.
+    ///
+    /// The count check is not defensive padding. The two lists are matched up BY POSITION, so if
+    /// Notes.app ever returned them at different lengths every date would be attributed to the
+    /// wrong note — silently, and plausibly. Failing is the only safe answer.
+    ///
+    /// TRUST CONTRACT, as on `searchBody`: `notesSource` is a MODEL-DERIVED fragment (a fixed
+    /// literal, or `folderRefExpr`'s argv references). User text must never be passed in it.
+    static func recentKeysBody(notesSource: String) -> String {
+        """
+        set noteIds to id of every \(notesSource)
+        set noteMods to modification date of every \(notesSource)
+        set n to count of noteIds
+        if (count of noteMods) is not n then error "apple-cli: Notes.app returned mismatched id and date lists"
+        set resultList to {}
+        repeat with i from 1 to n
+          try
+            set md to item i of noteMods
+            set modifiedParts to \(Self.dateParts("md"))
+          on error
+            set modifiedParts to ""
+          end try
+          set end of resultList to (item i of noteIds) & \(Self.asUS) & modifiedParts
+        end repeat
+        set AppleScript's text item delimiters to \(Self.asRS)
+        return resultList as text
+        """
+    }
+
+    /// Parse pass-1's two-field rows — field 0 the id, field 1 the numeric date parts. The
+    /// readability of the date is decided by the same fallible parse everywhere: a value that is
+    /// present but unparseable is as unusable for ranking as an empty one.
+    static func parseRecentKeys(_ out: String) -> [RecentKey] {
+        var seen = Set<String>()
+        var keys: [RecentKey] = []
         for row in splitRows(out) {
             let f = splitFields(row)
-            guard f.count > 1 else { continue }
-            let modified = f.count > 4 ? f[4].trimmingCharacters(in: .whitespaces) : ""
-            if modified.isEmpty { ids.insert(f[1].trimmingCharacters(in: .whitespaces)) }
+            guard let id = f.first?.trimmingCharacters(in: .whitespaces), !id.isEmpty else { continue }
+            if seen.contains(id) { continue }
+            seen.insert(id)
+            keys.append(RecentKey(id: id, modified: parseDateIfReadable(f.count > 1 ? f[1] : "")))
         }
-        return ids
+        return keys
     }
 
-    /// Every note in scope, carrying the SAME per-hit fields a search hit does — for `recent`,
-    /// which ranks by modification date and therefore has to see all of them before it can cut.
-    ///
-    /// No `limitCheck` is emitted on purpose: an `exit repeat` here would cut in Notes.app's own
-    /// enumeration order, which is NOT modification order, so the newest note could be the one
-    /// dropped. `recent` sorts and truncates in Swift instead.
-    ///
-    /// This reuses `searchBody` rather than writing a fresh `every note` traversal, and that is
-    /// the whole point: reading a note's folder as `name of container of nt` off a bare
-    /// traversal raises `-1728`, and the two-step container binding (plus the `"Notes"`
-    /// on-error fallback) inside `searchBody` is the mechanism that already survives it. The
-    /// dates come back in the same numeric `y-mo-d-h-mi-s` parts `parseSummaries` expects, so
-    /// no locale-dependent date string is ever parsed.
-    func recentNotes(account: String?, folder: String?) throws -> [RecentHit] {
+    /// PASS 1 — every note in scope as (id, modification date), in two Apple events.
+    func recentKeys(account: String?, folder: String?) throws -> [RecentKey] {
         var args: [String] = []
-        var notesSource = "notes"
+        var notesSource = "note"
         if let folder, !folder.isEmpty {
             // `splitFolderPath` drops empty components, so a path of nothing but separators
             // ("///") yields NO components and `folderRefExpr` would return an empty expression —
-            // emitting the literal `notes of `, which fails to compile and surfaces as
-            // "Internal error. Please report this issue." for what is plain bad input.
+            // emitting a dangling `of`, which fails to compile and would surface as "Internal
+            // error. Please report this issue." for what is plain bad input.
             try requireNonEmptyFolderName(folder)
             let comps = Self.splitFolderPath(folder)
             let (expr, fargs) = Self.folderRefExpr(comps, startIndex: args.count + 1)
-            notesSource = "notes of \(expr)"
+            notesSource = "note of \(expr)"
             args.append(contentsOf: fargs)
         }
-        let body = Self.searchBody(dateSetup: "", notesSource: notesSource,
-                                   whereClause: nil, limitCheck: "")
         // Index computed on its own line — same inout-evaluation-order reason as `searchNotes`.
         let acctIndex = accountArgIndex(&args, account)
-        let resolvedAccount = args[acctIndex - 1] // the account we just appended (1-based index)
-        let out = try run(body, args: args, tellAccount: acctIndex)
-        let unreadable = Self.unreadableModifiedIds(out)
-        return Self.parseSummaries(out, account: resolvedAccount).map {
-            RecentHit(note: $0, modifiedReadable: !unreadable.contains($0.id))
-        }
+        let out = try run(Self.recentKeysBody(notesSource: notesSource), args: args,
+                          tellAccount: acctIndex)
+        return Self.parseRecentKeys(out)
+    }
+
+    /// PASS 2 — the full search-shaped hit for the notes that survived the cut.
+    ///
+    /// This reuses `searchBody` rather than writing a fresh traversal, and that is the whole
+    /// point: reading a note's folder as `name of container of nt` off a bare traversal raises
+    /// `-1728`, and the two-step container binding (plus the `"Notes"` on-error fallback) inside
+    /// `searchBody` is the mechanism that already survives it. The dates come back in the same
+    /// numeric `y-mo-d-h-mi-s` parts `parseSummaries` expects, so no locale-dependent date string
+    /// is ever parsed.
+    ///
+    /// The preamble resolves each id inside its own `try`, so a note deleted between the two
+    /// passes drops out instead of taking the whole fetch down — which a list literal of
+    /// `note id …` would do. Addressed at APPLICATION scope, like `getNoteById`: the ids already
+    /// carry their account, and `container of n` resolves there (measured).
+    func recentDetails(ids: [String], account: String?) throws -> [NoteSummary] {
+        guard !ids.isEmpty else { return [] }
+        let preamble = """
+        set resolvedNotes to {}
+        repeat with k from 1 to \(ids.count)
+          try
+            set end of resolvedNotes to note id (item k of argv)
+          end try
+        end repeat
+
+        """
+        let body = Self.searchBody(preamble: preamble, notesSource: "resolvedNotes",
+                                   whereClause: nil, limitCheck: "")
+        let out = try runApp(body, args: ids)
+        return Self.parseSummaries(out, account: resolveAccount(account))
     }
 
     func listNotes(account: String?, folder: String?, modifiedSince: Date?, limit: Int?) throws -> [String] {

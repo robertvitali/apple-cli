@@ -249,29 +249,46 @@ The MCP emits camelCase keys; apple-cli emits snake_case per `docs/DESIGN.md` ("
   placeholders — so a consumer of a search hit reads a recent hit unchanged; the envelope adds
   `count`, `applied_limit`, and the `sync_warning` the other enumerating reads carry.
   `limit_reached` / `limit_was_default` are deliberately ABSENT — and the reason is NOT that the
-  fact is unknowable. `recent` enumerates the whole scope, so it knows exactly whether it cut;
-  the fields are omitted to keep the hit-and-envelope shape a caller already handles, and
+  fact is unknowable. `recent` ranks the whole scope, so it knows exactly whether it cut; the
+  fields are omitted to keep the hit-and-envelope shape a caller already handles, and
   `count < applied_limit` proves the scope was exhausted (only `count == applied_limit` leaves
-  the question open). **Cost, measured 2026-09-09 on the reference library: 20.6s over a
-  ~210-note scope**, against `NotesScript.timeoutSeconds = 45` — five property reads per note,
-  and `--limit` bounds none of them by design (see below). So a scope roughly twice that size
-  reaches the cap, and because the read-retry wrapper treats a timeout as transient
-  (`maxReadAttempts = 2`), the caller waits ~2×45s plus backoff before an `upstream`/69. Scoping
-  with `--folder` / `--account` is the caller's control; a cheaper two-pass script (id +
-  modification date first, full reads for the surviving N) is the obvious next move if that
-  proves insufficient and has NOT been done. Two more mechanism notes, both load-bearing: the AppleScript
-  reuses `searchBody` with no `where` clause — reading a hit's folder as `name of container of nt`
-  off a bare `every note` traversal raises `-1728`, and that body's two-step container binding is
-  the mechanism that survives it — and the ranking happens in **Swift**, because an `exit repeat`
-  cut inside the enumeration would drop by traversal order rather than by recency. Dates come back
-  in the same numeric `y-mo-d-h-mi-s` parts the search loop emits, so no locale-dependent date
-  string is ever parsed. The ranking is a TOTAL order — `modified` descending, then `id`
-  ascending, because `sorted` is not stable and Notes dates are second-granular, so ties are
-  ordinary — and a note whose modification date Notes.app could not report ranks LAST rather
-  than where `parseDate`'s now-fallback would put it (first, and potentially filling the whole
-  default window). `--limit` is `exclusiveMinimum: 0`, matching search and list; a `--folder`
-  path with no components after `splitFolderPath` (`"///"`) is refused as `validation_error`
-  rather than emitting the un-compilable `notes of ` that `search`/`list` still emit.
+  the question open).
+- **`notes recent` runs in TWO passes, and the split is the whole cost story.** Ranking needs
+  every note in scope; the RANKING needs only two fields. **Pass 1** reads
+  `id of every note` + `modification date of every note` — **two Apple events for the scope,
+  whatever its size** — and renders the dates by walking two in-process AppleScript lists, so it
+  costs no further events. Swift then sorts and cuts, and **pass 2** pays the five-field per-hit
+  reads for the N survivors only, addressing them by id at application scope.
+  Measured on the same reference library (~210 notes), 2026-09-09:
+
+  | invocation | one pass (first cut) | two passes (shipped) |
+  |---|---|---|
+  | `--limit 5` | 20.6s | 1.09s |
+  | `--limit 10` (default) | 20.6s | 1.69s |
+  | `--limit 50` | 20.6s | 6.38s |
+
+  The one-pass cost was flat because it read everything regardless of `--limit`; against
+  `NotesScript.timeoutSeconds = 45` — and a timeout is retried (`maxReadAttempts = 2`) — a library
+  roughly twice this size would have hung ~91s and then failed on the bare default invocation.
+  Cost now tracks `--limit`, and the scope contributes two events. Pass 1's two lists are matched
+  BY POSITION, so a length mismatch is a hard error rather than a silent mis-attribution of every
+  date; pass 2 resolves each id inside its own `try`, so a note deleted between the passes drops
+  out instead of taking the fetch down, and the Swift-side RANK (not the fetch order) decides the
+  output order.
+- **`notes recent` ranking details.** The sort is a TOTAL order — `modified` descending, then
+  `id` ascending, because `sorted` is not stable and Notes dates are second-granular, so ties are
+  ordinary. A note whose modification date Notes.app could not report — an empty value from the
+  script's `on error` branch, OR a value that is present but does not parse, decided by one
+  fallible parse (`parseDateIfReadable`) — ranks LAST rather than where `parseDate`'s now-fallback
+  would put it (first, and potentially filling the whole default window). The cut happens in
+  Swift and never as an `exit repeat`, which would drop by traversal order rather than by
+  recency. Pass 2 reuses `searchBody` rather than a hand-rolled traversal: reading a hit's folder
+  as `name of container of nt` off a bare traversal raises `-1728`, and that body's two-step
+  container binding is the mechanism that already survives it. Dates cross in the same numeric
+  `y-mo-d-h-mi-s` parts the search loop emits, so no locale-dependent date string is ever parsed.
+  `--limit` is `exclusiveMinimum: 0`, matching search and list; a `--folder` path with no
+  components after `splitFolderPath` (`"///"`) is refused as `validation_error` rather than
+  emitting the un-compilable dangling `of` that `search`/`list` still emit.
 - **`get-checklist` / `get-metadata` are SQLite-only** — they do NOT require the MCP's AppleScript existence-guard, so they resolve notes AppleScript can't (trashed, or when Notes.app automation is slow/unavailable). Verified live: the MCP oracle failed `get-checklist-state` on a real note whose checklist apple-cli read correctly.
 - **`sync_warning`** — a structured field on `search`/`list`/`folders` (the MCP's `withSyncAwareness` warning was text-only).
 - **Write model (v2 — behaves like the MCP; see `docs/write-model-v2.md`)**: every write

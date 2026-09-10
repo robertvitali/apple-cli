@@ -10,9 +10,76 @@ import Foundation
 struct ScriptGenTests {
 
     private func makeBody() -> String {
-        NotesScript.searchBody(dateSetup: "", notesSource: "notes",
+        NotesScript.searchBody(preamble: "", notesSource: "notes",
                                whereClause: "name contains (item 1 of argv)",
                                limitCheck: "")
+    }
+
+    // MARK: golden — the WHOLE script searchNotes hands osascript
+
+    /// Every other assertion in this file is `contains`-based, which is the right shape for a
+    /// single regression but cannot see a change it was not written to look for: `searchBody`
+    /// gained a `preamble` parameter and made `whereClause` optional while every one of them
+    /// stayed green. This pins the complete text, wrapper included, so ANY change to the emitted
+    /// script — a new parameter that reorders a line, a lost `tell account`, a changed timeout —
+    /// fails loudly and has to be re-approved here rather than shipping unnoticed.
+    ///
+    /// Update it only after confirming the new text is what you meant to emit.
+    @Test("the full search script is byte-for-byte what it was")
+    func searchScriptGolden() throws {
+        let runner = FakeNotesRunner(results: [""])
+        _ = try NotesScript(runner: runner, store: StubNotesStore.quiet())
+            .searchNotes(query: "milk", searchContent: false, account: "iCloud",
+                         folder: nil, modifiedSince: nil, limit: 50)
+        let us = NotesScript.asUS
+        let rs = NotesScript.asRS
+        let expected = """
+        on run argv
+          with timeout of 45 seconds
+            tell application "Notes"
+              tell account (item 2 of argv)
+        set matchingNotes to notes where name contains (item 1 of argv)
+        set resultList to {}
+        set seenIds to {}
+        repeat with n in matchingNotes
+          try
+            set noteName to name of n
+            set noteId to id of n
+            if seenIds does not contain noteId then
+              set end of seenIds to noteId
+              try
+                set noteCreated to creation date of n
+                set createdParts to ((year of noteCreated) as text) & "-" & ((month of noteCreated) as integer as text) & "-" & ((day of noteCreated) as text) & "-" & ((hours of noteCreated) as text) & "-" & ((minutes of noteCreated) as text) & "-" & ((seconds of noteCreated) as text)
+              on error
+                set createdParts to ""
+              end try
+              try
+                set noteModified to modification date of n
+                set modifiedParts to ((year of noteModified) as text) & "-" & ((month of noteModified) as integer as text) & "-" & ((day of noteModified) as text) & "-" & ((hours of noteModified) as text) & "-" & ((minutes of noteModified) as text) & "-" & ((seconds of noteModified) as text)
+              on error
+                set modifiedParts to ""
+              end try
+              try
+                set noteContainer to container of n
+                set noteFolder to name of noteContainer
+              on error
+                set noteFolder to "Notes"
+              end try
+              set end of resultList to noteName & \(us) & noteId & \(us) & noteFolder & \(us) & createdParts & \(us) & modifiedParts
+                  if (count of resultList) >= 50 then exit repeat
+            end if
+          end try
+        end repeat
+        set AppleScript's text item delimiters to \(rs)
+        return resultList as text
+              end tell
+        end tell
+          end timeout
+        end run
+        """
+        #expect(try #require(runner.scripts.first) == expected)
+        // The user's query is the control on the golden itself: it must be argv, not source.
+        #expect(runner.arguments == [["milk", "iCloud"]])
     }
 
     // MARK: emitted limit guard (NOTES-M7/L2)
@@ -25,7 +92,7 @@ struct ScriptGenTests {
     @Test("the emitted limit guard appears after the append and reads >= N")
     func emittedLimitGuard() {
         for n in [1, 50] {
-            let body = NotesScript.searchBody(dateSetup: "", notesSource: "notes",
+            let body = NotesScript.searchBody(preamble: "", notesSource: "notes",
                                               whereClause: "name contains (item 1 of argv)",
                                               limitCheck: "\n          if (count of resultList) >= \(n) then exit repeat")
             #expect(body.contains("if (count of resultList) >= \(n) then exit repeat"))
