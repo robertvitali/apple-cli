@@ -13,6 +13,7 @@ from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
+from capability_runtime_metadata_fixtures import descriptors
 from test_capability_process_lifecycle import Clock, LifecycleFixture, core, identity
 
 
@@ -63,9 +64,10 @@ class AdmissionFixture(LifecycleFixture):
 
     def profile_row(self):
         record = vars(self.selected).copy()
+        platform, runtime = descriptors()
         return {"id": "synthetic-profile", "status": "qualified",
-                "platform": {"qualification_fixture": True},
-                "runtime": {"qualification_fixture": True},
+                "platform": platform,
+                "runtime": runtime,
                 "projection": {"qualification_fixture": True},
                 "compiler_arguments": ["synthetic-never-executed"],
                 "executables": {name: dict(record) for name in ("git", "swift", "compiler", "linker")}}
@@ -271,13 +273,14 @@ class ClosedPackageTests(AdmissionFixture):
 class ProfileMetadataTests(AdmissionFixture):
     def test_nested_profile_metadata_is_deeply_immutable(self):
         row = self.profile_row()
-        row["runtime"]["nested"] = [{"value": 1}]
         package = self.install_profiles([row])
         selected = self.succeed(lambda: core._select_profile(
             package, "synthetic-profile", deadline=68.0, clock=self.clock))
         with self.assertRaises(TypeError):
-            selected.runtime["nested"][0]["value"] = 2
-        self.assertIs(type(selected.runtime["nested"]), tuple)
+            selected.runtime["modules"][0]["registry_name"] = "changed"
+        self.assertIs(type(selected.runtime["modules"]), tuple)
+        with self.assertRaises(TypeError):
+            selected.platform["apple_base"]["images"][0]["uuid"] = "0" * 32
 
     def test_selected_tool_identities_are_immutable_metadata_not_runtime_authority(self):
         package = self.install_profiles([self.profile_row()])
@@ -289,10 +292,66 @@ class ProfileMetadataTests(AdmissionFixture):
         with self.assertRaises(TypeError):
             selected.executables["git"] = self.selected
         with self.assertRaises(TypeError):
-            selected.runtime["qualification_fixture"] = False
+            selected.runtime["schema_version"] = 2
         with self.assertRaises(core.ProcessFailure):
             core._qualify_runtime(selected, deadline=68.0, clock=self.clock)
         self.popen.assert_not_called()
+
+    def test_selected_profile_refuses_opaque_or_incomplete_runtime_and_platform(self):
+        for domain in ("platform", "runtime"):
+            for malformed in ("opaque", "incomplete"):
+                with self.subTest(domain=domain, malformed=malformed):
+                    row = self.profile_row()
+                    if malformed == "opaque":
+                        row[domain] = {"qualification_fixture": True}
+                    else:
+                        del row[domain]["schema_version"]
+                    package = self.install_profiles([row])
+                    with self.assertRaises(core.ProcessFailure):
+                        core._select_profile(package, "synthetic-profile",
+                                             deadline=68.0, clock=self.clock)
+        self.popen.assert_not_called()
+        self.signal.assert_not_called()
+
+    def test_selected_profile_enforces_cross_record_runtime_consistency(self):
+        for mismatch in ("architecture", "popen-source", "absent-ancestor", "entry-alias"):
+            with self.subTest(mismatch=mismatch):
+                row = self.profile_row()
+                runtime = row["runtime"]
+                if mismatch == "architecture":
+                    runtime["images"]["main"]["architecture"] = "x86_64"
+                elif mismatch == "popen-source":
+                    runtime["popen"]["source"] = "subprocess-cache"
+                elif mismatch == "absent-ancestor":
+                    runtime["absent_inputs"] = ["/synthetic/runtime"]
+                else:
+                    runtime["modules"][0]["aliases"] = ["__main__"]
+                package = self.install_profiles([row])
+                with self.assertRaises(core.ProcessFailure):
+                    core._select_profile(package, "synthetic-profile",
+                                         deadline=68.0, clock=self.clock)
+        self.popen.assert_not_called()
+        self.signal.assert_not_called()
+
+    def test_malformed_selected_metadata_is_refused_before_immutable_expansion(self):
+        row = self.profile_row()
+        row["runtime"] = {"unrecognized_runtime": True}
+        package = self.install_profiles([row])
+        original = core._freeze_data
+        malformed_expansions = []
+
+        def freeze(value):
+            if type(value) is dict and value == {"unrecognized_runtime": True}:
+                malformed_expansions.append(True)
+            return original(value)
+
+        with mock.patch.object(core, "_freeze_data", side_effect=freeze):
+            with self.subTest(check="refusal"):
+                with self.assertRaises(core.ProcessFailure):
+                    core._select_profile(package, "synthetic-profile",
+                                         deadline=68.0, clock=self.clock)
+            with self.subTest(check="before-expansion"):
+                self.assertEqual(malformed_expansions, [])
 
     def test_inactive_and_missing_profile_refuse(self):
         row = self.profile_row()

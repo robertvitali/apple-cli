@@ -526,8 +526,10 @@ def _select_profile(package, profile_id, *, deadline, clock):
         except (TypeError, ValueError, ProcessFailure):
             raise _unavailable() from None
         if row["id"] == profile_id and row["status"] == "qualified":
-            selected = _SelectedProfile(profile_id, _freeze_data(row["platform"]),
-                _freeze_data(row["runtime"]), _freeze_data(row["projection"]),
+            metadata = _admit_runtime_metadata(row["platform"], row["runtime"],
+                                               deadline=deadline, clock=clock)
+            selected = _SelectedProfile(profile_id, metadata.platform,
+                metadata.runtime, _freeze_data(row["projection"]),
                 tuple(row["compiler_arguments"]), MappingProxyType({
                     "git": tools["git"], "swift-test": tools["swift"],
                     "swift-build": tools["swift"], "swift-bin-path": tools["swift"]}),
@@ -545,6 +547,296 @@ def _freeze_data(value):
     if type(value) is list:
         return tuple(_freeze_data(item) for item in value)
     return value
+
+
+@dataclass(frozen=True)
+class _RuntimeMetadata:
+    """Detached descriptors only; these contain no captured runtime authority."""
+    platform: object
+    runtime: object
+
+
+def _bound_runtime_metadata(value, checkpoint):
+    """Apply the profile JSON ceilings before copying or expanding descriptors."""
+    size = items = 0
+    ancestors = set()
+
+    def charge(amount):
+        nonlocal size
+        size += amount
+        if size > 1024 * 1024:
+            raise _unavailable()
+
+    def visit(item, depth):
+        nonlocal items
+        checkpoint()
+        items += 1
+        if items > 32768:
+            raise _unavailable()
+        kind = type(item)
+        if kind in (dict, list):
+            if depth >= 16 or len(item) > 32768 or id(item) in ancestors:
+                raise _unavailable()
+            ancestors.add(id(item))
+            charge(2 + max(0, len(item) - 1))
+            if kind is dict:
+                for key, child in item.items():
+                    if type(key) is not str:
+                        raise _unavailable()
+                    visit(key, depth + 1)
+                    charge(1)
+                    visit(child, depth + 1)
+            else:
+                for child in item:
+                    visit(child, depth + 1)
+            ancestors.remove(id(item))
+        elif kind is str:
+            # Count compact UTF-8 JSON without first allocating its escaped form.
+            if len(item) > 1024 * 1024 - size:
+                raise _unavailable()
+            charge(2)
+            for index, character in enumerate(item):
+                if index % 256 == 0:
+                    checkpoint()
+                code = ord(character)
+                if 0xD800 <= code <= 0xDFFF:
+                    raise _unavailable()
+                charge(2 if character in '\\"\b\f\n\r\t' else
+                       6 if code < 32 else 1 if code < 128 else
+                       2 if code < 2048 else 3 if code < 65536 else 4)
+        elif item is None:
+            charge(4)
+        elif kind is bool:
+            charge(4 if item else 5)
+        elif kind is int:
+            if not -(10**20) < item < 10**20:
+                raise _unavailable()
+            charge(len(str(item)))
+        elif kind is float and math.isfinite(item):
+            charge(len(repr(item)))
+        else:
+            raise _unavailable()
+
+    visit(value, 0)
+    checkpoint()
+
+
+def _admit_runtime_metadata(platform, runtime, *, deadline, clock):
+    """Validate finite metadata without imports, file reads, reset or loading.
+
+    Existing-loader source/cache selection and image/body observations still need
+    actual-process qualification. A well-formed row cannot activate a profile.
+    """
+    checkpoint = _bounded_clock(clock, deadline)
+    checkpoint()
+    _bound_runtime_metadata({"platform": platform, "runtime": runtime}, checkpoint)
+
+    def need(condition):
+        if not condition:
+            raise _unavailable()
+
+    def record(value, fields):
+        need(type(value) is dict and set(value) == set(fields.split()))
+
+    def integer(value, minimum=0, maximum=2**64 - 1):
+        need(type(value) is int and minimum <= value <= maximum)
+
+    def text(value):
+        need(type(value) is str and bool(value) and "\x00" not in value)
+
+    def pattern(value, expression):
+        text(value)
+        need(re.fullmatch(expression, value) is not None)
+
+    def path(value):
+        text(value)
+        need(value.startswith("/") and (value == "/" or all(
+            part not in ("", ".", "..") for part in value[1:].split("/"))))
+
+    def unique(values):
+        need(type(values) is list and all(type(value) is str for value in values))
+        need(len(values) == len(set(values)))
+
+    def uuid(value):
+        pattern(value, r"[0-9a-f]{32}")
+
+    def module_name(value):
+        pattern(value, r"[A-Za-z_][A-Za-z_0-9]*(?:\.[A-Za-z_][A-Za-z_0-9]*)*")
+
+    record(platform, "schema_version system architecture product_version build_version apple_base")
+    integer(platform["schema_version"], 1, 1)
+    need(platform["system"] == "Darwin" and platform["architecture"] == "arm64")
+    pattern(platform["product_version"], r"[0-9]+(?:\.[0-9]+){1,2}")
+    pattern(platform["build_version"], r"[0-9]+[A-Z][0-9]+[a-z]?")
+    base = platform["apple_base"]
+    record(base, "assumption cache_uuid images")
+    need(base["assumption"] == "selected-apple-system")
+    uuid(base["cache_uuid"])
+    need(type(base["images"]) is list and bool(base["images"]))
+    system_names = set()
+    for image in base["images"]:
+        record(image, "install_name uuid file_type")
+        path(image["install_name"])
+        need(image["install_name"].startswith(("/usr/lib/", "/System/Library/")))
+        need(image["install_name"] not in system_names)
+        system_names.add(image["install_name"])
+        uuid(image["uuid"])
+        integer(image["file_type"], 6, 6)
+
+    record(runtime, "schema_version implementation startup images bindings files search_paths "
+           "absent_inputs external_entry_module modules popen limits")
+    integer(runtime["schema_version"], 1, 1)
+    implementation = runtime["implementation"]
+    record(implementation, "name version pointer_bits byteorder cache_tag bytecode_magic")
+    need(implementation["name"] == "cpython")
+    version = implementation["version"]
+    need(type(version) is list and len(version) == 3)
+    for component in version:
+        integer(component)
+    need(version[:2] == [3, 9])
+    integer(implementation["pointer_bits"], 64, 64)
+    need(implementation["byteorder"] == "little" and implementation["cache_tag"] == "cpython-39")
+    pattern(implementation["bytecode_magic"], r"[0-9a-f]{8}")
+    record(runtime["startup"], "isolated no_site dont_write_bytecode ignore_environment optimize")
+    for name, value in runtime["startup"].items():
+        integer(value, 0 if name == "optimize" else 1, 0 if name == "optimize" else 1)
+
+    bindings = runtime["bindings"]
+    record(bindings, "clock reset")
+    record(bindings["clock"], "module name constant value")
+    need(bindings["clock"] == {"module": "time", "name": "clock_gettime",
+                              "constant": "CLOCK_UPTIME_RAW", "value": 8})
+    integer(bindings["clock"]["value"], 8, 8)
+    reset = bindings["reset"]
+    record(reset, "module name getter_offset wrapper_offset helper_offset")
+    need(reset["module"] == "_signal" and reset["name"] == "signal")
+    for name in ("getter_offset", "wrapper_offset", "helper_offset"):
+        integer(reset[name])
+
+    limits = runtime["limits"]
+    record(limits, "module_count file_count per_file_bytes aggregate_file_bytes "
+           "code_nodes code_depth code_bytes image_command_bytes")
+    for value in limits.values():
+        integer(value, 1)
+    need(type(runtime["files"]) is list and 0 < len(runtime["files"]) <= limits["file_count"])
+    files, file_paths = {}, set()
+    total = 0
+    for row in runtime["files"]:
+        checkpoint()
+        record(row, "id identity")
+        pattern(row["id"], r"[a-z0-9][a-z0-9._-]*")
+        need(row["id"] not in files and type(row["identity"]) is dict)
+        try:
+            identity = ExecutableIdentity(**row["identity"])
+        except (TypeError, ValueError, ProcessFailure):
+            raise _unavailable() from None
+        need(identity.path not in file_paths)
+        file_paths.add(identity.path)
+        need(identity.size <= limits["per_file_bytes"])
+        total += identity.size
+        need(total <= limits["aggregate_file_bytes"])
+        files[row["id"]] = identity
+
+    def file_reference(value):
+        need(type(value) is str and value in files)
+
+    images = runtime["images"]
+    record(images, "launcher main framework")
+    image_files, image_identities = set(), set()
+    for name, image in images.items():
+        record(image, "file" if name == "launcher" else "file uuid file_type architecture")
+        file_reference(image["file"])
+        need(image["file"] not in image_files)
+        image_files.add(image["file"])
+        identity = files[image["file"]]
+        need((identity.device, identity.inode) not in image_identities)
+        image_identities.add((identity.device, identity.inode))
+        if name != "framework":
+            need(bool(identity.mode & 0o111))
+        if name != "launcher":
+            uuid(image["uuid"])
+            integer(image["file_type"], 2 if name == "main" else 6, 2 if name == "main" else 6)
+            need(image["architecture"] == platform["architecture"])
+    for field in ("search_paths", "absent_inputs"):
+        unique(runtime[field])
+        for value in runtime[field]:
+            path(value)
+    need(bool(runtime["search_paths"]))
+    absent = set(runtime["absent_inputs"])
+    for file_path in file_paths:
+        # Compare complete components, including the root, without multiplying
+        # the file count by the number of absence observations.
+        ancestor = file_path
+        while True:
+            need(ancestor not in absent)
+            if ancestor == "/":
+                break
+            ancestor = ancestor.rpartition("/")[0] or "/"
+        checkpoint()
+    need(runtime["external_entry_module"] == "__main__")
+    need(type(runtime["modules"]) is list and 0 < len(runtime["modules"]) <= limits["module_count"])
+    modules, names = {}, {runtime["external_entry_module"]}
+    common = "name kind spec_name aliases "
+    fields = {
+        "builtin": "registry_name", "frozen": "registry_name file_alias",
+        "source": "loader selected_input source cache package_member",
+        "extension": "file uuid dependencies"}
+    for row in runtime["modules"]:
+        checkpoint()
+        need(type(row) is dict and type(row.get("kind")) is str and row["kind"] in fields)
+        kind = row["kind"]
+        record(row, common + fields[kind])
+        module_name(row["name"])
+        module_name(row["spec_name"])
+        unique(row["aliases"])
+        for alias in [row["name"]] + row["aliases"]:
+            module_name(alias)
+            need(alias not in names)
+            names.add(alias)
+        modules[row["name"]] = row
+        if kind in ("builtin", "frozen"):
+            module_name(row["registry_name"])
+            need(row["spec_name"] == row["registry_name"])
+            if kind == "frozen" and row["file_alias"] is not None:
+                file_reference(row["file_alias"])
+        elif kind == "source":
+            need(row["spec_name"] == row["name"])
+            if row["loader"] == "verified-package-buffer":
+                need(row["selected_input"] == "package-buffer" and row["source"] is None
+                     and row["cache"] is None and type(row["package_member"]) is str
+                     and row["package_member"] == row["name"] + ".py"
+                     and _PACKAGE_MEMBERS.get(row["package_member"]) == "python-source")
+            else:
+                need(row["loader"] == "SourceFileLoader" and row["package_member"] is None
+                     and row["selected_input"] in ("source", "cache"))
+                file_reference(row["source"])
+                if row["selected_input"] == "cache":
+                    file_reference(row["cache"])
+                    need(row["cache"] != row["source"])
+                else:
+                    need(row["cache"] is None)
+        else:
+            need(row["spec_name"] == row["name"])
+            file_reference(row["file"])
+            uuid(row["uuid"])
+            unique(row["dependencies"])
+            for dependency in row["dependencies"]:
+                file_reference(dependency)
+                need(dependency != row["file"])
+    for name in ("time", "_signal"):
+        need(name in modules and modules[name]["kind"] == "builtin"
+             and modules[name]["registry_name"] == name)
+    popen = runtime["popen"]
+    record(popen, "module class destructor source active_name expected_active_count")
+    need(popen["module"] == "subprocess" and popen["class"] == "Popen"
+         and popen["destructor"] == "__del__" and popen["active_name"] == "_active")
+    integer(popen["expected_active_count"], 0, 0)
+    file_reference(popen["source"])
+    need("subprocess" in modules and modules["subprocess"]["kind"] == "source"
+         and modules["subprocess"]["source"] == popen["source"])
+    result = _RuntimeMetadata(_freeze_data(platform), _freeze_data(runtime))
+    checkpoint()
+    return result
 
 
 def _qualify_runtime(profile, *, deadline, clock):
