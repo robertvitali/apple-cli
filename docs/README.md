@@ -32,4 +32,5 @@
 ## discovery
 
 - [apple-script-output-limit](discovery/apple-script-output-limit.md)
+- [capability-evidence-claims-and-parser](discovery/capability-evidence-claims-and-parser.md)
 - [owned-process-cleanup](discovery/owned-process-cleanup.md)
