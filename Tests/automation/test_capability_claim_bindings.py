@@ -21,7 +21,7 @@ class CapabilityClaimBindingRegressionTests(unittest.TestCase):
         policy = self.policy()
         with tempfile.TemporaryDirectory() as directory:
             fixture = fixtures.write_candidate_fixture(Path(directory).resolve())
-            self.assertTrue(policy.check_candidate(**fixtures.candidate_input(fixture))["ok"])
+            self.assertTrue(policy.check_candidate(**fixtures.candidate_input(fixture), process_session=fixtures.fixture_session(policy, fixture))["ok"])
 
             def reuse_parser_as_behavior(manifest):
                 evidence = manifest["commands"][0]["evidence"]
@@ -30,7 +30,7 @@ class CapabilityClaimBindingRegressionTests(unittest.TestCase):
             fixtures.mutate_manifest(fixture, reuse_parser_as_behavior)
             with patch.object(policy, "_default_runtime_runner") as runner:
                 with self.assertRaises(policy.PolicyError) as caught:
-                    policy.check_candidate(**fixtures.candidate_input(fixture))
+                    policy.check_candidate(**fixtures.candidate_input(fixture), process_session=fixtures.fixture_session(policy, fixture))
                 self.assertEqual(str(caught.exception), "evidence-role-mismatch")
                 runner.assert_not_called()
 
@@ -55,10 +55,10 @@ class CapabilityClaimBindingRegressionTests(unittest.TestCase):
                              (head["repository_root"] / "Tests/CapabilityTests.swift").read_bytes())
             self.assertEqual(json.loads(base["test_catalog"].read_text())["tests"],
                              json.loads(head["test_catalog"].read_text())["tests"])
-            self.assertTrue(policy.check_candidate(**fixtures.candidate_input(base))["ok"])
-            self.assertTrue(policy.check_candidate(**fixtures.candidate_input(head))["ok"])
+            self.assertTrue(policy.check_candidate(**fixtures.candidate_input(base), process_session=fixtures.fixture_session(policy, base))["ok"])
+            self.assertTrue(policy.check_candidate(**fixtures.candidate_input(head), process_session=fixtures.fixture_session(policy, head))["ok"])
             with self.assertRaises(policy.PolicyError) as caught:
-                policy.compare_candidates(base=fixtures.candidate_input(base), head=fixtures.candidate_input(head))
+                policy.compare_candidates(base=fixtures.candidate_input(base), head=fixtures.candidate_input(head), process_session=fixtures.fixture_session(policy, base, head))
             self.assertEqual(str(caught.exception), "compare-test-content-change")
 
     def test_individually_valid_role_swap_cannot_reclassify_retained_evidence(self):
@@ -73,13 +73,13 @@ class CapabilityClaimBindingRegressionTests(unittest.TestCase):
             fixtures.write_json(head["manifest"], manifest, canonical=True)
             fixtures.sync_fixture_bindings(head)
             fixtures.commit_fixture(head)
-            self.assertTrue(policy.check_candidate(**fixtures.candidate_input(base))["ok"])
-            self.assertTrue(policy.check_candidate(**fixtures.candidate_input(head))["ok"])
+            self.assertTrue(policy.check_candidate(**fixtures.candidate_input(base), process_session=fixtures.fixture_session(policy, base))["ok"])
+            self.assertTrue(policy.check_candidate(**fixtures.candidate_input(head), process_session=fixtures.fixture_session(policy, head))["ok"])
             self.assertEqual((base["repository_root"] / "Tests/CapabilityTests.swift").read_bytes(),
                              (head["repository_root"] / "Tests/CapabilityTests.swift").read_bytes())
             # Role-list removal is the established, earlier comparison guard.
             with self.assertRaisesRegex(policy.PolicyError, "^compare-evidence-removal$"):
-                policy.compare_candidates(base=fixtures.candidate_input(base), head=fixtures.candidate_input(head))
+                policy.compare_candidates(base=fixtures.candidate_input(base), head=fixtures.candidate_input(head), process_session=fixtures.fixture_session(policy, base, head))
 
     def test_retained_claim_removal_changes_record_and_fails_existing_removal_guard(self):
         policy = self.policy()
@@ -93,7 +93,7 @@ class CapabilityClaimBindingRegressionTests(unittest.TestCase):
             fixtures.commit_fixture(head)
             records = []
             for fixture in (base, head):
-                self.assertTrue(policy.check_candidate(**fixtures.candidate_input(fixture))["ok"])
+                self.assertTrue(policy.check_candidate(**fixtures.candidate_input(fixture), process_session=fixtures.fixture_session(policy, fixture))["ok"])
                 raw = json.loads(fixture["test_catalog"].read_text())
                 sources = policy._swift_catalog(fixture["repository_root"], raw)
                 bound, _ = policy._validate_evidence(json.loads(fixture["manifest"].read_text()), sources, raw["bindings"])
@@ -105,7 +105,7 @@ class CapabilityClaimBindingRegressionTests(unittest.TestCase):
             # Valid claim removal necessarily removes a manifest reference from
             # that surface, so the existing earlier guard must keep its priority.
             with self.assertRaisesRegex(policy.PolicyError, "^compare-evidence-removal$"):
-                policy.compare_candidates(base=fixtures.candidate_input(base), head=fixtures.candidate_input(head))
+                policy.compare_candidates(base=fixtures.candidate_input(base), head=fixtures.candidate_input(head), process_session=fixtures.fixture_session(policy, base, head))
 
     def test_bats_declarations_without_execution_refuse_before_runtime(self):
         policy = self.policy()
@@ -125,7 +125,7 @@ class CapabilityClaimBindingRegressionTests(unittest.TestCase):
                 policy._validate_evidence(json.loads(fixture["manifest"].read_text()), sources, catalog["bindings"])
                 with patch.object(policy, "_default_runtime_runner") as runner:
                     with self.assertRaises(policy.PolicyError) as caught:
-                        policy.check_candidate(**fixtures.candidate_input(fixture))
+                        policy.check_candidate(**fixtures.candidate_input(fixture), process_session=fixtures.fixture_session(policy, fixture))
                     self.assertEqual(str(caught.exception), "bats-execution-unavailable")
                     runner.assert_not_called()
 
@@ -145,7 +145,7 @@ class CapabilityClaimBindingRegressionTests(unittest.TestCase):
                 fixtures.commit_fixture(fixture)
                 with patch.object(policy, "_default_runtime_runner") as runner:
                     with self.assertRaisesRegex(policy.PolicyError, "^test-catalog-invalid$"):
-                        policy.check_candidate(**fixtures.candidate_input(fixture))
+                        policy.check_candidate(**fixtures.candidate_input(fixture), process_session=fixtures.fixture_session(policy, fixture))
                     runner.assert_not_called()
 
     def add_surface(self, policy, fixture, *, existing_file):
@@ -188,12 +188,12 @@ class CapabilityClaimBindingRegressionTests(unittest.TestCase):
                 base = fixtures.write_candidate_fixture(Path(left).resolve())
                 head = fixtures.write_candidate_fixture(Path(right).resolve())
                 self.add_surface(policy, head, existing_file=existing_file)
-                self.assertTrue(policy.check_candidate(**fixtures.candidate_input(head))["ok"])
+                self.assertTrue(policy.check_candidate(**fixtures.candidate_input(head), process_session=fixtures.fixture_session(policy, head))["ok"])
                 if existing_file:
                     with self.assertRaisesRegex(policy.PolicyError, "^compare-test-content-change$"):
-                        policy.compare_candidates(base=fixtures.candidate_input(base), head=fixtures.candidate_input(head))
+                        policy.compare_candidates(base=fixtures.candidate_input(base), head=fixtures.candidate_input(head), process_session=fixtures.fixture_session(policy, base, head))
                 else:
-                    report = policy.compare_candidates(base=fixtures.candidate_input(base), head=fixtures.candidate_input(head))
+                    report = policy.compare_candidates(base=fixtures.candidate_input(base), head=fixtures.candidate_input(head), process_session=fixtures.fixture_session(policy, base, head))
                     self.assertTrue(report["ok"])
                     self.assertEqual((report["new_commands"], report["new_arguments"]), (0, 1))
 

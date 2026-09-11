@@ -1,4 +1,4 @@
-"""Synthetic subprocess and parser contracts; never invoke the installed Swift CLI."""
+"""Actual policy runner/parsers with explicit no-spawn transport; no Swift execution."""
 
 import base64
 import hashlib
@@ -153,7 +153,8 @@ class CapabilityDiagnosticTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             fixture = write_candidate_fixture(Path(directory).resolve())
             mutate(fixture)
-            completed = run_policy_main(policy, ["check", *candidate_cli_arguments(fixture)])
+            completed = run_policy_main(policy, ["check", *candidate_cli_arguments(fixture)],
+                                        process_session=fixture_session(policy, fixture))
         self.assertEqual(completed.returncode, 2)
         self.assertEqual(completed.stdout, "")
         self.assertEqual(completed.stderr, f"capability-policy: {expected}\n")
@@ -196,37 +197,9 @@ class CapabilityDiagnosticTests(unittest.TestCase):
             manifest["commands"][0]["evidence"].update(sentinelUnknownRole=[])), "evidence-roles-invalid")
 
 
-# These executables only emulate the three Swift stages and the resulting dump command.
-# They never dispatch another executable or load the candidate's source as code.
-FAKE_EXECUTABLE = r'''
-import json, os, pathlib, sys
-config = json.loads(pathlib.Path(CONFIG_PATH).read_text())
-args = sys.argv[1:]
-if pathlib.Path(sys.argv[0]).name == "apple":
-    stage = "dump"
-else:
-    stage = "test" if args[0] == "test" else "bin" if "--show-bin-path" in args else "build"
-with open(config["log"], "a") as log:
-    log.write(json.dumps({"stage": stage, "argv": sys.argv, "cwd": os.getcwd(),
-                          "environment": dict(os.environ), "stdin_empty": sys.stdin.buffer.read() == b""}) + "\n")
-if config.get("fail") == stage:
-    print("synthetic stage failure", file=sys.stderr)
-    sys.exit(9)
-if stage == "test":
-    pathlib.Path(args[args.index("--xunit-output") + 1]).write_bytes(bytes.fromhex(config["xml_hex"]))
-elif stage == "build":
-    binary = pathlib.Path(args[args.index("--scratch-path") + 1]) / "debug" / "apple"
-    binary.parent.mkdir(parents=True)
-    binary.write_text(pathlib.Path(sys.argv[0]).read_text())
-    binary.chmod(0o700)
-elif stage == "bin":
-    if config.get("outside_bin"):
-        print(pathlib.Path(CONFIG_PATH).parent)
-    else:
-        print(pathlib.Path(args[args.index("--scratch-path") + 1]) / "debug")
-else:
-    sys.stdout.buffer.write(bytes.fromhex(config["dump_hex"]))
-'''
+# Retained separately for the mandatory qualified child-transport acceptance lane.
+from capability_runtime_subjects import FAKE_EXECUTABLE
+from capability_session_fixtures import RecordingProcessSession, admit_recording_session, fixture_session, process
 
 
 class CapabilityRuntimeRunnerTests(unittest.TestCase):
@@ -247,6 +220,32 @@ class CapabilityRuntimeRunnerTests(unittest.TestCase):
         swift.write_bytes(self.executable)
         swift.chmod(0o700)
         self.sha, self.tree = "1" * 40, "2" * 40
+        self.session = RecordingProcessSession(process, swift=str(swift), handler=self.stage)
+        admit_recording_session(self.policy, self.session)
+
+    def stage(self, request):
+        # Actual policy code runs; only transport/file-producing subject is fake.
+        args = list(request.argv)
+        stage = {"swift-test": "test", "swift-build": "build", "swift-bin-path": "bin", "help-dump": "dump"}[request.role]
+        with self.log.open("a") as log:
+            log.write(json.dumps({"stage": stage, "argv": args, "cwd": str(request.cwd),
+                                  "environment": dict(request.environment)}) + "\n")
+        if self.config.get("fail") == stage:
+            raise self.session.failure("command-failed", status=9)
+        stdout = b""
+        if stage == "test":
+            Path(args[args.index("--xunit-output") + 1]).write_bytes(bytes.fromhex(self.config["xml_hex"]))
+        elif stage == "build":
+            binary = Path(args[args.index("--scratch-path") + 1]) / "debug" / "apple"
+            binary.parent.mkdir(parents=True)
+            binary.write_bytes(self.executable)
+            binary.chmod(0o700)
+        elif stage == "bin":
+            location = self.root if self.config.get("outside_bin") else Path(args[args.index("--scratch-path") + 1]) / "debug"
+            stdout = (str(location) + "\n").encode()
+        else:
+            stdout = bytes.fromhex(self.config["dump_hex"])
+        return process.CommandResult(stdout=stdout, stderr=b"", command_status=0, cleanup_complete=True)
 
     def invoke(self):
         self.config_path.write_text(json.dumps(self.config))
@@ -254,8 +253,10 @@ class CapabilityRuntimeRunnerTests(unittest.TestCase):
                        "TMPDIR": str(self.root), "DEVELOPER_DIR": "/synthetic/developer",
                        "SDKROOT": "/synthetic/sdk", "TOOLCHAINS": "synthetic-toolchain",
                        "APPLE_TEST_MODE": "1", "SYNTHETIC_SECRET": "must-not-inherit"}
-        with patch.dict(os.environ, environment, clear=True):
-            return self.policy._default_runtime_runner(self.root, self.sha, self.tree)
+        with patch.dict(os.environ, environment, clear=True), \
+             patch("subprocess.Popen", side_effect=AssertionError("no-spawn transport launched child")), \
+             patch.object(os, "killpg", side_effect=AssertionError("no-spawn transport signalled group")):
+            return self.policy._default_runtime_runner(self.root, self.sha, self.tree, process_session=self.session)
 
     def calls(self):
         return [json.loads(line) for line in self.log.read_text().splitlines()]
@@ -269,7 +270,7 @@ class CapabilityRuntimeRunnerTests(unittest.TestCase):
             self.assertFalse(Path(home).parent.exists())
         self.assertTrue(self.root.is_dir())
 
-    def test_actual_runner_stages_arguments_environment_attestation_and_cleanup(self):
+    def test_actual_runner_emits_exact_requests_parses_artifacts_and_cleans_files(self):
         with patch.object(self.policy, "_run_bounded_command",
                           wraps=self.policy._run_bounded_command) as commands:
             payload = self.invoke()
@@ -300,19 +301,18 @@ class CapabilityRuntimeRunnerTests(unittest.TestCase):
         }
         for command in commands.call_args_list:
             self.assertEqual(command.kwargs["environment"], expected_environment)
-        for call in calls:
-            self.assertEqual(call["cwd"], str(self.root))
-            self.assertTrue(call["stdin_empty"])
-            # macOS may add this CoreFoundation setting at child startup. The supplied
-            # environment above is exact; arbitrary ambient entries still must be absent.
-            observed = dict(call["environment"])
-            observed.pop("__CF_USER_TEXT_ENCODING", None)
-            self.assertEqual(observed, expected_environment)
+        for request in self.session.requests:
+            self.assertEqual(request.cwd, self.root)
+            self.assertEqual(dict(request.environment), expected_environment)
+        self.assertEqual([request.role for request in self.session.requests],
+                         ["swift-test", "swift-build", "swift-bin-path", "help-dump"])
+        # Actual child-observed stdin/environment remains in the qualified fixture.
+        # These are supplied request assertions, not child transport observations.
         self.assert_cleaned(calls)
 
     def test_nonzero_stage_errors_stop_later_stages_and_remove_temporary_files(self):
-        # Production currently signals a numeric group after reaping a nonzero child.
-        # Record that narrow boundary instead of sending it; this does not prove signal cleanup.
+        # A cleaned nonzero session result maps to the original stage diagnostic.
+        # No numeric process ownership crosses this policy boundary.
         stages = ["test", "build", "bin", "dump"]
         for index, stage in enumerate(stages):
             with self.subTest(stage=stage):
@@ -320,12 +320,9 @@ class CapabilityRuntimeRunnerTests(unittest.TestCase):
                 self.config["fail"] = stage
                 expected = {"test": "runtime-tests-failed", "build": "runtime-build-failed",
                             "bin": "runtime-build-failed", "dump": "runtime-dump-failed"}[stage]
-                with patch.object(self.policy.os, "killpg") as signal_boundary:
-                    with self.assertRaises(self.policy.PolicyError) as caught:
-                        self.invoke()
+                with self.assertRaises(self.policy.PolicyError) as caught:
+                    self.invoke()
                 self.assertEqual(str(caught.exception), expected)
-                # Intentionally do not pin the unsafe signal: the separate owner fix may remove it.
-                self.assertLessEqual(signal_boundary.call_count, 1)
                 calls = self.calls()
                 self.assertEqual([call["stage"] for call in calls], stages[:index + 1])
                 self.assert_cleaned(calls)
@@ -354,9 +351,10 @@ class CapabilityRuntimeRunnerTests(unittest.TestCase):
         self.assert_cleaned(calls)
 
     def test_missing_swift_is_value_free_and_executes_nothing(self):
-        with patch.dict(os.environ, {"PATH": str(self.root / "missing")}, clear=True):
+        with patch.dict(os.environ, {"PATH": str(self.root / "missing")}, clear=True), \
+             patch.object(self.session, "selected_executable", side_effect=self.session.failure("process-unavailable")):
             with self.assertRaises(self.policy.PolicyError) as caught:
-                self.policy._default_runtime_runner(self.root, self.sha, self.tree)
+                self.policy._default_runtime_runner(self.root, self.sha, self.tree, process_session=self.session)
         self.assertEqual(str(caught.exception), "runtime-runner-unavailable")
         self.assertFalse(self.log.exists())
 

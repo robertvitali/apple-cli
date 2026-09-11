@@ -13,6 +13,8 @@ from types import ModuleType
 from typing import Optional, Set
 import unittest
 
+from capability_session_fixtures import fixture_session, run_recorded_trusted
+
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCHEMA_PATH = REPO_ROOT / "scripts" / "ci" / "capability_schema.py"
@@ -496,7 +498,7 @@ def synthetic_attestation(
     ).encode("utf-8")
 
 
-def synthetic_runner(root: Path, sha: str, tree_oid: str) -> bytes:
+def synthetic_runner(root: Path, sha: str, tree_oid: str, *, process_session) -> bytes:
     return synthetic_attestation(root, sha, tree_oid)
 
 
@@ -507,11 +509,12 @@ def candidate_input(fixture: dict) -> dict:
     }
 
 
-def run_policy_main(policy, arguments: list[str]) -> subprocess.CompletedProcess:
+def run_policy_main(policy, arguments: list[str], *, process_session=None) -> subprocess.CompletedProcess:
     stdout = io.StringIO()
     stderr = io.StringIO()
     with redirect_stdout(stdout), redirect_stderr(stderr):
-        return_code = policy.main(arguments)
+        return_code = (policy.main(arguments) if process_session is None else
+                       run_recorded_trusted(policy, arguments, process_session))
     return subprocess.CompletedProcess(
         arguments,
         return_code,
@@ -768,7 +771,7 @@ class CapabilityPolicyBootstrapTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temporary_directory:
             fixture = write_candidate_fixture(Path(temporary_directory).resolve())
 
-            report = policy.check_candidate(**candidate_input(fixture))
+            report = policy.check_candidate(**candidate_input(fixture), process_session=fixture_session(policy, fixture))
 
         self.assertTrue(report["ok"])
         self.assertEqual(report["contract_stage"], "command-arguments")
@@ -793,7 +796,7 @@ class CapabilityPolicyBootstrapTests(unittest.TestCase):
             write_json(fixture["bats_inventory"], inventory, canonical=True)
             commit_fixture(fixture)
 
-            report = policy.check_candidate(**candidate_input(fixture))
+            report = policy.check_candidate(**candidate_input(fixture), process_session=fixture_session(policy, fixture))
 
         self.assertTrue(report["ok"])
 
@@ -810,7 +813,7 @@ class CapabilityPolicyBootstrapTests(unittest.TestCase):
             # Pretty inventory bytes validate; declaration-only evidence still
             # cannot pass the new execution-admission boundary.
             with self.assertRaisesRegex(policy.PolicyError, "^bats-execution-unavailable$"):
-                policy.check_candidate(**candidate_input(fixture))
+                policy.check_candidate(**candidate_input(fixture), process_session=fixture_session(policy, fixture))
 
     def test_bats_evidence_titles_must_match_hardened_source_declarations(self) -> None:
         policy = load_module(POLICY_PATH, "capability_policy_bats_titles")
@@ -836,7 +839,7 @@ class CapabilityPolicyBootstrapTests(unittest.TestCase):
             commit_fixture(fixture)
 
             with self.assertRaisesRegex(policy.PolicyError, "bats-inventory-title-drift"):
-                policy.check_candidate(**candidate_input(fixture))
+                policy.check_candidate(**candidate_input(fixture), process_session=fixture_session(policy, fixture))
 
     def test_manual_tokens_must_name_the_exact_command_or_argument(self) -> None:
         policy = load_module(POLICY_PATH, "capability_policy_manual_identity")
@@ -850,7 +853,7 @@ class CapabilityPolicyBootstrapTests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(policy.PolicyError, "manual-identity-missing"):
-                policy.check_candidate(**candidate_input(fixture))
+                policy.check_candidate(**candidate_input(fixture), process_session=fixture_session(policy, fixture))
 
     def test_manual_path_is_derived_from_the_exact_command_path(self) -> None:
         policy = load_module(POLICY_PATH, "capability_policy_manual_path")
@@ -868,7 +871,7 @@ class CapabilityPolicyBootstrapTests(unittest.TestCase):
             commit_fixture(fixture)
 
             with self.assertRaisesRegex(policy.PolicyError, "manual-path-invalid"):
-                policy.check_candidate(**candidate_input(fixture))
+                policy.check_candidate(**candidate_input(fixture), process_session=fixture_session(policy, fixture))
 
     def test_documented_capability_anchors_cannot_be_orphaned(self) -> None:
         policy = load_module(POLICY_PATH, "capability_policy_origin_anchor_orphan")
@@ -883,7 +886,7 @@ class CapabilityPolicyBootstrapTests(unittest.TestCase):
             commit_fixture(fixture)
 
             with self.assertRaisesRegex(policy.PolicyError, "origin-anchor-orphan"):
-                policy.check_candidate(**candidate_input(fixture))
+                policy.check_candidate(**candidate_input(fixture), process_session=fixture_session(policy, fixture))
 
     def test_origin_document_scan_is_bounded(self) -> None:
         policy = load_module(POLICY_PATH, "capability_policy_origin_bounds")
@@ -893,7 +896,7 @@ class CapabilityPolicyBootstrapTests(unittest.TestCase):
             fixture = write_candidate_fixture(Path(temporary_directory).resolve())
 
             with self.assertRaisesRegex(policy.PolicyError, "origin-documents-too-large"):
-                policy.check_candidate(**candidate_input(fixture))
+                policy.check_candidate(**candidate_input(fixture), process_session=fixture_session(policy, fixture))
 
     def test_swift_evidence_ids_must_resolve_to_test_declarations(self) -> None:
         policy = load_module(POLICY_PATH, "capability_policy_swift_test_symbol")
@@ -927,7 +930,7 @@ class CapabilityPolicyBootstrapTests(unittest.TestCase):
             commit_fixture(fixture)
 
             with self.assertRaisesRegex(policy.PolicyError, "test-catalog-symbol-not-test"):
-                policy.check_candidate(**candidate_input(fixture))
+                policy.check_candidate(**candidate_input(fixture), process_session=fixture_session(policy, fixture))
 
     def test_swift_evidence_resolves_multiline_test_attributes(self) -> None:
         policy = load_module(POLICY_PATH, "capability_policy_swift_multiline")
@@ -962,7 +965,7 @@ class CapabilityPolicyBootstrapTests(unittest.TestCase):
             sync_fixture_bindings(fixture)
             commit_fixture(fixture)
 
-            report = policy.check_candidate(**candidate_input(fixture))
+            report = policy.check_candidate(**candidate_input(fixture), process_session=fixture_session(policy, fixture))
 
         self.assertTrue(report["ok"])
 
@@ -1008,7 +1011,7 @@ class CapabilityPolicyBootstrapTests(unittest.TestCase):
             write_json(fixture["test_catalog"], catalog, canonical=True)
             commit_fixture(fixture)
             with self.assertRaisesRegex(policy.PolicyError, "test-catalog-invalid"):
-                policy.check_candidate(**candidate_input(fixture))
+                policy.check_candidate(**candidate_input(fixture), process_session=fixture_session(policy, fixture))
 
         with tempfile.TemporaryDirectory() as temporary_directory:
             fixture = write_candidate_fixture(Path(temporary_directory).resolve())
@@ -1017,7 +1020,7 @@ class CapabilityPolicyBootstrapTests(unittest.TestCase):
             write_json(fixture["bats_inventory"], inventory, canonical=True)
             commit_fixture(fixture)
             with self.assertRaisesRegex(policy.PolicyError, "bats-inventory-invalid"):
-                policy.check_candidate(**candidate_input(fixture))
+                policy.check_candidate(**candidate_input(fixture), process_session=fixture_session(policy, fixture))
 
     def test_checkout_validation_disables_repository_configured_fsmonitor(self) -> None:
         policy = load_module(POLICY_PATH, "capability_policy_fsmonitor")
@@ -1042,7 +1045,7 @@ class CapabilityPolicyBootstrapTests(unittest.TestCase):
                 check=True,
             )
 
-            report = policy.check_candidate(**candidate_input(fixture))
+            report = policy.check_candidate(**candidate_input(fixture), process_session=fixture_session(policy, fixture))
 
             self.assertTrue(report["ok"])
             self.assertFalse(marker.exists(), "policy must not execute repository-configured helpers")
@@ -1062,6 +1065,7 @@ class CapabilityPolicyBootstrapTests(unittest.TestCase):
                     "status",
                     "--porcelain=v1",
                     "-z",
+                    process_session=fixture_session(policy, fixture),
                 )
 
     def test_manifest_rejects_unknown_nested_fields(self) -> None:
@@ -1074,7 +1078,7 @@ class CapabilityPolicyBootstrapTests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(policy.PolicyError, "manifest-command-fields"):
-                policy.check_candidate(**candidate_input(fixture))
+                policy.check_candidate(**candidate_input(fixture), process_session=fixture_session(policy, fixture))
 
     def test_manifest_rejects_unknown_argument_origin_and_supersedes_fields(self) -> None:
         policy = load_module(POLICY_PATH, "capability_policy_nested_more")
@@ -1093,7 +1097,7 @@ class CapabilityPolicyBootstrapTests(unittest.TestCase):
                 fixture = write_candidate_fixture(Path(temporary_directory).resolve())
                 mutate_manifest(fixture, mutation)
                 with self.assertRaisesRegex(policy.PolicyError, diagnostic):
-                    policy.check_candidate(**candidate_input(fixture))
+                    policy.check_candidate(**candidate_input(fixture), process_session=fixture_session(policy, fixture))
 
     def test_every_surface_requires_every_nonempty_evidence_role(self) -> None:
         policy = load_module(POLICY_PATH, "capability_policy_evidence_roles")
@@ -1107,7 +1111,7 @@ class CapabilityPolicyBootstrapTests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(policy.PolicyError, "evidence-role-empty"):
-                policy.check_candidate(**candidate_input(fixture))
+                policy.check_candidate(**candidate_input(fixture), process_session=fixture_session(policy, fixture))
 
     def test_evidence_references_have_deterministic_order(self) -> None:
         policy = load_module(POLICY_PATH, "capability_policy_evidence_order")
@@ -1124,7 +1128,7 @@ class CapabilityPolicyBootstrapTests(unittest.TestCase):
             commit_fixture(fixture)
 
             with self.assertRaisesRegex(policy.PolicyError, "evidence-order"):
-                policy.check_candidate(**candidate_input(fixture))
+                policy.check_candidate(**candidate_input(fixture), process_session=fixture_session(policy, fixture))
 
     def test_evidence_roles_fail_close_on_unhashable_references(self) -> None:
         policy = load_module(POLICY_PATH, "capability_policy_evidence_unhashable")
@@ -1138,7 +1142,7 @@ class CapabilityPolicyBootstrapTests(unittest.TestCase):
             )
 
             with self.assertRaisesRegex(policy.PolicyError, "evidence-role-empty"):
-                policy.check_candidate(**candidate_input(fixture))
+                policy.check_candidate(**candidate_input(fixture), process_session=fixture_session(policy, fixture))
 
     def test_parser_exit_and_json_evidence_must_be_hosted_safe(self) -> None:
         policy = load_module(POLICY_PATH, "capability_policy_hosted_evidence")
@@ -1175,7 +1179,7 @@ class CapabilityPolicyBootstrapTests(unittest.TestCase):
             commit_fixture(fixture)
 
             with self.assertRaisesRegex(policy.PolicyError, "evidence-not-hosted-safe"):
-                policy.check_candidate(**candidate_input(fixture))
+                policy.check_candidate(**candidate_input(fixture), process_session=fixture_session(policy, fixture))
 
     def test_compare_accepts_two_exact_unchanged_candidates(self) -> None:
         policy = load_module(POLICY_PATH, "capability_policy_compare_valid")
@@ -1184,7 +1188,7 @@ class CapabilityPolicyBootstrapTests(unittest.TestCase):
             base = write_candidate_fixture(Path(base_directory).resolve())
             head = write_candidate_fixture(Path(head_directory).resolve())
 
-            report = policy.compare_candidates(base=candidate_input(base), head=candidate_input(head))
+            report = policy.compare_candidates(base=candidate_input(base), head=candidate_input(head), process_session=fixture_session(policy, base, head))
 
         self.assertTrue(report["ok"])
         self.assertEqual(report["contract_stage"], "command-arguments")
@@ -1203,7 +1207,7 @@ class CapabilityPolicyBootstrapTests(unittest.TestCase):
                 os.path.relpath(head["repository_root"], Path.cwd())
             )
 
-            report = policy.compare_candidates(base=candidate_input(base), head=candidate_input(head))
+            report = policy.compare_candidates(base=candidate_input(base), head=candidate_input(head), process_session=fixture_session(policy, base, head))
 
         self.assertTrue(report["ok"])
 
@@ -1214,7 +1218,7 @@ class CapabilityPolicyBootstrapTests(unittest.TestCase):
             head = write_candidate_fixture(Path(head_directory).resolve())
             head["sha"] = "0" * 40
             with self.assertRaisesRegex(policy.PolicyError, "checkout-invalid"):
-                policy.compare_candidates(base=candidate_input(base), head=candidate_input(head))
+                policy.compare_candidates(base=candidate_input(base), head=candidate_input(head), process_session=fixture_session(policy, base, head))
 
             head["sha"] = subprocess.check_output(
                 ["git", "-C", str(head["repository_root"]), "rev-parse", "HEAD"],
@@ -1222,7 +1226,7 @@ class CapabilityPolicyBootstrapTests(unittest.TestCase):
             ).strip()
             (head["repository_root"] / "dirty.txt").write_text("dirty\n", encoding="utf-8")
             with self.assertRaisesRegex(policy.PolicyError, "checkout-dirty"):
-                policy.compare_candidates(base=candidate_input(base), head=candidate_input(head))
+                policy.compare_candidates(base=candidate_input(base), head=candidate_input(head), process_session=fixture_session(policy, base, head))
 
     def test_compare_rejects_command_or_argument_removal(self) -> None:
         policy = load_module(POLICY_PATH, "capability_policy_compare_removal")
@@ -1259,7 +1263,7 @@ class CapabilityPolicyBootstrapTests(unittest.TestCase):
             commit_fixture(head)
 
             with self.assertRaisesRegex(policy.PolicyError, "compare-surface-removal"):
-                policy.compare_candidates(base=candidate_input(base), head=candidate_input(head))
+                policy.compare_candidates(base=candidate_input(base), head=candidate_input(head), process_session=fixture_session(policy, base, head))
 
     def test_compare_rejects_origin_changes(self) -> None:
         policy = load_module(POLICY_PATH, "capability_policy_compare_origin")
@@ -1294,7 +1298,7 @@ class CapabilityPolicyBootstrapTests(unittest.TestCase):
             commit_fixture(head)
 
             with self.assertRaisesRegex(policy.PolicyError, "compare-origin-change"):
-                policy.compare_candidates(base=candidate_input(base), head=candidate_input(head))
+                policy.compare_candidates(base=candidate_input(base), head=candidate_input(head), process_session=fixture_session(policy, base, head))
 
     def test_compare_rejects_evidence_role_shrinkage(self) -> None:
         policy = load_module(POLICY_PATH, "capability_policy_compare_shrink")
@@ -1311,7 +1315,7 @@ class CapabilityPolicyBootstrapTests(unittest.TestCase):
             sync_fixture_bindings(head)
             commit_fixture(head)
             with self.assertRaisesRegex(policy.PolicyError, "compare-evidence-removal"):
-                policy.compare_candidates(base=candidate_input(base), head=candidate_input(head))
+                policy.compare_candidates(base=candidate_input(base), head=candidate_input(head), process_session=fixture_session(policy, base, head))
 
     def test_compare_rejects_test_replacement_without_structured_supersedes(self) -> None:
         policy = load_module(POLICY_PATH, "capability_policy_compare_replacement")
@@ -1355,7 +1359,7 @@ class CapabilityPolicyBootstrapTests(unittest.TestCase):
             commit_fixture(head)
 
             with self.assertRaisesRegex(policy.PolicyError, "compare-evidence-removal"):
-                policy.compare_candidates(base=candidate_input(base), head=candidate_input(head))
+                policy.compare_candidates(base=candidate_input(base), head=candidate_input(head), process_session=fixture_session(policy, base, head))
 
             mutate_manifest(
                 head,
@@ -1376,7 +1380,7 @@ class CapabilityPolicyBootstrapTests(unittest.TestCase):
                 ),
             )
             with self.assertRaisesRegex(policy.PolicyError, "compare-supersedes-frozen"):
-                policy.compare_candidates(base=candidate_input(base), head=candidate_input(head))
+                policy.compare_candidates(base=candidate_input(base), head=candidate_input(head), process_session=fixture_session(policy, base, head))
 
     def test_compare_rejects_same_id_test_body_replacement(self) -> None:
         policy = load_module(POLICY_PATH, "capability_policy_compare_test_body")
@@ -1399,7 +1403,7 @@ class CapabilityPolicyBootstrapTests(unittest.TestCase):
             commit_fixture(head)
 
             with self.assertRaisesRegex(policy.PolicyError, "compare-test-content-change"):
-                policy.compare_candidates(base=candidate_input(base), head=candidate_input(head))
+                policy.compare_candidates(base=candidate_input(base), head=candidate_input(head), process_session=fixture_session(policy, base, head))
 
             mutate_manifest(
                 head,
@@ -1410,7 +1414,7 @@ class CapabilityPolicyBootstrapTests(unittest.TestCase):
                 ),
             )
             with self.assertRaisesRegex(policy.PolicyError, "compare-supersedes-frozen"):
-                policy.compare_candidates(base=candidate_input(base), head=candidate_input(head))
+                policy.compare_candidates(base=candidate_input(base), head=candidate_input(head), process_session=fixture_session(policy, base, head))
 
     def test_compare_rejects_hosted_to_local_evidence_downgrade(self) -> None:
         policy = load_module(POLICY_PATH, "capability_policy_compare_downgrade")
@@ -1443,9 +1447,9 @@ class CapabilityPolicyBootstrapTests(unittest.TestCase):
                 sources.update(policy._bats_catalog(root, json.loads(fixture["bats_inventory"].read_text())))
                 bound, _ = policy._validate_evidence(value, sources, raw["bindings"])
                 captured[str(root)] = policy.CandidateDetails(root, fixture["sha"], value, bound, {})
-            policy._checked_candidate_details = lambda candidate: captured[str(candidate["repository_root"])]
+            policy._checked_candidate_details = lambda candidate, **_kwargs: captured[str(candidate["repository_root"])]
             with self.assertRaisesRegex(policy.PolicyError, "compare-evidence-removal"):
-                policy.compare_candidates(base=candidate_input(base), head=candidate_input(head))
+                policy.compare_candidates(base=candidate_input(base), head=candidate_input(head), process_session=fixture_session(policy, base, head))
 
     def test_snapshot_cli_prints_only_canonical_draft_to_stdout(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -1510,6 +1514,7 @@ class CapabilityPolicyBootstrapTests(unittest.TestCase):
             check_completed = run_policy_main(
                 policy,
                 ["check", *candidate_cli_arguments(head)],
+                process_session=fixture_session(policy, head),
             )
             compare_completed = run_policy_main(
                 policy,
@@ -1518,6 +1523,7 @@ class CapabilityPolicyBootstrapTests(unittest.TestCase):
                     *candidate_cli_arguments(base, "base"),
                     *candidate_cli_arguments(head, "head"),
                 ],
+                process_session=fixture_session(policy, base, head),
             )
 
         for completed in (check_completed, compare_completed):
@@ -1542,6 +1548,7 @@ class CapabilityPolicyBootstrapTests(unittest.TestCase):
             completed = run_policy_main(
                 policy,
                 ["check", *candidate_cli_arguments(fixture)],
+                process_session=fixture_session(policy, fixture),
             )
 
         self.assertEqual(completed.returncode, 2)
@@ -1683,7 +1690,7 @@ class CapabilityPolicyHardeningTests(unittest.TestCase):
                 return payload
 
             policy.CommitSnapshot.blob = counted
-            policy.compare_candidates(base=candidate_input(base), head=candidate_input(head))
+            policy.compare_candidates(base=candidate_input(base), head=candidate_input(head), process_session=fixture_session(policy, base, head))
 
         for fixture in (base, head):
             for path in (
@@ -1703,13 +1710,13 @@ class CapabilityPolicyHardeningTests(unittest.TestCase):
             fixture = write_candidate_fixture(Path(temporary_directory).resolve())
             captures = 0
 
-            def runner(root, sha, tree_oid):
+            def runner(root, sha, tree_oid, *, process_session):
                 nonlocal captures
                 captures += 1
                 return synthetic_attestation(root, sha, tree_oid)
 
             policy._default_runtime_runner = runner
-            policy.check_candidate(**candidate_input(fixture))
+            policy.check_candidate(**candidate_input(fixture), process_session=fixture_session(policy, fixture))
 
         self.assertEqual(captures, 1)
 
@@ -1738,12 +1745,12 @@ class CapabilityPolicyHardeningTests(unittest.TestCase):
             original = policy._validate_checkout
             validations = []
 
-            def counted(root, sha):
+            def counted(root, sha, *, process_session):
                 validations.append((str(root), sha))
-                return original(root, sha)
+                return original(root, sha, process_session=process_session)
 
             policy._validate_checkout = counted
-            policy.check_candidate(**candidate_input(fixture))
+            policy.check_candidate(**candidate_input(fixture), process_session=fixture_session(policy, fixture))
 
         self.assertEqual(len(validations), 2)
 
@@ -1754,7 +1761,7 @@ class CapabilityPolicyHardeningTests(unittest.TestCase):
             checkout_manifest = fixture["manifest"]
             original = checkout_manifest.read_bytes()
 
-            def runner(source_root, sha, tree_oid):
+            def runner(source_root, sha, tree_oid, *, process_session):
                 checkout_manifest.write_bytes(b"transient checkout mutation\n")
                 try:
                     self.assertFalse((source_root / ".git").exists())
@@ -1767,7 +1774,7 @@ class CapabilityPolicyHardeningTests(unittest.TestCase):
                     checkout_manifest.write_bytes(original)
 
             policy._default_runtime_runner = runner
-            report = policy.check_candidate(**candidate_input(fixture))
+            report = policy.check_candidate(**candidate_input(fixture), process_session=fixture_session(policy, fixture))
 
         self.assertTrue(report["ok"])
 
@@ -1778,7 +1785,7 @@ class CapabilityPolicyHardeningTests(unittest.TestCase):
             fixture["manifest"].write_text("{}\n", encoding="utf-8")
 
             with self.assertRaisesRegex(policy.PolicyError, "checkout-dirty"):
-                policy.check_candidate(**candidate_input(fixture))
+                policy.check_candidate(**candidate_input(fixture), process_session=fixture_session(policy, fixture))
 
     def test_fixed_policy_blob_symlinks_are_rejected(self) -> None:
         policy = load_module(POLICY_PATH, "capability_policy_fixed_blob_symlink")
@@ -1790,7 +1797,7 @@ class CapabilityPolicyHardeningTests(unittest.TestCase):
             commit_fixture(fixture)
 
             with self.assertRaisesRegex(policy.PolicyError, "commit-blob-invalid"):
-                policy.check_candidate(**candidate_input(fixture))
+                policy.check_candidate(**candidate_input(fixture), process_session=fixture_session(policy, fixture))
 
     def test_unrelated_nonregular_tree_entries_are_rejected(self) -> None:
         policy = load_module(POLICY_PATH, "capability_policy_tree_nonregular")
@@ -1801,7 +1808,7 @@ class CapabilityPolicyHardeningTests(unittest.TestCase):
             commit_fixture(fixture)
 
             with self.assertRaisesRegex(policy.PolicyError, "commit-tree-nonregular"):
-                policy.check_candidate(**candidate_input(fixture))
+                policy.check_candidate(**candidate_input(fixture), process_session=fixture_session(policy, fixture))
 
     def test_swift_bats_and_manual_sources_are_read_once(self) -> None:
         policy = load_module(POLICY_PATH, "capability_policy_source_cache")
@@ -1820,7 +1827,7 @@ class CapabilityPolicyHardeningTests(unittest.TestCase):
 
             policy.CommitSnapshot.blob = counted
             with self.assertRaisesRegex(policy.PolicyError, "bats-execution-unavailable"):
-                policy.check_candidate(**candidate_input(fixture))
+                policy.check_candidate(**candidate_input(fixture), process_session=fixture_session(policy, fixture))
 
         for path in (
             "Tests/CapabilityTests.swift",
@@ -1875,7 +1882,7 @@ class CapabilityPolicyHardeningTests(unittest.TestCase):
             commit_fixture(head)
 
             with self.assertRaisesRegex(policy.PolicyError, "compare-command-structure-change"):
-                policy.compare_candidates(base=candidate_input(base), head=candidate_input(head))
+                policy.compare_candidates(base=candidate_input(base), head=candidate_input(head), process_session=fixture_session(policy, base, head))
 
     def test_compare_rejects_retained_argument_behavior_change(self) -> None:
         policy = load_module(POLICY_PATH, "capability_policy_argument_regression_red")
@@ -1896,7 +1903,7 @@ class CapabilityPolicyHardeningTests(unittest.TestCase):
             commit_fixture(head)
 
             with self.assertRaisesRegex(policy.PolicyError, "compare-argument-structure-change"):
-                policy.compare_candidates(base=candidate_input(base), head=candidate_input(head))
+                policy.compare_candidates(base=candidate_input(base), head=candidate_input(head), process_session=fixture_session(policy, base, head))
 
     def test_compare_allows_only_additive_aliases_and_argument_names(self) -> None:
         policy = load_module(POLICY_PATH, "capability_policy_additive_names")
@@ -1923,6 +1930,7 @@ class CapabilityPolicyHardeningTests(unittest.TestCase):
             report = policy.compare_candidates(
                 base=candidate_input(base),
                 head=candidate_input(head),
+                process_session=fixture_session(policy, base, head),
             )
 
         self.assertTrue(report["ok"])
@@ -1947,6 +1955,7 @@ class CapabilityPolicyHardeningTests(unittest.TestCase):
                 policy.compare_candidates(
                     base=candidate_input(base),
                     head=candidate_input(head),
+                    process_session=fixture_session(policy, base, head),
                 )
 
     def test_ordinary_compare_freezes_self_supersedes(self) -> None:
@@ -1977,7 +1986,7 @@ class CapabilityPolicyHardeningTests(unittest.TestCase):
             commit_fixture(head)
 
             with self.assertRaisesRegex(policy.PolicyError, "compare-supersedes-frozen"):
-                policy.compare_candidates(base=candidate_input(base), head=candidate_input(head))
+                policy.compare_candidates(base=candidate_input(base), head=candidate_input(head), process_session=fixture_session(policy, base, head))
 
     def test_swift_catalog_reads_each_source_file_once(self) -> None:
         policy = load_module(POLICY_PATH, "capability_policy_swift_cache_red")
@@ -2102,7 +2111,7 @@ class CapabilityPolicyHardeningTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 policy.PolicyError, "bats-inventory-incomplete"
             ):
-                policy.check_candidate(**candidate_input(fixture))
+                policy.check_candidate(**candidate_input(fixture), process_session=fixture_session(policy, fixture))
 
         policy = load_module(POLICY_PATH, "capability_policy_bats_byte_bounds")
         with tempfile.TemporaryDirectory() as temporary_directory:
@@ -2120,14 +2129,14 @@ class CapabilityPolicyHardeningTests(unittest.TestCase):
             fixture = write_candidate_fixture(Path(temporary_directory).resolve())
             policy.MAX_MANUAL_FILES = 1
             with self.assertRaisesRegex(policy.PolicyError, "manual-sources-too-large"):
-                policy.check_candidate(**candidate_input(fixture))
+                policy.check_candidate(**candidate_input(fixture), process_session=fixture_session(policy, fixture))
 
         policy = load_module(POLICY_PATH, "capability_policy_manual_byte_bounds")
         with tempfile.TemporaryDirectory() as temporary_directory:
             fixture = write_candidate_fixture(Path(temporary_directory).resolve())
             policy.MAX_MANUAL_BYTES = 0
             with self.assertRaisesRegex(policy.PolicyError, "manual-sources-too-large"):
-                policy.check_candidate(**candidate_input(fixture))
+                policy.check_candidate(**candidate_input(fixture), process_session=fixture_session(policy, fixture))
 
     def test_source_materialization_has_an_aggregate_byte_bound(self) -> None:
         policy = load_module(POLICY_PATH, "capability_policy_source_tree_bound")
@@ -2137,7 +2146,7 @@ class CapabilityPolicyHardeningTests(unittest.TestCase):
             with self.assertRaisesRegex(
                 policy.PolicyError, "commit-tree-content-too-large"
             ):
-                policy.check_candidate(**candidate_input(fixture))
+                policy.check_candidate(**candidate_input(fixture), process_session=fixture_session(policy, fixture))
 
     def test_swift_evidence_requires_a_passed_runtime_test(self) -> None:
         policy = load_module(POLICY_PATH, "capability_policy_execution_receipt_red")
@@ -2152,7 +2161,7 @@ class CapabilityPolicyHardeningTests(unittest.TestCase):
 
             with self.assertRaisesRegex(policy.PolicyError, "swift-evidence-unexecuted"):
                 policy._default_runtime_runner = (
-                    lambda root, sha, tree_oid: synthetic_attestation(
+                    lambda root, sha, tree_oid, *, process_session: synthetic_attestation(
                         root,
                         sha,
                         tree_oid,
@@ -2162,6 +2171,7 @@ class CapabilityPolicyHardeningTests(unittest.TestCase):
                 policy.check_candidate(
                     repository_root=fixture["repository_root"],
                     sha=fixture["sha"],
+                    process_session=fixture_session(policy, fixture),
                 )
 
     def test_runtime_attestation_is_bound_to_the_exact_candidate_sha(self) -> None:
@@ -2171,7 +2181,7 @@ class CapabilityPolicyHardeningTests(unittest.TestCase):
 
             with self.assertRaisesRegex(policy.PolicyError, "runtime-sha-mismatch"):
                 policy._default_runtime_runner = (
-                    lambda root, sha, tree_oid: synthetic_attestation(
+                    lambda root, sha, tree_oid, *, process_session: synthetic_attestation(
                         root,
                         sha,
                         tree_oid,
@@ -2181,6 +2191,7 @@ class CapabilityPolicyHardeningTests(unittest.TestCase):
                 policy.check_candidate(
                     repository_root=fixture["repository_root"],
                     sha=fixture["sha"],
+                    process_session=fixture_session(policy, fixture),
                 )
 
     def test_runtime_attestation_rejects_a_stale_tree_and_dump(self) -> None:
@@ -2189,7 +2200,7 @@ class CapabilityPolicyHardeningTests(unittest.TestCase):
             fixture = write_candidate_fixture(Path(temporary_directory).resolve())
             with self.assertRaisesRegex(policy.PolicyError, "runtime-sha-mismatch"):
                 policy._default_runtime_runner = (
-                    lambda root, sha, tree_oid: synthetic_attestation(
+                    lambda root, sha, tree_oid, *, process_session: synthetic_attestation(
                         root,
                         sha,
                         tree_oid,
@@ -2199,6 +2210,7 @@ class CapabilityPolicyHardeningTests(unittest.TestCase):
                 policy.check_candidate(
                     repository_root=fixture["repository_root"],
                     sha=fixture["sha"],
+                    process_session=fixture_session(policy, fixture),
                 )
 
         policy = load_module(POLICY_PATH, "capability_policy_runtime_dump")
@@ -2208,7 +2220,7 @@ class CapabilityPolicyHardeningTests(unittest.TestCase):
             stale_dump["command"]["abstract"] = "Stale runtime shape."
             with self.assertRaisesRegex(policy.PolicyError, "runtime-command-bijection"):
                 policy._default_runtime_runner = (
-                    lambda root, sha, tree_oid: synthetic_attestation(
+                    lambda root, sha, tree_oid, *, process_session: synthetic_attestation(
                         root,
                         sha,
                         tree_oid,
@@ -2218,6 +2230,7 @@ class CapabilityPolicyHardeningTests(unittest.TestCase):
                 policy.check_candidate(
                     repository_root=fixture["repository_root"],
                     sha=fixture["sha"],
+                    process_session=fixture_session(policy, fixture),
                 )
 
     def test_inactive_and_non_target_swift_markers_need_executed_ids(self) -> None:

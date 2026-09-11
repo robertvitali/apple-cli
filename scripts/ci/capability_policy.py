@@ -11,14 +11,9 @@ import json
 import os
 from pathlib import Path, PurePosixPath
 import re
-import selectors
-import shutil
-import signal
 import stat
-import subprocess
 import sys
 import tempfile
-import time
 from typing import Any, Dict, FrozenSet, Iterator, NamedTuple, Optional, Set, Tuple
 import xml.etree.ElementTree as ElementTree
 
@@ -30,6 +25,11 @@ if str(SCRIPT_DIRECTORY) not in sys.path:
 import bats_inventory
 import bats_evidence
 import capability_schema as schema
+from capability_process import (
+    CommandRequest, CommandResult, ProcessDecision, ProcessFailure,
+    QualifiedProcessSession, TrustedEntryContext, require_process_session,
+    require_trusted_entry_context,
+)
 
 
 class PolicyError(ValueError):
@@ -245,9 +245,20 @@ def _load_json(path: Path, *, canonical: bool = False) -> Any:
     return value
 
 
+def _admit_session(value: object):
+    try:
+        return require_process_session(value)
+    except ProcessFailure as error:
+        raise PolicyError("process-session-unavailable") from error
+
+
 def _run_bounded_command(
     command: list[str],
     *,
+    process_session,
+    role: str,
+    executable=None,
+    deadline=None,
     cwd: Path,
     environment: dict[str, str],
     timeout: float,
@@ -255,74 +266,54 @@ def _run_bounded_command(
     failure: str,
     output_failure: str,
 ) -> bytes:
-    process: Optional[subprocess.Popen[bytes]] = None
-    completed = False
-    selector = selectors.DefaultSelector()
+    session = _admit_session(process_session)
     try:
-        process = subprocess.Popen(
-            command,
-            cwd=str(cwd),
-            env=environment,
-            stdin=subprocess.DEVNULL,
-            stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
-            start_new_session=True,
+        deadline = session.clock() + timeout if deadline is None else deadline
+        identity = executable if executable is not None else session.selected_executable(role)
+        request = CommandRequest(
+            role=role, executable=identity, argv=tuple(command), cwd=cwd,
+            environment=tuple(sorted(environment.items())), deadline=deadline,
+            maximum_output_bytes=maximum,
         )
-        if process.stdout is None or process.stderr is None:
+        result = session.run(request)
+        if (type(result) is not CommandResult or type(result.command_status) is not int
+                or result.command_status != 0 or result.cleanup_complete is not True
+                or type(result.stdout) is not bytes or type(result.stderr) is not bytes):
             raise PolicyError(failure)
-        selector.register(process.stdout, selectors.EVENT_READ, "stdout")
-        selector.register(process.stderr, selectors.EVENT_READ, "stderr")
-        stdout_chunks = []
-        output_bytes = 0
-        deadline = time.monotonic() + timeout
-        while selector.get_map():
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                raise subprocess.TimeoutExpired(process.args, timeout)
-            ready = selector.select(remaining)
-            if not ready:
-                raise subprocess.TimeoutExpired(process.args, timeout)
-            for key, _events in ready:
-                chunk = os.read(
-                    key.fd,
-                    min(65536, max(1, maximum + 1 - output_bytes)),
-                )
-                if not chunk:
-                    selector.unregister(key.fileobj)
-                    continue
-                output_bytes += len(chunk)
-                if output_bytes > maximum:
-                    raise PolicyError(output_failure)
-                if key.data == "stdout":
-                    stdout_chunks.append(chunk)
-        remaining = deadline - time.monotonic()
-        if remaining <= 0:
-            raise subprocess.TimeoutExpired(process.args, timeout)
-        if process.wait(timeout=remaining) != 0:
-            raise PolicyError(failure)
-        completed = True
-        return b"".join(stdout_chunks)
-    except PolicyError:
+        return result.stdout
+    except ProcessFailure as error:
+        raise PolicyError(output_failure if error.reason == "output-limit" else failure) from error
+
+
+@contextmanager
+def _final_checkout_scope(process_session, roots):
+    """Keep acquisition failures primary while finalizing only validated roots."""
+    primary = None
+    try:
+        yield
+    except BaseException as error:
+        primary = error
         raise
-    except (OSError, subprocess.SubprocessError) as error:
-        raise PolicyError(failure) from error
     finally:
-        selector.close()
-        if process is not None:
-            if not completed:
+        final_error = None
+        for root, sha in roots:
+            available = process_session.can_validate_final_checkout
+            if available:
                 try:
-                    os.killpg(process.pid, signal.SIGKILL)
-                except OSError:
-                    if process.poll() is None:
-                        process.kill()
-            try:
-                process.wait(timeout=1)
-            except subprocess.SubprocessError:
-                pass
-            if process.stdout is not None:
-                process.stdout.close()
-            if process.stderr is not None:
-                process.stderr.close()
+                    _validate_checkout(root, sha, process_session=process_session)
+                except (PolicyError, schema.SchemaError, ProcessFailure) as error:
+                    final_error = final_error or error
+                # The last observation can lose authority even when it returns
+                # normally. Record that loss without attempting another Git.
+                available = process_session.can_validate_final_checkout
+            if not available:
+                unavailable = primary or final_error or PolicyError("final-checkout-unavailable")
+                # Private diagnostic fact, never serialized into policy output.
+                unavailable.final_validation_unavailable = True
+                final_error = final_error or unavailable
+                break
+        if primary is None and final_error is not None:
+            raise final_error
 
 
 def _git_environment() -> dict[str, str]:
@@ -337,12 +328,17 @@ def _git_environment() -> dict[str, str]:
 
 
 def _run_git_bytes(
-    root: Path, *arguments: str, maximum: Optional[int] = None
+    root: Path, *arguments: str, process_session, maximum: Optional[int] = None
 ) -> bytes:
     limit = MAX_GIT_OUTPUT_BYTES if maximum is None else maximum
+    session = _admit_session(process_session)
+    try:
+        git = session.selected_executable("git")
+    except ProcessFailure as error:
+        raise PolicyError("checkout-invalid") from error
     return _run_bounded_command(
         [
-            "/usr/bin/git",
+            str(git.path),
             "-c",
             "core.fsmonitor=false",
             "-c",
@@ -353,6 +349,7 @@ def _run_git_bytes(
             str(root),
             *arguments,
         ],
+        process_session=session, role="git", executable=git,
         cwd=root,
         environment=_git_environment(),
         timeout=10,
@@ -362,14 +359,15 @@ def _run_git_bytes(
     )
 
 
-def _run_git(root: Path, *arguments: str) -> str:
+def _run_git(root: Path, *arguments: str, process_session) -> str:
     try:
-        return _run_git_bytes(root, *arguments).decode("utf-8")
+        return _run_git_bytes(root, *arguments, process_session=process_session).decode("utf-8")
     except UnicodeDecodeError as error:
         raise PolicyError("checkout-invalid") from error
 
 
-def _validate_checkout(root: Path, sha: str) -> Path:
+def _validate_checkout(root: Path, sha: str, *, process_session) -> Path:
+    _admit_session(process_session)
     if not isinstance(sha, str) or _SHA.fullmatch(sha) is None:
         raise PolicyError("checkout-invalid")
     absolute = _without_symlink_components(root)
@@ -380,14 +378,14 @@ def _validate_checkout(root: Path, sha: str) -> Path:
     except OSError as error:
         raise PolicyError("checkout-invalid") from error
     try:
-        top = Path(_run_git(resolved, "rev-parse", "--show-toplevel").strip()).resolve(
+        top = Path(_run_git(resolved, "rev-parse", "--show-toplevel", process_session=process_session).strip()).resolve(
             strict=True
         )
     except OSError as error:
         raise PolicyError("checkout-invalid") from error
-    if top != resolved or _run_git(resolved, "rev-parse", "HEAD").strip() != sha:
+    if top != resolved or _run_git(resolved, "rev-parse", "HEAD", process_session=process_session).strip() != sha:
         raise PolicyError("checkout-invalid")
-    if _run_git(resolved, "status", "--porcelain=v1", "-z"):
+    if _run_git(resolved, "status", "--porcelain=v1", "-z", process_session=process_session):
         raise PolicyError("checkout-dirty")
     return resolved
 
@@ -407,7 +405,9 @@ class CommitSnapshot:
         sha: str,
         tree_oid: str,
         entries: Dict[str, GitTreeEntry],
+        process_session,
     ) -> None:
+        self.process_session = process_session
         self.root = root
         self.sha = sha
         self.tree_oid = tree_oid
@@ -415,9 +415,10 @@ class CommitSnapshot:
         self._blobs: Dict[str, bytes] = {}
 
     @classmethod
-    def capture(cls, root: Path, sha: str) -> "CommitSnapshot":
+    def capture(cls, root: Path, sha: str, *, process_session) -> "CommitSnapshot":
+        _admit_session(process_session)
         try:
-            tree_oid = _run_git(root, "rev-parse", f"{sha}^{{tree}}").strip()
+            tree_oid = _run_git(root, "rev-parse", f"{sha}^{{tree}}", process_session=process_session).strip()
         except PolicyError:
             raise
         if _SHA.fullmatch(tree_oid) is None:
@@ -429,7 +430,7 @@ class CommitSnapshot:
             "-z",
             "--full-tree",
             sha,
-            maximum=MAX_TREE_BYTES,
+            process_session=process_session, maximum=MAX_TREE_BYTES,
         )
         entries: Dict[str, GitTreeEntry] = {}
         records = payload.split(b"\0")
@@ -455,7 +456,7 @@ class CommitSnapshot:
             if pure.is_absolute() or any(part in ("", ".", "..") for part in pure.parts):
                 raise PolicyError("commit-tree-invalid")
             entries[path] = GitTreeEntry(mode, object_type, oid)
-        return cls(root, sha, tree_oid, entries)
+        return cls(root, sha, tree_oid, entries, process_session)
 
     def blob(self, raw: Any, *, maximum: int = MAX_TEXT_BYTES) -> bytes:
         path = _repository_relative(raw)
@@ -476,7 +477,7 @@ class CommitSnapshot:
             "cat-file",
             "blob",
             entry.oid,
-            maximum=maximum,
+            process_session=self.process_session, maximum=maximum,
         )
         if len(payload) > maximum:
             raise PolicyError("input-too-large")
@@ -1280,7 +1281,7 @@ def _bats_catalog(source_root: Any, raw: Any) -> Dict[str, SourceEvidenceRecord]
     return references
 
 
-def _validate_origins(source_root: Any, manifest: dict[str, Any]) -> Set[str]:
+def _validate_origins(source_root: Any, manifest: dict[str, Any], *, process_session) -> Set[str]:
     identifiers: Set[str] = set()
     documents: Dict[str, str] = {}
     for origin in manifest["origins"]:
@@ -1336,6 +1337,7 @@ def _validate_origins(source_root: Any, manifest: dict[str, Any]) -> Set[str]:
             "HEAD",
             "--",
             "docs",
+            process_session=process_session,
         ).split("\0")
         markdown_docs = [
             relative
@@ -1694,11 +1696,13 @@ def _runner_environment(temporary_root: Path) -> dict[str, str]:
     return environment
 
 
-def _default_runtime_runner(root: Path, sha: str, tree_oid: str) -> bytes:
+def _default_runtime_runner(root: Path, sha: str, tree_oid: str, *, process_session) -> bytes:
     """Build, execute the full Swift suite, and dump the freshly built CLI."""
-    swift = shutil.which("swift", path=os.environ.get("PATH", "/usr/bin:/bin"))
-    if swift is None or not Path(swift).is_absolute():
-        raise PolicyError("runtime-runner-unavailable")
+    session = _admit_session(process_session)
+    try:
+        swift = str(session.selected_executable("swift-test").path)
+    except ProcessFailure as error:
+        raise PolicyError("runtime-runner-unavailable") from error
     with tempfile.TemporaryDirectory(prefix="apple-cli-capability-") as directory:
         temporary_root = Path(directory).resolve()
         scratch = temporary_root / "build"
@@ -1713,6 +1717,7 @@ def _default_runtime_runner(root: Path, sha: str, tree_oid: str) -> bytes:
         ]
         _run_bounded_command(
             [swift, "test", *common, "--xunit-output", str(xunit)],
+            process_session=session, role="swift-test",
             cwd=root,
             environment=environment,
             timeout=MAX_RUNTIME_SECONDS,
@@ -1724,6 +1729,7 @@ def _default_runtime_runner(root: Path, sha: str, tree_oid: str) -> bytes:
         passed = _passed_xunit_ids(xunit_payload)
         _run_bounded_command(
             [swift, "build", *common, "--product", "apple"],
+            process_session=session, role="swift-build",
             cwd=root,
             environment=environment,
             timeout=MAX_RUNTIME_SECONDS,
@@ -1733,6 +1739,7 @@ def _default_runtime_runner(root: Path, sha: str, tree_oid: str) -> bytes:
         )
         bin_path_output = _run_bounded_command(
             [swift, "build", *common, "--show-bin-path"],
+            process_session=session, role="swift-bin-path",
             cwd=root,
             environment=environment,
             timeout=MAX_RUNTIME_SECONDS,
@@ -1749,8 +1756,17 @@ def _default_runtime_runner(root: Path, sha: str, tree_oid: str) -> bytes:
             raise PolicyError("runtime-binary-invalid") from error
         binary = bin_directory / "apple"
         binary_payload = _read_regular_bytes(binary, MAX_BINARY_BYTES)
+        try:
+            dump_deadline = session.clock() + 60
+            binary_identity = session.bind_help_executable(
+                binary, build_root=scratch, expected_sha256=hashlib.sha256(binary_payload).hexdigest(),
+                deadline=dump_deadline,
+            )
+        except ProcessFailure as error:
+            raise PolicyError("runtime-binary-invalid") from error
         dump_payload = _run_bounded_command(
             [str(binary), "--experimental-dump-help"],
+            process_session=session, role="help-dump", executable=binary_identity, deadline=dump_deadline,
             cwd=root,
             environment=environment,
             timeout=60,
@@ -1839,11 +1855,17 @@ def _parse_runtime_attestation(
 def _capture_candidate(
     repository_root: Path,
     sha: str,
+    *, process_session, operation_roots=None,
 ) -> CandidateDetails:
     """Capture and validate one immutable exact-commit candidate."""
-    root = _validate_checkout(Path(repository_root), sha)
-    snapshot = CommitSnapshot.capture(root, sha)
-    try:
+    session = _admit_session(process_session)
+    roots = []
+    with _final_checkout_scope(session, roots):
+        root = _validate_checkout(Path(repository_root), sha, process_session=session)
+        roots.append((root, sha))
+        if operation_roots is not None:
+            operation_roots.append((root, sha))
+        snapshot = CommitSnapshot.capture(root, sha, process_session=session)
         manifest_data = _blob_json(snapshot, MANIFEST_PATH, canonical=True)
         catalog_data = _blob_json(snapshot, SWIFT_CATALOG_PATH, canonical=True)
         bats_data = _blob_json(snapshot, BATS_INVENTORY_PATH, canonical=False)
@@ -1854,7 +1876,7 @@ def _capture_candidate(
         if manifest_data["status"] != "curated":
             raise PolicyError("manifest-not-curated")
 
-        origin_ids = _validate_origins(snapshot, manifest_data)
+        origin_ids = _validate_origins(snapshot, manifest_data, process_session=session)
         used_origin_ids = {
             surface.get("origin_id")
             for surface in [*manifest_data["commands"], *manifest_data["arguments"]]
@@ -1881,6 +1903,7 @@ def _capture_candidate(
                     source_root,
                     sha,
                     snapshot.tree_oid,
+                    process_session=session,
                 )
         except PolicyError:
             raise
@@ -1905,23 +1928,23 @@ def _capture_candidate(
             "tree_oid": snapshot.tree_oid,
         }
         return CandidateDetails(root, sha, manifest_data, evidence_catalog, report)
-    finally:
-        _validate_checkout(root, sha)
 
 
 def check_candidate(
     *,
     repository_root: Path,
     sha: str,
+    process_session=None,
     **candidate_artifacts: Any,
 ) -> dict[str, Any]:
     """Check fixed policy blobs and executed runtime evidence for one exact SHA."""
     if candidate_artifacts:
         raise PolicyError("artifact-path-invalid")
-    return _capture_candidate(repository_root, sha).report
+    session = _admit_session(process_session)
+    return _capture_candidate(repository_root, sha, process_session=session).report
 
 
-def _checked_candidate_details(candidate: dict[str, Any]) -> CandidateDetails:
+def _checked_candidate_details(candidate: dict[str, Any], *, process_session, operation_roots) -> CandidateDetails:
     if not isinstance(candidate, dict) or set(candidate) != {
         "repository_root",
         "sha",
@@ -1930,6 +1953,7 @@ def _checked_candidate_details(candidate: dict[str, Any]) -> CandidateDetails:
     return _capture_candidate(
         Path(candidate["repository_root"]),
         candidate["sha"],
+        process_session=process_session, operation_roots=operation_roots,
     )
 
 
@@ -1962,18 +1986,20 @@ def _argument_names(argument: dict[str, Any]) -> Set[Tuple[str, str]]:
 
 
 def compare_candidates(
-    *, base: dict[str, Any], head: dict[str, Any]
+    *, base: dict[str, Any], head: dict[str, Any], process_session=None
 ) -> dict[str, Any]:
     """Reject command/argument capability-policy regressions between exact checkouts."""
-    base_details = _checked_candidate_details(base)
-    head_details = _checked_candidate_details(head)
-    base_manifest = base_details.manifest
-    head_manifest = head_details.manifest
-    base_commands = {item["id"]: item for item in base_manifest["commands"]}
-    head_commands = {item["id"]: item for item in head_manifest["commands"]}
-    base_arguments = {item["id"]: item for item in base_manifest["arguments"]}
-    head_arguments = {item["id"]: item for item in head_manifest["arguments"]}
-    try:
+    session = _admit_session(process_session)
+    roots = []
+    with _final_checkout_scope(session, roots):
+        base_details = _checked_candidate_details(base, process_session=session, operation_roots=roots)
+        head_details = _checked_candidate_details(head, process_session=session, operation_roots=roots)
+        base_manifest = base_details.manifest
+        head_manifest = head_details.manifest
+        base_commands = {item["id"]: item for item in base_manifest["commands"]}
+        head_commands = {item["id"]: item for item in head_manifest["commands"]}
+        base_arguments = {item["id"]: item for item in base_manifest["arguments"]}
+        head_arguments = {item["id"]: item for item in head_manifest["arguments"]}
         if base_manifest["supersedes"] != head_manifest["supersedes"]:
             raise PolicyError("compare-supersedes-frozen")
         if not set(base_commands).issubset(head_commands) or not set(
@@ -2031,9 +2057,6 @@ def compare_candidates(
             "new_commands": len(set(head_commands) - set(base_commands)),
             "ok": True,
         }
-    finally:
-        _validate_checkout(base_details.root, base_details.sha)
-        _validate_checkout(head_details.root, head_details.sha)
 
 
 def _add_candidate_arguments(parser: argparse.ArgumentParser, prefix: str = "") -> None:
@@ -2058,35 +2081,87 @@ def _candidate_from_namespace(
     }
 
 
+def _parse_arguments(argv):
+    parser = _ValueFreeArgumentParser(description=__doc__, allow_abbrev=False)
+    subparsers = parser.add_subparsers(dest="operation", required=True)
+    snapshot_parser = subparsers.add_parser("snapshot", allow_abbrev=False)
+    snapshot_parser.add_argument("--dump", required=True)
+    check_parser = subparsers.add_parser("check", allow_abbrev=False)
+    _add_candidate_arguments(check_parser)
+    compare_parser = subparsers.add_parser("compare", allow_abbrev=False)
+    _add_candidate_arguments(compare_parser, "base")
+    _add_candidate_arguments(compare_parser, "head")
+    return parser.parse_args(argv)
+
+
+def _decision(error=None, result=None):
+    if error is not None:
+        return ProcessDecision(stdout=b"", stderr=f"capability-policy: {error}\n".encode("utf-8"), exit_code=2)
+    return ProcessDecision(stdout=canonical_json(result).encode("utf-8"), stderr=b"", exit_code=0)
+
+
+def _publish_decision(decision):
+    # Public content is UTF-8 JSON/fixed text; writing failure never becomes success.
+    if decision.stderr:
+        sys.stderr.write(decision.stderr.decode("utf-8"))
+    if decision.stdout:
+        sys.stdout.write(decision.stdout.decode("utf-8"))
+    return decision.exit_code
+
+
 def main(argv: Optional[list[str]] = None) -> int:
     try:
-        parser = _ValueFreeArgumentParser(description=__doc__, allow_abbrev=False)
-        subparsers = parser.add_subparsers(dest="operation", required=True)
-        snapshot_parser = subparsers.add_parser("snapshot", allow_abbrev=False)
-        snapshot_parser.add_argument("--dump", required=True)
-        check_parser = subparsers.add_parser("check", allow_abbrev=False)
-        _add_candidate_arguments(check_parser)
-        compare_parser = subparsers.add_parser("compare", allow_abbrev=False)
-        _add_candidate_arguments(compare_parser, "base")
-        _add_candidate_arguments(compare_parser, "head")
-        namespace = parser.parse_args(argv)
+        namespace = _parse_arguments(argv)
+        if namespace.operation != "snapshot":
+            raise PolicyError("process-session-unavailable")
+        result = snapshot_manifest(_load_json(Path(namespace.dump)))
+        decision = _decision(result=result)
+    except (PolicyError, schema.SchemaError) as error:
+        decision = _decision(error=error)
+    return _publish_decision(decision)
+
+
+def run_trusted(argv, *, context: TrustedEntryContext) -> int:
+    """Use externally verified in-memory authority; never infer or deserialize it."""
+    session = None
+    primary = None
+    result = None
+    try:
+        admitted = require_trusted_entry_context(context)
+        namespace = _parse_arguments(argv)
         if namespace.operation == "snapshot":
             result = snapshot_manifest(_load_json(Path(namespace.dump)))
-        elif namespace.operation == "check":
-            candidate = _candidate_from_namespace(namespace)
-            result = check_candidate(**candidate)
         else:
-            base = _candidate_from_namespace(namespace, "base")
-            head = _candidate_from_namespace(namespace, "head")
-            result = compare_candidates(
-                base=base,
-                head=head,
-            )
+            session = QualifiedProcessSession.prepare(admitted.trusted_root, admitted.profile_id)
+            _admit_session(session)
+            if namespace.operation == "check":
+                result = check_candidate(**_candidate_from_namespace(namespace), process_session=session)
+            else:
+                result = compare_candidates(
+                    base=_candidate_from_namespace(namespace, "base"),
+                    head=_candidate_from_namespace(namespace, "head"),
+                    process_session=session,
+                )
     except (PolicyError, schema.SchemaError) as error:
-        sys.stderr.write(f"capability-policy: {error}\n")
-        return 2
-    sys.stdout.write(canonical_json(result))
-    return 0
+        primary = error
+    except ProcessFailure:
+        primary = PolicyError("process-session-unavailable")
+    finally:
+        if session is not None:
+            try:
+                session.close()
+            except ProcessFailure:
+                primary = primary or PolicyError("process-session-unavailable")
+    proposed = _decision(error=primary, result=result)
+    if session is not None:
+        cancelled = _decision(error=primary or PolicyError("process-session-unavailable"))
+        try:
+            proposed = session.finalize_decision(proposed=proposed, cancelled=cancelled)
+        except ProcessFailure:
+            # Finalization refusal cannot publish provisional success or replace
+            # an earlier policy diagnostic. Do not retry the decision boundary.
+            proposed = cancelled
+    return _publish_decision(proposed)
 
 
 if __name__ == "__main__":
