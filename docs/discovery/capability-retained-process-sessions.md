@@ -38,6 +38,8 @@ diagnostics and evidence policy in `capability_policy.py`. Worker/bootstrap role
 belong to this same trusted package; do not add a generic external supervisor or
 public executable override. A separate module is justified only by keeping the
 trusted bootstrap import closure small, not by introducing another owner engine.
+The external native authority entry specified below replaces itself with Python;
+it is a packaging trust boundary, not another process owner or supervisor.
 
 The initial target profile is standalone macOS arm64 CLT CPython. Its production
 profile remains unqualified until the distribution records and actual package
@@ -71,67 +73,186 @@ Unreviewed local fork code with real HOME/TCC access remains inadmissible.
 
 ## External authority and trusted entry
 
-Use an externally selected, reviewed standalone authority shim, separate from the
-capability package. The shim belongs to the trusted orchestrator. This unit
-introduces no installer or public authority configuration command. Independently reviewed invocation
-records supply this boundary during qualification; distribution packaging must
-provide the same boundary before production admission.
+Use an externally selected native macOS authority executable and a separately
+pinned Python authority shim, both outside the capability package. The native
+entry checks finite inputs before Python startup, then calls `execve` to replace
+itself with the exact CLT interpreter and shim. PID and process group remain
+unchanged. It creates no child, waiter, signal routine, supervisor, daemon or
+installer. A new Python wrapper would itself load startup inputs before checking
+them and does not supply this boundary.
 
-The shim contains three reviewed literals: canonical trusted package root,
-expected SHA256 of the closed package-member manifest, and the admitted profile
-identifier. Its own exact bytes/digest and the isolated Python executable are
-pinned by the external invocation review/dispatch record. They are not learned
-from candidate cwd, a candidate receipt, its own runtime self-hash, or a public
-argument/environment override.
+The native artifact is built and qualified offline and pinned independently by
+the external invocation/distribution record. It may depend only on the admitted
+Apple OS/dyld/system-runtime base, including qualified system cryptographic
+services. Its concrete linkage must establish that boundary: no CLT Python,
+Swift or third-party runtime executes in the native prelude. This external entry
+is distinct from the ownership ABI artifact compiled once per session below;
+it cannot substitute for, cache or bypass that preparing-only build.
+
+Native entry and Python shim contain the same three reviewed literals: canonical
+trusted package root, expected SHA256 of the closed package-member manifest,
+and admitted profile identifier. Candidate cwd, receipts, runtime self-hashes
+and public argument/environment overrides never select them. Freeze pins in this
+acyclic order:
+
+1. Freeze package/profile bytes and their closed manifest. The profile may bind
+   the independently selected interpreter. It must not embed the final digest of
+   the Python shim, native authority artifact or dispatch record that depends on
+   this manifest.
+2. Freeze the Python shim with its three literals. It embeds neither its own
+   final digest nor the native artifact's digest.
+3. Freeze the native artifact with matching literals and external exact
+   interpreter/shim path and digest pins. These execution pins belong to the
+   external artifact, not the manifest-covered profile. Its interpreter pin must
+   agree with the selected verified profile record.
+4. Freeze the external dispatch record last, binding manifest, interpreter,
+   Python shim and resulting native binary. It supplies the native artifact's
+   trust anchor; the artifact cannot establish authority by hashing itself.
+
+The closed eight-member package binds its six process/protocol/policy/import
+Python sources, fixed native ownership source and profile data. Its manifest
+excludes itself and both external entry artifacts. Every launcher supplied by
+the package remains a member. The external artifacts have separate invocation
+pins; no backward digest reference is permitted. No external entry or production
+profile is qualified merely by this specification.
 
 The externally reviewed invocation has this fixed shape, with canonical paths
-and shim digest resolved before review rather than taken from the candidate:
+and all artifact pins resolved before review:
 
 ```
 env -i PATH=/usr/bin:/bin:/usr/sbin:/sbin LC_ALL=C \
-  <profile-pinned-absolute-CLT-python> -I -S -B \
-  <externally-reviewed-authority-shim> <existing-check-or-compare-arguments>
+  <externally-pinned-native-authority-entry> <existing-check-or-compare-arguments>
 ```
 
-The invocation exposes no new capability-policy authority option. Only the
-existing candidate root/SHA operands vary within its admitted scope;
-they are untrusted inputs and cannot replace the three authority literals.
-No pre-session Git, xcrun, compiler/version query or installer discovers them.
-The startup environment, argument shape and selected profile must all match the
-admitted invocation; missing authority fails closed.
+Its internal exec vector is the exact profile-pinned CLT Python, `-I -S -B`, the
+externally pinned Python shim, a fixed internal descriptor prefix/read-FD pair,
+then the existing candidate operands. Freeze that vector before qualification.
+The prefix is not a public capability-policy authority option. Only existing
+candidate root/SHA operands vary; they remain untrusted data. No pre-session
+Git, xcrun, compiler/version query or installer discovers or repairs authority.
+Startup environment, argument shape and profile must match the admitted
+invocation. Direct Python-shim invocation without the required handoff refuses.
 
-The closed package-member manifest binds the process/worker/policy modules and
-other package import members, fixed native source and profile data. It excludes
-its own bytes and the external authority shim. The shim is the externally trusted
-root supplying the expected manifest digest; including its embedded digest in
-that manifest would recreate a hash cycle. This does not leave an unreviewed
-package launcher: every launcher supplied by the package is a manifest member.
-The independently selected external shim is expressly outside that package and
-has its own invocation pin. No production authority shim is qualified by this
-specification.
+### Pre-load premise and finite verification
 
-The shim validates and captures the actual built-in shared-clock binding and
-immediately takes started, setting D=started+58 before any charged package/profile/
-runtime/member hashing. It verifies the closed members as bounded data before
-loading/compiling their Python source in this same owned process, then hands the
-captured clock and started/D onward without serialization or reset. Verification,
-loading and preparation share one budget. The shim's minimal clock/manifest-loader
-code is part of its external invocation review, not arbitrary candidate imports.
-The complete runtime/reset/triple-image qualification stays at its accepted
-pre-child position; these first clock reads do not confer ownership qualification.
+The verified-buffer Python shim already verifies package bytes, compiles those
+exact buffers, executes the resulting code, checks installed module identities
+and calls trusted entry directly. That control flow supplies package provenance
+under the accepted trusted-process assumption. It does not prove that an
+unadmitted startup cache did not execute and disappear before the shim ran.
+Post-import absence alone cannot establish that history.
 
-Once modules are verified, the trusted entry checks context shape and invokes
-preparation, which consumes its one preparation token. A second preparation or
-reuse after failure refuses.
-This is a lifecycle invariant, not protection against hostile Python running in
-the same process. Tests may inject a fake context only through an explicit test
-seam and must label that boundary. No serialized context ever becomes evidence.
+The native entry verifies the fixed manifest/profile as bounded data through a
+small strict parser for the supported schema. Bound manifest size and member
+counts before expansion. Check exact membership, no-follow regular-file
+identities, stable bounded reads and independent digests. Extract only the
+selected profile's fixed pre-load records. Interpreter identity must agree with
+its external pin; shim path/digest come only from the native external pins.
+Later reads of already-admitted shim bytes are comparison data, not authority.
 
-Bound manifest size/member counts and no-follow regular member reads. Verify
-exact relative membership, hashes and stable metadata before loading package
-members, before each worker launch and after cleanup. Preparation checks consume
-the original bootstrap budget; operational checks consume the corresponding
-command budget. No pre-session process discovers or repairs authority.
+Pre-load coverage includes startup, shim and package-induced stock-loader search
+topology: source/extension files, frozen-loader distribution binding, potential
+caches, zip/legacy-sourceless/shadow alternatives or fixed absences excluding
+them, and exact startup branch controls. A list of adjacent cache paths alone is
+insufficient. The first supported shape admits verified source with exact cache
+absence; no arbitrary cache decoding or replacement importer follows. Missing
+coverage leaves the profile inactive. Do not discover, delete, repair, install
+or broaden an input to make it match.
+
+Recheck source/search identities and absences immediately before exec. Trusted
+orchestration and reviewed code preserve that established stable-input premise
+through the run. The existing exclusion of concurrent same-account tampering
+remains; it does not excuse initially executing unadmitted code. Independently
+reviewed offline preflight/census records are qualification evidence, not
+transferable production admission receipts.
+
+### One clock and bounded native-to-Python handoff
+
+The native entry's first preparation observation is the admitted
+`CLOCK_UPTIME_RAW` reading. Convert it to the qualified finite nonnegative
+binary64 representation, retain `started`, and set `D = started + 58.0` once.
+Reject overflow or a nonincreasing deadline. Capture precedes per-launch
+argument/profile/member/runtime hashing and validation. Native verification,
+descriptor setup and exec preparation consume this same D, with checks before
+and after synchronous operations. Nonfinite, backward, failing or late reads
+refuse; no alternate clock, tolerance increase or fresh allowance is permitted.
+
+Create a private anonymous pipe with nonblocking, close-on-exec ends. Complete
+one bounded 64-byte write, close the sole writer and confirm descriptor cleanup.
+Reserve the read end above descriptors 0/1/2 and clear close-on-exec only for it.
+Close all preflight-owned file descriptors before exec; preserve admitted
+stdin/stdout/stderr semantics. Recheck D, then exec the exact vector above.
+Exec and interpreter startup consume the original budget.
+
+The handoff has this exact 64-byte layout; integer and floating fields are
+big-endian:
+
+| Field | Bytes | Required value |
+|---|---:|---|
+| Magic/version | 8 | ASCII `CAPBOOT1` |
+| Clock ID | 4 | Unsigned 32-bit integer 8 |
+| Reserved | 4 | Unsigned 32-bit zero |
+| Started | 8 | Finite nonnegative binary64 original started |
+| Deadline | 8 | Binary64 D, exactly started+58.0 |
+| Authority binding | 32 | SHA256 of the encoding below |
+
+Hash this exact concatenation: ASCII `capability-bootstrap-authority-v1` and one
+NUL byte; the root literal's UTF-8 byte length as unsigned 32-bit big-endian and its
+bytes; expected manifest SHA256 decoded to 32 bytes; the profile literal's ASCII
+byte length as unsigned 32-bit big-endian and its bytes. Enforce 4096-byte root and
+128-byte profile bounds before expansion, without normalizing literal bytes.
+Native entry and shim recompute this from their own matching three literals.
+Interpreter/shim/native artifact digests are deliberately excluded: their exact
+execution pins remain external, avoiding a shim self-hash dependency.
+
+The shim captures and validates its actual builtin clock before charged imports;
+its first local reading does not become a new started. Consume the nonblocking
+read end once, require exactly 64 bytes plus EOF with no tail, and close it on
+every path. Minimal decoder/import work remains charged. Require matching
+authority binding/clock ID, valid finite times, `D == started + 58.0`, and
+`started <= local_now < D`. Missing, stale, retargeted, malformed or reused
+handoff refuses; never substitute `local_now + 58` or fall back to direct entry.
+These refusals occur before package execution where the check is available, and
+always before preparation or subprocess admission.
+Qualify native/Python conversion and boundary behavior against the same OS clock
+without increasing tolerance or extending D.
+
+This fixed record is budget metadata under the external invocation contract,
+not independent authority, an authenticated same-user receipt, a serialized
+context or a readiness assertion. It does not select root/profile. Same-account
+code can fabricate descriptors; admitted invocation still depends on the
+independently selected external entry, not Python authenticating its own caller.
+
+The shim retains all existing bounded package verification/compilation and
+runtime rechecks under D, then constructs the in-memory bootstrap token with
+its captured callable and original started/D. Trusted entry consumes that token
+once; a second preparation or reuse after failure refuses. The shim-to-core
+context remains in memory. Tests may inject an explicitly labeled test seam;
+no caller-deserialized context becomes evidence.
+
+Verify exact relative membership, hashes and stable metadata before package
+execution, before worker launches and after cleanup, using bounded no-follow
+regular-file reads. All preparation rereads remain charged to the original
+budget; operational checks consume their corresponding command budget. Complete
+runtime/reset/triple-image qualification stays at its accepted pre-child
+position. Early clock readings and pre-load checks do not confer ownership.
+
+### Pre-exec failure boundary
+
+Observed and reported input drift, unexpected cache/search state, bad metadata,
+deadline, incomplete handoff, uncertain close or exec failure uses the fixed
+unavailable classification. Close only owned descriptors. Do not signal a PID or
+group, delete caches, retry exec, use a fallback interpreter or discover another
+profile. The prelude has no subject child to reap; Python owns handoff-read-end
+closure after exec.
+
+Default or external signal termination may prevent a diagnostic. For that case,
+require no acceptance, no child created by the prelude, and retained external
+termination outcome/captures as failure evidence; do not add a handler, repair
+or supervisor to manufacture a message. Qualify signal/mask preservation, the
+CLT launcher's own SETEXEC transition, read-FD survival, EOF and close handling.
+The shared clock remains cooperative: synchronous filesystem/loader calls can
+overrun D, and late returns refuse rather than receive more time.
 
 ## Session and policy interfaces
 
@@ -208,16 +329,18 @@ deadline; it cannot multiply that budget by file count.
 
 ## Qualification and bootstrap
 
-1. In the externally selected authority shim, validate/capture the built-in time
-   module and actual built-in `clock_gettime` identity/name/module/self binding,
-   with exact integer `CLOCK_UPTIME_RAW == 8`. Immediately take the first shared
-   reading `started` and fix bootstrap workdeadline `D = started + 58`, before
-   charged package/profile/runtime hashing or qualification work. These early
-   reads are nonmutating observations, not ownership qualification. Reject
-   non-float, nonfinite, negative, backward or failing reads; no alternate clock,
-   increased tolerance, later start or budget reset is permitted. Verify closed
-   members before loading their code, then transfer this exact clock/started/D in
-   the internal context to trusted entry; preparation consumes that token once.
+1. The externally pinned native entry captures original `started` and fixes
+   `D = started + 58` before all per-launch verification. Establish the finite
+   pre-load premise, then use the bounded CAPBOOT1 handoff and same-process exec
+   above. The Python shim validates/captures the built-in time module and actual
+   built-in `clock_gettime` identity/name/module/self binding, with exact integer
+   `CLOCK_UPTIME_RAW == 8`, and adopts the original started/D after validating the
+   handoff. These early readings are nonmutating observations, not ownership
+   qualification. Reject non-float, nonfinite, negative, backward or failing
+   readings; no alternate clock, increased tolerance, later start or budget reset
+   is permitted. Verify closed members before loading their code, then transfer
+   the captured callable and original started/D in the internal context to
+   trusted entry; preparation consumes that token once.
 2. Enter preparing and validate the externally selected closed package/profile
    and actual launcher, loaded main image, framework and reset implementation.
    Perform the qualified built-in SIGCHLD reset in this owned process before
@@ -229,8 +352,9 @@ deadline; it cannot multiply that budget by file count.
    the existing reserve.
 3. Only this fresh preparing state may issue one private `compiler-bootstrap`
    request. Its worker uses the qualified runtime, shared clock and built-in reset
-   without a native artifact dependency. It builds fixed trusted native source
-   with profile-fixed compiler/SDK/argv, 1 MiB aggregate capture and the original
+   without an ownership-ABI artifact dependency. The external authority binary
+   already executed and is not built here. This worker builds fixed trusted native
+   source with profile-fixed compiler/SDK/argv, 1 MiB aggregate capture and the original
    D. Use the retained worker, noninherited receipt FD, signal-before-sole-wait
    and cleanup contract below. Before the artifact exists, this path retains the
    unpolled direct worker using the qualified built-in reset contract; it makes
@@ -591,9 +715,26 @@ copied orchestration as a substitute.
 - Prove the external manifest digest selects the trusted closed closure before
   candidate imports; reject candidate-selected manifests, extra/missing members,
   self-member recursion and changed profile/tool mappings before child launch.
-  Verify the first clock reading precedes all charged package/runtime hash work.
-- Exercise preparing-only compiler bootstrap without any native artifact, followed
-  by artifact acceptance and ready transition. Missing operational artifact,
+  Verify the native first clock reading precedes all per-launch verification and
+  all charged package/runtime hash work. Test the acyclic package/manifest→shim→
+  native-artifact→dispatch freeze order; no manifest-covered downstream identity
+  or shim self-hash may become authority.
+- Exercise pre-launch source/cache/search controls before the subject interpreter
+  starts: a pre-existing unadmitted cache or shadow input refuses before exec;
+  incomplete finite topology refuses. Post-import absence alone cannot pass.
+  Verify native preflight cost reduces the original allowance, with no restart
+  at exec, Python entry or preparation. Retain all charged Python rereads.
+- Test the actual native-entry→Python-shim→trusted-entry handoff: exact 64-byte
+  encoding, three-literal binding, original times, read FD above stdio, sole
+  writer closure, exact EOF and read-FD closure on every path. Missing, partial,
+  extra, malformed, stale, mismatched and reused data refuse; no fallback start
+  or authority from an FD number, serialized context or record is permitted.
+  Include full-pipe/read/close/exec failures and late observations without retries,
+  signals, children or a second owner. Qualify native/Python clock conversion,
+  signal dispositions/masks and CLT SETEXEC descriptor transport. External signal
+  termination before exec cannot count as acceptance or promise a diagnostic.
+- Exercise preparing-only compiler bootstrap without an ownership-ABI artifact,
+  followed by artifact acceptance and ready transition. Missing operational artifact,
   forged compiler role, second bootstrap or failed preparation must never invoke
   compiler/Git as a recovery path. Test both exact request/receipt schemas and
   actual policy-owned command shapes, not only synthetic schema examples.
@@ -651,24 +792,33 @@ The authority source, preparing-only bootstrap role, ABI signatures, frame limit
 cleanup reserve and cooperative fallback are fixed above. The remaining
 implementation prerequisites require qualification evidence:
 
-1. Supply the independently selected authority shim/invocation pin and populate
+1. Supply the independently selected native entry, Python shim and dispatch pins
+   in the acyclic freeze order above, and populate
    the closed package manifest, runtime/reset/Git/Swift/compiler records, finite
    build-input projection and linker mappings. Keep the manifest outside its own
-   membership and the external shim separately pinned. Qualify the explicit Apple
-   platform-base mapping. Unqualified rows stay inactive; prototype evidence does
+   membership and both external entry artifacts separately pinned. Qualify the
+   native entry's exact offline source, compiler/header/linker inputs and argv,
+   resulting binary and Apple-only runtime dependency closure, canonical
+   distribution paths and responsible packaging owner; it is never built
+   during preparation. Qualify the finite startup/source/cache/search premise,
+   explicit Apple platform-base mapping, actual distribution layout, clock and
+   descriptor transport. Unqualified rows stay inactive; prototype evidence does
    not establish those production records or their timing.
 2. Complete offline dependency/search qualification, then exercise the actual
+   native-entry→Python-shim handoff and
    trusted-entry/package bootstrap and ABI with the shared clock and fixed compiler
    closure, including post-cleanup artifact/state validation. No installer
-   or cache is needed: once per session without persistent cache remains fixed.
+   or cache is needed: the ownership-ABI build remains once per session without
+   persistent cache, separate from the offline-built external authority artifact.
 3. Verify all existing constructed policy requests against the exact role schemas,
    preserved argv/environment and public failure strings. Keep original primary
    PolicyError when final validation becomes unavailable; do not replace it with
    a cleanup/protocol diagnostic or success. Qualify the finite request/receipt
    bounds with boundary tests, not by loosening them after a fixture failure.
-4. Independently review this revision and the local identity boundary, then promote
-   the settled process spec through the normal tracked-spec gate before process
-   RED/implementation. Hosted qualification stays after publication. Bats binding
+4. Independently review this amendment and its local identity boundary, then
+   pass the normal tracked-spec gate before implementing the amended native
+   entry and handoff. Existing process mechanics do not qualify this new entry.
+   Hosted qualification stays after publication. Bats binding
    and local leases retain their separate admission and acceptance requirements.
 
 No production qualification or integration result is supplied by this design.
