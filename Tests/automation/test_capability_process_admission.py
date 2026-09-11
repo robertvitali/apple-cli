@@ -13,7 +13,7 @@ from dataclasses import replace
 from pathlib import Path
 from unittest import mock
 
-from capability_runtime_metadata_fixtures import descriptors
+from capability_runtime_metadata_fixtures import preload_descriptors
 from test_capability_process_lifecycle import Clock, LifecycleFixture, core, identity
 
 
@@ -64,10 +64,11 @@ class AdmissionFixture(LifecycleFixture):
 
     def profile_row(self):
         record = vars(self.selected).copy()
-        platform, runtime = descriptors()
+        platform, runtime, preload = preload_descriptors()
         return {"id": "synthetic-profile", "status": "qualified",
                 "platform": platform,
                 "runtime": runtime,
+                "preload": preload,
                 "projection": {"qualification_fixture": True},
                 "compiler_arguments": ["synthetic-never-executed"],
                 "executables": {name: dict(record) for name in ("git", "swift", "compiler", "linker")}}

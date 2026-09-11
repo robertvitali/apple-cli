@@ -288,6 +288,7 @@ class _SelectedProfile:
     executables: object
     compiler: ExecutableIdentity
     linker: ExecutableIdentity
+    preload: object
 
 
 def _bounded_clock(clock, deadline):
@@ -510,12 +511,12 @@ def _select_profile(package, profile_id, *, deadline, clock):
         raise _unavailable()
     selected = None
     names = set()
-    fields = {"id", "status", "platform", "runtime", "projection", "compiler_arguments", "executables"}
+    fields = {"id", "status", "platform", "runtime", "preload", "projection", "compiler_arguments", "executables"}
     for row in registry["profiles"]:
         if (type(row) is not dict or set(row) != fields or type(row["id"]) is not str
                 or _PROFILE_ID.fullmatch(row["id"]) is None or row["id"] in names
                 or type(row["status"]) is not str or row["status"] not in {"qualified", "inactive"}
-                or any(type(row[name]) is not dict for name in ("platform", "runtime", "projection"))
+                or any(type(row[name]) is not dict for name in ("platform", "runtime", "preload", "projection"))
                 or type(row["compiler_arguments"]) is not list
                 or not 0 < len(row["compiler_arguments"]) <= 256
                 or any(type(arg) is not str or "\x00" in arg or len(arg.encode("utf-8")) > 4096
@@ -538,12 +539,13 @@ def _select_profile(package, profile_id, *, deadline, clock):
         if row["id"] == profile_id and row["status"] == "qualified":
             metadata = _admit_runtime_metadata(row["platform"], row["runtime"],
                                                deadline=deadline, clock=clock)
+            preload = _admit_preload_metadata(metadata, row["preload"], deadline=deadline, clock=clock)
             selected = _SelectedProfile(profile_id, metadata.platform,
                 metadata.runtime, _freeze_data(row["projection"]),
                 tuple(row["compiler_arguments"]), MappingProxyType({
                     "git": tools["git"], "swift-test": tools["swift"],
                     "swift-build": tools["swift"], "swift-bin-path": tools["swift"]}),
-                tools["compiler"], tools["linker"])
+                tools["compiler"], tools["linker"], preload)
         checkpoint()
     if selected is None:
         raise _unavailable()
@@ -845,6 +847,175 @@ def _admit_runtime_metadata(platform, runtime, *, deadline, clock):
     need("subprocess" in modules and modules["subprocess"]["kind"] == "source"
          and modules["subprocess"]["source"] == popen["source"])
     result = _RuntimeMetadata(_freeze_data(platform), _freeze_data(runtime))
+    checkpoint()
+    return result
+
+
+@dataclass(frozen=True)
+class _PreloadMetadata:
+    """Detached finite pre-load premises, without verification or authority."""
+    descriptor: object
+
+
+def _admit_preload_metadata(metadata, preload, *, deadline, clock):
+    """Connect source-only pre-load declarations to already admitted runtime data.
+
+    This checks consistency, not exhaustive stock-loader search coverage. Native
+    file verification and actual-process qualification remain separate gates.
+    """
+    checkpoint = _bounded_clock(clock, deadline)
+    checkpoint()
+
+    def need(condition):
+        if not condition:
+            raise _unavailable()
+
+    need(type(metadata) is _RuntimeMetadata)
+    _bound_runtime_metadata(preload, checkpoint)
+    runtime = metadata.runtime
+
+    def record(value, fields):
+        need(type(value) is dict and set(value) == set(fields.split()))
+
+    def integer(value):
+        need(type(value) is int and 0 <= value <= 2**64 - 1)
+
+    def path(value):
+        need(type(value) is str and 0 < len(value) <= 4096 and "\x00" not in value)
+        try:
+            need(len(value.encode("utf-8", errors="strict")) <= 4096)
+        except UnicodeError:
+            raise _unavailable() from None
+        need(value.startswith("/") and (value == "/" or all(
+            part not in ("", ".", "..") for part in value[1:].split("/"))))
+
+    def parent(value):
+        return value.rpartition("/")[0] or "/"
+
+    def ancestors(value):
+        while value != "/":
+            checkpoint()
+            value = parent(value)
+            yield value
+
+    def under(value, root):
+        checkpoint()
+        return value == root or (value.startswith(root + "/") if root != "/" else value.startswith("/"))
+
+    record(preload, "schema_version policy launch_environment cache_branch directories searches")
+    need(type(preload["schema_version"]) is int and preload["schema_version"] == 1
+         and preload["policy"] == "stock-source-no-cache-v1")
+    environment = preload["launch_environment"]
+    record(environment, "LC_ALL PATH")
+    need(all(type(value) is str for value in environment.values())
+         and environment == {"LC_ALL": "C", "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"})
+    branch = preload["cache_branch"]
+    record(branch, "pycache_prefix check_hash_based_pycs")
+    need(branch["pycache_prefix"] is None and type(branch["check_hash_based_pycs"]) is str
+         and branch["check_hash_based_pycs"] == "default")
+
+    files, file_paths = {}, set()
+    total_bytes = 0
+    need(0 < len(runtime["files"]) <= 4096)
+    for row in runtime["files"]:
+        checkpoint()
+        identity = row["identity"]
+        path(identity["path"])
+        need(identity["size"] <= 64 * 1024 * 1024)
+        total_bytes += identity["size"]
+        need(total_bytes <= 128 * 1024 * 1024)
+        files[row["id"]] = identity["path"]
+        file_paths.add(identity["path"])
+    absent = set(runtime["absent_inputs"])
+    search_paths = runtime["search_paths"]
+    for value in (*absent, *search_paths):
+        checkpoint()
+        path(value)
+
+    rows = preload["directories"]
+    need(type(rows) is list and 0 < len(rows) <= 4096)
+    directories = set()
+    previous = None
+    for row in rows:
+        checkpoint()
+        record(row, "path device inode mode uid gid mtime_ns ctime_ns")
+        value = row["path"]
+        path(value)
+        need(previous is None or previous < value)
+        previous = value
+        for name in ("device", "inode", "mode", "uid", "gid", "mtime_ns", "ctime_ns"):
+            integer(row[name])
+        mode = row["mode"]
+        need(mode & 0o170000 == 0o040000 and mode & ~(0o040000 | 0o755) == 0
+             and mode & 0o500 == 0o500 and value not in file_paths and value not in absent)
+        need(all(ancestor not in file_paths and ancestor not in absent for ancestor in ancestors(value)))
+        directories.add(value)
+    for value in file_paths:
+        checkpoint()
+        need(parent(value) in directories
+             and all(ancestor not in file_paths and ancestor not in absent for ancestor in ancestors(value)))
+    for value in search_paths:
+        checkpoint()
+        need(value in directories or value in absent)
+        need(value not in file_paths and all(ancestor not in file_paths for ancestor in ancestors(value)))
+    existing_roots = tuple(value for value in search_paths if value in directories)
+    absent_roots = tuple(value for value in search_paths if value in absent)
+
+    expected_modules = {}
+    for module in runtime["modules"]:
+        checkpoint()
+        if module["kind"] == "extension":
+            expected_modules[module["name"]] = (module["file"], ())
+        elif module["kind"] == "source" and module["loader"] == "SourceFileLoader":
+            need(module["selected_input"] == "source" and module["cache"] is None)
+            selected = files[module["source"]]
+            need(selected.endswith(".py"))
+            stem = selected.rsplit("/", 1)[1][:-3]
+            cache = parent(selected).rstrip("/") + "/__pycache__/" + stem + "." + runtime["implementation"]["cache_tag"] + ".pyc"
+            legacy = selected + "c"
+            path(cache)
+            path(legacy)
+            need(cache in absent and legacy in absent)
+            expected_modules[module["name"]] = (module["source"], (cache, legacy))
+
+    searches = preload["searches"]
+    need(type(searches) is list and len(searches) <= 1024 and len(searches) == len(expected_modules))
+    previous = None
+    seen_modules, candidate_count = set(), 0
+    for search in searches:
+        checkpoint()
+        record(search, "module candidates")
+        name = search["module"]
+        need(type(name) is str and name in expected_modules and (previous is None or previous < name))
+        previous = name
+        seen_modules.add(name)
+        selected_file, required_absences = expected_modules[name]
+        candidates = search["candidates"]
+        need(type(candidates) is list and 0 < len(candidates) <= 4096 - candidate_count)
+        candidate_count += len(candidates)
+        selected_count, seen_paths = 0, set()
+        for candidate in candidates:
+            checkpoint()
+            record(candidate, "path file")
+            value, reference = candidate["path"], candidate["file"]
+            path(value)
+            need(value not in seen_paths)
+            seen_paths.add(value)
+            need(any(under(value, root) for root in existing_roots)
+                 and not any(under(value, root) for root in absent_roots))
+            lineage = tuple(ancestors(value))
+            need(all(ancestor not in file_paths for ancestor in lineage))
+            need(parent(value) in directories or any(ancestor in absent for ancestor in lineage))
+            if reference is None:
+                need(value in absent)
+            else:
+                need(type(reference) is str and reference == selected_file
+                     and files[reference] == value and value not in absent
+                     and not any(ancestor in absent for ancestor in lineage))
+                selected_count += 1
+        need(selected_count == 1 and all(value in seen_paths for value in required_absences))
+    need(seen_modules == set(expected_modules))
+    result = _PreloadMetadata(_freeze_data(preload))
     checkpoint()
     return result
 

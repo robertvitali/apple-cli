@@ -68,3 +68,33 @@ def descriptors():
                    "code_depth": 16, "code_bytes": 65536,
                    "image_command_bytes": 65536}}
     return platform, runtime
+
+
+def preload_descriptors():
+    """Source-only synthetic selection with finite pre-load premises."""
+    platform, runtime = descriptors()
+    root = "/synthetic/runtime"
+    runtime["files"] = [row for row in runtime["files"] if row["id"] != "subprocess-cache"]
+    source = next(row for row in runtime["files"] if row["id"] == "subprocess-source")
+    source["identity"]["path"] = root + "/subprocess.py"
+    module = next(row for row in runtime["modules"] if row["name"] == "subprocess")
+    module.update(selected_input="source", cache=None)
+    cache = root + "/__pycache__/subprocess.cpython-39.pyc"
+    legacy = root + "/subprocess.pyc"
+    runtime["absent_inputs"] = sorted((cache, legacy, root + "/subprocess.so", root + "/extension.py"))
+    preload = {"schema_version": 1, "policy": "stock-source-no-cache-v1",
+        "launch_environment": {"LC_ALL": "C", "PATH": "/usr/bin:/bin:/usr/sbin:/sbin"},
+        "cache_branch": {"pycache_prefix": None, "check_hash_based_pycs": "default"},
+        "directories": [
+            {"path": path, "device": 1, "inode": 2, "mode": 0o40755,
+             "uid": 1, "gid": 1, "mtime_ns": 1, "ctime_ns": 1}
+            for path in (root, root + "/__pycache__")],
+        "searches": [
+            {"module": "subprocess", "candidates": [
+                {"path": root + "/subprocess.so", "file": None},
+                {"path": root + "/subprocess.py", "file": "subprocess-source"},
+                {"path": cache, "file": None}, {"path": legacy, "file": None}]},
+            {"module": "synthetic_extension", "candidates": [
+                {"path": root + "/extension", "file": "extension"},
+                {"path": root + "/extension.py", "file": None}]}]}
+    return platform, runtime, preload
