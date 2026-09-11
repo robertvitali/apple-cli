@@ -80,4 +80,10 @@ int ca_profile_envelope_decode(const unsigned char *input, size_t length,
                                const char *profile_id, CAProfileEnvelope *output,
                                CABudget *budget);
 
+/* Selected platform/runtime/preload consistency only; no effects or authority
+   result. Projection/compiler admission and finite file preflight remain required.
+   The input is unchanged and every check consumes the existing original budget. */
+int ca_profile_preload_check(const unsigned char *input, size_t length,
+                             const char *profile_id, CABudget *budget);
+
 #endif

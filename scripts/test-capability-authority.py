@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the two synthetic native-authority harnesses on macOS arm64 with CLT.
+"""Run the three synthetic native-authority harnesses on macOS arm64 with CLT.
 
 From the repository root:
     python3 -I -S -B scripts/test-capability-authority.py
@@ -83,8 +83,10 @@ def main():
     harnesses = (
         ("primitive", REPO / "Tests/automation/capability_authority_native_tests.c"),
         ("schema", REPO / "Tests/automation/capability_authority_schema_tests.c"),
+        ("nested", REPO / "Tests/automation/capability_authority_nested_tests.c"),
     )
     for path in (source, include / "capability_authority_entry.h",
+                 REPO / "Tests/automation/capability_authority_nested_fixture.h",
                  *(path for _, path in harnesses)):
         if not path.is_file() or path.is_symlink():
             raise RunFailure("missing or symlinked harness input")
@@ -139,7 +141,7 @@ if __name__ == "__main__":
         try:
             status = main()
             if status == 0:
-                print("authority-tests: both synthetic harnesses passed", flush=True)
+                print("authority-tests: all three synthetic harnesses passed", flush=True)
             raise SystemExit(status)
         except RunFailure as error:
             print("authority-tests: " + str(error), file=sys.stderr)
