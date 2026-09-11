@@ -31,4 +31,5 @@
 
 ## discovery
 
+- [apple-script-output-limit](discovery/apple-script-output-limit.md)
 - [owned-process-cleanup](discovery/owned-process-cleanup.md)
