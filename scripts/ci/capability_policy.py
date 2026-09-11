@@ -28,6 +28,7 @@ if str(SCRIPT_DIRECTORY) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIRECTORY))
 
 import bats_inventory
+import bats_evidence
 import capability_schema as schema
 
 
@@ -42,10 +43,23 @@ class _ValueFreeArgumentParser(argparse.ArgumentParser):
         raise PolicyError("cli-arguments-invalid")
 
 
+class Claim(NamedTuple):
+    command_id: str
+    argument_id: Optional[str]
+
+
+class SourceEvidenceRecord(NamedTuple):
+    tier: str
+    content_sha256: str
+    runtime_id: Optional[str]
+
+
 class EvidenceRecord(NamedTuple):
     tier: str
     content_sha256: str
     runtime_id: Optional[str]
+    role: str
+    claims: Tuple[Claim, ...]
 
 
 class CandidateDetails(NamedTuple):
@@ -153,6 +167,11 @@ MAX_BATS_TESTS = 20_000
 MAX_BATS_BYTES = 128 * 1024 * 1024
 MAX_MANUAL_FILES = 4096
 MAX_MANUAL_BYTES = 128 * 1024 * 1024
+MAX_BINDINGS = 40_000
+MAX_CLAIMS_PER_BINDING = 24_096
+MAX_DECLARED_CLAIMS = 100_000
+MAX_REFERENCE_OCCURRENCES = 100_000
+
 MAX_ORIGIN_DOCUMENTS = 10_000
 MAX_ORIGIN_DOCUMENT_BYTES = 64 * 1024 * 1024
 
@@ -981,22 +1000,30 @@ def _swift_function_tests(source: str) -> Dict[str, list[bool]]:
     return results
 
 
+def _catalog_bindings(raw: Any) -> list[Any]:
+    if (
+        not isinstance(raw, dict)
+        or set(raw) != {"schema_version", "tests", "bindings"}
+        or type(raw["schema_version"]) is not int
+        or raw["schema_version"] != 2
+        or not isinstance(raw["tests"], list)
+        or not isinstance(raw["bindings"], list)
+    ):
+        raise PolicyError("test-catalog-invalid")
+    if len(raw["bindings"]) > MAX_BINDINGS:
+        raise PolicyError("evidence-bindings-too-large")
+    return raw["bindings"]
+
+
 def _swift_catalog(
     source_root: Any,
     raw: Any,
     passed_runtime_ids: Optional[FrozenSet[str]] = None,
-) -> Dict[str, EvidenceRecord]:
-    if not isinstance(raw, dict) or set(raw) != {"schema_version", "tests"}:
-        raise PolicyError("test-catalog-invalid")
-    if (
-        type(raw["schema_version"]) is not int
-        or raw["schema_version"] != 1
-        or not isinstance(raw["tests"], list)
-    ):
-        raise PolicyError("test-catalog-invalid")
+) -> Dict[str, SourceEvidenceRecord]:
+    _catalog_bindings(raw)
     if len(raw["tests"]) > MAX_SWIFT_TESTS:
         raise PolicyError("swift-catalog-too-large")
-    records: Dict[str, EvidenceRecord] = {}
+    records: Dict[str, SourceEvidenceRecord] = {}
     runtime_ids: Set[str] = set()
     files: Dict[str, Tuple[bytes, Dict[str, list[bool]]]] = {}
     total_bytes = 0
@@ -1065,7 +1092,7 @@ def _swift_catalog(
             and item["runtime_id"] not in passed_runtime_ids
         ):
             raise PolicyError("swift-evidence-unexecuted")
-        records[identifier] = EvidenceRecord(
+        records[identifier] = SourceEvidenceRecord(
             "logic", item["file_sha256"], item["runtime_id"]
         )
         runtime_ids.add(item["runtime_id"])
@@ -1074,7 +1101,7 @@ def _swift_catalog(
     return records
 
 
-def _bats_catalog(source_root: Any, raw: Any) -> Dict[str, EvidenceRecord]:
+def _bats_catalog(source_root: Any, raw: Any) -> Dict[str, SourceEvidenceRecord]:
     if not isinstance(raw, dict) or set(raw) != {
         "live",
         "schema_version",
@@ -1093,7 +1120,7 @@ def _bats_catalog(source_root: Any, raw: Any) -> Dict[str, EvidenceRecord]:
         raise PolicyError("bats-catalog-too-large")
     if set(raw["tiers"]) != {"hosted", "local"}:
         raise PolicyError("bats-inventory-invalid")
-    references: Dict[str, EvidenceRecord] = {}
+    references: Dict[str, SourceEvidenceRecord] = {}
     seen_files: Set[str] = set()
     total_bytes = 0
     total = 0
@@ -1104,6 +1131,8 @@ def _bats_catalog(source_root: Any, raw: Any) -> Dict[str, EvidenceRecord]:
         files = tier_data["files"]
         if not isinstance(files, list) or type(tier_data["test_count"]) is not int:
             raise PolicyError("bats-inventory-invalid")
+        if len(files) > MAX_BATS_FILES - len(seen_files):
+            raise PolicyError("bats-catalog-too-large")
         ordered_paths = []
         for entry in files:
             if not isinstance(entry, dict) or not isinstance(entry.get("path"), str):
@@ -1122,6 +1151,8 @@ def _bats_catalog(source_root: Any, raw: Any) -> Dict[str, EvidenceRecord]:
                 raise PolicyError("bats-inventory-invalid")
             path = entry["path"]
             titles = entry["ordered_title_sha256"]
+            if isinstance(titles, list) and len(titles) > MAX_BATS_TESTS - total - tier_count:
+                raise PolicyError("bats-catalog-too-large")
             if (
                 not isinstance(path, str)
                 or not isinstance(titles, list)
@@ -1183,11 +1214,19 @@ def _bats_catalog(source_root: Any, raw: Any) -> Dict[str, EvidenceRecord]:
             ]
             if actual_titles != titles:
                 raise PolicyError("bats-inventory-title-drift")
+            try:
+                bats_evidence.build_file_plan(
+                    payload, tier=tier, path=path,
+                    content_sha256=entry["file_sha256"],
+                    ordered_title_sha256=tuple(titles),
+                )
+            except bats_evidence.BatsEvidenceError as error:
+                raise PolicyError(str(error)) from error
             for title in titles:
                 identifier = f"bats:{tier}:{path}:{title}"
                 if identifier in references:
                     raise PolicyError("bats-inventory-invalid")
-                references[identifier] = EvidenceRecord(
+                references[identifier] = SourceEvidenceRecord(
                     "hosted-smoke" if tier == "hosted" else "local-tcc",
                     entry["file_sha256"],
                     None,
@@ -1204,6 +1243,8 @@ def _bats_catalog(source_root: Any, raw: Any) -> Dict[str, EvidenceRecord]:
     if not isinstance(live, dict) or set(live) != {"files", "test_count"}:
         raise PolicyError("bats-inventory-invalid")
     live_files = live["files"]
+    if isinstance(live_files, list) and len(live_files) > MAX_BATS_FILES - len(seen_files):
+        raise PolicyError("bats-catalog-too-large")
     if (
         type(live["test_count"]) is not int
         or live["test_count"] != 0
@@ -1454,37 +1495,117 @@ def _validate_runtime_bijection(manifest: dict[str, Any], dump: Any) -> None:
         raise PolicyError("runtime-argument-bijection")
 
 
+def _claim_key(claim: Claim) -> Tuple[str, bool, str]:
+    return (claim.command_id, claim.argument_id is not None, claim.argument_id or "")
+
+
 def _validate_evidence(
-    manifest: dict[str, Any], catalog: Dict[str, EvidenceRecord]
-) -> Dict[str, int]:
-    used: Set[str] = set()
+    manifest: dict[str, Any],
+    catalog: Dict[str, SourceEvidenceRecord],
+    bindings: list[Any],
+) -> Tuple[Dict[str, EvidenceRecord], Dict[str, int]]:
+    # Shape validation precedes hashing/sorting; counts precede expanded collections.
+    if not isinstance(bindings, list) or not bindings:
+        raise PolicyError("evidence-bindings-invalid")
+    if len(bindings) > MAX_BINDINGS:
+        raise PolicyError("evidence-bindings-too-large")
+    surface_count = len(manifest["commands"]) + len(manifest["arguments"])
+    if len(manifest["commands"]) > MAX_COMMANDS or len(manifest["arguments"]) > MAX_ARGUMENTS:
+        raise PolicyError("evidence-surfaces-too-large")
+    commands = {surface["id"] for surface in manifest["commands"]}
+    arguments = {surface["id"]: surface["command_id"] for surface in manifest["arguments"]}
+    actual: Dict[str, Tuple[str, Set[Claim]]] = {}
     fanout: Dict[str, int] = {}
-    for surface in [*manifest["commands"], *manifest["arguments"]]:
-        evidence = surface["evidence"]
-        if not isinstance(evidence, dict) or set(evidence) != set(_EVIDENCE_ROLES):
-            raise PolicyError("evidence-roles-invalid")
-        for role in _EVIDENCE_ROLES:
-            references = evidence[role]
-            if (
-                not isinstance(references, list)
-                or not references
-                or any(not isinstance(reference, str) for reference in references)
-                or len(references) != len(set(references))
-            ):
-                raise PolicyError("evidence-role-empty")
-            if references != sorted(references):
-                raise PolicyError("evidence-order")
-            for reference in references:
-                record = catalog.get(reference)
-                if record is None:
-                    raise PolicyError("evidence-reference-missing")
-                if role in _HOSTED_ROLES and record.tier == "local-tcc":
-                    raise PolicyError("evidence-not-hosted-safe")
-                used.add(reference)
-                fanout[reference] = fanout.get(reference, 0) + 1
-    if not set(catalog).issubset(used):
+    occurrences = 0
+    for surfaces, is_argument in ((manifest["commands"], False), (manifest["arguments"], True)):
+        for surface in surfaces:
+            claim = Claim(surface["command_id"], surface["id"]) if is_argument else Claim(surface["id"], None)
+            evidence = surface["evidence"]
+            if not isinstance(evidence, dict) or set(evidence) != set(_EVIDENCE_ROLES):
+                raise PolicyError("evidence-roles-invalid")
+            for role in _EVIDENCE_ROLES:
+                references = evidence[role]
+                if not isinstance(references, list) or not references:
+                    raise PolicyError("evidence-role-empty")
+                if len(references) > MAX_REFERENCE_OCCURRENCES - occurrences:
+                    raise PolicyError("evidence-references-too-large")
+                occurrences += len(references)
+                if any(not isinstance(reference, str) for reference in references) or len(references) != len(set(references)):
+                    raise PolicyError("evidence-role-empty")
+                if references != sorted(references):
+                    raise PolicyError("evidence-order")
+                for reference in references:
+                    record = catalog.get(reference)
+                    if record is None:
+                        raise PolicyError("evidence-reference-missing")
+                    if role in _HOSTED_ROLES and record.tier == "local-tcc":
+                        raise PolicyError("evidence-not-hosted-safe")
+                    if reference in actual and actual[reference][0] != role:
+                        raise PolicyError("evidence-role-mismatch")
+                    actual.setdefault(reference, (role, set()))[1].add(claim)
+                    fanout[reference] = fanout.get(reference, 0) + 1
+    if set(catalog) != set(actual):
         raise PolicyError("test-catalog-orphan")
-    return fanout
+
+    bound: Dict[str, EvidenceRecord] = {}
+    identities: Set[Tuple[str, str]] = set()
+    previous_reference: Optional[str] = None
+    declared_total = 0
+    for binding in bindings:
+        if not isinstance(binding, dict) or set(binding) != {"reference", "role", "claims"}:
+            raise PolicyError("evidence-binding-invalid")
+        reference, role, claims = binding["reference"], binding["role"], binding["claims"]
+        if (
+            not isinstance(reference, str)
+            or schema.EVIDENCE_REF.fullmatch(reference) is None
+            or not isinstance(role, str)
+            or role not in _EVIDENCE_ROLES
+            or not isinstance(claims, list)
+            or not claims
+        ):
+            raise PolicyError("evidence-binding-invalid")
+        if previous_reference is not None and reference <= previous_reference:
+            raise PolicyError("evidence-binding-order")
+        previous_reference = reference
+        if len(claims) > min(surface_count, MAX_CLAIMS_PER_BINDING) or len(claims) > MAX_DECLARED_CLAIMS - declared_total:
+            raise PolicyError("evidence-claims-too-large")
+        declared_total += len(claims)
+        canonical: list[Claim] = []
+        previous_claim: Optional[Tuple[str, bool, str]] = None
+        for raw in claims:
+            if not isinstance(raw, dict) or set(raw) != {"command_id", "argument_id"}:
+                raise PolicyError("evidence-claim-invalid")
+            command_id, argument_id = raw["command_id"], raw["argument_id"]
+            if (
+                not isinstance(command_id, str)
+                or command_id not in commands
+                or (argument_id is not None and (
+                    not isinstance(argument_id, str) or arguments.get(argument_id) != command_id
+                ))
+            ):
+                raise PolicyError("evidence-claim-invalid")
+            claim = Claim(command_id, argument_id)
+            key = _claim_key(claim)
+            if previous_claim is not None and key <= previous_claim:
+                raise PolicyError("evidence-claim-order")
+            previous_claim = key
+            canonical.append(claim)
+        record = catalog.get(reference)
+        if record is None or reference not in actual:
+            raise PolicyError("evidence-binding-unused")
+        actual_role, actual_claims = actual[reference]
+        if role != actual_role:
+            raise PolicyError("evidence-role-mismatch")
+        if tuple(canonical) != tuple(sorted(actual_claims, key=_claim_key)):
+            raise PolicyError("evidence-claims-mismatch")
+        identity = ("swift", record.runtime_id) if record.runtime_id is not None else ("bats", reference)
+        if identity in identities:
+            raise PolicyError("evidence-identity-alias")
+        identities.add(identity)
+        bound[reference] = EvidenceRecord(*record, role, tuple(canonical))
+    if set(bound) != set(actual):
+        raise PolicyError("evidence-binding-missing")
+    return bound, fanout
 
 
 class RuntimeEvidence(NamedTuple):
@@ -1741,7 +1862,18 @@ def _capture_candidate(
         if used_origin_ids != origin_ids:
             raise PolicyError("origin-orphan-or-missing")
         _validate_manual(snapshot, manifest_data)
+        bindings = _catalog_bindings(catalog_data)
+        evidence_sources = _swift_catalog(snapshot, catalog_data)
         bats_catalog = _bats_catalog(snapshot, bats_data)
+        for identifier, record in bats_catalog.items():
+            if identifier in evidence_sources:
+                raise PolicyError("evidence-catalog-duplicate")
+            evidence_sources[identifier] = record
+        evidence_catalog, fanout = _validate_evidence(manifest_data, evidence_sources, bindings)
+        # Source declarations and pure report parsers provide no execution authority.
+        # Keep every Bats row in closure; no runner is qualified in this unit.
+        if bats_catalog:
+            raise PolicyError("bats-execution-unavailable")
 
         try:
             with _materialized_snapshot(snapshot) as source_root:
@@ -1760,16 +1892,9 @@ def _capture_candidate(
             tree_oid=snapshot.tree_oid,
         )
         _validate_runtime_bijection(manifest_data, runtime.dump)
-        evidence_catalog = _swift_catalog(
-            snapshot,
-            catalog_data,
-            runtime.passed_swift_runtime_ids,
-        )
-        for identifier, record in bats_catalog.items():
-            if identifier in evidence_catalog:
-                raise PolicyError("evidence-catalog-duplicate")
-            evidence_catalog[identifier] = record
-        fanout = _validate_evidence(manifest_data, evidence_catalog)
+        for record in evidence_catalog.values():
+            if record.runtime_id not in runtime.passed_swift_runtime_ids:
+                raise PolicyError("swift-evidence-unexecuted")
         report = {
             "binary_sha256": runtime.binary_sha256,
             "contract_stage": schema.CONTRACT_STAGE,

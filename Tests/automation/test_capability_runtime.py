@@ -113,7 +113,7 @@ class CapabilitySwiftMaskTests(unittest.TestCase):
             path = root / "Tests" / "Synthetic.swift"
             path.parent.mkdir()
             path.write_text(source, encoding="utf-8")
-            catalog = {"schema_version": 1, "tests": [{
+            catalog = {"schema_version": 2, "bindings": [], "tests": [{
                 "file_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
                 "id": "swift:Tests/Synthetic.swift:realTest:1", "occurrence": 1,
                 "path": "Tests/Synthetic.swift", "runtime_id": "Synthetic::realTest",

@@ -156,14 +156,40 @@ def write_json(path: Path, value: object, *, canonical: bool = False) -> None:
     path.write_text(source, encoding="utf-8")
 
 
-def write_candidate_fixture(root: Path) -> dict:
+def bindings_for_manifest(manifest: dict) -> list[dict]:
+    """Explicit fixture construction, never an implicit repair during policy checks."""
+    uses = {}
+    for surfaces, is_argument in ((manifest["commands"], False), (manifest["arguments"], True)):
+        for surface in surfaces:
+            claim = {"command_id": surface["command_id"] if is_argument else surface["id"],
+                     "argument_id": surface["id"] if is_argument else None}
+            for role, references in surface["evidence"].items():
+                for reference in references:
+                    binding = uses.setdefault(reference, {"reference": reference, "role": role, "claims": []})
+                    if binding["role"] != role:
+                        raise ValueError("synthetic binding has mixed roles")
+                    binding["claims"].append(claim)
+    for binding in uses.values():
+        binding["claims"].sort(key=lambda claim: (claim["command_id"], claim["argument_id"] is not None, claim["argument_id"] or ""))
+    return [uses[reference] for reference in sorted(uses)]
+
+
+def sync_fixture_bindings(fixture: dict) -> None:
+    """Use only when a test intentionally constructs an internally valid candidate."""
+    catalog = json.loads(fixture["test_catalog"].read_text(encoding="utf-8"))
+    manifest = json.loads(fixture["manifest"].read_text(encoding="utf-8"))
+    catalog["bindings"] = bindings_for_manifest(manifest)
+    write_json(fixture["test_catalog"], catalog, canonical=True)
+
+
+def write_candidate_fixture(root: Path, *, include_bats: bool = False) -> dict:
     policy = load_module(POLICY_PATH, f"capability_policy_fixture_{id(root)}")
     dump = sample_dump()
     manifest = policy.snapshot_manifest(dump)
 
     swift_path = root / "Tests" / "CapabilityTests.swift"
     swift_path.parent.mkdir(parents=True)
-    symbols = ("testParser", "testInvalid", "testJSON", "testBehavior")
+    symbols = ("testParser", "testInvalid", "testJSON", "testBehavior", "testAdditionalBehavior")
     swift_path.write_text(
         "\n".join(f"@Test func {symbol}() {{}}" for symbol in symbols) + "\n",
         encoding="utf-8",
@@ -174,7 +200,8 @@ def write_candidate_fixture(root: Path) -> dict:
         for role, symbol in zip(EVIDENCE_ROLES, symbols)
     }
     catalog = {
-        "schema_version": 1,
+        "schema_version": 2,
+        "bindings": [],
         "tests": [
             {
                 "file_sha256": swift_digest,
@@ -188,6 +215,13 @@ def write_candidate_fixture(root: Path) -> dict:
             for role, symbol in zip(EVIDENCE_ROLES, symbols)
         ],
     }
+
+    additional_ref = "swift:Tests/CapabilityTests.swift:testAdditionalBehavior:1"
+    catalog["tests"].append({
+        "file_sha256": swift_digest, "id": additional_ref, "occurrence": 1,
+        "path": "Tests/CapabilityTests.swift", "runtime_id": "SyntheticTests::testAdditionalBehavior",
+        "symbol": "testAdditionalBehavior", "tier": "logic",
+    })
 
     bats_title = "synthetic behavior"
     bats_title_digest = hashlib.sha256(bats_title.encode("utf-8")).hexdigest()
@@ -267,7 +301,15 @@ def write_candidate_fixture(root: Path) -> dict:
         argument["evidence"] = {
             role: [swift_ids[role]] for role in EVIDENCE_ROLES
         }
-    manifest["arguments"][-1]["evidence"]["behavior"].append(bats_ref)
+    manifest["commands"][0]["evidence"]["behavior"].append(additional_ref)
+    manifest["arguments"][-1]["evidence"]["behavior"].append(additional_ref)
+    if include_bats:
+        manifest["arguments"][-1]["evidence"]["behavior"].append(bats_ref)
+    else:
+        bats_path.unlink()
+        inventory["test_count"] = 0
+        inventory["tiers"]["hosted"] = {"files": [], "test_count": 0}
+    catalog["bindings"] = bindings_for_manifest(manifest)
     for surface in [*manifest["commands"], *manifest["arguments"]]:
         for role in EVIDENCE_ROLES:
             surface["evidence"][role].sort()
@@ -395,7 +437,7 @@ def add_local_bats(fixture: dict, title: str = "local synthetic behavior") -> st
         ],
         "test_count": 1,
     }
-    inventory["test_count"] = 2
+    inventory["test_count"] = inventory["tiers"]["hosted"]["test_count"] + 1
     write_json(fixture["bats_inventory"], inventory, canonical=True)
     return f"bats:local:bats/local/capability.bats:{title_digest}"
 
@@ -758,21 +800,22 @@ class CapabilityPolicyBootstrapTests(unittest.TestCase):
     def test_supplied_bats_inventory_keeps_its_owned_pretty_json_format(self) -> None:
         policy = load_module(POLICY_PATH, "capability_policy_bats_format")
         with tempfile.TemporaryDirectory() as temporary_directory:
-            fixture = write_candidate_fixture(Path(temporary_directory).resolve())
+            fixture = write_candidate_fixture(Path(temporary_directory).resolve(), include_bats=True)
             inventory = json.loads(
                 fixture["bats_inventory"].read_text(encoding="utf-8")
             )
             write_json(fixture["bats_inventory"], inventory, canonical=False)
             commit_fixture(fixture)
 
-            report = policy.check_candidate(**candidate_input(fixture))
-
-        self.assertTrue(report["ok"])
+            # Pretty inventory bytes validate; declaration-only evidence still
+            # cannot pass the new execution-admission boundary.
+            with self.assertRaisesRegex(policy.PolicyError, "^bats-execution-unavailable$"):
+                policy.check_candidate(**candidate_input(fixture))
 
     def test_bats_evidence_titles_must_match_hardened_source_declarations(self) -> None:
         policy = load_module(POLICY_PATH, "capability_policy_bats_titles")
         with tempfile.TemporaryDirectory() as temporary_directory:
-            fixture = write_candidate_fixture(Path(temporary_directory).resolve())
+            fixture = write_candidate_fixture(Path(temporary_directory).resolve(), include_bats=True)
             invented_digest = hashlib.sha256(b"invented title").hexdigest()
             inventory = json.loads(
                 fixture["bats_inventory"].read_text(encoding="utf-8")
@@ -916,6 +959,7 @@ class CapabilityPolicyBootstrapTests(unittest.TestCase):
             manifest = json.loads(fixture["manifest"].read_text(encoding="utf-8"))
             manifest["commands"][0]["evidence"]["behavior"].append(multiline_id)
             write_json(fixture["manifest"], manifest, canonical=True)
+            sync_fixture_bindings(fixture)
             commit_fixture(fixture)
 
             report = policy.check_candidate(**candidate_input(fixture))
@@ -935,7 +979,8 @@ class CapabilityPolicyBootstrapTests(unittest.TestCase):
             )
             digest = hashlib.sha256(source_path.read_bytes()).hexdigest()
             catalog = {
-                "schema_version": 1,
+                "schema_version": 2,
+                "bindings": [],
                 "tests": [
                     {
                         "file_sha256": digest,
@@ -1098,7 +1143,7 @@ class CapabilityPolicyBootstrapTests(unittest.TestCase):
     def test_parser_exit_and_json_evidence_must_be_hosted_safe(self) -> None:
         policy = load_module(POLICY_PATH, "capability_policy_hosted_evidence")
         with tempfile.TemporaryDirectory() as temporary_directory:
-            fixture = write_candidate_fixture(Path(temporary_directory).resolve())
+            fixture = write_candidate_fixture(Path(temporary_directory).resolve(), include_bats=True)
             title = "local synthetic behavior"
             title_digest = hashlib.sha256(title.encode("utf-8")).hexdigest()
             path = fixture["repository_root"] / "bats" / "local" / "capability.bats"
@@ -1210,6 +1255,7 @@ class CapabilityPolicyBootstrapTests(unittest.TestCase):
                 "# Extras\n", encoding="utf-8"
             )
             write_json(head["manifest"], manifest, canonical=True)
+            sync_fixture_bindings(head)
             commit_fixture(head)
 
             with self.assertRaisesRegex(policy.PolicyError, "compare-surface-removal"):
@@ -1262,6 +1308,8 @@ class CapabilityPolicyBootstrapTests(unittest.TestCase):
                 ),
             )
 
+            sync_fixture_bindings(head)
+            commit_fixture(head)
             with self.assertRaisesRegex(policy.PolicyError, "compare-evidence-removal"):
                 policy.compare_candidates(base=candidate_input(base), head=candidate_input(head))
 
@@ -1303,6 +1351,7 @@ class CapabilityPolicyBootstrapTests(unittest.TestCase):
                     for reference in surface["evidence"]["parser_help"]
                 ]
             write_json(head["manifest"], manifest, canonical=True)
+            sync_fixture_bindings(head)
             commit_fixture(head)
 
             with self.assertRaisesRegex(policy.PolicyError, "compare-evidence-removal"):
@@ -1366,21 +1415,35 @@ class CapabilityPolicyBootstrapTests(unittest.TestCase):
     def test_compare_rejects_hosted_to_local_evidence_downgrade(self) -> None:
         policy = load_module(POLICY_PATH, "capability_policy_compare_downgrade")
         with tempfile.TemporaryDirectory() as base_directory, tempfile.TemporaryDirectory() as head_directory:
-            base = write_candidate_fixture(Path(base_directory).resolve())
-            head = write_candidate_fixture(Path(head_directory).resolve())
+            base = write_candidate_fixture(Path(base_directory).resolve(), include_bats=True)
+            head = write_candidate_fixture(Path(head_directory).resolve(), include_bats=True)
             local_ref = add_local_bats(head)
             manifest = json.loads(head["manifest"].read_text(encoding="utf-8"))
             behavior = manifest["arguments"][-1]["evidence"]["behavior"]
             old_hosted = next(reference for reference in behavior if reference.startswith("bats:"))
-            retained = next(reference for reference in behavior if reference != old_hosted)
+            retained = [reference for reference in behavior if reference != old_hosted]
             manifest["commands"][0]["evidence"]["behavior"].append(old_hosted)
             manifest["commands"][0]["evidence"]["behavior"].sort()
             manifest["arguments"][-1]["evidence"]["behavior"] = sorted(
-                [retained, local_ref]
+                [*retained, local_ref]
             )
             write_json(head["manifest"], manifest, canonical=True)
+            sync_fixture_bindings(head)
             commit_fixture(head)
 
+            # Preserve this comparison characterization without pretending these
+            # Bats declarations are runtime evidence. The public check path now
+            # refuses both candidates before its unavailable Bats runner.
+            captured = {}
+            for fixture in (base, head):
+                root = fixture["repository_root"]
+                value = json.loads(fixture["manifest"].read_text())
+                raw = json.loads(fixture["test_catalog"].read_text())
+                sources = policy._swift_catalog(root, raw)
+                sources.update(policy._bats_catalog(root, json.loads(fixture["bats_inventory"].read_text())))
+                bound, _ = policy._validate_evidence(value, sources, raw["bindings"])
+                captured[str(root)] = policy.CandidateDetails(root, fixture["sha"], value, bound, {})
+            policy._checked_candidate_details = lambda candidate: captured[str(candidate["repository_root"])]
             with self.assertRaisesRegex(policy.PolicyError, "compare-evidence-removal"):
                 policy.compare_candidates(base=candidate_input(base), head=candidate_input(head))
 
@@ -1743,7 +1806,7 @@ class CapabilityPolicyHardeningTests(unittest.TestCase):
     def test_swift_bats_and_manual_sources_are_read_once(self) -> None:
         policy = load_module(POLICY_PATH, "capability_policy_source_cache")
         with tempfile.TemporaryDirectory() as temporary_directory:
-            fixture = write_candidate_fixture(Path(temporary_directory).resolve())
+            fixture = write_candidate_fixture(Path(temporary_directory).resolve(), include_bats=True)
             original = policy.CommitSnapshot.blob
             reads = {}
 
@@ -1756,7 +1819,8 @@ class CapabilityPolicyHardeningTests(unittest.TestCase):
                 return payload
 
             policy.CommitSnapshot.blob = counted
-            policy.check_candidate(**candidate_input(fixture))
+            with self.assertRaisesRegex(policy.PolicyError, "bats-execution-unavailable"):
+                policy.check_candidate(**candidate_input(fixture))
 
         for path in (
             "Tests/CapabilityTests.swift",
@@ -1778,7 +1842,8 @@ class CapabilityPolicyHardeningTests(unittest.TestCase):
             )
             digest = hashlib.sha256(source_path.read_bytes()).hexdigest()
             catalog = {
-                "schema_version": 1,
+                "schema_version": 2,
+                "bindings": [],
                 "tests": [
                     {
                         "file_sha256": digest,
@@ -1926,7 +1991,8 @@ class CapabilityPolicyHardeningTests(unittest.TestCase):
             )
             digest = hashlib.sha256(source_path.read_bytes()).hexdigest()
             catalog = {
-                "schema_version": 1,
+                "schema_version": 2,
+                "bindings": [],
                 "tests": [
                     {
                         "file_sha256": digest,
@@ -1963,7 +2029,8 @@ class CapabilityPolicyHardeningTests(unittest.TestCase):
             source_path.write_text("@Test func boundedTest() {}\n", encoding="utf-8")
             digest = hashlib.sha256(source_path.read_bytes()).hexdigest()
             catalog = {
-                "schema_version": 1,
+                "schema_version": 2,
+                "bindings": [],
                 "tests": [
                     {
                         "file_sha256": digest,
@@ -2001,7 +2068,7 @@ class CapabilityPolicyHardeningTests(unittest.TestCase):
     def test_bats_catalog_enforces_aggregate_file_bounds(self) -> None:
         policy = load_module(POLICY_PATH, "capability_policy_bats_bounds_red")
         with tempfile.TemporaryDirectory() as temporary_directory:
-            fixture = write_candidate_fixture(Path(temporary_directory).resolve())
+            fixture = write_candidate_fixture(Path(temporary_directory).resolve(), include_bats=True)
             inventory = json.loads(
                 fixture["bats_inventory"].read_text(encoding="utf-8")
             )
@@ -2013,7 +2080,7 @@ class CapabilityPolicyHardeningTests(unittest.TestCase):
     def test_bats_catalog_enforces_test_and_byte_bounds(self) -> None:
         policy = load_module(POLICY_PATH, "capability_policy_bats_test_bounds")
         with tempfile.TemporaryDirectory() as temporary_directory:
-            fixture = write_candidate_fixture(Path(temporary_directory).resolve())
+            fixture = write_candidate_fixture(Path(temporary_directory).resolve(), include_bats=True)
             inventory = json.loads(
                 fixture["bats_inventory"].read_text(encoding="utf-8")
             )
@@ -2039,7 +2106,7 @@ class CapabilityPolicyHardeningTests(unittest.TestCase):
 
         policy = load_module(POLICY_PATH, "capability_policy_bats_byte_bounds")
         with tempfile.TemporaryDirectory() as temporary_directory:
-            fixture = write_candidate_fixture(Path(temporary_directory).resolve())
+            fixture = write_candidate_fixture(Path(temporary_directory).resolve(), include_bats=True)
             inventory = json.loads(
                 fixture["bats_inventory"].read_text(encoding="utf-8")
             )
@@ -2167,7 +2234,8 @@ class CapabilityPolicyHardeningTests(unittest.TestCase):
                 symbol = "inactiveTest" if label == "Inactive" else "nonTargetTest"
                 runtime_id = f"SyntheticTests::{symbol}"
                 catalog = {
-                    "schema_version": 1,
+                    "schema_version": 2,
+                    "bindings": [],
                     "tests": [
                         {
                             "file_sha256": hashlib.sha256(source_path.read_bytes()).hexdigest(),
@@ -2193,7 +2261,8 @@ class CapabilityPolicyHardeningTests(unittest.TestCase):
             source_path.parent.mkdir(parents=True)
             source_path.write_text("@Test func intendedTest() {}\n", encoding="utf-8")
             catalog = {
-                "schema_version": 1,
+                "schema_version": 2,
+                "bindings": [],
                 "tests": [
                     {
                         "file_sha256": hashlib.sha256(source_path.read_bytes()).hexdigest(),
