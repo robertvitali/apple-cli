@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import builtins
+import ctypes
 import hashlib
+import importlib.util
 import json
 import math
 import os
@@ -12,8 +15,15 @@ import re
 import selectors
 import signal
 import stat
+import struct
 import subprocess
+import sys
 import tempfile
+import time
+import types
+import warnings
+import _signal
+import _warnings
 from types import MappingProxyType
 from typing import Callable
 
@@ -835,6 +845,636 @@ def _admit_runtime_metadata(platform, runtime, *, deadline, clock):
     need("subprocess" in modules and modules["subprocess"]["kind"] == "source"
          and modules["subprocess"]["source"] == popen["source"])
     result = _RuntimeMetadata(_freeze_data(platform), _freeze_data(runtime))
+    checkpoint()
+    return result
+
+
+def _inspection_need(condition):
+    if not condition:
+        raise _unavailable("identity-drift")
+
+
+@dataclass(frozen=True)
+class _RuntimeMember:
+    identity: ExecutableIdentity
+    payload: object
+
+
+def _read_runtime_member(identity, *, maximum_bytes, retain, checkpoint):
+    """Verify a selected file, with no retry after an uncertain close."""
+    checkpoint()
+    _inspection_need(type(identity) is ExecutableIdentity
+                     and type(maximum_bytes) is int and 0 <= identity.size <= maximum_bytes
+                     and type(retain) is bool)
+    descriptor = None
+    try:
+        _inspection_need(os.path.realpath(identity.path) == identity.path)
+        checkpoint()
+        descriptor = os.open(identity.path, os.O_RDONLY | os.O_NOFOLLOW
+                             | os.O_NONBLOCK | os.O_CLOEXEC)
+        checkpoint()
+        before = os.fstat(descriptor)
+        _inspection_need(stat.S_ISREG(before.st_mode))
+        expected_key = (identity.device, identity.inode, identity.mode, identity.uid,
+                        identity.gid, identity.size, identity.mtime_ns, identity.ctime_ns)
+        _inspection_need(_stat_key(before) == expected_key)
+        total, parts, digest = 0, [], hashlib.sha256()
+        while True:
+            checkpoint()
+            chunk = os.read(descriptor, min(65536, maximum_bytes - total + 1))
+            checkpoint()
+            if not chunk:
+                break
+            total += len(chunk)
+            _inspection_need(total <= maximum_bytes and total <= identity.size)
+            digest.update(chunk)
+            if retain:
+                parts.append(chunk)
+        _inspection_need(total == identity.size and digest.hexdigest() == identity.sha256
+                         and _stat_key(os.fstat(descriptor)) == expected_key
+                         and _stat_key(os.lstat(identity.path)) == expected_key)
+        checkpoint()
+        result = _RuntimeMember(identity, b"".join(parts) if retain else None)
+    except ProcessFailure:
+        raise
+    except Exception:
+        raise _unavailable("identity-drift") from None
+    finally:
+        if descriptor is not None:
+            owned, descriptor = descriptor, None
+            _close_descriptor(owned)
+    checkpoint()
+    return result
+
+
+def _runtime_image_extent(header, maximum_bytes):
+    _inspection_need(type(header) is bytes and len(header) == 32
+                     and type(maximum_bytes) is int and maximum_bytes > 0)
+    words = struct.unpack("<8I", header)
+    _inspection_need(words[0] == 0xFEEDFACF and words[1] == 0x0100000C
+                     and words[2] == 0 and words[3] in (2, 6)
+                     and 0 < words[4] <= words[5] // 8
+                     and 0 < words[5] <= maximum_bytes and words[5] % 8 == 0)
+    return words
+
+
+def _decode_runtime_image(header, commands, *, expected, maximum_bytes, checkpoint):
+    checkpoint()
+    words = _runtime_image_extent(header, maximum_bytes)
+    _inspection_need(type(commands) is bytes and len(commands) == words[5]
+                     and words[3] == expected["file_type"]
+                     and expected["architecture"] == "arm64")
+    offset, uuids, segments = 0, [], []
+    for _ in range(words[4]):
+        checkpoint()
+        _inspection_need(offset + 8 <= len(commands))
+        kind, size = struct.unpack_from("<II", commands, offset)
+        _inspection_need(size >= 8 and size % 8 == 0 and offset + size <= len(commands))
+        if kind == 0x1B:
+            _inspection_need(size == 24)
+            uuids.append(commands[offset + 8:offset + 24].hex())
+        elif kind == 0x19:
+            _inspection_need(size >= 72)
+            segment = struct.unpack_from("<II16sQQQQIIII", commands, offset)
+            _inspection_need(size == 72 + segment[9] * 80)
+            if segment[2] == b"__TEXT" + b"\0" * 10:
+                _inspection_need(segment[4] > 0 and segment[3] + segment[4] <= 2**64)
+                segments.append((segment[3], segment[4]))
+        offset += size
+    _inspection_need(offset == len(commands) and uuids == [expected["uuid"]]
+                     and len(segments) == 1)
+    if words[3] == 6:
+        _inspection_need(segments[0][0] == 0)
+    result = MappingProxyType({"uuid": uuids[0], "file_type": words[3],
+        "architecture": "arm64", "text_vmaddr": segments[0][0],
+        "text_size": segments[0][1]})
+    checkpoint()
+    return result
+
+
+_POPEN_CODE_FIELDS = ("co_argcount", "co_posonlyargcount", "co_kwonlyargcount",
+    "co_nlocals", "co_stacksize", "co_flags", "co_code", "co_names", "co_varnames",
+    "co_filename", "co_name", "co_firstlineno", "co_lnotab", "co_freevars", "co_cellvars")
+
+
+def _popen_code_shape(code, *, limits, checkpoint):
+    """Describe the supported code fields without executing any code object."""
+    checkpoint()
+    _inspection_need(type(code) is types.CodeType)
+    nodes, size = 0, 0
+
+    def visit(value, depth):
+        nonlocal nodes, size
+        checkpoint()
+        nodes += 1
+        _inspection_need(nodes <= limits["code_nodes"] and depth <= limits["code_depth"])
+        kind = type(value)
+        if value is None or value is Ellipsis:
+            return ("none" if value is None else "ellipsis",)
+        if kind is bool:
+            return ("bool", value)
+        if kind is int:
+            width = max(1, (value.bit_length() + 7) // 8)
+            _inspection_need(width <= limits["code_bytes"] - size)
+            size += width
+            result = ("int", value)
+        elif kind is float:
+            _inspection_need(math.isfinite(value))
+            size += 8
+            result = ("float", value.hex())
+        elif kind in (str, bytes):
+            _inspection_need(len(value) <= limits["code_bytes"] - size)
+            try:
+                data = value.encode("utf-8", "strict") if kind is str else value
+            except UnicodeError:
+                raise _unavailable("identity-drift") from None
+            size += len(data)
+            result = ("str" if kind is str else "bytes", value)
+        elif kind is tuple:
+            _inspection_need(len(value) <= limits["code_nodes"] - nodes)
+            result = ("tuple", tuple(visit(item, depth + 1) for item in value))
+        elif kind is types.CodeType:
+            result = ("code", tuple((name, visit(getattr(value, name), depth + 1))
+                                   for name in _POPEN_CODE_FIELDS),
+                      visit(value.co_consts, depth + 1))
+        else:
+            raise _unavailable("identity-drift")
+        _inspection_need(size <= limits["code_bytes"])
+        checkpoint()
+        return result
+
+    result = visit(code, 0)
+    checkpoint()
+    return result
+
+
+def _runtime_builtin(module, name):
+    _inspection_need(type(module) is types.ModuleType
+                     and sys.modules.get(module.__name__) is module
+                     and module.__spec__ is not None
+                     and module.__spec__.origin == "built-in"
+                     and module.__spec__.name == module.__name__)
+    function = vars(module).get(name)
+    _inspection_need(type(function) is types.BuiltinFunctionType
+                     and function.__name__ == name
+                     and function.__module__ == module.__name__
+                     and function.__self__ is module)
+    return function
+
+
+def _popen_namespace(module):
+    _inspection_need(type(module) is types.ModuleType and module.__name__ == "subprocess"
+                     and sys.modules.get("subprocess") is module)
+    cls = vars(module).get("Popen")
+    _inspection_need(type(cls) is type and cls.__bases__ == (object,))
+    # Ordinary class attribute access could execute a descriptor defined by the
+    # inspected class. The sole allowed base is already established above.
+    _inspection_need(cls.__dict__.get("__getattribute__", object.__getattribute__)
+                     is object.__getattribute__
+                     and cls.__dict__.get("__setattr__", object.__setattr__)
+                     is object.__setattr__
+                     and cls.__dict__.get("_child_created") is False)
+    method = cls.__dict__.get("__del__")
+    _inspection_need(type(method) is types.FunctionType
+                     and method.__globals__ is module.__dict__)
+    defaults = method.__defaults__
+    _inspection_need(type(defaults) is tuple and len(defaults) == 2
+                     and type(sys.maxsize) is int and sys.maxsize == 2**63 - 1
+                     and defaults[0] is sys.maxsize
+                     and vars(module).get("sys") is sys
+                     and vars(module).get("warnings") is warnings
+                     and sys.modules.get("sys") is sys
+                     and sys.modules.get("warnings") is warnings)
+    warning = _runtime_builtin(_warnings, "warn")
+    _inspection_need(warnings.warn is warning and defaults[1] is warning)
+    active = vars(module).get("_active")
+    _inspection_need(type(active) is list and not active)
+    return (module, cls, method, method.__code__, method.__globals__, active,
+            defaults, sys, warnings, warning)
+
+
+@dataclass(frozen=True)
+class _PopenBodyBinding:
+    references: tuple
+    descriptor: tuple
+    path: str
+    limits: object
+
+    def inspect(self, checkpoint):
+        checkpoint()
+        current = _popen_namespace(self.references[0])
+        _inspection_need(all(left is right for left, right in zip(current, self.references))
+                         and self.references[0].__file__ == self.path
+                         and _popen_code_shape(current[3], limits=self.limits,
+                                               checkpoint=checkpoint) == self.descriptor)
+        checkpoint()
+
+
+def _bind_popen_body(source_record, module, *, limits, checkpoint):
+    checkpoint()
+    try:
+        identity, source = source_record.identity, source_record.payload
+        _inspection_need(type(identity) is ExecutableIdentity and type(source) is bytes
+                         and len(source) == identity.size
+                         and hashlib.sha256(source).hexdigest() == identity.sha256
+                         and type(module) is types.ModuleType
+                         and module.__file__ == identity.path)
+        current = _popen_namespace(module)
+        compiler = _runtime_builtin(builtins, "compile")
+        reference = compiler(source, identity.path, "exec", dont_inherit=True, optimize=0)
+        checkpoint()
+        # Traverse the complete bounded reference before extracting its unique
+        # class/method; duplicate definitions cannot select a convenient body.
+        _popen_code_shape(reference, limits=limits, checkpoint=checkpoint)
+        classes = [item for item in reference.co_consts
+                   if type(item) is types.CodeType and item.co_name == "Popen"]
+        _inspection_need(len(classes) == 1)
+        methods = [item for item in classes[0].co_consts
+                   if type(item) is types.CodeType and item.co_name == "__del__"]
+        _inspection_need(len(methods) == 1)
+        expected = _popen_code_shape(methods[0], limits=limits, checkpoint=checkpoint)
+        _inspection_need(_popen_code_shape(current[3], limits=limits,
+                                           checkpoint=checkpoint) == expected)
+        result = _PopenBodyBinding(current, expected, identity.path, limits)
+        result.inspect(checkpoint)
+    except ProcessFailure:
+        raise
+    except Exception:
+        # Includes inspection/compile failures. Never retry a failed callable.
+        raise _unavailable("identity-drift") from None
+    checkpoint()
+    return result
+
+
+class _RuntimeDlInfo(ctypes.Structure):
+    _fields_ = [("dli_fname", ctypes.c_void_p), ("dli_fbase", ctypes.c_void_p),
+                ("dli_sname", ctypes.c_void_p), ("dli_saddr", ctypes.c_void_p)]
+
+
+@dataclass(frozen=True)
+class _RuntimeLoader:
+    loader: object
+    python_api: object
+    dladdr: object
+    image_name: object
+    image_header: object
+    getter: object
+    helper: object
+
+    def inspect(self):
+        for owner, name, function, arguments, result in (
+                (self.loader, "dladdr", self.dladdr,
+                 [ctypes.c_void_p, ctypes.POINTER(_RuntimeDlInfo)], ctypes.c_int),
+                (self.loader, "_dyld_get_image_name", self.image_name,
+                 [ctypes.c_uint32], ctypes.c_void_p),
+                (self.loader, "_dyld_get_image_header", self.image_header,
+                 [ctypes.c_uint32], ctypes.c_void_p),
+                (self.python_api, "PyCFunction_GetFunction", self.getter,
+                 [ctypes.py_object], ctypes.c_void_p)):
+            _inspection_need(getattr(owner, name) is function and function.argtypes == arguments
+                             and function.restype is result)
+        _inspection_need(self.python_api.PyOS_setsig is self.helper)
+
+
+def _declare_runtime_loader(loader, python_api):
+    dladdr = loader.dladdr
+    dladdr.argtypes, dladdr.restype = [ctypes.c_void_p, ctypes.POINTER(_RuntimeDlInfo)], ctypes.c_int
+    name, header = loader._dyld_get_image_name, loader._dyld_get_image_header
+    for function in (name, header):
+        function.argtypes, function.restype = [ctypes.c_uint32], ctypes.c_void_p
+    getter = python_api.PyCFunction_GetFunction
+    getter.argtypes, getter.restype = [ctypes.py_object], ctypes.c_void_p
+    result = _RuntimeLoader(loader, python_api, dladdr, name, header, getter, python_api.PyOS_setsig)
+    result.inspect()
+    return result
+
+
+def _runtime_pointer(address, extent=1):
+    _inspection_need(type(address) is int and type(extent) is int
+                     and 0 < address < 2**64 and 0 < extent <= 2**64 - address)
+    return address
+
+
+def _runtime_path(address, checkpoint):
+    _runtime_pointer(address)
+    data = bytearray()
+    for offset in range(4096):
+        checkpoint()
+        location = _runtime_pointer(address + offset)
+        byte = ctypes.string_at(location, 1)
+        checkpoint()
+        _inspection_need(type(byte) is bytes and len(byte) == 1)
+        if byte == b"\0":
+            _inspection_need(bool(data))
+            try:
+                return bytes(data).decode("utf-8", "strict")
+            except UnicodeError:
+                raise _unavailable("identity-drift") from None
+        data.extend(byte)
+    raise _unavailable("identity-drift")
+
+
+def _loaded_runtime_image(address, expected, maximum_bytes, checkpoint):
+    _runtime_pointer(address, 32)
+    checkpoint()
+    header = ctypes.string_at(address, 32)
+    checkpoint()
+    words = _runtime_image_extent(header, maximum_bytes)
+    _inspection_need(words[3] == expected["file_type"])
+    _runtime_pointer(address, 32 + words[5])
+    checkpoint()
+    commands = ctypes.string_at(address + 32, words[5])
+    checkpoint()
+    return _decode_runtime_image(header, commands, expected=expected,
+                                 maximum_bytes=maximum_bytes, checkpoint=checkpoint)
+
+
+def _runtime_file_slice(payload, checkpoint):
+    """Select one arm64 slice from a bounded fat32 container, or a thin file."""
+    checkpoint()
+    if payload[:4] != b"\xca\xfe\xba\xbe":
+        return payload
+    _inspection_need(len(payload) >= 8)
+    count = struct.unpack_from(">I", payload, 4)[0]
+    _inspection_need(0 < count <= (len(payload) - 8) // 20)
+    table_end = 8 + count * 20
+    intervals, selected = [], []
+    for index in range(count):
+        checkpoint()
+        cpu, subtype, offset, size, alignment = struct.unpack_from(">5I", payload, 8 + index * 20)
+        _inspection_need(alignment < 32 and offset % (1 << alignment) == 0
+                         and table_end <= offset < len(payload)
+                         and 0 < size <= len(payload) - offset)
+        intervals.append((offset, offset + size))
+        if cpu == 0x0100000C:
+            _inspection_need(subtype == 0)
+            selected.append((offset, size))
+    _inspection_need(len(selected) == 1)
+    intervals.sort()
+    checkpoint()
+    previous_end = table_end
+    for start, end in intervals:
+        checkpoint()
+        _inspection_need(start >= previous_end)
+        previous_end = end
+    offset, size = selected[0]
+    result = payload[offset:offset + size]
+    checkpoint()
+    return result
+
+
+def _file_runtime_image(record, expected, maximum_bytes, checkpoint):
+    checkpoint()
+    payload = record.payload
+    _inspection_need(type(payload) is bytes and len(payload) == record.identity.size
+                     and len(payload) >= 32
+                     and hashlib.sha256(payload).hexdigest() == record.identity.sha256)
+    checkpoint()
+    payload = _runtime_file_slice(payload, checkpoint)
+    header = payload[:32]
+    words = _runtime_image_extent(header, maximum_bytes)
+    _inspection_need(32 + words[5] <= len(payload))
+    return _decode_runtime_image(header, payload[32:32 + words[5]], expected=expected,
+                                 maximum_bytes=maximum_bytes, checkpoint=checkpoint)
+
+
+def _runtime_clock_reset():
+    clock = _runtime_builtin(time, "clock_gettime")
+    reset = _runtime_builtin(_signal, "signal")
+    _inspection_need(type(time.CLOCK_UPTIME_RAW) is int and time.CLOCK_UPTIME_RAW == 8)
+    return clock, reset
+
+
+@dataclass(frozen=True)
+class _RuntimeImageBinding:
+    accessors: _RuntimeLoader
+    metadata: _RuntimeMetadata
+    members: object
+    references: tuple
+    facts: tuple
+
+    def inspect(self, checkpoint):
+        references, facts = _runtime_image_observations(
+            self.accessors, self.metadata, self.members, checkpoint)
+        _inspection_need(all(left is right for left, right in zip(references, self.references))
+                         and facts == self.facts)
+        checkpoint()
+
+
+def _runtime_image_observations(accessors, metadata, members, checkpoint):
+    checkpoint()
+    accessors.inspect()
+    clock, reset = _runtime_clock_reset()
+    runtime = metadata.runtime
+    images, limits = runtime["images"], runtime["limits"]
+    main, framework = members[images["main"]["file"]], members[images["framework"]["file"]]
+    _inspection_need(sys.executable == members[images["launcher"]["file"]].identity.path)
+    maximum = limits["image_command_bytes"]
+    main_file = _file_runtime_image(main, images["main"], maximum, checkpoint)
+    framework_file = _file_runtime_image(framework, images["framework"], maximum, checkpoint)
+    checkpoint()
+    main_name = accessors.image_name(0)
+    checkpoint()
+    _inspection_need(_runtime_path(main_name, checkpoint) == main.identity.path)
+    main_address = accessors.image_header(0)
+    checkpoint()
+    main_loaded = _loaded_runtime_image(main_address, images["main"], maximum, checkpoint)
+    _inspection_need(main_loaded == main_file)
+
+    def symbol_address(function):
+        checkpoint()
+        address = ctypes.cast(function, ctypes.c_void_p).value
+        checkpoint()
+        return _runtime_pointer(address)
+
+    def mapped(address):
+        _runtime_pointer(address)
+        info = _RuntimeDlInfo()
+        checkpoint()
+        outcome = accessors.dladdr(address, ctypes.byref(info))
+        checkpoint()
+        _inspection_need(type(outcome) is int and outcome != 0
+                         and _runtime_path(info.dli_fname, checkpoint) == framework.identity.path)
+        return _runtime_pointer(info.dli_fbase)
+
+    getter_address = symbol_address(accessors.getter)
+    base = mapped(getter_address)
+    offsets = runtime["bindings"]["reset"]
+    _inspection_need(getter_address - base == offsets["getter_offset"])
+    framework_loaded = _loaded_runtime_image(base, images["framework"], maximum, checkpoint)
+    _inspection_need(framework_loaded == framework_file)
+
+    def code_address(address):
+        _runtime_pointer(address)
+        _inspection_need(base <= address < base + framework_loaded["text_size"]
+                         and mapped(address) == base)
+        return address
+
+    code_address(getter_address)
+    helper_address = code_address(symbol_address(accessors.helper))
+    _inspection_need(helper_address - base == offsets["helper_offset"])
+    # Both target builtin declarations and the getter mapping are checked above.
+    # PyDLL keeps the GIL. These are address getters, never clock/reset calls.
+    checkpoint()
+    reset_address = accessors.getter(reset)
+    checkpoint()
+    reset_address = code_address(reset_address)
+    _inspection_need(reset_address - base == offsets["wrapper_offset"])
+    clock_address = accessors.getter(clock)
+    checkpoint()
+    clock_address = code_address(clock_address)
+    return (time, _signal, clock, reset), (main_address, base, getter_address,
+        helper_address, reset_address, clock_address, main_loaded, framework_loaded)
+
+
+def _observe_runtime_images(metadata, verified_members, *, checkpoint):
+    checkpoint()
+    try:
+        _inspection_need(type(metadata) is _RuntimeMetadata)
+        # Current-process namespace only. Never load a profile-supplied library.
+        loader = ctypes.CDLL(None)
+        checkpoint()
+        python_api = ctypes.PyDLL(None)
+        checkpoint()
+        accessors = _declare_runtime_loader(loader, python_api)
+        references, facts = _runtime_image_observations(accessors, metadata, verified_members, checkpoint)
+        result = _RuntimeImageBinding(accessors, metadata, verified_members, references, facts)
+    except ProcessFailure:
+        raise
+    except Exception:
+        # A failed accessor/guard is terminal for this inspection; no retry.
+        raise _unavailable("identity-drift") from None
+    checkpoint()
+    return result
+
+
+def _python_runtime_observations(metadata):
+    implementation, startup = metadata.runtime["implementation"], metadata.runtime["startup"]
+    _inspection_need(sys.modules.get("sys") is sys and sys.implementation.name == "cpython"
+                     and tuple(sys.version_info[:3]) == implementation["version"]
+                     and sys.implementation.cache_tag == implementation["cache_tag"]
+                     and sys.byteorder == implementation["byteorder"]
+                     and ctypes.sizeof(ctypes.c_void_p) * 8 == implementation["pointer_bits"]
+                     and importlib.util.MAGIC_NUMBER.hex() == implementation["bytecode_magic"])
+    for name, value in startup.items():
+        _inspection_need(type(getattr(sys.flags, name)) is int and getattr(sys.flags, name) == value)
+    _inspection_need(sys.dont_write_bytecode is True)
+    clock, reset = _runtime_clock_reset()
+    return (sys, sys.implementation, sys.flags, time, _signal, clock, reset)
+
+
+_PARTIAL_RUNTIME_TOKEN = object()
+
+
+@dataclass(frozen=True, init=False)
+class _PartialRuntimeBindings:
+    """Inspection references only: cannot reset, observe children or launch."""
+    _metadata: object
+    _members: object
+    _images: object
+    _popen: object
+    _python: tuple
+    _clock: object
+    _clock_state: object
+    _deadline: float
+
+    def __init__(self, token, metadata, members, images, popen, python, clock, clock_state, deadline):
+        _inspection_need(token is _PARTIAL_RUNTIME_TOKEN)
+        for name, value in (("_metadata", metadata), ("_members", members), ("_images", images),
+                            ("_popen", popen), ("_python", python), ("_clock", clock),
+                            ("_clock_state", clock_state), ("_deadline", deadline)):
+            object.__setattr__(self, name, value)
+
+    @property
+    def status(self):
+        return "partial"
+
+    def inspect_drift(self, *, deadline):
+        self._inspect(deadline, final=False)
+
+    def _inspect_final_drift(self, *, deadline):
+        self._inspect(deadline, final=True)
+
+    def _inspect(self, deadline, *, final):
+        _inspection_need(_valid_time(deadline) and deadline == self._deadline + (2.0 if final else 0.0))
+        checkpoint = _inspection_checkpoint(self._clock, self._clock_state, deadline)
+        checkpoint()
+        try:
+            current = _python_runtime_observations(self._metadata)
+            _inspection_need(all(left is right for left, right in zip(current, self._python)))
+            _verify_runtime_members(self._metadata, checkpoint, expected=self._members)
+            self._images.inspect(checkpoint)
+            self._popen.inspect(checkpoint)
+        except ProcessFailure:
+            raise
+        except Exception:
+            raise _unavailable("identity-drift") from None
+        checkpoint()
+
+
+def _inspection_checkpoint(clock, state, deadline):
+    def checkpoint():
+        try:
+            now = clock()
+        except Exception:
+            raise _unavailable("deadline") from None
+        if (not _valid_time(now) or now >= deadline
+                or (state[0] is not None and now < state[0])):
+            raise _unavailable("deadline")
+        state[0] = now
+        return deadline - now
+    return checkpoint
+
+
+def _verify_runtime_members(metadata, checkpoint, *, expected=None):
+    limits = metadata.runtime["limits"]
+    retained = {metadata.runtime["popen"]["source"],
+                metadata.runtime["images"]["main"]["file"],
+                metadata.runtime["images"]["framework"]["file"]}
+    members, total = {}, 0
+    for row in metadata.runtime["files"]:
+        checkpoint()
+        identity = ExecutableIdentity(**row["identity"])
+        total += identity.size
+        _inspection_need(total <= limits["aggregate_file_bytes"])
+        member = _read_runtime_member(identity, maximum_bytes=limits["per_file_bytes"],
+                                      retain=row["id"] in retained, checkpoint=checkpoint)
+        checkpoint()
+        if expected is not None:
+            _inspection_need(member.identity == expected[row["id"]].identity
+                             and member.payload == expected[row["id"]].payload)
+        members[row["id"]] = member
+    checkpoint()
+    return MappingProxyType(members)
+
+
+def _inspect_runtime_bindings(metadata, *, deadline, clock):
+    """Observe a partial layer; no source/cache closure, reset or admission."""
+    _inspection_need(_valid_time(deadline) and callable(clock))
+    state = [None]
+    checkpoint = _inspection_checkpoint(clock, state, deadline)
+    checkpoint()
+    _inspection_need(type(metadata) is _RuntimeMetadata
+                     and type(metadata.runtime) is MappingProxyType
+                     and type(metadata.platform) is MappingProxyType)
+    try:
+        members = _verify_runtime_members(metadata, checkpoint)
+        python = _python_runtime_observations(metadata)
+        checkpoint()
+        images = _observe_runtime_images(metadata, members, checkpoint=checkpoint)
+        popen = _bind_popen_body(members[metadata.runtime["popen"]["source"]], subprocess,
+                                 limits=metadata.runtime["limits"], checkpoint=checkpoint)
+        checkpoint()
+        images.inspect(checkpoint)
+        popen.inspect(checkpoint)
+        _inspection_need(all(left is right for left, right in zip(
+            _python_runtime_observations(metadata), python)))
+        result = _PartialRuntimeBindings(_PARTIAL_RUNTIME_TOKEN, metadata, members,
+                                         images, popen, python, clock, state, deadline)
+    except ProcessFailure:
+        raise
+    except Exception:
+        raise _unavailable("identity-drift") from None
     checkpoint()
     return result
 
