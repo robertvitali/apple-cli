@@ -19,6 +19,18 @@ JSON output are stable per the versioning policy — breaking changes bump
 
 ### Added
 
+- **AppleScript capture can now have an opt-in byte limit.** Set
+  `APPLE_SCRIPT_MAX_OUTPUT_BYTES` to a positive decimal byte count, or pass
+  `maximumOutputBytes` when constructing `AppleScriptRunner`. The allowance combines
+  raw stdout and stderr per invocation; leaving the setting unset preserves unlimited
+  capture. Invalid configuration returns `validation_error` (exit 64) before launch.
+  Observed overflow returns `upstream_error` (exit 69), without partial output, and
+  warns that the operation may already have completed: verify its state before retrying.
+  Notes and Mail CLI fallbacks propagate these errors instead of reporting partial
+  success. The limit is not a disk quota, total-memory ceiling or command-wide budget;
+  retained nonthrowing Mail library APIs keep their best-effort behavior. Existing
+  output fields and `schema_version` are unchanged.
+
 - **`messages recent` and `messages search` now report attachment metadata.** Each
   message gains an `attachments` array — per file: `rowid`, `guid`, `filename` (verbatim, as
   chat.db stores it, often `~`-relative), `path` (an absolute standardized path when one can be

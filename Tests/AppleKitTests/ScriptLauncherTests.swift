@@ -940,3 +940,310 @@ struct OsascriptLauncherTests {
         return try #require(box.result).get()
     }
 }
+
+@Suite("AppleScript output-limit error provenance")
+struct ScriptOutputLimitErrorTests {
+    private var errors: [AppleError] {
+        [.outputLimitEnvironmentInvalid(), .outputLimitExplicitInvalid(),
+         .outputLimitExceeded(maximumOutputBytes: 64)]
+    }
+
+    @Test("error reflection preserves the legacy public-field presentation and hides origin")
+    func reflectionPreservesLegacyDescription() throws {
+        let metadata = AppleError(type: "synthetic_type", message: "synthetic \"message\"", exitCode: 71,
+                                  status: "synthetic-status", remediation: "synthetic-remediation",
+                                  applied: ["synthetic-id"], sandbox: true)
+        let expected = #"AppleError(type: "synthetic_type", message: "synthetic \"message\"", exitCode: 71, status: Optional("synthetic-status"), remediation: Optional("synthetic-remediation"), applied: Optional(["synthetic-id"]), sandbox: Optional(true))"#
+        #expect(String(describing: metadata) == expected)
+        #expect(String(reflecting: metadata) == "AppleKit." + expected)
+        for error in errors {
+            let expected = "AppleError(type: \(String(reflecting: error.type)), message: \(String(reflecting: error.message)), exitCode: \(error.exitCode), status: nil, remediation: nil, applied: nil, sandbox: nil)"
+            #expect(String(describing: error) == expected)
+            #expect(String(reflecting: error) == "AppleKit." + expected)
+            let legacyWrapper = AppleError.upstream("wrapper: \(error)")
+            let root = try #require(try JSONSerialization.jsonObject(
+                with: Output.encodeError(tool: "mail", from: legacyWrapper)) as? [String: Any])
+            let payload = try #require(root["error"] as? [String: Any])
+            #expect(payload["message"] as? String == "wrapper: " + expected)
+        }
+    }
+
+    @Test("dedicated factories retain exact public classification and private provenance")
+    func factoryContracts() {
+        let expected = [
+            ("validation_error", Int32(64), "APPLE_SCRIPT_MAX_OUTPUT_BYTES must be a positive decimal byte count"),
+            ("validation_error", Int32(64), "maximumOutputBytes must be a positive byte count"),
+            ("upstream_error", Int32(69), "osascript output exceeded the configured limit of 64 bytes; no partial result returned. The operation may have completed; verify its state before retrying."),
+        ]
+        for (error, contract) in zip(errors, expected) {
+            #expect(AppleScriptRunner.isOutputLimitError(error))
+            #expect(error.type == contract.0)
+            #expect(error.exitCode == contract.1)
+            #expect(error.message == contract.2)
+            #expect(error.status == nil && error.remediation == nil)
+            #expect(error.applied == nil && error.sandbox == nil)
+        }
+    }
+
+    @Test("identical public fields and nested descriptions cannot forge provenance")
+    func ordinaryErrorsRemainUnmarked() {
+        for error in errors {
+            let copy = AppleError(type: error.type, message: error.message, exitCode: error.exitCode)
+            #expect(!AppleScriptRunner.isOutputLimitError(copy))
+            #expect(!AppleScriptRunner.isOutputLimitError(AppleError.validation(error.message)))
+            #expect(!AppleScriptRunner.isOutputLimitError(AppleError.upstream(error.message)))
+            let nested = NSError(domain: "synthetic", code: Int(error.exitCode), userInfo: [
+                NSLocalizedDescriptionKey: error.message, NSUnderlyingErrorKey: error,
+            ])
+            #expect(!AppleScriptRunner.isOutputLimitError(nested))
+        }
+    }
+
+    @Test("bulk copies preserve provenance and existing metadata while empty applied stays absent")
+    func bulkCopiesPreserveOrigin() {
+        for error in errors {
+            let ordinary = AppleError(type: error.type, message: error.message, exitCode: error.exitCode,
+                                      status: "synthetic-status", remediation: "synthetic-remediation",
+                                      sandbox: true)
+            for applied in [[], ["synthetic-prior"]] {
+                for original in [error, ordinary] {
+                    let copied = original.addingBulkContext(applied: applied, failedID: "synthetic-failed")
+                    #expect(AppleScriptRunner.isOutputLimitError(copied)
+                            == AppleScriptRunner.isOutputLimitError(original))
+                    #expect(copied.type == original.type && copied.exitCode == original.exitCode)
+                    #expect(copied.status == original.status && copied.remediation == original.remediation)
+                    #expect(copied.sandbox == original.sandbox)
+                    #expect(copied.applied == (applied.isEmpty ? nil : applied))
+                    #expect(copied.message.hasSuffix(original.message))
+                    #expect(copied.message.contains("The failed item may have changed"))
+                }
+            }
+        }
+    }
+
+    @Test("marked errors emit exactly the existing envelope keys without provenance")
+    func wireShapeDoesNotExposeOrigin() throws {
+        for error in errors {
+            for applied in [[], ["synthetic-prior"]] {
+                let copied = error.addingBulkContext(applied: applied, failedID: "synthetic-failed")
+                let root = try #require(try JSONSerialization.jsonObject(
+                    with: Output.encodeError(tool: "notes", from: copied)) as? [String: Any])
+                #expect(Set(root.keys) == ["schema_version", "tool", "ok", "error"])
+                #expect(root["ok"] as? Bool == false)
+                #expect(root["tool"] as? String == "notes")
+                let payload = try #require(root["error"] as? [String: Any])
+                let expectedKeys: Set<String> = applied.isEmpty ? ["type", "message"] : ["type", "message", "applied"]
+                #expect(Set(payload.keys) == expectedKeys)
+                #expect(payload["type"] as? String == copied.type)
+                #expect(payload["message"] as? String == copied.message)
+                #expect(payload["applied"] as? [String] == copied.applied)
+            }
+        }
+    }
+}
+
+@Suite("AppleScript output-limit configuration")
+struct ScriptOutputLimitConfigurationTests {
+    @Test("strict decimal configuration accepts only positive representable byte counts")
+    func resolution() throws {
+        #expect(try AppleScriptRunner.resolveMaximumOutputBytes(explicit: nil, environment: nil) == nil)
+        for (text, value) in [("1", 1), ("0001", 1), (String(Int.max), Int.max)] {
+            #expect(try AppleScriptRunner.resolveMaximumOutputBytes(explicit: nil, environment: text) == value)
+        }
+        for text in ["", "0", "000", "-1", "+1", " 1", "1 ", "1\n", "1.0", "1KiB", "١", "１", String(Int.max) + "0"] {
+            let error = try #require(#expect(throws: AppleError.self) {
+                _ = try AppleScriptRunner.resolveMaximumOutputBytes(explicit: nil, environment: text)
+            })
+            #expect(error.message == "APPLE_SCRIPT_MAX_OUTPUT_BYTES must be a positive decimal byte count")
+            #expect(error.exitCode == 64 && AppleScriptRunner.isOutputLimitError(error))
+        }
+        for value in [0, -1, Int.min] {
+            let error = try #require(#expect(throws: AppleError.self) {
+                _ = try AppleScriptRunner.resolveMaximumOutputBytes(explicit: value, environment: "1")
+            })
+            #expect(error.message == "maximumOutputBytes must be a positive byte count")
+            #expect(error.exitCode == 64 && AppleScriptRunner.isOutputLimitError(error))
+        }
+        #expect(try AppleScriptRunner.resolveMaximumOutputBytes(explicit: 7, environment: "invalid") == 7)
+    }
+
+    @Test("explicit configuration never reads environment and invalid configuration never launches")
+    func explicitPrecedence() throws {
+        let launcher = RecordingLauncher()
+        var reads = 0
+        let reader = { reads += 1; return "synthetic-invalid-environment" }
+        let runner = AppleScriptRunner(launcher: launcher, maximumOutputBytes: 7, environmentValue: reader)
+        _ = try runner.run("x")
+        #expect(try #require(launcher.only).maximumOutputBytes == 7)
+        #expect(reads == 0)
+        let invalidLauncher = RecordingLauncher()
+        let invalid = AppleScriptRunner(launcher: invalidLauncher, maximumOutputBytes: 0, environmentValue: reader)
+        #expect(throws: AppleError.self) { _ = try invalid.run("x") }
+        #expect(reads == 0 && invalidLauncher.invocations.isEmpty)
+        let fromEnvironment = AppleScriptRunner(launcher: invalidLauncher, environmentValue: reader)
+        #expect(throws: AppleError.self) { _ = try fromEnvironment.run("x") }
+        #expect(reads == 1 && invalidLauncher.invocations.isEmpty)
+    }
+
+    @Test("each of four run forms resolves once per invocation with unchanged delivery and argv")
+    func invocationWiring() throws {
+        let launcher = RecordingLauncher()
+        let sequence: [String?] = [nil, "0002", "3", "4"]
+        var reads = 0
+        let runner = AppleScriptRunner(launcher: launcher, environmentValue: {
+            defer { reads += 1 }
+            return sequence[reads]
+        })
+        _ = try runner.run("source", arguments: ["-arg"])
+        _ = try runner.run("source", arguments: ["-arg"], timeout: 2)
+        _ = try runner.runViaStdin("source", arguments: ["-arg"])
+        _ = try runner.runViaStdin("source", arguments: ["-arg"], timeout: 2)
+        #expect(reads == 4)
+        #expect(launcher.invocations.map(\.maximumOutputBytes) == [nil, 2, 3, 4])
+        #expect(launcher.invocations.map(\.delivery) == [.inline, .timed(seconds: 2), .stdin(script: "source"), .timedStdin(script: "source", seconds: 2)])
+        #expect(launcher.invocations.map(\.arguments) == [["-e", "source", "--", "-arg"], ["-e", "source", "--", "-arg"], ["-", "-arg"], ["-", "-arg"]])
+        let absent = RecordingLauncher()
+        _ = try AppleScriptRunner(launcher: absent).run("x")
+        #expect(try #require(absent.only).maximumOutputBytes == nil)
+    }
+
+    @Test("invalid timeout precedes invalid output configuration without reading environment")
+    func timeoutPrecedence() {
+        let launcher = RecordingLauncher()
+        var reads = 0
+        let runner = AppleScriptRunner(launcher: launcher, maximumOutputBytes: 0,
+                                       environmentValue: { reads += 1; return "invalid" })
+        #expect(throws: AppleScriptRunner.InvalidTimeoutError.self) { _ = try runner.run("x", timeout: 0) }
+        #expect(throws: AppleScriptRunner.InvalidTimeoutError.self) { _ = try runner.runViaStdin("x", timeout: 0) }
+        #expect(reads == 0 && launcher.invocations.isEmpty)
+    }
+
+    @Test("the shared runner boundary maps typed overflow in every delivery form")
+    func typedOverflowMapping() throws {
+        let launcher = RecordingLauncher(failure: ScriptOutputLimitExceeded(maximumOutputBytes: 9))
+        let runner = AppleScriptRunner(launcher: launcher)
+        let calls: [() throws -> String] = [
+            { try runner.run("synthetic-source", arguments: ["synthetic-argument"]) },
+            { try runner.run("synthetic-source", timeout: 1) },
+            { try runner.runViaStdin("synthetic-source") },
+            { try runner.runViaStdin("synthetic-source", timeout: 1) },
+        ]
+        for call in calls {
+            let error = try #require(#expect(throws: AppleError.self) { _ = try call() })
+            #expect(AppleScriptRunner.isOutputLimitError(error))
+            #expect(error.message == AppleError.outputLimitExceeded(maximumOutputBytes: 9).message)
+            #expect(error.exitCode == 69 && error.type == "upstream_error")
+        }
+        #expect(launcher.invocations.count == 4)
+    }
+}
+
+@Suite("AppleScript raw output byte boundaries")
+struct ScriptOutputLimitBoundaryTests {
+    private let scratch = ScratchDirs("script-output-limit")
+
+    @Test("overflow aborts while stdin is pending and the empty sibling stream remains open")
+    func overflowDuringPendingInput() throws {
+        let program = #"""
+import os, signal
+signal.signal(signal.SIGALRM, signal.SIG_DFL)
+signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGALRM})
+signal.alarm(5)
+os.write(1, b"123456789")
+signal.pause()
+"""#
+        let launcher = OsascriptLauncher(captureDirectory: try scratch.directory())
+        let started = Date()
+        let failure = try #require(#expect(throws: ScriptOutputLimitExceeded.self) {
+            _ = try launcher.launch(ScriptInvocation(executablePath: "/usr/bin/python3",
+                arguments: ["-I", "-S", "-c", program],
+                delivery: .timedStdin(script: String(repeating: "x", count: 262_144), seconds: 3),
+                maximumOutputBytes: 8))
+        })
+        #expect(failure.maximumOutputBytes == 8)
+        #expect(Date().timeIntervalSince(started) < 3,
+                "overflow must stop the pending write without waiting for the script deadline")
+    }
+    // Harmless fixed Python fixture, no subprocesses or Apple operations. Its independent
+    // alarm bounds even untimed launcher regressions; no test signals a numeric process ID.
+    private static let program = #"""
+import os, signal, sys
+signal.signal(signal.SIGALRM, signal.SIG_DFL)
+signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGALRM})
+signal.alarm(5)
+os.write(1, bytes.fromhex(sys.argv[1]))
+os.write(2, bytes.fromhex(sys.argv[2]))
+os._exit(int(sys.argv[3]))
+"""#
+
+    private func invocation(mode: Int, output: Data, error: Data,
+                            limit: Int?, status: Int = 0) -> ScriptInvocation {
+        let delivery: ScriptDelivery
+        switch mode {
+        case 0: delivery = .inline
+        case 1: delivery = .timed(seconds: 3)
+        case 2: delivery = .stdin(script: "")
+        default: delivery = .timedStdin(script: "", seconds: 3)
+        }
+        func hex(_ data: Data) -> String { data.map { String(format: "%02x", $0) }.joined() }
+        return ScriptInvocation(executablePath: "/usr/bin/python3",
+                                arguments: ["-I", "-S", "-c", Self.program, hex(output), hex(error), String(status)],
+                                delivery: delivery, maximumOutputBytes: limit)
+    }
+
+    @Test("all delivery forms count combined raw bytes at N-1, N and N+1",
+          arguments: [0, 1, 2, 3], [0, 1, 2])
+    func byteBoundaries(mode: Int, stream: Int) throws {
+        let launcher = OsascriptLauncher(captureDirectory: try scratch.directory())
+        let bytes = Data([0xC3, 0xA9, 0, 0xFF, 65, 66, 67, 68, 69])
+        for count in [7, 8, 9] {
+            let payload = Data(bytes.prefix(count))
+            let split = stream == 0 ? count : (stream == 1 ? 0 : count / 2)
+            let out = Data(payload.prefix(split))
+            let err = Data(payload.dropFirst(split))
+            let request = invocation(mode: mode, output: out, error: err, limit: 8)
+            if count > 8 {
+                let failure = try #require(#expect(throws: ScriptOutputLimitExceeded.self) {
+                    _ = try launcher.launch(request)
+                })
+                #expect(failure.maximumOutputBytes == 8)
+            } else {
+                let result = try launcher.launch(request)
+                #expect(result.standardOutput == out && result.standardError == err)
+                #expect(result.terminationStatus == 0)
+            }
+        }
+    }
+
+    @Test("unlimited and under-limit nonzero outcomes retain existing bytes and classification",
+          arguments: [0, 1, 2, 3])
+    func compatibility(mode: Int) throws {
+        let launcher = OsascriptLauncher(captureDirectory: try scratch.directory())
+        let output = Data("unlimited-output".utf8)
+        let unlimited = try launcher.launch(invocation(mode: mode, output: output, error: Data(), limit: nil))
+        #expect(unlimited.standardOutput == output)
+        let errorBytes = Data("synthetic-error".utf8)
+        let failed = try launcher.launch(invocation(mode: mode, output: Data(), error: errorBytes, limit: 64, status: 7))
+        #expect(failed.terminationStatus == 7 && failed.standardError == errorBytes)
+        let mapped = try #require(#expect(throws: AppleScriptRunner.RunError.self) {
+            _ = try AppleScriptRunner.result(of: failed)
+        })
+        guard case .scriptFailed(let status, let stderr) = mapped else {
+            Issue.record("expected existing scriptFailed classification"); return
+        }
+        #expect(status == 7 && stderr == "synthetic-error")
+    }
+
+    @Test("observed overflow takes precedence over nonzero status and later launch remains usable",
+          arguments: [0, 1, 2, 3])
+    func overflowBeforeStatus(mode: Int) throws {
+        let launcher = OsascriptLauncher(captureDirectory: try scratch.directory())
+        let failure = try #require(#expect(throws: ScriptOutputLimitExceeded.self) {
+            _ = try launcher.launch(invocation(mode: mode, output: Data("12345".utf8),
+                                               error: Data("6789".utf8), limit: 8, status: 7))
+        })
+        #expect(failure.maximumOutputBytes == 8)
+        let next = try launcher.launch(invocation(mode: mode, output: Data("ok".utf8), error: Data(), limit: 8))
+        #expect(next.standardOutput == Data("ok".utf8))
+    }
+}

@@ -30,6 +30,13 @@ private final class RecordingProcessIO: ScriptProcessIO, @unchecked Sendable {
     var failInputClose = false
     var inputWriter: Int32?
     var syntheticReadUntil: DispatchTime?
+    var capturePayloads: [Data] = []
+    var captureSizeFailure: NSError?
+    var captureGrowthBeforeSnapshot: Data?
+    private var capturesCreated = 0
+    var sizeObservations = 0
+    var snapshotAllowances: [Int?] = []
+    var readBufferSizes: [Int] = []
 
     init(trace: ProcessTrace = ProcessTrace()) { self.trace = trace }
     var outstanding: Set<Int32> { lock.withLock { liveDescriptors } }
@@ -52,9 +59,15 @@ private final class RecordingProcessIO: ScriptProcessIO, @unchecked Sendable {
     func nullInput() throws -> Int32 { record(try live.nullInput()) }
     func capture(in directory: URL) throws -> Int32 {
         if failSecondCaptureAllocation, allocationCount == 2 { throw DarwinScriptProcessIO.posixError(EMFILE) }
-        return record(try live.capture(in: directory))
+        let fd = record(try live.capture(in: directory))
+        if capturesCreated < capturePayloads.count {
+            _ = try capturePayloads[capturesCreated].withUnsafeBytes { try live.write(fd, from: $0) }
+        }
+        capturesCreated += 1
+        return fd
     }
     func read(_ fd: Int32, into buffer: UnsafeMutableRawBufferPointer) throws -> Int {
+        readBufferSizes.append(buffer.count)
         if let readFailure, fd == failedReadFD { throw DarwinScriptProcessIO.posixError(readFailure) }
         if let until = syntheticReadUntil {
             if DispatchTime.now() >= until { throw DarwinScriptProcessIO.posixError(EIO) }
@@ -65,11 +78,21 @@ private final class RecordingProcessIO: ScriptProcessIO, @unchecked Sendable {
         return try live.read(fd, into: buffer)
     }
     func write(_ fd: Int32, from buffer: UnsafeRawBufferPointer) throws -> Int { try live.write(fd, from: buffer) }
-    func captureSnapshot(_ fd: Int32) throws -> Data {
+    func captureSize(_ fd: Int32) throws -> off_t {
+        sizeObservations += 1
+        trace.add("size")
+        if let captureSizeFailure { throw captureSizeFailure }
+        return try live.captureSize(fd)
+    }
+    func captureSnapshot(_ fd: Int32, maximumBytes: Int? = nil, configuredLimit: Int? = nil) throws -> Data {
         captureReads += 1
+        snapshotAllowances.append(maximumBytes)
         trace.add("capture\(captureReads)")
         if captureReads == failCaptureRead, let captureFailure { throw captureFailure }
-        return try live.captureSnapshot(fd)
+        if captureReads == 2, let growth = captureGrowthBeforeSnapshot {
+            _ = try growth.withUnsafeBytes { try live.write(fd, from: $0) }
+        }
+        return try live.captureSnapshot(fd, maximumBytes: maximumBytes, configuredLimit: configuredLimit)
     }
     func close(_ fd: Int32) throws {
         try live.close(fd)
@@ -253,8 +276,133 @@ struct ProcessResourceTests {
         signal.pause()
     """#
 
-    private func invocation(_ mode: String, delivery: ScriptDelivery) -> ScriptInvocation {
-        ScriptInvocation(executablePath: "/usr/bin/python3", arguments: ["-c", Self.fixture, mode], delivery: delivery)
+    private func invocation(_ mode: String, delivery: ScriptDelivery,
+                            maximumOutputBytes: Int? = nil) -> ScriptInvocation {
+        ScriptInvocation(executablePath: "/usr/bin/python3", arguments: ["-c", Self.fixture, mode],
+                         delivery: delivery, maximumOutputBytes: maximumOutputBytes)
+    }
+
+    @Test("bounded capture rejects its observed extent before attempting an unreadable payload")
+    func outputLimitSnapshotBeforeRead() throws {
+        let file = try scratch.directory().appendingPathComponent("write-only")
+        try Data("123456789".utf8).write(to: file)
+        let fd = open(file.path, O_WRONLY | O_CLOEXEC)
+        try #require(fd >= 0)
+        defer { _ = Darwin.close(fd) }
+        let io = DarwinScriptProcessIO()
+        #expect(try io.captureSize(fd) == 9)
+        let overflow = try #require(#expect(throws: ScriptOutputLimitExceeded.self) {
+            _ = try io.captureSnapshot(fd, maximumBytes: 8, configuredLimit: 8)
+        })
+        #expect(overflow.maximumOutputBytes == 8)
+        // Once size fits, the same descriptor must still report the real pread EBADF.
+        let readError = try #require(#expect(throws: NSError.self) {
+            _ = try io.captureSnapshot(fd, maximumBytes: 9, configuredLimit: 9)
+        })
+        #expect(readError.domain == NSCocoaErrorDomain)
+        #expect((readError.userInfo[NSUnderlyingErrorKey] as? NSError)?.code == Int(EBADF))
+    }
+
+    @Test("zero remaining capture allowance accepts empty and refuses positive extent")
+    func outputLimitZeroRemainder() throws {
+        let io = DarwinScriptProcessIO()
+        let fd = try io.capture(in: scratch.directory())
+        defer { try? io.close(fd) }
+        #expect(try io.captureSnapshot(fd, maximumBytes: 0, configuredLimit: 8).isEmpty)
+        _ = try Data([1]).withUnsafeBytes { try io.write(fd, from: $0) }
+        let overflow = try #require(#expect(throws: ScriptOutputLimitExceeded.self) {
+            _ = try io.captureSnapshot(fd, maximumBytes: 0, configuredLimit: 8)
+        })
+        #expect(overflow.maximumOutputBytes == 8)
+        let failure = try #require(#expect(throws: NSError.self) { _ = try io.captureSize(-1) })
+        #expect(failure.domain == NSCocoaErrorDomain)
+        #expect((failure.userInfo[NSUnderlyingErrorKey] as? NSError)?.code == Int(EBADF))
+    }
+
+    @Test("aggregate capture overflow and growth retain configured limit and close all allocations",
+          arguments: [false, true], [false, true])
+    func outputLimitCaptureGrowth(growing: Bool, cleanupFails: Bool) throws {
+        let io = RecordingProcessIO()
+        io.capturePayloads = [Data("1234".utf8), growing ? Data() : Data("56789".utf8)]
+        if growing { io.captureGrowthBeforeSnapshot = Data("56789".utf8) }
+        let children = NoSpawnChildren()
+        children.fakeReaper.reply = .exited
+        if cleanupFails { children.signalError = EIO }
+        let launcher = OsascriptLauncher(captureDirectory: try scratch.directory(), dependencies: .init(io: io, children: children))
+        let overflow = try #require(#expect(throws: ScriptOutputLimitExceeded.self) {
+            _ = try launcher.launch(ScriptInvocation(arguments: [], delivery: .timed(seconds: 1), maximumOutputBytes: 8))
+        })
+        #expect(overflow.maximumOutputBytes == 8)
+        #expect(io.sizeObservations == 2)
+        #expect(io.snapshotAllowances == (growing ? [8, 4] : []))
+        #expect(children.signals == [SIGTERM, SIGKILL])
+        #expect(children.fakeReaper.calls == 1)
+        #expect(io.outstanding.isEmpty && io.allocationCount == 3)
+    }
+
+    @Test("pipe read requests stay within remaining allowance plus one without Int.max overflow",
+          arguments: [8, Int.max])
+    func outputLimitReadRequestBound(limit: Int) throws {
+        let io = RecordingProcessIO()
+        let launcher = OsascriptLauncher(dependencies: .init(io: io))
+        let invocation = ScriptInvocation(executablePath: "/bin/echo", arguments: ["123456789"],
+                                          maximumOutputBytes: limit)
+        if limit == 8 {
+            #expect(throws: ScriptOutputLimitExceeded.self) { _ = try launcher.launch(invocation) }
+            #expect(io.readBufferSizes.allSatisfy { (1...9).contains($0) })
+        } else {
+            #expect(try launcher.launch(invocation).standardOutput == Data("123456789\n".utf8))
+            #expect(io.readBufferSizes.allSatisfy { (1...65_536).contains($0) })
+        }
+        #expect(!io.readBufferSizes.isEmpty)
+        #expect(io.outstanding.isEmpty)
+    }
+
+    @Test("limited size observations preserve the original read error and unlimited avoids them",
+          arguments: [false, true])
+    func outputLimitCaptureErrorCompatibility(limited: Bool) throws {
+        let io = RecordingProcessIO()
+        io.captureSizeFailure = Self.sentinel
+        let children = NoSpawnChildren()
+        children.fakeReaper.reply = .exited
+        let launcher = OsascriptLauncher(captureDirectory: try scratch.directory(), dependencies: .init(io: io, children: children))
+        let invocation = ScriptInvocation(arguments: [], delivery: .timed(seconds: 1), maximumOutputBytes: limited ? 8 : nil)
+        if limited {
+            do { _ = try launcher.launch(invocation); Issue.record("expected original capture error") }
+            catch { #expect((error as NSError) === Self.sentinel) }
+            #expect(io.sizeObservations == 1 && io.snapshotAllowances.isEmpty)
+            #expect(children.signals == [SIGTERM, SIGKILL])
+        } else {
+            #expect(try launcher.launch(invocation).standardOutput.isEmpty)
+            #expect(io.sizeObservations == 0 && io.snapshotAllowances == [nil, nil])
+            #expect(children.signals.isEmpty)
+        }
+        #expect(io.outstanding.isEmpty)
+    }
+
+    @Test("overflow during the final capture snapshots signals the owned group before reap")
+    func outputLimitCaptureSignalsBeforeReap() throws {
+        // The existing fixture independently expires after six seconds. Wait through that
+        // bound even on RED, where an incorrectly successful capture leaves its child live.
+        defer { usleep(6_200_000) }
+        let io = RecordingProcessIO()
+        io.captureGrowthBeforeSnapshot = Data("123456789".utf8)
+        let children = RecordedChildren(io.trace)
+        let launcher = OsascriptLauncher(captureDirectory: try scratch.directory(), dependencies: .init(io: io, children: children))
+        let base = invocation("capture", delivery: .timed(seconds: 3))
+        let failure = try #require(#expect(throws: ScriptOutputLimitExceeded.self) {
+            _ = try launcher.launch(ScriptInvocation(executablePath: base.executablePath,
+                arguments: base.arguments, delivery: base.delivery, maximumOutputBytes: 16))
+        })
+        #expect(failure.maximumOutputBytes == 16)
+        let events = io.trace.events
+        let observed = try #require(events.firstIndex(of: "observed"))
+        let snapshot = try #require(events.firstIndex(of: "capture2"))
+        let term = try #require(events.firstIndex(of: "signal\(SIGTERM)"))
+        let kill = try #require(events.firstIndex(of: "signal\(SIGKILL)"))
+        let reap = try #require(events.firstIndex(of: "reaped"))
+        #expect(observed < snapshot && snapshot < term && term < kill && kill < reap)
+        #expect(io.outstanding.isEmpty)
     }
 
     @Test("spawn and partial capture setup failures close every returned allocation")
@@ -327,14 +475,15 @@ struct ProcessResourceTests {
         #expect(io.outstanding.isEmpty)
     }
 
-    @Test("a read failure closes all parent resources and leaves subsequent launches usable", arguments: [1, 2])
-    func readFailureClosesResources(stream: Int) throws {
+    @Test("a read failure closes all parent resources and leaves subsequent launches usable", arguments: [1, 2], [false, true])
+    func readFailureClosesResources(stream: Int, limited: Bool) throws {
         let io = RecordingProcessIO()
         io.readFailure = EIO
         io.failedReadPipe = stream
         let launcher = OsascriptLauncher(dependencies: .init(io: io))
         let error = #expect(throws: AppleScriptRunner.RunError.self) {
-            try launcher.launch(invocation("read", delivery: .timedStdin(script: "x", seconds: 4)))
+            try launcher.launch(invocation("read", delivery: .timedStdin(script: "x", seconds: 4),
+                                           maximumOutputBytes: limited ? 64 : nil))
         }
         guard case .launchFailed(let diagnosis) = try #require(error) else { Issue.record("wrong error"); return }
         #expect(diagnosis.hasPrefix("could not read osascript stdin-form-"))
@@ -347,15 +496,16 @@ struct ProcessResourceTests {
     }
 
     @Test("both completed capture reads retain signal authority and propagate the original error",
-          arguments: [1, 2])
-    func captureFailureBeforeReap(read: Int) throws {
+          arguments: [1, 2], [false, true])
+    func captureFailureBeforeReap(read: Int, limited: Bool) throws {
         let io = RecordingProcessIO()
         io.captureFailure = Self.sentinel
         io.failCaptureRead = read
         let children = RecordedChildren(io.trace)
         let launcher = OsascriptLauncher(captureDirectory: try scratch.directory(), dependencies: .init(io: io, children: children))
         do {
-            _ = try launcher.launch(invocation("capture", delivery: .timed(seconds: 2)))
+            _ = try launcher.launch(invocation("capture", delivery: .timed(seconds: 2),
+                                               maximumOutputBytes: limited ? 64 : nil))
             Issue.record("expected capture failure")
         } catch {
             #expect((error as NSError) === Self.sentinel)
@@ -523,22 +673,25 @@ struct ProcessResourceTests {
         }
     }
 
-    @Test("completion first observed after the deadline is a timeout", arguments: [false, true])
-    func lateObservationCannotSucceed(stdin: Bool) throws {
+    @Test("completion first observed after the deadline is a timeout", arguments: [false, true], [false, true])
+    func lateObservationCannotSucceed(stdin: Bool, limited: Bool) throws {
         let children = NoSpawnChildren()
         children.fakeReaper.reply = .exited
         children.pendingObservations = stdin ? 1 : 0
         children.delayedObservationMicroseconds = 100_000
         let io = RecordingProcessIO()
+        if limited { io.capturePayloads = [Data("123456789".utf8)] }
         let sink = HeldReaps()
         let launcher = OsascriptLauncher(captureDirectory: try scratch.directory(), dependencies: .init(io: io, children: children, deferred: sink))
         let delivery: ScriptDelivery = stdin ? .timedStdin(script: "", seconds: 0.02) : .timed(seconds: 0.02)
         #expect(throws: AppleScriptRunner.TimeoutError.self) {
-            try launcher.launch(ScriptInvocation(arguments: [], delivery: delivery))
+            try launcher.launch(ScriptInvocation(arguments: [], delivery: delivery,
+                                                 maximumOutputBytes: limited ? 8 : nil))
         }
         #expect(children.signals == [SIGTERM, SIGKILL])
         #expect(io.outstanding.isEmpty)
         #expect(sink.obligations.isEmpty)
+        #expect(io.sizeObservations == 0, "the elapsed deadline must win before a capture-size check")
     }
 
     @Test("the capture snapshot preserves the shared offset and reads the observed extent")

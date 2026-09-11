@@ -121,10 +121,10 @@ func resolveTargets(ctx: MailContext, ids: [String], match: MatchOptions, accoun
         var uuidMemo: [String: String] = [:]   // review: don't re-resolve per id
         for id in ids {
             guard let row = try resolveMessageRow(ctx: ctx, id: id) else { throw AppleError.notFound("no message for id '\(id)'.") }
-            let m = ctx.decodeSummary(row)
+            let m = try ctx.checkedDecodeSummary(row)
             if let scopeUUID {
-                let msgUUID = uuidMemo[m.account]
-                    ?? ((try? ctx.requireAccountUUID(m.account)) ?? "")
+                let msgUUID = try uuidMemo[m.account]
+                    ?? ((try MailScript.bestEffort { try ctx.requireAccountUUID(m.account) }) ?? "")
                 uuidMemo[m.account] = msgUUID
                 // Mailbox narrows ONLY when the flag was explicitly typed — the commands
                 // default it to INBOX, and review measured `mark <archived-id> --account X`
@@ -174,7 +174,7 @@ func resolveTargets(ctx: MailContext, ids: [String], match: MatchOptions, accoun
     // max_deletes=5 — the old shared 50 left mark/flag 5x and delete 10x looser than the oracle.
     f.limit = match.max ?? defaultMax
     let rows = try ctx.index.queryMessages(f)
-    return (rows.map { ctx.decodeSummary($0) }, true, nil)
+    return (try rows.map { try ctx.checkedDecodeSummary($0) }, true, nil)
 }
 
 /// Scope warning for a FILTER-BASED bulk mutation. Two cases warrant one:
@@ -479,7 +479,7 @@ struct DeleteCommand: ParsableCommand {
                         throw AppleError.notFound("could not identify a trash mailbox\(account.map { " on account '\($0)'" } ?? "") — refusing to report an erase outcome without one.")
                     }
                 } else {
-                    trashBoxes = ((try? script.trashMailboxes(accountName: account ?? "")) ?? [])
+                    trashBoxes = ((try MailScript.bestEffort { try script.trashMailboxes(accountName: account ?? "") }) ?? [])
                 }
             }
             let trashNames = trashBoxes.map(\.name)
@@ -651,7 +651,7 @@ struct TrashEmpty: ParsableCommand {
                 }
                 boxes = all.filter { MailScript.isTrashMailboxName($0.name) }
             } else {
-                boxes = (try? script.trashMailboxes(accountName: account)) ?? []
+                boxes = (try MailScript.bestEffort { try script.trashMailboxes(accountName: account) }) ?? []
             }
             guard willExecute else {
                 // Resolution can legitimately throw here (ambiguous / unknown --trash-mailbox);
@@ -728,13 +728,14 @@ struct AttachmentsSave: ParsableCommand {
 
     static func resolveLiveAttachmentNames(
         _ lookup: () throws -> [MailScript.AttachmentMeta]?
-    ) -> (names: [String]?, failure: String?) {
+    ) throws -> (names: [String]?, failure: String?) {
         do {
             guard let live = try lookup() else {
                 return (nil, "message not locatable in Mail.app")
             }
             return (live.map(\.name), nil)
         } catch {
+            if AppleScriptRunner.isOutputLimitError(error) { throw error }
             return (nil, "Mail.app enumeration failed (\(error))")
         }
     }
@@ -966,7 +967,7 @@ struct AttachmentsSave: ParsableCommand {
                 guard let r = try ctx.index.queryMessages(f).first else { throw AppleError.notFound("no message with attachments matching '\(subject ?? "")'.") }
                 row = r
             }
-            let msg = ctx.decodeSummary(row)
+            let msg = try ctx.checkedDecodeSummary(row)
             let rowid = intVal(row["rowid"]) ?? 0
 
             // Positional selection. `master` is now the LIVE Mail.app enumeration (extra32):
@@ -982,7 +983,7 @@ struct AttachmentsSave: ParsableCommand {
                                              // with Mail-down / timeout / TCC-denied
             let liveNames: [String]?
             if let internetID = msg.internet_message_id {
-                let resolution = Self.resolveLiveAttachmentNames {
+                let resolution = try Self.resolveLiveAttachmentNames {
                     try scriptFactory().listAttachments(
                         internetMessageID: internetID, accountName: msg.account)
                 }

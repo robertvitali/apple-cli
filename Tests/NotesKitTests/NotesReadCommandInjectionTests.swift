@@ -771,3 +771,86 @@ struct NotesGetLinkCommandTests {
         #expect(String(decoding: stdout.data, as: UTF8.self).trimmingCharacters(in: .whitespacesAndNewlines) == link)
     }
 }
+
+@Suite("Notes output policy — optional Markdown and link enrichment")
+struct NotesReadOutputPolicyTests {
+    @Test(arguments: notesPolicyScenarios(["markdown"]))
+    func markdownDetailsFailureKeepsPolicyOrigin(_ scenario: NotesPolicyScenario) throws {
+        let error = scenario.policy.error(marked: scenario.marked)
+        let runner = FakeNotesRunner()
+        let store = StubNotesStore.quiet()
+        var phases: [String] = []
+        runner.handler = { source, _ in
+            if source.contains("return body of note") {
+                phases.append("body"); return "<div>synthetic paragraph</div>"
+            }
+            #expect(source.contains("set noteProps to"))
+            phases.append("details")
+            throw error
+        }
+        let command = try GetMarkdownCmd.parse(["--title", "apple-cli-test markdown"])
+        let run = { try command.run(scriptFactory: { NotesScript(runner: runner, store: store) }) }
+        if scenario.marked {
+            try expectNotesPolicyFailure(error, run)
+        } else {
+            let data = try notesData(captureNotesEnvelope(run))
+            #expect(data["markdown"] as? String == "synthetic paragraph")
+        }
+        #expect(phases == ["body", "details"])
+        #expect(store.checklistQueries.isEmpty)
+    }
+
+    @Test(arguments: notesPolicyScenarios(["id", "title"]))
+    func linkFallbackKeepsPolicyOriginForBothSelectors(_ scenario: NotesPolicyScenario) throws {
+        let error = scenario.policy.error(marked: scenario.marked)
+        let runner = FakeNotesRunner()
+        let store = StubNotesStore.quiet()
+        var phases: [String] = []
+        runner.handler = { source, _ in
+            if source.contains("return note link") {
+                phases.append("link"); throw error
+            }
+            #expect(source.contains("set noteProps to"))
+            phases.append("details")
+            return noteRow(title: "apple-cli-test link", id: fixtureNoteID(1))
+        }
+        let selector = scenario.phase == "id" ? ["--id", fixtureNoteID(1)] : ["--title", "apple-cli-test link"]
+        let command = try GetNoteLinkCmd.parse(selector)
+        let run = { try command.run(scriptFactory: { NotesScript(runner: runner, store: store) }, storeFactory: { store }) }
+        if scenario.marked {
+            try expectNotesPolicyFailure(error, run)
+        } else {
+            let failure = try captureNotesFailure(run)
+            #expect(failure.code == AppleExit.upstream)
+            #expect(failure.error["type"] as? String == AppleErrorType.upstream)
+            #expect(failure.error["message"] as? String == GetNoteLinkCmd.linkFailure("apple-cli-test link"))
+        }
+        #expect(phases == ["details", "link"])
+        #expect(store.linkQueries == [fixtureNoteID(1)])
+    }
+
+    @Test func successfulStoreLinkAndEmptyMarkdownDoNotRequestOptionalScripts() throws {
+        let store = StubNotesStore.quiet()
+        store.link = "notes://synthetic"
+        let runner = FakeNotesRunner()
+        runner.handler = { source, _ in
+            if source.contains("return note link") { throw AppleError.outputLimitEnvironmentInvalid() }
+            #expect(source.contains("set noteProps to"))
+            return noteRow(title: "apple-cli-test link", id: fixtureNoteID(1))
+        }
+        let command = try GetNoteLinkCmd.parse(["--id", fixtureNoteID(1)])
+        let data = try notesData(captureNotesEnvelope {
+            try command.run(scriptFactory: { NotesScript(runner: runner, store: store) }, storeFactory: { store })
+        })
+        #expect(data["url"] as? String == "notes://synthetic")
+        #expect(runner.invocationCount == 1)
+        let emptyRunner = FakeNotesRunner()
+        emptyRunner.handler = { source, _ in
+            #expect(source.contains("return body of note"))
+            return ""
+        }
+        #expect(try NotesScript(runner: emptyRunner, store: store).getNoteMarkdown(title: "apple-cli-test empty", account: nil) == "")
+        #expect(emptyRunner.invocationCount == 1)
+        #expect(store.checklistQueries.isEmpty)
+    }
+}

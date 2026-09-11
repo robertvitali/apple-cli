@@ -27,7 +27,10 @@ struct RulesList: ParsableCommand {
         try runGuarded(tool: "mail") {
             let rules: [MailScript.ScriptRule]
             do { rules = try scriptFactory().listRules() }
-            catch { throw AppleError.upstream("could not read Mail rules — is Mail.app available with automation permitted? (\(error))") }
+            catch {
+                if AppleScriptRunner.isOutputLimitError(error) { throw error }
+                throw AppleError.upstream("could not read Mail rules — is Mail.app available with automation permitted? (\(error))")
+            }
             let infos = rules.map { RuleInfo(index: $0.index, name: $0.name, enabled: $0.enabled) }
             let result = Result(rules: infos, count: infos.count)
             if global.json { try Output.emit(tool: "mail", data: result) }
@@ -147,18 +150,19 @@ struct RulesCreate: ParsableCommand {
             // returns "ok" — creating ENABLED first would let a silently-condition-less rule
             // (which matches ALL mail) act on real messages in the window before verification,
             // and a failed readback would leave it enabled permanently (review-caught). With
-            // create-disabled-first, every failure mode leaves the rule INERT.
+            // create-disabled-first, verification failures before enable leave the rule INERT.
+            // An enable or later readback failure cannot establish the final enabled state.
             try script.createRule(name: name, enabled: false, matchAll: createMatchAll, conditions: conds, plan: plan)
             // `last(where:)` — Mail appends new rules, so the LAST name-match is the one just
             // created (belt-and-braces on top of the duplicate-name refusal above). A readback
             // failure is a HARD error here: the rule stays disabled (fail-safe), the operator is
             // told what state it is in.
-            guard let created = try? script.listRules().last(where: { $0.name == name }) else {
+            guard let created = try MailScript.bestEffort({ try script.listRules().last(where: { $0.name == name }) }) ?? nil else {
                 throw AppleError.upstream("rule '\(name)' was created (disabled) but could not be read back to verify its conditions — it was NOT enabled. Inspect it in Mail.app, then `rules enable` it or delete it.")
             }
-            let attached = (try? script.ruleConditionCount(index: created.index)) ?? -1
+            let attached = (try MailScript.bestEffort { try script.ruleConditionCount(index: created.index) }) ?? -1
             if attached != conds.count {
-                try? script.deleteRule(index: created.index)
+                _ = try MailScript.bestEffort { try script.deleteRule(index: created.index) }
                 throw AppleError.upstream("rule create attached \(attached)/\(conds.count) conditions — removed the malformed rule rather than leave one whose conditions may be missing (a 0-condition rule matches ALL mail).")
             }
             // MATCH-LOGIC VERIFICATION (review-caught 2026-08-19): the sandboxed self-scoping
@@ -171,11 +175,12 @@ struct RulesCreate: ParsableCommand {
             do {
                 matchLogicReadback = try script.readRuleScalars(index: created.index).matchAll
             } catch {
-                try? script.deleteRule(index: created.index)
+                if AppleScriptRunner.isOutputLimitError(error) { throw error }
+                _ = try MailScript.bestEffort { try script.deleteRule(index: created.index) }
                 throw AppleError.upstream("rule create could not verify its match-all/any logic after creation (\(error)) — removed the malformed rule rather than leave one whose AND/OR logic is unverified.")
             }
             if let mismatch = RuleLiveGuards.matchLogicMismatch(requested: createMatchAll, readback: matchLogicReadback) {
-                try? script.deleteRule(index: created.index)
+                _ = try MailScript.bestEffort { try script.deleteRule(index: created.index) }
                 throw AppleError.upstream(mismatch)
             }
             if createEnabled {
@@ -183,9 +188,9 @@ struct RulesCreate: ParsableCommand {
             }
             // Oracle A `create_rule` returns `rule_index` (the new total rule count) and `name`.
             // Mail exposes no "index of this rule" property, so re-read the list and take the
-            // count — same definition the oracle uses. Best-effort: a read failure must not fail
-            // an already-successful create, so the key is simply omitted then.
-            let newIndex = (try? script.listRules().count).map(AnyEncodableBox.init)
+            // count — same definition the oracle uses. Ordinary read failures omit the key;
+            // output-policy failures still escape, without claiming the enabled state.
+            let newIndex = (try MailScript.bestEffort { try script.listRules().count }).map(AnyEncodableBox.init)
             // Advisory note, independent of the sandbox note below: a live delete action needs to
             // stay visible even in the success envelope, not just the dry-run preview — the rule
             // now exists and (once enabled) will auto-trash matching mail unattended.
@@ -482,6 +487,7 @@ struct RulesUpdate: ParsableCommand {
                 try script.createRule(name: mergedName, enabled: false, matchAll: mergedMatchAll,   // 2) create DISABLED
                                             conditions: condTriples, plan: mergedPlan)
             } catch {
+                if AppleScriptRunner.isOutputLimitError(error) { throw error }
                 throw AppleError.upstream("rule recreate FAILED to create the replacement AFTER deleting the old rule — the rule is GONE. Recreate it in Mail.app: \(recovery). (underlying: \(error))")
             }
             guard let created = try script.listRules().first(where: { $0.name == mergedName }) else {
@@ -489,7 +495,7 @@ struct RulesUpdate: ParsableCommand {
             }
             let attached = try script.ruleConditionCount(index: created.index)         // 3) VERIFY conditions
             guard attached == condTriples.count else {
-                try? script.deleteRule(index: created.index)                           //    remove the malformed rule
+                _ = try MailScript.bestEffort { try script.deleteRule(index: created.index) }
                 throw AppleError.upstream("rule recreate dropped conditions (\(attached)/\(condTriples.count) attached) — removed the malformed rule and did NOT enable it (a 0-condition rule matches ALL mail). Recreate in Mail.app: \(recovery)")
             }
             // MATCH-LOGIC VERIFICATION (review-caught 2026-08-19) — same rationale + fail-safe
@@ -501,17 +507,18 @@ struct RulesUpdate: ParsableCommand {
             do {
                 matchLogicReadback = try script.readRuleScalars(index: created.index).matchAll
             } catch {
-                try? script.deleteRule(index: created.index)
+                if AppleScriptRunner.isOutputLimitError(error) { throw error }
+                _ = try MailScript.bestEffort { try script.deleteRule(index: created.index) }
                 throw AppleError.upstream("rule recreate could not verify its match-all/any logic after creation (\(error)) — removed the malformed rule and did NOT enable it. Recreate in Mail.app: \(recovery)")
             }
             if let mismatch = RuleLiveGuards.matchLogicMismatch(requested: mergedMatchAll, readback: matchLogicReadback) {
-                try? script.deleteRule(index: created.index)
+                _ = try MailScript.bestEffort { try script.deleteRule(index: created.index) }
                 throw AppleError.upstream(mismatch + " Recreate in Mail.app: \(recovery)")
             }
             if mergedEnabled {                                                              // 4) re-enable only once verified
                 try script.updateRuleMeta(index: created.index, name: nil, enabled: true, matchAll: nil, plan: nil)
             }
-            let newIndex = (try? script.listRules())?.first(where: { $0.name == mergedName })?.index ?? created.index
+            let newIndex = (try MailScript.bestEffort { try script.listRules() })?.first(where: { $0.name == mergedName })?.index ?? created.index
             try Output.emit(tool: "mail", data: [
                 "updated_rule_index": AnyEncodableBox(newIndex),
                 // Oracle A wire names (`rule_index` / `name`) alongside the CLI's originals.
@@ -847,7 +854,7 @@ struct TemplatesRender: ParsableCommand {
                                      message: "no message for id '\(messageId)'.",
                                      exitCode: AppleExit.notFound)
                 }
-                let m = ctx.decodeSummary(row)
+                let m = try ctx.checkedDecodeSummary(row)
                 // Oracle fallback chain (`auto_template_vars`): recipient_email is the PARSED
                 // address or, failing that, the raw sender field; recipient_name is the display
                 // name or, failing that, recipient_email. So all three keys are ALWAYS present

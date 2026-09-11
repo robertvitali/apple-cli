@@ -22,15 +22,22 @@ public final class MailContext {
         return a
     }
 
+    public func checkedAccounts() throws -> AccountDirectory {
+        let directory = accounts()
+        try directory.checkOutputLimitFailure()
+        return directory
+    }
+
     /// Resolve an account selector (name or UUID) to a UUID, or throw a clear validation
     /// error listing what's available.
     public func requireAccountUUID(_ selector: String) throws -> String {
-        if let uuid = accounts().resolveUUID(selector) { return uuid }
+        let directory = try checkedAccounts()
+        if let uuid = directory.resolveUUID(selector) { return uuid }
         // Fall back to matching a UUID that actually appears in the mailbox store.
         if index.accountUUIDs().contains(selector) { return selector }
         throw MailContext.accountResolutionError(selector: selector,
-                                                 directoryLoadError: accounts().loadError,
-                                                 knownNames: accounts().accounts.map(\.name))
+                                                 directoryLoadError: directory.loadError,
+                                                 knownNames: directory.accounts.map(\.name))
     }
 
     /// extra31 pure core (pinned): which error a FAILED account resolution reports. When the
@@ -61,6 +68,17 @@ public final class MailContext {
     public func decodeSummary(_ row: [String: String?]) -> MailMessage {
         let mbRowid = intVal(row["mailbox_rowid"]) ?? 0
         let (path, account) = labels(forMailboxRowid: mbRowid)
+        return MailDecode.message(row: row, mailboxPath: path, accountLabel: account)
+    }
+
+    public func checkedLabels(forMailboxRowid rowid: Int) throws -> (path: String, account: String) {
+        guard let mb = index.mailbox(forRowid: rowid) else { return ("", "") }
+        return (mb.url.path, try checkedAccounts().name(forUUID: mb.url.accountID))
+    }
+
+    public func checkedDecodeSummary(_ row: [String: String?]) throws -> MailMessage {
+        let mbRowid = intVal(row["mailbox_rowid"]) ?? 0
+        let (path, account) = try checkedLabels(forMailboxRowid: mbRowid)
         return MailDecode.message(row: row, mailboxPath: path, accountLabel: account)
     }
 }

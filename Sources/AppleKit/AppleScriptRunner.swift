@@ -41,13 +41,16 @@ struct ScriptInvocation: Equatable {
     /// Where the source travels and whether a deadline applies. Exactly one of the four
     /// shapes, so no invocation can ask for two at once.
     let delivery: ScriptDelivery
+    let maximumOutputBytes: Int?
 
     init(executablePath: String = AppleScriptRunner.osascriptPath,
          arguments: [String],
-         delivery: ScriptDelivery = .inline) {
+         delivery: ScriptDelivery = .inline,
+         maximumOutputBytes: Int? = nil) {
         self.executablePath = executablePath
         self.arguments = arguments
         self.delivery = delivery
+        self.maximumOutputBytes = maximumOutputBytes
     }
 }
 
@@ -57,6 +60,15 @@ struct ScriptOutcome: Equatable {
     let terminationStatus: Int32
     let standardOutput: Data
     let standardError: Data
+}
+
+struct ScriptOutputLimitExceeded: Error {
+    let maximumOutputBytes: Int
+
+    init(maximumOutputBytes: Int) {
+        precondition(maximumOutputBytes > 0)
+        self.maximumOutputBytes = maximumOutputBytes
+    }
 }
 
 /// Starts a `ScriptInvocation` and reports its outcome. Production binds `OsascriptLauncher`.
@@ -99,6 +111,12 @@ struct OsascriptLauncher: ScriptLaunching {
 /// so the argv rule above is checkable without a live `osascript`. The seam is module-internal
 /// and the public `init()` binds the real launcher, so nothing about a production run changes.
 public struct AppleScriptRunner: AppleScriptRunning {
+    /// Recognizes only errors marked by the shared runner's output-limit policy.
+    /// Ordinary errors with identical public fields remain unrelated failures.
+    public static func isOutputLimitError(_ error: any Error) -> Bool {
+        (error as? AppleError)?.outputLimitOrigin != nil
+    }
+
     public enum RunError: Error, CustomStringConvertible {
         case launchFailed(String)
         case scriptFailed(status: Int32, stderr: String)
@@ -131,12 +149,50 @@ public struct AppleScriptRunner: AppleScriptRunning {
     static let osascriptPath = "/usr/bin/osascript"
 
     private let launcher: any ScriptLaunching
+    private let maximumOutputBytes: Int?
+    private let environmentValue: () -> String?
 
-    public init() { self.init(launcher: OsascriptLauncher()) }
+    /// Opt-in combined raw stdout/stderr allowance. Nil consults
+    /// APPLE_SCRIPT_MAX_OUTPUT_BYTES on each invocation; absence means unlimited.
+    public init(maximumOutputBytes: Int? = nil) {
+        self.init(launcher: OsascriptLauncher(), maximumOutputBytes: maximumOutputBytes,
+                  environmentValue: { ProcessInfo.processInfo.environment["APPLE_SCRIPT_MAX_OUTPUT_BYTES"] })
+    }
 
-    /// Module-internal seam. Production never calls this; `init()` is the only public spelling
-    /// and it binds `OsascriptLauncher`.
-    init(launcher: any ScriptLaunching) { self.launcher = launcher }
+    /// Module-internal seam. Recording tests default to an absent environment value.
+    init(launcher: any ScriptLaunching, maximumOutputBytes: Int? = nil,
+         environmentValue: @escaping () -> String? = { nil }) {
+        self.launcher = launcher
+        self.maximumOutputBytes = maximumOutputBytes
+        self.environmentValue = environmentValue
+    }
+
+    static func resolveMaximumOutputBytes(explicit: Int?, environment: String?) throws -> Int? {
+        if let explicit {
+            guard explicit > 0 else { throw AppleError.outputLimitExplicitInvalid() }
+            return explicit
+        }
+        guard let environment else { return nil }
+        guard !environment.isEmpty,
+              environment.utf8.allSatisfy({ (48...57).contains($0) }),
+              let value = Int(environment), value > 0 else {
+            throw AppleError.outputLimitEnvironmentInvalid()
+        }
+        return value
+    }
+
+    private func resolvedMaximumOutputBytes() throws -> Int? {
+        // Do not even inspect the environment when an explicit API value was supplied.
+        try Self.resolveMaximumOutputBytes(explicit: maximumOutputBytes,
+                                          environment: maximumOutputBytes == nil ? environmentValue() : nil)
+    }
+
+    private func launch(_ invocation: ScriptInvocation) throws -> String {
+        do { return try Self.result(of: launcher.launch(invocation)) }
+        catch let error as ScriptOutputLimitExceeded {
+            throw AppleError.outputLimitExceeded(maximumOutputBytes: error.maximumOutputBytes)
+        }
+    }
 
     /// The argv every `-e` form builds: the script source, then `--`, then the caller's data.
     ///
@@ -167,8 +223,9 @@ public struct AppleScriptRunner: AppleScriptRunning {
     /// trimmed stdout.
     public func run(_ script: String, arguments: [String] = []) throws -> String {
         let invocation = ScriptInvocation(
-            arguments: AppleScriptRunner.dashEArguments(script: script, arguments: arguments))
-        return try AppleScriptRunner.result(of: try launcher.launch(invocation))
+            arguments: AppleScriptRunner.dashEArguments(script: script, arguments: arguments),
+            maximumOutputBytes: try resolvedMaximumOutputBytes())
+        return try launch(invocation)
     }
 
     /// Execute an AppleScript with a host-side wall-clock deadline. This overload is opt-in:
@@ -182,8 +239,9 @@ public struct AppleScriptRunner: AppleScriptRunning {
         try AppleScriptRunner.validateTimeout(seconds)
         let invocation = ScriptInvocation(
             arguments: AppleScriptRunner.dashEArguments(script: script, arguments: arguments),
-            delivery: .timed(seconds: seconds))
-        return try AppleScriptRunner.result(of: try launcher.launch(invocation))
+            delivery: .timed(seconds: seconds),
+            maximumOutputBytes: try resolvedMaximumOutputBytes())
+        return try launch(invocation)
     }
 
     /// The one deadline rule every timed form applies before it launches anything: finite,
@@ -210,8 +268,9 @@ public struct AppleScriptRunner: AppleScriptRunning {
     /// A synchronous nonblocking I/O loop interleaves both output streams and stdin delivery.
     public func runViaStdin(_ script: String, arguments: [String] = []) throws -> String {
         let invocation = ScriptInvocation(arguments: ["-"] + arguments,
-                                          delivery: .stdin(script: script))
-        return try AppleScriptRunner.result(of: try launcher.launch(invocation))
+                                          delivery: .stdin(script: script),
+                                          maximumOutputBytes: try resolvedMaximumOutputBytes())
+        return try launch(invocation)
     }
 
     /// `runViaStdin(_:arguments:)` with a host-side wall-clock deadline — the stdin counterpart
@@ -230,8 +289,9 @@ public struct AppleScriptRunner: AppleScriptRunning {
                             timeout seconds: TimeInterval) throws -> String {
         try AppleScriptRunner.validateTimeout(seconds)
         let invocation = ScriptInvocation(arguments: ["-"] + arguments,
-                                          delivery: .timedStdin(script: script, seconds: seconds))
-        return try AppleScriptRunner.result(of: try launcher.launch(invocation))
+                                          delivery: .timedStdin(script: script, seconds: seconds),
+                                          maximumOutputBytes: try resolvedMaximumOutputBytes())
+        return try launch(invocation)
     }
 
     /// Escape a string literal for the RARE case a value must be embedded directly in

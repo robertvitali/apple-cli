@@ -123,7 +123,7 @@ struct BulkTargetingTests {
     }
 
     @Test func attachmentSaveRefusesTimeoutFallbackOnExecute() throws {
-        let resolution = AttachmentsSave.resolveLiveAttachmentNames {
+        let resolution = try AttachmentsSave.resolveLiveAttachmentNames {
             throw AppleScriptRunner.TimeoutError(seconds: 30)
         }
         #expect(resolution.names == nil)

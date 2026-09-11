@@ -162,33 +162,52 @@ struct NotesScriptMutationCallSitePinTests {
         #expect(fake.invocationCount == 1)
     }
 
-    // MARK: batch entrypoints (non-throwing — failure surfaces per-item in the result list)
+    // MARK: batch entrypoints (ordinary failure surfaces per-item in the result list)
 
     @Test("batchDeleteNotes never retries; the AppleScript call attempts exactly once")
-    func batchDeleteNeverRetries() {
+    func batchDeleteNeverRetries() throws {
         let fake = AlwaysFailingRunner()
         let script = quietScript(fake)
-        let results = script.batchDeleteNotes(ids: [validNoteId])
+        let results = try script.batchDeleteNotes(ids: [validNoteId])
         #expect(results.count == 1)
         #expect(results.first?.success == false)
         #expect(fake.invocationCount == 1)
     }
 
     @Test("batchMoveNotes never retries; the AppleScript call attempts exactly once")
-    func batchMoveNeverRetries() {
+    func batchMoveNeverRetries() throws {
         let fake = AlwaysFailingRunner()
         let script = quietScript(fake)
-        let results = script.batchMoveNotes(ids: [validNoteId], folder: "Work", account: nil)
+        let results = try script.batchMoveNotes(ids: [validNoteId], folder: "Work", account: nil)
         #expect(results.count == 1)
         #expect(results.first?.success == false)
         #expect(fake.invocationCount == 1)
     }
 
     // NOTE: `createFolder(name:account:)` is deliberately NOT pinned here. It interleaves READ
-    // existence-checks (default retry-once policy, swallowed via `try?`) with MUTATION creation
+    // existence-checks (retry once; ordinary errors permit creation) with MUTATION creation
     // calls (`maxAttempts: maxMutationAttempts`) across a per-path-segment loop, so a single
     // "invoked exactly once" assertion can't express its contract the way the single-call-site
     // entrypoints above do. Its mutation calls already pass `maxAttempts: Self.maxMutationAttempts`
     // (see `NotesScript.swift`), and the shared retry-mechanics pinned in
     // `NotesScriptRunnerRetryPolicyTests` above cover the policies it composes.
+}
+
+@Suite("Notes output policy — runner provenance bypasses retry mapping")
+struct NotesRunnerOutputPolicyTests {
+    @Test(arguments: notesPolicyScenarios(["read", "mutation"]))
+    func policyAndIdenticalOrdinaryErrorsRemainDistinctWithoutRetry(_ scenario: NotesPolicyScenario) throws {
+        let expected = scenario.policy.error(marked: scenario.marked)
+        let runner = FakeNotesRunner()
+        runner.handler = { _, _ in throw expected }
+        let attempts = scenario.phase == "read" ? NotesScript.maxReadAttempts : NotesScript.maxMutationAttempts
+        let error = try #require(#expect(throws: AppleError.self) {
+            try quietScript(runner).run("return \"synthetic\"", args: [], maxAttempts: attempts)
+        })
+        #expect(error.type == expected.type)
+        #expect(error.message == expected.message)
+        #expect(error.exitCode == expected.exitCode)
+        #expect(AppleScriptRunner.isOutputLimitError(error) == scenario.marked)
+        #expect(runner.invocationCount == 1)
+    }
 }

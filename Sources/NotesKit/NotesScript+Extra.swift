@@ -45,7 +45,7 @@ extension NotesScript {
 
     /// Partition ids into valid (runnable) + invalid, run the AppleScript loop on the valid ones,
     /// and merge results back in original order. Mirrors the reference's per-id independent loop.
-    func batchDeleteNotes(ids: [String]) -> [BatchItemResult] {
+    func batchDeleteNotes(ids: [String]) throws -> [BatchItemResult] {
         if ids.isEmpty { return [] }
         var results = [BatchItemResult?](repeating: nil, count: ids.count)
         var runnableIdx: [Int] = []
@@ -92,6 +92,7 @@ extension NotesScript {
                     results[idx] = Self.mapBatchStatus(ids[idx], k < statuses.count ? statuses[k] : nil, op: "delete")
                 }
             } catch {
+                if AppleScriptRunner.isOutputLimitError(error) { throw error }
                 let msg = (error as? AppleError)?.message ?? "Batch delete failed"
                 for idx in runnableIdx { results[idx] = BatchItemResult(id: ids[idx], success: false, error: msg) }
             }
@@ -99,7 +100,7 @@ extension NotesScript {
         return results.compactMap { $0 }
     }
 
-    func batchMoveNotes(ids: [String], folder: String, account: String?) -> [BatchItemResult] {
+    func batchMoveNotes(ids: [String], folder: String, account: String?) throws -> [BatchItemResult] {
         if ids.isEmpty { return [] }
         let acct = resolveAccount(account)
         var results = [BatchItemResult?](repeating: nil, count: ids.count)
@@ -156,6 +157,7 @@ extension NotesScript {
                     results[idx] = Self.mapBatchStatus(ids[idx], k < statuses.count ? statuses[k] : nil, op: "move")
                 }
             } catch {
+                if AppleScriptRunner.isOutputLimitError(error) { throw error }
                 let msg = (error as? AppleError)?.message ?? "Batch move failed"
                 for idx in runnableIdx { results[idx] = BatchItemResult(id: ids[idx], success: false, error: msg) }
             }
@@ -165,10 +167,16 @@ extension NotesScript {
 
     // MARK: - Health check
 
-    func healthCheck() -> (healthy: Bool, checks: [HealthCheckItem]) {
+    func healthCheck() throws -> (healthy: Bool, checks: [HealthCheckItem]) {
         var checks: [HealthCheckItem] = []
         // Notes.app reachable?
-        let appOK = (try? runApp("return \"ok\"", args: [])) == "ok"
+        let appOK: Bool
+        do {
+            appOK = try runApp("return \"ok\"", args: []) == "ok"
+        } catch {
+            if AppleScriptRunner.isOutputLimitError(error) { throw error }
+            appOK = false
+        }
         if appOK {
             checks.append(HealthCheckItem(name: "notes_app", passed: true, message: "Notes.app is accessible"))
         } else {
@@ -180,6 +188,7 @@ extension NotesScript {
             _ = try runApp("return name of account 1", args: [])
             checks.append(HealthCheckItem(name: "permissions", passed: true, message: "AppleScript automation permissions granted"))
         } catch {
+            if AppleScriptRunner.isOutputLimitError(error) { throw error }
             let denied = (error as? AppleError)?.type == AppleErrorType.permissionDenied
             checks.append(HealthCheckItem(name: "permissions", passed: !denied,
                 message: denied ? "AppleScript permissions denied. Grant access in System Settings > Privacy & Security > Automation"
@@ -187,7 +196,13 @@ extension NotesScript {
             if denied { return (false, checks) }
         }
         // Accounts present?
-        let accounts = (try? listAccounts()) ?? []
+        let accounts: [Account]
+        do {
+            accounts = try listAccounts()
+        } catch {
+            if AppleScriptRunner.isOutputLimitError(error) { throw error }
+            accounts = []
+        }
         if accounts.isEmpty {
             checks.append(HealthCheckItem(name: "accounts", passed: false,
                 message: "No Notes accounts found. Set up an account in Notes.app first."))
@@ -197,7 +212,13 @@ extension NotesScript {
             message: "Found \(accounts.count) account(s): \(accounts.map { $0.name }.joined(separator: ", "))"))
         // Basic op.
         let defaultAccountName = accounts.first?.name ?? "iCloud"
-        let notes = (try? listNotes(account: defaultAccountName, folder: nil, modifiedSince: nil, limit: nil)) ?? []
+        let notes: [String]
+        do {
+            notes = try listNotes(account: defaultAccountName, folder: nil, modifiedSince: nil, limit: nil)
+        } catch {
+            if AppleScriptRunner.isOutputLimitError(error) { throw error }
+            notes = []
+        }
         checks.append(HealthCheckItem(name: "operations", passed: true,
             message: "Basic operations working (\(notes.count) note(s) in \(defaultAccountName))"))
         return (checks.allSatisfy { $0.passed }, checks)
@@ -233,6 +254,7 @@ extension NotesScript {
                 accountStats.append(AccountStat(name: account.name, total_notes: accountTotal,
                                                 folder_count: folderStats.count, folders: folderStats))
             } catch {
+                if AppleScriptRunner.isOutputLimitError(error) { throw error }
                 warnings.append(CoverageWarning(scope: account.name,
                     reason: (error as? AppleError)?.message ?? "unknown error"))
             }
@@ -240,7 +262,7 @@ extension NotesScript {
         if !accounts.isEmpty && accountStats.isEmpty {
             throw AppleError.upstream("Failed to read folder stats for any of \(accounts.count) account(s).")
         }
-        let recent = getRecentlyModifiedCounts()
+        let recent = try getRecentlyModifiedCounts()
         if let err = recent.error { warnings.append(CoverageWarning(scope: "recent-activity", reason: err)) }
         let scanned = accounts.count + 1
         let covered = scanned - warnings.count
@@ -249,7 +271,7 @@ extension NotesScript {
             coverage: Coverage(complete: warnings.isEmpty, scanned: scanned, covered: covered, warnings: warnings))
     }
 
-    func getRecentlyModifiedCounts() -> (counts: RecentlyModified, error: String?) {
+    func getRecentlyModifiedCounts() throws -> (counts: RecentlyModified, error: String?) {
         let now = Date()
         let d1 = now.addingTimeInterval(-24 * 3600)
         let d7 = now.addingTimeInterval(-7 * 24 * 3600)
@@ -271,6 +293,7 @@ extension NotesScript {
             func toInt(_ i: Int) -> Int { i < f.count ? (Int(f[i].trimmingCharacters(in: .whitespaces)) ?? 0) : 0 }
             return (RecentlyModified(last_24h: toInt(0), last_7d: toInt(1), last_30d: toInt(2)), nil)
         } catch {
+            if AppleScriptRunner.isOutputLimitError(error) { throw error }
             return (RecentlyModified(last_24h: 0, last_7d: 0, last_30d: 0),
                     (error as? AppleError)?.message ?? "unknown error")
         }
@@ -284,15 +307,40 @@ extension NotesScript {
         var totalNotes = 0
         var totalFolders = 0
         for account in accounts {
-            let folders = (try? listFolders(account: account.name)) ?? []
+            let folders: [Folder]
+            do {
+                folders = try listFolders(account: account.name)
+            } catch {
+                if AppleScriptRunner.isOutputLimitError(error) { throw error }
+                folders = []
+            }
             var exportFolders: [ExportFolder] = []
             for folder in folders {
                 var exportNotes: [ExportNote] = []
-                let titles = (try? listNotes(account: account.name, folder: folder.name, modifiedSince: nil, limit: nil)) ?? []
+                let titles: [String]
+                do {
+                    titles = try listNotes(account: account.name, folder: folder.name, modifiedSince: nil, limit: nil)
+                } catch {
+                    if AppleScriptRunner.isOutputLimitError(error) { throw error }
+                    titles = []
+                }
                 for title in titles {
-                    guard let note = try? getNoteDetails(title: title, account: account.name) else { continue }
+                    let details: ParsedNote?
+                    do {
+                        details = try getNoteDetails(title: title, account: account.name)
+                    } catch {
+                        if AppleScriptRunner.isOutputLimitError(error) { throw error }
+                        continue
+                    }
+                    guard let note = details else { continue }
                     var content = ""
-                    if !note.passwordProtected { content = (try? getNoteContent(title: title, account: account.name)) ?? "" }
+                    if !note.passwordProtected {
+                        do {
+                            content = try getNoteContent(title: title, account: account.name)
+                        } catch {
+                            if AppleScriptRunner.isOutputLimitError(error) { throw error }
+                        }
+                    }
                     exportNotes.append(ExportNote(
                         id: note.id, title: note.title, content: content,
                         plaintext: NotesText.htmlToPlaintext(content),
@@ -317,7 +365,14 @@ extension NotesScript {
         let html = try getNoteContent(title: title, account: account)
         if html.isEmpty { return "" }
         var md = try NotesText.htmlToMarkdown(html)
-        if let note = try? getNoteDetails(title: title, account: account) {
+        let details: ParsedNote?
+        do {
+            details = try getNoteDetails(title: title, account: account)
+        } catch {
+            if AppleScriptRunner.isOutputLimitError(error) { throw error }
+            details = nil
+        }
+        if let note = details {
             let result = store.checklistItems(noteId: note.id)
             if let items = result.items { md = NotesText.enrichMarkdownWithChecklists(md, items: items) }
         }

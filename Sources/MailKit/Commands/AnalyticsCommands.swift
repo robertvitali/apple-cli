@@ -339,10 +339,10 @@ struct AnalyticsOverview: ParsableCommand {
             // Unread per account from Mail's live counts (matches the oracle).
             var accounts: [AccountUnread] = []
             var total = 0
-            if let unread = try? scriptFactory().unreadCounts(summary: true, includeZero: true, accountFilter: nil) {
+            if let unread = try MailScript.bestEffort({ try scriptFactory().unreadCounts(summary: true, includeZero: true, accountFilter: nil) }) {
                 for u in unread {
-                    let totalMsgs = ctx.index.mailboxes.first(where: {
-                        ctx.accounts().name(forUUID: $0.url.accountID) == u.account && $0.url.leaf.caseInsensitiveCompare("INBOX") == .orderedSame
+                    let totalMsgs = try ctx.index.mailboxes.first(where: {
+                        try ctx.checkedAccounts().name(forUUID: $0.url.accountID) == u.account && $0.url.leaf.caseInsensitiveCompare("INBOX") == .orderedSame
                     })?.total ?? 0
                     accounts.append(AccountUnread(account: u.account, unread: u.unread, total: totalMsgs))
                     total += u.unread
@@ -351,7 +351,7 @@ struct AnalyticsOverview: ParsableCommand {
             // Recent across all inboxes.
             var f = EnvelopeIndex.MessageFilters()
             f.mailboxName = "INBOX"; f.limit = 10
-            let recent = try ctx.index.queryMessages(f).map { ctx.decodeSummary($0) }
+            let recent = try ctx.index.queryMessages(f).map { try ctx.checkedDecodeSummary($0) }
             let suggestions = [
                 "Review unread messages with `apple mail list --unread`.",
                 "Find replies needed with `apple mail analytics needs-response --account <a>`.",

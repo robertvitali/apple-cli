@@ -1035,7 +1035,14 @@ struct NotesScript {
             let (expr, fargs) = Self.folderRefExpr(prefix, startIndex: checkArgs.count + 1)
             checkArgs.append(contentsOf: fargs)
             let acctIdx = accountArgIndex(&checkArgs, acct)
-            let exists = (try? run("return id of \(expr)", args: checkArgs, tellAccount: acctIdx)) != nil
+            let exists: Bool
+            do {
+                _ = try run("return id of \(expr)", args: checkArgs, tellAccount: acctIdx)
+                exists = true
+            } catch {
+                if AppleScriptRunner.isOutputLimitError(error) { throw error }
+                exists = false
+            }
             if exists { continue }
             // Create segment i.
             if i == 0 {
@@ -1058,7 +1065,13 @@ struct NotesScript {
         let (fullExpr, fullArgs) = Self.folderRefExpr(comps, startIndex: idArgs.count + 1)
         idArgs.append(contentsOf: fullArgs)
         let idAcctIdx = accountArgIndex(&idArgs, acct)
-        let idOut = (try? run("return id of \(fullExpr)", args: idArgs, tellAccount: idAcctIdx)) ?? ""
+        let idOut: String
+        do {
+            idOut = try run("return id of \(fullExpr)", args: idArgs, tellAccount: idAcctIdx)
+        } catch {
+            if AppleScriptRunner.isOutputLimitError(error) { throw error }
+            idOut = ""
+        }
         return Folder(id: Self.extractId(idOut, prefix: "folder") ?? "", name: name, account: acct, shared: false)
     }
 
@@ -1204,7 +1217,13 @@ struct NotesScript {
             set AppleScript's text item delimiters to \(Self.asRS)
             return resultList as text
             """
-            guard let out = try? run(body, args: [account.name], tellAccount: 1) else { continue }
+            let out: String
+            do {
+                out = try run(body, args: [account.name], tellAccount: 1)
+            } catch {
+                if AppleScriptRunner.isOutputLimitError(error) { throw error }
+                continue
+            }
             for row in Self.splitRows(out) {
                 let f = Self.splitFields(row)
                 guard f.count >= 6 else { continue }

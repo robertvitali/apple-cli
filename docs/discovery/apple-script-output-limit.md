@@ -1,6 +1,6 @@
 # Opt-in AppleScript capture limit
 
-Status: accepted specification. Implementation and verification are pending.
+Status: accepted specification.
 
 ## Decision and scope
 
@@ -128,7 +128,7 @@ Keep the existing nonthrowing public initializer/API for source compatibility, b
 - Add checked throwing label/summary decoding paths (for example `checkedLabels(forMailboxRowid:)` and `checkedDecodeSummary(_:)`) for CLI callers. Acquire/check the directory before fallback labels are chosen. Keep legacy nonthrowing public accessors source-compatible if needed, but migrate CLI call sites to the checked variants.
 - CLI consumers receiving AccountDirectory directly from a factory must call its check before consuming accounts, names, sender addresses, display names or fallback values. Preserve injection seams. Do not depend on callers reading loadError manually by convention alone.
 
-Migrate actual CLI access in AccountCommands (accounts/mailboxes/unread/doctor), MessageReadCommands (search/list/get/selected/thread/attachments), WriteManageCommands (target resolution/attachment save), ExportCommands (dashboard/export), AnalyticsCommands (overview), WriteComposeCommands (send/reply/forward/rich draft/draft), and RuleTemplateCommands (template save). These families consume direct directory factories, ctx.accounts or ctx.decodeSummary. Use throwing maps/loops where necessary, preserving previous lazy evaluation and command ordering.
+Migrate actual CLI access in AccountCommands (accounts/mailboxes/unread/doctor), MessageReadCommands (search/list/get/selected/thread/attachments), WriteManageCommands (target resolution/attachment save), ExportCommands (dashboard/export), AnalyticsCommands (overview), WriteComposeCommands (send/reply/forward/rich draft/draft), and RuleTemplateCommands (template render with message context). These families consume direct directory factories, ctx.accounts or ctx.decodeSummary. Use throwing maps/loops where necessary, preserving previous lazy evaluation and command ordering.
 
 Do not eagerly load a directory for a path that never previously used it. For example, a missing mailbox row still produces the existing empty labels without fetching a directory, and a dry-run branch that previously avoided Mail must continue to do so. Once an existing operation requests the directory, its recorded marked failure must propagate before UUID/name fallback or row enrichment. Unmarked directory failures continue the existing headless UUID-label/index-resolution behavior. Tests must cover both the throwing path and actual CLI wiring; adding an unused checked accessor does not satisfy this requirement.
 

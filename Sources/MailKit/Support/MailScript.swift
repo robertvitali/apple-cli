@@ -82,6 +82,16 @@ public struct LaunchServicesMailOpener: MailAppOpening {
 /// values are passed as `arguments:` (osascript argv) — never interpolated into script source
 /// (AppleScript injection is RCE-class; see `AppleScriptRunner`).
 public struct MailScript {
+    /// Existing Mail fallbacks may omit unavailable live data, but an opted-in
+    /// output-policy failure must reach the command boundary unchanged.
+    static func bestEffort<Value>(_ operation: () throws -> Value) throws -> Value? {
+        do { return try operation() }
+        catch {
+            if AppleScriptRunner.isOutputLimitError(error) { throw error }
+            return nil
+        }
+    }
+
     /// Protocol-typed so tests can inject a fake. This property was previously kept CONCRETE with
     /// the note "protocol-typing it would silently remove `AppleScriptRunner`'s timed overload from
     /// the call surface" — a real hazard, and the reason `MailAppleScriptExecuting` declares ALL
@@ -452,10 +462,22 @@ public struct MailScript {
     /// subject is empty (oracle guard), the window never surfaces, or Mail errors.
     public func saveOpenDraft(subject: String, retries: Int = 10,
                               delaySeconds: TimeInterval = 0.5) -> Bool {
+        (try? saveOpenDraftChecked(subject: subject, retries: retries, delaySeconds: delaySeconds)) ?? false
+    }
+
+    /// CLI callers retain ordinary polling fallbacks while output-policy failures escape.
+    public func saveOpenDraftChecked(subject: String, retries: Int = 10,
+                                    delaySeconds: TimeInterval = 0.5) throws -> Bool {
         guard !subject.isEmpty else { return false }
         for _ in 0..<retries {
-            let out = (try? runner.run(MailScript.saveOpenDraftScript, arguments: [subject]))?
-                .trimmingCharacters(in: .whitespacesAndNewlines).lowercased() ?? "error: run failed"
+            let out: String
+            do {
+                out = try runner.run(MailScript.saveOpenDraftScript, arguments: [subject])
+                    .trimmingCharacters(in: .whitespacesAndNewlines).lowercased()
+            } catch {
+                if AppleScriptRunner.isOutputLimitError(error) { throw error }
+                return false
+            }
             if out == "saved" { return true }
             if out.hasPrefix("error:") { return false }
             Thread.sleep(forTimeInterval: delaySeconds)
@@ -3302,6 +3324,7 @@ public struct MailScript {
             raw = try runner.run(MailScript.checkSupportedActionsScript, arguments: [String(index)])
                 .trimmingCharacters(in: .whitespacesAndNewlines)
         } catch {
+            if AppleScriptRunner.isOutputLimitError(error) { throw error }
             // Fail CLOSED: if the probe script itself errors (e.g. the rule vanished, or a Mail-version
             // change broke the tell block), REFUSE rather than proceed blind past an unmodeled action.
             throw AppleError.mailSafety("could not verify rule \(index)'s existing actions are within the supported schema (\(error)) — refusing to update; edit this rule in Mail.app's Rules pane.")

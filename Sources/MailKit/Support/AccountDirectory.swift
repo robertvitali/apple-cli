@@ -38,6 +38,11 @@ public final class AccountDirectory {
 
     public var isLoaded: Bool { loaded }
 
+    /// Keep ordinary headless fallbacks, but never consume a cached output-policy failure.
+    public func checkOutputLimitFailure() throws {
+        if let error = loadError, AppleScriptRunner.isOutputLimitError(error) { throw error }
+    }
+
     /// Human name for a UUID, or the UUID itself when Mail is unavailable.
     public func name(forUUID uuid: String) -> String { nameByUUID[uuid] ?? uuid }
 

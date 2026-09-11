@@ -181,7 +181,7 @@ struct SearchCommand: ParsableCommand {
                 // would be a silent empty result, so refuse it loudly instead.
                 var acctDisplay: String? = nil
                 if let account {
-                    guard let d = ctx.accounts().displayName(for: account) else {
+                    guard let d = try ctx.checkedAccounts().displayName(for: account) else {
                         throw AppleError.upstream("--body-live must address the account by its Mail display name, and '\(account)' could not be resolved to one (Mail's account directory is unavailable). Use the account NAME, or drop --body-live for the indexed path.")
                     }
                     acctDisplay = d
@@ -228,7 +228,7 @@ struct SearchCommand: ParsableCommand {
                                                             direct: scope.direct, label: scope.label) {
                         unindexed += 1; continue
                     }
-                    live.append(ctx.decodeSummary(row))
+                    live.append(try ctx.checkedDecodeSummary(row))
                 }
                 // Review B2 (the oracle SORTS in body mode): `_build_search_response`
                 // sorts the collected window by received_date, then slices `[:limit]`
@@ -267,7 +267,7 @@ struct SearchCommand: ParsableCommand {
             }
 
             let rows = try ctx.index.queryMessages(f)
-            var messages = rows.map { ctx.decodeSummary($0) }
+            var messages = try rows.map { try ctx.checkedDecodeSummary($0) }
             // `snippet` and `content_preview` are ONE value under two wire names (A/B dual-key
             // rule), so every mutation below must touch both — otherwise --no-content would clear
             // `snippet` and leave the same text exposed under `content_preview`.
@@ -366,7 +366,7 @@ struct ListCommand: ParsableCommand {
                 f.limit = (limit == 0) ? Int.max : limit
                 rows = try ctx.index.queryMessages(f)
             }
-            var messages = rows.map { ctx.decodeSummary($0) }
+            var messages = try rows.map { try ctx.checkedDecodeSummary($0) }
             if !content {
                 for i in messages.indices {
                     messages[i].snippet = nil
@@ -405,14 +405,14 @@ struct GetCommand: ParsableCommand {
             guard let row = try resolveMessageRow(ctx: ctx, id: id) else {
                 throw AppleError.notFound("no message for id '\(id)'.")
             }
-            var msg = ctx.decodeSummary(row)
+            var msg = try ctx.checkedDecodeSummary(row)
             // MCP A get_message account/mailbox: the CLI resolves by globally-unique id, so these
             // are SCOPING assertions — the returned message must be in that account/mailbox, else
             // not_found. Account compares canonically (name-or-UUID → UUID both sides); mailbox
             // matches the full path or its leaf component, case-insensitively.
             if let account {
                 let wantUUID = try ctx.requireAccountUUID(account)
-                let msgUUID = (try? ctx.requireAccountUUID(msg.account)) ?? ""
+                let msgUUID = (try MailScript.bestEffort { try ctx.requireAccountUUID(msg.account) }) ?? ""
                 guard wantUUID == msgUUID else {
                     throw AppleError.notFound("message '\(id)' is not in account '\(account)'.")
                 }
@@ -476,6 +476,7 @@ struct SelectedCommand: ParsableCommand {
             do {
                 selections = try scriptFactory().selectedMessages(includeContent: !noContent)
             } catch {
+                if AppleScriptRunner.isOutputLimitError(error) { throw error }
                 throw AppleError.upstream("could not read Mail selection — is Mail.app running with automation permitted? (\(error))")
             }
             var messages: [MailMessage] = []
@@ -483,7 +484,7 @@ struct SelectedCommand: ParsableCommand {
                 var m: MailMessage
                 if let internetID = sel.internetMessageID, let ctx,
                    let row = try? ctx.index.message(internetMessageID: internetID) {
-                    m = ctx.decodeSummary(row)
+                    m = try ctx.checkedDecodeSummary(row)
                     m.applescript_id = sel.applescriptID
                     m.content = sel.content
                     m.snippet = strVal(row["snippet"])
@@ -560,7 +561,7 @@ struct ThreadCommand: ParsableCommand {
                     // MCP A header-threading: messages sharing this one's References/In-Reply-To
                     // chain (via the Envelope Index message_references table), chronologically.
                     matchedBy = "references"
-                    messages = try ctx.index.referencesThread(rowid: rowid, limit: effectiveLimit).map { ctx.decodeSummary($0) }
+                    messages = try ctx.index.referencesThread(rowid: rowid, limit: effectiveLimit).map { try ctx.checkedDecodeSummary($0) }
                     total = effectiveLimit == Int.max ? messages.count
                         : try ctx.index.referencesThread(rowid: rowid, limit: Int.max).count
                 } else {
@@ -570,11 +571,11 @@ struct ThreadCommand: ParsableCommand {
                         // Query the whole conversation directly (Apple's own thread id), chronologically.
                         var f = EnvelopeIndex.MessageFilters()
                         f.mailboxName = "All"; f.conversationID = convID; f.sortAscending = true; f.limit = effectiveLimit
-                        messages = try ctx.index.queryMessages(f).map { ctx.decodeSummary($0) }
+                        messages = try ctx.index.queryMessages(f).map { try ctx.checkedDecodeSummary($0) }
                         total = try ctx.index.countMessages(f)
                     }
                 }
-                if messages.isEmpty { messages = [ctx.decodeSummary(row)]; total = 1 } // singleton thread
+                if messages.isEmpty { messages = [try ctx.checkedDecodeSummary(row)]; total = 1 } // singleton thread
             } else if let subject {
                 matchedBy = "subject_keyword"
                 var f = EnvelopeIndex.MessageFilters()
@@ -603,7 +604,7 @@ struct ThreadCommand: ParsableCommand {
                 f.includeSystemFolders = true
                 f.sortAscending = true; f.limit = effectiveLimit
                 let rows = try ctx.index.queryMessages(f)
-                messages = rows.map { ctx.decodeSummary($0) }
+                messages = try rows.map { try ctx.checkedDecodeSummary($0) }
                 total = try ctx.index.countMessages(f)
             } else {
                 throw AppleError.validation("provide a message id argument or --subject keyword.")
@@ -667,9 +668,12 @@ struct AttachmentsList: ParsableCommand {
     /// catch policy outside MailScript so save can preserve the same error and refuse execute.
     static func liveAttachmentMetadataOrNil(
         _ lookup: () throws -> [MailScript.AttachmentMeta]?
-    ) -> [MailScript.AttachmentMeta]? {
+    ) throws -> [MailScript.AttachmentMeta]? {
         do { return try lookup() }
-        catch { return nil }
+        catch {
+            if AppleScriptRunner.isOutputLimitError(error) { throw error }
+            return nil
+        }
     }
 
     static func shapeAttachmentRows(
@@ -719,10 +723,10 @@ struct AttachmentsList: ParsableCommand {
                                 live: Bool, scriptFactory: () -> MailScript) throws
         -> (rows: [MailAttachment], degraded: Bool) {
         let indexRows = try ctx.index.attachments(messageRowid: rowid)
-        let msg = ctx.decodeSummary(row)
+        let msg = try ctx.checkedDecodeSummary(row)
         var liveMetas: [MailScript.AttachmentMeta]? = nil
         if live, let internetID = msg.internet_message_id {
-            liveMetas = Self.liveAttachmentMetadataOrNil {
+            liveMetas = try Self.liveAttachmentMetadataOrNil {
                 try scriptFactory().listAttachments(
                     internetMessageID: internetID, accountName: msg.account)
             }
@@ -748,13 +752,13 @@ struct AttachmentsList: ParsableCommand {
                 guard let row = try resolveMessageRow(ctx: ctx, id: id) else {
                     throw AppleError.notFound("no message for id '\(id)'.")
                 }
-                let msg = ctx.decodeSummary(row)
+                let msg = try ctx.checkedDecodeSummary(row)
                 // --account/--mailbox were previously declared and silently IGNORED on the id
                 // path (ok:true with the payload for a nonexistent account). Same scope-assertion
                 // semantics as `get`, with the oracle-A hint divergence disclosed in the help/spec.
                 if let account {
                     let wantUUID = try ctx.requireAccountUUID(account)
-                    let msgUUID = (try? ctx.requireAccountUUID(msg.account)) ?? ""
+                    let msgUUID = (try MailScript.bestEffort { try ctx.requireAccountUUID(msg.account) }) ?? ""
                     guard wantUUID == msgUUID else {
                         throw AppleError.notFound("message '\(id)' is not in account '\(account)'.")
                     }
@@ -790,7 +794,7 @@ struct AttachmentsList: ParsableCommand {
                 var grouped: [MailAttachmentEmail] = []
                 for row in rows {
                     let rowid = intVal(row["rowid"]) ?? 0
-                    let msg = ctx.decodeSummary(row)
+                    let msg = try ctx.checkedDecodeSummary(row)
                     let (rowsForMsg, deg) = try attachmentRows(
                         ctx: ctx, row: row, rowid: rowid, live: !noLive, scriptFactory: scriptFactory)
                     degraded = degraded || deg

@@ -4,7 +4,31 @@ import Foundation
 /// `runGuarded` in CommandSupport.swift) emits the JSON error envelope on stdout AND
 /// exits with the bound contractual exit code — atomically, so `error.type` and the
 /// exit code can never drift. Domains throw these; they do not hand-pair emit + exit.
-public struct AppleError: Error {
+public struct AppleError: Error, CustomReflectable {
+    enum OutputLimitOrigin {
+        case configuration
+        case overflow
+    }
+
+    // Non-wire provenance. Public constructors cannot manufacture it, and only this
+    // type's dedicated factories and bulk copy may set it.
+    private(set) var outputLimitOrigin: OutputLimitOrigin?
+
+    /// Preserve the pre-provenance public-field description used by legacy diagnostics.
+    /// Reflection must not turn a private classifier into stdout/stderr message content.
+    public var customMirror: Mirror {
+        let fields: [(label: String?, value: Any)] = [
+            (label: "type", value: type as Any),
+            (label: "message", value: message as Any),
+            (label: "exitCode", value: exitCode as Any),
+            (label: "status", value: status as Any),
+            (label: "remediation", value: remediation as Any),
+            (label: "applied", value: applied as Any),
+            (label: "sandbox", value: sandbox as Any),
+        ]
+        return Mirror(self, children: fields, displayStyle: .struct)
+    }
+
     public let type: String        // becomes error.type in the JSON envelope
     public let message: String
     public let exitCode: Int32
@@ -46,6 +70,7 @@ public struct AppleError: Error {
         self.remediation = remediation
         self.applied = applied
         self.sandbox = sandbox
+        self.outputLimitOrigin = nil
     }
 
     /// Re-wrap this error with the bulk partial-mutation context: earlier confirmed ids plus a
@@ -60,9 +85,30 @@ public struct AppleError: Error {
             : "bulk mutation failed at '\(failedID)' after \(applied.count) earlier message(s) were confirmed changed; "
               + "EXCLUDE the ids in `applied` from a retry. "
         let uncertainty = "The failed item may have changed; verify its state before retrying — "
-        return AppleError(type: type, message: note + uncertainty + message, exitCode: exitCode,
+        var result = AppleError(type: type, message: note + uncertainty + message, exitCode: exitCode,
                           status: status, remediation: remediation,
                           applied: applied.isEmpty ? nil : applied, sandbox: sandbox)
+        result.outputLimitOrigin = outputLimitOrigin
+        return result
+    }
+
+    static func outputLimitEnvironmentInvalid() -> AppleError {
+        var error = validation("APPLE_SCRIPT_MAX_OUTPUT_BYTES must be a positive decimal byte count")
+        error.outputLimitOrigin = .configuration
+        return error
+    }
+
+    static func outputLimitExplicitInvalid() -> AppleError {
+        var error = validation("maximumOutputBytes must be a positive byte count")
+        error.outputLimitOrigin = .configuration
+        return error
+    }
+
+    static func outputLimitExceeded(maximumOutputBytes: Int) -> AppleError {
+        precondition(maximumOutputBytes > 0)
+        var error = upstream("osascript output exceeded the configured limit of \(maximumOutputBytes) bytes; no partial result returned. The operation may have completed; verify its state before retrying.")
+        error.outputLimitOrigin = .overflow
+        return error
     }
 
     public static func validation(_ m: String) -> AppleError {

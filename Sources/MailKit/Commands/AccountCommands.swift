@@ -24,6 +24,7 @@ struct AccountsList: ParsableCommand {
     func run(directoryFactory: () -> AccountDirectory) throws {
         try runGuarded(tool: "mail") {
             let dir = directoryFactory()
+            try dir.checkOutputLimitFailure()
             guard dir.isLoaded else {
                 throw AppleError.upstream("could not read Mail accounts — is Mail.app available and automation permitted?")
             }
@@ -63,7 +64,7 @@ struct MailboxesList: ParsableCommand {
             let ctx = try contextFactory()
             var accountUUID: String?
             if let account { accountUUID = try ctx.requireAccountUUID(account) }
-            let dir = ctx.accounts()
+            let dir = try ctx.checkedAccounts()
 
             var out: [MailMailbox] = []
             for mb in ctx.index.mailboxes.sorted(by: { $0.url.accountID == $1.url.accountID ? $0.url.path.lowercased() < $1.url.path.lowercased() : $0.url.accountID < $1.url.accountID }) {
@@ -115,6 +116,7 @@ struct UnreadCountsCommand: ParsableCommand {
             var accountFilter = account
             if let account {
                 let dir = directoryFactory()
+                try dir.checkOutputLimitFailure()
                 guard let name = dir.displayName(for: account) else {
                     let known = dir.accounts.map(\.name).joined(separator: ", ")
                     throw AppleError.notFound("unknown account '\(account)'.\(known.isEmpty ? "" : " Known accounts: \(known).")")
@@ -125,6 +127,7 @@ struct UnreadCountsCommand: ParsableCommand {
             do {
                 rows = try scriptFactory().unreadCounts(summary: summary, includeZero: includeZero, accountFilter: accountFilter)
             } catch {
+                if AppleScriptRunner.isOutputLimitError(error) { throw error }
                 throw AppleError.upstream("could not read unread counts — is Mail.app running with automation permitted? (\(error))")
             }
             var total = 0
@@ -195,6 +198,7 @@ struct MailDoctor: ParsableCommand {
                 notes.append("No Envelope Index under ~/Library/Mail/V*/MailData/.")
             }
             let dir = directoryFactory()
+            try dir.checkOutputLimitFailure()
             if !dir.isLoaded { notes.append("Mail automation unavailable — account names and live reads (get content, selected) will be limited.") }
             let report = Report(
                 full_disk_access: pre.full_disk_access,

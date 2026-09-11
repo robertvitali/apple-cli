@@ -9,7 +9,8 @@ protocol ScriptProcessIO: Sendable {
     func capture(in directory: URL) throws -> Int32
     func read(_ fd: Int32, into buffer: UnsafeMutableRawBufferPointer) throws -> Int
     func write(_ fd: Int32, from buffer: UnsafeRawBufferPointer) throws -> Int
-    func captureSnapshot(_ fd: Int32) throws -> Data
+    func captureSize(_ fd: Int32) throws -> off_t
+    func captureSnapshot(_ fd: Int32, maximumBytes: Int?, configuredLimit: Int?) throws -> Data
     func close(_ fd: Int32) throws
 }
 
@@ -79,10 +80,24 @@ struct DarwinScriptProcessIO: ScriptProcessIO {
         return count
     }
 
-    func captureSnapshot(_ fd: Int32) throws -> Data {
+    func captureSize(_ fd: Int32) throws -> off_t {
         var information = stat()
         guard fstat(fd, &information) == 0 else { throw Self.captureError(errno) }
-        let length = information.st_size
+        return information.st_size
+    }
+
+    func captureSnapshot(_ fd: Int32, maximumBytes: Int? = nil, configuredLimit: Int? = nil) throws -> Data {
+        let length = try captureSize(fd)
+        if let maximumBytes {
+            precondition(maximumBytes >= 0)
+            // The second stream can have zero allowance left; report the original
+            // positive invocation limit rather than that smaller remaining allowance.
+            let original = configuredLimit ?? maximumBytes
+            precondition(original > 0)
+            guard length <= off_t(maximumBytes) else {
+                throw ScriptOutputLimitExceeded(maximumOutputBytes: original)
+            }
+        }
         var result = Data()
         var offset: off_t = 0
         var buffer = [UInt8](repeating: 0, count: 64 * 1024)
@@ -452,6 +467,16 @@ final class OwnedScriptProcess {
                 if let deadline, DispatchTime.now() >= deadline {
                     throw AppleScriptRunner.TimeoutError(seconds: seconds!)
                 }
+                if usesCaptures, let limit = invocation.maximumOutputBytes {
+                    let outputSize = try dependencies.io.captureSize(childOutput)
+                    guard outputSize <= off_t(limit) else {
+                        throw ScriptOutputLimitExceeded(maximumOutputBytes: limit)
+                    }
+                    let errorSize = try dependencies.io.captureSize(childError)
+                    guard errorSize <= off_t(limit) - outputSize else {
+                        throw ScriptOutputLimitExceeded(maximumOutputBytes: limit)
+                    }
+                }
                 if observedStatus != nil, writer == nil,
                    usesCaptures || (outputReader == nil && errorReader == nil) { break }
                 var polls: [pollfd] = []
@@ -484,24 +509,39 @@ final class OwnedScriptProcess {
                     } else {
                         let label = script == nil ? (event.fd == outputReader ? "stdout" : "piped-stderr") :
                             (event.fd == outputReader ? "stdin-form-stdout" : "stdin-form-stderr")
+                        let allowance = invocation.maximumOutputBytes.map { $0 - output.count - errorOutput.count }
+                        // Branch before adding one, so Int.max never overflows. One excess
+                        // byte distinguishes EOF from overflow when the allowance is zero.
+                        let request = allowance.map { $0 < buffer.count ? $0 + 1 : buffer.count } ?? buffer.count
+                        let count: Int
                         do {
-                            let count = try buffer.withUnsafeMutableBytes { try dependencies.io.read(event.fd, into: $0) }
+                            count = try buffer.withUnsafeMutableBytes {
+                                try dependencies.io.read(event.fd, into: UnsafeMutableRawBufferPointer(rebasing: $0[..<request]))
+                            }
                             if count == 0 {
                                 try close(event.fd)
                                 if event.fd == outputReader { outputReader = nil } else { errorReader = nil }
-                            } else if event.fd == outputReader { output.append(contentsOf: buffer.prefix(count)) }
-                            else { errorOutput.append(contentsOf: buffer.prefix(count)) }
+                            }
                         } catch {
                             if Self.retryable(error) { continue }
                             throw OsascriptLauncher.outputReadFailure(label, error)
                         }
+                        // A policy error is not a POSIX read failure and must never acquire
+                        // launchFailed classification or retain the detection byte.
+                        if let allowance, count > allowance {
+                            throw ScriptOutputLimitExceeded(maximumOutputBytes: invocation.maximumOutputBytes!)
+                        }
+                        if event.fd == outputReader { output.append(contentsOf: buffer.prefix(count)) }
+                        else { errorOutput.append(contentsOf: buffer.prefix(count)) }
                     }
                 }
             }
             if usesCaptures {
                 // Hold the root waitable across BOTH reads; preserve a raw capture error.
-                output = try dependencies.io.captureSnapshot(childOutput)
-                errorOutput = try dependencies.io.captureSnapshot(childError)
+                let limit = invocation.maximumOutputBytes
+                output = try dependencies.io.captureSnapshot(childOutput, maximumBytes: limit, configuredLimit: limit)
+                errorOutput = try dependencies.io.captureSnapshot(childError,
+                    maximumBytes: limit.map { $0 - output.count }, configuredLimit: limit)
             }
             let outcome = ScriptOutcome(terminationStatus: observedStatus!, standardOutput: output, standardError: errorOutput)
             maySignal = false

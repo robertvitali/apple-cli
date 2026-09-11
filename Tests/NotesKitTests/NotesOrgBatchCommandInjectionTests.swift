@@ -1945,3 +1945,97 @@ struct NotesBatchCommandTests {
         #expect((failure.error["message"] as? String)?.contains("Notes.app is not running.") == true)
     }
 }
+
+@Suite("Notes output policy — folder, shared and batch boundaries")
+struct NotesOrgOutputPolicyTests {
+    @Test(arguments: notesPolicyScenarios(["existence", "readback"]))
+    func folderExistenceAndFinalReadbackKeepPolicyFailures(_ scenario: NotesPolicyScenario) throws {
+        let policy = scenario.policy, marked = scenario.marked
+        let finalReadback = scenario.phase == "readback"
+        let error = policy.error(marked: marked)
+        let runner = FakeNotesRunner()
+        var phases: [String] = []
+        var reads = 0
+        runner.handler = { source, _ in
+            if source.contains("make new folder") { phases.append("make"); return "folder id F1" }
+            #expect(source.contains("return id of folder"))
+            reads += 1
+            phases.append("read")
+            if finalReadback && reads == 1 { throw AppleError.notFound("synthetic absence") }
+            if !finalReadback && reads > 1 { return "folder id F1" }
+            throw error
+        }
+        let name = finalReadback ? "apple-cli-test folder" : "apple-cli-test folder/apple-cli-test child"
+        let command = try CreateFolderCmd.parse([name])
+        let run = { try command.run(scriptFactory: { quietScript(runner) }, env: pinnedWriteEnv("policy-folder")) }
+        if marked {
+            try expectNotesPolicyFailure(error, run)
+            #expect(phases == (finalReadback ? ["read", "make", "read"] : ["read"]))
+        } else {
+            _ = try notesData(captureNotesEnvelope(run))
+            #expect(phases == (finalReadback ? ["read", "make", "read"] : ["read", "make", "read", "read"]))
+        }
+    }
+
+    @Test(arguments: notesPolicyScenarios(["shared"]))
+    func sharedAccountFailureStopsOnlyForPolicyOrigin(_ scenario: NotesPolicyScenario) throws {
+        let policy = scenario.policy, marked = scenario.marked
+        let error = policy.error(marked: marked)
+        let runner = FakeNotesRunner()
+        var phases: [String] = []
+        runner.handler = { source, args in
+            if source.contains("repeat with a in accounts") {
+                phases.append("accounts"); return policyAccountRows(["Example One", "Example Two"])
+            }
+            #expect(source.contains("if shared of n is true"))
+            let account = try #require(args.first)
+            phases.append(account)
+            if account == "Example One" { throw error }
+            return noteRow(title: "apple-cli-test shared", id: fixtureNoteID(2), shared: true) + RS
+        }
+        let command = try SharedCmd.parse([])
+        let run = { try command.run(scriptFactory: { quietScript(runner) }) }
+        if marked {
+            try expectNotesPolicyFailure(error, run)
+            #expect(phases == ["accounts", "Example One"])
+        } else {
+            let data = try notesData(captureNotesEnvelope(run))
+            #expect(data["count"] as? Int == 1)
+            #expect(phases == ["accounts", "Example One", "Example Two"])
+        }
+    }
+
+    @Test(arguments: notesPolicyScenarios(["delete", "move"]))
+    func batchWholeScriptFailurePreservesPolicyInsteadOfClaimingPerItemFailure(_ scenario: NotesPolicyScenario) throws {
+        let policy = scenario.policy, marked = scenario.marked
+        let move = scenario.phase == "move"
+        let error = policy.error(marked: marked)
+        let runner = FakeNotesRunner()
+        var attemptedMutation = false
+        runner.handler = { source, _ in
+            #expect(source.contains(move ? "move noteRef" : "delete noteRef"))
+            attemptedMutation = true // The synthetic mutation may have happened before throwing.
+            throw error
+        }
+        let run: () throws -> Void = {
+            if move {
+                let command = try BatchMoveCmd.parse(["--ids", fixtureNoteID(1), "--folder", "apple-cli-test destination"])
+                try command.run(scriptFactory: { quietScript(runner) }, env: pinnedWriteEnv("policy-batch"))
+            } else {
+                let command = try BatchDeleteCmd.parse(["--ids", fixtureNoteID(1)])
+                try command.run(scriptFactory: { quietScript(runner) }, env: pinnedWriteEnv("policy-batch"))
+            }
+        }
+        if marked {
+            try expectNotesPolicyFailure(error, run)
+        } else {
+            let failure = try captureNotesFailure(run)
+            #expect(failure.code == AppleExit.upstream)
+            #expect(failure.error["type"] as? String == AppleErrorType.upstream)
+            let scope = move ? "move to \"apple-cli-test destination\"" : "delete"
+            #expect(failure.error["message"] as? String == "Batch \(scope): 0 succeeded, 1 failed\n\nFailures:\n  - \(fixtureNoteID(1)): \(error.message)")
+        }
+        #expect(attemptedMutation)
+        #expect(runner.invocationCount == 1)
+    }
+}

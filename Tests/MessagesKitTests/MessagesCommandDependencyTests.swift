@@ -794,6 +794,57 @@ struct MessagesCommandDependencyTests {
                                   run: { try $0.run(dependencies: .fixture()) })
     }
 
+    @Test("send preserves marked output-limit errors and identical unmarked errors")
+    func sendOutputLimitErrorsAtCommandBoundary() throws {
+        let cases: [(error: AppleError, type: String, exit: Int32, message: String)] = [
+            (.outputLimitEnvironmentInvalid(), AppleErrorType.validation, AppleExit.usage,
+             "APPLE_SCRIPT_MAX_OUTPUT_BYTES must be a positive decimal byte count"),
+            (.outputLimitExplicitInvalid(), AppleErrorType.validation, AppleExit.usage,
+             "maximumOutputBytes must be a positive byte count"),
+            (.outputLimitExceeded(maximumOutputBytes: 17), AppleErrorType.upstream, AppleExit.upstream,
+             "osascript output exceeded the configured limit of 17 bytes; no partial result returned. "
+             + "The operation may have completed; verify its state before retrying."),
+        ]
+        for item in cases {
+            for marked in [true, false] {
+                let injected = marked ? item.error
+                    : AppleError(type: item.error.type, message: item.error.message,
+                                 exitCode: item.error.exitCode)
+                #expect(AppleScriptRunner.isOutputLimitError(injected) == marked)
+                for group in [false, true] {
+                    let handle = group ? "iMessage;+;chat-example" : "12125550100"
+                    let arguments = (group ? ["--group"] : [])
+                        + [handle, "--message", "synthetic output-limit send"]
+                    let command = try Send_.parse(arguments)
+                    let calls = LockedBox<Int>(0)
+                    let result = try captureCommand {
+                        try command.run(dependencies: .fixture(performSend: { recipient, message, isGroup in
+                            calls.withLock { $0 += 1 }
+                            #expect(recipient == handle)
+                            #expect(message == "synthetic output-limit send")
+                            #expect(isGroup == group)
+                            throw injected
+                        }))
+                    }
+                    #expect(calls.value == 1)
+                    #expect(result.exitCode == item.exit)
+                    #expect(result.stderr.isEmpty)
+                    let envelope = try #require(
+                        try JSONSerialization.jsonObject(with: Data(result.stdout.utf8)) as? [String: Any])
+                    #expect(Set(envelope.keys) == Set(["schema_version", "tool", "ok", "error"]))
+                    #expect(envelope["schema_version"] as? Int == 1)
+                    #expect(envelope["tool"] as? String == "messages")
+                    #expect(envelope["ok"] as? Bool == false)
+                    let error = try #require(envelope["error"] as? [String: Any])
+                    #expect(Set(error.keys) == Set(["type", "message"]))
+                    #expect(error["type"] as? String == item.type)
+                    #expect(error["message"] as? String == item.message)
+                }
+            }
+        }
+    }
+
+
     /// The raw `osascript` failure text is UNSTABLE and can echo store-derived content, so it goes
     /// to stderr (the human channel) only; stdout carries a fixed, parseable message. Asserting the
     /// stderr text, the EXACT stdout message, and the raw text's ABSENCE from stdout is what makes

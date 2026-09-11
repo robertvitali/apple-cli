@@ -69,6 +69,35 @@ policy: [`docs/versioning-policy.md`](./docs/versioning-policy.md).
 `schema_version` bumps only on a breaking output change. Consumers must ignore
 unknown keys (tolerant reader). Exit codes are contractual (see `docs/DESIGN.md`).
 
+## AppleScript output limit
+
+Unreleased builds support an optional limit on combined raw stdout and stderr
+captured from each AppleScript invocation:
+
+```sh
+APPLE_SCRIPT_MAX_OUTPUT_BYTES=1048576 apple notes folders
+```
+
+Leave the variable unset for the existing unlimited default. Its value must be a
+positive decimal byte count; signs, spaces and unit suffixes are rejected before
+launch with `validation_error` (exit 64). The setting is read once per invocation.
+Library callers can supply `AppleScriptRunner(maximumOutputBytes: 1048576)` to
+override the environment; `nil` inherits the environment.
+
+Exactly the configured number of bytes is allowed. Observed overflow returns
+`upstream_error` (exit 69), without partial output. **The operation may already
+have completed; verify its state before retrying.** The JSON schema is unchanged.
+The limit bounds retained capture bytes, not total memory, disk use, or all
+invocations within a command. Successful background descendants may keep writing
+after capture ends.
+
+CLI paths propagate these policy errors through Notes and Mail's ordinary
+best-effort fallbacks. Library callers using the retained nonthrowing Mail
+account-directory, context or draft-save APIs still receive their legacy
+best-effort results; use the checked throwing alternatives for propagation.
+See the [capture-limit specification](./docs/discovery/apple-script-output-limit.md)
+for API details and coverage boundaries.
+
 ## License
 
 MIT — see [LICENSE](./LICENSE) and [NOTICE](./NOTICE) (attribution to the

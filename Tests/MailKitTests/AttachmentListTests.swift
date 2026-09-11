@@ -51,7 +51,7 @@ struct AttachmentListTests {
     }
 
     @Test func callerMapsTimeoutToDisclosedIndexFallback() throws {
-        let live = AttachmentsList.liveAttachmentMetadataOrNil {
+        let live = try AttachmentsList.liveAttachmentMetadataOrNil {
             throw AppleScriptRunner.TimeoutError(seconds: 30)
         }
         let shaped = AttachmentsList.shapeAttachmentRows(

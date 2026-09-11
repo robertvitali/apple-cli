@@ -39,8 +39,8 @@ final class FakeNotesRunner: AppleScriptRunning, @unchecked Sendable {
     /// against a fabricated answer instead of failing on the missing stub.
     ///
     /// `.empty` is for the wrappers that legitimately probe until empty: `createFolder` walks each
-    /// path segment with a `try?` existence check, and `healthCheck`/`doctor` swallow failures by
-    /// design.
+    /// path segment with a best-effort existence check, and `healthCheck`/`doctor` swallow ordinary
+    /// failures by design. Output-policy failures propagate.
     enum Exhaustion { case fail, empty }
 
     var results: [String] = []
@@ -252,4 +252,49 @@ func noteRow(title: String, id: String, shared: Bool = false, passwordProtected:
 /// runnable instead of short-circuiting to the invalid-id branch.
 func fixtureNoteID(_ pk: Int) -> String {
     "x-coredata://11111111-2222-3333-4444-555555555555/ICNote/p\(pk)"
+}
+
+// Output-policy fixtures use AppleKit's internal factories, never a public forgeable marker.
+enum NotesOutputPolicyCase: String, CaseIterable, Sendable {
+    case environment, explicit, overflow
+
+    func error(marked: Bool) -> AppleError {
+        let error: AppleError
+        switch self {
+        case .environment: error = .outputLimitEnvironmentInvalid()
+        case .explicit: error = .outputLimitExplicitInvalid()
+        case .overflow: error = .outputLimitExceeded(maximumOutputBytes: 17)
+        }
+        return marked ? error : AppleError(type: error.type, message: error.message, exitCode: error.exitCode)
+    }
+}
+
+func expectNotesPolicyFailure(_ expected: AppleError, _ body: () throws -> Void) throws {
+    let failure = try captureNotesFailure(body)
+    #expect(failure.code == expected.exitCode)
+    #expect(failure.error["type"] as? String == expected.type)
+    #expect(failure.error["message"] as? String == expected.message)
+    #expect(Set(failure.error.keys) == Set(["type", "message"]))
+    #expect(failure.envelope["ok"] as? Bool == false)
+    #expect(failure.envelope["data"] == nil)
+}
+
+func policyAccountRows(_ names: [String]) -> String {
+    names.enumerated().map { index, name in
+        ["A\(index)", name, "true", "F\(index)", "Notes"].joined(separator: US) + RS
+    }.joined()
+}
+
+struct NotesPolicyScenario: Sendable {
+    let phase: String
+    let policy: NotesOutputPolicyCase
+    let marked: Bool
+}
+
+func notesPolicyScenarios(_ phases: [String]) -> [NotesPolicyScenario] {
+    phases.flatMap { phase in
+        NotesOutputPolicyCase.allCases.flatMap { policy in
+            [true, false].map { NotesPolicyScenario(phase: phase, policy: policy, marked: $0) }
+        }
+    }
 }

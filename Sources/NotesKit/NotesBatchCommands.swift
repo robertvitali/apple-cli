@@ -116,7 +116,7 @@ struct BatchDeleteCmd: ParsableCommand {
             }
             let script = scriptFactory()
             try verifyBatchTargetsLabeled(ids, script, sandboxActive: gate.sandboxActive, prefix: env.sandboxPrefix)
-            let results = script.batchDeleteNotes(ids: ids)
+            let results = try script.batchDeleteNotes(ids: ids)
             try requireAnyBatchSuccess(results, verb: "delete")
             let succeeded = results.filter { $0.success }.count
             let failed = results.count - succeeded
@@ -165,7 +165,7 @@ struct BatchMoveCmd: ParsableCommand {
             }
             let script = scriptFactory()
             try verifyBatchTargetsLabeled(ids, script, sandboxActive: gate.sandboxActive, prefix: env.sandboxPrefix)
-            let results = script.batchMoveNotes(ids: ids, folder: folder, account: account)
+            let results = try script.batchMoveNotes(ids: ids, folder: folder, account: account)
             try requireAnyBatchSuccess(results, verb: "move", folder: folder)
             let succeeded = results.filter { $0.success }.count
             let failed = results.count - succeeded

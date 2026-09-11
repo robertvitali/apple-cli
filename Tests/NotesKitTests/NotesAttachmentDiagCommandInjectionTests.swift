@@ -838,3 +838,181 @@ struct NotesDiagCommandTests {
         #expect(failure.code == AppleExit.upstream)
     }
 }
+
+@Suite("Notes output policy — diagnostics and export boundaries")
+struct NotesDiagOutputPolicyTests {
+    @Test(arguments: notesPolicyScenarios(["app", "permission", "accounts", "notes", "doctor-accounts", "doctor-health"]))
+    func healthAndDoctorKeepPolicyFailures(_ scenario: NotesPolicyScenario) throws {
+        let error = scenario.policy.error(marked: scenario.marked)
+        let runner = FakeNotesRunner()
+        let store = StubNotesStore.quiet()
+        var phases: [String] = []
+        var accountCalls = 0
+        var signatureCalls = 0
+        runner.handler = { source, _ in
+            let phase: String
+            let reply: String
+            if source.contains("return \"ok\"") { phase = "app"; reply = "ok" }
+            else if source.contains("return name of account 1") { phase = "permission"; reply = "Example Account" }
+            else if source.contains("repeat with a in accounts") {
+                accountCalls += 1
+                phase = accountCalls == 1 ? "accounts" : "doctor-accounts"
+                reply = policyAccountRows(["Example Account"])
+            } else {
+                #expect(source.contains("set end of resultList to noteName"))
+                phase = "notes"; reply = ""
+            }
+            phases.append(phase)
+            if phase == scenario.phase || (scenario.phase == "doctor-health" && phase == "app") { throw error }
+            return reply
+        }
+        let run: () throws -> Void = {
+            if scenario.phase.hasPrefix("doctor-") {
+                let command = try DoctorCmd.parse([])
+                try command.run(scriptFactory: { NotesScript(runner: runner, store: store) }, storeFactory: { store },
+                    signatureCheck: {
+                        signatureCalls += 1
+                        return DoctorCheck(name: "Synthetic signature", status: "ok", detail: "synthetic")
+                    })
+            } else {
+                let command = try HealthCmd.parse([])
+                try command.run(scriptFactory: { NotesScript(runner: runner, store: store) }, storeFactory: { store })
+            }
+        }
+        let order = ["app", "permission", "accounts", "notes", "doctor-accounts"]
+        if scenario.marked {
+            try expectNotesPolicyFailure(error, run)
+            let failedPhase = scenario.phase == "doctor-health" ? "app" : scenario.phase
+            let last = try #require(order.firstIndex(of: failedPhase))
+            #expect(phases == Array(order.prefix(last + 1)))
+            #expect(signatureCalls == 0)
+        } else {
+            let data = try notesData(captureNotesEnvelope(run))
+            let checks = try #require(data["checks"] as? [[String: Any]])
+            switch scenario.phase {
+            case "app":
+                #expect(phases == ["app"])
+                #expect(data["healthy"] as? Bool == false)
+                #expect(checks.count == 1)
+            case "accounts":
+                #expect(phases == Array(order.prefix(3)))
+                #expect(data["healthy"] as? Bool == false)
+                #expect(checks.last?["name"] as? String == "accounts")
+            case "doctor-health":
+                #expect(phases == ["app", "accounts"])
+                #expect(signatureCalls == 1)
+                #expect(data["healthy"] as? Bool == false)
+            case "doctor-accounts":
+                #expect(phases == order)
+                #expect(signatureCalls == 1)
+                #expect(checks.contains { $0["name"] as? String == "Accounts" && $0["status"] as? String == "fail" })
+            default:
+                #expect(phases == Array(order.prefix(4)))
+                #expect(data["healthy"] as? Bool == true)
+                if scenario.phase == "permission" {
+                    #expect(checks[1]["message"] as? String == "Permission check returned an error")
+                } else {
+                    #expect(checks.last?["message"] as? String == "Basic operations working (0 note(s) in Example Account)")
+                }
+            }
+        }
+    }
+
+    @Test(arguments: notesPolicyScenarios(["account", "recent"]))
+    func statsKeepPolicyFailuresInsteadOfCoverageWarnings(_ scenario: NotesPolicyScenario) throws {
+        let error = scenario.policy.error(marked: scenario.marked)
+        let runner = FakeNotesRunner()
+        var phases: [String] = []
+        runner.handler = { source, args in
+            if source.contains("repeat with a in accounts") {
+                phases.append("accounts"); return policyAccountRows(["Example One", "Example Two"])
+            }
+            if source.contains("count of notes of fldr") {
+                let account = try #require(args.first)
+                phases.append(account)
+                if scenario.phase == "account" && account == "Example One" { throw error }
+                return ["Notes", "1"].joined(separator: US) + RS
+            }
+            #expect(source.contains("modification date >= d1"))
+            phases.append("recent")
+            if scenario.phase == "recent" { throw error }
+            return ["1", "1", "1"].joined(separator: US)
+        }
+        let command = try StatsCmd.parse([])
+        let run = { try command.run(scriptFactory: { quietScript(runner) }) }
+        if scenario.marked {
+            try expectNotesPolicyFailure(error, run)
+            #expect(phases == (scenario.phase == "account" ? ["accounts", "Example One"] : ["accounts", "Example One", "Example Two", "recent"]))
+        } else {
+            let data = try notesData(captureNotesEnvelope(run))
+            #expect(phases == ["accounts", "Example One", "Example Two", "recent"])
+            let coverage = try #require(data["coverage"] as? [String: Any])
+            #expect(coverage["complete"] as? Bool == false)
+            let warnings = try #require(coverage["warnings"] as? [[String: Any]])
+            #expect(warnings.count == 1)
+            #expect(warnings.first?["reason"] as? String == error.message)
+            #expect(data["total_notes"] as? Int == (scenario.phase == "account" ? 1 : 2))
+            let recent = try #require(data["recently_modified"] as? [String: Any])
+            #expect(recent["last_24h"] as? Int == (scenario.phase == "recent" ? 0 : 1))
+        }
+    }
+
+    @Test(arguments: notesPolicyScenarios(["folders", "titles", "details", "body"]))
+    func exportKeepsPolicyFailuresAtEachOptionalLookup(_ scenario: NotesPolicyScenario) throws {
+        let error = scenario.policy.error(marked: scenario.marked)
+        let runner = FakeNotesRunner()
+        var phases: [String] = []
+        runner.handler = { source, args in
+            if source.contains("repeat with a in accounts") {
+                phases.append("accounts"); return policyAccountRows(["Example Account"])
+            }
+            let phase: String
+            let reply: String
+            if source.contains("set allFolders to every folder") {
+                phase = "folders"; reply = ["F1", "Notes", "", "false"].joined(separator: US) + RS
+            } else if source.contains("set noteProps to") {
+                let title = try #require(args.first)
+                phase = title == "apple-cli-test one" ? "details" : "details-two"
+                reply = noteRow(title: title, id: fixtureNoteID(1))
+            } else if source.contains("return body of note") {
+                phase = args.first == "apple-cli-test one" ? "body" : "body-two"
+                reply = "<div>synthetic content</div>"
+            } else {
+                #expect(source.contains("set end of resultList to noteName"))
+                phase = "titles"; reply = "apple-cli-test one" + RS + "apple-cli-test two" + RS
+            }
+            phases.append(phase)
+            if phase == scenario.phase { throw error }
+            return reply
+        }
+        let command = try ExportCmd.parse([])
+        let run = { try command.run(scriptFactory: { quietScript(runner) }) }
+        let order = ["accounts", "folders", "titles", "details", "body", "details-two", "body-two"]
+        if scenario.marked {
+            try expectNotesPolicyFailure(error, run)
+            let last = try #require(order.firstIndex(of: scenario.phase))
+            #expect(phases == Array(order.prefix(last + 1)))
+        } else {
+            let data = try notesData(captureNotesEnvelope(run))
+            let summary = try #require(data["summary"] as? [String: Any])
+            switch scenario.phase {
+            case "folders":
+                #expect(phases == ["accounts", "folders"])
+                #expect(summary["total_folders"] as? Int == 0)
+            case "titles":
+                #expect(phases == ["accounts", "folders", "titles"])
+                #expect(summary["total_notes"] as? Int == 0)
+            case "details":
+                #expect(phases == order.filter { $0 != "body" })
+                #expect(summary["total_notes"] as? Int == 1)
+            default:
+                #expect(phases == order)
+                #expect(summary["total_notes"] as? Int == 2)
+                let accounts = try #require(data["accounts"] as? [[String: Any]])
+                let folders = try #require(accounts.first?["folders"] as? [[String: Any]])
+                let notes = try #require(folders.first?["notes"] as? [[String: Any]])
+                #expect(notes.first?["content"] as? String == "")
+            }
+        }
+    }
+}

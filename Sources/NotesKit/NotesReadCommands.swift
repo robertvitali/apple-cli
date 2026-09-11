@@ -151,9 +151,15 @@ struct GetNoteLinkCmd: ParsableCommand {
     /// oracle keeps it for macOS 12–15, where it IS reachable; without FDA on macOS 26 the only
     /// outcome is the link-failure error, which is why its classification (authorization_denied
     /// when the store is unreadable, not `unknown`) matters more here than the prose suggests.
-    static func resolveLink(_ script: NotesScript, store: any NotesStoreReading, id: String) -> String? {
+    static func resolveLink(_ script: NotesScript, store: any NotesStoreReading, id: String) throws -> String? {
         if let fromDB = store.noteLink(noteId: id) { return fromDB }
-        guard let out = try? script.noteLinkById(id: id) else { return nil }
+        let out: String
+        do {
+            out = try script.noteLinkById(id: id)
+        } catch {
+            if AppleScriptRunner.isOutputLimitError(error) { throw error }
+            return nil
+        }
         let trimmed = out.trimmingCharacters(in: .whitespacesAndNewlines)
         return trimmed.isEmpty ? nil : trimmed
     }
@@ -204,7 +210,7 @@ struct GetNoteLinkCmd: ParsableCommand {
                 if note.passwordProtected {
                     throw AppleError.validation("Note \"\(note.title)\" is password-protected. Unlock it in Notes.app first.")
                 }
-                guard let url = Self.resolveLink(script, store: store, id: id) else {
+                guard let url = try Self.resolveLink(script, store: store, id: id) else {
                     throw Self.linkFailureError(note.title, store: store)
                 }
                 try emitNotes(NoteLinkResult(id: id, title: note.title, url: url),
@@ -219,7 +225,7 @@ struct GetNoteLinkCmd: ParsableCommand {
                 if note.passwordProtected {
                     throw AppleError.validation("Note \"\(title)\" is password-protected. Unlock it in Notes.app first.")
                 }
-                guard let url = Self.resolveLink(script, store: store, id: note.id) else {
+                guard let url = try Self.resolveLink(script, store: store, id: note.id) else {
                     throw Self.linkFailureError(title, store: store)
                 }
                 // No `id` key on this path — the oracle omits it here.

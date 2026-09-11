@@ -12,6 +12,27 @@ struct OwnedProcessCleanupTests {
     private let launcher = OsascriptLauncher()
     private let scratch = ScratchDirs("owned-process-cleanup")
 
+    @Test("output overflow stops inheriting descendants during live output and after root exit",
+          arguments: ["live-capture", "live-pipe", "after-exit"])
+    func outputLimitStopsOwnedDescendants(phase: String) throws {
+        let fixture = try Fixture(directory: scratch.directory())
+        defer { fixture.waitForNaturalExpiry() }
+        let delivery: ScriptDelivery = phase == "live-capture" ? .timed(seconds: 3) : .timedStdin(script: "x", seconds: 3)
+        let mode = phase == "after-exit" ? "overflow-after-exit" : "overflow-live"
+        let started = Date()
+        let failure = try #require(#expect(throws: ScriptOutputLimitExceeded.self) {
+            _ = try launcher.launch(fixture.invocation(mode: mode, status: 0, delivery: delivery, maximumOutputBytes: 32))
+        })
+        #expect(failure.maximumOutputBytes == 32)
+        #expect(Date().timeIntervalSince(started) < 6)
+        if phase == "after-exit" {
+            #expect(FileManager.default.fileExists(atPath: fixture.path("root-observed-exited")))
+        }
+        #expect(try fixture.stops(fixture.identity("root"), within: 0.5))
+        #expect(try fixture.stops(fixture.identity("descendant"), within: 0.5),
+                "overflow must stop the inheriting descendant, not just the root")
+    }
+
     @Test("a timeout stops the TERM-ignoring root and its TERM-ignoring descendant",
           arguments: [false, true])
     func timeoutStopsOwnedGroup(stdin: Bool) throws {
@@ -150,10 +171,12 @@ struct OwnedProcessCleanupTests {
             publish_identity("descendant")
             os.write(ready_write, b"R")
             os.close(ready_write)
-            if mode != "wait":
+            if mode not in ("wait", "overflow-live"):
                 while os.getppid() == root_pid:
                     time.sleep(0.01)
                 publish("root-observed-exited", time.clock_gettime_ns(time.CLOCK_MONOTONIC))
+                if mode == "overflow-after-exit":
+                    os.write(1, b"x" * 64)
             while True:
                 signal.pause()
         os.close(ready_write)
@@ -161,7 +184,9 @@ struct OwnedProcessCleanupTests {
         os.close(ready_read)
         if ready != b"R":
             os._exit(91)
-        if mode == "wait":
+        if mode in ("wait", "overflow-live"):
+            if mode == "overflow-live":
+                os.write(1, b"x" * 64)
             os.waitpid(descendant, 0)
         else:
             publish("root-exiting", "yes")
@@ -172,10 +197,11 @@ struct OwnedProcessCleanupTests {
 
         func path(_ name: String) -> String { directory.appendingPathComponent(name).path }
 
-        func invocation(mode: String, status: Int32, delivery: ScriptDelivery) -> ScriptInvocation {
+        func invocation(mode: String, status: Int32, delivery: ScriptDelivery,
+                        maximumOutputBytes: Int? = nil) -> ScriptInvocation {
             ScriptInvocation(executablePath: "/usr/bin/python3",
                              arguments: ["-c", Self.rootScript, directory.path, mode, String(status)],
-                             delivery: delivery)
+                             delivery: delivery, maximumOutputBytes: maximumOutputBytes)
         }
 
         // Python and Swift explicitly use the same named OS clock and nanosecond units.

@@ -484,7 +484,9 @@ struct SendCommand: ParsableCommand {
             // require Mail; the dry-run preview `.eml` falls back to the raw --account string below.
             var senderAddress: String?
             if let account, willLiveOutbound {
-                guard let addr = directoryFactory().sendAddress(for: account) else {
+                let directory = directoryFactory()
+                try directory.checkOutputLimitFailure()
+                guard let addr = directory.sendAddress(for: account) else {
                     throw AppleError.notFound("account '\(account)' not found or has no send address.")
                 }
                 senderAddress = addr
@@ -733,7 +735,7 @@ struct ReplyCommand: ParsableCommand {
             } else {
                 throw AppleError.validation("provide a message id argument or --subject.")
             }
-            var target = ctx.decodeSummary(row)
+            var target = try ctx.checkedDecodeSummary(row)
             // reply-all folds in the original to/cc — but the summary decode omits recipients, so
             // hydrate them from the index (same source `mail get` uses) or --all would fold nothing.
             if all {
@@ -796,7 +798,9 @@ struct ReplyCommand: ParsableCommand {
                 // out FROM this account's address, not Mail's default. Live-path only, so headless
                 // dry-runs never touch Mail; unknown/addressless account is a not_found up front.
                 if let account {
-                    guard let addr = directoryFactory().sendAddress(for: account) else {
+                    let directory = directoryFactory()
+                    try directory.checkOutputLimitFailure()
+                    guard let addr = directory.sendAddress(for: account) else {
                         throw AppleError.notFound("account '\(account)' not found or has no send address.")
                     }
                     senderAddress = addr
@@ -972,7 +976,9 @@ struct ForwardCommand: ParsableCommand {
             // not_found even where the index is unreadable.
             var senderAddress: String?
             if willExecute, let account {
-                guard let addr = directoryFactory().sendAddress(for: account) else {
+                let directory = directoryFactory()
+                try directory.checkOutputLimitFailure()
+                guard let addr = directory.sendAddress(for: account) else {
                     throw AppleError.notFound("account '\(account)' not found or has no send address.")
                 }
                 senderAddress = addr
@@ -981,14 +987,14 @@ struct ForwardCommand: ParsableCommand {
             let target: MailMessage
             if let id {
                 guard let row = try resolveMessageRow(ctx: ctx, id: id) else { throw AppleError.notFound("no message for id '\(id)'.") }
-                target = ctx.decodeSummary(row)
+                target = try ctx.checkedDecodeSummary(row)
             } else if let subject {
                 var f = EnvelopeIndex.MessageFilters()
                 if let account { f.accountUUID = try ctx.requireAccountUUID(account) }
                 try requireMailboxKnown(ctx: ctx, name: mailbox, accountUUID: f.accountUUID)
                 f.mailboxName = mailbox; f.subjectContains = subject; f.limit = 1
                 guard let row = try ctx.index.queryMessages(f).first else { throw AppleError.notFound("no message matching subject '\(subject)' in mailbox '\(mailbox)' (pass --mailbox All to sweep the whole store).") }
-                target = ctx.decodeSummary(row)
+                target = try ctx.checkedDecodeSummary(row)
             } else {
                 throw AppleError.validation("provide a message id argument or --subject.")
             }
@@ -1327,7 +1333,9 @@ struct DraftRichCommand: ParsableCommand {
                 // On the live-open path an unresolvable account stays FAIL-LOUD (deliberate,
                 // stricter than the oracle, which silently omits From).
                 if let account {
-                    guard let addr = directoryFactory().sendAddress(for: account) else {
+                    let directory = directoryFactory()
+                    try directory.checkOutputLimitFailure()
+                    guard let addr = directory.sendAddress(for: account) else {
                         throw AppleError.notFound("account '\(account)' not found or has no send address.")
                     }
                     senderAddress = addr
@@ -1340,7 +1348,9 @@ struct DraftRichCommand: ParsableCommand {
                 // the header, byte-what the oracle writes. Gated on willExecute (review):
                 // AccountDirectory drives Mail via AppleScript, and a dry-run that LAUNCHES
                 // Mail is not a preview — sender_address stays nil in preview, disclosed.
-                senderAddress = directoryFactory().sendAddress(for: account)
+                let directory = directoryFactory()
+                try directory.checkOutputLimitFailure()
+                senderAddress = directory.sendAddress(for: account)
             }
             // emitBcc: a draft-rich .eml is only opened / written to disk, never wire-sent, so
             // carrying --bcc into it is safe and required for create_rich_email_draft parity.
@@ -1411,7 +1421,7 @@ struct DraftRichCommand: ParsableCommand {
                 try scriptFactory().openEml(path: dest.path)
                 opened = true
                 if saveAsDraft {
-                    let ok = scriptFactory().saveOpenDraft(subject: subject)
+                    let ok = try scriptFactory().saveOpenDraftChecked(subject: subject)
                     saved = ok
                     note = ok
                         ? "compose window opened and auto-filed to Drafts (oracle save verb)."
@@ -1522,7 +1532,9 @@ struct DraftCommand: ParsableCommand {
                     // parity); live path only, strict not_found on an unknown account.
                     var senderAddress: String?
                     if let account {
-                        guard let addr = directoryFactory().sendAddress(for: account) else {
+                        let directory = directoryFactory()
+                        try directory.checkOutputLimitFailure()
+                        guard let addr = directory.sendAddress(for: account) else {
                             throw AppleError.notFound("account '\(account)' not found or has no send address.")
                         }
                         senderAddress = addr

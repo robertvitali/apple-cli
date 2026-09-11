@@ -63,7 +63,7 @@ struct HealthCmd: ParsableCommand {
              storeFactory: () -> any NotesStoreReading) throws {
         try runGuarded(tool: notesTool) {
             let store = storeFactory()
-            let (healthy, checks) = scriptFactory().healthCheck()
+            let (healthy, checks) = try scriptFactory().healthCheck()
             let fda = store.hasFDA()
             try emitNotes(HealthResult(healthy: healthy, checks: checks, full_disk_access: fda),
                           json: global.json, human: (healthy ? "healthy" : "issues detected") + ", FDA: \(fda)")
@@ -92,9 +92,16 @@ struct DoctorCmd: ParsableCommand {
             let store = storeFactory()
             let script = scriptFactory()
             var checks: [DoctorCheck] = []
-            let (_, hc) = script.healthCheck()
+            let (_, hc) = try script.healthCheck()
             for c in hc { checks.append(DoctorCheck(name: "Notes.app: \(c.name)", status: c.passed ? "ok" : "fail", detail: c.message)) }
-            if let accounts = try? script.listAccounts() {
+            let listedAccounts: [Account]?
+            do {
+                listedAccounts = try script.listAccounts()
+            } catch {
+                if AppleScriptRunner.isOutputLimitError(error) { throw error }
+                listedAccounts = nil
+            }
+            if let accounts = listedAccounts {
                 checks.append(DoctorCheck(name: "Accounts", status: accounts.isEmpty ? "warn" : "ok",
                     detail: accounts.isEmpty ? "no Notes accounts found"
                         : "\(accounts.count) account(s): \(accounts.map { $0.name }.joined(separator: ", "))"))

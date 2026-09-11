@@ -33,10 +33,10 @@ struct AnalyticsDashboard: ParsableCommand {
             try refuseFinalLeafSymlink(out, action: "write the dashboard HTML to")
             let url = try confineWriteDestination(out, action: "write the dashboard HTML to", allowOutsideHome: true)
             let ctx = try contextFactory()
-            let unread = (try? scriptFactory().unreadCounts(summary: true, includeZero: true, accountFilter: nil)) ?? []
+            let unread = (try MailScript.bestEffort { try scriptFactory().unreadCounts(summary: true, includeZero: true, accountFilter: nil) }) ?? []
             let total = unread.reduce(0) { $0 + $1.unread }
             var f = EnvelopeIndex.MessageFilters(); f.mailboxName = "INBOX"; f.limit = 15
-            let recent = try ctx.index.queryMessages(f).map { ctx.decodeSummary($0) }
+            let recent = try ctx.index.queryMessages(f).map { try ctx.checkedDecodeSummary($0) }
             let html = MailDashboard.render(unread: unread, totalUnread: total, recent: recent)
             if willExecute {
                 try refuseFinalLeafSymlink(out, action: "write the dashboard HTML to")
@@ -171,7 +171,7 @@ struct ExportCommand: ParsableCommand {
             } else {
                 f.limit = max
             }
-            var messages = try ctx.index.queryMessages(f).map { ctx.decodeSummary($0) }
+            var messages = try ctx.index.queryMessages(f).map { try ctx.checkedDecodeSummary($0) }
             if scope == "entire_mailbox", max == 0 { messages = [] }
             guard scope == "entire_mailbox" && max == 0 || !messages.isEmpty else {
                 throw AppleError.notFound("no messages matched to export.")
@@ -187,7 +187,7 @@ struct ExportCommand: ParsableCommand {
             if scope == "single_email", let iid = messages[0].internet_message_id, !iid.isEmpty {
                 if !willExecute {
                     bodySource = "full_body"
-                } else if let body = try? scriptFactory().body(internetMessageID: iid, accountName: messages[0].account) {
+                } else if let body = try MailScript.bestEffort({ try scriptFactory().body(internetMessageID: iid, accountName: messages[0].account) }) ?? nil {
                     messages[0].content = body
                     bodySource = "full_body"
                 }
