@@ -1,7 +1,14 @@
 # Publication Automation Design
 
-**Status:** Approved for private implementation on 2026-09-01. Publication is
-not authorized by this document.
+**Status:** Approved for private implementation on 2026-09-01; sequencing amended
+on 2026-09-10. The operator's 2026-09-06 conditional visibility authorization
+continues: finish the pre-visibility implementation, review, full local gates,
+and fresh privacy audit, then change visibility. Mandatory hosted validation and
+its dependent rehearsals follow public visibility, rather than waiting for the
+previous October 1 quota-reset date. This is not an immediate visibility change
+or authorization to publish a release, tag, Pages site, or Homebrew artifact.
+References below to the future publisher's public-launch phase mean separately
+authorized version-publication work, not the earlier visibility-only transition.
 
 ## 1. Purpose
 
@@ -13,8 +20,9 @@ trace to that candidate. During a later authorized public launch, the separate
 deployment approval names that exact candidate.
 
 This design makes reviewed pull requests the normal replacement for the private,
-owner-operated direct-to-`main` workflow only after a private bootstrap proves
-the replacement works. It deliberately retains an exact-user operator bypass.
+owner-operated direct-to-`main` workflow only after the bootstrap, including
+post-visibility hosted rehearsals, proves the replacement works. It deliberately
+retains an exact-user operator bypass.
 Until that activation point, the repository's existing main-only rule remains
 authoritative.
 
@@ -67,8 +75,11 @@ Private implementation of this design must not:
 - configure an OIDC or artifact-attestation trust relationship;
 - add unrelated product functionality.
 
-Every outward-facing action remains subject to a later, explicit publication or
-release instruction.
+The conditional visibility step is authorized only after the pre-visibility
+gates in Section 18 pass. All other outward publication actions remain subject
+to separate explicit instructions. The approved continuation stops before
+Homebrew distribution and does not lift the release freeze. Public visibility
+alone grants no publisher, deployment, collaborator-write, or bypass authority.
 
 ## 4. Locked product and governance decisions
 
@@ -124,21 +135,22 @@ release instruction.
 
 Deployment has two deliberately separate phases:
 
-- During private implementation, release and Pages automation is rehearsal-only.
+- During private implementation and post-visibility hosted validation, release
+  and Pages automation is rehearsal-only.
   It receives one explicit full commit ID, checks out and verifies that object,
   runs the release preflight, and builds release and complete-site artifacts
   without an environment, deployment, tag, Release, Pages, or branch-write
-  permission. By private readiness the repository must contain no
-  write-capable publisher. Today it still does: the tracked `release.yml`
-  carries `workflow_dispatch`, `contents: write`, an atomic push of `main` and
-  the version tag, and GitHub Release creation, and the tracked `docs.yml`
-  carries a `pages` job with `pages: write` and `id-token: write` behind a
+  permission. Before visibility changes the repository must contain no
+  write-capable publisher. At the original design baseline, `release.yml`
+  carried `workflow_dispatch`, `contents: write`, an atomic push of `main` and
+  the version tag, and GitHub Release creation, and `docs.yml`
+  carried a `pages` job with `pages: write` and `id-token: write` behind a
   repository variable. A conduct rule ("agents never dispatch it") and a
   variable gate are not technical controls. Converting those existing write
   paths to the read-only rehearsal shape, or removing them, is a required
   bootstrap step (Section 18), and the readiness scan covers every workflow
   under `.github/workflows/`, not only the rehearsal workflows.
-- After a separately authorized public launch, a dedicated bot-initiated
+- After separately authorized version-publication work, a dedicated bot-initiated
   publisher may be added. Release preparation is then an ordinary protected
   pull request, the publisher never edits source or pushes a branch, and its
   outward-write job waits in an operator-reviewed production environment.
@@ -157,7 +169,7 @@ the real environment and bot path are public-launch work.
 | Operator | Author PRs; review others' PRs; merge; administer settings; bypass branch rules; force push; after public-launch authorization, approve production deployment | Self-approve a PR through GitHub's review UI; publication of a candidate that has not passed the full Section 15.1 gate (the recorded operator bypass substitutes for the approval only) |
 | Trusted maintainer/reviewer | Review and approve PRs; merge only after every normal protection passes; contribute through fork branches after launch (repository-hosted branches only before it) | Bypass rules; direct-push or force-push `main`; deploy; publish; merge a control-plane change without the operator's code-owner approval |
 | PR `GITHUB_TOKEN` | Read source; upload non-sensitive checks and artifacts | Write repository contents; receive ordinary secrets; deploy; publish |
-| Private release/Pages rehearsal | Read one exact commit; run tests and preflight; build local release and complete-site artifacts | Environments; write tokens; tags; Releases; Pages deployment; branch mutation; Homebrew |
+| Read-only release/Pages rehearsal | Read one exact commit; run tests and preflight; build local release and complete-site artifacts | Environments; write tokens; tags; Releases; Pages deployment; branch mutation; Homebrew |
 | Future public publisher | After launch authorization and environment approval, create the exact version tag, draft/release assets, and Pages deployment | Exist as a write-capable private workflow; mutate branches; generate source changes; retarget or delete published tags |
 | Dependabot | Open dependency PRs; create and update its own proposal branches under the one Section 7.3 catch-all bypass | Auto-merge, approve, deploy, access ordinary Actions secrets, or hold any bypass on `main`, tags, or environments |
 | Outside contributor | Open fork PRs and receive public CI results | Secrets, write tokens, TCC/live runners, release authority |
@@ -247,12 +259,16 @@ review-capable access and does not grant them ruleset bypass.
 
 ### 7.2 `main` and active maintenance lines
 
-The private bootstrap first installs this rule set as an **active** ruleset that
+After public visibility and the successful push-triggered runs of Section 18
+step 6, the bootstrap first installs this rule set as an **active** ruleset that
 targets one exact disposable validation-branch name. It exercises real accepts
 and rejects there, then removes the disposable ref and rehearsal ruleset. It
 does not rely on or claim ruleset `evaluate` mode. Only after the active
 rehearsal, hosted checks, bypass tests, and rollback path pass may the same
-reviewed rule shape be activated for `main`.
+reviewed rule shape be activated for `main` or an active maintenance line.
+The disposable ruleset in step 8 precedes the validation PR in step 9, which
+produces the first hosted `governance / required` evidence. That first governance
+pass is not a prerequisite for installing the disposable rehearsal ruleset.
 
 Rulesets require:
 
@@ -298,9 +314,9 @@ Rulesets require:
   lists the operator for every enforcement-control-plane path (Section 7.1), so
   a control-plane change merges only on the operator's approval or through the
   operator's sole bypass (code owners on a private personal-account repository
-  are Pro-only; if Section 18 step 4 reads a plan without them, private
-  readiness is blocked under Section 20 item 5 rather than the rule being
-  dropped);
+  are Pro-only; if Section 18 step 4 reads a plan without them, enforcement
+  verification waits for the post-visibility readback under Section 20 item 5
+  rather than the rule being dropped);
 - strict up-to-date status checks before merge;
 - linear history;
 - force pushes blocked for every non-bypass actor;
@@ -343,8 +359,9 @@ enforcement that the current ownership model cannot provide.
 
 ### 7.3 Tags and releases
 
-Tag protection is a future public-launch control, not a private rehearsal. Once
-publication is separately authorized, two layered `v*` tag rulesets apply,
+Tag protection is a future version-publication control, not a visibility-change
+prerequisite. Once version publication is separately authorized, two layered
+`v*` tag rulesets apply,
 because a single ruleset that grants the publisher bypass for creation would
 also let it bypass that ruleset's update and deletion rules. The creation
 ruleset names the publisher principal as its only bypass actor, and that
@@ -790,8 +807,13 @@ may be excluded wholesale.
 
 ### 11.2 Measurement
 
-The recorded validated hosted lane (macOS 26 once a stable hosted image
-exists; until then the `macos-15` lane recorded under Section 18 step 5) runs
+Before visibility, two fresh clean-head local SwiftPM coverage measurements on
+the same exact SHA must have identical production totals and satisfy the
+aggregate, changed-line, and per-target policies against the recorded baseline.
+The full canonical local gate remains separate and required before every push.
+After visibility, the recorded validated hosted lane (macOS 26 once a stable
+hosted image exists; until then the `macos-15` lane recorded under Section 18
+step 5) runs
 SwiftPM with code coverage enabled and exports LLVM's machine-readable
 coverage data. A line enters the denominator only when
 LLVM reports an executable region for that line. Comments, blank lines,
@@ -882,9 +904,9 @@ before Pages or Dependabot is enabled for it.
 
 ## 14. Release preparation and exact candidate
 
-### 14.1 Private exact-SHA preparation rehearsal
+### 14.1 Read-only exact-SHA preparation rehearsal
 
-The private workflow is a read-only rehearsal, not a release-preparation or
+The pre-publication workflow is a read-only rehearsal, not a release-preparation or
 publisher workflow. It accepts one explicit full commit ID, verifies the
 checkout and every generated artifact against that ID, and runs with only the
 read permissions required to fetch source and check metadata. It has no
@@ -1015,18 +1037,21 @@ repository has no organization audit log.
 
 ## 15. Future public-launch publisher
 
-Nothing in this section is installed or activated during private
-implementation. A later explicit public-launch instruction adds the bot
+Nothing in this section is installed or activated during private implementation
+or post-visibility hosted validation. A later explicit version-publication
+instruction adds the bot
 identity, listener, write-capable publisher, tag rulesets, and protected
 environment together. Until then, Section 14.1 is the only release/Pages
 execution surface.
 
 That launch is a privilege jump, and this document does not pretend to verify
 it privately. Three hard preconditions apply: the `main` ruleset of Section 18
-step 20 must be active and read back through the API before the visibility
-change, the publisher credentials, the listener, or any environment exist
+step 20 must be active and read back through the API before
+the publisher credentials, the listener, or any environment exist
 (otherwise a write-capable collaborator could push directly to `main` while
-publication controls are being provisioned); the fresh pre-publication privacy
+publication controls are being provisioned). Repository visibility changes
+earlier, under Section 18, while the main-only rule and publication-write
+prohibitions remain in force; the fresh pre-publication privacy
 audit gate recorded in `AGENTS.md` and `HUMAN-DECISIONS.md` (distinct from the
 D9 closure; one fresh value-free audit round with zero findings for its stated
 scope) must be closed, and a separate
@@ -1471,7 +1496,8 @@ serves an unpublished candidate.
 
 - `github-actions` at repository root;
 - the tracked Python documentation dependency manifest;
-- SwiftPM after a private empirical Swift tools-version 6 update check succeeds.
+- SwiftPM after an empirical Swift tools-version 6 update check succeeds during
+  the post-visibility hosted rehearsals.
 
 Minor and patch updates are grouped per ecosystem. Major updates remain
 individual. Open PR counts are bounded, titles remain Conventional Commit-
@@ -1512,16 +1538,48 @@ If native Swift 6 updates fail empirically, Dependabot remains active for
 Actions and documentation while a scheduled read-only Swift dependency
 freshness check reports available updates. It does not auto-merge or publish.
 
-## 18. Private bootstrap and migration
+## 18. Bootstrap, visibility transition, and hosted validation
 
-The bootstrap proceeds while the repository is private. Its very first commit,
+Implementation begins while the repository is private. Its very first commit,
 before step 1 and before any other hosted run, neutralizes the two tracked
 write paths (removing `release.yml`'s `workflow_dispatch` trigger and
 `contents: write` and `docs.yml`'s `pages` deployment job) and reads back that
 no dispatchable or Pages-writing workflow remains; step 5 then completes the
 conversion to the read-only rehearsal shape. Conduct rules and repository
 variables are not technical gates, so the write paths are removed before
-anything else runs:
+anything else runs.
+
+The 2026-09-10 ordering amendment preserves the numbered steps below so their
+cross-references remain stable, but separates their execution into two phases:
+
+1. Before visibility, finish steps 1–5 and 7, implement and locally exercise the
+   read-only release/Pages tooling of steps 15–16, complete the step 17 scan and
+   applicable settings readbacks, and capture the local portion of step 19.
+   Finish the capability, inventory, coverage, governance, dependency, and
+   contributor-documentation implementation, independent reviews, exact-SHA
+   full local gates, and fresh pre-publication privacy audit. The audit must
+   include the history, commit-message, ref, object, and retained-artifact
+   surfaces required by the repository rules, with zero findings for its stated
+   scope. Record hosted and actor-dependent results as pending, not passed.
+2. Only when those pre-visibility gates pass, perform the conditional visibility
+   change authorized on 2026-09-06 and reaffirmed on 2026-09-10. Do not wait for
+   October 1 and do not run hosted acceptance while private. No immediate flip,
+   publication writer, release, tag, Pages deployment, or Homebrew action is
+   authorized by starting implementation.
+3. After public visibility, re-read Actions/fork/settings capabilities for the
+   public state, then execute step 6, steps 8–14, the hosted evidence portions
+   of steps 15–16, and steps 17–19 in their dependency order. Local rehearsals
+   do not replace hosted evidence. Step 8 still requires the D16 in-session
+   first-ref reconfirmation and preceding policy commit; qualified-actor
+   constraints remain unchanged. Step 20 requires its separate main-only
+   reversal instruction. Final `main` or maintenance ruleset activation requires
+   every mandatory job to have allocated a runner and passed. The active
+   disposable ruleset in step 8 is the rehearsal prerequisite for the first
+   governance run on the step 9 PR; it does not require that run in advance.
+   Stop before Homebrew distribution;
+   version-publication controls remain separately authorized future work.
+
+Numbered implementation and verification requirements:
 
 1. Implement the design in reviewed, test-green logical commits under the
    existing private main-only rule.
@@ -1630,8 +1688,8 @@ anything else runs:
    enforced, a governance-document edit and a product-documentation edit are
    paired PRs, never one). Re-run the static scan of step 17 against the whole
    directory afterwards.
-6. Obtain at least one successful private hosted Actions run of every
-   push-triggered mandatory job. The PR-triggered mandatory job (`governance /
+6. After public visibility, obtain at least one successful hosted Actions run of
+   every push-triggered mandatory job. The PR-triggered mandatory job (`governance /
    required`, which runs only on a pull request event) obtains its first
    successful hosted run on the step 9 validation PR, and the readiness
    evidence records that run's commitment (step 19). A job that never receives
@@ -1651,7 +1709,7 @@ anything else runs:
    created only after an in-session operator instruction that explicitly and
    narrowly reverses the main-only ruling for the disposable rehearsal refs,
    recorded in `AGENTS.md` by a reviewed direct commit on `main` under the
-   private main-only gate before the first branch is created (a policy pull
+   still-binding main-only gate before the first branch is created (a policy pull
    request cannot carry it, because a pull request needs the head branch the
    ruling forbids; this is the ordering step 20 uses as well), and recorded in
    the readiness evidence; that reversal names the disposable target ref, the
@@ -1730,7 +1788,7 @@ anything else runs:
 13. Enable and validate governed Dependabot updates while the rehearsal
     ruleset is still active: set Dependabot's `target-branch` to that same
     disposable branch (the step 8 authorization names Dependabot-created head
-    refs explicitly, and this control-plane edit goes through the private
+    refs explicitly, and this control-plane edit goes through the still-binding
     main-only review gate), verify that its PR receives the
     ordinary secret-free checks and requires the ordinary approval, and
     verify that the narrow workflow-pin exception of Section 10.5 accepts a
@@ -1743,19 +1801,23 @@ anything else runs:
     Goal 2, never as passed. Restore the branch to its recorded commit, then
     remove the rehearsal ruleset; the disposable refs themselves are removed
     in step 18.
-15. Run the release rehearsal against an explicit full commit ID with read-only
-    permissions. The evidence binds three identities together: the exact commit
+15. After public visibility, run the hosted release rehearsal against an explicit
+    full commit ID with read-only permissions. The evidence binds three
+    identities together: the exact commit
     ID given to the rehearsal and the step 19 commitments of the hosted
     `quality / required` run that succeeded for that same commit and of the
     rehearsal run; a rehearsal of a commit without its own successful hosted
-    quality run is not evidence. Verify the predicted release-file changes,
+    quality run is not hosted acceptance evidence. The earlier local rehearsal
+    remains required pre-visibility evidence of the tooling, not a substitute.
+    Verify the predicted release-file changes,
     archive contents, checksums, linkage, runtime version, and refusal of any
     outward-write step.
 16. Run complete-site assembly against the same exact commit, verify `/`,
     `/version/`, archive routes, manifest, the temporary-artifact restore
     path, and deterministic digests from the temporary artifact, and keep
     Pages disabled. The post-launch reconciliation workflow of Section 16 is
-    not privately verifiable and is not claimed.
+    not exercised by this read-only program and is not claimed. Local assembly
+    and restore checks run before visibility; the hosted run follows visibility.
 17. Statically verify every workflow under `.github/workflows/`, rehearsal or
     otherwise: none contains an environment, deployment, tag, Release, Pages,
     branch-write, or write-capable permission path, and every workflow and
@@ -1799,8 +1861,10 @@ anything else runs:
     is not used), the fork pull-request workflow settings (no write token, no
     secrets or variables, approval required for outside-collaborator runs), the
     workflow-permissions settings (`default_workflow_permissions` read,
-    `can_approve_pull_request_reviews` false), and the private-forking setting
-    (disabled), the Pages configuration (the Pages endpoint must report no site
+    `can_approve_pull_request_reviews` false), and, before visibility, the
+    private-forking setting (disabled), replacing that private-state observation
+    with the public fork-policy readbacks of Section 9 after visibility;
+    the Pages configuration (the Pages endpoint must report no site
     and no deployment, since a site configured outside any workflow is
     invisible to the static scan), the `.github/CODEOWNERS` file (present,
     naming only the operator, covering every control-plane path of Section 10.5
@@ -1814,7 +1878,7 @@ anything else runs:
     separately at the provider), so the credential non-goals of Section 3 are
     detectable rather than merely declared.
 18. Restore `.github/dependabot.yml` by removing the disposable
-    `target-branch` set in step 13, through the private main-only review gate
+    `target-branch` set in step 13, through the still-binding main-only review gate
     that is the reviewed path at this point (the rehearsal ruleset is gone
     and the `main` ruleset is not yet active), verify the committed file
     through the contents API, and record that no endpoint exposes
@@ -1823,7 +1887,7 @@ anything else runs:
     Dependabot PR is logged in the evidence as a deferred confirming
     observation when it arrives. Only then close and remove validation PRs
     and disposable refs after evidence is captured.
-19. Capture private readiness evidence as one tracked, value-free file at
+19. Capture phased readiness evidence as one tracked, value-free file at
     `docs/discovery/prelaunch-readiness-evidence.md` containing only commands
     written as placeholder-only templates (repository owner, local paths, URLs,
     environment names, and infrastructure identifiers replaced by fixed
@@ -1835,9 +1899,12 @@ anything else runs:
     role labels, salted digests, operator attestations named as such (including
     the step 11 test-token revocation), and pass/fail results (never a
     collaborator's login, name, or a review API ID that resolves to a person),
-    including the restored `dependabot.yml` state from step 18, and stop before
-    visibility, environment, publisher, tag-ruleset, Pages, release, Homebrew,
-    credential, or freeze changes.
+    including the restored `dependabot.yml` state from step 18. Before visibility,
+    record local verification, the fresh privacy audit, and explicitly pending
+    hosted/actor-dependent criteria. After visibility, append the actual hosted
+    and rehearsal evidence; never relabel a pending result as passed. Stop before
+    environment, publisher, tag-ruleset, Pages, release, Homebrew, credential,
+    or freeze changes.
 20. Operator-gated, outside the implementation's control: only on an in-session
     operator instruction that explicitly reverses the standing main-only ruling
     in `AGENTS.md`, activate the reviewed `main` ruleset, confirm that
@@ -1853,7 +1920,7 @@ anything else runs:
     Until that instruction, the main-only ruling stands and every earlier step
     exercises only disposable refs.
 
-Private release preparation may transform a temporary exact-SHA tree and
+Read-only release preparation may transform a temporary exact-SHA tree and
 compute the predicted next version from branch-reachable Conventional Commit
 subjects, displaying it inside rehearsal artifacts and evidence clearly
 labelled as unassigned. That is what lets the rehearsal exercise the existing
@@ -1863,17 +1930,19 @@ by it, not computing it. The rehearsal does not change `AppleVersion.current`
 on `main`, promote `[Unreleased]`, push a ref, create a tag, create or edit a
 Release, or deploy Pages.
 
-The later public-launch transaction is a new, explicitly authorized phase. It
-adds the bot identity and listener, write-capable publisher, operator-reviewed
+The later version-publication transaction is a new, explicitly authorized phase.
+It adds the bot identity and listener, write-capable publisher, operator-reviewed
 environment, `v*` tag ruleset, release immutability, and Pages deployment before
 the first publication. None of those controls is treated as privately verified.
 
 If the current account plan cannot enforce a required private-repository
 feature, implementation prepares and validates everything possible but does not
 weaken the design. Activation waits until the repository is public or the plan
-supports the control. Required branch checks must not be activated until hosted
-Actions can allocate runners and pass, or they could lock the repository behind
-checks that cannot start.
+supports the control. Required checks on `main` or a maintenance line must not
+be activated until every mandatory hosted job has allocated a runner and passed,
+or they could lock the repository behind checks that cannot start. The disposable
+active rehearsal ruleset follows Section 18 steps 6 and 8–9, including the first
+governance run after its installation.
 
 ## 19. Failure and recovery
 
@@ -1884,7 +1953,7 @@ checks that cannot start.
 | Native squash metadata mismatch | `main` is red; release remains blocked | Correct through a reviewed PR or an explicit operator history-repair decision |
 | Exact-branch CI failure | No outward write | Fix through another approved PR |
 | Active disposable-ruleset rehearsal blocks the branch | `main` and publication state are unchanged | Use only the exact-user operator bypass to restore the recorded disposable ref, remove its ruleset, and correct the design without weakening `main` |
-| Private exact-SHA release or Pages rehearsal fails | No outward write exists | Fix through reviewed code, rerun the new exact candidate read-only, and do not add a publisher, environment, deployment, or write permission |
+| Read-only exact-SHA release or Pages rehearsal fails | No outward write exists | Fix through reviewed code, rerun the new exact candidate read-only, and do not add a publisher, environment, deployment, or write permission |
 | Private Action pin or allowlist validation fails | No untrusted Action is accepted | Correct the committed workflow or allowlist; keep `sha_pinning_required` enabled |
 | Future public publisher preflight fails | No outward write | Correct through PR; retry the exact candidate |
 | Future operator rejects deployment | No outward write | Run stops rejected |
@@ -1897,7 +1966,7 @@ checks that cannot start.
 | Future published binary is defective | Published release remains immutable | Fix forward with a new patch release |
 | Dependabot ecosystem rejection | Other ecosystems remain active | Disable only failing entry; use freshness monitor |
 | Required check can never allocate a runner after ruleset activation | `main` is locked behind a check that cannot start | Exact-user operator bypass lands a dedicated policy PR that fixes or relabels the runner; the ruleset is not weakened and the bypass use is logged |
-| Hosted Actions minutes exhausted on the private repository | Nothing merges; no outward write exists | Operator raises the limit or waits for the cycle; the exact-user bypass may land an urgent fix only after the local canonical suite passes on that SHA |
+| Hosted Actions unavailable while the repository is private | Reviewed main-only implementation continues under exact-SHA full local gates; required rulesets remain inactive | Defer mandatory hosted runs and dependent rehearsals until after the conditional visibility transition, not a quota-reset date; preserve every pending criterion, use steps 6 and 8–9 for disposable-rule rehearsals, and require every mandatory hosted job to allocate and pass before final `main` or maintenance ruleset activation |
 | A merged policy PR breaks `governance / required` so the fix PR is itself blocked | `main` is red; releases and merges stop | Exact-user operator bypass lands the corrective policy PR; post-merge exact quality must pass before any later merge |
 | Personal data discovered in already-merged `main` history | Published-history rules (linear history, no force push) collide with the remediation | Redact at HEAD immediately; a history rewrite is an operator decision that uses the exact-user bypass with `--force-with-lease`, recorded in `HUMAN-DECISIONS.md`, and never reaches forks or existing clones |
 | No qualified independent reviewer is available for a change | The normal path cannot complete | The exact-user bypass is the recorded normal path for that change, each use is logged, and Goal 2 is reported as unmet until a reviewer exists |
@@ -1929,8 +1998,10 @@ The future public publisher's resume path refuses:
 
 ## 20. Known prerequisites, not design exceptions
 
-1. Hosted Actions must successfully allocate runners before required checks are
-   activated or claimed as verified.
+1. Every mandatory hosted job must allocate a runner and pass before final
+   `main` or maintenance ruleset activation or a claim of hosted verification.
+   The disposable active ruleset is installed after the step 6 push-triggered
+   runs and before the first governance run on the step 9 validation PR.
 2. At least one trusted collaborator must have enough repository permission for
    GitHub to count their review before the independent-review path can be
    proven. The repository is user-owned and the operator works alone by
@@ -1956,12 +2027,16 @@ The future public publisher's resume path refuses:
    role label, a run-local salted digest, and the pass/fail result for the
    reviewer used in Section 18 step 9, never a login, a name, or a resolvable
    review API ID.
-3. Swift 6 Dependabot compatibility requires a private empirical check.
+3. Swift 6 Dependabot compatibility requires an empirical check during the
+   post-visibility hosted rehearsals; local configuration validation alone does
+   not satisfy it.
 4. A future macOS 27 line requires a stable hosted runner or a separately
    reviewed hardened alternative.
 5. Active rulesets for a private repository depend on the account plan. If the
    plan cannot enforce the exact disposable-branch rehearsal and final `main`
-   ruleset, private readiness remains blocked; no unavailable rule is silently
+   ruleset, record the private limitation and perform those checks after public
+   visibility. Hosted and governance readiness remain incomplete until the
+   public-state readbacks and rehearsals pass; no unavailable rule is silently
    omitted. Every plan-dependent claim in this document (required environment
    reviewers, selected-action patterns, private rulesets, and code-owner
    enforcement on a private repository, which GitHub documents as available to
@@ -1982,14 +2057,23 @@ The future public publisher's resume path refuses:
 8. Live Pages deployment cannot be exercised before the separately authorized
    public-launch phase. Private evidence is limited to deterministic temporary
    site assembly and route tests.
-9. Before public launch, the tag-creation ruleset must identify only the newly
-   provisioned environment-gated publisher, and the tag update-and-deletion
+9. Before separately authorized version publication, the tag-creation ruleset
+   must identify only the newly provisioned environment-gated publisher, and the tag update-and-deletion
    ruleset must name no bypass actor. If it cannot, publication waits for a
    safely selectable publisher identity.
 
 ## 21. Acceptance criteria
 
-Readiness has two levels. Every criterion belongs to both; where a criterion
+The visibility checkpoint and the completed hosted readiness levels are distinct.
+Before visibility changes, the private phase in Section 18 must satisfy all
+implementation, independent review, full local test and coverage gates, static
+and applicable settings checks, and the fresh privacy audit. It records hosted
+and actor-dependent criteria as pending. The conditional visibility authorization
+permits proceeding only at that checkpoint, without calling pending checks
+passed or waiving them.
+
+After visibility, readiness has two levels. Every criterion below belongs to
+both; where a criterion
 carries an "unverified by absence" clause, that fallback satisfies only the
 first level, and the second level requires the criterion itself to be verified.
 "Rehearsal complete" is the implementation-owned state and may carry criteria
@@ -2009,8 +2093,10 @@ unreachable while the operator works alone, because the code-owner refusal and
 the independent approval need an actor who does not yet exist, and reachable
 once a qualified reviewer with counted-review permission exists (Section 20
 item 2). Both levels stop at the Section 21.1 hard stop; only the second is the
-input to a later publication decision. The private automation program is ready
-for a later publication decision only when:
+input to a later version-publication decision. Neither level is a prerequisite
+for the earlier visibility-only transition, and neither authorizes a publisher,
+release, tag, Pages deployment, or Homebrew action. The automation program's
+post-visibility readiness criteria are:
 
 - macOS 26 is documented as the current tested and supported baseline, future
   majors become supported only after validation, macOS 14 through 25 are
@@ -2018,7 +2104,9 @@ for a later publication decision only when:
   floor remains macOS 14;
 - the PR template contains exactly Rationale, Details, Testing, and Checklist
   as its four top-level sections;
-- every mandatory private hosted job allocates a runner and passes;
+- every mandatory hosted job allocates a runner and passes after public
+  visibility on the recorded exact candidate; elapsed time or the former
+  October 1 date is not evidence;
 - trusted-base governance rejects policy tampering and mixed policy/product
   PRs, demonstrated on the disposable branch in Section 18 step 11 by a
   deliberate mixed PR and a deliberate control-plane edit in an ordinary PR,
@@ -2059,7 +2147,7 @@ for a later publication decision only when:
   captured, and the reviewed `main` ruleset is prepared and fully rehearsed
   on the disposable exact-name ruleset (its activation on `main` is the
   separate operator-gated step 20 of Section 18, recorded alongside the
-  Section 21.1 hard stop, and is not a condition of private readiness);
+  Section 21.1 hard stop, and is not authorized by the visibility transition);
 - an explicit full commit ID passes the read-only release rehearsal, including
   predicted release-file changes, archive contents, checksums, linkage, and
   runtime version;
@@ -2076,7 +2164,7 @@ for a later publication decision only when:
   API and recorded, selected-action and merge-queue availability were derived
   from those documented facts, and no claim in the readiness evidence relies on
   a setting the read-back did not show;
-- private readiness does not rely on server-side selected-action patterns;
+- neither phase relies on unverified server-side selected-action patterns;
 - static inspection of every workflow under `.github/workflows/` proves that
   none has a deployment environment, tag, Release, Pages deployment,
   branch-write, write-capable permission, listener, publisher, or
@@ -2098,23 +2186,28 @@ for a later publication decision only when:
   GitHub-side OIDC and attestation settings matches the recorded expected sets,
   and the previously tracked dispatchable release workflow and Pages deployment
   job have been converted or removed;
-- the private readiness evidence exists as the single tracked value-free file
+- the phased readiness evidence exists as the single tracked value-free file
   named in Section 18 step 19;
-- the repository is still private;
-- no Pages deployment, release, tag, Homebrew change, visibility change,
-  version deployment, or release-freeze lift occurred.
+- the pre-visibility gates and conditional visibility change are recorded,
+  followed by actual public-state hosted and rehearsal evidence;
+- no Pages deployment, release, tag, Homebrew change, version deployment, or
+  release-freeze lift occurred as part of this program.
 
-### 21.1 Private hard stop
+### 21.1 Stop before distribution and version publication
 
-Meeting these criteria establishes private readiness, not launch authorization.
-The implementation must stop with visibility private, Pages undeployed, the
-release freeze intact, and no publisher bot, event listener, protected
+Meeting these criteria establishes post-visibility readiness, not authorization
+for version publication or distribution. The approved continuation must stop
+before Homebrew distribution, with Pages undeployed, the release freeze intact,
+and no publisher bot, event listener, protected
 deployment environment, `v*` tag ruleset, GitHub Release, Homebrew update,
 version publication, bot account, GitHub App, personal access token, deploy
 key, write-granting secret or variable, or OIDC or attestation trust
 relationship created for publication (the ephemeral status-only test token of
 Section 18 step 11 is revoked and its absence re-confirmed before readiness is
-asserted). The future public-launch controls remain intentionally unverified
+asserted). Before the conditional visibility checkpoint passes, the repository
+remains private. After it passes, mandatory hosted validation and its dependent
+rehearsals proceed while the release freeze and publication-write prohibitions
+remain in force. The future publisher controls remain intentionally unverified
 until the operator separately authorizes that transaction.
 
 ## 22. Primary references
