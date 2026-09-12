@@ -12,6 +12,147 @@ struct OwnedProcessCleanupTests {
     private let launcher = OsascriptLauncher()
     private let scratch = ScratchDirs("owned-process-cleanup")
 
+    private enum StopProbeFailure: Error, Equatable { case callLimit, clockRead }
+
+    @Test("a forward wall-clock jump cannot shorten fixture expiry observation")
+    func forwardWallJumpDoesNotShortenExpiryWait() throws {
+        // Every effectful endpoint below is synthetic. No directory is created.
+        let fixture = Fixture(directory: URL(fileURLWithPath: "/synthetic/unused"))
+        let expected = Fixture.Identity(pid: 123, seconds: 456, microseconds: 789)
+        var wall: TimeInterval = 1000
+        var elapsed: TimeInterval = 100
+        var pauses = 0
+        var observations = 0
+        var matchingIdentity = true
+        var result: Bool?
+        do {
+            result = try fixture.stops(expected, within: 16,
+                wallNow: { wall }, monotonicNow: { elapsed },
+                observe: { identity in
+                    observations += 1
+                    guard observations <= 20 else { throw StopProbeFailure.callLimit }
+                    matchingIdentity = matchingIdentity && identity.pid == expected.pid
+                        && identity.seconds == expected.seconds
+                        && identity.microseconds == expected.microseconds
+                    return elapsed < 110
+                }, pause: {
+                    pauses += 1
+                    guard pauses <= 16 else { throw StopProbeFailure.callLimit }
+                    elapsed += 1
+                    wall = 2000
+                })
+        } catch StopProbeFailure.callLimit {
+            // A bounded fixture guard is never the expected helper outcome.
+        }
+        #expect(result == true)
+        #expect(pauses == 10)
+        #expect(observations == 11)
+        #expect(matchingIdentity)
+    }
+
+    @Test("a backward wall-clock jump cannot extend fixture expiry observation")
+    func backwardWallJumpDoesNotExtendExpiryWait() throws {
+        let fixture = Fixture(directory: URL(fileURLWithPath: "/synthetic/unused"))
+        let expected = Fixture.Identity(pid: 123, seconds: 456, microseconds: 789)
+        var wall: TimeInterval = 1000
+        var elapsed: TimeInterval = 100
+        var pauses = 0
+        var observations = 0
+        var matchingIdentity = true
+        var result: Bool?
+        do {
+            result = try fixture.stops(expected, within: 16,
+                wallNow: { wall }, monotonicNow: { elapsed },
+                observe: { identity in
+                    observations += 1
+                    guard observations <= 4 else { throw StopProbeFailure.callLimit }
+                    matchingIdentity = matchingIdentity && identity.pid == expected.pid
+                        && identity.seconds == expected.seconds
+                        && identity.microseconds == expected.microseconds
+                    return true
+                }, pause: {
+                    pauses += 1
+                    guard pauses <= 2 else { throw StopProbeFailure.callLimit }
+                    elapsed += 8
+                    wall = 900
+                })
+        } catch StopProbeFailure.callLimit {
+            // A prolonged wait reaches this guard instead of its elapsed deadline.
+        }
+        #expect(result == false)
+        #expect(pauses == 2)
+        #expect(observations == 3)
+        #expect(matchingIdentity)
+    }
+
+    @Test("fixture expiry retains its final observation at the exact elapsed deadline")
+    func exactElapsedDeadlineRetainsFinalObservation() throws {
+        let fixture = Fixture(directory: URL(fileURLWithPath: "/synthetic/unused"))
+        let expected = Fixture.Identity(pid: 123, seconds: 456, microseconds: 789)
+        var elapsed: TimeInterval = 100
+        var pauses = 0
+        var observations = 0
+        var wallReads = 0
+        var matchingIdentity = true
+        let result = try fixture.stops(expected, within: 16,
+            wallNow: { wallReads += 1; return 1000 }, monotonicNow: { elapsed },
+            observe: { identity in
+                observations += 1
+                guard observations <= 3 else { throw StopProbeFailure.callLimit }
+                matchingIdentity = matchingIdentity && identity.pid == expected.pid
+                    && identity.seconds == expected.seconds
+                    && identity.microseconds == expected.microseconds
+                return elapsed < 116
+            }, pause: {
+                pauses += 1
+                guard pauses <= 2 else { throw StopProbeFailure.callLimit }
+                elapsed += 8
+            })
+        #expect(result)
+        #expect(pauses == 2)
+        #expect(observations == 3)
+        #expect(elapsed == 116)
+        #expect(wallReads == 0)
+        #expect(matchingIdentity)
+    }
+
+    @Test("fixture expiry propagates elapsed-clock errors without wall-clock fallback",
+          arguments: [false, true])
+    func elapsedClockErrorsPropagate(afterPause: Bool) throws {
+        let fixture = Fixture(directory: URL(fileURLWithPath: "/synthetic/unused"))
+        let expected = Fixture.Identity(pid: 123, seconds: 456, microseconds: 789)
+        var clockReads = 0
+        var wallReads = 0
+        var pauses = 0
+        var observations = 0
+        var matchingIdentity = true
+        #expect(throws: StopProbeFailure.clockRead) {
+            _ = try fixture.stops(expected, within: 16,
+                wallNow: { wallReads += 1; return 1000 },
+                monotonicNow: {
+                    clockReads += 1
+                    if !afterPause || clockReads == 2 { throw StopProbeFailure.clockRead }
+                    guard clockReads <= 2 else { throw StopProbeFailure.callLimit }
+                    return 100
+                }, observe: { identity in
+                    observations += 1
+                    guard observations <= 1 else { throw StopProbeFailure.callLimit }
+                    matchingIdentity = matchingIdentity && identity.pid == expected.pid
+                        && identity.seconds == expected.seconds
+                        && identity.microseconds == expected.microseconds
+                    return true
+                }, pause: {
+                    pauses += 1
+                    guard pauses <= 1 else { throw StopProbeFailure.callLimit }
+                })
+        }
+        #expect(clockReads == (afterPause ? 2 : 1))
+        #expect(observations == (afterPause ? 1 : 0))
+        #expect(pauses == (afterPause ? 1 : 0))
+        #expect(wallReads == 0)
+        #expect(matchingIdentity)
+    }
+
     @Test("output overflow stops inheriting descendants during live output and after root exit",
           arguments: ["live-capture", "live-pipe", "after-exit"])
     func outputLimitStopsOwnedDescendants(phase: String) throws {
@@ -251,12 +392,23 @@ struct OwnedProcessCleanupTests {
         }
 
         func stops(_ identity: Identity, within seconds: TimeInterval) throws -> Bool {
-            let deadline = Date().addingTimeInterval(seconds)
+            try stops(identity, within: seconds,
+                      wallNow: { Date().timeIntervalSinceReferenceDate },
+                      monotonicNow: { Double(try monotonicNanoseconds()) / 1_000_000_000 },
+                      observe: { try isRunning($0) }, pause: { usleep(20_000) })
+        }
+
+        // Private actual-helper seam. Elapsed waiting ignores calendar adjustments;
+        // wallNow remains only to verify that no wall-clock fallback is consulted.
+        func stops(_ identity: Identity, within seconds: TimeInterval,
+                   wallNow: () -> TimeInterval, monotonicNow: () throws -> TimeInterval,
+                   observe: (Identity) throws -> Bool, pause: () throws -> Void) throws -> Bool {
+            let deadline = try monotonicNow() + seconds
             repeat {
-                if try !isRunning(identity) { return true }
-                usleep(20_000)
-            } while Date() < deadline
-            return try !isRunning(identity)
+                if try !observe(identity) { return true }
+                try pause()
+            } while try monotonicNow() < deadline
+            return try !observe(identity)
         }
 
         /// The fixtures, not stale-PID kills or abandoned test workers, bound RED-path cleanup.
