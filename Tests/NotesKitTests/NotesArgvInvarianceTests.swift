@@ -37,6 +37,10 @@ import TestSupport
 //     validated Swift-side; the value selects a code path, it is never emitted.
 //   * `--limit` (list/search): an `Int`, embedded numerically after validation — the documented
 //     exception in `NotesScript`'s header, and covered by the limit-parity suites.
+//   * `--limit` (recent): a DIFFERENT reason from the two above, not the same entry. It is never
+//     embedded in a script at all — pass 1 enumerates the whole scope unbounded and the cut is
+//     Swift-side, so there is no interpolation site to protect. Covered by the recent suite's
+//     limit cases.
 //   * `--modified-since` (list/search): parsed to a `Date` and emitted as numeric date parts;
 //     an unparseable value is refused before any script is built.
 //   * `--tags` (create): echo-only. It is copied into the JSON response and never handed to
@@ -347,6 +351,11 @@ struct NotesArgvInvarianceTests {
             return runner
         })
 
+        // This row exercises PASS 1 only: the empty reply below leaves no winners, so pass 2 is
+        // skipped. That is acceptable rather than a gap — pass-2 argv carries nothing but note
+        // ids Notes.app itself issued in pass 1, never user text, so "argv-only" is not the
+        // property protecting it. A hostile-id row would still make the matrix's coverage match
+        // its header claim; noted as a follow-up.
         rows.append(ArgvCase(command: "notes recent", markers: [
             "PWNDRECENTFOLDER", "PWNDRECENTACCOUNT",
         ]) {

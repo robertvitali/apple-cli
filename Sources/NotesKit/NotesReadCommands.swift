@@ -531,29 +531,50 @@ struct RecentCmd: ParsableCommand {
             let winners = Array(ranked.sorted(by: RecentCmd.newestFirst).prefix(effective))
             // Pass 2 returns rows in whatever order Notes.app resolved them and may drop a note
             // deleted between the passes, so the RANK decides the output order, not the fetch.
-            let rank = Dictionary(uniqueKeysWithValues: winners.enumerated().map { ($1.id, $0) })
+            //
+            // `uniquingKeysWith:` and not `uniqueKeysWithValues:`: the ids come from another
+            // process, and the initialiser that assumes uniqueness TRAPS on a duplicate. Today
+            // `parseRecentKeys` dedupes, but that is an invariant in another file which nothing
+            // here pins — and a trap is not a failure mode this command may have. Keeping the
+            // FIRST occurrence keeps the better (earlier) rank.
+            let rank = Dictionary(winners.enumerated().map { ($1.id, $0) },
+                                  uniquingKeysWith: { first, _ in first })
             let notes = try script.recentDetails(ids: winners.map(\.id), account: account)
                 .sorted { (rank[$0.id] ?? .max, $0.id) < (rank[$1.id] ?? .max, $1.id) }
+            // The SAME truncation signal `search` gives, for the same reason: `count` alone
+            // cannot be read as "the scope was exhausted". Pass 2 drops a winner it cannot read
+            // back — a note deleted between the passes, an untitled one (`parseSummaries` skips
+            // an empty title), any per-hit read failure — and nothing backfills from the
+            // next-ranked candidate, so `count` can sit below `applied_limit` with more notes
+            // still in scope. The rank count is what knows whether the cut bit.
+            let truncated = ranked.count > effective
             // ISO-8601, like the JSON encoder's dates: a locale-formatted stamp would render
             // differently per machine for the same note.
             let stamp = ISO8601DateFormatter()
             try emitNotes(NoteList(notes: notes, count: notes.count,
-                                   sync_warning: currentSyncWarning(store), applied_limit: effective),
+                                   sync_warning: currentSyncWarning(store), applied_limit: effective,
+                                   limit_reached: truncated),
                 json: global.json,
                 human: notes.isEmpty ? "No notes found."
                     : notes.map { n in
-                        // The folder is omitted, not defaulted, when Notes.app could not report
-                        // the note's container — `search` leaves it absent for the same reason.
+                        // `searchBody` substitutes the literal folder name "Notes" when the
+                        // container read fails, and never emits an empty field, so a hit whose
+                        // container Notes.app could not report arrives as folder "Notes" rather
+                        // than absent. The `?? ""` below is for a shape this script cannot
+                        // produce, kept because `NoteSummary.folder` is Optional.
                         let container = n.folder.map { "  (\($0))" } ?? ""
                         return "\(stamp.string(from: n.modified))  \(n.title)\(container)"
                     }.joined(separator: "\n"))
         }
     }
 
-    /// The ranking, as a TOTAL order — `Sequence.sorted` is not stable, and Notes dates arrive at
-    /// one-second granularity, so ties are ordinary (a bulk import, a sync landing, a scripted
-    /// create loop). Without a tie-break, which of two equally-modified notes survives `--limit`
-    /// would be arbitrary and could differ between runs and toolchains.
+    /// The ranking, as a TOTAL order. Notes dates arrive at one-second granularity, so ties are
+    /// ordinary (a bulk import, a sync landing, a scripted create loop), and the tie-break is
+    /// what makes the answer a property of the STORE rather than of the order Notes.app happened
+    /// to enumerate in — which `--limit` then cuts. (`Sequence.sorted` has been stable since
+    /// Swift 5.8, so stability is not the argument; an earlier draft of this comment said it was
+    /// and was out of date. Stability would only preserve the input order, and pass 1's input
+    /// order is Notes.app's own, which is exactly what must not decide who survives the cut.)
     ///
     /// A note whose modification date Notes.app could not report ranks LAST: there is no date to
     /// rank it by, and `parseDate`'s now-fallback would put a hole above every real note. See

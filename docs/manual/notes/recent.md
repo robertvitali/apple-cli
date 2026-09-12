@@ -10,7 +10,7 @@ apple notes recent [flags]
 
 ## Description
 
-Returns the notes in scope ordered by modification date, newest first, cut to `--limit` (default 10). Each hit is the same `NoteSummary` shape `apple notes search` emits — `id`, `title`, `content` (always `""`), `tags` (always `[]`), `folder`, `account`, `created`, `modified` — so anything that already consumes a search hit consumes a recent hit unchanged. The envelope carries `notes`, `count`, `applied_limit`, and `sync_warning` when an iCloud sync is in progress. `--account` and `--folder` scope the enumeration the way `apple notes list` does; `--folder` accepts a nested path (`Parent/Child`, with `\/` escaping a literal slash in a folder name).
+Returns the notes in scope ordered by modification date, newest first, cut to `--limit` (default 10). Each hit is the same `NoteSummary` shape `apple notes search` emits — `id`, `title`, `content` (always `""`), `tags` (always `[]`), `folder`, `account`, `created`, `modified` — so anything that already consumes a search hit consumes a recent hit unchanged. The envelope carries `notes`, `count`, `applied_limit`, `limit_reached`, and `sync_warning` when an iCloud sync is in progress. With no `--account` the scope is the **default account only** (iCloud), not every account; `--account` selects a different one. `--folder` narrows further and accepts a nested path (`Parent/Child`, with `\/` escaping a literal slash in a folder name).
 
 ## Options
 
@@ -58,7 +58,15 @@ apple notes recent --account 'iCloud' --text
 
 ## Notes
 
-Ranking is done over the whole scope rather than by stopping early, so the newest note is never the one dropped, and a `count` below `applied_limit` means the scope was exhausted. It runs as two passes: one bulk read of every note's id and modification date — two Apple events, whatever the size of the scope — then the full per-note read for the few that survive the cut. So the cost tracks `--limit`, not the size of the library: measured on a ~210-note account, 1.1s at `--limit 5`, 1.7s at the default 10, and 6.4s at `--limit 50`, against the 45-second timeout every Notes command shares. Notes with the same modification date — second granularity makes ties ordinary — are ordered by `id`, so repeated runs return the same list; a note whose modification date Notes.app cannot report is ranked last rather than treated as just-modified, and a note deleted between the two passes simply drops out. `--limit` must be greater than 0, and `--folder` must name at least one path component; either failure is a `validation_error`, exit 64, raised before Notes.app is contacted. `--text` renders one line per note as `modified  title  (folder)` with an ISO-8601 timestamp; the folder is omitted on a note whose container Notes.app cannot report.
+**Notes in Recently Deleted are enumerated.** Deleting a note updates its modification date, so a note you just deleted can be the most recently modified note in the account and lead this list. A hit's `folder` identifies it, and passing `--folder` scopes past the trash. There is no exclusion flag yet: the trash folder's AppleScript name is localized and Notes exposes no "deleted" property, so filtering it needs a design rather than a name match.
+
+`limit_reached` is true when more notes were in scope than `--limit` asked for. Read that field, not `count`: a note can be ranked and then fail to read back — deleted between the two reads, untitled, or unreadable — and nothing backfills from the next candidate, so `count` can be below `applied_limit` while the scope still holds more.
+
+The command runs as two reads: one bulk read of every note's id and modification date in scope — two Apple events, whatever the size of the scope — then the full per-note read for the few that survive the cut. So the per-note reads track `--limit`, while the id-and-date enumeration still touches the whole scope at that fixed cost. Measured on a few-hundred-note library: 1.1s at `--limit 5`, 1.7s at the default 10, 6.4s at `--limit 50`.
+
+The 45-second AppleScript timeout bounds a single Apple event, not the command: this command issues two scripts, each retried once on a timeout, so the worst case is roughly three minutes, and the bulk read's in-process loop is not bounded at all. On expiry the caller gets `upstream_error`, exit 69, "Notes.app timed out…".
+
+Notes with the same modification date — second granularity makes ties ordinary — are ordered by `id`, so repeated runs return the same list; a note whose modification date Notes.app cannot report is ranked last rather than treated as just-modified. `--limit` must be greater than 0, and `--folder` must name at least one path component (both `""` and `"///"` are refused); either failure is a `validation_error`, exit 64, raised before Notes.app is contacted. `--text` renders one line per note as `modified  title  (folder)` with an ISO-8601 timestamp; a note whose container Notes.app cannot report is shown in the folder `Notes`, which is the fallback the underlying script substitutes.
 
 ## Output
 

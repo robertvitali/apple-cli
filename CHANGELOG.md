@@ -38,21 +38,31 @@ JSON output are stable per the versioning policy — breaking changes bump
   enumeration order, and `notes search`, which needs a query, so recency had no answer. Each hit
   is the same object `notes search` returns — `id`, `title`, `content`, `tags`, `folder`,
   `account`, `created`, `modified` — so a caller already reading search results reads these
-  unchanged; the payload carries `notes`, `count`, `applied_limit`, and the same `sync_warning`
-  the other enumerating reads emit when an iCloud sync is in progress. `--folder` takes a nested
-  path (`Parent/Child`), and `--text` prints one line per note as `modified  title  (folder)`.
-  A `--limit` of zero or less, or a `--folder` naming no path component, is a `validation_error`,
-  exit 64, raised before Notes.app is contacted. The ranking is computed after the whole scope has
-  been enumerated rather than by stopping early, so the newest note is never the one dropped, and
-  a `count` below `applied_limit` means the scope was exhausted; notes sharing a modification
-  date are ordered by id so repeated runs agree, and a note whose modification date Notes.app
-  cannot report is ranked last rather than treated as just-modified. The cost tracks `--limit`
-  rather than the size of the library — the whole scope is ranked from one bulk read of every
-  note's id and modification date, and only the notes that survive the cut are read in full;
-  measured on a roughly 210-note account, 1.1s at `--limit 5`, 1.7s at the default 10, and 6.4s
-  at `--limit 50`, against the 45-second timeout every Notes command shares. `schema_version` is
-  unchanged at 1: this adds a command and removes, renames, and retypes nothing.
+  unchanged; the payload carries `notes`, `count`, `applied_limit`, `limit_reached`, and the same
+  `sync_warning` the other enumerating reads emit when an iCloud sync is in progress.
+  **`limit_reached` is the field to read for "is there more"** — true when more notes were in
+  scope than `--limit` asked for. `count` is not a substitute: a note can be ranked and then fail
+  to read back (deleted while the command ran, untitled, or unreadable) with nothing backfilling
+  from the next candidate, so `count` can come back below `applied_limit` while the scope still
+  holds more.
+  **Scope:** with no `--account` this reads the **default account only** (iCloud), not every
+  account; `--account` selects another. **Notes in Recently Deleted are included** — deleting a
+  note updates its modification date, so a note you just deleted can lead the list. A hit's
+  `folder` identifies it, and `--folder` scopes past the trash; there is no exclusion flag yet
+  because the trash folder's name is localized and Notes exposes no "deleted" property.
+  `--folder` takes a nested path (`Parent/Child`), and `--text` prints one line per note as
+  `modified  title  (folder)`. A `--limit` of zero or less, or a `--folder` naming no path
+  component (`""` and `"///"` alike), is a `validation_error`, exit 64, raised before Notes.app is
+  contacted. Notes sharing a modification date are ordered by id so repeated runs agree, and a
+  note whose modification date Notes.app cannot report is ranked last rather than treated as
+  just-modified. The whole scope is ranked from one bulk read of every note's id and modification
+  date, and only the notes that survive the cut are read in full — so the per-note reads track
+  `--limit` while that enumeration still touches the whole scope; measured on a few-hundred-note
+  library, 1.1s at `--limit 5`, 1.7s at the default 10, and 6.4s at `--limit 50`.
+  `schema_version` is unchanged at 1: this adds a command and removes, renames, and retypes
+  nothing.
   Manual: [`apple notes recent`](https://github.com/robertvitali/apple-cli/blob/main/docs/manual/notes/recent.md).
+
 - **`messages recent` and `messages search` now report attachment metadata.** Each
   message gains an `attachments` array — per file: `rowid`, `guid`, `filename` (verbatim, as
   chat.db stores it, often `~`-relative), `path` (an absolute standardized path when one can be

@@ -174,6 +174,16 @@ struct NotesScript {
             let normalized = stderr.replacingOccurrences(of: "\u{2019}", with: "'", options: .literal)
             let s = normalized.lowercased()
 
+            // Our OWN diagnostics, raised by `error "apple-cli: …"` inside a generated script,
+            // pass through verbatim. Without this they match no branch below and fall to the
+            // terminal "Notes.app returned an error." — so the one failure a script goes out of
+            // its way to make specific would arrive as the least informative string the domain
+            // emits. The prefix is not user-reachable: user text never enters script source.
+            if let range = normalized.range(of: "apple-cli: ") {
+                return .upstream(String(normalized[range.upperBound...])
+                    .trimmingCharacters(in: .whitespacesAndNewlines))
+            }
+
             if s.contains("not authorized") || s.contains("not permitted") || s.contains("access") && s.contains("denied") {
                 return .permissionDenied("Notes automation not authorized. Grant access in System Settings > "
                     + "Privacy & Security > Automation, then retry.")
@@ -545,15 +555,21 @@ struct NotesScript {
     /// `recent` runs in TWO passes, and the split is what makes it affordable. Ranking by
     /// modification date needs every note in scope, but the RANKING only needs two fields. The
     /// first cut of this command read all five per-hit fields over the whole scope and cost
-    /// **20.6s at ~210 notes** against `timeoutSeconds` 45 — and since a timeout is retried
-    /// (`maxReadAttempts` 2), a library roughly twice that size would have hung ~91s and then
-    /// failed, on the bare default invocation, with `--limit` bounding none of it.
+    /// **20.6s on a few-hundred-note library**, flat in `--limit` because it read everything
+    /// regardless.
     ///
     /// So pass 1 (`recentKeys`) reads `id of every note` and `modification date of every note` —
     /// **two Apple events for the whole scope, whatever its size** — and the loop that renders
     /// the dates walks two in-process AppleScript lists, costing no further events. Pass 2
     /// (`recentDetails`) does the expensive five-field per-hit reads only for the N notes that
     /// survived the cut. Measured on the same library: **0.24s + 1.29s**.
+    ///
+    /// Be careful about what `timeoutSeconds` 45 bounds: ONE Apple event, not a script and not
+    /// the command. `run` uses the runner overload with no host-side deadline, and `recent`
+    /// issues two scripts, each retried once on a timeout — so the ceiling is roughly three
+    /// minutes, and pass 1's in-process render loop is bounded by nothing at all. On expiry the
+    /// caller gets `upstream_error`, exit 69, "Notes.app timed out…". Routing Notes reads
+    /// through the bounded runner overload is a separate change.
     ///
     /// `modified` is nil when Notes.app gave us no usable value — the script's `on error`
     /// branch, or a value that does not parse. That distinction is load-bearing here in a way it
@@ -567,9 +583,14 @@ struct NotesScript {
 
     /// The pass-1 script body: two bulk property reads, then an in-process render.
     ///
-    /// The count check is not defensive padding. The two lists are matched up BY POSITION, so if
-    /// Notes.app ever returned them at different lengths every date would be attributed to the
-    /// wrong note — silently, and plausibly. Failing is the only safe answer.
+    /// The two lists are matched up BY POSITION, and the count check is what catches the
+    /// cheapest way that can go wrong: if Notes.app returned them at different lengths, every
+    /// date after the divergence would be attributed to the wrong note, silently and plausibly.
+    /// Be precise about what it proves, though — it compares LENGTHS ONLY. A create plus a
+    /// delete landing between the two bulk events leaves the lengths equal with every date after
+    /// the edit shifted by one, and nothing here detects that; closing it needs a third read to
+    /// cross-check against, or a single combined read. Recorded as a known gap rather than
+    /// implied away.
     ///
     /// TRUST CONTRACT, as on `searchBody`: `notesSource` is a MODEL-DERIVED fragment (a fixed
     /// literal, or `folderRefExpr`'s argv references). User text must never be passed in it.
@@ -611,15 +632,30 @@ struct NotesScript {
     }
 
     /// PASS 1 — every note in scope as (id, modification date), in two Apple events.
+    ///
+    /// "Every note" INCLUDES Recently Deleted: `id of every note` at account scope enumerates
+    /// the trash, the same inclusion `search` has (see the `searchBody` comment on trashed
+    /// notes), so parity holds — but the consequence differs here. Deleting a note bumps its
+    /// modification date, so on a live store a note sitting in Recently Deleted can be the
+    /// newest-modified note in the account and lead a bare `apple notes recent`. Disclosed in
+    /// the manual, the port spec and the changelog; a hit's `folder` identifies it, and
+    /// `--folder` scopes past it. Excluding trash by default is a follow-up, not a one-liner:
+    /// the folder's AppleScript name is localized and Notes exposes no "deleted" property, so a
+    /// name match is not a design.
     func recentKeys(account: String?, folder: String?) throws -> [RecentKey] {
         var args: [String] = []
         var notesSource = "note"
-        if let folder, !folder.isEmpty {
-            // `splitFolderPath` drops empty components, so a path of nothing but separators
-            // ("///") yields NO components and `folderRefExpr` would return an empty expression —
-            // emitting a dangling `of`, which fails to compile and would surface as "Internal
-            // error. Please report this issue." for what is plain bad input.
-            try requireNonEmptyFolderName(folder)
+        // NOT `if let folder, !folder.isEmpty`: that shape — which `searchNotes` and `listNotes`
+        // still use — silently WIDENS `--folder ""` to the whole account, while `--folder "///"`
+        // (which also names no component) is refused. A caller interpolating an unset variable
+        // then reads the entire account instead of an error, the wrong failure direction for a
+        // command whose job is to bound what reaches an agent. Both spellings are refused here.
+        if let folder {
+            // `splitFolderPath` drops empty components, so "" and "///" alike yield NO
+            // components, and `folderRefExpr` would return an empty expression — emitting a
+            // dangling `of`, which fails to compile and would surface as "Internal error.
+            // Please report this issue." for what is plain bad input.
+            try requireNonEmptyFolderName(folder, "--folder")
             let comps = Self.splitFolderPath(folder)
             let (expr, fargs) = Self.folderRefExpr(comps, startIndex: args.count + 1)
             notesSource = "note of \(expr)"
@@ -641,10 +677,16 @@ struct NotesScript {
     /// numeric `y-mo-d-h-mi-s` parts `parseSummaries` expects, so no locale-dependent date string
     /// is ever parsed.
     ///
-    /// The preamble resolves each id inside its own `try`, so a note deleted between the two
+    /// The preamble resolves each id inside its own handler, so a note deleted between the two
     /// passes drops out instead of taking the whole fetch down — which a list literal of
     /// `note id …` would do. Addressed at APPLICATION scope, like `getNoteById`: the ids already
     /// carry their account, and `container of n` resolves there (measured).
+    ///
+    /// The handler is NARROW on purpose. A bare `try … end try` suppresses every error, so a
+    /// per-event timeout or a lost connection during id resolution would shorten the result and
+    /// return `ok: true` with notes missing, never reaching the Swift retry or `mapError`. Only
+    /// `-1728` — the not-found this loop exists to tolerate — is swallowed; anything else is
+    /// re-raised and surfaces as the failure it is.
     func recentDetails(ids: [String], account: String?) throws -> [NoteSummary] {
         guard !ids.isEmpty else { return [] }
         let preamble = """
@@ -652,6 +694,8 @@ struct NotesScript {
         repeat with k from 1 to \(ids.count)
           try
             set end of resolvedNotes to note id (item k of argv)
+          on error errMsg number errNum
+            if errNum is not -1728 then error errMsg number errNum
           end try
         end repeat
 

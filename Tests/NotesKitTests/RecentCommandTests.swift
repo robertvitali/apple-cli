@@ -104,8 +104,9 @@ struct RecentCommandTests {
 
     @Test("equal modification dates break the tie by id, so the order is total and reproducible")
     func tiesAreBrokenDeterministically() throws {
-        // One-second granularity makes ties ordinary (a bulk import, a sync landing). `sorted` is
-        // NOT stable, so without a tie-break which note survives --limit would be arbitrary.
+        // One-second granularity makes ties ordinary (a bulk import, a sync landing). Without a
+        // tie-break, which note survives --limit would be decided by pass 1's input order, which
+        // is Notes.app's own enumeration order — the very thing the ranking exists to replace.
         let same = "2026-2-10-17-45-30"
         let notes = [Fixture(3, same), Fixture(1, same), Fixture(2, same)]
         for _ in 0..<5 {
@@ -165,6 +166,72 @@ struct RecentCommandTests {
         #expect(data["count"] as? Int == 2)
     }
 
+    // MARK: truncation disclosure
+
+    /// `count` alone cannot be read as "the scope was exhausted", which is why `limit_reached`
+    /// is emitted rather than left to the caller to infer. Pass 2 drops a winner it cannot read
+    /// back and nothing backfills from the next-ranked candidate, so a truncated result can
+    /// report a `count` BELOW `applied_limit` while more notes are still in scope — the exact
+    /// shape an agent paging by raising `--limit` would stop on.
+    @Test("limit_reached is true when the cut bit, even though count came back under the limit")
+    func limitReachedSurvivesADroppedWinner() throws {
+        let notes = [Fixture(1, "2026-3-2-8-0-0"), Fixture(2, "2026-2-10-17-45-30"),
+                     Fixture(3, "2026-1-15-9-30-0")]
+        // Two winners out of three candidates, and one of those two never comes back.
+        let data = try drive(try RecentCmd.parse(["--limit", "2"]),
+                             twoPassRunner(notes, missing: [2]))
+
+        #expect(data["limit_reached"] as? Bool == true, "three candidates, limit two: the cut bit")
+        #expect(data["count"] as? Int == 1)
+        #expect(data["applied_limit"] as? Int == 2)
+        // The pairing is the whole point: count < applied_limit while the scope is NOT exhausted.
+        #expect((data["count"] as? Int).map { $0 < (data["applied_limit"] as? Int ?? 0) } == true)
+    }
+
+    @Test("limit_reached is false when the whole scope fitted inside the limit")
+    func limitReachedFalseWhenScopeFits() throws {
+        let data = try drive(try RecentCmd.parse(["--limit", "10"]), twoPassRunner(scrambled))
+
+        #expect(data["limit_reached"] as? Bool == false)
+        #expect(data["count"] as? Int == 3)
+        // Exactly-at-the-limit is the boundary: three candidates, limit three, nothing was cut.
+        let exact = try drive(try RecentCmd.parse(["--limit", "3"]), twoPassRunner(scrambled))
+        #expect(exact["limit_reached"] as? Bool == false)
+    }
+
+    // MARK: Recently Deleted
+
+    /// `id of every note` enumerates the trash, and deleting a note bumps its modification date,
+    /// so a note in Recently Deleted can lead the ranking. That is disclosed rather than
+    /// filtered (the folder's AppleScript name is localized and Notes exposes no "deleted"
+    /// property, so exclusion needs a design pass), and the disclosure says a hit's `folder`
+    /// identifies it — so the folder has to survive the pipeline verbatim.
+    @Test("a note in Recently Deleted passes through unchanged, identifiable by its folder")
+    func trashedNotesPassThroughIdentifiably() throws {
+        let trash = "Recently Deleted"
+        let runner = FakeNotesRunner()
+        runner.handler = { script, args in
+            if script.contains("set noteIds to id of every") {
+                return [self.noteID(1), "2026-3-2-8-0-0"].joined(separator: US) + RS
+                    + [self.noteID(2), "2026-1-15-9-30-0"].joined(separator: US) + RS
+            }
+            if script.contains("set resolvedNotes to {}") {
+                return [self.hitRow(1, modified: "2026-3-2-8-0-0", folder: trash),
+                        self.hitRow(2, modified: "2026-1-15-9-30-0")].joined(separator: RS) + RS
+            }
+            return nil
+        }
+
+        let data = try drive(try RecentCmd.parse([]), runner)
+        let hits = try #require(data["notes"] as? [[String: Any]])
+
+        // Ranked first, because deleting it bumped its modification date — and NOT filtered.
+        #expect(hits.first?["id"] as? String == noteID(1))
+        #expect(hits.first?["folder"] as? String == trash, "the folder is what identifies it")
+        #expect(hits.count == 2)
+        #expect(hits.last?["folder"] as? String == "Folder")
+    }
+
     // MARK: emitted scripts
 
     @Test("pass 1 reads two bulk properties over the whole scope — no filter, no cut, no per-note event")
@@ -204,6 +271,73 @@ struct RecentCommandTests {
         #expect(pass2.contains("repeat with k from 1 to 3"))
         // Application scope, like getNoteById — the ids already carry their account.
         #expect(!pass2.contains("tell account"))
+    }
+
+    // MARK: failure paths
+
+    /// The mismatch guard exists to make ONE failure loud. Before `mapError` learned to pass an
+    /// `apple-cli:`-prefixed message through, it matched no branch and fell to the terminal
+    /// "Notes.app returned an error." — the least informative string the domain emits, on the
+    /// one error the script goes out of its way to raise.
+    @Test("a script's own apple-cli: diagnostic reaches the caller verbatim")
+    func ownDiagnosticSurvivesErrorMapping() throws {
+        let runner = FakeNotesRunner()
+        runner.handler = { _, _ in
+            throw AppleScriptRunner.RunError.scriptFailed(
+                status: 1,
+                stderr: "execution error: apple-cli: Notes.app returned mismatched id and date lists (1)")
+        }
+        let command = try RecentCmd.parse([])
+
+        let failure = try captureNotesFailure {
+            try command.run(scriptFactory: { NotesScript(runner: runner, store: StubNotesStore.quiet()) },
+                            storeFactory: { StubNotesStore.quiet() })
+        }
+
+        let message = try #require(failure.error["message"] as? String)
+        #expect(message.contains("mismatched id and date lists"))
+        #expect(!message.contains("Notes.app returned an error."), "the generic terminal branch")
+        #expect(!message.contains("apple-cli:"), "the prefix is routing, not caller-facing text")
+        #expect(failure.error["type"] as? String == "upstream_error")
+    }
+
+    /// The pass-2 preamble tolerates a vanished note and NOTHING else: a bare `try … end try`
+    /// would also swallow a timeout or a lost connection mid-resolution and return `ok: true`
+    /// with notes silently missing.
+    @Test("pass 2 re-raises anything that is not a not-found, and says so in the script")
+    func passTwoFailureSurfaces() throws {
+        let runner = FakeNotesRunner()
+        runner.handler = { script, _ in
+
+            if script.contains("set noteIds to id of every") {
+                return [self.noteID(1), "2026-3-2-8-0-0"].joined(separator: US) + RS
+            }
+            throw AppleScriptRunner.RunError.scriptFailed(
+                status: 1, stderr: "execution error: Notes got an error: AppleEvent timed out. (-1712)")
+        }
+        let command = try RecentCmd.parse([])
+
+        let failure = try captureNotesFailure {
+            try command.run(scriptFactory: { NotesScript(runner: runner, store: StubNotesStore.quiet()) },
+                            storeFactory: { StubNotesStore.quiet() })
+        }
+
+        #expect(failure.code == AppleExit.upstream)
+        #expect((failure.error["message"] as? String)?.contains("timed out") == true,
+                "a pass-2 failure must surface, not shorten the result to ok:true")
+
+        // And the narrowing is in the emitted script, which is where it actually has to hold:
+        // only -1728 is swallowed, everything else re-raised.
+        let details = FakeNotesRunner()
+        details.handler = { script, _ in
+            script.contains("set noteIds to id of every")
+                ? [self.noteID(1), "2026-3-2-8-0-0"].joined(separator: US) + RS
+                : self.hitRow(1, modified: "2026-3-2-8-0-0") + RS
+        }
+        _ = try drive(try RecentCmd.parse([]), details)
+        let pass2 = try #require(details.scripts.last)
+        #expect(pass2.contains("on error errMsg number errNum"))
+        #expect(pass2.contains("if errNum is not -1728 then error errMsg number errNum"))
     }
 
     @Test("pass 2 is skipped entirely when nothing survives the cut")
@@ -306,22 +440,29 @@ struct RecentCommandTests {
         #expect(runner.arguments.first == ["iCloud"])
     }
 
-    @Test("a folder path with no components is a validation error, not a script syntax failure")
+    @Test("a folder naming no path component is a validation error — empty and separators alike")
     func refusesAFolderPathWithNoComponents() throws {
-        // `splitFolderPath("///")` drops every empty component, leaving an EMPTY folder
-        // expression — the emitted dangling `of` fails to compile, and the syntax error surfaces
-        // as upstream/69 "Internal error. Please report this issue." for plain bad input.
-        let runner = ThrowingNotesRunner()
-        let command = try RecentCmd.parse(["--folder", "///"])
+        // `splitFolderPath` drops every empty component, so both spellings name NO folder and
+        // the emitted dangling `of` would fail to compile, surfacing as upstream/69 "Internal
+        // error. Please report this issue." for plain bad input.
+        //
+        // `""` is the one that matters in practice: the `!folder.isEmpty` shape `search` and
+        // `list` still use lets it fall through and enumerate the WHOLE ACCOUNT, so a caller
+        // interpolating an unset variable silently widens the read instead of being refused.
+        for value in ["", "///"] {
+            let runner = ThrowingNotesRunner()
+            let command = try RecentCmd.parse(["--folder", value])
 
-        let failure = try captureNotesFailure {
-            try command.run(scriptFactory: { NotesScript(runner: runner, store: StubNotesStore.quiet()) },
-                            storeFactory: { StubNotesStore.quiet() })
+            let failure = try captureNotesFailure {
+                try command.run(scriptFactory: { NotesScript(runner: runner, store: StubNotesStore.quiet()) },
+                                storeFactory: { StubNotesStore.quiet() })
+            }
+
+            #expect(failure.code == AppleExit.usage, "exit for --folder \"\(value)\"")
+            #expect(failure.error["type"] as? String == "validation_error")
+            #expect((failure.error["message"] as? String)?.contains("--folder") == true)
+            #expect(runner.neverCalled, "--folder \"\(value)\" must not reach Notes.app")
         }
-
-        #expect(failure.code == AppleExit.usage)
-        #expect(failure.error["type"] as? String == "validation_error")
-        #expect(runner.neverCalled)
     }
 
     @Test("a hostile --folder value never reaches the script source")
@@ -346,8 +487,10 @@ struct RecentCommandTests {
         #expect((hit["tags"] as? [Any])?.isEmpty == true)
         #expect(hit["folder"] as? String == "Folder")
         #expect(hit["account"] as? String == "iCloud")
-        // The oracle's search disclosure fields have no meaning on a fully-enumerated ranking.
-        #expect(data["limit_reached"] == nil)
+        // `limit_reached` is the truncation signal `search` gives and this surface owes too.
+        #expect(data["limit_reached"] as? Bool == false)
+        // `limit_was_default` stays absent: `recent` has one default and discloses it as
+        // `applied_limit`, so there is nothing a second flag would tell a caller.
         #expect(data["limit_was_default"] == nil)
     }
 
