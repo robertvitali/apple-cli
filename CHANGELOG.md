@@ -34,7 +34,8 @@ JSON output are stable per the versioning policy — breaking changes bump
 - **Messages reads now say which conversation a message came from.** Every message returned by
   `messages recent` and `messages search` gains `chat_identifier` and `chat_guid` (the chat's id
   and guid, or `null` when the message belongs to no chat) and `is_group` (true when that chat is
-  a group). A message that lives in more than one chat reports the first of them. This answers a
+  a group). A message that lives in more than one chat reports the one whose chat row is
+  lowest-numbered, which is the same chat `--direct-only` judges it by. This answers a
   question the previous output could not: `group_name` is only a chat's DISPLAY NAME, so a group
   nobody ever named looked exactly like a 1:1 conversation, and there was no id to send a reply
   back to. Both commands also take a new `--direct-only` flag that drops group-chat messages
@@ -60,7 +61,8 @@ JSON output are stable per the versioning policy — breaking changes bump
   not divide it or subtract two of them. Use `last_activity` for anything that treats it as a
   time. Two new flags narrow the listing: `--name <text>` keeps only chats
   whose name contains that text, case-insensitively (echoed back as `name_filter`; an empty value
-  is treated as no filter at all), and `--limit <N>` caps how many come back. With neither flag
+  is treated as no filter at all), and `--limit <N>` caps how many come back, accepting 1 to
+  10000 and rejecting anything outside that range. With neither flag
   the listing returns the same chats in the same order as before.
 - These additions keep `schema_version` at 1: no existing **JSON** key is removed, renamed, or
   retyped, the key order is unchanged, and the new nullable keys are always present with an

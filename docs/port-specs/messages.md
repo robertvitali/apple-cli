@@ -271,9 +271,11 @@ accepts 1-10000 and rejects anything outside that with a validation error (exit
 `participants` are RAW handle ids — phone numbers and email addresses exactly as
 chat.db stores them, not contact-resolved the way a message's `sender` is. The
 account owner is not among them: `chat_handle_join` records the other parties
-only, so a 1:1 chat lists one handle. The array is not deduplicated, and the
-schema permits one person to appear more than once when a store holds separate
-handle rows per service for them, so treat it as a list rather than a set.
+only, so a 1:1 chat lists just the person on the other end. That is a count of
+PEOPLE, not of entries — the array is not deduplicated, and the schema permits
+one person to occupy more than one entry when a store holds separate handle rows
+per service for them, so even a 1:1 chat is not guaranteed to be a single-element
+array. Treat it as a list rather than a set.
 
 `last_activity_timestamp` is the RAW `message.date` value chat.db stores, and is
 NOT a fixed unit: nanoseconds since the Apple epoch on modern rows and SECONDS on
@@ -320,11 +322,10 @@ and the two lookups are keyed on that chat-ROWID set. The one-pass shape it
 replaced grouped over every message row on every invocation — measured on one
 large real store, the whole-store grouping took ~28x as long as the same lookup
 restricted to that store's named chats, and far longer than the lookup for a
-`--limit 5` selection. Treat the multiplier as an illustration from a single
-store, not a constant. What
-remains is not a constant: the cost scales with the number of messages held by
-the chats actually RETURNED, so a selection covering many busy chats is still
-substantial work, and `--limit` is the lever on a large store. The listing's
+`--limit 5` selection. Treat that multiplier as an illustration from a single
+store rather than a constant: what remains scales with the number of messages
+held by the chats actually RETURNED, so a selection covering many busy chats is
+still substantial work, and `--limit` is the lever on a large store. The listing's
 `ORDER BY ROWID` is stated in SQL rather than left to a bare SELECT's incidental
 scan order, because `--limit` makes the ordering decide WHICH chats a caller
 receives.
