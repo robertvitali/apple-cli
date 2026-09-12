@@ -495,10 +495,18 @@ struct SearchCmd: ParsableCommand {
 ///
 /// The hit shape is `search`'s NoteSummary verbatim — same eight keys, same `content:""`/`tags:[]`
 /// placeholders — so a caller can hand a `recent` hit to anything that already consumes a search
-/// hit. The envelope adds `applied_limit` (always present: this surface always cuts) and the
-/// `sync_warning` the other enumerating reads carry; `limit_reached`/`limit_was_default` stay
-/// absent, because the cut here is a ranking of a fully-enumerated scope rather than the oracle's
-/// "we stopped looking" disclosure.
+/// hit. The envelope adds `applied_limit` (always present: this surface always cuts),
+/// `limit_reached`, and the `sync_warning` the other enumerating reads carry.
+///
+/// `limit_reached` is `ranked.count > effective` — the whole scope was ranked, so this says
+/// there ARE more notes, where `search`'s `count >= effective` can only say there MAY be. Same
+/// key, deliberately different predicate; see `NoteList.limit_reached`. It is emitted rather
+/// than left to a caller to infer from `count < applied_limit`, because that inference is false
+/// here: pass 2 drops a winner it cannot read back and nothing backfills, so a truncated result
+/// can still report a short count.
+///
+/// `limit_was_default` stays absent: `recent` has exactly one default and already discloses it
+/// as `applied_limit`, so a second flag would tell a caller nothing.
 struct RecentCmd: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "recent",
         abstract: "Notes by modification date, newest first (default 10). CLI-only superset.")
@@ -539,14 +547,40 @@ struct RecentCmd: ParsableCommand {
             // FIRST occurrence keeps the better (earlier) rank.
             let rank = Dictionary(winners.enumerated().map { ($1.id, $0) },
                                   uniquingKeysWith: { first, _ in first })
+            // The emitted `modified` is the RANKING key, not pass 2's re-read of it. Two reasons,
+            // and both are about the payload agreeing with the order it is sorted in:
+            //
+            //   * a note modified BETWEEN the two passes would otherwise print a date that
+            //     contradicts its position in the list;
+            //   * a note whose date pass 1 could not read is ranked last on purpose, but pass 2
+            //     re-reads the same unreadable date and `parseDate` maps it to `Date()` — NOW,
+            //     the newest value there is — so a consumer re-sorting the array by `modified`
+            //     would hoist exactly the notes this command deliberately demoted.
+            //
+            // The second case cannot be fixed in the payload without retyping `modified` to a
+            // nullable, which is a breaking wire change. So the row is kept, ranked last, and
+            // the docs say plainly that a last-ranked note's `modified` is a read-time
+            // placeholder rather than a fact about the note.
+            let rankingDate = Dictionary(winners.map { ($0.id, $0.modified) },
+                                         uniquingKeysWith: { first, _ in first })
             let notes = try script.recentDetails(ids: winners.map(\.id), account: account)
+                .map { hit -> NoteSummary in
+                    guard let known = rankingDate[hit.id], let ranked = known else { return hit }
+                    return NoteSummary(id: hit.id, title: hit.title, content: hit.content,
+                                       tags: hit.tags, folder: hit.folder, account: hit.account,
+                                       created: hit.created, modified: ranked)
+                }
                 .sorted { (rank[$0.id] ?? .max, $0.id) < (rank[$1.id] ?? .max, $1.id) }
-            // The SAME truncation signal `search` gives, for the same reason: `count` alone
-            // cannot be read as "the scope was exhausted". Pass 2 drops a winner it cannot read
-            // back — a note deleted between the passes, an untitled one (`parseSummaries` skips
-            // an empty title), any per-hit read failure — and nothing backfills from the
-            // next-ranked candidate, so `count` can sit below `applied_limit` with more notes
-            // still in scope. The rank count is what knows whether the cut bit.
+            // The truncation signal, on the same key `search` uses but from a STRONGER
+            // predicate: search's `count >= effective` says more matches MAY exist (it stopped
+            // looking), while ranking the whole scope first means `ranked.count > effective`
+            // says more DO. See `NoteList.limit_reached`.
+            //
+            // It has to come from the rank count, not from what was returned: pass 2 drops a
+            // winner it cannot read back — a note deleted between the passes, an untitled one
+            // (`parseSummaries` skips an empty title), any per-hit read failure — and nothing
+            // backfills from the next-ranked candidate, so `count` can sit below `applied_limit`
+            // with more notes still in scope.
             let truncated = ranked.count > effective
             // ISO-8601, like the JSON encoder's dates: a locale-formatted stamp would render
             // differently per machine for the same note.

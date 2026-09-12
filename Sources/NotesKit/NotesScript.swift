@@ -80,6 +80,41 @@ struct NotesScript {
     /// errors (not-found, validation, permission, syntax) are deliberately ABSENT and must fail
     /// fast. Kept as a pure `String -> Bool` predicate so the retry decision is unit-testable
     /// without a live Notes.app.
+    /// The sentinel a generated script uses to raise a diagnostic of OUR OWN
+    /// (`error "apple-cli: …"`), and the osascript preamble that precedes it on stderr.
+    static let ownDiagnosticSentinel = "apple-cli: "
+    private static let osascriptErrorPreamble = "execution error: "
+
+    /// The text of our own diagnostic, or nil if this stderr is not one.
+    ///
+    /// Anchored at the START (after osascript's preamble) on purpose — see the call site in
+    /// `mapError`. A caller-supplied folder or note name containing the sentinel is echoed back
+    /// inside Notes.app's own error text, and matching it anywhere would let that value pick
+    /// this branch.
+    static func ownDiagnostic(_ stderr: String) -> String? {
+        var s = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+        if s.lowercased().hasPrefix(osascriptErrorPreamble) {
+            s = String(s.dropFirst(osascriptErrorPreamble.count))
+                .trimmingCharacters(in: .whitespacesAndNewlines)
+        }
+        guard s.hasPrefix(ownDiagnosticSentinel) else { return nil }
+        return String(s.dropFirst(ownDiagnosticSentinel.count))
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+    }
+
+    /// CLI-only transient patterns, kept SEPARATE from the ported table below so that table's
+    /// "verbatim port of the oracle's `RETRYABLE_ERROR_PATTERNS`" claim stays literally true —
+    /// the oracle has no counterpart for a diagnostic our own scripts raise.
+    ///
+    /// The pass-1 list mismatch is here because of what it detects: the id list and the date
+    /// list came back at different lengths, which means the note set CHANGED between two Apple
+    /// events (a create or delete landed, or a sync did). That is a race, not a broken store, so
+    /// re-running the whole read is exactly the right response and the second attempt normally
+    /// succeeds. Reads retry once; mutations pass `maxMutationAttempts` and never reach here.
+    static let cliRetryableErrorPatterns = [
+        "apple-cli: notes\\.app returned mismatched",
+    ]
+
     static let retryableErrorPatterns = [
         "timed? out",              // /timed? out/i — includes "-1712 AppleEvent timed out"
         "not responding",          // /not responding/i
@@ -93,7 +128,7 @@ struct NotesScript {
     /// `isRetryableError`). Matched against the RAW stderr, not the mapped message, so a "busy" /
     /// "connection invalid" that `mapError` buckets differently is still recognised as transient.
     static func isRetryable(_ errorMessage: String) -> Bool {
-        retryableErrorPatterns.contains { pattern in
+        (retryableErrorPatterns + cliRetryableErrorPatterns).contains { pattern in
             errorMessage.range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil
         }
     }
@@ -178,11 +213,16 @@ struct NotesScript {
             // pass through verbatim. Without this they match no branch below and fall to the
             // terminal "Notes.app returned an error." — so the one failure a script goes out of
             // its way to make specific would arrive as the least informative string the domain
-            // emits. The prefix is not user-reachable: user text never enters script source.
-            if let range = normalized.range(of: "apple-cli: ") {
-                return .upstream(String(normalized[range.upperBound...])
-                    .trimmingCharacters(in: .whitespacesAndNewlines))
-            }
+            // emits.
+            //
+            // ANCHORED, and that is the whole security of it. User text DOES reach stderr — not
+            // as script source, but echoed back inside Notes.app's own message: a nonexistent
+            // `--folder 'apple-cli: x'` yields `Can't get folder "apple-cli: x". (-1728)`. An
+            // unanchored search would let that hijack this branch and reclassify a not_found/65
+            // as upstream_error/69, on EVERY Notes command, from a value the caller controls.
+            // Only a message that BEGINS with the sentinel (after osascript's own
+            // `execution error: ` preamble) is ours.
+            if let own = Self.ownDiagnostic(normalized) { return .upstream(own) }
 
             if s.contains("not authorized") || s.contains("not permitted") || s.contains("access") && s.contains("denied") {
                 return .permissionDenied("Notes automation not authorized. Grant access in System Settings > "
@@ -558,18 +598,23 @@ struct NotesScript {
     /// **20.6s on a few-hundred-note library**, flat in `--limit` because it read everything
     /// regardless.
     ///
-    /// So pass 1 (`recentKeys`) reads `id of every note` and `modification date of every note` —
-    /// **two Apple events for the whole scope, whatever its size** — and the loop that renders
-    /// the dates walks two in-process AppleScript lists, costing no further events. Pass 2
-    /// (`recentDetails`) does the expensive five-field per-hit reads only for the N notes that
-    /// survived the cut. Measured on the same library: **0.24s + 1.29s**.
+    /// So pass 1 (`recentKeys`) asks for `id of every note` and `modification date of every
+    /// note` — **two bulk property reads for the whole scope, however large** — and the loop
+    /// that renders the dates walks two in-process AppleScript lists rather than going back to
+    /// Notes.app per note. Pass 2 (`recentDetails`) does the expensive five-field per-hit reads
+    /// only for the N notes that survived the cut. End to end on the same library: **1.69s at
+    /// the default `--limit 10`**, against 20.6s for the one-pass shape at any limit.
     ///
-    /// Be careful about what `timeoutSeconds` 45 bounds: ONE Apple event, not a script and not
-    /// the command. `run` uses the runner overload with no host-side deadline, and `recent`
-    /// issues two scripts, each retried once on a timeout — so the ceiling is roughly three
-    /// minutes, and pass 1's in-process render loop is bounded by nothing at all. On expiry the
-    /// caller gets `upstream_error`, exit 69, "Notes.app timed out…". Routing Notes reads
-    /// through the bounded runner overload is a separate change.
+    /// Be careful about what `timeoutSeconds` 45 bounds: ONE Apple event's reply. Not a script,
+    /// not the command, and NOT in-process work — measured, a `delay 5` inside a
+    /// `with timeout of 2 seconds` block completes normally rather than erroring, so pass 1's
+    /// render loop is bounded by nothing at all. There is therefore **no fixed ceiling** on this
+    /// command: `run` uses the runner overload with no host-side deadline, the event count
+    /// scales with the scope and with `--limit` (pass 1 is the two bulk reads plus account
+    /// resolution; pass 2 is one `note id` lookup per surviving id plus roughly five property
+    /// reads each), and each of the two scripts is retried once on a timeout. Any one event
+    /// exceeding 45s surfaces as `upstream_error`, exit 69, "Notes.app timed out…". Routing
+    /// Notes reads through the bounded runner overload is a separate change.
     ///
     /// `modified` is nil when Notes.app gave us no usable value — the script's `on error`
     /// branch, or a value that does not parse. That distinction is load-bearing here in a way it

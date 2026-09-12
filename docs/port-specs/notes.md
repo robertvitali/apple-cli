@@ -248,8 +248,12 @@ The MCP emits camelCase keys; apple-cli emits snake_case per `docs/DESIGN.md` ("
   `search-notes` emits — eight keys including the oracle's hardcoded `content:""` / `tags:[]`
   placeholders — so a consumer of a search hit reads a recent hit unchanged; the envelope adds
   `count`, `applied_limit`, `limit_reached`, and the `sync_warning` the other enumerating reads
-  carry. `limit_reached` is `ranked.count > effective` and is the SAME truncation signal
-  `search-notes` gives. It is emitted rather than left to a caller to infer from
+  carry. `limit_reached` is the SAME KEY `search-notes` sets, with a deliberately DIFFERENT
+  predicate, because the two know different things: search uses `count >= effective` — it stopped
+  looking at the limit, so more matches MAY exist — while `recent` uses `ranked.count > effective`,
+  having ranked the whole scope before cutting, so more DO. A consumer reads both the same way
+  ("ask for more if you need them"), which is why one key is right. It is emitted rather than
+  left to a caller to infer from
   `count < applied_limit`, because that inference is FALSE here: pass 2 drops a winner it cannot
   read back — deleted between the passes, untitled (`parseSummaries` skips an empty title), or
   any per-hit read failure — and nothing backfills from the next-ranked candidate, so `count` can
@@ -269,9 +273,10 @@ The MCP emits camelCase keys; apple-cli emits snake_case per `docs/DESIGN.md` ("
   follow-up.
 - **`notes recent` runs in TWO passes, and the split is the whole cost story.** Ranking needs
   every note in scope; the RANKING needs only two fields. **Pass 1** reads
-  `id of every note` + `modification date of every note` — **two Apple events for the scope,
-  whatever its size** — and renders the dates by walking two in-process AppleScript lists, so it
-  costs no further events. Swift then sorts and cuts, and **pass 2** pays the five-field per-hit
+  `id of every note` + `modification date of every note` — **two bulk property reads for the
+  scope, however large, rather than a round trip per note** — and renders the dates by walking two
+  in-process AppleScript lists, so the render asks Notes.app for nothing further. (That is what
+  the script asks for; the wall-clock effect is the table below.) Swift then sorts and cuts, and **pass 2** pays the five-field per-hit
   reads for the N survivors only, addressing them by id at application scope. Measured on a
   few-hundred-note library:
 
@@ -296,11 +301,17 @@ The MCP emits camelCase keys; apple-cli emits snake_case per `docs/DESIGN.md` ("
   re-raises everything else, so a note deleted between the passes drops out while a timeout or a
   lost connection surfaces instead of silently shortening an `ok: true` result; the Swift-side
   RANK, not the fetch order, decides the output order.
-- **`notes recent` timeout envelope.** `with timeout of 45 seconds` bounds ONE Apple event, not a
-  script and not the command, and `NotesScript.run` uses the runner overload with no host-side
-  deadline. `recent` issues two scripts, each retried once on a timeout, so the ceiling is roughly
-  **three minutes**; pass 1's in-process render loop is bounded by nothing at all. On expiry the
-  caller gets `upstream_error`, exit 69, "Notes.app timed out. It may be unresponsive or busy
+- **`notes recent` timeout envelope: there is NO fixed ceiling.** `with timeout of 45 seconds`
+  bounds ONE Apple event's reply — not a script, not the command, and not in-process work.
+  Measured: a `delay 5` inside a `with timeout of 2 seconds` block completes normally in ~5.2s
+  rather than erroring, so pass 1's render loop is bounded by nothing at all. `NotesScript.run`
+  uses the runner overload with no host-side deadline, and the EVENT COUNT scales — pass 1 is the
+  two bulk reads plus account resolution; pass 2 is one `note id` lookup per surviving id plus
+  roughly five property reads each, so it grows with `--limit`. Each of the two scripts is
+  additionally retried once when an event times out. An earlier revision of this note reasoned a
+  "roughly three minutes" ceiling from two scripts x 45s x 2 attempts; that was wrong on the
+  premise (per-event, not per-script) and is corrected here. Any single event exceeding 45s
+  surfaces as `upstream_error`, exit 69, "Notes.app timed out. It may be unresponsive or busy
   syncing; try again." Routing Notes reads through the bounded runner overload is a separate
   reviewed change.
 - **`notes recent` ranking details.** The sort is a TOTAL order — `modified` descending, then
@@ -312,7 +323,16 @@ The MCP emits camelCase keys; apple-cli emits snake_case per `docs/DESIGN.md` ("
   not report — an empty value from the script's `on error` branch, OR a value present but
   unparseable, decided by one fallible parse (`parseDateIfReadable`) — ranks LAST rather than
   where `parseDate`'s now-fallback would put it (first, and potentially filling the whole default
-  window). The cut happens in Swift and never as an `exit repeat`, which would drop by traversal
+  window). **The emitted `modified` is the RANKING key, not pass 2's re-read of it**, so the array
+  order and the dates in it always agree — without that, a note modified between the two passes
+  would print a date contradicting its position. The ONE case the payload cannot make honest is
+  that same unreadable note: `NoteSummary.modified` is non-optional, and pass 2 re-reads the same
+  unreadable value into `parseDate`'s now-fallback, so the row ships a READ-TIME PLACEHOLDER. A
+  consumer re-sorting the array by `modified` would therefore hoist exactly the notes this
+  command demoted. Making the key nullable would be a retype and a breaking wire change, so the
+  behavior is disclosed instead — in the manual, the changelog and here — and pinned by test
+  (`unreadableWinnerShipsAPlaceholderModified`). The cut happens in Swift and never as an
+  `exit repeat`, which would drop by traversal
   order rather than by recency. Pass 2 reuses `searchBody` rather than a hand-rolled traversal:
   reading a hit's folder as `name of container of nt` off a bare traversal raises `-1728`, and
   that body's two-step container binding is the mechanism that already survives it; a hit whose

@@ -59,10 +59,20 @@ struct NoteList: Encodable {
     /// two are additive optional fields — MINOR per docs/versioning-policy.md — and stay absent
     /// on surfaces that apply no limit (e.g. `list`, which the oracle also leaves unbounded).
     var applied_limit: Int? = nil
-    /// True when the result set REACHED the limit, so more matches may exist. Named
-    /// `limit_reached` rather than `truncated`: at count == limit we cannot know whether a 51st
-    /// match exists, so "truncated" asserts more than the data supports. Renaming later would be
-    /// a MAJOR wire break; it is free now.
+    /// The truncation signal. TWO producers share this key and compute it differently, because
+    /// they know different things:
+    ///
+    ///   * `search` sets it from `count >= effective` — it stopped looking at the limit, so more
+    ///     matches MAY exist. Named `limit_reached` rather than `truncated` for exactly that
+    ///     reason: at count == limit nothing proves a further match exists, and "truncated"
+    ///     would assert more than the data supports.
+    ///   * `recent` sets it from `ranked.count > effective` — it ranked the WHOLE scope before
+    ///     cutting, so it knows there ARE more. It cannot use the count of returned notes at
+    ///     all: pass 2 drops a winner it fails to read back, with no backfill, so `count` can
+    ///     land under `applied_limit` on a genuinely truncated result.
+    ///
+    /// A consumer reads it the same way either way — "ask for more if you need them" — which is
+    /// why one key is right. Renaming would be a MAJOR wire break.
     var limit_reached: Bool? = nil
     /// True when `applied_limit` came from the default rather than an explicit --limit.
     var limit_was_default: Bool? = nil

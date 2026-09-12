@@ -273,6 +273,53 @@ struct RecentCommandTests {
         #expect(!pass2.contains("tell account"))
     }
 
+    // MARK: the emitted `modified` is the ranking key
+
+    /// Pass 2 re-reads the modification date, so without this the payload could disagree with
+    /// the order it is sorted in — a note modified between the two passes would print a date
+    /// that contradicts its position.
+    @Test("the emitted modified comes from the ranking read, not from pass 2's re-read")
+    func emittedModifiedIsTheRankingKey() throws {
+        let runner = FakeNotesRunner()
+        runner.handler = { script, _ in
+            if script.contains("set noteIds to id of every") {
+                return [self.noteID(1), "2026-3-2-8-0-0"].joined(separator: US) + RS
+            }
+            // Pass 2 reports a DIFFERENT date for the same note, as if it were touched between
+            // the two reads. The rank was decided on the first value, so that is what ships.
+            return self.hitRow(1, modified: "2020-1-1-0-0-0") + RS
+        }
+        let hit = try #require((try drive(try RecentCmd.parse([]), runner)["notes"]
+            as? [[String: Any]])?.first)
+
+        let modified = try #require(hit["modified"] as? String)
+        #expect(modified.hasPrefix("2026-03-02"), "the pass-1 value, not pass 2's 2020 re-read")
+    }
+
+    /// The one case the payload cannot make honest: a note pass 1 could not date is ranked last
+    /// deliberately, but `NoteSummary.modified` is non-optional and pass 2's re-read of the same
+    /// unreadable value becomes `parseDate`'s now-fallback. Making it nullable would retype the
+    /// wire. So the row ships with a read-time placeholder, and this test states what a consumer
+    /// actually receives — the behaviour the three docs warn about, pinned rather than implied.
+    @Test("a last-ranked note ships a read-time placeholder for modified, and the docs say so")
+    func unreadableWinnerShipsAPlaceholderModified() throws {
+        let before = Date()
+        let data = try drive(try RecentCmd.parse([]),
+                             twoPassRunner([Fixture(1, ""), Fixture(2, "2026-1-15-9-30-0")]))
+        let hits = try #require(data["notes"] as? [[String: Any]])
+
+        // Ranked last, as ever.
+        #expect(hits.last?["id"] as? String == noteID(1))
+        // And its `modified` is neither absent nor a real date: it is ~now.
+        let raw = try #require(hits.last?["modified"] as? String)
+        let stamp = try #require(ISO8601DateFormatter().date(from: raw))
+        #expect(stamp.timeIntervalSince(before) >= -1 && stamp.timeIntervalSince(before) < 300,
+                "a read-time placeholder, which is exactly why the docs say not to trust it")
+        // The note that DID have a date is unaffected — the placeholder is not a blanket rewrite.
+        let dated = try #require(hits.first?["modified"] as? String)
+        #expect(dated.hasPrefix("2026-01-15"))
+    }
+
     // MARK: failure paths
 
     /// The mismatch guard exists to make ONE failure loud. Before `mapError` learned to pass an
@@ -299,6 +346,67 @@ struct RecentCommandTests {
         #expect(!message.contains("Notes.app returned an error."), "the generic terminal branch")
         #expect(!message.contains("apple-cli:"), "the prefix is routing, not caller-facing text")
         #expect(failure.error["type"] as? String == "upstream_error")
+    }
+
+    /// The sentinel is anchored, and this is why: user text DOES reach stderr — echoed back
+    /// inside Notes.app's own message. An unanchored match would let a caller-chosen folder name
+    /// reclassify a not_found/65 as upstream_error/69 on EVERY Notes command.
+    @Test("a folder name containing the sentinel cannot hijack the passthrough")
+    func sentinelCannotBeSpoofedFromUserText() throws {
+        let hostileName = "apple-cli: x"
+        let runner = FakeNotesRunner()
+        runner.handler = { _, _ in
+            throw AppleScriptRunner.RunError.scriptFailed(
+                status: 1,
+                stderr: "execution error: Notes got an error: Can\u{2019}t get folder "
+                    + "\"\(hostileName)\". (-1728)")
+        }
+        let command = try RecentCmd.parse(["--folder", hostileName])
+
+        let failure = try captureNotesFailure {
+            try command.run(scriptFactory: { NotesScript(runner: runner, store: StubNotesStore.quiet()) },
+                            storeFactory: { StubNotesStore.quiet() })
+        }
+
+        #expect(failure.error["type"] as? String == "not_found", "must not become upstream_error")
+        #expect(failure.code == AppleExit.notFound)
+        #expect((failure.error["message"] as? String)?.contains("not found") == true)
+
+        // The classifier directly, both directions, so the anchor is pinned independent of the
+        // command wiring: ours matches with and without osascript's preamble; an echo does not.
+        #expect(NotesScript.ownDiagnostic("apple-cli: boom") == "boom")
+        #expect(NotesScript.ownDiagnostic("execution error: apple-cli: boom") == "boom")
+        #expect(NotesScript.ownDiagnostic("Can't get folder \"apple-cli: x\". (-1728)") == nil)
+    }
+
+    /// A length mismatch between pass 1's two bulk reads means the note set CHANGED between two
+    /// Apple events — a race, and re-running the read is the right response, so it belongs in
+    /// the transient set rather than failing on the first attempt.
+    @Test("the pass-1 mismatch is treated as transient and the read is retried once")
+    func mismatchIsRetried() throws {
+        let stderr = "execution error: apple-cli: Notes.app returned mismatched id and date lists (1)"
+        #expect(NotesScript.isRetryable(stderr), "a mid-read mutation is a retryable race")
+        // The ported oracle table stays literally verbatim; ours lives beside it.
+        #expect(!NotesScript.retryableErrorPatterns.contains { stderr.range(of: $0, options: [.regularExpression, .caseInsensitive]) != nil })
+
+        // End to end: the first attempt raises it, the second succeeds, and the caller sees a
+        // normal result rather than an error.
+        let runner = FakeNotesRunner()
+        var pass1Attempts = 0
+        runner.handler = { script, _ in
+            if script.contains("set noteIds to id of every") {
+                pass1Attempts += 1
+                if pass1Attempts == 1 {
+                    throw AppleScriptRunner.RunError.scriptFailed(status: 1, stderr: stderr)
+                }
+                return [self.noteID(1), "2026-3-2-8-0-0"].joined(separator: US) + RS
+            }
+            return self.hitRow(1, modified: "2026-3-2-8-0-0") + RS
+        }
+
+        let data = try drive(try RecentCmd.parse([]), runner)
+        #expect(pass1Attempts == 2, "read policy is attempt-twice on a transient failure")
+        #expect(data["count"] as? Int == 1)
     }
 
     /// The pass-2 preamble tolerates a vanished note and NOTHING else: a bare `try … end try`
