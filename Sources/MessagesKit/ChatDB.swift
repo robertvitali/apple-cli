@@ -231,6 +231,14 @@ public struct ChatDB {
     // MARK: - Chat identity (`chat_message_join` → `chat`)
 
     /// `chat.style` for a group chat. Apple's other value (45) is a 1:1 conversation.
+    ///
+    /// POLICY: any style other than 43 — including an absent or unrecognized one — is reported
+    /// and filtered as non-group. So `is_group: false` covers four states: a real 1:1 chat, a
+    /// message joined to no chat row, a store that cannot classify chats at all, and a chat row
+    /// whose style is NULL or a value Apple does not ship today. The filter uses the same rule,
+    /// so it KEEPS rows in all four. Two of the four are separately visible to a caller —
+    /// `chat_identifier: null` for the no-chat case, `direct_only_applied: false` for the
+    /// cannot-classify case.
     public static let groupChatStyle: Int64 = 43
 
     /// Which chat a message belongs to. `identifier`/`guid` are nil when the chat row
@@ -276,9 +284,43 @@ public struct ChatDB {
     }
 
     /// Whether this store can honor `directOnly` and populate the chat-identity fields.
-    /// Public so a command can TELL the caller when the filter it asked for was not applied,
-    /// rather than handing back group-chat content under a `direct_only: true` envelope.
     public func canIdentifyChats() -> Bool { chatIdentityAvailable() }
+
+    /// The resolved `--direct-only` posture for ONE invocation: what the caller asked for, and
+    /// whether this store can actually deliver it.
+    ///
+    /// Bound ONCE at the top of `run()` and threaded from there — the same discipline
+    /// `MessagesWriteGuard.Gate` applies to the write posture, and for the same reason. The
+    /// capability used to be re-probed independently by the filter and by the warning, so the
+    /// two could disagree; now the filter, the stderr warning, and the `direct_only_applied`
+    /// field are all reading one value decided at one moment.
+    public struct DirectOnlyFilter: Sendable, Equatable {
+        /// What `--direct-only` was set to.
+        public let requested: Bool
+        /// Whether the filter was actually applied. False when requested against a store that
+        /// cannot say which chat a message belongs to — the fail-open case a machine consumer
+        /// has to be able to SEE, because stdout JSON is the only channel it is told to trust.
+        public let applied: Bool
+
+        public static let off = DirectOnlyFilter(requested: false, applied: false)
+
+        public init(requested: Bool, available: Bool) {
+            self.requested = requested
+            self.applied = requested && available
+        }
+
+        private init(requested: Bool, applied: Bool) {
+            self.requested = requested
+            self.applied = applied
+        }
+    }
+
+    /// Probe the store ONCE and resolve the posture. Call at the top of `run()`.
+    public func resolveDirectOnly(requested: Bool) -> DirectOnlyFilter {
+        // Short-circuit: an unrequested filter must not pay for two PRAGMA round-trips.
+        guard requested else { return .off }
+        return DirectOnlyFilter(requested: true, available: chatIdentityAvailable())
+    }
 
     /// Chat identity for a batch of message rowids, keyed by message rowid.
     private func chatIdentities(ids: [Int64]) -> [Int64: ChatIdentity] {
@@ -311,7 +353,7 @@ public struct ChatDB {
     /// rows survive only when authoritative attachment rows exist. `directOnly` drops
     /// group-chat messages.
     public mutating func recent(hours: Int, handleRowIds: [Int64]?, limit: Int,
-                                directOnly: Bool = false) -> [Message] {
+                                directOnly: DirectOnlyFilter = .off) -> [Message] {
         // Filter semantics are load-bearing for privacy: `nil` = NO filter requested
         // (return all recent messages), but a non-nil EMPTY array = a filter WAS
         // requested and matched zero handles → return NOTHING. Without this guard the
@@ -326,7 +368,7 @@ public struct ChatDB {
             sql += "AND m.handle_id IN (\(placeholders)) "
             binds.append(contentsOf: ids.map(String.init))
         }
-        if directOnly, chatIdentityAvailable() {
+        if directOnly.applied {
             sql += "AND \(ChatDB.directOnlyPredicate) "
         }
         sql += "ORDER BY m.date DESC LIMIT \(max(0, limit))"
@@ -582,7 +624,7 @@ public struct ChatDB {
     /// `match`: `.fuzzy` (default, WRatio), `.contains` (substring), `.exact`.
     /// `directOnly` drops group-chat messages, exactly as on the `recent` path.
     public mutating func search(term: String, hours: Int, threshold: Double, match: SearchMatch,
-                                directOnly: Bool = false) -> SearchResult {
+                                directOnly: DirectOnlyFilter = .off) -> SearchResult {
         let likeParam = "%" + escapeLike(term) + "%"
         var where_ = "(m.text LIKE ?1 ESCAPE '\\' OR (m.text IS NULL AND m.attributedBody IS NOT NULL))"
         var binds = [likeParam]
@@ -593,10 +635,14 @@ public struct ChatDB {
             where_ = "m.date > ?2 AND " + where_
             binds.append(String(dateThreshold))
         }
-        // Prepended, not appended: the predicate carries no host parameters, so it cannot
-        // disturb the ?1/?2 numbering the two clauses above depend on.
-        if directOnly, chatIdentityAvailable() {
-            where_ = "\(ChatDB.directOnlyPredicate) AND " + where_
+        // APPENDED, not prepended. SQLite codes non-indexable WHERE terms in source order, so
+        // putting this correlated subquery first ran it on every row the scan visited, ahead of
+        // the cheap LIKE and date tests: measured 0.905s prepended vs 0.557s appended on a
+        // synthetic 600k-message store with Apple's indexes at `--hours 0` (0.394s with no
+        // filter at all). Bind numbering is not what decides this — the placeholders above are
+        // explicitly numbered ?1/?2, so either position is safe, and `recent` already appends.
+        if directOnly.applied {
+            where_ += " AND \(ChatDB.directOnlyPredicate)"
         }
         let sql = ChatDB.messageSelect + "\nWHERE \(where_)\nORDER BY m.date DESC LIMIT \(ChatDB.fuzzySoftCap)"
         let rows = (try? reader.rows(sql, binds)) ?? []
@@ -736,8 +782,13 @@ public struct ChatDB {
         // TWO PASSES, deliberately: choose the rows FIRST, then look up activity and
         // participants for only those chats. Doing it the other way round made every
         // invocation — `chats --name x --limit 1` included — pay for a GROUP BY across every
-        // message row in the store. Measured on a 596k-message store: 3.91s for the whole-store
-        // grouping, 0.139s restricted to the named chats, 0.019s for a `--limit 5` call.
+        // message row in the store. Measured on a large store, the whole-store grouping was
+        // ~28x slower than the same lookup restricted to the named chats, and slower still than
+        // a `--limit 5` call.
+        //
+        // This is a reduction in cost, not a constant: what remains scales with the number of
+        // messages held by the chats actually RETURNED, so a selection covering many busy chats
+        // is still substantial work. `--limit` is the lever on a large store.
         var selected: [SQLiteReader.Row] = []
         for row in rows {
             guard row.text("chat_identifier") != nil, let name = row.text("display_name") else { continue }

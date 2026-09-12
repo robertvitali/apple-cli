@@ -40,22 +40,28 @@ JSON output are stable per the versioning policy — breaking changes bump
   back to. Both commands also take a new `--direct-only` flag that drops group-chat messages
   entirely, so a caller can read just their 1:1 conversations; the filter is applied before
   `--limit`, so asking for 100 messages still returns up to 100 rather than 100-minus-the-groups,
-  and the payload echoes `direct_only`. A Messages database too old to record which chat a message
-  is in reports nulls and `is_group: false` instead of failing, and `--direct-only` then filters
-  nothing out — saying so on stderr rather than quietly handing back the group messages you asked
-  to exclude.
+  and the payload echoes `direct_only` alongside `direct_only_applied`. A Messages database too
+  old to record which chat a message is in reports nulls and `is_group: false` instead of failing,
+  and `--direct-only` then filters nothing out — `direct_only_applied: false` says so in the JSON,
+  and a warning goes to stderr, rather than quietly handing back the group messages you asked to
+  exclude. Any chat style other than "group", including an absent or unrecognized one, is reported
+  and filtered as non-group.
 - **`messages chats` now reports when each chat was last active and who is in it.** Each chat
   gains `last_activity` (the date of the newest message in it, or `null` if it has none),
-  `last_activity_timestamp` (the same instant in the raw form Messages stores) and `participants`
-  (the phone numbers and email addresses in the chat, possibly empty) — enough to pick the right
-  chat without a second command. Two new flags narrow the listing: `--name <text>` keeps only
-  chats whose name contains that text, case-insensitively (echoed back as `name_filter`), and
-  `--limit <N>` caps how many come back. With neither flag the output and its order are exactly
-  what they were before.
-- These additions keep `schema_version` at 1: no existing key is removed, renamed, or retyped, and
-  the new nullable keys are always present with an explicit `null` so a caller can tell "no value"
-  from "an older binary". `group_name`, `handle`, `service` and the chat row's existing optional
-  fields keep their present-only-when-set shape unchanged.
+  `last_activity_timestamp` and `participants` (the phone numbers and email addresses in the chat,
+  possibly empty) — enough to pick the right chat without a second command. Compare chats on
+  `last_activity`: `last_activity_timestamp` is the raw value Messages stores, which is in
+  nanoseconds on recent messages but seconds on old ones, so it is not a fixed unit and is not
+  comparable across chats. Two new flags narrow the listing: `--name <text>` keeps only chats
+  whose name contains that text, case-insensitively (echoed back as `name_filter`; an empty value
+  is treated as no filter at all), and `--limit <N>` caps how many come back. With neither flag
+  the listing returns the same chats in the same order as before.
+- These additions keep `schema_version` at 1: no existing **JSON** key is removed, renamed, or
+  retyped, the key order is unchanged, and the new nullable keys are always present with an
+  explicit `null` so a caller can tell "no value" from "an older binary". `group_name`, `handle`,
+  `service` and the chat row's existing optional fields keep their present-only-when-set shape
+  unchanged. The human `--text` rendering is not the versioned contract and does change: `messages
+  chats` now appends `— last activity …; participants: …` to each listed chat that has them.
 - **`messages recent` and `messages search` now report attachment metadata.** Each
   message gains an `attachments` array — per file: `rowid`, `guid`, `filename` (verbatim, as
   chat.db stores it, often `~`-relative), `path` (an absolute standardized path when one can be

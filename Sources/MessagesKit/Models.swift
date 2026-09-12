@@ -38,6 +38,11 @@ struct RecentData: Encodable {
     /// Echoes `--direct-only`, so a caller can tell a filtered read from an unfiltered one
     /// without re-deriving it from the messages.
     let direct_only: Bool
+    /// Whether the filter was actually APPLIED. `direct_only: true` with this false means the
+    /// store cannot say which chat a message belongs to, so group-chat messages are still in
+    /// the result. Always present. stdout JSON is the only channel a machine consumer is told
+    /// to trust, so a filter that did not run has to be visible here and not only on stderr.
+    let direct_only_applied: Bool
     let count: Int
     let messages: [ChatDB.Message]
 }
@@ -71,6 +76,8 @@ struct SearchData: Encodable {
     let match: String
     /// Echoes `--direct-only`, matching the `recent` payload.
     let direct_only: Bool
+    /// Whether the filter was actually applied — see `RecentData.direct_only_applied`.
+    let direct_only_applied: Bool
     let count: Int
     let scanned: Int
     let truncated: Bool

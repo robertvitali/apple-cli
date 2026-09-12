@@ -589,6 +589,19 @@ struct ChatDBFixtureTests {
         #expect(direct.chat_identifier == "+12125550100")
     }
 
+    /// A NAMED group reached through search. Every other search test hits the ''-display-name
+    /// chat, so the search path's `group_name` assignment had no coverage — and this is the case
+    /// where `group_name` and `is_group` should agree rather than diverge.
+    @Test func searchReportsBothNameAndIdentityForANamedGroup() throws {
+        let fx = try ChatFixture()
+        var db = try makeDB(fx, book: friendBook)
+        let hit = try #require(db.search(term: "group hi", hours: 24, threshold: 0.6, match: .contains)
+            .matches.first { $0.rowid == 4 })
+        #expect(hit.group_name == "Test Group")
+        #expect(hit.is_group == true)
+        #expect(hit.chat_identifier == "chat999")
+    }
+
     /// A chat.db that cannot answer "which chat is this message in?" degrades to nulls rather
     /// than failing the read outright — the posture the attachment join already takes.
     @Test func missingChatJoinYieldsNullChatIdentity() throws {
@@ -601,7 +614,7 @@ struct ChatDBFixtureTests {
         #expect(msgs.allSatisfy { $0.chat_identifier == nil && $0.chat_guid == nil && !$0.is_group })
         // …and `--direct-only` cannot silently swallow the whole store when the schema is the
         // thing that is missing: nothing is KNOWN to be a group, so nothing is excluded.
-        #expect(db.recent(hours: 24, handleRowIds: nil, limit: 100, directOnly: true).count == 9)
+        #expect(db.recent(hours: 24, handleRowIds: nil, limit: 100, directOnly: db.resolveDirectOnly(requested: true)).count == 9)
     }
 
     /// The guard both `--direct-only` and the identity fields hang off must be the SAME one.
@@ -627,7 +640,7 @@ struct ChatDBFixtureTests {
         #expect(unfiltered == [1, 2, 3, 4, 5, 6, 8, 9, 10], "precondition: the read still works")
         // The store cannot classify a chat, so nothing is KNOWN to be a group and nothing is
         // excluded. Returning [] here is the regression this pins.
-        #expect(db.recent(hours: 24, handleRowIds: nil, limit: 100, directOnly: true).map(\.rowid)
+        #expect(db.recent(hours: 24, handleRowIds: nil, limit: 100, directOnly: db.resolveDirectOnly(requested: true)).map(\.rowid)
             == unfiltered)
         #expect(db.canIdentifyChats() == false)
         // …and the fields degrade in step with the filter, rather than one working alone.
@@ -641,7 +654,7 @@ struct ChatDBFixtureTests {
         let fx = try ChatFixture()
         var db = try makeDB(fx, book: friendBook)
         let all = db.recent(hours: 24, handleRowIds: nil, limit: 100).map(\.rowid)
-        let direct = db.recent(hours: 24, handleRowIds: nil, limit: 100, directOnly: true).map(\.rowid)
+        let direct = db.recent(hours: 24, handleRowIds: nil, limit: 100, directOnly: db.resolveDirectOnly(requested: true)).map(\.rowid)
 
         #expect(all == [1, 2, 3, 4, 5, 6, 8, 9, 10])
         // 4 and 5 are the two group-chat messages; 3 has no chat row and is NOT a group, so it
@@ -654,7 +667,7 @@ struct ChatDBFixtureTests {
     @Test func recentDirectOnlyFillsTheRequestedLimit() throws {
         let fx = try ChatFixture()
         var db = try makeDB(fx, book: friendBook)
-        #expect(db.recent(hours: 24, handleRowIds: nil, limit: 4, directOnly: true).map(\.rowid)
+        #expect(db.recent(hours: 24, handleRowIds: nil, limit: 4, directOnly: db.resolveDirectOnly(requested: true)).map(\.rowid)
             == [1, 2, 3, 6])
         // Same limit unfiltered stops at 4, proving the group rows really were in the way.
         #expect(db.recent(hours: 24, handleRowIds: nil, limit: 4).map(\.rowid) == [1, 2, 3, 4])
@@ -668,9 +681,9 @@ struct ChatDBFixtureTests {
         var db = try makeDB(fx, book: friendBook)
         // Handle 2's only message is the group one, so the two filters together match nothing…
         #expect(db.recent(hours: 24, handleRowIds: [2], limit: 100).map(\.rowid) == [4])
-        #expect(db.recent(hours: 24, handleRowIds: [2], limit: 100, directOnly: true).isEmpty)
+        #expect(db.recent(hours: 24, handleRowIds: [2], limit: 100, directOnly: db.resolveDirectOnly(requested: true)).isEmpty)
         // …while handle 1's messages are all 1:1 and survive both.
-        #expect(db.recent(hours: 24, handleRowIds: [1], limit: 100, directOnly: true).map(\.rowid)
+        #expect(db.recent(hours: 24, handleRowIds: [1], limit: 100, directOnly: db.resolveDirectOnly(requested: true)).map(\.rowid)
             == [1, 2, 3, 6, 8, 9, 10])
     }
 
@@ -679,10 +692,10 @@ struct ChatDBFixtureTests {
         var db = try makeDB(fx, book: friendBook)
         #expect(db.search(term: "error", hours: 24, threshold: 0.6, match: .contains)
             .matches.contains { $0.rowid == 5 })
-        #expect(db.search(term: "error", hours: 24, threshold: 0.6, match: .contains, directOnly: true)
+        #expect(db.search(term: "error", hours: 24, threshold: 0.6, match: .contains, directOnly: db.resolveDirectOnly(requested: true))
             .matches.isEmpty)
         // Positive control: a 1:1 hit is untouched by the flag.
-        #expect(db.search(term: "hello", hours: 24, threshold: 0.6, match: .contains, directOnly: true)
+        #expect(db.search(term: "hello", hours: 24, threshold: 0.6, match: .contains, directOnly: db.resolveDirectOnly(requested: true))
             .matches.map(\.rowid) == [1])
     }
 

@@ -185,6 +185,12 @@ struct Recent: ParsableCommand {
             // unmatched or ambiguous `--contact` exit 0 on a machine where the database cannot be
             // opened at all, which is a behavior change from the oracle-parity contract.
             var db = try dependencies.makeChatDB(book)
+            // Bound ONCE, before any branch can return, and threaded from here — the same
+            // discipline the write gate uses. Hoisted above the `--contact` early returns
+            // deliberately: those used to emit `direct_only: true` with no warning and no way
+            // for a consumer to tell the filter had not run.
+            let directOnlyFilter = db.resolveDirectOnly(requested: directOnly)
+            warnIfDirectOnlyUnavailable(directOnlyFilter)
 
             var rowIds: [Int64]? = nil
             var candidates: [ContactCandidateData]? = nil
@@ -204,7 +210,9 @@ struct Recent: ParsableCommand {
                         note = "No contacts found matching '\(filter)'."
                         try emit(global, RecentData(hours: hours, limit: limit, contact: filter,
                             resolved_handle_rowids: nil, ambiguous: false, candidates: nil,
-                            note: note, direct_only: directOnly, count: 0, messages: [])) { note! }
+                            note: note, direct_only: directOnly,
+                            direct_only_applied: directOnlyFilter.applied,
+                            count: 0, messages: [])) { note! }
                         return
                     } else if matches.count == 1 {
                         // A single fuzzy match may resolve to an email handle, not a
@@ -217,7 +225,9 @@ struct Recent: ParsableCommand {
                         try emit(global, RecentData(hours: hours, limit: limit, contact: filter,
                             resolved_handle_rowids: nil, ambiguous: true, candidates: candidates,
                             note: "Multiple contacts matched; re-run with --handle <phone/email>.",
-                            direct_only: directOnly, count: 0, messages: [])) {
+                            direct_only: directOnly,
+                            direct_only_applied: directOnlyFilter.applied,
+                            count: 0, messages: [])) {
                                 "Multiple contacts found matching '\(filter)':\n" +
                                 matches.enumerated().prefix(10)
                                     .map { "\($0.offset + 1). \($0.element.name) (\($0.element.phone)) - confidence \(String(format: "%.2f", $0.element.score))" }
@@ -228,15 +238,15 @@ struct Recent: ParsableCommand {
                 }
             }
 
-            warnIfDirectOnlyUnavailable(directOnly, db)
             let messages = db.recent(hours: hours, handleRowIds: rowIds, limit: limit,
-                                     directOnly: directOnly)
+                                     directOnly: directOnlyFilter)
             // Echo the effective filter (contact OR handle) so a `--handle`-only
             // invocation yields a self-describing envelope instead of contact:null.
             try emit(global, RecentData(hours: hours, limit: limit, contact: filter,
                 resolved_handle_rowids: rowIds, ambiguous: false, candidates: nil,
                 note: messages.isEmpty ? (note ?? "No messages found in the specified time period.") : note,
-                direct_only: directOnly, count: messages.count, messages: messages)) {
+                direct_only: directOnly, direct_only_applied: directOnlyFilter.applied,
+                count: messages.count, messages: messages)) {
                     messages.isEmpty ? "No messages found in the specified time period."
                                      : messages.map(renderMessage).joined(separator: "\n")
                 }
@@ -250,10 +260,11 @@ struct Recent: ParsableCommand {
 /// Silence here is the bad option: the caller asked to exclude group chats, got group-chat
 /// content back, and the envelope still says `direct_only: true`. This module already carries a
 /// scar from a filter that failed open (see the privacy note in `ChatDB.recent`). It goes to
-/// stderr rather than into the payload because `--text`/stderr is explicitly NOT the versioned
-/// contract, so saying this costs no schema surface.
-private func warnIfDirectOnlyUnavailable(_ directOnly: Bool, _ db: ChatDB) {
-    guard directOnly, !db.canIdentifyChats() else { return }
+/// stderr in ADDITION to the payload's `direct_only_applied`, not instead of it: stderr is
+/// explicitly NOT the versioned contract, so a machine consumer has to be able to read this
+/// fact from stdout, while a human at a terminal should not have to know the field exists.
+private func warnIfDirectOnlyUnavailable(_ filter: ChatDB.DirectOnlyFilter) {
+    guard filter.requested, !filter.applied else { return }
     Output.writeError(Data("""
         warning: --direct-only was not applied. This Messages database cannot report which \
         chat a message belongs to, so no group-chat messages were excluded.
@@ -459,15 +470,21 @@ struct Chats: ParsableCommand {
             if let limit, !(1...10_000).contains(limit) {
                 throw AppleError.validation("limit must be between 1 and 10000")
             }
+            // An EMPTY `--name` is not a filter — it is almost always an unset shell variable.
+            // `namedChats` already declines to filter on it, so echoing the raw value told a
+            // consumer "a filter was applied" while every chat came back, and `--text` rendered
+            // a bare `matching ''`. Normalize to nil ONCE, before filtering and before echoing,
+            // so the envelope and the behavior cannot disagree.
+            let nameFilter = (name?.isEmpty == false) ? name : nil
             let book = dependencies.loadAddressBook()
             let db = try dependencies.makeChatDB(book)
-            let chats = db.namedChats(nameFilter: name, limit: limit)
-            try emit(global, ChatsData(count: chats.count, name_filter: name, chats: chats)) {
+            let chats = db.namedChats(nameFilter: nameFilter, limit: limit)
+            try emit(global, ChatsData(count: chats.count, name_filter: nameFilter, chats: chats)) {
                 if chats.isEmpty {
-                    return name.map { "No named group chats matching '\($0)'." }
+                    return nameFilter.map { "No named group chats matching '\($0)'." }
                         ?? "No named group chats found."
                 }
-                let header = name.map { "Available group chats matching '\($0)':" }
+                let header = nameFilter.map { "Available group chats matching '\($0)':" }
                     ?? "Available group chats:"
                 return header + "\n" + chats.enumerated().map { renderChat($0.offset + 1, $0.element) }
                     .joined(separator: "\n")
@@ -540,11 +557,13 @@ struct Search: ParsableCommand {
             }
             let book = dependencies.loadAddressBook()
             var db = try dependencies.makeChatDB(book)
-            warnIfDirectOnlyUnavailable(directOnly, db)
+            let directOnlyFilter = db.resolveDirectOnly(requested: directOnly)
+            warnIfDirectOnlyUnavailable(directOnlyFilter)
             let result = db.search(term: term, hours: hours, threshold: threshold, match: mode,
-                                   directOnly: directOnly)
+                                   directOnly: directOnlyFilter)
             let data = SearchData(search_term: term, hours: hours, threshold: threshold, match: match,
-                direct_only: directOnly, count: result.matches.count, scanned: result.scanned,
+                direct_only: directOnly, direct_only_applied: directOnlyFilter.applied,
+                count: result.matches.count, scanned: result.scanned,
                 truncated: result.truncated, messages: result.matches)
             try emit(global, data) {
                 if result.matches.isEmpty { return "No messages found matching '\(term)'." }
