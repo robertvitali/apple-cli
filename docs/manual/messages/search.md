@@ -10,7 +10,7 @@ apple messages search <term> [flags]
 
 ## Description
 
-Search returns scored message matches and carries the same chat identity and attachment shape as `messages recent`: `chat_identifier`, `chat_guid`, `is_group`, `has_attachments`, and per-file metadata in `attachments`. `--direct-only` drops group-chat hits; `direct_only` echoes the flag and `direct_only_applied` reports whether the filter actually ran. If the store cannot say which chat a message is in, the filter excludes nothing, `direct_only_applied` is false, and a warning goes to stderr. Any `chat.style` other than 43, including an absent or unrecognized one, is reported and filtered as non-group. This is additive under `schema_version` 1 because existing keys keep their names and types.
+Search returns scored message matches and carries the same chat identity and attachment shape as `messages recent`: `chat_identifier`, `chat_guid`, `is_group`, `has_attachments`, and per-file metadata in `attachments`. `--direct-only` drops group-chat hits, keeping messages that belong to no chat at all (they are not in a group chat, and carry a null `chat_identifier`). `search` has no `--limit`; the filter is applied before the internal cap on how many candidate messages are scored, so that budget goes to messages that can actually match. `direct_only` echoes the flag and `direct_only_applied` reports whether the filter actually ran. If the store cannot say which chat a message is in, the filter excludes nothing, `direct_only_applied` is false, and a warning goes to stderr. Any `chat.style` other than 43, including an absent or unrecognized one, is reported and filtered as non-group. This is additive under `schema_version` 1 because existing keys keep their names and types.
 
 ## Options
 

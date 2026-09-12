@@ -17,6 +17,11 @@ public struct ChatDB {
     private let homeDirectoryForTilde: String
     // Caches for per-invocation sender resolution.
     private var chatDisplayNameCache: [String: String?] = [:]
+    /// Memoized `chatIdentityAvailable()`. The probe is two `PRAGMA table_info` round-trips and
+    /// its answer cannot change under a read-only reader, but `shape` ran it on every call —
+    /// so a `recent` and its `search` sibling each paid it again after the filter had already
+    /// resolved the same fact. One probe per instance now backs both.
+    private var chatIdentityAvailableCache: Bool?
 
     /// Open a reader for a data command. `copyToTemp` snapshots chat.db (+wal/shm)
     /// so a concurrently-writing Messages.app can't corrupt the read.
@@ -278,13 +283,16 @@ public struct ChatDB {
     /// Whether this store can answer "which chat is this message in?". A chat.db old or
     /// pruned enough to lack the join (or the `chat` columns) yields nulls and `is_group:false`
     /// rather than failing the whole read — the same posture the attachment join takes.
-    private func chatIdentityAvailable() -> Bool {
-        chatMessageJoinAvailable()
+    private mutating func chatIdentityAvailable() -> Bool {
+        if let cached = chatIdentityAvailableCache { return cached }
+        let available = chatMessageJoinAvailable()
             && tableColumns("chat").isSuperset(of: ["chat_identifier", "guid", "style"])
+        chatIdentityAvailableCache = available
+        return available
     }
 
     /// Whether this store can honor `directOnly` and populate the chat-identity fields.
-    public func canIdentifyChats() -> Bool { chatIdentityAvailable() }
+    public mutating func canIdentifyChats() -> Bool { chatIdentityAvailable() }
 
     /// The resolved `--direct-only` posture for ONE invocation: what the caller asked for, and
     /// whether this store can actually deliver it.
@@ -316,14 +324,14 @@ public struct ChatDB {
     }
 
     /// Probe the store ONCE and resolve the posture. Call at the top of `run()`.
-    public func resolveDirectOnly(requested: Bool) -> DirectOnlyFilter {
+    public mutating func resolveDirectOnly(requested: Bool) -> DirectOnlyFilter {
         // Short-circuit: an unrequested filter must not pay for two PRAGMA round-trips.
         guard requested else { return .off }
         return DirectOnlyFilter(requested: true, available: chatIdentityAvailable())
     }
 
     /// Chat identity for a batch of message rowids, keyed by message rowid.
-    private func chatIdentities(ids: [Int64]) -> [Int64: ChatIdentity] {
+    private mutating func chatIdentities(ids: [Int64]) -> [Int64: ChatIdentity] {
         guard !ids.isEmpty, chatIdentityAvailable() else { return [:] }
         var out: [Int64: ChatIdentity] = [:]
         for chunk in ChatDB.idChunks(ids) {
@@ -736,7 +744,13 @@ public struct ChatDB {
         /// Newest message in this chat — ISO-8601 in JSON. ALWAYS present (null when the
         /// chat holds no messages, or the store cannot answer).
         public let last_activity: Date?
-        /// The same instant as the raw Apple-epoch nanosecond value `chat.db` stores.
+        /// The RAW `message.date` value chat.db stores for that message — NOT a fixed unit:
+        /// nanoseconds since the Apple epoch on modern rows, SECONDS on legacy ones (the same
+        /// greater-than-10-digit heuristic `MessageTime.date(fromRaw:)` applies to a message
+        /// `timestamp`). Bigger still means more recent, within a chat and across chats, because
+        /// ns values always exceed seconds values and ns rows are always the newer ones — so it
+        /// is safe to SORT on. It is not safe to divide by 1e9, subtract, or otherwise treat as
+        /// one unit; `last_activity` is the normalized form for that.
         public let last_activity_timestamp: Int64?
         /// Handle ids from `chat_handle_join` → `handle.id`; possibly empty.
         public let participants: [String]
@@ -816,12 +830,15 @@ public struct ChatDB {
     /// chat ROWID → raw date of its newest message, for the given chats. Chats with no messages
     /// are absent.
     ///
-    /// MAX runs on the RAW column, which `MessageTime.date(fromRaw:)` exists because is bi-modal:
-    /// seconds since 2001 on legacy rows, nanoseconds on modern ones. That is safe here and the
-    /// reasoning is worth not re-deriving — a nanosecond value (~7.8e17) always exceeds a seconds
-    /// value (~7.8e8), and the ns rows are always the newer ones, so the numeric maximum IS the
+    /// MAX runs on the RAW column, which is bi-modal — seconds since 2001 on legacy rows,
+    /// nanoseconds on modern ones. That is exactly why `MessageTime.date(fromRaw:)` exists, and
+    /// exactly why taking MAX of it looks wrong at first glance. It is sound, and the reasoning
+    /// is worth not re-deriving: a nanosecond value (~7.8e17) always exceeds a seconds value
+    /// (~7.8e8), and the ns rows are always the newer ones, so the numeric maximum IS the
     /// chronological maximum. Converting per row before comparing would give the same answer at
-    /// much greater cost.
+    /// much greater cost. The same premise is what makes the emitted
+    /// `last_activity_timestamp` safe to ORDER on across chats while remaining unsafe to read
+    /// as a fixed unit.
     ///
     /// Like `chatParticipants`, this leans on `try?` to absorb a store that has no
     /// `chat_message_join` at all, rather than pre-checking the schema: one posture for both.

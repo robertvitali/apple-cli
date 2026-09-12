@@ -38,9 +38,13 @@ JSON output are stable per the versioning policy — breaking changes bump
   question the previous output could not: `group_name` is only a chat's DISPLAY NAME, so a group
   nobody ever named looked exactly like a 1:1 conversation, and there was no id to send a reply
   back to. Both commands also take a new `--direct-only` flag that drops group-chat messages
-  entirely, so a caller can read just their 1:1 conversations; the filter is applied before
-  `--limit`, so asking for 100 messages still returns up to 100 rather than 100-minus-the-groups,
-  and the payload echoes `direct_only` alongside `direct_only_applied`. A Messages database too
+  entirely, so a caller can read just their 1:1 conversations. On `messages recent` the filter is
+  applied before `--limit`, so asking for 100 messages still returns up to 100 rather than
+  100-minus-the-groups; `messages search` has no `--limit`, and there the filter runs before the
+  internal cap on how many candidate messages are scored, so that budget is spent on messages
+  that can actually match. A message that belongs to no chat at all is kept either way — it is
+  not in a group chat — and you can spot those by their null `chat_identifier`. The payload
+  echoes `direct_only` alongside `direct_only_applied`. A Messages database too
   old to record which chat a message is in reports nulls and `is_group: false` instead of failing,
   and `--direct-only` then filters nothing out — `direct_only_applied: false` says so in the JSON,
   and a warning goes to stderr, rather than quietly handing back the group messages you asked to
@@ -49,10 +53,12 @@ JSON output are stable per the versioning policy — breaking changes bump
 - **`messages chats` now reports when each chat was last active and who is in it.** Each chat
   gains `last_activity` (the date of the newest message in it, or `null` if it has none),
   `last_activity_timestamp` and `participants` (the phone numbers and email addresses in the chat,
-  possibly empty) — enough to pick the right chat without a second command. Compare chats on
-  `last_activity`: `last_activity_timestamp` is the raw value Messages stores, which is in
-  nanoseconds on recent messages but seconds on old ones, so it is not a fixed unit and is not
-  comparable across chats. Two new flags narrow the listing: `--name <text>` keeps only chats
+  as stored rather than resolved to contact names, and not including you) — enough to pick the
+  right chat without a second command. `last_activity_timestamp` is the raw value Messages
+  stores, which is in nanoseconds for recent messages but seconds for old ones: a larger value is
+  always the more recent message, so it is safe to sort on, but it is not a single unit, so do
+  not divide it or subtract two of them. Use `last_activity` for anything that treats it as a
+  time. Two new flags narrow the listing: `--name <text>` keeps only chats
   whose name contains that text, case-insensitively (echoed back as `name_filter`; an empty value
   is treated as no filter at all), and `--limit <N>` caps how many come back. With neither flag
   the listing returns the same chats in the same order as before.
