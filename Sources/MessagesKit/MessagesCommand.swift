@@ -314,18 +314,30 @@ private func sendBodyDescription(message: String?, files: [String]) -> String {
 /// delivered, because a retry that includes them sends them a second time rather than updating
 /// anything.
 ///
-/// When the failure was not during a file send (the body failed, or the recipient could not be
-/// resolved on the requested service) nothing was delivered and the generic message stands.
-private func sendFailure(_ outcome: Send.Outcome, files: [String]) -> AppleError {
+/// THE BODY IS REPORTED SEPARATELY, on every branch. `filesSent` counts attachments only, so a
+/// "body delivered, attachment 1 failed" run has `filesSent == 0` and an empty `applied` — and a
+/// caller that did exactly what the old message said ("anything already delivered is listed in
+/// `applied`") re-sent the body to a real person. `bodyDelivered` is carried out of the script for
+/// this one purpose, and it matters on the no-failed-attachment branch too: "body delivered, then
+/// the SMS account lookup failed" is reachable.
+private func sendFailure(_ outcome: Send.Outcome, message: String?, files: [String]) -> AppleError {
+    // Only meaningful when a body was actually asked for; a file-only send has none to re-send.
+    let bodyNote = (message != nil && outcome.bodyDelivered)
+        ? " The message body WAS already delivered — omit --message from a retry."
+        : ""
     guard let failed = outcome.failedFile, files.indices.contains(failed - 1) else {
-        return AppleError.upstream("send failed (Messages returned an error)")
+        return AppleError(
+            type: AppleErrorType.upstream,
+            message: "send failed (Messages returned an error)." + bodyNote,
+            exitCode: AppleExit.upstream)
     }
     let delivered = Array(files.prefix(outcome.filesSent))
     return AppleError(
         type: AppleErrorType.upstream,
         message: "send failed on attachment \(failed) of \(files.count) ('\(files[failed - 1])') — "
-            + "files_sent=\(outcome.filesSent). Anything already delivered is listed in `applied`; "
-            + "EXCLUDE it from a retry, because a resend is a second message, not an update.",
+            + "files_sent=\(outcome.filesSent). Attachments already delivered are listed in "
+            + "`applied`; EXCLUDE them from a retry, because a resend is a second message, not an "
+            + "update." + bodyNote,
         exitCode: AppleExit.upstream,
         applied: delivered.isEmpty ? nil : delivered)
 }
@@ -367,10 +379,6 @@ struct Send_: ParsableCommand {
             guard message != nil || !file.isEmpty else {
                 throw AppleError.validation("nothing to send: pass --message, --file, or both")
             }
-            // EVERY attachment is validated before ANY of them is dispatched. Validating lazily
-            // would let a typo in the third path surface only after the body and two files had
-            // already been delivered — an unrecoverable half-send for a free-to-catch mistake.
-            let files = try file.map { try Send.resolveAttachment($0) }
             let book = dependencies.loadAddressBook()
             switch Send.resolve(recipient: recipient, groupChat: group, book: book) {
             case .notFound(let r):
@@ -411,6 +419,26 @@ struct Send_: ParsableCommand {
                         exitCode: AppleExit.usage, sandbox: true)
                 }
 
+                // `--service sms` to an address the SMS service cannot reach is knowably
+                // impossible, and the oracle's own phone-shaped test is what knows it — the same
+                // test that stops the `auto` fallback from trying SMS for an email address. Naming
+                // it here turns an opaque `upstream_error` (after Messages has been asked to do it)
+                // into a `validation_error` the caller can fix. `auto` is deliberately NOT
+                // pre-validated: for it, an email address is a legitimate iMessage-only send.
+                if serviceMode == .sms, !group, !Send.smsReachable(handle) {
+                    throw AppleError.validation(
+                        "--service sms cannot reach '\(handle)': SMS needs a phone number, and this "
+                        + "recipient has no digits in it. Use --service imessage or --service auto.")
+                }
+
+                // EVERY attachment is validated before ANY of them is dispatched — a typo in the
+                // third path must not surface only after the body and two files have been
+                // delivered. It runs BELOW the sandbox gate on purpose: above it, a sandbox-refused
+                // send would report a plain file `validation_error` with no `sandbox: true` for a
+                // caller to branch on, and `--dry-run` would stat arbitrary paths and report
+                // exists/directory/readable for a send that was never going to happen.
+                let files = try file.map { try AttachmentSource.resolve($0) }
+
                 guard gate.willExecute else {
                     let preview = SendPreview(action: "send", executed: false, dry_run: true,
                         group_chat: group, recipient: recipient, resolved_handle: handle,
@@ -432,7 +460,7 @@ struct Send_: ParsableCommand {
                     if let raw = result.error {
                         Output.writeError(Data(("osascript: " + raw + "\n").utf8))
                     }
-                    throw sendFailure(result, files: files)
+                    throw sendFailure(result, message: message, files: files)
                 }
                 let data = SendResult(action: "send", executed: true, ok: true, group_chat: group,
                     recipient: recipient, resolved_handle: handle, display_name: displayName,

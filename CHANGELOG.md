@@ -21,40 +21,25 @@ JSON output are stable per the versioning policy — breaking changes bump
 
 - **`messages send` can now pick a service and carry file attachments.** `--service
   auto|imessage|sms` chooses how a one-to-one send is routed: `auto` is the default and is
-  unchanged behaviour (iMessage first, then SMS for a phone number), `imessage` uses iMessage
-  only and fails instead of quietly falling back to SMS, and `sms` uses the enabled SMS account
-  only. An unrecognized value is a `validation_error` (exit 64). The flag is accepted with
-  `--group` and has no effect there — a chat id already names the chat's own service — and is
-  echoed back so a caller can see it was ignored rather than honoured. `--file <path>` attaches a
-  file and may be repeated: the message body goes out first, then each file in the order given,
-  all in one Messages run. `--message` is now optional, and a send with neither a message nor a
-  file is refused instead of dispatching a send that delivers nothing. Every `--file` path is
-  checked before anything is sent — it must be an existing, readable, regular file, resolved to
-  an absolute path — so a typo is a refusal rather than a message delivered with the attachment
-  missing. A send is not atomic, though: if an attachment fails partway through, the failure is
-  an `upstream_error` that names which file failed, how many had already gone out, and (in
-  `error.applied`) the paths already delivered, which a retry must exclude because a resend is a
-  second message rather than an update. For the same reason `auto` will not fall back to SMS once
-  any part of a send has been delivered. JSON gains `service_requested` and `files` on both the
-  dry-run and the execute envelope and `files_sent` on the execute envelope; `service_plan` gains
-  the values `iMessage only` and `SMS only`; a file-only send reports no `message`. Attachment
-  paths are reported standardized but NOT symlink-resolved — `.`/`..` are removed, a symlink is
-  left as you spelled it — so a path you pass is a path you get back. The `--test-mode` sandbox
-  is unchanged: recipients are still confined to `APPLE_TEST_RECIPIENTS` and group sends are
-  still refused.
-
-  **`schema_version` stays 1, including for the two changes that look like contract breaks.**
-  The rule this repo works to is that changing an enum or retyping a field IS breaking, so both
-  are stated rather than assumed. (1) `service_plan` gains the values `iMessage only` and
-  `SMS only`, but an existing invocation cannot produce either: the new values are reachable
-  ONLY by passing `--service imessage`/`--service sms`, a flag that did not exist, so every
-  command line that worked before this release still emits `iMessage→SMS auto` or `group chat`
-  and its payload is byte-identical. A consumer that switches exhaustively on `service_plan`
-  sees a new value only once it starts asking for one. (2) `message` becomes omissible, but only
-  on a file-only send — a shape that could not previously exist, because `--message` was
-  required. Wherever `message` was present before, it is present now, with the same type and
-  value. No key is removed, renamed, or retyped, and no exit code changed, so agents keyed on
-  `schema_version` via `apple version` have nothing to branch on.
+  unchanged, `imessage` never falls back to SMS, and `sms` uses the SMS account only. It is
+  accepted with `--group` and has no effect there (a chat id already names the chat's own
+  service); `--service sms` to an email address is refused up front. `--file <path>` attaches a
+  file and may be repeated — the body goes out first, then each file in order, in one Messages
+  run — and works with `--group`, where every participant receives each file. `--message` is now
+  optional; a send with neither a message nor a file is refused. Attachments go through the same
+  guard `mail send --attach` uses, so a file inside a credential directory (`~/.ssh` and the
+  rest), an executable or script type, or anything over 25 MB is refused before anything is
+  sent, and the whole batch is checked first — `--dry-run` refuses exactly what an execute
+  would. Paths are symlink-resolved: a link is sent, and reported back, as the file it points
+  at. A send is not atomic, so a failure partway through returns an `upstream_error` naming
+  which attachment failed, listing the paths already delivered in `error.applied`, and saying
+  when the message body itself already went out so a retry omits `--message`. JSON gains
+  `service_requested` and `files` on the dry-run and execute envelopes and `files_sent` on the
+  execute envelope; `service_plan` gains `iMessage only` and `SMS only`; a file-only send
+  reports no `message`. `schema_version` is unchanged at 1: every new key is additive, the new
+  `service_plan` values are reachable only by passing the new flag, and `message` is omitted
+  only for a file-only send, which was not previously expressible — see
+  `docs/port-specs/messages.md` §8 for the full reasoning.
 
 - **AppleScript capture can now have an opt-in byte limit.** Set
   `APPLE_SCRIPT_MAX_OUTPUT_BYTES` to a positive decimal byte count, or pass

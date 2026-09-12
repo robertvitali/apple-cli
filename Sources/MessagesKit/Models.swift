@@ -82,7 +82,9 @@ struct SendPreview: Encodable {
     /// Absent when the send carries no body (a file-only send). Present — including as `""` —
     /// whenever `--message` was given.
     let message: String?
-    /// Absolute standardized attachment paths, in send order. `[]` when there are none.
+    /// Attachment paths in send order, absolute and SYMLINK-RESOLVED by the shared
+    /// `AppleKit.AttachmentSource.resolve` — a link is reported as the file it points at,
+    /// because that is the file being sent. `[]` when there are none.
     let files: [String]
     let note: String
 }
@@ -101,7 +103,9 @@ struct SendResult: Encodable {
     let service_requested: String
     /// Absent when the send carried no body (a file-only send).
     let message: String?
-    /// Absolute standardized attachment paths, in send order. `[]` when there are none.
+    /// Attachment paths in send order, absolute and SYMLINK-RESOLVED by the shared
+    /// `AppleKit.AttachmentSource.resolve` — a link is reported as the file it points at,
+    /// because that is the file being sent. `[]` when there are none.
     let files: [String]
     /// How many of `files` Messages actually accepted.
     let files_sent: Int

@@ -201,7 +201,7 @@ against a historical value (Q12 [1]).
 | `find_contact` | A common first name → **count 30 == 30**, all 0.95 (exact-token) — scores byte-exact. |
 | `check_imessage_availability` | 2125550142 → `available=true`, recommendation string **byte-identical**. |
 | `get_chats` | **CLI == oracle** on named-chat count (superset fields: guid, room_name, service_name, group_id, style). |
-| `send_message --group` | Validation-evidence asterisk: the `--group` path accepts the oracle group-chat identifier and dispatches via chat id, but it has never been exercised against a live group. No live group was created or messaged, and no live group send is authorized. This limits validation evidence; it does not mark the capability missing. |
+| `send_message --group` | Validation-evidence asterisk: the `--group` path accepts the oracle group-chat identifier and dispatches via chat id, but it has never been exercised against a live group. No live group was created or messaged, and no live group send is authorized. The same asterisk now covers `--group --file`: the group script builds the identical attachment loop, so every participant would receive each file, and that path has never been run against a live group either — it is pinned at the command layer and compile-checked, nothing more. This limits validation evidence; it does not mark the capability missing. |
 | `get_recent_messages` | hours=6 cross-chat: every MCP output line reproduced **byte-verbatim** (attributedBody-decoded bodies, group names, sender resolution, timestamps). **This claim is bounded to the pre-attachment build and is deliberately no longer true of `--text`** — see "Attachment metadata" below for the two intentional deviations (an appended `[N attachments: …]` suffix, and a row set that now includes attachment-only messages the oracle drops). The JSON body/group/sender/timestamp shaping the claim was really about is unchanged. |
 | `fuzzy_search_messages` | See the WRatio boundary note below. |
 
@@ -222,32 +222,60 @@ back as `service_requested` so a caller can see it was ignored rather than honou
 
 **`--file <path>`, repeatable.** The body (when there is one) is sent first, then each
 attachment in the order given, **in one `osascript` run**: splitting them across runs
-would mean a second Messages automation prompt mid-batch and a partial batch no single
+would mean a second Messages automation prompt mid-batch, and a partial batch no single
 result line could describe. `--message` is therefore optional, and a send with neither a
 body nor a file is a `validation_error`. Paths reach osascript as **argv**, never
 interpolated into the script source — the same contract the recipient and body already
 had; only the SHAPE of a send (has a body, which service) varies the emitted source, and
-that shape comes from the CLI's own flags. Each path is resolved to an absolute
-standardized path and must be an existing, readable, regular file; the whole batch is
-validated before any of it is dispatched, because Messages fails on a bad path only
-AFTER the body has gone out.
+that shape comes from the CLI's own flags. `--file` works with `--group`, and every
+participant in the chat then receives each file.
+
+**Attachment containment is the SHARED `AppleKit.AttachmentSource.resolve`**, promoted
+out of `MailKit` when this flag landed rather than reimplemented (AGENTS.md: shared
+helpers live in `AppleKit`). The first draft of `--file` checked existence and
+readability only, which under write-model v2 — where an unsandboxed send reaches any
+recipient — meant `messages send <number> --file ~/.ssh/id_ed25519` was accepted and
+delivered unrecallably from one command line, while Mail's sibling surface had refused
+exactly that for months.
+
+The guard, in order: control characters (C0/DEL) → `safety_violation`; symlinks resolved,
+then must be an existing regular file → `not_found`; over 25 MB → `validation_error`;
+executable/script extension → `validation_error`; under a credential/config directory →
+`safety_violation`, tested against BOTH the resolved path (defeats a symlink INTO one)
+and the tilde-expanded literal (defeats a credential directory that is itself a symlink).
+`--dry-run` refuses identically to execute.
+
+**The two policy questions this raised, decided rather than left silent.** The
+executable-extension blocklist and the 25 MB cap are ADOPTED for Messages, not just
+inherited by accident. Neither narrows parity — `mac_messages_mcp` is text-only and
+cannot send a file at all, so no refusal here drops an oracle capability — and the
+alternative was a second, laxer content policy on the repo's other outbound surface,
+which is the divergence the promotion exists to end. The cap also bounds a send's
+duration, which matters while the osascript run behind it still has no host deadline.
+The Notes D12 carve-out does not apply: that one exists because the Notes oracle PERMITS
+the write in question.
+
+**Paths are symlink-RESOLVED, and that is what is reported.** `files` and
+`error.applied` carry the resolved location, not the operator's spelling, because that is
+the file actually being sent; the check has to run on the resolved path anyway. The
+argument is never trimmed — `report ` (one trailing space) is a legal macOS filename, and
+trimming would silently substitute a neighbouring `report` that also exists.
+
+**`--service sms` to a digit-less recipient is refused up front** (`validation_error`,
+exit 64) using the oracle's own phone-shaped test — the same test that stops the `auto`
+fallback trying SMS for an email address. `auto` and `imessage` reach email addresses
+normally; only the arm that is knowably impossible is pre-validated.
 
 **A multi-part send is not atomic**, and the CLI says so rather than pretending
 otherwise. Body and attachments are separate transfers, so a mid-batch failure is an
 `upstream_error` naming which attachment failed, how many preceded it, and — in
 `error.applied`, the field a partial bulk Mail mutation already uses — the exact paths
-already delivered, which a retry must exclude. The same fact bounds the `auto` fallback:
+already delivered, which a retry must exclude. `filesSent` counts attachments only, so
+the result grammar carries a separate **body-delivered** bit and the error says
+explicitly when the body has to be omitted from a retry; without it a caller following
+the advice re-sent the body to a real person. The same fact bounds the `auto` fallback:
 it may only re-run a batch of which NOTHING was delivered, or the recipient would receive
 the delivered part twice.
-
-**Attachment paths are standardized, NOT symlink-resolved.** `.` and `..` are removed and
-a leading `/private` is dropped where that still names the same file, but a symlink is
-left exactly as the operator spelled it. These paths are echoed back in `files` and in
-`error.applied`; resolving them would report a location the caller never named, and for a
-link into another tree, one they may not have meant to disclose. Messages resolves the
-link itself when it reads the file, so the bytes sent are identical either way. The
-argument is also NOT trimmed: `report ` (one trailing space) is a legal macOS filename,
-and trimming would silently substitute a neighbouring `report` that also exists.
 
 **`schema_version` stays 1, and the two changes that resemble contract breaks are stated
 rather than assumed** (this repo treats an enum change or a retype as BREAKING, so
@@ -268,10 +296,12 @@ body, group x with/without a body) are compile-checked against `/usr/bin/osacomp
 Mail's `bats/helpers/applescript_syntax_check.py`, placed in the Swift tier because
 `bats/` files are frozen against branch work by the trusted-catalog gate in
 `scripts/ci/bats_inventory.py`. That test COMPILES and never executes: the same script
-under `osascript` would drive Messages.app and reach a real person. Routing, ordering,
-validation and failure reporting are pinned in the logic tier. Like the `--group` row
-above, what remains is a validation-evidence limitation rather than a capability gap: no
-attachment has been sent to a live recipient, and no live send is authorized.
+under `osascript` would drive Messages.app and reach a real person. The `auto` arm's
+two-tier `try` nesting is pinned structurally, not by substring, because that nesting is
+what keeps the routing claim above true. Routing, ordering, validation and failure
+reporting are pinned in the logic tier. Like the `--group` row above, what remains is a
+validation-evidence limitation rather than a capability gap: no attachment has been sent
+to a live recipient — 1:1 or group — and no live send is authorized.
 
 ### Attachment metadata
 

@@ -235,31 +235,47 @@ struct SendTests {
     }
 
     /// The result grammar is `success:<service>:<filesSent>` /
-    /// `error:<filesSent>:<failedFile>:<text>`. Both counters are integers, so an error message
-    /// carrying colons of its own still parses whole.
+    /// `error:<filesSent>:<failedFile>:<bodyDelivered>:<text>`. The leading fields are integers,
+    /// so an error message carrying colons of its own still parses whole.
     @Test func interpretResults() {
         #expect(Send.interpret("success:iMessage:0")
-            == Send.Outcome(ok: true, service: "iMessage", filesSent: 0, failedFile: nil, error: nil))
+            == Send.Outcome(ok: true, service: "iMessage", filesSent: 0, failedFile: nil,
+                            bodyDelivered: true, error: nil))
         #expect(Send.interpret("success:SMS:2").service == "SMS")
         #expect(Send.interpret("success:SMS:2").filesSent == 2)
         // A group chat reports no service — Messages does not name the chat's own.
         #expect(Send.interpret("success::1").service == nil)
-        #expect(Send.interpret("error:0:0:boom").ok == false)
-        #expect(Send.interpret("error:0:0:boom").error == "boom")
-        #expect(Send.interpret("error:1:2:boom: -1728").error == "boom: -1728")
-        #expect(Send.interpret("error:1:2:boom").filesSent == 1)
-        #expect(Send.interpret("error:1:2:boom").failedFile == 2)
+        #expect(Send.interpret("error:0:0:0:boom").ok == false)
+        #expect(Send.interpret("error:0:0:0:boom").error == "boom")
+        #expect(Send.interpret("error:1:2:1:boom: -1728").error == "boom: -1728")
+        #expect(Send.interpret("error:1:2:1:boom").filesSent == 1)
+        #expect(Send.interpret("error:1:2:1:boom").failedFile == 2)
         // `failedFile` 0 means "not during a file send", surfaced as nil rather than index 0.
-        #expect(Send.interpret("error:0:0:boom").failedFile == nil)
+        #expect(Send.interpret("error:0:0:0:boom").failedFile == nil)
+    }
+
+    /// THE FACT `filesSent` CANNOT CARRY. The body is not an attachment, so a run that delivered
+    /// the body and then failed on attachment 1 reports `filesSent: 0` — and before the body bit
+    /// existed, that read as "nothing was delivered". A caller following the retry advice re-sent
+    /// the body to a real person.
+    @Test func interpretCarriesWhetherTheBodyWasDelivered() {
+        #expect(Send.interpret("error:0:1:1:transfer refused").bodyDelivered == true)
+        #expect(Send.interpret("error:0:1:1:transfer refused").filesSent == 0)
+        #expect(Send.interpret("error:0:1:0:transfer refused").bodyDelivered == false)
+        // Reachable without any attachment in flight: body out, then the SMS lookup failed.
+        #expect(Send.interpret("error:0:0:1:no SMS account").bodyDelivered == true)
+        #expect(Send.interpret("error:0:0:1:no SMS account").failedFile == nil)
     }
 
     /// FAIL-CLOSED PIN. Anything outside the grammar — including whatever osascript itself prints
     /// when it never reaches a `return` — must read as a FAILURE. On a surface that reaches a real
     /// human, a parser that shrugged and called an unrecognized line a success would report a
-    /// delivery that never happened.
+    /// delivery that never happened. The superseded four-field error shape is in the list on
+    /// purpose: a half-upgraded build must not parse as a success or as a silent zero.
     @Test func interpretRejectsAnythingOutsideTheGrammar() {
         for line in ["success", "success:iMessage", "success:iMessage:x", "error:boom",
-                     "error:0:boom", "", "0:0:0", "succeeded:iMessage:0"] {
+                     "error:0:boom", "error:0:0:boom", "error:0:0:x:boom", "", "0:0:0",
+                     "succeeded:iMessage:0"] {
             let outcome = Send.interpret(line)
             #expect(outcome.ok == false, "\(line) must not read as a success")
             #expect(outcome.error?.hasPrefix("Unknown result:") == true)
@@ -364,8 +380,6 @@ struct SendTests {
 /// them sends to a real human.
 @Suite("Send service + attachments")
 struct SendServiceAndAttachmentTests {
-    private let scratch = ScratchDirs("messages-send-attachments")
-
     @Test func serviceNamesRoundTrip() {
         #expect(Send.Service(rawValue: "auto") == .auto)
         #expect(Send.Service(rawValue: "imessage") == .imessage)
@@ -417,13 +431,15 @@ struct SendServiceAndAttachmentTests {
         #expect(!smsOnly.contains("success:iMessage"))
     }
 
-    /// The `auto` fallback may only re-run a batch of which NOTHING was delivered. Without the
-    /// `firstDelivered` latch, an iMessage run that placed the body and one attachment before
-    /// failing would be replayed whole over SMS and the recipient would get both twice.
+    /// The `auto` fallback may only re-run a batch of which NOTHING was delivered. Without that
+    /// guard, an iMessage run that placed the body and one attachment before failing would be
+    /// replayed whole over SMS and the recipient would get both twice. The condition is DERIVED
+    /// from the two counters the result grammar already carries, rather than kept as a third latch
+    /// that could disagree with them.
     @Test func autoScriptRefusesToFallBackAfterAnythingWasDelivered() {
         let script = Send.directScript(service: .auto, includeMessage: true)
-        #expect(script.contains("set firstDelivered to false"))
-        #expect(script.contains("if firstDelivered then"))
+        #expect(script.contains("set bodyDelivered to 0"))
+        #expect(script.contains("if not (bodyDelivered is 0 and filesSent is 0) then"))
         #expect(script.contains("iMessage send failed after part of it was already delivered"))
     }
 
@@ -493,109 +509,44 @@ struct SendServiceAndAttachmentTests {
         }
         // …and the line that reset reaches: nothing transferred reads as no failed attachment,
         // never as attachment 0 or attachment 1.
-        let outcome = Send.interpret("error:0:0:Both iMessage and SMS failed - iMessage: x SMS: y")
+        let outcome = Send.interpret("error:0:0:0:Both iMessage and SMS failed - iMessage: x SMS: y")
         #expect(outcome.ok == false)
         #expect(outcome.filesSent == 0)
         #expect(outcome.failedFile == nil)
+        #expect(outcome.bodyDelivered == false)
         #expect(outcome.error == "Both iMessage and SMS failed - iMessage: x SMS: y")
     }
 
-    // MARK: resolveAttachment
-
-    @Test func resolvesAnExistingFileToAnAbsoluteStandardizedPath() throws {
-        let dir = try scratch.directory()
-        let file = dir.appendingPathComponent("apple-cli-test-note.txt")
-        try "synthetic".write(to: file, atomically: true, encoding: .utf8)
-
-        let resolved = try Send.resolveAttachment(file.path)
-        #expect(resolved.hasPrefix("/"))
-        #expect(resolved == file.standardizedFileURL.path)
-
-        // A `..` hop resolves to the same file rather than being handed to AppleScript verbatim.
-        let indirect = dir.appendingPathComponent("sub/../apple-cli-test-note.txt").path
-        #expect(try Send.resolveAttachment(indirect) == resolved)
-    }
-
-    /// NO TRIMMING. `report ` (one trailing space) is a legal macOS filename, so trimming the
-    /// argument would make `--file "…/report "` stat, resolve and SEND `…/report` instead — a
-    /// different file, silently substituted, with the envelope reporting the path the CLI picked
-    /// rather than the one asked for. The fixture pair is what proves it: both files exist, so a
-    /// trimming implementation still passes every existence check and simply sends the wrong one.
-    @Test func aTrailingSpaceSelectsTheTrailingSpaceFile() throws {
-        let dir = try scratch.directory()
-        let plain = dir.path + "/apple-cli-test-report"
-        let spaced = dir.path + "/apple-cli-test-report "
-        try "plain".write(toFile: plain, atomically: true, encoding: .utf8)
-        try "spaced".write(toFile: spaced, atomically: true, encoding: .utf8)
-
-        let resolved = try Send.resolveAttachment(spaced)
-        #expect(resolved.hasSuffix("apple-cli-test-report "))
-        #expect(try String(contentsOfFile: resolved, encoding: .utf8) == "spaced")
-        // The neighbour still resolves to itself — the two are distinguishable in both directions.
-        #expect(try String(contentsOfFile: Send.resolveAttachment(plain), encoding: .utf8) == "plain")
-    }
-
-    /// A leading space is a filename too, and `expandingTildeInPath` must not be handed a trimmed
-    /// spelling either.
-    @Test func aLeadingSpaceIsPartOfTheFilename() throws {
-        let dir = try scratch.directory()
-        let spaced = dir.path + "/ apple-cli-test-leading"
-        try "leading".write(toFile: spaced, atomically: true, encoding: .utf8)
-        #expect(try Send.resolveAttachment(spaced).hasSuffix("/ apple-cli-test-leading"))
-        // Trimmed, this names nothing — so a trimming implementation would refuse a real file.
-        #expect(throws: AppleError.self) {
-            try Send.resolveAttachment(dir.path + "/apple-cli-test-leading")
+    /// ROUTING PIN (option (a)). The ported `_send_message_direct` nested two `try`s: the iMessage
+    /// SERVICE lookup in the outer one, whose handler returns an error and attempts no SMS, and
+    /// only the participant lookup + delivery in the inner one that falls back. Flattening them
+    /// makes a Mac signed out of iMessage send a real SMS where the oracle sent nothing — a silent
+    /// routing change under a flag whose whole point is to leave the default alone. Substring
+    /// presence cannot see nesting, so this asserts the ORDERING that encodes it.
+    @Test func autoKeepsTheServiceLookupOutsideTheFallbackBearingTry() {
+        for includeMessage in [true, false] {
+            let script = Send.directScript(service: .auto, includeMessage: includeMessage)
+            guard let service = script.range(of: "set targetService to"),
+                  let buddy = script.range(of: "set targetBuddy to"),
+                  let fallback = script.range(of: "on error iMessageErr"),
+                  let general = script.range(of: "on error generalErr")
+            else {
+                Issue.record("auto script is missing the two-tier service/participant structure")
+                continue
+            }
+            // The service lookup precedes the participant lookup…
+            #expect(service.upperBound < buddy.lowerBound)
+            // …with EXACTLY ONE `try` opening between them: the inner, fallback-bearing one. Two
+            // would mean the lookup had been pushed inside it.
+            let between = script[service.upperBound..<buddy.lowerBound]
+            #expect(between.components(separatedBy: "try").count - 1 == 1)
+            // And the outer handler — the one that reaches no SMS — closes after the inner one.
+            #expect(fallback.lowerBound < general.lowerBound)
         }
-    }
-
-    @Test func rejectsAMissingFile() throws {
-        let missing = try scratch.directory().appendingPathComponent("no-such-file.txt").path
-        #expect(throws: AppleError.self) { try Send.resolveAttachment(missing) }
-        #expect(validationExit(try Send.resolveAttachment(missing)) == AppleExit.usage)
-    }
-
-    /// A directory is the near-miss worth pinning: Messages fails on one only AFTER the body has
-    /// gone out, so catching it here is the difference between a refusal and a half-send.
-    @Test func rejectsADirectory() throws {
-        let dir = try scratch.directory().path
-        #expect(throws: AppleError.self) { try Send.resolveAttachment(dir) }
-        #expect(validationExit(try Send.resolveAttachment(dir)) == AppleExit.usage)
-    }
-
-    @Test func rejectsAnUnreadableFile() throws {
-        let file = try scratch.directory().appendingPathComponent("apple-cli-test-locked.txt")
-        try "synthetic".write(to: file, atomically: true, encoding: .utf8)
-        try FileManager.default.setAttributes([.posixPermissions: 0o000], ofItemAtPath: file.path)
-        defer { try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: file.path) }
-        // Running as root would make every file readable and make this assertion meaningless.
-        try #require(getuid() != 0)
-        #expect(throws: AppleError.self) { try Send.resolveAttachment(file.path) }
-    }
-
-    @Test func rejectsAnEmptyPath() {
-        #expect(throws: AppleError.self) { try Send.resolveAttachment("") }
-        #expect(throws: AppleError.self) { try Send.resolveAttachment("   ") }
-    }
-
-    /// argv reaches `osascript` as C strings, so a NUL would TRUNCATE the path between the check
-    /// here and the send that uses it — validating one file and attaching another.
-    @Test func rejectsAPathCarryingANULByte() throws {
-        let file = try scratch.directory().appendingPathComponent("apple-cli-test-nul.txt")
-        try "synthetic".write(to: file, atomically: true, encoding: .utf8)
-        #expect(throws: AppleError.self) { try Send.resolveAttachment(file.path + "\u{0}/elsewhere") }
-    }
-
-    /// Every refusal is a `validation_error` at exit 64 — a bad argument, not an upstream failure,
-    /// so a caller can tell "fix your command line" from "Messages broke".
-    private func validationExit(_ body: @autoclosure () throws -> String) -> Int32? {
-        do {
-            _ = try body()
-            return nil
-        } catch let error as AppleError {
-            #expect(error.type == AppleErrorType.validation)
-            return error.exitCode
-        } catch {
-            return nil
+        // The single-service arms need no outer tier: there is no fallback to keep out of.
+        for service in [Send.Service.imessage, .sms] {
+            #expect(!Send.directScript(service: service, includeMessage: true)
+                .contains("on error generalErr"))
         }
     }
 }
