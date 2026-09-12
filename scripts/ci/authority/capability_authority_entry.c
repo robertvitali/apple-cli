@@ -6,6 +6,7 @@
 #include <fcntl.h>
 #include <float.h>
 #include <math.h>
+#include <limits.h>
 #include <stdlib.h>
 #include <stdio.h>
 #include <string.h>
@@ -931,7 +932,7 @@ typedef struct {
     char **strings, *pool;
     size_t pool_used, pool_size;
     CANestedFile *files;
-    size_t file_count;
+    size_t file_count, launcher_file;
     CANestedModule *modules;
     size_t module_count;
     const char **names, **absent, **search, **directories, **candidates;
@@ -1199,6 +1200,7 @@ static int nested_images(CANested *n, size_t object) {
             if (file == seen[j] || (n->files[file].identity.device == n->files[seen[j]].identity.device
                 && n->files[file].identity.inode == n->files[seen[j]].identity.inode)) return CA_REFUSED;
         seen[i] = file;
+        if (i == 0) n->launcher_file = file;
         if (i && (!nested_hex(n, v[1], 32) || !nested_number(n, v[2], i == 1 ? 2 : 6, i == 1 ? 2 : 6)
                   || !nested_equal(n, v[3], "arm64"))) return CA_REFUSED;
     }
@@ -1754,8 +1756,195 @@ static int selected_files(CANested *n, CAPathObservation *directories, CAPathObs
 #ifndef CA_TEST_BEFORE_FINAL
 #define CA_TEST_BEFORE_FINAL() ((void)0)
 #endif
-int ca_preload_files_check(const char *root, const unsigned char manifest_sha256[32],
-                           const char *profile_id, CABudget *budget) {
+/* This internal selection owns its copied invocation bytes until the sole
+   exec attempt returns or replaces the process. It is not an admission receipt.
+   A future native main supplies compiled external pins and the original clock;
+   this translation unit still has no executable entry or active profile. */
+enum { CA_SHIM_BYTES = 65536, CA_OPERAND_BYTES = 16384, CA_OPERANDS = 9 };
+typedef struct {
+    char root[4097], manifest_hex[65], profile[129];
+    char interpreter[4097], shim[4097], shim_parent[4097];
+    unsigned char manifest_digest[32], interpreter_digest[32], shim_digest[32], binding[32];
+    char operand_bytes[CA_OPERAND_BYTES + CA_OPERANDS];
+    char *operands[CA_OPERANDS + 1];
+    size_t operand_count;
+    double started, deadline;
+    CAClockRead clock; void *clock_state;
+    int reader, writer, duplicate;
+    struct stat shim_identity;
+    size_t shim_size;
+    CAPathObservation shim_directory;
+} CADispatch;
+
+static int dispatch_check(const CADispatch *dispatch, CABudget *budget) {
+    if (!dispatch || !budget || budget->started != dispatch->started
+        || budget->deadline != dispatch->deadline || budget->read != dispatch->clock
+        || budget->state != dispatch->clock_state || ca_budget_check(budget) != CA_OK)
+        return CA_REFUSED;
+    /* The captured callable may fail or change metadata while returning. */
+    return budget->started == dispatch->started && budget->deadline == dispatch->deadline
+        && budget->read == dispatch->clock && budget->state == dispatch->clock_state ? CA_OK : CA_REFUSED;
+}
+static int execution_digest(const char *text, unsigned char output[32], CABudget *budget) {
+    if (!text || ca_budget_check(budget) != CA_OK || strnlen(text, 65) != 64) return CA_REFUSED;
+    for (size_t i = 0; i < 32; i++) {
+        unsigned char high = (unsigned char)text[2 * i], low = (unsigned char)text[2 * i + 1];
+        if ((high >= 'A' && high <= 'F') || (low >= 'A' && low <= 'F')) return CA_REFUSED;
+        int h = hex_digit(high), l = hex_digit(low);
+        if (h < 0 || l < 0) return CA_REFUSED;
+        output[i] = (unsigned char)((h << 4) | l);
+    }
+    return ca_budget_check(budget);
+}
+static int execution_path(const char *input, char output[4097], CABudget *budget) {
+    size_t length;
+    if (canonical_path(input, &length, budget) != CA_OK || length == 1) return CA_REFUSED;
+    memcpy(output, input, length + 1);
+    return ca_budget_check(budget);
+}
+static int dispatch_selection(CADispatch *dispatch, const CAExecutionPins *pins,
+                                size_t count, const char *const operands[], CABudget *budget) {
+    static const char *const check[] = {"check", "--repository-root", NULL, "--expected-sha", NULL};
+    static const char *const compare[] = {"compare", "--base-repository-root", NULL,
+        "--expected-base-sha", NULL, "--head-repository-root", NULL, "--expected-head-sha", NULL};
+    if (!pins || !operands || (count != 5 && count != 9) || dispatch_check(dispatch, budget) != CA_OK)
+        return CA_REFUSED;
+    /* Length bounds precede copy/expansion. Only the fixed candidate operand
+       values vary, and no candidate token selects the internal handoff prefix. */
+    size_t lengths[CA_OPERANDS], total = 0;
+    const char *const *shape = count == 5 ? check : compare;
+    for (size_t i = 0; i < count; i++) {
+        if (dispatch_check(dispatch, budget) != CA_OK || !operands[i]) return CA_REFUSED;
+        lengths[i] = strnlen(operands[i], CA_PATH_BYTES + 1);
+        if (lengths[i] > CA_PATH_BYTES || lengths[i] > CA_OPERAND_BYTES - total
+            || (shape[i] && strcmp(operands[i], shape[i]) != 0)
+            || strcmp(operands[i], "--capability-bootstrap-fd") == 0) return CA_REFUSED;
+        total += lengths[i];
+    }
+    size_t used = 0;
+    for (size_t i = 0; i < count; i++) {
+        if (dispatch_check(dispatch, budget) != CA_OK) return CA_REFUSED;
+        dispatch->operands[i] = dispatch->operand_bytes + used;
+        memcpy(dispatch->operands[i], operands[i], lengths[i] + 1); used += lengths[i] + 1;
+    }
+    dispatch->operands[count] = NULL; dispatch->operand_count = count;
+    if (ca_authority_binding(pins->root, pins->manifest_sha256, pins->profile_id, dispatch->binding, budget) != CA_OK
+        || execution_path(pins->interpreter_path, dispatch->interpreter, budget) != CA_OK
+        || execution_path(pins->shim_path, dispatch->shim, budget) != CA_OK
+        || execution_digest(pins->manifest_sha256, dispatch->manifest_digest, budget) != CA_OK
+        || execution_digest(pins->interpreter_sha256, dispatch->interpreter_digest, budget) != CA_OK
+        || execution_digest(pins->shim_sha256, dispatch->shim_digest, budget) != CA_OK) return CA_REFUSED;
+    /* binding() already checked exact profile/manifest string bounds. */
+    memcpy(dispatch->root, pins->root, strlen(pins->root) + 1);
+    memcpy(dispatch->manifest_hex, pins->manifest_sha256, 65);
+    size_t profile_length = strnlen(pins->profile_id, CA_PROFILE_BYTES + 1);
+    if (profile_length > CA_PROFILE_BYTES) return CA_REFUSED;
+    memcpy(dispatch->profile, pins->profile_id, profile_length + 1);
+    memcpy(dispatch->shim_parent, dispatch->shim, strlen(dispatch->shim) + 1);
+    char *separator = strrchr(dispatch->shim_parent, '/');
+    if (!separator) return CA_REFUSED;
+    if (separator == dispatch->shim_parent) separator[1] = 0; else *separator = 0;
+    return dispatch_check(dispatch, budget);
+}
+static int execution_shim(CADispatch *dispatch, int compare, unsigned char *buffer,
+                            size_t capacity, CABudget *budget) {
+    CAPathObservation directory;
+    if (dispatch_check(dispatch, budget) != CA_OK
+        || inspect_path(dispatch->shim_parent, CP_DIRECTORY, compare ? &dispatch->shim_directory : NULL,
+                         &directory, NULL, budget) != CA_OK) return CA_REFUSED;
+    if (!compare) dispatch->shim_directory = directory;
+    CAReadExpectation expected = {NULL, compare ? &dispatch->shim_identity : NULL,
+        dispatch->shim_digest, dispatch->shim_size, CA_SHIM_BYTES, compare, 0};
+    size_t written; struct stat identity;
+    if (read_verified(dispatch->shim, &expected, buffer, capacity, &written, &identity, budget) != CA_OK
+        || (compare && dispatch->shim_identity.st_nlink != identity.st_nlink)
+        || inspect_path(dispatch->shim_parent, CP_DIRECTORY, &dispatch->shim_directory,
+                         &directory, NULL, budget) != CA_OK) return CA_REFUSED;
+    if (!compare) { dispatch->shim_identity = identity; dispatch->shim_size = written; }
+    return dispatch_check(dispatch, budget);
+}
+static int pipe_flags(int descriptor, int access, CABudget *budget) {
+    if (ca_budget_check(budget) != CA_OK) return CA_REFUSED;
+    int status = fcntl(descriptor, F_GETFL);
+    if (ca_budget_check(budget) != CA_OK || status < 0 || (status & O_ACCMODE) != access) return CA_REFUSED;
+    int result = fcntl(descriptor, F_SETFL, status | O_NONBLOCK);
+    if (ca_budget_check(budget) != CA_OK || result != 0) return CA_REFUSED;
+    status = fcntl(descriptor, F_GETFL);
+    if (ca_budget_check(budget) != CA_OK || status < 0 || !(status & O_NONBLOCK)
+        || (status & O_ACCMODE) != access) return CA_REFUSED;
+    int flags = fcntl(descriptor, F_GETFD);
+    if (ca_budget_check(budget) != CA_OK || flags < 0) return CA_REFUSED;
+    result = fcntl(descriptor, F_SETFD, flags | FD_CLOEXEC);
+    if (ca_budget_check(budget) != CA_OK || result != 0) return CA_REFUSED;
+    flags = fcntl(descriptor, F_GETFD);
+    return ca_budget_check(budget) == CA_OK && flags >= 0 && (flags & FD_CLOEXEC) ? CA_OK : CA_REFUSED;
+}
+static int relocate_endpoint(CADispatch *dispatch, int *endpoint, CABudget *budget) {
+    if (*endpoint > 2) return dispatch_check(dispatch, budget);
+    if (*endpoint < 0 || dispatch->duplicate >= 0 || dispatch_check(dispatch, budget) != CA_OK) return CA_REFUSED;
+    /* Adopt a successful duplicate before any checkpoint. The original remains
+       independently owned until close_owned consumes its one close attempt. */
+    dispatch->duplicate = fcntl(*endpoint, F_DUPFD_CLOEXEC, 3);
+    if (dispatch_check(dispatch, budget) != CA_OK || dispatch->duplicate < 3) return CA_REFUSED;
+    if (close_owned(endpoint, budget) != CA_OK) return CA_REFUSED;
+    *endpoint = dispatch->duplicate; dispatch->duplicate = -1;
+    return dispatch_check(dispatch, budget);
+}
+static int prepare_handoff(CADispatch *dispatch, CABudget *budget) {
+    unsigned char record[64];
+    if (PIPE_BUF < 64 || dispatch_check(dispatch, budget) != CA_OK
+        || ca_bootstrap_record(budget, dispatch->binding, record) != CA_OK) return CA_REFUSED;
+    int ends[2] = {-1, -1};
+    int result = pipe(ends);
+    if (result == 0) { dispatch->reader = ends[0]; dispatch->writer = ends[1]; }
+    if (dispatch_check(dispatch, budget) != CA_OK || result != 0) return CA_REFUSED;
+    if (dispatch->reader < 0 || dispatch->writer < 0 || dispatch->reader == dispatch->writer) {
+        if (dispatch->reader == dispatch->writer) dispatch->writer = -1;
+        return CA_REFUSED;
+    }
+    if (pipe_flags(dispatch->reader, O_RDONLY, budget) != CA_OK
+        || pipe_flags(dispatch->writer, O_WRONLY, budget) != CA_OK
+        || relocate_endpoint(dispatch, &dispatch->reader, budget) != CA_OK
+        || relocate_endpoint(dispatch, &dispatch->writer, budget) != CA_OK
+        || dispatch_check(dispatch, budget) != CA_OK) return CA_REFUSED;
+    /* Reader ownership is continuous through this sole write and confirmed
+       writer closure. No SIGPIPE disposition/mask change or write retry exists. */
+    ssize_t written = write(dispatch->writer, record, sizeof(record));
+    if (dispatch_check(dispatch, budget) != CA_OK || written != (ssize_t)sizeof(record)) return CA_REFUSED;
+    if (close_owned(&dispatch->writer, budget) != CA_OK) return CA_REFUSED;
+    return dispatch_check(dispatch, budget);
+}
+static int dispatch_exec(CADispatch *dispatch, CABudget *budget) {
+    if (dispatch->reader < 3 || (uint64_t)dispatch->reader > INT32_MAX || dispatch->writer >= 0
+        || dispatch->duplicate >= 0 || dispatch_check(dispatch, budget) != CA_OK) return CA_REFUSED;
+    int status = fcntl(dispatch->reader, F_GETFL);
+    if (dispatch_check(dispatch, budget) != CA_OK || status < 0 || (status & O_ACCMODE) != O_RDONLY
+        || !(status & O_NONBLOCK)) return CA_REFUSED;
+    int flags = fcntl(dispatch->reader, F_GETFD);
+    if (dispatch_check(dispatch, budget) != CA_OK || flags < 0 || !(flags & FD_CLOEXEC)) return CA_REFUSED;
+    int changed = fcntl(dispatch->reader, F_SETFD, flags & ~FD_CLOEXEC);
+    if (dispatch_check(dispatch, budget) != CA_OK || changed != 0) return CA_REFUSED;
+    flags = fcntl(dispatch->reader, F_GETFD);
+    if (dispatch_check(dispatch, budget) != CA_OK || flags < 0 || (flags & FD_CLOEXEC)) return CA_REFUSED;
+    char descriptor[11];
+    int length = snprintf(descriptor, sizeof(descriptor), "%d", dispatch->reader);
+    if (dispatch_check(dispatch, budget) != CA_OK || length < 1 || length > 10) return CA_REFUSED;
+    char *arguments[17] = {dispatch->interpreter, "-I", "-S", "-B", dispatch->shim,
+                          "--capability-bootstrap-fd", descriptor};
+    if (dispatch->operand_count > CA_OPERANDS) return CA_REFUSED;
+    for (size_t i = 0; i < dispatch->operand_count; i++) arguments[7 + i] = dispatch->operands[i];
+    char path_environment[] = "PATH=/usr/bin:/bin:/usr/sbin:/sbin", locale_environment[] = "LC_ALL=C";
+    char *environment[] = {path_environment, locale_environment, NULL};
+    if (dispatch_check(dispatch, budget) != CA_OK) return CA_REFUSED;
+    (void)execve(dispatch->interpreter, arguments, environment);
+    /* Every returned exec is failure, including a late return. Cleanup belongs
+       to the caller's single ledger; never retry exec or reset its budget. */
+    (void)dispatch_check(dispatch, budget);
+    return CA_REFUSED;
+}
+
+static int preload_files(const char *root, const unsigned char manifest_sha256[32],
+                           const char *profile_id, CADispatch *dispatch, CABudget *budget) {
     size_t root_length;
     if (!manifest_sha256 || schema_profile_id(profile_id, budget) != CA_OK
         || canonical_path(root, &root_length, budget) != CA_OK) return CA_REFUSED;
@@ -1783,6 +1972,12 @@ int ca_preload_files_check(const char *root, const unsigned char manifest_sha256
     }
     if (schema_open(&document, profile, profile_length, CA_JSON_BYTES, budget) != CA_OK
         || nested_admit(&n, profile_id) != CA_OK) goto cleanup;
+    if (dispatch) {
+        if (dispatch_check(dispatch, budget) != CA_OK || n.launcher_file >= n.file_count
+            || strcmp(n.files[n.launcher_file].path, dispatch->interpreter) != 0
+            || memcmp(n.files[n.launcher_file].identity.sha256, dispatch->interpreter_digest, 32) != 0
+            || execution_shim(dispatch, 0, buffer, capacity, budget) != CA_OK) goto cleanup;
+    }
     /* Declared runtime paths are first observed only after connected metadata
        admission. The reusable buffer retains no aggregate file contents. */
     size_t maximum = capacity;
@@ -1801,6 +1996,7 @@ int ca_preload_files_check(const char *root, const unsigned char manifest_sha256
     if ((n.directory_count && !directories) || (n.absent_count && !absent)
         || nested_check(&n) != CA_OK
         || selected_files(&n, directories, absent, 0, buffer, capacity) != CA_OK) goto cleanup;
+    if (dispatch && prepare_handoff(dispatch, budget) != CA_OK) goto cleanup;
     CA_TEST_BEFORE_FINAL();
     if (ca_budget_check(budget) != CA_OK) goto cleanup;
     for (size_t i = 0; i < 9; i++) {
@@ -1812,6 +2008,7 @@ int ca_preload_files_check(const char *root, const unsigned char manifest_sha256
             || read_verified(path, &selection, buffer, capacity, &written, &observed, budget) != CA_OK) goto cleanup;
     }
     if (selected_files(&n, directories, absent, 1, buffer, capacity) != CA_OK
+        || (dispatch && execution_shim(dispatch, 1, buffer, capacity, budget) != CA_OK)
         || package_scan(root, &package_initial, &package_final, budget) != CA_OK) goto cleanup;
     status = CA_OK;
 cleanup:
@@ -1821,4 +2018,38 @@ cleanup:
     free(profile); free(buffer);
     if (ca_budget_check(budget) != CA_OK) status = CA_REFUSED;
     return status;
+}
+
+
+int ca_preload_files_check(const char *root, const unsigned char manifest_sha256[32],
+                           const char *profile_id, CABudget *budget) {
+    return preload_files(root, manifest_sha256, profile_id, NULL, budget);
+}
+int ca_authority_dispatch(const CAExecutionPins *pins, size_t count,
+                           const char *const operands[], CABudget *budget) {
+    if (!budget) return CA_REFUSED;
+    /* Snapshot supplied original fields before the first callback can change
+       them. This detects mutation during entry, not forged pre-entry provenance. */
+    double started = budget->started, deadline = budget->deadline;
+    CAClockRead clock = budget->read; void *clock_state = budget->state;
+    if (ca_budget_check(budget) != CA_OK || budget->started != started || budget->deadline != deadline
+        || budget->read != clock || budget->state != clock_state) return CA_REFUSED;
+    CADispatch *dispatch = calloc(1, sizeof(*dispatch));
+    if (!dispatch) { (void)ca_budget_check(budget); return CA_REFUSED; }
+    dispatch->reader = dispatch->writer = dispatch->duplicate = -1;
+    dispatch->started = started; dispatch->deadline = deadline;
+    dispatch->clock = clock; dispatch->clock_state = clock_state;
+    if (dispatch_selection(dispatch, pins, count, operands, budget) != CA_OK
+        || preload_files(dispatch->root, dispatch->manifest_digest, dispatch->profile, dispatch, budget) != CA_OK)
+        goto cleanup;
+    (void)dispatch_exec(dispatch, budget);
+cleanup:
+    /* Consume every owned endpoint even when the original D has expired or a
+       prior close was uncertain. No second close of a consumed number occurs. */
+    (void)close_owned(&dispatch->duplicate, budget);
+    (void)close_owned(&dispatch->writer, budget);
+    (void)close_owned(&dispatch->reader, budget);
+    free(dispatch);
+    (void)ca_budget_check(budget);
+    return CA_REFUSED;
 }

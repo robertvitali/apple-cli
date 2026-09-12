@@ -92,4 +92,15 @@ int ca_profile_preload_check(const unsigned char *input, size_t length,
 int ca_preload_files_check(const char *root, const unsigned char manifest_sha256[32],
                            const char *profile_id, CABudget *budget);
 
+/* Internal compiled execution selection. It is never supplied by a public
+   argument/environment override or imported as an authority receipt. */
+typedef struct {
+    const char *root, *manifest_sha256, *profile_id;
+    const char *interpreter_path, *interpreter_sha256;
+    const char *shim_path, *shim_sha256;
+} CAExecutionPins;
+/* Original CABudget provenance belongs to the trusted native caller. Every
+   return refuses; success can only replace this process via the sole exec. */
+int ca_authority_dispatch(const CAExecutionPins *, size_t,
+                          const char *const [], CABudget *);
 #endif
