@@ -28,6 +28,26 @@ import Foundation
 /// Messages, `mac_messages_mcp` is text-only — it cannot send a file at all — so a refusal here
 /// cannot drop a capability the oracle had. The Notes D12 carve-out does not reach this surface
 /// either: that one exists because the Notes oracle PERMITS the write being discussed.
+///
+/// **WHAT THIS DOES NOT STOP.** Stated plainly, because a guard read as stronger than it is, is
+/// worse than no guard:
+///
+///  - **It is a PATH check, so a HARD LINK defeats it.** `ln ~/.ssh/id_ed25519 ~/notes.txt` gives
+///    the same inode a second name carrying no trace of the first, and nothing here can see that.
+///    This is not a hole so much as the boundary of the idea: an operator who can hard-link a file
+///    can equally `cp` it, and copying was never stopped either. The denylist raises the cost of
+///    an ACCIDENT (`--file ~/.ssh/id_rsa` typed at 2am, a tab-completed path) and of a naive
+///    prompt-injected command; it is not an exfiltration control against a deliberate operator.
+///  - **It is not atomic with the send (TOCTOU).** This function resolves and `stat`s a path; the
+///    bytes are read later, by Messages or Mail, when `POSIX file` follows the SAME PATH again. A
+///    file that passed here can be replaced in that window. Closing it needs an
+///    open-the-descriptor-then-send design, which the AppleScript route cannot express.
+///  - **The denylist is not exhaustive.** It is `sensitiveWriteDir`'s list, inherited verbatim
+///    from the Mail oracle's `sensitive_dirs`, and it is measured against `$HOME`. Not covered,
+///    among others: `~/.netrc`, `~/.git-credentials`, `~/.npmrc`, `~/.pypirc`, `~/.kube`,
+///    `~/.docker`, any `.env`, and everything outside `$HOME` including `/etc`. Widening the list
+///    here would silently widen MAIL's refusals too — a parity change to a shipped surface — so
+///    it stays as inherited and the gap is written down instead of quietly assumed away.
 public enum AttachmentSource {
 
     /// Executable / script extensions refused by default (mirrors s-morgan

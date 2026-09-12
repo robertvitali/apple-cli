@@ -989,6 +989,86 @@ struct MessagesCommandDependencyTests {
         }
     }
 
+    /// The same ordering for the empty-send guard. Every refusal that depends on the RECIPIENT
+    /// having been accepted belongs below the sandbox gate, so a caller branching on
+    /// `error.sandbox` is never handed an ordinary argument error for a send the sandbox is what
+    /// actually stopped.
+    @Test func theSandboxRefusalPrecedesTheNothingToSendGuard() throws {
+        let command = try Send_.parse(["--test-mode", "+1 (212) 555-0100"])
+        let result = try captureCommand {
+            try command.run(dependencies: .fixture(allowedRecipients: []))
+        }
+
+        #expect(result.exitCode == AppleExit.usage)
+        let error = try errorPayload(from: result.stdout)
+        #expect(error["sandbox"] as? Bool == true)
+        #expect((error["message"] as? String)?.hasPrefix("refusing send:") == true)
+        #expect((error["message"] as? String)?.contains("nothing to send") == false)
+    }
+
+    /// `files_sent` is an EXECUTE-only key: a dry run sent nothing, and reporting `0` there would
+    /// read as "it ran and delivered none of them".
+    @Test func theDryRunEnvelopeOmitsFilesSent() throws {
+        let file = try scratch.directory().appendingPathComponent("apple-cli-test-a.txt")
+        try "synthetic".write(to: file, atomically: true, encoding: .utf8)
+        let output = try captureStdout {
+            let command = try Send_.parse(["--dry-run", "+1 (212) 555-0100",
+                                           "--message", "synthetic hello", "--file", file.path])
+            try command.run(dependencies: .fixture())
+        }
+        let data = try payload(from: output)
+        #expect(data["files"] as? [String] == [file.path])
+        #expect(data["files_sent"] == nil)
+        #expect(data["dry_run"] as? Bool == true)
+    }
+
+    /// The RESOLVED path is what reaches the sender and what the envelope reports — a symlink is
+    /// sent as the file it points at, which is what the manual, the changelog and the port spec
+    /// now say. (The first draft refused a symlink outright while all four documents promised the
+    /// opposite.)
+    @Test func aSymlinkedAttachmentIsReportedAsItsTarget() throws {
+        let dir = try scratch.directory()
+        let target = dir.appendingPathComponent("apple-cli-test-target.txt")
+        try "synthetic".write(to: target, atomically: true, encoding: .utf8)
+        let link = dir.appendingPathComponent("apple-cli-test-link.txt")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+        let resolved = target.resolvingSymlinksInPath().path
+
+        let output = try captureStdout {
+            let command = try Send_.parse(["+1 (212) 555-0100", "--message", "synthetic hello",
+                                           "--file", link.path])
+            try command.run(dependencies: .fixture(performSend: { request in
+                #expect(request.files == [resolved])
+                return .sent("iMessage", files: 1)
+            }))
+        }
+        let data = try payload(from: output)
+        #expect(data["files"] as? [String] == [resolved])
+        #expect((data["files"] as? [String])?.first?.hasSuffix("apple-cli-test-link.txt") == false)
+    }
+
+    /// MUTATION KILL for the `message != nil` half of the body note. A file-only send whose
+    /// outcome nonetheless reports `bodyDelivered` must NOT claim a body went out — there was no
+    /// body. Without this, dropping the `message != nil` conjunct stays green.
+    @Test func aFileOnlySendSuppressesTheBodyNoteEvenIfTheOutcomeClaimsIt() throws {
+        let file = try scratch.directory().appendingPathComponent("apple-cli-test-a.txt")
+        try "synthetic".write(to: file, atomically: true, encoding: .utf8)
+        let command = try Send_.parse(["+1 (212) 555-0100", "--file", file.path])
+        let result = try captureCommand {
+            try command.run(dependencies: .fixture(performSend: { request in
+                #expect(request.message == nil)
+                return .failed(error: "transfer refused", filesSent: 0, failedFile: 1,
+                               bodyDelivered: true)
+            }))
+        }
+
+        #expect(result.exitCode == AppleExit.upstream)
+        let message = try #require(try errorPayload(from: result.stdout)["message"] as? String)
+        #expect(message.contains("attachment 1 of 1"))
+        #expect(!message.contains("message body"))
+        #expect(!message.contains("omit --message"))
+    }
+
     /// `--text` has to describe an attachment-bearing send too, or a file-only send renders as a
     /// blank line after "would send … via …:".
     @Test func textOutputDescribesAttachments() throws {

@@ -261,16 +261,27 @@ the file actually being sent; the check has to run on the resolved path anyway. 
 argument is never trimmed — `report ` (one trailing space) is a legal macOS filename, and
 trimming would silently substitute a neighbouring `report` that also exists.
 
+**What the guard does NOT stop, stated so nobody reads it as more than it is.** It is a
+PATH check. A HARD LINK to a credential file is a second name for the same inode with no
+trace of the first, so the denylist cannot see it — an operator who can hard-link a file
+can equally `cp` it, which this never claimed to stop either. And the check is not atomic
+with the send: `POSIX file` follows the path again inside Messages, so a path that passed
+here can be replaced in the window before delivery (TOCTOU). Both are inherited from the
+Mail resolver and are NOT widened by this change; closing either needs an
+open-then-send-the-descriptor design that the AppleScript route cannot express.
+
 **`--service sms` to a digit-less recipient is refused up front** (`validation_error`,
 exit 64) using the oracle's own phone-shaped test — the same test that stops the `auto`
 fallback trying SMS for an email address. `auto` and `imessage` reach email addresses
 normally; only the arm that is knowably impossible is pre-validated.
 
 **A multi-part send is not atomic**, and the CLI says so rather than pretending
-otherwise. Body and attachments are separate transfers, so a mid-batch failure is an
-`upstream_error` naming which attachment failed, how many preceded it, and — in
-`error.applied`, the field a partial bulk Mail mutation already uses — the exact paths
-already delivered, which a retry must exclude. `filesSent` counts attachments only, so
+otherwise. Body and attachments are separate transfers, so a failure WITH AN
+ATTACHMENT IN FLIGHT is an `upstream_error` naming which attachment failed, how many
+preceded it, and — in `error.applied`, the field a partial bulk Mail mutation already
+uses — the exact paths already delivered, which a retry must exclude. A failure with no
+attachment in flight (the body went out, then the SMS account lookup failed) carries the
+generic message and the body note only, because there is no attachment to name. `filesSent` counts attachments only, so
 the result grammar carries a separate **body-delivered** bit and the error says
 explicitly when the body has to be omitted from a retry; without it a caller following
 the advice re-sent the body to a real person. The same fact bounds the `auto` fallback:
@@ -282,13 +293,14 @@ rather than assumed** (this repo treats an enum change or a retype as BREAKING, 
 silence would be the failure). `service_plan` gains `iMessage only` / `SMS only`, but
 those values are reachable ONLY through `--service imessage` / `--service sms` — a flag
 that did not exist before. Every command line that was valid before this change still
-produces `iMessage→SMS auto` or `group chat`, and its payload is byte-identical, so a
-consumer switching exhaustively on `service_plan` meets a new value only once it starts
-requesting one. `message` becomes omissible, but only on a file-only send, a shape that
+produces `iMessage→SMS auto` or `group chat`: its `service_plan` VALUE is unchanged, so a
+consumer switching exhaustively on that field meets a new value only once it starts
+requesting one. The payload around it is not byte-identical, and deliberately so — `message` becomes omissible, but only on a file-only send, a shape that
 could not previously exist because `--message` was required; wherever `message` appeared
-before it appears now, same type, same value. `service_requested` and `files` are new
-keys on both envelopes and `files_sent` a new key on the execute envelope — additive for
-a tolerant reader. Nothing is removed, renamed, retyped, and no exit code moved.
+before it appears now, same type, same value. `service_requested` and `files` are emitted
+UNCONDITIONALLY on both envelopes, and `files_sent` on every execute envelope, whether or
+not the new flags were passed. That is additive for a tolerant reader, which the contract
+requires consumers to be. Nothing is removed, renamed, retyped, and no exit code moved.
 
 **Verification, and its bound.** All eight emitted shapes (3 services x with/without a
 body, group x with/without a body) are compile-checked against `/usr/bin/osacompile` by

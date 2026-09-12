@@ -372,13 +372,6 @@ struct Send_: ParsableCommand {
             guard let serviceMode = Send.Service(rawValue: service) else {
                 throw AppleError.validation("service must be one of: \(Send.Service.allNames)")
             }
-            // `--message` is optional now, so a send with NEITHER a body nor a file would
-            // otherwise dispatch an osascript run that delivers nothing and reports success.
-            // The test is on PRESENCE, not emptiness: `--message ""` still means "send this
-            // (empty) body", exactly as it did when `--message` was mandatory.
-            guard message != nil || !file.isEmpty else {
-                throw AppleError.validation("nothing to send: pass --message, --file, or both")
-            }
             let book = dependencies.loadAddressBook()
             switch Send.resolve(recipient: recipient, groupChat: group, book: book) {
             case .notFound(let r):
@@ -417,6 +410,17 @@ struct Send_: ParsableCommand {
                     throw AppleError(type: AppleErrorType.validation,
                         message: "refusing send: \(String(describing: error))",
                         exitCode: AppleExit.usage, sandbox: true)
+                }
+
+                // `--message` is optional now, so a send with NEITHER a body nor a file would
+                // otherwise dispatch an osascript run that delivers nothing and reports success.
+                // The test is on PRESENCE, not emptiness: `--message ""` still means "send this
+                // (empty) body", exactly as it did when `--message` was mandatory. It sits BELOW
+                // the sandbox gate for the same reason attachment resolution does: a
+                // sandbox-refused send must report the sandbox refusal, so a caller branching on
+                // `error.sandbox` is never handed an ordinary argument error instead.
+                guard message != nil || !file.isEmpty else {
+                    throw AppleError.validation("nothing to send: pass --message, --file, or both")
                 }
 
                 // `--service sms` to an address the SMS service cannot reach is knowably
