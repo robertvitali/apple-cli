@@ -173,23 +173,6 @@ func composeFailureMessage(kind: String, reason: String, discarded: Bool) -> Str
         : "\(head) WARNING: the composed draft could NOT be discarded and may still be in Mail's outgoing messages — open Mail and delete it manually."
 }
 
-/// Resolve + validate a single attachment path: expand `~`, require it to exist and be a REGULAR
-/// file (a directory / missing path is rejected). Returns the resolved absolute path for both the
-/// AppleScript attachment route and the `.eml` builder. CONTAINMENT NOTE (write-model v2): outside
-/// the sandbox recipients are unrestricted, so the sensitive-directory blocklist below and the
-/// executable-extension blocklist ARE the containment for attachment content — they are absolute
-/// and fire in both modes. Inside the sandbox, `guardOutbound`'s self-only allowlist additionally
-/// bounds where an attachment can go. Missing/non-regular files are `not_found` (exit 65),
-/// matching the prior inline behavior.
-/// Executable / script extensions blocked from attachment sends by default (mirrors s-morgan
-/// `validate_attachment_type`'s `dangerous_extensions`). Blocking is the parity default; there is
-/// no allow-executables override yet.
-let dangerousAttachmentExtensions: Set<String> = [
-    "exe", "bat", "cmd", "com", "scr", "pif", "vbs", "vbe", "js", "jse", "wsf", "wsh",
-    "msi", "msp", "scf", "lnk", "inf", "reg", "ps1", "psm1", "app", "deb", "rpm", "sh",
-    "bash", "csh", "ksh", "zsh", "command",
-]
-
 /// Whether a Mail outbound refusal `reason` (the `bad`/`addr` value an in-script recipient check
 /// returns) was caused BY the sandbox's self-only allowlist rather than an always-on condition.
 /// Only an allowlist miss — a real recipient outside the self-only set — is a sandbox-policy
@@ -231,51 +214,8 @@ func blockedDraftSendError(address: String, subject: String, sandboxActive: Bool
         sandbox: sandboxCaused)
 }
 
-func resolveAttachmentPath(_ raw: String) throws -> String {
-    // CONTROL CHARACTERS FIRST, unconditionally — the exact rule (and rationale) of
-    // confineWriteDestination: resolved attachment paths are US-joined into the AppleScript
-    // argv blob and re-split in-script, so a path CONTAINING a US byte would smuggle a second,
-    // never-vetted path past the sensitive-dir blocklist below (review-caught; under v2 that
-    // blocklist is the sole containment for unsandboxed attachment content).
-    if let bad = raw.unicodeScalars.first(where: { $0.value < 0x20 || $0.value == 0x7F }) {
-        throw AppleError.mailSafety(
-            "cannot attach a path containing a control character (U+\(String(format: "%04X", bad.value))) — refusing.")
-    }
-    let expanded = (raw as NSString).expandingTildeInPath
-    // Resolve symlinks BEFORE the sensitive-dir check so a symlink into ~/.ssh (etc.) cannot
-    // bypass it (matches patrickfreyer's realpath). The real path is also what Mail attaches.
-    let path = URL(fileURLWithPath: expanded).resolvingSymlinksInPath().path
-    var isDir: ObjCBool = false
-    guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir), !isDir.boolValue else {
-        throw AppleError.notFound("attachment not found or not a regular file: \(raw)")
-    }
-    // Reject oversized attachments before handing the file to Mail (a clean pre-send refusal vs an
-    // opaque Mail hang/failure) — matches s-morgan send_email_with_attachments' 25 MB default cap.
-    let maxBytes = 25 * 1024 * 1024
-    if let size = (try? FileManager.default.attributesOfItem(atPath: path))?[.size] as? NSNumber,
-       size.intValue > maxBytes {
-        throw AppleError.validation("attachment exceeds the 25 MB send limit (\(size.intValue) bytes): \(raw)")
-    }
-    // Refuse dangerous executable/script types by default (s-morgan validate_attachment_type,
-    // which matches on filename `endswith` — so a file literally named ".sh" is blocked too, which
-    // NSString.pathExtension would miss).
-    let base = (path as NSString).lastPathComponent.lowercased()
-    if let blockedExt = dangerousAttachmentExtensions.first(where: { base.hasSuffix(".\($0)") }) {
-        throw AppleError.validation("attachment type '.\(blockedExt)' is blocked (executable/script); refusing: \(raw)")
-    }
-    // Refuse reading from sensitive credential/config directories (patrickfreyer sensitive_dirs) —
-    // a safety refusal (don't exfiltrate keys/tokens as an attachment). Check BOTH the resolved
-    // path (defeats a symlink INTO a sensitive dir) AND the tilde-expanded literal (defeats a
-    // sensitive dir that is ITSELF a symlink, e.g. a stow-managed `~/.ssh` -> `~/dotfiles/ssh`).
-    let home = FileManager.default.homeDirectoryForCurrentUser.path
-    if let dir = sensitiveWriteDir(path, home: home) ?? sensitiveWriteDir(expanded, home: home) {
-        throw AppleError.mailSafety("cannot attach a file from a sensitive directory (\(dir)) — refusing.")
-    }
-    return path
-}
-
 /// Read already-resolved attachment paths into `EmlBuilder.Attachment` parts (for the HTML/`.eml`
-/// route). A path that can't be read (e.g. a TOCTOU race after `resolveAttachmentPath`) is
+/// route). A path that can't be read (e.g. a TOCTOU race after `AttachmentSource.resolve`) is
 /// `not_found` rather than a silent drop.
 func attachmentsFromPaths(_ paths: [String]) throws -> [EmlBuilder.Attachment] {
     try paths.map { path in
@@ -497,7 +437,7 @@ struct SendCommand: ParsableCommand {
             // compose window for ANY body type): it is the preview artifact, the `--out` target,
             // AND the delivery vehicle for the reliable HTML OPEN / --mode open / draft-HTML paths.
             // From: uses the resolved address on a live path, else the raw --account (headless preview).
-            let attPaths = try attach.map { try resolveAttachmentPath($0) }
+            let attPaths = try attach.map { try AttachmentSource.resolve($0) }
             var emlPath: String?
             // MODE-keyed (not willOpen): a plain-body `--mode open --dry-run` must still build
             // the .eml so `--out` runs through confineWriteDestination and the preview reports
@@ -713,7 +653,7 @@ struct ReplyCommand: ParsableCommand {
             // would, store-independently, and matches SendCommand's precedence (review-caught
             // twice: they first ran only inside the live block, then only after target
             // resolution — where a not_found target masked them).
-            let attachPaths = try attach.map { try resolveAttachmentPath($0) }
+            let attachPaths = try attach.map { try AttachmentSource.resolve($0) }
             let ctx = try contextFactory()
             // Resolve the target to a full summary (need original sender + subject to compose).
             let row: [String: String?]
