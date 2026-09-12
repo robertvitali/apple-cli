@@ -66,7 +66,10 @@ JSON output are stable per the versioning policy — breaking changes bump
   library, 1.1s at `--limit 5`, 1.7s at the default 10, and 6.4s at `--limit 50`. There is no
   fixed time limit: the 45-second AppleScript timeout bounds a single Apple event's reply, the
   number of events grows with the scope and with `--limit`, and a timed-out read is retried once
-  before surfacing as `upstream_error`, exit 69.
+  before surfacing as `upstream_error`, exit 69. The bulk read is also retried once when its id
+  and date lists come back at different lengths — the note set changed mid-read, which a second
+  attempt normally resolves; if it survives both, that too is an `upstream_error`, exit 69,
+  carrying its own message.
   `schema_version` is unchanged at 1: this adds a command and removes, renames, and retypes
   nothing.
   Manual: [`apple notes recent`](https://github.com/robertvitali/apple-cli/blob/main/docs/manual/notes/recent.md).

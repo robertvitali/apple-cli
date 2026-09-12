@@ -111,8 +111,16 @@ struct NotesScript {
     /// events (a create or delete landed, or a sync did). That is a race, not a broken store, so
     /// re-running the whole read is exactly the right response and the second attempt normally
     /// succeeds. Reads retry once; mutations pass `maxMutationAttempts` and never reach here.
+    ///
+    /// These are matched against the SENTINEL-ANCHORED message (`ownDiagnostic`), never against
+    /// raw stderr — the same anchoring `mapError` needs, and for the same reason. Notes.app
+    /// echoes a caller's folder or note name back inside its own error text, so an unanchored
+    /// match would let `--folder 'apple-cli: Notes.app returned mismatched'` buy itself a
+    /// pointless retry and a 1s backoff on a plain not-found. Bounded, but it is the caller
+    /// steering our retry policy with a value they chose, which is not a thing to leave open.
+    /// The pattern is written WITHOUT the sentinel because the sentinel is already stripped.
     static let cliRetryableErrorPatterns = [
-        "apple-cli: notes\\.app returned mismatched",
+        "^notes\\.app returned mismatched",
     ]
 
     static let retryableErrorPatterns = [
@@ -125,12 +133,23 @@ struct NotesScript {
     ]
 
     /// Whether an osascript error message is a transient one worth retrying (mirrors the oracle's
-    /// `isRetryableError`). Matched against the RAW stderr, not the mapped message, so a "busy" /
-    /// "connection invalid" that `mapError` buckets differently is still recognised as transient.
+    /// `isRetryableError`).
+    ///
+    /// TWO surfaces, matched against DIFFERENT text, and the split is deliberate:
+    ///
+    ///   * the ported oracle patterns run against the RAW stderr, exactly as the oracle does, so
+    ///     a "busy" / "connection invalid" that `mapError` buckets differently is still
+    ///     recognised as transient;
+    ///   * the CLI patterns run only against `ownDiagnostic` — the message a generated script
+    ///     raised itself, sentinel-anchored — so a caller-supplied name echoed back inside
+    ///     Notes.app's error text cannot reach them.
     static func isRetryable(_ errorMessage: String) -> Bool {
-        (retryableErrorPatterns + cliRetryableErrorPatterns).contains { pattern in
-            errorMessage.range(of: pattern, options: [.regularExpression, .caseInsensitive]) != nil
+        func matches(_ patterns: [String], _ text: String) -> Bool {
+            patterns.contains { text.range(of: $0, options: [.regularExpression, .caseInsensitive]) != nil }
         }
+        if matches(retryableErrorPatterns, errorMessage) { return true }
+        guard let own = ownDiagnostic(errorMessage) else { return false }
+        return matches(cliRetryableErrorPatterns, own)
     }
 
     /// Whether a raw `RunError` should be retried: only `.scriptFailed` whose stderr is transient.

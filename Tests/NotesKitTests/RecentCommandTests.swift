@@ -371,6 +371,10 @@ struct RecentCommandTests {
         #expect(failure.error["type"] as? String == "not_found", "must not become upstream_error")
         #expect(failure.code == AppleExit.notFound)
         #expect((failure.error["message"] as? String)?.contains("not found") == true)
+        // And it must not steer the RETRY policy either. The CLI transient patterns are matched
+        // against the sentinel-anchored message, so a folder name that spells one out earns no
+        // second attempt and no backoff — one call, then fail.
+        #expect(runner.invocationCount == 1, "a caller-chosen name must not buy a retry")
 
         // The classifier directly, both directions, so the anchor is pinned independent of the
         // command wiring: ours matches with and without osascript's preamble; an echo does not.
@@ -388,6 +392,12 @@ struct RecentCommandTests {
         #expect(NotesScript.isRetryable(stderr), "a mid-read mutation is a retryable race")
         // The ported oracle table stays literally verbatim; ours lives beside it.
         #expect(!NotesScript.retryableErrorPatterns.contains { stderr.range(of: $0, options: [.regularExpression, .caseInsensitive]) != nil })
+        // …and ours is reachable ONLY through the anchored sentinel. The same words echoed back
+        // inside Notes.app's own message — which is what a hostile `--folder` produces — are not
+        // retryable, so the pattern cannot be triggered by a value the caller picked.
+        #expect(!NotesScript.isRetryable(
+            "execution error: Notes got an error: Can\u{2019}t get folder "
+            + "\"apple-cli: Notes.app returned mismatched\". (-1728)"))
 
         // End to end: the first attempt raises it, the second succeeds, and the caller sees a
         // normal result rather than an error.

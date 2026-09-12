@@ -5,7 +5,7 @@
 **Version analyzed:** **2.5.12** (published 2026-07-14; latest at analysis time 2026-07-15)
 **Source repo:** https://github.com/sweetrb/apple-notes-mcp (tag `v2.5.12`, MIT, author Rob Sweet)
 **Analysis basis:** Clean TypeScript source read at tag `v2.5.12` (not the bundled `build/index.js`); published tarball verified to match. No binaries executed.
-**Update (2026-08-18):** the transient-retry wrapper (NOTES-#8) and the 11-entry error-mapping table (NOTES-#9) were ported against the **currently-installed** oracle `apple-notes-mcp@2.7.5` (`build/index.js`), NOT 2.5.12 — 2.7.5 is what the parity oracle runs on the fleet. Ported byte/value-exact: `RETRYABLE_ERROR_PATTERNS` (6 patterns), `DEFAULT_MAX_RETRIES=2` / `executeMutationAppleScript maxRetries:1` (reads retry once, MUTATIONS never retry — a non-idempotent write must not double-apply), `DEFAULT_RETRY_DELAY_MS=1000` with `2^(attempt-1)` backoff, and the `ERROR_MAPPINGS` table. This §5-era header still cites the 2.5.12/2.6.12 analysis baseline; the retry/error-map behavior is anchored to 2.7.5 as noted here.
+**Update (2026-08-18):** the transient-retry wrapper (NOTES-#8) and the 11-entry error-mapping table (NOTES-#9) were ported against the **currently-installed** oracle `apple-notes-mcp@2.7.5` (`build/index.js`), NOT 2.5.12 — 2.7.5 is what the parity oracle runs on the fleet. Ported byte/value-exact: `RETRYABLE_ERROR_PATTERNS` (6 patterns), `DEFAULT_MAX_RETRIES=2` / `executeMutationAppleScript maxRetries:1` (reads retry once, MUTATIONS never retry — a non-idempotent write must not double-apply), `DEFAULT_RETRY_DELAY_MS=1000` with `2^(attempt-1)` backoff, and the `ERROR_MAPPINGS` table. **Deviation, additive:** a seventh transient pattern exists that the oracle has no counterpart for — `NotesScript.cliRetryableErrorPatterns`, holding the pass-1 id/date length mismatch `notes recent` raises itself. It is kept in a SEPARATE list that `isRetryable` unions in, never added to `retryableErrorPatterns`, so the ported table stays byte-exact at its 6; and it is matched against the sentinel-anchored `ownDiagnostic` message rather than raw stderr, so a caller-supplied name echoed back by Notes.app cannot reach it. This §5-era header still cites the 2.5.12/2.6.12 analysis baseline; the retry/error-map behavior is anchored to 2.7.5 as noted here.
 **Verdict (TL;DR): BUILD.** No candidate CLI covers even half the surface. The strongest (memo) reaches ~12/34 and uses an interactive-picker UX unsuitable for agent scripting. Attachments-to-disk, checklist state, note metadata, sync status, full-library JSON export, batch ops, and account/selection/diagnostic tools are absent across every candidate.
 
 ---
@@ -308,7 +308,12 @@ The MCP emits camelCase keys; apple-cli emits snake_case per `docs/DESIGN.md` ("
   uses the runner overload with no host-side deadline, and the EVENT COUNT scales — pass 1 is the
   two bulk reads plus account resolution; pass 2 is one `note id` lookup per surviving id plus
   roughly five property reads each, so it grows with `--limit`. Each of the two scripts is
-  additionally retried once when an event times out. An earlier revision of this note reasoned a
+  additionally retried once when an event times out — and pass 1 is retried once more broadly
+  than that: the id/date LENGTH MISMATCH it raises is classed transient too, because it means the
+  note set changed between the two bulk events, which a second read normally resolves. A mismatch
+  that survives both attempts surfaces as `upstream_error`, exit 69, carrying its own message
+  ("Notes.app returned mismatched id and date lists") rather than the generic Notes failure text.
+  An earlier revision of this note reasoned a
   "roughly three minutes" ceiling from two scripts x 45s x 2 attempts; that was wrong on the
   premise (per-event, not per-script) and is corrected here. Any single event exceeding 45s
   surfaces as `upstream_error`, exit 69, "Notes.app timed out. It may be unresponsive or busy
