@@ -1,4 +1,5 @@
-/* Internal authority primitives. This translation unit has no executable entry. */
+/* Internal authority implementation. Standalone entry requires its explicit
+   build guard; ordinary synthetic harness builds do not define a main here. */
 #include "capability_authority_entry.h"
 #include <CommonCrypto/CommonDigest.h>
 #include <dirent.h>
@@ -2053,3 +2054,108 @@ cleanup:
     (void)ca_budget_check(budget);
     return CA_REFUSED;
 }
+
+
+#if defined(CA_AUTHORITY_STANDALONE) && defined(CA_AUTHORITY_OUTER_TEST)
+#error "standalone and outer-test authority entry guards are mutually exclusive"
+#endif
+#if defined(CA_AUTHORITY_STANDALONE) || defined(CA_AUTHORITY_OUTER_TEST)
+#include <time.h>
+
+#if defined(CA_AUTHORITY_OUTER_TEST)
+#if !defined(CA_OUTER_CLOCK_GETTIME) || !defined(CA_OUTER_DISPATCH) || !defined(CA_OUTER_DIAGNOSTIC_WRITE) || !defined(CA_OUTER_TEST_PINS)
+#error "outer-test authority entry requires its compile-time test leaves"
+#endif
+static const CAExecutionPins ca_outer_selection = CA_OUTER_TEST_PINS;
+#else
+/* A deployment build pins these literals independently of this package. UNSET
+   is an inactive source template, never discovered from argv, cwd or environment.
+   External native-artifact authentication remains the invoking authority's job. */
+static const CAExecutionPins ca_outer_selection = {
+    "UNSET", "UNSET", "UNSET", "UNSET", "UNSET", "UNSET", "UNSET"
+};
+#define CA_OUTER_CLOCK_GETTIME(identifier, output) clock_gettime((clockid_t)(identifier), (output))
+#define CA_OUTER_DISPATCH ca_authority_dispatch
+#define CA_OUTER_DIAGNOSTIC_WRITE write
+#endif
+
+static int ca_outer_timespec_value(const struct timespec *value, double *output) {
+    if (!value || !output || value->tv_sec < 0 || value->tv_nsec < 0
+        || value->tv_nsec >= 1000000000L) return CA_REFUSED;
+    double result = (double)value->tv_sec + (double)value->tv_nsec / 1000000000.0;
+    if (!isfinite(result) || result < 0) return CA_REFUSED;
+    *output = result;
+    return CA_OK;
+}
+
+static int ca_outer_clock_read(void *state, double *output) {
+    (void)state;
+    struct timespec value;
+    /* Fixed admitted OS clock only, also used by every later CABudget check. */
+    if (CA_OUTER_CLOCK_GETTIME(8, &value) != 0) return -1;
+    return ca_outer_timespec_value(&value, output) == CA_OK ? 0 : -1;
+}
+
+static int ca_outer_budget_initialize(double initial, CABudget *output) {
+    if (!output || !isfinite(initial) || initial < 0) return CA_REFUSED;
+    double deadline = initial + 58.0;
+    if (!isfinite(deadline) || deadline <= initial) return CA_REFUSED;
+    *output = (CABudget){initial, deadline, initial, ca_outer_clock_read, NULL};
+    return CA_OK;
+}
+
+static int ca_outer_environment(char *const environment[]) {
+    static const char path[] = "PATH=/usr/bin:/bin:/usr/sbin:/sbin";
+    static const char locale[] = "LC_ALL=C";
+    if (!environment || !environment[0] || !environment[1] || environment[2]) return CA_REFUSED;
+    int first_path = strncmp(environment[0], path, sizeof(path)) == 0;
+    int first_locale = strncmp(environment[0], locale, sizeof(locale)) == 0;
+    int second_path = strncmp(environment[1], path, sizeof(path)) == 0;
+    int second_locale = strncmp(environment[1], locale, sizeof(locale)) == 0;
+    return ((first_path && second_locale) || (first_locale && second_path)) ? CA_OK : CA_REFUSED;
+}
+
+static int ca_outer_run(int argc, char *const argv[], char *const environment[]) {
+    double initial;
+    CABudget budget;
+    /* No per-launch argument, environment, selection, hash or file admission
+       precedes this first reading. Native loader work before main is qualified
+       externally; this code does not claim to measure that earlier interval. */
+    if (ca_outer_clock_read(NULL, &initial) != 0
+        || ca_outer_budget_initialize(initial, &budget) != CA_OK) goto refused;
+    if (ca_budget_check(&budget) != CA_OK) goto refused;
+    if (ca_outer_environment(environment) != CA_OK) goto refused;
+    if (ca_budget_check(&budget) != CA_OK) goto refused;
+    if (argc < 1 || !argv) goto refused;
+    /* The dispatcher owns exact5/9 operand admission and copying. argv[0] does
+       not select authority and is not treated as native-artifact proof. */
+    if (ca_budget_check(&budget) != CA_OK) goto refused;
+    (void)CA_OUTER_DISPATCH(&ca_outer_selection, (size_t)(argc - 1),
+        (const char *const *)(argv + 1), &budget);
+refused:
+    /* One ordinary attempt, no retry/FD repair/alternate sink or signal change.
+       Default SIGPIPE may terminate before status2; no success is inferred. */
+    {
+        static const char diagnostic[] = "capability-policy: process-session-unavailable\n";
+        (void)CA_OUTER_DIAGNOSTIC_WRITE(STDERR_FILENO, diagnostic, sizeof(diagnostic) - 1);
+    }
+    return 2;
+}
+
+#if defined(CA_AUTHORITY_OUTER_TEST)
+int ca_outer_test_timespec(const struct timespec *value, double *output) {
+    return ca_outer_timespec_value(value, output);
+}
+int ca_outer_test_budget(double initial, CABudget *output) {
+    return ca_outer_budget_initialize(initial, output);
+}
+int ca_outer_test_run(int argc, char *const argv[], char *const environment[]) {
+    return ca_outer_run(argc, argv, environment);
+}
+#else
+extern char **environ;
+int main(int argc, char **argv) {
+    return ca_outer_run(argc, argv, environ);
+}
+#endif
+#endif

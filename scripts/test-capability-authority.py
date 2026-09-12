@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the five synthetic native-authority harnesses on macOS arm64 with CLT.
+"""Run the six synthetic native-authority harnesses on macOS arm64 with CLT.
 
 From the repository root:
     python3 -I -S -B scripts/test-capability-authority.py
@@ -86,10 +86,13 @@ def main():
         ("nested", REPO / "Tests/automation/capability_authority_nested_tests.c"),
         ("files", REPO / "Tests/automation/capability_authority_files_tests.c"),
         ("handoff", REPO / "Tests/automation/capability_authority_handoff_tests.c"),
+        ("outer", REPO / "Tests/automation/capability_authority_outer_tests.c"),
     )
     file_entry = REPO / "Tests/automation/capability_authority_files_test_entry.c"
     handoff_entry = REPO / "Tests/automation/capability_authority_handoff_test_entry.c"
-    for path in (source, file_entry, handoff_entry, include / "capability_authority_entry.h",
+    outer_entry = REPO / "Tests/automation/capability_authority_outer_test_entry.c"
+    for path in (source, file_entry, handoff_entry, outer_entry, include / "capability_authority_entry.h",
+                 REPO / "Tests/automation/capability_authority_outer_test_api.h",
                  REPO / "Tests/automation/capability_authority_handoff_test_hooks.h",
                  REPO / "Tests/automation/capability_authority_files_test_hooks.h",
                  REPO / "Tests/automation/capability_authority_nested_fixture.h",
@@ -116,7 +119,7 @@ def main():
                     "-D_DARWIN_C_SOURCE", "-Wall", "-Wextra", "-Werror",
                     "-O0", "-g0", "-fno-modules", "-fno-implicit-modules",
                     "-I", include, harness,
-                    handoff_entry if name == "handoff" else file_entry if name == "files" else source,
+                    outer_entry if name == "outer" else handoff_entry if name == "handoff" else file_entry if name == "files" else source,
                     "-o", binary]
             status = command(argv, scratch=scratch, seconds=COMPILE_SECONDS,
                              label="compile " + name)
@@ -149,7 +152,7 @@ if __name__ == "__main__":
         try:
             status = main()
             if status == 0:
-                print("authority-tests: all five synthetic harnesses passed", flush=True)
+                print("authority-tests: all six synthetic harnesses passed", flush=True)
             raise SystemExit(status)
         except RunFailure as error:
             print("authority-tests: " + str(error), file=sys.stderr)
