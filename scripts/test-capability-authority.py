@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Run the three synthetic native-authority harnesses on macOS arm64 with CLT.
+"""Run the four synthetic native-authority harnesses on macOS arm64 with CLT.
 
 From the repository root:
     python3 -I -S -B scripts/test-capability-authority.py
@@ -84,8 +84,11 @@ def main():
         ("primitive", REPO / "Tests/automation/capability_authority_native_tests.c"),
         ("schema", REPO / "Tests/automation/capability_authority_schema_tests.c"),
         ("nested", REPO / "Tests/automation/capability_authority_nested_tests.c"),
+        ("files", REPO / "Tests/automation/capability_authority_files_tests.c"),
     )
-    for path in (source, include / "capability_authority_entry.h",
+    file_entry = REPO / "Tests/automation/capability_authority_files_test_entry.c"
+    for path in (source, file_entry, include / "capability_authority_entry.h",
+                 REPO / "Tests/automation/capability_authority_files_test_hooks.h",
                  REPO / "Tests/automation/capability_authority_nested_fixture.h",
                  *(path for _, path in harnesses)):
         if not path.is_file() or path.is_symlink():
@@ -109,14 +112,15 @@ def main():
                     "-isysroot", SDK, "-B", CLT / "usr/bin", "-std=c11",
                     "-D_DARWIN_C_SOURCE", "-Wall", "-Wextra", "-Werror",
                     "-O0", "-g0", "-fno-modules", "-fno-implicit-modules",
-                    "-I", include, harness, source, "-o", binary]
+                    "-I", include, harness, file_entry if name == "files" else source,
+                    "-o", binary]
             status = command(argv, scratch=scratch, seconds=COMPILE_SECONDS,
                              label="compile " + name)
             if status:
                 print("authority-tests: compiler status=" + str(status), file=sys.stderr)
                 cleanup = True
                 return status if 0 < status < 126 else 1
-            invocation = [binary, fixture] if name == "primitive" else [binary]
+            invocation = [binary, fixture] if name in ("primitive", "files") else [binary]
             status = command(invocation, scratch=scratch, seconds=RUN_SECONDS,
                              label="run " + name)
             if status:
@@ -141,7 +145,7 @@ if __name__ == "__main__":
         try:
             status = main()
             if status == 0:
-                print("authority-tests: all three synthetic harnesses passed", flush=True)
+                print("authority-tests: all four synthetic harnesses passed", flush=True)
             raise SystemExit(status)
         except RunFailure as error:
             print("authority-tests: " + str(error), file=sys.stderr)

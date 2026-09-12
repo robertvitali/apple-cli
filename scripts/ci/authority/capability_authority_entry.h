@@ -86,4 +86,10 @@ int ca_profile_envelope_decode(const unsigned char *input, size_t length,
 int ca_profile_preload_check(const unsigned char *input, size_t length,
                              const char *profile_id, CABudget *budget);
 
+/* Finite package/selected pre-load observations only. The eventual caller must
+   supply independently selected root/digest/profile literals. No launch authority
+   or transferable accepted record is returned; the original budget is consumed. */
+int ca_preload_files_check(const char *root, const unsigned char manifest_sha256[32],
+                           const char *profile_id, CABudget *budget);
+
 #endif

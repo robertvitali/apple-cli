@@ -1,6 +1,7 @@
 /* Internal authority primitives. This translation unit has no executable entry. */
 #include "capability_authority_entry.h"
 #include <CommonCrypto/CommonDigest.h>
+#include <dirent.h>
 #include <errno.h>
 #include <fcntl.h>
 #include <float.h>
@@ -527,12 +528,33 @@ cleanup:
     return status;
 }
 
-int ca_read_verified_file(const char *path, const CAFileIdentity *expected,
+/* The package form still requires an independent digest. A captured stat is
+   only comparison state; it never supplies the expected content digest. */
+typedef struct {
+    const CAFileIdentity *identity;
+    const struct stat *prior;
+    const unsigned char *digest;
+    uint64_t size;
+    size_t maximum;
+    int exact_size, package;
+} CAReadExpectation;
+static int package_file(const struct stat *info) {
+    return S_ISREG(info->st_mode) && info->st_uid == getuid()
+        && info->st_nlink == 1 && !(info->st_mode & 0022);
+}
+static int read_stat_matches(const struct stat *initial, const struct stat *next,
+                             int package) {
+    return same_stat(initial, next) && (!package
+        || (package_file(next) && initial->st_nlink == next->st_nlink));
+}
+static int read_verified(const char *path, const CAReadExpectation *expected,
                           unsigned char *output, size_t capacity,
-                          size_t *written, CABudget *budget) {
+                          size_t *written, struct stat *captured, CABudget *budget) {
     size_t path_size;
-    if (!expected || !written || (!output && capacity) || expected->size > CA_FILE_BYTES
-        || expected->size > capacity || !S_ISREG(expected->mode)
+    if (!expected || !expected->digest || !written || (!output && capacity)
+        || expected->maximum > CA_FILE_BYTES
+        || (expected->exact_size && (expected->size > expected->maximum || expected->size > capacity))
+        || (expected->identity && !S_ISREG(expected->identity->mode))
         || canonical_path(path, &path_size, budget) != CA_OK || path_size == 1)
         return CA_REFUSED;
     *written = 0;
@@ -546,6 +568,7 @@ int ca_read_verified_file(const char *path, const CAFileIdentity *expected,
     }
     struct stat *directories = calloc(count, sizeof(*directories));
     int parent = -1, leaf = -1, status = CA_REFUSED;
+    size_t file_size = 0;
     if (!directories) return CA_REFUSED;
     if (ca_budget_check(budget) != CA_OK
         || walk_parent(parts, count, directories, 0, &parent, budget) != CA_OK) goto cleanup;
@@ -554,13 +577,19 @@ int ca_read_verified_file(const char *path, const CAFileIdentity *expected,
     if (ca_budget_check(budget) != CA_OK || leaf < 0) goto cleanup;
     struct stat initial, final, named;
     if (fstat(leaf, &initial) != 0 || ca_budget_check(budget) != CA_OK
-        || !expected_stat(&initial, expected)) goto cleanup;
+        || !S_ISREG(initial.st_mode) || initial.st_size < 0
+        || (uint64_t)initial.st_size > expected->maximum || (uint64_t)initial.st_size > capacity
+        || (expected->exact_size && (uint64_t)initial.st_size != expected->size)
+        || (expected->identity && !expected_stat(&initial, expected->identity))
+        || (expected->package && !package_file(&initial))
+        || (expected->prior && !read_stat_matches(expected->prior, &initial, expected->package))) goto cleanup;
+    file_size = (size_t)initial.st_size;
     CC_SHA256_CTX hash; unsigned char digest[32];
     if (!CC_SHA256_Init(&hash) || ca_budget_check(budget) != CA_OK) goto cleanup;
     size_t used = 0;
-    while (used < (size_t)expected->size) {
+    while (used < file_size) {
         if (ca_budget_check(budget) != CA_OK) goto cleanup;
-        size_t amount = (size_t)expected->size - used;
+        size_t amount = file_size - used;
         if (amount > CA_IO_BYTES) amount = CA_IO_BYTES;
         ssize_t received = read(leaf, output + used, amount);
         int read_error = errno;
@@ -582,23 +611,34 @@ int ca_read_verified_file(const char *path, const CAFileIdentity *expected,
         break;
     }
     if (!CC_SHA256_Final(digest, &hash) || ca_budget_check(budget) != CA_OK
-        || memcmp(digest, expected->sha256, 32) != 0) goto cleanup;
+        || memcmp(digest, expected->digest, 32) != 0) goto cleanup;
     if (fstat(leaf, &final) != 0 || ca_budget_check(budget) != CA_OK
-        || !same_stat(&initial, &final)) goto cleanup;
+        || !read_stat_matches(&initial, &final, expected->package)) goto cleanup;
     if (fstatat(parent, parts[count - 1], &named, AT_SYMLINK_NOFOLLOW) != 0
-        || ca_budget_check(budget) != CA_OK || !same_stat(&initial, &named)) goto cleanup;
+        || ca_budget_check(budget) != CA_OK || !read_stat_matches(&initial, &named, expected->package)) goto cleanup;
     if (close_owned(&leaf, budget) != CA_OK || close_owned(&parent, budget) != CA_OK) goto cleanup;
     if (walk_parent(parts, count, directories, 1, &parent, budget) != CA_OK) goto cleanup;
     if (fstatat(parent, parts[count - 1], &named, AT_SYMLINK_NOFOLLOW) != 0
-        || ca_budget_check(budget) != CA_OK || !same_stat(&initial, &named)) goto cleanup;
+        || ca_budget_check(budget) != CA_OK || !read_stat_matches(&initial, &named, expected->package)) goto cleanup;
     status = CA_OK;
 cleanup:
     if (close_owned(&leaf, budget) != CA_OK) status = CA_REFUSED;
     if (close_owned(&parent, budget) != CA_OK) status = CA_REFUSED;
     free(directories);
     if (ca_budget_check(budget) != CA_OK) status = CA_REFUSED;
-    if (status == CA_OK) *written = (size_t)expected->size;
+    if (status == CA_OK) {
+        *written = file_size;
+        if (captured) *captured = initial;
+    }
     return status;
+}
+int ca_read_verified_file(const char *path, const CAFileIdentity *expected,
+                          unsigned char *output, size_t capacity,
+                          size_t *written, CABudget *budget) {
+    if (!expected) return CA_REFUSED;
+    CAReadExpectation selection = {expected, NULL, expected->sha256,
+                                  expected->size, CA_FILE_BYTES, 1, 0};
+    return read_verified(path, &selection, output, capacity, written, NULL, budget);
 }
 
 /* Schema extraction is data-only. These helpers neither observe files nor
@@ -726,6 +766,12 @@ static int schema_identity(CASchemaDocument *document, size_t object,
     return CA_OK;
 }
 
+static const char *const package_names[9] = {
+    "bats_evidence.py", "bats_inventory.py", "capability_policy.py", "capability_process.py",
+    "capability_process_native.c", "capability_process_profiles.json",
+    "capability_process_protocol.py", "capability_schema.py", "capability_package_manifest.json"
+};
+
 int ca_manifest_decode(const unsigned char *input, size_t length,
                        const unsigned char expected_sha256[32], CAManifest *output,
                        CABudget *budget) {
@@ -736,11 +782,6 @@ int ca_manifest_decode(const unsigned char *input, size_t length,
         || memcmp(actual, expected_sha256, 32) != 0) return CA_REFUSED;
     static const char *const top_names[] = {"schema_version", "members"};
     static const char *const member_fields[] = {"path", "kind", "size", "sha256"};
-    static const char *const member_names[] = {
-        "bats_evidence.py", "bats_inventory.py", "capability_policy.py", "capability_process.py",
-        "capability_process_native.c", "capability_process_profiles.json",
-        "capability_process_protocol.py", "capability_schema.py"
-    };
     static const char *const member_kinds[] = {
         "python-source", "python-source", "python-source", "python-source",
         "native-source", "profile-data", "python-source", "python-source"
@@ -760,7 +801,7 @@ int ca_manifest_decode(const unsigned char *input, size_t length,
             || schema_fields(&document, at, member_fields, 4, fields) != CA_OK
             || schema_string(&document, fields[0], name, sizeof(name)) != CA_OK
             || schema_string(&document, fields[1], kind, sizeof(kind)) != CA_OK
-            || strcmp(name, member_names[i]) != 0 || strcmp(kind, member_kinds[i]) != 0
+            || strcmp(name, package_names[i]) != 0 || strcmp(kind, member_kinds[i]) != 0
             || schema_u64(&document, fields[2], &result.members[i].size) != CA_OK
             || result.members[i].size > 1048576
             || schema_digest(&document, fields[3], result.members[i].sha256) != CA_OK)
@@ -894,7 +935,7 @@ typedef struct {
     CANestedModule *modules;
     size_t module_count;
     const char **names, **absent, **search, **directories, **candidates;
-    size_t name_count, absent_count, search_count, directory_count;
+    size_t name_count, absent_count, search_count, directory_count, directory_array;
     int failed;
 } CANested;
 enum { CN_BUILTIN, CN_FROZEN, CN_SOURCE, CN_EXTENSION };
@@ -1326,6 +1367,7 @@ static int nested_directories(CANested *n, size_t array) {
     CASchemaDocument *d = n->document;
     if (!nested_array(n, array, 1, 4096)) return CA_REFUSED;
     n->directory_count = d->tokens[array].children;
+    n->directory_array = array;
     n->directories = calloc(n->directory_count, sizeof(*n->directories));
     if (!n->directories || nested_check(n) != CA_OK) return CA_REFUSED;
     size_t at = array + 1;
@@ -1474,29 +1516,309 @@ static void nested_release(CANested *n) {
     free(n->candidates); free(n->directories); free(n->search); free(n->absent);
     free(n->names); free(n->modules); free(n->files); free(n->strings); free(n->pool);
 }
+static int nested_admit(CANested *n, const char *profile_id) {
+    CASchemaDocument *document = n->document; CAProfileEnvelope envelope;
+    if (schema_envelope(document, profile_id, &envelope) != CA_OK) return CA_REFUSED;
+    n->pool_size = document->length + document->count;
+    n->pool = malloc(n->pool_size);
+    n->strings = calloc(document->count, sizeof(*n->strings));
+    if (!n->pool || !n->strings || nested_check(n) != CA_OK) return CA_REFUSED;
+    size_t platform = SIZE_MAX, runtime = SIZE_MAX, preload = SIZE_MAX;
+    for (size_t i = 0; i < document->count; i++) {
+        if (nested_check(n) != CA_OK) return CA_REFUSED;
+        if (document->tokens[i].start == envelope.platform.start && document->tokens[i].end == envelope.platform.end) platform = i;
+        if (document->tokens[i].start == envelope.runtime.start && document->tokens[i].end == envelope.runtime.end) runtime = i;
+        if (document->tokens[i].start == envelope.preload.start && document->tokens[i].end == envelope.preload.end) preload = i;
+    }
+    return nested_platform(n, platform) == CA_OK && nested_runtime(n, runtime) == CA_OK
+        && nested_preload(n, preload) == CA_OK ? CA_OK : CA_REFUSED;
+}
 int ca_profile_preload_check(const unsigned char *input, size_t length,
                              const char *profile_id, CABudget *budget) {
     if (schema_profile_id(profile_id, budget) != CA_OK) return CA_REFUSED;
-    CASchemaDocument document; CAProfileEnvelope envelope;
+    CASchemaDocument document;
     CANested n = {0}; n.document = &document;
     int status = CA_REFUSED;
-    if (schema_open(&document, input, length, CA_JSON_BYTES, budget) != CA_OK) goto cleanup;
-    if (schema_envelope(&document, profile_id, &envelope) != CA_OK) goto cleanup;
-    n.pool_size = document.length + document.count;
-    n.pool = malloc(n.pool_size);
-    n.strings = calloc(document.count, sizeof(*n.strings));
-    if (!n.pool || !n.strings || nested_check(&n) != CA_OK) goto cleanup;
-    size_t platform = SIZE_MAX, runtime = SIZE_MAX, preload = SIZE_MAX;
-    for (size_t i = 0; i < document.count; i++) {
-        if (nested_check(&n) != CA_OK) goto cleanup;
-        if (document.tokens[i].start == envelope.platform.start && document.tokens[i].end == envelope.platform.end) platform = i;
-        if (document.tokens[i].start == envelope.runtime.start && document.tokens[i].end == envelope.runtime.end) runtime = i;
-        if (document.tokens[i].start == envelope.preload.start && document.tokens[i].end == envelope.preload.end) preload = i;
-    }
-    if (nested_platform(&n, platform) == CA_OK && nested_runtime(&n, runtime) == CA_OK
-        && nested_preload(&n, preload) == CA_OK) status = CA_OK;
-cleanup:
+    if (schema_open(&document, input, length, CA_JSON_BYTES, budget) == CA_OK)
+        status = nested_admit(&n, profile_id);
     nested_release(&n);
     if (schema_close(&document) != CA_OK) status = CA_REFUSED;
+    return status;
+}
+
+/* Filesystem comparison state stays inside this call. Hash explicit stat fields
+   rather than struct padding, so total ancestor storage does not multiply path
+   count by maximum depth. A 4096-byte canonical path visits at most2049
+   directories. Each visited node contributes exactly11 unsigned64 big-endian
+   fields, followed by a16-byte kind/first-missing marker. Up to4096 declared
+   directories and4096 absences each retain one fingerprint/stat/index record.
+   Fingerprint equality relies on SHA256 collision resistance; exact leaf stat
+   and package link-count comparisons remain separate. The original budget
+   checks every observation/update. The final pass repeats the same path order. */
+typedef struct {
+    struct stat info;
+    unsigned char ancestors[32];
+    size_t missing;
+} CAPathObservation;
+enum { CP_DIRECTORY, CP_ABSENT };
+static int hash_stat(CC_SHA256_CTX *hash, const struct stat *info, CABudget *budget) {
+    uint64_t fields[] = {
+        (uint64_t)info->st_dev, (uint64_t)info->st_ino, (uint64_t)info->st_mode,
+        (uint64_t)info->st_uid, (uint64_t)info->st_gid, (uint64_t)info->st_size,
+        (uint64_t)info->st_mtimespec.tv_sec, (uint64_t)info->st_mtimespec.tv_nsec,
+        (uint64_t)info->st_ctimespec.tv_sec, (uint64_t)info->st_ctimespec.tv_nsec,
+        (uint64_t)info->st_nlink
+    };
+    unsigned char encoded[sizeof(fields)];
+    if (ca_budget_check(budget) != CA_OK) return CA_REFUSED;
+    for (size_t i = 0; i < sizeof(fields) / sizeof(fields[0]); i++) big_u64(encoded + i * 8, fields[i]);
+    return CC_SHA256_Update(hash, encoded, (CC_LONG)sizeof(encoded))
+        && ca_budget_check(budget) == CA_OK ? CA_OK : CA_REFUSED;
+}
+static int stable_directory(const struct stat *before, const struct stat *after) {
+    return S_ISDIR(after->st_mode) && same_stat(before, after) && before->st_nlink == after->st_nlink;
+}
+/* A retained descriptor is returned only for an admitted directory. Absence
+   requires ENOENT at the same first missing component on both observations. */
+static int inspect_path(const char *path, int kind, const CAPathObservation *prior,
+                         CAPathObservation *observed, int *retained, CABudget *budget) {
+    size_t length;
+    if ((kind != CP_DIRECTORY && kind != CP_ABSENT) || !observed
+        || (retained && kind != CP_DIRECTORY)
+        || canonical_path(path, &length, budget) != CA_OK) return CA_REFUSED;
+    if (retained) *retained = -1;
+    char copy[CA_PATH_BYTES + 1]; char *parts[CA_PATH_BYTES / 2 + 1];
+    memcpy(copy, path, length + 1);
+    size_t count = 0;
+    if (length > 1) {
+        parts[count++] = copy + 1;
+        for (size_t i = 1; i < length; i++) if (copy[i] == '/') {
+            copy[i] = 0;
+            if (count >= sizeof(parts) / sizeof(parts[0])) return CA_REFUSED;
+            parts[count++] = copy + i + 1;
+        }
+    }
+    CAPathObservation result = {0}; result.missing = SIZE_MAX;
+    CC_SHA256_CTX hash;
+    int current = -1, next = -1, status = CA_REFUSED;
+    if (!CC_SHA256_Init(&hash) || ca_budget_check(budget) != CA_OK) goto cleanup;
+    current = open("/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+    if (ca_budget_check(budget) != CA_OK || current < 0) goto cleanup;
+    for (size_t i = 0; i <= count; i++) {
+        struct stat before, after;
+        if (ca_budget_check(budget) != CA_OK || fstat(current, &before) != 0
+            || ca_budget_check(budget) != CA_OK || !S_ISDIR(before.st_mode)
+            || hash_stat(&hash, &before, budget) != CA_OK) goto cleanup;
+        if (i == count) {
+            if (kind != CP_DIRECTORY || ca_budget_check(budget) != CA_OK
+                || fstat(current, &after) != 0 || ca_budget_check(budget) != CA_OK
+                || !stable_directory(&before, &after)) goto cleanup;
+            result.info = before; status = CA_OK; break;
+        }
+        int error;
+        if (ca_budget_check(budget) != CA_OK) goto cleanup;
+        if (kind == CP_ABSENT && i + 1 == count) {
+            struct stat leaf;
+            int found = fstatat(current, parts[i], &leaf, AT_SYMLINK_NOFOLLOW);
+            error = errno;
+            if (ca_budget_check(budget) != CA_OK || found == 0 || error != ENOENT) goto cleanup;
+        } else {
+            next = openat(current, parts[i], O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC | O_NONBLOCK);
+            error = errno;
+            if (ca_budget_check(budget) != CA_OK) goto cleanup;
+            if (next < 0 && (kind != CP_ABSENT || error != ENOENT)) goto cleanup;
+        }
+        if (ca_budget_check(budget) != CA_OK || fstat(current, &after) != 0
+            || ca_budget_check(budget) != CA_OK || !stable_directory(&before, &after)) goto cleanup;
+        if (next < 0) {
+            result.info = before; result.missing = i; status = CA_OK; break;
+        }
+        if (close_owned(&current, budget) != CA_OK) goto cleanup;
+        current = next; next = -1;
+    }
+    if (status == CA_OK) {
+        unsigned char marker[16]; big_u64(marker, (uint64_t)kind);
+        big_u64(marker + 8, (uint64_t)result.missing);
+        if (!CC_SHA256_Update(&hash, marker, sizeof(marker))
+            || ca_budget_check(budget) != CA_OK || !CC_SHA256_Final(result.ancestors, &hash)
+            || ca_budget_check(budget) != CA_OK
+            || (prior && (prior->missing != result.missing
+                || memcmp(prior->ancestors, result.ancestors, 32) != 0
+                || !stable_directory(&prior->info, &result.info)))) status = CA_REFUSED;
+    }
+cleanup:
+    if (close_owned(&next, budget) != CA_OK) status = CA_REFUSED;
+    if (status != CA_OK || !retained)
+        if (close_owned(&current, budget) != CA_OK) status = CA_REFUSED;
+    if (ca_budget_check(budget) != CA_OK) status = CA_REFUSED;
+    if (status == CA_OK) {
+        *observed = result;
+        if (retained) { *retained = current; current = -1; }
+    }
+    /* A late final check cannot abandon the still-owned directory. */
+    if (close_owned(&current, budget) != CA_OK) status = CA_REFUSED;
+    return status;
+}
+static int private_root(const struct stat *info) {
+    return S_ISDIR(info->st_mode) && info->st_uid == getuid() && (info->st_mode & 07777) == 0700;
+}
+/* closedir consumes stream ownership even when the result is uncertain. */
+static int close_stream(DIR **stream, CABudget *budget) {
+    if (!*stream) return CA_OK;
+    DIR *value = *stream; *stream = NULL;
+    int result = closedir(value), checkpoint = ca_budget_check(budget);
+    return result == 0 && checkpoint == CA_OK ? CA_OK : CA_REFUSED;
+}
+static int package_scan(const char *root, const CAPathObservation *prior,
+                         CAPathObservation *observed, CABudget *budget) {
+    int descriptor = -1, borrowed = -1, status = CA_REFUSED;
+    DIR *stream = NULL; CAPathObservation result;
+    if (inspect_path(root, CP_DIRECTORY, prior, &result, &descriptor, budget) != CA_OK
+        || !private_root(&result.info) || ca_budget_check(budget) != CA_OK) goto cleanup;
+    borrowed = descriptor;
+    stream = fdopendir(descriptor);
+    if (stream) descriptor = -1;
+    if (ca_budget_check(budget) != CA_OK || !stream) goto cleanup;
+    unsigned seen = 0; size_t count = 0;
+    for (;;) {
+        if (ca_budget_check(budget) != CA_OK) goto cleanup;
+        errno = 0;
+        struct dirent *entry = readdir(stream);
+        int error = errno;
+        if (ca_budget_check(budget) != CA_OK) goto cleanup;
+        if (!entry) { if (error) goto cleanup; break; }
+        if (strcmp(entry->d_name, ".") == 0 || strcmp(entry->d_name, "..") == 0) continue;
+        if (++count > 9) goto cleanup;
+        size_t index = 9;
+        for (size_t i = 0; i < 9; i++) if (strcmp(entry->d_name, package_names[i]) == 0) { index = i; break; }
+        if (index == 9 || (seen & (1u << index))) goto cleanup;
+        seen |= 1u << index;
+    }
+    struct stat final;
+    if (count != 9 || seen != 511 || ca_budget_check(budget) != CA_OK
+        || fstat(borrowed, &final) != 0 || ca_budget_check(budget) != CA_OK
+        || !private_root(&final) || !stable_directory(&result.info, &final)) goto cleanup;
+    status = CA_OK;
+cleanup:
+    if (close_stream(&stream, budget) != CA_OK) status = CA_REFUSED;
+    if (close_owned(&descriptor, budget) != CA_OK) status = CA_REFUSED;
+    if (ca_budget_check(budget) != CA_OK) status = CA_REFUSED;
+    if (status == CA_OK) *observed = result;
+    return status;
+}
+static int package_path(const char *root, size_t index, char path[4097], CABudget *budget) {
+    if (index >= 9 || ca_budget_check(budget) != CA_OK) return CA_REFUSED;
+    int count = snprintf(path, 4097, "%s%s%s", root, strcmp(root, "/") == 0 ? "" : "/", package_names[index]);
+    return count > 0 && count <= CA_PATH_BYTES && ca_budget_check(budget) == CA_OK ? CA_OK : CA_REFUSED;
+}
+static int directory_expected(CASchemaDocument *d, size_t token, const char *path,
+                               const struct stat *info) {
+    static const char *const fields[] = {"path", "device", "inode", "mode", "uid", "gid", "mtime_ns", "ctime_ns"};
+    size_t values[8]; char selected[4097]; uint64_t expected[7], mtime, ctime;
+    if (!S_ISDIR(info->st_mode) || schema_fields(d, token, fields, 8, values) != CA_OK
+        || schema_string(d, values[0], selected, sizeof(selected)) != CA_OK || strcmp(selected, path) != 0
+        || timespec_ns(&info->st_mtimespec, &mtime) != CA_OK
+        || timespec_ns(&info->st_ctimespec, &ctime) != CA_OK) return CA_REFUSED;
+    for (size_t i = 0; i < 7; i++) if (schema_u64(d, values[i + 1], &expected[i]) != CA_OK) return CA_REFUSED;
+    uint64_t actual[] = {(uint64_t)info->st_dev, (uint64_t)info->st_ino, (uint64_t)info->st_mode,
+                         (uint64_t)info->st_uid, (uint64_t)info->st_gid, mtime, ctime};
+    return memcmp(actual, expected, sizeof(actual)) == 0 && ca_budget_check(d->budget) == CA_OK ? CA_OK : CA_REFUSED;
+}
+static int selected_files(CANested *n, CAPathObservation *directories, CAPathObservation *absent,
+                           int compare, unsigned char *buffer, size_t capacity) {
+    CASchemaDocument *d = n->document; CABudget *budget = d->budget;
+    size_t token = n->directory_array + 1;
+    for (size_t i = 0; i < n->directory_count; i++) {
+        CAPathObservation current;
+        if (nested_check(n) != CA_OK
+            || inspect_path(n->directories[i], CP_DIRECTORY, compare ? &directories[i] : NULL, &current, NULL, budget) != CA_OK
+            || directory_expected(d, token, n->directories[i], &current.info) != CA_OK) return CA_REFUSED;
+        if (!compare) directories[i] = current;
+        token = schema_after(d, token);
+        if (token == SIZE_MAX) return CA_REFUSED;
+    }
+    for (size_t i = 0; i < n->file_count; i++) {
+        size_t written;
+        if (nested_check(n) != CA_OK || ca_read_verified_file(n->files[i].path, &n->files[i].identity,
+            buffer, capacity, &written, budget) != CA_OK || written != n->files[i].identity.size) return CA_REFUSED;
+    }
+    for (size_t i = 0; i < n->absent_count; i++) {
+        CAPathObservation current;
+        if (nested_check(n) != CA_OK
+            || inspect_path(n->absent[i], CP_ABSENT, compare ? &absent[i] : NULL, &current, NULL, budget) != CA_OK)
+            return CA_REFUSED;
+        if (!compare) absent[i] = current;
+    }
+    return nested_check(n);
+}
+#ifndef CA_TEST_BEFORE_FINAL
+#define CA_TEST_BEFORE_FINAL() ((void)0)
+#endif
+int ca_preload_files_check(const char *root, const unsigned char manifest_sha256[32],
+                           const char *profile_id, CABudget *budget) {
+    size_t root_length;
+    if (!manifest_sha256 || schema_profile_id(profile_id, budget) != CA_OK
+        || canonical_path(root, &root_length, budget) != CA_OK) return CA_REFUSED;
+    unsigned char *buffer = NULL, *profile = NULL;
+    size_t capacity = CA_JSON_BYTES, profile_length = 0, manifest_length = 0;
+    struct stat package_files[9]; CAManifest manifest;
+    CAPathObservation package_initial, package_final, *directories = NULL, *absent = NULL;
+    CASchemaDocument document = {NULL, 0, 0, NULL, budget};
+    CANested n = {0}; n.document = &document;
+    int status = CA_REFUSED; char path[4097];
+    if (package_scan(root, NULL, &package_initial, budget) != CA_OK) goto cleanup;
+    buffer = malloc(capacity); profile = malloc(CA_JSON_BYTES);
+    if (!buffer || !profile || ca_budget_check(budget) != CA_OK) goto cleanup;
+    CAReadExpectation selection = {NULL, NULL, manifest_sha256, 0, 65536, 0, 1};
+    if (package_path(root, 8, path, budget) != CA_OK
+        || read_verified(path, &selection, buffer, capacity, &manifest_length, &package_files[8], budget) != CA_OK
+        || ca_manifest_decode(buffer, manifest_length, manifest_sha256, &manifest, budget) != CA_OK) goto cleanup;
+    for (size_t i = 0; i < 8; i++) {
+        size_t written;
+        selection = (CAReadExpectation){NULL, NULL, manifest.members[i].sha256, manifest.members[i].size, CA_JSON_BYTES, 1, 1};
+        if (package_path(root, i, path, budget) != CA_OK
+            || read_verified(path, &selection, i == 5 ? profile : buffer, capacity,
+                              &written, &package_files[i], budget) != CA_OK) goto cleanup;
+        if (i == 5) profile_length = written;
+    }
+    if (schema_open(&document, profile, profile_length, CA_JSON_BYTES, budget) != CA_OK
+        || nested_admit(&n, profile_id) != CA_OK) goto cleanup;
+    /* Declared runtime paths are first observed only after connected metadata
+       admission. The reusable buffer retains no aggregate file contents. */
+    size_t maximum = capacity;
+    for (size_t i = 0; i < n.file_count; i++) {
+        if (nested_check(&n) != CA_OK) goto cleanup;
+        if (n.files[i].identity.size > maximum) maximum = (size_t)n.files[i].identity.size;
+    }
+    if (maximum > capacity) {
+        unsigned char *larger = realloc(buffer, maximum);
+        if (!larger) goto cleanup;
+        buffer = larger; capacity = maximum;
+        if (ca_budget_check(budget) != CA_OK) goto cleanup;
+    }
+    directories = calloc(n.directory_count, sizeof(*directories));
+    absent = calloc(n.absent_count, sizeof(*absent));
+    if ((n.directory_count && !directories) || (n.absent_count && !absent)
+        || nested_check(&n) != CA_OK
+        || selected_files(&n, directories, absent, 0, buffer, capacity) != CA_OK) goto cleanup;
+    CA_TEST_BEFORE_FINAL();
+    if (ca_budget_check(budget) != CA_OK) goto cleanup;
+    for (size_t i = 0; i < 9; i++) {
+        size_t written; struct stat observed;
+        const unsigned char *digest = i == 8 ? manifest_sha256 : manifest.members[i].sha256;
+        uint64_t size = i == 8 ? manifest_length : manifest.members[i].size;
+        selection = (CAReadExpectation){NULL, &package_files[i], digest, size, i == 8 ? 65536 : CA_JSON_BYTES, 1, 1};
+        if (package_path(root, i, path, budget) != CA_OK
+            || read_verified(path, &selection, buffer, capacity, &written, &observed, budget) != CA_OK) goto cleanup;
+    }
+    if (selected_files(&n, directories, absent, 1, buffer, capacity) != CA_OK
+        || package_scan(root, &package_initial, &package_final, budget) != CA_OK) goto cleanup;
+    status = CA_OK;
+cleanup:
+    free(absent); free(directories);
+    nested_release(&n);
+    if (schema_close(&document) != CA_OK) status = CA_REFUSED;
+    free(profile); free(buffer);
+    if (ca_budget_check(budget) != CA_OK) status = CA_REFUSED;
     return status;
 }
