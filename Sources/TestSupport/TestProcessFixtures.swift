@@ -159,10 +159,31 @@ public enum TestEnvironment {
 /// vended — never a pattern match against a shared directory.
 public final class ConfinedScratchDirs {
     private let label: String
-    private let lock = NSLock()
+    // Root creation, leaf registration, and cleanup share one in-process lifetime.
+    // Separate test processes or unrelated filesystem actors are not serialized.
+    private static let lifecycleLock = NSLock()
     private var created: [URL] = []
+    private let rootForTesting: URL?
+    private let afterRootCreated: (() -> Void)?
+    private let onLifecycleContention: (() -> Void)?
 
-    public init(_ label: String) { self.label = label }
+    public init(_ label: String) {
+        self.label = label
+        rootForTesting = nil
+        afterRootCreated = nil
+        onLifecycleContention = nil
+    }
+
+    // Internal deterministic lifecycle-test seam. Callbacks must not reenter this
+    // helper: afterRootCreated runs with the nonrecursive lifecycle lock held.
+    init(_ label: String, rootForTesting: URL,
+         afterRootCreated: (() -> Void)? = nil,
+         onLifecycleContention: (() -> Void)? = nil) {
+        self.label = label
+        self.rootForTesting = rootForTesting
+        self.afterRootCreated = afterRootCreated
+        self.onLifecycleContention = onLifecycleContention
+    }
 
     private static func root() -> URL {
         let home = FileManager.default.homeDirectoryForCurrentUser.resolvingSymlinksInPath()
@@ -176,28 +197,41 @@ public final class ConfinedScratchDirs {
     /// A fresh, existing, uniquely-named directory owned by this instance, inside the home
     /// directory so home-confined write commands accept it.
     public func directory() throws -> URL {
-        let root = Self.root()
+        acquireLifecycleLock()
+        defer { Self.lifecycleLock.unlock() }
+        let root = rootForTesting ?? Self.root()
         // The root is created as its OWN step so `0700` lands on it too. A single
         // `createDirectory(withIntermediateDirectories: true, attributes:)` applies the attributes
         // to the leaf and leaves any intermediate it had to create at the process umask — which is
         // how the root ended up world-readable while the leaf under it was 0700.
         try FileManager.default.createDirectory(
             at: root, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
+        afterRootCreated?()
         let url = root.appendingPathComponent("apple-cli-\(label)-\(UUID().uuidString)", isDirectory: true)
         try FileManager.default.createDirectory(
             at: url, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
-        lock.lock(); created.append(url); lock.unlock()
+        created.append(url)
         return url
     }
 
+    private func acquireLifecycleLock() {
+        if !Self.lifecycleLock.try() {
+            onLifecycleContention?()
+            Self.lifecycleLock.lock()
+        }
+    }
+
     deinit {
-        lock.lock(); let all = created; created.removeAll(); lock.unlock()
+        acquireLifecycleLock()
+        defer { Self.lifecycleLock.unlock() }
+        let all = created
+        created.removeAll()
         for url in all { try? FileManager.default.removeItem(at: url) }
         // Reclaim the root too, so a checkout OUTSIDE the home directory (CI, a container, a /tmp
         // clone) does not leave `~/.apple-cli-test-scratch` behind — unlike a `$TMPDIR` scratch,
         // nothing ever reaps it. POSIX `rmdir`, deliberately NOT `removeItem`: `rmdir` fails with
         // ENOTEMPTY, so a root another live instance still owns directories under is left alone,
         // whereas `removeItem` is recursive and would delete them.
-        _ = rmdir(Self.root().path)
+        _ = rmdir((rootForTesting ?? Self.root()).path)
     }
 }
