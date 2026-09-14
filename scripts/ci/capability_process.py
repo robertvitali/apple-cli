@@ -73,13 +73,16 @@ _MODULE_FIELDS = {
 _STOCK_SPECIAL_KINDS = frozenset({"stock-typing-namespace", "stock-extension-child"})
 # Imported-module kinds, derived so the two sets cannot drift apart.
 _STOCK_MODULE_KINDS = frozenset(_MODULE_FIELDS) - _STOCK_SPECIAL_KINDS
-# NATIVE MIRROR, CURRENTLY UNPAIRED: scripts/ci/authority/capability_authority_entry.c
-# (nested_modules, ~:1230-1252) re-validates these same rows against four closed
-# field sets and answers CA_REFUSED for any kind outside them. Composite admission
-# is the INTERSECTION of the two validators, so a profile carrying a special row is
-# admitted here and refused natively — fail-closed, never fail-open. The two
-# validators must be paired before any profile containing these kinds can activate;
-# native admission of the special kinds is pending, tracked.
+# NATIVE MIRROR, PAIRED: scripts/ci/authority/capability_authority_entry.c
+# (nested_modules + nested_special) re-validates these same rows against the same
+# six closed field sets and answers CA_REFUSED for any kind outside them. Composite
+# admission is the INTERSECTION of the two validators, so every rule below — closed
+# fields, None spec, empty aliases, pinned parent literal + admitted non-special (or
+# extension) parent, child-after-parent ordering, one row per (parent, attribute),
+# pinned attribute/export sequences, both extension-child spellings, strict boolean
+# presence, and the no-search rule further down — has a native twin. The native
+# tests live in Tests/automation/capability_authority_nested_tests.c (the
+# `special-*` cases); keep the two validators and the two test sets in step.
 _TYPING_NAMESPACE_PARENT = "typing"
 # Pinned `__all__` member names per typing namespace attribute. Names only: the
 # observed raw mapping carried id() heap addresses, which are ASLR-dependent and

@@ -151,6 +151,142 @@ static void relationship_cases(void) {
     check("fixed-aggregate-ceiling-over-declared-limit",invoke()==CA_REFUSED);
 }
 
+/* Stock special module kinds: attribute-backed rows reached through an
+   already-admitted parent. The parent rows and one file record are synthetic
+   fixture additions; nothing here is observed. */
+#define EXPAT_FILE "{\"id\":\"expat-extension\",\"identity\":{\"path\":\"/synthetic/runtime/expat-extension\",\"sha256\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"device\":1,\"inode\":16,\"size\":4096,\"mode\":33261,\"uid\":1,\"gid\":1,\"mtime_ns\":1,\"ctime_ns\":1}}"
+#define TYPING_PARENT "{\"name\":\"typing\",\"kind\":\"builtin\",\"spec_name\":\"typing\",\"aliases\":[],\"registry_name\":\"typing\"}"
+#define EXPAT_PARENT "{\"name\":\"pyexpat\",\"kind\":\"extension\",\"spec_name\":\"pyexpat\",\"aliases\":[],\"file\":\"expat-extension\",\"uuid\":\"ffffffffffffffffffffffffffffffff\",\"dependencies\":[]}"
+#define TYPING_IO "{\"name\":\"typing.io\",\"kind\":\"stock-typing-namespace\",\"spec_name\":null,\"aliases\":[],\"parent\":\"typing\",\"attribute\":\"io\",\"exports\":[\"BinaryIO\",\"IO\",\"TextIO\"]}"
+#define EXPAT_ERRORS "{\"name\":\"pyexpat.errors\",\"kind\":\"stock-extension-child\",\"spec_name\":null,\"aliases\":[],\"parent\":\"pyexpat\",\"attribute\":\"errors\",\"file_present\":false,\"cached_present\":false}"
+#define TYPING_RE_PREFIX "{\"name\":\"typing.re\",\"kind\":\"stock-typing-namespace\",\"spec_name\":null,\"aliases\":[],\"parent\":\"typing\",\"attribute\":\"re\",\"exports\":"
+#define EXPAT_SEARCH "{\"module\":\"pyexpat\",\"candidates\":[{\"path\":\"/synthetic/runtime/expat-extension\",\"file\":\"expat-extension\"}]}"
+/* Append the parent rows and both special rows (parent-first unless reversed)
+   to the base fixture, with the extension parent's file record and search. */
+static void enrich_special(int children_first) {
+    reset();
+    replace_once("{\"id\":\"framework\"",EXPAT_FILE ",{\"id\":\"framework\"");
+    replace_once("{\"module\":\"subprocess\",\"candidates\"",EXPAT_SEARCH ",{\"module\":\"subprocess\",\"candidates\"");
+    replace_once("\"registry_name\":\"time\"}]",children_first
+        ? "\"registry_name\":\"time\"}," TYPING_IO "," EXPAT_ERRORS "," TYPING_PARENT "," EXPAT_PARENT "]"
+        : "\"registry_name\":\"time\"}," TYPING_PARENT "," EXPAT_PARENT "," TYPING_IO "," EXPAT_ERRORS "]");
+}
+/* Each refusal names the single native check whose removal would admit it;
+   where two checks overlap the second is defence in depth, as in Python. */
+static const struct Mutation special_negatives[]={
+ /* closed field sets: schema_fields exact-set match selects the kind */
+ {"special-typing-extra-field","\"exports\":[\"BinaryIO\",\"IO\",\"TextIO\"]}","\"exports\":[\"BinaryIO\",\"IO\",\"TextIO\"],\"extra\":0}"},
+ {"special-typing-missing-exports",",\"exports\":[\"BinaryIO\",\"IO\",\"TextIO\"]",""},
+ {"special-child-extra-field","\"cached_present\":false}","\"cached_present\":false,\"extra\":0}"},
+ {"special-child-missing-presence",",\"cached_present\":false",""},
+ {"special-typing-kind-of-child-fields","\"kind\":\"stock-typing-namespace\"","\"kind\":\"stock-extension-child\""},
+ {"special-child-kind-of-typing-fields","\"kind\":\"stock-extension-child\"","\"kind\":\"stock-typing-namespace\""},
+ /* anti-relabel, both directions (field set and kind literal must agree) */
+ {"special-typing-relabel-builtin","\"kind\":\"stock-typing-namespace\"","\"kind\":\"builtin\""},
+ {"special-typing-relabel-source","\"kind\":\"stock-typing-namespace\"","\"kind\":\"source\""},
+ {"special-child-relabel-extension","\"kind\":\"stock-extension-child\"","\"kind\":\"extension\""},
+ {"special-child-relabel-frozen","\"kind\":\"stock-extension-child\"","\"kind\":\"frozen\""},
+ {"special-frozen-relabel-typing","\"kind\":\"frozen\"","\"kind\":\"stock-typing-namespace\""},
+ {"special-extension-relabel-child","\"kind\":\"extension\",\"spec_name\":\"synthetic_extension\"","\"kind\":\"stock-extension-child\",\"spec_name\":\"synthetic_extension\""},
+ /* spec_name exactly null; aliases exactly empty */
+ {"special-typing-spec-name","\"spec_name\":null,\"aliases\":[],\"parent\":\"typing\"","\"spec_name\":\"typing.io\",\"aliases\":[],\"parent\":\"typing\""},
+ {"special-child-spec-name","\"spec_name\":null,\"aliases\":[],\"parent\":\"pyexpat\"","\"spec_name\":\"pyexpat.errors\",\"aliases\":[],\"parent\":\"pyexpat\""},
+ {"special-typing-alias","\"aliases\":[],\"parent\":\"typing\"","\"aliases\":[\"typing.io_alias\"],\"parent\":\"typing\""},
+ {"special-child-alias-other-spelling","\"aliases\":[],\"parent\":\"pyexpat\"","\"aliases\":[\"xml.parsers.expat.errors\"],\"parent\":\"pyexpat\""},
+ {"special-child-alias-unrelated","\"aliases\":[],\"parent\":\"pyexpat\"","\"aliases\":[\"subprocess\"],\"parent\":\"pyexpat\""},
+ /* parent and attribute are text */
+ {"special-typing-parent-not-text","\"parent\":\"typing\"","\"parent\":null"},
+ {"special-child-attribute-not-text","\"attribute\":\"errors\"","\"attribute\":1"},
+ /* typing namespace: pinned parent literal, admitted non-special parent, pinned attribute, name, exports */
+ {"special-typing-parent-absent","\"parent\":\"typing\",\"attribute\":\"io\"","\"parent\":\"typing_absent\",\"attribute\":\"io\""},
+ {"special-typing-parent-absent-name","\"name\":\"typing.io\",\"kind\":\"stock-typing-namespace\",\"spec_name\":null,\"aliases\":[],\"parent\":\"typing\"","\"name\":\"typing_absent.io\",\"kind\":\"stock-typing-namespace\",\"spec_name\":null,\"aliases\":[],\"parent\":\"typing_absent\""},
+ {"special-typing-parent-other-admitted","\"name\":\"typing.io\",\"kind\":\"stock-typing-namespace\",\"spec_name\":null,\"aliases\":[],\"parent\":\"typing\"","\"name\":\"importlib._bootstrap.io\",\"kind\":\"stock-typing-namespace\",\"spec_name\":null,\"aliases\":[],\"parent\":\"importlib._bootstrap\""},
+ {"special-typing-attribute-unpinned","\"attribute\":\"io\"","\"attribute\":\"codecs\""},
+ {"special-typing-attribute-unpinned-consistent",TYPING_IO,"{\"name\":\"typing.codecs\",\"kind\":\"stock-typing-namespace\",\"spec_name\":null,\"aliases\":[],\"parent\":\"typing\",\"attribute\":\"codecs\",\"exports\":[\"Match\",\"Pattern\"]}"},
+ {"special-typing-parent-row-missing",TYPING_PARENT ",",""},
+ {"special-typing-name-drift","\"name\":\"typing.io\"","\"name\":\"typing.text\""},
+ /* name == parent "." attribute: the prefix and the dot delimiter are checked
+    separately, so each has its own negative (parent/attribute stay consistent) */
+ {"special-typing-name-wrong-prefix","\"name\":\"typing.io\"","\"name\":\"abcdef.io\""},
+ {"special-typing-name-no-dot","\"name\":\"typing.io\"","\"name\":\"typingXio\""},
+ /* typing.re: every malformed-exports shape, so no attribute-specific bypass admits */
+ {"special-typing-re-exports-wrong-member",TYPING_IO,TYPING_RE_PREFIX "[\"Match\",\"Regex\"]}"},
+ {"special-typing-re-exports-reversed",TYPING_IO,TYPING_RE_PREFIX "[\"Pattern\",\"Match\"]}"},
+ {"special-typing-re-exports-missing",TYPING_IO,TYPING_RE_PREFIX "[\"Match\"]}"},
+ {"special-typing-re-exports-extra",TYPING_IO,TYPING_RE_PREFIX "[\"Match\",\"Pattern\",\"TextIO\"]}"},
+ {"special-typing-re-exports-duplicate",TYPING_IO,TYPING_RE_PREFIX "[\"Match\",\"Match\",\"Pattern\"]}"},
+ {"special-typing-re-exports-non-text",TYPING_IO,TYPING_RE_PREFIX "[\"Match\",1]}"},
+ {"special-typing-re-exports-of-io",TYPING_IO,TYPING_RE_PREFIX "[\"BinaryIO\",\"IO\",\"TextIO\"]}"},
+ {"special-typing-exports-object","\"exports\":[\"BinaryIO\",\"IO\",\"TextIO\"]","\"exports\":{\"IO\":4096}"},
+ {"special-typing-exports-string","\"exports\":[\"BinaryIO\",\"IO\",\"TextIO\"]","\"exports\":\"BinaryIO\""},
+ {"special-typing-exports-disorder","\"exports\":[\"BinaryIO\",\"IO\",\"TextIO\"]","\"exports\":[\"IO\",\"BinaryIO\",\"TextIO\"]"},
+ {"special-typing-exports-duplicate","\"exports\":[\"BinaryIO\",\"IO\",\"TextIO\"]","\"exports\":[\"BinaryIO\",\"BinaryIO\",\"IO\",\"TextIO\"]"},
+ {"special-typing-exports-short","\"exports\":[\"BinaryIO\",\"IO\",\"TextIO\"]","\"exports\":[\"BinaryIO\",\"IO\"]"},
+ {"special-typing-exports-extra-empty","\"exports\":[\"BinaryIO\",\"IO\",\"TextIO\"]","\"exports\":[\"BinaryIO\",\"IO\",\"TextIO\",\"\"]"},
+ {"special-typing-exports-non-text","\"exports\":[\"BinaryIO\",\"IO\",\"TextIO\"]","\"exports\":[\"BinaryIO\",\"IO\",4096]"},
+ {"special-typing-exports-of-other-attribute","\"exports\":[\"BinaryIO\",\"IO\",\"TextIO\"]","\"exports\":[\"Match\",\"Pattern\"]"},
+ /* extension child: pinned parent literal, extension-kind parent, attribute set, spellings, strict booleans */
+ {"special-child-parent-builtin","\"parent\":\"pyexpat\",\"attribute\":\"errors\"","\"parent\":\"time\",\"attribute\":\"errors\""},
+ {"special-child-parent-builtin-name","\"name\":\"pyexpat.errors\",\"kind\":\"stock-extension-child\",\"spec_name\":null,\"aliases\":[],\"parent\":\"pyexpat\"","\"name\":\"time.errors\",\"kind\":\"stock-extension-child\",\"spec_name\":null,\"aliases\":[],\"parent\":\"time\""},
+ {"special-child-parent-typing-name","\"name\":\"pyexpat.errors\",\"kind\":\"stock-extension-child\",\"spec_name\":null,\"aliases\":[],\"parent\":\"pyexpat\"","\"name\":\"typing.errors\",\"kind\":\"stock-extension-child\",\"spec_name\":null,\"aliases\":[],\"parent\":\"typing\""},
+ {"special-child-parent-absent-name","\"name\":\"pyexpat.errors\",\"kind\":\"stock-extension-child\",\"spec_name\":null,\"aliases\":[],\"parent\":\"pyexpat\"","\"name\":\"pyexpat_absent.errors\",\"kind\":\"stock-extension-child\",\"spec_name\":null,\"aliases\":[],\"parent\":\"pyexpat_absent\""},
+ {"special-child-attribute-unpinned","\"attribute\":\"errors\"","\"attribute\":\"handler\""},
+ {"special-child-attribute-unpinned-consistent","\"name\":\"pyexpat.errors\",\"kind\":\"stock-extension-child\",\"spec_name\":null,\"aliases\":[],\"parent\":\"pyexpat\",\"attribute\":\"errors\"","\"name\":\"pyexpat.handler\",\"kind\":\"stock-extension-child\",\"spec_name\":null,\"aliases\":[],\"parent\":\"pyexpat\",\"attribute\":\"handler\""},
+ {"special-child-parent-other-extension","\"name\":\"pyexpat.errors\",\"kind\":\"stock-extension-child\",\"spec_name\":null,\"aliases\":[],\"parent\":\"pyexpat\"","\"name\":\"synthetic_extension.errors\",\"kind\":\"stock-extension-child\",\"spec_name\":null,\"aliases\":[],\"parent\":\"synthetic_extension\""},
+ {"special-child-name-drift","\"name\":\"pyexpat.errors\"","\"name\":\"pyexpat.errors_alias\""},
+ {"special-child-name-other-attribute","\"name\":\"pyexpat.errors\"","\"name\":\"xml.parsers.expat.model\""},
+ {"special-child-name-wrong-prefix","\"name\":\"pyexpat.errors\"","\"name\":\"abcdefg.errors\""},
+ {"special-child-name-no-dot","\"name\":\"pyexpat.errors\"","\"name\":\"pyexpatXerrors\""},
+ {"special-child-alias-spelling-wrong-prefix","\"name\":\"pyexpat.errors\"","\"name\":\"xml.parsers.expaX.errors\""},
+ {"special-child-alias-spelling-no-dot","\"name\":\"pyexpat.errors\"","\"name\":\"xml.parsers.expatXerrors\""},
+ {"special-child-file-present-integer","\"file_present\":false","\"file_present\":0"},
+ {"special-child-cached-present-null","\"cached_present\":false","\"cached_present\":null"},
+ {"special-child-file-present-string","\"file_present\":false","\"file_present\":\"false\""},
+ /* one child, both spellings */
+ {"special-child-both-spellings",EXPAT_ERRORS,EXPAT_ERRORS ",{\"name\":\"xml.parsers.expat.errors\",\"kind\":\"stock-extension-child\",\"spec_name\":null,\"aliases\":[],\"parent\":\"pyexpat\",\"attribute\":\"errors\",\"file_present\":false,\"cached_present\":false}"},
+ /* a special row never parents another special row */
+ {"special-reparent-onto-special",EXPAT_ERRORS,EXPAT_ERRORS ",{\"name\":\"pyexpat.errors.io\",\"kind\":\"stock-typing-namespace\",\"spec_name\":null,\"aliases\":[],\"parent\":\"pyexpat.errors\",\"attribute\":\"io\",\"exports\":[\"BinaryIO\",\"IO\",\"TextIO\"]}"},
+ /* special rows are never located by a stock search */
+ {"special-search-names-child",EXPAT_SEARCH,EXPAT_SEARCH ",{\"module\":\"pyexpat.errors\",\"candidates\":[{\"path\":\"/synthetic/runtime/expat-extension\",\"file\":\"expat-extension\"}]}"}
+};
+static void special_cases(void) {
+    enrich_special(0); check("special-rows-admitted",invoke()==CA_OK);
+    enrich_special(0); replace_once(TYPING_PARENT,"{\"name\":\"typing\",\"kind\":\"frozen\",\"spec_name\":\"typing\",\"aliases\":[],\"registry_name\":\"typing\",\"file_alias\":null}");
+    check("special-typing-frozen-parent-admitted",invoke()==CA_OK);
+    enrich_special(0); replace_once(TYPING_IO,"{\"name\":\"typing.re\",\"kind\":\"stock-typing-namespace\",\"spec_name\":null,\"aliases\":[],\"parent\":\"typing\",\"attribute\":\"re\",\"exports\":[\"Match\",\"Pattern\"]}");
+    check("special-typing-re-admitted",invoke()==CA_OK);
+    enrich_special(0); replace_once(TYPING_IO,TYPING_IO ",{\"name\":\"typing.re\",\"kind\":\"stock-typing-namespace\",\"spec_name\":null,\"aliases\":[],\"parent\":\"typing\",\"attribute\":\"re\",\"exports\":[\"Match\",\"Pattern\"]}");
+    check("special-typing-both-attributes-admitted",invoke()==CA_OK);
+    enrich_special(0); replace_once("\"name\":\"pyexpat.errors\"","\"name\":\"xml.parsers.expat.errors\"");
+    check("special-child-alias-spelling-admitted",invoke()==CA_OK);
+    enrich_special(0); replace_once(EXPAT_ERRORS,EXPAT_ERRORS ",{\"name\":\"xml.parsers.expat.model\",\"kind\":\"stock-extension-child\",\"spec_name\":null,\"aliases\":[],\"parent\":\"pyexpat\",\"attribute\":\"model\",\"file_present\":true,\"cached_present\":true}");
+    check("special-child-both-attributes-admitted",invoke()==CA_OK);
+    enrich_special(0); replace_once("\"file_present\":false,\"cached_present\":false","\"file_present\":true,\"cached_present\":false");
+    check("special-child-presence-true-admitted",invoke()==CA_OK);
+    /* ORDERING CONTRACT: the very same rows, children ahead of parents, refuse. */
+    enrich_special(1); check("special-children-before-parents",invoke()==CA_REFUSED);
+    enrich_special(0); replace_once(TYPING_PARENT "," EXPAT_PARENT "," TYPING_IO,TYPING_IO "," TYPING_PARENT "," EXPAT_PARENT);
+    check("special-typing-child-before-its-parent",invoke()==CA_REFUSED);
+    /* A parent so named but not an extension row: the search is dropped with it
+       so the owner-kind check, not the search, is what refuses. */
+    enrich_special(0); replace_once(EXPAT_PARENT,"{\"name\":\"pyexpat\",\"kind\":\"builtin\",\"spec_name\":\"pyexpat\",\"aliases\":[],\"registry_name\":\"pyexpat\"}");
+    replace_once(EXPAT_SEARCH ",","");
+    check("special-child-parent-so-named-builtin",invoke()==CA_REFUSED);
+    enrich_special(0); replace_once(EXPAT_PARENT ",",""); replace_once(EXPAT_SEARCH ",","");
+    check("special-child-parent-row-missing",invoke()==CA_REFUSED);
+    for(size_t i=0;i<sizeof(special_negatives)/sizeof(special_negatives[0]);i++) {
+        enrich_special(0); replace_once(special_negatives[i].old,special_negatives[i].replacement);
+        check(special_negatives[i].label,invoke()==CA_REFUSED);
+    }
+}
+#undef EXPAT_FILE
+#undef TYPING_PARENT
+#undef EXPAT_PARENT
+#undef TYPING_IO
+#undef EXPAT_ERRORS
+#undef EXPAT_SEARCH
+#undef TYPING_RE_PREFIX
+
 /* An inactive row's nested objects are intentionally empty: only its envelope
    must pass when a different row is selected. Identities are synthetic. */
 #define INACTIVE_ID "{\"path\":\"/synthetic/inactive-tool\",\"sha256\":\"1111111111111111111111111111111111111111111111111111111111111111\",\"device\":1,\"inode\":99,\"size\":1,\"mode\":33261,\"uid\":1,\"gid\":1,\"mtime_ns\":1,\"ctime_ns\":1}"
@@ -201,7 +337,7 @@ int main(void) {
         reset(); replace_once(negatives[i].old,negatives[i].replacement);
         check(negatives[i].label,invoke()==CA_REFUSED);
     }
-    relationship_cases(); composition_cases(); bound_cases();
+    relationship_cases(); special_cases(); composition_cases(); bound_cases();
     printf("summary cases=%u failures=%u fixture_errors=%u\n",cases,failures,fixture_errors);
     return fixture_errors ? 2 : failures ? 1 : 0;
 }

@@ -927,6 +927,8 @@ typedef struct {
     const char *name;
     size_t file;
     int kind, stock, searched;
+    /* Set only on the two attribute-backed stock special kinds. */
+    const char *parent, *attribute;
 } CANestedModule;
 typedef struct {
     CASchemaDocument *document;
@@ -940,7 +942,7 @@ typedef struct {
     size_t name_count, absent_count, search_count, directory_count, directory_array;
     int failed;
 } CANested;
-enum { CN_BUILTIN, CN_FROZEN, CN_SOURCE, CN_EXTENSION };
+enum { CN_BUILTIN, CN_FROZEN, CN_SOURCE, CN_EXTENSION, CN_TYPING_NAMESPACE, CN_EXTENSION_CHILD };
 
 static int nested_check(CANested *n) {
     if (n->failed || ca_budget_check(n->document->budget) != CA_OK) {
@@ -969,6 +971,11 @@ static int nested_equal(CANested *n, size_t token, const char *expected) {
 }
 static int nested_null(CANested *n, size_t token) {
     return token < n->document->count && n->document->tokens[token].kind == CA_NULL;
+}
+/* Strict JSON boolean: a bare true/false token, never a number, null or text. */
+static int nested_bool(CANested *n, size_t token) {
+    return token < n->document->count && (n->document->tokens[token].kind == CA_TRUE
+                                          || n->document->tokens[token].kind == CA_FALSE);
 }
 static int nested_number(CANested *n, size_t token, uint64_t minimum, uint64_t maximum) {
     uint64_t value;
@@ -1226,6 +1233,69 @@ static int nested_package(CANested *n, const char *module, size_t token) {
         || strcmp(value + length, ".py") != 0) return 0;
     return nested_contains(n, members, 6, value) == 1;
 }
+/* name == parent "." attribute, compared as whole strings. */
+static int nested_dotted(const char *name, const char *parent, const char *attribute) {
+    size_t length = strlen(parent);
+    return strncmp(name, parent, length) == 0 && name[length] == '.'
+        && strcmp(name + length + 1, attribute) == 0;
+}
+/* Exactly the pinned member-name sequence: same count, same text, same order. */
+static int nested_exports(CANested *n, size_t array, const char *const *expected, size_t count) {
+    if (!nested_array(n, array, count, count)) return 0;
+    size_t at = array + 1;
+    for (size_t i = 0; i < count; i++) {
+        if (!nested_equal(n, at, expected[i])) return 0;
+        at = schema_after(n->document, at);
+        if (at == SIZE_MAX) return 0;
+    }
+    return nested_check(n) == CA_OK;
+}
+/* Mirror of the Python special-kind branch (capability_process.py
+   _admit_runtime_metadata): an attribute of an already-admitted parent. Field
+   order is the closed set the caller matched: 4 parent, 5 attribute, then
+   6 exports (typing namespace) or 6 file_present, 7 cached_present (child). */
+static int nested_special(CANested *n, size_t index, CANestedModule *module, const size_t *v) {
+    static const char *const io_exports[] = {"BinaryIO", "IO", "TextIO"};
+    static const char *const re_exports[] = {"Match", "Pattern"};
+    const char *parent = nested_text(n, v[4]), *attribute = nested_text(n, v[5]);
+    if (!parent || !attribute) return CA_REFUSED;
+    const CANestedModule *owner = NULL;
+    for (size_t j = 0; j < index; j++) {
+        const CANestedModule *prior = &n->modules[j];
+        if (nested_check(n) != CA_OK) return CA_REFUSED;
+        /* At most one row per (parent, attribute): the canonical and alias
+           spellings of one child can never both be admitted. */
+        if (prior->parent && strcmp(prior->parent, parent) == 0
+            && strcmp(prior->attribute, attribute) == 0) return CA_REFUSED;
+        /* ORDERING CONTRACT: only rows already admitted ahead of this one can
+           parent it, so a child placed before its parent refuses exactly as a
+           dangling parent does. Names are unique, so at most one row matches. */
+        if (strcmp(prior->name, parent) == 0) owner = prior;
+    }
+    if (!owner) return CA_REFUSED;
+    if (module->kind == CN_TYPING_NAMESPACE) {
+        /* The pinned literal is the truth; the non-special parent kind is the
+           consistency check, so a special row never parents another. */
+        if (strcmp(parent, "typing") != 0
+            || owner->kind == CN_TYPING_NAMESPACE || owner->kind == CN_EXTENSION_CHILD) return CA_REFUSED;
+        const char *const *expected; size_t count;
+        if (strcmp(attribute, "io") == 0) { expected = io_exports; count = 3; }
+        else if (strcmp(attribute, "re") == 0) { expected = re_exports; count = 2; }
+        else return CA_REFUSED;
+        if (!nested_dotted(module->name, parent, attribute)
+            || !nested_exports(n, v[6], expected, count)) return CA_REFUSED;
+    } else {
+        if (strcmp(parent, "pyexpat") != 0 || owner->kind != CN_EXTENSION) return CA_REFUSED;
+        if (strcmp(attribute, "errors") != 0 && strcmp(attribute, "model") != 0) return CA_REFUSED;
+        /* Supported but unobserved: xml.parsers.expat.<attribute> names the
+           same child as the observed pyexpat.<attribute> spelling. */
+        if (!nested_dotted(module->name, parent, attribute)
+            && !nested_dotted(module->name, "xml.parsers.expat", attribute)) return CA_REFUSED;
+        if (!nested_bool(n, v[6]) || !nested_bool(n, v[7])) return CA_REFUSED;
+    }
+    module->parent = parent; module->attribute = attribute;
+    return nested_check(n);
+}
 static int nested_modules(CANested *n, size_t array, uint64_t maximum) {
     static const char *const builtin[] = {"name", "kind", "spec_name", "aliases", "registry_name"};
     static const char *const frozen[] = {"name", "kind", "spec_name", "aliases", "registry_name", "file_alias"};
@@ -1233,6 +1303,10 @@ static int nested_modules(CANested *n, size_t array, uint64_t maximum) {
         "name", "kind", "spec_name", "aliases", "loader", "selected_input", "source", "cache", "package_member"
     };
     static const char *const extension[] = {"name", "kind", "spec_name", "aliases", "file", "uuid", "dependencies"};
+    static const char *const typing_namespace[] = {"name", "kind", "spec_name", "aliases", "parent", "attribute", "exports"};
+    static const char *const extension_child[] = {
+        "name", "kind", "spec_name", "aliases", "parent", "attribute", "file_present", "cached_present"
+    };
     CASchemaDocument *d = n->document;
     if (!nested_array(n, array, 1, CA_JSON_ITEMS) || d->tokens[array].children > maximum) return CA_REFUSED;
     n->module_count = d->tokens[array].children;
@@ -1249,18 +1323,28 @@ static int nested_modules(CANested *n, size_t array, uint64_t maximum) {
         else if (schema_fields(d, at, frozen, 6, v) == CA_OK && nested_equal(n, v[1], "frozen")) kind = CN_FROZEN;
         else if (schema_fields(d, at, source, 9, v) == CA_OK && nested_equal(n, v[1], "source")) kind = CN_SOURCE;
         else if (schema_fields(d, at, extension, 7, v) == CA_OK && nested_equal(n, v[1], "extension")) kind = CN_EXTENSION;
+        else if (schema_fields(d, at, typing_namespace, 7, v) == CA_OK
+                 && nested_equal(n, v[1], "stock-typing-namespace")) kind = CN_TYPING_NAMESPACE;
+        else if (schema_fields(d, at, extension_child, 8, v) == CA_OK
+                 && nested_equal(n, v[1], "stock-extension-child")) kind = CN_EXTENSION_CHILD;
         if (kind < 0 || nested_check(n) != CA_OK) return CA_REFUSED;
-        const char *name = nested_text(n, v[0]), *spec = nested_text(n, v[2]);
-        if (nested_name(n, name) != CA_OK || !nested_identifier(n, spec, 1)
-            || !nested_array(n, v[3], 0, CA_JSON_ITEMS)) return CA_REFUSED;
+        /* Special rows describe a parent attribute, not an import: the absent
+           spec is exactly null and the alias list exactly empty. */
+        int special = kind == CN_TYPING_NAMESPACE || kind == CN_EXTENSION_CHILD;
+        const char *name = nested_text(n, v[0]), *spec = special ? NULL : nested_text(n, v[2]);
+        if (nested_name(n, name) != CA_OK
+            || (special ? !nested_null(n, v[2]) : !nested_identifier(n, spec, 1))
+            || !nested_array(n, v[3], 0, special ? 0 : CA_JSON_ITEMS)) return CA_REFUSED;
         size_t alias = v[3] + 1;
         for (size_t j = 0; j < d->tokens[v[3]].children; j++) {
             if (nested_name(n, nested_text(n, alias)) != CA_OK) return CA_REFUSED;
             alias = schema_after(d, alias);
             if (alias == SIZE_MAX) return CA_REFUSED;
         }
-        CANestedModule module = {name, SIZE_MAX, kind, 0, 0};
-        if (kind == CN_BUILTIN || kind == CN_FROZEN) {
+        CANestedModule module = {name, SIZE_MAX, kind, 0, 0, NULL, NULL};
+        if (special) {
+            if (nested_special(n, i, &module, v) != CA_OK) return CA_REFUSED;
+        } else if (kind == CN_BUILTIN || kind == CN_FROZEN) {
             const char *registry = nested_text(n, v[4]);
             if (!nested_identifier(n, registry, 1) || strcmp(registry, spec) != 0) return CA_REFUSED;
             if (kind == CN_FROZEN && !nested_null(n, v[5])

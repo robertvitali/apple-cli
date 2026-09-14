@@ -19,6 +19,17 @@ JSON output are stable per the versioning policy — breaking changes bump
 
 ### Added
 
+- **Runtime-metadata profiles carrying the two stock special module kinds are now
+  admitted by the native authority validator as well.** `stock-typing-namespace` and
+  `stock-extension-child` module rows, admitted by the Python validator since the
+  previous change, were still refused by the native mirror, so a profile containing
+  either could not activate (composite admission is the intersection of the two).
+  The native validator now admits exactly what the Python one admits for these kinds
+  and refuses exactly what it refuses. **For anyone running the binary, nothing
+  changes:** no `apple` command, output field, error type, or exit code is affected, and
+  `schema_version` stays `1` — this is internal capability-admission automation, not the
+  JSON envelope contract agents key on, and no shipped profile carries either kind yet.
+
 - **AppleScript capture can now have an opt-in byte limit.** Set
   `APPLE_SCRIPT_MAX_OUTPUT_BYTES` to a positive decimal byte count, or pass
   `maximumOutputBytes` when constructing `AppleScriptRunner`. The allowance combines
@@ -56,11 +67,10 @@ JSON output are stable per the versioning policy — breaking changes bump
   relabelled between these kinds and the imported-module kinds. Two limits are worth
   stating: the identity relations the descriptor cannot express (that the module entry *is*
   the parent's attribute, and each typing member *is* the module's own) are not asserted by
-  this schema and remain obligations to check against a live process; and the native
-  authority in `scripts/ci/authority/capability_authority_entry.c` still refuses any kind
-  outside the original four, so a profile carrying one of these rows is admitted by the
-  Python validator and refused natively — fail-closed. Pairing the two validators is pending
-  and tracked; until then no profile containing these kinds can activate. **For anyone
+  this schema and remain obligations to check against a live process; and composite
+  admission is the intersection of this validator and the native authority in
+  `scripts/ci/authority/capability_authority_entry.c`, which admits the same two kinds (see
+  the entry above), so a profile carrying one of these rows is admitted by both. **For anyone
   running the binary, nothing changes:** no `apple` command, output field, error type, or
   exit code is affected, and `schema_version` stays `1` — this schema is internal
   automation and is not the JSON envelope contract agents key on.
