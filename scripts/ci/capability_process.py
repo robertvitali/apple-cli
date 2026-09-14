@@ -60,6 +60,37 @@ _PACKAGE_MEMBERS = {
     "capability_process_protocol.py": "python-source", "capability_schema.py": "python-source",
 }
 _MANIFEST_NAME = "capability_package_manifest.json"
+# Closed per-kind field sets for a runtime module row. The first four kinds
+# describe an imported module with its own import spec; the last two describe an
+# attribute of an already-imported parent module, reached through that parent and
+# never by a stock filesystem search, so they contribute no pre-load candidates.
+_MODULE_FIELDS = {
+    "builtin": "registry_name", "frozen": "registry_name file_alias",
+    "source": "loader selected_input source cache package_member",
+    "extension": "file uuid dependencies",
+    "stock-typing-namespace": "parent attribute exports",
+    "stock-extension-child": "parent attribute file_present cached_present"}
+_STOCK_SPECIAL_KINDS = frozenset({"stock-typing-namespace", "stock-extension-child"})
+# Imported-module kinds, derived so the two sets cannot drift apart.
+_STOCK_MODULE_KINDS = frozenset(_MODULE_FIELDS) - _STOCK_SPECIAL_KINDS
+# NATIVE MIRROR, CURRENTLY UNPAIRED: scripts/ci/authority/capability_authority_entry.c
+# (nested_modules, ~:1230-1252) re-validates these same rows against four closed
+# field sets and answers CA_REFUSED for any kind outside them. Composite admission
+# is the INTERSECTION of the two validators, so a profile carrying a special row is
+# admitted here and refused natively — fail-closed, never fail-open. The two
+# validators must be paired before any profile containing these kinds can activate;
+# native admission of the special kinds is pending, tracked.
+_TYPING_NAMESPACE_PARENT = "typing"
+# Pinned `__all__` member names per typing namespace attribute. Names only: the
+# observed raw mapping carried id() heap addresses, which are ASLR-dependent and
+# run-unstable, so they are never admitted.
+_TYPING_NAMESPACE_EXPORTS = {
+    "io": ("BinaryIO", "IO", "TextIO"), "re": ("Match", "Pattern")}
+_EXTENSION_CHILD_PARENT = "pyexpat"
+_EXTENSION_CHILD_ATTRIBUTES = ("errors", "model")
+# Supported but unobserved: `xml.parsers.expat.<attribute>` names the same child
+# object as the observed `pyexpat.<attribute>` spelling.
+_EXTENSION_CHILD_ALIAS_PARENT = "xml.parsers.expat"
 
 
 def _unavailable(reason="process-unavailable", cleanup="not-needed"):
@@ -787,19 +818,43 @@ def _admit_runtime_metadata(platform, runtime, *, deadline, clock):
         checkpoint()
     need(runtime["external_entry_module"] == "__main__")
     need(type(runtime["modules"]) is list and 0 < len(runtime["modules"]) <= limits["module_count"])
-    modules, names = {}, {runtime["external_entry_module"]}
+    modules, names, children = {}, {runtime["external_entry_module"]}, set()
     common = "name kind spec_name aliases "
-    fields = {
-        "builtin": "registry_name", "frozen": "registry_name file_alias",
-        "source": "loader selected_input source cache package_member",
-        "extension": "file uuid dependencies"}
+    fields = _MODULE_FIELDS
     for row in runtime["modules"]:
         checkpoint()
         need(type(row) is dict and type(row.get("kind")) is str and row["kind"] in fields)
         kind = row["kind"]
         record(row, common + fields[kind])
         module_name(row["name"])
-        module_name(row["spec_name"])
+        if kind in _STOCK_SPECIAL_KINDS:
+            # These rows describe an attribute of an already-imported parent, not an
+            # imported module, so they carry no import spec. `None` is this schema's
+            # established spelling for an absent value (frozen file_alias, source
+            # cache/package_member), so the absent spec is required to be exactly
+            # None, not a sentinel string. What that None RECORDS differs by kind:
+            # for stock-extension-child the census observed __spec__, __loader__ and
+            # __package__ present and explicitly None on the child object; for
+            # stock-typing-namespace there is no such observation — the namespace is
+            # a class object whose absent spec is a property of the construction,
+            # not a captured attribute.
+            need(row["spec_name"] is None)
+            # At most one row per (parent, attribute), so the canonical and alias
+            # spellings of one child cannot both be admitted. Both are pinned to
+            # text first so an unhashable value refuses rather than raising.
+            text(row["parent"])
+            text(row["attribute"])
+            key = (row["parent"], row["attribute"])
+            need(key not in children)
+            children.add(key)
+            # No aliases on either special kind: the census rows carry none, and an
+            # alternative spelling such as xml.parsers.expat.errors is admissible
+            # only as a distinct canonical `name`, never as an alias — an alias
+            # would otherwise re-enter the same child past the check above, or
+            # claim an arbitrary module name for an attribute row.
+            need(row["aliases"] == [])
+        else:
+            module_name(row["spec_name"])
         unique(row["aliases"])
         for alias in [row["name"]] + row["aliases"]:
             module_name(alias)
@@ -827,7 +882,7 @@ def _admit_runtime_metadata(platform, runtime, *, deadline, clock):
                     need(row["cache"] != row["source"])
                 else:
                     need(row["cache"] is None)
-        else:
+        elif kind == "extension":
             need(row["spec_name"] == row["name"])
             file_reference(row["file"])
             uuid(row["uuid"])
@@ -835,6 +890,52 @@ def _admit_runtime_metadata(platform, runtime, *, deadline, clock):
             for dependency in row["dependencies"]:
                 file_reference(dependency)
                 need(dependency != row["file"])
+        elif kind == "stock-typing-namespace":
+            # ORDERING CONTRACT: `modules` is built as this loop advances, so a row
+            # must FOLLOW its parent in runtime["modules"]. A child placed before
+            # its parent refuses exactly as a dangling parent does; row order is
+            # part of the descriptor, not an incidental detail.
+            # The parent is the fixed stdlib module `typing` — the literal is the
+            # truth and membership is the consistency check; both are required, and
+            # a special row can never parent another special row.
+            need(row["parent"] == _TYPING_NAMESPACE_PARENT and row["parent"] in modules
+                 and modules[row["parent"]]["kind"] in _STOCK_MODULE_KINDS)
+            # NOT ASSERTED HERE: the census also observed the identity relations
+            # sys.modules[name] is typing.<attribute> and, per member,
+            # raw[member] is typing.<member>. An identity relation between live
+            # objects is not expressible in a finite descriptor, so it stays a
+            # QUALIFICATION-TIME obligation to be checked against a live process;
+            # admitting this row does not stand in for that check.
+            need(row["attribute"] in _TYPING_NAMESPACE_EXPORTS)
+            need(row["name"] == row["parent"] + "." + row["attribute"])
+            exports = row["exports"]
+            # Member names only, sorted and unique; the pinned `__all__` set for
+            # the attribute is the whole admissible content.
+            unique(exports)
+            for export in exports:
+                text(export)
+            need(exports == sorted(exports))
+            need(tuple(exports) == _TYPING_NAMESPACE_EXPORTS[row["attribute"]])
+        else:
+            # Same ORDERING CONTRACT as above: the parent row must come first.
+            # The parent is the fixed stdlib extension `pyexpat`; the literal is
+            # the truth and admitted membership is the consistency check.
+            need(row["parent"] == _EXTENSION_CHILD_PARENT and row["parent"] in modules
+                 and modules[row["parent"]]["kind"] == "extension")
+            # NOT ASSERTED HERE: the census also observed
+            # sys.modules[name] is pyexpat.<attribute>. That identity relation
+            # between live objects remains a QUALIFICATION-TIME obligation, checked
+            # against a live process rather than inferred from this metadata.
+            need(row["attribute"] in _EXTENSION_CHILD_ATTRIBUTES)
+            need(row["name"] in (row["parent"] + "." + row["attribute"],
+                                 _EXTENSION_CHILD_ALIAS_PARENT + "." + row["attribute"]))
+            # __spec__, __loader__ and __package__ are invariants here (present and
+            # explicitly None, pinned by the spec_name check above), not free
+            # fields. Only the None-versus-absent distinction for __file__ and
+            # __cached__ varies, and record()'s exact key set makes key absence
+            # unrepresentable, so it is carried as explicit booleans.
+            for presence in ("file_present", "cached_present"):
+                need(type(row[presence]) is bool)
     for name in ("time", "_signal"):
         need(name in modules and modules[name]["kind"] == "builtin"
              and modules[name]["registry_name"] == name)
@@ -962,11 +1063,14 @@ def _admit_preload_metadata(metadata, preload, *, deadline, clock):
     absent_roots = tuple(value for value in search_paths if value in absent)
 
     expected_modules = {}
+    searchable, special_names = 0, set()
     for module in runtime["modules"]:
         checkpoint()
         if module["kind"] == "extension":
+            searchable += 1
             expected_modules[module["name"]] = (module["file"], ())
         elif module["kind"] == "source" and module["loader"] == "SourceFileLoader":
+            searchable += 1
             need(module["selected_input"] == "source" and module["cache"] is None)
             selected = files[module["source"]]
             need(selected.endswith(".py"))
@@ -977,6 +1081,16 @@ def _admit_preload_metadata(metadata, preload, *, deadline, clock):
             path(legacy)
             need(cache in absent and legacy in absent)
             expected_modules[module["name"]] = (module["source"], (cache, legacy))
+        elif module["kind"] in _STOCK_SPECIAL_KINDS:
+            # Stated rule, not an if/elif artefact: the attribute-backed stock kinds
+            # are reached through an already-imported parent and are never located by
+            # a stock filesystem search, so they contribute no expected module.
+            special_names.add(module["name"])
+    # Prove that by construction rather than by silence: the expected set is
+    # exactly the stock-loader-searchable rows, and it names none of the special
+    # rows. Both clauses fail if a future branch ever gives a special row a search,
+    # which is what makes the searches/expected_modules equality below meaningful.
+    need(len(expected_modules) == searchable and not special_names & set(expected_modules))
 
     searches = preload["searches"]
     need(type(searches) is list and len(searches) <= 1024 and len(searches) == len(expected_modules))

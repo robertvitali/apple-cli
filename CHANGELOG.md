@@ -40,6 +40,31 @@ JSON output are stable per the versioning policy — breaking changes bump
   readers: `schema_version` is unchanged at 1 because no existing key is removed, renamed, or
   retyped, and a message with nothing attached gets an empty array rather than a missing key.
 
+- **The repository's capability-admission automation now accepts two additional stock
+  module kinds: `stock-typing-namespace` and `stock-extension-child`.** Its runtime-metadata
+  schema previously recognised only four kinds of Python module row (`builtin`, `frozen`,
+  `source`, `extension`) and refused everything else, so a stock interpreter's
+  attribute-backed modules — a `typing` namespace attribute, and an extension module's
+  `errors`/`model` child — could not be described at all. A typing-namespace row carries the
+  pinned member-name set for `io` or `re`; an extension-child row carries explicit
+  `file_present`/`cached_present` booleans and also accepts the `xml.parsers.expat.*`
+  spelling, which is supported though never observed. Both kinds are attributes of an
+  already-imported parent, so they are pre-load-invisible: they contribute no stock-loader
+  search, now proved by construction rather than left to a fall-through. A row must follow
+  its parent in the module list, and neither kind carries aliases — an alternative spelling
+  is admissible only as a row's own name. Any unrecognised kind still refuses, as does a row
+  relabelled between these kinds and the imported-module kinds. Two limits are worth
+  stating: the identity relations the descriptor cannot express (that the module entry *is*
+  the parent's attribute, and each typing member *is* the module's own) are not asserted by
+  this schema and remain obligations to check against a live process; and the native
+  authority in `scripts/ci/authority/capability_authority_entry.c` still refuses any kind
+  outside the original four, so a profile carrying one of these rows is admitted by the
+  Python validator and refused natively — fail-closed. Pairing the two validators is pending
+  and tracked; until then no profile containing these kinds can activate. **For anyone
+  running the binary, nothing changes:** no `apple` command, output field, error type, or
+  exit code is affected, and `schema_version` stays `1` — this schema is internal
+  automation and is not the JSON envelope contract agents key on.
+
 ### Changed
 
 - **Mail's GUI-driven composes are now bounded by a 300-second host deadline.** `mail send

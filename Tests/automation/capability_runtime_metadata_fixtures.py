@@ -11,6 +11,41 @@ def file_record(name, *, size=4096):
         "mode": 0o100755, "uid": 1, "gid": 1, "mtime_ns": 1, "ctime_ns": 1}}
 
 
+def special_parent_records():
+    """Parent rows the stock special kinds attach to, with their file records.
+
+    Kept out of ``descriptors`` so the base profile keeps exactly the two
+    stock-loader searches it already declares; callers append what they need.
+    """
+    files = [file_record("typing-source"), file_record("expat-extension")]
+    modules = [
+        {"name": "typing", "kind": "source", "spec_name": "typing", "aliases": [],
+         "loader": "SourceFileLoader", "selected_input": "source",
+         "source": "typing-source", "cache": None, "package_member": None},
+        {"name": "pyexpat", "kind": "extension", "spec_name": "pyexpat",
+         "aliases": [], "file": "expat-extension", "uuid": "f" * 32,
+         "dependencies": []}]
+    return files, modules
+
+
+def stock_special_modules():
+    """Representative rows for the two attribute-backed stock module kinds.
+
+    Both describe an attribute of an already-imported parent, so they carry no
+    import spec. ``exports`` is the pinned member-name set for the attribute.
+    Parents are the fixed stdlib names the schema pins, so these rows are only
+    valid once ``special_parent_records`` supplies the parents BEFORE them: a row
+    must follow its parent in the module list.
+    """
+    return [
+        {"name": "typing.io", "kind": "stock-typing-namespace",
+         "spec_name": None, "aliases": [], "parent": "typing",
+         "attribute": "io", "exports": ["BinaryIO", "IO", "TextIO"]},
+        {"name": "pyexpat.errors", "kind": "stock-extension-child",
+         "spec_name": None, "aliases": [], "parent": "pyexpat",
+         "attribute": "errors", "file_present": False, "cached_present": False}]
+
+
 def descriptors():
     files = [file_record(name) for name in sorted((
         "launcher", "main", "framework", "subprocess-source", "subprocess-cache",

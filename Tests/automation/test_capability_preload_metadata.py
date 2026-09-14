@@ -11,7 +11,8 @@ from types import MappingProxyType
 import unittest
 from unittest import mock
 
-from capability_runtime_metadata_fixtures import descriptors
+from capability_runtime_metadata_fixtures import (
+    descriptors, special_parent_records, stock_special_modules)
 from test_capability_process_lifecycle import Clock, core
 
 
@@ -196,6 +197,46 @@ class PreloadMetadataTests(unittest.TestCase):
         self.row["runtime"]["absent_inputs"].append(child)
         self.row["preload"]["searches"][0]["candidates"].insert(0, {"path": child, "file": None})
         self.reject()
+
+    def test_stock_special_kinds_contribute_no_stock_loader_search(self):
+        # The parents are ordinary searchable rows, declared with the searches that
+        # cover them; the two special rows that follow add none of their own.
+        row = copy.deepcopy(self.row)
+        files, parents = special_parent_records()
+        source = next(value for value in files if value["id"] == "typing-source")
+        source["identity"]["path"] = ROOT + "/typing.py"
+        extension = next(value for value in files if value["id"] == "expat-extension")
+        extension["identity"]["path"] = ROOT + "/pyexpat"
+        cache = ROOT + "/__pycache__/typing.cpython-39.pyc"
+        legacy = ROOT + "/typing.pyc"
+        row["runtime"]["files"].extend(files)
+        row["runtime"]["modules"].extend(parents)
+        row["runtime"]["absent_inputs"] = sorted(
+            row["runtime"]["absent_inputs"] + [cache, legacy])
+        row["preload"]["searches"].extend((
+            {"module": "pyexpat", "candidates": [
+                {"path": ROOT + "/pyexpat", "file": "expat-extension"}]},
+            {"module": "typing", "candidates": [
+                {"path": ROOT + "/typing.py", "file": "typing-source"},
+                {"path": cache, "file": None}, {"path": legacy, "file": None}]}))
+        row["preload"]["searches"].sort(key=lambda search: search["module"])
+        # Independently computed, so this cannot pass by comparing a value to
+        # itself: the declared searches must cover exactly the searchable rows.
+        searchable = sum(module["kind"] == "extension"
+                         or (module["kind"] == "source"
+                             and module["loader"] == "SourceFileLoader")
+                         for module in row["runtime"]["modules"])
+        self.assertEqual(len(row["preload"]["searches"]), searchable)
+        self.assertIsNotNone(self.select(row).preload)
+        row["runtime"]["modules"].extend(stock_special_modules())
+        self.assertEqual(len(row["preload"]["searches"]), searchable)
+        self.assertIsNotNone(self.select(row).preload)
+        # A search that DOES name a special row refuses, so the equality above
+        # cannot be satisfied by handing one a search.
+        row["preload"]["searches"].insert(1, {
+            "module": "pyexpat.errors",
+            "candidates": [{"path": ROOT + "/pyexpat.errors", "file": None}]})
+        self.reject(row)
 
     def test_module_coverage_requires_exact_stock_loader_set(self):
         for operation in ("missing", "builtin", "unknown"):

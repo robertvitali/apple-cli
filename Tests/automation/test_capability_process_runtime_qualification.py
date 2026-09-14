@@ -14,7 +14,8 @@ import unittest
 from contextlib import ExitStack
 from unittest import mock
 
-from capability_runtime_metadata_fixtures import descriptors
+from capability_runtime_metadata_fixtures import (
+    descriptors, special_parent_records, stock_special_modules)
 from test_capability_process_lifecycle import Clock, core
 
 
@@ -246,6 +247,185 @@ class RuntimeMetadataTests(unittest.TestCase):
                 runtime = copy.deepcopy(self.runtime)
                 row = next(row for row in runtime["modules"] if row["kind"] == "extension")
                 row.update(change)
+                self.reject(runtime=runtime)
+
+    def special_runtime(self):
+        """The base descriptor plus the parent rows and both stock special rows.
+
+        Always built from an untouched copy of the fixture, so no caller can
+        enrich one descriptor twice: a doubly-enriched runtime refuses on its
+        duplicate records, which would mask the rule a refusal test is checking.
+        """
+        runtime = copy.deepcopy(self.runtime)
+        files, parents = special_parent_records()
+        runtime["files"].extend(files)
+        runtime["modules"].extend(parents)
+        runtime["modules"].extend(stock_special_modules())
+        return runtime
+
+    def admitted_special_runtime(self):
+        """`special_runtime`, proved to ADMIT before the caller mutates it.
+
+        Non-vacuity guard: without it a later refusal could come from the fixture
+        rather than from the rule under test, and the rule could be deleted with
+        the refusal tests still green.
+        """
+        runtime = self.special_runtime()
+        self.admit(runtime=runtime)
+        return runtime
+
+    def special(self, runtime, kind):
+        return next(row for row in runtime["modules"] if row["kind"] == kind)
+
+    def test_stock_special_kinds_describe_parent_attributes_without_an_import_spec(self):
+        runtime = self.special_runtime()
+        admitted = self.admit(runtime=runtime)
+        rows = {row["name"]: row for row in admitted.runtime["modules"]}
+        namespace = rows["typing.io"]
+        self.assertEqual(namespace["kind"], "stock-typing-namespace")
+        self.assertEqual(namespace["parent"], "typing")
+        self.assertIsNone(namespace["spec_name"])
+        self.assertEqual(namespace["exports"], ("BinaryIO", "IO", "TextIO"))
+        child = rows["pyexpat.errors"]
+        self.assertEqual(child["kind"], "stock-extension-child")
+        self.assertEqual(child["parent"], "pyexpat")
+        self.assertIsNone(child["spec_name"])
+        self.assertIs(child["file_present"], False)
+        self.assertIs(child["cached_present"], False)
+        # Presence booleans encode the metadata absence the exact key set cannot.
+        with self.assertRaises(TypeError):
+            namespace["exports"][0:0] = ("Extra",)
+        with self.assertRaises(TypeError):
+            child["file_present"] = True
+
+    def test_stock_special_rows_carry_no_aliases(self):
+        runtime = self.special_runtime()
+        admitted = self.admit(runtime=runtime)
+        rows = {row["name"]: row for row in admitted.runtime["modules"]}
+        for name in ("typing", "pyexpat", "typing.io", "pyexpat.errors"):
+            self.assertEqual(rows[name]["aliases"], ())
+        # An alias would otherwise re-enter the same child under its other
+        # spelling, past the per-(parent, attribute) check, or claim an unrelated
+        # module name. The empty-alias rule refuses first; the global alias
+        # uniqueness that would catch the third case remains the backstop for
+        # every other kind.
+        for kind, aliases in (("stock-typing-namespace", ["typing.io_alias"]),
+                              ("stock-extension-child", ["xml.parsers.expat.errors"]),
+                              ("stock-extension-child", ["subprocess"])):
+            with self.subTest(kind=kind, alias=aliases[0]):
+                runtime = self.admitted_special_runtime()
+                self.special(runtime, kind)["aliases"] = aliases
+                self.reject(runtime=runtime)
+
+    def test_typing_namespace_attributes_pin_their_own_member_name_set(self):
+        runtime = self.special_runtime()
+        self.special(runtime, "stock-typing-namespace").update(
+            name="typing.re", attribute="re", exports=["Match", "Pattern"])
+        admitted = self.admit(runtime=runtime)
+        result = next(row for row in admitted.runtime["modules"]
+                      if row["name"] == "typing.re")
+        self.assertEqual(result["exports"], ("Match", "Pattern"))
+
+    def test_extension_child_alias_spelling_is_supported_but_unobserved(self):
+        runtime = self.special_runtime()
+        self.special(runtime, "stock-extension-child")["name"] = "xml.parsers.expat.errors"
+        admitted = self.admit(runtime=runtime)
+        self.assertTrue(any(row["name"] == "xml.parsers.expat.errors"
+                            for row in admitted.runtime["modules"]))
+
+    def test_typing_namespace_member_names_reject_addresses_disorder_and_drift(self):
+        for update in ({"exports": {"IO": 4096}},
+                       {"exports": ["IO", "BinaryIO", "TextIO"]},
+                       {"exports": ["BinaryIO", "BinaryIO", "IO", "TextIO"]},
+                       {"exports": ["BinaryIO", "IO"]},
+                       {"exports": ["BinaryIO", "IO", "TextIO", ""]},
+                       {"attribute": "codecs"},
+                       {"name": "typing.text"},
+                       {"parent": "typing_absent", "name": "typing_absent.io"},
+                       {"parent": "importlib._bootstrap",
+                        "name": "importlib._bootstrap.io"},
+                       {"spec_name": "typing.io"}):
+            with self.subTest(field=sorted(update)[0]):
+                runtime = self.admitted_special_runtime()
+                self.special(runtime, "stock-typing-namespace").update(update)
+                self.reject(runtime=runtime)
+
+    def test_a_stock_special_row_cannot_be_reparented_onto_another_special_row(self):
+        # The pinned parent literal forecloses this; the parent-kind clause behind
+        # it is the defence in depth that would still refuse without the literal.
+        runtime = self.admitted_special_runtime()
+        runtime["modules"].append({
+            "name": "pyexpat.errors.io", "kind": "stock-typing-namespace",
+            "spec_name": None, "aliases": [], "parent": "pyexpat.errors",
+            "attribute": "io", "exports": ["BinaryIO", "IO", "TextIO"]})
+        self.reject(runtime=runtime)
+
+    def test_a_child_placed_before_its_parent_refuses_and_parent_first_admits(self):
+        # Row order is part of the descriptor: the admitted-module set is built as
+        # the list is walked, so a child ahead of its parent is indistinguishable
+        # from a dangling parent and refuses the same way.
+        files, parents = special_parent_records()
+        specials = stock_special_modules()
+        # Parent-first ADMITS: proved first, so the refusal below cannot be the
+        # fixture failing for some unrelated reason.
+        runtime = copy.deepcopy(self.runtime)
+        runtime["files"].extend(files)
+        runtime["modules"].extend(parents + specials)
+        admitted = self.admit(runtime=runtime)
+        self.assertEqual(
+            sum(row["kind"] in ("stock-typing-namespace", "stock-extension-child")
+                for row in admitted.runtime["modules"]), 2)
+        # The very same rows, reordered, refuse.
+        runtime = copy.deepcopy(self.runtime)
+        runtime["files"].extend(files)
+        runtime["modules"].extend(specials + parents)
+        self.reject(runtime=runtime)
+
+    def test_extension_child_parent_must_be_an_extension_row_not_merely_so_named(self):
+        runtime = self.admitted_special_runtime()
+        parent = next(row for row in runtime["modules"] if row["name"] == "pyexpat")
+        parent.clear()
+        parent.update({"name": "pyexpat", "kind": "builtin", "registry_name": "pyexpat",
+                       "spec_name": "pyexpat", "aliases": []})
+        self.reject(runtime=runtime)
+
+    def test_one_child_cannot_be_admitted_under_both_of_its_spellings(self):
+        runtime = self.admitted_special_runtime()
+        alias = copy.deepcopy(self.special(runtime, "stock-extension-child"))
+        alias["name"] = "xml.parsers.expat.errors"
+        runtime["modules"].append(alias)
+        self.reject(runtime=runtime)
+
+    def test_extension_child_requires_an_extension_parent_and_boolean_presence(self):
+        for update in ({"parent": "time", "name": "time.errors"},
+                       {"parent": "typing", "name": "typing.errors"},
+                       {"parent": "pyexpat_absent", "name": "pyexpat_absent.errors"},
+                       {"attribute": "handler"},
+                       {"name": "pyexpat.errors_alias"},
+                       {"name": "xml.parsers.expat.model"},
+                       {"file_present": 0},
+                       {"cached_present": None},
+                       {"spec_name": "pyexpat.errors"}):
+            with self.subTest(field=sorted(update)[0]):
+                runtime = self.admitted_special_runtime()
+                self.special(runtime, "stock-extension-child").update(update)
+                self.reject(runtime=runtime)
+
+    def test_relabelling_between_stock_special_and_imported_module_kinds_refuses(self):
+        for kind, relabel in (("stock-typing-namespace", "builtin"),
+                              ("stock-typing-namespace", "source"),
+                              ("stock-extension-child", "extension"),
+                              ("stock-extension-child", "frozen")):
+            with self.subTest(kind=kind, relabel=relabel):
+                runtime = self.admitted_special_runtime()
+                self.special(runtime, kind)["kind"] = relabel
+                self.reject(runtime=runtime)
+        for name, relabel in (("importlib._bootstrap", "stock-typing-namespace"),
+                              ("synthetic_extension", "stock-extension-child")):
+            with self.subTest(name=name, relabel=relabel):
+                runtime = self.admitted_special_runtime()
+                next(row for row in runtime["modules"]
+                     if row["name"] == name)["kind"] = relabel
                 self.reject(runtime=runtime)
 
     def test_popen_record_requires_source_body_and_separate_empty_active_binding(self):
