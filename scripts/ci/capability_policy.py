@@ -704,11 +704,40 @@ def _argument_id(command_id: str, argument: dict[str, Any], ordinal: int) -> str
     return f"{command_id}::{kind}::{_display_name(preferred)}"
 
 
-def _manual_path(path: list[str]) -> str:
+def _manual_parent_paths(
+    commands: list[dict[str, Any]],
+) -> FrozenSet[Tuple[str, ...]]:
+    return frozenset(
+        tuple(command["path"][:-1])
+        for command in commands
+        if len(command["path"]) > 1
+    )
+
+
+def _manual_path(
+    path: list[str],
+    parent_paths: FrozenSet[Tuple[str, ...]] = frozenset(),
+) -> str:
     suffix = path[1:]
     if not suffix:
         return "docs/manual/index.md"
-    return PurePosixPath("docs", "manual", *suffix).with_suffix(".md").as_posix()
+    base = PurePosixPath("docs", "manual", *suffix)
+    if tuple(path) in parent_paths:
+        return (base / "index.md").as_posix()
+    return base.with_suffix(".md").as_posix()
+
+
+def _manual_paths(commands: list[dict[str, Any]]) -> Dict[str, str]:
+    parent_paths = _manual_parent_paths(commands)
+    destinations: Set[str] = set()
+    paths: Dict[str, str] = {}
+    for command in commands:
+        destination = _manual_path(command["path"], parent_paths)
+        if destination in destinations:
+            raise PolicyError("manual-path-collision")
+        destinations.add(destination)
+        paths[command["id"]] = destination
+    return paths
 
 
 def snapshot_manifest(dump: Any) -> dict[str, Any]:
@@ -795,7 +824,6 @@ def snapshot_manifest(dump: Any) -> dict[str, Any]:
                     "parser_help": [],
                 },
                 "id": command_id,
-                "manual": {"path": _manual_path(current), "tokens": [command_id]},
                 "name": name,
                 "origin_id": "",
                 "path": current,
@@ -883,6 +911,12 @@ def snapshot_manifest(dump: Any) -> dict[str, Any]:
         raise PolicyError("dump-framework-help-missing")
     commands.sort(key=lambda item: item["id"])
     arguments.sort(key=lambda item: item["id"])
+    manual_paths = _manual_paths(commands)
+    for command in commands:
+        command["manual"] = {
+            "path": manual_paths[command["id"]],
+            "tokens": [command["id"]],
+        }
     return {
         "arguments": arguments,
         "commands": commands,
@@ -1381,6 +1415,7 @@ def _validate_manual(source_root: Any, manifest: dict[str, Any]) -> None:
     sources_by_path: Dict[str, str] = {}
     total_bytes = 0
     command_by_id = {item["id"]: item for item in manifest["commands"]}
+    manual_paths = _manual_paths(manifest["commands"])
     for command in manifest["commands"]:
         manual = command["manual"]
         if not isinstance(manual, dict) or set(manual) != {"path", "tokens"}:
@@ -1399,7 +1434,7 @@ def _validate_manual(source_root: Any, manifest: dict[str, Any]) -> None:
             )
         ):
             raise PolicyError("manual-invalid")
-        if manual["path"] != _manual_path(command["path"]):
+        if manual["path"] != manual_paths[command["id"]]:
             raise PolicyError("manual-path-invalid")
         if command["id"] not in tokens:
             raise PolicyError("manual-identity-missing")

@@ -12,6 +12,7 @@ import tempfile
 from types import ModuleType
 from typing import Optional, Set
 import unittest
+from unittest import mock
 
 from capability_session_fixtures import fixture_session, run_recorded_trusted
 
@@ -19,6 +20,7 @@ from capability_session_fixtures import fixture_session, run_recorded_trusted
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCHEMA_PATH = REPO_ROOT / "scripts" / "ci" / "capability_schema.py"
 POLICY_PATH = REPO_ROOT / "scripts" / "ci" / "capability_policy.py"
+MANUAL_GENERATOR_PATH = REPO_ROOT / "scripts" / "gen-manual.py"
 
 
 def load_module(
@@ -136,6 +138,64 @@ def sample_dump() -> dict:
             ],
         },
     }
+
+
+def nested_manual_dump() -> dict:
+    leaf = {
+        "abstract": "Synthetic leaf.",
+        "arguments": [],
+        "commandName": "leaf",
+        "shouldDisplay": True,
+        "superCommands": ["apple", "parent", "nested"],
+    }
+    nested = {
+        "abstract": "Synthetic nested parent.",
+        "arguments": [],
+        "commandName": "nested",
+        "shouldDisplay": True,
+        "subcommands": [leaf],
+        "superCommands": ["apple", "parent"],
+    }
+    parent = {
+        "abstract": "Synthetic parent.",
+        "arguments": [],
+        "commandName": "parent",
+        "shouldDisplay": True,
+        "subcommands": [nested],
+        "superCommands": ["apple"],
+    }
+    return {
+        "serializationVersion": 0,
+        "command": {
+            "abstract": "Synthetic root.",
+            "arguments": [],
+            "commandName": "apple",
+            "shouldDisplay": True,
+            "subcommands": [parent, framework_help_command()],
+        },
+    }
+
+
+def colliding_manual_dump() -> dict:
+    dump = nested_manual_dump()
+    nested = dump["command"]["subcommands"][0]["subcommands"][0]
+    nested["subcommands"][0]["commandName"] = "index"
+    return dump
+
+
+def root_colliding_manual_dump() -> dict:
+    dump = nested_manual_dump()
+    dump["command"]["subcommands"] = [
+        {
+            "abstract": "Synthetic index child.",
+            "arguments": [],
+            "commandName": "index",
+            "shouldDisplay": True,
+            "superCommands": ["apple"],
+        },
+        framework_help_command(),
+    ]
+    return dump
 
 
 EVIDENCE_ROLES = ("parser_help", "invalid_exit", "json_envelope", "behavior")
@@ -595,6 +655,112 @@ class CapabilityPolicyBootstrapTests(unittest.TestCase):
             ["apple", "apple foo"],
         )
         self.assertEqual(snapshot["counts"], {"arguments": 3, "commands": 2, "origins": 0})
+
+    def test_manual_paths_match_generated_parent_and_leaf_layout(self) -> None:
+        policy = load_module(POLICY_PATH, "capability_policy_manual_parent_paths")
+
+        snapshot = policy.snapshot_manifest(nested_manual_dump())
+        paths = {
+            command["id"]: command["manual"]["path"]
+            for command in snapshot["commands"]
+        }
+
+        self.assertEqual(
+            paths,
+            {
+                "apple": "docs/manual/index.md",
+                "apple parent": "docs/manual/parent/index.md",
+                "apple parent nested": "docs/manual/parent/nested/index.md",
+                "apple parent nested leaf": "docs/manual/parent/nested/leaf.md",
+            },
+        )
+        self.assertEqual(
+            policy._manual_path(["apple", "unknown"]),
+            "docs/manual/unknown.md",
+        )
+
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            for command in snapshot["commands"]:
+                manual = root / command["manual"]["path"]
+                manual.parent.mkdir(parents=True, exist_ok=True)
+                manual.write_text(command["id"] + "\n", encoding="utf-8")
+
+            policy._validate_manual(root, snapshot)
+
+    def test_manual_path_collisions_fail_before_snapshot_or_manual_reads(self) -> None:
+        policy = load_module(POLICY_PATH, "capability_policy_manual_path_collision")
+
+        cases = (
+            ("root", root_colliding_manual_dump()),
+            ("nested", colliding_manual_dump()),
+        )
+        for label, dump in cases:
+            with self.subTest(label=label), self.assertRaisesRegex(
+                policy.PolicyError,
+                "^manual-path-collision$",
+            ):
+                policy.snapshot_manifest(dump)
+
+        manifest = policy.snapshot_manifest(nested_manual_dump())
+        leaf = next(
+            command
+            for command in manifest["commands"]
+            if command["id"] == "apple parent nested leaf"
+        )
+        leaf["id"] = "apple parent nested index"
+        leaf["name"] = "index"
+        leaf["path"] = ["apple", "parent", "nested", "index"]
+        leaf["manual"] = {
+            "path": "docs/manual/parent/nested/index.md",
+            "tokens": ["apple parent nested index"],
+        }
+        manifest["commands"].sort(key=lambda command: command["id"])
+
+        with self.assertRaisesRegex(policy.PolicyError, "^manual-path-collision$"):
+            policy._validate_manual(Path("/does-not-exist"), manifest)
+
+    def test_manual_generator_rejects_collisions_before_replacing_output(self) -> None:
+        generator = load_module(
+            MANUAL_GENERATOR_PATH,
+            "capability_policy_manual_generator_collision",
+            synthetic_runtime=False,
+        )
+        cases = (
+            ("root", root_colliding_manual_dump()),
+            ("nested", colliding_manual_dump()),
+        )
+        for label, dump in cases:
+            with (
+                self.subTest(label=label),
+                tempfile.TemporaryDirectory() as temporary_directory,
+            ):
+                root = Path(temporary_directory).resolve()
+                output = root / "docs" / "manual"
+                output.mkdir(parents=True)
+                sentinel = output / "sentinel.txt"
+                sentinel.write_text("preserve\n", encoding="utf-8")
+
+                with (
+                    mock.patch.object(generator, "REPO", root),
+                    mock.patch.object(generator, "OUT", output),
+                    mock.patch.object(
+                        generator,
+                        "SIDECAR",
+                        root / "docs" / "manual-prose.json",
+                    ),
+                    mock.patch.object(generator, "dump_help", return_value=dump["command"]),
+                    mock.patch.object(
+                        sys,
+                        "argv",
+                        ["gen-manual.py", "--binary", "synthetic"],
+                    ),
+                    redirect_stdout(io.StringIO()),
+                    self.assertRaisesRegex(SystemExit, "manual-page-path-collision"),
+                ):
+                    generator.main()
+
+                self.assertEqual(sentinel.read_text(encoding="utf-8"), "preserve\n")
 
     def test_framework_help_exclusion_requires_the_exact_synthetic_shape(self) -> None:
         policy = load_module(POLICY_PATH, "capability_policy_framework_help")

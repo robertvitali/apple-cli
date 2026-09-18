@@ -26,6 +26,10 @@ REPO = pathlib.Path(__file__).resolve().parent.parent
 OUT = REPO / "docs" / "manual"
 SIDECAR = REPO / "docs" / "manual-prose.json"
 
+
+class ManualGenerationError(ValueError):
+    """Raised when the help tree cannot produce a lossless manual."""
+
 # ---------------------------------------------------------------- help dump
 
 
@@ -119,6 +123,19 @@ def page_path(path: tuple[str, ...], has_children: bool) -> str:
         return "index.md"
     tail = "/".join(path[1:])
     return f"{tail}/index.md" if has_children else f"{tail}.md"
+
+
+def page_destinations(nodes: list[tuple[tuple[str, ...], dict]], tree: dict) -> dict:
+    """Resolve every output path and reject commands that would overwrite a page."""
+    destinations = {}
+    seen = set()
+    for path, _ in nodes:
+        destination = page_path(path, bool(tree.get(path)))
+        if destination in seen:
+            raise ManualGenerationError("manual-page-path-collision")
+        seen.add(destination)
+        destinations[path] = destination
+    return destinations
 
 
 def rel_link(frm: str, to: str) -> str:
@@ -271,6 +288,10 @@ def main() -> int:
     tree: dict[tuple, list[tuple]] = {}
     for p, _ in nodes:
         tree.setdefault(p[:-1], []).append(p)
+    try:
+        destinations = page_destinations(nodes, tree)
+    except ManualGenerationError as error:
+        sys.exit(f"error: {error}")
 
     prose = json.loads(SIDECAR.read_text()) if SIDECAR.exists() else {}
 
@@ -284,7 +305,7 @@ def main() -> int:
     written = 0
     for p, n in nodes:
         page = render(p, n, inherited_keys, inherited_args, prose, tree)
-        dest = target / page_path(p, bool(tree.get(p)))
+        dest = target / destinations[p]
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(page)
         written += 1
