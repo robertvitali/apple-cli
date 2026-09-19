@@ -103,6 +103,8 @@ static void conversion_case(const char *name,struct timespec value,int accepted,
 static void conversion_cases(void) {
     conversion_case("timespec-zero",(struct timespec){0,0},1,0);
     conversion_case("timespec-quarter",(struct timespec){100,250000000},1,100.25);
+    conversion_case("timespec-fused-rounding",(struct timespec){0,959191865},1,
+        0x1.eb1b3235874b7p-1);
     conversion_case("timespec-negative-seconds",(struct timespec){-1,0},0,0);
     conversion_case("timespec-negative-nanoseconds",(struct timespec){0,-1},0,0);
     conversion_case("timespec-billion-nanoseconds",(struct timespec){0,1000000000},0,0);

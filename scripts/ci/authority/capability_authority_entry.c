@@ -2166,7 +2166,7 @@ static const CAExecutionPins ca_outer_selection = {
 static int ca_outer_timespec_value(const struct timespec *value, double *output) {
     if (!value || !output || value->tv_sec < 0 || value->tv_nsec < 0
         || value->tv_nsec >= 1000000000L) return CA_REFUSED;
-    double result = (double)value->tv_sec + (double)value->tv_nsec / 1000000000.0;
+    double result = fma((double)value->tv_nsec, 1e-9, (double)value->tv_sec);
     if (!isfinite(result) || result < 0) return CA_REFUSED;
     *output = result;
     return CA_OK;
