@@ -59,7 +59,7 @@ findings for its stated scope; the repo stays private until then.
 | D14 | Live-exercise `mail rules` delete | **APPLIED 2026-08-27** | First live exercise done operator-present: labeled disabled test rule deleted by index, readback matched, 3 real rules untouched |
 | D15 | Extend the public-attribution exception to `.github/CODEOWNERS` | **RATIFIED 2026-09-07** | The operator's exact GitHub user may appear in `.github/CODEOWNERS` for every enforcement-control-plane path, as deliberate public attribution alongside LICENSE, README, and git author metadata. Sequence is fixed: the `AGENTS.md` exception extension lands first as its own reviewed commit, the CODEOWNERS commit lands second with its own fresh privacy scan, then GitHub's code-owners errors API confirms it parses. Trade-off recorded per the design: from that step until public launch no release can be cut; the release freeze's urgent-fix clause is satisfiable only by a reviewed, operator-authorized, temporary restoration of a write-capable release workflow, recorded as an explicit exception and removed again afterwards |
 | D16 | Narrow main-only reversal for disposable rehearsal refs | **RATIFIED 2026-09-07** | Three disposable ref classes, and only these, may be created for the publication-automation rehearsals (design §18 steps 8–14, removal at step 18): the uniquely named disposable target ref, the proposal head refs of the validation PRs (which target that ref, never `main`), and the Dependabot-created head refs of step 13; never for feature work; never merged into `main`; deleted after the rehearsal, including on abort; does not reverse the ruling for ordinary work. The `AGENTS.md` reversal commit lands under the private main-only gate when the rehearsal step begins, after an in-session re-confirmation and before the first branch is cut. The later full reversal that activates the `main` ruleset is a SEPARATE future operator instruction and is not granted here |
-| D17 | Early visibility flip to restore hosted Actions; pre-flip privacy audit round 1; disposition of its findings | **ANSWERED 2026-09-20** (APPLIED when the flip lands) | Operator ordered: fresh audit first, flip on zero findings, end-of-roadmap audit still required. Round 1's zero-findings condition was NOT met: seven findings — five operator-dispositioned (D17–D20), the fixture fix pending, and the hosted-log deletion OPEN in D21 — both closed 2026-09-21 (fixture fix landed, D21 applied); D19 later superseded; for the binary the operator chose rebuild + re-cut (as `v27.0.0`) rather than accept, and, because the design forbids a private publisher and hosted runs are billing-blocked, ordered the `v26.0.0` Release converted to a draft first, the flip second, the re-cut after hosted validation |
+| D17 | Early visibility flip to restore hosted Actions; pre-flip privacy audit round 1; disposition of its findings | **ANSWERED 2026-09-20; APPLIED 2026-09-21** (flip 14:31Z; hosted CI and Docs green the same day) | Operator ordered: fresh audit first, flip on zero findings, end-of-roadmap audit still required. Round 1's zero-findings condition was NOT met: seven findings — five operator-dispositioned (D17–D20), the fixture fix pending, and the hosted-log deletion OPEN in D21 — both closed 2026-09-21 (fixture fix landed, D21 applied); D19 later superseded; for the binary the operator chose rebuild + re-cut (as `v27.0.0`) rather than accept, and, because the design forbids a private publisher and hosted runs are billing-blocked, ordered the `v26.0.0` Release converted to a draft first, the flip second, the re-cut after hosted validation |
 | D18 | macOS 27 adoption release `v27.0.0` | **OPEN** | Operator instruction 2026-09-20: bump to `27.0.0` once all tests pass on macOS 27. Waits on the D17 flip, hosted validation, the design's publisher path, a §4.1 adoption-matrix amendment, and verified removal of every R1-F1 to R1-F3 carrier from the rebuilt binary and archive |
 | D19 | GitHub still serves pre-rewrite commits by id | **SUPERSEDED 2026-09-21** (ANSWERED 2026-09-20) | Verified: seven pre-rewrite commit ids formerly cited in this file return HTTP 200 from the API and still carry pre-redaction tracker identifiers. Operator reversed the 2026-08-23 no-Support posture: request a purge of unreachable objects and cached views from GitHub Support while the repo is still private; the D17 flip waits on that confirmation. Stale id citations in this file were re-pointed to their rewritten counterparts the same day. Superseded 2026-09-21: request withdrawn by the operator, no purge filed; residual by-id reachability accepted; D9's no-Support posture stands |
 | D20 | Outside contributor's plaintext git identity on open PRs 3–5 | **RATIFIED 2026-09-20** | Accepted as that contributor's own public attribution for now; the PRs are to be squash-merged when convenient with the squash author identity read back first; the reachable `refs/pull/*` copies are outside the D19 purge and persist until the PRs close |
@@ -1009,8 +1009,8 @@ branch exists.
 
 ## D17 — Flip to public early to restore hosted Actions; pre-flip privacy audit; its findings
 
-- **Status:** **ANSWERED 2026-09-20** — three in-session operator rulings, recorded here in
-  order; **APPLIED** when the visibility change lands (the entry is amended with the date).
+- **Status:** **ANSWERED 2026-09-20; APPLIED 2026-09-21** — three in-session operator rulings,
+  recorded here in order; the visibility change landed 2026-09-21 14:31Z (see "Applied" below).
 - **Context.** Hosted GitHub Actions stopped allocating runners for this private repository:
   every job of the last five `CI` and `Docs` runs finished in under fifteen seconds with zero
   steps and the annotation "not started because recent account payments have failed or your
@@ -1088,6 +1088,18 @@ release.
 **Blocking?** The flip waits on exactly: the written GitHub Support purge confirmation of D19 (request prepared; operator filing PENDING; confirmation PENDING); the R1-F6 fixture fix; the R1-F7 log deletion authorized and executed (D21, OPEN); the repository-level external-Action allowlist configured; the pre-push re-scan of every commit added after `053b56e`; and the local canonical suite green on the exact pushed commit. (as recorded 2026-09-20)
 **Amended 2026-09-21:** the flip waits on exactly: the pre-push re-scan of the commit that records this revision and the local canonical suite green on that exact pushed commit (the D19 Support gate was withdrawn by the operator on 2026-09-21; the R1-F6 fixture fix, the R1-F7 log deletion under D21 and the repository-level external-Action allowlist were completed the same day).
 `v27.0.0` waits on D18.
+
+**Applied (2026-09-21).** The blocker list closed the same day: the R1-F6 fixture fix landed in
+the visibility-step commit, the R1-F7 hosted-log deletion was executed and read back under D21,
+the repository-level external-Action allowlist was configured, and the operator withdrew the D19
+Support gate. The controller changed the visibility at 14:31Z through the API and read back
+public visibility, wiki disabled, zero forks, the `v26.0.0` Release still a draft, and fork-PR
+contributor approval set to all external contributors. The first hosted runs exposed five
+hosted-only defects that local runs never exercise (recorded in
+`docs/learnings/hot/hosted-ci.md`); after two reviewed fix commits, CI and Docs were green on
+`main` the same day, which satisfies design §18 step 6 for the push-triggered jobs. Evidence:
+`docs/discovery/prelaunch-readiness-evidence.md` Sections 3 and 4. No other publication action is
+unlocked by this: D18 (`v27.0.0`) and the end-of-roadmap audit remain open.
 
 ---
 

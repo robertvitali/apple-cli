@@ -1,7 +1,7 @@
 ---
 title: Pre-launch readiness evidence
-last-used: 2026-09-20
-uses: 1
+last-used: 2026-09-21
+uses: 2
 ---
 
 # Pre-launch readiness evidence
@@ -32,7 +32,7 @@ so until evidence is appended.
 |---|---|---|---|
 | 1 Implementation in reviewed, test-green commits | pre-visibility | PENDING (not evidenced here) | — |
 | 2 Production-coverage baseline per target | pre-visibility | PENDING (not evidenced here) | — |
-| 3 Full local canonical suite + independent reviews on the exact SHA | pre-visibility | Partially evidenced: Section 3 carries the suite result for `08cc984`; the result for the commit that records this revision, and the independent reviews, are recorded in the first post-flip revision (a commit cannot carry its own suite result) | Section 3 |
+| 3 Full local canonical suite + independent reviews on the exact SHA | pre-visibility | Evidenced for four commits: `08cc984`, the visibility-step commit `bdbbe9d`, and the two hosted-CI fixes `7b46b8d` and `0ff7442` (Section 3; the earlier same-day pushes `053b56e` and `a52c44e` carry no suite record here); each also carried codex plus code, security and critic review provenance in its trailers | Section 3 |
 | 4 External-Action allowlist committed and validated | pre-visibility | Repository-level allowlist configured 2026-09-21 (see the Actions-settings row); the committed/validated form of the design is advanced past for visibility only — PENDING, owner: controller | — |
 | 5 Workflow inventory: publishers converted or removed | pre-visibility | Partially evidenced: `.github/workflows/` holds `ci.yml`, `docs.yml`, `pr-metadata.yml`; no `release.yml`; all three declare `contents: read` only and none carries `workflow_dispatch`, `pages`, `id-token`, or an `environment`; no repository secrets or variables (read back 2026-09-20). Static scan of step 17 PENDING | this row (read back 2026-09-20) |
 | 7 Squash-only merge with PR title/body as squash commit | pre-visibility | PENDING (not evidenced here) | — |
@@ -42,10 +42,11 @@ so until evidence is appended.
 | Design §18/§3, `AGENTS.md` and ledger-preamble amendment recording the advanced visibility step (D15 precedent) | pre-visibility | Landed in the same commit as this revision (design §18 dated amendment, `AGENTS.md` privacy paragraph, ledger preamble, D2 freeze amendment) | this commit |
 | 4 (repository-level part) Actions settings | pre-visibility | Read back 2026-09-20: `default_workflow_permissions` = read, `can_approve_pull_request_reviews` = false, `allowed_actions` = all. Configured 2026-09-21 and read back: `allowed_actions` = `selected`, GitHub-owned actions allowed, one third-party pattern with a wildcard ref (the SHA pins live in the workflow files; `sha_pinning_required` is false), covering the five actions the workflows use; the unused wiki flag disabled the same day; fork-PR contributor approval cannot be read while private — read back immediately after the flip, before any outside PR is allowed to run | this row |
 | Surfaces that become public on the flip and were not in round 1's scan | pre-visibility | Complete. Scanned after round 1 (see Round 1 addendum): PR timelines, issue events, commit comments clean apart from the known R1-F4 identity class; all 305 hosted workflow runs' logs scanned value-free — no personal data, but 18 runs' logs carry pre-redaction tracker identifiers inside historical branch names (R1-F7). Those 18 runs' logs were deleted under D21 on 2026-09-21 (read back absent). Projects unreadable with the current token | Round 1 addendum |
-| Pre-push re-scan of every commit added after `053b56e` (tree + commit message) | pre-visibility | Done for the pushes of 2026-09-21 (`053b56e`, `a52c44e`, `08cc984`: changed blobs, messages and author headers; Python `re`, `pcre2grep`, `git grep -P`; clean apart from the git-identity lines and one integer constant); repeated for the commit that records this revision before its push, with the result recorded in the first post-flip revision | this row |
+| Pre-push re-scan of every commit added after `053b56e` (tree + commit message) | pre-visibility | Done for the pushes of 2026-09-21 (`053b56e`, `a52c44e`, `08cc984`: changed blobs, messages and author headers; Python `re`, `pcre2grep`, `git grep -P`; clean apart from the git-identity lines and one integer constant); repeated before each later push the same day for `bdbbe9d`, `7b46b8d` and `0ff7442` (changed blobs at the commit via `git grep -P`, message via Python `re`): clean apart from the AI co-author trailer address and, at `0ff7442`, one pre-existing reserved-domain placeholder in an old CHANGELOG entry | this row |
 | Rollback plan if a finding surfaces after the flip | pre-visibility | Recorded in D17: re-flip to private immediately (mechanically reversible; clones, caches and indexes are not), redact at HEAD, file the incident in the ledger, re-run the audit round | D17 |
 | 19 This file, local portion | pre-visibility | This revision | — |
-| 6, 8–14, hosted halves of 15–17, 20 | post-visibility | PENDING — appended after the flip with run-ID commitments; owner: controller | — |
+| 6 One successful hosted run of every push-triggered mandatory job | post-visibility | Satisfied for the push-triggered jobs 2026-09-21 by the `0ff7442` CI and Docs runs (Section 4); the PR-triggered job waits for step 9 | Section 4 |
+| 8–14, hosted halves of 15–17, 20 | post-visibility | PENDING — appended with run-ID commitments as each runs; owner: controller | — |
 | 18 Restored `dependabot.yml` state | post-visibility | PENDING — owner: controller | — |
 | D18 §4.1 macOS 27 adoption-matrix amendment | pre-release | PENDING — owner: controller, gated by D18 | — |
 | External-state readbacks (controller, via the API) and operator attestations, each named as such | all phases | Round 1 carries two controller readbacks: the hosted-run failure shape (five runs, zero steps, billing annotation; no run-ID commitments taken) and the Release-to-draft conversion (draft=true, prerelease=false, 2 assets, tag unchanged, 2026-09-20). Operator attestations so far: none required by this round | Section 2 |
@@ -263,27 +264,65 @@ Done before any flip: the `v26.0.0` Release converted to a draft (read back draf
 contains F1–F3 on the public surface but does not remediate them — remediation is the D18
 rebuild; F4 accepted under D20. Still required before the flip (two items): the pre-push re-scan of the commit that records this revision and the local canonical suite green on that exact pushed commit (the D19 Support gate was withdrawn by the operator on 2026-09-21; the R1-F6 fixture fix, the R1-F7 log deletion under D21 and the repository-level external-Action allowlist were completed the same day).
 
-## 3. Local verification for the visibility-step commit
+## 3. Local verification for the visibility-step commit and its successors
 
-For `08cc984` (pushed 2026-09-21, the tip before the commit that records this revision), all
-stages exit 0 except where noted: swiftly toolchain Swift 6.3.3 — `swift build` exit 0 (log
-sha256 `c9bc4c4ed0dbeabc…`), `swift test` exit 0, 1846 tests in 256 suites (`dfdea3b0685959d0…`);
-Command Line Tools Swift 6.3.2 — `swift build` exit 0 (`ac11c36b97ac26e9…`); Python automation
-tier `python -m unittest discover -s Tests/automation -p 'test_*.py'`, CPython 3.13.14, 764/764,
-exit 0 (`93dda1039dd19d0a…`); bats `bats -r bats/`: first pass 451/452, exit 1 (`d9bd869ed2de1412…`,
-one live-Mail transient in an attachment-enrichment test that passed alone), full rerun on the same
-commit 452/452, exit 0 (`bfa4d32c2a3db24a…`). Launched through a signal-reset wrapper (see the
-learnings entry). The same suite is run on the commit that records this revision before it is
-pushed; its result is recorded in the first post-flip revision, because a commit cannot carry its
-own suite result.
+The four commits below each ran the full local canonical suite through the signal-reset launcher
+before their push (two before the visibility change, two after it); the suite that gates a commit
+necessarily runs before that commit's successor records it here.
+
+- `08cc984` (pushed 2026-09-21, before the flip): swiftly toolchain Swift 6.3.3 — `swift build`
+  exit 0 (log sha256 `c9bc4c4ed0dbeabc…`), `swift test` exit 0, 1846 tests in 256 suites
+  (`dfdea3b0685959d0…`); Command Line Tools Swift 6.3.2 — `swift build` exit 0
+  (`ac11c36b97ac26e9…`); Python automation tier, CPython 3.13.14, 764/764, exit 0
+  (`93dda1039dd19d0a…`); bats: first pass 451/452, exit 1 (`d9bd869ed2de1412…`, one live-Mail
+  transient in an attachment-enrichment test that passed alone), full rerun on the same commit
+  452/452, exit 0 (`bfa4d32c2a3db24a…`).
+- `bdbbe9d` (the visibility-step commit, pushed 2026-09-21 before the flip): swiftly build
+  (`f89b8ad4c23d175b…`) and test, 1846/256 (`e6cc7fcf678c7d85…`); CLT build (`e1b1108a988c9df3…`);
+  Python 764/764 on a rerun after a first-pass timing flake in the app-lifecycle module
+  (`4ae0758542beecf8…`, rerun `e4fb8d854e105ce2…`); bats 452/452 after one live-Mail transient
+  (`041847b6fed3c753…`, `52aac20fc85167dd…`). Pushed on the basis of every test green on the
+  commit across those runs.
+- `7b46b8d` (first hosted-CI fix, pushed 2026-09-21 15:30Z): one pass, exit 0 end to end —
+  swiftly build (`463694d3e514e12c…`) and test 1846/256 (`03bf637cb87ecc90…`); CLT build (`e8bd3deb3ce658f4…`); Python 767/767
+  (`12a3fa3778b40658…`); bats 452/452 (`5272ec826afa6a9b…`).
+- `0ff7442` (macOS-15 Foundation fix, pushed 2026-09-21 16:17Z): one pass, exit 0 end to end —
+  swiftly build (`a686569dc36deb28…`) and test 1847/256 (`2082d571d6ed5ba0…`); CLT build
+  (`6d07bf426161a025…`); Python 767/767 (`fd156dac3c992bf4…`); bats 452/452 (`820ab4b0defc6883…`).
 
 ## 4. Post-visibility hosted evidence
 
-Read back immediately after the flip, before anything else runs: repository visibility; the
-`v26.0.0` Release still `draft=true`; `default_workflow_permissions` and
-`can_approve_pull_request_reviews`; `allowed_actions` and the selected-actions set; fork-PR
-contributor approval (unreadable while private); the wiki flag; the fork count.
+**Visibility change:** 2026-09-21 14:31Z, by the controller through the API, after the D17
+blocker list closed (R1-F6 fixture fix in `bdbbe9d`, D21 log deletion read back as 18 × 404 at
+13:19Z; the D19 Support gate withdrawn by the operator the same day). Readbacks immediately after:
+visibility public; wiki disabled; forks 0; the `v26.0.0` Release still a draft.
 
-PENDING — appended after the visibility change: hosted run outcomes as salted run-ID
-commitments, capability and settings readbacks for the public state, and the rehearsal results
-of design §18 steps 6 and 8–18, in dependency order. Nothing here is asserted before it runs.
+**Actions settings, read back 2026-09-21 15:08Z:** `default_workflow_permissions` read;
+`can_approve_pull_request_reviews` false; `allowed_actions` selected, GitHub-owned allowed,
+verified-creator allowed false, pattern allowlist exactly one entry (the pinned `setup-uv`
+publisher, any ref; SHA pinning is enforced by the committed `action_pins.py` policy rather than
+the repository setting); fork-PR contributor approval `all_external_contributors`. Open pull
+requests at the flip: three outside contributions and one Dependabot Actions bump; none were run,
+approved or merged as part of this step.
+
+**Hosted runs on `main` since the flip** (each named by a salted SHA-256 commitment over the
+run id and attempt, first 16 hex digits, under a dedicated run-ID salt kept outside the repository — distinct from
+the Round 1 denylist salt — whose own SHA-256 commitment is `450869584cbaa726`):
+
+| Commit | Workflow | Commitment | Outcome |
+|---|---|---|---|
+| `bdbbe9d` | Docs | `e38acbc2ab3deb6a` | success |
+| `bdbbe9d` | CI | `235a8fd2c3c038c8` | failure — three hosted-only defects, none reproducible locally: the pinned Bats step assumed an npm bin link the runner did not create; the coverage policy hard-coded a macOS-only temp root and one runtime-bindings test read a macOS-only clock constant (the Python tier runs on Ubuntu); a test expression exceeded the macos-15 toolchain's type-check budget. Fixed in `7b46b8d`. |
+| `7b46b8d` | Docs | `52c333db7570bc2e` | success |
+| `7b46b8d` | CI | `27d6dd53c56704bf` | failure — Supply-chain policy, hosted-bats-build, hosted-bats and commit-lint green; build-test red on two logic tests whose expectations depended on macOS-27 Foundation behaviour (directory flag on a resolved symlink URL; unknown `~user` expansion). Fixed in `0ff7442`; the Notes attachment guard now refuses other users' `~user` spellings before expansion, a real defect on macOS 15 recorded under CHANGELOG `[Unreleased]`. |
+| `0ff7442` | Docs | `7bfc75cef643f225` | success |
+| `0ff7442` | CI | `c188d356233ffb0a` | success — every job (Supply-chain policy, build-test, hosted-bats-build, hosted-bats, commit-lint, quality / required) green; the first fully green hosted run since 2026-09-02. |
+
+Design §18 step 6 (one successful hosted run of every push-triggered mandatory job): satisfied for
+the push-triggered jobs by the `0ff7442` CI and Docs runs above. The PR-triggered mandatory job
+obtains its first successful run on the step 9 validation PR, still PENDING.
+Learnings from the hosted runs are in `docs/learnings/hot/hosted-ci.md`.
+
+PENDING — appended as each runs: capability readbacks that change after the first outside
+contribution, and the rehearsal results of design §18 steps 8–18, in dependency order. Nothing
+here is asserted before it runs.
