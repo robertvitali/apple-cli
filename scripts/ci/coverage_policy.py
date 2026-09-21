@@ -57,6 +57,8 @@ XCRUN_ENV = {
     "LANG": "C",
     "LC_ALL": "C",
     "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+    # Fixed on purpose: xcrun is macOS-only, so this literal never needs the host probe
+    # that _snapshot_directory performs for the policy's own (Linux-tested) snapshots.
     "TMPDIR": "/private/tmp",
 }
 DECLARATION_ONLY_COVERAGE_EXCLUSIONS = {
@@ -233,13 +235,37 @@ def _path_identity(path: Path, *, error_message: str) -> Tuple[int, int, int, st
     )
 
 
+_SNAPSHOT_ROOTS = ("/private/tmp", "/tmp")
+
+
+def _snapshot_directory() -> str:
+    """Directory that receives coverage-input snapshots.
+
+    `_write_snapshot` returns the canonical (resolved) snapshot path and
+    `_verify_snapshot_identities` re-checks that path's dev/ino/size/digest, so the
+    root only has to be a real directory outside the repository whose canonical form
+    is stable. macOS gets /private/tmp explicitly because it is the canonical form of
+    /tmp, keeping the created and resolved paths identical; a hosted Linux runner
+    (where the policy's own unit tests run) has no /private, so /tmp serves the same
+    role. Both are fixed constants rather than the environment-derived TMPDIR that the
+    subprocess environments deliberately pin away; the platform default is only the
+    last resort for a host with neither, and stays safe because the snapshot is
+    created O_EXCL at 0600 and re-verified by identity before use.
+    """
+    for root in _SNAPSHOT_ROOTS:
+        candidate = Path(root)
+        if candidate.is_dir():
+            return str(candidate)
+    return tempfile.gettempdir()
+
+
 def _write_snapshot(data: bytes, *, error_message: str) -> Path:
     temp_file = None
     path: Optional[Path] = None
     try:
         temp_file = tempfile.NamedTemporaryFile(
             prefix="apple-cli-coverage-",
-            dir="/private/tmp",
+            dir=_snapshot_directory(),
             delete=False,
         )
         path = Path(temp_file.name)

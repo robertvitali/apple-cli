@@ -742,6 +742,11 @@ class AccessorBindingTests(BindingFixture):
         with ExitStack() as stack:
             memory.install(stack)
             stack.enter_context(mock.patch.object(sys, "executable", "/synthetic/runtime/launcher"))
+            # The clock/reset guard pins the macOS-only CLOCK_UPTIME_RAW constant. Supply
+            # it on every host (the hosted Python tier runs on Linux) so each accessor
+            # test reaches its own assertion instead of failing early on the missing
+            # constant; the real host value is checked separately below.
+            stack.enter_context(mock.patch.object(time, "CLOCK_UPTIME_RAW", 8, create=True))
             return operation(metadata, records, checkpoint=self.checkpoint())
 
     def test_exact_declarations_do_not_invoke_accessors(self):
@@ -760,6 +765,11 @@ class AccessorBindingTests(BindingFixture):
         for symbol in vars(memory.loader).values():
             self.assertEqual(symbol.calls, [])
         self.assertEqual(memory.getter.calls, [])
+
+    @unittest.skipUnless(sys.platform == "darwin", "the real host constant exists only on macOS")
+    def test_host_clock_constant_matches_the_pinned_guard_value(self):
+        self.assertIs(type(time.CLOCK_UPTIME_RAW), int)
+        self.assertEqual(time.CLOCK_UPTIME_RAW, 8)
 
     def test_synthetic_image_observation_uses_pydll_and_never_calls_reset_helper(self):
         self.api("_observe_runtime_images")

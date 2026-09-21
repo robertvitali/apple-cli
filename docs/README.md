@@ -18,6 +18,7 @@
 
 ### hot
 - [bats-app-lifecycle](learnings/hot/bats-app-lifecycle.md)
+- [hosted-ci](learnings/hot/hosted-ci.md)
 - [mail-automation](learnings/hot/mail-automation.md)
 
 ### medium

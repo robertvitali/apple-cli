@@ -1170,7 +1170,7 @@ class AppLifecycleShellTests(unittest.TestCase):
             app_lifecycle_lsappinfo_exec() {{
               count=0; [ ! -e "$tmp/calls" ] || count=$(wc -l < "$tmp/calls")
               printf '%s\n' call >> "$tmp/calls"
-              if [ "$count" -eq 0 ]; then sleep 0.005; else sleep 0.08; fi
+              if [ "$count" -eq 0 ]; then sleep 0.05; else sleep 0.8; fi
               printf '%s\n' success
             }}
             app_lifecycle_observe() {{
@@ -1179,7 +1179,10 @@ class AppLifecycleShellTests(unittest.TestCase):
               APPLE_CLI_BATS_APP_RESULT=000000
             }}
             APPLE_CLI_BATS_APP_POLL_SECONDS=0.005
-            APPLE_CLI_BATS_APP_SETUP_TIMEOUT_SECONDS=0.04
+            # 10x the original margins: a loaded host or hosted runner could expire the
+            # 40 ms window before the first observation even started. The poll granularity
+            # is deliberately left unscaled; it only sets how often the wait loop looks.
+            APPLE_CLI_BATS_APP_SETUP_TIMEOUT_SECONDS=0.4
             setup_file; status=$?
             printf 'STATUS:%s READY:%s CHILD:%s TIMER:%s STATE:%s CALLS:%s\n' "$status" \
               "$APPLE_CLI_BATS_APP_SNAPSHOT_READY" "$APPLE_CLI_BATS_APP_CHILD_PID" \

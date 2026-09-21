@@ -237,10 +237,16 @@ struct WriteDestinationFinalLeafTests {
         let home = FileManager.default.homeDirectoryForCurrentUser.path
         let cwdDepth = FileManager.default.currentDirectoryPath.split(separator: "/").count
         for leaf in ["ordinary", "new-leaf"] {
-            let normalized = root.path + "/absent/../" + leaf
-            let relative = String(repeating: "../", count: cwdDepth) + normalized.dropFirst()
-            for raw in [root.path + "/" + leaf, normalized, root.path + "//./" + leaf,
-                        parent.path + "/" + leaf, relative, "~" + normalized.dropFirst(home.count)] {
+            let normalized: String = root.path + "/absent/../" + leaf
+            let relative: String = String(repeating: "../", count: cwdDepth) + String(normalized.dropFirst())
+            let direct: String = root.path + "/" + leaf
+            let doubled: String = root.path + "//./" + leaf
+            let viaParent: String = parent.path + "/" + leaf
+            let tilde: String = "~" + String(normalized.dropFirst(home.count))
+            // Kept as typed lets: one literal with six concatenations exceeded the hosted
+            // toolchain's type-checker budget.
+            let candidates: [String] = [direct, normalized, doubled, viaParent, relative, tilde]
+            for raw in candidates {
                 try refuseFinalLeafSymlink(raw, action: "write")
                 #expect(try confineWriteDestination(raw, action: "write").lastPathComponent == leaf)
             }

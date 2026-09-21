@@ -248,11 +248,17 @@ invariant kept by convention, not enforced, so a new write-posture suite added w
 become a second reporter). It fires on any run that includes `AppleKitTests`; a `--filter`ed lane
 that excludes that target goes green with the export still in place.**
 
-Three test tiers: **logic** (swift-testing, pure — CI + local), **CLI smoke** (bats,
-invokes the binary — LOCAL ONLY: measured 2026-08-30, hosted runners lack the real
-Apple state many tests exercise, failing environment-dependently and crawling at
-~10s/test), **live** (drives the real Apple frameworks
-against the sandbox — real Mac with granted TCC, not CI). Add golden-JSON
+Four test tiers: **logic** (swift-testing, pure — CI + local), **CLI smoke** (bats,
+invokes the binary — the full recursive `bats -r bats/` tier is LOCAL ONLY: measured
+2026-08-30, hosted runners lack the real Apple state many tests exercise, failing
+environment-dependently and crawling at ~10s/test; a hosted-safe partition runs in CI's
+`hosted-bats` job on `macos-15`), **Python automation** (`python3 -m unittest discover -s
+Tests/automation`, the CI-policy tooling's own tests — run ONLY by the Ubuntu
+`Supply-chain policy` job, so a macOS-only skip there is a test no CI job runs), and
+**live** (drives the real Apple frameworks against the sandbox — real Mac with granted
+TCC, not CI). Hosted CI is Ubuntu plus `macos-15` while local development tracks the
+current macOS, so a green local run is not evidence for the hosted lanes or vice versa;
+reproduce hosted-only Python failures in a Linux container before pushing a fix. Add golden-JSON
 snapshot tests + an exit-code matrix per domain, and MCP-diff parity tests.
 
 Each local Bats file uses targeted LaunchServices bundle-only and exact name-plus-bundle queries

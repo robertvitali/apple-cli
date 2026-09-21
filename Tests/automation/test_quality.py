@@ -88,15 +88,20 @@ def assert_pinned_bats_install(testcase: unittest.TestCase, install_step: str) -
         install_step,
     )
     testcase.assertIn(
-        'echo "$RUNNER_TEMP/node_modules/.bin" >> "$GITHUB_PATH"',
+        'bats_bin="$RUNNER_TEMP/node_modules/bats/bin"',
         install_step,
     )
     testcase.assertIn(
-        'echo "BATS_EXECUTABLE=$RUNNER_TEMP/node_modules/.bin/bats" >> "$GITHUB_ENV"',
+        '[ -x "$bats_bin/bats" ] || { echo "Pinned Bats executable missing after install."; exit 1; }',
+        install_step,
+    )
+    testcase.assertNotIn("GITHUB_PATH", install_step)
+    testcase.assertIn(
+        'echo "BATS_EXECUTABLE=$bats_bin/bats" >> "$GITHUB_ENV"',
         install_step,
     )
     testcase.assertIn(
-        '[ "$("$RUNNER_TEMP/node_modules/.bin/bats" --version)" = "Bats 1.13.0" ]',
+        '[ "$("$bats_bin/bats" --version)" = "Bats 1.13.0" ]',
         install_step,
     )
     testcase.assertNotIn("brew install", install_step)
@@ -134,9 +139,10 @@ def assert_pinned_bats_install(testcase: unittest.TestCase, install_step: str) -
         'ACTUAL_INTEGRITY="sha512-$(openssl dgst -sha512 -binary "$tarball" | openssl base64 -A)"',
         'if [ "$ACTUAL_INTEGRITY" != "$BATS_INTEGRITY" ]; then',
         'npm install --ignore-scripts --no-audit --no-fund "$tarball"',
-        'echo "$RUNNER_TEMP/node_modules/.bin" >> "$GITHUB_PATH"',
-        'echo "BATS_EXECUTABLE=$RUNNER_TEMP/node_modules/.bin/bats" >> "$GITHUB_ENV"',
-        '[ "$("$RUNNER_TEMP/node_modules/.bin/bats" --version)" = "Bats 1.13.0" ]',
+        'bats_bin="$RUNNER_TEMP/node_modules/bats/bin"',
+        '[ -x "$bats_bin/bats" ] || { echo "Pinned Bats executable missing after install."; exit 1; }',
+        'echo "BATS_EXECUTABLE=$bats_bin/bats" >> "$GITHUB_ENV"',
+        '[ "$("$bats_bin/bats" --version)" = "Bats 1.13.0" ]',
     )
     marker_offsets = [install_step.index(marker) for marker in ordered_markers]
     testcase.assertEqual(marker_offsets, sorted(marker_offsets))

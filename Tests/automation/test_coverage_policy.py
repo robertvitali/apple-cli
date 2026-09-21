@@ -164,6 +164,38 @@ class CoveragePolicyTests(unittest.TestCase):
     def tearDown(self):
         self.tmp.cleanup()
 
+    def test_snapshot_directory_prefers_the_private_tmp_root_and_falls_to_the_platform_tempdir(self):
+        # macOS: /tmp resolves to /private/tmp, and the identity checks compare canonical
+        # paths, so the fixed private root is preferred whenever it exists. The probe is
+        # pinned to its receiver so a wrong path being tested cannot pass by accident.
+        with mock.patch.object(self.policy.Path, "is_dir", autospec=True, return_value=True) as probe:
+            self.assertEqual(self.policy._snapshot_directory(), "/private/tmp")
+        self.assertEqual([call.args[0] for call in probe.call_args_list], [Path("/private/tmp")])
+        # A hosted Linux runner has no /private: the fixed /tmp root is next, never the
+        # environment-derived TMPDIR.
+        def only_tmp(path):
+            return str(path) == "/tmp"
+        with mock.patch.object(self.policy.Path, "is_dir", autospec=True, side_effect=only_tmp) as probe:
+            self.assertEqual(self.policy._snapshot_directory(), "/tmp")
+        self.assertEqual([call.args[0] for call in probe.call_args_list],
+                         [Path("/private/tmp"), Path("/tmp")])
+        # Neither fixed root exists: the platform default is the last resort, and the
+        # snapshot is still created privately by NamedTemporaryFile (O_EXCL, 0600).
+        with mock.patch.object(self.policy.Path, "is_dir", autospec=True, return_value=False), \
+                mock.patch.object(self.policy.tempfile, "gettempdir", return_value="/synthetic/tmp"):
+            self.assertEqual(self.policy._snapshot_directory(), "/synthetic/tmp")
+
+    def test_snapshot_files_are_private_regardless_of_root(self):
+        with tempfile.TemporaryDirectory() as directory:
+            with mock.patch.object(self.policy, "_snapshot_directory", return_value=directory):
+                path = self.policy._write_snapshot(b"payload", error_message="coverage tool input is invalid")
+            try:
+                self.assertEqual(path.parent, Path(directory).resolve())
+                self.assertEqual(oct(path.stat().st_mode & 0o777), "0o600")
+                self.assertEqual(path.read_bytes(), b"payload")
+            finally:
+                path.unlink()
+
     def evaluate(self, base_lcov, head_lcov, statuses=None, **kwargs):
         tool = kwargs.pop("tool", None) or CoverageTool(
             self.base_binary,
