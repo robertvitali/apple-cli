@@ -207,13 +207,19 @@ struct WriteDestinationFinalLeafTests {
         let cwdDepth = FileManager.default.currentDirectoryPath.split(separator: "/").count
         let spelledRoot = relative ? String(repeating: "../", count: cwdDepth) + root.path.dropFirst() : root.path
         let raw = spelledRoot + "/alias/../leaf"
+        // Bind the resolved destination first: a throwing expression inside `#expect` is not
+        // expanded on failure, so a hosted-only failure would otherwise print no values.
+        let confined = try confineWriteDestination(raw, action: "write", allowOutsideHome: true)
         if relative || physicalLeaf == "dangling" {
-            #expect(try confineWriteDestination(raw, action: "write", allowOutsideHome: true) == lexical)
+            #expect(confined.path == lexical.path)
             try refuseFinalLeafSymlink(raw, action: "write")
         } else {
             // Absolute + existing physical link (to a file or a directory): Foundation follows it,
-            // so the write WOULD be redirected — this is what the guard exists for.
-            #expect(try confineWriteDestination(raw, action: "write", allowOutsideHome: true) == physicalTarget)
+            // so the write WOULD be redirected — this is what the guard exists for. Compare paths,
+            // not URLs: for the directory target Foundation may or may not mark the resolved URL
+            // as a directory (a trailing slash) depending on the macOS release (observed to
+            // differ between 15 and 27), and that flag is not what this test is about.
+            #expect(confined.path == physicalTarget.path)
             let error = #expect(throws: AppleError.self) { try refuseFinalLeafSymlink(raw, action: "write") }
             #expect(error?.exitCode == 77)
         }

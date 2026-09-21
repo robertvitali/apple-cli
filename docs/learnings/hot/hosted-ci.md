@@ -37,6 +37,39 @@ red step had been unexercised since the last hosted run on 2026-09-02; the local
    typed `let`s. The local toolchain accepts the original, so this class of failure is only
    visible hosted.
 
+4. **`build-test` (`macos-15`) — second run, after the type-check fix.** Two logic-tier tests
+   failed on Foundation behaviour that differs between macOS 15 and the current release:
+   - `URL.resolvingSymlinksInPath()` through a symlink whose final target is a DIRECTORY came back
+     with a different directory flag (trailing slash) than the URL built by
+     `appendingPathComponent`, so a URL `==` failed while the paths were equal. Compare `.path`
+     when the assertion is about where a write lands, not about the URL's directory-ness.
+   - `NSString.expandingTildeInPath` on an unknown `~user/…` returns the spelling unchanged on
+     macOS 27 but substitutes the PROCESS HOME on macOS 15 (only those two releases were
+     observed; the package floor is macOS 14, so 14, 16 and 26 are unverified either way). A
+     guard that relied on the "unchanged" behaviour to refuse the form let `~nosuchuser/x.bin`
+     resolve to `$HOME/x.bin` there. The Notes attachment guard now refuses any `~user` form
+     other than the current account's own name before expanding, checked on unicode scalars
+     (a combining mark after the tilde is one grapheme to Swift but still a tilde to Foundation).
+   - Diagnostic method worth reusing: the parameterised test's failure line named the one
+     argument combination that failed (`dirlink`, the only directory target), which is what
+     isolated the directory-flag difference without a macOS 15 host. A throwing expression
+     inside `#expect` prints no operand values on failure; bind it to a `let` first.
+
+**Follow-up — the other tilde-expansion sites still hand `~user` spellings to Foundation** and
+therefore inherit the macOS 15 substitution. Ranked by consequence:
+
+1. `Sources/MailKit/Commands/WriteComposeCommands.swift` (`--attach` path resolution): on
+   macOS 15 a `~user/report.pdf` spelling reads `$HOME/report.pdf` and attaches a file the
+   operator did not name to OUTBOUND mail. Outward-facing, so first.
+2. `Sources/AppleKit/PathConfinement.swift` (`confineWriteDestination`, `refuseFinalLeafSymlink`
+   and the sensitive-dir check): a wrong destination inside the home, not a confinement bypass
+   (the blocklist still sees the substituted path).
+3. `Sources/MailKit/Commands/WriteManageCommands.swift`, `Sources/MessagesKit/ChatDB.swift`,
+   `Sources/AppleKit/RateLimiter.swift` (env-supplied paths; lowest).
+
+Land them as ONE shared `AppleKit` helper, scalar-wise from the start, with tests — five copies of
+a security predicate is how they drift.
+
 **Lessons.**
 
 - Hosted CI is Ubuntu plus `macos-15`; local development tracks the current macOS. A green local

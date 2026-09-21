@@ -95,7 +95,7 @@ struct SaveAttachmentCmd: ParsableCommand {
             let abs: String
             do {
                 abs = try AttachmentFS.assertSafeSavePath(path)
-                try refuseRawFinalLeafSymlink(path, action: "write the attachment to")
+                try refuseRawFinalLeafSymlink(AttachmentFS.rawSpellingForChecks(path), action: "write the attachment to")
                 try refuseRawFinalLeafSymlink(abs, action: "write the attachment to")
             } catch let e as AttachmentFS.FSError {
                 throw AppleError.validation(e.description)

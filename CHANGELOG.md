@@ -97,6 +97,14 @@ JSON output are stable per the versioning policy — breaking changes bump
   an existing error class.
 
 ### Fixed
+- **`apple notes` attachment save paths spelled as another user's home are refused on every
+  macOS release.** A `~user` or `~user/…` destination naming any account other than your own
+  is now refused as not-absolute before any expansion. Previously the outcome depended on the macOS release: on macOS 27 a real
+  user's home was refused as outside the allowed locations and an unknown user as
+  not-absolute, but on macOS 15 an unknown user silently saved under the running user's
+  home instead (other supported releases were not observed). The accepted tilde forms are
+  `~`, `~/…`, and your own account's `~name` / `~name/…`, which now always mean the same
+  directory as `~` / `~/…`.
 
 - **Capability checks accept escaped quotes in ordinary multiline Swift test literals.**
   Literal contents remain excluded from test discovery. xUnit evidence now requires UTF-8

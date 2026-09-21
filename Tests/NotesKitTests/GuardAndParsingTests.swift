@@ -171,12 +171,42 @@ struct AttachmentFSTests {
         #expect(AttachmentFS.resolvedPath(escape) == "/\u{0301}/out.bin")
     }
 
-    @Test("an unknown `~user` spelling is refused as not-absolute, never anchored at `/`")
-    func unknownTildeUserIsNotAbsolute() {
-        // `expandingTildeInPath` returns an unknown `~user/…` unchanged; `isAbsolutePath` admits it.
-        #expect(throws: AttachmentFS.FSError.self) {
-            try AttachmentFS.assertSafeSavePath("~apple-cli-test-nosuchuser/x.bin")
+    @Test("another user's `~user` spelling is refused as not-absolute, never anchored at `/` or at the process home")
+    func otherUserTildeIsNotAbsolute() {
+        // `isAbsolutePath` admits `~user/…`, and `expandingTildeInPath` treats an unknown user
+        // differently by macOS release (unchanged on current releases, the process home on
+        // macOS 15). The guard refuses the form itself, so neither expansion is reachable — and
+        // neither is a real other user's home, which the guard never means to name.
+        // The last three put a combining mark, a ZWJ and a variation selector right after the
+        // tilde: one grapheme cluster to Swift, still a leading U+007E to Foundation.
+        // A real account that is not the current one (the suite may run as root somewhere).
+        let otherAccount = NSUserName() == "root" ? "daemon" : "root"
+        for spelling in ["~apple-cli-test-nosuchuser/x.bin", "~apple-cli-test-nosuchuser", "~" + otherAccount + "/x.bin",
+                         "~" + NSUserName() + "-apple-cli-test/x.bin",
+                         "~\u{0301}/x.bin", "~\u{200D}/x.bin", "~\u{FE0F}apple-cli-test-nosuchuser/x.bin"] {
+            #expect(throws: AttachmentFS.FSError.self, "\(spelling)") {
+                try AttachmentFS.assertSafeSavePath(spelling)
+            }
         }
+    }
+
+    @Test("the current account's own `~name` spelling names the same home as `~`")
+    func ownUserTildeIsTheBareHome() throws {
+        // Both forms go through the same expansion, so they agree even when HOME is overridden
+        // (the hosted quality run points HOME at a scratch directory).
+        let name = NSUserName()
+        try #require(!name.isEmpty)
+        let leaf = "apple-cli-test-own-home.bin"
+        #expect(try AttachmentFS.assertSafeSavePath("~" + name + "/" + leaf)
+                == AttachmentFS.assertSafeSavePath("~/" + leaf))
+        #expect(AttachmentFS.ownHomeSpelling("~" + name) == "~")
+        #expect(AttachmentFS.ownHomeSpelling("~" + name + "/a/b") == "~/a/b")
+        #expect(AttachmentFS.ownHomeSpelling("/tmp/x") == "/tmp/x")
+        #expect(AttachmentFS.rawSpellingForChecks("  ~" + name + "/" + leaf) == "~/" + leaf)
+        #expect(AttachmentFS.rawSpellingForChecks("/tmp/" + leaf) == "/tmp/" + leaf)
+        #expect(AttachmentFS.ownHomeSpelling("~") == "~")
+        #expect(AttachmentFS.ownHomeSpelling("~/x.bin") == "~/x.bin")
+        #expect(try AttachmentFS.assertSafeSavePath("~") == AttachmentFS.assertSafeSavePath("~/"))
     }
 
     @Test("a case-variant /private alias spelling is not folded and stays fail-closed")

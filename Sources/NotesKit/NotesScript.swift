@@ -1379,7 +1379,7 @@ struct NotesScript {
             abs = try AttachmentFS.assertSafeSavePath(savePath)
             try AttachmentFS.ensureParentDir(abs)
             try AttachmentFS.assertResolvedParentContained(abs) // symlink-aware re-check post-mkdir
-            try refuseRawFinalLeafSymlink(savePath, action: "write the attachment to")
+            try refuseRawFinalLeafSymlink(AttachmentFS.rawSpellingForChecks(savePath), action: "write the attachment to")
             // The normalized leaf too: it is the path the `save` below is handed, and it can
             // differ from the raw leaf (see `SaveAttachmentCmd`).
             try refuseRawFinalLeafSymlink(abs, action: "write the attachment to")

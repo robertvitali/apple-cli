@@ -35,7 +35,9 @@ enum AttachmentFS {
         ]
     }
 
-    /// Existence-INDEPENDENT lexical normalization. Expands a leading tilde (`~` / `~user`), collapses
+    /// Existence-INDEPENDENT lexical normalization. Expands a leading tilde (`~` / `~user` — though
+    /// `assertSafeSavePath` refuses every `~user` form but the current account's own, rewritten to
+    /// `~`, before calling here), collapses
     /// repeated slashes, resolves `.` and `..` component-wise without ever escaping `/`, drops a
     /// trailing slash, and canonicalizes the macOS `/private` aliases the allowed roots use
     /// (`/private/tmp`, `/private/var`) to their short spellings so both sides of the guard compare
@@ -92,10 +94,16 @@ enum AttachmentFS {
         let trimmed = p.trimmingCharacters(in: .whitespaces)
         guard !trimmed.isEmpty else { throw FSError.pathRequired }
         guard (trimmed as NSString).isAbsolutePath else { throw FSError.notAbsolute(p) }
-        // `isAbsolutePath` admits `~…`; expand it here so an unknown `~user` (which
-        // `expandingTildeInPath` returns unchanged) is refused as not-absolute rather than being
-        // anchored at `/` by the lexical normalizer.
-        let expanded = (trimmed as NSString).expandingTildeInPath
+        // `isAbsolutePath` admits `~…`. Only the operator's own home is a spelling this guard
+        // accepts: `~`, `~/…`, and the same home named by the current account (`~name`,
+        // `~name/…`), which is rewritten to the bare form so both expand through the same
+        // home directory. Any other `~user` form is refused outright rather than handed to
+        // `expandingTildeInPath`, whose treatment of an unknown user differs by macOS release
+        // (observed unchanged on macOS 27 and silently replaced by the process home on
+        // macOS 15) — either way it names a destination the operator did not spell.
+        let own = ownHomeSpelling(trimmed)
+        guard let spelled = own else { throw FSError.notAbsolute(p) }
+        let expanded = (spelled as NSString).expandingTildeInPath
         guard expanded.hasPrefix("/") else { throw FSError.notAbsolute(p) }
         let abs = resolvedPath(expanded)
         let allowed = roots ?? allowedSaveRoots()
@@ -105,6 +113,37 @@ enum AttachmentFS {
         }
         guard ok else { throw FSError.outsideAllowed(abs) }
         return abs
+    }
+
+    /// `nil` for a `~user` spelling that is not the current account; otherwise the spelling with
+    /// the current account's own `~name` collapsed to `~`, and any non-tilde path unchanged.
+    ///
+    /// Works on UNICODE SCALARS, never Characters: `isAbsolutePath` and `expandingTildeInPath`
+    /// both see a leading U+007E even when a combining mark, ZWJ or variation selector follows
+    /// it and turns the pair into one grapheme cluster that `hasPrefix("~")` would not match.
+    /// (The same hazard class as the `/` split in `resolvedPath`.)
+    static func ownHomeSpelling(_ trimmed: String) -> String? {
+        let scalars = trimmed.unicodeScalars
+        guard scalars.first == "~" else { return trimmed }
+        let rest = scalars.dropFirst()
+        if rest.isEmpty || rest.first == "/" { return trimmed }
+        let name = Array(NSUserName().unicodeScalars)
+        guard !name.isEmpty, rest.count >= name.count, Array(rest.prefix(name.count)) == name else { return nil }
+        let tail = rest.dropFirst(name.count)
+        guard tail.isEmpty || tail.first == "/" else { return nil }
+        var own = String.UnicodeScalarView()
+        own.append("~")
+        own.append(contentsOf: tail)
+        return String(own)
+    }
+
+    /// The spelling downstream RAW-path checks must inspect: the operator's input with its
+    /// whitespace trimmed and the current account's `~name` collapsed to `~`, so a raw check
+    /// expands through the same home as the normalized write. Call only after
+    /// `assertSafeSavePath` accepted the same input (a refused `~user` form comes back unchanged).
+    static func rawSpellingForChecks(_ p: String) -> String {
+        let trimmed = p.trimmingCharacters(in: .whitespaces)
+        return ownHomeSpelling(trimmed) ?? trimmed
     }
 
     static func ensureParentDir(_ abs: String) throws {
