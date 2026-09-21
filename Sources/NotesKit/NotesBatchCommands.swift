@@ -55,7 +55,7 @@ private func verifyBatchTargetsLabeled(_ ids: [String], _ script: NotesScript, s
 /// that string is guessing at something we already knew. And the guess inverted almost everywhere
 /// it mattered:
 ///
-/// - a TCC denial became `unknown`/70, DROPPING the `status` + `remediation` keys that `b6230ed`
+/// - a TCC denial became `unknown`/70, DROPPING the `status` + `remediation` keys that `cc32f06`
 ///   had just added to the error envelope for exactly this case;
 /// - a timeout, correctly `upstream`/69 upstream, became 70;
 /// - a batch of entirely malformed ids became 70 — an internal-error signal for what is

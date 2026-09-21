@@ -80,12 +80,12 @@ extends beyond the MCP where useful. Full per-capability matrices live in
 
 | Domain | Branch tip | Tests (swift / bats) | Review verdict | Notes |
 |---|---|---|---|---|
-| Messages | `b394913` | 54 / 19 | APPROVE | Live read-parity vs `mac_messages_mcp` (chat.db, FDA). DoS/limit guards, allowlist-normalize. Additive typed-`Row` SQLiteReader extension (adopted as canonical). |
-| Mail | `6a8e77d` | 64 / 17 | APPROVE (≈25 findings fixed) | Union of two MCPs. Live read-parity vs both oracles. **No live-mutation path reachable** (rule/draft mutators defined-but-never-called; all writes emit `executed:false` preview). CRLF/MIME header-injection fixed. |
-| Contacts | `84daa08` | 51 / 32 | APPROVE (1 CRITICAL fixed) | 21/21 live read-parity. Fixed `--text` flag collision that had silently killed `note set` + `vcard import` at parse time; added all-21-leaf `--help` guard. |
-| Notes | `88a42f2` | 52 / 17 | APPROVE | SQLite reads live-parity. gzip-bomb clamp, protobuf+path-guard tested, golden-JSON + exit-code matrix. |
-| Calendar | `23be5d7` | 71 / 16 | APPROVE | Built the shared **EventKitCore** engine first (frozen `8d30189`). Enum wire-strings verified verbatim vs MCP source (oracle hangs on TCC). Fixed a real `EKWeekday(rawValue:8)` NSException. |
-| Reminders | `eabc31b` | 94 / 24 | APPROVE (1 CRITICAL fixed) | Built on frozen EventKitCore (additive `Subtask`/`subtask_progress` fields only). Subtask/tag notes byte-compatible with MCP source. Write-safety CRITICAL fixed (see below). |
+| Messages | `836e8aa` | 54 / 19 | APPROVE | Live read-parity vs `mac_messages_mcp` (chat.db, FDA). DoS/limit guards, allowlist-normalize. Additive typed-`Row` SQLiteReader extension (adopted as canonical). |
+| Mail | `8fb392b` | 64 / 17 | APPROVE (≈25 findings fixed) | Union of two MCPs. Live read-parity vs both oracles. **No live-mutation path reachable** (rule/draft mutators defined-but-never-called; all writes emit `executed:false` preview). CRLF/MIME header-injection fixed. |
+| Contacts | `9ac5331` | 51 / 32 | APPROVE (1 CRITICAL fixed) | 21/21 live read-parity. Fixed `--text` flag collision that had silently killed `note set` + `vcard import` at parse time; added all-21-leaf `--help` guard. |
+| Notes | `a1e5030` | 52 / 17 | APPROVE | SQLite reads live-parity. gzip-bomb clamp, protobuf+path-guard tested, golden-JSON + exit-code matrix. |
+| Calendar | `76dd466` | 71 / 16 | APPROVE | Built the shared **EventKitCore** engine first (frozen `2b559d2`). Enum wire-strings verified verbatim vs MCP source (oracle hangs on TCC). Fixed a real `EKWeekday(rawValue:8)` NSException. |
+| Reminders | `efe9c08` | 94 / 24 | APPROVE (1 CRITICAL fixed) | Built on frozen EventKitCore (additive `Subtask`/`subtask_progress` fields only). Subtask/tag notes byte-compatible with MCP source. Write-safety CRITICAL fixed (see below). |
 
 Shared core (`AppleKit`) + `EventKitCore` merged cleanly (only additive
 `Package.swift` test-target lines conflicted; resolved to the full 8-target set).

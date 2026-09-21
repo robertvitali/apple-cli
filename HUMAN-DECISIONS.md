@@ -50,7 +50,7 @@ findings for its stated scope; the repo stays private until then.
 | D5 | Chasing the Messages fuzzy-search recall gap | WITHDRAWN | Should not have been asked; became ordinary queue work |
 | D6 | Eight parity posture calls | **APPLIED** | CONTACTS-L4 delete claim · NOTES-M1 restore 4 keys · NOTES-L4 structural divergence · gap10 keep opt-in body · **gap25 wire delete-rules live** · extra20 open by default |
 | D7 | Committed phone number in public history | **ANSWERED** | "B then A" — superseded by D9, which covers the same number plus more |
-| D8 | Which Mail oracle wins on a safety limit | RESOLVED | **Safety wins** — stricter limit wins on A/B conflicts; landed in `86728f4` |
+| D8 | Which Mail oracle wins on a safety limit | RESOLVED | **Safety wins** — stricter limit wins on A/B conflicts; landed in `415709c` |
 | D9 | Personal data published to a public repo | **CLOSED 2026-08-31** (APPLIED 2026-08-23, amended 2026-08-29, REOPENED 2026-08-31, then finally closed the same day) | Repo private. Prior rewrite passes were verified against the classes then known; a 2026-08-31 round found further history and current-tree defects and the gate was reopened. The approved scoped remediation was completed the same day — history rewrite in a fresh clone, fresh-clone verification, rollback/audit scratch removed and absent-verified — and one complete, independently challenged, value-free audit round returned zero findings for its stated scope (an earlier same-day closure attempt was recorded invalid and reversed first). Rewritten main `c794d7e` is an ancestor of current main; `v26.0.0` peels to `0f617eb`. This closure covers its stated scope only and does NOT authorize publication: the repo stays private until every readiness gate passes and a separate fresh pre-publication privacy audit records zero findings for the then-current tree, history, commit messages, objects, refs, and artifacts |
 | D10 | Search/find-contact length caps | WITHDRAWN | Should not have been filed |
 | D11 | What `schema_version` tracks | **APPLIED** | **Shape only** — value breaks ride the MAJOR + CHANGELOG; both policy lines rewritten to agree |
@@ -59,6 +59,15 @@ findings for its stated scope; the repo stays private until then.
 | D14 | Live-exercise `mail rules` delete | **APPLIED 2026-08-27** | First live exercise done operator-present: labeled disabled test rule deleted by index, readback matched, 3 real rules untouched |
 | D15 | Extend the public-attribution exception to `.github/CODEOWNERS` | **RATIFIED 2026-09-07** | The operator's exact GitHub user may appear in `.github/CODEOWNERS` for every enforcement-control-plane path, as deliberate public attribution alongside LICENSE, README, and git author metadata. Sequence is fixed: the `AGENTS.md` exception extension lands first as its own reviewed commit, the CODEOWNERS commit lands second with its own fresh privacy scan, then GitHub's code-owners errors API confirms it parses. Trade-off recorded per the design: from that step until public launch no release can be cut; the release freeze's urgent-fix clause is satisfiable only by a reviewed, operator-authorized, temporary restoration of a write-capable release workflow, recorded as an explicit exception and removed again afterwards |
 | D16 | Narrow main-only reversal for disposable rehearsal refs | **RATIFIED 2026-09-07** | Three disposable ref classes, and only these, may be created for the publication-automation rehearsals (design §18 steps 8–14, removal at step 18): the uniquely named disposable target ref, the proposal head refs of the validation PRs (which target that ref, never `main`), and the Dependabot-created head refs of step 13; never for feature work; never merged into `main`; deleted after the rehearsal, including on abort; does not reverse the ruling for ordinary work. The `AGENTS.md` reversal commit lands under the private main-only gate when the rehearsal step begins, after an in-session re-confirmation and before the first branch is cut. The later full reversal that activates the `main` ruleset is a SEPARATE future operator instruction and is not granted here |
+| D17 | Early visibility flip to restore hosted Actions; pre-flip privacy audit round 1; disposition of its findings | **ANSWERED 2026-09-20** (APPLIED when the flip lands) | Operator ordered: fresh audit first, flip on zero findings, end-of-roadmap audit still required. Round 1's zero-findings condition was NOT met: seven findings — five operator-dispositioned (D17–D20), the fixture fix pending, and the hosted-log deletion OPEN in D21; for the binary the operator chose rebuild + re-cut (as `v27.0.0`) rather than accept, and, because the design forbids a private publisher and hosted runs are billing-blocked, ordered the `v26.0.0` Release converted to a draft first, the flip second, the re-cut after hosted validation |
+| D18 | macOS 27 adoption release `v27.0.0` | **OPEN** | Operator instruction 2026-09-20: bump to `27.0.0` once all tests pass on macOS 27. Waits on the D17 flip, hosted validation, the design's publisher path, a §4.1 adoption-matrix amendment, and verified removal of every R1-F1 to R1-F3 carrier from the rebuilt binary and archive |
+| D19 | GitHub still serves pre-rewrite commits by id | **ANSWERED 2026-09-20** | Verified: seven pre-rewrite commit ids formerly cited in this file return HTTP 200 from the API and still carry pre-redaction tracker identifiers. Operator reversed the 2026-08-23 no-Support posture: request a purge of unreachable objects and cached views from GitHub Support while the repo is still private; the D17 flip waits on that confirmation. Stale id citations in this file were re-pointed to their rewritten counterparts the same day |
+| D20 | Outside contributor's plaintext git identity on open PRs 3–5 | **RATIFIED 2026-09-20** | Accepted as that contributor's own public attribution for now; the PRs are to be squash-merged when convenient with the squash author identity read back first; the reachable `refs/pull/*` copies are outside the D19 purge and persist until the PRs close |
+| D21 | Delete 18 hosted workflow runs' logs that echo pre-redaction tracker identifiers | **OPEN** | Post-round scan of all 305 run logs: no personal data; 18 runs' logs contain 16-digit tracker identifiers inside historical branch names. Deleting run logs is destructive and outward-facing, so it waits for the operator's instruction; named as a D17 pre-flip blocker |
+
+---
+
+**Amendment 2026-09-20 (D17).** The preamble's and D9's "repo stays private until every readiness gate passes and a fresh pre-publication privacy audit records zero findings" condition was advanced by operator ruling: the operator authorized the visibility change ahead of the remaining readiness gates, on a fresh audit round whose zero-findings condition was NOT met: findings 1–5 received the operator's own dispositions (D17–D20), while the fixture fix (6) and the hosted-log deletion (7, D21 OPEN) remain pre-flip blockers. The end-of-roadmap audit and every other readiness gate still stand as written; publication actions beyond visibility remain gated. See D17 and `docs/discovery/prelaunch-readiness-evidence.md`.
 
 ---
 
@@ -66,7 +75,7 @@ findings for its stated scope; the repo stays private until then.
 
 - **Status:** **RATIFIED 2026-08-19** — keep the preview-by-default deviation (option (a)).
 - **Resolution:** The operator ruled to keep `--execute` required. `delete-folder` is the CLI's only irreversible-AND-unrecoverable write (measured: it cascades, and cascaded notes do NOT reach Recently Deleted), so the one-command divergence from the oracle stands as a documented safety posture, same class as the `APPLE_ALLOW_EMPTY_TRASH` precedent. No code change.
-- **Filed:** 2026-08-02 (Notes write-model v2 flip, commit `ac0a7d0`)
+- **Filed:** 2026-08-02 (Notes write-model v2 flip, commit `8cc21f3`)
 - **Category:** product-posture deviation
 - **One-line:** The only write that previews by default **without an oracle counterpart doing the
   same**. (Corrected after review: the first draft said "the only write in the whole CLI that
@@ -151,12 +160,16 @@ condition you asked for.
 
 ---
 
+**Amended 2026-09-20 (D17 ruling 2):** the release freeze is lifted for exactly one release, `v27.0.0`, when it is cut under D18's preconditions; all other freeze terms stand, and D2's remaining Homebrew part is unchanged.
+
+---
+
 ## D3 — Operator-present live validation: `mail send --gui-send`
 
 - **Status:** **APPLIED 2026-08-27** — live-validated operator-present.
 - **Resolution:** After a first failed attempt (2026-08-26, exit 70) and a second failed
   attempt (2026-08-27, exit 69 upstream_error, body paste never occurred), the automation
-  fix landed (`dd83be1`, bounded nonce-window poll) and a no-send diagnostic passed the full
+  fix landed (`5ebbf39`, bounded nonce-window poll) and a no-send diagnostic passed the full
   flow. The operator authorized attempt 3, watched the compose auto-send, and delivery was
   oracle-verified on both the sent and inbox sides (one self-addressed message, sandbox
   engaged). Test items were cleaned by exact id. Evidence: Asana `GID-REDACTED`.
@@ -336,7 +349,7 @@ you saying so explicitly.
 adopt the **scoped standing rule**: *on an A-vs-B disagreement about a SAFETY limit (send rate,
 recipient caps, bulk caps on destructive ops), the stricter limit wins.* This knowingly makes the
 CLI stricter than oracle B on those paths — accepted as a deliberate safety posture for an
-agent-driven tool where a runaway mass-send is irreversible. **LANDED 2026-08-19** in `86728f4`
+agent-driven tool where a runaway mass-send is irreversible. **LANDED 2026-08-19** in `415709c`
 (ReplyRateLimiter 20/60s consumed once per live reply; draft-send consumes the sends budget +
 100-recipient in-script cap; dry-run never consumes; review-hardened with a cross-process flock
 and a corrupt-state degraded signal); the stricter-than-B posture is documented in
@@ -865,9 +878,9 @@ mail are all clear to close, and I bring you D2. (Amended 2026-08-19: mail's clo
 code/security/critic rounds, both APPROVE; the round-2 hardening added an flock cross-process
 lock + corrupt-state degraded signal to the D8 limiters), gate-tested (886 swift-testing +
 420 bats, all green), and pushed to `integration`:
-- `e67bb8c` fix(messages): space-form negative `--hours`/`--threshold` (gap6 fast-follow)
-- `39e6d4a` feat(notes): transient-retry + error-map ported from installed 2.7.5 (item 4 + #9)
-- `86728f4` feat(mail): plain-reply via pasteboard + D8 reply/draft-send rate caps (items 5–6)
+- `f4d5814` fix(messages): space-form negative `--hours`/`--threshold` (gap6 fast-follow)
+- `708a1c0` feat(notes): transient-retry + error-map ported from installed 2.7.5 (item 4 + #9)
+- `415709c` feat(mail): plain-reply via pasteboard + D8 reply/draft-send rate caps (items 5–6)
 Remaining before the close recommendations: the read-only live-verifications (next loop step).
 
 **LIVE-VERIFIED (2026-08-19, #39 read-only sweep) — all Bucket-B obligations discharged:**
@@ -878,15 +891,15 @@ Remaining before the close recommendations: the read-only live-verifications (ne
 - **notes triple-fix PASS + a NEW defect found and fixed** — checklist note normalized-identical
   (12/12 `- [ ]` byte-match); the 166-item ordered-list note exposed real corruption: Notes.app
   serialized an unterminated `&amp ` which the oracle's DOM decoded and the CLI left verbatim.
-  Fixed as NOTES-L1 (`e88cadf`, legacy-entity optional-semicolon decode + nbsp→U+00A0 on the
+  Fixed as NOTES-L1 (`50c30f0`, legacy-entity optional-semicolon decode + nbsp→U+00A0 on the
   markdown path), re-diffed live: both notes normalized-identical. Residual divergence is
   trailing-whitespace cosmetics only (CLI right-trims; turndown preserves) — documented.
 - **mail attachments PASS (CLI-superset)** — reported `size` byte-exact vs the saved file
   (37164 == on-disk), `downloaded` verified by a real save; the ORACLE returned an EMPTY
   attachment list for the same message on both its paths (its deficiency, not ours).
 - **Process disclosure:** the sweep also caught a stale bats harness expectation left red by the
-  decision-5 script deletion — and with it a tests-green breach at the `86728f4` push (the bats
-  run before that push was tail-masked). Fixed + disclosed in `11a63df`; suites now counted
+  decision-5 script deletion — and with it a tests-green breach at the `415709c` push (the bats
+  run before that push was tail-masked). Fixed + disclosed in `252498c`; suites now counted
   strictly (swift 889/889, bats 420/420).
 
 **Close recommendations (operator's call — nothing auto-closed):** contacts and mail were
@@ -991,5 +1004,219 @@ an exception, and the design insists the carve-out be narrow and explicitly reco
 branch exists.
 
 **Blocking?** It unblocks the rehearsal steps when they are reached. Nothing else waits on it.
+
+---
+
+## D17 — Flip to public early to restore hosted Actions; pre-flip privacy audit; its findings
+
+- **Status:** **ANSWERED 2026-09-20** — three in-session operator rulings, recorded here in
+  order; **APPLIED** when the visibility change lands (the entry is amended with the date).
+- **Context.** Hosted GitHub Actions stopped allocating runners for this private repository:
+  every job of the last five `CI` and `Docs` runs finished in under fifteen seconds with zero
+  steps and the annotation "not started because recent account payments have failed or your
+  spending limit needs to be increased". Public repositories get hosted runners without that
+  allotment, and the publication design already sequences hosted validation AFTER visibility
+  (design §18 phase 2–3, amended 2026-09-10). The operator directed: flip the repository to
+  public now so Actions and checks go green again.
+- **Ruling 1 (audit first).** Before any flip, run a fresh independent privacy audit over the
+  tree, history, commit messages, objects, refs, GitHub-side text and release artifacts, with
+  two regex engines plus an independent cross-check, and flip only on zero findings for that
+  scope. The operator added, explicitly, that this pre-flip round does NOT replace the
+  end-of-roadmap pre-publication audit the repository rules require; that later round still
+  runs after the remaining readiness items complete. Round 1 is recorded, value-free, in
+  `docs/discovery/prelaunch-readiness-evidence.md`.
+- **Round 1 result.** Seven findings: the primary pass found R1-F1; the independent challenge added R1-F2 to R1-F6 (two further release-packaging carriers of the same account token, an outside contributor's plaintext identity on pull refs, host-side reachability of pre-rewrite objects, and a fixture pairing a fictional street with a real locality); the post-round scan of all 305 hosted run logs added R1-F7 (tracker identifiers inside historical branch names in 18 runs' logs; no personal data). Dispositions: D17 ruling 2 / D18 (F1–F3), D20 (F4), D19 (F5), fix pending before the flip (F6), D21 (F7). R1-F1: the `v26.0.0` release asset's binary embeds 270
+  build-time source and build-directory paths whose user segment is the operator's macOS
+  account short name (the same string as the public GitHub handle covered by the attribution
+  exception; no third party). Every other raw hit of the primary pass resolved to a reserved
+  placeholder, a synthetic fixture, an integer constant, a GitHub object id, a redaction marker,
+  or the recorded attribution exception. The independent challenge is recorded in the evidence
+  file. **Ruling 1's zero-findings condition was therefore NOT met.** Seven findings were returned; the
+  operator dispositioned R1-F1 to R1-F5 (D17–D20) and named the R1-F6 fixture fix and the R1-F7
+  log deletion (D21, OPEN — not yet authorized) as pre-flip blockers, advancing the flip on that
+  basis. The round does not satisfy the design's §18 phase 1
+  zero-findings gate; the end-of-roadmap audit must, for its own scope.
+- **Ruling 2 (disposition of R1-F1).** Offered: (A) accept under the attribution exception;
+  (B) rebuild with compiler path remapping and re-cut the release; (C) accept now, fix forward.
+  **Operator chose B.** In the same turn the operator added that the re-cut release is to be
+  `v27.0.0`, because the host platform is now macOS 27 (see D18). B therefore lifts the release
+  freeze for exactly that one release, when it is cut; nothing else in the freeze changes.
+- **Ruling 3 (order).** B before the flip would contradict the locked design in two ways: no
+  write-capable publisher may exist while the repository is private (§3, §18 step 5), and the
+  hosted runs a release needs are exactly what is billing-blocked until the flip. Offered:
+  (A) convert the `v26.0.0` GitHub Release to a draft (collaborators-only, reversible, tag and
+  assets retained), flip, run hosted validation, then cut `v27.0.0` with path remapping through
+  the design's publisher path; (B) fix billing, restore a temporary private publisher, re-cut,
+  then flip; (C) delete the asset, flip, then re-cut. **Operator chose A.** The Release was
+  converted to a draft on 2026-09-20 immediately after that ruling; the `v26.0.0` tag, its clean
+  commit, and both assets (now collaborator-visible only) are unchanged. This is the explicit
+  instruction the design requires before an agent edits a published Release. **Consequence,
+  accepted:** from the drafting until the version-publication path of design §18 phase 3 lands
+  and `v27.0.0` is cut, the project has no downloadable release, and D2's Homebrew part cannot
+  progress in that window.
+- **Residual risk of advancing ahead of design steps 4 and 17, and the rollback plan.**
+  Repository-level read-backs on 2026-09-20: default workflow token permission is read and
+  workflow approval of pull-request reviews is off; the external-Action allowlist is NOT yet
+  configured (all actions allowed) and the step-17 static scan has not run; fork-PR contributor
+  approval cannot be read while private and is read back immediately after the flip, before any
+  outside pull request may run. The allowlist is set before the flip. Rollback: if a finding
+  surfaces after the flip, re-flip to private at once (mechanically reversible; clones, caches
+  and indexes are not), redact at HEAD, record the incident here, and re-run the audit round.
+- **Amendments landed with this entry (D15 precedent, adapted).** The design's Status header,
+  §3, §18 and §21 carry dated amendments recording the advanced visibility step, `AGENTS.md`'s
+  privacy paragraph gains the same clause (and its "remains private" lead sentence is dated),
+  this ledger's preamble is amended, and D2 records the one-release freeze lift. D15 required
+  the policy commit to land first because its second commit would itself have published an
+  identifier; here the amendments and the record land in one reviewed commit and the act they
+  authorize (the flip) is a separate later operation with its own blocking list, so no hazard
+  window exists between them.
+- **What this advances, stated plainly.** The design's §18 phase 1 says the visibility step
+  follows completion of its pre-visibility items. The operator advanced the visibility step
+  ahead of the items not yet evidenced in the readiness file, on the audit condition above. The
+  evidence file lists each pre-visibility item as evidenced or PENDING; nothing is relabelled.
+  Public visibility grants no publisher, deployment, release, Pages, Homebrew, or bypass
+  authority (design §3); those remain separately gated.
+- **Filed:** 2026-09-20 · **Category:** publication / privacy / outward-facing action
+
+**Why it needed you.** Visibility is an outward-facing, effectively irreversible publication
+event; editing a published Release is on the design's forbidden list absent your instruction;
+and the finding's disposition is a posture call between an already-public string and a re-cut
+release.
+
+**Blocking?** The flip waits on exactly: the written GitHub Support purge confirmation of D19 (request prepared; operator filing PENDING; confirmation PENDING); the R1-F6 fixture fix; the R1-F7 log deletion authorized and executed (D21, OPEN); the repository-level external-Action allowlist configured; the pre-push re-scan of every commit added after `053b56e`; and the local canonical suite green on the exact pushed commit.
+`v27.0.0` waits on D18.
+
+---
+
+## D18 — macOS 27 adoption release: bump to `v27.0.0` once all tests pass
+
+- **Status:** **OPEN** — instruction received 2026-09-20; execution gated as below.
+- **Instruction.** "We also need to version bump to 27.0.0 because we are on macOS 27. If all of
+  our tests pass we should bump to v27." The host now reports macOS 27.0. Under the
+  platform-keyed scheme (AGENTS.md "Versioning + releases"), MAJOR names the newest macOS the
+  release is built and validated against, so a macOS 27 adoption release is `27.0.0`; the
+  deployment minimum in `Package.swift` does not move.
+- **What has to be true first, in order.** (1) The D17 visibility flip and at least one green
+  hosted run. (2) The full local canonical suite green on macOS 27 for the exact commit to be
+  released — this is the operator's stated condition — plus the hosted logic-tier gate. (3) The
+  design's §4.1 platform-support text ("macOS 26 is the current tested and supported baseline;
+  a newer major joins only after its adoption matrix passes") amended by a reviewed commit that
+  records the macOS 27 adoption matrix and result, with `[Unreleased]` notes stating the new
+  baseline and the unchanged macOS 14 technical floor. (4) The release build and packaging remove every R1-F1 to R1-F3 carrier, stated as a
+  **verified outcome, not a flag list**: the shipped binary contains no `N_OSO` debug-map entry
+  (`nm -ap` shows none) and no home-directory path anywhere in its bytes; the archive's member
+  headers show uid 0, gid 0 and empty owner/group names, and no AppleDouble member. Means that
+  are known to work on this toolchain: suppress the debug map (`-Xswiftc -gnone`) or remap the
+  object paths at link time (`-Xlinker -oso_prefix`) or `strip -S` the artifact — compiler
+  `-file-prefix-map`/`-debug-prefix-map` alone do NOT remove the debug-map entries (verified
+  empirically by the security reviewer) and are kept only for the DWARF side; package with
+  `COPYFILE_DISABLE=1 tar --uid 0 --gid 0 --uname '' --gname ''` (GNU tar equivalents if the
+  packaging host changes). The check is recorded in the evidence file before publication.
+  (4a) A published-release path exists (design §18 phase 3 publisher) and the §18/§3 amendments
+  of D17 are in place. (5) The release itself goes
+  through the design's separately authorized version-publication path (bot publisher,
+  operator-reviewed environment); no hand edit of `AppleVersion.current`, no local manual
+  release. The freeze lifts for this one release only, per D17 ruling 2.
+- **Not decided here:** whether hosted macOS 27 runners exist yet for the adoption matrix, and
+  whether `v26.0.0` stays a draft or is deleted once `v27.0.0` ships. Both are raised when
+  reached.
+- **Filed:** 2026-09-20 · **Category:** release / platform adoption
+
+**Why it needed you.** A version bump is a release, and releases are yours to call.
+
+**Blocking?** D2's remaining Homebrew part waits on it (no downloadable release exists until it ships); nothing else in the current roadmap does.
+
+---
+
+## D19 — GitHub still serves pre-rewrite commits by id; purge before the flip
+
+- **Status:** **ANSWERED 2026-09-20** — operator chose purge-before-flip; **APPLIED** when
+  Support confirms and the entry is amended with the date.
+- **Finding (independent challenger, verified by the controller).** `git clone --mirror`
+  fetches only objects reachable from advertised refs, so a local mirror cannot see what the
+  host still holds. Seven pre-rewrite commit ids that this file cited (the summary table, D1, D3,
+  D8 and D13) are absent from the mirror — the four authorized rewrites replaced them — yet the
+  commits API returned HTTP 200 for all seven on 2026-09-20, and their payloads still carry the
+  pre-redaction 16-digit tracker identifiers and the tracker URL that the 2026-08-30 rewrite
+  removed. The D9 personal-data commits are held by the same mechanism; their ids are not
+  retained anywhere this project controls. Orphaned objects are reachable only by exact id
+  (never listed, searched, or cloned), but ids survive in pull-request timelines,
+  notification mail, and any fork or cached page.
+- **Ruling.** The 2026-08-23 D9 resolution declined a GitHub Support escalation while the
+  repository was private. The operator reversed that for the visibility change: file a GitHub
+  Support request to remove unreachable objects and cached views for the repository **while it
+  is still private**, and flip only after written confirmation. The request text (value-free, listing the known served ids as examples — the seven from this
+  file plus three more found among 38 orphaned ids referenced by pull-request timelines, of
+  which 35 already return not-found — and asking for a purge across the repository AND its
+  fork network, since fork networks share object storage and the one existing fork is a third
+  party's) is prepared outside the repository (account-level, outward-facing): request prepared; operator
+  filing PENDING; written confirmation PENDING. Reachable refs such as `refs/pull/*` are not covered by an
+  unreachable-object purge (see D20).
+- **Same-day hygiene.** Ten stale id citations covering seven distinct pre-rewrite ids in this file, and fourteen more in `docs/port-specs/mail.md`, `docs/INTEGRATION-STATUS.md`, `docs/COMPLETION-LOOP.md` and two source comments — 24 citation occurrences (one id four times, one twice, eighteen once), 20 distinct pre-rewrite ids, one of them cited in both the ledger and a port spec, every one probed and served by the host — were re-pointed to their
+  rewritten counterparts on `main` (matched by commit subject), so tracked files no longer
+  advertise orphaned ids — except three citations inside the released `v26.0.0` CHANGELOG body,
+  which the release-notes rule forbids editing; those become dead references once the purge
+  lands, and are recorded here rather than edited. This is the same class of edit as the 2026-08-30 condensing and is
+  recorded here rather than made silently.
+- **Filed:** 2026-09-20 · **Category:** privacy / publication / outward-facing action
+
+**Why it needed you.** Contacting Support is an account-level action you declined once; only
+you can reverse that, and the flip's timing is yours.
+
+**Blocking?** The D17 flip waits on Support's confirmation. Nothing else waits.
+
+---
+
+## D20 — Outside contributor's plaintext git identity on open pull requests 3–5
+
+- **Status:** **RATIFIED 2026-09-20** — accepted as public attribution for now, with a
+  follow-up.
+- **Finding (independent challenger).** Fifteen commits on the open PRs 3, 4 and 5 (the
+  contributor's fork branch tips, served by GitHub as `refs/pull/N/head` and `/merge`) carry the
+  contributor's display name and a plaintext personal mailbox address as author and committer;
+  three other commits by the same person use GitHub's private no-reply address. None is
+  reachable from `main`. Rewriting `main` cannot touch them; only the contributor (force-push
+  of their branch) or a Support purge can.
+- **Ruling.** The operator ruled: accept as the contributor's own public attribution — the
+  identity is the one they configured and submitted with their pull requests — and fix it after
+  the PRs are merged. Because `AGENTS.md` named the operator's attribution as the sole
+  exception, this ruling is recorded there as a second, narrow one (an outside contributor's own
+  git identity on their own pull-request commits) in the same commit. The PRs are to be squash-merged when convenient (each under the
+  outside-PR review workflow: independent review, the contribution-model comment, the
+  metadata gate); a squash merge drops the branch commits from `main`'s history but may carry the
+  contributor's configured author email into the squash commit; before merging each PR the
+  proposed squash author identity is read back and the merge proceeds only if it is the
+  no-reply form — otherwise the contributor is asked to re-push with the no-reply identity, or
+  an explicit operator exception is recorded here. The `refs/pull/*` copies are reachable refs,
+  outside D19's unreachable-object purge; they persist until the PRs are closed or the branch
+  is rewritten by the contributor.
+- **Filed:** 2026-09-20 · **Category:** third-party data / contribution handling
+
+**Why it needed you.** It is a third party's data and the repo rule says it is not ours to
+disclose or to redact unilaterally; the posture call is the operator's.
+
+**Blocking?** Not blocking the flip. Adds "squash-merge PRs 3–5" to the queue.
+
+---
+
+## D21 — Delete the 18 hosted workflow-run logs that echo pre-redaction tracker identifiers
+
+- **Status:** **OPEN** — waiting on the operator.
+- **Finding (R1-F7).** After the independent challenge, the controller downloaded and scanned
+  all 305 hosted workflow runs' logs (484 files, 245 MB) value-free, deleting each archive
+  after scanning. No email, phone, non-runner home path, tracker URL or secret shape; the
+  operator's handle appears only inside repository URLs (attribution exception). Eighteen runs
+  from the pre-consolidation period echo the names of historical `asana-<id>` branches in their
+  checkout steps: 144 occurrences of 16-digit tracker identifiers, the class the 2026-08-30
+  history rewrite removed from the repository. Run logs become world-readable on the flip.
+- **Ask.** Authorize deleting those 18 runs' logs (the log archives only, via the Actions API;
+  the runs' status records remain) before the flip. The run ids are held outside the repository
+  with the audit evidence; nothing else in Actions history is touched. Alternative: delete the
+  18 runs entirely. Either is destructive and outward-facing, so it is not done autonomously.
+- **Filed:** 2026-09-21 · **Category:** privacy / outward-facing destructive action
+
+**Why it needed you.** Deleting hosted history is irreversible.
+
+**Blocking?** Named in D17's pre-flip blocker list; nothing else waits on it.
 
 ---

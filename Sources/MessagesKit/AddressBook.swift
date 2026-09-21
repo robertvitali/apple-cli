@@ -87,7 +87,7 @@ public struct AddressBook: Sendable {
             // FALL BACK, never drop. `.walAware` (mode=ro) is the accurate read — it applies the
             // -wal, which `immutable=1` skips — but it must write the -shm wal-index, so it FAILS
             // where an immutable open succeeded (missing -shm on a non-writable dir, lock
-            // contention). That is the very failure `3316a92` adopted `immutable=1` to avoid.
+            // contention). That is the very failure `71b829a` adopted `immutable=1` to avoid.
             //
             // `load()` is the HOT path — seven command paths call it — and its reads are `try?`,
             // so skipping a source silently deletes every contact in it and degrades every sender

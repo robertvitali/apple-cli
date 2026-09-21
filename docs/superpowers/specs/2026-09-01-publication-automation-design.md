@@ -9,6 +9,8 @@ previous October 1 quota-reset date. This is not an immediate visibility change
 or authorization to publish a release, tag, Pages site, or Homebrew artifact.
 References below to the future publisher's public-launch phase mean separately
 authorized version-publication work, not the earlier visibility-only transition.
+**Amended 2026-09-20 (HUMAN-DECISIONS D17):** the operator advanced the visibility step ahead of
+the unevidenced pre-visibility items; see the §18 amendment for the exact pre-flip blockers.
 
 ## 1. Purpose
 
@@ -80,6 +82,9 @@ gates in Section 18 pass. All other outward publication actions remain subject
 to separate explicit instructions. The approved continuation stops before
 Homebrew distribution and does not lift the release freeze. Public visibility
 alone grants no publisher, deployment, collaborator-write, or bypass authority.
+**Amended 2026-09-20 (HUMAN-DECISIONS D17):** the "only after the pre-visibility gates in
+Section 18 pass" ordering was advanced by the operator; the visibility step now waits on the
+exact blockers named in the §18 amendment, and everything else in this section stands.
 
 ## 4. Locked product and governance decisions
 
@@ -1540,6 +1545,18 @@ freshness check reports available updates. It does not auto-merge or publish.
 
 ## 18. Bootstrap, visibility transition, and hosted validation
 
+**Amendment 2026-09-20 (HUMAN-DECISIONS D17).** The operator advanced the conditional
+visibility step ahead of the phase-1 items not yet evidenced in
+`docs/discovery/prelaunch-readiness-evidence.md`, because hosted Actions stopped allocating
+runners for the private repository. The pre-flip privacy audit round ran and its zero-findings
+condition was NOT met; the operator dispositioned findings 1–5 (D17–D20) and gated the flip on
+exactly: the written GitHub Support purge confirmation of D19 (request prepared; operator filing PENDING; confirmation PENDING); the R1-F6 fixture fix; the R1-F7 log deletion authorized and executed (D21, OPEN); the repository-level external-Action allowlist configured; the pre-push re-scan of every commit added after `053b56e`; and the local canonical suite green on the exact pushed commit (R1-F6 and R1-F7 are the two undispositioned findings, both in that list). Every other
+phase-1 item of this section not in that list is advanced past for visibility only — it remains
+required before any later publication step and stays PENDING in the evidence file. Every other
+requirement of this section apart from the visibility ordering amended here, of §3 (as amended
+the same day), and of the freeze (as amended in D2 for one release) stands as written; the end-of-roadmap audit must return zero findings for its
+scope. Section 4.1's macOS 26 baseline is unchanged until the D18 adoption matrix passes.
+
 Implementation begins while the repository is private. Its very first commit,
 before step 1 and before any other hosted run, neutralizes the two tracked
 write paths (removing `release.yml`'s `workflow_dispatch` trigger and
@@ -2070,7 +2087,10 @@ implementation, independent review, full local test and coverage gates, static
 and applicable settings checks, and the fresh privacy audit. It records hosted
 and actor-dependent criteria as pending. The conditional visibility authorization
 permits proceeding only at that checkpoint, without calling pending checks
-passed or waiving them.
+passed or waiving them. **Amended 2026-09-20 (HUMAN-DECISIONS D17):** the operator advanced
+the visibility checkpoint ahead of the unevidenced phase-1 items on the blockers named in the
+§18 amendment; pending checks are still not called passed — they stay PENDING in the evidence
+file until evidenced.
 
 After visibility, readiness has two levels. Every criterion below belongs to
 both; where a criterion

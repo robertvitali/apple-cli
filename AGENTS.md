@@ -44,7 +44,10 @@ returned (superset — may add more, must not drop any).
 
 ## No personal data in this repo — ever, anywhere
 
-This repository is publication-bound and remains private during containment. **Treat every
+This repository is publication-bound and remained private during containment (the operator
+authorized the visibility change on 2026-09-20, HUMAN-DECISIONS D17; once it is public a
+discovered leak is NOT contained, so the stop-and-tell-the-operator rule below applies with more
+urgency, not less). **Treat every
 committed byte as future-public**: source, tests, fixtures, comments, docs, JSON artifacts, AND
 commit messages. Nothing that identifies a real person may be committed — not the operator's,
 and especially not a third party's (theirs is not ours to disclose).
@@ -68,7 +71,10 @@ byte-lengths in write-ups — not values. Counts must not be PAIRED with account
 provider mix, mailbox names, or calendar dates in a way that fingerprints a person's store
 (a bare "N rows" is fine; "provider X's mailbox Y, N rows, oldest year Z" is a profile). The operator's name and GitHub handle in LICENSE, README, git author metadata,
 and authorship prose are deliberate public attribution, not a leak — that is the one standing
-exception to the real-names ban. `.gitignore` matches audit dumps BY CLASS (not by known
+exception to the real-names ban. A second, narrow exception (operator ruling 2026-09-20, D20): an
+outside contributor's own git author identity, as they configured it on the commits of their own
+pull request, is their public GitHub attribution; it is never copied into tracked files or prose,
+and a squash merge's author identity is read back before merging. `.gitignore` matches audit dumps BY CLASS (not by known
 filename) because the 2026-08-03 leak was a dump whose name matched none of the enumerated
 patterns.
 
@@ -108,7 +114,11 @@ regex engines, commit-message coverage, object/ref/artifact surfaces, and indepe
 cross-checks, with zero findings for that stated scope. The operator has authorized only the
 scoped rewrite recorded in D9; any materially different history rewrite or force-push still
 requires fresh explicit instruction. Private status is temporary containment, NOT a licence to
-relax this rule.
+relax this rule. (Amendment 2026-09-20, HUMAN-DECISIONS D17: the operator advanced the visibility
+change ahead of the remaining readiness gates on a pre-flip audit round whose zero-findings
+condition was NOT met: findings 1–5 received operator dispositions, and the fixture fix (6) and
+the hosted-log deletion (7, D21 OPEN) remain pre-flip blockers; the end-of-roadmap
+audit still must record zero findings, and no other publication action is unlocked by visibility.)
 
 ## Safety — product capability vs agent conduct
 

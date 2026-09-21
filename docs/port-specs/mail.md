@@ -422,7 +422,7 @@ Asana tasks cited there).
   self-addressed HTML send executed via GUI keystroke automation with the sandbox engaged;
   delivery oracle-verified on both the sent and inbox sides (same internet message id);
   test items cleaned by exact id. Two earlier failed attempts (exit 70; exit 69
-  upstream_error) preceded the `dd83be1` window-binding fix.
+  upstream_error) preceded the `5ebbf39` window-binding fix.
 - `rules delete` — **first live exercise 2026-08-27** (D14, Asana `GID-REDACTED`):
   an agent-created, DISABLED, uniquely-tokened `apple-cli-test` rule was deleted by index
   operator-present; the envelope's fail-loud readback matched the rule name verbatim and

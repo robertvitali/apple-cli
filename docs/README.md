@@ -36,3 +36,4 @@
 - [capability-local-owner-protocol](discovery/capability-local-owner-protocol.md)
 - [capability-retained-process-sessions](discovery/capability-retained-process-sessions.md)
 - [owned-process-cleanup](discovery/owned-process-cleanup.md)
+- [prelaunch-readiness-evidence](discovery/prelaunch-readiness-evidence.md)
