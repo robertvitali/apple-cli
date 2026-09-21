@@ -2,12 +2,12 @@
 topic: hosted-ci
 importance: high
 last-used: 2026-09-21
-uses: 1
+uses: 2
 ---
 
 # Hosted CI (public, free GitHub-hosted runners)
 
-## 2026-09-21 — first public CI run after 19 days private: three hosted-only defects, none reproducible locally
+## 2026-09-21 — first public CI runs after 19 days private: hosted-only defects, none reproducible locally
 
 **Symptom.** The repository went public on 2026-09-21 (its hosted minutes were exhausted while
 private) and the first `CI` run on `main` went red in three jobs while `Docs` stayed green. Every
@@ -54,6 +54,23 @@ red step had been unexercised since the last hosted run on 2026-09-02; the local
      argument combination that failed (`dirlink`, the only directory target), which is what
      isolated the directory-flag difference without a macOS 15 host. A throwing expression
      inside `#expect` prints no operand values on failure; bind it to a `let` first.
+
+5. **`build-test` (`macos-15`) — a later run, on a docs-only commit: a timing-margin flake on
+   unchanged code.** `OwnedProcessCleanupTests` "drain timeout stops the descendant after the
+   root has exited" asserted the root's exit was observed within 1.5 s of the test's start.
+   On the loaded runner (fewer cores than the local host, the whole suite in flight) process
+   startup through the descendant's first observation took longer than that, on code that had
+   passed the identical test one run earlier. The stopwatch assertion is gone: a test-only
+   decorator over the real child operations stamps, on the same `CLOCK_MONOTONIC` the fixture
+   uses, when `spawn` returned and when cleanup first signalled the group, and the test
+   asserts event order — spawn ≤ observed exit < first cleanup signal, and first signal ≥
+   spawn + the 2 s deadline. Start-up latency on a slow runner moves every stamp together.
+   Residual, stated: the root must still exit inside the same 2 s drain deadline the
+   production path uses; a runner too slow for that fails as a missing
+   `root-observed-exited` read, not as a timing assertion, and the `root-exiting` marker
+   (written only on the voluntary branch) says whether the root ever got that far. A hosted
+   failure on unchanged code is a timing margin: replace the stopwatch with the event order
+   it was standing in for.
 
 **Follow-up — the other tilde-expansion sites still hand `~user` spellings to Foundation** and
 therefore inherit the macOS 15 substitution. Ranked by consequence:

@@ -14,6 +14,43 @@ struct OwnedProcessCleanupTests {
 
     private enum StopProbeFailure: Error, Equatable { case callLimit, clockRead }
 
+    /// Test-only decorator over the real child operations that stamps, on `CLOCK_MONOTONIC`
+    /// (the clock the fixture's own observations use), when `spawn` returned and when cleanup
+    /// first signalled the group. Timing assertions then compare event order on one clock
+    /// instead of a stopwatch that also measures process start-up on a loaded runner.
+    private final class SpawnStampingChildren: ScriptProcessChildren, @unchecked Sendable {
+        private let real = DarwinScriptProcessChildren()
+        private let lock = NSLock()
+        private var stamps: (spawned: UInt64?, firstSignal: UInt64?) = (nil, nil)
+        var reaper: any ScriptProcessReaping { real.reaper }
+
+        private static func now() throws -> UInt64 {
+            var value = timespec()
+            guard clock_gettime(CLOCK_MONOTONIC, &value) == 0 else {
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
+            return UInt64(value.tv_sec) * 1_000_000_000 + UInt64(value.tv_nsec)
+        }
+
+        var spawnedAt: UInt64? { lock.withLock { stamps.spawned } }
+        var firstSignalAt: UInt64? { lock.withLock { stamps.firstSignal } }
+
+        func spawn(_ invocation: ScriptInvocation, input: Int32, output: Int32, error: Int32) throws -> pid_t {
+            let pid = try real.spawn(invocation, input: input, output: output, error: error)
+            let at = try Self.now()
+            lock.withLock { if stamps.spawned == nil { stamps.spawned = at } }
+            return pid
+        }
+
+        func observe(_ pid: pid_t) throws -> Int32? { try real.observe(pid) }
+
+        func signal(group: pid_t, signal: Int32) throws {
+            let at = try Self.now()
+            lock.withLock { if stamps.firstSignal == nil { stamps.firstSignal = at } }
+            try real.signal(group: group, signal: signal)
+        }
+    }
+
     @Test("a forward wall-clock jump cannot shorten fixture expiry observation")
     func forwardWallJumpDoesNotShortenExpiryWait() throws {
         // Every effectful endpoint below is synthetic. No directory is created.
@@ -201,8 +238,12 @@ struct OwnedProcessCleanupTests {
         defer { fixture.waitForNaturalExpiry() }
         let started = Date()
         let monotonicStart = try fixture.monotonicNanoseconds()
+        let children = SpawnStampingChildren()
+        var dependencies = ScriptProcessDependencies()
+        dependencies.children = children
+        let stampingLauncher = OsascriptLauncher(dependencies: dependencies)
         let error = #expect(throws: AppleScriptRunner.TimeoutError.self) {
-            _ = try launcher.launch(fixture.invocation(
+            _ = try stampingLauncher.launch(fixture.invocation(
                 mode: "exit", status: 0, delivery: .timedStdin(script: "x", seconds: 2)))
         }
         #expect(try #require(error).seconds == 2)
@@ -213,8 +254,20 @@ struct OwnedProcessCleanupTests {
         let observationText = try String(contentsOfFile: fixture.path("root-observed-exited"),
                                          encoding: .utf8)
         let observedExit = try #require(UInt64(observationText.trimmingCharacters(in: .whitespacesAndNewlines)))
-        #expect(observedExit >= monotonicStart && observedExit < monotonicStart + 1_500_000_000,
-                "root exit must be observed well before the two-second deadline, not caused by cleanup")
+        // Event order on one clock: the root's exit was observed after the launcher's spawn
+        // returned and before cleanup sent its first group signal, so it was the root's own
+        // exit and not cleanup's doing. No arbitrary pre-deadline margin: pre-spawn latency on
+        // a loaded runner moves every stamp together, and what remains is the configured
+        // two-second deadline itself. (`root-exiting` above already proves the voluntary
+        // branch ran; this pins the order.)
+        let spawnedAt = try #require(children.spawnedAt, "the stamping decorator must have spawned the root")
+        let firstSignalAt = try #require(children.firstSignalAt, "drain-timeout cleanup must have signalled the group")
+        #expect(monotonicStart <= spawnedAt && spawnedAt <= observedExit,
+                "the recorded exit must postdate the launcher's spawn")
+        #expect(observedExit < firstSignalAt,
+                "root exit must be observed before cleanup's first signal, not caused by it")
+        #expect(firstSignalAt >= spawnedAt + 2_000_000_000,
+                "cleanup's first signal must not precede the two-second drain deadline")
         #expect(try fixture.monotonicNanoseconds() >= monotonicStart + 2_000_000_000,
                 "the pending drain must reach its deadline rather than fail early")
         #expect(try fixture.stops(fixture.identity("root"), within: 0.5))
