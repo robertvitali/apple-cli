@@ -131,6 +131,133 @@ class AppLifecyclePlannerTests(unittest.TestCase):
                 with self.assertRaises(self.engine.LifecycleError):
                     self.engine.parse_find_outputs("mail", *paths)
 
+    def test_info_parser_accepts_macos27_block_layout(self):
+        fixture = textwrap.dedent('''\
+            "Mail" ASN:0x0-0x40c40c: (hidden) 
+                bundleID="com.apple.mail"
+                bundle path="/System/Applications/Mail.app"
+                executable path="/System/Applications/Mail.app/Contents/MacOS/Mail"
+                pid = 4242 token=[sess=1 pid=4242 uid:1,1,1 g:1,1 pV:1] type="Foreground" flavor=3
+                coalition: 6680
+                parentASN=ASN:0x0-0x1: 
+                launch time =  2026/09/20 19:17:21 ( 5 hours, 32 minutes, 32.639 seconds ago )
+                checkin time = 2026/09/20 19:17:21 ( 5 hours, 32 minutes, 32.596 seconds ago )
+                launch to checkin time: 0.0430961 seconds
+
+        ''')
+        self.assertTrue(fixture.endswith("\n\n"), "real output ends with a blank line")
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "info"
+            self.write_private(path, fixture)
+            digest = hashlib.sha256(b"2026/09/20 19:17:21").hexdigest()
+            self.assertEqual(
+                self.engine.parse_info_output("mail", "ASN:0x0-0x40c40c", path),
+                f"ASN:0x0-0x40c40c\t4242\t{digest}",
+            )
+
+    def test_info_parser_block_layout_digest_ignores_relative_age(self):
+        def block(age: str) -> str:
+            return textwrap.dedent(f'''\
+                "Mail" ASN:0x0-0x40c40c: 
+                    bundleID="com.apple.mail"
+                    pid = 4242 token=[sess=1 pid=4242] type="Foreground"
+                    checkin time = 2026/09/20 19:17:21 ( {age} ago )
+            ''')
+        with tempfile.TemporaryDirectory() as directory:
+            results = []
+            for index, age in enumerate(("1.5 seconds", "2 hours, 3 minutes, 4.1 seconds")):
+                path = Path(directory) / str(index)
+                self.write_private(path, block(age))
+                results.append(self.engine.parse_info_output("mail", "ASN:0x0-0x40c40c", path))
+            self.assertEqual(results[0], results[1])
+
+    def test_info_parser_block_layout_rejects_identity_defects(self):
+        good = (
+            '"Mail" ASN:0x0-0x40c40c: \n'
+            '    bundleID="com.apple.mail"\n'
+            '    pid = 4242 token=[x]\n'
+            '    checkin time = 2026/09/20 19:17:21 ( 1 seconds ago )\n'
+        )
+        cases = {
+            "asn-mismatch": good.replace("ASN:0x0-0x40c40c", "ASN:0x0-0x40c40d"),
+            "name-mismatch": good.replace('"Mail"', '"Notes"'),
+            "bundle-mismatch": good.replace("com.apple.mail", "com.apple.Notes"),
+            "missing-checkin": good.replace('    checkin time = 2026/09/20 19:17:21 ( 1 seconds ago )\n', ""),
+            "missing-pid": good.replace('    pid = 4242 token=[x]\n', ""),
+            "duplicate-pid": good + '    pid = 4243 token=[y]\n',
+            "pid-not-decimal": good.replace("pid = 4242", "pid = 42x2"),
+            "header-junk": good.replace('"Mail" ASN', '"Mail" junk ASN'),
+            "null-bundle": good.replace('bundleID="com.apple.mail"', "bundleID=[ NULL ]"),
+            "second-block-appended": good + '"Notes" ASN:0x0-0x40c40d: \n    bundleID="com.apple.Notes"\n',
+            "second-block-supplies-fields": (
+                '"Mail" ASN:0x0-0x40c40c: \n'
+                '"Notes" ASN:0x0-0x40c40d: \n'
+                '    bundleID="com.apple.mail"\n'
+                '    pid = 4242 token=[x]\n'
+                '    checkin time = 2026/09/20 19:17:21 ( 1 seconds ago )\n'
+            ),
+            "unindented-body-line": good.replace('    pid = 4242 token=[x]\n', 'pid = 4242 token=[x]\n'),
+            "legacy-line-inside-block": good + '"pid"=4243\n',
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            for name, payload in cases.items():
+                with self.subTest(name=name):
+                    path = Path(directory) / name
+                    self.write_private(path, payload)
+                    with self.assertRaises(self.engine.LifecycleError):
+                        self.engine.parse_info_output("mail", "ASN:0x0-0x40c40c", path)
+
+    def test_info_parser_rejects_oversize_output_with_fixed_token(self):
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "info"
+            self.write_private(path, '"Mail" ASN:0x0-0x1: \n' + "    x\n" * 4000)
+            with self.assertRaises(self.engine.LifecycleError) as caught:
+                self.engine.parse_info_output("mail", "ASN:0x0-0x1", path)
+            self.assertEqual(caught.exception.code, "info-too-large")
+
+    def test_info_parser_block_layout_tolerates_flag_text_tabs_and_hex_case(self):
+        fixture = (
+            '"Mail" ASN:0x0-0x40C40C: (hidden) (in-progress 2) \n'
+            '\tbundleID="com.apple.mail"\n'
+            '      pid = 4242 token=[x]\n'
+            '\t checkin time = 2026/09/20 19:17:21 ( 1 seconds ago )\n'
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "info"
+            self.write_private(path, fixture)
+            digest = hashlib.sha256(b"2026/09/20 19:17:21").hexdigest()
+            self.assertEqual(
+                self.engine.parse_info_output("mail", "ASN:0x0-0x40c40c", path),
+                f"ASN:0x0-0x40c40c\t4242\t{digest}",
+            )
+
+    def test_info_parser_block_layout_tolerates_blank_lines(self):
+        body = (
+            '"Mail" ASN:0x0-0x40c40c: \n'
+            '\n'
+            '    bundleID="com.apple.mail"\n'
+            '   \n'
+            '    pid = 4242 token=[x]\n'
+            '    checkin time = 2026/09/20 19:17:21 ( 1 seconds ago )\n'
+            '\n\n'
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "info"
+            self.write_private(path, body)
+            digest = hashlib.sha256(b"2026/09/20 19:17:21").hexdigest()
+            self.assertEqual(
+                self.engine.parse_info_output("mail", "ASN:0x0-0x40c40c", path),
+                f"ASN:0x0-0x40c40c\t4242\t{digest}",
+            )
+
+    def test_info_parser_empty_output_is_stopped(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for name, payload in (("empty", ""), ("newline", "\n"), ("whitespace", "  \n\t\n")):
+                with self.subTest(name=name):
+                    path = Path(directory) / name
+                    self.write_private(path, payload)
+                    self.assertEqual(self.engine.parse_info_output("mail", "ASN:0x0-0x1", path), "STOPPED")
+
     def test_info_parser_accepts_exact_identity_and_hashes_checkin(self):
         checkin = "2026-09-04 12:34:56 +0000"
         fixture = textwrap.dedent(f'''\
@@ -326,6 +453,7 @@ class AppLifecycleShellTests(unittest.TestCase):
             "", "find-multiple", "find-name", "find-asn", "find-bundle-exact-disagree",
             "info-line-shape", "info-field", "info-fields-missing", "info-pid",
             "info-partial-null", "info-name-mismatch", "info-bundle-mismatch", "info-checkin",
+            "info-asn-mismatch", "info-too-large",
         )
         diagnostics = [(1, "app lifecycle operation failed" + (f": {code}" if code else "")) for code in codes]
         diagnostics.append((130, "app lifecycle interrupted"))
@@ -549,7 +677,19 @@ class AppLifecycleShellTests(unittest.TestCase):
         )
         self.assertEqual(completed.stderr, "")
 
-    def fake_body(self, scenario: str) -> str:
+    def fake_body(self, scenario: str, layout: str = "block") -> str:
+        """Shell fake for the LaunchServices tool. `layout` selects the macOS 27
+        block rendering (stopped = empty output) or the compact rendering of
+        earlier releases (stopped = the "[ NULL ]" quartet); both stay supported."""
+        if layout == "block":
+            live = "block Mail com.apple.mail {pid} '{ts}'"
+            stopped = ":  # macOS 27 prints nothing for a stopped process"
+        else:
+            live = "printf '%s\\n' 'LSDisplayName=\"Mail\"' 'pid={pid}' 'CFBundleIdentifier=\"com.apple.mail\"' 'LSCheckInTime*=\"{ts}\"'"
+            stopped = "printf '%s\\n' 'LSDisplayName=[ NULL ]' 'pid=[ NULL ]' 'CFBundleIdentifier=[ NULL ]' 'LSCheckInTime*=[ NULL ]'"
+        new_4243 = live.format(pid=4243, ts="2026/09/04 12:34:57")
+        new_4242 = live.format(pid=4242, ts="2026/09/04 12:34:57")
+        old_4242 = live.format(pid=4242, ts="2026/09/04 12:34:56")
         return textwrap.dedent(f"""\
             tmp=$(mktemp -d)
             trap 'rm -rf "$tmp"' EXIT
@@ -568,22 +708,23 @@ class AppLifecycleShellTests(unittest.TestCase):
                   printf '%s\n' 'ASN:0x0-0x40c40c-"Mail":'
                   ;;
                 info)
-                  [ "$*" = '-only name -only pid -only bundleID -only kLSCheckInTimeKey -app ASN:0x0-0x40c40c' ] || exit 66
+                  [ "$*" = '-app ASN:0x0-0x40c40c' ] || exit 66
+                  block() {{ printf '"%s" ASN:0x0-0x40c40c: (hidden) \n    bundleID="%s"\n    pid = %s token=[x] type="Foreground"\n    checkin time = %s ( 1 seconds ago )\n\n' "$1" "$2" "$3" "$4"; }}
                   count=0; [ ! -f "$FAKE_DIR/count" ] || count=$(<"$FAKE_DIR/count")
                   count=$((count + 1)); printf '%s' "$count" > "$FAKE_DIR/count"
                   printf 'INFO:%s\n' "$count" >> "$FAKE_DIR/log"
                   if [ "$FAKE_SCENARIO" = stopped ] && [ "$count" -ge 2 ]; then
-                    printf '%s\n' 'LSDisplayName=[ NULL ]' 'pid=[ NULL ]' 'CFBundleIdentifier=[ NULL ]' 'LSCheckInTime*=[ NULL ]'
+                    {stopped}
                   elif [ "$FAKE_SCENARIO" = grace ] && [ "$count" -ge 3 ]; then
-                    printf '%s\n' 'LSDisplayName=[ NULL ]' 'pid=[ NULL ]' 'CFBundleIdentifier=[ NULL ]' 'LSCheckInTime*=[ NULL ]'
+                    {stopped}
                   elif [ "$FAKE_SCENARIO" = postkill ] && [ "$count" -ge 4 ]; then
-                    printf '%s\n' 'LSDisplayName=[ NULL ]' 'pid=[ NULL ]' 'CFBundleIdentifier=[ NULL ]' 'LSCheckInTime*=[ NULL ]'
+                    {stopped}
                   elif [ "$FAKE_SCENARIO" = replacement ] && [ "$count" -ge 2 ]; then
-                    printf '%s\n' 'LSDisplayName="Mail"' 'pid=4243' 'CFBundleIdentifier="com.apple.mail"' 'LSCheckInTime*="new"'
+                    {new_4243}
                   elif [ "$FAKE_SCENARIO" = changedtoken ] && [ "$count" -ge 2 ]; then
-                    printf '%s\n' 'LSDisplayName="Mail"' 'pid=4242' 'CFBundleIdentifier="com.apple.mail"' 'LSCheckInTime*="new"'
+                    {new_4242}
                   else
-                    printf '%s\n' 'LSDisplayName="Mail"' 'pid=4242' 'CFBundleIdentifier="com.apple.mail"' 'LSCheckInTime*="old"'
+                    {old_4242}
                   fi
                   ;;
                 kill)
@@ -609,13 +750,75 @@ class AppLifecycleShellTests(unittest.TestCase):
             sed -n '1,99p' "$tmp/log"
             """)
 
-    def test_restore_call_order_is_targeted_and_instance_bound(self):
-        completed = self.run_shell(self.fake_body("postkill"))
+    def test_find_info_disagreement_fails_closed_after_three_rounds(self):
+        completed = self.run_shell(textwrap.dedent(f"""\
+            HELPERS={quote(HOOK_PATH.parent)}
+            source {quote(HOOK_PATH)}
+            for round in 1 2; do
+              app_lifecycle_note_find_info_disagreement mail || {{ printf 'EARLY:%s\\n' "$round"; exit 1; }}
+            done
+            app_lifecycle_note_find_info_disagreement mail && {{ printf 'NOFAIL\\n'; exit 1; }}
+            printf 'REASON:%s\\n' "$APPLE_CLI_BATS_APP_LAST_REASON"
+            app_lifecycle_note_find_info_disagreement notes || exit 1   # per-key isolation
+            app_lifecycle_clear_find_info_disagreement mail
+            app_lifecycle_note_find_info_disagreement mail || exit 1
+            app_lifecycle_note_find_info_disagreement mail || exit 1
+            printf 'RESET:ok\\n'
+            app_lifecycle_note_find_info_disagreement other && exit 1  # unknown key refused
+            APPLE_CLI_BATS_APP_FIND_INFO_DISAGREE_notes='$(printf INJECTED >&2)'
+            app_lifecycle_note_find_info_disagreement notes && exit 1  # inherited junk refused, never evaluated
+            printf 'GUARDS:ok\\n'
+        """))
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertNotIn("INJECTED", completed.stderr)
+        self.assertEqual(completed.stdout.splitlines(), ["REASON:observe:mail:find-info-disagree", "RESET:ok", "GUARDS:ok"])
+
+    def test_observe_reports_find_info_disagreement_after_three_rounds(self):
+        # find always names a live Mail ASN; info always prints nothing (macOS 27 stopped/malformed shape).
+        completed = self.run_shell(textwrap.dedent(f"""\
+            tmp=$(mktemp -d)
+            trap 'rm -rf "$tmp"' EXIT
+            HELPERS={quote(HOOK_PATH.parent)}
+            source {quote(HOOK_PATH)}
+            app_lifecycle_lsappinfo_exec() {{
+              case "$1" in
+                find) [ -n "${{FAKE_MAIL_GONE-}}" ] && exit 0; case "${{2-}}" in bundleid=com.apple.mail|name=Mail) printf '%s\\n' 'ASN:0x0-0x40c40c-"Mail":' ;; *) : ;; esac ;;
+                info) if [ -n "${{FAKE_MAIL_INFO_LIVE-}}" ]; then printf '"Mail" ASN:0x0-0x40c40c: \\n    bundleID="com.apple.mail"\\n    pid = 4242 token=[x]\\n    checkin time = 2026/09/04 12:34:56 ( 1 seconds ago )\\n\\n'; fi ;;
+                *) exit 68 ;;
+              esac
+            }}
+            APPLE_CLI_BATS_APP_POLL_SECONDS=0
+            export FAKE_MAIL_GONE="" FAKE_MAIL_INFO_LIVE=""
+            for round in 1 2 3; do
+              if app_lifecycle_observe "$tmp/r$round" true; then printf 'ROUND:%s:ok\\n' "$round"; else printf 'ROUND:%s:fail:%s\\n' "$round" "$APPLE_CLI_BATS_APP_LAST_REASON"; fi
+            done
+            # Two disagreements, then Mail is genuinely gone (find NONE): the counter resets and a
+            # single later disagreement does not fail.
+            app_lifecycle_clear_find_info_disagreement mail
+            app_lifecycle_observe "$tmp/a1" true && app_lifecycle_observe "$tmp/a2" true || exit 1
+            FAKE_MAIL_GONE=1; app_lifecycle_observe "$tmp/a3" true || exit 1
+            FAKE_MAIL_GONE=""; app_lifecycle_observe "$tmp/a4" true && printf 'AFTER-NONE:ok\\n' || printf 'AFTER-NONE:fail:%s\\n' "$APPLE_CLI_BATS_APP_LAST_REASON"
+            # Two disagreements, then a successful identity capture, then one more: also resets.
+            app_lifecycle_clear_find_info_disagreement mail
+            app_lifecycle_observe "$tmp/b1" true && app_lifecycle_observe "$tmp/b2" true || exit 1
+            FAKE_MAIL_INFO_LIVE=1; app_lifecycle_observe "$tmp/b3" true || exit 1
+            FAKE_MAIL_INFO_LIVE=""; app_lifecycle_observe "$tmp/b4" true && printf 'AFTER-IDENTITY:ok\\n' || printf 'AFTER-IDENTITY:fail:%s\\n' "$APPLE_CLI_BATS_APP_LAST_REASON"
+        """))
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(completed.stdout.splitlines(), [
-            "STATUS:0", "FIND:bundle", "FIND:exact", "INFO:1",
-            "INFO:2", "TERM", "INFO:3", "HARD", "INFO:4",
+            "ROUND:1:ok", "ROUND:2:ok", "ROUND:3:fail:observe:mail:find-info-disagree", "AFTER-NONE:ok",
+            "AFTER-IDENTITY:ok",
         ])
+
+    def test_restore_call_order_is_targeted_and_instance_bound(self):
+        for layout in ("block", "compact"):
+            with self.subTest(layout=layout):
+                completed = self.run_shell(self.fake_body("postkill", layout))
+                self.assertEqual(completed.returncode, 0, completed.stderr)
+                self.assertEqual(completed.stdout.splitlines(), [
+                    "STATUS:0", "FIND:bundle", "FIND:exact", "INFO:1",
+                    "INFO:2", "TERM", "INFO:3", "HARD", "INFO:4",
+                ])
 
     def test_restore_stopped_replacement_refusal_and_persistent_fail_closed(self):
         expectations = {
@@ -624,9 +827,10 @@ class AppLifecycleShellTests(unittest.TestCase):
             "changedtoken": ("STATUS:1", False), "refusal": ("STATUS:1", False),
             "persistent": ("STATUS:1", True),
         }
-        for scenario, (status, hard_killed) in expectations.items():
-            with self.subTest(scenario=scenario):
-                completed = self.run_shell(self.fake_body(scenario))
+        for layout in ("block", "compact"):
+          for scenario, (status, hard_killed) in expectations.items():
+            with self.subTest(layout=layout, scenario=scenario):
+                completed = self.run_shell(self.fake_body(scenario, layout))
                 lines = completed.stdout.splitlines()
                 self.assertEqual(lines[0], status, completed.stderr)
                 self.assertEqual("HARD" in lines, hard_killed)

@@ -17,6 +17,7 @@
 ## learnings
 
 ### hot
+- [bats-app-lifecycle](learnings/hot/bats-app-lifecycle.md)
 - [mail-automation](learnings/hot/mail-automation.md)
 
 ### medium

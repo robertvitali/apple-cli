@@ -51,7 +51,7 @@ app_lifecycle_python() {
     if [ "$status" -eq 1 ]; then
       for code in "" find-multiple find-name find-asn find-bundle-exact-disagree \
         info-line-shape info-field info-fields-missing info-pid info-partial-null \
-        info-name-mismatch info-bundle-mismatch info-checkin; do
+        info-name-mismatch info-bundle-mismatch info-checkin info-asn-mismatch info-too-large; do
         diagnostic="app lifecycle operation failed${code:+: $code}"
         if /usr/bin/cmp -s "$err" <(printf '%s\n' "$diagnostic"); then
           APPLE_CLI_BATS_APP_LAST_REASON="python:$diagnostic"
@@ -306,6 +306,52 @@ app_lifecycle_target_find() {
   app_lifecycle_read_output "${prefix}.parsed"
 }
 
+APPLE_CLI_BATS_APP_FIND_INFO_DISAGREE_LIMIT=3
+APPLE_CLI_BATS_APP_FIND_INFO_DISAGREE_mail=0
+APPLE_CLI_BATS_APP_FIND_INFO_DISAGREE_notes=0
+APPLE_CLI_BATS_APP_FIND_INFO_DISAGREE_messages=0
+APPLE_CLI_BATS_APP_FIND_INFO_DISAGREE_contacts=0
+APPLE_CLI_BATS_APP_FIND_INFO_DISAGREE_calendar=0
+APPLE_CLI_BATS_APP_FIND_INFO_DISAGREE_reminders=0
+# No eval and no indirect arithmetic: the key is matched against the fixed list and the
+# counter is read through a case so an inherited variable value can never be evaluated.
+app_lifecycle_find_info_disagreement_count() {
+  case "$1" in
+    mail) printf '%s' "$APPLE_CLI_BATS_APP_FIND_INFO_DISAGREE_mail" ;;
+    notes) printf '%s' "$APPLE_CLI_BATS_APP_FIND_INFO_DISAGREE_notes" ;;
+    messages) printf '%s' "$APPLE_CLI_BATS_APP_FIND_INFO_DISAGREE_messages" ;;
+    contacts) printf '%s' "$APPLE_CLI_BATS_APP_FIND_INFO_DISAGREE_contacts" ;;
+    calendar) printf '%s' "$APPLE_CLI_BATS_APP_FIND_INFO_DISAGREE_calendar" ;;
+    reminders) printf '%s' "$APPLE_CLI_BATS_APP_FIND_INFO_DISAGREE_reminders" ;;
+    *) return 1 ;;
+  esac
+}
+app_lifecycle_set_find_info_disagreement_count() {
+  case "$2" in ''|*[!0-9]*) return 1 ;; esac
+  case "$1" in
+    mail) APPLE_CLI_BATS_APP_FIND_INFO_DISAGREE_mail="$2" ;;
+    notes) APPLE_CLI_BATS_APP_FIND_INFO_DISAGREE_notes="$2" ;;
+    messages) APPLE_CLI_BATS_APP_FIND_INFO_DISAGREE_messages="$2" ;;
+    contacts) APPLE_CLI_BATS_APP_FIND_INFO_DISAGREE_contacts="$2" ;;
+    calendar) APPLE_CLI_BATS_APP_FIND_INFO_DISAGREE_calendar="$2" ;;
+    reminders) APPLE_CLI_BATS_APP_FIND_INFO_DISAGREE_reminders="$2" ;;
+    *) return 1 ;;
+  esac
+}
+app_lifecycle_note_find_info_disagreement() {
+  local key="$1" count
+  count="$(app_lifecycle_find_info_disagreement_count "$key")" || return 1
+  case "$count" in ''|*[!0-9]*) return 1 ;; esac
+  [ "${#count}" -le 9 ] || return 1
+  count=$((count + 1))
+  app_lifecycle_set_find_info_disagreement_count "$key" "$count" || return 1
+  if [ "$count" -ge "$APPLE_CLI_BATS_APP_FIND_INFO_DISAGREE_LIMIT" ]; then
+    APPLE_CLI_BATS_APP_LAST_REASON="observe:${key}:find-info-disagree"
+    return 1
+  fi
+}
+app_lifecycle_clear_find_info_disagreement() { app_lifecycle_set_find_info_disagreement_count "$1" 0; }
+
 app_lifecycle_observe() {
   local prefix="$1" capture_identities="${2:-false}" key status running="" asn identity
   app_lifecycle_clear_observed_identities
@@ -313,14 +359,22 @@ app_lifecycle_observe() {
     app_lifecycle_target_find "$key" "${prefix}.${key}"
     status=$?; [ "$status" -eq 0 ] || return "$status"
     case "$APPLE_CLI_BATS_APP_RESULT" in
-      NONE) running="${running}0" ;;
+      NONE) app_lifecycle_clear_find_info_disagreement "$key" || return 1; running="${running}0" ;;
       ASN:*)
         asn="$APPLE_CLI_BATS_APP_RESULT"
         if [ "$capture_identities" = true ]; then
           app_lifecycle_info "$key" "$asn" "${prefix}.${key}.observed"
           status=$?; [ "$status" -eq 0 ] || return "$status"
           identity="$APPLE_CLI_BATS_APP_RESULT"
-          if [ "$identity" = STOPPED ]; then running="${running}0"; continue; fi
+          if [ "$identity" = STOPPED ]; then
+            # find named a live ASN but info reported nothing. Once or twice that
+            # is the app quitting between the two queries; persistently it means
+            # the info query itself is broken (macOS 27 prints nothing, exit 0,
+            # for a malformed invocation too), and silence must not pass as quiescence.
+            app_lifecycle_note_find_info_disagreement "$key" || return 1
+            running="${running}0"; continue
+          fi
+          app_lifecycle_clear_find_info_disagreement "$key"
           app_lifecycle_split_identity "$identity" || return 1
           [ "$APP_LIFECYCLE_ASN" = "$asn" ] || return 1
           app_lifecycle_store_observed_identity "$key" "$identity" || return 1
@@ -336,8 +390,9 @@ app_lifecycle_observe() {
 
 app_lifecycle_info() {
   local key="$1" asn="$2" prefix="$3" status
-  app_lifecycle_run_lsappinfo "${prefix}.info" info -only name -only pid \
-    -only bundleID -only kLSCheckInTimeKey -app "$asn"
+  # macOS 27 dropped the compact "key"=value rendering of `-only`; the plain block
+  # layout carries the same four identity fields and the parser accepts both.
+  app_lifecycle_run_lsappinfo "${prefix}.info" info -app "$asn"
   status=$?; [ "$status" -eq 0 ] || return "$status"
   umask 077
   if ! app_lifecycle_python "${prefix}.err" parse-info --app "$key" \

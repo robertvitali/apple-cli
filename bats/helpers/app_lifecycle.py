@@ -26,7 +26,7 @@ APPLICATION_IDENTITIES = {
 SCHEMA_VERSION = 1
 MAX_STATE_BYTES = 4096
 MAX_FIND_BYTES = 4096
-MAX_INFO_BYTES = 8192
+MAX_INFO_BYTES = 16384
 MAX_CHECKIN_BYTES = 1024
 PRESERVE_ENV = "APPLE_CLI_BATS_PRESERVE_APPS"
 GENERIC_ERROR = "app lifecycle operation failed"
@@ -69,7 +69,7 @@ def _validate_token(value: Any) -> str:
     return value
 
 
-def _read_private_bytes(path: Path, maximum: int) -> bytes:
+def _read_private_bytes(path: Path, maximum: int, too_large_code: str = "") -> bytes:
     flags = os.O_RDONLY
     if hasattr(os, "O_NOFOLLOW"):
         flags |= os.O_NOFOLLOW
@@ -80,7 +80,7 @@ def _read_private_bytes(path: Path, maximum: int) -> bytes:
         if not stat.S_ISREG(metadata.st_mode) or stat.S_IMODE(metadata.st_mode) != 0o600:
             raise LifecycleError(GENERIC_ERROR)
         if metadata.st_size > maximum:
-            raise LifecycleError(GENERIC_ERROR)
+            raise LifecycleError(GENERIC_ERROR, too_large_code)
         chunks: list[bytes] = []
         remaining = maximum + 1
         while remaining > 0:
@@ -178,14 +178,80 @@ def parse_find_outputs(key: str, bundle_path: Path, exact_path: Path) -> str:
     raise LifecycleError(GENERIC_ERROR, "find-bundle-exact-disagree")
 
 
-def _parse_info_fields(path: Path) -> dict[str, str]:
+BLOCK_INFO_HEADER_PATTERN = re.compile(
+    r'^"(?P<name>[^"\\]{1,255})" (?P<asn>ASN:0x[0-9A-Fa-f]+-0x[0-9A-Fa-f]+): ?'
+    r'(?:\([^()\n]{0,63}\) ?)*[ \t]*$'
+)
+BLOCK_INFO_BUNDLE_PATTERN = re.compile(r'^[ \t]+bundleID="(?P<bundle>[A-Za-z0-9.\-]{1,255})"[ \t]*$')
+BLOCK_INFO_PID_PATTERN = re.compile(r'^[ \t]+pid = (?P<pid>[0-9]{1,10})(?: .*)?$')
+BLOCK_INFO_CHECKIN_PATTERN = re.compile(
+    rf'^[ \t]+checkin time = (?P<checkin>{CHECKIN_TIMESTAMP_PATTERN})(?: \(.*\))?[ \t]*$'
+)
+INFO_FIELD_NAMES = ("LSDisplayName", "pid", "CFBundleIdentifier", "LSCheckInTime*")
+
+
+def _parse_block_info_fields(lines: list[str], asn: str) -> dict[str, str]:
+    """Parse the block layout the LaunchServices info query prints on macOS 27.
+
+    The header names the application and its ASN; the indented lines carry the
+    bundle identifier, the pid and the check-in time. Only those four values are
+    read; every other line is ignored, and a duplicated or missing value fails.
+    A stopped process is reported as empty output in this layout (handled by the
+    caller); the legacy "[ NULL ]" quartet never appears here.
+    """
+    header = BLOCK_INFO_HEADER_PATTERN.fullmatch(lines[0])
+    if header is None:
+        raise LifecycleError(GENERIC_ERROR, "info-line-shape")
+    # Hex case is not guaranteed stable between the find and info renderings.
+    if header.group("asn").lower() != asn.lower():
+        raise LifecycleError(GENERIC_ERROR, "info-asn-mismatch")
+    fields: dict[str, str] = {"LSDisplayName": f'"{header.group("name")}"'}
+    for line in lines[1:]:
+        # The real rendering ends with a blank line; blank lines carry nothing.
+        if not line.strip(" \t"):
+            continue
+        # Exactly one block: every body line is indented, and a second header
+        # (another process's block, indented or not) or an unindented line is a
+        # shape failure, so identity fields can never be combined across blocks.
+        stripped = line.lstrip(" \t")
+        if stripped == line or (stripped.startswith('"') and " ASN:" in stripped):
+            raise LifecycleError(GENERIC_ERROR, "info-line-shape")
+        for key, pattern, group in (
+            ("CFBundleIdentifier", BLOCK_INFO_BUNDLE_PATTERN, "bundle"),
+            ("pid", BLOCK_INFO_PID_PATTERN, "pid"),
+            ("LSCheckInTime*", BLOCK_INFO_CHECKIN_PATTERN, "checkin"),
+        ):
+            match = pattern.fullmatch(line)
+            if match is None:
+                continue
+            if key in fields:
+                raise LifecycleError(GENERIC_ERROR, "info-field")
+            value = match.group(group)
+            fields[key] = value if key == "pid" else f'"{value}"'
+    if set(fields) != set(INFO_FIELD_NAMES):
+        raise LifecycleError(GENERIC_ERROR, "info-fields-missing")
+    return fields
+
+
+def _parse_info_fields(path: Path, asn: str) -> dict[str, str] | None:
+    """Return the four identity fields, or None when LaunchServices reports no
+    such process (macOS 27 prints nothing for an unknown ASN).
+
+    Two layouts are accepted: the compact `"key"=value` lines of earlier macOS
+    releases, and the block layout of macOS 27 (see _parse_block_info_fields).
+    """
     try:
-        payload = _read_private_bytes(path, MAX_INFO_BYTES).decode("ascii")
+        payload = _read_private_bytes(path, MAX_INFO_BYTES, "info-too-large").decode("ascii")
     except UnicodeError as error:
         raise LifecycleError(GENERIC_ERROR) from error
+    if not payload.strip(" \t\r\n"):
+        return None
+    lines = payload.splitlines()
+    if lines[0].startswith('"') and " ASN:" in lines[0]:
+        return _parse_block_info_fields(lines, asn)
     fields: dict[str, str] = {}
-    allowed = {"LSDisplayName", "pid", "CFBundleIdentifier", "LSCheckInTime*"}
-    for line in payload.splitlines():
+    allowed = set(INFO_FIELD_NAMES)
+    for line in lines:
         if "=" not in line:
             raise LifecycleError(GENERIC_ERROR, "info-line-shape")
         raw_key, value = line.split("=", 1)
@@ -216,8 +282,10 @@ def parse_info_output(key: str, asn: str, output_path: Path) -> str:
     expected_name, expected_bundle = _application_identity(key)
     if ASN_PATTERN.fullmatch(asn) is None:
         raise LifecycleError(GENERIC_ERROR)
-    fields = _parse_info_fields(output_path)
-    values = tuple(fields[name] for name in ("LSDisplayName", "pid", "CFBundleIdentifier", "LSCheckInTime*"))
+    fields = _parse_info_fields(output_path, asn)
+    if fields is None:
+        return "STOPPED"
+    values = tuple(fields[name] for name in INFO_FIELD_NAMES)
     stopped_value = "[ NULL ]"
     if values == (stopped_value, stopped_value, stopped_value, stopped_value):
         return "STOPPED"
