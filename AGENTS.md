@@ -117,7 +117,7 @@ requires fresh explicit instruction. Private status is temporary containment, NO
 relax this rule. (Amendment 2026-09-20, HUMAN-DECISIONS D17: the operator advanced the visibility
 change ahead of the remaining readiness gates on a pre-flip audit round whose zero-findings
 condition was NOT met: findings 1–5 received operator dispositions, and the fixture fix (6) and
-the hosted-log deletion (7, D21 OPEN) remain pre-flip blockers; the end-of-roadmap
+the hosted-log deletion (7, D21 OPEN) remained pre-flip blockers, both completed 2026-09-21; the end-of-roadmap
 audit still must record zero findings, and no other publication action is unlocked by visibility.)
 
 ## Safety — product capability vs agent conduct

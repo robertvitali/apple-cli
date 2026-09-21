@@ -1057,10 +1057,10 @@ struct GeofenceSpecTests {
     /// kept only its LAST fragment.
     @Test("a comma-bearing title survives verbatim, spacing intact")
     func commaTitle() throws {
-        let g = try GeofenceSpec.parse("40.0,-74.0,100,enter,742 Evergreen Terrace, Springfield, OR 97475")
+        let g = try GeofenceSpec.parse("40.0,-74.0,100,enter,742 Evergreen Terrace, Exampleton, ZZ 00000")
         #expect(g.radius == 100)
         #expect(g.proximity == "enter")
-        #expect(g.title == "742 Evergreen Terrace, Springfield, OR 97475")
+        #expect(g.title == "742 Evergreen Terrace, Exampleton, ZZ 00000")
     }
 
     @Test("radius and proximity are order-independent, each at most once")

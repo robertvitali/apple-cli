@@ -32,17 +32,17 @@ so until evidence is appended.
 |---|---|---|---|
 | 1 Implementation in reviewed, test-green commits | pre-visibility | PENDING (not evidenced here) | — |
 | 2 Production-coverage baseline per target | pre-visibility | PENDING (not evidenced here) | — |
-| 3 Full local canonical suite + independent reviews on the exact SHA | pre-visibility | PENDING — Section 3 not yet filled | — |
-| 4 External-Action allowlist committed and validated | pre-visibility | PENDING — owner: controller; the repository-level allowlist is a named pre-flip blocker in D17, the committed/validated form is advanced past for visibility only | — |
+| 3 Full local canonical suite + independent reviews on the exact SHA | pre-visibility | Partially evidenced: Section 3 carries the suite result for `08cc984`; the result for the commit that records this revision, and the independent reviews, are recorded in the first post-flip revision (a commit cannot carry its own suite result) | Section 3 |
+| 4 External-Action allowlist committed and validated | pre-visibility | Repository-level allowlist configured 2026-09-21 (see the Actions-settings row); the committed/validated form of the design is advanced past for visibility only — PENDING, owner: controller | — |
 | 5 Workflow inventory: publishers converted or removed | pre-visibility | Partially evidenced: `.github/workflows/` holds `ci.yml`, `docs.yml`, `pr-metadata.yml`; no `release.yml`; all three declare `contents: read` only and none carries `workflow_dispatch`, `pages`, `id-token`, or an `environment`; no repository secrets or variables (read back 2026-09-20). Static scan of step 17 PENDING | this row (read back 2026-09-20) |
 | 7 Squash-only merge with PR title/body as squash commit | pre-visibility | PENDING (not evidenced here) | — |
 | 15–16 Read-only release/site rehearsal tooling exercised locally | pre-visibility (local half) | PENDING (not evidenced here) | — |
 | 17 Static workflow scan + settings readbacks | pre-visibility (local half) | PENDING (not evidenced here) | — |
-| Fresh pre-publication privacy audit | pre-visibility | **Round 1 complete. Its zero-findings condition was NOT met: seven findings (R1-F1 to R1-F7); the operator dispositioned F1–F5 (D17–D20), the F6 fixture fix and the F7 log deletion (D21, OPEN) are pre-flip blockers, and the flip was advanced on that basis. This round does not satisfy design §18 phase 1's zero-findings gate; the end-of-roadmap round must.** Owner: controller for the record, operator for the dispositions | Section 2 |
+| Fresh pre-publication privacy audit | pre-visibility | **Round 1 complete. Its zero-findings condition was NOT met: seven findings (R1-F1 to R1-F7); the operator dispositioned F1–F5 (D17–D20), the F6 fixture fix and the F7 log deletion (D21) were pre-flip blockers, both completed 2026-09-21, and the flip was advanced on that basis. This round does not satisfy design §18 phase 1's zero-findings gate; the end-of-roadmap round must.** Owner: controller for the record, operator for the dispositions | Section 2 |
 | Design §18/§3, `AGENTS.md` and ledger-preamble amendment recording the advanced visibility step (D15 precedent) | pre-visibility | Landed in the same commit as this revision (design §18 dated amendment, `AGENTS.md` privacy paragraph, ledger preamble, D2 freeze amendment) | this commit |
-| 4 (repository-level part) Actions settings | pre-visibility | Read back 2026-09-20: `default_workflow_permissions` = read, `can_approve_pull_request_reviews` = false; `allowed_actions` = all (allowlist NOT yet configured — PENDING, owner: controller, before the flip); fork-PR contributor approval cannot be read while private — read back immediately after the flip, before any outside PR is allowed to run | this row |
-| Surfaces that become public on the flip and were not in round 1's scan | pre-visibility | Scanned after round 1 (see Round 1 addendum): PR timelines, issue events, commit comments clean apart from the known R1-F4 identity class; all 305 hosted workflow runs' logs scanned value-free — no personal data, but 18 runs' logs carry pre-redaction tracker identifiers inside historical branch names (R1-F7). PENDING — owner: operator (D21): delete those 18 runs' logs before the flip. Projects unreadable with the current token | Round 1 addendum |
-| Pre-push re-scan of every commit added after `053b56e` (tree + commit message) | pre-visibility | PENDING — owner: controller, immediately before the push that precedes the flip | — |
+| 4 (repository-level part) Actions settings | pre-visibility | Read back 2026-09-20: `default_workflow_permissions` = read, `can_approve_pull_request_reviews` = false, `allowed_actions` = all. Configured 2026-09-21 and read back: `allowed_actions` = `selected`, GitHub-owned actions allowed, one third-party pattern with a wildcard ref (the SHA pins live in the workflow files; `sha_pinning_required` is false), covering the five actions the workflows use; the unused wiki flag disabled the same day; fork-PR contributor approval cannot be read while private — read back immediately after the flip, before any outside PR is allowed to run | this row |
+| Surfaces that become public on the flip and were not in round 1's scan | pre-visibility | Complete. Scanned after round 1 (see Round 1 addendum): PR timelines, issue events, commit comments clean apart from the known R1-F4 identity class; all 305 hosted workflow runs' logs scanned value-free — no personal data, but 18 runs' logs carry pre-redaction tracker identifiers inside historical branch names (R1-F7). Those 18 runs' logs were deleted under D21 on 2026-09-21 (read back absent). Projects unreadable with the current token | Round 1 addendum |
+| Pre-push re-scan of every commit added after `053b56e` (tree + commit message) | pre-visibility | Done for the pushes of 2026-09-21 (`053b56e`, `a52c44e`, `08cc984`: changed blobs, messages and author headers; Python `re`, `pcre2grep`, `git grep -P`; clean apart from the git-identity lines and one integer constant); repeated for the commit that records this revision before its push, with the result recorded in the first post-flip revision | this row |
 | Rollback plan if a finding surfaces after the flip | pre-visibility | Recorded in D17: re-flip to private immediately (mechanically reversible; clones, caches and indexes are not), redact at HEAD, file the incident in the ledger, re-run the audit round | D17 |
 | 19 This file, local portion | pre-visibility | This revision | — |
 | 6, 8–14, hosted halves of 15–17, 20 | post-visibility | PENDING — appended after the flip with run-ID commitments; owner: controller | — |
@@ -156,9 +156,9 @@ dispositioned it in D20.
 | R1-F2 | Same tarball, tar member headers | build account user and group names and numeric ids | 2 members | Same as R1-F1 (drafted now; D18 repackaging normalises ownership). Raised by the independent challenge. |
 | R1-F3 | Same tarball, AppleDouble `._apple` member | macOS resource-fork metadata (one provenance attribute, no text) | 1 member, 163 B | Same as R1-F1 (D18 packaging sets `COPYFILE_DISABLE=1`). LOW. Raised by the independent challenge. |
 | R1-F4 | `refs/pull/3,4,5/head` and `/merge` in the mirror (not reachable from `main`) | outside contributor's display name and plaintext personal mailbox address as author and committer | 15 commits | **Operator (D20): accepted as that contributor's own public attribution for now; PRs to be squash-merged when convenient with the squash author identity read back first; the pull refs are reachable, so they are outside D19's unreachable-object purge and persist until the PRs are closed or the contributor rewrites the branch.** Raised by the independent challenge. |
-| R1-F5 | GitHub host, commits API | orphaned pre-rewrite commits still served by id, carrying pre-redaction tracker identifiers | 7 probed ids, all HTTP 200 | **Operator (D19): a GitHub Support purge of unreachable objects and cached views, across the fork network, is required while the repository is private. Status: request text prepared; operator filing PENDING; written confirmation PENDING; the flip waits on it.** Raised by the independent challenge, verified by the controller. |
-| R1-F7 | Hosted workflow-run logs (18 of 305 runs) | tracker identifiers inside historical branch names echoed by checkout steps | 144 hits in 18 runs | **PENDING — owner: operator (D21) — delete those runs' logs before the flip; no personal data involved.** Raised by the post-round log scan. |
-| R1-F6 | Tracked tree, test fixtures | postal fixture pairing a fictional street with a real US city/state/ZIP (identifies no person; off-standard placeholder) | 81 occurrences, 1 value | **PENDING — owner: controller — replace with an invented locality in a separate reviewed commit before the flip.** Raised by the independent challenge as informational; promoted to a finding because the rule requires invented values. |
+| R1-F5 | GitHub host, commits API | orphaned pre-rewrite commits still served by id, carrying pre-redaction tracker identifiers | 7 probed ids, all HTTP 200 | **Operator (D19, superseded 2026-09-21): the Support purge was withdrawn; residual by-id reachability of orphaned pre-rewrite objects is accepted because every published surface is clean or operator-dispositioned (pull refs under D20; the drafted release asset pending D18), with the uncovered surfaces (Projects, traffic pages, the private third-party fork, third-party clones) scoped out. No request was filed.** Raised by the independent challenge, verified by the controller. |
+| R1-F7 | Hosted workflow-run logs (18 of 305 runs) | tracker identifiers inside historical branch names echoed by checkout steps | 144 hits in 18 runs | **Done (D21, 2026-09-21): the 18 runs' log archives deleted via the Actions API, 18 × 204, read back 18 × 404; no personal data was involved.** Raised by the post-round log scan. |
+| R1-F6 | Tracked tree, test fixtures | postal fixture pairing a fictional street with a real US city/state/ZIP (identifies no person; off-standard placeholder) | 81 occurrences, 1 value | **Fixed at HEAD in the commit that records this revision (one source comment, four test lines now use an invented locality). The value remains in the released `v26.0.0` section of the tracked CHANGELOG, which the release-notes rule forbids editing, and in the reachable history blobs of the pre-fix commits; both are accepted under the repository's redact-at-HEAD posture (it identifies no person).** Raised by the independent challenge as informational; promoted to a finding because the rule requires invented values. |
 
 Every other raw hit was resolved to a reserved placeholder, a synthetic
 fixture, an integer constant, a GitHub object id, a redaction marker, or the recorded attribution
@@ -211,14 +211,14 @@ substance:
   GitHub Support while the repository is private, and flip only after confirmation. The stale
   citations were re-pointed to the rewritten commits the same day.
 - **R1-F6:** one fixture postal line pairs a fictional street with a real US city/state/ZIP
-  (81 occurrences, one value). Identifies no person; promoted to a finding, fix pending before
-  the flip.
+  (81 occurrences, one value). Identifies no person; promoted to a finding, fixed at HEAD on 2026-09-21.
 - **Not covered by either reviewer:** PR timeline events, commit comments, outdated review
   revisions, Actions logs/artifacts, gists, Projects; non-Latin-script identifiers; semantics
   reachable only by decoding the binary; a distributed store fingerprint across prose.
 - **Challenger verdict:** BLOCK until (1) the release artifact's account token is removed
   from both surfaces and (2) the host-side orphan question is closed **before** the flip. Both
-  are now operator-dispositioned (D17/D18 rebuild + draft; D19 purge-before-flip).
+  are now operator-dispositioned (D17/D18 rebuild + draft; D19 purge-before-flip, later withdrawn on
+  2026-09-21 in favour of accepting the residual).
 
 #### Round 1 addendum — surfaces fetched after the challenge
 
@@ -234,6 +234,8 @@ Fetched and scanned 2026-09-20 with the primary engine (same classes), value-fre
 | Hosted workflow run logs | 305 runs (484 log files, 245 MB), 0 artifacts | Scanned with the primary engine after download (each archive deleted after scanning): email 0, phone 0, home path other than the hosted runner's 0, tracker URL 0, secret shapes 0; handle hits only inside repository URLs (attribution exception); **16-digit tracker identifiers: 144 hits in 18 runs, all inside the names of historical `asana-<id>` branches that the runs checked out** — R1-F7, deletion of those 18 runs' logs pending operator authorization (D21) |
 | Wiki | flag enabled, no wiki repository exists | recommendation: disable the flag before the flip (one setting, no content) |
 | `pr-metadata.yml` | uses `pull_request_target` | base-owned metadata validator only, `contents: read`, no PR-code checkout (per `AGENTS.md`); becomes fork-reachable on the flip, which is its designed use |
+
+**Superseded 2026-09-21.** The rows above are dated observations. Re-dispositions since: F5 — the Support purge was withdrawn by the operator, no request was filed, the three still-served timeline ids stay reachable by id under the accepted residual; F6 — fixed at HEAD; F7 — the 18 runs' logs deleted and read back absent (D21); the external-Action allowlist configured; the wiki flag disabled.
 
 #### Commitments (value-free)
 
@@ -254,20 +256,33 @@ timelines, issue events and commit comments, all 305 hosted workflow-run logs, t
 assets, plus the host-side reachability probe. Findings for that scope: **seven** — the primary
 pass found R1-F1, the independent challenge added R1-F2 to R1-F6, and the post-round hosted-log
 scan added R1-F7. **The operator's stated zero-findings condition was NOT met.** The operator
-dispositioned R1-F1 to R1-F5 (D17–D20), named the R1-F6 fix and the R1-F7 deletion (D21, OPEN) as
-pre-flip blockers, and advanced the flip on that basis. This round therefore does not satisfy
+dispositioned R1-F1 to R1-F5 (D17–D20), named the R1-F6 fix and the R1-F7 deletion (D21) as
+pre-flip blockers (both completed 2026-09-21), and advanced the flip on that basis. This round therefore does not satisfy
 design §18 phase 1's zero-findings gate; the end-of-roadmap round must, for its own stated scope.
 Done before any flip: the `v26.0.0` Release converted to a draft (read back draft=true), which
 contains F1–F3 on the public surface but does not remediate them — remediation is the D18
-rebuild; F4 accepted under D20. Required before the flip, all **PENDING**: the written GitHub Support purge confirmation of D19 (request prepared; operator filing PENDING; confirmation PENDING); the R1-F6 fixture fix; the R1-F7 log deletion authorized and executed (D21, OPEN); the repository-level external-Action allowlist configured; the pre-push re-scan of every commit added after `053b56e`; and the local canonical suite green on the exact pushed commit.
+rebuild; F4 accepted under D20. Still required before the flip (two items): the pre-push re-scan of the commit that records this revision and the local canonical suite green on that exact pushed commit (the D19 Support gate was withdrawn by the operator on 2026-09-21; the R1-F6 fixture fix, the R1-F7 log deletion under D21 and the repository-level external-Action allowlist were completed the same day).
 
 ## 3. Local verification for the visibility-step commit
 
-PENDING — filled with the canonical-suite result (both Swift toolchains, Python automation tier,
-bats tier) for the exact commit pushed immediately before the flip, with the interpreter and
-toolchain versions, stage exit statuses and log digests.
+For `08cc984` (pushed 2026-09-21, the tip before the commit that records this revision), all
+stages exit 0 except where noted: swiftly toolchain Swift 6.3.3 — `swift build` exit 0 (log
+sha256 `c9bc4c4ed0dbeabc…`), `swift test` exit 0, 1846 tests in 256 suites (`dfdea3b0685959d0…`);
+Command Line Tools Swift 6.3.2 — `swift build` exit 0 (`ac11c36b97ac26e9…`); Python automation
+tier `python -m unittest discover -s Tests/automation -p 'test_*.py'`, CPython 3.13.14, 764/764,
+exit 0 (`93dda1039dd19d0a…`); bats `bats -r bats/`: first pass 451/452, exit 1 (`d9bd869ed2de1412…`,
+one live-Mail transient in an attachment-enrichment test that passed alone), full rerun on the same
+commit 452/452, exit 0 (`bfa4d32c2a3db24a…`). Launched through a signal-reset wrapper (see the
+learnings entry). The same suite is run on the commit that records this revision before it is
+pushed; its result is recorded in the first post-flip revision, because a commit cannot carry its
+own suite result.
 
 ## 4. Post-visibility hosted evidence
+
+Read back immediately after the flip, before anything else runs: repository visibility; the
+`v26.0.0` Release still `draft=true`; `default_workflow_permissions` and
+`can_approve_pull_request_reviews`; `allowed_actions` and the selected-actions set; fork-PR
+contributor approval (unreadable while private); the wiki flag; the fork count.
 
 PENDING — appended after the visibility change: hosted run outcomes as salted run-ID
 commitments, capability and settings readbacks for the public state, and the rehearsal results

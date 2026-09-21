@@ -11,7 +11,7 @@ import Foundation
 /// `radius` (numeric) and the proximity keyword may appear in either order, each at most once,
 /// immediately after `lon`. The title is everything from the first fragment that is neither —
 /// rejoined VERBATIM (original spacing, original commas), so `…,enter,742 Evergreen Terrace,
-/// Springfield, OR 97475` yields that whole address as the title instead of its last fragment.
+/// Exampleton, ZZ 00000` yields that whole address as the title instead of its last fragment.
 /// Consequences, documented rather than accidental:
 ///   - a purely-numeric title is expressible after an explicit radius (`…,100,enter,500` →
 ///     title "500"), because a second numeric fragment no longer overwrites the radius;

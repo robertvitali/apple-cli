@@ -1550,7 +1550,7 @@ visibility step ahead of the phase-1 items not yet evidenced in
 `docs/discovery/prelaunch-readiness-evidence.md`, because hosted Actions stopped allocating
 runners for the private repository. The pre-flip privacy audit round ran and its zero-findings
 condition was NOT met; the operator dispositioned findings 1–5 (D17–D20) and gated the flip on
-exactly: the written GitHub Support purge confirmation of D19 (request prepared; operator filing PENDING; confirmation PENDING); the R1-F6 fixture fix; the R1-F7 log deletion authorized and executed (D21, OPEN); the repository-level external-Action allowlist configured; the pre-push re-scan of every commit added after `053b56e`; and the local canonical suite green on the exact pushed commit (R1-F6 and R1-F7 are the two undispositioned findings, both in that list). Every other
+exactly: the pre-push re-scan of the commit that records this revision and the local canonical suite green on that exact pushed commit (the D19 Support gate was withdrawn by the operator on 2026-09-21; the R1-F6 fixture fix, the R1-F7 log deletion under D21 and the repository-level external-Action allowlist were completed the same day) (R1-F6 and R1-F7 were the two undispositioned findings; both were completed on 2026-09-21 and are no longer in the list). Every other
 phase-1 item of this section not in that list is advanced past for visibility only — it remains
 required before any later publication step and stays PENDING in the evidence file. Every other
 requirement of this section apart from the visibility ordering amended here, of §3 (as amended

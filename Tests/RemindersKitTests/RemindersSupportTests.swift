@@ -334,8 +334,8 @@ struct AlarmSpecTests {
     /// closing the per-domain copy's three defects — pinned HERE (not only in EventKitCore)
     /// so the delegation itself cannot silently regress.
     @Test func geofenceCommaTitleAndNumericTitle() throws {
-        let a = try ReminderAlarmSpec.parse("geo:37.7,-122.4,100,enter,742 Evergreen Terrace, Springfield, OR 97475")
-        #expect(a.location_trigger?.title == "742 Evergreen Terrace, Springfield, OR 97475")
+        let a = try ReminderAlarmSpec.parse("geo:37.7,-122.4,100,enter,742 Evergreen Terrace, Exampleton, ZZ 00000")
+        #expect(a.location_trigger?.title == "742 Evergreen Terrace, Exampleton, ZZ 00000")
         // a numeric title after an explicit radius no longer overwrites the radius
         let b = try ReminderAlarmSpec.parse("geo:37.7,-122.4,100,enter,2024")
         #expect(b.location_trigger?.radius == 100)

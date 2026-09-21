@@ -59,15 +59,15 @@ findings for its stated scope; the repo stays private until then.
 | D14 | Live-exercise `mail rules` delete | **APPLIED 2026-08-27** | First live exercise done operator-present: labeled disabled test rule deleted by index, readback matched, 3 real rules untouched |
 | D15 | Extend the public-attribution exception to `.github/CODEOWNERS` | **RATIFIED 2026-09-07** | The operator's exact GitHub user may appear in `.github/CODEOWNERS` for every enforcement-control-plane path, as deliberate public attribution alongside LICENSE, README, and git author metadata. Sequence is fixed: the `AGENTS.md` exception extension lands first as its own reviewed commit, the CODEOWNERS commit lands second with its own fresh privacy scan, then GitHub's code-owners errors API confirms it parses. Trade-off recorded per the design: from that step until public launch no release can be cut; the release freeze's urgent-fix clause is satisfiable only by a reviewed, operator-authorized, temporary restoration of a write-capable release workflow, recorded as an explicit exception and removed again afterwards |
 | D16 | Narrow main-only reversal for disposable rehearsal refs | **RATIFIED 2026-09-07** | Three disposable ref classes, and only these, may be created for the publication-automation rehearsals (design §18 steps 8–14, removal at step 18): the uniquely named disposable target ref, the proposal head refs of the validation PRs (which target that ref, never `main`), and the Dependabot-created head refs of step 13; never for feature work; never merged into `main`; deleted after the rehearsal, including on abort; does not reverse the ruling for ordinary work. The `AGENTS.md` reversal commit lands under the private main-only gate when the rehearsal step begins, after an in-session re-confirmation and before the first branch is cut. The later full reversal that activates the `main` ruleset is a SEPARATE future operator instruction and is not granted here |
-| D17 | Early visibility flip to restore hosted Actions; pre-flip privacy audit round 1; disposition of its findings | **ANSWERED 2026-09-20** (APPLIED when the flip lands) | Operator ordered: fresh audit first, flip on zero findings, end-of-roadmap audit still required. Round 1's zero-findings condition was NOT met: seven findings — five operator-dispositioned (D17–D20), the fixture fix pending, and the hosted-log deletion OPEN in D21; for the binary the operator chose rebuild + re-cut (as `v27.0.0`) rather than accept, and, because the design forbids a private publisher and hosted runs are billing-blocked, ordered the `v26.0.0` Release converted to a draft first, the flip second, the re-cut after hosted validation |
+| D17 | Early visibility flip to restore hosted Actions; pre-flip privacy audit round 1; disposition of its findings | **ANSWERED 2026-09-20** (APPLIED when the flip lands) | Operator ordered: fresh audit first, flip on zero findings, end-of-roadmap audit still required. Round 1's zero-findings condition was NOT met: seven findings — five operator-dispositioned (D17–D20), the fixture fix pending, and the hosted-log deletion OPEN in D21 — both closed 2026-09-21 (fixture fix landed, D21 applied); D19 later superseded; for the binary the operator chose rebuild + re-cut (as `v27.0.0`) rather than accept, and, because the design forbids a private publisher and hosted runs are billing-blocked, ordered the `v26.0.0` Release converted to a draft first, the flip second, the re-cut after hosted validation |
 | D18 | macOS 27 adoption release `v27.0.0` | **OPEN** | Operator instruction 2026-09-20: bump to `27.0.0` once all tests pass on macOS 27. Waits on the D17 flip, hosted validation, the design's publisher path, a §4.1 adoption-matrix amendment, and verified removal of every R1-F1 to R1-F3 carrier from the rebuilt binary and archive |
-| D19 | GitHub still serves pre-rewrite commits by id | **ANSWERED 2026-09-20** | Verified: seven pre-rewrite commit ids formerly cited in this file return HTTP 200 from the API and still carry pre-redaction tracker identifiers. Operator reversed the 2026-08-23 no-Support posture: request a purge of unreachable objects and cached views from GitHub Support while the repo is still private; the D17 flip waits on that confirmation. Stale id citations in this file were re-pointed to their rewritten counterparts the same day |
+| D19 | GitHub still serves pre-rewrite commits by id | **SUPERSEDED 2026-09-21** (ANSWERED 2026-09-20) | Verified: seven pre-rewrite commit ids formerly cited in this file return HTTP 200 from the API and still carry pre-redaction tracker identifiers. Operator reversed the 2026-08-23 no-Support posture: request a purge of unreachable objects and cached views from GitHub Support while the repo is still private; the D17 flip waits on that confirmation. Stale id citations in this file were re-pointed to their rewritten counterparts the same day. Superseded 2026-09-21: request withdrawn by the operator, no purge filed; residual by-id reachability accepted; D9's no-Support posture stands |
 | D20 | Outside contributor's plaintext git identity on open PRs 3–5 | **RATIFIED 2026-09-20** | Accepted as that contributor's own public attribution for now; the PRs are to be squash-merged when convenient with the squash author identity read back first; the reachable `refs/pull/*` copies are outside the D19 purge and persist until the PRs close |
-| D21 | Delete 18 hosted workflow runs' logs that echo pre-redaction tracker identifiers | **OPEN** | Post-round scan of all 305 run logs: no personal data; 18 runs' logs contain 16-digit tracker identifiers inside historical branch names. Deleting run logs is destructive and outward-facing, so it waits for the operator's instruction; named as a D17 pre-flip blocker |
+| D21 | Delete 18 hosted workflow runs' logs that echo pre-redaction tracker identifiers | **APPLIED 2026-09-21** | Post-round scan of all 305 run logs: no personal data; 18 runs' logs contain 16-digit tracker identifiers inside historical branch names. Deleting run logs is destructive and outward-facing, so it waited for the operator's instruction; authorized and executed 2026-09-21 (18 log archives deleted, 18 × 204, read back 18 × 404); removed from D17's blocker list |
 
 ---
 
-**Amendment 2026-09-20 (D17).** The preamble's and D9's "repo stays private until every readiness gate passes and a fresh pre-publication privacy audit records zero findings" condition was advanced by operator ruling: the operator authorized the visibility change ahead of the remaining readiness gates, on a fresh audit round whose zero-findings condition was NOT met: findings 1–5 received the operator's own dispositions (D17–D20), while the fixture fix (6) and the hosted-log deletion (7, D21 OPEN) remain pre-flip blockers. The end-of-roadmap audit and every other readiness gate still stand as written; publication actions beyond visibility remain gated. See D17 and `docs/discovery/prelaunch-readiness-evidence.md`.
+**Amendment 2026-09-20 (D17).** The preamble's and D9's "repo stays private until every readiness gate passes and a fresh pre-publication privacy audit records zero findings" condition was advanced by operator ruling: the operator authorized the visibility change ahead of the remaining readiness gates, on a fresh audit round whose zero-findings condition was NOT met: findings 1–5 received the operator's own dispositions (D17–D20), while the fixture fix (6) and the hosted-log deletion (7, D21 OPEN) remained pre-flip blockers — both completed 2026-09-21. The end-of-roadmap audit and every other readiness gate still stand as written; publication actions beyond visibility remain gated. See D17 and `docs/discovery/prelaunch-readiness-evidence.md`.
 
 ---
 
@@ -1025,7 +1025,7 @@ branch exists.
   end-of-roadmap pre-publication audit the repository rules require; that later round still
   runs after the remaining readiness items complete. Round 1 is recorded, value-free, in
   `docs/discovery/prelaunch-readiness-evidence.md`.
-- **Round 1 result.** Seven findings: the primary pass found R1-F1; the independent challenge added R1-F2 to R1-F6 (two further release-packaging carriers of the same account token, an outside contributor's plaintext identity on pull refs, host-side reachability of pre-rewrite objects, and a fixture pairing a fictional street with a real locality); the post-round scan of all 305 hosted run logs added R1-F7 (tracker identifiers inside historical branch names in 18 runs' logs; no personal data). Dispositions: D17 ruling 2 / D18 (F1–F3), D20 (F4), D19 (F5), fix pending before the flip (F6), D21 (F7). R1-F1: the `v26.0.0` release asset's binary embeds 270
+- **Round 1 result.** Seven findings: the primary pass found R1-F1; the independent challenge added R1-F2 to R1-F6 (two further release-packaging carriers of the same account token, an outside contributor's plaintext identity on pull refs, host-side reachability of pre-rewrite objects, and a fixture pairing a fictional street with a real locality); the post-round scan of all 305 hosted run logs added R1-F7 (tracker identifiers inside historical branch names in 18 runs' logs; no personal data). Dispositions: D17 ruling 2 / D18 (F1–F3), D20 (F4), D19 (F5), fix pending before the flip (F6), D21 (F7). Both closed 2026-09-21. R1-F1: the `v26.0.0` release asset's binary embeds 270
   build-time source and build-directory paths whose user segment is the operator's macOS
   account short name (the same string as the public GitHub handle covered by the attribution
   exception; no third party). Every other raw hit of the primary pass resolved to a reserved
@@ -1034,7 +1034,7 @@ branch exists.
   file. **Ruling 1's zero-findings condition was therefore NOT met.** Seven findings were returned; the
   operator dispositioned R1-F1 to R1-F5 (D17–D20) and named the R1-F6 fixture fix and the R1-F7
   log deletion (D21, OPEN — not yet authorized) as pre-flip blockers, advancing the flip on that
-  basis. The round does not satisfy the design's §18 phase 1
+  basis. Both closed 2026-09-21 (fixture fix landed; D21 applied). The round does not satisfy the design's §18 phase 1
   zero-findings gate; the end-of-roadmap audit must, for its own scope.
 - **Ruling 2 (disposition of R1-F1).** Offered: (A) accept under the attribution exception;
   (B) rebuild with compiler path remapping and re-cut the release; (C) accept now, fix forward.
@@ -1059,7 +1059,9 @@ branch exists.
   workflow approval of pull-request reviews is off; the external-Action allowlist is NOT yet
   configured (all actions allowed) and the step-17 static scan has not run; fork-PR contributor
   approval cannot be read while private and is read back immediately after the flip, before any
-  outside pull request may run. The allowlist is set before the flip. Rollback: if a finding
+  outside pull request may run. The allowlist is set before the flip (configured and read back 2026-09-21: `selected`, GitHub-owned
+  actions plus one third-party pattern with a wildcard ref — the SHA pins live in the workflow files
+  and `sha_pinning_required` is false; the unused wiki flag was disabled the same day). Rollback: if a finding
   surfaces after the flip, re-flip to private at once (mechanically reversible; clones, caches
   and indexes are not), redact at HEAD, record the incident here, and re-run the audit round.
 - **Amendments landed with this entry (D15 precedent, adapted).** The design's Status header,
@@ -1083,7 +1085,8 @@ event; editing a published Release is on the design's forbidden list absent your
 and the finding's disposition is a posture call between an already-public string and a re-cut
 release.
 
-**Blocking?** The flip waits on exactly: the written GitHub Support purge confirmation of D19 (request prepared; operator filing PENDING; confirmation PENDING); the R1-F6 fixture fix; the R1-F7 log deletion authorized and executed (D21, OPEN); the repository-level external-Action allowlist configured; the pre-push re-scan of every commit added after `053b56e`; and the local canonical suite green on the exact pushed commit.
+**Blocking?** The flip waits on exactly: the written GitHub Support purge confirmation of D19 (request prepared; operator filing PENDING; confirmation PENDING); the R1-F6 fixture fix; the R1-F7 log deletion authorized and executed (D21, OPEN); the repository-level external-Action allowlist configured; the pre-push re-scan of every commit added after `053b56e`; and the local canonical suite green on the exact pushed commit. (as recorded 2026-09-20)
+**Amended 2026-09-21:** the flip waits on exactly: the pre-push re-scan of the commit that records this revision and the local canonical suite green on that exact pushed commit (the D19 Support gate was withdrawn by the operator on 2026-09-21; the R1-F6 fixture fix, the R1-F7 log deletion under D21 and the repository-level external-Action allowlist were completed the same day).
 `v27.0.0` waits on D18.
 
 ---
@@ -1130,8 +1133,15 @@ release.
 
 ## D19 — GitHub still serves pre-rewrite commits by id; purge before the flip
 
-- **Status:** **ANSWERED 2026-09-20** — operator chose purge-before-flip; **APPLIED** when
-  Support confirms and the entry is amended with the date.
+- **Status:** **SUPERSEDED 2026-09-21** — operator withdrew the Support request: no purge is
+  filed, and residual by-id reachability of orphaned pre-rewrite objects is accepted provided
+  every published surface is clean or operator-dispositioned: trees, messages, GitHub-side text
+  and run logs are clean; the pull refs carry the D20-accepted contributor identity; the release
+  asset carries F1–F3 behind a draft pending the D18 rebuild. Surfaces round 1 could not cover
+  are accepted as out of scope for the stated reasons: GitHub Projects (token lacks the scope; no
+  project known), traffic and insights pages, the one private third-party fork, and third-party
+  clones or caches (not this repository's to audit). The D9 no-Support posture therefore stands
+  unchanged. (Was ANSWERED 2026-09-20 as purge-before-flip.)
 - **Finding (independent challenger, verified by the controller).** `git clone --mirror`
   fetches only objects reachable from advertised refs, so a local mirror cannot see what the
   host still holds. Seven pre-rewrite commit ids that this file cited (the summary table, D1, D3,
@@ -1156,14 +1166,18 @@ release.
   rewritten counterparts on `main` (matched by commit subject), so tracked files no longer
   advertise orphaned ids — except three citations inside the released `v26.0.0` CHANGELOG body,
   which the release-notes rule forbids editing; those become dead references once the purge
-  lands, and are recorded here rather than edited. This is the same class of edit as the 2026-08-30 condensing and is
+  lands, and are recorded here rather than edited. **Amended 2026-09-21:** with the purge
+  withdrawn those three citations stay live pointers to served pre-rewrite objects (which carry
+  pre-redaction tracker identifiers, no personal data); accepted under the same residual-reachability
+  ruling, and correctable later only through the release-notes follow-up-entry mechanism. This is the same class of edit as the 2026-08-30 condensing and is
   recorded here rather than made silently.
 - **Filed:** 2026-09-20 · **Category:** privacy / publication / outward-facing action
 
 **Why it needed you.** Contacting Support is an account-level action you declined once; only
 you can reverse that, and the flip's timing is yours.
 
-**Blocking?** The D17 flip waits on Support's confirmation. Nothing else waits.
+**Blocking?** The D17 flip waits on Support's confirmation. Nothing else waits. (as recorded 2026-09-20)
+**Resolution (2026-09-21):** withdrawn by the operator; no request filed; no longer blocks the flip.
 
 ---
 
@@ -1201,7 +1215,9 @@ disclose or to redact unilaterally; the posture call is the operator's.
 
 ## D21 — Delete the 18 hosted workflow-run logs that echo pre-redaction tracker identifiers
 
-- **Status:** **OPEN** — waiting on the operator.
+- **Status:** **APPLIED 2026-09-21** — the operator authorized the deletion in-session; the 18
+  runs' log archives were deleted through the Actions API (18 × HTTP 204) and read back as absent
+  (18 × HTTP 404) at 13:19 UTC. Run status records remain.
 - **Finding (R1-F7).** After the independent challenge, the controller downloaded and scanned
   all 305 hosted workflow runs' logs (484 files, 245 MB) value-free, deleting each archive
   after scanning. No email, phone, non-runner home path, tracker URL or secret shape; the
@@ -1217,6 +1233,7 @@ disclose or to redact unilaterally; the posture call is the operator's.
 
 **Why it needed you.** Deleting hosted history is irreversible.
 
-**Blocking?** Named in D17's pre-flip blocker list; nothing else waits on it.
+**Blocking?** Named in D17's pre-flip blocker list; nothing else waits on it. (as recorded 2026-09-21 at filing)
+**Resolution (2026-09-21):** authorized in-session and executed the same day; removed from D17's blocker list.
 
 ---
