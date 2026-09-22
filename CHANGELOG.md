@@ -178,6 +178,25 @@ JSON output are stable per the versioning policy — breaking changes bump
   exit code is affected, and `schema_version` stays `1` — this schema is internal
   automation and is not the JSON envelope contract agents key on.
 
+### BREAKING
+- **`apple notes search` and `apple notes list` refuse an empty `--folder`.** Old shape: an
+  empty `--folder ""` was accepted and the command read the WHOLE account with exit 0, while a
+  separators-only value (`"///"`) reached Notes.app as a malformed folder reference and failed
+  there with an upstream error. New shape: both are refused as a `validation_error` (exit 64),
+  the rule `apple notes recent` already applied, so a caller interpolating an unset variable
+  gets an error instead of a silently widened read. Migration: omit `--folder` to search or
+  list every folder. `schema_version` is unchanged at 1: no field, type, enum or exit-code
+  MEANING changes; one previously accepted input now takes the existing validation exit.
+- **Attachment sources and write destinations spelled as another user's home are refused**
+  (details under Fixed): a `~user/…` naming any account other than your own is now a
+  `validation_error` (exit 64) for `mail send --attach` / `messages send --file` and a
+  `safety_violation` (exit 77) for confined write destinations. Old shape, by platform: on
+  macOS 27 a `~user` naming a real account expanded to THAT account's home, so with
+  `--allow-outside-home` the destination was accepted and a write could land in another
+  user's home, while an unknown user was left unexpanded and failed later; on macOS 15 an
+  unknown user was silently replaced by the running user's home. `schema_version` is
+  unchanged at 1 for the same reason.
+
 ### Changed
 
 - **Mail's GUI-driven composes are now bounded by a 300-second host deadline.** `mail send
@@ -200,6 +219,26 @@ JSON output are stable per the versioning policy — breaking changes bump
   an existing error class.
 
 ### Fixed
+- **Attachment paths and write destinations spelled as another user's home (`~user/…`) are
+  refused on every macOS release.** `apple mail send --attach`, `apple messages send --file`,
+  and every write destination that goes through the shared path confinement (`--out` files,
+  attachment saves) now refuse a `~user` spelling naming any account other than your own,
+  before anything is read or written: attachments as a `validation_error` (exit 64), write
+  destinations as a `safety_violation` (exit 77). Previously the outcome depended on the macOS
+  release: on macOS 27 a real account's `~user/…` expanded to that account's home and, under
+  `--allow-outside-home`, was accepted as a write destination; on macOS 15 an unknown user
+  was silently replaced by the running user's home, so the file read or written was not the
+  one spelled. Your own account's `~name/…` keeps working and means the same directory as
+  `~/…`.
+- **`apple notes recent` now retries its one transient condition on a real store.** The
+  mismatch between the two bulk reads was recognised only in a synthetic error shape;
+  osascript prefixes a script-raised error with a source position, so on a live store the
+  retry never happened and the error fell through to generic text. The position prefix is now
+  accepted, the retry fires, and osascript's trailing error number no longer leaks into the
+  message. A second read that answers with rows for notes that were not asked for (a framing
+  fault) is now reported as an `upstream_error` (exit 69) instead of being folded into the
+  result, so `count` can never exceed `applied_limit` and a stray row can never stand in for a
+  note the first read ranked.
 - **`apple notes` attachment save paths spelled as another user's home are refused on every
   macOS release.** A `~user` or `~user/…` destination naming any account other than your own
   is now refused as not-absolute before any expansion. Previously the outcome depended on the macOS release: on macOS 27 a real

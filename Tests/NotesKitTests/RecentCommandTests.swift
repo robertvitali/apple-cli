@@ -381,6 +381,16 @@ struct RecentCommandTests {
         #expect(NotesScript.ownDiagnostic("apple-cli: boom") == "boom")
         #expect(NotesScript.ownDiagnostic("execution error: apple-cli: boom") == "boom")
         #expect(NotesScript.ownDiagnostic("Can't get folder \"apple-cli: x\". (-1728)") == nil)
+        // The shape a LIVE osascript run produces: a source range, then the preamble, then the
+        // sentinel, and its own error number appended to the message.
+        #expect(NotesScript.ownDiagnostic("35:39: execution error: apple-cli: boom (-2700)") == "boom")
+        #expect(NotesScript.ownDiagnostic("35:39: execution error: apple-cli: kept (1) (-2700)") == "kept (1)")
+        // Only that exact prefix shape is accepted; anything looser stays anchored out.
+        #expect(NotesScript.ownDiagnostic("note 35:39: execution error: apple-cli: boom") == nil)
+        #expect(NotesScript.ownDiagnostic("35:39 execution error: apple-cli: boom") == nil)
+        #expect(NotesScript.isRetryable(
+            "35:39: execution error: apple-cli: Notes.app returned mismatched id and date lists (1) (-2700)"))
+        #expect(!NotesScript.isRetryable("Can't get folder \"apple-cli: Notes.app returned mismatched\". (-1728)"))
     }
 
     /// A length mismatch between pass 1's two bulk reads means the note set CHANGED between two
@@ -483,6 +493,57 @@ struct RecentCommandTests {
         #expect(runner.arguments.last?.count == 2)
     }
 
+    @Test("a pass 2 that answers for notes it was not asked about is an upstream error, not a cap",
+          arguments: ["unranked", "empty-id"])
+    func passTwoRowsOutsideTheRequestAreRefused(shape: String) throws {
+        // Pass 2 is asked for exactly the winners. A reply carrying a note pass 1 never ranked,
+        // or a row with no id, is a framing fault; folding it in would let the stray row take a
+        // missing winner's slot or push a real one past the cut while `limit_reached` still
+        // reads false. It fails as `upstream_error` instead. (A repeated id is collapsed by the
+        // row parser before it gets here — `parseSummaries` keeps the first — so the command's
+        // own duplicate check is a belt over an invariant that lives in another file.)
+        let effective = 2
+        let all = scrambled
+        let runner = FakeNotesRunner()
+        runner.handler = { script, args in
+            if script.contains("set noteIds to id of every") {
+                return all.map { [self.noteID($0.n), $0.modified].joined(separator: US) }
+                    .joined(separator: RS) + RS
+            }
+            if script.contains("set resolvedNotes to {}") {
+                #expect(args.count == effective)
+                var rows = args.compactMap { id in
+                    all.first { self.noteID($0.n) == id }.map { self.hitRow($0.n, modified: $0.modified) }
+                }
+                if shape == "unranked" {
+                    rows.append(self.hitRow(99, modified: "2026-9-1-0-0-0"))
+                } else {
+                    rows.append(["apple-cli-test note", "", "Folder", fixtureDate, "2026-9-1-0-0-0"]
+                                    .joined(separator: US))
+                }
+                return rows.joined(separator: RS) + RS
+            }
+            return nil
+        }
+        let command = try RecentCmd.parse(["--limit", "\(effective)"])
+        let failure = try captureNotesFailure {
+            try command.run(scriptFactory: { NotesScript(runner: runner, store: StubNotesStore.quiet()) },
+                            storeFactory: { StubNotesStore.quiet() })
+        }
+        #expect(failure.code == AppleExit.upstream, Comment(rawValue: shape))
+        #expect(failure.error["type"] as? String == "upstream_error", Comment(rawValue: shape))
+        let expectedFault = shape == "unranked" ? "not requested" : "a row with no id"
+        #expect((failure.error["message"] as? String)?.contains(expectedFault) == true, Comment(rawValue: shape))
+    }
+
+    @Test("a well-formed pass 2 reply keeps count at applied_limit and the ranked order")
+    func wellFormedPassTwoKeepsTheBound() throws {
+        let data = try drive(try RecentCmd.parse(["--limit", "2"]), twoPassRunner(scrambled))
+        #expect(try ids(data) == [noteID(2), noteID(3)])
+        #expect(data["count"] as? Int == 2)
+        #expect(data["limit_reached"] as? Bool == true)
+    }
+
     @Test("the default cut is 10 and is always disclosed as applied_limit")
     func defaultLimitIsDisclosed() throws {
         let data = try drive(try RecentCmd.parse([]), twoPassRunner(scrambled))
@@ -558,15 +619,40 @@ struct RecentCommandTests {
         #expect(runner.arguments.first == ["iCloud"])
     }
 
+    @Test("search and list refuse an empty --folder the same way recent does")
+    func searchAndListRefuseAFolderPathWithNoComponents() throws {
+        for value in ["", "///"] {
+            let searchRunner = ThrowingNotesRunner()
+            let search = try SearchCmd.parse(["apple-cli-test-query", "--folder", value])
+            let searchFailure = try captureNotesFailure {
+                try search.run(scriptFactory: { NotesScript(runner: searchRunner, store: StubNotesStore.quiet()) },
+                               storeFactory: { StubNotesStore.quiet() })
+            }
+            #expect(searchFailure.code == AppleExit.usage, "search --folder \"\(value)\"")
+            #expect(searchFailure.error["type"] as? String == "validation_error")
+            #expect(searchRunner.neverCalled, "search --folder \"\(value)\" must not reach Notes.app")
+
+            let listRunner = ThrowingNotesRunner()
+            let list = try ListCmd.parse(["--folder", value])
+            let listFailure = try captureNotesFailure {
+                try list.run(scriptFactory: { NotesScript(runner: listRunner, store: StubNotesStore.quiet()) },
+                             storeFactory: { StubNotesStore.quiet() })
+            }
+            #expect(listFailure.code == AppleExit.usage, "list --folder \"\(value)\"")
+            #expect(listFailure.error["type"] as? String == "validation_error")
+            #expect(listRunner.neverCalled, "list --folder \"\(value)\" must not reach Notes.app")
+        }
+    }
+
     @Test("a folder naming no path component is a validation error — empty and separators alike")
     func refusesAFolderPathWithNoComponents() throws {
         // `splitFolderPath` drops every empty component, so both spellings name NO folder and
         // the emitted dangling `of` would fail to compile, surfacing as upstream/69 "Internal
         // error. Please report this issue." for plain bad input.
         //
-        // `""` is the one that matters in practice: the `!folder.isEmpty` shape `search` and
-        // `list` still use lets it fall through and enumerate the WHOLE ACCOUNT, so a caller
-        // interpolating an unset variable silently widens the read instead of being refused.
+        // `""` is the one that matters in practice: until they were aligned with this command,
+        // `search` and `list` let it fall through and enumerate the WHOLE ACCOUNT, so a caller
+        // interpolating an unset variable silently widened the read instead of being refused.
         for value in ["", "///"] {
             let runner = ThrowingNotesRunner()
             let command = try RecentCmd.parse(["--folder", value])

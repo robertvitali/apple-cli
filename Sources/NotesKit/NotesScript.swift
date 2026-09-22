@@ -93,13 +93,25 @@ struct NotesScript {
     /// this branch.
     static func ownDiagnostic(_ stderr: String) -> String? {
         var s = stderr.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Live osascript prefixes a script-raised error with a source range — `35:39: ` — before
+        // `execution error:`. Accept exactly that shape (digits, colon, digits, colon, space) and
+        // nothing looser, so the anchor still cannot be reached through echoed caller text.
+        if let range = s.range(of: #"^[0-9]+:[0-9]+: "#, options: .regularExpression) {
+            s = String(s[range.upperBound...])
+        }
         if s.lowercased().hasPrefix(osascriptErrorPreamble) {
             s = String(s.dropFirst(osascriptErrorPreamble.count))
                 .trimmingCharacters(in: .whitespacesAndNewlines)
         }
         guard s.hasPrefix(ownDiagnosticSentinel) else { return nil }
-        return String(s.dropFirst(ownDiagnosticSentinel.count))
+        var message = String(s.dropFirst(ownDiagnosticSentinel.count))
             .trimmingCharacters(in: .whitespacesAndNewlines)
+        // osascript appends its own ` (-NNNN)` error number to a script-raised message; it is
+        // not part of the diagnostic this tool wrote.
+        if let tail = message.range(of: #" \(-[0-9]+\)$"#, options: .regularExpression) {
+            message = String(message[..<tail.lowerBound])
+        }
+        return message
     }
 
     /// CLI-only transient patterns, kept SEPARATE from the ported table below so that table's
@@ -492,7 +504,10 @@ struct NotesScript {
             whereParts.append("modification date >= thresholdDate")
         }
         var notesSource = "notes"
-        if let folder, !folder.isEmpty {
+        if let folder {
+            // Same rule as `recentKeys`: `""` and `"///"` name no folder and are refused, never
+            // silently widened to the whole account.
+            try requireNonEmptyFolderName(folder, "--folder")
             let comps = Self.splitFolderPath(folder)
             let (expr, fargs) = Self.folderRefExpr(comps, startIndex: args.count + 1)
             notesSource = "notes of \(expr)"
@@ -709,11 +724,12 @@ struct NotesScript {
     func recentKeys(account: String?, folder: String?) throws -> [RecentKey] {
         var args: [String] = []
         var notesSource = "note"
-        // NOT `if let folder, !folder.isEmpty`: that shape — which `searchNotes` and `listNotes`
-        // still use — silently WIDENS `--folder ""` to the whole account, while `--folder "///"`
-        // (which also names no component) is refused. A caller interpolating an unset variable
-        // then reads the entire account instead of an error, the wrong failure direction for a
-        // command whose job is to bound what reaches an agent. Both spellings are refused here.
+        // NOT `if let folder, !folder.isEmpty`: that shape silently WIDENS `--folder ""` to the
+        // whole account, while `--folder "///"` (which also names no component) is refused. A
+        // caller interpolating an unset variable then reads the entire account instead of an
+        // error, the wrong failure direction for a command whose job is to bound what reaches an
+        // agent. Both spellings are refused here, and `searchNotes` / `listNotes` follow the same
+        // rule.
         if let folder {
             // `splitFolderPath` drops empty components, so "" and "///" alike yield NO
             // components, and `folderRefExpr` would return an empty expression — emitting a
@@ -781,7 +797,9 @@ struct NotesScript {
         var args: [String] = []
         var dateSetup = ""
         var baseSource = "notes"
-        if let folder, !folder.isEmpty {
+        if let folder {
+            // Same rule as `recentKeys`: `""` and `"///"` are refused, not widened.
+            try requireNonEmptyFolderName(folder, "--folder")
             let comps = Self.splitFolderPath(folder)
             let (expr, fargs) = Self.folderRefExpr(comps, startIndex: args.count + 1)
             baseSource = "notes of \(expr)"

@@ -29,6 +29,31 @@ struct RawFinalLeafSymlinkGuardTests {
         #expect(rawFinalLeafPath(raw) == expected)
     }
 
+    @Test("another user's `~user` write destination is refused before expansion; the operator's own resolves like `~/`")
+    func refusesAForeignTildeUserDestination() throws {
+        let otherAccount = NSUserName() == "root" ? "daemon" : "root"
+        for spelling in ["~apple-cli-test-nosuchuser/out.bin", "~\(otherAccount)/out.bin", "~\u{0301}/out.bin"] {
+            let confine = #expect(throws: AppleError.self, "\(spelling)") {
+                try confineWriteDestination(spelling, action: "write", allowOutsideHome: true)
+            }
+            #expect(confine?.exitCode == 77)
+            let leaf = #expect(throws: AppleError.self, "\(spelling)") {
+                try refuseFinalLeafSymlink(spelling, action: "write")
+            }
+            #expect(leaf?.exitCode == 77)
+            // The raw-leaf reducer never expands a foreign spelling (scalar check: the
+            // combining-mark spelling is one grapheme, so `hasPrefix("~")` would be false).
+            #expect(rawFinalLeafPath(spelling).unicodeScalars.first == "~")
+        }
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let raw = "~/apple-cli-test-placeholder/leaf"
+        let own = "~" + NSUserName() + "/apple-cli-test-placeholder/leaf"
+        #expect(try confineWriteDestination(own, action: "write").path
+                == confineWriteDestination(raw, action: "write").path)
+        #expect(rawFinalLeafPath(own) == rawFinalLeafPath(raw))
+        #expect(rawFinalLeafPath(own).hasPrefix(home))
+    }
+
     @Test func refusesExistingAndDanglingSymlinks() throws {
         let root = try scratch.directory()
         let target = root.appendingPathComponent("target.txt")

@@ -99,6 +99,30 @@ struct AttachmentSourceTests {
     /// promotion the Messages copy asked `URL.isRegularFile` about the LINK, which answers false,
     /// so a symlink to an ordinary file was refused as "not a regular file" while four documents
     /// promised it was sent.
+    @Test("another user's `~user` spelling is refused before expansion; the operator's own is accepted")
+    func refusesAForeignTildeUserSpelling() throws {
+        // Foundation expands an unknown `~user` differently by macOS release (macOS 15 substitutes
+        // the process home), so the resolver decides the spelling itself. The combining mark after
+        // the tilde is one grapheme to Swift but still a tilde to Foundation.
+        // A KNOWN other account, never the one the suite happens to run as (`~root` IS the own
+        // home under `sudo swift test`, and the assertion would flip).
+        let otherAccount = NSUserName() == "root" ? "daemon" : "root"
+        for spelling in ["~apple-cli-test-nosuchuser/x.pdf", "~\(otherAccount)/x.pdf", "~\u{0301}/x.pdf",
+                         "~" + NSUserName() + "-apple-cli-test/x.pdf"] {
+            let error = #expect(throws: AppleError.self, "\(spelling)") {
+                try AttachmentSource.resolve(spelling)
+            }
+            #expect(error?.exitCode == 64, "\(spelling) must be a validation refusal, not a lookup")
+        }
+        // The operator's own `~name/…` is the same path as `~/…`: both reach the not-found
+        // branch for a file that does not exist, with the same exit code.
+        let leaf = "apple-cli-test-nonexistent-attachment.pdf"
+        let own = #expect(throws: AppleError.self) { try AttachmentSource.resolve("~" + NSUserName() + "/" + leaf) }
+        let bare = #expect(throws: AppleError.self) { try AttachmentSource.resolve("~/" + leaf) }
+        #expect(own?.exitCode == 65)
+        #expect(bare?.exitCode == 65)
+    }
+
     @Test func resolvesAFinalComponentSymlinkToItsTarget() throws {
         let dir = try scratch.directory()
         let target = dir.appendingPathComponent("apple-cli-test-target.txt")

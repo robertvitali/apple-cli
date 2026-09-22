@@ -42,7 +42,10 @@ public func rawFinalLeafPath(_ raw: String) -> String {
     // Keep this expansion identical to `confineWriteDestination`; the guard and eventual write
     // must address the same tilde-spelled path. ASCII slash/dot suffixes that do not match
     // literally fail toward non-reduction.
-    var path = (raw as NSString).expandingTildeInPath
+    // A foreign `~user` spelling is never expanded here (Foundation would resolve a KNOWN
+    // user's home): `confineWriteDestination` refuses it first, and a raw lstat of the literal
+    // spelling is harmless.
+    var path = TildeSpelling.ownHome(raw).map { ($0 as NSString).expandingTildeInPath } ?? raw
     while true {
         let before = path
         while path.count > 1 && path.hasSuffix("/") {
@@ -100,7 +103,10 @@ public func refuseRawFinalLeafSymlink(_ raw: String, action: String) throws {
 /// makes there. `refuseRawFinalLeafSymlink` remains for callers that already hold the exact
 /// spelling a later write or AppleScript receives.
 public func refuseFinalLeafSymlink(_ raw: String, action: String) throws {
-    let expanded = (raw as NSString).expandingTildeInPath
+    guard let spelled = TildeSpelling.ownHome(raw) else {
+        throw AppleError.safetyViolation("cannot \(action) " + TildeSpelling.refusalMessage(raw))
+    }
+    let expanded = (spelled as NSString).expandingTildeInPath
     let destination = URL(fileURLWithPath: expanded)
     if FileManager.default.fileExists(atPath: destination.path) {
         try refuseRawFinalLeafSymlink(destination.path, action: action)
@@ -135,7 +141,13 @@ public func confineWriteDestination(_ raw: String, action: String,
         throw AppleError.safetyViolation(
             "cannot \(action) a path containing a control character (U+\(String(format: "%04X", bad.value))) — refusing.")
     }
-    let expanded = (raw as NSString).expandingTildeInPath
+    // Refuse another user's `~user` spelling before expansion (see TildeSpelling): on macOS 15
+    // Foundation would silently rewrite an unknown user to the process home, turning a path the
+    // operator did not spell into an accepted, in-home destination.
+    guard let spelled = TildeSpelling.ownHome(raw) else {
+        throw AppleError.safetyViolation("cannot \(action) " + TildeSpelling.refusalMessage(raw))
+    }
+    let expanded = (spelled as NSString).expandingTildeInPath
     let resolved = URL(fileURLWithPath: expanded).resolvingSymlinksInPath()
     let home = FileManager.default.homeDirectoryForCurrentUser.resolvingSymlinksInPath().path
     let path = resolved.path

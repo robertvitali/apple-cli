@@ -258,6 +258,36 @@ struct WriteDestinationConfinementTests {
         }
     }
 
+    @Test("a foreign ~user destination is never expanded before confinement sees it")
+    func attachmentSaveRefusesAForeignTildeUserDestination() throws {
+        // The two destination helpers used to expand the tilde themselves, so a `--dir ~user/…`
+        // reached `confineWriteDestination` as an already-substituted absolute path — on
+        // macOS 15 the process home for an unknown user — and the shared refusal never fired.
+        // Both now leave a foreign spelling alone; the refusal comes from confinement (77).
+        let otherAccount = NSUserName() == "root" ? "daemon" : "root"
+        for spelling in ["~\(otherAccount)/apple-cli-test", "~apple-cli-test-nosuchuser/out",
+                         "~\u{0301}/apple-cli-test"] {
+            let lexical = AttachmentsSave.lexicalDestinationPath(spelling)
+            let normalized = AttachmentsSave.normalizeDestinationPath(spelling)
+            #expect(lexical.unicodeScalars.first == "~", "lexical kept the tilde: \(spelling)")
+            #expect(normalized.unicodeScalars.contains("~"), "normalize kept the tilde: \(spelling)")
+            for allowOutsideHome in [false, true] {
+                let error = try #require(throws: AppleError.self,
+                                         "\(spelling) allowOutsideHome=\(allowOutsideHome)") {
+                    try confineWriteDestination(lexical, action: "save attachments",
+                                                allowOutsideHome: allowOutsideHome)
+                }
+                #expect(error.exitCode == AppleExit.permissionDenied)
+                #expect(error.type == AppleErrorType.safetyViolation)
+            }
+        }
+        // The operator's own account name and the bare `~` still expand to the home.
+        let home = FileManager.default.homeDirectoryForCurrentUser.path
+        let own = AttachmentsSave.lexicalDestinationPath("~\(NSUserName())/apple-cli-test")
+        #expect(own == AttachmentsSave.lexicalDestinationPath("~/apple-cli-test"))
+        #expect(own.hasPrefix(home))
+    }
+
     @Test func attachmentSaveRefusesReparentedDirAndOutBeforeWrite() throws {
         let root = try scratch.directory()
         let expected = root.appendingPathComponent("expected", isDirectory: true)

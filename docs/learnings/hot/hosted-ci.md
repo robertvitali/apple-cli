@@ -72,20 +72,18 @@ red step had been unexercised since the last hosted run on 2026-09-02; the local
    failure on unchanged code is a timing margin: replace the stopwatch with the event order
    it was standing in for.
 
-**Follow-up — the other tilde-expansion sites still hand `~user` spellings to Foundation** and
-therefore inherit the macOS 15 substitution. Ranked by consequence:
-
-1. `Sources/MailKit/Commands/WriteComposeCommands.swift` (`--attach` path resolution): on
-   macOS 15 a `~user/report.pdf` spelling reads `$HOME/report.pdf` and attaches a file the
-   operator did not name to OUTBOUND mail. Outward-facing, so first.
-2. `Sources/AppleKit/PathConfinement.swift` (`confineWriteDestination`, `refuseFinalLeafSymlink`
-   and the sensitive-dir check): a wrong destination inside the home, not a confinement bypass
-   (the blocklist still sees the substituted path).
-3. `Sources/MailKit/Commands/WriteManageCommands.swift`, `Sources/MessagesKit/ChatDB.swift`,
-   `Sources/AppleKit/RateLimiter.swift` (env-supplied paths; lowest).
-
-Land them as ONE shared `AppleKit` helper, scalar-wise from the start, with tests — five copies of
-a security predicate is how they drift.
+**Follow-up — the tilde-expansion sites.** Landed 2026-09-22 as ONE shared helper,
+`AppleKit.TildeSpelling.ownHome`, applied by the attachment resolver (`AttachmentSource.resolve`,
+which Mail `--attach` and Messages `--file` share) and by `PathConfinement`
+(`confineWriteDestination`, `refuseFinalLeafSymlink`, `rawFinalLeafPath`); the Notes save-path
+guard delegates to it. Mail's `save-attachments` destination helpers
+(`WriteManageCommands.swift`) expand through the same policy so a foreign spelling reaches
+confinement unexpanded and is refused there. The complete list of remaining raw
+`expandingTildeInPath` calls: `Sources/NotesKit/AttachmentFS.swift` `resolvedPath` (internal;
+every caller has already passed the guard or supplies an allowed-root constant), and the two
+lowest-consequence sites that take no operator argument — `Sources/MessagesKit/ChatDB.swift`
+(store-sourced existence probe) and `Sources/AppleKit/RateLimiter.swift` (env-supplied state
+paths).
 
 **Lessons.**
 

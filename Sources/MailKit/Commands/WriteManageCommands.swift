@@ -764,7 +764,16 @@ struct AttachmentsSave: ParsableCommand {
     }
 
     static func normalizeDestinationPath(_ path: String) -> String {
-        URL(fileURLWithPath: (path as NSString).expandingTildeInPath).standardizedFileURL.path
+        URL(fileURLWithPath: Self.ownHomeExpanded(path)).standardizedFileURL.path
+    }
+
+    /// Tilde expansion under the shared policy: the operator's own home expands, any other
+    /// `~user` spelling is left UNEXPANDED so `confineWriteDestination` (which runs on every
+    /// destination before a write) sees and refuses it. Expanding here first would hand
+    /// confinement an already-substituted absolute path — on macOS 15 the process home for an
+    /// unknown user — and the refusal would never fire.
+    static func ownHomeExpanded(_ path: String) -> String {
+        TildeSpelling.ownHome(path).map { ($0 as NSString).expandingTildeInPath } ?? path
     }
 
     /// Preserve an operator destination's unresolved spelling for the leaf-symlink check, but
@@ -772,7 +781,7 @@ struct AttachmentsSave: ParsableCommand {
     /// Do not standardize or resolve this path: either would erase an existing symlink before the
     /// check that is specifically meant to detect it.
     static func lexicalDestinationPath(_ path: String) -> String {
-        var raw = (path as NSString).expandingTildeInPath
+        var raw = Self.ownHomeExpanded(path)
         while raw.count > 1 {
             if raw.hasSuffix("/") {
                 raw.removeLast()

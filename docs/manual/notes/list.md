@@ -8,6 +8,10 @@ List note titles in an account/folder (supports --modified-since, --limit).
 apple notes list [flags]
 ```
 
+## Description
+
+Lists note titles across the account, or within one folder with `--folder`. `--folder` must name at least one path component: `""` and separators-only values such as `"///"` are refused as a `validation_error` (exit 64) rather than silently widening the listing to the whole account. Omit `--folder` to list every folder.
+
 ## Options
 
 - `--account` `<account>`
@@ -33,6 +37,24 @@ apple notes list [flags]
   <br>Emit human-readable text instead of the default JSON output.
 - `--version`
   <br>Show the version.
+
+## Examples
+
+List every note title
+
+```console
+apple notes list
+```
+
+List one folder, at most 20 titles
+
+```console
+apple notes list --folder 'Projects' --limit 20
+```
+
+## Notes
+
+Nested folders are addressed with `/` between components. Titles come back in the order Notes.app returns them, not sorted by date; use `apple notes recent` for newest-first.
 
 ## Output
 

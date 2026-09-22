@@ -563,7 +563,34 @@ struct RecentCmd: ParsableCommand {
             // placeholder rather than a fact about the note.
             let rankingDate = Dictionary(winners.map { ($0.id, $0.modified) },
                                          uniquingKeysWith: { first, _ in first })
-            let notes = try script.recentDetails(ids: winners.map(\.id), account: account)
+            let details = try script.recentDetails(ids: winners.map(\.id), account: account)
+            // Pass 2 is asked for the winners and nothing else, so a row for an id that was not
+            // requested, an empty id, or the same id twice is a framing violation (a separator
+            // inside a note's fields, or a store answering a different question). Capping such
+            // a reply would let a stray row take a missing winner's slot, or drop a real one
+            // while `limit_reached` still says nothing was cut — so it fails loudly instead.
+            // Known residual: `parseSummaries` is tolerant BEFORE this runs (it skips a row with
+            // a blank title and keeps the first of a repeated id), so a malformed row that also
+            // lacks a title vanishes and reads as a tolerated partial reply. That is the safe
+            // direction — fewer rows, never a stray one — and detecting every framing fault is
+            // not this check's job; keeping a wrong note out of the ranked list is.
+            var seen = Set<String>()
+            for hit in details {
+                let fault: String?
+                if hit.id.isEmpty { fault = "a row with no id" }
+                else if rank[hit.id] == nil { fault = "a row for a note that was not requested" }
+                else if !seen.insert(hit.id).inserted { fault = "the same note twice" }
+                else { fault = nil }
+                if let fault {
+                    // Counts only: no id, title or folder leaves the process in an error message.
+                    throw AppleError.upstream(
+                        "Notes.app returned \(fault) in the second read (\(details.count) rows for "
+                        + "\(winners.count) requested ids); the store's reply could not be framed")
+                }
+            }
+            // `count <= applied_limit` follows: every row is one requested winner, and there
+            // are at most `effective` of those.
+            let notes = details
                 .map { hit -> NoteSummary in
                     guard let known = rankingDate[hit.id], let ranked = known else { return hit }
                     return NoteSummary(id: hit.id, title: hit.title, content: hit.content,

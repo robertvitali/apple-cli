@@ -8,6 +8,10 @@ Search notes by title (or body with --content); returns id/title/folder.
 apple notes search <query> [flags]
 ```
 
+## Description
+
+Searches note titles, or note bodies instead of titles with `--content`, across the account or within one folder with `--folder`. `--folder` must name at least one path component: `""` and separators-only values such as `"///"` are refused as a `validation_error` (exit 64) rather than silently widening the search to the whole account. Omit `--folder` to search every folder.
+
 ## Options
 
 - `<query>`
@@ -39,6 +43,24 @@ apple notes search <query> [flags]
   <br>Emit human-readable text instead of the default JSON output.
 - `--version`
   <br>Show the version.
+
+## Examples
+
+Search titles across every folder
+
+```console
+apple notes search "budget"
+```
+
+Search bodies instead of titles, inside one folder
+
+```console
+apple notes search "budget" --content --folder 'Projects/Drafts'
+```
+
+## Notes
+
+Nested folders are addressed with `/` between components.
 
 ## Output
 

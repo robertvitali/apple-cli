@@ -83,10 +83,17 @@ public enum AttachmentSource {
     ///     of those bytes passes every check as one string and re-splits in-script as TWO,
     ///     the second never vetted. The same rule also covers the NUL that would truncate a path
     ///     between this `stat` and the `osascript` argv that carries it.
-    ///  2. missing / not a regular file → `not_found` (65).
-    ///  3. over `maxBytes` → `validation_error` (64).
-    ///  4. executable/script extension → `validation_error` (64).
-    ///  5. under a credential/config directory → `safety_violation` (77), checked against BOTH
+    ///  2. another user's `~user` spelling → `validation_error` (64), decided BEFORE any tilde
+    ///     expansion (`TildeSpelling.ownHome`): Foundation's expansion of an unknown user differs
+    ///     by macOS release, and a known user's home is never a source this tool means to read.
+    ///     It is 64 and not 77 because the spelling names no file yet: nothing was read, and
+    ///     the sensitive-directory check (class 6) still runs on whatever `~/…` or absolute
+    ///     path the caller resubmits. Class 1 is 77 because a control character in a path is a
+    ///     spoofing attempt on the operator, not a spelling to correct.
+    ///  3. missing / not a regular file → `not_found` (65).
+    ///  4. over `maxBytes` → `validation_error` (64).
+    ///  5. executable/script extension → `validation_error` (64).
+    ///  6. under a credential/config directory → `safety_violation` (77), checked against BOTH
     ///     the resolved path (defeats a symlink INTO a sensitive dir) AND the tilde-expanded
     ///     literal (defeats a sensitive dir that is ITSELF a symlink, e.g. a stow-managed
     ///     `~/.ssh` -> `~/dotfiles/ssh`).
@@ -102,7 +109,13 @@ public enum AttachmentSource {
             throw AppleError.safetyViolation(
                 "cannot attach a path containing a control character (U+\(String(format: "%04X", bad.value))) — refusing.")
         }
-        let expanded = (raw as NSString).expandingTildeInPath
+        // Refuse another user's `~user` spelling BEFORE expansion: Foundation's expansion of an
+        // unknown user differs by macOS release (macOS 15 substitutes the process home), so the
+        // file that would be READ and sent is not the one the operator spelled. See TildeSpelling.
+        guard let spelled = TildeSpelling.ownHome(raw) else {
+            throw AppleError.validation("cannot attach " + TildeSpelling.refusalMessage(raw))
+        }
+        let expanded = (spelled as NSString).expandingTildeInPath
         let path = URL(fileURLWithPath: expanded).resolvingSymlinksInPath().path
         var isDir: ObjCBool = false
         guard FileManager.default.fileExists(atPath: path, isDirectory: &isDir), !isDir.boolValue else {

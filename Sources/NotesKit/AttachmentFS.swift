@@ -1,4 +1,5 @@
 import Foundation
+import AppleKit
 
 /// Filesystem guards for attachment save/fetch, ported from `apple-notes-mcp@2.5.12`
 /// `attachmentFs.ts`. The path-traversal guard (`assertSafeSavePath`) is the security-critical
@@ -123,18 +124,7 @@ enum AttachmentFS {
     /// it and turns the pair into one grapheme cluster that `hasPrefix("~")` would not match.
     /// (The same hazard class as the `/` split in `resolvedPath`.)
     static func ownHomeSpelling(_ trimmed: String) -> String? {
-        let scalars = trimmed.unicodeScalars
-        guard scalars.first == "~" else { return trimmed }
-        let rest = scalars.dropFirst()
-        if rest.isEmpty || rest.first == "/" { return trimmed }
-        let name = Array(NSUserName().unicodeScalars)
-        guard !name.isEmpty, rest.count >= name.count, Array(rest.prefix(name.count)) == name else { return nil }
-        let tail = rest.dropFirst(name.count)
-        guard tail.isEmpty || tail.first == "/" else { return nil }
-        var own = String.UnicodeScalarView()
-        own.append("~")
-        own.append(contentsOf: tail)
-        return String(own)
+        TildeSpelling.ownHome(trimmed)
     }
 
     /// The spelling downstream RAW-path checks must inspect: the operator's input with its

@@ -346,8 +346,8 @@ The MCP emits camelCase keys; apple-cli emits snake_case per `docs/DESIGN.md` ("
   no locale-dependent date string is ever parsed. `--limit` is `exclusiveMinimum: 0`, matching
   search and list; `--folder` must name at least one component after `splitFolderPath`, so BOTH
   `""` and `"///"` are refused as `validation_error` rather than the empty string silently
-  widening the read to the whole account (the `!folder.isEmpty` shape `search`/`list` still use —
-  aligning them is a follow-up on main).
+  widening the read to the whole account. `search` and `list` apply the same rule since
+  2026-09-22; before that an empty `--folder` on those two silently read the whole account.
 - **`get-checklist` / `get-metadata` are SQLite-only** — they do NOT require the MCP's AppleScript existence-guard, so they resolve notes AppleScript can't (trashed, or when Notes.app automation is slow/unavailable). Verified live: the MCP oracle failed `get-checklist-state` on a real note whose checklist apple-cli read correctly.
 - **`sync_warning`** — a structured field on `search`/`list`/`folders` (the MCP's `withSyncAwareness` warning was text-only).
 - **Write model (v2 — behaves like the MCP; see `docs/write-model-v2.md`)**: every write
