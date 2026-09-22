@@ -32,13 +32,13 @@ so until evidence is appended.
 |---|---|---|---|
 | 1 Implementation in reviewed, test-green commits | pre-visibility | PENDING (not evidenced here) | — |
 | 2 Production-coverage baseline per target | pre-visibility | PENDING (not evidenced here) | — |
-| 3 Full local canonical suite + independent reviews on the exact SHA | pre-visibility | Evidenced for four commits: `08cc984`, the visibility-step commit `bdbbe9d`, and the two hosted-CI fixes `7b46b8d` and `0ff7442` (Section 3; the earlier same-day pushes `053b56e` and `a52c44e` carry no suite record here); each also carried codex plus code, security and critic review provenance in its trailers | Section 3 |
+| 3 Full local canonical suite + independent reviews on the exact SHA | pre-visibility | Evidenced for five commits: `08cc984`, the visibility-step commit `bdbbe9d`, the two hosted-CI fixes `7b46b8d` and `0ff7442`, and the Round 2 record `3e46e82` (Section 3; the earlier same-day pushes `053b56e` and `a52c44e` carry no suite record here); each also carried codex plus code, security and critic review provenance in its trailers | Section 3 |
 | 4 External-Action allowlist committed and validated | pre-visibility | Repository-level allowlist configured 2026-09-21 (see the Actions-settings row); the committed/validated form of the design is advanced past for visibility only — PENDING, owner: controller | — |
 | 5 Workflow inventory: publishers converted or removed | pre-visibility | Partially evidenced: `.github/workflows/` holds `ci.yml`, `docs.yml`, `pr-metadata.yml`; no `release.yml`; all three declare `contents: read` only and none carries `workflow_dispatch`, `pages`, `id-token`, or an `environment`; no repository secrets or variables (read back 2026-09-20). Static scan of step 17 PENDING | this row (read back 2026-09-20) |
 | 7 Squash-only merge with PR title/body as squash commit | pre-visibility | PENDING (not evidenced here) | — |
 | 15–16 Read-only release/site rehearsal tooling exercised locally | pre-visibility (local half) | PENDING (not evidenced here) | — |
 | 17 Static workflow scan + settings readbacks | pre-visibility (local half) | PENDING (not evidenced here) | — |
-| Fresh pre-publication privacy audit | pre-visibility | **Round 1 complete. Its zero-findings condition was NOT met: seven findings (R1-F1 to R1-F7); the operator dispositioned F1–F5 (D17–D20), the F6 fixture fix and the F7 log deletion (D21) were pre-flip blockers, both completed 2026-09-21, and the flip was advanced on that basis. This round does not satisfy design §18 phase 1's zero-findings gate; the end-of-roadmap round must.** Owner: controller for the record, operator for the dispositions. Round 2 (end-of-roadmap, 2026-09-22): **zero NEW findings; the gate is NOT yet closed — R1-F1 recurs in the unchanged draft asset as a deferred finding under OPEN D18 (rebuild, re-cut, re-scan), while the D20 identity class recurs as accepted. Closes on the appended scan of the rebuilt asset.** | Section 2 |
+| Fresh pre-publication privacy audit | pre-visibility | **Round 1 complete. Its zero-findings condition was NOT met: seven findings (R1-F1 to R1-F7); the operator dispositioned F1–F5 (D17–D20), the F6 fixture fix and the F7 log deletion (D21) were pre-flip blockers, both completed 2026-09-21, and the flip was advanced on that basis. This round does not satisfy design §18 phase 1's zero-findings gate; the end-of-roadmap round must.** Owner: controller for the record, operator for the dispositions. Round 2 (end-of-roadmap, 2026-09-22): **zero NEW findings; the gate is NOT yet closed — R1-F1 recurs in the unchanged draft asset as a deferred finding under OPEN D18 (rebuild, re-cut, re-scan), while the D20 identity class recurs as accepted. Closes on the appended scan of the rebuilt asset.** Rebuild rehearsal 2026-09-22 (D23/D24): the path-free build and packaging PASS every gate on the operator's macOS 27 host — zero R1-F1 to R1-F3 carriers in the rehearsal binary and archive (Section 3a); D18 steps (2) and (4) are thereby demonstrated on `3e46e82`, to be re-established on the exact release commit and its shipped artifact. **Still not closed:** the gate names the PUBLISHED rebuilt asset, and no publisher exists yet (D18 steps 4a/5); the draft `v26.0.0` asset is unchanged. | Sections 2, 3a |
 | Design §18/§3, `AGENTS.md` and ledger-preamble amendment recording the advanced visibility step (D15 precedent) | pre-visibility | Landed in the same commit as this revision (design §18 dated amendment, `AGENTS.md` privacy paragraph, ledger preamble, D2 freeze amendment) | this commit |
 | 4 (repository-level part) Actions settings | pre-visibility | Read back 2026-09-20: `default_workflow_permissions` = read, `can_approve_pull_request_reviews` = false, `allowed_actions` = all. Configured 2026-09-21 and read back: `allowed_actions` = `selected`, GitHub-owned actions allowed, one third-party pattern with a wildcard ref (the SHA pins live in the workflow files; `sha_pinning_required` is false), covering the five actions the workflows use; the unused wiki flag disabled the same day; fork-PR contributor approval cannot be read while private — read back immediately after the flip, before any outside PR is allowed to run | this row |
 | Surfaces that become public on the flip and were not in round 1's scan | pre-visibility | Complete. Scanned after round 1 (see Round 1 addendum): PR timelines, issue events, commit comments clean apart from the known R1-F4 identity class; all 305 hosted workflow runs' logs scanned value-free — no personal data, but 18 runs' logs carry pre-redaction tracker identifiers inside historical branch names (R1-F7). Those 18 runs' logs were deleted under D21 on 2026-09-21 (read back absent). Projects unreadable with the current token | Round 1 addendum |
@@ -48,7 +48,7 @@ so until evidence is appended.
 | 6 One successful hosted run of every push-triggered mandatory job | post-visibility | Satisfied for the push-triggered jobs 2026-09-21 by the `0ff7442` CI and Docs runs (Section 4); the PR-triggered job waits for step 9 | Section 4 |
 | 8–14, hosted halves of 15–17, 20 | post-visibility | PENDING — appended with run-ID commitments as each runs; owner: controller | — |
 | 18 Restored `dependabot.yml` state | post-visibility | PENDING — owner: controller | — |
-| D18 §4.1 macOS 27 adoption-matrix amendment | pre-release | PENDING — owner: controller, gated by D18 | — |
+| D18 §4.1 macOS 27 adoption-matrix amendment | pre-release | **Applied 2026-09-22** (D25 accepted the local run plus the rebuild rehearsal as the §12 alternative; design §4.1 and §12 amended, `[Unreleased]` baseline note added, in the commit that records this row) | Section 3 |
 | External-state readbacks (controller, via the API) and operator attestations, each named as such | all phases | Round 1 carries two controller readbacks: the hosted-run failure shape (five runs, zero steps, billing annotation; no run-ID commitments taken) and the Release-to-draft conversion (draft=true, prerelease=false, 2 assets, tag unchanged, 2026-09-20). Operator attestations so far: none required by this round | Section 2 |
 
 ## 2. Privacy audit rounds
@@ -331,10 +331,21 @@ draft Release stays a draft until then. Everything else in scope is clean. This 
 extend to surfaces that did not exist at run time (later commits carry their own pre-push
 scans, recorded in Section 3).
 
+**Rehearsal scan appended 2026-09-22 (D23/D24).** The D18 step (4) rehearsal rebuilt the binary
+path-free on the operator's macOS 27 host and scanned the rehearsal binary and archive under the
+Round 1/2 gated classes (home-directory path prefixes, the denylist terms, the runtime identity
+terms) plus the debug-map and archive-header checks: zero hits in every gated class, zero
+`N_OSO` entries, one archive member with uid 0, gid 0 and empty owner names, no AppleDouble
+member (details in Section 3a). This demonstrates step (4)'s recipe on `3e46e82` — it removes
+every R1-F1 to R1-F3 carrier there, to be re-established on the shipped artifact — but the
+zero-findings gate still names the published asset: it closes when a publisher
+exists (D18 step 4a), the release is cut through it (step 5), and that published asset is scanned
+under the same classes with the same result. The draft `v26.0.0` Release is unchanged.
+
 ## 3. Local verification for the visibility-step commit and its successors
 
-The four commits below each ran the full local canonical suite through the signal-reset launcher
-before their push (two before the visibility change, two after it); the suite that gates a commit
+The five commits below each ran the full local canonical suite through the signal-reset launcher
+before their push (two before the visibility change, three after it); the suite that gates a commit
 necessarily runs before that commit's successor records it here.
 
 - `08cc984` (pushed 2026-09-21, before the flip): swiftly toolchain Swift 6.3.3 — `swift build`
@@ -356,6 +367,62 @@ necessarily runs before that commit's successor records it here.
 - `0ff7442` (macOS-15 Foundation fix, pushed 2026-09-21 16:17Z): one pass, exit 0 end to end —
   swiftly build (`a686569dc36deb28…`) and test 1847/256 (`2082d571d6ed5ba0…`); CLT build
   (`6d07bf426161a025…`); Python 767/767 (`fd156dac3c992bf4…`); bats 452/452 (`820ab4b0defc6883…`).
+- `3e46e82` (Round 2 record, pushed 2026-09-22): run 1 red in the bats tier only — two live-Mail
+  attachment-enrichment cases on a degraded host (load above 9, Mail's LaunchServices record
+  absent); swiftly build (`038b04726214e542…`) and test 1968/261 (`593663fc0f0fc260…`); CLT build
+  (`c26ef3eac0d03ddb…`); Python 767/767 (`c4279016495e14b6…`); bats 450/452 (`dfc1aef66bf6a710…`).
+  After the container runtime was stopped and load fell below 8, one bounded rerun on the same
+  commit passed end to end, exit 0 at 10:02Z: swiftly build (`91df719f6e4c0de1…`) and test
+  1968/261 (`fe9515e9d0e09274…`); CLT build (`21843017eaee8d52…`); Python 767/767
+  (`5fb3af480c5ecb83…`); bats 452/452 (`5272ec826afa6a9b…` — byte-identical TAP output to the
+  `7b46b8d` bats log above: the bats log carries no timestamps, so an identical pass produces an
+  identical file; the four other logs of this run are distinct). Host: macOS 27.0 (26A428) arm64. This
+  is the macOS 27 adoption-matrix run the design §4.1 amendment cites (D25), and it includes the
+  §12 canary `acceptsSymlinkedParentDotDotWhenFoundationSelectsTheLexicalLeaf`, passed.
+
+### 3a. D18 step (4) rebuild rehearsal — 2026-09-22 (D23 grant, D24 exact command)
+
+**What ran.** A one-shot controller ran a frozen invocation on the operator's host against
+`3e46e82` (clean tree asserted before and after): `swift build -c release` with resolution
+disabled (the pinned dependency pre-checked in the local SwiftPM cache), `-Xswiftc -gnone`,
+`-file-prefix-map`/`-ffile-prefix-map` for the repository and scratch prefixes, `-Xlinker
+-oso_prefix` on the scratch prefix, `strip -S` followed by ad-hoc `codesign --force --sign -`
+and `codesign --verify`, then `COPYFILE_DISABLE=1 bsdtar --uid 0 --gid 0 --uname '' --gname ''
+--no-xattrs --no-mac-metadata`. Combined recipe, no ablation: the outcome is not attributed to
+any single flag, and `-gnone` forfeits DWARF (a publisher decision to revisit). The packet
+(README, invocation, controller) was reviewed over six rounds (codex; security reviewer; critic)
+and its digests were frozen before the grant; the controller re-hashed the copy it ran and the
+as-run digests equal the reviewed ones (README `46cf8018ae95eb9a`, invocation
+`aec133cdf3e01715`, controller `793841dde16545c5`). Wall time about two minutes under a
+2400-second bound. PATH was pinned to the system directories for the whole run.
+
+**Toolchain.** Command Line Tools Swift 6.3.2 (swift-driver 1.148.6), ld-1267, bsdtar 3.5.3 /
+libarchive 3.7.4, CPython 3.13.14 for the scanner, macOS 27.0 (26A428) arm64.
+
+**Result — PASS on every gate.** `nm -ap`: 0 `N_OSO` entries (the Round 1 asset had 135).
+`strings -a`: 0 home-directory lines. Raw-byte scan of the binary and of the decompressed archive
+(plus the gzip container's own bytes): 0 hits in every gated class — home-directory prefixes
+(`/Users/`, `/private/tmp/`, `/var/folders/`, `/home/`), the five denylist terms of Rounds 1–2,
+and the runtime identity terms (account short name and gecos words, derived at run time). Both
+scanner processes exited 0. Informational classes, reviewed and expected: 5 `~/` and 1 `$HOME`
+(the product's own credential-directory list and `--allow-outside-home` help text), 1
+`/Volumes/` (same help text); 0 `/tmp/`, `/opt/homebrew/`, `workspace/apple-cli`, `.build/`,
+`/src/`, `/build/`. Archive: exactly one member `apple`, uid 0, gid 0, owner and group names
+empty, no PAX keys, no global PAX header, no AppleDouble member. Zero network fetches (one
+SwiftPM fetch line, satisfied from cache). `apple --version` reports `26.0.0` — the constant is
+frozen by design and untouched by the run; the publisher sets the release number. Binary
+8,804,144 bytes, sha256 `79f5bca6c9a6f545…`; archive 2,417,542 bytes, sha256 `6f13cbdd8fda3b22…`.
+
+**What this does and does not settle.** It demonstrates D18 step (4) on `3e46e82`: this recipe,
+on this toolchain, removes every R1-F1 to R1-F3 carrier, as a verified outcome. It does not
+produce a release: no publisher path exists (step 4a; the design's phase 3 bot publisher is
+unbuilt), so no asset was published and the end-of-roadmap gate above stays open on the published
+asset. **Disposition of the rehearsal artifacts:** the rehearsal binary and archive were never
+published, are not a release input, and are not retained beyond the session scratchpad (the
+0700 packet directory under the session's private temporary root, deleted with the session); the
+two digests above identify that rehearsal artifact only — no reproducible-build claim is made,
+and the publisher builds and scans its own artifact on the exact release commit, re-establishing
+steps (2) and (4) there. Only the value-free record above enters the repository.
 
 ## 4. Post-visibility hosted evidence
 
@@ -400,6 +467,8 @@ the Round 1 denylist salt — whose own SHA-256 commitment is `450869584cbaa726`
 | `098e784` | CI | `7895d4c6b06b1bce` | success (Dependabot PR 6 squash: `setup-uv` 9.0.0 → 10.1.0 with the committed pin policy moved in the same commit; GitHub closed PR 6, and no superseded Dependabot branch remains) |
 | `4f8776a` | Docs | `5a394c4cd1881cd6` | success |
 | `4f8776a` | CI | `6c18c6f8013b63bf` | success (third maintainer follow-up; D22 filed) |
+| `3e46e82` | Docs | `9a72e145e66a6bcd` | success |
+| `3e46e82` | CI | `365d2d84f740993b` | success — all six CI jobs green (Round 2 audit record) |
 
 **Outside pull requests 3–5 (D20), 2026-09-21/22.** Each was squash-merged LOCALLY onto `main`
 (not through the GitHub merge button) so the squash could be reviewed and tested as an ordinary

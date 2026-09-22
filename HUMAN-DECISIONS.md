@@ -60,11 +60,14 @@ findings for its stated scope; the repo stays private until then.
 | D15 | Extend the public-attribution exception to `.github/CODEOWNERS` | **RATIFIED 2026-09-07** | The operator's exact GitHub user may appear in `.github/CODEOWNERS` for every enforcement-control-plane path, as deliberate public attribution alongside LICENSE, README, and git author metadata. Sequence is fixed: the `AGENTS.md` exception extension lands first as its own reviewed commit, the CODEOWNERS commit lands second with its own fresh privacy scan, then GitHub's code-owners errors API confirms it parses. Trade-off recorded per the design: from that step until public launch no release can be cut; the release freeze's urgent-fix clause is satisfiable only by a reviewed, operator-authorized, temporary restoration of a write-capable release workflow, recorded as an explicit exception and removed again afterwards |
 | D16 | Narrow main-only reversal for disposable rehearsal refs | **RATIFIED 2026-09-07** | Three disposable ref classes, and only these, may be created for the publication-automation rehearsals (design §18 steps 8–14, removal at step 18): the uniquely named disposable target ref, the proposal head refs of the validation PRs (which target that ref, never `main`), and the Dependabot-created head refs of step 13; never for feature work; never merged into `main`; deleted after the rehearsal, including on abort; does not reverse the ruling for ordinary work. The `AGENTS.md` reversal commit lands under the private main-only gate when the rehearsal step begins, after an in-session re-confirmation and before the first branch is cut. The later full reversal that activates the `main` ruleset is a SEPARATE future operator instruction and is not granted here |
 | D17 | Early visibility flip to restore hosted Actions; pre-flip privacy audit round 1; disposition of its findings | **ANSWERED 2026-09-20; APPLIED 2026-09-21** (flip 14:31Z; hosted CI and Docs green the same day; end-of-roadmap audit round 2 run 2026-09-22: zero new findings, gate not yet closed — R1-F1 recurs in the unchanged draft asset pending the OPEN D18 rebuild and re-scan) | Operator ordered: fresh audit first, flip on zero findings, end-of-roadmap audit still required. Round 1's zero-findings condition was NOT met: seven findings — five operator-dispositioned (D17–D20), the fixture fix pending, and the hosted-log deletion OPEN in D21 — both closed 2026-09-21 (fixture fix landed, D21 applied); D19 later superseded; for the binary the operator chose rebuild + re-cut (as `v27.0.0`) rather than accept, and, because the design forbids a private publisher and hosted runs are billing-blocked, ordered the `v26.0.0` Release converted to a draft first, the flip second, the re-cut after hosted validation |
-| D18 | macOS 27 adoption release `v27.0.0` | **OPEN** | Operator instruction 2026-09-20: bump to `27.0.0` once all tests pass on macOS 27. Waits on the D17 flip, hosted validation, the design's publisher path, a §4.1 adoption-matrix amendment, and verified removal of every R1-F1 to R1-F3 carrier from the rebuilt binary and archive |
+| D18 | macOS 27 adoption release `v27.0.0` | **OPEN — steps (1) and (3) satisfied 2026-09-22; (2) and (4) demonstrated on `3e46e82` in rehearsal; (4a)/(5) gated on the phase-3 publisher** | Operator instruction 2026-09-20: bump to `27.0.0` once all tests pass on macOS 27. Satisfied: the D17 flip and green hosted runs (1); the §4.1 adoption-matrix amendment and `[Unreleased]` baseline note, this commit (3). Demonstrated on `3e46e82`, to be re-established on the exact release commit and its shipped artifact when the publisher runs: the local canonical suite green on macOS 27 plus the hosted logic gate (2); the path-free rebuild rehearsal PASS on every gate — zero debug-map entries, zero home paths in binary or archive, clean tar headers, zero network fetches (4, D23/D24), with the local run accepted as the §12 hardened alternative (D25). Still waiting: a publisher path (4a, design §18 phase 3, unbuilt) and the release through it (5) |
 | D19 | GitHub still serves pre-rewrite commits by id | **SUPERSEDED 2026-09-21** (ANSWERED 2026-09-20) | Verified: seven pre-rewrite commit ids formerly cited in this file return HTTP 200 from the API and still carry pre-redaction tracker identifiers. Operator reversed the 2026-08-23 no-Support posture: request a purge of unreachable objects and cached views from GitHub Support while the repo is still private; the D17 flip waits on that confirmation. Stale id citations in this file were re-pointed to their rewritten counterparts the same day. Superseded 2026-09-21: request withdrawn by the operator, no purge filed; residual by-id reachability accepted; D9's no-Support posture stands |
 | D20 | Outside contributor's plaintext git identity on open PRs 3–5 | **RATIFIED 2026-09-20; APPLIED 2026-09-22** (PRs 3–5 squash-merged locally as `7fc4a49`, `6f8b852`, `57984cf`; follow-ups `9a86125`, `8e9be32`, `4f8776a`; two further proposals filed as D22) | Accepted as that contributor's own public attribution for now; the PRs were squash-merged with the squash author identity read back first; the reachable `refs/pull/*` copies are outside the D19 purge and remain resolvable after the PRs closed — their retention is GitHub's, not this repository's |
 | D21 | Delete 18 hosted workflow runs' logs that echo pre-redaction tracker identifiers | **APPLIED 2026-09-21** | Post-round scan of all 305 run logs: no personal data; 18 runs' logs contain 16-digit tracker identifiers inside historical branch names. Deleting run logs is destructive and outward-facing, so it waited for the operator's instruction; authorized and executed 2026-09-21 (18 log archives deleted, 18 × 204, read back 18 × 404); removed from D17's blocker list |
 | D22 | Two parity-vs-safety narrowings proposed by the PR 4/5 reviewers: (a) a read-side credential-file denylist for attachments; (b) the Notes search script's outer per-hit handler tolerating only "not found" | **OPEN 2026-09-22** | Both were implemented, reviewed, and then PULLED from the follow-up commit because each drops something the retired oracle permits: (a) narrows Mail's `--attach` surface; (b) turns a per-note read error into a whole-command failure without an enumeration of what a locked note raises. Awaiting the operator's ruling (D12 precedent) |
+| D23 | Grant the D18 step (4) path-free rebuild rehearsal (native build on the operator's host) | **GRANTED 2026-09-22** | Operator chose "grant the rebuild now": controller prepares a frozen invocation + controller packet for review, then runs the build and the asset re-scan. Packet went through six review rounds (codex, security reviewer, critic) before the exact command was put to the operator as D24 |
+| D24 | Run the frozen revision-7 rebuild packet (exact command, digest-pinned) | **GRANTED 2026-09-22; APPLIED 15:44–15:46Z** | Operator confirmed the exact `controller.sh` invocation at the frozen digests (README `46cf8018ae95eb9a`, invocation `aec133cdf3e01715`, controller `793841dde16545c5`); one-shot run-01 returned `REBUILD_EXIT=0 PASS`, as-run digests identical to the reviewed ones. Value-free results are in the readiness evidence §3 |
+| D25 | Does the local macOS 27 canonical run plus the reviewed rebuild satisfy design §12's "separately reviewed, hardened alternative" to a stable hosted macOS 27 image? | **ANSWERED 2026-09-22: accepted** | Operator accepted; design §4.1 and §12 amended in this commit to record the matrix as run and its evidence basis (one operator-owned host; hosted lanes unchanged on `macos-15`). macOS 27 joins macOS 26 as a tested and supported baseline; the technical macOS 14 floor is unchanged |
 
 ---
 
@@ -1107,6 +1110,17 @@ unlocked by this: D18 (`v27.0.0`) and the end-of-roadmap audit remain open.
 ## D18 — macOS 27 adoption release: bump to `v27.0.0` once all tests pass
 
 - **Status:** **OPEN** — instruction received 2026-09-20; execution gated as below.
+  **Update 2026-09-22:** steps (1) and (3) are satisfied — (1) flip and green hosted runs
+  2026-09-21; (3) the §4.1 amendment and the `[Unreleased]` baseline note land in the commit
+  that records this update. Steps (2) and (4) are demonstrated on `3e46e82`, not yet on the
+  release commit their wording names: (2) canonical suite green on macOS 27.0 for `3e46e82`
+  (run 2, 10:02Z) and the hosted logic gate green on the same commit; (4) the path-free
+  rebuild rehearsal (D23 grant, D24 exact command) returned PASS on every gate, recorded
+  value-free in the readiness evidence §3a, and the operator accepted the local run as the §12
+  hardened alternative (D25). Both are re-established on the exact commit the publisher
+  releases and on its shipped artifact. Steps (4a) and (5) remain: no publisher path exists
+  (`release.yml` was removed and the design's phase 3 bot publisher is unbuilt), so `v27.0.0`
+  cannot be cut yet.
 - **Instruction.** "We also need to version bump to 27.0.0 because we are on macOS 27. If all of
   our tests pass we should bump to v27." The host now reports macOS 27.0. Under the
   platform-keyed scheme (AGENTS.md "Versioning + releases"), MAJOR names the newest macOS the
@@ -1312,5 +1326,65 @@ claim is frozen and no longer re-runnable, so a narrowing that lands without a r
 recovered into the record later.
 
 **Blocking?** No. The rest of the follow-ups landed without them.
+
+---
+
+## D23 — Grant the D18 step (4) rebuild rehearsal
+
+- **Status:** **GRANTED 2026-09-22** (answered "grant the rebuild now").
+- **Ask.** D18 step (4) requires the release build and packaging to be shown free of every
+  R1-F1 to R1-F3 carrier as a verified outcome. That needs a native build on the operator's
+  macOS 27 host, which under the standing rules is a fresh, concrete, reviewed grant.
+- **Ruling.** Prepare a frozen invocation and controller packet for the operator's review, then
+  run the path-free build and the asset re-scan. The packet: PATH pinned to system directories,
+  SwiftPM resolution disabled with the pinned dependency pre-checked in the local cache, the
+  build under `-gnone`, source and scratch prefix maps and `-oso_prefix`, `strip -S` then ad-hoc
+  re-signing, `COPYFILE_DISABLE=1 bsdtar` with numeric-zero ownership and empty names, and a
+  scanner whose gated classes are home-directory paths, denylist terms and runtime identity
+  terms; a one-shot controller re-hashes the copy it runs and bounds it with a timeout.
+- **Filed:** 2026-09-22 · **Category:** native run grant (D18 step 4)
+
+**Why it needed you.** Every native build or inspection on the operator's host is a grant.
+
+**Blocking?** D18 step (4) waited on it; nothing else.
+
+---
+
+## D24 — Run the frozen revision-7 packet (exact command)
+
+- **Status:** **GRANTED 2026-09-22; APPLIED** (run-01, 15:44:05Z–15:46:08Z).
+- **What was confirmed.** The exact `controller.sh` invocation at the frozen sha256 prefixes
+  README `46cf8018ae95eb9a`, invocation `aec133cdf3e01715`, controller `793841dde16545c5`, after
+  six review rounds (codex PASS on revisions 6 and 7; security reviewer and critic APPROVE on
+  revision 6, their minors folded into revision 7). The brief stated what a PASS does not
+  settle: steps (4a) and (5), and the §12 call, which became D25.
+- **Outcome.** `REBUILD_EXIT=0 PASS`, controller exit 0; the as-run digests equal the reviewed
+  ones; HEAD and the working tree unchanged. Value-free record in the readiness evidence §3a.
+- **Filed:** 2026-09-22 · **Category:** native run grant (D18 step 4)
+
+**Why it needed you.** The grant in D23 was in principle; the command that runs is the grant.
+
+**Blocking?** No further step waits on it.
+
+---
+
+## D25 — Accept the local macOS 27 run as design §12's hardened alternative
+
+- **Status:** **ANSWERED 2026-09-22: accepted.**
+- **Question.** Design §12 admits macOS 27 only on a stable hosted macOS 27 image or a
+  "separately reviewed, hardened alternative". No hosted `macos-26`/`macos-27` image exists.
+  Available instead: the full local canonical suite green on the operator's macOS 27.0 host
+  for `3e46e82` (logic tier 1968 swift-testing tests in 261 suites, Python automation tier 767
+  tests, local Bats tier 452 cases, both toolchains, the §12 path-confinement canary included;
+  the live tier is not part of that suite) and the D24 rebuild rehearsal PASS.
+- **Ruling.** Accepted. Design §4.1 and §12 are amended to record the matrix as run and its
+  evidence basis; the `[Unreleased]` note states the new baseline and the unchanged macOS 14
+  floor. The trade the operator accepted: the baseline claim rests on one operator-owned host
+  rather than a neutral hosted runner; the amendment says so in its own sentence.
+- **Filed:** 2026-09-22 · **Category:** platform adoption (D18 step 3)
+
+**Why it needed you.** It writes a public support claim on the strength of a host you own.
+
+**Blocking?** No; it unblocked D18 step (3).
 
 ---

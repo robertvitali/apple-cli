@@ -90,8 +90,9 @@ exact blockers named in the §18 amendment, and everything else in this section 
 
 ### 4.1 Platform support
 
-- macOS 26 is the current tested and supported runtime baseline. A newer macOS
-  major joins the supported set only after its adoption matrix passes.
+- macOS 26 is a tested and supported runtime baseline, and macOS 27 joined it on
+  2026-09-22 (amendment below). A newer macOS major joins the supported set only
+  after its adoption matrix passes.
 - `Package.swift` retains macOS 14 as the technical deployment minimum. This
   keeps installation possible on macOS 14 through 25 when the binary and used
   frameworks happen to work there.
@@ -102,10 +103,30 @@ exact blockers named in the §18 amendment, and everything else in this section 
   to encode the support policy.
 - Product `MAJOR` continues to name the newest macOS major validated by that
   release. It does not encode the deployment minimum.
-- `[Unreleased]` release notes must state the macOS 26 support baseline while
-  making clear that the technical macOS 14 deployment floor is unchanged.
+- `[Unreleased]` release notes must state the supported macOS baseline (macOS 26,
+  and macOS 27 from the amendment below) while making clear that the technical
+  macOS 14 deployment floor is unchanged.
 - `AppleVersion.current` remains workflow-owned and stays frozen until an
   explicitly authorized release.
+
+**Amendment 2026-09-22 (HUMAN-DECISIONS D18, D23–D25).** macOS 27 adoption matrix, as run.
+No stable hosted `macos-26` or `macos-27` image exists, so the hosted lanes are unchanged
+(`ubuntu-latest` policy job; `macos-15` build-test and hosted-bats). The macOS 27 claim rests
+on the operator's local macOS 27.0 (26A428) canonical run recorded in the readiness evidence:
+the full local canonical suite green on `3e46e82` — the logic tier (1968 swift-testing tests
+in 261 suites), the Python automation tier (767 tests) and the local Bats tier (452 cases),
+on the Command Line Tools and swiftly toolchains; the live tier is not part of that suite —
+including the Section 12 canary `acceptsSymlinkedParentDotDotWhenFoundationSelectsTheLexicalLeaf`,
+which passed with no changed destination or refusal behavior. The operator accepted that run,
+together with the reviewed path-free rebuild rehearsal of D18 step (4) (recorded in the
+readiness evidence, 2026-09-22), as the "separately reviewed, hardened alternative" Section 12
+names (D25). Result: macOS 27 joins macOS 26 as a tested and supported runtime baseline; product
+`MAJOR` moves to 27 at the next release; `Package.swift`'s macOS 14 technical deployment minimum
+is unchanged; macOS 14 through 25 remain untested and unsupported. The evidence basis is one
+operator-owned host, not a neutral hosted runner; the hosted lanes continue to gate the logic
+tier on `macos-15`. The release itself still waits on the Section 18 phase 3 publisher (D18
+steps 4a and 5), and the canonical suite and the path-free packaging check are re-established
+on the exact release commit and its shipped artifact when that publisher runs.
 
 ### 4.2 Contribution model
 
@@ -866,6 +887,11 @@ Section 21 rests on the operator's local macOS 26 canonical run recorded in the
 readiness evidence. `macos-latest` is not used as a compatibility claim. A
 macOS 27 adoption cannot complete while only preview tooling exists; it
 requires a stable hosted image or a separately reviewed, hardened alternative.
+(Amendment 2026-09-22, D25: the operator accepted the local macOS 27 canonical run plus the
+reviewed rebuild rehearsal as that alternative for macOS 27; see Section 4.1. Until stable
+`macos-26`/`macos-27` hosted images exist, the "macOS 27 adoption" and "`main` at 27.x" rows'
+hosted matrices are likewise the recorded `macos-15` lane plus that local run, and the
+"Artifact runner" column stays "no publish" until the Section 18 phase 3 publisher exists.)
 
 Before accepting macOS 27, first run the full path-confinement test file
 (`Tests/AppleKitTests/PathConfinementTests.swift`) on that stable environment,

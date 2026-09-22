@@ -199,6 +199,15 @@ JSON output are stable per the versioning policy — breaking changes bump
 
 ### Changed
 
+- **macOS 27 is now a tested and supported runtime baseline, alongside macOS 26.** The full
+  local canonical suite (the logic, Python automation and local CLI tiers; the live tier is
+  not part of it) runs green on macOS 27.0, so the
+  next release is numbered `27.0.0` under the platform-keyed scheme (MAJOR names the newest
+  macOS the release is validated against). **The technical deployment floor is unchanged:
+  `Package.swift` still declares macOS 14**, so the binary still installs on macOS 14 through
+  25, which remain untested and unsupported. Nothing about the JSON contract changes;
+  `schema_version` stays 1.
+
 - **Mail's GUI-driven composes are now bounded by a 300-second host deadline.** `mail send
   --gui-send`, the threaded HTML reply, and the native forward drive Mail through an
   AppleScriptObjC script that previously had no wall-clock limit, so a Mail dialog, a lost
