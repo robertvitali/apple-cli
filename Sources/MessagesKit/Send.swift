@@ -187,7 +187,7 @@ public enum Send {
     // MARK: - Request / outcome
 
     /// One fully-resolved send: the handle `resolve` produced, the optional body, the attachments
-    /// (already absolute and validated by `resolveAttachment`), and which service was asked for.
+    /// (already absolute and validated by `AppleKit.AttachmentSource.resolve`), and which service was asked for.
     ///
     /// A struct rather than five positional parameters because this is also the injected
     /// `performSend` seam's argument — a five-tuple of `String, String?, [String], Bool, Service`

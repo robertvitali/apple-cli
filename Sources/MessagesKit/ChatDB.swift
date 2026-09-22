@@ -242,8 +242,10 @@ public struct ChatDB {
     /// message joined to no chat row, a store that cannot classify chats at all, and a chat row
     /// whose style is NULL or a value Apple does not ship today. The filter uses the same rule,
     /// so it KEEPS rows in all four. Two of the four are separately visible to a caller —
-    /// `chat_identifier: null` for the no-chat case, `direct_only_applied: false` for the
-    /// cannot-classify case.
+    /// `chat_identifier: null` for the no-chat case, and `direct_only_applied: false` for the
+    /// cannot-classify case WHEN `--direct-only` was requested (without the flag that key is
+    /// `false` on every store, so a plain read cannot tell the no-chat and cannot-classify
+    /// cases apart).
     public static let groupChatStyle: Int64 = 43
 
     /// Which chat a message belongs to. `identifier`/`guid` are nil when the chat row

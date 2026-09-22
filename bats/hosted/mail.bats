@@ -461,7 +461,7 @@ teardown() {
 }
 
 @test "mail send --attach inside the sandbox with an EMPTY allowlist is refused before the attachment read (exit 77)" {
-  # guardOutbound fires BEFORE resolveAttachmentPath, so the missing file never turns this
+  # guardOutbound fires BEFORE AppleKit.AttachmentSource.resolve, so the missing file never turns this
   # refusal into a not_found.
   run env -u APPLE_TEST_RECIPIENTS APPLE_TEST_MODE=1 "$BIN" mail send --to me@self.test --subject "apple-cli-test x" --body y \
     --attach /tmp/apple-cli-test-nonexistent --mode send --execute --test-mode

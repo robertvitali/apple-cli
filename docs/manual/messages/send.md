@@ -10,7 +10,7 @@ apple messages send <recipient> [flags]
 
 ## Description
 
-Sends when invoked, exactly as the MCP's `tool_send_message` does; `--dry-run` previews. `--service` picks the route for a one-to-one send: `auto` (the default, and the ported behaviour) tries iMessage and falls back to SMS for a phone-shaped recipient, `imessage` uses iMessage only and fails rather than falling back, and `sms` uses the enabled SMS account only. `--file` attaches a file and may be repeated; the message body goes out first, then each file in the order given, all in one Messages automation run. Either a message or a file is required — a send with neither is a `validation_error`.
+Sends when invoked, exactly as the MCP's `tool_send_message` does; `--dry-run` previews. `--service` picks the route for a one-to-one send: `auto` (the default, and the ported behaviour) tries iMessage and falls back to SMS for a phone-shaped recipient, `imessage` uses iMessage only and fails rather than falling back, and `sms` uses the enabled SMS account only. `--file` attaches a file and may be repeated; the message body goes out first, then each file in the order given, all in one Messages automation run. Either a message or a file is required — a send with neither is a `validation_error`, reported after the recipient has been resolved, so an unknown recipient or a sandbox refusal comes first.
 
 ## Options
 
