@@ -49,12 +49,18 @@ MCP servers return so a client can act on the failure instead of parsing prose:
 - `status` — the TCC state: `denied`, `restricted`, or `notDetermined`. Branch on it: retrying
   after a prompt can succeed for `notDetermined`, is pointless for `restricted` (MDM), and needs
   a visit to System Settings for `denied`.
-- `remediation` — user-facing copy describing how to grant access. Absent when there is nothing
-  useful to say — notably the permission-prompt-timeout case, where the dialog is already on
-  screen.
+- `remediation` — user-facing copy describing what to do next: how to grant access on an
+  authorization failure, and, on one non-authorization failure, a CONTRACTED prefix — a
+  `messages send` whose result Messages returned in a shape the CLI cannot read carries
+  `remediation` beginning `delivery unknown:` (the send may have completed; check the
+  conversation before retrying), so a consumer can tell that state from an ordinary upstream
+  error without parsing `message`. Absent when there is nothing useful to say — notably the
+  permission-prompt-timeout case, where the dialog is already on screen.
 
-Both keys are **omitted, not `null`**, on errors with no authorization dimension, so
-`if "status" in error` is a valid test. Only `contacts` populates them today.
+Both keys are **omitted, not `null`**, when there is nothing to say, so `if "status" in error`
+is a valid test for the authorization case. `status` is populated only by authorization
+failures (`contacts` today); `remediation` additionally by the `messages send` unknown-delivery
+case above.
 
 Consumers must ignore unknown keys (tolerant reader); key order is not
 guaranteed (we sort keys for snapshot stability). `schema_version` is an integer

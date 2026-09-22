@@ -352,6 +352,19 @@ private func sendBodyDescription(message: String?, files: [String]) -> String {
 /// this one purpose, and it matters on the no-failed-attachment branch too: "body delivered, then
 /// the SMS account lookup failed" is reachable.
 private func sendFailure(_ outcome: Send.Outcome, message: String?, files: [String]) -> AppleError {
+    if outcome.deliveryUnknown {
+        // Neither result grammar matched, so nothing below (counters, `applied`) was observed.
+        return AppleError(
+            type: AppleErrorType.upstream,
+            message: "send failed (Messages returned a result this version cannot read), so "
+                + "WHAT WAS DELIVERED IS UNKNOWN — the message and any attachments may have "
+                + "been sent in full. Check the conversation before retrying.",
+            exitCode: AppleExit.upstream,
+            // The machine-visible half: `error.type` and the exit code are the same as an
+            // ordinary upstream failure, so a caller that branches on them cannot see this
+            // state; `remediation` (an existing error-envelope key) carries it.
+            remediation: "delivery unknown: verify the conversation in Messages before any retry")
+    }
     // Only meaningful when a body was actually asked for; a file-only send has none to re-send.
     let bodyNote = (message != nil && outcome.bodyDelivered)
         ? " The message body WAS already delivered — omit --message from a retry."

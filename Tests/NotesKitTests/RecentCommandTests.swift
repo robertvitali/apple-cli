@@ -715,6 +715,26 @@ struct RecentCommandTests {
 
     // MARK: --text
 
+    @Test("--text marks a note whose date could not be read instead of printing the placeholder as a date")
+    func textMarksTheUnreadableDate() throws {
+        // Same fixture as `unreadableModifiedRanksLast`: note 1's date is unreadable, note 2's is
+        // real. The JSON carries the documented placeholder for note 1; the human line must not.
+        let runner = twoPassRunner([Fixture(1, ""), Fixture(2, "2026-1-15-9-30-0")])
+        let command = try RecentCmd.parse(["--text"])
+        let (streams, stdout) = notesStreams()
+        try Output.withStreams(streams) {
+            try command.run(scriptFactory: { NotesScript(runner: runner, store: StubNotesStore.quiet()) },
+                            storeFactory: { StubNotesStore.quiet() })
+        }
+        let lines = String(decoding: stdout.data, as: UTF8.self).split(separator: "\n").map(String.init)
+        #expect(lines.count == 2)
+        #expect(lines[0].hasPrefix("2026-"), "the readable date still renders as a stamp")
+        #expect(lines[0].contains("note 2"))
+        #expect(lines[1].hasPrefix("modified: unknown"))
+        #expect(lines[1].contains("note 1"))
+        #expect(!lines[1].contains("2026-"), "no fabricated stamp on the unreadable row")
+    }
+
     @Test("--text renders `modified  title  (folder)`, newest first")
     func textRendering() throws {
         let runner = twoPassRunner(scrambled)

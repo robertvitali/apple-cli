@@ -219,6 +219,19 @@ JSON output are stable per the versioning policy — breaking changes bump
   an existing error class.
 
 ### Fixed
+- **`apple notes recent --text` no longer prints a fresh timestamp for a note whose date
+  could not be read.** Such a note is ranked last on purpose and its JSON `modified` is the
+  documented read-time placeholder; the text line used to render that placeholder as if it
+  were the note's real date. It now reads `modified: unknown` in place of the timestamp. JSON
+  output is unchanged.
+- **`apple messages send` says so when delivery is unknown.** If Messages returns a result the
+  CLI cannot parse, the failure used to be the generic `send failed (Messages returned an
+  error).`, which reads as "nothing was sent" and invites a full retry to a real person. The
+  error now states that what was delivered is unknown and that the message may have gone in
+  full, and asks you to check the conversation before retrying; the error envelope also
+  carries `remediation` (an existing optional key) beginning `delivery unknown:` so a caller
+  that branches on fields rather than prose can tell this state from an ordinary upstream
+  failure. Exit code and error type are unchanged (`upstream_error`, 69).
 - **Attachment paths and write destinations spelled as another user's home (`~user/…`) are
   refused on every macOS release.** `apple mail send --attach`, `apple messages send --file`,
   and every write destination that goes through the shared path confinement (`--out` files,

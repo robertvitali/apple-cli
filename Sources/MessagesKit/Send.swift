@@ -233,15 +233,22 @@ public enum Send {
         /// where everything asked for was delivered.
         public let bodyDelivered: Bool
         public let error: String?
+        /// True when the result line matched NEITHER grammar, so the counters above were never
+        /// observed: `filesSent: 0` / `bodyDelivered: false` then mean "unknown", not "none" —
+        /// the send may have completed in full. The failure message says so, because the
+        /// retry advice built from the counters would otherwise tell a caller to resend
+        /// everything to a real person.
+        public let deliveryUnknown: Bool
 
         public init(ok: Bool, service: String?, filesSent: Int, failedFile: Int?,
-                    bodyDelivered: Bool, error: String?) {
+                    bodyDelivered: Bool, error: String?, deliveryUnknown: Bool = false) {
             self.ok = ok
             self.service = service
             self.filesSent = filesSent
             self.failedFile = failedFile
             self.bodyDelivered = bodyDelivered
             self.error = error
+            self.deliveryUnknown = deliveryUnknown
         }
     }
 
@@ -459,7 +466,8 @@ public enum Send {
                            error: parts[4])
         }
         return Outcome(ok: false, service: nil, filesSent: 0, failedFile: nil,
-                       bodyDelivered: false, error: "Unknown result: \(trimmed)")
+                       bodyDelivered: false, error: "Unknown result: \(trimmed)",
+                       deliveryUnknown: true)
     }
 
     /// Perform the actual send (only reached on `--execute` after the write guard).

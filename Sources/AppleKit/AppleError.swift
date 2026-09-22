@@ -40,7 +40,10 @@ public struct AppleError: Error, CustomReflectable {
     /// of `error.message`, which is not machine-readable, so that branch was unavailable.
     public let status: String?
 
-    /// Human-facing copy telling the user how to grant access, surfaced as `error.remediation`.
+    /// Human-facing copy telling the user what to do next, surfaced as `error.remediation`:
+    /// originally how to grant access; also the CONTRACTED prefix `delivery unknown:` on a
+    /// Messages send whose result could not be parsed (CHANGELOG and manual promise that prefix,
+    /// so a consumer may branch on it — do not reword the prefix).
     /// Same rationale: the oracle returns it as its own key so a client can display it verbatim.
     public let remediation: String?
 

@@ -563,6 +563,10 @@ struct RecentCmd: ParsableCommand {
             // placeholder rather than a fact about the note.
             let rankingDate = Dictionary(winners.map { ($0.id, $0.modified) },
                                          uniquingKeysWith: { first, _ in first })
+            // The ids whose date pass 1 could not read: the JSON carries the documented
+            // read-time placeholder for them (a wire-compatible stand-in); the human line
+            // must not print that placeholder as a fact, so it says so instead.
+            let unreadable = Set(winners.filter { $0.modified == nil }.map(\.id))
             let details = try script.recentDetails(ids: winners.map(\.id), account: account)
             // Pass 2 is asked for the winners and nothing else, so a row for an id that was not
             // requested, an empty id, or the same id twice is a framing violation (a separator
@@ -624,7 +628,10 @@ struct RecentCmd: ParsableCommand {
                         // than absent. The `?? ""` below is for a shape this script cannot
                         // produce, kept because `NoteSummary.folder` is Optional.
                         let container = n.folder.map { "  (\($0))" } ?? ""
-                        return "\(stamp.string(from: n.modified))  \(n.title)\(container)"
+                        // Same width as the ISO-8601 stamp so titles stay aligned.
+                        let when = unreadable.contains(n.id)
+                            ? "modified: unknown   " : stamp.string(from: n.modified)
+                        return "\(when)  \(n.title)\(container)"
                     }.joined(separator: "\n"))
         }
     }

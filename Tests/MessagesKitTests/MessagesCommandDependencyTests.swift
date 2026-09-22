@@ -1766,6 +1766,30 @@ struct MessagesCommandDependencyTests {
         #expect(!result.stdout.contains("osascript"))
     }
 
+    /// An UNPARSEABLE sender result must not be reported as "nothing was sent": the counters
+    /// were never observed, so the envelope says delivery is unknown and withholds the retry
+    /// advice that the parsed-failure branches build from those counters.
+    @Test func sendUnknownResultSaysDeliveryIsUnknown() throws {
+        let command = try Send_.parse(["+1 (212) 555-0100", "--message", "synthetic hello"])
+        let result = try captureCommand {
+            try command.run(dependencies: .fixture(performSend: { _ in
+                Send.interpret("garbled line the grammar does not know")
+            }))
+        }
+        #expect(result.exitCode == AppleExit.upstream)
+        let error = try errorPayload(from: result.stdout)
+        #expect(error["type"] as? String == AppleErrorType.upstream)
+        let message = error["message"] as? String ?? ""
+        #expect(message.contains("WHAT WAS DELIVERED IS UNKNOWN"))
+        #expect(message.contains("Check the conversation before retrying"))
+        #expect(!message.contains("files_sent="), "no counter-derived retry advice")
+        #expect(error["applied"] == nil)
+        #expect((error["remediation"] as? String)?.hasPrefix("delivery unknown:") == true,
+                "the machine-visible signal rides the existing remediation key")
+        // The raw, unparseable sender text stays off the JSON channel, as on every failure path.
+        #expect(!result.stdout.contains("garbled line"))
+    }
+
     @Test func sendNotFoundEmitsNotFoundWithoutInvokingSender() throws {
         let command = try Send_.parse(["Unknown", "--message", "synthetic hello"])
         let result = try captureCommand {

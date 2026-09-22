@@ -64,6 +64,7 @@ findings for its stated scope; the repo stays private until then.
 | D19 | GitHub still serves pre-rewrite commits by id | **SUPERSEDED 2026-09-21** (ANSWERED 2026-09-20) | Verified: seven pre-rewrite commit ids formerly cited in this file return HTTP 200 from the API and still carry pre-redaction tracker identifiers. Operator reversed the 2026-08-23 no-Support posture: request a purge of unreachable objects and cached views from GitHub Support while the repo is still private; the D17 flip waits on that confirmation. Stale id citations in this file were re-pointed to their rewritten counterparts the same day. Superseded 2026-09-21: request withdrawn by the operator, no purge filed; residual by-id reachability accepted; D9's no-Support posture stands |
 | D20 | Outside contributor's plaintext git identity on open PRs 3–5 | **RATIFIED 2026-09-20; APPLIED 2026-09-22** (PRs 3–5 squash-merged locally as `7fc4a49`, `6f8b852`, `57984cf`; follow-ups `9a86125`, `8e9be32`) | Accepted as that contributor's own public attribution for now; the PRs were squash-merged with the squash author identity read back first; the reachable `refs/pull/*` copies are outside the D19 purge and remain resolvable after the PRs closed — their retention is GitHub's, not this repository's |
 | D21 | Delete 18 hosted workflow runs' logs that echo pre-redaction tracker identifiers | **APPLIED 2026-09-21** | Post-round scan of all 305 run logs: no personal data; 18 runs' logs contain 16-digit tracker identifiers inside historical branch names. Deleting run logs is destructive and outward-facing, so it waited for the operator's instruction; authorized and executed 2026-09-21 (18 log archives deleted, 18 × 204, read back 18 × 404); removed from D17's blocker list |
+| D22 | Two parity-vs-safety narrowings proposed by the PR 4/5 reviewers: (a) a read-side credential-file denylist for attachments; (b) the Notes search script's outer per-hit handler tolerating only "not found" | **OPEN 2026-09-22** | Both were implemented, reviewed, and then PULLED from the follow-up commit because each drops something the retired oracle permits: (a) narrows Mail's `--attach` surface; (b) turns a per-note read error into a whole-command failure without an enumeration of what a locked note raises. Awaiting the operator's ruling (D12 precedent) |
 
 ---
 
@@ -1262,5 +1263,52 @@ tracked outside the repository.
 
 **Blocking?** Named in D17's pre-flip blocker list; nothing else waits on it. (as recorded 2026-09-21 at filing)
 **Resolution (2026-09-21):** authorized in-session and executed the same day; removed from D17's blocker list.
+
+---
+
+## D22 — Two parity narrowings proposed by the outside-PR reviewers (attachment denylist; Notes per-hit error handling)
+
+- **Status:** **OPEN 2026-09-22** — filed by the controller; nothing applied.
+- **Context.** Reviewing the maintainer follow-ups to PRs 4 and 5, the reviewers proposed two
+  changes that the controller implemented, put through the full review gate, and then removed
+  from the commit before it landed, because the critic's parity read (against the oracle source
+  still on disk in the npx cache — apple-notes-mcp 2.8.1 at review time; the port itself was
+  mapped against 2.6.12 per `docs/port-specs/notes.md` §8, and the search loop's shape is the
+  same in both — and the Mail oracle's `sensitive_dirs`) showed that each
+  drops a capability the oracle grants — the class AGENTS.md's one rule calls a failure and the
+  class D12 reserved to the operator.
+- **(a) Read-side attachment denylist.** Proposal: on top of the inherited credential-directory
+  list (`sensitive_dirs`, byte-faithful for Mail), refuse as an ATTACHMENT SOURCE `~/.netrc`,
+  `~/.git-credentials`, `~/.npmrc`, `~/.pypirc`, `~/.kube`, `~/.docker` (`safety_violation`,
+  exit 77), for `mail send --attach`, `mail reply --attach` and `messages send --file`; write
+  destinations untouched. Cost: Mail's attach surface becomes narrower than the oracle's; a
+  legitimately shareable file under `~/.docker` or `~/.kube` needs copying first. Benefit: the
+  denylist is the containment for attachment content under write-model v2 (an unsandboxed send
+  reaches any recipient), and these are the credential files most often exfiltrated by a
+  prompt-injected command. If accepted: re-land the reviewed patch (held with the controller's
+  private evidence outside the repository; small enough to redo from this description if that
+  copy is gone), record the deviation in `docs/port-specs/mail.md`, and update the resolver's
+  parity comment.
+- **(b) Notes search per-hit error handling.** Proposal: the generated search script's OUTER
+  per-hit handler (a bare `try … end try` in the oracle, verified) tolerates only error -1728
+  (note vanished mid-traversal) and re-raises everything else, so a timeout, lost connection or
+  refused automation fails `notes search` / `notes recent` loudly instead of returning a shorter
+  list under `ok: true`. Cost: parity deviation, and an unenumerated risk — if a password-locked
+  note raises a different code on `name`/`id`/date/container reads, one such note makes every
+  search fail. Precondition before any ruling to accept: a live-store enumeration of what those
+  five reads raise on a locked note (needs an `apple-cli-test` note locked by the operator; the
+  controller will not create one). If accepted: re-land the reviewed patch (held outside the
+  repository as above; two hunks, redoable from this description), record the deviation in
+  `docs/port-specs/notes.md` §8, and correct the code comment that attributes only the inner
+  handlers to the oracle.
+- **Ask.** Rule on (a) and (b) separately: accept (with the recorded deviation), reject, or
+  defer. For (b), also whether to grant the live locked-note enumeration.
+- **Filed:** 2026-09-22 · **Category:** parity vs safety (D12 class)
+
+**Why it needed you.** Each drops something the oracle permits on a shipped surface; the parity
+claim is frozen and no longer re-runnable, so a narrowing that lands without a ruling cannot be
+recovered into the record later.
+
+**Blocking?** No. The rest of the follow-ups landed without them.
 
 ---

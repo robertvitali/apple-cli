@@ -70,7 +70,7 @@ The command runs as two reads: one bulk read of every note's id and modification
 
 A hit's `folder` is the name of the folder holding the note; when Notes.app cannot report a note's container the field carries the literal `Notes`, which is the fallback the underlying script substitutes rather than a folder of that name — the key is never absent and never empty.
 
-`--limit` must be greater than 0, and `--folder` must name at least one path component (both `""` and `"///"` are refused); either failure is a `validation_error`, exit 64, raised before Notes.app is contacted. `--text` renders one line per note as `modified  title  (folder)` with an ISO-8601 timestamp, showing that same `folder` value.
+`--limit` must be greater than 0, and `--folder` must name at least one path component (both `""` and `"///"` are refused); either failure is a `validation_error`, exit 64, raised before Notes.app is contacted. `--text` renders one line per note as `modified  title  (folder)` with an ISO-8601 timestamp, showing that same `folder` value; a note whose modification date could not be read (ranked last, see above) shows `modified: unknown` in place of the timestamp.
 
 ## Output
 

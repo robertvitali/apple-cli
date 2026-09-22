@@ -252,6 +252,10 @@ struct SendTests {
         #expect(Send.interpret("error:1:2:1:boom").failedFile == 2)
         // `failedFile` 0 means "not during a file send", surfaced as nil rather than index 0.
         #expect(Send.interpret("error:0:0:0:boom").failedFile == nil)
+        // A PARSED failure carries observed counters; it is never "unknown".
+        #expect(Send.interpret("error:0:0:0:boom").deliveryUnknown == false)
+        #expect(Send.interpret("error:1:2:1:boom").deliveryUnknown == false)
+        #expect(Send.interpret("success:SMS:2").deliveryUnknown == false)
     }
 
     /// THE FACT `filesSent` CANNOT CARRY. The body is not an attachment, so a run that delivered
@@ -279,6 +283,8 @@ struct SendTests {
             let outcome = Send.interpret(line)
             #expect(outcome.ok == false, "\(line) must not read as a success")
             #expect(outcome.error?.hasPrefix("Unknown result:") == true)
+            // Neither grammar matched, so the counters were never observed: delivery UNKNOWN.
+            #expect(outcome.deliveryUnknown == true, "\(line)")
         }
     }
 
