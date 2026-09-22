@@ -5,7 +5,7 @@
 **Version analyzed:** **2.5.12** (published 2026-07-14; latest at analysis time 2026-07-15)
 **Source repo:** https://github.com/sweetrb/apple-notes-mcp (tag `v2.5.12`, MIT, author Rob Sweet)
 **Analysis basis:** Clean TypeScript source read at tag `v2.5.12` (not the bundled `build/index.js`); published tarball verified to match. No binaries executed.
-**Update (2026-08-18):** the transient-retry wrapper (NOTES-#8) and the 11-entry error-mapping table (NOTES-#9) were ported against the **currently-installed** oracle `apple-notes-mcp@2.7.5` (`build/index.js`), NOT 2.5.12 — 2.7.5 is what the parity oracle runs on the fleet. Ported byte/value-exact: `RETRYABLE_ERROR_PATTERNS` (6 patterns), `DEFAULT_MAX_RETRIES=2` / `executeMutationAppleScript maxRetries:1` (reads retry once, MUTATIONS never retry — a non-idempotent write must not double-apply), `DEFAULT_RETRY_DELAY_MS=1000` with `2^(attempt-1)` backoff, and the `ERROR_MAPPINGS` table. This §5-era header still cites the 2.5.12/2.6.12 analysis baseline; the retry/error-map behavior is anchored to 2.7.5 as noted here.
+**Update (2026-08-18):** the transient-retry wrapper (NOTES-#8) and the 11-entry error-mapping table (NOTES-#9) were ported against the **currently-installed** oracle `apple-notes-mcp@2.7.5` (`build/index.js`), NOT 2.5.12 — 2.7.5 is what the parity oracle runs on the fleet. Ported byte/value-exact: `RETRYABLE_ERROR_PATTERNS` (6 patterns), `DEFAULT_MAX_RETRIES=2` / `executeMutationAppleScript maxRetries:1` (reads retry once, MUTATIONS never retry — a non-idempotent write must not double-apply), `DEFAULT_RETRY_DELAY_MS=1000` with `2^(attempt-1)` backoff, and the `ERROR_MAPPINGS` table. **Deviation, additive:** a seventh transient pattern exists that the oracle has no counterpart for — `NotesScript.cliRetryableErrorPatterns`, holding the pass-1 id/date length mismatch `notes recent` raises itself. It is kept in a SEPARATE list that `isRetryable` unions in, never added to `retryableErrorPatterns`, so the ported table stays byte-exact at its 6; and it is matched against the sentinel-anchored `ownDiagnostic` message rather than raw stderr, so a caller-supplied name echoed back by Notes.app cannot reach it. This §5-era header still cites the 2.5.12/2.6.12 analysis baseline; the retry/error-map behavior is anchored to 2.7.5 as noted here.
 **Verdict (TL;DR): BUILD.** No candidate CLI covers even half the surface. The strongest (memo) reaches ~12/34 and uses an interactive-picker UX unsuitable for agent scripting. Attachments-to-disk, checklist state, note metadata, sync status, full-library JSON export, batch ops, and account/selection/diagnostic tools are absent across every candidate.
 
 ---
@@ -241,6 +241,113 @@ The MCP emits camelCase keys; apple-cli emits snake_case per `docs/DESIGN.md` ("
 - Optional fields are omitted (not `null`) when absent — matching the MCP's "field absent when unavailable" for `get-metadata` (schema-drift columns), attachment `url`, etc.
 
 ### Superset improvements (capabilities BEYOND the MCP)
+- **`notes recent`** — the notes touched most recently, newest first (`--limit`, default 10;
+  `--account` / `--folder` scope it the way `list` does). No oracle counterpart exists: `list-notes`
+  returns titles in Notes.app's own enumeration order and `search-notes` requires a query, so the
+  MCP has no way to answer "what did I just work on". Hits are the SAME `NoteSummary` shape
+  `search-notes` emits — eight keys including the oracle's hardcoded `content:""` / `tags:[]`
+  placeholders — so a consumer of a search hit reads a recent hit unchanged; the envelope adds
+  `count`, `applied_limit`, `limit_reached`, and the `sync_warning` the other enumerating reads
+  carry. `limit_reached` is the SAME KEY `search-notes` sets, with a deliberately DIFFERENT
+  predicate, because the two know different things: search uses `count >= effective` — it stopped
+  looking at the limit, so more matches MAY exist — while `recent` uses `ranked.count > effective`,
+  having ranked the whole scope before cutting, so more DO. A consumer reads both the same way
+  ("ask for more if you need them"), which is why one key is right. It is emitted rather than
+  left to a caller to infer from
+  `count < applied_limit`, because that inference is FALSE here: pass 2 drops a winner it cannot
+  read back — deleted between the passes, untitled (`parseSummaries` skips an empty title), or
+  any per-hit read failure — and nothing backfills from the next-ranked candidate, so `count` can
+  sit under `applied_limit` with more notes still in scope. An agent paging by raising `--limit`
+  and stopping on a short count would under-read silently. `limit_was_default` stays absent:
+  `recent` has one default and already discloses it as `applied_limit`.
+- **`notes recent` scope: the default account, and the trash is in it.** With `--account` omitted
+  the enumeration is scoped to `resolveAccount(nil)` — the default account only, not every
+  account — inherited from `list`/`search` but newly surprising on the command a user reaches for
+  first, so it is stated in the manual and the changelog. And `id of every note` at account scope
+  INCLUDES Recently Deleted, the same inclusion `search-notes` has (parity holds), but the
+  consequence differs: deleting a note bumps its modification date, so a note sitting in the trash
+  can be the newest-modified note in the account and lead a bare `apple notes recent`. Disclosed,
+  not filtered: a hit's `folder` identifies it and `--folder` scopes past it. Excluding the trash
+  by default (or an `--include-deleted` flag) needs a design pass rather than a name match — the
+  folder's AppleScript name is localized and Notes exposes no "deleted" property — so it is a
+  follow-up.
+- **`notes recent` runs in TWO passes, and the split is the whole cost story.** Ranking needs
+  every note in scope; the RANKING needs only two fields. **Pass 1** reads
+  `id of every note` + `modification date of every note` — **two bulk property reads for the
+  scope, however large, rather than a round trip per note** — and renders the dates by walking two
+  in-process AppleScript lists, so the render asks Notes.app for nothing further. (That is what
+  the script asks for; the wall-clock effect is the table below.) Swift then sorts and cuts, and **pass 2** pays the five-field per-hit
+  reads for the N survivors only, addressing them by id at application scope. Measured on a
+  few-hundred-note library:
+
+  | invocation | one pass (first cut) | two passes (shipped) |
+  |---|---|---|
+  | `--limit 5` | 20.6s | 1.09s |
+  | `--limit 10` (default) | 20.6s | 1.69s |
+  | `--limit 50` | 20.6s | 6.38s |
+
+  Be precise about what that buys: **the per-note reads track `--limit`; the id-and-date
+  enumeration still touches the whole scope**, at a fixed two Apple events plus an N-iteration
+  render loop that `--limit` does not bound. The intercept is visible in the numbers — at
+  `--limit 5` the library-sized pass is most of the wall time. The one-pass cost was flat in
+  `--limit` because it read everything regardless. A genuinely `--limit`-tracking pass 1 would
+  need a threshold query; the repo already has the `whose modification date >= d` primitive
+  (`listNotes`'s `--modified-since`) that such a design would build on, but choosing the
+  threshold without a second round trip is the open part.
+  Pass 1's two lists are matched BY POSITION; the count check catches a LENGTH mismatch only —
+  a create plus a delete between the two bulk events leaves the lengths equal with every date
+  after the edit shifted by one, which nothing detects (a third id read, or one combined read,
+  would close it). Pass 2 resolves each id under a NARROW handler that swallows `-1728` and
+  re-raises everything else, so a note deleted between the passes drops out while a timeout or a
+  lost connection surfaces instead of silently shortening an `ok: true` result; the Swift-side
+  RANK, not the fetch order, decides the output order.
+- **`notes recent` timeout envelope: there is NO fixed ceiling.** `with timeout of 45 seconds`
+  bounds ONE Apple event's reply — not a script, not the command, and not in-process work.
+  Measured: a `delay 5` inside a `with timeout of 2 seconds` block completes normally in ~5.2s
+  rather than erroring, so pass 1's render loop is bounded by nothing at all. `NotesScript.run`
+  uses the runner overload with no host-side deadline, and the EVENT COUNT scales — pass 1 is the
+  two bulk reads plus account resolution; pass 2 is one `note id` lookup per surviving id plus
+  roughly five property reads each, so it grows with `--limit`. Each of the two scripts is
+  additionally retried once when an event times out — and pass 1 is retried once more broadly
+  than that: the id/date LENGTH MISMATCH it raises is classed transient too, because it means the
+  note set changed between the two bulk events, which a second read normally resolves. A mismatch
+  that survives both attempts surfaces as `upstream_error`, exit 69, carrying its own message
+  ("Notes.app returned mismatched id and date lists") rather than the generic Notes failure text.
+  An earlier revision of this note reasoned a
+  "roughly three minutes" ceiling from two scripts x 45s x 2 attempts; that was wrong on the
+  premise (per-event, not per-script) and is corrected here. Any single event exceeding 45s
+  surfaces as `upstream_error`, exit 69, "Notes.app timed out. It may be unresponsive or busy
+  syncing; try again." Routing Notes reads through the bounded runner overload is a separate
+  reviewed change.
+- **`notes recent` ranking details.** The sort is a TOTAL order — `modified` descending, then
+  `id` ascending. Notes dates are second-granular so ties are ordinary, and the tie-break is what
+  makes the answer a property of the store rather than of pass 1's input order, which is
+  Notes.app's own enumeration order — precisely what must not decide who survives the cut.
+  (`Sequence.sorted` has been stable since Swift 5.8; stability is not the argument, and an
+  earlier revision of this note claimed it was.) A note whose modification date Notes.app could
+  not report — an empty value from the script's `on error` branch, OR a value present but
+  unparseable, decided by one fallible parse (`parseDateIfReadable`) — ranks LAST rather than
+  where `parseDate`'s now-fallback would put it (first, and potentially filling the whole default
+  window). **The emitted `modified` is the RANKING key, not pass 2's re-read of it**, so the array
+  order and the dates in it always agree — without that, a note modified between the two passes
+  would print a date contradicting its position. The ONE case the payload cannot make honest is
+  that same unreadable note: `NoteSummary.modified` is non-optional, and pass 2 re-reads the same
+  unreadable value into `parseDate`'s now-fallback, so the row ships a READ-TIME PLACEHOLDER. A
+  consumer re-sorting the array by `modified` would therefore hoist exactly the notes this
+  command demoted. Making the key nullable would be a retype and a breaking wire change, so the
+  behavior is disclosed instead — in the manual, the changelog and here — and pinned by test
+  (`unreadableWinnerShipsAPlaceholderModified`). The cut happens in Swift and never as an
+  `exit repeat`, which would drop by traversal
+  order rather than by recency. Pass 2 reuses `searchBody` rather than a hand-rolled traversal:
+  reading a hit's folder as `name of container of nt` off a bare traversal raises `-1728`, and
+  that body's two-step container binding is the mechanism that already survives it; a hit whose
+  container cannot be read arrives as folder `"Notes"`, the literal that body substitutes, not as
+  an absent key. Dates cross in the same numeric `y-mo-d-h-mi-s` parts the search loop emits, so
+  no locale-dependent date string is ever parsed. `--limit` is `exclusiveMinimum: 0`, matching
+  search and list; `--folder` must name at least one component after `splitFolderPath`, so BOTH
+  `""` and `"///"` are refused as `validation_error` rather than the empty string silently
+  widening the read to the whole account (the `!folder.isEmpty` shape `search`/`list` still use —
+  aligning them is a follow-up on main).
 - **`get-checklist` / `get-metadata` are SQLite-only** — they do NOT require the MCP's AppleScript existence-guard, so they resolve notes AppleScript can't (trashed, or when Notes.app automation is slow/unavailable). Verified live: the MCP oracle failed `get-checklist-state` on a real note whose checklist apple-cli read correctly.
 - **`sync_warning`** — a structured field on `search`/`list`/`folders` (the MCP's `withSyncAwareness` warning was text-only).
 - **Write model (v2 — behaves like the MCP; see `docs/write-model-v2.md`)**: every write

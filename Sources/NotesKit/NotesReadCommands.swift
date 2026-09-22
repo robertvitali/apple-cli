@@ -487,6 +487,142 @@ struct SearchCmd: ParsableCommand {
     }
 }
 
+// MARK: recent
+
+/// `recent` — the notes touched most recently, newest first. CLI-only superset: the oracle has
+/// no recency operation at all (`list-notes` returns titles in Notes.app's own enumeration order
+/// and `search-notes` needs a query), so "what did I just work on" had no answer here.
+///
+/// The hit shape is `search`'s NoteSummary verbatim — same eight keys, same `content:""`/`tags:[]`
+/// placeholders — so a caller can hand a `recent` hit to anything that already consumes a search
+/// hit. The envelope adds `applied_limit` (always present: this surface always cuts),
+/// `limit_reached`, and the `sync_warning` the other enumerating reads carry.
+///
+/// `limit_reached` is `ranked.count > effective` — the whole scope was ranked, so this says
+/// there ARE more notes, where `search`'s `count >= effective` can only say there MAY be. Same
+/// key, deliberately different predicate; see `NoteList.limit_reached`. It is emitted rather
+/// than left to a caller to infer from `count < applied_limit`, because that inference is false
+/// here: pass 2 drops a winner it cannot read back and nothing backfills, so a truncated result
+/// can still report a short count.
+///
+/// `limit_was_default` stays absent: `recent` has exactly one default and already discloses it
+/// as `applied_limit`, so a second flag would tell a caller nothing.
+struct RecentCmd: ParsableCommand {
+    static let configuration = CommandConfiguration(commandName: "recent",
+        abstract: "Notes by modification date, newest first (default 10). CLI-only superset.")
+    @OptionGroup var global: GlobalOptions
+    @Option(name: .long, help: "Account to enumerate.") var account: String?
+    @Option(name: .long, help: "Limit to a folder (nested paths ok).") var folder: String?
+    @Option(name: .long, help: "Max notes to return (default 10).") var limit: Int?
+
+    func run() throws {
+        try run(scriptFactory: { NotesScript(store: LiveNotesStore()) }, storeFactory: { LiveNotesStore() })
+    }
+
+    /// Dependency-injection seam. `run()` above binds the live boundaries and is the ONLY
+    /// binding production uses — no flag or environment variable can select another. See
+    /// `NotesStoreReading` for why the seam exists.
+    func run(scriptFactory: () -> NotesScript,
+             storeFactory: () -> any NotesStoreReading) throws {
+        try runGuarded(tool: notesTool) {
+            let store = storeFactory()
+            // Same exclusiveMinimum-0 rule search and list enforce, so `--limit 0` is a
+            // validation error rather than a silently-empty (or silently-1) result.
+            try validateSearchLimit(limit)
+            let effective = limit ?? NotesLimits.defaultRecentLimit
+            // Sort in Swift, not AppleScript: `notes whose …` cannot order, and cutting inside
+            // the enumeration loop would drop by traversal order, not by recency.
+            let script = scriptFactory()
+            // Pass 1 ranks the whole scope from two cheap fields; pass 2 pays the five-field
+            // per-hit cost only for the survivors. See `NotesScript.RecentKey` for the numbers.
+            let ranked = try script.recentKeys(account: account, folder: folder)
+            let winners = Array(ranked.sorted(by: RecentCmd.newestFirst).prefix(effective))
+            // Pass 2 returns rows in whatever order Notes.app resolved them and may drop a note
+            // deleted between the passes, so the RANK decides the output order, not the fetch.
+            //
+            // `uniquingKeysWith:` and not `uniqueKeysWithValues:`: the ids come from another
+            // process, and the initialiser that assumes uniqueness TRAPS on a duplicate. Today
+            // `parseRecentKeys` dedupes, but that is an invariant in another file which nothing
+            // here pins — and a trap is not a failure mode this command may have. Keeping the
+            // FIRST occurrence keeps the better (earlier) rank.
+            let rank = Dictionary(winners.enumerated().map { ($1.id, $0) },
+                                  uniquingKeysWith: { first, _ in first })
+            // The emitted `modified` is the RANKING key, not pass 2's re-read of it. Two reasons,
+            // and both are about the payload agreeing with the order it is sorted in:
+            //
+            //   * a note modified BETWEEN the two passes would otherwise print a date that
+            //     contradicts its position in the list;
+            //   * a note whose date pass 1 could not read is ranked last on purpose, but pass 2
+            //     re-reads the same unreadable date and `parseDate` maps it to `Date()` — NOW,
+            //     the newest value there is — so a consumer re-sorting the array by `modified`
+            //     would hoist exactly the notes this command deliberately demoted.
+            //
+            // The second case cannot be fixed in the payload without retyping `modified` to a
+            // nullable, which is a breaking wire change. So the row is kept, ranked last, and
+            // the docs say plainly that a last-ranked note's `modified` is a read-time
+            // placeholder rather than a fact about the note.
+            let rankingDate = Dictionary(winners.map { ($0.id, $0.modified) },
+                                         uniquingKeysWith: { first, _ in first })
+            let notes = try script.recentDetails(ids: winners.map(\.id), account: account)
+                .map { hit -> NoteSummary in
+                    guard let known = rankingDate[hit.id], let ranked = known else { return hit }
+                    return NoteSummary(id: hit.id, title: hit.title, content: hit.content,
+                                       tags: hit.tags, folder: hit.folder, account: hit.account,
+                                       created: hit.created, modified: ranked)
+                }
+                .sorted { (rank[$0.id] ?? .max, $0.id) < (rank[$1.id] ?? .max, $1.id) }
+            // The truncation signal, on the same key `search` uses but from a STRONGER
+            // predicate: search's `count >= effective` says more matches MAY exist (it stopped
+            // looking), while ranking the whole scope first means `ranked.count > effective`
+            // says more DO. See `NoteList.limit_reached`.
+            //
+            // It has to come from the rank count, not from what was returned: pass 2 drops a
+            // winner it cannot read back — a note deleted between the passes, an untitled one
+            // (`parseSummaries` skips an empty title), any per-hit read failure — and nothing
+            // backfills from the next-ranked candidate, so `count` can sit below `applied_limit`
+            // with more notes still in scope.
+            let truncated = ranked.count > effective
+            // ISO-8601, like the JSON encoder's dates: a locale-formatted stamp would render
+            // differently per machine for the same note.
+            let stamp = ISO8601DateFormatter()
+            try emitNotes(NoteList(notes: notes, count: notes.count,
+                                   sync_warning: currentSyncWarning(store), applied_limit: effective,
+                                   limit_reached: truncated),
+                json: global.json,
+                human: notes.isEmpty ? "No notes found."
+                    : notes.map { n in
+                        // `searchBody` substitutes the literal folder name "Notes" when the
+                        // container read fails, and never emits an empty field, so a hit whose
+                        // container Notes.app could not report arrives as folder "Notes" rather
+                        // than absent. The `?? ""` below is for a shape this script cannot
+                        // produce, kept because `NoteSummary.folder` is Optional.
+                        let container = n.folder.map { "  (\($0))" } ?? ""
+                        return "\(stamp.string(from: n.modified))  \(n.title)\(container)"
+                    }.joined(separator: "\n"))
+        }
+    }
+
+    /// The ranking, as a TOTAL order. Notes dates arrive at one-second granularity, so ties are
+    /// ordinary (a bulk import, a sync landing, a scripted create loop), and the tie-break is
+    /// what makes the answer a property of the STORE rather than of the order Notes.app happened
+    /// to enumerate in — which `--limit` then cuts. (`Sequence.sorted` has been stable since
+    /// Swift 5.8, so stability is not the argument; an earlier draft of this comment said it was
+    /// and was out of date. Stability would only preserve the input order, and pass 1's input
+    /// order is Notes.app's own, which is exactly what must not decide who survives the cut.)
+    ///
+    /// A note whose modification date Notes.app could not report ranks LAST: there is no date to
+    /// rank it by, and `parseDate`'s now-fallback would put a hole above every real note. See
+    /// `NotesScript.RecentKey`.
+    static func newestFirst(_ a: NotesScript.RecentKey, _ b: NotesScript.RecentKey) -> Bool {
+        switch (a.modified, b.modified) {
+        case let (x?, y?) where x != y: return x > y
+        case (nil, .some): return false
+        case (.some, nil): return true
+        default: return a.id < b.id
+        }
+    }
+}
+
 // MARK: selected
 
 struct SelectedCmd: ParsableCommand {

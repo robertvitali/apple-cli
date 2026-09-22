@@ -24,7 +24,7 @@ public struct NotesCommand: ParsableCommand {
             GetCmd.self, GetPlaintextCmd.self, GetMarkdownCmd.self, GetByIdCmd.self,
             GetDetailsCmd.self, GetMetadataCmd.self, GetChecklistCmd.self,
             GetNoteLinkCmd.self,
-            ListCmd.self, SearchCmd.self, SelectedCmd.self,
+            ListCmd.self, SearchCmd.self, RecentCmd.self, SelectedCmd.self,
             // Notes: write
             CreateCmd.self, UpdateCmd.self, AppendCmd.self, DeleteCmd.self, MoveCmd.self,
             // Folders / accounts
