@@ -62,7 +62,7 @@ findings for its stated scope; the repo stays private until then.
 | D17 | Early visibility flip to restore hosted Actions; pre-flip privacy audit round 1; disposition of its findings | **ANSWERED 2026-09-20; APPLIED 2026-09-21** (flip 14:31Z; hosted CI and Docs green the same day) | Operator ordered: fresh audit first, flip on zero findings, end-of-roadmap audit still required. Round 1's zero-findings condition was NOT met: seven findings — five operator-dispositioned (D17–D20), the fixture fix pending, and the hosted-log deletion OPEN in D21 — both closed 2026-09-21 (fixture fix landed, D21 applied); D19 later superseded; for the binary the operator chose rebuild + re-cut (as `v27.0.0`) rather than accept, and, because the design forbids a private publisher and hosted runs are billing-blocked, ordered the `v26.0.0` Release converted to a draft first, the flip second, the re-cut after hosted validation |
 | D18 | macOS 27 adoption release `v27.0.0` | **OPEN** | Operator instruction 2026-09-20: bump to `27.0.0` once all tests pass on macOS 27. Waits on the D17 flip, hosted validation, the design's publisher path, a §4.1 adoption-matrix amendment, and verified removal of every R1-F1 to R1-F3 carrier from the rebuilt binary and archive |
 | D19 | GitHub still serves pre-rewrite commits by id | **SUPERSEDED 2026-09-21** (ANSWERED 2026-09-20) | Verified: seven pre-rewrite commit ids formerly cited in this file return HTTP 200 from the API and still carry pre-redaction tracker identifiers. Operator reversed the 2026-08-23 no-Support posture: request a purge of unreachable objects and cached views from GitHub Support while the repo is still private; the D17 flip waits on that confirmation. Stale id citations in this file were re-pointed to their rewritten counterparts the same day. Superseded 2026-09-21: request withdrawn by the operator, no purge filed; residual by-id reachability accepted; D9's no-Support posture stands |
-| D20 | Outside contributor's plaintext git identity on open PRs 3–5 | **RATIFIED 2026-09-20** | Accepted as that contributor's own public attribution for now; the PRs are to be squash-merged when convenient with the squash author identity read back first; the reachable `refs/pull/*` copies are outside the D19 purge and persist until the PRs close |
+| D20 | Outside contributor's plaintext git identity on open PRs 3–5 | **RATIFIED 2026-09-20; APPLIED 2026-09-22** (PRs 3–5 squash-merged locally as `7fc4a49`, `6f8b852`, `57984cf`; follow-ups `9a86125`, `8e9be32`) | Accepted as that contributor's own public attribution for now; the PRs were squash-merged with the squash author identity read back first; the reachable `refs/pull/*` copies are outside the D19 purge and remain resolvable after the PRs closed — their retention is GitHub's, not this repository's |
 | D21 | Delete 18 hosted workflow runs' logs that echo pre-redaction tracker identifiers | **APPLIED 2026-09-21** | Post-round scan of all 305 run logs: no personal data; 18 runs' logs contain 16-digit tracker identifiers inside historical branch names. Deleting run logs is destructive and outward-facing, so it waited for the operator's instruction; authorized and executed 2026-09-21 (18 log archives deleted, 18 × 204, read back 18 × 404); removed from D17's blocker list |
 
 ---
@@ -1222,6 +1222,21 @@ you can reverse that, and the flip's timing is yours.
 disclose or to redact unilaterally; the posture call is the operator's.
 
 **Blocking?** Not blocking the flip. Adds "squash-merge PRs 3–5" to the queue.
+
+**Applied (2026-09-22).** The operator refined the ruling on 2026-09-21: merge now, and fix
+whatever the reviewers found ourselves rather than asking the contributor to reword. PRs 3, 4
+and 5 were squash-merged locally onto `main` as `7fc4a49`, `6f8b852` and `57984cf` (each PR head
+fetched under a forced refspec and asserted equal to the API's head before review; each squash
+reviewed by the full gate and run through the local canonical suite before its push; the
+contributor's own git author identity read back and kept as the squash author; each PR closed by
+GitHub on push). Two maintainer follow-ups landed the accepted findings: `9a86125` (documentation
+and comment corrections) and `8e9be32` (one shared tilde-spelling policy for every operator-
+supplied path, the Notes `recent` retry on live osascript output with validated second reads,
+and the `search`/`list` empty-`--folder` refusal, recorded as BREAKING with `schema_version`
+unchanged). Hosted CI is green on every merge and on `8e9be32` (`9a86125`'s CI was red on
+commit-lint only, a comma in the header scope; see §4); the run commitments are in
+`docs/discovery/prelaunch-readiness-evidence.md` §4. The residual follow-ups still open are
+tracked outside the repository.
 
 ---
 

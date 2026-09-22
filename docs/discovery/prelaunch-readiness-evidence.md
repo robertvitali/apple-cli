@@ -317,6 +317,28 @@ the Round 1 denylist salt — whose own SHA-256 commitment is `450869584cbaa726`
 | `7b46b8d` | CI | `27d6dd53c56704bf` | failure — Supply-chain policy, hosted-bats-build, hosted-bats and commit-lint green; build-test red on two logic tests whose expectations depended on macOS-27 Foundation behaviour (directory flag on a resolved symlink URL; unknown `~user` expansion). Fixed in `0ff7442`; the Notes attachment guard now refuses other users' `~user` spellings before expansion, a real defect on macOS 15 recorded under CHANGELOG `[Unreleased]`. |
 | `0ff7442` | Docs | `7bfc75cef643f225` | success |
 | `0ff7442` | CI | `c188d356233ffb0a` | success — every job (Supply-chain policy, build-test, hosted-bats-build, hosted-bats, commit-lint, quality / required) green; the first fully green hosted run since 2026-09-02. |
+| `7fc4a49` | Docs | `30ef3ed273e5093b` | success |
+| `7fc4a49` | CI | `577cf803fc77680e` | success (squash merge of PR 3) |
+| `6f8b852` | Docs | `2124a4e7399f037a` | success |
+| `6f8b852` | CI | `017b890421194cc0` | success (squash merge of PR 4) |
+| `57984cf` | Docs | `a5157d7eaf89bf0d` | success |
+| `57984cf` | CI | `d29ba6108e2e0cbd` | success (squash merge of PR 5) |
+| `9a86125` | Docs | `52fb0a1ddef442a9` | success |
+| `9a86125` | CI | `b517718a3c4ede2a` | failure — commit-lint, and the quality / required aggregator that gates on it: the header scope carried a comma (`docs(messages,notes)`), which the lint regex forbids; Supply-chain policy, build-test, hosted-bats-build and hosted-bats green. The lint covers only the pushed range, so the next push is unaffected; the lesson is recorded in `docs/learnings/hot/hosted-ci.md`. |
+| `8e9be32` | Docs | `14052ae772450ee0` | success |
+| `8e9be32` | CI | `bb0639fa1bc5aedd` | success — all six CI jobs green (Supply-chain policy, build-test, hosted-bats-build, hosted-bats, commit-lint, quality / required); with the Docs run's manual-fresh and release-notes, eight green jobs for the commit. |
+
+**Outside pull requests 3–5 (D20), 2026-09-21/22.** Each was squash-merged LOCALLY onto `main`
+(not through the GitHub merge button) so the squash could be reviewed and tested as an ordinary
+commit: the PR head was fetched under a forced refspec and asserted equal to the API's
+`headRefOid` before review; the review gate (codex plus the code, security and critic
+reviewers) ran on the squash; the sanitised PR body became the commit body (session links and
+store-ratio phrasing removed); the contributor's own git author identity was read back and kept
+as the squash author per D20; the full local canonical suite ran on each squash before its push;
+and GitHub closed each PR on push. Two maintainer follow-ups (`9a86125`, `8e9be32`) then landed
+the reviewers' findings that the maintainer had accepted as their own to fix. The reachable
+`refs/pull/*` copies named in D20 lose their reason to exist once the PRs are closed; their
+retention is GitHub's, not this repository's.
 
 Design §18 step 6 (one successful hosted run of every push-triggered mandatory job): satisfied for
 the push-triggered jobs by the `0ff7442` CI and Docs runs above. The PR-triggered mandatory job
