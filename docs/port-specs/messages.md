@@ -118,6 +118,19 @@ Notable MCP behaviors the port must respect for parity: (a) **stateful `"contact
 - **JSON-RPC 2.0 stdio server** `imsg rpc` (imsg) — single long-running process for agents; effectively an MCP replacement transport we own.
 - **Live stream** `imsg watch` (fs-events + poll, WAL-aware) (imsg) — MCP has no streaming; high value.
 - **Structured message schema** (imsg): `reply_to_guid/text/sender`, `thread_originator_guid`, `url_preview`, `reactions`, per-chat **unread counts** + **read timestamps** — far richer than MCP's flat strings.
+- **Chat identity on message reads** (CLI-only JSON extra, this port): `chat_identifier`,
+  `chat_guid` and `is_group` on every `recent`/`search` message, so a caller can tell an unnamed
+  group from a 1:1 conversation and has an id to reply to. The MCP exposed only `group_name`, a
+  display name, which is absent for both.
+- **`--direct-only` on `recent`/`search`** (CLI-only, this port): exclude group-chat messages,
+  applied in SQL ahead of `--limit`, with `direct_only` / `direct_only_applied` reporting what was
+  requested and what actually ran.
+- **Chat activity + participants on `chats`** (CLI-only JSON extra, this port): `last_activity`,
+  `last_activity_timestamp` and `participants`, so a caller can pick a chat without a second
+  command. **Deviates in `--text`** — see the `get_chats` row in §8.
+- **`chats --name` / `chats --limit`** (CLI-only, this port): case-insensitive substring filter on
+  the display name (echoed as `name_filter`) and a result cap. Neither changes the default
+  listing or its order.
 - **Attachment metadata** (implemented as a CLI-only JSON extra) + optional
   **CAF→M4A / GIF→PNG** conversion (imsg) — model-consumable media.
 - **Explicit service control** `--service imessage|sms|auto` + `--no-sms-fallback` (imsg) — MCP's routing is implicit/uncontrollable.
@@ -200,7 +213,7 @@ against a historical value (Q12 [1]).
 | `check_addressbook` | Per-source counts matched CLI==oracle on the verification run, source-for-source and in total (see the point-in-time note above). CLI also reports the top-level `AddressBook-v22.abcddb` the MCP's *diagnostic* omits (its contact loader reads it) — superset, not a drop. |
 | `find_contact` | A common first name → **count 30 == 30**, all 0.95 (exact-token) — scores byte-exact. |
 | `check_imessage_availability` | 2125550142 → `available=true`, recommendation string **byte-identical**. |
-| `get_chats` | **CLI == oracle** on named-chat count (superset fields: guid, room_name, service_name, group_id, style). |
+| `get_chats` | **CLI == oracle** on named-chat count (superset fields: guid, room_name, service_name, group_id, style; later also last_activity, last_activity_timestamp, participants). **`--text` deviates deliberately, as it does for `get_recent_messages`:** each listed chat now carries an appended `— last activity …; participants: …` when the store has those facts for it. The default listing (no `--name`, no `--limit`) still returns the same named chats in the same order, and the JSON key set and its ordering are unchanged. |
 | `send_message --group` | Validation-evidence asterisk: the `--group` path accepts the oracle group-chat identifier and dispatches via chat id, but it has never been exercised against a live group. No live group was created or messaged, and no live group send is authorized. This limits validation evidence; it does not mark the capability missing. |
 | `get_recent_messages` | hours=6 cross-chat: every MCP output line reproduced **byte-verbatim** (attributedBody-decoded bodies, group names, sender resolution, timestamps). **This claim is bounded to the pre-attachment build and is deliberately no longer true of `--text`** — see "Attachment metadata" below for the two intentional deviations (an appended `[N attachments: …]` suffix, and a row set that now includes attachment-only messages the oracle drops). The JSON body/group/sender/timestamp shaping the claim was really about is unchanged. |
 | `fuzzy_search_messages` | See the WRatio boundary note below. |
@@ -224,6 +237,113 @@ no file details to return. `messages search` still cannot discover
 attachment-only rows with no searchable body, because its SQL prefilter is
 text/attributedBody-based before scoring. If such a row is otherwise selected in
 the future, it should use the same attachment shape.
+
+### Chat identity
+
+A second read-only extra beyond the MCP surface. Every message emitted by
+`messages recent` and `messages search` now carries `chat_identifier`
+(`string|null`), `chat_guid` (`string|null`) and `is_group` (bool), derived by
+joining `chat_message_join` → `chat`; `is_group` is `chat.style == 43`. A message
+joined to several chats reports the LOWEST chat ROWID, and a message joined to no
+chat reports nulls with `is_group: false`. `--direct-only` on both commands
+excludes group-chat messages using that same first-chat-by-ROWID rule, applied in
+SQL: on `recent` that means `--limit N` still yields up to N direct messages
+rather than N-minus-the-groups, and on `search`, which has no `--limit`, it means
+the filter runs before the `fuzzySoftCap` prefilter so the cap is spent on
+candidates that can actually match. `direct_only` echoes the flag in the
+`RecentData`/`SearchData` payloads.
+
+**`--direct-only` excludes group chats, not "everything that is not a 1:1".** A
+message joined to NO chat row is kept: it has no style, and a message in no chat
+is not in a group chat. Those rows are identifiable by `chat_identifier: null`. A
+message joined to several chats is judged by its lowest-ROWID chat, so a message
+in both a 1:1 and a group survives the filter when the 1:1 chat has the lower row
+id and is excluded when the group does.
+
+`messages chats` gains `last_activity` (ISO-8601 UTC of the chat's newest
+message, or null), `last_activity_timestamp` and `participants` (handle ids from
+`chat_handle_join` → `handle.id`, possibly empty), alongside a `--name` substring
+filter (case-insensitive, echoed as `name_filter`, with an empty value normalized
+to null so the echo cannot claim a filter that did not run) and `--limit`, which
+accepts 1-10000 and rejects anything outside that with a validation error (exit
+64), the same bound `recent --limit` uses.
+
+`participants` are RAW handle ids — phone numbers and email addresses exactly as
+chat.db stores them, not contact-resolved the way a message's `sender` is. The
+account owner is not among them: `chat_handle_join` records the other parties
+only, so a 1:1 chat lists just the person on the other end. That is a count of
+PEOPLE, not of entries — the array is not deduplicated, and the schema permits
+one person to occupy more than one entry when a store holds separate handle rows
+per service for them, so even a 1:1 chat is not guaranteed to be a single-element
+array. Treat it as a list rather than a set.
+
+`last_activity_timestamp` is the RAW `message.date` value chat.db stores, and is
+NOT a fixed unit: nanoseconds since the Apple epoch on modern rows and SECONDS on
+legacy ones, the same greater-than-10-digit heuristic message `timestamp` uses.
+Be precise about what that does and does not rule out, because the two are easy
+to conflate. **Ordering is sound**, within a chat and across chats: a nanosecond
+value (~7.8e17) always exceeds a seconds value (~7.8e8) and the ns rows are
+always the newer ones, so a larger raw value always means a more recent message.
+That is the same premise `chatLastActivity` relies on to take `MAX()` of the raw
+column at all. **Arithmetic is not sound**: dividing by 1e9 yields a 1970 date on
+a chat whose newest message is legacy, and differences between two raw values are
+meaningless when they straddle the two modes. Sort on `last_activity_timestamp`
+if you want the raw value; use `last_activity` for anything that treats it as a
+time.
+
+`--direct-only` reports whether it ran. `direct_only` echoes the request and
+`direct_only_applied` says whether the predicate was actually applied; the two
+differ exactly when the store cannot classify chats, in which case group messages
+are still present. The capability is resolved ONCE per invocation and threaded,
+so the filter, the stderr warning and the field cannot disagree. This matters
+because stdout JSON is the versioned interface and stderr is not: a filter that
+silently failed open would be invisible to the only channel an agent is told to
+trust.
+
+Any `chat.style` other than 43, including an absent or unrecognized one, is
+reported and filtered as non-group.
+
+This is additive and keeps `schema_version = 1`: no existing key is removed,
+renamed, or retyped. Two shapes are deliberate and worth stating, because they
+differ. The new nullable keys are ALWAYS PRESENT with an explicit JSON `null` —
+Swift's synthesized encoder omits a nil optional entirely, so present-and-null is
+what lets a consumer distinguish "this message is in no chat" from "a binary that
+predates the field". The PRE-EXISTING optionals (`group_name`, `handle`,
+`service`, and the `chat` row's `guid`/`room_name`/`service_name`/`group_id`/
+`style`) keep their omit-when-nil shape unchanged; `group_name` in particular is
+the oracle's deliberate two-state absent-or-name field (see §8's `get_recent_messages`
+row, the Python-truthiness comment on the `group_name` binding in `ChatDB.swift`,
+and the `emptyChatDisplayNameEmitsNoGroup` test), and giving it a third state
+would re-introduce exactly the defect that was fixed there.
+
+`messages chats` resolves activity and participants for the chats it is actually
+returning, not for the whole store: the `--name`/`--limit` selection runs first
+and the two lookups are keyed on that chat-ROWID set. The one-pass shape it
+replaced grouped over every message row on every invocation — measured on one
+large real store, the whole-store grouping took ~28x as long as the same lookup
+restricted to that store's named chats, and far longer than the lookup for a
+`--limit 5` selection. Treat that multiplier as an illustration from a single
+store rather than a constant: what remains scales with the number of messages
+held by the chats actually RETURNED, so a selection covering many busy chats is
+still substantial work, and `--limit` is the lever on a large store. The listing's
+`ORDER BY ROWID` is stated in SQL rather than left to a bare SELECT's incidental
+scan order, because `--limit` makes the ordering decide WHICH chats a caller
+receives.
+
+`group_name` and `is_group` are not the same fact: `group_name` is a display name
+and is absent for an unnamed group, while `is_group` reads `chat.style` and so
+still reports such a chat as a group. A chat.db lacking `chat_message_join`
+degrades to null identifiers and `is_group: false` rather than failing the read —
+the posture the attachment join already takes — and `--direct-only` then excludes
+nothing, since nothing is known to be a group. The filter and the fields are
+gated on the IDENTICAL capability check for that reason: a schema that could
+answer one but not the other would drop rows while reporting every survivor as
+`is_group: false`. When the filter cannot be applied the commands say so on
+stderr, so it never fails open silently — and, more importantly, the payload
+itself says so: `direct_only` and `direct_only_applied` are both new keys on
+`RecentData`/`SearchData`, and the stderr warning is a human-channel addition on
+top of them, not the record of it. The JSON gained keys; nothing in it was
+removed, renamed or retyped, so `schema_version` stays 1.
 
 ### WRatio fuzzy-search boundary (behavioral, per §6 / §7)
 

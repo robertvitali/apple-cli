@@ -78,6 +78,15 @@ extension MessagesCommandDependencies {
 private let syntheticChatDBPath = "synthetic/chat.db"
 private let syntheticAddressBookDir = "synthetic/AddressBook"
 
+/// Rebuilds `chat` WITHOUT `style`, keeping `chat_message_join` intact. That is the one schema
+/// shape where a store can join messages to chats but cannot classify them, so it is what makes
+/// `--direct-only` unable to run — the fail-open case the `direct_only_applied` field exists for.
+private let styleLessChatSchema = """
+    DROP TABLE chat;
+    CREATE TABLE chat(ROWID INTEGER PRIMARY KEY, chat_identifier TEXT, display_name TEXT,
+        room_name TEXT, guid TEXT, service_name TEXT, group_id TEXT);
+    """
+
 @Suite("Messages command dependency injection")
 struct MessagesCommandDependencyTests {
     private let scratch = ScratchDirs("messages-command-dependencies")
@@ -491,9 +500,258 @@ struct MessagesCommandDependencyTests {
         }
 
         let data = try payload(from: output)
-        #expect(data["count"] as? Int == 1)
+        #expect(data["count"] as? Int == 2)
+        #expect(data["name_filter"] is NSNull)
         let chats = try #require(data["chats"] as? [[String: Any]])
         #expect(chats.first?["display_name"] as? String == "Test Group")
+    }
+
+    /// The chat-identity keys are contract-documented as `string|null`, so they must be PRESENT
+    /// and null for a message in no chat — Swift's synthesized encoder would have omitted them,
+    /// which is the shape a consumer cannot tell apart from an older binary.
+    @Test func recentEmitsChatIdentityWithExplicitNulls() throws {
+        let command = try Recent.parse(["--hours", "24", "--limit", "100"])
+        let output = try captureStdout {
+            try command.run(dependencies: fixtureDependencies(chat))
+        }
+
+        let data = try payload(from: output)
+        #expect(data["direct_only"] as? Bool == false)
+        let messages = try #require(data["messages"] as? [[String: Any]])
+        let byRow = Dictionary(uniqueKeysWithValues: messages.compactMap { m -> (Int, [String: Any])? in
+            (m["rowid"] as? Int).map { ($0, m) }
+        })
+
+        let group = try #require(byRow[4])
+        #expect(group["chat_identifier"] as? String == "chat999")
+        #expect(group["chat_guid"] as? String == "iMessage;+;chat999")
+        #expect(group["is_group"] as? Bool == true)
+
+        let orphan = try #require(byRow[3])
+        #expect(orphan["chat_identifier"] is NSNull)
+        #expect(orphan["chat_guid"] is NSNull)
+        #expect(orphan["is_group"] as? Bool == false)
+        // `group_name` keeps its pre-existing omit-when-absent shape; only the new keys are nulls.
+        #expect(orphan["group_name"] == nil)
+    }
+
+    @Test func recentDirectOnlyFiltersAndIsEchoed() throws {
+        let command = try Recent.parse(["--hours", "24", "--limit", "100", "--direct-only"])
+        let output = try captureStdout {
+            try command.run(dependencies: fixtureDependencies(chat))
+        }
+
+        let data = try payload(from: output)
+        #expect(data["direct_only"] as? Bool == true)
+        let messages = try #require(data["messages"] as? [[String: Any]])
+        #expect(messages.compactMap { $0["rowid"] as? Int } == [1, 2, 3, 6, 8, 9, 10])
+        #expect(messages.allSatisfy { $0["is_group"] as? Bool == false })
+    }
+
+    /// A `--direct-only` the store cannot honor must SAY so. The caller asked to exclude group
+    /// chats and is getting them back, so silence here is a filter failing open — the shape this
+    /// module already has a scar from (see the privacy note in `ChatDB.recent`).
+    ///
+    /// The text assertions are not padding: the warning goes to a terminal verbatim, which
+    /// AGENTS.md treats as user-facing documentation, and this string was FIRST WRITTEN with a
+    /// nine-space gap in the middle of the sentence — a wrapped source line rejoined without
+    /// dropping its continuation indent. Reading the Swift source did not show it; rendering it
+    /// did. So the rendering is what gets asserted.
+    @Test func directOnlyWarnsOnStderrWhenTheStoreCannotClassifyChats() throws {
+        try chat.exec(styleLessChatSchema)
+        let result = try captureCommand {
+            try Recent.parse(["--hours", "24", "--direct-only"])
+                .run(dependencies: fixtureDependencies(chat))
+        }
+
+        #expect(result.stderr.contains("warning: --direct-only was not applied."))
+        #expect(result.stderr.contains("cannot report which chat a message belongs to"))
+        #expect(!result.stderr.contains("  "), "no run of spaces: \(result.stderr.debugDescription)")
+        #expect(result.stderr.hasSuffix("excluded.\n"))
+        // The read itself still succeeds and excludes nothing — the warning explains the rows,
+        // it does not replace them.
+        let data = try payload(from: result.stdout)
+        #expect(data["direct_only"] as? Bool == true)
+        #expect((data["messages"] as? [[String: Any]])?.count == 9)
+        // THE JSON CHANNEL CARRIES IT TOO. stderr is not the versioned interface, so a machine
+        // consumer that only reads stdout must still be able to see that the filter did not run.
+        #expect(data["direct_only_applied"] as? Bool == false)
+    }
+
+    /// `search` has the same fail-open surface as `recent`, and had no coverage for it.
+    @Test func searchDirectOnlyReportsWhenItCouldNotBeApplied() throws {
+        try chat.exec(styleLessChatSchema)
+        let result = try captureCommand {
+            try Search.parse(["error", "--hours", "24", "--match", "contains", "--direct-only"])
+                .run(dependencies: fixtureDependencies(chat))
+        }
+
+        let data = try payload(from: result.stdout)
+        #expect(data["direct_only"] as? Bool == true)
+        #expect(data["direct_only_applied"] as? Bool == false)
+        // The group-chat hit is still present, which is exactly why the flag above must say so.
+        #expect(data["count"] as? Int == 1)
+        #expect(result.stderr.contains("warning: --direct-only was not applied."))
+    }
+
+    /// The applied case on both commands, so `direct_only_applied` is not vacuously always false.
+    @Test func directOnlyAppliedIsTrueWhenTheFilterRuns() throws {
+        let deps = fixtureDependencies(chat)
+
+        let recent = try payload(from: captureStdout {
+            try Recent.parse(["--hours", "24", "--direct-only"]).run(dependencies: deps)
+        })
+        #expect(recent["direct_only"] as? Bool == true)
+        #expect(recent["direct_only_applied"] as? Bool == true)
+
+        let search = try payload(from: captureStdout {
+            try Search.parse(["hello", "--hours", "24", "--match", "contains", "--direct-only"])
+                .run(dependencies: deps)
+        })
+        #expect(search["direct_only_applied"] as? Bool == true)
+
+        // …and an unrequested filter reports both false rather than a vacuous "applied".
+        let plain = try payload(from: captureStdout {
+            try Recent.parse(["--hours", "24"]).run(dependencies: deps)
+        })
+        #expect(plain["direct_only"] as? Bool == false)
+        #expect(plain["direct_only_applied"] as? Bool == false)
+    }
+
+    /// The `--contact` branches return EARLY. They used to emit `direct_only: true` with no
+    /// warning and nothing to say the filter had not run, which is why the capability is now
+    /// resolved above them rather than beside the query.
+    @Test func directOnlyIsReportedOnTheEarlyContactReturns() throws {
+        try chat.exec(styleLessChatSchema)
+        let path = chat.path
+        let homePath = chat.homePath
+        let book = AddressBook(contacts: [
+            "12125550100": "Alice Example",
+            "12125550101": "Alice Example",
+        ])
+        let deps = MessagesCommandDependencies.fixture(book: book, makeChatDB: { _ in
+            try ChatDB(path: path, book: book, copyToTemp: false, homeDirectoryForTilde: homePath)
+        })
+
+        // Unmatched contact — the "no contacts found" early return.
+        let unmatched = try captureCommand {
+            try Recent.parse(["--contact", "Zzyzx Qqqqq", "--hours", "24", "--direct-only"])
+                .run(dependencies: deps)
+        }
+        let unmatchedData = try payload(from: unmatched.stdout)
+        #expect(unmatchedData["direct_only"] as? Bool == true)
+        #expect(unmatchedData["direct_only_applied"] as? Bool == false)
+        #expect(unmatched.stderr.contains("warning: --direct-only was not applied."))
+
+        // Ambiguous contact — the ranked-candidates early return.
+        let ambiguous = try captureCommand {
+            try Recent.parse(["--contact", "Alice", "--hours", "24", "--direct-only"])
+                .run(dependencies: deps)
+        }
+        let ambiguousData = try payload(from: ambiguous.stdout)
+        #expect(ambiguousData["ambiguous"] as? Bool == true)
+        #expect(ambiguousData["direct_only_applied"] as? Bool == false)
+        #expect(ambiguous.stderr.contains("warning: --direct-only was not applied."))
+    }
+
+    /// Negative control: a store that CAN classify chats must stay quiet, or the warning would
+    /// be noise on every ordinary run and get tuned out.
+    @Test func directOnlyIsSilentWhenTheFilterActuallyApplies() throws {
+        let result = try captureCommand {
+            try Recent.parse(["--hours", "24", "--direct-only"])
+                .run(dependencies: fixtureDependencies(chat))
+        }
+        #expect(result.stderr.isEmpty)
+        #expect((try payload(from: result.stdout)["messages"] as? [[String: Any]])?.count == 7)
+    }
+
+    @Test func searchDirectOnlyFiltersAndIsEchoed() throws {
+        let deps = fixtureDependencies(chat)
+
+        let all = try payload(from: captureStdout {
+            try Search.parse(["error", "--hours", "24", "--match", "contains"]).run(dependencies: deps)
+        })
+        #expect(all["direct_only"] as? Bool == false)
+        #expect(all["count"] as? Int == 1)
+
+        let direct = try payload(from: captureStdout {
+            try Search.parse(["error", "--hours", "24", "--match", "contains", "--direct-only"])
+                .run(dependencies: deps)
+        })
+        #expect(direct["direct_only"] as? Bool == true)
+        #expect(direct["count"] as? Int == 0)
+    }
+
+    @Test func chatsReportActivityParticipantsAndFilters() throws {
+        let deps = fixtureDependencies(chat)
+
+        let unfiltered = try payload(from: captureStdout {
+            try Chats.parse([]).run(dependencies: deps)
+        })
+        let chats = try #require(unfiltered["chats"] as? [[String: Any]])
+        let group = try #require(chats.first)
+        // Assert the RENDERING, not merely that a string is there: the docs promise ISO-8601,
+        // and a change of `dateEncodingStrategy` away from `.iso8601` would keep a
+        // string-is-non-nil check green while breaking the documented contract.
+        let expected = ISO8601DateFormatter().string(from: MessageTime.date(fromRaw: chat.base - 300))
+        #expect(group["last_activity"] as? String == expected)
+        #expect(group["last_activity_timestamp"] as? Int == Int(chat.base - 300))
+        #expect(group["participants"] as? [String] == ["+12125550101", "+12125550102"])
+        let quiet = try #require(chats.last)
+        #expect(quiet["display_name"] as? String == "Other Group")
+        #expect(quiet["last_activity"] is NSNull)
+        #expect(quiet["last_activity_timestamp"] is NSNull)
+        #expect((quiet["participants"] as? [String])?.isEmpty == true)
+
+        let filtered = try payload(from: captureStdout {
+            try Chats.parse(["--name", "oTHer"]).run(dependencies: deps)
+        })
+        #expect(filtered["count"] as? Int == 1)
+        #expect(filtered["name_filter"] as? String == "oTHer")
+        #expect((filtered["chats"] as? [[String: Any]])?.first?["display_name"] as? String == "Other Group")
+
+        let limited = try payload(from: captureStdout {
+            try Chats.parse(["--limit", "1"]).run(dependencies: deps)
+        })
+        #expect(limited["count"] as? Int == 1)
+        #expect(limited["name_filter"] is NSNull)
+        #expect((limited["chats"] as? [[String: Any]])?.first?["display_name"] as? String == "Test Group")
+    }
+
+    /// An empty `--name` is the reachable form of the envelope-vs-behavior mismatch: an unset
+    /// shell variable expands to one. It must read as NO filter on both channels, not as a
+    /// filter that happened to match everything.
+    @Test func chatsEmptyNameIsNotAFilter() throws {
+        let deps = fixtureDependencies(chat)
+
+        let data = try payload(from: captureStdout {
+            try Chats.parse(["--name", ""]).run(dependencies: deps)
+        })
+        #expect(data["name_filter"] is NSNull, "an empty --name must not echo as a filter")
+        #expect(data["count"] as? Int == 2, "and must not narrow the listing")
+
+        let text = try captureStdout {
+            try Chats.parse(["--text", "--name", ""]).run(dependencies: deps)
+        }
+        #expect(text.contains("Available group chats:"))
+        #expect(!text.contains("matching ''"))
+    }
+
+    @Test func chatsTextRendererShowsActivityAndParticipants() throws {
+        let deps = fixtureDependencies(chat)
+
+        let listing = try captureStdout {
+            try Chats.parse(["--text", "--name", "test"]).run(dependencies: deps)
+        }
+        #expect(listing.contains("Available group chats matching 'test':"))
+        #expect(listing.contains("1. Test Group (ID: chat999)"))
+        #expect(listing.contains("last activity "))
+        #expect(listing.contains("participants: +12125550101, +12125550102"))
+
+        let empty = try captureStdout {
+            try Chats.parse(["--text", "--name", "no-such-chat"]).run(dependencies: deps)
+        }
+        #expect(empty.contains("No named group chats matching 'no-such-chat'."))
     }
 
     @Test func searchUsesInjectedChatDB() throws {
@@ -792,6 +1050,12 @@ struct MessagesCommandDependencyTests {
                                   run: { try $0.run(dependencies: .fixture()) })
         try expectValidationError(try Search.parse([String(repeating: "a", count: 1025)]),
                                   run: { try $0.run(dependencies: .fixture()) })
+        // `chats --limit` takes the same bound as `recent --limit`, and rejects it before the
+        // fail-closed fixture would throw `upstream` instead.
+        try expectValidationError(try Chats.parse(["--limit", "0"]),
+                                  run: { try $0.run(dependencies: .fixture()) })
+        try expectValidationError(try Chats.parse(["--limit", "10001"]),
+                                  run: { try $0.run(dependencies: .fixture()) })
     }
 
     @Test("send preserves marked output-limit errors and identical unmarked errors")
@@ -1026,6 +1290,7 @@ struct MessagesCommandDependencyTests {
             CREATE TABLE chat(ROWID INTEGER PRIMARY KEY, chat_identifier TEXT, display_name TEXT,
                 room_name TEXT, guid TEXT, service_name TEXT, group_id TEXT, style INTEGER);
             CREATE TABLE chat_handle_join(chat_id INTEGER, handle_id INTEGER);
+            CREATE TABLE chat_message_join(chat_id INTEGER, message_id INTEGER);
             CREATE TABLE message(ROWID INTEGER PRIMARY KEY, guid TEXT, text TEXT, attributedBody BLOB,
                 is_from_me INTEGER, handle_id INTEGER, cache_roomnames TEXT, service TEXT,
                 cache_has_attachments INTEGER, date INTEGER, error INTEGER);
@@ -1051,6 +1316,7 @@ struct MessagesCommandDependencyTests {
             CREATE TABLE chat(ROWID INTEGER PRIMARY KEY, chat_identifier TEXT, display_name TEXT,
                 room_name TEXT, guid TEXT, service_name TEXT, group_id TEXT, style INTEGER);
             CREATE TABLE chat_handle_join(chat_id INTEGER, handle_id INTEGER);
+            CREATE TABLE chat_message_join(chat_id INTEGER, message_id INTEGER);
             CREATE TABLE message(ROWID INTEGER PRIMARY KEY, guid TEXT, text TEXT, attributedBody BLOB,
                 is_from_me INTEGER, handle_id INTEGER, cache_roomnames TEXT, service TEXT,
                 cache_has_attachments INTEGER, date INTEGER, error INTEGER);

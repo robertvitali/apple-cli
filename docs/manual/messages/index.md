@@ -14,7 +14,7 @@ apple messages
 
 ## Subcommands
 
-- [`chats`](./chats.md) — List named group chats (chat_identifier + display_name).
+- [`chats`](./chats.md) — List named group chats (chat_identifier, display_name, last activity, participants).
 - [`check-addressbook`](./check-addressbook.md) — Diagnose AddressBook *.abcddb access + required tables + contact counts.
 - [`check-availability`](./check-availability.md) — Check (history-based) whether a recipient has iMessage, else SMS fallback.
 - [`check-contacts`](./check-contacts.md) — Enumerate AddressBook contacts (count + sample number→name entries).

@@ -7,6 +7,19 @@ import Foundation
 /// structured extras.
 enum MessagesModels {}
 
+/// Encode an optional as its value or an explicit JSON `null` — never omitting the key.
+///
+/// Swift's SYNTHESIZED `Encodable` omits a nil optional entirely (measured, not assumed), which
+/// is the shape every optional in this module shipped with and must keep. Fields whose contract
+/// is documented as `<type>|null` have to be present either way, so a caller can distinguish
+/// "no value here" from "an older binary that did not emit this key"; those go through this
+/// helper. Used by the payloads below and by the row shapes in `ChatDB.swift`.
+func encodeOrNull<K: CodingKey, V: Encodable>(
+    _ c: inout KeyedEncodingContainer<K>, _ value: V?, _ key: K
+) throws {
+    if let value { try c.encode(value, forKey: key) } else { try c.encodeNil(forKey: key) }
+}
+
 struct ContactCandidateData: Encodable {
     let name: String
     let phone: String
@@ -22,6 +35,14 @@ struct RecentData: Encodable {
     let ambiguous: Bool
     let candidates: [ContactCandidateData]?
     let note: String?
+    /// Echoes `--direct-only`, so a caller can tell a filtered read from an unfiltered one
+    /// without re-deriving it from the messages.
+    let direct_only: Bool
+    /// Whether the filter was actually APPLIED. `direct_only: true` with this false means the
+    /// store cannot say which chat a message belongs to, so group-chat messages are still in
+    /// the result. Always present. stdout JSON is the only channel a machine consumer is told
+    /// to trust, so a filter that did not run has to be visible here and not only on stderr.
+    let direct_only_applied: Bool
     let count: Int
     let messages: [ChatDB.Message]
 }
@@ -34,7 +55,18 @@ struct FindContactData: Encodable {
 
 struct ChatsData: Encodable {
     let count: Int
+    /// Echoes `--name`; ALWAYS present, null when no filter was given.
+    let name_filter: String?
     let chats: [ChatDB.Chat]
+
+    enum CodingKeys: String, CodingKey { case count, name_filter, chats }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(count, forKey: .count)
+        try encodeOrNull(&c, name_filter, .name_filter)
+        try c.encode(chats, forKey: .chats)
+    }
 }
 
 struct SearchData: Encodable {
@@ -42,6 +74,10 @@ struct SearchData: Encodable {
     let hours: Int
     let threshold: Double
     let match: String
+    /// Echoes `--direct-only`, matching the `recent` payload.
+    let direct_only: Bool
+    /// Whether the filter was actually applied — see `RecentData.direct_only_applied`.
+    let direct_only_applied: Bool
     let count: Int
     let scanned: Int
     let truncated: Bool
