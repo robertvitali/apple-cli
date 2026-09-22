@@ -38,7 +38,7 @@ so until evidence is appended.
 | 7 Squash-only merge with PR title/body as squash commit | pre-visibility | PENDING (not evidenced here) | — |
 | 15–16 Read-only release/site rehearsal tooling exercised locally | pre-visibility (local half) | PENDING (not evidenced here) | — |
 | 17 Static workflow scan + settings readbacks | pre-visibility (local half) | PENDING (not evidenced here) | — |
-| Fresh pre-publication privacy audit | pre-visibility | **Round 1 complete. Its zero-findings condition was NOT met: seven findings (R1-F1 to R1-F7); the operator dispositioned F1–F5 (D17–D20), the F6 fixture fix and the F7 log deletion (D21) were pre-flip blockers, both completed 2026-09-21, and the flip was advanced on that basis. This round does not satisfy design §18 phase 1's zero-findings gate; the end-of-roadmap round must.** Owner: controller for the record, operator for the dispositions | Section 2 |
+| Fresh pre-publication privacy audit | pre-visibility | **Round 1 complete. Its zero-findings condition was NOT met: seven findings (R1-F1 to R1-F7); the operator dispositioned F1–F5 (D17–D20), the F6 fixture fix and the F7 log deletion (D21) were pre-flip blockers, both completed 2026-09-21, and the flip was advanced on that basis. This round does not satisfy design §18 phase 1's zero-findings gate; the end-of-roadmap round must.** Owner: controller for the record, operator for the dispositions. Round 2 (end-of-roadmap, 2026-09-22): **zero NEW findings; the gate is NOT yet closed — R1-F1 recurs in the unchanged draft asset as a deferred finding under OPEN D18 (rebuild, re-cut, re-scan), while the D20 identity class recurs as accepted. Closes on the appended scan of the rebuilt asset.** | Section 2 |
 | Design §18/§3, `AGENTS.md` and ledger-preamble amendment recording the advanced visibility step (D15 precedent) | pre-visibility | Landed in the same commit as this revision (design §18 dated amendment, `AGENTS.md` privacy paragraph, ledger preamble, D2 freeze amendment) | this commit |
 | 4 (repository-level part) Actions settings | pre-visibility | Read back 2026-09-20: `default_workflow_permissions` = read, `can_approve_pull_request_reviews` = false, `allowed_actions` = all. Configured 2026-09-21 and read back: `allowed_actions` = `selected`, GitHub-owned actions allowed, one third-party pattern with a wildcard ref (the SHA pins live in the workflow files; `sha_pinning_required` is false), covering the five actions the workflows use; the unused wiki flag disabled the same day; fork-PR contributor approval cannot be read while private — read back immediately after the flip, before any outside PR is allowed to run | this row |
 | Surfaces that become public on the flip and were not in round 1's scan | pre-visibility | Complete. Scanned after round 1 (see Round 1 addendum): PR timelines, issue events, commit comments clean apart from the known R1-F4 identity class; all 305 hosted workflow runs' logs scanned value-free — no personal data, but 18 runs' logs carry pre-redaction tracker identifiers inside historical branch names (R1-F7). Those 18 runs' logs were deleted under D21 on 2026-09-21 (read back absent). Projects unreadable with the current token | Round 1 addendum |
@@ -264,6 +264,73 @@ Done before any flip: the `v26.0.0` Release converted to a draft (read back draf
 contains F1–F3 on the public surface but does not remediate them — remediation is the D18
 rebuild; F4 accepted under D20. Still required before the flip (two items): the pre-push re-scan of the commit that records this revision and the local canonical suite green on that exact pushed commit (the D19 Support gate was withdrawn by the operator on 2026-09-21; the R1-F6 fixture fix, the R1-F7 log deletion under D21 and the repository-level external-Action allowlist were completed the same day).
 
+### Round 2 — 2026-09-22 — end-of-roadmap audit
+
+**Purpose.** The round the operator required after the advanced visibility step: the same
+searched classes and the same two engines as Round 1, run against the repository as it
+stands after the outside pull requests, the maintainer follow-ups and the Dependabot merge
+landed, plus the surfaces that only exist after the flip (post-flip hosted run logs). Its
+zero-findings condition is stated for its own scope below.
+
+#### Inputs
+
+- The local checkout at `4f8776a` (tree clean, 12 refs including the four fetched pull refs) and a
+  fresh mirror clone of `origin` taken at 08:48 UTC (8 refs). Objects: local 2281 blobs, 255
+  commits, 1856 trees, 1 tag; mirror 1966 / 246 / 1755 / 1.
+- GitHub-side text (24 files): repository metadata, description, forks, issues, issue comments,
+  pull-request review comments, commit comments, releases, the six pull requests' reviews and
+  timelines, wiki probe, branches, Actions secrets/variables counts.
+- The post-flip hosted workflow-run logs: 25 runs created at or after 2026-09-21T14:00Z
+  (24 scanned; one still in progress had no log archive).
+- The `v26.0.0` draft Release asset: the same bytes as Round 1 (asset digest unchanged, read
+  back from the Releases API), scanned again raw-byte with the primary engine.
+- The denylist: the same five private entries as Round 1 (same salted commitments; salt
+  commitment `67473db6a1d04f92`).
+
+#### Engines and results
+
+Primary: Python `re` (3.13.14), value-free outputs, over every object, ref name, tree-entry
+name, commit header and message, GitHub text field, and release byte. Cross-check: `git grep -P`
+(git 2.50.1) over every ref's tree plus `pcre2grep` 10.47 over messages, GitHub text and the
+release bytes. Controller scripts hashed before the run and held with the private evidence.
+**Independence in this round is narrower than in Round 1:** the two engines were run by the same
+controller and there was no separate independent challenger; the independent reviews this round
+(a security reviewer and codex) examined the RECORD and its framing, not the scan itself. Units
+differ by engine exactly as in Round 1: the primary column counts matches over every object and
+surface; the cross-check reports matching lines per ref tree (`git grep -P`) or per file
+(`pcre2grep`), so the columns are not expected to agree — each row's triage reconciles them.
+
+| Class | Primary raw hits (local, all surfaces / mirror) | Cross-check | Triage outcome |
+|---|---|---|---|
+| email | 4810 / 4681 | tree lines 3527; messages 277 | placeholders and provider addresses; the operator's address only in commit-header attribution; 50 other author headers and 30 PR-timeline addresses = the outside contributor's own commit identity (D20); every other address non-personal: placeholder domains (`x.io`, `example.invalid`, …) plus the newsletter-platform classifier patterns and their test fixtures (real platform domains, invented local parts) |
+| phone | 33 / 8 | tree lines 472; messages 2 | 2 reserved `555-01xx` in messages; every other match is the integer `2147483647` (Int32.max) in code and docs |
+| home_path | 532 / 137 | trees 0; messages 0; release `strings` 0 | 270 raw-byte matches in the draft asset = R1-F1, unchanged; blobs are `/Users/<placeholder>`, `/private/tmp`, `/var/folders` and `/home` fixtures with no session markers; one commit message carries the literal `/private/tmp/...` |
+| tracker | 2616 / 2131 | 16-digit 0; tracker URL 0 | the word "asana" (a tool name in docs, `AGENTS.md`, `CHANGELOG.md`, the ledger) and the `GID-REDACTED` markers; no identifier |
+| operator_identifier | 1758 / 1653 | operator email 0 outside author metadata | author headers, `github.com/<handle>` URLs, LICENSE/README/NOTICE, the tap slug, `mkdocs` repo name, CODEOWNERS handles in the design, one `Reviewed-by: <handle> (maintainer…)` line — attribution exception throughout |
+| street_address | 177 / 120 | tree lines 92 | the two fixtures (`1 Main St`, `742 Evergreen Terrace`) |
+| provider_mailbox | 500 / 484 | — | domain fragments inside patterns and prose, no addresses beyond the email class |
+| geocoordinate, public_ip, secret_shape, image_or_binary_media | 0 | 0 | — |
+| post-flip run logs | — | 0 email / phone / 16-digit / non-runner home path / secret in 24 runs | the handle appears only inside the repository slug, URL and runner path (`Syncing repository:`, `job defined at:`) |
+| GitHub text | 4 operator-identifier | 2 email / 2 phone lines (placeholders) | handle and surname as release author and wiki URL; repository public, wiki off, discussions off, forks 0, Actions secrets 0, variables 0 |
+
+#### Verdict for this round
+
+Stated scope: the local checkout and a fresh origin mirror (all refs and objects, commit metadata
+and messages, tree names), GitHub-side text including all six pull requests' reviews and
+timelines, the 24 post-flip hosted run logs with archives, and the draft Release asset. Result
+for that scope: **zero new findings, one recurring in-scope detection.** The two classes that
+recur are not alike and are recorded separately. The outside contributor's own commit identity
+on pull refs and PR timelines is an ACCEPTED class (D20, ratified and applied) and is not a
+finding. R1-F1 — the draft asset's embedded build paths, byte-identical to Round 1 — is a
+DEFERRED finding, not an accepted one: the operator chose rebuild-and-re-cut over acceptance
+(D17 ruling 2), and D18 remains OPEN until the rebuilt binary and archive are verified free of
+every R1-F1 to R1-F3 carrier. **The end-of-roadmap zero-findings gate is therefore NOT yet
+closed by this round.** It closes when the D18 rebuild lands, the rebuilt asset is scanned
+under the same classes and engines, and that scan is appended here with zero findings; the
+draft Release stays a draft until then. Everything else in scope is clean. This round does not
+extend to surfaces that did not exist at run time (later commits carry their own pre-push
+scans, recorded in Section 3).
+
 ## 3. Local verification for the visibility-step commit and its successors
 
 The four commits below each ran the full local canonical suite through the signal-reset launcher
@@ -327,6 +394,12 @@ the Round 1 denylist salt — whose own SHA-256 commitment is `450869584cbaa726`
 | `9a86125` | CI | `b517718a3c4ede2a` | failure — commit-lint, and the quality / required aggregator that gates on it: the header scope carried a comma (`docs(messages,notes)`), which the lint regex forbids; Supply-chain policy, build-test, hosted-bats-build and hosted-bats green. The lint covers only the pushed range, so the next push is unaffected; the lesson is recorded in `docs/learnings/hot/hosted-ci.md`. |
 | `8e9be32` | Docs | `14052ae772450ee0` | success |
 | `8e9be32` | CI | `bb0639fa1bc5aedd` | success — all six CI jobs green (Supply-chain policy, build-test, hosted-bats-build, hosted-bats, commit-lint, quality / required); with the Docs run's manual-fresh and release-notes, eight green jobs for the commit. |
+| `afc6779` | Docs | `1542086f7569df97` | success |
+| `afc6779` | CI | `c8dbf2fedb6d8e60` | success (evidence and D20 record revision) |
+| `098e784` | Docs | `9e2a63f7ef9cd7cf` | success |
+| `098e784` | CI | `7895d4c6b06b1bce` | success (Dependabot PR 6 squash: `setup-uv` 9.0.0 → 10.1.0 with the committed pin policy moved in the same commit; GitHub closed PR 6, and no superseded Dependabot branch remains) |
+| `4f8776a` | Docs | `5a394c4cd1881cd6` | success |
+| `4f8776a` | CI | `6c18c6f8013b63bf` | success (third maintainer follow-up; D22 filed) |
 
 **Outside pull requests 3–5 (D20), 2026-09-21/22.** Each was squash-merged LOCALLY onto `main`
 (not through the GitHub merge button) so the squash could be reviewed and tested as an ordinary
@@ -335,8 +408,10 @@ commit: the PR head was fetched under a forced refspec and asserted equal to the
 reviewers) ran on the squash; the sanitised PR body became the commit body (session links and
 store-ratio phrasing removed); the contributor's own git author identity was read back and kept
 as the squash author per D20; the full local canonical suite ran on each squash before its push;
-and GitHub closed each PR on push. Two maintainer follow-ups (`9a86125`, `8e9be32`) then landed
-the reviewers' findings that the maintainer had accepted as their own to fix. The reachable
+and GitHub closed each PR on push. Three maintainer follow-ups (`9a86125`, `8e9be32`, `4f8776a`)
+then landed the reviewers' findings that the maintainer had accepted as their own to fix; two
+further proposals that would narrow parity with the retired oracles were pulled before landing
+and filed for the operator as D22. The reachable
 `refs/pull/*` copies named in D20 lose their reason to exist once the PRs are closed; their
 retention is GitHub's, not this repository's.
 
