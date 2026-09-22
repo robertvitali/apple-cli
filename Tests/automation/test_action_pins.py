@@ -24,7 +24,7 @@ EXPECTED_ACTION_COUNTS = {
 EXPECTED_ACTION_PINS = {
     "actions/checkout": ("3d3c42e5aac5ba805825da76410c181273ba90b1", "v7.0.1"),
     "actions/setup-python": ("5fda3b95a4ea91299a34e894583c3862153e4b97", "v7.0.0"),
-    "astral-sh/setup-uv": ("c771a70e6277c0a99b617c7a806ffedaca235ff9", "v9.0.0"),
+    "astral-sh/setup-uv": ("bec219d24cd3e171d82865faccec33120bb574f4", "v10.1.0"),
     "actions/upload-artifact": ("043fb46d1a93c77aae656e7c1c64a875d1fc6a0a", "v7.0.1"),
     "actions/download-artifact": ("3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c", "v8.0.1"),
 }
@@ -450,11 +450,11 @@ class RepositoryActionInventoryTests(unittest.TestCase):
         ):
             self.assertIn(dependency, aggregate_job)
         self.assertIn(
-            "uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9.0.0",
+            "uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10.1.0",
             job,
         )
         setup_uv_block = re.compile(
-            r"(?m)^\s*- uses: astral-sh/setup-uv@c771a70e6277c0a99b617c7a806ffedaca235ff9 # v9\.0\.0\n"
+            r"(?m)^\s*- uses: astral-sh/setup-uv@bec219d24cd3e171d82865faccec33120bb574f4 # v10\.1\.0\n"
             r"\s+with:\n"
             r'\s+version: "0\.11\.27"\n'
             r"\s+enable-cache: false$"

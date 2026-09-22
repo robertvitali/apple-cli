@@ -47,8 +47,8 @@ APPROVED_REMOTE_ACTIONS = {
         "v7.0.0",
     ),
     "astral-sh/setup-uv": (
-        "c771a70e6277c0a99b617c7a806ffedaca235ff9",
-        "v9.0.0",
+        "bec219d24cd3e171d82865faccec33120bb574f4",
+        "v10.1.0",
     ),
     "actions/configure-pages": (
         "45bfe0192ca1faeb007ade9deae92b16b8254a0d",
