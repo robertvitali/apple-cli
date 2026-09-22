@@ -234,18 +234,66 @@ struct SendTests {
         } else { Issue.record("expected notFound for unknown name in empty book") }
     }
 
+    /// The result grammar is `success:<service>:<filesSent>` /
+    /// `error:<filesSent>:<failedFile>:<bodyDelivered>:<text>`. The leading fields are integers,
+    /// so an error message carrying colons of its own still parses whole.
     @Test func interpretResults() {
-        #expect(Send.interpret("success:iMessage") == (true, "iMessage", nil))
-        #expect(Send.interpret("success:SMS").service == "SMS")
-        #expect(Send.interpret("error:boom").ok == false)
-        #expect(Send.interpret("error:boom").error == "boom")
+        #expect(Send.interpret("success:iMessage:0")
+            == Send.Outcome(ok: true, service: "iMessage", filesSent: 0, failedFile: nil,
+                            bodyDelivered: true, error: nil))
+        #expect(Send.interpret("success:SMS:2").service == "SMS")
+        #expect(Send.interpret("success:SMS:2").filesSent == 2)
+        // A group chat reports no service — Messages does not name the chat's own.
+        #expect(Send.interpret("success::1").service == nil)
+        #expect(Send.interpret("error:0:0:0:boom").ok == false)
+        #expect(Send.interpret("error:0:0:0:boom").error == "boom")
+        #expect(Send.interpret("error:1:2:1:boom: -1728").error == "boom: -1728")
+        #expect(Send.interpret("error:1:2:1:boom").filesSent == 1)
+        #expect(Send.interpret("error:1:2:1:boom").failedFile == 2)
+        // `failedFile` 0 means "not during a file send", surfaced as nil rather than index 0.
+        #expect(Send.interpret("error:0:0:0:boom").failedFile == nil)
+    }
+
+    /// THE FACT `filesSent` CANNOT CARRY. The body is not an attachment, so a run that delivered
+    /// the body and then failed on attachment 1 reports `filesSent: 0` — and before the body bit
+    /// existed, that read as "nothing was delivered". A caller following the retry advice re-sent
+    /// the body to a real person.
+    @Test func interpretCarriesWhetherTheBodyWasDelivered() {
+        #expect(Send.interpret("error:0:1:1:transfer refused").bodyDelivered == true)
+        #expect(Send.interpret("error:0:1:1:transfer refused").filesSent == 0)
+        #expect(Send.interpret("error:0:1:0:transfer refused").bodyDelivered == false)
+        // Reachable without any attachment in flight: body out, then the SMS lookup failed.
+        #expect(Send.interpret("error:0:0:1:no SMS account").bodyDelivered == true)
+        #expect(Send.interpret("error:0:0:1:no SMS account").failedFile == nil)
+    }
+
+    /// FAIL-CLOSED PIN. Anything outside the grammar — including whatever osascript itself prints
+    /// when it never reaches a `return` — must read as a FAILURE. On a surface that reaches a real
+    /// human, a parser that shrugged and called an unrecognized line a success would report a
+    /// delivery that never happened. The superseded four-field error shape is in the list on
+    /// purpose: a half-upgraded build must not parse as a success or as a silent zero.
+    @Test func interpretRejectsAnythingOutsideTheGrammar() {
+        for line in ["success", "success:iMessage", "success:iMessage:x", "error:boom",
+                     "error:0:boom", "error:0:0:boom", "error:0:0:x:boom", "", "0:0:0",
+                     "succeeded:iMessage:0"] {
+            let outcome = Send.interpret(line)
+            #expect(outcome.ok == false, "\(line) must not read as a success")
+            #expect(outcome.error?.hasPrefix("Unknown result:") == true)
+        }
     }
 
     @Test func scriptsAreArgvDriven() {
-        // Security: recipient/body arrive via `on run argv`, never interpolated.
-        #expect(Send.directScript().contains("on run argv"))
-        #expect(Send.directScript().contains("item 1 of argv"))
-        #expect(Send.groupScript().contains("chat id chatId"))
+        // Security: recipient/body/attachment paths arrive via `on run argv`, never interpolated.
+        for service in Send.Service.allCases {
+            for includeMessage in [true, false] {
+                let script = Send.directScript(service: service, includeMessage: includeMessage)
+                #expect(script.contains("on run argv"))
+                #expect(script.contains("set targetRecipient to item 1 of argv"))
+                #expect(script.contains("set end of fileList to POSIX file (item fileIndex of argv)"))
+            }
+        }
+        #expect(Send.groupScript(includeMessage: true).contains("chat id chatId"))
+        #expect(Send.groupScript(includeMessage: false).contains("on run argv"))
     }
 
     // [L3] Allowlist footgun fix: normalize BOTH sides before comparing.
@@ -319,6 +367,186 @@ struct SendTests {
         #expect(throws: Never.self) {
             try Send.assertAllowedRecipient("2125550142", groupChat: false, sandboxActive: true,
                                             allowedRecipients: ["+1 (212) 555-0142"])
+        }
+    }
+}
+
+// MARK: - Service selection + attachments (CLI extras over the MCP surface)
+
+/// The two send extras port-spec §5 listed as WORTH-INCLUDING: explicit service control and file
+/// attachments. Every assertion here is on the PURE builders — the emitted AppleScript source and
+/// the path resolver — because nothing else can see them: the script bodies are Swift string
+/// literals that `swift build` never parses as AppleScript, and the only tier that would execute
+/// them sends to a real human.
+@Suite("Send service + attachments")
+struct SendServiceAndAttachmentTests {
+    @Test func serviceNamesRoundTrip() {
+        #expect(Send.Service(rawValue: "auto") == .auto)
+        #expect(Send.Service(rawValue: "imessage") == .imessage)
+        #expect(Send.Service(rawValue: "sms") == .sms)
+        // The validation message, the help text and the manual all derive from this one list, so
+        // a fourth service can only be a new case.
+        #expect(Send.Service.allNames == "auto, imessage, sms")
+        // Anything else is rejected here rather than reaching Messages as a routing surprise.
+        for bad in ["iMessage", "SMS", "rcs", "", "auto ", "imessage,sms"] {
+            #expect(Send.Service(rawValue: bad) == nil, "\(bad) must not parse as a service")
+        }
+    }
+
+    /// `service_plan` is what a dry run PROMISES the execute path will do, so each mode must have
+    /// its own wording — a shared string would let a preview say "iMessage→SMS auto" for a send
+    /// that will never try SMS.
+    @Test func servicePlansAreDistinct() {
+        #expect(Send.Service.auto.plan == "iMessage→SMS auto")
+        #expect(Send.Service.imessage.plan == "iMessage only")
+        #expect(Send.Service.sms.plan == "SMS only")
+        #expect(Set(Send.Service.allCases.map(\.plan)).count == Send.Service.allCases.count)
+    }
+
+    /// `auto` keeps the ported `_send_message_direct` routing verbatim: iMessage first, then the
+    /// SMS account, and only for a recipient that contains a digit.
+    @Test func autoScriptKeepsTheiMessageThenSMSFallback() {
+        let script = Send.directScript(service: .auto, includeMessage: true)
+        #expect(script.contains("set targetService to 1st service whose service type = iMessage"))
+        #expect(script.contains("set smsService to first account whose service type = SMS and enabled is true"))
+        #expect(script.contains("targetRecipient contains \"0\""))
+        #expect(script.contains("targetRecipient contains \"9\""))
+        #expect(script.contains("SMS not available for email addresses"))
+        #expect(script.contains("return \"success:iMessage:\" & filesSent"))
+        #expect(script.contains("return \"success:SMS:\" & filesSent"))
+    }
+
+    /// EXPLICIT MEANS EXPLICIT. `--service imessage` must not silently reach SMS and
+    /// `--service sms` must not silently reach iMessage — a fallback the caller ruled out is the
+    /// one thing these modes exist to prevent, and it would be invisible from the outside.
+    @Test func singleServiceScriptsHaveNoFallback() {
+        let iMessageOnly = Send.directScript(service: .imessage, includeMessage: true)
+        #expect(iMessageOnly.contains("set targetService to 1st service whose service type = iMessage"))
+        #expect(!iMessageOnly.contains("service type = SMS"))
+        #expect(!iMessageOnly.contains("success:SMS"))
+
+        let smsOnly = Send.directScript(service: .sms, includeMessage: true)
+        #expect(smsOnly.contains("set smsService to first account whose service type = SMS and enabled is true"))
+        #expect(!smsOnly.contains("service type = iMessage"))
+        #expect(!smsOnly.contains("success:iMessage"))
+    }
+
+    /// The `auto` fallback may only re-run a batch of which NOTHING was delivered. Without that
+    /// guard, an iMessage run that placed the body and one attachment before failing would be
+    /// replayed whole over SMS and the recipient would get both twice. The condition is DERIVED
+    /// from the two counters the result grammar already carries, rather than kept as a third latch
+    /// that could disagree with them.
+    @Test func autoScriptRefusesToFallBackAfterAnythingWasDelivered() {
+        let script = Send.directScript(service: .auto, includeMessage: true)
+        #expect(script.contains("set bodyDelivered to 0"))
+        #expect(script.contains("if not (bodyDelivered is 0 and filesSent is 0) then"))
+        #expect(script.contains("iMessage send failed after part of it was already delivered"))
+    }
+
+    /// A file-only send carries NO body argument, so the script must neither read argv item 2 as
+    /// a body nor emit a `send messageText` — and the attachment loop has to start one item
+    /// earlier. Getting this wrong sends the first attachment path as a text message.
+    @Test func bodylessScriptsReadNoMessageAndStartFilesEarlier() {
+        for service in Send.Service.allCases {
+            let withBody = Send.directScript(service: service, includeMessage: true)
+            let bodyless = Send.directScript(service: service, includeMessage: false)
+            #expect(withBody.contains("set messageText to item 2 of argv"))
+            #expect(withBody.contains("repeat with fileIndex from 3 to (count of argv)"))
+            #expect(!bodyless.contains("messageText"))
+            #expect(bodyless.contains("repeat with fileIndex from 2 to (count of argv)"))
+        }
+        #expect(!Send.groupScript(includeMessage: false).contains("messageText"))
+        #expect(Send.groupScript(includeMessage: true).contains("send messageText to targetChat"))
+    }
+
+    /// Order is part of the contract: the body goes out first, then each attachment in the order
+    /// the operator listed them.
+    @Test func everyScriptSendsTheBodyBeforeTheAttachments() {
+        var scripts = Send.Service.allCases.map { Send.directScript(service: $0, includeMessage: true) }
+        scripts.append(Send.groupScript(includeMessage: true))
+        for script in scripts {
+            guard let body = script.range(of: "send messageText to"),
+                  let files = script.range(of: "repeat with fileIndex from 1 to (count of fileList)")
+            else {
+                Issue.record("script is missing the body or the attachment loop")
+                continue
+            }
+            #expect(body.lowerBound < files.lowerBound)
+        }
+    }
+
+    /// `POSIX file` is coerced OUTSIDE the `tell application "Messages"` block. Inside a tell it
+    /// can resolve against the target application's terminology instead of AppleScript's own.
+    @Test func attachmentPathsAreCoercedOutsideTheTellBlock() {
+        for script in [Send.directScript(service: .auto, includeMessage: true),
+                       Send.groupScript(includeMessage: true)] {
+            guard let coercion = script.range(of: "POSIX file (item fileIndex of argv)"),
+                  let tell = script.range(of: "tell application \"Messages\"")
+            else {
+                Issue.record("script is missing the POSIX coercion or the tell block")
+                continue
+            }
+            #expect(coercion.lowerBound < tell.lowerBound)
+        }
+    }
+
+    /// The `auto` fallback runs after the iMessage half died, possibly mid-batch, and the SMS
+    /// ACCOUNT LOOKUP can fail on its own (no enabled SMS account). Its error handler reports
+    /// `currentFile`, so unless the counter is cleared first it still names the attachment the
+    /// iMessage half was on — telling the caller "send failed on attachment 1" for a run that
+    /// transferred nothing at all. Asserted as "the reset lies between the fallback's entry and
+    /// the account lookup", which is the invariant, not the line number.
+    @Test func autoFallbackClearsTheInFlightAttachmentBeforeResolvingSMS() {
+        for includeMessage in [true, false] {
+            let script = Send.directScript(service: .auto, includeMessage: includeMessage)
+            guard let fallback = script.range(of: "on error iMessageErr"),
+                  let lookup = script.range(of: "set smsService to first account")
+            else {
+                Issue.record("auto script is missing the fallback or the SMS account lookup")
+                continue
+            }
+            #expect(script[fallback.upperBound..<lookup.lowerBound].contains("set currentFile to 0"))
+        }
+        // …and the line that reset reaches: nothing transferred reads as no failed attachment,
+        // never as attachment 0 or attachment 1.
+        let outcome = Send.interpret("error:0:0:0:Both iMessage and SMS failed - iMessage: x SMS: y")
+        #expect(outcome.ok == false)
+        #expect(outcome.filesSent == 0)
+        #expect(outcome.failedFile == nil)
+        #expect(outcome.bodyDelivered == false)
+        #expect(outcome.error == "Both iMessage and SMS failed - iMessage: x SMS: y")
+    }
+
+    /// ROUTING PIN (option (a)). The ported `_send_message_direct` nested two `try`s: the iMessage
+    /// SERVICE lookup in the outer one, whose handler returns an error and attempts no SMS, and
+    /// only the participant lookup + delivery in the inner one that falls back. Flattening them
+    /// makes a Mac signed out of iMessage send a real SMS where the oracle sent nothing — a silent
+    /// routing change under a flag whose whole point is to leave the default alone. Substring
+    /// presence cannot see nesting, so this asserts the ORDERING that encodes it.
+    @Test func autoKeepsTheServiceLookupOutsideTheFallbackBearingTry() {
+        for includeMessage in [true, false] {
+            let script = Send.directScript(service: .auto, includeMessage: includeMessage)
+            guard let service = script.range(of: "set targetService to"),
+                  let buddy = script.range(of: "set targetBuddy to"),
+                  let fallback = script.range(of: "on error iMessageErr"),
+                  let general = script.range(of: "on error generalErr")
+            else {
+                Issue.record("auto script is missing the two-tier service/participant structure")
+                continue
+            }
+            // The service lookup precedes the participant lookup…
+            #expect(service.upperBound < buddy.lowerBound)
+            // …with EXACTLY ONE `try` opening between them: the inner, fallback-bearing one. Two
+            // would mean the lookup had been pushed inside it.
+            let between = script[service.upperBound..<buddy.lowerBound]
+            #expect(between.components(separatedBy: "try").count - 1 == 1)
+            // And the outer handler — the one that reaches no SMS — closes after the inner one.
+            #expect(fallback.lowerBound < general.lowerBound)
+        }
+        // The single-service arms need no outer tier: there is no fallback to keep out of.
+        for service in [Send.Service.imessage, .sms] {
+            #expect(!Send.directScript(service: service, includeMessage: true)
+                .contains("on error generalErr"))
         }
     }
 }

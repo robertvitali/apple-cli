@@ -19,31 +19,31 @@ struct ComposeAttachmentTests {
         return url.path
     }
 
-    @Test("resolveAttachmentPath returns the resolved path for an existing regular file")
+    @Test("AttachmentSource.resolve returns the resolved path for an existing regular file")
     func resolvesExistingFile() throws {
         let path = try tempFile("note.txt", "hello")
-        // resolveAttachmentPath resolves symlinks; compare against the resolved form (a no-op on
+        // AttachmentSource.resolve resolves symlinks; compare against the resolved form (a no-op on
         // /private-backed temp dirs, but consistent with the sibling tests + correct in general).
-        #expect(try resolveAttachmentPath(path) == URL(fileURLWithPath: path).resolvingSymlinksInPath().path)
+        #expect(try AttachmentSource.resolve(path) == URL(fileURLWithPath: path).resolvingSymlinksInPath().path)
     }
 
-    @Test("resolveAttachmentPath rejects a missing file as not_found (exit 65)")
+    @Test("AttachmentSource.resolve rejects a missing file as not_found (exit 65)")
     func rejectsMissingFile() throws {
         // A never-created child of an OWNED scratch directory — the parent exists, the file does
         // not, and nothing is left in the shared temp root.
         let missing = try scratch.directory().appendingPathComponent("nope.txt").path
-        let err = #expect(throws: AppleError.self) { _ = try resolveAttachmentPath(missing) }
+        let err = #expect(throws: AppleError.self) { _ = try AttachmentSource.resolve(missing) }
         #expect(err?.exitCode == 65)
     }
 
-    @Test("resolveAttachmentPath rejects a directory (not a regular file)")
+    @Test("AttachmentSource.resolve rejects a directory (not a regular file)")
     func rejectsDirectory() throws {
         let dir = try scratch.directory()
-        let err = #expect(throws: AppleError.self) { _ = try resolveAttachmentPath(dir.path) }
+        let err = #expect(throws: AppleError.self) { _ = try AttachmentSource.resolve(dir.path) }
         #expect(err?.exitCode == 65)
     }
 
-    @Test("resolveAttachmentPath expands a leading tilde")
+    @Test("AttachmentSource.resolve expands a leading tilde")
     func expandsTilde() throws {
         // Create a uniquely-named file directly under $HOME, resolve it via ~, then clean up.
         let name = "apple-cli-test-\(UUID().uuidString).txt"
@@ -51,9 +51,9 @@ struct ComposeAttachmentTests {
         let url = home.appendingPathComponent(name)
         try "x".write(to: url, atomically: true, encoding: .utf8)
         defer { try? FileManager.default.removeItem(at: url) }
-        // resolveAttachmentPath resolves symlinks (anti-bypass for the sensitive-dir check), so
+        // AttachmentSource.resolve resolves symlinks (anti-bypass for the sensitive-dir check), so
         // compare against the symlink-resolved home path.
-        #expect(try resolveAttachmentPath("~/\(name)") == url.resolvingSymlinksInPath().path)
+        #expect(try AttachmentSource.resolve("~/\(name)") == url.resolvingSymlinksInPath().path)
     }
 
     @Test("attachmentsFromPaths reads bytes + infers filename/MIME for the .eml route")
@@ -66,26 +66,26 @@ struct ComposeAttachmentTests {
         #expect(parts[0].data == Data("%PDF-1.4 stub".utf8))
     }
 
-    @Test("resolveAttachmentPath blocks a dangerous executable extension (.sh) — validation, exit 64")
+    @Test("AttachmentSource.resolve blocks a dangerous executable extension (.sh) — validation, exit 64")
     func blocksDangerousExtension() throws {
         let path = try tempFile("payload.sh", "#!/bin/sh\necho hi")
-        let err = #expect(throws: AppleError.self) { _ = try resolveAttachmentPath(path) }
+        let err = #expect(throws: AppleError.self) { _ = try AttachmentSource.resolve(path) }
         #expect(err?.exitCode == 64)
     }
 
-    @Test("resolveAttachmentPath blocks a file named literally .command (leading-dot, no basename)")
+    @Test("AttachmentSource.resolve blocks a file named literally .command (leading-dot, no basename)")
     func blocksLeadingDotExecutable() throws {
         // NSString.pathExtension is "" for a leading-dot-only name; the endswith match still blocks
         // it (matches s-morgan validate_attachment_type's filename endswith).
         let path = try tempFile(".command", "#!/bin/sh")
-        let err = #expect(throws: AppleError.self) { _ = try resolveAttachmentPath(path) }
+        let err = #expect(throws: AppleError.self) { _ = try AttachmentSource.resolve(path) }
         #expect(err?.exitCode == 64)
     }
 
-    @Test("resolveAttachmentPath allows an ordinary extension (.pdf)")
+    @Test("AttachmentSource.resolve allows an ordinary extension (.pdf)")
     func allowsNormalExtension() throws {
         let path = try tempFile("report.pdf", "%PDF-1.4")
-        #expect(try resolveAttachmentPath(path) == URL(fileURLWithPath: path).resolvingSymlinksInPath().path)
+        #expect(try AttachmentSource.resolve(path) == URL(fileURLWithPath: path).resolvingSymlinksInPath().path)
     }
 
     @Test("sensitiveWriteDir flags credential dirs but not ordinary paths")

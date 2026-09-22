@@ -180,7 +180,7 @@ func resolveAttachmentIndices(names: [String], name: String?, indices: String?) 
 /// True when a string carries a C0 control character or DEL — the bytes that desynchronize the
 /// RS(0x1E)/US(0x1F)-delimited blobs every AppleScript call is argv-fed with. Any operator- or
 /// REMOTE-supplied value that lands in such a blob must be rejected or scrubbed first, or one
-/// vetted field silently becomes two (see `confineWriteDestination`, `resolveAttachmentPath`,
+/// vetted field silently becomes two (see `confineWriteDestination`, `AttachmentSource.resolve`,
 /// `outboundAllowlist`, `safeAttachmentBasename`).
 func hasControlCharacters(_ s: String) -> Bool {
     s.unicodeScalars.contains { $0.value < 0x20 || $0.value == 0x7F }

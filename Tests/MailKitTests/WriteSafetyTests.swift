@@ -458,11 +458,11 @@ struct OutboundAllowlistAndDefaultsTests {
         #expect(throws: AppleError.self) { _ = try outboundAddressFromIndex("Name <a@x.test\u{1F}b@y.test>") }
     }
 
-    @Test("resolveAttachmentPath refuses a control character in the path — US would split one vetted path into two")
+    @Test("AttachmentSource.resolve refuses a control character in the path — US would split one vetted path into two")
     func attachmentPathRefusesControlCharacters() {
         for p in ["/tmp/a\u{1F}/Users/x/.ssh/id_rsa", "/tmp/a\u{1E}b", "/tmp/a\nb", "/tmp/a\u{7F}b"] {
             do {
-                _ = try resolveAttachmentPath(p)
+                _ = try AttachmentSource.resolve(p)
                 Issue.record("accepted \(String(reflecting: p))")
             } catch let e as AppleError {
                 #expect(e.exitCode == AppleExit.permissionDenied)  // 77 — the mailSafety refusal

@@ -298,7 +298,7 @@ BREAKING (behavior), flagged in the CHANGELOG per pre-1.0 policy:
 Doc/help sweep in the same commits as the flips: every `@Flag`/`@Option` help string and
 emitted `note:` field asserting v1 semantics (e.g. the `--all` help's "on a real INBOX this
 refuses"), the TestMode.swift and WriteComposeCommands.swift file headers **and the
-`guardOutbound`/`resolveAttachmentPath` doc comments in that file** — the latter must be
+`guardOutbound` / `AppleKit.AttachmentSource.resolve` doc comments in that file** — the latter must be
 rewritten to state the post-v2 truth: outside the sandbox the recipient allowlist does not
 apply, so the sensitive-directory refusal and the executable-extension blocklist are the SOLE
 containment for attachment content, and they must never be relaxed or made

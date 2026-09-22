@@ -21,7 +21,7 @@ extension MessagesCommandDependencies {
         makeChatDB: @escaping @Sendable (AddressBook) throws -> ChatDB = { _ in
             throw AppleError.upstream("test ChatDB dependency not configured")
         },
-        performSend: @escaping @Sendable (String, String, Bool) throws -> (ok: Bool, service: String?, error: String?) = { _, _, _ in
+        performSend: @escaping @Sendable (Send.Request) throws -> Send.Outcome = { _ in
             throw AppleError.upstream("test send dependency not configured")
         },
         dbDiagnostic: @escaping @Sendable () -> ChatDB.DBCheck = {
@@ -69,6 +69,24 @@ extension MessagesCommandDependencies {
                 sandboxActive: global.testMode,
                 allowedRecipients: allowedRecipients)
         }
+    }
+}
+
+/// Shorthands for the two `Send.Outcome` shapes the fixtures return, so a stubbed sender reads as
+/// what it is ("this went out over iMessage") instead of as five positional fields.
+extension Send.Outcome {
+    static func sent(_ service: String?, files: Int = 0) -> Send.Outcome {
+        Send.Outcome(ok: true, service: service, filesSent: files, failedFile: nil,
+                     bodyDelivered: true, error: nil)
+    }
+
+    /// `bodyDelivered` defaults to FALSE so a test that cares about the body has to say so —
+    /// the opposite default would let the "body was delivered and the envelope must say so"
+    /// regression pass by accident.
+    static func failed(error: String, filesSent: Int = 0, failedFile: Int? = nil,
+                       bodyDelivered: Bool = false) -> Send.Outcome {
+        Send.Outcome(ok: false, service: nil, filesSent: filesSent, failedFile: failedFile,
+                     bodyDelivered: bodyDelivered, error: error)
     }
 }
 
@@ -246,9 +264,9 @@ struct MessagesCommandDependencyTests {
     @Test func sendDryRunDoesNotInvokeSender() throws {
         let command = try Send_.parse(["--dry-run", "+1 (212) 555-0100", "--message", "synthetic hello"])
         let output = try captureStdout {
-            try command.run(dependencies: .fixture(performSend: { _, _, _ in
+            try command.run(dependencies: .fixture(performSend: { _ in
                 Issue.record("dry-run must not invoke sender")
-                return (true, nil, nil)
+                return .sent(nil)
             }))
         }
 
@@ -261,11 +279,14 @@ struct MessagesCommandDependencyTests {
     @Test func sendExecuteUsesInjectedSender() throws {
         let command = try Send_.parse(["+1 (212) 555-0100", "--message", "synthetic hello"])
         let output = try captureStdout {
-            try command.run(dependencies: .fixture(performSend: { handle, message, group in
-                #expect(handle == "12125550100")
-                #expect(message == "synthetic hello")
-                #expect(group == false)
-                return (true, "iMessage", nil)
+            try command.run(dependencies: .fixture(performSend: { request in
+                #expect(request.handle == "12125550100")
+                #expect(request.message == "synthetic hello")
+                #expect(request.groupChat == false)
+                // The default service, and no attachments, reach the sender as such.
+                #expect(request.service == .auto)
+                #expect(request.files.isEmpty)
+                return .sent("iMessage")
             }))
         }
 
@@ -282,11 +303,11 @@ struct MessagesCommandDependencyTests {
     @Test func sendGroupExecuteUsesInjectedSender() throws {
         let command = try Send_.parse(["--group", "iMessage;+;chat-example", "--message", "synthetic group hello"])
         let output = try captureStdout {
-            try command.run(dependencies: .fixture(performSend: { handle, message, group in
-                #expect(handle == "iMessage;+;chat-example")
-                #expect(message == "synthetic group hello")
-                #expect(group == true)
-                return (true, nil, nil)
+            try command.run(dependencies: .fixture(performSend: { request in
+                #expect(request.handle == "iMessage;+;chat-example")
+                #expect(request.message == "synthetic group hello")
+                #expect(request.groupChat == true)
+                return .sent(nil)
             }))
         }
 
@@ -303,9 +324,9 @@ struct MessagesCommandDependencyTests {
                     "12125550100": "Alice Able",
                     "12125550101": "Alice Baker",
                 ]),
-                performSend: { _, _, _ in
+                performSend: { _ in
                     Issue.record("ambiguous contact must not invoke sender")
-                    return (true, nil, nil)
+                    return .sent(nil)
                 }
             ))
         }
@@ -324,9 +345,9 @@ struct MessagesCommandDependencyTests {
     @Test func sandboxRefusesRecipientOutsideAllowlistAndNeverSends() throws {
         let command = try Send_.parse(["--test-mode", "+1 (212) 555-0100", "--message", "synthetic hello"])
         let result = try captureCommand {
-            try command.run(dependencies: .fixture(performSend: { _, _, _ in
+            try command.run(dependencies: .fixture(performSend: { _ in
                 Issue.record("a sandbox-refused recipient must not invoke sender")
-                return (true, nil, nil)
+                return .sent(nil)
             }, allowedRecipients: []))
         }
 
@@ -363,9 +384,9 @@ struct MessagesCommandDependencyTests {
         let command = try Send_.parse(["--test-mode", "--group", "iMessage;+;chat-example",
                                        "--message", "synthetic group hello"])
         let result = try captureCommand {
-            try command.run(dependencies: .fixture(performSend: { _, _, _ in
+            try command.run(dependencies: .fixture(performSend: { _ in
                 Issue.record("sandboxed group send must not invoke sender")
-                return (true, nil, nil)
+                return .sent(nil)
             }, allowedRecipients: ["+1 (212) 555-0100"]))
         }
 
@@ -386,9 +407,9 @@ struct MessagesCommandDependencyTests {
             let command = try Send_.parse(extraArgs + ["--test-mode", "--group", chatId,
                                                        "--message", "synthetic group hello"])
             let result = try captureCommand {
-                try command.run(dependencies: .fixture(performSend: { _, _, _ in
+                try command.run(dependencies: .fixture(performSend: { _ in
                     Issue.record("a sandboxed group send must not invoke sender")
-                    return (true, nil, nil)
+                    return .sent(nil)
                 }, allowedRecipients: [chatId]))
             }
 
@@ -414,10 +435,10 @@ struct MessagesCommandDependencyTests {
         let chatId = "iMessage;+;chat-example"
         let command = try Send_.parse(["--group", chatId, "--message", "synthetic group hello"])
         let output = try captureStdout {
-            try command.run(dependencies: .fixture(performSend: { handle, _, isGroup in
-                #expect(handle == chatId)
-                #expect(isGroup == true)
-                return (true, nil, nil)
+            try command.run(dependencies: .fixture(performSend: { request in
+                #expect(request.handle == chatId)
+                #expect(request.groupChat == true)
+                return .sent(nil)
             }, allowedRecipients: [chatId]))
         }
 
@@ -433,9 +454,9 @@ struct MessagesCommandDependencyTests {
     @Test func sandboxTagsEnvelopeForAnAllowlistedRecipient() throws {
         let command = try Send_.parse(["--test-mode", "+1 (212) 555-0100", "--message", "synthetic hello"])
         let output = try captureStdout {
-            try command.run(dependencies: .fixture(performSend: { handle, _, _ in
-                #expect(handle == "12125550100")
-                return (true, "iMessage", nil)
+            try command.run(dependencies: .fixture(performSend: { request in
+                #expect(request.handle == "12125550100")
+                return .sent("iMessage")
             }, allowedRecipients: ["+1 (212) 555-0100"]))
         }
 
@@ -452,9 +473,9 @@ struct MessagesCommandDependencyTests {
         let command = try Send_.parse(["--dry-run", "--test-mode", "+1 (212) 555-0100",
                                        "--message", "synthetic hello"])
         let output = try captureStdout {
-            try command.run(dependencies: .fixture(performSend: { _, _, _ in
+            try command.run(dependencies: .fixture(performSend: { _ in
                 Issue.record("dry-run must not invoke sender")
-                return (true, nil, nil)
+                return .sent(nil)
             }, allowedRecipients: ["+1 (212) 555-0100"]))
         }
 
@@ -470,7 +491,7 @@ struct MessagesCommandDependencyTests {
         let executed = try captureStdout {
             let command = try Send_.parse(["--text", "--test-mode", "+1 (212) 555-0100",
                                            "--message", "synthetic hello"])
-            try command.run(dependencies: .fixture(performSend: { _, _, _ in (true, "iMessage", nil) },
+            try command.run(dependencies: .fixture(performSend: { _ in .sent("iMessage") },
                                                    allowedRecipients: ["+1 (212) 555-0100"]))
         }
         #expect(executed.hasPrefix("[sandbox] Message sent successfully"))
@@ -486,9 +507,623 @@ struct MessagesCommandDependencyTests {
         // when the sandbox is not engaged.
         let unsandboxed = try captureStdout {
             let command = try Send_.parse(["--text", "+1 (212) 555-0100", "--message", "synthetic hello"])
-            try command.run(dependencies: .fixture(performSend: { _, _, _ in (true, "iMessage", nil) }))
+            try command.run(dependencies: .fixture(performSend: { _ in .sent("iMessage") }))
         }
         #expect(unsandboxed.hasPrefix("Message sent successfully"))
+    }
+
+    // MARK: - --service / --file (CLI extras over the MCP surface)
+
+    /// A misspelled service is a BAD ARGUMENT, not a routing surprise: exit 64,
+    /// `validation_error`, and the sender is never reached.
+    @Test func sendRejectsAnUnknownService() throws {
+        let command = try Send_.parse(["+1 (212) 555-0100", "--message", "synthetic hello",
+                                       "--service", "rcs"])
+        let result = try captureCommand {
+            try command.run(dependencies: .fixture(performSend: { _ in
+                Issue.record("an invalid service must not invoke sender")
+                return .sent(nil)
+            }))
+        }
+
+        #expect(result.exitCode == AppleExit.usage)
+        let error = try errorPayload(from: result.stdout)
+        #expect(error["type"] as? String == AppleErrorType.validation)
+        #expect((error["message"] as? String)?.contains("auto, imessage, sms") == true)
+    }
+
+    /// `--message` became optional, so a send with neither a body nor a file would otherwise
+    /// dispatch an osascript run that delivers nothing and reports success.
+    @Test func sendRequiresAMessageOrAFile() throws {
+        let command = try Send_.parse(["+1 (212) 555-0100"])
+        let result = try captureCommand {
+            try command.run(dependencies: .fixture(performSend: { _ in
+                Issue.record("an empty send must not invoke sender")
+                return .sent(nil)
+            }))
+        }
+
+        #expect(result.exitCode == AppleExit.usage)
+        #expect(try errorPayload(from: result.stdout)["type"] as? String == AppleErrorType.validation)
+    }
+
+    /// PRESENCE, not emptiness. `--message ""` still means "send this (empty) body", exactly as it
+    /// did when `--message` was mandatory — making it newly invalid would be a behaviour change
+    /// dressed up as a validation improvement.
+    @Test func anExplicitlyEmptyMessageIsStillASend() throws {
+        let command = try Send_.parse(["+1 (212) 555-0100", "--message", ""])
+        let output = try captureStdout {
+            try command.run(dependencies: .fixture(performSend: { request in
+                #expect(request.message == "")
+                return .sent("iMessage")
+            }))
+        }
+        #expect(try payload(from: output)["executed"] as? Bool == true)
+    }
+
+    /// Attachments are validated BEFORE anything is dispatched. Messages fails on a missing path
+    /// only after the body has already gone out, and a half-send cannot be taken back. The
+    /// refusal is whatever the SHARED resolver says — `not_found` (65) for a path that names
+    /// nothing, the same code Mail's `--attach` has always returned for it.
+    @Test func sendRejectsAMissingOrUnusableAttachmentBeforeSending() throws {
+        let dir = try scratch.directory()
+        let missing = dir.appendingPathComponent("no-such-file.txt").path
+        for badPath in [missing, dir.path] {
+            let command = try Send_.parse(["+1 (212) 555-0100", "--message", "synthetic hello",
+                                           "--file", badPath])
+            let result = try captureCommand {
+                try command.run(dependencies: .fixture(performSend: { _ in
+                    Issue.record("an unusable attachment must not invoke sender")
+                    return .sent(nil)
+                }))
+            }
+
+            #expect(result.exitCode == AppleExit.notFound)
+            #expect(try errorPayload(from: result.stdout)["type"] as? String == AppleErrorType.notFound)
+        }
+    }
+
+    /// `messages send --file` goes through the SHARED outbound-attachment guard, not a
+    /// Messages-local check — so the containment Mail's `--attach` has always had now applies
+    /// here too. The extension blocklist is what this pins, because it needs nothing but a
+    /// scratch file: the credential-directory cases (a direct path, a symlinked parent, a
+    /// symlinked directory) are proven against a SYNTHETIC `$HOME` in `AttachmentSourceTests`,
+    /// via the resolver's `home:` seam, since the command layer offers no way to redirect it and
+    /// this suite must never touch the operator's real `~/.ssh`.
+    @Test func sendRoutesAttachmentsThroughTheSharedGuard() throws {
+        let path = try scratch.directory().appendingPathComponent("apple-cli-test-payload.sh").path
+        try "#!/bin/sh".write(toFile: path, atomically: true, encoding: .utf8)
+        let command = try Send_.parse(["+1 (212) 555-0100", "--message", "synthetic hello",
+                                       "--file", path])
+        let result = try captureCommand {
+            try command.run(dependencies: .fixture(performSend: { _ in
+                Issue.record("a blocked attachment type must not invoke sender")
+                return .sent(nil)
+            }))
+        }
+
+        #expect(result.exitCode == AppleExit.usage)
+        let error = try errorPayload(from: result.stdout)
+        #expect(error["type"] as? String == AppleErrorType.validation)
+        #expect((error["message"] as? String)?.contains("executable/script") == true)
+        // A content-policy refusal, not a sandbox one — it fires with the sandbox off.
+        #expect(error["sandbox"] == nil)
+    }
+
+    /// DRY-RUN REFUSES IDENTICALLY. A preview that reported "would send" for an attachment the
+    /// execute path will refuse is the same class of lie as a preview that promises a refused
+    /// recipient, and on this surface it is the one most likely to be acted on.
+    @Test func aDryRunRefusesTheSameAttachmentsAnExecuteWould() throws {
+        let dir = try scratch.directory()
+        let executable = dir.appendingPathComponent("apple-cli-test-payload.sh").path
+        try "#!/bin/sh".write(toFile: executable, atomically: true, encoding: .utf8)
+
+        for path in [executable, dir.appendingPathComponent("no-such-file.txt").path,
+                     dir.path] {
+            var codes: [Int32] = []
+            for extraArgs in [["--dry-run"], []] {
+                let command = try Send_.parse(extraArgs + ["+1 (212) 555-0100",
+                                                           "--message", "synthetic hello",
+                                                           "--file", path])
+                let result = try captureCommand {
+                    try command.run(dependencies: .fixture(performSend: { _ in
+                        Issue.record("a refused attachment must not invoke sender")
+                        return .sent(nil)
+                    }))
+                }
+                codes.append(result.exitCode ?? 0)
+                #expect(!result.stdout.contains("would send"))
+            }
+            #expect(codes.first == codes.last, "dry-run and execute must refuse identically")
+        }
+    }
+
+    /// EVERY path is checked before ANY of them is dispatched — a typo in the second path must not
+    /// surface only after the first attachment has been delivered.
+    @Test func oneBadAttachmentRefusesTheWholeBatch() throws {
+        let dir = try scratch.directory()
+        let good = dir.appendingPathComponent("apple-cli-test-a.txt")
+        try "synthetic".write(to: good, atomically: true, encoding: .utf8)
+        let command = try Send_.parse(["+1 (212) 555-0100", "--file", good.path,
+                                       "--file", dir.appendingPathComponent("missing.txt").path])
+        let result = try captureCommand {
+            try command.run(dependencies: .fixture(performSend: { _ in
+                Issue.record("a batch with one bad path must not invoke sender at all")
+                return .sent(nil)
+            }))
+        }
+
+        #expect(result.exitCode == AppleExit.notFound)
+    }
+
+    /// The requested service reaches the sender, and the preview NAMES what the execute path will
+    /// do. A preview that said "iMessage→SMS auto" for a send that will never try SMS is the same
+    /// class of lie as a preview that promises a refused recipient.
+    @Test func serviceFlagReachesTheSenderAndThePreview() throws {
+        for (flag, plan) in [("auto", "iMessage→SMS auto"), ("imessage", "iMessage only"),
+                             ("sms", "SMS only")] {
+            let preview = try captureStdout {
+                let command = try Send_.parse(["--dry-run", "+1 (212) 555-0100",
+                                               "--message", "synthetic hello", "--service", flag])
+                try command.run(dependencies: .fixture())
+            }
+            let previewData = try payload(from: preview)
+            #expect(previewData["service_plan"] as? String == plan)
+            #expect(previewData["service_requested"] as? String == flag)
+            #expect(previewData["files"] as? [String] == [])
+
+            let executed = try captureStdout {
+                let command = try Send_.parse(["+1 (212) 555-0100", "--message", "synthetic hello",
+                                               "--service", flag])
+                try command.run(dependencies: .fixture(performSend: { request in
+                    #expect(request.service == Send.Service(rawValue: flag))
+                    return .sent("iMessage")
+                }))
+            }
+            #expect(try payload(from: executed)["service_requested"] as? String == flag)
+        }
+    }
+
+    /// `auto` stays the default, so an unflagged send is routed exactly as it was before
+    /// `--service` existed.
+    @Test func theDefaultServiceIsAuto() throws {
+        let output = try captureStdout {
+            let command = try Send_.parse(["--dry-run", "+1 (212) 555-0100",
+                                           "--message", "synthetic hello"])
+            try command.run(dependencies: .fixture())
+        }
+        let data = try payload(from: output)
+        #expect(data["service_requested"] as? String == "auto")
+        #expect(data["service_plan"] as? String == "iMessage→SMS auto")
+    }
+
+    /// A group send's service is the chat's own, so `--service` is ACCEPTED (one flag set works
+    /// for both shapes) and has no effect: the plan stays "group chat" and the flag is reported
+    /// verbatim so a caller can see it was ignored rather than silently honoured.
+    @Test func groupSendAcceptsServiceButThePlanStaysGroupChat() throws {
+        let output = try captureStdout {
+            let command = try Send_.parse(["--dry-run", "--group", "iMessage;+;chat-example",
+                                           "--message", "synthetic group hello", "--service", "sms"])
+            try command.run(dependencies: .fixture())
+        }
+        let data = try payload(from: output)
+        #expect(data["service_plan"] as? String == "group chat")
+        #expect(data["service_requested"] as? String == "sms")
+    }
+
+    /// Attachments reach the sender as absolute standardized paths, in the order given, and both
+    /// envelopes carry them: `files` on the preview and the execute, `files_sent` on the execute.
+    @Test func attachmentsReachTheSenderAndBothEnvelopes() throws {
+        let dir = try scratch.directory()
+        let first = dir.appendingPathComponent("apple-cli-test-a.txt")
+        let second = dir.appendingPathComponent("apple-cli-test-b.txt")
+        try "synthetic a".write(to: first, atomically: true, encoding: .utf8)
+        try "synthetic b".write(to: second, atomically: true, encoding: .utf8)
+
+        let preview = try captureStdout {
+            let command = try Send_.parse(["--dry-run", "+1 (212) 555-0100",
+                                           "--message", "synthetic hello",
+                                           "--file", first.path, "--file", second.path])
+            try command.run(dependencies: .fixture())
+        }
+        #expect(try payload(from: preview)["files"] as? [String] == [first.path, second.path])
+
+        let executed = try captureStdout {
+            let command = try Send_.parse(["+1 (212) 555-0100", "--message", "synthetic hello",
+                                           "--file", first.path, "--file", second.path])
+            try command.run(dependencies: .fixture(performSend: { request in
+                #expect(request.files == [first.path, second.path])
+                #expect(request.message == "synthetic hello")
+                return .sent("iMessage", files: 2)
+            }))
+        }
+        let data = try payload(from: executed)
+        #expect(data["files"] as? [String] == [first.path, second.path])
+        #expect(data["files_sent"] as? Int == 2)
+    }
+
+    /// A file-only send carries no body at all — `message: nil`, not `""` — so the script that is
+    /// built reads no body argument and the envelope reports no `message`.
+    @Test func aFileOnlySendCarriesNoBody() throws {
+        let file = try scratch.directory().appendingPathComponent("apple-cli-test-only.txt")
+        try "synthetic".write(to: file, atomically: true, encoding: .utf8)
+
+        let output = try captureStdout {
+            let command = try Send_.parse(["+1 (212) 555-0100", "--file", file.path])
+            try command.run(dependencies: .fixture(performSend: { request in
+                #expect(request.message == nil)
+                #expect(request.files == [file.path])
+                return .sent("iMessage", files: 1)
+            }))
+        }
+        let data = try payload(from: output)
+        #expect(data["message"] == nil)
+        #expect(data["files_sent"] as? Int == 1)
+    }
+
+    /// A multi-part send is NOT atomic: a failure at attachment 2 leaves the body and attachment 1
+    /// delivered. The error must therefore name which attachment failed AND list what already went
+    /// out in `error.applied`, because a retry that includes those sends them a second time.
+    @Test func aMidBatchAttachmentFailureReportsWhatWasAlreadyDelivered() throws {
+        let dir = try scratch.directory()
+        let first = dir.appendingPathComponent("apple-cli-test-a.txt")
+        let second = dir.appendingPathComponent("apple-cli-test-b.txt")
+        try "synthetic a".write(to: first, atomically: true, encoding: .utf8)
+        try "synthetic b".write(to: second, atomically: true, encoding: .utf8)
+
+        let command = try Send_.parse(["+1 (212) 555-0100", "--message", "synthetic hello",
+                                       "--file", first.path, "--file", second.path])
+        let result = try captureCommand {
+            try command.run(dependencies: .fixture(performSend: { _ in
+                .failed(error: "transfer refused", filesSent: 1, failedFile: 2)
+            }))
+        }
+
+        #expect(result.exitCode == AppleExit.upstream)
+        let error = try errorPayload(from: result.stdout)
+        #expect(error["type"] as? String == AppleErrorType.upstream)
+        let message = try #require(error["message"] as? String)
+        #expect(message.contains("attachment 2 of 2"))
+        #expect(message.contains(second.path))
+        #expect(message.contains("files_sent=1"))
+        #expect(error["applied"] as? [String] == [first.path])
+        // The raw osascript text stays OFF the envelope and on the human channel, as it already
+        // did for a whole-send failure.
+        #expect(!result.stdout.contains("transfer refused"))
+        #expect(result.stderr == "osascript: transfer refused\n")
+    }
+
+    /// A failure that was NOT during a file send delivered nothing, so the generic message stands
+    /// and there is no `applied` list to exclude from a retry.
+    @Test func aBodyFailureKeepsTheGenericMessageAndNoAppliedList() throws {
+        let file = try scratch.directory().appendingPathComponent("apple-cli-test-a.txt")
+        try "synthetic".write(to: file, atomically: true, encoding: .utf8)
+        let command = try Send_.parse(["+1 (212) 555-0100", "--message", "synthetic hello",
+                                       "--file", file.path])
+        let result = try captureCommand {
+            try command.run(dependencies: .fixture(performSend: { _ in
+                .failed(error: "no iMessage service")
+            }))
+        }
+
+        #expect(result.exitCode == AppleExit.upstream)
+        let error = try errorPayload(from: result.stdout)
+        #expect(error["message"] as? String == "send failed (Messages returned an error).")
+        #expect(error["applied"] == nil)
+    }
+
+    /// The reviewer's case, end to end: a FILE-ONLY send where the iMessage half died on the one
+    /// attachment and no SMS account exists. The script clears the in-flight counter before the
+    /// account lookup, so the outcome carries no failed attachment — and the CLI must then report
+    /// the generic failure rather than claiming attachment 1 of 1 went wrong when nothing was
+    /// transferred at all.
+    @Test func aFallbackThatTransferredNothingDoesNotBlameAnAttachment() throws {
+        let file = try scratch.directory().appendingPathComponent("apple-cli-test-a.txt")
+        try "synthetic".write(to: file, atomically: true, encoding: .utf8)
+        let command = try Send_.parse(["+1 (212) 555-0100", "--file", file.path])
+        let result = try captureCommand {
+            try command.run(dependencies: .fixture(performSend: { _ in
+                .failed(error: "Both iMessage and SMS failed", filesSent: 0, failedFile: nil)
+            }))
+        }
+
+        #expect(result.exitCode == AppleExit.upstream)
+        let error = try errorPayload(from: result.stdout)
+        #expect(error["message"] as? String == "send failed (Messages returned an error).")
+        #expect(error["applied"] == nil)
+        #expect((error["message"] as? String)?.contains("attachment") == false)
+    }
+
+    /// THE DUPLICATE THE OLD MESSAGE CAUSED. `filesSent` counts attachments only, so a run that
+    /// delivered the BODY and then failed on attachment 1 has `filesSent == 0` and an empty
+    /// `applied` — and the old wording ("anything already delivered is listed in `applied`") told
+    /// an agent that nothing had gone out. Doing exactly what it said re-sent the body to a real
+    /// person: the duplicate the fallback latch exists to prevent, reintroduced by the error text.
+    @Test func aBodyDeliveredBeforeAFailedAttachmentIsNamedInTheEnvelope() throws {
+        let file = try scratch.directory().appendingPathComponent("apple-cli-test-a.txt")
+        try "synthetic".write(to: file, atomically: true, encoding: .utf8)
+        let command = try Send_.parse(["+1 (212) 555-0100", "--message", "synthetic hello",
+                                       "--file", file.path])
+        let result = try captureCommand {
+            try command.run(dependencies: .fixture(performSend: { _ in
+                .failed(error: "transfer refused", filesSent: 0, failedFile: 1, bodyDelivered: true)
+            }))
+        }
+
+        #expect(result.exitCode == AppleExit.upstream)
+        let error = try errorPayload(from: result.stdout)
+        let message = try #require(error["message"] as? String)
+        #expect(message.contains("attachment 1 of 1"))
+        #expect(message.contains("The message body WAS already delivered"))
+        #expect(message.contains("omit --message from a retry"))
+        // No attachment went out, so there is nothing to exclude by path.
+        #expect(error["applied"] == nil)
+    }
+
+    /// The same fact on the OTHER branch: no attachment was ever in flight (body out, then the SMS
+    /// account lookup failed), so `failedFile` is nil and the generic message is used — it must
+    /// still say the body went out.
+    @Test func aBodyDeliveredWithNoFailedAttachmentIsStillNamed() throws {
+        let command = try Send_.parse(["+1 (212) 555-0100", "--message", "synthetic hello"])
+        let result = try captureCommand {
+            try command.run(dependencies: .fixture(performSend: { _ in
+                .failed(error: "no enabled SMS account", bodyDelivered: true)
+            }))
+        }
+
+        #expect(result.exitCode == AppleExit.upstream)
+        let message = try #require(try errorPayload(from: result.stdout)["message"] as? String)
+        #expect(message.hasPrefix("send failed (Messages returned an error)."))
+        #expect(message.contains("The message body WAS already delivered"))
+    }
+
+    /// And the converse, so the sentence means something: a file-only send that delivered nothing
+    /// must NOT claim a body went out — there was no body to deliver.
+    @Test func aFileOnlySendNeverClaimsADeliveredBody() throws {
+        let file = try scratch.directory().appendingPathComponent("apple-cli-test-a.txt")
+        try "synthetic".write(to: file, atomically: true, encoding: .utf8)
+        let command = try Send_.parse(["+1 (212) 555-0100", "--file", file.path])
+        let result = try captureCommand {
+            try command.run(dependencies: .fixture(performSend: { _ in
+                .failed(error: "Both iMessage and SMS failed", filesSent: 0, failedFile: 1)
+            }))
+        }
+
+        #expect(result.exitCode == AppleExit.upstream)
+        let message = try #require(try errorPayload(from: result.stdout)["message"] as? String)
+        #expect(message.contains("attachment 1 of 1"))
+        #expect(!message.contains("message body"))
+    }
+
+    /// `--group --file` is a real, reachable shape: the group script builds the same attachment
+    /// loop, so every participant in the chat receives each file. Nothing downstream of the seam
+    /// exercised it before, and no document mentioned it.
+    @Test func groupSendCarriesAttachmentsToTheChat() throws {
+        let dir = try scratch.directory()
+        let first = dir.appendingPathComponent("apple-cli-test-a.txt")
+        let second = dir.appendingPathComponent("apple-cli-test-b.txt")
+        try "synthetic a".write(to: first, atomically: true, encoding: .utf8)
+        try "synthetic b".write(to: second, atomically: true, encoding: .utf8)
+        let chatId = "iMessage;+;chat-example"
+
+        let preview = try captureStdout {
+            let command = try Send_.parse(["--dry-run", "--group", chatId,
+                                           "--message", "synthetic group hello",
+                                           "--file", first.path, "--file", second.path])
+            try command.run(dependencies: .fixture())
+        }
+        let previewData = try payload(from: preview)
+        #expect(previewData["group_chat"] as? Bool == true)
+        #expect(previewData["service_plan"] as? String == "group chat")
+        #expect(previewData["files"] as? [String] == [first.path, second.path])
+
+        let executed = try captureStdout {
+            let command = try Send_.parse(["--group", chatId, "--message", "synthetic group hello",
+                                           "--file", first.path, "--file", second.path])
+            try command.run(dependencies: .fixture(performSend: { request in
+                #expect(request.groupChat == true)
+                #expect(request.handle == chatId)
+                #expect(request.files == [first.path, second.path])
+                return .sent(nil, files: 2)
+            }))
+        }
+        let data = try payload(from: executed)
+        #expect(data["group_chat"] as? Bool == true)
+        #expect(data["files"] as? [String] == [first.path, second.path])
+        #expect(data["files_sent"] as? Int == 2)
+        // A group send still reports no service — Messages does not name the chat's own.
+        #expect(data["service_used"] == nil)
+    }
+
+    /// `--service sms` to an address with no digits in it is knowably impossible — the oracle's own
+    /// phone-shaped test says so, and it is the same test that stops the `auto` fallback trying SMS
+    /// for an email. Naming it at exit 64 beats an opaque `upstream_error` after Messages has been
+    /// asked to do it.
+    @Test func smsToAnEmailRecipientIsRefusedBeforeTheSender() throws {
+        let command = try Send_.parse(["jane.doe@example.com", "--message", "synthetic hello",
+                                       "--service", "sms"])
+        let result = try captureCommand {
+            try command.run(dependencies: .fixture(performSend: { _ in
+                Issue.record("an unreachable SMS recipient must not invoke sender")
+                return .sent(nil)
+            }))
+        }
+
+        #expect(result.exitCode == AppleExit.usage)
+        let error = try errorPayload(from: result.stdout)
+        #expect(error["type"] as? String == AppleErrorType.validation)
+        #expect((error["message"] as? String)?.contains("SMS needs a phone number") == true)
+    }
+
+    /// The refusal is scoped: `auto` and `imessage` must still reach an email address, and a phone
+    /// number must still reach `sms`. Without this the pre-validation could quietly become "no
+    /// email recipients at all".
+    @Test func theSMSPreValidationDoesNotTouchTheOtherServices() throws {
+        for flag in ["auto", "imessage"] {
+            let output = try captureStdout {
+                let command = try Send_.parse(["--dry-run", "jane.doe@example.com",
+                                               "--message", "synthetic hello", "--service", flag])
+                try command.run(dependencies: .fixture())
+            }
+            #expect(try payload(from: output)["service_requested"] as? String == flag)
+        }
+        let phone = try captureStdout {
+            let command = try Send_.parse(["--dry-run", "+1 (212) 555-0100",
+                                           "--message", "synthetic hello", "--service", "sms"])
+            try command.run(dependencies: .fixture())
+        }
+        #expect(try payload(from: phone)["service_plan"] as? String == "SMS only")
+    }
+
+    /// ORDERING PIN. Attachment resolution runs BELOW the sandbox gate. Above it, a sandbox-refused
+    /// send with a bad path returned a plain file `validation_error` with no `sandbox: true` for a
+    /// caller to branch on — and `--dry-run` stat-ed arbitrary paths, reporting exists/directory
+    /// back on stdout, for a send that was never going to happen.
+    @Test func theSandboxRefusalPrecedesAttachmentValidation() throws {
+        let missing = try scratch.directory().appendingPathComponent("no-such-file.txt").path
+        for extraArgs in [[], ["--dry-run"]] {
+            let command = try Send_.parse(extraArgs + ["--test-mode", "+1 (212) 555-0100",
+                                                       "--message", "synthetic hello",
+                                                       "--file", missing])
+            let result = try captureCommand {
+                try command.run(dependencies: .fixture(allowedRecipients: []))
+            }
+
+            #expect(result.exitCode == AppleExit.usage)
+            let error = try errorPayload(from: result.stdout)
+            // The SANDBOX refusal, not the file one — that is the whole point of the ordering.
+            #expect(error["sandbox"] as? Bool == true)
+            #expect((error["message"] as? String)?.hasPrefix("refusing send:") == true)
+            #expect(!result.stdout.contains("no-such-file"))
+        }
+    }
+
+    /// The same ordering for the empty-send guard. Every refusal that depends on the RECIPIENT
+    /// having been accepted belongs below the sandbox gate, so a caller branching on
+    /// `error.sandbox` is never handed an ordinary argument error for a send the sandbox is what
+    /// actually stopped.
+    @Test func theSandboxRefusalPrecedesTheNothingToSendGuard() throws {
+        let command = try Send_.parse(["--test-mode", "+1 (212) 555-0100"])
+        let result = try captureCommand {
+            try command.run(dependencies: .fixture(allowedRecipients: []))
+        }
+
+        #expect(result.exitCode == AppleExit.usage)
+        let error = try errorPayload(from: result.stdout)
+        #expect(error["sandbox"] as? Bool == true)
+        #expect((error["message"] as? String)?.hasPrefix("refusing send:") == true)
+        #expect((error["message"] as? String)?.contains("nothing to send") == false)
+    }
+
+    /// `files_sent` is an EXECUTE-only key: a dry run sent nothing, and reporting `0` there would
+    /// read as "it ran and delivered none of them".
+    @Test func theDryRunEnvelopeOmitsFilesSent() throws {
+        let file = try scratch.directory().appendingPathComponent("apple-cli-test-a.txt")
+        try "synthetic".write(to: file, atomically: true, encoding: .utf8)
+        let output = try captureStdout {
+            let command = try Send_.parse(["--dry-run", "+1 (212) 555-0100",
+                                           "--message", "synthetic hello", "--file", file.path])
+            try command.run(dependencies: .fixture())
+        }
+        let data = try payload(from: output)
+        #expect(data["files"] as? [String] == [file.path])
+        #expect(data["files_sent"] == nil)
+        #expect(data["dry_run"] as? Bool == true)
+    }
+
+    /// The RESOLVED path is what reaches the sender and what the envelope reports — a symlink is
+    /// sent as the file it points at, which is what the manual, the changelog and the port spec
+    /// now say. (The first draft refused a symlink outright while all four documents promised the
+    /// opposite.)
+    @Test func aSymlinkedAttachmentIsReportedAsItsTarget() throws {
+        let dir = try scratch.directory()
+        let target = dir.appendingPathComponent("apple-cli-test-target.txt")
+        try "synthetic".write(to: target, atomically: true, encoding: .utf8)
+        let link = dir.appendingPathComponent("apple-cli-test-link.txt")
+        try FileManager.default.createSymbolicLink(at: link, withDestinationURL: target)
+        let resolved = target.resolvingSymlinksInPath().path
+
+        let output = try captureStdout {
+            let command = try Send_.parse(["+1 (212) 555-0100", "--message", "synthetic hello",
+                                           "--file", link.path])
+            try command.run(dependencies: .fixture(performSend: { request in
+                #expect(request.files == [resolved])
+                return .sent("iMessage", files: 1)
+            }))
+        }
+        let data = try payload(from: output)
+        #expect(data["files"] as? [String] == [resolved])
+        #expect((data["files"] as? [String])?.first?.hasSuffix("apple-cli-test-link.txt") == false)
+    }
+
+    /// MUTATION KILL for the `message != nil` half of the body note. A file-only send whose
+    /// outcome nonetheless reports `bodyDelivered` must NOT claim a body went out — there was no
+    /// body. Without this, dropping the `message != nil` conjunct stays green.
+    @Test func aFileOnlySendSuppressesTheBodyNoteEvenIfTheOutcomeClaimsIt() throws {
+        let file = try scratch.directory().appendingPathComponent("apple-cli-test-a.txt")
+        try "synthetic".write(to: file, atomically: true, encoding: .utf8)
+        let command = try Send_.parse(["+1 (212) 555-0100", "--file", file.path])
+        let result = try captureCommand {
+            try command.run(dependencies: .fixture(performSend: { request in
+                #expect(request.message == nil)
+                return .failed(error: "transfer refused", filesSent: 0, failedFile: 1,
+                               bodyDelivered: true)
+            }))
+        }
+
+        #expect(result.exitCode == AppleExit.upstream)
+        let message = try #require(try errorPayload(from: result.stdout)["message"] as? String)
+        #expect(message.contains("attachment 1 of 1"))
+        #expect(!message.contains("message body"))
+        #expect(!message.contains("omit --message"))
+    }
+
+    /// `--text` has to describe an attachment-bearing send too, or a file-only send renders as a
+    /// blank line after "would send … via …:".
+    @Test func textOutputDescribesAttachments() throws {
+        let file = try scratch.directory().appendingPathComponent("apple-cli-test-a.txt")
+        try "synthetic".write(to: file, atomically: true, encoding: .utf8)
+
+        let preview = try captureStdout {
+            let command = try Send_.parse(["--text", "--dry-run", "+1 (212) 555-0100",
+                                           "--file", file.path])
+            try command.run(dependencies: .fixture())
+        }
+        #expect(preview.contains("[1 file(s): \(file.path)]"))
+        #expect(preview.contains("via iMessage→SMS auto"))
+
+        let executed = try captureStdout {
+            let command = try Send_.parse(["--text", "+1 (212) 555-0100",
+                                           "--message", "synthetic hello", "--file", file.path])
+            try command.run(dependencies: .fixture(performSend: { _ in .sent("iMessage", files: 1) }))
+        }
+        #expect(executed.contains("(1 of 1 file(s) sent)"))
+
+        // A plain text send is unchanged — no attachment noise when there are none.
+        let plain = try captureStdout {
+            let command = try Send_.parse(["--text", "+1 (212) 555-0100", "--message", "synthetic hello"])
+            try command.run(dependencies: .fixture(performSend: { _ in .sent("iMessage") }))
+        }
+        #expect(plain.hasPrefix("Message sent successfully via iMessage"))
+        #expect(!plain.contains("file(s)"))
+    }
+
+    /// The sandbox restriction is unchanged by either flag: a non-allowlisted recipient is still
+    /// refused before anything is validated, dispatched, or previewed.
+    @Test func theSandboxAllowlistStillGovernsAnAttachmentSend() throws {
+        let file = try scratch.directory().appendingPathComponent("apple-cli-test-a.txt")
+        try "synthetic".write(to: file, atomically: true, encoding: .utf8)
+        let command = try Send_.parse(["--test-mode", "+1 (212) 555-0100", "--service", "sms",
+                                       "--file", file.path])
+        let result = try captureCommand {
+            try command.run(dependencies: .fixture(performSend: { _ in
+                Issue.record("a sandbox-refused recipient must not invoke sender")
+                return .sent(nil)
+            }, allowedRecipients: []))
+        }
+
+        #expect(result.exitCode == AppleExit.usage)
+        #expect(try errorPayload(from: result.stdout)["sandbox"] as? Bool == true)
     }
 
     // MARK: - Reads + diagnostics
@@ -906,9 +1541,9 @@ struct MessagesCommandDependencyTests {
         ])
         let deps = MessagesCommandDependencies.fixture(book: book, makeChatDB: { _ in
             try ChatDB(path: path, book: book, copyToTemp: false, homeDirectoryForTilde: homePath)
-        }, performSend: { _, _, _ in
+        }, performSend: { _ in
             Issue.record("an ambiguous recipient must not invoke sender")
-            return (true, nil, nil)
+            return .sent(nil)
         })
 
         let recent = try captureStdout {
@@ -1082,11 +1717,11 @@ struct MessagesCommandDependencyTests {
                     let command = try Send_.parse(arguments)
                     let calls = LockedBox<Int>(0)
                     let result = try captureCommand {
-                        try command.run(dependencies: .fixture(performSend: { recipient, message, isGroup in
+                        try command.run(dependencies: .fixture(performSend: { request in
                             calls.withLock { $0 += 1 }
-                            #expect(recipient == handle)
-                            #expect(message == "synthetic output-limit send")
-                            #expect(isGroup == group)
+                            #expect(request.handle == handle)
+                            #expect(request.message == "synthetic output-limit send")
+                            #expect(request.groupChat == group)
                             throw injected
                         }))
                     }
@@ -1117,8 +1752,8 @@ struct MessagesCommandDependencyTests {
         let rawError = "synthetic osascript failure"
         let command = try Send_.parse(["+1 (212) 555-0100", "--message", "synthetic hello"])
         let result = try captureCommand {
-            try command.run(dependencies: .fixture(performSend: { _, _, _ in
-                (false, nil, rawError)
+            try command.run(dependencies: .fixture(performSend: { _ in
+                .failed(error: rawError)
             }))
         }
 
@@ -1126,7 +1761,7 @@ struct MessagesCommandDependencyTests {
         #expect(result.stderr == "osascript: " + rawError + "\n")
         let error = try errorPayload(from: result.stdout)
         #expect(error["type"] as? String == AppleErrorType.upstream)
-        #expect(error["message"] as? String == "send failed (Messages returned an error)")
+        #expect(error["message"] as? String == "send failed (Messages returned an error).")
         #expect(!result.stdout.contains(rawError))
         #expect(!result.stdout.contains("osascript"))
     }
@@ -1134,9 +1769,9 @@ struct MessagesCommandDependencyTests {
     @Test func sendNotFoundEmitsNotFoundWithoutInvokingSender() throws {
         let command = try Send_.parse(["Unknown", "--message", "synthetic hello"])
         let result = try captureCommand {
-            try command.run(dependencies: .fixture(performSend: { _, _, _ in
+            try command.run(dependencies: .fixture(performSend: { _ in
                 Issue.record("not-found recipient must not invoke sender")
-                return (true, nil, nil)
+                return .sent(nil)
             }))
         }
 

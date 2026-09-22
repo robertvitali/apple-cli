@@ -108,8 +108,20 @@ struct SendPreview: Encodable {
     let recipient: String
     let resolved_handle: String
     let display_name: String?
-    let service_plan: String    // "iMessage→SMS auto" | "group chat"
-    let message: String
+    /// What the execute path WILL do: "iMessage→SMS auto" | "iMessage only" | "SMS only" |
+    /// "group chat". Derived from `--service`, except on a group send, whose service is the
+    /// chat's own.
+    let service_plan: String
+    /// What the caller ASKED for, verbatim: "auto" | "imessage" | "sms". Reported on a group
+    /// send too, where it is accepted and has no effect.
+    let service_requested: String
+    /// Absent when the send carries no body (a file-only send). Present — including as `""` —
+    /// whenever `--message` was given.
+    let message: String?
+    /// Attachment paths in send order, absolute and SYMLINK-RESOLVED by the shared
+    /// `AppleKit.AttachmentSource.resolve` — a link is reported as the file it points at,
+    /// because that is the file being sent. `[]` when there are none.
+    let files: [String]
     let note: String
 }
 
@@ -122,7 +134,17 @@ struct SendResult: Encodable {
     let resolved_handle: String
     let display_name: String?
     let service_used: String?
-    let message: String
+    /// What the caller asked for ("auto" | "imessage" | "sms"), alongside `service_used`, which
+    /// is what actually carried it — the two differ whenever `auto` fell back to SMS.
+    let service_requested: String
+    /// Absent when the send carried no body (a file-only send).
+    let message: String?
+    /// Attachment paths in send order, absolute and SYMLINK-RESOLVED by the shared
+    /// `AppleKit.AttachmentSource.resolve` — a link is reported as the file it points at,
+    /// because that is the file being sent. `[]` when there are none.
+    let files: [String]
+    /// How many of `files` Messages actually accepted.
+    let files_sent: Int
 }
 
 struct SendAmbiguousData: Encodable {

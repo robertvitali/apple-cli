@@ -354,7 +354,7 @@ enum MailDashboard {
 /// Export WRITES MESSAGE BODIES to disk, so an unguarded `--dir` could scatter mail content into
 /// `~/.ssh` or outside the home entirely — the CLI previously accepted any path. Resolving
 /// symlinks BEFORE the checks is what stops a symlink into a blocked directory from bypassing
-/// them (the same ordering `resolveAttachmentPath` uses), and the blocklist itself is the shared
+/// them (the same ordering `AppleKit.AttachmentSource.resolve` uses), and the blocklist itself is the shared
 /// `AppleKit.sensitiveWriteDir` so the two surfaces cannot drift apart.
 func resolveExportDirectory(_ raw: String) throws -> URL {
     // Delegates to the shared guard so export and `attachments save` cannot drift apart —
