@@ -11,7 +11,8 @@
 > in (at least) a MINOR release. `schema_version` + `apple version` remain the machine contract
 > agents key on (§5.4). Everything else in this policy — batched `[Unreleased]` releases,
 > `vX.Y.Z` tags, single source of truth, the drift gate, Keep-a-Changelog — stands, and is now
-> automated by `.github/workflows/release.yml` (see AGENTS.md "Versioning + releases"). The
+> automated by the publication design's release path — today only its read-only rehearsal,
+> `scripts/ci/release_prep.py`, exists (see AGENTS.md "Versioning + releases"). The
 > §3–§4 text below is retained as the original rationale record, and §5–§7's procedures are
 > superseded wherever they conflict with the workflow (in particular §7's hand-bump release
 > steps — the workflow owns the bump, the CHANGELOG promotion, the tag, and the Release).

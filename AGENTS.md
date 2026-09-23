@@ -346,11 +346,12 @@ above; the branch rules below govern the cases where a branch exists at all.
   an older macOS normally just take the latest release — no parallel line exists. Cut a
   maintenance branch (`26.x`, from the last 26 tag) only when a release actually stops serving
   those users (deployment-minimum raise past their macOS, or a genuine behavioral break).
-  Fixes land on `main` first and cherry-pick back. **Maintenance releases are NOT supported by
-  release.yml today** — it hard-refuses non-main refs, pushes a literal `main`, and reads the
-  repo-wide newest tag — so adopting a `NN.x` line starts with a reviewed workflow change
-  (branch-scoped ref guard, `HEAD:<ref>` push, branch-reachable `git describe` tag discovery,
-  non-latest release marking). On the Homebrew side the tap then gains a versioned formula
+  Fixes land on `main` first and cherry-pick back. **Maintenance releases are not something the
+  release tooling supports yet** — the removed `release.yml` hard-refused non-main refs, pushed a
+  literal `main` and read the repo-wide newest tag, and the future publisher must be built with
+  a branch-scoped ref guard, a `HEAD:<ref>` push, branch-reachable tag discovery (the rehearsal
+  script already selects the highest tag reachable from the candidate, not the nearest) and
+  non-latest release marking before a `NN.x` line is adopted. On the Homebrew side the tap then gains a versioned formula
   (`apple-cli@26`) pinned to that line, `python@3.x`-style, while the main formula keeps
   tracking latest with a `depends_on macos:` floor. Until that trigger event, the repo has
   exactly one branch.
@@ -403,59 +404,69 @@ in the changelog. This supersedes the strict-SemVer MAJOR semantics in
 
 **Single source of truth:** `AppleVersion.current` in `Sources/AppleKit/CommandSupport.swift`
 (`--version` and `apple version` read it). Never hand-bump it, and never hand-edit released
-CHANGELOG headings — the release workflow owns both.
+CHANGELOG headings — release preparation owns both.
 
-**Release automation:** `.github/workflows/release.yml` (workflow_dispatch). It computes the
-bump from Conventional Commit subjects since the last tag (`feat:` present → MINOR, else
-PATCH; `bump` input can force a level), rewrites `AppleVersion.current`, moves CHANGELOG
-`[Unreleased]` under `## [X.Y.Z] - date`, enforces a drift gate (constant == changelog == tag),
-runs the hosted build + logic-tier test gate (aborts on red; the bats tier is local-only — see
-Toolchain + testing), verifies the built binary's `--version`, then
-commits `chore(release): vX.Y.Z`, tags, pushes, and publishes a GitHub Release with notes and
-an arm64 binary. The `macos_major` input is the ONLY way to change MAJOR and is required for
-the very first release. Commit-header discipline is CI-enforced (`commit-lint` job) because the
+**Release automation — current state (2026-09-22):** the legacy `release.yml` publisher was
+REMOVED on 2026-09-07 as a publication-design prerequisite; no workflow in this repository can
+tag, publish, or write a branch, and the repository's own tests refuse any that could. The
+publication design (`docs/superpowers/specs/2026-09-01-publication-automation-design.md`,
+§14–§15) replaces it in two halves. The half that exists today is the READ-ONLY exact-SHA
+release-preparation rehearsal, `scripts/ci/release_prep.py`: for one explicit full commit ID
+on a clean checkout it computes the next version from the Conventional Commit subjects since
+the last branch-reachable `vMAJOR.MINOR.PATCH` tag (`feat:` or a breaking marker → MINOR, else
+PATCH; `--bump` forces a level; `--macos-major NN` is the ONLY way to move MAJOR and is
+required for a first release; `--declared-version` fails closed on any mismatch), renders the
+`AppleVersion.current` rewrite and the CHANGELOG `[Unreleased]` → `## [X.Y.Z] - date` move
+into a scratch directory the caller names, enforces the drift gate (constant == changelog
+heading == tag-to-be) on those copies, and writes a value-free report that never carries the
+version. It touches nothing in the tree and creates no ref. The other half — the
+release-preparation PR, the trusted listener, the bot publisher with its operator-approved
+environment and tag rulesets — does not exist yet and may not be added until the design's
+§15 preconditions hold (active `main` ruleset, closed privacy gate, reviewed launch
+specification). Commit-header discipline stays CI-enforced (`commit-lint` job) because the
 bump math depends on it.
 
 **RELEASE FREEZE (operator ruling, 2026-08-30) — no version bump until Homebrew is serving.**
 The version stays pinned at the released `v26.0.0` until the tap from the distribution task is
 actually serving `brew install apple-cli`; only then does incrementing resume. Work landing on
 `main` in the meantime — the pre-publication redaction passes, the Messages attachment feature,
-anything else — accumulates under CHANGELOG `[Unreleased]` and ships UNRELEASED. Do not dispatch
-release.yml, do not hand-edit `AppleVersion.current`, and do not describe pending work by a
-version number it has not been assigned. This freeze overrides the "run it when a batch has
+anything else — accumulates under CHANGELOG `[Unreleased]` and ships UNRELEASED. There is no release
+workflow to dispatch; do not hand-edit `AppleVersion.current`, and do not describe pending work
+by a version number it has not been assigned. This freeze overrides the "run it when a batch has
 accumulated" guidance below until the operator lifts it — and an explicit operator instruction to
 cut a release lifts it for that release (so an urgent fix is never blocked by this paragraph).
 The freeze is recorded in `HUMAN-DECISIONS.md` D2, whose remaining part is the tap work that ends
 it; keep the two in step.
 
-**When to run it:** only on an explicit operator instruction — a release publishes an
-outward-facing tag + GitHub Release, so agents never trigger it autonomously (this is a
-conduct rule, not a technical control: anyone with repo write access CAN dispatch it, so the
-discipline lives here). Run it when a batch of merged work has accumulated under
-`[Unreleased]` and the operator calls the release: `gh workflow run release.yml` (add
-`-f bump=minor|patch` to override auto, or `-f macos_major=NN` for a macOS adoption release).
-Prerequisites: clean main; the FULL local canonical suite (both Swift toolchains AND
-`bats -r bats/`, per Toolchain + testing) green on the EXACT tip being dispatched — the hosted
-release gate runs only build + swift test, so the bats tier is enforced here and nowhere else;
-`[Unreleased]` accurately describes the batch (the workflow refuses an empty section); and a
-quick `git log <last-tag>..HEAD --format=%s` review since release notes and history are public
-surfaces. (The FIRST release — `v26.0.0` via `-f macos_major=26` — was cut 2026-08-30 under
-D2; every subsequent dispatch is an ordinary auto-bump with NO `macos_major` input until the
-next macOS major is adopted.)
+**When a release happens:** only on an explicit operator instruction and only through the
+design's publisher path once it exists — a release publishes an outward-facing tag + GitHub
+Release, so agents never trigger one autonomously, and today there is no mechanism that could.
+Until then the rehearsal above is the only release-shaped execution an agent may perform, and
+it may run freely against any clean commit because it writes nothing outside its scratch
+directory. Prerequisites that will carry over to the real path: clean `main`; the FULL local
+canonical suite (both Swift toolchains AND `bats -r bats/`, per Toolchain + testing) green on
+the EXACT candidate commit — the hosted gate runs only build + swift test, so the bats tier is
+enforced locally and nowhere else; `[Unreleased]` accurately describes the batch (the
+rehearsal refuses an empty section); and a `git log <last-tag>..HEAD --format=%s` review,
+since release notes and history are public surfaces. (The FIRST release — `v26.0.0` via the
+legacy workflow's `macos_major=26` input — was cut 2026-08-30 under D2; the next release is
+the macOS 27 adoption release `v27.0.0`, D18.)
 
-**Release-commit review posture:** the `chore(release): vX.Y.Z` commit is mechanical, authored
-by the workflow bot, and contains only the version-constant rewrite and the CHANGELOG heading
-move — content already reviewed when the constituent commits landed. Treat it like a git
+**Release-commit review posture:** the release-preparation commit (`chore(release): vX.Y.Z`,
+produced by the future release-preparation PR of design §14.2) is mechanical and contains only
+the version-constant rewrite and the CHANGELOG heading move — content already reviewed when the
+constituent commits landed. Treat it like a git
 auto-generated commit (merge/revert class): no reviewer fan-out and no trailers are expected
 on it. Note the CI/release jobs build with the hosted runner's single Xcode toolchain; the
 canonical two-toolchain suite (swiftly + CLT) remains the LOCAL pre-push gate.
 
 ## Release notes — required contract
 
-**The CHANGELOG `[Unreleased]` section IS the release note.** `release.yml` moves it verbatim
-under a dated heading and publishes it as the GitHub Release body, so it is written for a reader
-who has never seen this repo, not as a diff summary. Enforced by `scripts/check-release-notes.py`,
-which the release workflow runs before it will cut anything.
+**The CHANGELOG `[Unreleased]` section IS the release note.** Release preparation moves it
+verbatim under a dated heading and the publisher, once it exists, publishes it as the GitHub
+Release body, so it is written for a reader who has never seen this repo, not as a diff summary.
+Enforced by `scripts/check-release-notes.py`, which `docs.yml` runs on every push (advisory
+today) and which the future publisher path runs as a hard gate.
 
 Every `[Unreleased]` section MUST satisfy all of the following:
 
@@ -475,7 +486,10 @@ Every `[Unreleased]` section MUST satisfy all of the following:
    is NOT a deployment minimum. If the real floor changes, the release note says so in a sentence
    of its own, or users on older macOS will read the MAJOR and draw the wrong conclusion.
 5. **A link to the manual** for the version being cut, so the notes are navigable from the
-   Releases page into the command reference.
+   Releases page into the command reference. Write it as a main-branch link
+   (`.../blob/main/docs/manual/...`) while the work is unreleased: release preparation retargets
+   every such link inside the section to the release tag, and refuses to run if a main-branch
+   manual link is found in an already-released section (those must link their own tag).
 6. **No personal data.** Release notes are public, permanent, and mirrored into the GitHub Release
    body where no later rewrite reaches them — the repo-wide rule applies with no exception.
 

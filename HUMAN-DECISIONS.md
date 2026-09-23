@@ -68,6 +68,8 @@ findings for its stated scope; the repo stays private until then.
 | D23 | Grant the D18 step (4) path-free rebuild rehearsal (native build on the operator's host) | **GRANTED 2026-09-22** | Operator chose "grant the rebuild now": controller prepares a frozen invocation + controller packet for review, then runs the build and the asset re-scan. Packet went through six review rounds (codex, security reviewer, critic) before the exact command was put to the operator as D24 |
 | D24 | Run the frozen revision-7 rebuild packet (exact command, digest-pinned) | **GRANTED 2026-09-22; APPLIED 15:44–15:46Z** | Operator confirmed the exact `controller.sh` invocation at the frozen digests (README `46cf8018ae95eb9a`, invocation `aec133cdf3e01715`, controller `793841dde16545c5`); one-shot run-01 returned `REBUILD_EXIT=0 PASS`, as-run digests identical to the reviewed ones. Value-free results are in the readiness evidence §3 |
 | D25 | Does the local macOS 27 canonical run plus the reviewed rebuild satisfy design §12's "separately reviewed, hardened alternative" to a stable hosted macOS 27 image? | **ANSWERED 2026-09-22: accepted** | Operator accepted; design §4.1 and §12 amended in this commit to record the matrix as run and its evidence basis (one operator-owned host; hosted lanes unchanged on `macos-15`). macOS 27 joins macOS 26 as a tested and supported baseline; the technical macOS 14 floor is unchanged |
+| D26 | Next work item after the D18 rehearsal: the design's phase-3 publisher (D18 step 4a) | **ANSWERED 2026-09-22: build the publisher** | Operator chose the publisher over ruling on D22 first or stopping; D22 stays open and non-blocking. No release, tag, version, Pages or Homebrew action is authorized by this choice |
+| D27 | Publisher sequencing: start with the design's read-only release-preparation rehearsal (§14.1, §18 step 15) or author the write-capable publisher now | **ANSWERED 2026-09-22: read-only tooling first** | Design §15 forbids installing any publisher-side control before the active `main` ruleset, the closed privacy gate and a reviewed launch specification, and the repository's tests refuse write-capable workflows; `scripts/ci/release_prep.py` (version computation, drift gate, scratch-only rendering, value-free report) lands first with `Tests/automation` coverage; the write-capable half waits for the §15 preconditions |
 
 ---
 
@@ -1386,5 +1388,50 @@ recovered into the record later.
 **Why it needed you.** It writes a public support claim on the strength of a host you own.
 
 **Blocking?** No; it unblocked D18 step (3).
+
+---
+
+## D26 — Next work item: the phase-3 publisher
+
+- **Status:** **ANSWERED 2026-09-22: build the publisher** (D18 step 4a).
+- **Question.** With D18 steps (1)–(4) recorded and `ec28b26` green, what comes next: the
+  publisher, the open D22 parity ruling, or a stop for operator re-planning?
+- **Ruling.** The publisher. D22 remains open and non-blocking and is presented separately.
+  This choice authorizes design-conformant implementation under the standing review, exact-SHA
+  canonical-suite and privacy gates only; it does not authorize a release, a tag, a version
+  change, a Pages deployment or any Homebrew action. The first `v27.0.0` publication still
+  requires the design's own operator approval step once the publisher exists.
+- **Filed:** 2026-09-22 · **Category:** roadmap sequencing
+
+**Why it needed you.** Multi-session scope; the order of the remaining roadmap is yours.
+
+**Blocking?** No.
+
+---
+
+## D27 — Publisher sequencing: read-only release preparation first
+
+- **Status:** **ANSWERED 2026-09-22: read-only tooling first.**
+- **Finding that framed the question.** Design §15 says nothing publisher-side (bot identity,
+  listener, write-capable workflow, tag rulesets, protected environment) is installed until the
+  §18 step 20 `main` ruleset is active and read back, the privacy gate is closed and a
+  separately reviewed launch specification exists; `Tests/automation/test_action_pins.py`
+  enforces that today by refusing any workflow with `workflow_dispatch`, a write permission, an
+  environment or a release/tag command. Design §14.1 does permit a read-only exact-SHA
+  release-preparation rehearsal now, and none of its logic existed as a script — it lived inline
+  in the removed `release.yml`, untested.
+- **Ruling.** Build the read-only half first: `scripts/ci/release_prep.py` (version computation
+  from branch-reachable Conventional Commit subjects, `--macos-major` as the only MAJOR mover,
+  fail-closed `--declared-version`, the `AppleVersion.current` and CHANGELOG renderings into a
+  caller-named scratch directory, the constant == changelog == tag drift gate, a value-free
+  report that never carries the version) with `Tests/automation` coverage; then continue with
+  the remaining §18 steps and the launch specification; the write-capable half only after the
+  §15 preconditions hold.
+- **Filed:** 2026-09-22 · **Category:** roadmap sequencing (D26 follow-on)
+
+**Why it needed you.** The alternative — authoring the write-capable publisher now — would
+have meant redesigning the guard tests or parking untestable workflow files.
+
+**Blocking?** No.
 
 ---

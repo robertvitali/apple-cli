@@ -86,8 +86,10 @@ platform-keyed amendment) and AGENTS.md "Versioning + releases". Summary:
 - Pre-release (until the first tag): surface may change; breaking changes flagged.
 - **`v26.0.0` (the first release) = all six domains at verified strict-superset MCP
   parity** — the milestone previously named `1.0.0`.
-- Releases are cut by `.github/workflows/release.yml` (workflow_dispatch,
-  operator-instructed only).
+- Releases are cut only on operator instruction through the publication design's release
+  path (`docs/superpowers/specs/2026-09-01-publication-automation-design.md` §14–§15); the
+  legacy `release.yml` was removed on 2026-09-07, and today only the read-only rehearsal
+  `scripts/ci/release_prep.py` exists (see AGENTS.md "Versioning + releases").
 - **Retirement gate — EXECUTED 2026-08-30:** both conditions were met (v26.0.0 cut;
   e2e validation complete) and the six MCPs were retired together on explicit live
   operator instruction (retirement landed in the private fleet-config repo; hosts converge on their next

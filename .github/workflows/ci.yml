@@ -288,8 +288,9 @@ jobs:
       # The base-owned quality driver runs the hosted-safe Bats partition only.
       # The local and live/TCC tiers remain forbidden on fork-reachable runners.
 
-  # The release workflow (release.yml) computes bump levels from Conventional Commit
-  # headers, so malformed headers silently corrupt version math. This job hard-fails
+  # Release preparation (scripts/ci/release_prep.py, and the future publisher path of the
+  # publication design) computes bump levels from Conventional Commit headers, so malformed
+  # headers silently corrupt version math. This job hard-fails
   # any pushed commit whose subject is not Conventional (git-mechanical forms exempt).
   commit-lint:
     runs-on: ubuntu-latest
@@ -329,7 +330,7 @@ jobs:
               echo "NOT CONVENTIONAL: $subj"; BAD=1
             fi
           done < "$SUBJECTS"
-          [ "$BAD" = "0" ] || { echo "Commit headers must follow Conventional Commits (release.yml depends on them)."; exit 1; }
+          [ "$BAD" = "0" ] || { echo "Commit headers must follow Conventional Commits (release preparation depends on them)."; exit 1; }
 
   quality-required:
     name: quality / required

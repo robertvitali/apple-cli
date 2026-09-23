@@ -8,8 +8,8 @@ macOS major (first release `26.0.0` for macOS 26), MINOR = feature additions, PA
 fixes/docs/small updates. Breaking agent-contract changes bump the envelope
 `schema_version` and are flagged `BREAKING:` here; they ride a MINOR, never MAJOR.
 See AGENTS.md "Versioning + releases" and docs/versioning-policy.md (2026-08-29
-amendment). Releases are cut by `.github/workflows/release.yml`, which moves
-`[Unreleased]` under a dated heading — do not hand-edit released headings.
+amendment). Release preparation moves `[Unreleased]` under a dated heading — do not
+hand-edit released headings.
 
 The first tag, `v26.0.0`, was cut 2026-08-30 (D2); from it onward the CLI surface and
 JSON output are stable per the versioning policy — breaking changes bump
@@ -18,6 +18,15 @@ JSON output are stable per the versioning policy — breaking changes bump
 ## [Unreleased]
 
 ### Added
+
+- **A read-only release-preparation rehearsal now exists in the repository's CI tooling
+  (`scripts/ci/release_prep.py`).** For one explicit commit it computes the next version from
+  the commit history, renders the version-constant and CHANGELOG changes a release would make
+  into a scratch directory, and checks that the three agree, without touching the tree, creating
+  a tag, or publishing anything. **For anyone running the binary, nothing changes:** no `apple`
+  command, output field, error type, or exit code is affected, and `schema_version` stays `1`.
+  It replaces the version logic of the release workflow removed on 2026-09-07 with a tested
+  script; the publisher that would use it is not part of this change.
 
 - **Runtime-metadata profiles carrying the two stock special module kinds are now
   admitted by the native authority validator as well.** `stock-typing-namespace` and
