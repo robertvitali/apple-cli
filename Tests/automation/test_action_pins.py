@@ -487,6 +487,7 @@ class RepositoryActionInventoryTests(unittest.TestCase):
             "python -m unittest discover -s Tests/automation -p 'test_*.py'",
             "python scripts/ci/action_pins.py",
             "python scripts/ci/dependency_policy.py",
+            "python scripts/ci/workflow_policy.py",
         ):
             self.assertIn(command, validation_step)
         for command in (

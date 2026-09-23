@@ -306,6 +306,10 @@ def _read_regular_utf8(path: Path, maximum_bytes: int) -> str:
         os.close(descriptor)
 
 
+# Public name for the sibling policy scripts (workflow_policy.py); same contract.
+read_regular_utf8 = _read_regular_utf8
+
+
 def _scan_file(path: Path) -> tuple[list[ActionReference], list[tuple[int, str]]]:
     references: list[ActionReference] = []
     errors: list[tuple[int, str]] = []

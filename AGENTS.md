@@ -333,7 +333,10 @@ above; the branch rules below govern the cases where a branch exists at all.
   `pull_request_target` exception is `metadata / required`: its base-owned workflow checks out
   and executes only the base-owned metadata validator, with `contents: read`, no secrets, and
   PR title/body inspection only; it must never checkout, execute, download, or cache PR code
-  or artifacts. No other `pull_request_target` use is permitted. This metadata check is not a
+  or artifacts. No other `pull_request_target` use is permitted — `scripts/ci/workflow_policy.py`
+  (design §18 step 17), run by the `Supply-chain policy` job, refuses a second one, any reference
+  to the proposal head or an artifact download inside it, and any checkout in it without an
+  explicit base-pinned `ref`. This metadata check is not a
   substitute for the later `governance / required` control-plane gate and must not be used as
   one before that gate lands. The live/TCC tier must NEVER be wired to a fork-reachable trigger;
   keep "require approval for outside-contributor runs" enabled in repo Actions settings.
@@ -408,7 +411,14 @@ CHANGELOG headings — release preparation owns both.
 
 **Release automation — current state (2026-09-22):** the legacy `release.yml` publisher was
 REMOVED on 2026-09-07 as a publication-design prerequisite; no workflow in this repository can
-tag, publish, or write a branch, and the repository's own tests refuse any that could. The
+tag, publish, or write a branch, and the repository's own tests refuse any that could; since
+2026-09-23 the parsed-YAML scan `scripts/ci/workflow_policy.py` (design §18 step 17: explicit
+read-only `permissions` on every workflow and job, no forbidden trigger, environment, secret or
+token reference, none of the recorded publish/deploy actions or write commands, hosted runner
+labels only, every checkout with `persist-credentials: false`, recorded trigger sets per required
+check) runs in the `Supply-chain policy` job on every `main` push and pull request; it is a
+recorded-list check, not a proof — a write reachable only through a remote action's own code is
+bounded by the read-only permissions and the absence of secrets, not detected. The
 publication design (`docs/superpowers/specs/2026-09-01-publication-automation-design.md`,
 §14–§15) replaces it in two halves. The half that exists today is the READ-ONLY exact-SHA
 release-preparation rehearsal, `scripts/ci/release_prep.py`: for one explicit full commit ID

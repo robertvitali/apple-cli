@@ -70,6 +70,7 @@ findings for its stated scope; the repo stays private until then.
 | D25 | Does the local macOS 27 canonical run plus the reviewed rebuild satisfy design §12's "separately reviewed, hardened alternative" to a stable hosted macOS 27 image? | **ANSWERED 2026-09-22: accepted** | Operator accepted; design §4.1 and §12 amended in this commit to record the matrix as run and its evidence basis (one operator-owned host; hosted lanes unchanged on `macos-15`). macOS 27 joins macOS 26 as a tested and supported baseline; the technical macOS 14 floor is unchanged |
 | D26 | Next work item after the D18 rehearsal: the design's phase-3 publisher (D18 step 4a) | **ANSWERED 2026-09-22: build the publisher** | Operator chose the publisher over ruling on D22 first or stopping; D22 stays open and non-blocking. No release, tag, version, Pages or Homebrew action is authorized by this choice |
 | D27 | Publisher sequencing: start with the design's read-only release-preparation rehearsal (§14.1, §18 step 15) or author the write-capable publisher now | **ANSWERED 2026-09-22: read-only tooling first** | Design §15 forbids installing any publisher-side control before the active `main` ruleset, the closed privacy gate and a reviewed launch specification, and the repository's tests refuse write-capable workflows; `scripts/ci/release_prep.py` (version computation, drift gate, scratch-only rendering, value-free report) lands first with `Tests/automation` coverage; the write-capable half waits for the §15 preconditions |
+| D28 | Order of the remaining pre-launch tooling: parsed-YAML workflow scan (design §18 step 17) before the site-assembly rehearsal (step 16), or the reverse | **ANSWERED 2026-09-22: steps 17 then 16** | The scan is the guard every later workflow change (including step 16's own job) is checked against, so it lands first, wired into the `Supply-chain policy` job with `Tests/automation` coverage; the site-assembly rehearsal follows as its own reviewed commit; §18 steps 8–14 and 20 remain operator-involved and are not started by this ruling |
 
 ---
 
@@ -1431,6 +1432,31 @@ recovered into the record later.
 
 **Why it needed you.** The alternative — authoring the write-capable publisher now — would
 have meant redesigning the guard tests or parking untestable workflow files.
+
+**Blocking?** No.
+
+---
+## D28 — Remaining pre-launch tooling order: workflow scan, then site assembly
+
+- **Status:** **ANSWERED 2026-09-22: steps 17 then 16.**
+- **Finding that framed the question.** With the read-only release-preparation rehearsal in
+  place (D27), two design items remained that need no operator grant: the §18 step 17 static
+  workflow scan and the step 16 site-assembly rehearsal. `Tests/automation/test_action_pins.py`
+  already refused the worst shapes (`workflow_dispatch`, write permissions, environments, Pages
+  actions, release and tag commands, `github.token`) by text search; step 17 asks for the check
+  to run on parsed YAML, to require an explicit `permissions` block on every workflow and job,
+  and to pin each required check's recorded trigger set and the `pull_request_target` invariants.
+- **Ruling.** Build the scanner first — `scripts/ci/workflow_policy.py`, a dependency-free
+  block-YAML subset parser plus the step 17 checks, run by the `Supply-chain policy` job and
+  covered by `Tests/automation/test_workflow_policy.py` — so that the step 16 job, and every
+  later workflow change, is admitted through it; then the site-assembly rehearsal (Pages stays
+  disabled) as a separate reviewed commit. The recorded trigger set names today's
+  `metadata / required` check and moves to `governance / required` when step 5's fold lands.
+  Settings and API read-backs of step 17 stay pending as value-free expected sets.
+- **Filed:** 2026-09-22 · **Category:** roadmap sequencing (D27 follow-on)
+
+**Why it needed you.** Both orders are defensible; the scan-first order means the site job is
+born under the guard rather than grandfathered past it.
 
 **Blocking?** No.
 

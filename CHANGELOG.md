@@ -30,6 +30,21 @@ JSON output are stable per the versioning policy — breaking changes bump
   and pull-request merge commits) in a throwaway clone, treating only "nothing to release
   yet" as advisory; the publisher that would use it is not part of this change.
 
+- **Every CI workflow is now checked, on parsed YAML rather than by text search, to be
+  read-only before each `main` push and pull request (`scripts/ci/workflow_policy.py`).** The
+  Supply-chain policy job refuses any workflow that matches the recorded denylist of publish,
+  deploy, attest and ref-writing actions or of `git`, `gh`, REST and package-registry write
+  commands, that references a secret or the built-in token in any expression form, that runs
+  on a runner label outside the admitted hosted set, that keeps checkout credentials, that uses
+  a local or unpinned action or a job container, or that reaches the proposal head under
+  `pull_request_target`; and it requires an explicit read-only `permissions` block on every
+  workflow and every job (the nine jobs that lacked one now declare it; the tenth already did). It also pins the recorded trigger set
+  of each required check and the count of `pull_request_target` workflows. A write reachable
+  only through a remote action's own code, or a command outside the recorded patterns, is not
+  something a static list can detect; the read-only permissions and the absence of any secret
+  are what bound such a path. **For anyone running the binary, nothing changes:** no `apple`
+  command, output field, error type, or exit code is affected, and `schema_version` stays `1`.
+
 - **Runtime-metadata profiles carrying the two stock special module kinds are now
   admitted by the native authority validator as well.** `stock-typing-namespace` and
   `stock-extension-child` module rows, admitted by the Python validator since the

@@ -18,6 +18,8 @@ jobs:
   supply-chain-policy:
     name: Supply-chain policy
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     timeout-minutes: 15
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -39,6 +41,7 @@ jobs:
           python -m unittest discover -s Tests/automation -p 'test_*.py'
           python scripts/ci/action_pins.py
           python scripts/ci/dependency_policy.py
+          python scripts/ci/workflow_policy.py
 
       - name: Prove documentation lock closure
         run: |
@@ -55,6 +58,8 @@ jobs:
     # runners; the read-only token bounds that to compute abuse. Keep "require approval for
     # outside-contributor runs" enabled in repo Actions settings.
     runs-on: macos-15
+    permissions:
+      contents: read
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -110,6 +115,8 @@ jobs:
     # Separate runner from hosted-bats: PR-controlled Swift build code cannot mutate the
     # trusted policy checkout or pinned Bats executable used by the hosted Bats partition.
     runs-on: macos-15
+    permissions:
+      contents: read
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -190,6 +197,8 @@ jobs:
     # candidate binary artifact, which is untrusted and exercised by hosted-safe Bats tests.
     needs: hosted-bats-build
     runs-on: macos-15
+    permissions:
+      contents: read
     timeout-minutes: 30
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -294,6 +303,8 @@ jobs:
   # any pushed commit whose subject is not Conventional (git-mechanical forms exempt).
   commit-lint:
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     timeout-minutes: 10
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -335,6 +346,8 @@ jobs:
   quality-required:
     name: quality / required
     runs-on: ubuntu-latest
+    permissions:
+      contents: read
     timeout-minutes: 5
     if: always()
     needs:
