@@ -8,6 +8,24 @@ name: Docs
 #                   build rather than a follow-up task.
 #  - release-notes: advisory because an empty [Unreleased] is normal between
 #                   releases, so failing CI on it would be noise.
+#  - release-prep-rehearsal: the read-only exact-SHA release-preparation rehearsal
+#                   (design section 14.1; a smoke check toward section 18 step 15,
+#                   whose explicit-SHA evidence binding is separate) run against the
+#                   commit this workflow builds — the pushed commit on main, or the
+#                   pull request's merge commit — in a throwaway clone. Only the
+#                   script's NOTHING-TO-RELEASE status (exit 3: no commits since the
+#                   last tag, or an empty [Unreleased], both normal right after a
+#                   release) is advisory, for the same reason release-notes is. A
+#                   checked failure (exit 1: drift, a malformed CHANGELOG, a stray
+#                   manual link, git or I/O trouble) or a refused invocation (exit 2)
+#                   fails the job, so a real regression cannot hide behind the
+#                   advisory case. It covers the default-bump path only; the
+#                   macOS-adoption shape (--macos-major) is exercised locally before a
+#                   cut. It writes only into RUNNER_TEMP, has no secrets, uploads
+#                   nothing (the scratch copies carry the predicted version and are
+#                   never an artifact), and prints only the value-free report; the
+#                   predicted version appears in the run log labelled UNASSIGNED, as
+#                   section 14.1 permits.
 
 on:
   push:
@@ -55,3 +73,46 @@ jobs:
       - name: Release-notes contract (advisory)
         continue-on-error: true
         run: python3 scripts/check-release-notes.py
+
+  release-prep-rehearsal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0       # the rehearsal needs the reachable release tags
+          persist-credentials: false
+
+      - name: Read-only release-preparation rehearsal (nothing-to-release advisory)
+        env:
+          PUSHED_SHA: ${{ github.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          # A throwaway clone keeps the rehearsal off the checkout (design 14.1: a fresh
+          # tree or isolated scratch clone). Nothing under RUNNER_TEMP is uploaded, and
+          # the scratch copies (which carry the predicted version) go on every exit.
+          trap 'rm -rf "$RUNNER_TEMP/release-prep-scratch" "$RUNNER_TEMP/candidate"' EXIT
+          git clone --quiet --no-hardlinks "$GITHUB_WORKSPACE" "$RUNNER_TEMP/candidate"
+          CANDIDATE_SHA="$(git -C "$RUNNER_TEMP/candidate" rev-parse HEAD)"
+          if [ "$EVENT_NAME" = push ] && [ "$CANDIDATE_SHA" != "$PUSHED_SHA" ]; then
+            echo "::error::checked-out commit does not equal the pushed commit"; exit 1
+          fi
+          # On pull_request the checkout is the synthetic merge commit, whose id can lag
+          # github.sha; the clone's HEAD is the commit that was actually built.
+          set +e
+          python3 -I -S -B scripts/ci/release_prep.py \
+            --candidate-root "$RUNNER_TEMP/candidate" \
+            --candidate-sha "$CANDIDATE_SHA" \
+            --repository "$REPOSITORY" \
+            --scratch "$RUNNER_TEMP/release-prep-scratch"
+          status=$?
+          set -e
+          case "$status" in
+            0) ;;
+            3) echo "::notice::release-prep: nothing to release at this commit (normal right after a release)" ;;
+            *) echo "::error::release-prep rehearsal failed (exit $status); see the log"; exit "$status" ;;
+          esac

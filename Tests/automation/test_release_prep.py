@@ -189,8 +189,8 @@ class ReleasePrepTests(unittest.TestCase):
 
     def test_macos_major_still_requires_commits_since_last_tag(self) -> None:
         result = self.rehearse(self.base, "--macos-major", "27")
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("no commits since", result.stderr)
+        self.assertEqual(result.returncode, 3)
+        self.assertIn("NOTHING TO RELEASE: no commits since", result.stderr)
 
     def test_macos_major_must_exceed_current(self) -> None:
         sha = commit(self.root, "fix(mail): small")
@@ -216,10 +216,12 @@ class ReleasePrepTests(unittest.TestCase):
         self.assertEqual(result.returncode, 1)
         self.assertIn("already carries a heading", result.stderr)
 
-    def test_no_commits_since_tag_is_refused(self) -> None:
+    def test_no_commits_since_tag_is_nothing_to_release(self) -> None:
         result = self.rehearse(self.base)
-        self.assertEqual(result.returncode, 1)
-        self.assertIn("no commits since", result.stderr)
+        self.assertEqual(result.returncode, 3)
+        self.assertIn("NOTHING TO RELEASE: no commits since", result.stderr)
+        report = json.loads(self.report.read_text(encoding="utf-8"))
+        self.assertEqual((report["pass"], report["failure_class"]), (False, "nothing-to-release"))
 
     def test_unreachable_tag_is_ignored(self) -> None:
         # A higher tag on an unrelated branch must not become "the last release".
@@ -368,13 +370,15 @@ class ReleasePrepTests(unittest.TestCase):
         self.assertEqual(target.read_text(encoding="utf-8"), "keep\n")
 
     def test_failure_report_is_written_without_values(self) -> None:
-        result = self.rehearse(self.base)  # no commits since the tag
+        sha = commit(self.root, "feat(notes): add search")
+        result = self.rehearse(sha, "--declared-version", "26.0.1")  # a genuine checked failure
         self.assertEqual(result.returncode, 1)
         report = json.loads(self.report.read_text(encoding="utf-8"))
         self.assertEqual(report["pass"], False)
         self.assertEqual(report["failure_class"], "assertion")
-        self.assertEqual(report["candidate_sha"], self.base)
-        self.assertNotIn("no commits", json.dumps(report))
+        self.assertEqual(report["candidate_sha"], sha)
+        self.assertNotIn("declared", json.dumps(report))
+        self.assertNotIn("26.1.0", json.dumps(report))
 
     def test_invalid_date_is_policy_error(self) -> None:
         sha = commit(self.root, "fix: x")
@@ -444,8 +448,32 @@ class ReleasePrepTests(unittest.TestCase):
         git(["commit", "-q", "-am", "docs: empty unreleased"], self.root)
         sha = git(["rev-parse", "HEAD"], self.root).strip()
         result = self.rehearse(sha)
+        self.assertEqual(result.returncode, 3)
+        self.assertIn("NOTHING TO RELEASE: the moved [Unreleased] section is empty", result.stderr)
+
+    def test_stray_link_is_a_failure_even_when_unreleased_is_empty(self) -> None:
+        text = CHANGELOG_SOURCE.replace(
+            "## [Unreleased]\n\n### Added\n\n- **Something callers can see.** Manual: "
+            "https://github.com/{}/blob/main/docs/manual/README.md\n\n".format(REPOSITORY),
+            "## [Unreleased]\n\n",
+        ).replace("blob/v26.0.0/docs/manual/", "blob/main/docs/manual/")
+        (self.root / CHANGELOG_REL).write_text(text, encoding="utf-8")
+        git(["commit", "-q", "-am", "docs: empty unreleased plus stale link"], self.root)
+        sha = git(["rev-parse", "HEAD"], self.root).strip()
+        result = self.rehearse(sha)
+        self.assertEqual(result.returncode, 1)  # drift, not nothing-to-release
+        self.assertIn("outside the new release section", result.stderr)
+
+    def test_unwritable_failure_report_is_never_advisory(self) -> None:
+        self.report.parent.mkdir(parents=True)
+        self.report.parent.chmod(0o500)
+        try:
+            result = self.rehearse(self.base)  # nothing to release, but the report cannot be written
+        finally:
+            self.report.parent.chmod(0o700)
         self.assertEqual(result.returncode, 1)
-        self.assertIn("nothing to release", result.stderr)
+        self.assertIn("NOTHING TO RELEASE", result.stderr)
+        self.assertIn("failure report could not be written", result.stderr)
 
     def test_missing_or_duplicate_constant_is_refused(self) -> None:
         (self.root / CONSTANT_REL).write_text(CONSTANT_SOURCE + CONSTANT_SOURCE, encoding="utf-8")

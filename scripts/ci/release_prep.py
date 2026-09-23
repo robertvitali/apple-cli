@@ -20,7 +20,9 @@ editor state and untracked files that would make a real checkout "dirty".
 Exit status: 0 pass; 1 a checked condition on the candidate failed (or git / the
 filesystem failed); 2 the request itself was refused before any work (bad argument
 shape, scratch or report location, a report path that already exists, conflicting
-inputs). Every file the rehearsal writes is created new (O_EXCL, no symlink follow),
+inputs); 3 NOTHING TO RELEASE — the candidate is sound but there are no commits since
+the last reachable release tag, or the `[Unreleased]` section is empty (both normal
+right after a release; callers may treat 3 as advisory and must treat 1 as a defect). Every file the rehearsal writes is created new (O_EXCL, no symlink follow),
 so no pre-existing inode — including a hard link to a tracked file — is ever modified.
 
 What it checks and produces, in order:
@@ -92,6 +94,7 @@ MANUAL_LINK_SUFFIX = "/blob/main/docs/manual/"
 GIT_TIMEOUT_SECONDS = 30
 POLICY_FAILURE_STATUS = 2
 ASSERTION_FAILURE_STATUS = 1
+NOTHING_TO_RELEASE_STATUS = 3
 REPORT_SCHEMA_VERSION = 1
 
 CONSTANT_PATH = Path("Sources/AppleKit/CommandSupport.swift")
@@ -128,6 +131,10 @@ class PolicyError(Exception):
 
 class AssertionFailure(Exception):
     """A checked condition on the candidate that did not hold."""
+
+
+class NothingToRelease(AssertionFailure):
+    """The candidate is sound but carries nothing releasable (normal after a release)."""
 
 
 class GitError(Exception):
@@ -232,7 +239,7 @@ def compute_version(
         last_tag = last[1]
         subjects = git(["log", "--format=%s", "{}..HEAD".format(last_tag)], root).splitlines()
         if not any(line.strip() for line in subjects):
-            raise AssertionFailure("no commits since the last reachable release tag")
+            raise NothingToRelease("no commits since the last reachable release tag")
     if macos_major is not None:
         if last is not None and macos_major <= last[0][0]:
             raise AssertionFailure(
@@ -286,20 +293,22 @@ def render_changelog(text: str, version: str, date: str, repository: str) -> str
     )
     if section_match is None:
         raise AssertionFailure("release heading not found after the move")
-    if not section_match.group(1).strip():
-        raise AssertionFailure("the moved [Unreleased] section is empty; nothing to release")
     placeholder = "https://github.com/{}{}".format(repository, MANUAL_LINK_SUFFIX)
     target = "https://github.com/{}/blob/v{}/docs/manual/".format(repository, version)
     section = section_match.group(0)
     inside = section.count(placeholder)
-    if inside == 0:
-        raise AssertionFailure(
-            "the new release section carries no `{}` manual link".format(MANUAL_LINK_SUFFIX)
-        )
+    # Drift checks come BEFORE the nothing-to-release classification, so a stray
+    # main-branch link in a released section is never masked as "nothing to release".
     if moved.count(placeholder) != inside:
         raise AssertionFailure(
             "a `{}` manual link exists outside the new release section; released sections "
             "must link the manual at their own tag".format(MANUAL_LINK_SUFFIX)
+        )
+    if not section_match.group(1).strip():
+        raise NothingToRelease("the moved [Unreleased] section is empty; nothing to release")
+    if inside == 0:
+        raise AssertionFailure(
+            "the new release section carries no `{}` manual link".format(MANUAL_LINK_SUFFIX)
         )
     section = section.replace(placeholder, target)
     rendered = moved[: section_match.start()] + section + moved[section_match.end():]
@@ -502,22 +511,30 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
         print("release-prep: policy: {}".format(error), file=sys.stderr)
         return POLICY_FAILURE_STATUS
     except (AssertionFailure, GitError, OSError, UnicodeDecodeError) as error:
+        status = ASSERTION_FAILURE_STATUS
         if isinstance(error, OSError):
             detail = error.strerror or error.__class__.__name__
             failure_class = "io"
         elif isinstance(error, UnicodeDecodeError):
             detail = "an allowlisted file is not UTF-8"
             failure_class = "io"
+        elif isinstance(error, NothingToRelease):
+            detail = str(error)
+            failure_class = "nothing-to-release"
+            status = NOTHING_TO_RELEASE_STATUS
         else:
             detail = str(error)
             failure_class = "git" if isinstance(error, GitError) else "assertion"
-        print("release-prep: FAIL: {}".format(detail), file=sys.stderr)
+        label = "NOTHING TO RELEASE" if status == NOTHING_TO_RELEASE_STATUS else "FAIL"
+        print("release-prep: {}: {}".format(label, detail), file=sys.stderr)
         if report_path is not None:
             try:
                 write_report(report_path, failure_report(candidate_sha, failure_class))
             except OSError:
+                # An unwritable report is an I/O defect in its own right: never advisory.
                 print("release-prep: FAIL: the failure report could not be written", file=sys.stderr)
-        return ASSERTION_FAILURE_STATUS
+                status = ASSERTION_FAILURE_STATUS
+        return status
 
     try:
         if report_path is not None:

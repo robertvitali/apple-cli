@@ -26,7 +26,9 @@ JSON output are stable per the versioning policy — breaking changes bump
   a tag, or publishing anything. **For anyone running the binary, nothing changes:** no `apple`
   command, output field, error type, or exit code is affected, and `schema_version` stays `1`.
   It replaces the version logic of the release workflow removed on 2026-09-07 with a tested
-  script; the publisher that would use it is not part of this change.
+  script, and the Docs workflow now runs it against every commit it builds (pushed commits
+  and pull-request merge commits) in a throwaway clone, treating only "nothing to release
+  yet" as advisory; the publisher that would use it is not part of this change.
 
 - **Runtime-metadata profiles carrying the two stock special module kinds are now
   admitted by the native authority validator as well.** `stock-typing-namespace` and

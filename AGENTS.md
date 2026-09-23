@@ -419,7 +419,13 @@ required for a first release; `--declared-version` fails closed on any mismatch)
 `AppleVersion.current` rewrite and the CHANGELOG `[Unreleased]` → `## [X.Y.Z] - date` move
 into a scratch directory the caller names, enforces the drift gate (constant == changelog
 heading == tag-to-be) on those copies, and writes a value-free report that never carries the
-version. It touches nothing in the tree and creates no ref. The other half — the
+version. It touches nothing in the tree and creates no ref; `docs.yml` runs it against every commit
+that workflow builds (the pushed commit on `main`, or a pull request's merge commit) in a
+throwaway clone; only the script's nothing-to-release status (no commits since the last tag, or
+an empty `[Unreleased]`) is advisory, every other failure fails the job — a smoke check of the
+default-bump path toward design §18 step 15, whose explicit-SHA evidence binding is still
+pending; the macOS-adoption shape is exercised locally before a cut, and the scratch copies are
+never uploaded. The other half — the
 release-preparation PR, the trusted listener, the bot publisher with its operator-approved
 environment and tag rulesets — does not exist yet and may not be added until the design's
 §15 preconditions hold (active `main` ruleset, closed privacy gate, reviewed launch

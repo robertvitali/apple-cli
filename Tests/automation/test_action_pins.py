@@ -14,7 +14,7 @@ CHECKER_PATH = REPO_ROOT / "scripts" / "ci" / "action_pins.py"
 WORKFLOWS_ROOT = REPO_ROOT / ".github" / "workflows"
 
 EXPECTED_ACTION_COUNTS = {
-    "actions/checkout": 8,
+    "actions/checkout": 9,
     "actions/setup-python": 1,
     "astral-sh/setup-uv": 1,
     "actions/upload-artifact": 1,
@@ -97,8 +97,31 @@ class ActionPinPolicyTests(unittest.TestCase):
         jobs = docs.split("\njobs:\n", 1)[1]
         self.assertEqual(
             re.findall(r"(?m)^  ([a-z0-9-]+):\s*$", jobs),
-            ["manual-fresh", "release-notes"],
+            ["manual-fresh", "release-notes", "release-prep-rehearsal"],
         )
+        rehearsal = workflow_job(docs, "release-prep-rehearsal")
+        # The rehearsal must stay read-only and must never publish its scratch copies,
+        # which carry the predicted version; only a CHECKED refusal (exit 1) is advisory.
+        self.assertIn("permissions:\n      contents: read", rehearsal)
+        self.assertIn("fetch-depth: 0", rehearsal)
+        self.assertIn("python3 -I -S -B scripts/ci/release_prep.py", rehearsal)
+        self.assertTrue((REPO_ROOT / "scripts" / "ci" / "release_prep.py").is_file())
+        self.assertNotIn("continue-on-error", rehearsal)
+        # Only the script's nothing-to-release status (3) is advisory; 1 and 2 fail the job.
+        self.assertRegex(rehearsal, r'(?m)^\s+3\) echo "::notice::')
+        self.assertNotRegex(rehearsal, r'(?m)^\s+1\) ')
+        self.assertRegex(rehearsal, r'(?m)^\s+\*\) echo "::error::[^"]*"; exit "\$status" ;;')
+        self.assertNotRegex(rehearsal, r"upload-artifact|actions/cache|GITHUB_OUTPUT|GITHUB_STEP_SUMMARY")
+        self.assertIn('--scratch "$RUNNER_TEMP/', rehearsal)
+        self.assertRegex(rehearsal, r"trap 'rm -rf \"\$RUNNER_TEMP/release-prep-scratch\"[^']*' EXIT")
+        # Inputs reach the shell through env:, never by expression: every run: must be a
+        # literal block and no block may contain an expression marker.
+        run_keys = re.findall(r"(?m)^\s+run:.*$", rehearsal)
+        run_blocks = re.findall(r"(?ms)^        run: \|\n(.*?)(?=^      - |\Z)", rehearsal)
+        self.assertTrue(run_blocks)
+        self.assertEqual(len(run_keys), len(run_blocks))
+        for block in run_blocks:
+            self.assertNotIn("${{", block)
         self.assertEqual(
             re.findall(r"(?m)^permissions:\n(?:  [^\n]+\n?)+", docs),
             ["permissions:\n  contents: read\n"],
@@ -398,7 +421,7 @@ class RepositoryActionInventoryTests(unittest.TestCase):
         references = checker.collect_references(REPO_ROOT)
         remote = [reference for reference in references if reference.kind == "remote"]
 
-        self.assertEqual(len(remote), 12)
+        self.assertEqual(len(remote), 13)
         counts = {}
         for reference in remote:
             counts[reference.name] = counts.get(reference.name, 0) + 1
@@ -425,7 +448,7 @@ class RepositoryActionInventoryTests(unittest.TestCase):
             )
             expected_count = {
                 "ci.yml": 5,
-                "docs.yml": 2,
+                "docs.yml": 3,
                 "pr-metadata.yml": 1,
             }[workflow_name]
             self.assertEqual(len(blocks), expected_count)
