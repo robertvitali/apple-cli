@@ -532,3 +532,24 @@ CLI actually accepts.
   reject, while `--check` passed. Rendering fidelity is a review responsibility, not a CI one.
 - Because flag help text is published verbatim into the manual, **an argument's `help:` string is
   user-facing documentation** — write it as such in the Swift source.
+- **Site assembly is rehearsed, not deployed.** `scripts/ci/site_assembly.py` (design §16 and
+  §18 step 16) assembles the complete site — `/` for the current manual, `/versions/` and
+  `/versions/MAJOR.MINOR/` for prior-series archives (the plural root is a D29 amendment: the
+  `apple version` page occupies `/version/`), `/version-manifest.json` — from one exact commit
+  plus the published release tags the CALLER has read back as published (a draft Release's
+  tag is an ordinary ref, so git cannot tell; the script verifies each tag's commit declares the
+  same `AppleVersion.current`), renders each selected manual twice from its own tracked
+  `docs/manual/**` and `mkdocs.yml` with the renderer it is handed (the pinned toolchain in
+  `docs/requirements.txt` in every real run; the renderer executable's digest and reported
+  version go in the report), and proves a deterministic artifact restores byte-for-byte. It
+  writes only into the scratch directory it is given; Pages remains disabled until the launch
+  specification says otherwise. **`mkdocs.yml` is policy-checked before it is rendered**, from
+  every selected commit: it is parsed with the same fail-closed YAML subset the workflow scan
+  uses (no anchors, tags, flow mappings or multi-document files) and must fit a recorded
+  allowlist — known top-level keys only, `docs_dir` present and exactly `docs/manual`, `use_directory_urls` absent or
+  true, no `hooks`, no plugin but `search`, no `theme.custom_dir`, Markdown extensions and their
+  options from the recorded set (`pymdownx.snippets` is refused), relative asset paths. A
+  config edit outside that set turns the rehearsal red; `Tests/automation/test_site_assembly.py`
+  pins the tracked file against the policy so the break shows in CI, not at the next rehearsal.
+  A published tag whose commit carries no tracked manual is a refusal by design (today's
+  `v26.0.0` is one); the first archive-able tag is the macOS 27 re-cut.

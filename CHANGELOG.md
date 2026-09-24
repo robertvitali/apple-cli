@@ -45,6 +45,21 @@ JSON output are stable per the versioning policy — breaking changes bump
   are what bound such a path. **For anyone running the binary, nothing changes:** no `apple`
   command, output field, error type, or exit code is affected, and `schema_version` stays `1`.
 
+- **A read-only complete-site assembly rehearsal now exists in the repository's CI tooling
+  (`scripts/ci/site_assembly.py`).** For one explicit commit plus the set of published
+  release tags it assembles, into a scratch directory, the whole documentation site a future
+  Pages deployment would serve — the current manual at `/`, a prior-series index at
+  `/versions/`, one archive per prior `MAJOR.MINOR` series at `/versions/MAJOR.MINOR/`, and a
+  machine-readable `/version-manifest.json` — renders every selected manual twice from its
+  own tracked sources with the renderer the caller supplies (the pinned MkDocs toolchain in
+  every real run; the report records the renderer executable's digest and its reported
+  version), requires the two renders to agree, refuses a manual configuration outside a
+  recorded allowlist (the keys that could make the toolchain load code or read outside the
+  manual are not on it), packs the result
+  into a deterministic archive, restores it, and proves the digests match. Pages stays
+  disabled; nothing is deployed or uploaded. **For anyone running the binary, nothing changes:** no `apple` command,
+  output field, error type, or exit code is affected, and `schema_version` stays `1`.
+
 - **Runtime-metadata profiles carrying the two stock special module kinds are now
   admitted by the native authority validator as well.** `stock-typing-namespace` and
   `stock-extension-child` module rows, admitted by the Python validator since the

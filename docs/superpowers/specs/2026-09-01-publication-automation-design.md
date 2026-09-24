@@ -46,7 +46,7 @@ authoritative.
    compatible macOS versions.
 8. Preserve branch-owned test policy when future macOS product lines appear.
 9. Publish the newest released documentation automatically at `/`.
-10. Retain one documentation archive under `/version/` for every previous
+10. Retain one documentation archive under `/versions/` for every previous
     `MAJOR.MINOR` series, representing that series' highest published patch.
 11. Enable governed dependency updates for GitHub Actions, SwiftPM when
     empirically supported, and the pinned Python documentation toolchain.
@@ -1342,7 +1342,7 @@ operator environment approval
   -> create or resume draft GitHub Release
   -> upload and verify binary and checksum
   -> deploy the complete Pages artifact
-  -> canary /, /version/, archive paths, and manifest
+  -> canary /, /versions/, archive paths, and manifest
   -> publish the immutable GitHub Release
   -> trigger the separately governed distribution update
 ```
@@ -1444,8 +1444,8 @@ Routes:
 
 ```text
 /                              newest released documentation
-/version/                      prior-series archive index
-/version/MAJOR.MINOR/          highest patch of each prior series
+/versions/                     prior-series archive index
+/versions/MAJOR.MINOR/         highest patch of each prior series
 /version-manifest.json         machine-readable selection and digests
 ```
 
@@ -1497,6 +1497,34 @@ The manifest records, without wall-clock nondeterminism:
 - public path;
 - content-manifest digest.
 
+**Amendment 2026-09-23 (HUMAN-DECISIONS D29).** The archive routes above were
+`/version/` and `/version/MAJOR.MINOR/` in the original text. The generated manual
+renders one page per command, and the `apple version` command page occupies `/version/`
+exactly, so the first local assembly rehearsal (`scripts/ci/site_assembly.py`, which
+refuses an archive root that collides with a page of the current manual) could not
+place the archive index there. The operator chose the plural `versions` root; the
+manifest path `/version-manifest.json`, the selection rules, and everything else in
+this section are unchanged, and every other mention of the archive route in this
+document reads `/versions/` from this amendment on. Two clarifications recorded with the
+same implementation: (1) "rejects drafts and prereleases" is satisfied at the boundary
+between the caller and the builder — a draft Release's tag is an ordinary git ref, so the
+builder takes the published set from its caller (a read-back of published Releases;
+unauthenticated, the public Releases listing returns no drafts at all and flags
+prereleases) and verifies each named tag's commit declares the tag's version in
+`AppleVersion.current`; (2) the builder refuses a selected commit's `mkdocs.yml` unless
+it fits a recorded allowlist (no `hooks`, no plugin but `search`, no `theme.custom_dir`,
+`docs_dir` pinned to the tracked manual, pure Markdown extensions), which is how "never
+execute historical scripts" is enforced rather than assumed, and it renders every
+selected manual twice, requiring byte-equal output, which is how the deterministic-digest
+claim is proven per run; and (3) while the candidate's version is unassigned (the release
+freeze), the rehearsal's manifest records the candidate's version and series as null and
+mounts a candidate archive under a series-free path, so no digested byte of the rehearsal
+can be enumerated back to the version, and the run log names no version — the
+publisher's manifest, produced after release preparation assigns the version, carries the
+full fields listed above; and (4) a published tag whose commit carries no tracked
+`docs/manual` tree is refused rather than archived as an empty series (the `v26.0.0`
+commit predates the manual), so the first archive-able release is the macOS 27 re-cut.
+
 The builder starts from an empty temporary directory, validates semantic tags,
 rejects path traversal, links, collisions, drafts, and prereleases, and verifies
 every tag-to-commit mapping. It copies tracked generated manual inputs from
@@ -1506,7 +1534,7 @@ retention-limited historical Actions artifacts as the archive.
 
 During private implementation, this builder writes only to a fresh local or
 runner-temporary directory. Tests serve that directory on loopback when needed
-and assert `/`, `/version/`, archive paths, and the manifest without creating a
+and assert `/`, `/versions/`, archive paths, and the manifest without creating a
 Pages deployment or referencing the `github-pages` environment. The exact input
 commit and every output digest appear in value-free rehearsal evidence.
 
@@ -1856,7 +1884,7 @@ Numbered implementation and verification requirements:
     archive contents, checksums, linkage, runtime version, and refusal of any
     outward-write step.
 16. Run complete-site assembly against the same exact commit, verify `/`,
-    `/version/`, archive routes, manifest, the temporary-artifact restore
+    `/versions/`, archive routes, manifest, the temporary-artifact restore
     path, and deterministic digests from the temporary artifact, and keep
     Pages disabled. The post-launch reconciliation workflow of Section 16 is
     not exercised by this read-only program and is not claimed. Local assembly
@@ -2197,7 +2225,7 @@ post-visibility readiness criteria are:
 - an explicit full commit ID passes the read-only release rehearsal, including
   predicted release-file changes, archive contents, checksums, linkage, and
   runtime version;
-- Pages `/`, `/version/`, prior-series paths, manifest, the
+- Pages `/`, `/versions/`, prior-series paths, manifest, the
   temporary-artifact restore path, and canaries validate from an exact-SHA
   temporary artifact without a Pages deployment;
 - Dependabot works for every enabled ecosystem and never auto-merges;

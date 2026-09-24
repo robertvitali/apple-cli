@@ -71,6 +71,7 @@ findings for its stated scope; the repo stays private until then.
 | D26 | Next work item after the D18 rehearsal: the design's phase-3 publisher (D18 step 4a) | **ANSWERED 2026-09-22: build the publisher** | Operator chose the publisher over ruling on D22 first or stopping; D22 stays open and non-blocking. No release, tag, version, Pages or Homebrew action is authorized by this choice |
 | D27 | Publisher sequencing: start with the design's read-only release-preparation rehearsal (§14.1, §18 step 15) or author the write-capable publisher now | **ANSWERED 2026-09-22: read-only tooling first** | Design §15 forbids installing any publisher-side control before the active `main` ruleset, the closed privacy gate and a reviewed launch specification, and the repository's tests refuse write-capable workflows; `scripts/ci/release_prep.py` (version computation, drift gate, scratch-only rendering, value-free report) lands first with `Tests/automation` coverage; the write-capable half waits for the §15 preconditions |
 | D28 | Order of the remaining pre-launch tooling: parsed-YAML workflow scan (design §18 step 17) before the site-assembly rehearsal (step 16), or the reverse | **ANSWERED 2026-09-22: steps 17 then 16** | The scan is the guard every later workflow change (including step 16's own job) is checked against, so it lands first, wired into the `Supply-chain policy` job with `Tests/automation` coverage; the site-assembly rehearsal follows as its own reviewed commit; §18 steps 8–14 and 20 remain operator-involved and are not started by this ruling |
+| D29 | Design §16 archive route: `/version/` collides with the generated `apple version` manual page | **ANSWERED 2026-09-23: amend to `/versions/`** | The site assembler refuses an archive root that a current-manual page occupies; the plural root is a route no command can render to, needs no manual special case, keeps `/version-manifest.json`, and already passed the local assembly rehearsal end to end |
 
 ---
 
@@ -1457,6 +1458,31 @@ have meant redesigning the guard tests or parking untestable workflow files.
 
 **Why it needed you.** Both orders are defensible; the scan-first order means the site job is
 born under the guard rather than grandfathered past it.
+
+**Blocking?** No.
+
+---
+
+## D29 — Design §16 archive route amended to `/versions/`
+
+- **Status:** **ANSWERED 2026-09-23: amend to `/versions/`.**
+- **Finding that framed the question.** Design §16 placed the prior-series archive index at
+  `/version/` and each archive at `/version/MAJOR.MINOR/`. The manual generator renders one
+  page per command, and `apple version` renders to `/version/` exactly. The first local run
+  of the step 16 assembler (`scripts/ci/site_assembly.py`) found the collision: the archive
+  index would overwrite or shadow a command page, a route the design never classified, so the
+  assembler refuses it and the rehearsal could not pass on the real tree.
+- **Options considered.** (A) amend the design's archive root to the plural `versions`; (B)
+  keep `/version/` and special-case the `apple version` page path in the generator; (C) nest
+  the archives under the command page. (B) breaks the one-page-per-command scheme for one
+  command; (C) shares a MkDocs-regenerated directory between a page and the archive.
+- **Ruling.** (A). Routes are `/versions/` and `/versions/MAJOR.MINOR/`; the manifest stays
+  `/version-manifest.json`; selection rules are unchanged; the assembler's default archive
+  root is `versions` and its collision refusal stays in force for any future command name.
+- **Filed:** 2026-09-23 · **Category:** design amendment (public route)
+
+**Why it needed you.** A public route is an outward-facing contract; moving it later breaks
+links and the manifest.
 
 **Blocking?** No.
 
