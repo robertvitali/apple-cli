@@ -57,7 +57,10 @@ JSON output are stable per the versioning policy — breaking changes bump
   recorded allowlist (the keys that could make the toolchain load code or read outside the
   manual are not on it), packs the result
   into a deterministic archive, restores it, and proves the digests match. Pages stays
-  disabled; nothing is deployed or uploaded. **For anyone running the binary, nothing changes:** no `apple` command,
+  disabled; nothing is deployed or uploaded. The Docs workflow now runs this rehearsal on
+  every commit it builds, in a throwaway clone, with the published release set read from the
+  public Releases listing without any token (when that listing is rate-limited from the
+  runner the job warns and the rehearsal does not run). **For anyone running the binary, nothing changes:** no `apple` command,
   output field, error type, or exit code is affected, and `schema_version` stays `1`.
 
 - **Runtime-metadata profiles carrying the two stock special module kinds are now

@@ -26,6 +26,27 @@ name: Docs
 #                   never an artifact), and prints only the value-free report; the
 #                   predicted version appears in the run log labelled UNASSIGNED, as
 #                   section 14.1 permits.
+#  - site-assembly-rehearsal: the read-only complete-site assembly rehearsal (design
+#                   section 16 / section 18 step 16) run against the same commit in a
+#                   throwaway clone: the pinned MkDocs toolchain is installed from
+#                   docs/requirements.txt with hashes required, the published release set
+#                   is read from the PUBLIC Releases listing without any token (the
+#                   unauthenticated listing returns no drafts and flags prereleases), the
+#                   candidate's pending version is derived the way release preparation
+#                   does and is never printed, the site is assembled into RUNNER_TEMP,
+#                   packed, restored and digest-checked, and only the value-free report
+#                   reaches the log. The site host stays disabled; nothing is uploaded or deployed.
+#                   A rate-limited listing read (HTTP 429, or 403 with the rate-limit
+#                   header at zero, from the shared runner IP) is an environmental
+#                   WARNING and the assembly does not run — a run with that warning is
+#                   not rehearsal evidence; every other failure fails the job. On
+#                   pull_request the job runs the PROPOSAL's own copy of the assembler and
+#                   toolchain manifest, so it is a smoke check there; the evidence runs are
+#                   the push runs on main. NOTE: this job reads the repository's Releases
+#                   page, so publishing a Release is an input to CI: a published Release
+#                   whose tag is not strict vMAJOR.MINOR.PATCH, or whose commit carries no
+#                   tracked docs/manual tree (the v26.0.0 commit predates the manual), turns
+#                   this job red on every later commit until the Release is fixed.
 
 on:
   push:
@@ -120,3 +141,73 @@ jobs:
             3) echo "::notice::release-prep: nothing to release at this commit (normal right after a release)" ;;
             *) echo "::error::release-prep rehearsal failed (exit $status); see the log"; exit "$status" ;;
           esac
+
+  site-assembly-rehearsal:
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    permissions:
+      contents: read
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0       # the assembly needs the reachable release tags
+          persist-credentials: false
+
+      - uses: actions/setup-python@5fda3b95a4ea91299a34e894583c3862153e4b97 # v7.0.0
+        with:
+          python-version: "3.12"
+
+      - name: Install the pinned documentation toolchain
+        run: |
+          set -euo pipefail
+          python -m pip install --require-hashes -r docs/requirements.txt
+
+      - name: Read the public Releases listing (no token)
+        env:
+          REPOSITORY: ${{ github.repository }}
+        run: |
+          set -euo pipefail
+          status="$(curl -sS --proto '=https' --tlsv1.2 --max-time 60 --retry 5 --retry-delay 5 --retry-all-errors -D "$RUNNER_TEMP/releases.headers" -o "$RUNNER_TEMP/releases.json" -w '%{http_code}' \
+            -H 'Accept: application/vnd.github+json' -H 'X-GitHub-Api-Version: 2022-11-28' \
+            "https://api.github.com/repos/$REPOSITORY/releases?per_page=100")"
+          limited=no
+          if [ "$status" = 429 ]; then limited=yes; fi
+          # Primary limits answer 403 with the remaining count at zero; secondary limits answer 403
+          # with a retry-after header. Any other 403 is a real failure. curl -D appends the headers
+          # of every retry attempt, so only the FINAL response's header block is classified.
+          final_headers="$(awk 'BEGIN{RS="\r\n\r\n"} NF{last=$0} END{print last}' "$RUNNER_TEMP/releases.headers")"
+          if [ "$status" = 403 ] && printf '%s\n' "$final_headers" | grep -qiE '^(x-ratelimit-remaining: 0|retry-after:)'; then limited=yes; fi
+          if [ "$status" = 200 ]; then
+            echo run > "$RUNNER_TEMP/releases.status"
+          elif [ "$limited" = yes ]; then
+            echo skip > "$RUNNER_TEMP/releases.status"
+            echo "::warning::site-assembly: the public Releases listing is rate-limited from this runner; the rehearsal did NOT run and this run is not rehearsal evidence"
+          else
+            echo "::error::site-assembly: the public Releases listing returned HTTP $status"; exit 1
+          fi
+
+      - name: Read-only complete-site assembly rehearsal
+        env:
+          PUSHED_SHA: ${{ github.sha }}
+          EVENT_NAME: ${{ github.event_name }}
+        run: |
+          set -euo pipefail
+          trap 'rm -rf "$RUNNER_TEMP/site-scratch" "$RUNNER_TEMP/candidate" "$RUNNER_TEMP/releases.json" "$RUNNER_TEMP/releases.headers" "$RUNNER_TEMP/releases.status" "$RUNNER_TEMP/site-report.json"' EXIT
+          if [ ! -f "$RUNNER_TEMP/releases.status" ] || [ "$(cat "$RUNNER_TEMP/releases.status")" != run ]; then
+            echo "site-assembly: NOT RUN (listing unavailable)"; exit 0
+          fi
+          git clone --quiet --no-hardlinks "$GITHUB_WORKSPACE" "$RUNNER_TEMP/candidate"
+          CANDIDATE_SHA="$(git -C "$RUNNER_TEMP/candidate" rev-parse HEAD)"
+          if [ "$EVENT_NAME" = push ] && [ "$CANDIDATE_SHA" != "$PUSHED_SHA" ]; then
+            echo "::error::checked-out commit does not equal the pushed commit"; exit 1
+          fi
+          RENDERER="$(python -c 'import shutil, sys; print(shutil.which("mkdocs") or sys.exit(1))')"
+          python3 -I -S -B scripts/ci/site_assembly.py \
+            --candidate-root "$RUNNER_TEMP/candidate" \
+            --candidate-sha "$CANDIDATE_SHA" \
+            --derive-candidate-version \
+            --published-from-json "$RUNNER_TEMP/releases.json" \
+            --renderer "$RENDERER" \
+            --scratch "$RUNNER_TEMP/site-scratch" \
+            --report "$RUNNER_TEMP/site-report.json"
+          cat "$RUNNER_TEMP/site-report.json"

@@ -12,8 +12,19 @@ here deploys, uploads, tags, or writes outside the directories it was given.
 
     python3 -I -S -B scripts/ci/site_assembly.py \\
         --candidate-root <clean checkout> --candidate-sha <full 40-hex> \\
-        --candidate-version X.Y.Z [--published-tag vX.Y.Z]... \\
+        (--candidate-version X.Y.Z | --derive-candidate-version) \\
+        [--published-tag vX.Y.Z]... [--published-from-json <releases listing>] \\
         --renderer <mkdocs executable> --scratch <empty dir> [--report <new file>]
+
+`--derive-candidate-version` computes the candidate's pending version the way release
+preparation does (`release_prep.compute_version`: the Conventional Commit subjects since the
+last reachable release tag, default bump rules) and never prints it; when nothing is
+releasable (the candidate IS the last tagged release) the candidate takes that tag's
+version and a matching entry in the published set is folded into it. It is a ROUTING
+input only: an operator-chosen macOS-major bump cannot change which manual serves `/`
+because the candidate is the newest either way. `--published-from-json` reads a saved
+GitHub Releases listing (the unauthenticated public listing, which returns no drafts) and
+keeps the strict `vMAJOR.MINOR.PATCH` tags of non-draft, non-prerelease entries.
 
 Selection (section 16): every published tag and the candidate are grouped by
 MAJOR.MINOR; the highest patch of each series is that series' tip; the numerically
@@ -74,6 +85,8 @@ assert _SPEC.loader is not None
 _SPEC.loader.exec_module(_RELEASE_PREP)
 
 PolicyError = _RELEASE_PREP.PolicyError
+NothingToRelease = _RELEASE_PREP.NothingToRelease
+compute_version = _RELEASE_PREP.compute_version
 AssertionFailure = _RELEASE_PREP.AssertionFailure
 GitError = _RELEASE_PREP.GitError
 run_git = _RELEASE_PREP.run_git
@@ -137,6 +150,7 @@ RENDER_TIMEOUT_SECONDS = 600
 MAX_INPUT_BYTES = 64 * 1024 * 1024
 MAX_OUTPUT_BYTES = 512 * 1024 * 1024
 MAX_OUTPUT_FILES = 20000
+LISTING_PAGE_LIMIT = 100  # the Releases API page size the hosted job requests; a full page means "maybe more"
 Version = Tuple[int, int, int]
 
 
@@ -547,11 +561,40 @@ def restore_artifact(artifact: Path, destination: Path) -> None:
         archive.extractall(destination, filter="data")
 
 
+def published_tags_from_listing(path: Path) -> List[str]:
+    """Strict release tags of the non-draft, non-prerelease entries of a saved Releases listing."""
+    try:
+        listing = json.loads(path.read_text(encoding="utf-8"))
+    except (OSError, UnicodeDecodeError, json.JSONDecodeError) as error:
+        raise PolicyError("--published-from-json is not a readable JSON document: {}".format(error.__class__.__name__)) from error
+    if not isinstance(listing, list):
+        raise PolicyError("--published-from-json must hold a JSON list of releases")
+    if len(listing) >= LISTING_PAGE_LIMIT:
+        raise PolicyError("--published-from-json holds a full page; the listing may be truncated (fetch every page)")
+    tags: List[str] = []
+    for entry in listing:
+        if not isinstance(entry, dict) or not isinstance(entry.get("tag_name"), str):
+            raise PolicyError("--published-from-json entries must be release objects with a tag_name")
+        if entry.get("draft") is True or entry.get("prerelease") is True:
+            continue
+        if TAG_RE.fullmatch(entry["tag_name"]) is None:
+            raise PolicyError("--published-from-json holds a published release whose tag is not strict vMAJOR.MINOR.PATCH")
+        tags.append(entry["tag_name"])
+    return tags
+
+
 def assemble(args: argparse.Namespace) -> Dict[str, object]:
     git = run_git
     candidate_root = args.candidate_root.expanduser().resolve()
     candidate_sha = full_sha(args.candidate_sha, "--candidate-sha")
-    candidate_version = parse_version(args.candidate_version, "--candidate-version")
+    if (args.candidate_version is None) == (not args.derive_candidate_version):
+        raise PolicyError("exactly one of --candidate-version and --derive-candidate-version is required")
+    candidate_version: Optional[Version] = None
+    if args.candidate_version is not None:
+        candidate_version = parse_version(args.candidate_version, "--candidate-version")
+    published_tag_args = list(args.published_tag or [])
+    if args.published_from_json is not None:
+        published_tag_args.extend(published_tags_from_listing(args.published_from_json.expanduser()))
     if ARCHIVE_ROOT_RE.fullmatch(args.archive_root) is None:
         raise PolicyError("--archive-root must be a short lowercase path segment")
     renderer = args.renderer.expanduser().resolve()
@@ -561,21 +604,41 @@ def assemble(args: argparse.Namespace) -> Dict[str, object]:
     report_path = resolve_outside(args.report, candidate_root, "--report") if args.report is not None else None
     if report_path is not None and (report_path.exists() or report_path.is_symlink()):
         raise PolicyError("--report must not already exist")
-    candidate = Selected(candidate_version, candidate_sha, None)
-    seen_versions = {candidate.version}
-    for tag in args.published_tag or []:
+    requested_versions: Dict[Version, str] = {}
+    for tag in published_tag_args:
         match = TAG_RE.fullmatch(tag)
         if match is None:
             raise PolicyError("--published-tag {!r} is not a strict vMAJOR.MINOR.PATCH tag".format(tag))
         version = (int(match.group(1)), int(match.group(2)), int(match.group(3)))
-        if version in seen_versions:
+        if version in requested_versions or version == candidate_version:
             raise PolicyError("a --published-tag repeats a version already in the set, or equals the candidate version")
-        seen_versions.add(version)
+        requested_versions[version] = tag
     prepare_scratch(scratch)
     validate_checkout(candidate_root, candidate_sha, git)
 
+    folded_tag: Optional[str] = None
+    if candidate_version is None:
+        try:
+            candidate_version = compute_version(candidate_root, git, None, None)[0]
+            if candidate_version in requested_versions:
+                raise AssertionFailure("a published tag already carries the derived candidate version; refusing to displace it")
+        except NothingToRelease:
+            # Nothing releasable: the candidate commit IS the last tagged release. It takes that
+            # tag's version, and the same tag in the published set is folded into the candidate.
+            # NothingToRelease is raised only when a reachable tag exists with no commits after it,
+            # so the tag list is non-empty and its newest entry points at HEAD == the candidate.
+            tags = _RELEASE_PREP.reachable_release_tags(candidate_root, git)
+            candidate_version = tags[0][0]
+            folded_tag = requested_versions.pop(candidate_version, None)
+            if folded_tag is not None:
+                folded = resolve_tag(candidate_root, folded_tag, git)
+                if folded.commit != candidate_sha:  # unreachable by construction; kept as a defence
+                    raise AssertionFailure("the published tag of the candidate's version does not point at the candidate")
+                check_tag_version_constant(candidate_root, folded, git)
+    candidate = Selected(candidate_version, candidate_sha, None)
+
     published: List[Selected] = []
-    for tag in args.published_tag or []:
+    for version, tag in sorted(requested_versions.items()):
         item = resolve_tag(candidate_root, tag, git)
         check_tag_version_constant(candidate_root, item, git)
         published.append(item)
@@ -607,9 +670,10 @@ def assemble(args: argparse.Namespace) -> Dict[str, object]:
             raise AssertionFailure("{}: two renders of the same inputs differ; the toolchain is not deterministic".format(item.label))
         if item is current:
             check_archive_root_free(rendered, archive_root)
-        mount = site if item is current else site / archive_root / (item.series if item.tag is not None else "candidate")
+        mount_leaf = item.series if item.tag is not None else "candidate"
+        mount = site if item is current else site / archive_root / mount_leaf
         if item is not current and mount.exists():
-            raise AssertionFailure("archive route collision at /{}/{}/".format(archive_root, item.series))
+            raise AssertionFailure("archive route collision at /{}/{}/".format(archive_root, mount_leaf))
         copy_tree(rendered, mount, mounted)
     index_dir = site / archive_root
     index_dir.mkdir(parents=True, exist_ok=True, mode=0o755)
@@ -641,7 +705,8 @@ def assemble(args: argparse.Namespace) -> Dict[str, object]:
         "schema_version": REPORT_SCHEMA_VERSION,
         "pass": True,
         "candidate_sha": candidate_sha,
-        "published_tag_count": len(published),
+        "published_tag_count": len(published) + (1 if folded_tag is not None else 0),
+        "candidate_is_published_release": folded_tag is not None,
         "candidate_serves_root": current is candidate,
         "routes": routes,
         "archive_route_count": len(archives),
@@ -675,11 +740,15 @@ def parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="Read-only complete-site assembly rehearsal.")
     parser.add_argument("--candidate-root", type=Path, default=POLICY_ROOT)
     parser.add_argument("--candidate-sha", required=True)
-    parser.add_argument("--candidate-version", required=True,
+    parser.add_argument("--candidate-version", default=None,
                         help="the pending, unassigned version of the candidate: release preparation's computed next version "
                              "(scripts/ci/release_prep.py), never a number written anywhere tracked")
+    parser.add_argument("--derive-candidate-version", action="store_true",
+                        help="compute the candidate's pending version the way release preparation does; never printed")
     parser.add_argument("--published-tag", action="append", default=[],
                         help="a published, non-draft, non-prerelease release tag (repeatable)")
+    parser.add_argument("--published-from-json", type=Path, default=None,
+                        help="a saved GitHub Releases listing; its non-draft, non-prerelease strict tags join the published set")
     parser.add_argument("--renderer", type=Path, required=True, help="mkdocs executable from the pinned toolchain")
     parser.add_argument("--scratch", type=Path, required=True, help="empty directory for inputs, renders, site, artifact, restore")
     parser.add_argument("--report", type=Path, default=None)

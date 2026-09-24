@@ -14,8 +14,8 @@ CHECKER_PATH = REPO_ROOT / "scripts" / "ci" / "action_pins.py"
 WORKFLOWS_ROOT = REPO_ROOT / ".github" / "workflows"
 
 EXPECTED_ACTION_COUNTS = {
-    "actions/checkout": 9,
-    "actions/setup-python": 1,
+    "actions/checkout": 10,
+    "actions/setup-python": 2,
     "astral-sh/setup-uv": 1,
     "actions/upload-artifact": 1,
     "actions/download-artifact": 1,
@@ -97,8 +97,33 @@ class ActionPinPolicyTests(unittest.TestCase):
         jobs = docs.split("\njobs:\n", 1)[1]
         self.assertEqual(
             re.findall(r"(?m)^  ([a-z0-9-]+):\s*$", jobs),
-            ["manual-fresh", "release-notes", "release-prep-rehearsal"],
+            ["manual-fresh", "release-notes", "release-prep-rehearsal", "site-assembly-rehearsal"],
         )
+        site = workflow_job(docs, "site-assembly-rehearsal")
+        # The site rehearsal is read-only: no token reaches it, the Releases listing is read
+        # unauthenticated, everything it writes lives under RUNNER_TEMP and goes on exit, and
+        # only the value-free report is printed. A rate-limited listing is a notice, not a pass
+        # of the assembly (the assembly step exits before running in that case).
+        self.assertIn("permissions:\n      contents: read", site)
+        self.assertIn("fetch-depth: 0", site)
+        self.assertIn("python3 -I -S -B scripts/ci/site_assembly.py", site)
+        self.assertIn("--derive-candidate-version", site)
+        self.assertIn('--published-from-json "$RUNNER_TEMP/releases.json"', site)
+        self.assertIn("pip install --require-hashes -r docs/requirements.txt", site)
+        self.assertTrue((REPO_ROOT / "scripts" / "ci" / "site_assembly.py").is_file())
+        self.assertNotIn("continue-on-error", site)
+        self.assertNotRegex(site, r"upload-artifact|actions/cache|GITHUB_OUTPUT|GITHUB_STEP_SUMMARY|github\.token|secrets\.|GH_TOKEN|Authorization")
+        self.assertRegex(site, r"trap 'rm -rf \"\$RUNNER_TEMP/site-scratch\"[^']*' EXIT")
+        self.assertIn("x-ratelimit-remaining: 0|retry-after:", site)
+        self.assertIn('echo "::warning::site-assembly: the public Releases listing is rate-limited', site)
+        self.assertIn('echo "::error::site-assembly: the public Releases listing returned HTTP $status"; exit 1', site)
+        self.assertIn('!= run ]; then', site)
+        site_run_keys = re.findall(r"(?m)^\s+run:.*$", site)
+        site_run_blocks = re.findall(r"(?ms)^        run: \|\n(.*?)(?=^      - |\Z)", site)
+        self.assertTrue(site_run_blocks)
+        self.assertEqual(len(site_run_keys), len(site_run_blocks))
+        for block in site_run_blocks:
+            self.assertNotIn("${{", block)
         rehearsal = workflow_job(docs, "release-prep-rehearsal")
         # The rehearsal must stay read-only and must never publish its scratch copies,
         # which carry the predicted version; only a CHECKED refusal (exit 1) is advisory.
@@ -421,7 +446,7 @@ class RepositoryActionInventoryTests(unittest.TestCase):
         references = checker.collect_references(REPO_ROOT)
         remote = [reference for reference in references if reference.kind == "remote"]
 
-        self.assertEqual(len(remote), 13)
+        self.assertEqual(len(remote), 15)
         counts = {}
         for reference in remote:
             counts[reference.name] = counts.get(reference.name, 0) + 1
@@ -448,7 +473,7 @@ class RepositoryActionInventoryTests(unittest.TestCase):
             )
             expected_count = {
                 "ci.yml": 5,
-                "docs.yml": 3,
+                "docs.yml": 4,
                 "pr-metadata.yml": 1,
             }[workflow_name]
             self.assertEqual(len(blocks), expected_count)

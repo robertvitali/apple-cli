@@ -143,7 +143,8 @@ class SiteAssemblyTests(unittest.TestCase):
         report_path = self.tmp / "report-{}.json".format(self.counter)
         argv = [sys.executable, "-I", "-S", "-B", str(SCRIPT),
                 "--candidate-root", str(self.repo.root), "--candidate-sha", sha or self.repo.head(),
-                "--candidate-version", version, "--renderer", str(self.renderer), "--scratch", str(scratch),
+                *(["--candidate-version", version] if version is not None else []),
+                "--renderer", str(self.renderer), "--scratch", str(scratch),
                 "--archive-root", archive_root, *extra]
         if report:
             argv += ["--report", str(report_path)]
@@ -464,6 +465,83 @@ class SiteAssemblyTests(unittest.TestCase):
         completed, _s, _r = self.run_assembly()
         self.assertEqual(completed.returncode, 1, completed.stderr)
         self.assertIn("use_directory_urls", completed.stderr)
+
+    def test_derived_candidate_version_routes_like_release_prep(self) -> None:
+        self.repo.commit_manual("26.0.0"); self.repo.tag("v26.0.0")
+        (self.repo.root / "feature.txt").write_text("x\n", encoding="utf-8")
+        git(["add", "-A"], self.repo.root); git(["commit", "-q", "-m", "feat(x): something new"], self.repo.root)
+        self.repo.commit_manual("current-after-feat")
+        completed, scratch, report_path = self.run_assembly("--derive-candidate-version", "--published-tag", "v26.0.0", version=None)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertTrue(report["candidate_serves_root"])
+        self.assertFalse(report["candidate_is_published_release"])
+        self.assertEqual(report["routes"], ["/", "/versions/", "/versions/26.0/", "/version-manifest.json"])
+        self.assertNotIn("26.1", completed.stderr + json.dumps(report), "the derived minor bump must not be logged or reported")
+
+    def test_derived_candidate_at_a_tagged_release_folds_the_tag(self) -> None:
+        self.repo.commit_manual("25.0.0"); self.repo.tag("v25.0.0")
+        self.repo.commit_manual("26.0.0"); self.repo.tag("v26.0.0")
+        completed, scratch, report_path = self.run_assembly("--derive-candidate-version", "--published-tag", "v25.0.0",
+                                                            "--published-tag", "v26.0.0", version=None)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertTrue(report["candidate_is_published_release"])
+        self.assertEqual(report["published_tag_count"], 2)
+        self.assertEqual(report["routes"], ["/", "/versions/", "/versions/25.0/", "/version-manifest.json"])
+
+    def test_published_set_from_a_releases_listing(self) -> None:
+        self.repo.commit_manual("26.0.0"); self.repo.tag("v26.0.0")
+        self.repo.commit_manual("26.1.0"); self.repo.tag("v26.1.0")
+        self.repo.commit_manual("current")
+        listing = self.tmp / "releases.json"
+        listing.write_text(json.dumps([
+            {"tag_name": "v26.1.0", "draft": False, "prerelease": False},
+            {"tag_name": "v26.0.0", "draft": True, "prerelease": False},
+            {"tag_name": "v27.0.0-rc.1", "draft": False, "prerelease": True},
+        ]), encoding="utf-8")
+        completed, _s, report_path = self.run_assembly("--published-from-json", str(listing))
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertEqual(report["routes"], ["/", "/versions/", "/versions/26.1/", "/version-manifest.json"])
+        self.assertEqual(report["published_tag_count"], 1)
+        for bad in ('{"tag_name": "v1.0.0"}', '[{"draft": false}]', '[{"tag_name": "release-1", "draft": false, "prerelease": false}]', "not json"):
+            listing.write_text(bad, encoding="utf-8")
+            with self.subTest(bad=bad):
+                completed, scratch, _r = self.run_assembly("--published-from-json", str(listing))
+                self.assertEqual(completed.returncode, 2, completed.stderr)
+                self.assertFalse(scratch.exists())
+
+    def test_derived_version_may_not_displace_a_published_tag(self) -> None:
+        self.repo.commit_manual("26.0.0"); self.repo.tag("v26.0.0")
+        self.repo.commit_manual("26.0.1"); self.repo.tag("v26.0.1")
+        # Rewind: a branch off v26.0.0 with one fix commit derives 26.0.1 — already published elsewhere.
+        git(["checkout", "-q", "-b", "fix", "v26.0.0"], self.repo.root)
+        (self.repo.root / "fix.txt").write_text("x\n", encoding="utf-8")
+        git(["add", "-A"], self.repo.root); git(["commit", "-q", "-m", "fix: something"], self.repo.root)
+        completed, _s, _r = self.run_assembly("--derive-candidate-version", "--published-tag", "v26.0.1", version=None)
+        self.assertEqual(completed.returncode, 1, completed.stderr)
+        self.assertIn("already carries the derived candidate version", completed.stderr)
+        self.assertNotIn("26.0.1", completed.stderr)
+
+    def test_folded_tag_is_constant_checked_and_full_listing_page_is_refused(self) -> None:
+        self.repo.commit_manual("26.0.0", constant="26.0.5"); self.repo.tag("v26.0.0")
+        completed, _s, _r = self.run_assembly("--derive-candidate-version", "--published-tag", "v26.0.0", version=None)
+        self.assertEqual(completed.returncode, 1, completed.stderr)
+        self.assertIn("version constant is 26.0.5", completed.stderr)
+        listing = self.tmp / "full.json"
+        listing.write_text(json.dumps([{"tag_name": "v1.0.{}".format(i), "draft": False, "prerelease": False} for i in range(100)]), encoding="utf-8")
+        completed, scratch, _r = self.run_assembly("--published-from-json", str(listing))
+        self.assertEqual(completed.returncode, 2, completed.stderr)
+        self.assertIn("may be truncated", completed.stderr)
+
+    def test_version_source_is_exactly_one(self) -> None:
+        self.repo.commit_manual("current")
+        completed, scratch, _r = self.run_assembly(version=None)
+        self.assertEqual(completed.returncode, 2, completed.stderr)
+        self.assertIn("exactly one of", completed.stderr)
+        completed, scratch, _r = self.run_assembly("--derive-candidate-version")
+        self.assertEqual(completed.returncode, 2, completed.stderr)
 
     def test_selection_function(self) -> None:
         S = assembly.Selected

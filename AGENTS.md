@@ -543,7 +543,17 @@ CLI actually accepts.
   `docs/requirements.txt` in every real run; the renderer executable's digest and reported
   version go in the report), and proves a deterministic artifact restores byte-for-byte. It
   writes only into the scratch directory it is given; Pages remains disabled until the launch
-  specification says otherwise. **`mkdocs.yml` is policy-checked before it is rendered**, from
+  specification says otherwise. `docs.yml` runs it against every commit it builds
+  (`site-assembly-rehearsal`: throwaway clone, toolchain installed with hashes required, the
+  published set read from the public Releases listing with no token — a rate-limited listing
+  (HTTP 429, or 403 with the rate-limit header at zero) is an environmental WARNING and the
+  assembly does not run, so such a run is not evidence; every other failure fails the job; the
+  candidate version is derived the way release preparation does and never printed). On a pull
+  request the job runs the proposal's own copy of the assembler, so it is a smoke check there;
+  the evidence runs are the push runs on `main`. Because the job reads the Releases page,
+  publishing a Release is an input to CI: a published Release whose tag is not strict
+  `vMAJOR.MINOR.PATCH`, or whose commit carries no tracked manual, turns the job red on every
+  later commit until the Release is fixed (a draft stays invisible to it). **`mkdocs.yml` is policy-checked before it is rendered**, from
   every selected commit: it is parsed with the same fail-closed YAML subset the workflow scan
   uses (no anchors, tags, flow mappings or multi-document files) and must fit a recorded
   allowlist — known top-level keys only, `docs_dir` present and exactly `docs/manual`, `use_directory_urls` absent or

@@ -149,7 +149,11 @@ class DocsDependencyPolicyTests(unittest.TestCase):
             "python -m pip install --require-hashes -r docs/requirements.txt"
         )
 
-        self.assertNotIn("pip install", docs_workflow)
+        # Two jobs install the documentation toolchain, both from the hash-locked file and
+        # nothing else: the supply-chain lock-closure proof (ci.yml) and the site-assembly
+        # rehearsal (docs.yml). No other `pip install` form is admitted anywhere.
+        self.assertEqual(docs_workflow.count("pip install"), 1)
+        self.assertIn(approved_command, docs_workflow)
         self.assertIn(approved_command, ci_workflow)
         self.assertNotIn("pip install mkdocs-material", ci_workflow)
         self.assertNotIn("python -m pip install mkdocs-material", ci_workflow)
@@ -159,7 +163,7 @@ class DocsDependencyPolicyTests(unittest.TestCase):
             for line in path.read_text(encoding="utf-8").splitlines():
                 if re.search(r"\bpip +install\b", line):
                     install_lines.append(line.strip())
-        self.assertEqual(len(install_lines), 1)
+        self.assertEqual(len(install_lines), 2)
         self.assertTrue(
             all(
                 line in {approved_command, f"run: {approved_command}"}
