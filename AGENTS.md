@@ -71,7 +71,15 @@ byte-lengths in write-ups — not values. Counts must not be PAIRED with account
 provider mix, mailbox names, or calendar dates in a way that fingerprints a person's store
 (a bare "N rows" is fine; "provider X's mailbox Y, N rows, oldest year Z" is a profile). The operator's name and GitHub handle in LICENSE, README, git author metadata,
 and authorship prose are deliberate public attribution, not a leak — that is the one standing
-exception to the real-names ban. A second, narrow exception (operator ruling 2026-09-20, D20): an
+exception to the real-names ban. It extends to exactly one more tracked file (operator ruling
+2026-09-07, HUMAN-DECISIONS D15; authoring go-ahead 2026-09-24, D30): `.github/CODEOWNERS` may name the operator's exact GitHub
+user as code owner of every enforcement-control-plane path of the publication-automation design
+(§10.5), because GitHub's code-owner mechanism cannot work without a user or team identifier in
+that file. The extension reaches that one file and no other — the handle goes into no further
+tracked file without a new recorded operator ruling. This exception is recorded here before the
+identifier lands anywhere; the CODEOWNERS commit is separate and carries its own fresh privacy
+scan.
+A second, narrow exception (operator ruling 2026-09-20, D20): an
 outside contributor's own git author identity, as they configured it on the commits of their own
 pull request, is their public GitHub attribution; it is never copied into tracked files or prose,
 and a squash merge's author identity is read back before merging. `.gitignore` matches audit dumps BY CLASS (not by known

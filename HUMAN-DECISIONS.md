@@ -31,7 +31,7 @@ recorded, scoped evidence).
 
 ---
 
-## LEDGER — every decision at a glance (updated 2026-09-07)
+## LEDGER — every decision at a glance (updated 2026-09-24)
 
 **Still needs you: D2.** D9 was reopened 2026-08-31 and finally closed the same day (recorded
 CLOSED — see D9). D15 and D16 were ratified 2026-09-07. D3 and D14 were live-validated
@@ -72,6 +72,7 @@ findings for its stated scope; the repo stays private until then.
 | D27 | Publisher sequencing: start with the design's read-only release-preparation rehearsal (§14.1, §18 step 15) or author the write-capable publisher now | **ANSWERED 2026-09-22: read-only tooling first** | Design §15 forbids installing any publisher-side control before the active `main` ruleset, the closed privacy gate and a reviewed launch specification, and the repository's tests refuse write-capable workflows; `scripts/ci/release_prep.py` (version computation, drift gate, scratch-only rendering, value-free report) lands first with `Tests/automation` coverage; the write-capable half waits for the §15 preconditions |
 | D28 | Order of the remaining pre-launch tooling: parsed-YAML workflow scan (design §18 step 17) before the site-assembly rehearsal (step 16), or the reverse | **ANSWERED 2026-09-22: steps 17 then 16** | The scan is the guard every later workflow change (including step 16's own job) is checked against, so it lands first, wired into the `Supply-chain policy` job with `Tests/automation` coverage; the site-assembly rehearsal follows as its own reviewed commit; §18 steps 8–14 and 20 remain operator-involved and are not started by this ruling |
 | D29 | Design §16 archive route: `/version/` collides with the generated `apple version` manual page | **ANSWERED 2026-09-23: amend to `/versions/`** | The site assembler refuses an archive root that a current-manual page occupies; the plural root is a route no command can render to, needs no manual special case, keeps `/version-manifest.json`, and already passed the local assembly rehearsal end to end |
+| D30 | Author `.github/CODEOWNERS` now under the D15 exception (design §18 step 5, CODEOWNERS half) | **ANSWERED 2026-09-24: author it now (option A)** | The step 17 read-back recorded CODEOWNERS absent (NOT SATISFIED) and every later bootstrap item waits on it; D15 already carries the attribution exception, so D30 settles only WHEN — now, rather than after the launch specification — and confirms the D15 sequence (AGENTS.md extension first, CODEOWNERS second with a fresh privacy scan and the control-plane manifest, errors API read-back third) |
 
 ---
 
@@ -982,6 +983,10 @@ changes likewise merge only on your code-owner approval or sole bypass.
 
 **Blocking?** It unblocks the governance step. Nothing else waits on it.
 
+**Amendment 2026-09-24 (D30):** the operator's go-ahead to execute this sequence now, rather
+than after the launch specification, is recorded as D30; D30 adds the control-plane manifest to
+step (2) and changes nothing else here.
+
 ---
 
 ## D16 — Narrow main-only reversal for disposable rehearsal refs
@@ -1483,6 +1488,52 @@ born under the guard rather than grandfathered past it.
 
 **Why it needed you.** A public route is an outward-facing contract; moving it later breaks
 links and the manifest.
+
+**Blocking?** No.
+
+---
+
+## D30 — Author `.github/CODEOWNERS` now, under the D15 exception
+
+- **Status:** **ANSWERED 2026-09-24: A — record the go-ahead and author it.**
+- **Finding that framed the question.** The design §18 step 17 API read-backs (recorded
+  2026-09-24) found `.github/CODEOWNERS` absent and the code-owners errors endpoint answering
+  404, so that read-back is NOT SATISFIED, and the design's step 5, step 8, step 11, step 17 and
+  step 20 items all wait on the file. The design's step 5 text says the file may be authored only once the
+  operator has recorded the extension of the attribution exception to it.
+- **Correction recorded here.** The controller's brief that asked this question (2026-09-24)
+  presented that extension as not yet recorded. It was: D15 (RATIFIED 2026-09-07) already extends
+  the exception to
+  `.github/CODEOWNERS` and fixes the landing sequence. The evidence file's two sentences that
+  called the step "gated on a not-yet-recorded operator decision" were wrong on the same point
+  and are corrected in the commit that records this entry. No recorded verdict changes:
+  `.github/CODEOWNERS` was and is absent, so step 17's NOT SATISFIED stands; only the stated reason for its absence was wrong.
+  D30 changes no policy: it is the operator's go-ahead to execute D15 now rather than after the
+  launch specification, with one addition to D15's sequence named in the Ruling.
+- **Options considered.** (A) author CODEOWNERS now under D15, in the D15 sequence; (B) hold
+  until the launch specification exists.
+- **Ruling.** (A). Sequence as fixed by D15, with the one addition noted in (2): (1) the
+  `AGENTS.md` extension lands in its own reviewed commit (the commit recording this entry);
+  (2) `.github/CODEOWNERS` lands second, naming the operator's GitHub user as code owner of every
+  enforcement-control-plane path of design §10.5, with a fresh privacy scan of that commit. One
+  addition beyond D15's three steps: that same commit carries the committed control-plane
+  manifest the path list is checked against, because §10.5 resolves owner coverage against the
+  manifest and step 17's coverage read-back has nothing to check without it. D15 did not name the
+  manifest; this is the only respect in which D30 goes beyond it; (3) the code-owners errors API
+  is read back as part of the step 17 set once the file is on `main`. Still open from step 5 and
+  not scheduled by this entry: the urgent-fix runbook under `docs/runbooks/` and its `AGENTS.md`
+  policy exception (the release-freeze sentence that says an operator instruction alone lifts the
+  freeze predates the publisher's removal and is corrected when that runbook lands).
+- **Trade-off this activates (recorded in D15, restated here because the go-ahead makes it
+  current).** From this step until public launch no release can be cut: the legacy publisher is
+  already removed, so the release freeze's urgent-fix clause is satisfiable only by a reviewed,
+  operator-authorized, temporary restoration of a write-capable release workflow, recorded as an
+  explicit exception and removed again afterwards. Control-plane changes merge only on the
+  operator's code-owner approval or sole bypass once the `main` ruleset of step 20 is active.
+- **Filed:** 2026-09-24 · **Category:** control-plane governance / timing under a standing ruling
+
+**Why it needed you.** The timing of the first tracked occurrence of the handle beyond the
+D15 set, and whether to wait for the launch specification, is the operator's call.
 
 **Blocking?** No.
 
