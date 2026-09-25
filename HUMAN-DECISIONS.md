@@ -1519,7 +1519,10 @@ links and the manifest.
   addition beyond D15's three steps: that same commit carries the committed control-plane
   manifest the path list is checked against, because §10.5 resolves owner coverage against the
   manifest and step 17's coverage read-back has nothing to check without it. D15 did not name the
-  manifest; this is the only respect in which D30 goes beyond it; (3) the code-owners errors API
+  manifest; this is the only respect in which D30 goes beyond it. The manifest arrives with its
+  checker, `Tests/automation/test_control_plane.py` (itself in the plane under the
+  `Tests/automation/**` deny-by-default tree), since a manifest the path list is checked against
+  is inert without one; that test is part of this addition, not a further one; (3) the code-owners errors API
   is read back as part of the step 17 set once the file is on `main`. Still open from step 5 and
   not scheduled by this entry: the urgent-fix runbook under `docs/runbooks/` and its `AGENTS.md`
   policy exception (the release-freeze sentence that says an operator instruction alone lifts the

@@ -1,0 +1,28 @@
+# Enforcement control plane — design §10.5 (publication-automation design), HUMAN-DECISIONS D15/D30.
+# GitHub resolves the LAST matching pattern; every pattern below names the operator alone, so every
+# control-plane path has exactly one code owner. Membership is defined by exact path in
+# .github/control-plane-manifest.json; the four deny-by-default trees are listed first, then the
+# governance documents and policy inputs outside those trees. Tests/automation/test_control_plane.py
+# checks that every manifest path is effectively owned by the single owner named here.
+
+# Deny-by-default trees (any file here is control plane; a new or renamed one is control plane
+# from the moment it is added, and the same change must register it in the manifest — listing it
+# records membership, it never removes it)
+/.github/                                       @robertvitali
+/scripts/                                       @robertvitali
+/Tests/automation/                              @robertvitali
+/bats/helpers/                                  @robertvitali
+
+# Governance documents
+/AGENTS.md                                      @robertvitali
+/CLAUDE.md                                      @robertvitali
+/HUMAN-DECISIONS.md                             @robertvitali
+/docs/superpowers/specs/                        @robertvitali
+/docs/runbooks/                                 @robertvitali
+/docs/discovery/prelaunch-readiness-evidence.md @robertvitali
+
+# Policy inputs read by in-plane drivers
+/bats/tier-inventory.json                       @robertvitali
+/docs/requirements.in                           @robertvitali
+/docs/requirements.txt                          @robertvitali
+/mkdocs.yml                                     @robertvitali

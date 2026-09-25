@@ -384,6 +384,30 @@ above; the branch rules below govern the cases where a branch exists at all.
   (published history carries no GIDs once that rewrite is pushed). This is an explicit, standing
   repo-local override of the fleet's `asana:`-trailer convention. Task traceability lives in
   Asana itself, not in this repo's history.
+- **Enforcement control plane (design §10.5) is code-owner gated and manifest-defined.**
+  `.github/CODEOWNERS` names the operator as sole code owner of every control-plane path, and
+  `.github/control-plane-manifest.json` lists the members by exact path: the four deny-by-default
+  trees (`.github/**`, `scripts/**`, `Tests/automation/**`, `bats/helpers/**`), the governance
+  documents (`AGENTS.md`, `HUMAN-DECISIONS.md`, the design specs, `docs/runbooks/`, the readiness
+  evidence file) and the policy inputs in-plane drivers read (`docs/requirements.*`,
+  `bats/tier-inventory.json`). Two entries go beyond §10.5's own enumeration, deliberately:
+  `CLAUDE.md` (the `@AGENTS.md` shim, so editing it changes which governance text loads) and
+  `mkdocs.yml` (policy-checked by `scripts/ci/site_assembly.py` before rendering, because an
+  unconstrained config executes hooks and plugins). Content a driver merely generates from is NOT
+  in the plane: `docs/manual-prose.json` and `docs/manual/**` are out, per §10.5's product-artifact
+  exclusion. Listing a path records membership; it never removes one. A new or renamed file under
+  a deny-by-default tree, or under a CODEOWNERS-owned directory, without a manifest entry in the
+  same change is a red build (`Tests/automation/test_control_plane.py`); add the entry in the same
+  commit. A policy input a driver newly reads outside those trees must be registered by review;
+  the test cannot see it, and no runtime loader consumes the manifest yet. The code-owner form of
+  the operator's GitHub user (`@handle`) appears in CODEOWNERS and in no other tracked file, under
+  HUMAN-DECISIONS D15/D30; the handle also appears as the repository-owner segment of GitHub URLs
+  in README, CHANGELOG, `mkdocs.yml` and two docs pages, which is the standing public-attribution
+  exception recorded above, not this one. Today CODEOWNERS changes what merges nowhere: no
+  ruleset exists (readiness evidence §4, rulesets 0); it begins to bind only when the disposable
+  rehearsal rulesets of design §18 steps 8–14 are created, then the `main` ruleset of step 20 and
+  the `governance / required` check, and, being a pull-request rule, it constrains outside
+  contributions rather than the operator's direct pushes, which required status checks gate.
 - Tests green before any push (both Swift toolchains plus `swift test` + `bats`; use the commands
   in Toolchain + testing above).
 
