@@ -74,6 +74,7 @@ findings for its stated scope; the repo stays private until then.
 | D29 | Design §16 archive route: `/version/` collides with the generated `apple version` manual page | **ANSWERED 2026-09-23: amend to `/versions/`** | The site assembler refuses an archive root that a current-manual page occupies; the plural root is a route no command can render to, needs no manual special case, keeps `/version-manifest.json`, and already passed the local assembly rehearsal end to end |
 | D30 | Author `.github/CODEOWNERS` now under the D15 exception (design §18 step 5, CODEOWNERS half) | **ANSWERED 2026-09-24: author it now (option A)** | The step 17 read-back recorded CODEOWNERS absent (NOT SATISFIED) and every later bootstrap item waits on it; D15 already carries the attribution exception, so D30 settles only WHEN — now, rather than after the launch specification — and confirms the D15 sequence (AGENTS.md extension first, CODEOWNERS second with a fresh privacy scan and the control-plane manifest, errors API read-back third) |
 | D31 | Outside collaborators with read access (step 17 read-back found two) | **ANSWERED 2026-09-25: remove one, keep one** | The operator named the account to remove after seeing the list; the controller removed it through the API (HTTP 204) and read the list back: collaborators 2 — admin 1, read 1, of which outside 1. The kept read grant meets every collaborator expectation the design states (only administrator, only environment reviewer, no other write-capable actor), so it is a conforming state, kept on the operator's ruling with no reason recorded and no adverse finding against either account; identities stay out of the repository |
+| D32 | Repository merge method and Actions SHA-pinning settings (design §18 steps 7 and 4) | **ANSWERED 2026-09-25: apply all (option A)** | Applied 2026-09-26T01:40Z and read back: merge commits and rebase merges disabled, squash kept, squash title from the PR title and body from the PR body, delete-branch-on-merge on, `sha_pinning_required` on; selected-actions allowlist unchanged. Reversible settings; nothing in the tree, no branch, tag or release touched |
 
 ---
 
@@ -1586,5 +1587,50 @@ D15 set, and whether to wait for the launch specification, is the operator's cal
 read them back.
 
 **Blocking?** No.
+
+---
+
+## D32 — Repository merge method and Actions SHA-pinning settings
+
+- **Status:** **ANSWERED 2026-09-25: apply all (option A).**
+- **Finding that framed the question.** Design §18 step 7 asks for squash-only merging with the
+  pull request's title and body as the squash commit's header and body, merge commits and rebase
+  merges disabled; step 4 names the repository-level `sha_pinning_required` setting among the
+  Actions settings. The step 17 read-backs (2026-09-24) found merge commits, squash and rebase
+  all allowed, the squash title and body taken from the branch commits, and `sha_pinning_required`
+  off (pinning enforced only by the committed `action_pins.py` policy and its tests).
+- **Options considered.** (A) apply the five step-7 merge fields, the pinning switch, and
+  `delete_branch_on_merge` now; (B) merge settings only, pinning later; (C) hold.
+- **Ruling.** (A). Applied by the controller through the API at 2026-09-26T01:40Z — the evening
+  of 2026-09-25 in the operator's local zone, the same day the answer was given — and read back
+  the same minute: `allow_merge_commit` true → false; `allow_rebase_merge` true → false;
+  `allow_squash_merge` true (kept); `squash_merge_commit_title` COMMIT_OR_PR_TITLE → PR_TITLE;
+  `squash_merge_commit_message` COMMIT_MESSAGES → PR_BODY; `delete_branch_on_merge` false → true
+  (housekeeping beyond design §18 step 7, offered and accepted as part of option A; not cosmetic:
+  a squash merge discards the head's commits and this setting then deletes the proposal head ref
+  at merge, before the step 18 evidence capture, so the rehearsal steps 9–14 capture their
+  evidence — head SHA, check runs, review state — BEFORE each merge, step 12's normalisation
+  record is taken from the squash commit itself and must not depend on the head ref surviving,
+  or the setting is turned off for the rehearsal window); Actions `sha_pinning_required` false →
+  true with `enabled` true and `allowed_actions` selected unchanged (HTTP 204); the
+  selected-actions allowlist read back unchanged (GitHub-owned allowed, verified-creator not
+  allowed, one pattern); `allow_auto_merge`, `allow_update_branch` and
+  `web_commit_signoff_required` read back unchanged (all false). The calls were made interactively
+  through the CLI, as D31's removal was; the `PATCH` sent exactly the six merge keys. All are
+  reversible repository settings; nothing in the tree and no branch, tag or release was touched.
+  Step 17's expected set is amended accordingly. Departure named: step 4 wants these settings read
+  back before the first hosted run of step 6; the D17 visibility advance overtook that ordering,
+  so every hosted run to date ran with the repository-level switch off and pinning enforced only
+  by the committed `action_pins.py` policy — the switch is prospective and no earlier run is
+  evidence of server-side enforcement. Ledger dates are the operator's local date and read-back
+  timestamps are UTC throughout, which is why `Filed` and the applied timestamp name different
+  calendar days here.
+- **Filed:** 2026-09-25 · **Category:** repository settings / design §18 steps 4 and 7
+
+**Why it needed you.** Repository settings are outward-facing state only the operator may
+authorize changing; the design lists the values, the operator decides when.
+
+**Blocking?** No for current work; it is a prerequisite for step 12 of the rehearsal
+(squash-merge normalisation), which could not have run without it.
 
 ---
