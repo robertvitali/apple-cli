@@ -1468,6 +1468,10 @@ born under the guard rather than grandfathered past it.
 
 **Blocking?** No.
 
+**Amendment (2026-09-25).** Step 5's fold landed on this date, so the recorded trigger set
+now names `governance / required`; the check still runs only the metadata validator
+(readiness evidence rows 5 and 17, design §10.5 amendment of this date).
+
 ---
 
 ## D29 — Design §16 archive route amended to `/versions/`

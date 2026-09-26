@@ -14,7 +14,7 @@
   ".github/dependabot.yml",
   ".github/workflows/ci.yml",
   ".github/workflows/docs.yml",
-  ".github/workflows/pr-metadata.yml",
+  ".github/workflows/governance.yml",
   "AGENTS.md",
   "CLAUDE.md",
   "HUMAN-DECISIONS.md",

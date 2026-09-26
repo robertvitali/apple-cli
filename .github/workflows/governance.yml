@@ -1,0 +1,33 @@
+# governance / required — the repository's only `pull_request_target` workflow (design §10.5,
+# §18 step 5). It runs from the base branch's checkout with `contents: read`, no secrets,
+# and executes only the base-owned metadata validator against the event payload; it never
+# checks out, executes, downloads or caches proposal code or artifacts. TODAY this check
+# validates the pull request's title and body only. The control-plane enforcement the design
+# assigns to this check name (manifest classification of changed paths, check-run provenance
+# through the checks API) is not implemented yet; until it is, a green `governance / required`
+# proves metadata hygiene and nothing more. `scripts/ci/workflow_policy.py` refuses a second
+# `pull_request_target` workflow and any proposal-head reference inside this one.
+name: Governance
+
+on:
+  pull_request_target:
+    types: [opened, edited, reopened, synchronize, ready_for_review]
+
+permissions:
+  contents: read
+
+jobs:
+  required:
+    name: governance / required
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: ${{ github.event.pull_request.base.sha }}
+          persist-credentials: false
+
+      - name: Validate pull request metadata
+        run: python3 scripts/ci/pr_metadata.py --event "$GITHUB_EVENT_PATH"

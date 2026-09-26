@@ -62,7 +62,7 @@ QUALITY = textwrap.dedent(
 
 METADATA = textwrap.dedent(
     f"""\
-    name: PR Metadata
+    name: Governance
     on:
       pull_request_target:
         types: [opened, edited, reopened, synchronize, ready_for_review]
@@ -70,7 +70,7 @@ METADATA = textwrap.dedent(
       contents: read
     jobs:
       required:
-        name: metadata / required
+        name: governance / required
         runs-on: ubuntu-latest
         permissions:
           contents: read
@@ -190,14 +190,14 @@ class ScanTests(unittest.TestCase):
         return policy.scan_repository(self.root)
 
     def scan_ci(self, ci_body: str) -> list:
-        return self.scan({"ci.yml": ci_body, "pr-metadata.yml": METADATA})
+        return self.scan({"ci.yml": ci_body, "governance.yml": METADATA})
 
     def assert_ci_violation(self, ci_body: str, needle: str) -> None:
         violations = self.scan_ci(ci_body)
         self.assertTrue(any(needle in v for v in violations), violations)
 
     def test_conforming_tree_passes(self) -> None:
-        self.assertEqual(self.scan({"ci.yml": QUALITY, "pr-metadata.yml": METADATA}), [])
+        self.assertEqual(self.scan({"ci.yml": QUALITY, "governance.yml": METADATA}), [])
 
     def test_missing_job_permissions_fails(self) -> None:
         body = mutate(QUALITY, JOB_HEADER, "    runs-on: ubuntu-latest\n    steps:")
@@ -407,7 +407,7 @@ class ScanTests(unittest.TestCase):
 
     def test_duplicate_check_names_across_workflows_fail(self) -> None:
         other = QUALITY.replace("name: CI", "name: Other").replace("  build:", "  build2:").replace("needs: [build]", "needs: [build2]")
-        violations = self.scan({"ci.yml": QUALITY, "other.yml": other, "pr-metadata.yml": METADATA})
+        violations = self.scan({"ci.yml": QUALITY, "other.yml": other, "governance.yml": METADATA})
         self.assertTrue(any("check `quality / required` is also produced by" in v for v in violations), violations)
 
     def test_duplicate_check_names_within_one_workflow_fail(self) -> None:
@@ -431,8 +431,8 @@ class ScanTests(unittest.TestCase):
     def test_exactly_one_pull_request_target_workflow(self) -> None:
         violations = self.scan({"ci.yml": QUALITY})
         self.assertTrue(any("exactly one pull_request_target workflow is required; found 0" in v for v in violations), violations)
-        second = METADATA.replace("name: PR Metadata", "name: Second").replace("metadata / required", "second / required")
-        violations = self.scan({"ci.yml": QUALITY, "pr-metadata.yml": METADATA, "second.yml": second})
+        second = METADATA.replace("name: Governance", "name: Second").replace("governance / required", "second / required")
+        violations = self.scan({"ci.yml": QUALITY, "governance.yml": METADATA, "second.yml": second})
         self.assertTrue(any("exactly one pull_request_target workflow is required; found 2" in v for v in violations), violations)
 
     def test_pull_request_target_may_not_touch_the_proposal_head(self) -> None:
@@ -461,7 +461,7 @@ class ScanTests(unittest.TestCase):
             ("      - run: python3", "      - run: |\n          gh pr \\\n            checkout 1\n      - run: python3"),
             ("      - run: python3", "      - run: curl -sSL https://example.com/o/r/pull/1/files\n      - run: python3"),
             ("      - run: python3", "      - run: curl -sSL https://example.com/o/r/pull/1.diff\n      - run: python3"),
-            ("    name: metadata / required\n", "    name: ${{ 'metadata / required' }}\n"),
+            ("    name: governance / required\n", "    name: ${{ 'governance / required' }}\n"),
             ("      - run: python3", "      - run: curl -sSL https://api.github.com/repos/o/r/actions/artifacts/1/zip -o a.zip\n      - run: python3"),
             ("      - run: python3", "      - run: git clone ${{ github.event.pull_request.head.repo.clone_url }} x\n      - run: python3"),
             ("- uses: " + CHECKOUT + "\n        with:\n          " + base_ref + "\n          persist-credentials: false\n",
@@ -474,15 +474,15 @@ class ScanTests(unittest.TestCase):
         ):
             body = mutate(METADATA, old, new)
             with self.subTest(new=new):
-                violations = self.scan({"ci.yml": QUALITY, "pr-metadata.yml": body})
+                violations = self.scan({"ci.yml": QUALITY, "governance.yml": body})
                 self.assertTrue(violations, "expected a violation for {!r}".format(new))
 
     def test_pull_request_target_may_read_event_name_and_base_fields(self) -> None:
         body = mutate(METADATA, "      - run: python3", "      - run: echo ${{ github.event_name }} ${{ github.event.number }} ${{ github.event.pull_request.number }}\n      - run: python3")
-        self.assertEqual(self.scan({"ci.yml": QUALITY, "pr-metadata.yml": body}), [])
+        self.assertEqual(self.scan({"ci.yml": QUALITY, "governance.yml": body}), [])
 
     def test_unparseable_workflow_is_a_violation_not_a_pass(self) -> None:
-        violations = self.scan({"ci.yml": QUALITY, "pr-metadata.yml": METADATA, "odd.yml": "name: x\non: push\njobs: {a: b}\n"})
+        violations = self.scan({"ci.yml": QUALITY, "governance.yml": METADATA, "odd.yml": "name: x\non: push\njobs: {a: b}\n"})
         self.assertTrue(any("odd.yml: refused" in v for v in violations), violations)
 
 

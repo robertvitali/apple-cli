@@ -619,7 +619,8 @@ Callers include:
 ### 10.2 Required jobs
 
 The required graph has two independent stable roots. `governance / required`
-runs the trusted-base policy. `quality / required` aggregates at least:
+runs the trusted-base policy (**Amended 2026-09-25:** not yet implemented; see
+the §10.5 amendment of that date). `quality / required` aggregates at least:
 
 - the deterministic quality drivers (metadata and PR-template policy belong to
   `governance / required` after step 5 folds them in);
@@ -686,7 +687,8 @@ percentage from hiding untested functionality growth.
 ### 10.5 Trusted policy and tamper resistance
 
 `governance / required` is the sole `pull_request_target` workflow once the
-bootstrap completes. Today the tracked `pr-metadata.yml` (`metadata /
+bootstrap completes. (**Amended 2026-09-25:** folded; see the amendment after
+this paragraph.) Today the tracked `pr-metadata.yml` (`metadata /
 required`) is a second one, and `AGENTS.md` names it as the current exception;
 Section 18 step 5 folds it into `governance / required` and updates `AGENTS.md`
 in the same commit, so the steady state is exactly one such workflow,
@@ -714,6 +716,21 @@ required` that Section 8 describes is an unconditional merge precondition and
 not only a post-edit step, and the residual after that re-run is the interval
 between it and the merge, bounded by the code-owner approval of this section.
 It reads changed paths and blobs as untrusted data through the API.
+
+**Amendment 2026-09-25 (§18 step 5 fold, recorded state; the operator's local
+date, per the HUMAN-DECISIONS D32 convention).** The fold has landed:
+`governance.yml` is the sole `pull_request_target` workflow and `AGENTS.md`
+names it. The check emits `governance / required` but today runs ONLY the
+base-owned metadata validator, with `contents: read` alone. The trusted-base
+policy this section and §10.2 assign to the name (manifest classification of
+changed paths, check-run provenance through the checks API, the §18 step 11
+mixed-PR and control-plane rejections, and the `checks` and `actions` read
+permissions those listings need) is NOT implemented. Requiring this check in a
+ruleset before that lands buys metadata hygiene and nothing more; §18 steps
+8–14 and 20 must not treat a green run as the control-plane gate. The
+`Supply-chain policy` job in `ci.yml` also still checks out the proposal on
+pull requests; its trusted-base conversion is part of the same unimplemented
+work.
 
 The enforcement control plane includes:
 
@@ -1759,6 +1776,13 @@ Numbered implementation and verification requirements:
    enforced, a governance-document edit and a product-documentation edit are
    paired PRs, never one). Re-run the static scan of step 17 against the whole
    directory afterwards.
+
+   **Amendment 2026-09-25 (fold landed).** The metadata check was folded into
+   `governance.yml` / `governance / required` on this date and `AGENTS.md`
+   was updated in the same commit; the check runs only the metadata validator
+   today (§10.5 amendment of this date). The urgent-release runbook and its
+   `AGENTS.md` exception did not land in the change that removed the write
+   path on 2026-09-07; they remain owed as a separate reviewed change.
 6. After public visibility, obtain at least one successful hosted Actions run of
    every push-triggered mandatory job. The PR-triggered mandatory job (`governance /
    required`, which runs only on a pull request event) obtains its first

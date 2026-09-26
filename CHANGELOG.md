@@ -243,6 +243,14 @@ JSON output are stable per the versioning policy — breaking changes bump
 
 ### Changed
 
+- **The pull-request metadata check is now named `governance / required`** (workflow
+  `governance.yml`, replacing `pr-metadata.yml`'s `metadata / required`). It still validates only
+  a pull request's title and body from the base branch's own code; the name is the one the
+  publication design reserves for the control-plane gate, whose enforcement is not yet
+  implemented, so a green check proves metadata hygiene and nothing more. **For anyone running
+  the binary, nothing changes:** no `apple` command, output field, error type, or exit code is
+  affected, and `schema_version` stays `1`.
+
 - **macOS 27 is now a tested and supported runtime baseline, alongside macOS 26.** The full
   local canonical suite (the logic, Python automation and local CLI tiers; the live tier is
   not part of it) runs green on macOS 27.0, so the

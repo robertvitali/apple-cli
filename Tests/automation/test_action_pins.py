@@ -466,7 +466,7 @@ class RepositoryActionInventoryTests(unittest.TestCase):
             r"# v[0-9]+\.[0-9]+\.[0-9]+"
         )
 
-        for workflow_name in ("ci.yml", "docs.yml", "pr-metadata.yml"):
+        for workflow_name in ("ci.yml", "docs.yml", "governance.yml"):
             blocks = re.findall(
                 rf"(?m)^\s*- {checkout_line}\n(?P<with>\s+with:\n(?:\s{{10,}}[^\n]*\n)*)",
                 workflows[workflow_name],
@@ -474,7 +474,7 @@ class RepositoryActionInventoryTests(unittest.TestCase):
             expected_count = {
                 "ci.yml": 5,
                 "docs.yml": 4,
-                "pr-metadata.yml": 1,
+                "governance.yml": 1,
             }[workflow_name]
             self.assertEqual(len(blocks), expected_count)
             self.assertTrue(all("persist-credentials: false" in block for block in blocks))

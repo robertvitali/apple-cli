@@ -209,9 +209,10 @@ RECORDED_REQUIRED_CHECKS: Dict[str, Dict[str, Any]] = {
         "push": {"branches": ["main"]},
         "pull_request": {"types": ["opened", "edited", "synchronize", "reopened"]},
     },
-    # The interim metadata gate; design step 5 folds it into `governance / required`
-    # in a later reviewed change, which edits this entry.
-    "metadata / required": {
+    # The sole `pull_request_target` check (design §18 step 5 fold, 2026-09-25). Today it runs
+    # only the base-owned metadata validator; the control-plane enforcement the design assigns
+    # to this name lands in later reviewed changes that edit this entry's trigger set if needed.
+    "governance / required": {
         "pull_request_target": {"types": ["opened", "edited", "reopened", "synchronize", "ready_for_review"]},
     },
 }

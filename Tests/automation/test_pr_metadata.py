@@ -15,11 +15,10 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 AGENTS_PATH = REPO_ROOT / "AGENTS.md"
 TEMPLATE_PATH = REPO_ROOT / ".github" / "PULL_REQUEST_TEMPLATE.md"
 CI_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "ci.yml"
-PR_METADATA_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "pr-metadata.yml"
-LEGACY_GOVERNANCE_WORKFLOW_PATH = (
-    REPO_ROOT / ".github" / "workflows" / "governance.yml"
-)
+GOVERNANCE_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "governance.yml"
+RETIRED_METADATA_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "pr-metadata.yml"
 VALIDATOR_PATH = REPO_ROOT / "scripts" / "ci" / "pr_metadata.py"
+WORKFLOW_POLICY_PATH = REPO_ROOT / "scripts" / "ci" / "workflow_policy.py"
 CHECKOUT_SHA = "3d3c42e5aac5ba805825da76410c181273ba90b1"
 
 
@@ -30,6 +29,17 @@ def load_validator_path(path: Path, module_name: str = "pr_metadata") -> ModuleT
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def parse_governance_workflow(text: str) -> dict:
+    """Parse with the `Supply-chain policy` scan's own fail-closed parser.
+
+    The assertions then see the same mapping the scan judges (comments stripped, dash-form
+    steps normalised), so the pin is exactly as faithful to GitHub's reading as that parser
+    is, and a construct the parser refuses raises instead of passing a text match.
+    """
+    policy = load_validator_path(WORKFLOW_POLICY_PATH, "workflow_policy")
+    return policy.parse_workflow(text)
 
 
 def load_validator() -> ModuleType:
@@ -146,11 +156,11 @@ class PullRequestTemplateTests(unittest.TestCase):
 class PullRequestWorkflowTests(unittest.TestCase):
     def test_trusted_metadata_job_invokes_repository_validator(self) -> None:
         self.assertTrue(
-            PR_METADATA_WORKFLOW_PATH.is_file(),
+            GOVERNANCE_WORKFLOW_PATH.is_file(),
             "dedicated PR metadata workflow must exist",
         )
-        self.assertFalse(LEGACY_GOVERNANCE_WORKFLOW_PATH.exists())
-        workflow = PR_METADATA_WORKFLOW_PATH.read_text(encoding="utf-8")
+        self.assertFalse(RETIRED_METADATA_WORKFLOW_PATH.exists())
+        workflow = GOVERNANCE_WORKFLOW_PATH.read_text(encoding="utf-8")
         match = re.search(
             r"^  required:\n(?P<job>.*?)(?=^  [a-z0-9-]+:\n|\Z)",
             workflow,
@@ -159,7 +169,7 @@ class PullRequestWorkflowTests(unittest.TestCase):
         self.assertIsNotNone(match, "PR metadata job must exist")
         job = match.group("job")
 
-        self.assertIn("name: metadata / required", job)
+        self.assertIn("name: governance / required", job)
         self.assertRegex(
             job,
             rf"(?m)^\s+- uses: actions/checkout@{CHECKOUT_SHA} +# v7\.0\.1$",
@@ -189,10 +199,12 @@ class PullRequestWorkflowTests(unittest.TestCase):
             "types: [opened, edited, reopened, synchronize, ready_for_review]",
             workflow,
         )
-        self.assertRegex(
-            workflow,
-            r"(?m)^permissions:\n  contents: read$",
-        )
+        # The workflow scan admits any read scope outside its forbidden set, so these
+        # exact parsed blocks are what pin the metadata-only posture: a new scope, even a
+        # read one, fails here until the control-plane half lands with its own review.
+        document = parse_governance_workflow(workflow)
+        self.assertEqual(document["permissions"], {"contents": "read"})
+        self.assertEqual(document["jobs"]["required"]["permissions"], {"contents": "read"})
         consumers = sorted(
             path.name
             for path in (REPO_ROOT / ".github" / "workflows").glob("*.yml")
@@ -201,7 +213,7 @@ class PullRequestWorkflowTests(unittest.TestCase):
                 path.read_text(encoding="utf-8"),
             )
         )
-        self.assertEqual(consumers, ["pr-metadata.yml"])
+        self.assertEqual(consumers, ["governance.yml"])
 
     def test_pr_head_ci_cannot_duplicate_the_metadata_check(self) -> None:
         workflow = CI_WORKFLOW_PATH.read_text(encoding="utf-8")
@@ -212,19 +224,55 @@ class PullRequestWorkflowTests(unittest.TestCase):
         self.assertNotIn("pr-title-lint:", workflow)
         self.assertNotIn("pull_request_target:", workflow)
 
-    def test_metadata_job_does_not_claim_future_governance_enforcement(self) -> None:
-        self.assertTrue(PR_METADATA_WORKFLOW_PATH.is_file())
-        workflow = PR_METADATA_WORKFLOW_PATH.read_text(encoding="utf-8")
+    def test_governance_job_runs_only_the_metadata_validator_today(self) -> None:
+        self.assertTrue(GOVERNANCE_WORKFLOW_PATH.is_file())
+        workflow = GOVERNANCE_WORKFLOW_PATH.read_text(encoding="utf-8")
 
-        self.assertNotIn("governance / required", workflow)
-        self.assertNotIn("control-plane", workflow)
+        # The whole parsed workflow is pinned: any added step, scope, trigger or job, in
+        # any YAML spelling the scan's parser accepts, fails here. Implementing the
+        # control-plane half is a deliberate, reviewed edit of this expectation.
+        self.assertEqual(
+            parse_governance_workflow(workflow),
+            {
+                "name": "Governance",
+                "on": {
+                    "pull_request_target": {
+                        "types": ["opened", "edited", "reopened", "synchronize", "ready_for_review"],
+                    },
+                },
+                "permissions": {"contents": "read"},
+                "jobs": {
+                    "required": {
+                        "name": "governance / required",
+                        "runs-on": "ubuntu-latest",
+                        "permissions": {"contents": "read"},
+                        "timeout-minutes": "5",
+                        "steps": [
+                            {
+                                "uses": f"actions/checkout@{CHECKOUT_SHA}",
+                                "with": {
+                                    "ref": "${{ github.event.pull_request.base.sha }}",
+                                    "persist-credentials": False,
+                                },
+                            },
+                            {
+                                "name": "Validate pull request metadata",
+                                "run": 'python3 scripts/ci/pr_metadata.py --event "$GITHUB_EVENT_PATH"',
+                            },
+                        ],
+                    },
+                },
+            },
+        )
+        # The parser strips comments, so the header's disclosure is checked as text.
+        self.assertIn("validates the pull request's title and body only", workflow)
 
-    def test_repository_instructions_define_only_the_metadata_exception(self) -> None:
-        self.assertTrue(PR_METADATA_WORKFLOW_PATH.is_file())
+    def test_repository_instructions_define_only_the_governance_exception(self) -> None:
+        self.assertTrue(GOVERNANCE_WORKFLOW_PATH.is_file())
         instructions = " ".join(AGENTS_PATH.read_text(encoding="utf-8").split())
-        metadata_workflow = PR_METADATA_WORKFLOW_PATH.read_text(encoding="utf-8")
+        metadata_workflow = GOVERNANCE_WORKFLOW_PATH.read_text(encoding="utf-8")
         check_name_match = re.search(
-            r"(?m)^\s+name: (metadata / required)$",
+            r"(?m)^\s+name: (governance / required)$",
             metadata_workflow,
         )
         self.assertIsNotNone(check_name_match)
@@ -233,13 +281,13 @@ class PullRequestWorkflowTests(unittest.TestCase):
         self.assertIn(f"`{check_name}`", instructions)
         for required_policy in (
             "ordinary build/test stays on `pull_request` with a read-only token and no secrets",
-            "sole current `pull_request_target` exception",
+            "sole `pull_request_target` workflow",
             "base-owned workflow checks out and executes only the base-owned metadata validator",
             "`contents: read`, no secrets, and PR title/body inspection only",
             "never checkout, execute, download, or cache PR code or artifacts",
             "No other `pull_request_target` use is permitted",
-            "not a substitute for the later `governance / required` control-plane gate",
-            "must not be used as one before that gate lands",
+            "proves metadata hygiene and nothing more",
+            "must not be treated as that gate until it is",
         ):
             self.assertIn(required_policy, instructions)
         self.assertNotIn("metadata/control-plane inspection", instructions)
