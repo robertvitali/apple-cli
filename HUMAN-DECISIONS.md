@@ -31,7 +31,7 @@ recorded, scoped evidence).
 
 ---
 
-## LEDGER — every decision at a glance (updated 2026-09-24)
+## LEDGER — every decision at a glance (updated 2026-09-25)
 
 **Still needs you: D2.** D9 was reopened 2026-08-31 and finally closed the same day (recorded
 CLOSED — see D9). D15 and D16 were ratified 2026-09-07. D3 and D14 were live-validated
@@ -73,6 +73,7 @@ findings for its stated scope; the repo stays private until then.
 | D28 | Order of the remaining pre-launch tooling: parsed-YAML workflow scan (design §18 step 17) before the site-assembly rehearsal (step 16), or the reverse | **ANSWERED 2026-09-22: steps 17 then 16** | The scan is the guard every later workflow change (including step 16's own job) is checked against, so it lands first, wired into the `Supply-chain policy` job with `Tests/automation` coverage; the site-assembly rehearsal follows as its own reviewed commit; §18 steps 8–14 and 20 remain operator-involved and are not started by this ruling |
 | D29 | Design §16 archive route: `/version/` collides with the generated `apple version` manual page | **ANSWERED 2026-09-23: amend to `/versions/`** | The site assembler refuses an archive root that a current-manual page occupies; the plural root is a route no command can render to, needs no manual special case, keeps `/version-manifest.json`, and already passed the local assembly rehearsal end to end |
 | D30 | Author `.github/CODEOWNERS` now under the D15 exception (design §18 step 5, CODEOWNERS half) | **ANSWERED 2026-09-24: author it now (option A)** | The step 17 read-back recorded CODEOWNERS absent (NOT SATISFIED) and every later bootstrap item waits on it; D15 already carries the attribution exception, so D30 settles only WHEN — now, rather than after the launch specification — and confirms the D15 sequence (AGENTS.md extension first, CODEOWNERS second with a fresh privacy scan and the control-plane manifest, errors API read-back third) |
+| D31 | Outside collaborators with read access (step 17 read-back found two) | **ANSWERED 2026-09-25: remove one, keep one** | The operator named the account to remove after seeing the list; the controller removed it through the API (HTTP 204) and read the list back: collaborators 2 — admin 1, read 1, of which outside 1. The kept read grant meets every collaborator expectation the design states (only administrator, only environment reviewer, no other write-capable actor), so it is a conforming state, kept on the operator's ruling with no reason recorded and no adverse finding against either account; identities stay out of the repository |
 
 ---
 
@@ -1537,6 +1538,52 @@ links and the manifest.
 
 **Why it needed you.** The timing of the first tracked occurrence of the handle beyond the
 D15 set, and whether to wait for the launch specification, is the operator's call.
+
+**Blocking?** No.
+
+---
+
+## D31 — Outside collaborators: remove one, keep one
+
+- **Status:** **ANSWERED 2026-09-25: remove one, keep one.**
+- **Finding that framed the question.** The step 17 API read-backs (2026-09-24) recorded three
+  collaborators — admin 1, read 2 — of which outside collaborators 2. The design's stated
+  collaborator expectations are narrower than "the operator alone": it requires the operator to
+  be the only administrator and only environment reviewer, and the solo-model evidence claims
+  require that no other write-capable actor exists; step 17 records counts and roles only. A read
+  grant satisfies all three. The brief that asked this question stated the stricter reading ("the
+  design expects the collaborator list to be you alone"); that reading was the controller's, not
+  the design's, and is withdrawn here.
+- **Options considered.** (A) remove both read grants; (B) keep both and record the reason;
+  (C) defer to the rehearsal check-in (the D16 re-confirmation). The operator asked to see the two
+  accounts (shown in-session only; never written to the repository) and ruled per account instead:
+  remove one, keep one.
+- **Ruling.** Remove one named account; keep the other. The controller removed it through the
+  API (`DELETE` on the collaborator, HTTP 204, issued interactively on the operator's in-session
+  instruction naming the account — the only mutating call in the step 17 set) and read the list
+  back: collaborators 2 by count, roles admin 1 and read 1, of which outside collaborators 1. The
+  remaining read grant meets every collaborator expectation the design states (not an
+  administrator, not an environment reviewer, not write-capable), so it is recorded as a
+  conforming state, not a deviation; what the operator declined was the controller's stricter
+  reading, which is not a design requirement. The expected set is, from 2026-09-25 until the operator rules
+  again, collaborators 2 by count, roles admin 1 and read 1, of which outside collaborators 1. No
+  reason for keeping the second grant was recorded; the operator may add one. The removal records
+  no finding about the account or its holder; it narrows the access surface to what the design's
+  expectations require and no more. Identities stay out of the repository, so the expected set
+  alone cannot distinguish the kept account from a substitute: a salted SHA-256 commitment over the
+  kept account's numeric GitHub id (stable across login renames; prefix `63f2fa71001a79ca`) is
+  recorded under a dedicated collaborator salt kept outside the repository — distinct from the
+  run-ID and denylist salts, because run ids are public plaintexts — whose own SHA-256 commitment
+  is `ebeae5033cdfe5a2`; a later read-back checks identity as well as count. On a user-owned
+  repository `read` is the whole grant (no team or organisation path can widen it) and no
+  environment exists to review, which is why the role string suffices today; re-checked when the
+  `main` ruleset introduces bypass actors. D31 is re-opened if that grant becomes
+  write-capable, if the account is ever named in CODEOWNERS, or when the step 20 `main` ruleset
+  activates (collaborator status then interacts with bypass and required-review resolution).
+- **Filed:** 2026-09-25 · **Category:** repository access / step 17 expected set
+
+**Why it needed you.** Collaborator grants are yours to give and withdraw; the design can only
+read them back.
 
 **Blocking?** No.
 
