@@ -466,6 +466,23 @@ class SiteAssemblyTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 1, completed.stderr)
         self.assertIn("use_directory_urls", completed.stderr)
 
+    def test_printed_errors_escape_characters_that_could_start_a_line(self) -> None:
+        # A refused tag or config key may hold a line feed; printed verbatim, a following
+        # `::error::` would reach the runner as a workflow command. (A refused tag is quoted with
+        # repr today; the check pins the outcome whichever layer does the escaping.)
+        self.repo.commit_manual("current")
+        completed, _s, _r = self.run_assembly("--published-tag", "v26.0.0\n::error::injected")
+        self.assertEqual(completed.returncode, 2, completed.stderr)
+        self.assertIn("::error::injected", completed.stderr)
+        self.assertFalse(any(line.startswith("::") for line in completed.stderr.splitlines()), completed.stderr)
+        (self.repo.root / "mkdocs.yml").write_text('site_name: t\ndocs_dir: docs/manual\n"a\\n::error::injected": x\n',
+                                                   encoding="utf-8")
+        git(["add", "-A"], self.repo.root); git(["commit", "-q", "-m", "docs: odd key"], self.repo.root)
+        completed, _s, _r = self.run_assembly()
+        self.assertEqual(completed.returncode, 1, completed.stderr)
+        self.assertIn("::error::injected", completed.stderr)
+        self.assertFalse(any(line.startswith("::") for line in completed.stderr.splitlines()), completed.stderr)
+
     def test_derived_candidate_version_routes_like_release_prep(self) -> None:
         self.repo.commit_manual("26.0.0"); self.repo.tag("v26.0.0")
         (self.repo.root / "feature.txt").write_text("x\n", encoding="utf-8")

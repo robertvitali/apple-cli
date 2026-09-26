@@ -40,8 +40,16 @@ What must hold for every workflow (exit 0), each named in the violations otherwi
 - each RECORDED required check is produced by exactly one workflow whose trigger set
   equals the recorded one at activity-type / branch-filter granularity (Section 7.2);
 - every `uses:` is a remote action pinned to a full commit SHA (a local `./` composite
-  action or a `docker://` image would place steps outside this scan); no `container:`
-  or `services:` image; an `actions/github-script` body is checked for write calls;
+  action or a `docker://` image would place steps outside this scan), and every step's
+  `uses:` is the reviewed pin (name and SHA) in `action_pins.py`'s allowlist; no
+  `container:` or `services:` image; an `actions/github-script` body is checked for write
+  calls;
+- literal and folded block scalars are read with YAML's rules: the indentation of the
+  first non-empty line after the header (`#` lines included), leading empty lines,
+  chomping and folding; explicit indentation indicators (`|2`, `>-1`) and a leading empty
+  line deeper than the first content line are refused, as is a tab in any line's leading
+  whitespace (the parser does not track where a tab would be block content, so this also
+  refuses some tabs YAML reads as text);
 - exactly one `pull_request_target` workflow exists; nothing in it — workflow-level
   `env`, `concurrency` or `defaults` included — references the proposal head
   (`head.sha`, `head.ref`, `github.head_ref`, `refs/pull/`, PR checkout/fetch/diff
@@ -447,12 +455,16 @@ class _Lines:
         raw_rows = text.split("\n")
         self.raw = raw_rows
         for number, raw in enumerate(raw_rows, start=1):
+            if "\t" in raw[: len(raw) - len(raw.lstrip())]:
+                # YAML refuses a tab where it expects indentation. This parser does not track where a
+                # tab would instead be block-scalar content, so it refuses a tab in the leading
+                # whitespace of every line, empty and comment-looking lines included (it would
+                # otherwise skip those while YAML refused the file).
+                raise ParseError("line {}: tab indentation is refused".format(number))
             if raw.strip() == "" or raw.lstrip().startswith("#"):
                 continue
             if raw.startswith("---") or raw.startswith("..."):
                 raise ParseError("line {}: multi-document markers are refused".format(number))
-            if "\t" in raw[: len(raw) - len(raw.lstrip())]:
-                raise ParseError("line {}: tab indentation is refused".format(number))
             indent = len(raw) - len(raw.lstrip(" "))
             self.rows.append((indent, number, _strip_comment(raw)))
         self.position = 0
@@ -466,44 +478,88 @@ class _Lines:
         return row
 
 
-def _block_scalar(lines: _Lines, parent_indent: int, indicator: str) -> str:
-    """Collect a literal/folded block scalar body: every following raw line indented
-    deeper than the parent (blank lines included), returned joined by newlines."""
-    if lines.position >= len(lines.rows):
-        return ""
-    body: List[str] = []
-    next_row = lines.peek()
-    if next_row is None or next_row[0] <= parent_indent:
-        return ""
-    block_indent = next_row[0]
-    # Walk raw lines from the current row's line number to reproduce blank lines inside.
-    start_lineno = next_row[1]
-    end_lineno = start_lineno
-    for indent, lineno, _content in lines.rows[lines.position:]:
-        if indent < block_indent:
-            break
-        end_lineno = lineno
+def _block_scalar(lines: _Lines, parent_indent: int, indicator: str, header_lineno: int) -> str:
+    """Collect a literal/folded block scalar from the raw lines by YAML's rules, value included.
 
-    def _comment_row(raw: str) -> bool:
-        return raw.lstrip().startswith("#") and len(raw) - len(raw.lstrip(" ")) >= block_indent
+    CONTROL PLANE — lines: the indentation is that of the first non-empty line after the header,
+    even when that line starts with `#` (inside a block scalar it is content, not a comment), and
+    the body runs until the first non-empty line indented less than that. Taking it from the first
+    non-comment row instead let a shallow leading `#` line lower YAML's indentation while this
+    parser dropped a trailing `#` line that the shell then ran. A leading empty line longer than
+    that indentation is an error under the YAML specification and is refused here (libyaml reads
+    some such blocks as empty instead, so this also refuses documents it accepts).
+    Value: leading empty lines stay as line feeds; clip chomping (`|`, `>`) keeps one final line
+    feed, strip (`-`) none, keep (`+`) all; a folded scalar joins two text lines with a space
+    unless empty lines separate them, and keeps the line breaks around more-indented lines. So a
+    value such as `runs-on: |` over `ubuntu-latest` reads as `ubuntu-latest` plus a line feed,
+    as YAML reads it, and the exact comparisons refuse it.
+    Explicit indentation indicators are refused before this is called."""
+    raw = lines.raw
+    # `text.split("\n")` leaves an empty string after a final line feed; it is not a line.
+    limit = len(raw) - 1 if raw and raw[-1] == "" else len(raw)
+    first = header_lineno  # raw index of the line after the header (line numbers are 1-based)
+    while first < limit and raw[first].strip(" \t") == "":
+        first += 1
+    if first >= limit or len(raw[first]) - len(raw[first].lstrip(" ")) <= parent_indent:
+        # No content: keep chomping still keeps the empty lines' line feeds, except that an
+        # unterminated final empty line carries no line break of its own.
+        breaks = first - header_lineno
+        if breaks and first == limit == len(raw):
+            breaks -= 1
+        return "\n" * breaks if indicator.endswith("+") else ""
+    block_indent = len(raw[first]) - len(raw[first].lstrip(" "))
+    for index in range(header_lineno, first):
+        if len(raw[index]) - len(raw[index].lstrip(" ")) > block_indent:
+            raise ParseError("line {}: a leading empty line is indented deeper than the block scalar's "
+                             "first line".format(index + 1))
+    end = first
+    while end < limit and (raw[end].strip(" \t") == ""
+                           or len(raw[end]) - len(raw[end].lstrip(" ")) >= block_indent):
+        end += 1
 
-    # `#`-only rows are not parse rows, but inside a block scalar they are body text: extend the
-    # body backwards to the row after the indicator and forwards over trailing comment rows.
-    previous_lineno = lines.rows[lines.position - 1][1] if lines.position > 0 else 0
-    while start_lineno - 1 > previous_lineno and _comment_row(lines.raw[start_lineno - 2]):
-        start_lineno -= 1
-    while end_lineno < len(lines.raw) and (_comment_row(lines.raw[end_lineno]) or (
-            lines.raw[end_lineno].strip() == "" and end_lineno + 1 < len(lines.raw) and _comment_row(lines.raw[end_lineno + 1]))):
-        end_lineno += 1
-    for raw in lines.raw[start_lineno - 1:end_lineno]:
-        if raw.strip() == "":
-            body.append("")
-        else:
-            body.append(raw[block_indent:])
-    while lines.position < len(lines.rows) and lines.rows[lines.position][1] <= end_lineno:
+    def _empty(line: str) -> bool:
+        # A line of spaces no longer than the indentation is empty; a longer one is content
+        # (its extra spaces are part of the value), as YAML reads it.
+        return line.strip(" \t") == "" and len(line) <= block_indent
+
+    last = end
+    while last > first and _empty(raw[last - 1]):
+        last -= 1
+    leading = first - header_lineno
+    content = ["" if _empty(raw[index]) else raw[index][block_indent:] for index in range(first, last)]
+    trailing = end - last
+    if end == limit == len(raw) and trailing and raw[end - 1].strip(" \t") == "":
+        trailing -= 1  # an unterminated final empty line carries no line break of its own
+    while lines.position < len(lines.rows) and lines.rows[lines.position][1] <= end:
         lines.position += 1
-    text = "\n".join(body)
-    return text if indicator.startswith("|") else re.sub(r"(?<!\n)\n(?!\n)", " ", text)
+    if indicator.startswith("|"):
+        text = "\n".join(content)
+    else:
+        parts: List[str] = []
+        previous_text_line = False
+        empty_run = 0
+        for line in content:
+            if line == "":
+                empty_run += 1
+                continue
+            text_line = line[0] not in " \t"
+            if parts:
+                if previous_text_line and text_line:
+                    parts.append(" " if empty_run == 0 else "\n" * empty_run)
+                else:
+                    parts.append("\n" * (empty_run + 1))
+            parts.append(line)
+            previous_text_line = text_line
+            empty_run = 0
+        text = "".join(parts)
+    text = "\n" * leading + text
+    # The last content line has no line break of its own only when it ends the file unterminated.
+    final_break = "" if last == limit == len(raw) else "\n"
+    if indicator.endswith("-"):
+        return text
+    if indicator.endswith("+"):
+        return text + final_break + "\n" * trailing
+    return text + final_break
 
 
 def _parse_block(lines: _Lines, indent: int) -> Any:
@@ -598,8 +654,10 @@ def _assign(mapping: Dict[str, Any], lines: _Lines, indent: int, match: "re.Matc
             mapping[key] = None
         return
     stripped = value.strip()
-    if re.fullmatch(r"[|>][+-]?[0-9]?", stripped):
-        mapping[key] = _block_scalar(lines, indent, stripped)
+    if re.fullmatch(r"[|>](?:[+-]?[0-9]|[0-9][+-]?)", stripped):
+        raise ParseError("line {}: explicit block indentation indicators are refused".format(lineno))
+    if re.fullmatch(r"[|>][+-]?", stripped):
+        mapping[key] = _block_scalar(lines, indent, stripped, lineno)
         return
     mapping[key] = _scalar(stripped)
 
@@ -843,6 +901,33 @@ def _canonical(value: Any) -> Any:
     return value
 
 
+def _unapproved_pins(display: str, document: Dict[str, Any], approved: Dict[str, Tuple[str, str]]) -> List[str]:
+    """Violations for each step `uses` whose action and SHA are not the reviewed pin.
+
+    `action_pins.py` checks the same allowlist with its own line scan; judging the parsed
+    document too means a line that scan skips (or reads differently) is still checked here.
+    The version annotation is a comment, which this parser drops, so only name and SHA are
+    compared."""
+    violations: List[str] = []
+    jobs = document.get("jobs")
+    if not isinstance(jobs, dict):
+        return violations
+    for job_id, job in jobs.items():
+        steps = job.get("steps") if isinstance(job, dict) else None
+        if not isinstance(steps, list):
+            continue
+        for index, step in enumerate(steps):
+            uses = step.get("uses") if isinstance(step, dict) else None
+            if not isinstance(uses, str):
+                continue
+            name, _, revision = uses.partition("@")
+            pin = approved.get(name)
+            if pin is None or pin[0] != revision:
+                violations.append("{}: job `{}` step {}: `uses` is not in the reviewed action-pin allowlist "
+                                  "(scripts/ci/action_pins.py)".format(display, job_id, index + 1))
+    return violations
+
+
 def scan_repository(root: Path) -> List[str]:
     violations: List[str] = []
     try:
@@ -865,6 +950,7 @@ def scan_repository(root: Path) -> List[str]:
             continue
         file_violations, facts = scan_workflow(display, document)
         violations.extend(file_violations)
+        violations.extend(_unapproved_pins(display, document, pins.APPROVED_REMOTE_ACTIONS))
         if facts["pull_request_target"]:
             prt_workflows.append(display)
         for check_name in facts["checks"]:
@@ -886,6 +972,13 @@ def scan_repository(root: Path) -> List[str]:
     return violations
 
 
+def _printable(text: str) -> str:
+    """Escape every character that is not printable. A violation can quote a decoded key or
+    value, which may hold a line feed; printed verbatim, a following `::error::` would reach
+    the runner as a workflow command."""
+    return "".join(character if character.isprintable() else "\\u{:04x}".format(ord(character)) for character in text)
+
+
 def main(argv: Optional[Sequence[str]] = None) -> int:
     parser = argparse.ArgumentParser(description="Static read-only scan of every GitHub workflow.")
     parser.add_argument("--root", type=Path, default=POLICY_ROOT)
@@ -893,7 +986,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
     violations = scan_repository(args.root.expanduser().resolve())
     if violations:
         for violation in violations:
-            print("workflow-policy: {}".format(violation), file=sys.stderr)
+            print("workflow-policy: {}".format(_printable(violation)), file=sys.stderr)
         return 1
     print("workflow-policy: every workflow is read-only and matches the recorded control plane")
     return 0

@@ -192,11 +192,11 @@ jobs:
   test:
     steps:
       -   run: |
-          uses: this-is-shell-text
-          !!str uses: tagged-shell-text
-          {? uses: flow-shell-text}
-          &anchor uses: anchored-shell-text
-          *alias: aliased-shell-text
+            uses: this-is-shell-text
+            !!str uses: tagged-shell-text
+            {? uses: flow-shell-text}
+            &anchor uses: anchored-shell-text
+            *alias: aliased-shell-text
       # !!str uses: tagged-comment-text {? &anchor *alias}
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
 """,
@@ -364,6 +364,30 @@ jobs:
                            "3d3c42e5aac5ba805825da76410c181273ba90b1\u00a0#\u00a0v7.0.1\n")
             errors = checker.validate_repository(root)
             self.assertTrue(any("hidden.yml" in error and "U+00A0" in error for error in errors), errors)
+
+    def test_block_scalar_under_a_sequence_item_does_not_hide_a_uses_key(self) -> None:
+        # For `- name: |` the block's content must be deeper than the key column, not the dash
+        # column; a `uses:` at the key column is a sibling key that YAML reads.
+        checker = load_checker()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_workflow(root, "hidden.yml",
+                           "jobs:\n  test:\n    steps:\n      - name: |\n"
+                           "        uses: attacker/evil-action@0123456789abcdef0123456789abcdef01234567 # v1.0.0\n")
+            errors = checker.validate_repository(root)
+            self.assertTrue(any("hidden.yml" in error and "allowlist" in error for error in errors), errors)
+
+    def test_printed_errors_escape_characters_that_could_start_a_line(self) -> None:
+        # A workflow file name may hold a line feed; printed verbatim, `::error::` would start a
+        # runner workflow command.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_workflow(root, "x\n::error::injected.yml", "jobs:\n  test:\n    steps:\n      - uses: evil/action@main\n")
+            result = subprocess.run([sys.executable, str(CHECKER_PATH), "--root", str(root)],
+                                    check=False, capture_output=True, text=True, timeout=30)
+            self.assertNotEqual(result.returncode, 0)
+            self.assertIn("::error::injected", result.stderr)
+            self.assertFalse(any(line.startswith("::") for line in result.stderr.splitlines()), result.stderr)
 
     def test_refused_character_rule_matches_the_workflow_scan(self) -> None:
         # The two scanners carry the same rule in two places; every code point must agree.

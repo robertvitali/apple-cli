@@ -24,7 +24,7 @@ USES_KEY_PATTERN = re.compile(
     r"^(?P<indent> *)(?P<sequence>- +)?uses(?P<space> *):(?P<rest>.*)$"
 )
 BLOCK_SCALAR_PATTERN = re.compile(
-    r"^ *(?:- +)?[A-Za-z0-9_-]+: *[|>][+-]? *(?:#.*)?$"
+    r"^(?P<lead> *(?:- +)?)[A-Za-z0-9_-]+: *[|>][+-]? *(?:#.*)?$"
 )
 QUOTED_MAPPING_KEY_PATTERN = re.compile(
     r'^ *(?:- +)?"(?:\\.|[^"\\])*" *:'
@@ -310,6 +310,13 @@ def _read_regular_utf8(path: Path, maximum_bytes: int) -> str:
 read_regular_utf8 = _read_regular_utf8
 
 
+def _printable(text: str) -> str:
+    """Escape every character that is not printable, so a workflow path holding a line feed cannot
+    start a new output line (a line beginning `::` is a runner workflow command). COUPLING:
+    `workflow_policy._printable` is the same helper."""
+    return "".join(character if character.isprintable() else "\\u{:04x}".format(ord(character)) for character in text)
+
+
 def _refused_character(character: str) -> bool:
     """Whitespace other than space and tab, a character outside YAML's printable set, U+FEFF,
     or a bidirectional control (U+061C, U+200E, U+200F, U+202A-U+202E, U+2066-U+2069).
@@ -373,8 +380,12 @@ def _scan_file(path: Path) -> tuple[list[ActionReference], list[tuple[int, str]]
         if match is None:
             if re.match(r"^ *(?:- +)?uses\b", line):
                 errors.append((line_number, "uses key is malformed"))
-            elif BLOCK_SCALAR_PATTERN.fullmatch(line):
-                block_scalar_indent = indent
+            else:
+                block = BLOCK_SCALAR_PATTERN.fullmatch(line)
+                if block:
+                    # The block's content must sit deeper than the KEY's column: for `- name: |`
+                    # that is past the dash, so a `uses:` at the key column is a sibling key.
+                    block_scalar_indent = len(block.group("lead"))
             continue
 
         sequence_item = match.group("sequence") is not None
@@ -431,7 +442,7 @@ def main(argv: Optional[list[str]] = None) -> int:
     arguments = parser.parse_args(argv)
     errors = validate_repository(arguments.root.resolve())
     for error in errors:
-        print(error, file=sys.stderr)
+        print(_printable(error), file=sys.stderr)
     return 1 if errors else 0
 
 

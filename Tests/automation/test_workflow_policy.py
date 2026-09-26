@@ -148,7 +148,7 @@ class ParserTests(unittest.TestCase):
             "on: push\npermissions: read-all\njobs:\n  a:\n    runs-on: ubuntu-latest\n    permissions: read-all\n"
             "    steps:\n      - run: |\n          # leading\n          echo hi\n          # trailing\n      - run: second\n"
         )
-        self.assertEqual(document["jobs"]["a"]["steps"][0]["run"], "# leading\necho hi\n# trailing")
+        self.assertEqual(document["jobs"]["a"]["steps"][0]["run"], "# leading\necho hi\n# trailing\n")  # libyaml's value (clip)
         self.assertEqual(document["jobs"]["a"]["steps"][1]["run"], "second")
 
     def test_same_indent_sequence_may_be_followed_by_sibling_keys(self) -> None:
@@ -162,7 +162,7 @@ class ParserTests(unittest.TestCase):
             "on: push\npermissions: read-all\njobs:\n  a:\n    runs-on: ubuntu-latest\n    permissions: read-all\n"
             "    steps:\n      - run: |\n          first\n\n            indented\n      - run: second\n"
         )
-        self.assertEqual(document["jobs"]["a"]["steps"][0]["run"], "first\n\n  indented")
+        self.assertEqual(document["jobs"]["a"]["steps"][0]["run"], "first\n\n  indented\n")  # libyaml's value (clip)
         self.assertEqual(document["jobs"]["a"]["steps"][1]["run"], "second")
 
 
@@ -191,6 +191,11 @@ class ScanTests(unittest.TestCase):
 
     def scan_ci(self, ci_body: str) -> list:
         return self.scan({"ci.yml": ci_body, "governance.yml": METADATA})
+
+    def scan_ci_rules(self, ci_body: str) -> list:
+        # For fixtures that use a dummy SHA to test the scan's own rules; the reviewed pin
+        # allowlist is tested on its own (`test_every_uses_is_checked_against_the_reviewed_pin_allowlist`).
+        return [v for v in self.scan_ci(ci_body) if "reviewed action-pin allowlist" not in v]
 
     def assert_ci_violation(self, ci_body: str, needle: str) -> None:
         violations = self.scan_ci(ci_body)
@@ -350,7 +355,7 @@ class ScanTests(unittest.TestCase):
         body = mutate(QUALITY, CHECKOUT_STEP,
                       "      - uses: actions/github-script@0000000000000000000000000000000000000000\n        with:\n"
                       "          script: core.setOutput('b', (await github.rest.repos.get(context.repo)).data.default_branch)\n" + CHECKOUT_STEP)
-        self.assertEqual(self.scan_ci(body), [])
+        self.assertEqual(self.scan_ci_rules(body), [])
 
     def test_interpreter_swaps_and_non_string_run_fail(self) -> None:
         body = mutate(QUALITY, "        run: |\n", "        shell: python\n        run: |\n")
@@ -399,11 +404,11 @@ class ScanTests(unittest.TestCase):
         body = mutate(QUALITY, 'echo "building"', "cat config/secrets.json && echo done")
         self.assertEqual(self.scan_ci(body), [])
         body = mutate(QUALITY, CHECKOUT_STEP, CHECKOUT_STEP + "      - uses: someone/tool@0000000000000000000000000000000000000000\n        with:\n          environment: staging\n")
-        self.assertEqual(self.scan_ci(body), [])
+        self.assertEqual(self.scan_ci_rules(body), [])
         body = mutate(QUALITY, 'echo "building"', "git log --format=%s origin/main..HEAD  # check every commit header\n          curl -d x https://example.com/")
         self.assertEqual(self.scan_ci(body), [])
         body = mutate(QUALITY, CHECKOUT_STEP, "      - uses: wagoid/commitlint-github-action@0000000000000000000000000000000000000000\n" + CHECKOUT_STEP)
-        self.assertEqual(self.scan_ci(body), [])
+        self.assertEqual(self.scan_ci_rules(body), [])
 
     def test_duplicate_check_names_across_workflows_fail(self) -> None:
         other = QUALITY.replace("name: CI", "name: Other").replace("  build:", "  build2:").replace("needs: [build]", "needs: [build2]")
@@ -569,6 +574,115 @@ class ScanTests(unittest.TestCase):
             body = mutate(QUALITY, "    name: quality / required\n", "    name: {}\n".format(name))
             with self.subTest(name=name):
                 self.assert_ci_violation(body, "may not begin or end with whitespace")
+
+    def test_block_scalar_indentation_follows_yaml(self) -> None:
+        # YAML takes a block scalar's indentation from its first non-empty line, and a `#` line
+        # inside it is content. Taking it from the first non-comment line instead let a shallow
+        # leading `#` line lower YAML's indentation while the parser dropped a trailing `#` line
+        # that the shell then ran through a continuation or an open quote.
+        for body_lines in (("# setup", "  echo ok\\", "#; gh release create v1"),
+                           ("# setup", '  python3 -c "print(1)', '#"; gh release create v1')):
+            block = "      - run: |\n" + "".join("          {}\n".format(line) for line in body_lines)
+            body = mutate(QUALITY, CHECKOUT_STEP, block + CHECKOUT_STEP)
+            with self.subTest(body_lines=body_lines):
+                document = policy.parse_workflow(body)
+                run = document["jobs"]["build"]["steps"][0]["run"]
+                self.assertIn(body_lines[-1], run)
+                self.assert_ci_violation(body, "run script contains a")
+
+    def test_block_scalar_values_match_libyaml(self) -> None:
+        # Values recorded from libyaml 0.2.1 (Ruby Psych 3.1): leading empty lines, clip, strip and
+        # keep chomping, folding around more-indented lines, whitespace-only content lines, and a
+        # block that ends the file without a final line feed.
+        cases = (
+            ("k: |\n  a\n  b\n", "a\nb\n"),
+            ("k: |-\n  a\n  b\n", "a\nb"),
+            ("k: |+\n  a\n\n\nn: x\n", "a\n\n\n"),
+            ("k: |\n\n  a\n", "\na\n"),
+            ("k: >\n  a\n  b\n\n  c\n", "a b\nc\n"),
+            ("k: >\n  a\n    b\n  c\n", "a\n  b\nc\n"),
+            ("k: >-\n  a\n\n    b\n", "a\n\n  b"),
+            ("k: |\n  a\n     \n  b\n", "a\n   \nb\n"),
+            ("k: |+\n\nn: x\n", "\n"),
+            ("k: |\n  a", "a"),
+            ("k: |\n  # c\n    x\n", "# c\n  x\n"),
+            ("k: >+\n  a\n  b\n\n", "a b\n\n"),
+            ("k: |+\n  a\n  ", "a\n"),
+            ("k: |+\n\n  ", "\n"),
+            ("k: |+\n  ", ""),
+            ("k: |+\n  \n", "\n"),
+            ("k: |\n  \n  a\n", "\na\n"),
+            ("k: |\n  a\n  \nn: x\n", "a\n"),
+        )
+        for text, expected in cases:
+            with self.subTest(text=text):
+                self.assertEqual(policy.parse_workflow(text)["k"], expected)
+        # Each of these is an error to libyaml: a leading empty line deeper than the first content
+        # line, and a tab where indentation is expected, on an empty, content or comment-looking line.
+        for text in ("k: |\n      \n  a\n", "k: |\n  a\n\t\n  b\n", "k: x\n\t\nn: y\n",
+                     "k: |\n \ta\n", "k: |\n  a\n \tb\n", "k: |\n  \t# a\n", "k: |\n  a\n \t# b\n"):
+            with self.subTest(refused=text), self.assertRaises(policy.ParseError):
+                policy.parse_workflow(text)
+        # libyaml accepts these, and this parser refuses them. In the first three the tab falls after
+        # the block's indentation and is content, but the parser refuses a tab in any line's leading
+        # whitespace rather than track where it is content. In the last, libyaml reads a leading empty
+        # line deeper than the first content line as an empty block; the YAML specification makes it
+        # an error, and the parser follows the specification.
+        for text in ("k: |\n  a\n  \tb\n", "k: |\n  a\n  \t# b\n", "k: >\n  a\n  \t\n  b\n",
+                     "k: |\n    \n  # c\nn: v\n"):
+            with self.subTest(over_refused=text), self.assertRaises(policy.ParseError):
+                policy.parse_workflow(text)
+
+    def test_block_scalar_values_meet_the_exact_comparisons(self) -> None:
+        # A block scalar keeps its final line feed, so it can no longer read as an admitted label,
+        # a recorded check name or the base ref (it did while the value was trimmed).
+        body = mutate(QUALITY, "  build:\n    runs-on: ubuntu-latest\n", "  build:\n    runs-on: |\n      ubuntu-latest\n")
+        self.assert_ci_violation(body, "ADMITTED_RUNNER_LABELS")
+        body = mutate(QUALITY, "    name: quality / required\n", "    name: |\n\n      quality / required\n")
+        self.assert_ci_violation(body, "may not begin or end with whitespace")
+        governance = mutate(METADATA, "ref: ${{ github.event.pull_request.base.sha }}",
+                            "ref: |\n                ${{ github.event.pull_request.base.sha }}")
+        violations = self.scan({"ci.yml": QUALITY, "governance.yml": governance})
+        self.assertTrue(any("must pin `ref`" in v for v in violations), violations)
+
+    def test_explicit_block_indentation_indicators_are_refused(self) -> None:
+        # The parser accepted `|-2` and then ignored the indicator, so it could disagree with YAML
+        # about where the scalar ends. No tracked file uses one.
+        for indicator in ("|2", "|-2", "|2-", ">2", ">+1"):
+            body = mutate(QUALITY, CHECKOUT_STEP,
+                          "      - run: {}\n            echo ok\n".format(indicator) + CHECKOUT_STEP)
+            with self.subTest(indicator=indicator):
+                violations = self.scan_ci(body)
+                self.assertTrue(any("ci.yml: refused" in v and "indentation indicator" in v for v in violations),
+                                violations)
+
+    def test_every_uses_is_checked_against_the_reviewed_pin_allowlist(self) -> None:
+        # One source of truth: the scan checks each parsed `uses` against action_pins.py's
+        # allowlist, so a line the action-pin line scan skips is still judged here.
+        sha = "0123456789abcdef0123456789abcdef01234567"
+        body = mutate(QUALITY, CHECKOUT_STEP, "      - uses: actions/cache@{} # v1.0.0\n".format(sha) + CHECKOUT_STEP)
+        self.assert_ci_violation(body, "not in the reviewed action-pin allowlist")
+        hidden = mutate(QUALITY, CHECKOUT_STEP,
+                        "      - name: |\n        uses: attacker/evil-action@{} # v1.0.0\n".format(sha) + CHECKOUT_STEP)
+        self.assert_ci_violation(hidden, "not in the reviewed action-pin allowlist")
+        # An approved name at a SHA outside the allowlist is refused too, visible or hidden.
+        for fragment in ("      - uses: actions/checkout@{} # v7.0.1\n".format(sha),
+                         "      - name: |\n        uses: actions/checkout@{} # v7.0.1\n".format(sha)):
+            body = mutate(QUALITY, CHECKOUT_STEP, fragment + CHECKOUT_STEP)
+            with self.subTest(fragment=fragment):
+                self.assert_ci_violation(body, "not in the reviewed action-pin allowlist")
+
+    def test_printed_violations_escape_characters_that_could_start_a_line(self) -> None:
+        # A decoded key or value may hold a line feed; printed verbatim, a following `::error::`
+        # would reach the runner as a workflow command.
+        body = QUALITY.replace("  build:\n", '  "a\\n::error::injected":\n    runs-on: ubuntu-latest\n  build:\n', 1)
+        write_tree(self.root, {"ci.yml": body, "governance.yml": METADATA})
+        result = subprocess.run([sys.executable, "-I", "-S", "-B", str(SCRIPT), "--root", str(self.root)],
+                                stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True,
+                                check=False)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("::error::injected", result.stderr)
+        self.assertFalse(any(line.startswith("::") for line in result.stderr.splitlines()), result.stderr)
 
     def test_unparseable_workflow_is_a_violation_not_a_pass(self) -> None:
         violations = self.scan({"ci.yml": QUALITY, "governance.yml": METADATA, "odd.yml": "name: x\non: push\njobs: {a: b}\n"})

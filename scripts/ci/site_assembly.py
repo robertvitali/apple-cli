@@ -766,10 +766,10 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             report_path = args.report.expanduser()
         report = assemble(args)
     except PolicyError as error:
-        print("site-assembly: refused: {}".format(error), file=sys.stderr)
+        print("site-assembly: refused: {}".format(_WORKFLOW_POLICY._printable(str(error))), file=sys.stderr)
         return 2
     except (AssertionFailure, GitError) as error:
-        print("site-assembly: FAIL: {}".format(error), file=sys.stderr)
+        print("site-assembly: FAIL: {}".format(_WORKFLOW_POLICY._printable(str(error))), file=sys.stderr)
         _write_failure(report_path, candidate_sha, "checked-failure")
         return 1
     except Exception as error:  # noqa: BLE001 — never a traceback with scratch paths; still a failure

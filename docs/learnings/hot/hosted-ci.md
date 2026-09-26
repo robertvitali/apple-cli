@@ -34,7 +34,16 @@ that the copies agree for every code point.
 matters, refuse input the parser might read differently instead of trying to interpret it,
 and say in the record that the refusals narrow the residual rather than remove it. Other
 hand-rolled readers in `scripts/ci/` (`pr_metadata.py`'s trailer split, `dependency_policy.py`)
-use the same helpers and are a follow-up.
+use the same helpers and are a follow-up, as are the scan parser's own paths outside block
+scalars (flow sequences and sequence entries), which no differential has covered yet. The same review found the structural cousin: block
+scalars read with a different indentation rule than YAML's hid a line from the scan. Check a
+parser's structural rules against a real YAML loader (libyaml via Ruby's Psych was on hand),
+not only its character handling: a seeded differential over generated block scalars found 983
+differences in 4,000 documents before the fix, including trimmed values that had slipped past
+exact comparisons. Widen the generator before trusting a zero: the first run's 0 in 12,000 never
+produced a tab or an unterminated final line, and adding both found a comment-looking line with
+a tab that YAML refuses and the parser skipped; with both in, 0 in 32,000 (15,161 accepted by
+both, the rest refused by at least one).
 
 ## 2026-09-21 — first public CI runs after 19 days private: hosted-only defects, none reproducible locally
 

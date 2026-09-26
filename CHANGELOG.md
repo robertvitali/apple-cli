@@ -34,26 +34,31 @@ JSON output are stable per the versioning policy — breaking changes bump
   read-only before each `main` push and pull request (`scripts/ci/workflow_policy.py`).** The
   Supply-chain policy job refuses any workflow that matches the recorded denylist of publish,
   deploy, attest and ref-writing actions or of `git`, `gh`, REST and package-registry write
-  commands, that references a secret or the built-in token in any expression form, that runs
-  on a runner label outside the admitted hosted set, that keeps checkout credentials, that uses
-  a local or unpinned action or a job container, or that reaches the proposal head under
-  `pull_request_target`; and it requires an explicit read-only `permissions` block on every
-  workflow and every job (the nine jobs that lacked one now declare it; the tenth already did). It also pins the recorded trigger set
-  of each required check and the count of `pull_request_target` workflows. A workflow holding
-  any whitespace other than space, tab and line feed (a no-break space, another Unicode space
-  or line separator, a carriage return), a byte-order mark, a bidirectional control or any
+  commands, that references a secret or the built-in token in any expression form, that runs on
+  a runner label outside the admitted hosted set, that keeps checkout credentials, that uses a
+  local or unpinned action, an action outside the reviewed pin allowlist or a job container, or
+  that reaches the proposal head under `pull_request_target`; and it requires an explicit
+  read-only `permissions` block on every workflow and every job (the nine jobs that lacked one
+  now declare it; the tenth already did). It also pins the recorded trigger set of each
+  required check and the count of `pull_request_target` workflows. A workflow holding any
+  whitespace other than space, tab and line feed (a no-break space, another Unicode space or
+  line separator, a carriage return), a byte-order mark, a bidirectional control or any
   character outside YAML's printable set is refused outright, in its text by this scan and by
   the action-pin check, and inside double-quoted escapes by this scan, because such a character
   could make them read a different file than GitHub runs; a carriage return is refused although
   YAML reads it as a line break, since the scan splits lines on line feeds only. The
   runner-label and checkout-ref allowlists compare values exactly, and a job name that begins
-  or ends with whitespace or holds a tab or line feed is refused. A write reachable only
-  through a remote action's own code, or a command outside the recorded patterns, is not
-  something a static list can detect, and every check reads the file through the scan's own
-  parser, which the character refusals narrow but cannot prove reads it exactly as GitHub does;
-  the read-only permissions and the absence of any secret are what bound such a path. **For
-  anyone running the binary, nothing changes:** no `apple` command, output field, error type,
-  or exit code is affected, and `schema_version` stays `1`.
+  or ends with whitespace or holds a tab or line feed is refused. Literal and folded block
+  scalars are read with YAML's own indentation and value rules (leading empty lines, chomping,
+  folding), explicit indentation indicators and a tab in any line's leading whitespace are
+  refused, and what this scan, the action-pin check and the site-assembly rehearsal print
+  escapes any character that is not printable. A write reachable only through a remote
+  action's own code, or a command outside the recorded patterns, is not something a static
+  list can detect, and every check reads the file through
+  the scan's own parser, which the character refusals narrow but cannot prove reads it exactly
+  as GitHub does; the read-only permissions and the absence of any secret are what bound such a
+  path. **For anyone running the binary, nothing changes:** no `apple` command, output field,
+  error type, or exit code is affected, and `schema_version` stays `1`.
 
 - **A read-only complete-site assembly rehearsal now exists in the repository's CI tooling
   (`scripts/ci/site_assembly.py`).** For one explicit commit plus the set of published
