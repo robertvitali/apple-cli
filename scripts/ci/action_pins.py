@@ -113,7 +113,7 @@ def _mask_quoted_scalars_and_comment(line: str) -> str:
             masked[index] = " "
             index += 1
             continue
-        if character == "#" and (index == 0 or line[index - 1].isspace()):
+        if character == "#" and (index == 0 or line[index - 1] in " \t"):
             masked[index:] = " " * (len(line) - index)
             break
         index += 1
@@ -231,7 +231,7 @@ def _split_scalar_and_comment(raw: str) -> tuple[str, Optional[str]]:
         if character in {"'", '"'}:
             quote = character
             continue
-        if character == "#" and (index == 0 or text[index - 1].isspace()):
+        if character == "#" and (index == 0 or text[index - 1] in " \t"):
             comment_at = index
             break
     if quote:
@@ -310,15 +310,43 @@ def _read_regular_utf8(path: Path, maximum_bytes: int) -> str:
 read_regular_utf8 = _read_regular_utf8
 
 
+def _refused_character(character: str) -> bool:
+    """Whitespace other than space and tab, a character outside YAML's printable set, U+FEFF,
+    or a bidirectional control (U+061C, U+200E, U+200F, U+202A-U+202E, U+2066-U+2069).
+
+    COUPLING: `workflow_policy.refused_character(character, " \t")` is the same rule; keep the
+    two in step (`Tests/automation/test_action_pins.py` checks they agree)."""
+    if character.isspace():
+        return character not in " \t"
+    code = ord(character)
+    return (code < 0x20 or 0x7F <= code <= 0x9F or 0xD800 <= code <= 0xDFFF or 0x202A <= code <= 0x202E
+            or 0x2066 <= code <= 0x2069 or code in (0x061C, 0x200E, 0x200F, 0xFEFF, 0xFFFE, 0xFFFF))
+
+
 def _scan_file(path: Path) -> tuple[list[ActionReference], list[tuple[int, str]]]:
     references: list[ActionReference] = []
     errors: list[tuple[int, str]] = []
     active_mapping_keys: dict[int, int] = {}
     block_scalar_indent: Optional[int] = None
     try:
-        lines = _read_regular_utf8(path, MAX_WORKFLOW_BYTES).splitlines()
+        text = _read_regular_utf8(path, MAX_WORKFLOW_BYTES)
     except (OSError, UnicodeError, ValueError):
         return references, [(1, "workflow must be a regular bounded UTF-8 file")]
+    # CONTROL PLANE — whitespace other than space, tab and line feed (a no-break space,
+    # another Unicode space, a Unicode line separator, a carriage return), a byte-order mark, a
+    # bidirectional control and any character outside YAML's printable set are refused before
+    # the line scan, so `splitlines()` and the
+    # comment boundary below cannot read a different document than GitHub does.
+    for line_number, line in enumerate(text.split("\n"), start=1):
+        for character in line:
+            if _refused_character(character):
+                return references, [(
+                    line_number,
+                    "character U+{:04X} is refused (only space, tab and line feed may be whitespace; "
+                    "no control character, byte-order mark, bidirectional control or other character "
+                    "outside YAML's printable set)".format(ord(character)),
+                )]
+    lines = text.splitlines()
 
     for line_number, line in enumerate(lines, start=1):
         if "\t" in line[: len(line) - len(line.lstrip())]:

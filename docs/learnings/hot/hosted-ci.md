@@ -1,11 +1,40 @@
 ---
 topic: hosted-ci
 importance: high
-last-used: 2026-09-21
-uses: 2
+last-used: 2026-09-26
+uses: 3
 ---
 
 # Hosted CI (public, free GitHub-hosted runners)
+
+## 2026-09-26 — Python's idea of whitespace is not YAML's: a no-break space hid a write from the workflow scan
+
+**Symptom.** Codex, reviewing an unrelated commit, found that `scripts/ci/workflow_policy.py`
+passed `run: echo ok<NBSP># ; gh release create v1` with no violation. The parser ended the
+comment at the no-break space; YAML and bash do not, so the runner would have run the release
+command (with a read-only token, so no release would have been published).
+Review of the first fix then found the escaped form (`runs-on: "ubuntu-latest\_"` decoded to a
+no-break space and `strip()` made it an admitted label), and the same character had let an
+`@<sha><NBSP>#<NBSP>v7.0.1` pin read as approved in both scanners.
+
+**Cause.** `str.isspace`, `str.strip` and regex `\s` accept 29 code points (`str.splitlines`
+breaks on 10 of them);
+YAML separates tokens only at space and tab and (1.2) breaks lines only at line feed and
+carriage return. Every hand-written YAML reader built on those helpers inherits the gap.
+
+The shell adds one more: bash and dash silently drop a NUL, so a decoded `\0` splits a command
+name for a regex but not for the shell (`g\0h` runs `gh`).
+
+**Fix.** Refuse, before parsing and again after decoding escapes, any whitespace other than
+space, tab and line feed and any character outside YAML's printable set; compare allowlisted
+values exactly, never after `strip()`; keep the rule in one predicate per scanner with a test
+that the copies agree for every code point.
+
+**Lesson.** A parser-based check is only as faithful as the parser. When a scan's verdict
+matters, refuse input the parser might read differently instead of trying to interpret it,
+and say in the record that the refusals narrow the residual rather than remove it. Other
+hand-rolled readers in `scripts/ci/` (`pr_metadata.py`'s trailer split, `dependency_policy.py`)
+use the same helpers and are a follow-up.
 
 ## 2026-09-21 — first public CI runs after 19 days private: hosted-only defects, none reproducible locally
 

@@ -590,7 +590,9 @@ CLI actually accepts.
   `vMAJOR.MINOR.PATCH`, or whose commit carries no tracked manual, turns the job red on every
   later commit until the Release is fixed (a draft stays invisible to it). **`mkdocs.yml` is policy-checked before it is rendered**, from
   every selected commit: it is parsed with the same fail-closed YAML subset the workflow scan
-  uses (no anchors, tags, flow mappings or multi-document files) and must fit a recorded
+  uses (no anchors, tags, flow mappings or multi-document files, no whitespace but space, tab
+  and line feed (a carriage return is read as a line feed on this path), and no byte-order
+  mark, bidirectional control or character outside YAML's printable set) and must fit a recorded
   allowlist — known top-level keys only, `docs_dir` present and exactly `docs/manual`, `use_directory_urls` absent or
   true, no `hooks`, no plugin but `search`, no `theme.custom_dir`, Markdown extensions and their
   options from the recorded set (`pymdownx.snippets` is refused), relative asset paths. A

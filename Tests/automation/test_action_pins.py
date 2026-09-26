@@ -337,6 +337,52 @@ jobs:
             self.assertTrue(any("linked.yml" in error for error in errors))
             self.assertTrue(any("oversized.yml" in error for error in errors))
 
+    def test_rejects_whitespace_other_than_space_tab_and_line_feed(self) -> None:
+        # The same rule the workflow scan applies: whitespace other than space, tab and line feed
+        # (Python's isspace() and splitlines() accept more than YAML's separators, and a carriage
+        # return is a YAML line break this line scan does not split on), a byte-order mark, a
+        # bidirectional control, and any character outside YAML's printable set.
+        checker = load_checker()
+        pinned = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1"
+        for character in ("\u00a0", "\u2028", "\x85", "\x0b", "\r", "\x00", "\x7f", "\x86", "\ufffe", "\ufeff", "\u202e", "\u200f"):
+            codepoint = "U+{:04X}".format(ord(character))
+            with self.subTest(codepoint=codepoint), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                write_workflow(root, "odd.yml",
+                               "jobs:\n  test:\n    steps:\n      - run: echo ok{}x\n      - uses: {}\n".format(character, pinned))
+                errors = checker.validate_repository(root)
+                self.assertTrue(any("odd.yml" in error and codepoint in error for error in errors), errors)
+
+    def test_rejects_a_pin_hidden_behind_a_no_break_space(self) -> None:
+        # Before the refusal, `@<sha><NBSP>#<NBSP>v7.0.1` read here as the approved pin and its
+        # annotation, while GitHub reads the whole scalar as the ref: not a SHA.
+        checker = load_checker()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            write_workflow(root, "hidden.yml",
+                           "jobs:\n  test:\n    steps:\n      - uses: actions/checkout@"
+                           "3d3c42e5aac5ba805825da76410c181273ba90b1\u00a0#\u00a0v7.0.1\n")
+            errors = checker.validate_repository(root)
+            self.assertTrue(any("hidden.yml" in error and "U+00A0" in error for error in errors), errors)
+
+    def test_refused_character_rule_matches_the_workflow_scan(self) -> None:
+        # The two scanners carry the same rule in two places; every code point must agree.
+        checker = load_checker()
+        spec = importlib.util.spec_from_file_location(
+            "workflow_policy", REPO_ROOT / "scripts" / "ci" / "workflow_policy.py"
+        )
+        policy = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(policy)
+        disagreements = [
+            code for code in range(0x110000)
+            if checker._refused_character(chr(code)) != policy.refused_character(chr(code), " \t")
+        ]
+        self.assertEqual(disagreements, [])
+        self.assertFalse(checker._refused_character(" "))
+        self.assertFalse(checker._refused_character("\t"))
+        self.assertTrue(checker._refused_character("\n"))  # line feeds are split out before the check
+
     def test_rejects_nonregular_workflow_without_blocking(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

@@ -481,6 +481,95 @@ class ScanTests(unittest.TestCase):
         body = mutate(METADATA, "      - run: python3", "      - run: echo ${{ github.event_name }} ${{ github.event.number }} ${{ github.event.pull_request.number }}\n      - run: python3")
         self.assertEqual(self.scan({"ci.yml": QUALITY, "governance.yml": body}), [])
 
+    def test_whitespace_other_than_space_tab_and_line_feed_is_refused(self) -> None:
+        # Python's isspace() treats a no-break space as whitespace; YAML and bash do not. Before
+        # this refusal, `echo ok<NBSP># ; gh release create v1` parsed here as `echo ok` plus a
+        # comment, while GitHub kept the whole line and the runner's shell ran the release.
+        hidden = mutate(QUALITY, CHECKOUT_STEP,
+                        "      - run: echo ok\u00a0# ; gh release create v1\n" + CHECKOUT_STEP)
+        violations = self.scan_ci(hidden)
+        self.assertTrue(any("ci.yml: refused" in v and "U+00A0" in v for v in violations), violations)
+        for character in ("\u00a0", "\u2009", "\u3000", "\u2028", "\u2029", "\x85", "\x0b", "\x0c", "\x1c", "\r"):
+            codepoint = "U+{:04X}".format(ord(character))
+            body = mutate(QUALITY, CHECKOUT_STEP, "      - run: echo ok{}x\n".format(character) + CHECKOUT_STEP)
+            with self.subTest(codepoint=codepoint):
+                violations = self.scan_ci(body)
+                self.assertTrue(any("ci.yml: refused" in v and codepoint in v for v in violations), violations)
+        # Space and tab still start a comment exactly as YAML and the shell do: the recorded
+        # write inside the comment is text, and would be flagged if the boundary were missed.
+        for separator in (" ", "\t"):
+            body = mutate(QUALITY, CHECKOUT_STEP,
+                          "      - run: echo ok{}# gh release create v1\n".format(separator) + CHECKOUT_STEP)
+            with self.subTest(separator=repr(separator)):
+                self.assertEqual(self.scan_ci(body), [])
+
+    def test_decoded_escapes_and_unprintable_characters_are_refused(self) -> None:
+        # A double-quoted escape yields characters the file's text never held: `\_` is a
+        # no-break space, so `"ubuntu-latest\_"` stripped to an admitted runner label here while
+        # GitHub read a different, custom one. Decoded scalars are checked as well.
+        build_runner = "  build:\n    runs-on: ubuntu-latest\n"
+        for escape, codepoint in (("\\_", "U+00A0"), ("\\N", "U+0085"), ("\\L", "U+2028"), ("\\P", "U+2029"),
+                                  ("\\r", "U+000D"), ("\\v", "U+000B"), ("\\f", "U+000C"), ("\\0", "U+0000"),
+                                  ("\\e", "U+001B"), ("\\x7f", "U+007F"), ("\\u0086", "U+0086"),
+                                  ("\\ud800", "U+D800"), ("\\u3000", "U+3000")):
+            body = mutate(QUALITY, build_runner,
+                          "  build:\n    runs-on: \"ubuntu-latest{}\"\n".format(escape))
+            with self.subTest(escape=escape):
+                violations = self.scan_ci(body)
+                self.assertTrue(any("ci.yml: refused" in v and codepoint in v for v in violations), violations)
+        # Admitted whitespace survives decoding, so the allowlists compare exactly, unstripped.
+        for label in ('"ubuntu-latest "', '" ubuntu-latest"', '"ubuntu-latest\\t"', '"ubuntu-latest\\n"',
+                      '["ubuntu-latest "]'):
+            body = mutate(QUALITY, build_runner, "  build:\n    runs-on: {}\n".format(label))
+            with self.subTest(label=label):
+                self.assert_ci_violation(body, "ADMITTED_RUNNER_LABELS")
+        # The escape check walks every list item and every key, not only mapping values: a `run:`
+        # sits inside the `steps` list, where `g\0h` read as two words here but `gh` to the shell,
+        # which drops a NUL; and a quoted key decodes like a value.
+        for fragment, codepoint in (('      - run: "echo ok\\ng\\0h release create v1"\n', "U+0000"),
+                                    ('      - env:\n          "A\\_B": x\n        run: echo ok\n', "U+00A0")):
+            body = mutate(QUALITY, CHECKOUT_STEP, fragment + CHECKOUT_STEP)
+            with self.subTest(fragment=fragment):
+                violations = self.scan_ci(body)
+                self.assertTrue(any("ci.yml: refused" in v and codepoint in v for v in violations), violations)
+        for ref in ('"${{ github.event.pull_request.base.sha }} "', '"${{ github.event.pull_request.base.sha }}\\n"'):
+            body = mutate(METADATA, "ref: ${{ github.event.pull_request.base.sha }}", "ref: " + ref)
+            with self.subTest(ref=ref):
+                violations = self.scan({"ci.yml": QUALITY, "governance.yml": body})
+                self.assertTrue(any("must pin `ref`" in v for v in violations), violations)
+        # Characters outside YAML's printable set, a byte-order mark and bidirectional controls are
+        # refused in the file's text too.
+        for character in ("\x00", "\x01", "\x7f", "\x86", "\ufffe", "\ufeff", "\u202e", "\u2066", "\u061c", "\u200e", "\u200f"):
+            codepoint = "U+{:04X}".format(ord(character))
+            body = mutate(QUALITY, CHECKOUT_STEP, "      - run: echo ok{}x\n".format(character) + CHECKOUT_STEP)
+            with self.subTest(codepoint=codepoint):
+                violations = self.scan_ci(body)
+                self.assertTrue(any("ci.yml: refused" in v and codepoint in v for v in violations), violations)
+
+    def test_a_pin_hidden_behind_a_no_break_space_is_refused(self) -> None:
+        # With the no-break space read as a comment start and then stripped, both scanners saw the
+        # approved `@<sha> # v7.0.1`; GitHub reads `@<sha><NBSP>#<NBSP>v7.0.1`, a non-SHA ref.
+        hidden = CHECKOUT.replace(" # v7.0.1", "\u00a0#\u00a0v7.0.1")
+        self.assertNotEqual(hidden, CHECKOUT)
+        violations = self.scan_ci(QUALITY.replace(CHECKOUT, hidden))
+        self.assertTrue(any("ci.yml: refused" in v and "U+00A0" in v for v in violations), violations)
+
+    def test_a_pin_with_a_decoded_trailing_line_feed_is_refused(self) -> None:
+        # Python's `$` also matches before a final line feed, and a decoded line feed is admitted,
+        # so `"<action>@<sha>\n"` matched the pin shape until the comparison became a full match.
+        quoted = QUALITY.replace("- uses: " + CHECKOUT, '- uses: "{}\\n" # v7.0.1'.format(CHECKOUT.split(" #")[0]))
+        self.assertNotEqual(quoted, QUALITY)
+        self.assert_ci_violation(quoted, "is not a remote action pinned to a full commit SHA")
+
+    def test_padded_job_names_are_refused(self) -> None:
+        # `quality / required ` is a different check context than the recorded one; whether GitHub
+        # would trim it is not something the scan should have to know.
+        for name in ('"quality / required "', '" quality / required"', '"quality / required\\t"',
+                     '"quality /\\nrequired"'):
+            body = mutate(QUALITY, "    name: quality / required\n", "    name: {}\n".format(name))
+            with self.subTest(name=name):
+                self.assert_ci_violation(body, "may not begin or end with whitespace")
+
     def test_unparseable_workflow_is_a_violation_not_a_pass(self) -> None:
         violations = self.scan({"ci.yml": QUALITY, "governance.yml": METADATA, "odd.yml": "name: x\non: push\njobs: {a: b}\n"})
         self.assertTrue(any("odd.yml: refused" in v for v in violations), violations)

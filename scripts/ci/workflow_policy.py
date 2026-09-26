@@ -4,8 +4,9 @@
 Verified on PARSED YAML, never by text search. The parser accepts exactly the subset
 `scripts/ci/action_pins.py` already enforces (block mappings, block sequences, scalar-only
 flow sequences, quoted scalars, literal/folded block scalars, comments) and refuses
-everything else, so a workflow that hides structure from this scanner fails the scan
-rather than passing it.
+everything else it recognises as outside that subset, so a workflow that hides structure
+the parser knows to look for fails the scan rather than passing it. A construct the parser
+accepts but reads differently from GitHub's loader is not caught that way; see below.
 
     python3 -I -S -B scripts/ci/workflow_policy.py [--root <repo>]
 
@@ -63,8 +64,14 @@ reword the prose. The
 explicit read-only `permissions` requirement on every job (backed by the repository's
 `default_workflow_permissions: read` read-back), the absence of any secret, and the
 SHA pinning enforced by `action_pins.py` are the controls that bound what such a path
-could do. The recorded sets below are control plane: changing a trigger, a required
-check name or an admitted runner label edits them in the same reviewed commit.
+could do. Every check also reads the file through this hand-written parser: the character
+refusals below (only space, tab and line feed as whitespace; no control character,
+byte-order mark, bidirectional control or other character outside YAML's printable set, in
+the text or after decoding an escape) narrow the constructs it could read differently from GitHub's loader,
+but do not prove there are none. A no-break space before `#` was one until 2026-09-26: it
+ended a comment here, and a write command after it passed. The recorded sets below are
+control plane: changing a trigger, a required check name or an admitted runner label edits
+them in the same reviewed commit.
 """
 from __future__ import annotations
 
@@ -232,6 +239,68 @@ def _load_action_pins():
     return module
 
 
+def refused_character(character: str, whitespace: str) -> bool:
+    """True for a character the scan refuses: whitespace outside `whitespace`, one outside YAML's
+    printable set (C0 controls, DEL, C1 controls, surrogates, U+FFFE, U+FFFF), a byte-order
+    mark (U+FEFF), which YAML loaders may skip silently where this parser would not, or one of
+    Unicode's bidirectional controls (U+061C, U+200E, U+200F, U+202A-U+202E, U+2066-U+2069),
+    which can make the text a reviewer sees differ from the text every parser reads. Zero-width
+    and other invisible characters are NOT refused: they are not whitespace to either reader, so
+    they change no parse, but a reviewer cannot see them.
+
+    CONTROL PLANE — YAML starts a comment and separates tokens only at a space or a tab.
+    Python's `str.isspace`, `str.strip`, `str.splitlines` and regex `\\s` also accept the
+    no-break space, the other Unicode spaces and several line separators, and this parser and
+    scan use all of them. Such a character would let the scan read a different document than
+    GitHub and the runner's shell do (a no-break space before `#` ended a comment here but not
+    there), so it is refused, never interpreted. A carriage return is refused as well, although
+    YAML reads it as a line break (and YAML 1.1 loaders also break lines at U+0085, U+2028 and
+    U+2029): this parser splits on line feeds only, and the tracked files use them. COUPLING:
+    `action_pins.py` applies the same rule to a workflow's text.
+    """
+    if character.isspace():
+        return character not in whitespace
+    code = ord(character)
+    return (code < 0x20 or 0x7F <= code <= 0x9F or 0xD800 <= code <= 0xDFFF or 0x202A <= code <= 0x202E
+            or 0x2066 <= code <= 0x2069 or code in (0x061C, 0x200E, 0x200F, 0xFEFF, 0xFFFE, 0xFFFF))
+
+
+def first_refused_character(text: str) -> Optional[Tuple[int, int]]:
+    """(line number, code point) of the first refused character in a file's text, else None.
+
+    Line feeds split the lines; inside a line only a space and a tab are admitted whitespace."""
+    for number, line in enumerate(text.split("\n"), start=1):
+        for character in line:
+            if refused_character(character, " \t"):
+                return number, ord(character)
+    return None
+
+
+def _first_refused_in_scalars(node: Any) -> Optional[int]:
+    """Code point of the first refused character in any key or string scalar, after decoding.
+
+    A double-quoted scalar's escapes (`\\_` is a no-break space, `\\N`, `\\L`, `\\P`, `\\r`,
+    `\\u...`) produce characters the file's text never held, so the parsed document is checked
+    again. A line feed and a tab are admitted here: block scalars carry line feeds, and both
+    mean the same thing to YAML, Python and the shell."""
+    if isinstance(node, dict):
+        for key, value in node.items():
+            for part in (key, value):
+                found = _first_refused_in_scalars(part)
+                if found is not None:
+                    return found
+    elif isinstance(node, list):
+        for item in node:
+            found = _first_refused_in_scalars(item)
+            if found is not None:
+                return found
+    elif isinstance(node, str):
+        for character in node:
+            if refused_character(character, " \t\n"):
+                return ord(character)
+    return None
+
+
 def _strip_comment(line: str) -> str:
     """Remove a trailing ` #` comment that sits outside a quoted scalar.
 
@@ -258,7 +327,7 @@ def _strip_comment(line: str) -> str:
             before = line[:index].rstrip()
             if before == "" or before[-1] in ":-[,":
                 quote = character
-        elif character == "#" and (index == 0 or line[index - 1].isspace()):
+        elif character == "#" and (index == 0 or line[index - 1] in " \t"):
             return line[:index].rstrip()
         index += 1
     return line.rstrip()
@@ -536,6 +605,11 @@ def _assign(mapping: Dict[str, Any], lines: _Lines, indent: int, match: "re.Matc
 
 
 def parse_workflow(text: str) -> Dict[str, Any]:
+    refused = first_refused_character(text)
+    if refused is not None:
+        raise ParseError("line {}: character U+{:04X} is refused (only space, tab and line feed may be "
+                         "whitespace; no control character, byte-order mark, bidirectional control or "
+                         "other character outside YAML's printable set)".format(*refused))
     lines = _Lines(text)
     if lines.peek() is None:
         raise ParseError("empty workflow")
@@ -544,6 +618,9 @@ def parse_workflow(text: str) -> Dict[str, Any]:
         raise ParseError("line {}: trailing content".format(lines.peek()[1]))
     if not isinstance(document, dict):
         raise ParseError("workflow root must be a mapping")
+    decoded = _first_refused_in_scalars(document)
+    if decoded is not None:
+        raise ParseError("a scalar decodes to character U+{:04X}, which is refused".format(decoded))
     return document
 
 
@@ -669,6 +746,10 @@ def scan_workflow(display: str, document: Dict[str, Any]) -> Tuple[List[str], Di
         check_name = _display_check_name(job_id, job)
         if "${{" in check_name:
             violations.append("{}: job `name` may not contain an expression (the check name must be a literal)".format(where))
+        raw_name = job.get("name")
+        if isinstance(raw_name, str) and (raw_name != raw_name.strip() or "\n" in raw_name or "\t" in raw_name):
+            violations.append("{}: job `name` may not begin or end with whitespace or hold a tab or line feed "
+                              "(a padded name is a different check context)".format(where))
         if "strategy" in job and check_name in RECORDED_REQUIRED_CHECKS:
             violations.append("{}: a recorded required check may not carry a `strategy` (matrix names diverge from the recorded context)".format(where))
         if check_name in facts["checks"]:
@@ -679,11 +760,11 @@ def scan_workflow(display: str, document: Dict[str, Any]) -> Tuple[List[str], Di
         runs_on = job.get("runs-on")
         if "uses" in job:
             violations.append("{}: reusable-workflow calls are not admitted by this scan".format(where))
-        elif isinstance(runs_on, list) and len(runs_on) == 1 and isinstance(runs_on[0], str) and runs_on[0].strip() in ADMITTED_RUNNER_LABELS:
+        elif isinstance(runs_on, list) and len(runs_on) == 1 and isinstance(runs_on[0], str) and runs_on[0] in ADMITTED_RUNNER_LABELS:
             pass
         elif not isinstance(runs_on, str):
             violations.append("{}: `runs-on` must be a single hosted label from ADMITTED_RUNNER_LABELS".format(where))
-        elif runs_on.strip() not in ADMITTED_RUNNER_LABELS:
+        elif runs_on not in ADMITTED_RUNNER_LABELS:
             violations.append("{}: `runs-on: {}` is not in ADMITTED_RUNNER_LABELS (edit that set in a reviewed commit to admit a label)".format(where, runs_on))
         steps = job.get("steps")
         if not isinstance(steps, list) or not steps:
@@ -697,7 +778,7 @@ def scan_workflow(display: str, document: Dict[str, Any]) -> Tuple[List[str], Di
             uses = step.get("uses")
             if isinstance(uses, str):
                 action = uses.split("@", 1)[0]
-                if not REMOTE_ACTION_RE.match(uses):
+                if not REMOTE_ACTION_RE.fullmatch(uses):
                     violations.append("{}: `uses: {}` is not a remote action pinned to a full commit SHA (local and docker actions are outside this scan)".format(step_where, uses))
                 if action.casefold() in FORBIDDEN_ACTIONS_FOLDED or FORBIDDEN_ACTION_SEGMENT_RE.search(action):
                     violations.append("{}: action `{}` is a publish, deploy or write path".format(step_where, action))
@@ -721,7 +802,7 @@ def scan_workflow(display: str, document: Dict[str, Any]) -> Tuple[List[str], Di
                             violations.append("{}: checkout option `{}` is forbidden".format(step_where, option))
                     if facts["pull_request_target"]:
                         ref = with_block.get("ref") if isinstance(with_block, dict) else None
-                        if not isinstance(ref, str) or ref.strip() not in BASE_REF_VALUES:
+                        if not isinstance(ref, str) or ref not in BASE_REF_VALUES:
                             violations.append(
                                 "{}: checkout under pull_request_target must pin `ref` to the protected base".format(step_where)
                             )
