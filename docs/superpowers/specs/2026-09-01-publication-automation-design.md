@@ -1783,6 +1783,27 @@ Numbered implementation and verification requirements:
    today (§10.5 amendment of this date). The urgent-release runbook and its
    `AGENTS.md` exception did not land in the change that removed the write
    path on 2026-09-07; they remain owed as a separate reviewed change.
+
+   **Amendment 2026-09-26 (runbook landed).** The urgent-release runbook is
+   `docs/runbooks/urgent-release.md`, and `AGENTS.md` carries its policy
+   exception (the release-freeze paragraph and "When a release happens"). Of
+   this step's two descriptions of the restored workflow, the runbook takes the
+   narrower: the workflow it records builds and verifies only, with a read-only
+   token, no secret and no dispatch trigger, and its one write is its own run's
+   verification artifact (no repository, ref, Release, Pages or deployment
+   write), so it passes the step 17 scan unchanged (a test runs that scan and
+   the action-pin check over the recorded text on every run of the Python
+   tier), while the tag push and the Release creation are the operator's, by
+   hand, as above. It runs only on a push whose head is a release commit, is
+   removed the same day the release is published or abandoned, and while it
+   exists neither readiness level is claimable. It never moves MAJOR, so it is
+   not the path for `v27.0.0`, which D18 routes through the publisher. This
+   step's "private window before the Section 7.3 tag rulesets exist" predates
+   the visibility change of D17; the condition the runbook relies on is the
+   second half, that no tag ruleset is active, which it reads back before every
+   use, and it retires at launch either way. Because it refuses a MAJOR change,
+   it cannot cut a release from current `main`, which has adopted macOS 27,
+   until the operator rules on how such a release is numbered.
 6. After public visibility, obtain at least one successful hosted Actions run of
    every push-triggered mandatory job. The PR-triggered mandatory job (`governance /
    required`, which runs only on a pull request event) obtains its first

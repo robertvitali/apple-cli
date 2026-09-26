@@ -14,12 +14,12 @@ name: Docs
 #                   commit this workflow builds — the pushed commit on main, or the
 #                   pull request's merge commit — in a throwaway clone. Only the
 #                   script's NOTHING-TO-RELEASE status (exit 3: no commits since the
-#                   last tag, or an empty [Unreleased], both normal right after a
-#                   release) is advisory, for the same reason release-notes is. A
-#                   checked failure (exit 1: drift, a malformed CHANGELOG, a stray
-#                   manual link, git or I/O trouble) or a refused invocation (exit 2)
-#                   fails the job, so a real regression cannot hide behind the
-#                   advisory case. It covers the default-bump path only; the
+#                   last tag, an empty [Unreleased], or a release commit awaiting its
+#                   tag, all normal around a release) is advisory, for the same reason
+#                   release-notes is. A checked failure (exit 1: drift, a malformed
+#                   CHANGELOG, a stray manual link, git or I/O trouble) or a refused
+#                   invocation (exit 2) fails the job, so a real regression cannot hide
+#                   behind the advisory case. It covers the default-bump path only; the
 #                   macOS-adoption shape (--macos-major) is exercised locally before a
 #                   cut. It writes only into RUNNER_TEMP, has no secrets, uploads
 #                   nothing (the scratch copies carry the predicted version and are
@@ -138,7 +138,7 @@ jobs:
           set -e
           case "$status" in
             0) ;;
-            3) echo "::notice::release-prep: nothing to release at this commit (normal right after a release)" ;;
+            3) echo "::notice::release-prep: nothing to release at this commit (normal around a release)" ;;
             *) echo "::error::release-prep rehearsal failed (exit $status); see the log"; exit "$status" ;;
           esac
 

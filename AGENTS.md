@@ -466,13 +466,13 @@ into a scratch directory the caller names, enforces the drift gate (constant == 
 heading == tag-to-be) on those copies, and writes a value-free report that never carries the
 version. It touches nothing in the tree and creates no ref; `docs.yml` runs it against every commit
 that workflow builds (the pushed commit on `main`, or a pull request's merge commit) in a
-throwaway clone; only the script's nothing-to-release status (no commits since the last tag, or
-an empty `[Unreleased]`) is advisory, every other failure fails the job — a smoke check of the
-default-bump path toward design §18 step 15, whose explicit-SHA evidence binding is still
-pending; the macOS-adoption shape is exercised locally before a cut, and the scratch copies are
-never uploaded. The other half — the
-release-preparation PR, the trusted listener, the bot publisher with its operator-approved
-environment and tag rulesets — does not exist yet and may not be added until the design's
+throwaway clone; only the script's nothing-to-release status (no commits since the last tag, an
+empty `[Unreleased]`, or a release commit awaiting its tag) is advisory, every other failure fails
+the job — a smoke check of the default-bump path toward design §18 step 15, whose explicit-SHA
+evidence binding is still pending; the macOS-adoption shape is exercised locally before a cut,
+and the scratch copies are never uploaded. The other half — the release-preparation PR, the
+trusted listener, the bot publisher with its operator-approved environment and tag rulesets —
+does not exist yet and may not be added until the design's
 §15 preconditions hold (active `main` ruleset, closed privacy gate, reviewed launch
 specification). Commit-header discipline stays CI-enforced (`commit-lint` job) because the
 bump math depends on it.
@@ -485,26 +485,40 @@ anything else — accumulates under CHANGELOG `[Unreleased]` and ships UNRELEASE
 workflow to dispatch; do not hand-edit `AppleVersion.current`, and do not describe pending work
 by a version number it has not been assigned. This freeze overrides the "run it when a batch has
 accumulated" guidance below until the operator lifts it — and an explicit operator instruction to
-cut a release lifts it for that release (so an urgent fix is never blocked by this paragraph).
+cut a release lifts it for that release. Until the design's publisher exists, such a release has
+exactly one path, the urgent-release runbook
+([`docs/runbooks/urgent-release.md`](./docs/runbooks/urgent-release.md)); a release that moves
+MAJOR, such as the macOS 27 adoption release `v27.0.0`, does not take it and waits for the
+publisher (D18).
 The freeze is recorded in `HUMAN-DECISIONS.md` D2, whose remaining part is the tap work that ends
 it; keep the two in step.
 
-**When a release happens:** only on an explicit operator instruction and only through the
-design's publisher path once it exists — a release publishes an outward-facing tag + GitHub
-Release, so agents never trigger one autonomously, and today there is no mechanism that could.
-Until then the rehearsal above is the only release-shaped execution an agent may perform, and
-it may run freely against any clean commit because it writes nothing outside its scratch
-directory. Prerequisites that will carry over to the real path: clean `main`; the FULL local
-canonical suite (both Swift toolchains AND `bats -r bats/`, per Toolchain + testing) green on
-the EXACT candidate commit — the hosted gate runs only build + swift test, so the bats tier is
-enforced locally and nowhere else; `[Unreleased]` accurately describes the batch (the
-rehearsal refuses an empty section); and a `git log <last-tag>..HEAD --format=%s` review,
-since release notes and history are public surfaces. (The FIRST release — `v26.0.0` via the
-legacy workflow's `macos_major=26` input — was cut 2026-08-30 under D2; the next release is
-the macOS 27 adoption release `v27.0.0`, D18.)
+**When a release happens:** only on an explicit operator instruction, and only through the
+design's publisher path once it exists or, before then, the urgent-release runbook — a release
+publishes an outward-facing tag + GitHub Release, so agents never trigger one autonomously.
+**Policy exception (design §18 step 5):** the runbook is the one sanctioned way to cut a release
+before launch. For the single release a `HUMAN-DECISIONS.md` entry authorizes, it restores the
+build-and-verify workflow recorded verbatim in the runbook, which runs with a read-only token,
+no secret and no dispatch trigger, only on a push whose head is a release commit, and whose one
+write is its own run's verification artifact; the operator creates the tag and the GitHub
+Release by hand, with the operator's own credentials, from that artifact; and the workflow is
+removed the same day the release is published or abandoned. No identity joins a bypass list,
+neither readiness level may be claimed while the workflow exists, and the runbook retires at
+launch. An agent may carry a runbook release through step 4 and stops there. Outside a runbook
+release, the rehearsal above is the only release-shaped execution an agent may perform, and it
+may run freely against any clean commit because it writes nothing outside its scratch directory.
+Prerequisites that carry over to every real path: clean `main`; the FULL local canonical suite
+(both Swift toolchains AND `bats -r bats/`, per Toolchain + testing) green on the EXACT
+candidate commit — the hosted gates run build, swift test and only a hosted-safe Bats partition,
+so the full bats tier is enforced locally and nowhere else; `[Unreleased]` accurately describes
+the batch (the rehearsal refuses an empty section); and a `git log <last-tag>..HEAD --format=%s`
+review, since release notes and history are public surfaces. (The FIRST release — `v26.0.0` via
+the legacy workflow's `macos_major=26` input — was cut 2026-08-30 under D2; the next planned
+release is the macOS 27 adoption release `v27.0.0`, D18.)
 
 **Release-commit review posture:** the release-preparation commit (`chore(release): vX.Y.Z`,
-produced by the future release-preparation PR of design §14.2) is mechanical and contains only
+produced by the future release-preparation PR of design §14.2, or before launch by the
+urgent-release runbook from release preparation's rendered copies) is mechanical and contains only
 the version-constant rewrite and the CHANGELOG heading move — content already reviewed when the
 constituent commits landed. Treat it like a git
 auto-generated commit (merge/revert class): no reviewer fan-out and no trailers are expected

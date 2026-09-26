@@ -31,7 +31,7 @@ recorded, scoped evidence).
 
 ---
 
-## LEDGER — every decision at a glance (updated 2026-09-25)
+## LEDGER — every decision at a glance (updated 2026-09-26)
 
 **Still needs you: D2.** D9 was reopened 2026-08-31 and finally closed the same day (recorded
 CLOSED — see D9). D15 and D16 were ratified 2026-09-07. D3 and D14 were live-validated
@@ -44,7 +44,7 @@ findings for its stated scope; the repo stays private until then.
 | # | Topic | Status | Ruling |
 |---|---|---|---|
 | D1 | `notes delete-folder` previews by default | **RATIFIED** | Keep the preview default — `--execute` stays required on the only irreversible-and-unrecoverable write |
-| D2 | Cut the first release + retire the six MCP servers | **2 of 3 parts APPLIED 2026-08-30** | **Terminal gate. Yours alone.** Release DONE: `v26.0.0` cut, tagged, GitHub Release published (notes-length recovery was manual; workflow fixed after). Retirement DONE: all six MCPs moved to `retiredServers` in the private fleet-config repo; hosts converge on their next whole-tree apply. REMAINING: fleet deployment of the binary — and the operator ruled 2026-08-30 that this is Homebrew-ONLY (a tap; the previously-scoped install script and self-update subcommand are CANCELLED), and that a RELEASE FREEZE holds until that tap actually serves `brew install apple-cli`: version stays pinned at `v26.0.0`, work lands UNRELEASED under `[Unreleased]`, do not dispatch release.yml or edit the version constant. Completing this part lifts the freeze; an explicit operator release instruction also lifts it for that release. D2 closes then |
+| D2 | Cut the first release + retire the six MCP servers | **2 of 3 parts APPLIED 2026-08-30** | **Terminal gate. Yours alone.** Release DONE: `v26.0.0` cut, tagged, GitHub Release published (notes-length recovery was manual; workflow fixed after). Retirement DONE: all six MCPs moved to `retiredServers` in the private fleet-config repo; hosts converge on their next whole-tree apply. REMAINING: fleet deployment of the binary — and the operator ruled 2026-08-30 that this is Homebrew-ONLY (a tap; the previously-scoped install script and self-update subcommand are CANCELLED), and that a RELEASE FREEZE holds until that tap actually serves `brew install apple-cli`: version stays pinned at `v26.0.0`, work lands UNRELEASED under `[Unreleased]`, do not dispatch release.yml or edit the version constant. Completing this part lifts the freeze; an explicit operator release instruction also lifts it for that release, and until the design's publisher exists such a release takes `docs/runbooks/urgent-release.md` (amended 2026-09-26; `release.yml` no longer exists). D2 closes then |
 | D3 | Live-validate `mail send --gui-send` | **APPLIED 2026-08-27** | Live-validated operator-present: one self-addressed send executed and delivered (oracle-verified both sides), test items cleaned by exact id |
 | D4 | Live-validate iMessage group-chat send | **APPLIED 2026-08-23** | Option (b): record "wired + code-inspected, never live-validated" as a port-spec asterisk |
 | D5 | Chasing the Messages fuzzy-search recall gap | WITHDRAWN | Should not have been asked; became ordinary queue work |
@@ -172,6 +172,10 @@ condition you asked for.
 ---
 
 **Amended 2026-09-20 (D17 ruling 2):** the release freeze is lifted for exactly one release, `v27.0.0`, when it is cut under D18's preconditions; all other freeze terms stand, and D2's remaining Homebrew part is unchanged.
+
+---
+
+**Amended 2026-09-26 (urgent-release runbook):** an explicit operator release instruction still lifts the freeze for that release, but until the design's publisher exists such a release has exactly one path, `docs/runbooks/urgent-release.md`, under a ledger entry of its own. `v27.0.0` (D17 ruling 2) does not take it: D18 routes that release through the publisher. The `AGENTS.md` freeze paragraph, whose "never blocked" sentence predated the publisher's removal, is corrected in the same change.
 
 ---
 
@@ -1545,6 +1549,10 @@ links and the manifest.
 D15 set, and whether to wait for the launch specification, is the operator's call.
 
 **Blocking?** No.
+
+---
+
+**Amended 2026-09-26:** the item this entry left open from step 5 has landed: the urgent-fix runbook `docs/runbooks/urgent-release.md`, its `AGENTS.md` policy exception, and the corrected release-freeze sentence, in one reviewed change. The workflow it restores builds and verifies only, and its one write is its own run's verification artifact; the tag and the Release stay the operator's, by hand. It cannot cut a release from current `main` until the operator decides how a release relates to the macOS 27 adoption (its step 2 names the options).
 
 ---
 

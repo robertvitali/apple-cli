@@ -29,7 +29,7 @@
 
 ## runbooks
 
-- _(empty)_
+- [urgent-release](runbooks/urgent-release.md)
 
 ## discovery
 

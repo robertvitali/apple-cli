@@ -21,6 +21,12 @@ EXPECTED_ACTION_COUNTS = {
     "actions/download-artifact": 1,
 }
 
+# The workflow the urgent-release runbook (docs/runbooks/urgent-release.md) restores for one
+# release adds exactly these references while it exists. test_urgent_release_runbook.py pins them
+# against the recorded text, and pins a restored copy byte for byte to that text.
+URGENT_RELEASE_WORKFLOW = WORKFLOWS_ROOT / "urgent-release-verify.yml"
+URGENT_RELEASE_ACTION_COUNTS = {"actions/checkout": 1, "actions/upload-artifact": 1}
+
 EXPECTED_ACTION_PINS = {
     "actions/checkout": ("3d3c42e5aac5ba805825da76410c181273ba90b1", "v7.0.1"),
     "actions/setup-python": ("5fda3b95a4ea91299a34e894583c3862153e4b97", "v7.0.0"),
@@ -516,7 +522,12 @@ class RepositoryActionInventoryTests(unittest.TestCase):
         references = checker.collect_references(REPO_ROOT)
         remote = [reference for reference in references if reference.kind == "remote"]
 
-        self.assertEqual(len(remote), 15)
+        expected = dict(EXPECTED_ACTION_COUNTS)
+        if URGENT_RELEASE_WORKFLOW.exists():
+            for name, count in URGENT_RELEASE_ACTION_COUNTS.items():
+                expected[name] = expected.get(name, 0) + count
+        self.assertEqual(len(remote), sum(expected.values()))
+        self.assertEqual(sum(EXPECTED_ACTION_COUNTS.values()), 15)
         counts = {}
         for reference in remote:
             counts[reference.name] = counts.get(reference.name, 0) + 1
@@ -524,7 +535,7 @@ class RepositoryActionInventoryTests(unittest.TestCase):
                 (reference.revision, reference.version_comment),
                 EXPECTED_ACTION_PINS[reference.name],
             )
-        self.assertEqual(counts, EXPECTED_ACTION_COUNTS)
+        self.assertEqual(counts, expected)
 
     def test_all_checkouts_disable_persisted_credentials(self) -> None:
         workflows = {

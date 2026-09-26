@@ -4,6 +4,7 @@ from __future__ import annotations
 import importlib.util
 import json
 import os
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -450,6 +451,64 @@ class ReleasePrepTests(unittest.TestCase):
         result = self.rehearse(sha)
         self.assertEqual(result.returncode, 3)
         self.assertIn("NOTHING TO RELEASE: the moved [Unreleased] section is empty", result.stderr)
+
+    def release_commit(self, *extra: str) -> str:
+        """Commit release preparation's rendered copies, as the urgent-release runbook does."""
+        fix = commit(self.root, "fix: correct a thing")
+        rendered = self.rehearse(fix, *extra)
+        self.assertEqual(rendered.returncode, 0, rendered.stderr)
+        for rel in (CONSTANT_REL, CHANGELOG_REL):
+            (self.root / rel).write_bytes((self.scratch / rel).read_bytes())
+        git(["commit", "-q", "-am", "chore(release): v26.0.1"], self.root)
+        shutil.rmtree(self.scratch)
+        self.report.unlink()
+        return git(["rev-parse", "HEAD"], self.root).strip()
+
+    def test_release_commit_awaiting_its_tag_is_nothing_to_release(self) -> None:
+        sha = self.release_commit()
+        result = self.rehearse(sha)
+        self.assertEqual(result.returncode, 3, result.stderr)
+        self.assertIn("NOTHING TO RELEASE: the candidate is the release commit for the computed version, awaiting its tag",
+                      result.stderr)
+
+    def test_existing_heading_under_a_non_empty_unreleased_is_still_refused(self) -> None:
+        self.release_commit()
+        text = (self.root / CHANGELOG_REL).read_text(encoding="utf-8").replace(
+            "## [Unreleased]\n\n", "## [Unreleased]\n\n### Fixed\n\n- **Another fix.**\n\n", 1)
+        (self.root / CHANGELOG_REL).write_text(text, encoding="utf-8")
+        git(["commit", "-q", "-am", "docs: note after the release commit"], self.root)
+        result = self.rehearse(git(["rev-parse", "HEAD"], self.root).strip())
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("already carries a heading for the computed version", result.stderr)
+
+    def test_release_heading_without_the_matching_constant_is_refused(self) -> None:
+        self.release_commit()
+        text = (self.root / CONSTANT_REL).read_text(encoding="utf-8").replace('"26.0.1"', '"26.0.0"')
+        (self.root / CONSTANT_REL).write_text(text, encoding="utf-8")
+        git(["commit", "-q", "-am", "fix: constant rolled back by mistake"], self.root)
+        result = self.rehearse(git(["rev-parse", "HEAD"], self.root).strip())
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("already carries a heading for the computed version", result.stderr)
+
+    def test_release_heading_not_directly_under_unreleased_is_refused(self) -> None:
+        self.release_commit()
+        text = (self.root / CHANGELOG_REL).read_text(encoding="utf-8").replace(
+            "## [Unreleased]\n\n", "## [Unreleased]\n\n## [0.0.1] - 2020-01-01\n\n", 1)
+        (self.root / CHANGELOG_REL).write_text(text, encoding="utf-8")
+        git(["commit", "-q", "-am", "docs: an out-of-place heading"], self.root)
+        result = self.rehearse(git(["rev-parse", "HEAD"], self.root).strip())
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("already carries a heading for the computed version", result.stderr)
+
+    def test_release_commit_with_a_stray_main_link_is_drift(self) -> None:
+        self.release_commit()
+        text = (self.root / CHANGELOG_REL).read_text(encoding="utf-8").replace(
+            "blob/v26.0.0/docs/manual/", "blob/main/docs/manual/")
+        (self.root / CHANGELOG_REL).write_text(text, encoding="utf-8")
+        git(["commit", "-q", "-am", "docs: stale link"], self.root)
+        result = self.rehearse(git(["rev-parse", "HEAD"], self.root).strip())
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("manual link survives in a released section", result.stderr)
 
     def test_stray_link_is_a_failure_even_when_unreleased_is_empty(self) -> None:
         text = CHANGELOG_SOURCE.replace(

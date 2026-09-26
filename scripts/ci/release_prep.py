@@ -21,8 +21,9 @@ Exit status: 0 pass; 1 a checked condition on the candidate failed (or git / the
 filesystem failed); 2 the request itself was refused before any work (bad argument
 shape, scratch or report location, a report path that already exists, conflicting
 inputs); 3 NOTHING TO RELEASE — the candidate is sound but there are no commits since
-the last reachable release tag, or the `[Unreleased]` section is empty (both normal
-right after a release; callers may treat 3 as advisory and must treat 1 as a defect). Every file the rehearsal writes is created new (O_EXCL, no symlink follow),
+the last reachable release tag, or the `[Unreleased]` section is empty, or the candidate
+is itself the release commit for the computed version and only its tag is missing (all
+normal around a release; callers may treat 3 as advisory and must treat 1 as a defect). Every file the rehearsal writes is created new (O_EXCL, no symlink follow),
 so no pre-existing inode — including a hard link to a tracked file — is ever modified.
 
 What it checks and produces, in order:
@@ -273,11 +274,34 @@ def render_constant(source: str, version: str) -> str:
     return source[: match.start(2)] + version + source[match.end(2):]
 
 
-def render_changelog(text: str, version: str, date: str, repository: str) -> str:
+def render_changelog(text: str, version: str, date: str, repository: str,
+                     current_version: Optional[str] = None) -> str:
     if len(re.findall(r"^## \[Unreleased\]", text, re.M)) != 1:
         raise AssertionFailure("CHANGELOG must contain exactly one `## [Unreleased]` heading")
     new_heading = "## [{}] - {}".format(version, date)
-    if re.search(r"^## \[{}\]".format(re.escape(version)), text, re.M):
+    existing = re.search(r"^## \[{}\]".format(re.escape(version)), text, re.M)
+    if existing:
+        # A release commit pushed ahead of its tag (the urgent-release runbook pushes the commit,
+        # verifies it, and only then tags it) declares the computed version in its constant and
+        # carries that version's heading directly under an empty [Unreleased]. That is nothing to
+        # release, not drift, unless a main-branch manual link survives; with [Unreleased] empty
+        # such a link can only sit in a released section, so drift is still checked first, as below.
+        unreleased = re.search(r"^## \[Unreleased\][^\n]*\n(.*?)(?=^## )", text, re.S | re.M)
+        awaiting_tag = (
+            current_version == version
+            and unreleased is not None
+            and not unreleased.group(1).strip()
+            and unreleased.end() == existing.start()
+        )
+        if awaiting_tag:
+            if "https://github.com/{}{}".format(repository, MANUAL_LINK_SUFFIX) in text:
+                raise AssertionFailure(
+                    "a `{}` manual link survives in a released section; released sections "
+                    "must link the manual at their own tag".format(MANUAL_LINK_SUFFIX)
+                )
+            raise NothingToRelease(
+                "the candidate is the release commit for the computed version, awaiting its tag"
+            )
         raise AssertionFailure("CHANGELOG already carries a heading for the computed version")
     moved = re.sub(
         r"^## \[Unreleased\][^\n]*$",
@@ -395,7 +419,8 @@ def rehearse(
         raise AssertionFailure("the tag for the computed version already exists")
 
     rendered_constant = render_constant(constant_source, version)
-    rendered_changelog = render_changelog(changelog_text, version, date, repository)
+    current_version = CONSTANT_RE.search(constant_source).group(2)  # exactly one, checked above
+    rendered_changelog = render_changelog(changelog_text, version, date, repository, current_version)
     drift_gate(rendered_constant, rendered_changelog, version)
 
     prepare_scratch(scratch)
