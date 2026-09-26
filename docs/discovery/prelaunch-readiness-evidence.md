@@ -1,7 +1,7 @@
 ---
 title: Pre-launch readiness evidence
-last-used: 2026-09-25
-uses: 3
+last-used: 2026-09-26
+uses: 4
 ---
 
 # Pre-launch readiness evidence
@@ -32,7 +32,7 @@ so until evidence is appended.
 |---|---|---|---|
 | 1 Implementation in reviewed, test-green commits | pre-visibility | PENDING (not evidenced here) | — |
 | 2 Production-coverage baseline per target | pre-visibility | PENDING (not evidenced here) | — |
-| 3 Full local canonical suite + independent reviews on the exact SHA | pre-visibility | Evidenced for five commits: `08cc984`, the visibility-step commit `bdbbe9d`, the two hosted-CI fixes `7b46b8d` and `0ff7442`, and the Round 2 record `3e46e82` (Section 3; the earlier same-day pushes `053b56e` and `a52c44e` carry no suite record here); each also carried codex plus code, security and critic review provenance in its trailers | Section 3 |
+| 3 Full local canonical suite + independent reviews on the exact SHA | pre-visibility | Suite: evidenced for 29 of the 33 commits pushed from `053b56e` (2026-09-21) through `7953268` (2026-09-26). Five were recorded at the time: `08cc984`, the visibility-step commit `bdbbe9d`, the two hosted-CI fixes `7b46b8d` and `0ff7442`, and the Round 2 record `3e46e82`. The other 24, `7953268` included, were backfilled on 2026-09-26 from retained run outputs (Section 3, backfill table). Four have no green run on record for their exact commit: `053b56e` and `a52c44e` ran red and reached `origin` in the same push as `08cc984`, whose suite is recorded green across a run and a full Bats re-run; `7049736` has no retained outputs and `19f48a2` only partial logs, and the controller's private notes record both red in Bats on two live-Mail cases (Section 3). Reviews: not assessed here beyond the trailers, which name codex plus the code, security and critic reviewers on 30 of the 33, codex and the security reviewer only on `afc6779` and `3e46e82`, and codex only on `7049736`. (Correction 2026-09-26: this row previously said all five commits recorded at the time carried the four review lanes; `3e46e82` carries codex and the security reviewer only.) | Section 3 |
 | 4 External-Action allowlist committed and validated | pre-visibility | Repository-level allowlist configured 2026-09-21 (see the Actions-settings row); the committed/validated form of the design is advanced past for visibility only — PENDING, owner: controller | — |
 | 5 Workflow inventory: publishers converted or removed | pre-visibility | Partially evidenced: `.github/workflows/` holds `ci.yml`, `docs.yml`, `governance.yml` (the metadata check folded into `governance / required` on 2026-09-25 — the fold half of step 5; the check still runs only the base-owned metadata validator, the design's control-plane enforcement for that name is not implemented, and the urgent-release runbook with its `AGENTS.md` exception, owed since `release.yml` was removed on 2026-09-07, landed on 2026-09-26 as `docs/runbooks/urgent-release.md` (the build-and-verify workflow it records is checked on every Python-tier run by `Tests/automation/test_urgent_release_runbook.py`: it parses, passes the static scan and the action-pin check beside the tracked workflows, and keeps a read-only-token shape whose one write is its own run's artifact; a restored copy must be byte-identical to it; it cannot cut a release from current `main` until the operator decides how a release relates to the macOS 27 adoption, which the runbook's step 2 names); the check will need `checks` and `actions` read permissions when its control-plane half lands (the workflow scan already accepts any read scope outside its forbidden set, so what refuses a new scope today is `test_pr_metadata.py`, which pins the whole workflow as parsed by the scan's own parser (so the pin is exactly as faithful to GitHub's reading as that parser), both `permissions` blocks at exactly `contents: read` included, and the edits then fall to that expectation and the AGENTS.md `contents: read` policy sentence); no pull request has run the renamed check yet, so it has no hosted first-run evidence; separately from step 5, the `Supply-chain policy` lane is still a proposal checkout on pull requests, see row 17); no `release.yml`; all three declare `contents: read` only and none carries `workflow_dispatch`, `pages`, `id-token`, or an `environment`; no repository secrets or variables (read back 2026-09-20). 2026-09-23: `docs.yml` gained `release-prep-rehearsal`, a read-only job (`contents: read`, no secrets, no artifact upload) that runs `scripts/ci/release_prep.py` — the design §14.1 rehearsal — in a throwaway clone against the commit the workflow builds (on `push`, the commit on `main`; on `pull_request`, the synthetic merge commit); only the script's nothing-to-release status is advisory, every other failure fails the job; it covers the default-bump path, the macOS-adoption shape being exercised locally before a cut. This is a smoke check toward step 15, not step 15 itself: the explicit-SHA hosted rehearsal with its three-way evidence binding is still PENDING. Static scan of step 17 EVIDENCED 2026-09-23 (step 17 row) | this row (read back 2026-09-20) |
 | 7 Squash-only merge with PR title/body as squash commit | pre-visibility | **SETTINGS APPLIED 2026-09-26 (D32)** — read back: `allow_merge_commit` false, `allow_rebase_merge` false, `allow_squash_merge` true, `squash_merge_commit_title` PR_TITLE, `squash_merge_commit_message` PR_BODY, `delete_branch_on_merge` true (Section 4, D32 read-back). Configuration half only: the empirical half — that a native squash merge produces a commit header equal to the final PR title after the ` (#N)` suffix and a body equal to the description after terminal-newline normalisation — is design step 12 and remains PENDING, with the same property on `main` confirmed only in step 20 | Section 4 |
@@ -42,7 +42,7 @@ so until evidence is appended.
 | Design §18/§3, `AGENTS.md` and ledger-preamble amendment recording the advanced visibility step (D15 precedent) | pre-visibility | Landed in the same commit as this revision (design §18 dated amendment, `AGENTS.md` privacy paragraph, ledger preamble, D2 freeze amendment) | this commit |
 | 4 (repository-level part) Actions settings | pre-visibility | Read back 2026-09-20: `default_workflow_permissions` = read, `can_approve_pull_request_reviews` = false, `allowed_actions` = all. Configured 2026-09-21 and read back: `allowed_actions` = `selected`, GitHub-owned actions allowed, one third-party pattern with a wildcard ref (the SHA pins live in the workflow files; `sha_pinning_required` was false until D32 turned it on 2026-09-26, Section 4), covering the five actions the workflows use; the unused wiki flag disabled 2026-09-21; fork-PR contributor approval could not be read while private; read back `all_external_contributors` on 2026-09-21 15:08Z and again on 2026-09-24 (step 17 read-backs, §4), unchanged | this row |
 | Surfaces that become public on the flip and were not in round 1's scan | pre-visibility | Complete. Scanned after round 1 (see Round 1 addendum): PR timelines, issue events, commit comments clean apart from the known R1-F4 identity class; all 305 hosted workflow runs' logs scanned value-free — no personal data, but 18 runs' logs carry pre-redaction tracker identifiers inside historical branch names (R1-F7). Those 18 runs' logs were deleted under D21 on 2026-09-21 (read back absent). Projects unreadable with the current token | Round 1 addendum |
-| Pre-push re-scan of every commit added after `053b56e` (tree + commit message) | pre-visibility | Done for the pushes of 2026-09-21 (`053b56e`, `a52c44e`, `08cc984`: changed blobs, messages and author headers; Python `re`, `pcre2grep`, `git grep -P`; clean apart from the git-identity lines and one integer constant); repeated before each later push the same day for `bdbbe9d`, `7b46b8d` and `0ff7442` (changed blobs at the commit via `git grep -P`, message via Python `re`): clean apart from the AI co-author trailer address and, at `0ff7442`, one pre-existing reserved-domain placeholder in an old CHANGELOG entry | this row |
+| Pre-push re-scan of every commit added after `053b56e` (tree + commit message) | pre-visibility | Done for the pushes of 2026-09-21 (`053b56e`, `a52c44e`, `08cc984`: changed blobs, messages and author headers; Python `re`, `pcre2grep`, `git grep -P`; clean apart from the git-identity lines and one integer constant); repeated before each later push the same day for `bdbbe9d`, `7b46b8d` and `0ff7442` (changed blobs at the commit via `git grep -P`, message via Python `re`): clean apart from the AI co-author trailer address and, at `0ff7442`, one pre-existing reserved-domain placeholder in an old CHANGELOG entry. Later commits: Section 3, "Pre-push scans after `0ff7442`" (backfilled 2026-09-26) — six have no pre-push scan record and are covered only by the Round 2 audit, read after they were public; one push was not chained to its scan; the scan used from `ec28b26` on is narrower than the scans before it; and five first attempts stopped and were re-run after a change to the scan | this row |
 | Rollback plan if a finding surfaces after the flip | pre-visibility | Recorded in D17: re-flip to private immediately (mechanically reversible; clones, caches and indexes are not), redact at HEAD, file the incident in the ledger, re-run the audit round | D17 |
 | 19 This file, local portion | pre-visibility | This revision | — |
 | 6 One successful hosted run of every push-triggered mandatory job | post-visibility | Satisfied for the push-triggered jobs 2026-09-21 by the `0ff7442` CI and Docs runs (Section 4); the PR-triggered job waits for step 9 | Section 4 |
@@ -380,6 +380,131 @@ necessarily runs before that commit's successor records it here.
   is the macOS 27 adoption-matrix run the design §4.1 amendment cites (D25), and it includes the
   §12 canary `acceptsSymlinkedParentDotDotWhenFoundationSelectsTheLexicalLeaf`, passed.
 
+**Backfill, 2026-09-26.** Of the 27 commits pushed after `0ff7442`, only `3e46e82` was recorded
+here at the time. The table below backfills 24 of the other 26 from the retained outputs of their
+canonical runs. Every run went through the canonical runner script, which refuses a commit other
+than the one it is given and a tree that is not clean; from `72112c3` on it ran behind a load
+gate. That script was lost to a temporary-directory sweep and recreated from its in-session copy
+on 2026-09-25; no digest of the earlier bytes was recorded, so the runs before then are not tied
+to exact runner bytes. The signal-reset launcher was recreated the same way on 2026-09-26. The
+outputs, the tier logs and the salt behind the run commitments now sit in a private directory
+outside the repository and outside temporary storage. Each run's output names the full commit it
+ran on, that commit matches the row, and each run ended with exit 0. Counts: `swift test`
+tests/suites under the swiftly toolchain; Python automation tests run (CPython 3.13.14); Bats
+cases passed and skipped out of the planned total (the earlier records in this section count a
+skipped case as passed). Each digest is the first 16 hex digits of the SHA-256 of that tier's log.
+A log that carries no timestamps is byte-identical across passes that print the same lines, the
+Bats log above all, and a commit that changes no Swift source leaves a five-line no-op build log
+that repeats whenever its rounded duration coincides, so repeated digests are expected. The run
+column gives the run's start (UTC, 2026). Each run ended before the first hosted push run for its
+commit was created, checked against the Actions run list.
+
+| Commit | Run start | swiftly build | swiftly test | CLT build | Python | Bats |
+|---|---|---|---|---|---|---|
+| `7fc4a49` | 09-22 03:45:06Z | `3ce74cb748ea82a9` | 1870/256 `03c5d20f5acbca04` | `937bbcb0d5039ac9` | 767 run, all passed `32e638b2b1e12b0c` | 450 passed, 2 skipped, of 452 `5272ec826afa6a9b` |
+| `6f8b852` | 09-22 04:06:20Z | `faa13eb4adfb943c` | 1925/259 `2b4fbac5a9b9770c` | `84472fe48f3b99fe` | 767 run, all passed `37dda8254cc7eb84` | 450 passed, 2 skipped, of 452 `5272ec826afa6a9b` |
+| `57984cf` | 09-22 04:24:54Z | `ecfb92c3a685b701` | 1958/260 `4e1a8235b31d1194` | `1e2dc36db24653b1` | 767 run, all passed `dab8b3c56b6a8254` | 450 passed, 2 skipped, of 452 `5272ec826afa6a9b` |
+| `9a86125` | 09-22 05:06:52Z | `75ec0fe3a60c25bc` | 1958/260 `52d9511a12c945b0` | `a4700420e2785ac6` | 767 run, all passed `cc8bc99bdae91d15` | 450 passed, 2 skipped, of 452 `5272ec826afa6a9b` |
+| `8e9be32` | 09-22 06:38:55Z | `e44f0b056c96c95b` | 1966/261 `0e9b7d08fd13c728` | `3655c79971b064f2` | 767 run, all passed `d46ab8c390985149` | 450 passed, 2 skipped, of 452 `5272ec826afa6a9b` |
+| `afc6779` | 09-22 07:12:54Z | `553067e2c938664b` | 1966/261 `559508ef4f90a94a` | `7e15481acb1a3986` | 767 run, all passed `91f841f8f5431f3b` | 450 passed, 2 skipped, of 452 `5272ec826afa6a9b` |
+| `098e784` | 09-22 07:40:52Z | `c88e164042eb6e82` | 1966/261 `064a22798932eb46` | `ac11c36b97ac26e9` | 767 run, all passed `8a7bd970fe678ace` | 450 passed, 2 skipped, of 452 `5272ec826afa6a9b` |
+| `4f8776a` | 09-22 08:31:11Z | `b71d7c382ba9e4ba` | 1968/261 `38de45662ed42230` | `8ec6a65c6a351162` | 767 run, all passed `fa93d16081dd8a75` | 450 passed, 2 skipped, of 452 `5272ec826afa6a9b` |
+| `ec28b26` | 09-22 17:17:07Z | `4ab897f42354c48b` | 1968/261 `00f3b904145631b9` | `95268768f9ee8c74` | 767 run, all passed `675a595e085a4d84` | 450 passed, 2 skipped, of 452 `5272ec826afa6a9b` |
+| `b94cc80` | 09-23 04:26:51Z | `6b1bad5cd5d42fd1` | 1968/261 `4322dafac4ef04dd` | `9d13216546ddfd7d` | 808 run, all passed `6e46dfb0d24e1c34` | 450 passed, 2 skipped, of 452 `5272ec826afa6a9b` |
+| `6e06af4` | 09-23 05:17:29Z | `e4062a4746203926` | 1968/261 `c664bc62019e2700` | `221be07ae6d6844f` | 810 run, all passed `dc57fca3c2e1fa40` | 450 passed, 2 skipped, of 452 `5272ec826afa6a9b` |
+| `eb728d3` | 09-23 16:20:43Z | `fdb8ebf9a06bc117` | 1968/261 `c960910d76164ed0` | `6a3eb3f08895abef` | 852 run, all passed `6c1ae18194ca3532` | 450 passed, 2 skipped, of 452 `5272ec826afa6a9b` |
+| `c8b8288` | 09-24 03:44:29Z | `80b7f20e8e2d1987` | 1968/261 `25924f85eae2152c` | `221be07ae6d6844f` | 874 run, 1 skipped `05ebaaa8e73ee480` | 450 passed, 2 skipped, of 452 `5272ec826afa6a9b` |
+| `72112c3` | 09-24 05:16:03Z | `2bceab4bc24e8597` | 1968/261 `caa0624025d4def5` | `17b88ab957fac4ca` | 880 run, 1 skipped `97e20a59b6c189da` | 450 passed, 2 skipped, of 452 `5272ec826afa6a9b` |
+| `1920b2a` | 09-24 06:23:16Z | `b307aa6497c5d3cf` | 1968/261 `7c614ecefa33f9cb` | `63af02ed8c63bedf` | 880 run, 1 skipped `af07cc989096affd` | 450 passed, 2 skipped, of 452 `5272ec826afa6a9b` |
+| `723f2dc` | 09-25 03:50:04Z | `05c213712f889d7e` | 1968/261 `b90e01d3432600a5` | `9ab38e7bdf4f124a` | 880 run, 1 skipped `dc85af02d13c569b` | 448 passed, 4 skipped, of 452 `d201823cc437a76d` |
+| `e48ec1e` | 09-25 23:06:58Z | `ce17ab6bbf23d990` | 1968/261 `4dbbd432adc88243` | `63af02ed8c63bedf` | 896 run, 1 skipped `dc451c4809e76c29` | 448 passed, 4 skipped, of 452 `d201823cc437a76d` |
+| `056fcd2` | 09-26 00:08:04Z | `0bbf9e51908dad4b` | 1968/261 `d33b33ff7ca2d179` | `7e15481acb1a3986` | 896 run, 1 skipped `be81a1cc5de2297f` | 448 passed, 4 skipped, of 452 `d201823cc437a76d` |
+| `d5c1c34` | 09-26 01:56:19Z | `ca7eacda5201f59c` | 1968/261 `51ec73c231e923db` | `95eb93d0f888ab32` | 896 run, 1 skipped `6df264911a9d78fe` | 448 passed, 4 skipped, of 452 `d201823cc437a76d` |
+| `cd7a46f` | 09-26 04:12:36Z | `d4c2b04a79a23d48` | 1968/261 `102c6d38ea95d3cb` | `461ddee478e5138b` | 896 run, 1 skipped `07a71124e1e057eb` | 448 passed, 4 skipped, of 452 `d201823cc437a76d` |
+| `609147a` | 09-26 05:13:40Z | `d90b02f488782440` | 1968/261 `42aee0b576ce44c4` | `21843017eaee8d52` | 904 run, 1 skipped `bacdc9474c68886b` | 448 passed, 4 skipped, of 452 `d201823cc437a76d` |
+| `40eb229` | 09-26 06:31:27Z | `1b3cf9d8d7db09ba` | 1968/261 `3243d79bb4f8419a` | `e7d0fe294176a04d` | 913 run, 1 skipped `a761ed356fbfa1cc` | 448 passed, 4 skipped, of 452 `d201823cc437a76d` |
+| `bdb6a86` | 09-26 09:45:43Z | `60914beedfb99951` | 1968/261 `47190f9a12ab685f` | `f5f3ffb6402a7800` | 954 run, 1 skipped `1cddfac113358848` | 448 passed, 4 skipped, of 452 `d201823cc437a76d` |
+| `7953268` | 09-26 11:26:09Z | `310b6839873a475e` | 1968/261 `7b0ee8acbda1fdba` | `e01bd8d7d1886375` | 954 run, 1 skipped `bbc4994f6b8ceb52` | 448 passed, 4 skipped, of 452 `d201823cc437a76d` |
+
+Runs that did not pass, and gaps. `ec28b26`'s first run (16:09Z) failed one test, the wall-clock
+bound in "parser is linear, not quadratic, in tag count" (5.9 s against a 5.0 s bound, on a loaded
+host); the recorded second run on the same commit passed every tier. A first run on `cd7a46f`
+ended during its Command Line Tools build without writing an exit line, after the swiftly tiers
+had passed and before any tier reported a failure; it is not evidence either way. `e48ec1e`'s
+first launch failed before any tier ran, because the runner script had been swept from the
+temporary directory; the recorded run is the relaunch. From `723f2dc` on, two further live-Mail
+thread cases skip on a local store-state precondition, which is why the Bats skip count rises from
+two to four. No outputs were retained for `7049736`; the controller's private notes record its run
+red in Bats on two live-Mail attachment cases, with a Mail-only Bats re-run passing on the same
+tree, so it has no single green run, and it was the head of its own push. For `19f48a2`, the Swift
+and Python tier logs survive under that commit's name, but neither a Bats log nor the runner
+output that names the commit, so it is not recorded as evidence; the notes record its Bats stage
+red on the same two live-Mail cases, and it reached `origin` in the same push as `7fc4a49`.
+`053b56e` and `a52c44e` (2026-09-21) have no green run on their exact commits and no retained
+logs. The notes record `053b56e` red in the Python and Bats tiers, and `a52c44e` red in the Python
+tier on its first run and in Bats teardown on its second. The Python failures were a launcher
+artefact (signals ignored at shell entry), fixed by the signal-reset launcher rather than by a
+commit, and the Bats teardown failure was fixed in `08cc984`. Both commits reached `origin` in the
+same push as `08cc984`, whose suite is recorded above as green across a run and a full Bats
+re-run.
+
+**Pre-push scans after `0ff7442` (backfilled 2026-09-26).** `7049736` through `4f8776a` were read
+by the Round 2 audit (2026-09-22, 08:48–08:53Z; the checkout and a fresh origin mirror at
+`4f8776a`) after they were already public, for up to nearly sixteen hours: post-push coverage,
+with zero new findings. Before their pushes, the controller's private notes record clean pre-push
+scans for `8e9be32` (Python `re` and `pcre2grep` named), `afc6779`, `098e784` and `4f8776a`, whose
+scan inputs are retained, and privacy scans of the pull-request additions before the squash merges
+`7fc4a49`, `6f8b852` and `57984cf`, which did not cover the squash messages or conflict
+resolutions; no pre-push scan record is retained for `7049736`, `19f48a2`, `7fc4a49`, `6f8b852`,
+`57984cf` or `9a86125`. `3e46e82`, the Round 2 record, postdates that audit. Its pre-push scan
+reported four raw hits, all fixture literals the record quotes (a 32-bit integer maximum, two
+placeholder street addresses and a temporary-directory path), and the push was not chained to that
+scan, so it went ahead regardless: a process defect. The four were cleared only by reading them at
+review time; the `ec28b26`-era pattern set has no class for any of them, so re-running it over the
+retained input verifies nothing, while the hardened scanner described below, run over that input
+on 2026-09-26, finds those four and two word-form tracker matches, and nothing else. From
+`ec28b26` on, each push ran through a controller script that puts the scan and the push in one
+`&&` chain. The scan reads the added lines of `origin/main..HEAD` and the commit messages, with
+`pcre2grep` for standalone 16-digit numbers, the local temporary-directory marker, the operator's
+home path, e-mail-shaped strings other than `noreply` addresses, and `noreply` addresses outside
+the co-author domain, and with a Python substring match against the operator's private denylist.
+That set is narrower than the pre-push scans before it: it excluded the `+++` path lines, so
+changed file names were not scanned, and it has no phone, street-address, geocoordinate,
+secret-shape or public-IP class, so those reach the chained scan only through the denylist's exact
+substrings, and a third party's value would pass it. The controller adopted it after `3e46e82`,
+without separate review, instead of the recorded plan to allowlist the fixture literals. Neither
+half checks that the scan input was built completely, a `pcre2grep` engine error would have read
+as clean because the scripts negate its exit status, and the Python half fails closed only on a
+read error (an empty denylist would pass). The first attempt stopped for five of the sixteen
+pushes, and each was re-run after a change to the scan made at that push: `ec28b26` (the address
+pattern matched the required co-author trailer; it now excepts `noreply` addresses), `b94cc80` (a
+reserved example-domain fixture; example domains are now excepted), `c8b8288` (a decorator matched
+the address shape; a word-character lookbehind was added) and `bdb6a86` (a sixteen-zero fixture;
+that run is now excepted), each a pattern change the controller made without separate review; and
+`e48ec1e` (the sanctioned CODEOWNERS handle lines), whose re-run removed exactly the 14 lines of
+the CODEOWNERS rule shape from the denylist match only, failing on any other count, while
+`pcre2grep` still read the full input. That exemption ran under an in-session operator
+authorization on 2026-09-25 that is recorded only in the controller's private notes (D15 and D30
+authorize the handle in CODEOWNERS, not a scan exemption), after a harness safety check had
+refused a first combined attempt. Push outputs are retained for `bdb6a86` and `7953268`; for the
+other fourteen, that each push went through its script rests on the retained scripts, which pin
+`HEAD` to the commit and `origin/main` to its parent, and on each script predating its commit's
+first hosted push run. The commit that records this paragraph is to be pushed through a hardened
+chain, whose actual output the next revision records, including any stop and re-run: the audit's
+nine regex classes (tracker and home-path broadened) plus a session-link class; a denylist match
+that also runs over normalised text (format characters removed, NFKC, whitespace collapsed), with
+lines ending in a hyphen joined both without and with the hyphen; the names of every changed file,
+and a check that the number of added lines in the scan input equals git's own numstat total plus
+one header line per file with content; both engines required to report clean by exact exit status,
+each under a time limit; the push refused unless the range is exactly one commit with no binary
+change; the scanner, denylist and exemption files pinned by digest; and the commit pushed by its
+id and read back. That push is configured with two count-bounded tracker-class exemptions, for
+word mentions of the tracker's name and, on one re-added line, the repository's redaction
+placeholder for tracker identifiers, and an exemption can no longer cover the denylist. Residuals:
+the regex classes are ASCII-only and run over the raw input, where each added line keeps its diff
+marker, so a value split across lines is caught only if it is a denylist term; a denylist term
+whose first half sits on an unchanged line is not seen; and author identity is not scanned.
+
 ### 3a. D18 step (4) rebuild rehearsal — 2026-09-22 (D23 grant, D24 exact command)
 
 **What ran.** A one-shot controller ran a frozen invocation on the operator's host against
@@ -566,6 +691,8 @@ the Round 1 denylist salt — whose own SHA-256 commitment is `450869584cbaa726`
 | `7b46b8d` | CI | `27d6dd53c56704bf` | failure — Supply-chain policy, hosted-bats-build, hosted-bats and commit-lint green; build-test red on two logic tests whose expectations depended on macOS-27 Foundation behaviour (directory flag on a resolved symlink URL; unknown `~user` expansion). Fixed in `0ff7442`; the Notes attachment guard now refuses other users' `~user` spellings before expansion, a real defect on macOS 15 recorded under CHANGELOG `[Unreleased]`. |
 | `0ff7442` | Docs | `7bfc75cef643f225` | success |
 | `0ff7442` | CI | `c188d356233ffb0a` | success — every job (Supply-chain policy, build-test, hosted-bats-build, hosted-bats, commit-lint, quality / required) green; the first fully green hosted run since 2026-09-02. |
+| `7049736` | Docs | `3ac359711d414e5f` | success (row backfilled 2026-09-26; the post-flip evidence record) |
+| `7049736` | CI | `3ce7fd254dafab53` | failure (row backfilled 2026-09-26) — build-test, and the quality / required aggregate that depends on it: "a drain timeout stops the descendant after the root has exited" missed its timing margin on the loaded macos-15 runner; the margin was replaced by an event-order check in `19f48a2` |
 | `7fc4a49` | Docs | `30ef3ed273e5093b` | success |
 | `7fc4a49` | CI | `577cf803fc77680e` | success (squash merge of PR 3) |
 | `6f8b852` | Docs | `2124a4e7399f037a` | success |
@@ -614,6 +741,8 @@ the Round 1 denylist salt — whose own SHA-256 commitment is `450869584cbaa726`
 | `40eb229` | CI | `12fa664563b7fe17` | success — first CI run with YAML's block-scalar rules and the scan's pin-allowlist check; all six jobs green |
 | `bdb6a86` | Docs | `29dd7a2dc587b7a3` | success — all four jobs; tenth site-assembly run: the listing read succeeded and the assembly ran and passed, published set empty, content-manifest sha256 `1a0ad6ab60f4da8d…` unchanged, restore verified; the release-preparation rehearsal took its normal path (exit 0) on the runbook commit |
 | `bdb6a86` | CI | `3ebd0c9ce4d078de` | success on attempt 2 — attempt 1 (`1bd99076510cb058`) failed one Swift test the commit does not touch, "a drain timeout stops the descendant after the root has exited", at its root-exit order check (the same test failed hosted CI on 2026-09-21, at the timing margin that `19f48a2` removed); a re-run of the two failed jobs passed, and attempt 2 shows all six green, four carried over from attempt 1. The commit carrying this row is designed to keep that scenario reachable under hosted load (a readiness gate before the deadline and the launcher's own exit observation) and re-runs an attempt that still misses it; not yet observed on hosted CI |
+| `7953268` | Docs | `e27703c5216cbcc6` | success — all four jobs; eleventh site-assembly run: the listing read succeeded with no rate-limit warning, and the assembly ran and passed, published set empty, 205 files, content-manifest sha256 `1a0ad6ab60f4da8d…` unchanged, restore verified; the release-preparation rehearsal took its normal path (pass, no outward writes) |
+| `7953268` | CI | `3ac785773bccacd2` | success on attempt 1 (the run's attempt number as read from the API) — all six jobs green. The deflaked "a drain timeout stops the descendant after the root has exited" passed in the hosted build-test job, whose log carries no "drain-timeout scenario missed" line, so the test needed no retry of its scenario: the first hosted observation of the change the `bdb6a86` row above anticipates |
 
 **Outside pull requests 3–5 (D20), 2026-09-21/22.** Each was squash-merged LOCALLY onto `main`
 (not through the GitHub merge button) so the squash could be reviewed and tested as an ordinary

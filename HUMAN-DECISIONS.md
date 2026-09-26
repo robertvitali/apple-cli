@@ -33,25 +33,28 @@ recorded, scoped evidence).
 
 ## LEDGER — every decision at a glance (updated 2026-09-26)
 
-**Still needs you: D2.** D9 was reopened 2026-08-31 and finally closed the same day (recorded
-CLOSED — see D9). D15 and D16 were ratified 2026-09-07. D3 and D14 were live-validated
-operator-present on 2026-08-27 (evidence on their Asana tasks; the Mail parent closed the
-same day under the closure-verification protocol). Publication remains blocked — independently
-of D9 — until every readiness gate passes and a separate fresh pre-publication privacy audit over
-the then-current tree, history, commit messages, objects, refs, and artifacts records zero
-findings for its stated scope; the repo stays private until then.
+**Still needs you: D2 (the Homebrew tap), D18 (the `v27.0.0` release, which waits on the phase-3
+publisher) and D22 (two parity narrowings).** D9 was reopened 2026-08-31 and finally closed the
+same day (recorded CLOSED — see D9). D15 and D16 were ratified 2026-09-07. D3 and D14 were
+live-validated operator-present on 2026-08-27 (evidence on their Asana tasks; the Mail parent
+closed the same day under the closure-verification protocol). Publication remains blocked —
+independently of D9 — until every readiness gate passes and a separate fresh pre-publication
+privacy audit over the then-current tree, history, commit messages, objects, refs, and artifacts
+records zero findings for its stated scope. The repository itself has been public since 2026-09-21:
+D17 advanced the visibility step ahead of those gates (see the amendment below the table), and
+visibility unlocks no other publication action.
 
 | # | Topic | Status | Ruling |
 |---|---|---|---|
 | D1 | `notes delete-folder` previews by default | **RATIFIED** | Keep the preview default — `--execute` stays required on the only irreversible-and-unrecoverable write |
-| D2 | Cut the first release + retire the six MCP servers | **2 of 3 parts APPLIED 2026-08-30** | **Terminal gate. Yours alone.** Release DONE: `v26.0.0` cut, tagged, GitHub Release published (notes-length recovery was manual; workflow fixed after). Retirement DONE: all six MCPs moved to `retiredServers` in the private fleet-config repo; hosts converge on their next whole-tree apply. REMAINING: fleet deployment of the binary — and the operator ruled 2026-08-30 that this is Homebrew-ONLY (a tap; the previously-scoped install script and self-update subcommand are CANCELLED), and that a RELEASE FREEZE holds until that tap actually serves `brew install apple-cli`: version stays pinned at `v26.0.0`, work lands UNRELEASED under `[Unreleased]`, do not dispatch release.yml or edit the version constant. Completing this part lifts the freeze; an explicit operator release instruction also lifts it for that release, and until the design's publisher exists such a release takes `docs/runbooks/urgent-release.md` (amended 2026-09-26; `release.yml` no longer exists). D2 closes then |
+| D2 | Cut the first release + retire the six MCP servers | **2 of 3 parts APPLIED 2026-08-30** | **Terminal gate. Yours alone.** Release DONE: `v26.0.0` cut, tagged, GitHub Release published (notes-length recovery was manual; workflow fixed after); the Release was converted to a draft on 2026-09-20 under D17 ruling 3, pending the `v27.0.0` re-cut (D17 ruling 2, D18). Retirement DONE: all six MCPs moved to `retiredServers` in the private fleet-config repo; hosts converge on their next whole-tree apply. REMAINING: fleet deployment of the binary — and the operator ruled 2026-08-30 that this is Homebrew-ONLY (a tap; the previously-scoped install script and self-update subcommand are CANCELLED), and that a RELEASE FREEZE holds until that tap actually serves `brew install apple-cli`: version stays pinned at `v26.0.0`, work lands UNRELEASED under `[Unreleased]`, do not dispatch release.yml or edit the version constant. Completing this part lifts the freeze; an explicit operator release instruction also lifts it for that release, and until the design's publisher exists such a release takes `docs/runbooks/urgent-release.md` (amended 2026-09-26; `release.yml` no longer exists). D2 closes then |
 | D3 | Live-validate `mail send --gui-send` | **APPLIED 2026-08-27** | Live-validated operator-present: one self-addressed send executed and delivered (oracle-verified both sides), test items cleaned by exact id |
 | D4 | Live-validate iMessage group-chat send | **APPLIED 2026-08-23** | Option (b): record "wired + code-inspected, never live-validated" as a port-spec asterisk |
 | D5 | Chasing the Messages fuzzy-search recall gap | WITHDRAWN | Should not have been asked; became ordinary queue work |
 | D6 | Eight parity posture calls | **APPLIED** | CONTACTS-L4 delete claim · NOTES-M1 restore 4 keys · NOTES-L4 structural divergence · gap10 keep opt-in body · **gap25 wire delete-rules live** · extra20 open by default |
 | D7 | Committed phone number in public history | **ANSWERED** | "B then A" — superseded by D9, which covers the same number plus more |
 | D8 | Which Mail oracle wins on a safety limit | RESOLVED | **Safety wins** — stricter limit wins on A/B conflicts; landed in `415709c` |
-| D9 | Personal data published to a public repo | **CLOSED 2026-08-31** (APPLIED 2026-08-23, amended 2026-08-29, REOPENED 2026-08-31, then finally closed the same day) | Repo private. Prior rewrite passes were verified against the classes then known; a 2026-08-31 round found further history and current-tree defects and the gate was reopened. The approved scoped remediation was completed the same day — history rewrite in a fresh clone, fresh-clone verification, rollback/audit scratch removed and absent-verified — and one complete, independently challenged, value-free audit round returned zero findings for its stated scope (an earlier same-day closure attempt was recorded invalid and reversed first). Rewritten main `c794d7e` is an ancestor of current main; `v26.0.0` peels to `0f617eb`. This closure covers its stated scope only and does NOT authorize publication: the repo stays private until every readiness gate passes and a separate fresh pre-publication privacy audit records zero findings for the then-current tree, history, commit messages, objects, refs, and artifacts |
+| D9 | Personal data published to a public repo | **CLOSED 2026-08-31** (APPLIED 2026-08-23, amended 2026-08-29, REOPENED 2026-08-31, then finally closed the same day) | Repo private (public since 2026-09-21 under D17). Prior rewrite passes were verified against the classes then known; a 2026-08-31 round found further history and current-tree defects and the gate was reopened. The approved scoped remediation was completed the same day — history rewrite in a fresh clone, fresh-clone verification, rollback/audit scratch removed and absent-verified — and one complete, independently challenged, value-free audit round returned zero findings for its stated scope (an earlier same-day closure attempt was recorded invalid and reversed first). Rewritten main `c794d7e` is an ancestor of current main; `v26.0.0` peels to `0f617eb`. This closure covers its stated scope only and does NOT authorize publication: the repo stays private until every readiness gate passes and a separate fresh pre-publication privacy audit records zero findings for the then-current tree, history, commit messages, objects, refs, and artifacts |
 | D10 | Search/find-contact length caps | WITHDRAWN | Should not have been filed |
 | D11 | What `schema_version` tracks | **APPLIED** | **Shape only** — value breaks ride the MAJOR + CHANGELOG; both policy lines rewritten to agree |
 | D12 | `notes save-attachment` can write to `~/.ssh` | **RATIFIED** | Keep strict Notes-oracle parity; residual documented, fleet stays intentionally inconsistent |
@@ -176,6 +179,10 @@ condition you asked for.
 ---
 
 **Amended 2026-09-26 (urgent-release runbook):** an explicit operator release instruction still lifts the freeze for that release, but until the design's publisher exists such a release has exactly one path, `docs/runbooks/urgent-release.md`, under a ledger entry of its own. `v27.0.0` (D17 ruling 2) does not take it: D18 routes that release through the publisher. The `AGENTS.md` freeze paragraph, whose "never blocked" sentence predated the publisher's removal, is corrected in the same change.
+
+---
+
+**Amended 2026-09-26 (Progress line overtaken):** the Progress line's "The tap requires the repo to be public" no longer describes what the tap waits on. The repository has been public since 2026-09-21 (D17). The tap still needs a downloadable published release: `v26.0.0` has been a draft since 2026-09-20 (D17 ruling 3), and its replacement, `v27.0.0` (D17 ruling 2), waits on the phase-3 publisher (D18). Design §15 also forbids any distribution writer (a tap-updating workflow, token or App) in this repository or its workflows until the launch specification is approved; that specification defines the tap's writer. The Blocked-by line stands as written.
 
 ---
 

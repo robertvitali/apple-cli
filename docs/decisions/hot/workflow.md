@@ -1,8 +1,8 @@
 ---
 topic: workflow
-last-used: 2026-09-07
+last-used: 2026-09-26
 importance: pinned
-uses: 3
+uses: 4
 ---
 
 # Workflow decisions
@@ -25,6 +25,8 @@ was completed and recorded closed the same day. Publication remains blocked on r
 separate fresh, value-free pre-publication audit round that records its searched classes,
 engines, commit-message coverage, object/ref/artifact surfaces, and independent cross-checks,
 with zero findings for its stated scope; the repo stays private until then.
+(Update 2026-09-26: on 2026-09-21 (D17) the repository went public ahead of that audit;
+readiness and the audit still gate every publication action beyond visibility.)
 
 D2 parts 1–2 executed on 2026-08-30 under explicit live operator instruction: the first release
 was cut as `v26.0.0` under the platform-keyed scheme, and the six MCPs were retired through the
@@ -57,3 +59,5 @@ Same day, D15 ratified extending the public-attribution exception to `.github/CO
 CODEOWNERS commit second with its own fresh privacy scan). The D9 privacy incident is recorded
 CLOSED 2026-08-31 across the tracked documents; the fresh pre-publication privacy audit is a
 separate, still-pending launch gate and the repo stays private until it and readiness pass.
+(Update 2026-09-26: superseded for visibility on 2026-09-21 by D17; readiness and the audit
+still gate every publication action beyond visibility.)

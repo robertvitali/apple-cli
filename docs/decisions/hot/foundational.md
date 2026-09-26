@@ -1,8 +1,8 @@
 ---
 topic: foundational
-last-used: 2026-08-31
+last-used: 2026-09-26
 importance: high
-uses: 2
+uses: 3
 ---
 
 # Foundational decisions
@@ -57,7 +57,10 @@ Calendar lane, then consumed by Reminders before both were consolidated onto `ma
 
 ### Deferred hardening (follow-ups, not blockers)
 
-- SHA-pin `actions/checkout` + Dependabot (CI currently `@v4`).
+- SHA-pin `actions/checkout` + Dependabot (CI was `@v4` when filed). Done by 2026-09: every
+  `uses:` is pinned to a full commit SHA, checked by `scripts/ci/action_pins.py` and the
+  workflow scan, with the repository's `sha_pinning_required` setting on since 2026-09-26
+  (D32); Dependabot is configured in `.github/dependabot.yml`.
 - Per-domain living parity tracker (`<domain>.PARITY.md`) + golden-JSON snapshot / exit-code
   matrix test helpers + a sandbox/test-data bootstrap command.
 - Confirm a subagent-driven-development lane can actually reach the deferred `mcp__apple-*`

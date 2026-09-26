@@ -25,7 +25,8 @@
 > D9). The repo stays private and publication still awaits a separate fresh pre-publication
 > privacy audit record naming searched classes, engines, commit-message coverage,
 > object/ref/artifact surfaces, and independent cross-checks, with zero findings for its stated
-> scope.
+> scope. (Update 2026-09-26: on 2026-09-21 (D17) the repository went public ahead of that
+> audit; readiness and the audit still gate every publication action beyond visibility.)
 
 **TL;DR (2026-07-16 snapshot).** All six domains are implemented to strict-superset MCP parity, each
 independently reviewed (3-pass OMC) and verified green, then aggregated onto the
@@ -187,7 +188,9 @@ Ordered. Nothing here is safe to do unattended, which is why it waited.
    D9 was reopened and closed 2026-08-31; publication is still independently blocked pending a
    separate fresh, value-free privacy audit record that names searched classes, engines,
    commit-message coverage, object/ref/artifact surfaces, and independent cross-checks, with zero
-   findings for that stated scope, and the repo stays private until then.
+   findings for that stated scope, and the repo stays private until then. (Update 2026-09-26:
+   on 2026-09-21 (D17) the repository went public ahead of that audit; readiness and the audit
+   still gate every publication action beyond visibility.)
    The rule stands: no agent may cut a release or unregister an MCP server without a
    direct in-session instruction.
 5. **`SQLiteReader immutable=1` (M2).** A Messages-specific perf/PII hardening
