@@ -15,14 +15,21 @@ struct OwnedProcessCleanupTests {
     private enum StopProbeFailure: Error, Equatable { case callLimit, clockRead }
 
     /// Test-only decorator over the real child operations that stamps, on `CLOCK_MONOTONIC`
-    /// (the clock the fixture's own observations use), when `spawn` returned and when cleanup
-    /// first signalled the group. Timing assertions then compare event order on one clock
-    /// instead of a stopwatch that also measures process start-up on a loaded runner.
+    /// (the clock the fixture's own observations use), when `spawn` returned, when the launcher
+    /// first observed the root's exit, and when cleanup first signalled the group. Timing
+    /// assertions then compare event order on one clock instead of a stopwatch that also
+    /// measures process start-up on a loaded runner. With `readyFile`, `spawn` also holds the
+    /// launcher, whose deadline starts when `spawn` returns, until the root has published that
+    /// file (bounded at ten seconds), so interpreter start-up falls outside the deadline.
     private final class SpawnStampingChildren: ScriptProcessChildren, @unchecked Sendable {
         private let real = DarwinScriptProcessChildren()
+        private let readyFile: String?
         private let lock = NSLock()
-        private var stamps: (spawned: UInt64?, firstSignal: UInt64?) = (nil, nil)
+        private var stamps: (spawned: UInt64?, pid: pid_t?, group: pid_t?, exitObserved: UInt64?, firstSignal: UInt64?)
+            = (nil, nil, nil, nil, nil)
         var reaper: any ScriptProcessReaping { real.reaper }
+
+        init(readyFile: String? = nil) { self.readyFile = readyFile }
 
         private static func now() throws -> UInt64 {
             var value = timespec()
@@ -33,16 +40,36 @@ struct OwnedProcessCleanupTests {
         }
 
         var spawnedAt: UInt64? { lock.withLock { stamps.spawned } }
+        var spawnedPID: pid_t? { lock.withLock { stamps.pid } }
+        /// The process group the root led when `spawn` returned (read while it is alive).
+        var spawnedGroup: pid_t? { lock.withLock { stamps.group } }
+        var exitObservedAt: UInt64? { lock.withLock { stamps.exitObserved } }
         var firstSignalAt: UInt64? { lock.withLock { stamps.firstSignal } }
 
         func spawn(_ invocation: ScriptInvocation, input: Int32, output: Int32, error: Int32) throws -> pid_t {
             let pid = try real.spawn(invocation, input: input, output: output, error: error)
+            if let readyFile {
+                let limit = try Self.now() + 10_000_000_000
+                while !FileManager.default.fileExists(atPath: readyFile), try Self.now() < limit {
+                    usleep(5_000)
+                }
+            }
+            let group = getpgid(pid)
             let at = try Self.now()
-            lock.withLock { if stamps.spawned == nil { stamps.spawned = at } }
+            lock.withLock {
+                if stamps.spawned == nil { (stamps.spawned, stamps.pid, stamps.group) = (at, pid, group) }
+            }
             return pid
         }
 
-        func observe(_ pid: pid_t) throws -> Int32? { try real.observe(pid) }
+        func observe(_ pid: pid_t) throws -> Int32? {
+            let status = try real.observe(pid)
+            if status != nil {
+                let at = try Self.now()
+                lock.withLock { if stamps.exitObserved == nil { stamps.exitObserved = at } }
+            }
+            return status
+        }
 
         func signal(group: pid_t, signal: Int32) throws {
             let at = try Self.now()
@@ -234,11 +261,30 @@ struct OwnedProcessCleanupTests {
 
     @Test("a drain timeout stops the descendant after the root has exited")
     func timeoutAfterRootExitStopsOwnedGroup() throws {
+        // The scenario is the launcher's drain state: the root has exited on its own, the
+        // descendant still holds the inherited output pipes, and the two-second drain deadline
+        // then stops the owned group. Hosted CI missed it (2026-09-26: the root's exit was seen
+        // 52 ms after cleanup's first signal): the root, a Python process, started inside the
+        // deadline, and its exit was read from the descendant's 10 ms poll, so either a slow root
+        // or a late observation failed the order check. The decorator therefore holds the
+        // deadline until the root has published its identity, and the order check reads the
+        // launcher's own observation of the exit. What is left (a stall after that gate) is
+        // re-run, at most twice, and each missed attempt prints why; the count is a backstop,
+        // not a measured rate. A failed product check on any attempt fails the test, and a pass
+        // needs one attempt that both reaches the scenario and passes every check.
+        for attempt in 1...3 {
+            if try drainTimeoutAfterRootExit(attempt: attempt, lastAttempt: attempt == 3) { return }
+        }
+    }
+
+    /// One attempt of the scenario above. Returns true after a failed product check (its recorded
+    /// issues fail the test) or after asserting the scenario; returns false only when every
+    /// product check held, the scenario was missed, and another attempt remains.
+    private func drainTimeoutAfterRootExit(attempt: Int, lastAttempt: Bool) throws -> Bool {
         let fixture = try Fixture(directory: scratch.directory())
         defer { fixture.waitForNaturalExpiry() }
-        let started = Date()
         let monotonicStart = try fixture.monotonicNanoseconds()
-        let children = SpawnStampingChildren()
+        let children = SpawnStampingChildren(readyFile: fixture.path("root"))
         var dependencies = ScriptProcessDependencies()
         dependencies.children = children
         let stampingLauncher = OsascriptLauncher(dependencies: dependencies)
@@ -246,33 +292,67 @@ struct OwnedProcessCleanupTests {
             _ = try stampingLauncher.launch(fixture.invocation(
                 mode: "exit", status: 0, delivery: .timedStdin(script: "x", seconds: 2)))
         }
-        #expect(try #require(error).seconds == 2)
-        #expect(Date().timeIntervalSince(started) < 6,
-                "the inherited output pipes must not extend the invocation until natural expiry")
-        #expect(FileManager.default.fileExists(atPath: fixture.path("root-exiting")),
-                "the root must reach its immediate-exit branch; missing readiness is a test failure")
-        let observationText = try String(contentsOfFile: fixture.path("root-observed-exited"),
-                                         encoding: .utf8)
-        let observedExit = try #require(UInt64(observationText.trimmingCharacters(in: .whitespacesAndNewlines)))
-        // Event order on one clock: the root's exit was observed after the launcher's spawn
-        // returned and before cleanup sent its first group signal, so it was the root's own
-        // exit and not cleanup's doing. No arbitrary pre-deadline margin: pre-spawn latency on
-        // a loaded runner moves every stamp together, and what remains is the configured
-        // two-second deadline itself. (`root-exiting` above already proves the voluntary
-        // branch ran; this pins the order.)
-        let spawnedAt = try #require(children.spawnedAt, "the stamping decorator must have spawned the root")
+        let returnedAt = try fixture.monotonicNanoseconds()
+        let seconds = try #require(error).seconds
+        let pid = try #require(children.spawnedPID, "the stamping decorator must have spawned the root")
+        let spawnedAt = try #require(children.spawnedAt)
         let firstSignalAt = try #require(children.firstSignalAt, "drain-timeout cleanup must have signalled the group")
-        #expect(monotonicStart <= spawnedAt && spawnedAt <= observedExit,
-                "the recorded exit must postdate the launcher's spawn")
-        #expect(observedExit < firstSignalAt,
-                "root exit must be observed before cleanup's first signal, not caused by it")
-        #expect(firstSignalAt >= spawnedAt + 2_000_000_000,
-                "cleanup's first signal must not precede the two-second drain deadline")
-        #expect(try fixture.monotonicNanoseconds() >= monotonicStart + 2_000_000_000,
-                "the pending drain must reach its deadline rather than fail early")
-        #expect(try fixture.stops(fixture.identity("root"), within: 0.5))
-        #expect(try fixture.stops(fixture.identity("descendant"), within: 0.5),
-                "root exit must not discard the authority needed for drain-timeout cleanup")
+        let survivors = try fixture.liveMembers(ofGroup: pid, settlingWithin: 0.5)
+        let published = ["root", "descendant"].filter { FileManager.default.fileExists(atPath: fixture.path($0)) }
+
+        // Product checks, on every attempt. The group check reads the kernel's membership of the
+        // owned group, so every surviving member is seen whether or not it published an identity;
+        // it is sound only if the root leads that group, which is checked too. Messages carry
+        // the stamps' offsets from the spawn, since hosted CI is where these fail.
+        func offset(_ stamp: UInt64) -> String {
+            stamp >= spawnedAt ? "\((stamp - spawnedAt) / 1_000_000) ms after spawn"
+                : "\((spawnedAt - stamp) / 1_000_000) ms before spawn"
+        }
+        let leadsGroup = children.spawnedGroup == pid
+        let timeoutReported = seconds == 2
+        let stampedInOrder = monotonicStart <= spawnedAt && spawnedAt <= returnedAt
+        let endedBeforeExpiry = stampedInOrder && returnedAt - spawnedAt < 6_000_000_000
+        let signalledAtDeadline = firstSignalAt >= spawnedAt + 2_000_000_000
+        let drainedToDeadline = returnedAt >= spawnedAt + 2_000_000_000
+        let groupRead = children.spawnedGroup.map { $0 < 0 ? "getpgid failed: the root was gone" : "another group" } ?? "not read"
+        #expect(leadsGroup, "the root must lead its own process group, or the group check is vacuous (\(groupRead))")
+        #expect(timeoutReported, "the timeout must report the configured two seconds, not \(seconds)")
+        #expect(stampedInOrder, "the spawn stamp must fall between the attempt's start and the launch's return (start \(offset(monotonicStart)), return \(offset(returnedAt)))")
+        #expect(endedBeforeExpiry, "the inherited output pipes must not extend the invocation until natural expiry (returned \(offset(returnedAt)))")
+        #expect(signalledAtDeadline, "cleanup's first signal must not precede the two-second drain deadline (first signal \(offset(firstSignalAt)))")
+        #expect(drainedToDeadline, "the pending drain must reach its deadline rather than fail early (returned \(offset(returnedAt)))")
+        #expect(survivors.isEmpty, "cleanup must stop every member of the owned group, published or not")
+        var stoppedPublished = true
+        for name in published {
+            let stopped = try fixture.stops(fixture.identity(name), within: 0.5)
+            #expect(stopped, name == "descendant"
+                    ? "root exit must not discard the authority needed for drain-timeout cleanup (descendant)"
+                    : "cleanup must stop the root")
+            stoppedPublished = stoppedPublished && stopped
+        }
+        let productHeld = leadsGroup && timeoutReported && stampedInOrder && endedBeforeExpiry
+            && signalledAtDeadline && drainedToDeadline && survivors.isEmpty && stoppedPublished
+        if !productHeld { return true }
+
+        // The scenario: both processes published their identity, the root reached its
+        // immediate-exit branch, and the launcher saw the root's exit after its spawn returned
+        // and before cleanup's first group signal, so the exit was the root's own; no signal had
+        // been sent when the product saw it.
+        let exiting = FileManager.default.fileExists(atPath: fixture.path("root-exiting"))
+        let exitSeenAt = children.exitObservedAt
+        let ordered = exitSeenAt.map { spawnedAt <= $0 && $0 < firstSignalAt } == true
+        if !(published.count == 2 && exiting && ordered) && !lastAttempt {
+            print("drain-timeout scenario missed on attempt \(attempt) of 3: identities \(published.count) of 2, "
+                  + "root-exiting \(exiting), exit seen before the first signal \(ordered)")
+            return false
+        }
+        #expect(published == ["root", "descendant"], "both fixture processes must have published their identity")
+        #expect(exiting, "the root must reach its immediate-exit branch; missing readiness is a test failure")
+        let exitedAt = try #require(exitSeenAt, "the launcher must have observed the root's exit")
+        #expect(spawnedAt <= exitedAt, "the observed exit must postdate the launcher's spawn")
+        #expect(exitedAt < firstSignalAt,
+                "the launcher must see the root's exit before cleanup's first signal, not because of it (exit seen \(offset(exitedAt)), first signal \(offset(firstSignalAt)))")
+        return true
     }
 
     @Test("completed timed capture preserves background work for zero and nonzero root status",
@@ -338,8 +418,11 @@ struct OwnedProcessCleanupTests {
         libproc.proc_pidinfo.restype = ctypes.c_int
         directory, mode, status = sys.argv[1:]
         def publish(name, value):
-            with open(os.path.join(directory, name), "w") as output:
+            # Write, then rename: a file that exists is complete, even if a kill lands mid-write.
+            final = os.path.join(directory, name)
+            with open(final + ".tmp", "w") as output:
                 output.write(str(value) + "\n")
+            os.replace(final + ".tmp", final)
         def publish_identity(name):
             info = BSDInfo()
             size = ctypes.sizeof(info)
@@ -442,6 +525,36 @@ struct OwnedProcessCleanupTests {
                 && Int64(started.tv_sec) == identity.seconds
                 && Int64(started.tv_usec) == identity.microseconds
                 && Int32(info.kp_proc.p_stat) != SZOMB
+        }
+
+        /// Live (non-zombie) members of a process group, polled until none remain or the settling
+        /// time passes. Read-only: it never signals. A reused group id can only add members, so it
+        /// can cause a false failure, never a false pass; the fixture never leaves its group.
+        func liveMembers(ofGroup group: pid_t, settlingWithin seconds: TimeInterval) throws -> [pid_t] {
+            let deadline = try monotonicNanoseconds() + UInt64(seconds * 1_000_000_000)
+            while true {
+                let members = try liveMembers(ofGroup: group)
+                let now = try monotonicNanoseconds()
+                if members.isEmpty || now >= deadline { return members }
+                usleep(20_000)
+            }
+        }
+
+        func liveMembers(ofGroup group: pid_t) throws -> [pid_t] {
+            var mib: [Int32] = [CTL_KERN, KERN_PROC, KERN_PROC_PGRP, group]
+            var size = 0
+            guard sysctl(&mib, 4, nil, &size, nil, 0) == 0 else {
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
+            let stride = MemoryLayout<kinfo_proc>.stride
+            var processes = [kinfo_proc](repeating: kinfo_proc(), count: size / stride + 16)
+            size = processes.count * stride
+            guard sysctl(&mib, 4, &processes, &size, nil, 0) == 0 else {
+                throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+            }
+            return processes.prefix(size / stride)
+                .filter { Int32($0.kp_proc.p_stat) != SZOMB }
+                .map { $0.kp_proc.p_pid }
         }
 
         func stops(_ identity: Identity, within seconds: TimeInterval) throws -> Bool {

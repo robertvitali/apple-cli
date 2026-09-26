@@ -2,7 +2,7 @@
 topic: hosted-ci
 importance: high
 last-used: 2026-09-26
-uses: 3
+uses: 4
 ---
 
 # Hosted CI (public, free GitHub-hosted runners)
@@ -109,6 +109,31 @@ red step had been unexercised since the last hosted run on 2026-09-02; the local
    (written only on the voluntary branch) says whether the root ever got that far. A hosted
    failure on unchanged code is a timing margin: replace the stopwatch with the event order
    it was standing in for.
+
+**Follow-up 2026-09-26 — the order check flaked too, and the residual in item 5 was incomplete.**
+Hosted CI failed the same test again, on a commit that changed no Swift code, now at the order
+check: the descendant recorded the root's exit 52 ms after cleanup's first signal. Two
+corrections to item 5. Start-up latency does not move every stamp together: the launcher starts
+its deadline when `spawn` returns, so the root's interpreter start-up sits inside the deadline.
+And a runner too slow for the deadline fails in one of three shapes, not one. A root still in
+interpreter start-up when SIGTERM arrives has not yet ignored it (spawn resets every signal to
+its default), dies, and leaves no `root-observed-exited` file, as item 5 predicted. A root that
+has armed its handlers and finishes within cleanup's one-second pause before SIGKILL exits on its
+own and the descendant records it: the order-check failure seen on 2026-09-26. A root still
+running at SIGKILL again leaves no observation file. The signature also cannot tell a slow root
+from a late observation, since the descendant polls every 10 ms and can be starved. The test now
+holds the launcher's deadline in its stamping decorator until the root has published its
+identity, reads the launcher's own first observation of the exit for the order check, checks that
+the root leads its own process group and that the kernel's membership of that group is empty
+after cleanup (survivors seen whether or not they published), publishes fixture files by
+write-then-rename, and re-runs an attempt that still misses the scenario at most twice, printing
+why; any failed product check fails the test. The sibling tests in the file
+(`timeoutStopsOwnedGroup`, the two completed-capture tests, and all three phases of the
+output-limit test) also run Python start-up inside a two- or three-second deadline and share the
+start-up exposure; the decorator's readiness gate would apply to them directly, but they call the
+plain launcher and do not use it yet. General lesson: an event-order assertion is only as good as
+the observer that stamps the event. Stamp it where the product sees it, and keep what the
+scenario needs before the product's own deadline starts outside that deadline.
 
 **Follow-up — the tilde-expansion sites.** Landed 2026-09-22 as ONE shared helper,
 `AppleKit.TildeSpelling.ownHome`, applied by the attachment resolver (`AttachmentSource.resolve`,
