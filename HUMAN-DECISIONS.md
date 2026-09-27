@@ -78,6 +78,7 @@ visibility unlocks no other publication action.
 | D30 | Author `.github/CODEOWNERS` now under the D15 exception (design §18 step 5, CODEOWNERS half) | **ANSWERED 2026-09-24: author it now (option A)** | The step 17 read-back recorded CODEOWNERS absent (NOT SATISFIED) and every later bootstrap item waits on it; D15 already carries the attribution exception, so D30 settles only WHEN — now, rather than after the launch specification — and confirms the D15 sequence (AGENTS.md extension first, CODEOWNERS second with a fresh privacy scan and the control-plane manifest, errors API read-back third) |
 | D31 | Outside collaborators with read access (step 17 read-back found two) | **ANSWERED 2026-09-25: remove one, keep one** | The operator named the account to remove after seeing the list; the controller removed it through the API (HTTP 204) and read the list back: collaborators 2 — admin 1, read 1, of which outside 1. The kept read grant meets every collaborator expectation the design states (only administrator, only environment reviewer, no other write-capable actor), so it is a conforming state, kept on the operator's ruling with no reason recorded and no adverse finding against either account; identities stay out of the repository |
 | D32 | Repository merge method and Actions SHA-pinning settings (design §18 steps 7 and 4) | **ANSWERED 2026-09-25: apply all (option A)** | Applied 2026-09-26T01:40Z and read back: merge commits and rebase merges disabled, squash kept, squash title from the PR title and body from the PR body, delete-branch-on-merge on, `sha_pinning_required` on; selected-actions allowlist unchanged. Reversible settings; nothing in the tree, no branch, tag or release touched |
+| D33 | Dependabot security settings and the Swift ecosystem (design §17) | **ANSWERED 2026-09-26: security on, keep Swift (option A)** | Applied 2026-09-26T20:03Z and read back: vulnerability alerts on; automated security fixes (Dependabot security updates) on and not paused; zero open alerts. Enabling alerts also registered a GitHub-managed "Dependency Graph" workflow. The dependency graph, read at 2026-09-27T01:43Z, holds no Swift package, so the alerts and security updates do not yet cover the product's SwiftPM dependency. The Swift version-update ecosystem stays on ahead of §17's order, a recorded deviation the controller intends to settle in the step 13 Dependabot rehearsal. Reversible settings; nothing in the tree touched |
 
 ---
 
@@ -1651,5 +1652,63 @@ authorize changing; the design lists the values, the operator decides when.
 
 **Blocking?** No for current work; it is a prerequisite for step 12 of the rehearsal
 (squash-merge normalisation), which could not have run without it.
+
+---
+
+## D33 — Dependabot security settings and the Swift ecosystem (design §17)
+
+- **Status:** **ANSWERED 2026-09-26: security on, keep Swift (option A).**
+- **Finding that framed the question.** Design §17's "Before activation" list has four items:
+  every third-party Action pinned to a full SHA (met); a committed `.github/actions-allowlist.json`
+  replacing the list embedded in `scripts/ci/action_pins.py`, with trusted-base rejection of any
+  unlisted `uses:` and of `docker://` (PENDING, readiness evidence row 4); `sha_pinning_required`
+  on (D32); and the dependency graph, vulnerability alerts and security updates enabled. Read
+  2026-09-26: the vulnerability-alerts endpoint answered 404 (off), automated security fixes
+  reported `enabled` false. Separately, §17 enables SwiftPM updates only after an empirical Swift
+  tools-version 6 update check succeeds during the post-visibility hosted rehearsals (§20 item 3),
+  yet `.github/dependabot.yml` (since 2026-09-01) enables `github-actions`, `pip` and `swift`, all
+  targeting `main`, and Dependabot version updates have run weekly since then for all three,
+  ahead of §17's list. The Swift update job has succeeded every week but has never opened a pull
+  request, so the §20 item 3 check is only half shown.
+- **Options considered.** (A) turn on vulnerability alerts and security updates now, keep the
+  Swift ecosystem on and record the deviation; (B) the same two switches, and remove the Swift
+  ecosystem until its check passes; (C) change nothing until ruleset activation.
+- **Ruling.** (A). Applied by the controller through the API at 2026-09-26T20:03Z and read back
+  the same minute: vulnerability alerts off → on (`PUT` 204; the read-back `GET` answers 204,
+  meaning enabled); automated security fixes, which is Dependabot security updates read through a
+  second endpoint, `enabled` false → true and `paused` false, reported enabled in
+  `security_and_analysis` too; the Dependabot alerts listing answers with zero open alerts. The
+  dependency graph's SBOM export answered 500 at that read-back; a re-read at 2026-09-27T01:43Z
+  answered 200 with 36 packages (29 pip, 5 GitHub Actions, 1 npm, and the repository itself) and
+  no Swift package, so the alerts and security updates cover the three workflows' Actions, the
+  documentation toolchain's `docs/requirements.txt` and a test fixture's npm manifest
+  (`Tests/NotesKitTests/fixtures/notes-markdown-oracle/package.json`, neither in §17's list nor
+  configured in `.github/dependabot.yml`), but not the product's SwiftPM dependency. Enabling
+  alerts also registered a GitHub-managed "Dependency Graph" workflow outside `.github/workflows/`
+  (first run 20:03Z); its job token, like that of the "Dependabot Updates" workflow, carries only
+  contents, metadata and packages read, with no secrets (read from each workflow's job log), while
+  Dependabot's branches and pull requests are created by Dependabot's own GitHub App identity, not
+  that token. Both workflows run a GitHub-owned action at the floating ref `@main`, admitted by
+  the selected-actions policy's GitHub-owned allowance; the Dependency Graph run fetched it at
+  20:03Z, after D32 had turned `sha_pinning_required` on at 01:40Z, so that requirement did not
+  stop it. Both switches are reversible repository settings; nothing in the tree and no branch,
+  tag or release was touched. Departures named: the Swift ecosystem stays on ahead of §17's order,
+  and the controller intends to settle §20 item 3 during the step 13 hosted Dependabot rehearsal;
+  with the single Swift dependency current, showing a Swift 6 update there may need a deliberately
+  down-pinned disposable branch; §17's read-only freshness fallback applies only if native Swift 6
+  updates fail empirically. Because `target-branch` names the default branch, GitHub documents
+  that each configured ecosystem's commit-message pattern also governs its security-update pull
+  requests; that stops holding once step 13 points `target-branch` at the disposable ref. It does
+  not reach the unconfigured npm fixture, whose security-update pull requests would carry
+  Dependabot's default title. Until governance / required has a Dependabot path, a Dependabot pull
+  request fails its title/body check, which binds no merge while no ruleset exists.
+- **Filed:** 2026-09-26 · **Category:** repository settings / design §17
+
+**Why it needed you.** Repository settings are outward-facing state only the operator may
+authorize changing, and keeping Swift on is a deviation from the design's stated order.
+
+**Blocking?** No. §17's list precedes Dependabot activation; the design does not say whether
+that means step 13's governed activation or the step 20 ruleset, and the controller reads it as
+gating both.
 
 ---
