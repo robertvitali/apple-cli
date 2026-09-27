@@ -613,5 +613,6 @@ CLI actually accepts.
   options from the recorded set (`pymdownx.snippets` is refused), relative asset paths. A
   config edit outside that set turns the rehearsal red; `Tests/automation/test_site_assembly.py`
   pins the tracked file against the policy so the break shows in CI, not at the next rehearsal.
-  A published tag whose commit carries no tracked manual is a refusal by design (today's
-  `v26.0.0` is one); the first archive-able tag is the macOS 27 re-cut.
+  A published tag whose commit carries no tracked manual is a refusal by design (`v26.0.0`
+  would be one, but it has had no Release since D34); the first archive-able tag is the macOS 27
+  re-cut.

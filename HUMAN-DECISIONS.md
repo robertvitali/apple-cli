@@ -39,15 +39,17 @@ same day (recorded CLOSED — see D9). D15 and D16 were ratified 2026-09-07. D3 
 live-validated operator-present on 2026-08-27 (evidence on their Asana tasks; the Mail parent
 closed the same day under the closure-verification protocol). Publication remains blocked —
 independently of D9 — until every readiness gate passes and a separate fresh pre-publication
-privacy audit over the then-current tree, history, commit messages, objects, refs, and artifacts
-records zero findings for its stated scope. The repository itself has been public since 2026-09-21:
-D17 advanced the visibility step ahead of those gates (see the amendment below the table), and
-visibility unlocks no other publication action.
+privacy audit over at least the then-current surfaces D34 names (tree, history, commit messages,
+objects, refs, GitHub-side text, workflow logs and artifacts, workflow-run, check-suite and
+check-run objects, Actions caches, repository metadata and Releases) records zero findings for its
+stated scope. The repository itself has been public since 2026-09-21: D17 advanced the visibility
+step ahead of those gates (see the amendment below the table), and visibility unlocks no other
+publication action.
 
 | # | Topic | Status | Ruling |
 |---|---|---|---|
 | D1 | `notes delete-folder` previews by default | **RATIFIED** | Keep the preview default — `--execute` stays required on the only irreversible-and-unrecoverable write |
-| D2 | Cut the first release + retire the six MCP servers | **2 of 3 parts APPLIED 2026-08-30** | **Terminal gate. Yours alone.** Release DONE: `v26.0.0` cut, tagged, GitHub Release published (notes-length recovery was manual; workflow fixed after); the Release was converted to a draft on 2026-09-20 under D17 ruling 3, pending the `v27.0.0` re-cut (D17 ruling 2, D18). Retirement DONE: all six MCPs moved to `retiredServers` in the private fleet-config repo; hosts converge on their next whole-tree apply. REMAINING: fleet deployment of the binary — and the operator ruled 2026-08-30 that this is Homebrew-ONLY (a tap; the previously-scoped install script and self-update subcommand are CANCELLED), and that a RELEASE FREEZE holds until that tap actually serves `brew install apple-cli`: version stays pinned at `v26.0.0`, work lands UNRELEASED under `[Unreleased]`, do not dispatch release.yml or edit the version constant. Completing this part lifts the freeze; an explicit operator release instruction also lifts it for that release, and until the design's publisher exists such a release takes `docs/runbooks/urgent-release.md` (amended 2026-09-26; `release.yml` no longer exists). D2 closes then |
+| D2 | Cut the first release + retire the six MCP servers | **2 of 3 parts APPLIED 2026-08-30** | **Terminal gate. Yours alone.** Release DONE: `v26.0.0` cut, tagged, GitHub Release published (notes-length recovery was manual; workflow fixed after); the Release was converted to a draft on 2026-09-20 under D17 ruling 3 and deleted on 2026-09-27 under D34, the `v26.0.0` tag kept; `v27.0.0` is planned to replace it (D17 ruling 2, D18). Retirement DONE: all six MCPs moved to `retiredServers` in the private fleet-config repo; hosts converge on their next whole-tree apply. REMAINING: fleet deployment of the binary — and the operator ruled 2026-08-30 that this is Homebrew-ONLY (a tap; the previously-scoped install script and self-update subcommand are CANCELLED), and that a RELEASE FREEZE holds until that tap actually serves `brew install apple-cli`: version stays pinned at `v26.0.0`, work lands UNRELEASED under `[Unreleased]`, do not dispatch release.yml or edit the version constant. Completing this part lifts the freeze; an explicit operator release instruction also lifts it for that release, and until the design's publisher exists such a release takes `docs/runbooks/urgent-release.md` (amended 2026-09-26; `release.yml` no longer exists). D2 closes then |
 | D3 | Live-validate `mail send --gui-send` | **APPLIED 2026-08-27** | Live-validated operator-present: one self-addressed send executed and delivered (oracle-verified both sides), test items cleaned by exact id |
 | D4 | Live-validate iMessage group-chat send | **APPLIED 2026-08-23** | Option (b): record "wired + code-inspected, never live-validated" as a port-spec asterisk |
 | D5 | Chasing the Messages fuzzy-search recall gap | WITHDRAWN | Should not have been asked; became ordinary queue work |
@@ -62,8 +64,8 @@ visibility unlocks no other publication action.
 | D14 | Live-exercise `mail rules` delete | **APPLIED 2026-08-27** | First live exercise done operator-present: labeled disabled test rule deleted by index, readback matched, 3 real rules untouched |
 | D15 | Extend the public-attribution exception to `.github/CODEOWNERS` | **RATIFIED 2026-09-07** | The operator's exact GitHub user may appear in `.github/CODEOWNERS` for every enforcement-control-plane path, as deliberate public attribution alongside LICENSE, README, and git author metadata. Sequence is fixed: the `AGENTS.md` exception extension lands first as its own reviewed commit, the CODEOWNERS commit lands second with its own fresh privacy scan, then GitHub's code-owners errors API confirms it parses. Trade-off recorded per the design: from that step until public launch no release can be cut; the release freeze's urgent-fix clause is satisfiable only by a reviewed, operator-authorized, temporary restoration of a write-capable release workflow, recorded as an explicit exception and removed again afterwards |
 | D16 | Narrow main-only reversal for disposable rehearsal refs | **RATIFIED 2026-09-07** | Three disposable ref classes, and only these, may be created for the publication-automation rehearsals (design §18 steps 8–14, removal at step 18): the uniquely named disposable target ref, the proposal head refs of the validation PRs (which target that ref, never `main`), and the Dependabot-created head refs of step 13; never for feature work; never merged into `main`; deleted after the rehearsal, including on abort; does not reverse the ruling for ordinary work. The `AGENTS.md` reversal commit lands under the private main-only gate when the rehearsal step begins, after an in-session re-confirmation and before the first branch is cut. The later full reversal that activates the `main` ruleset is a SEPARATE future operator instruction and is not granted here |
-| D17 | Early visibility flip to restore hosted Actions; pre-flip privacy audit round 1; disposition of its findings | **ANSWERED 2026-09-20; APPLIED 2026-09-21** (flip 14:31Z; hosted CI and Docs green the same day; end-of-roadmap audit round 2 run 2026-09-22: zero new findings, gate not yet closed — R1-F1 recurs in the unchanged draft asset pending the OPEN D18 rebuild and re-scan) | Operator ordered: fresh audit first, flip on zero findings, end-of-roadmap audit still required. Round 1's zero-findings condition was NOT met: seven findings — five operator-dispositioned (D17–D20), the fixture fix pending, and the hosted-log deletion OPEN in D21 — both closed 2026-09-21 (fixture fix landed, D21 applied); D19 later superseded; for the binary the operator chose rebuild + re-cut (as `v27.0.0`) rather than accept, and, because the design forbids a private publisher and hosted runs are billing-blocked, ordered the `v26.0.0` Release converted to a draft first, the flip second, the re-cut after hosted validation |
-| D18 | macOS 27 adoption release `v27.0.0` | **OPEN — steps (1) and (3) satisfied 2026-09-22; (2) and (4) demonstrated on `3e46e82` in rehearsal; (4a)/(5) gated on the phase-3 publisher** | Operator instruction 2026-09-20: bump to `27.0.0` once all tests pass on macOS 27. Satisfied: the D17 flip and green hosted runs (1); the §4.1 adoption-matrix amendment and `[Unreleased]` baseline note, this commit (3). Demonstrated on `3e46e82`, to be re-established on the exact release commit and its shipped artifact when the publisher runs: the local canonical suite green on macOS 27 plus the hosted logic gate (2); the path-free rebuild rehearsal PASS on every gate — zero debug-map entries, zero home paths in binary or archive, clean tar headers, zero network fetches (4, D23/D24), with the local run accepted as the §12 hardened alternative (D25). Still waiting: a publisher path (4a, design §18 phase 3, unbuilt) and the release through it (5) |
+| D17 | Early visibility flip to restore hosted Actions; pre-flip privacy audit round 1; disposition of its findings | **ANSWERED 2026-09-20; APPLIED 2026-09-21** (flip 14:31Z; hosted CI and Docs green the same day; end-of-roadmap audit round 2 run 2026-09-22: zero new findings, gate not yet closed — R1-F1 recurred in the unchanged draft asset; the draft was deleted 2026-09-27 under D34, and the gate will close on a fresh round with zero findings, not yet run) | Operator ordered: fresh audit first, flip on zero findings, end-of-roadmap audit still required. Round 1's zero-findings condition was NOT met: seven findings — five operator-dispositioned (D17–D20), the fixture fix pending, and the hosted-log deletion OPEN in D21 — both closed 2026-09-21 (fixture fix landed, D21 applied); D19 later superseded; for the binary the operator chose rebuild + re-cut (as `v27.0.0`) rather than accept, and, because the design forbids a private publisher and hosted runs are billing-blocked, ordered the `v26.0.0` Release converted to a draft first, the flip second, the re-cut after hosted validation |
+| D18 | macOS 27 adoption release `v27.0.0` | **OPEN — steps (1) and (3) satisfied 2026-09-22; (2) and (4) demonstrated on `3e46e82` in rehearsal; (4a)/(5) gated on the phase-3 publisher** | Operator instruction 2026-09-20: bump to `27.0.0` once all tests pass on macOS 27. Satisfied: the D17 flip and green hosted runs (1); the §4.1 adoption-matrix amendment and `[Unreleased]` baseline note, this commit (3). Demonstrated on `3e46e82`, to be re-established on the exact release commit and its shipped artifact when the publisher runs: the local canonical suite green on macOS 27 plus the hosted logic gate (2); the path-free rebuild rehearsal PASS on every gate — zero debug-map entries, zero home paths in binary or archive, clean tar headers, zero network fetches (4, D23/D24), with the local run accepted as the §12 hardened alternative (D25). Still waiting: a publisher path (4a, design §18 phase 3, unbuilt) and the release through it (5). The `v26.0.0` draft was deleted under D34, settling this entry's draft-or-delete question |
 | D19 | GitHub still serves pre-rewrite commits by id | **SUPERSEDED 2026-09-21** (ANSWERED 2026-09-20) | Verified: seven pre-rewrite commit ids formerly cited in this file return HTTP 200 from the API and still carry pre-redaction tracker identifiers. Operator reversed the 2026-08-23 no-Support posture: request a purge of unreachable objects and cached views from GitHub Support while the repo is still private; the D17 flip waits on that confirmation. Stale id citations in this file were re-pointed to their rewritten counterparts the same day. Superseded 2026-09-21: request withdrawn by the operator, no purge filed; residual by-id reachability accepted; D9's no-Support posture stands |
 | D20 | Outside contributor's plaintext git identity on open PRs 3–5 | **RATIFIED 2026-09-20; APPLIED 2026-09-22** (PRs 3–5 squash-merged locally as `7fc4a49`, `6f8b852`, `57984cf`; follow-ups `9a86125`, `8e9be32`, `4f8776a`; two further proposals filed as D22) | Accepted as that contributor's own public attribution for now; the PRs were squash-merged with the squash author identity read back first; the reachable `refs/pull/*` copies are outside the D19 purge and remain resolvable after the PRs closed — their retention is GitHub's, not this repository's |
 | D21 | Delete 18 hosted workflow runs' logs that echo pre-redaction tracker identifiers | **APPLIED 2026-09-21** | Post-round scan of all 305 run logs: no personal data; 18 runs' logs contain 16-digit tracker identifiers inside historical branch names. Deleting run logs is destructive and outward-facing, so it waited for the operator's instruction; authorized and executed 2026-09-21 (18 log archives deleted, 18 × 204, read back 18 × 404); removed from D17's blocker list |
@@ -79,6 +81,7 @@ visibility unlocks no other publication action.
 | D31 | Outside collaborators with read access (step 17 read-back found two) | **ANSWERED 2026-09-25: remove one, keep one** | The operator named the account to remove after seeing the list; the controller removed it through the API (HTTP 204) and read the list back: collaborators 2 — admin 1, read 1, of which outside 1. The kept read grant meets every collaborator expectation the design states (only administrator, only environment reviewer, no other write-capable actor), so it is a conforming state, kept on the operator's ruling with no reason recorded and no adverse finding against either account; identities stay out of the repository |
 | D32 | Repository merge method and Actions SHA-pinning settings (design §18 steps 7 and 4) | **ANSWERED 2026-09-25: apply all (option A)** | Applied 2026-09-26T01:40Z and read back: merge commits and rebase merges disabled, squash kept, squash title from the PR title and body from the PR body, delete-branch-on-merge on, `sha_pinning_required` on; selected-actions allowlist unchanged. Reversible settings; nothing in the tree, no branch, tag or release touched |
 | D33 | Dependabot security settings and the Swift ecosystem (design §17) | **ANSWERED 2026-09-26: security on, keep Swift (option A)** | Applied 2026-09-26T20:03Z and read back: vulnerability alerts on; automated security fixes (Dependabot security updates) on and not paused; zero open alerts. Enabling alerts also registered a GitHub-managed "Dependency Graph" workflow. The dependency graph, read at 2026-09-27T01:43Z, holds no Swift package, so the alerts and security updates do not yet cover the product's SwiftPM dependency. The Swift version-update ecosystem stays on ahead of §17's order, a recorded deviation the controller intends to settle in the step 13 Dependabot rehearsal. Reversible settings; nothing in the tree touched |
+| D34 | The end-of-roadmap privacy gate and the publisher (design §15): delete the `v26.0.0` draft Release | **ANSWERED 2026-09-26: delete the draft (option A); APPLIED 2026-09-27T01:32Z** | As written, the end-of-roadmap gate closed only on a scan of the published rebuilt asset, which needs the publisher, while design §15 makes a closed gate a precondition of the launch that adds it. After a private copy of both assets was kept, the draft Release was deleted through the API and read back: its id and both asset download URLs answer 404, zero Releases are listed, the `v26.0.0` tag is kept. The gate will close on a fresh round over at least Round 1's surfaces plus those the entry names, with zero findings; that round has not run. Before publication the exact rebuilt `v27.0.0` artifact must pass D18 step (4) and a value-free scan under the round's classes and denylist over the binary, archive, checksum file and Release notes body, both recorded first (entry below). Irreversible on GitHub |
 
 ---
 
@@ -184,6 +187,10 @@ condition you asked for.
 ---
 
 **Amended 2026-09-26 (Progress line overtaken):** the Progress line's "The tap requires the repo to be public" no longer describes what the tap waits on. The repository has been public since 2026-09-21 (D17). The tap still needs a downloadable published release: `v26.0.0` has been a draft since 2026-09-20 (D17 ruling 3), and its replacement, `v27.0.0` (D17 ruling 2), waits on the phase-3 publisher (D18). Design §15 also forbids any distribution writer (a tap-updating workflow, token or App) in this repository or its workflows until the launch specification is approved; that specification defines the tap's writer. The Blocked-by line stands as written.
+
+---
+
+**Amended 2026-09-26 (draft deleted, D34):** the `v26.0.0` Release, a draft since 2026-09-20 (D17 ruling 3), was deleted through the API on 2026-09-27T01:32Z under D34; the tag is kept. No `v26.0.0` Release exists any longer, draft or published, so the tap's first downloadable release is whichever release is next published, planned as `v27.0.0` (D17 ruling 2, D18). The Progress-line amendment above otherwise stands, and D2's remaining Homebrew part is unchanged.
 
 ---
 
@@ -1128,6 +1135,8 @@ hosted-only defects that local runs never exercise (recorded in
 `docs/discovery/prelaunch-readiness-evidence.md` Sections 3 and 4. No other publication action is
 unlocked by this: D18 (`v27.0.0`) and the end-of-roadmap audit remain open.
 
+**Amended 2026-09-26 (D34):** a broader form of the deletion that ruling 3's option (C) offered (there the asset; under D34 the whole Release and both assets), which the operator set aside then for the reversible draft, was taken on 2026-09-27T01:32Z under D34, after the flip: keeping the draft, under the end-of-roadmap closure condition as then written, left that gate unclosable. The tag is kept, and `v27.0.0` remains the planned re-cut (ruling 2, D18).
+
 ---
 
 ## D18 — macOS 27 adoption release: bump to `v27.0.0` once all tests pass
@@ -1178,6 +1187,8 @@ unlocked by this: D18 (`v27.0.0`) and the end-of-roadmap audit remain open.
 **Why it needed you.** A version bump is a release, and releases are yours to call.
 
 **Blocking?** D2's remaining Homebrew part waits on it (no downloadable release exists until it ships); nothing else in the current roadmap does.
+
+**Amended 2026-09-26 (D34):** the draft-or-delete question under "Not decided here" was raised early and is settled: the `v26.0.0` draft Release was deleted on 2026-09-27T01:32Z under D34, and the tag is kept. The end-of-roadmap privacy gate no longer waits on this entry; it will close when a fresh round records zero findings, before the launch that adds the publisher, and that round has not run. Before publication, the exact artifact to be published must pass step (4)'s verified-outcome check and a value-free scan under that round's classes and denylist covering the binary, the archive, the checksum file and the Release notes body, both recorded in the evidence file (D34). The denylist scan stays operator-local, never inside a hosted environment, recorded value-free against the sha256 digest of each covered item, the Release notes body as it will be published included. The design's §15.1 read-only preflight lists neither check today; the controller will propose adding step (4) and a check that a passing record matches those digests in the launch specification, and D34 requires both until an approved specification adds them, and continues to if it does not.
 
 ---
 
@@ -1710,5 +1721,65 @@ authorize changing, and keeping Swift on is a deviation from the design's stated
 **Blocking?** No. §17's list precedes Dependabot activation; the design does not say whether
 that means step 13's governed activation or the step 20 ruleset, and the controller reads it as
 gating both.
+
+---
+
+## D34 — The end-of-roadmap privacy gate and the publisher (design §15): delete the `v26.0.0` draft Release
+
+- **Status:** **ANSWERED 2026-09-26: delete the draft (option A); APPLIED 2026-09-27T01:32Z.**
+- **Finding that framed the question.** The readiness evidence (§2, Round 2 verdict and the
+  rehearsal note) closed the end-of-roadmap privacy gate only on a scan of the PUBLISHED rebuilt
+  asset, which needs the phase-3 publisher (D18 step 4a). Design §15 adds the bot identity,
+  listener, write-capable publisher, tag rulesets and protected environment together at launch,
+  with a closed privacy gate among its three hard preconditions, and `AGENTS.md` bars adding the
+  publisher until all three hold. As written, the gate could never close. The reason it named
+  the rebuilt asset: the `v26.0.0` draft Release's archive still carried the build paths Round 1
+  flagged (R1-F1), and D17 ruling 2 chose rebuild and re-cut over acceptance. D18 left open
+  whether the draft stays or is deleted.
+- **Options considered.** (A) delete the `v26.0.0` draft Release and its two assets, keep the tag,
+  and close the gate on the then-current surfaces; (B) keep the draft and amend the closure
+  condition to current surfaces plus the D23/D24 rebuild-rehearsal scan; (C) amend §15 so
+  publisher credentials may exist before the gate closes.
+- **Ruling.** (A). Before deleting, the controller read the Release back (draft true, prerelease
+  false, tag `v26.0.0`, 2 assets, recorded by name and size only) and kept a private copy of the
+  two assets outside the repository, the archive verified against its published checksum. The
+  Release object was then deleted through the API at 2026-09-27T01:32Z (the evening of 2026-09-26
+  in the operator's local zone): `DELETE` 204; the Release id then answers 404; the repository
+  lists zero Releases; both assets' public download URLs answered 404 when read at 04:16Z; the
+  `v26.0.0` tag is kept on `origin` and still peels to `0f617eb`. Asset ids were not captured
+  before deletion, so no asset was read back by id; removal rests on GitHub deleting a Release's
+  assets with it and on those download reads. **The gate will close** when a fresh round records
+  zero findings for its stated scope, before the launch that adds the publisher, so design §15's
+  order stands. That round has not run. Its scope is at least every surface Round 1 and its
+  addendum scanned (among them pull-request text and timelines, issue events and comments, and
+  commit comments), plus the tree, history, commit messages, objects, refs, workflow logs and
+  artifacts, workflow-run, check-suite and check-run objects (head branch, head-commit message and
+  author, display title, annotations and job summaries, not only their logs), Actions caches,
+  repository metadata and Releases; a surface it cannot read is recorded NOT READ, not clean, and
+  a NOT READ surface inside that minimum keeps the gate open until it is read or the operator
+  rules on it in this ledger. **The rebuilt `v27.0.0` asset leaves that round's scope and keeps
+  the full check the old condition gave it.** Before publication, the exact artifact to be
+  published must pass both D18 step (4)'s verified-outcome check as that step states it (no
+  `N_OSO` entry and no home-directory path anywhere in the binary's bytes; archive member headers
+  with user and group ids of 0 and empty owner and group names; no AppleDouble member) and a
+  value-free scan under the round's classes and denylist. That scan covers the binary, the
+  archive, the checksum file and the Release notes body. Both results are recorded in the evidence
+  file before publication. The denylist scan stays operator-local, never inside a hosted
+  environment, and is recorded value-free against the sha256 digest of each item it covers (the
+  archive, the binary, the checksum file, and the Release notes body exactly as it will be
+  published). The §15.1 read-only preflight lists neither check today; the controller will propose
+  that the launch specification add step (4) and a check that a passing scan record matches all
+  four digests. This entry requires both checks until an approved launch specification adds them,
+  and continues to require them if it does not. Irreversible on GitHub: the `v26.0.0` archive and
+  checksum file survive byte-for-byte only in the private copy. The Release notes body was not
+  preserved; its nearest source is the CHANGELOG section at `0f617eb`, which may differ from the
+  published body (D2 records a manual re-create after a notes-length rejection). A rebuild from
+  the tag would be a different artifact.
+- **Filed:** 2026-09-26 · **Category:** irreversible / outward-facing; privacy gate
+
+**Why it needed you.** Deleting a Release is irreversible and outward-facing, and the choice
+between deleting, accepting a carrier and weakening §15 is a posture call.
+
+**Blocking?** It unblocked the end-of-roadmap audit's closure path; nothing else waits on it.
 
 ---
