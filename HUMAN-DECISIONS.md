@@ -31,7 +31,7 @@ recorded, scoped evidence).
 
 ---
 
-## LEDGER — every decision at a glance (updated 2026-09-26)
+## LEDGER — every decision at a glance (updated 2026-09-28)
 
 **Still needs you: D2 (the Homebrew tap), D18 (the `v27.0.0` release, which waits on the phase-3
 publisher) and D22 (two parity narrowings).** D9 was reopened 2026-08-31 and finally closed the
@@ -82,6 +82,10 @@ publication action.
 | D32 | Repository merge method and Actions SHA-pinning settings (design §18 steps 7 and 4) | **ANSWERED 2026-09-25: apply all (option A)** | Applied 2026-09-26T01:40Z and read back: merge commits and rebase merges disabled, squash kept, squash title from the PR title and body from the PR body, delete-branch-on-merge on, `sha_pinning_required` on; selected-actions allowlist unchanged. Reversible settings; nothing in the tree, no branch, tag or release touched |
 | D33 | Dependabot security settings and the Swift ecosystem (design §17) | **ANSWERED 2026-09-26: security on, keep Swift (option A)** | Applied 2026-09-26T20:03Z and read back: vulnerability alerts on; automated security fixes (Dependabot security updates) on and not paused; zero open alerts. Enabling alerts also registered a GitHub-managed "Dependency Graph" workflow. The dependency graph, read at 2026-09-27T01:43Z, holds no Swift package, so the alerts and security updates do not yet cover the product's SwiftPM dependency. The Swift version-update ecosystem stays on ahead of §17's order, a recorded deviation the controller intends to settle in the step 13 Dependabot rehearsal. Reversible settings; nothing in the tree touched |
 | D34 | The end-of-roadmap privacy gate and the publisher (design §15): delete the `v26.0.0` draft Release | **ANSWERED 2026-09-26: delete the draft (option A); APPLIED 2026-09-27T01:32Z** | As written, the end-of-roadmap gate closed only on a scan of the published rebuilt asset, which needs the publisher, while design §15 makes a closed gate a precondition of the launch that adds it. After a private copy of both assets was kept, the draft Release was deleted through the API and read back: its id and both asset download URLs answer 404, zero Releases are listed, the `v26.0.0` tag is kept. The gate will close on a fresh round over at least Round 1's surfaces plus those the entry names, with zero findings; that round has not run. Before publication the exact rebuilt `v27.0.0` artifact must pass D18 step (4) and a value-free scan under the round's classes and denylist over the binary, archive, checksum file and Release notes body, both recorded first (entry below). Irreversible on GitHub |
+| D35 | Claude session links in eight historical commit messages | **RATIFIED 2026-09-26: accept as a recorded class (option A)** | Eight operator commit messages on `main` (2026-09-07 to 09-14) carry `Claude-Session` links to two sessions. Accepted as a class for the fresh round, scoped exactly to those commit messages; no history rewrite; new ones stay refused |
+| D36 | The outside contributor's own session link in the descriptions of PRs 3–5 | **RATIFIED 2026-09-26: accept as the contributor's own disclosure (option A)** | One session link of the contributor's, in those three descriptions and their edit histories only; never copied into a tracked file, commit or prose; the same link elsewhere is a finding, among them two commit messages on pull request 3's own branch, found after the ruling |
+| D37 | Workflow-run objects served pre-rewrite commit messages | **ANSWERED 2026-09-27; APPLIED 2026-09-27T04:43Z (option A)** | A scan of the public run listing found one run storing a pre-rewrite message with personal data and 90 with tracker identifiers or session links. All 168 runs whose head commit is not on `main` were deleted and read back (205 remain, none off-main, each deleted id answers 404); a re-scan of the listing found no personal data, denylist term or tracker identifier, and copies of the eight D35 messages remain for the fresh round. The commits themselves stay fetchable by id (D38); at least 29 off-main commit ids stay listed in the public Events feed until they age out (about 2026-12-13 at the latest), and third-party check suites keep copies of their messages by commit id. Irreversible |
+| D38 | A pre-rewrite commit with personal data stays fetchable by id | **RATIFIED 2026-09-28: accept under D19 (option C), re-confirmed on corrected facts** | The 2026-07-23 pre-rewrite commit D37 found still answers by id with two denylist terms, a provider mailbox and two personal email addresses in its message. It was public 2026-07-23 to 2026-08-19 (the D9 period), and its message was readable in the run listing 2026-09-21 to 2026-09-27. Accepted as a residual scoped to that one commit object and the stored copies of its message by commit id; no Support purge filed; any other personal-data object is a finding |
 
 ---
 
@@ -1240,6 +1244,8 @@ you can reverse that, and the flip's timing is yours.
 **Blocking?** The D17 flip waits on Support's confirmation. Nothing else waits. (as recorded 2026-09-20)
 **Resolution (2026-09-21):** withdrawn by the operator; no request filed; no longer blocks the flip.
 
+**Amended 2026-09-28 (D38):** this entry accepted by-id reachability of pre-rewrite objects, the D9 personal-data commits included, on the premises that their ids were retained nowhere this project controls and every published surface was clean or operator-dispositioned. Neither held for one of them: a 2026-07-23 pre-rewrite commit whose message carries personal data had its message and id served by the public workflow-run listing from 2026-09-21 to 2026-09-27 (D37), and a third-party check suite keeps a copy of the message by commit id. The operator accepted it as a recorded residual (D38) and filed no Support purge.
+
 ---
 
 ## D20 — Outside contributor's plaintext git identity on open pull requests 3–5
@@ -1781,5 +1787,164 @@ gating both.
 between deleting, accepting a carrier and weakening §15 is a posture call.
 
 **Blocking?** It unblocked the end-of-roadmap audit's closure path; nothing else waits on it.
+
+---
+
+## D35 — Claude session links in eight historical commit messages: accept as a recorded class
+
+- **Status:** **RATIFIED 2026-09-26: accept as a recorded class (option A).**
+- **Finding that framed the question.** Eight commit messages on `main`, dated 2026-09-07 to
+  2026-09-14, end with a `Claude-Session` line carrying a claude.ai coding-session link. The links
+  name two distinct sessions, both the operator's. The tracked tree carries none. The repository
+  bans account identifiers in commit messages, so the fresh end-of-roadmap round (D34) would
+  detect them. A session link opens only for the signed-in account that owns it: what is public is
+  an opaque session identifier, not the session's content. Removing the lines needs a history
+  rewrite. That would change the id of every commit from the first of them to the tip (76 through
+  `8ba43b1` when the question was framed), including every commit this ledger and the readiness
+  evidence cite. It would still not remove them from GitHub: five of the six pull-request refs
+  contain some of them, and only a GitHub Support purge could clear them.
+- **Options considered.** (A) accept the eight historical lines as a recorded class, and keep
+  refusing new ones; (B) rewrite history to drop them, force-push, file a Support purge and
+  re-cite every changed commit id; (C) defer to the fresh round.
+- **Ruling.** (A). The fresh end-of-roadmap round records this class as ACCEPTED, not as a
+  finding, in the same shape as D20. The class is scoped exactly: the `Claude-Session` lines, and
+  the same two links, in the commit messages of those eight commits, wherever those commit objects
+  are served. The copies of those same messages that GitHub stores on the workflow-run and
+  check-suite objects for those commits are not covered by this ruling as asked; the fresh round
+  dispositions them, as it does D36's surfaces found after that ruling. It covers no other surface
+  and no later commit. Any occurrence elsewhere is a finding: a new commit, the tree,
+  repository-side text, a Release. The controller's pre-push scan refuses the class in every
+  pushed diff and commit message, and the controller omits the session trailer its harness
+  suggests for commits. This entry authorizes no history rewrite.
+- **Filed:** 2026-09-26 · **Category:** privacy disposition / public history
+
+**Why it needed you.** Whether an identifier stays in public history, or history is rewritten, is
+yours alone to decide (D9 precedent).
+
+**Blocking?** No; it settles one class before the fresh round runs.
+
+---
+
+## D36 — The outside contributor's own Claude session link in the descriptions of PRs 3–5: accept
+
+- **Status:** **RATIFIED 2026-09-26: accept as the contributor's own disclosure (option A).**
+- **Finding that framed the question.** The descriptions of pull requests 3, 4 and 5 each contain
+  a claude.ai coding-session link. All three name one session, which is not one of the operator's;
+  it is the outside contributor's own. When those pull requests were squash-merged, the link was
+  stripped from the squash commit messages on `main` (readiness evidence §4, "Outside pull
+  requests 3–5"), so it is in no tracked file and no commit on `main`. The review of this record
+  found, after the operator ruled, that it also sits in two of the five commit messages on pull
+  request 3's own branch, served through that pull request's ref, commit list and timeline and by
+  id, and in copies of the descriptions embedded in nine comment events in the public Events feed;
+  the ruling below does not cover those, and the fresh round dispositions them. D20 accepts the
+  contributor's own git author identity, but not this identifier. Editing a contributor's
+  pull-request text is outward-facing, and GitHub keeps the prior text in each description's edit
+  history unless that revision is deleted too.
+- **Options considered.** (A) accept it as the contributor's own disclosure, scoped to those three
+  descriptions; (B) edit the descriptions and delete the prior revisions; (C) ask the contributor
+  to remove it.
+- **Ruling.** (A). The fresh end-of-roadmap round records this class as ACCEPTED, not as a
+  finding. The class is scoped exactly: that one link in the descriptions, and their edit
+  histories, of pull requests 3, 4 and 5. The identifier is never copied into a tracked file, a
+  commit message or project prose. The same link on any other surface, or another contributor's
+  link, is a finding for the round to disposition.
+- **Filed:** 2026-09-26 · **Category:** privacy disposition / third-party text
+
+**Why it needed you.** It concerns a third party's text on a public surface, and the choice
+between leaving it and editing someone else's words is a posture call.
+
+**Blocking?** No; it settles one class before the fresh round runs.
+
+---
+
+## D37 — Workflow-run objects served pre-rewrite commit messages: delete every run whose head commit is not on `main`
+
+- **Status:** **ANSWERED 2026-09-27: delete all off-main runs (option A); APPLIED
+  2026-09-27T04:43Z.**
+- **Finding that framed the question.** The D34 security reviewer found a public surface neither
+  privacy round had scanned: every Actions run stores its head commit's message and its head
+  branch, and on a public repository anyone can page the run listing without knowing a commit id.
+  The controller scanned that surface with both engines, the full class set and the denylist. Of
+  373 runs, 168 ran on commits no longer on `main` (pre-rewrite history, retired branches,
+  pull-request heads). One of those, from 2026-07-23, carried a pre-rewrite commit message with
+  two denylist terms, a provider mailbox and two personal email addresses. A further 90 carried
+  tracker identifiers (18 of them in branch names, a count matching the 18 runs whose logs D21
+  deleted) or Claude session links (three distinct sessions: the contributor's of D36, and two of
+  the operator's that D35 does not cover, in July and August pre-rewrite messages). The phone and
+  coordinate detections were a number in the fictional 555 area code, an RFC-reserved placeholder
+  and a ratio list. None of the 168 runs is cited in the readiness evidence. The deleted set
+  included the legacy 2026-08-30 Release run that cut `v26.0.0`, whose head commit was rewritten
+  off `main`. The underlying pre-rewrite commits stay fetchable by id; the run listing was one
+  public surface that listed their ids.
+- **Options considered.** (A) delete all 168 off-main runs; (B) delete only the 91 carrying a
+  detection; (C) delete only the run carrying personal data.
+- **Ruling.** (A). Before deleting, the controller re-read the listing and confirmed that the set
+  of off-main runs was exactly the 168 approved. It kept a private manifest outside the
+  repository, then deleted each run through the API, re-checking before each call that its head
+  commit was not on `main`: 168 `DELETE` calls, each answering 204. Read back: 205 runs listed,
+  none off-main, and each deleted id answers 404. A re-scan of the remaining listing under the
+  same classes and denylist found no personal data, no denylist term and no tracker identifier.
+  What remains mirrors commit messages already on `main`: AI co-author addresses, the path
+  literals Round 2 recorded, copies of the eight D35 messages (for the fresh round to disposition,
+  see D35), and a Unix group-id false positive. The 205 runs on `main` commits, which the hosted
+  evidence cites, are untouched. Irreversible: the 168 runs and their logs are gone. The ruling
+  reached workflow runs only. It removed the listing, not the commits: the personal-data commit
+  stays fetchable by id (D38), at least 29 off-main commit ids stay listed in the public Events
+  feed (21 through push events dated 2026-08-29 to 2026-09-08, 20 of them deleted-run heads, and 8
+  more, all deleted-run heads, only through pull-request and review events dated 2026-09-07 to
+  2026-09-14) until they age out, about 2026-12-13 at the latest under GitHub's 90-day window and
+  sooner if the feed's 300-event cap displaces them (the feed lists these commits by id only, not
+  their messages; of the 21 push-listed commits' messages, served by id, nine carry tracker
+  identifiers, and those messages' email detections are AI co-author addresses and Dependabot's
+  sign-off address); and check-suite objects, which are not Actions runs, survive. A third-party
+  GitHub App (Cursor) left a check suite on 129 of the 135 distinct head commits of the deleted
+  runs, three of them the head commits of the closed Dependabot pull requests 1, 2 and 6, and the
+  personal-data commit among them, each keeping a copy of its commit message by commit id. The
+  fresh round reads all of these (D34 names run and check-suite objects; the readiness evidence §2
+  lists the Events feed, added with this record); the App is also a lead for the installed-App
+  read-back that readiness row 17 records as not performed.
+- **Filed:** 2026-09-27 · **Category:** irreversible / outward-facing; privacy incident on a
+  GitHub-side surface
+
+**Why it needed you.** Deleting workflow runs is irreversible and outward-facing, and choosing how
+much history to drop is a posture call.
+
+**Blocking?** No. It removed the public listing before the fresh round runs, and that round now
+scans run and check-suite objects (D34) and the Events feed (readiness evidence §2); the carriers
+left by id are D38's and the round's.
+
+---
+
+## D38 — A pre-rewrite commit with personal data stays fetchable by id: accept under an amended D19
+
+- **Status:** **RATIFIED 2026-09-28: accept under D19 (option C), re-confirmed the same day on
+  corrected facts.**
+- **Finding that framed the question.** D37 deleted the run that pointed at the 2026-07-23
+  pre-rewrite commit, but not the commit: GitHub still serves it to anyone who asks for its exact
+  id (HTTP 200 when read on 2026-09-28), and its message still carries two denylist terms, a
+  provider mailbox and two personal email addresses. It was public from its push on 2026-07-23
+  until the repository was made private on 2026-08-19 (the D9 period), and from the 2026-09-21
+  visibility flip until the D37 deletion on 2026-09-27 the run listing served its full message and
+  its id to anyone paging it, with no id needed. A third-party check suite keeps a copy of the
+  same message by commit id. D19 accepted by-id reachability of pre-rewrite objects, the D9
+  personal-data commits included, on the premises that their ids were retained nowhere this
+  project controls and every published surface was clean or operator-dispositioned; neither held
+  for this commit during the six days from 2026-09-21 to 2026-09-27. Only GitHub Support can purge
+  such objects. The first brief for this question gave only that six-day window, leaving out the
+  2026-07-23 to 2026-08-19 public period, and misstated D19's premise as no personal data; the
+  operator re-confirmed the ruling on the corrected facts before this record landed.
+- **Options considered.** (A) the operator files a Support purge of all unreachable objects; (B)
+  the operator files a targeted purge of this one commit; (C) accept it under an amended D19.
+- **Ruling.** (C). The commit stays fetchable by id and is accepted as a recorded residual under
+  D19, scoped exactly to that one commit object and the stored copies of its message by commit id.
+  The fresh round records it as ACCEPTED, not as a finding, with both exposure windows above
+  stated. Any other object found carrying personal data is a finding. No Support request was
+  filed; the operator may still file one later, and this entry does not prevent it.
+- **Filed:** 2026-09-28 · **Category:** privacy disposition / residual on a GitHub-side surface
+
+**Why it needed you.** Leaving personal data retrievable, or contacting GitHub Support to remove
+it, is yours alone to decide (D9, D19).
+
+**Blocking?** No; it settles one residual before the fresh round runs.
 
 ---
