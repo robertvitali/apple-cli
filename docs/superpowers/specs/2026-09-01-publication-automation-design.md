@@ -182,6 +182,32 @@ the default Xcode's bundled toolchain. The CI record gives the image version and
 its three macOS jobs, or states that they match (on `1f8f3ab` all four macOS jobs, CI's three
 and Docs' `manual-fresh`, ran on the same image, `macos-26-arm64` 20260907.0351.1, macOS 26.6.2).
 
+**Amendment 2026-09-30 (baseline recorded).** The hosted macOS 26 baseline is complete. Its Docs
+half is `1f8f3ab`'s push run; its CI half is `53eae85`'s push run, whose first attempt passed all
+six jobs, every macOS job on `macos-26-arm64` 20260907.0351.1 (macOS 26.6.2), the image the Docs
+half ran on; both are recorded in Section 4 of the readiness evidence. The conditions the other
+sections attach to the lane are therefore met: Section 11.2's "counts as validated once its
+baseline runs are recorded", Section 12's "rests on that lane once its baseline runs are recorded
+there", and Section 18 step 5's "no recorded basis until the `macos-26` baseline runs are
+recorded". The coverage run Section 11.2 assigns to that lane is not implemented yet (readiness
+row 2, PENDING). From `53eae85` on, the macOS 26 support claim rests on the hosted lane: each
+commit's own hosted run is its per-commit basis, and a red one is recorded as such and fixed
+forward. One commit in that range, `ca4392d`, has no green hosted CI run (attempt 1 passed every
+Swift test and then failed its cleanup, attempt 2 failed one timing test); it changes no product
+source, so its product is the one `53eae85`'s run covered. The per-commit-basis gap of the
+2026-09-29 amendment now covers only the commits before `53eae85`; that amendment's three
+residuals and the four operator-path surfaces of the first 2026-09-30 amendment stand. Two later
+hosted failures on the same image, both in `ca4392d`'s CI run (attempts 1 and 2), were handled
+forward and do not reopen the baseline: a read-only filesystem left under the quality driver's
+isolated HOME that its cleanup could not delete, with every test green (addressed in `a4de516`: a
+hosted cleanup failure is now a warning, and a disk image is detached first, a path that has not
+yet met a hosted mount), and a timing bound set equal to the deadline it guarded (fixed in
+`675eebb`). The first was not an image failure in the
+2026-09-29 amendment's sense (withdrawn, broken, or jobs left queued): the image ran every job and
+the failing step was the driver's cleanup, which did not handle a mount under its root, so it was
+handled forward rather than reverted. Both are in the
+hosted-CI learnings.
+
 ### 4.2 Contribution model
 
 - After bootstrap activation, pull requests are the normal path to `main`.
