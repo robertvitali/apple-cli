@@ -959,6 +959,159 @@ struct MailComposeCommandInjectionTests {
         }
     }
 
+    // A rate-limit state variable spelled as another user's home is refused on BOTH paths, before
+    // the store opens or Mail is touched (preview honesty: a dry-run refuses exactly what
+    // --execute refuses). One test per call site, so deleting the early check at one site leaves
+    // the others' tests green and this one red.
+
+    /// Another account's spelling that is never the runner's own (`daemon` when the suite runs as
+    /// `root`), plus an unknown account; both must refuse.
+    private var foreignStatePaths: [String] {
+        [(NSUserName() == "root" ? "~daemon" : "~root") + "/state.json", "~no-such-user-apple-cli/state.json"]
+    }
+
+    private func expectStatePathRefusal(_ variable: String, raw: String, stdout: MemoryOutputSink,
+                                        _ body: () throws -> Void) throws {
+        var exit: ExitCode?
+        do { try body() } catch let code as ExitCode { exit = code }
+        #expect(try #require(exit, "the call site must refuse").rawValue == AppleExit.usage)
+        let envelope = try payload(from: stdout)
+        #expect(envelope["ok"] as? Bool == false)
+        let error = try #require(envelope["error"] as? [String: Any])
+        #expect(error["type"] as? String == AppleErrorType.validation)
+        #expect(error["message"] as? String == "\(variable) is " + TildeSpelling.refusalMessage(raw))
+    }
+
+    @Test func sendRefusesAForeignSendStatePathOnBothPaths() throws {
+        let base = ["--to", "recipient@example.com", "--subject", "Synthetic subject", "--body", "Synthetic body"]
+        for raw in foreignStatePaths {
+            try pinnedEnvironment {
+                try TestEnvironment.with(["APPLE_SEND_RATELIMIT_STATE": raw]) {
+                    // Every shape whose --execute consumes the send budget: the plain auto-send on
+                    // both paths, and the --html --gui-send preview.
+                    for extra in [["--dry-run"], ["--execute"], ["--html", "<p>Hi</p>", "--gui-send", "--dry-run"]] {
+                        let noScript = MailScriptInjectionTests.ThrowingMailRunner()
+                        let noOpen = noMailApp()
+                        let command = try SendCommand.parse(base + extra)
+                        let (streams, stdout, _) = streams()
+                        try expectStatePathRefusal("APPLE_SEND_RATELIMIT_STATE", raw: raw, stdout: stdout) {
+                            try Output.withStreams(streams) {
+                                try command.run(scriptFactory: { MailScript(runner: noScript, opener: noOpen) },
+                                                directoryFactory: { directory() })
+                            }
+                        }
+                        #expect(noScript.neverCalled)
+                        #expect(noOpen.neverCalled)
+                    }
+                    // Keyed on the mode like the consume it mirrors: `--mode draft` and an --html
+                    // send without --gui-send never spend the send budget, so their previews do not
+                    // read the variable either.
+                    for extra in [["--mode", "draft", "--dry-run"], ["--html", "<p>Hi</p>", "--dry-run"]] {
+                        let command = try SendCommand.parse(base + extra)
+                        let (streams, stdout, _) = streams()
+                        try Output.withStreams(streams) {
+                            try command.run(scriptFactory: { MailScript(runner: MailScriptInjectionTests.ThrowingMailRunner(),
+                                                                        opener: noMailApp()) },
+                                            directoryFactory: { directory() })
+                        }
+                        #expect(try payload(from: stdout)["ok"] as? Bool == true, Comment(rawValue: extra.joined(separator: " ")))
+                    }
+                }
+            }
+        }
+    }
+
+    @Test func forwardRefusesAForeignSendStatePathOnBothPaths() throws {
+        for raw in foreignStatePaths {
+            try pinnedEnvironment {
+                try TestEnvironment.with(["APPLE_SEND_RATELIMIT_STATE": raw]) {
+                    for path in ["--dry-run", "--execute"] {
+                        let noScript = MailScriptInjectionTests.ThrowingMailRunner()
+                        let noOpen = noMailApp()
+                        var storeOpened = false
+                        let command = try ForwardCommand.parse([
+                            "10",
+                            "--to", "recipient@example.com",
+                            "--body", "Synthetic prepend",
+                            path,
+                        ])
+                        let (streams, stdout, _) = streams()
+                        try expectStatePathRefusal("APPLE_SEND_RATELIMIT_STATE", raw: raw, stdout: stdout) {
+                            try Output.withStreams(streams) {
+                                try command.run(contextFactory: { storeOpened = true; return try context() },
+                                                scriptFactory: { MailScript(runner: noScript, opener: noOpen) },
+                                                directoryFactory: { directory() })
+                            }
+                        }
+                        #expect(!storeOpened, "the refusal must precede the store")
+                        #expect(noScript.neverCalled)
+                        #expect(noOpen.neverCalled)
+                    }
+                }
+            }
+        }
+    }
+
+    @Test func replyRefusesAForeignReplyStatePathOnBothPaths() throws {
+        for raw in foreignStatePaths {
+            try pinnedEnvironment {
+                try TestEnvironment.with(["APPLE_REPLY_RATELIMIT_STATE": raw]) {
+                    for path in ["--dry-run", "--execute"] {
+                        let noScript = MailScriptInjectionTests.ThrowingMailRunner()
+                        let noOpen = noMailApp()
+                        var storeOpened = false
+                        let command = try ReplyCommand.parse([
+                            "10",
+                            "--body", "Synthetic reply",
+                            path,
+                        ])
+                        let (streams, stdout, _) = streams()
+                        try expectStatePathRefusal("APPLE_REPLY_RATELIMIT_STATE", raw: raw, stdout: stdout) {
+                            try Output.withStreams(streams) {
+                                try command.run(contextFactory: { storeOpened = true; return try context() },
+                                                scriptFactory: { MailScript(runner: noScript, opener: noOpen) },
+                                                directoryFactory: { directory() })
+                            }
+                        }
+                        #expect(!storeOpened, "the refusal must precede the store")
+                        #expect(noScript.neverCalled)
+                        #expect(noOpen.neverCalled)
+                    }
+                }
+            }
+        }
+    }
+
+    @Test func draftSendRefusesAForeignSendStatePathOnBothPaths() throws {
+        for raw in foreignStatePaths {
+            try pinnedEnvironment {
+                try TestEnvironment.with(["APPLE_SEND_RATELIMIT_STATE": raw]) {
+                    for path in ["--dry-run", "--execute"] {
+                        let noScript = MailScriptInjectionTests.ThrowingMailRunner()
+                        let noOpen = noMailApp()
+                        let command = try DraftCommand.parse([
+                            "send",
+                            "--subject", "apple-cli-test draft",
+                            path,
+                            "--test-mode",
+                        ])
+                        let (streams, stdout, _) = streams()
+                        try expectStatePathRefusal("APPLE_SEND_RATELIMIT_STATE", raw: raw, stdout: stdout) {
+                            try withTestRecipients("recipient@example.com") {
+                                try Output.withStreams(streams) {
+                                    try command.run(scriptFactory: { MailScript(runner: noScript, opener: noOpen) },
+                                                    directoryFactory: { directory() })
+                                }
+                            }
+                        }
+                        #expect(noScript.neverCalled)
+                        #expect(noOpen.neverCalled)
+                    }
+                }
+            }
+        }
+    }
+
     /// A window one short of full still ALLOWS — so the four refusals above come from the cap,
     /// not from the exhausted-state fixture being unusable. One control for the shared fixture.
     @Test func sendExecuteIsAllowedWhenTheSendWindowHasOneSlotLeft() throws {

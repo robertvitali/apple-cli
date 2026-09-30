@@ -31,7 +31,7 @@ recorded, scoped evidence).
 
 ---
 
-## LEDGER — every decision at a glance (updated 2026-09-28)
+## LEDGER — every decision at a glance (updated 2026-09-30)
 
 **Still needs you: D2 (the Homebrew tap), D18 (the `v27.0.0` release, which waits on the phase-3
 publisher) and D22 (two parity narrowings).** D9 was reopened 2026-08-31 and finally closed the
@@ -86,6 +86,7 @@ publication action.
 | D36 | The outside contributor's own session link in the descriptions of PRs 3–5 | **RATIFIED 2026-09-26: accept as the contributor's own disclosure (option A)** | One session link of the contributor's, in those three descriptions and their edit histories only; never copied into a tracked file, commit or prose; the same link elsewhere is a finding, among them two commit messages on pull request 3's own branch, found after the ruling |
 | D37 | Workflow-run objects served pre-rewrite commit messages | **ANSWERED 2026-09-27; APPLIED 2026-09-27T04:43Z (option A)** | A scan of the public run listing found one run storing a pre-rewrite message with personal data and 90 with tracker identifiers or session links. All 168 runs whose head commit is not on `main` were deleted and read back (205 remain, none off-main, each deleted id answers 404); a re-scan of the listing found no personal data, denylist term or tracker identifier, and copies of the eight D35 messages remain for the fresh round. The commits themselves stay fetchable by id (D38); at least 29 off-main commit ids stay listed in the public Events feed until they age out (about 2026-12-13 at the latest), and third-party check suites keep copies of their messages by commit id. Irreversible |
 | D38 | A pre-rewrite commit with personal data stays fetchable by id | **RATIFIED 2026-09-28: accept under D19 (option C), re-confirmed on corrected facts** | The 2026-07-23 pre-rewrite commit D37 found still answers by id with two denylist terms, a provider mailbox and two personal email addresses in its message. It was public 2026-07-23 to 2026-08-19 (the D9 period), and its message was readable in the run listing 2026-09-21 to 2026-09-27. Accepted as a residual scoped to that one commit object and the stored copies of its message by commit id; no Support purge filed; any other personal-data object is a finding |
+| D39 | How APPLE_MAIL_MCP_HOME reads a tilde | **RATIFIED 2026-09-30: read it as the retired Mail MCP did (option A); APPLIED 2026-09-30** | No tilde expansion: a relative value, `~/…` and `~name/…` included, names a folder under the working directory on every macOS release, and an empty value means unset. This replaces the CLI's release-dependent reading (macOS 26 and 27 sent `~/…` to the home folder). Recorded as BREAKING with `schema_version` unchanged |
 
 ---
 
@@ -1946,5 +1947,46 @@ left by id are D38's and the round's.
 it, is yours alone to decide (D9, D19).
 
 **Blocking?** No; it settles one residual before the fresh round runs.
+
+---
+
+## D39 — How APPLE_MAIL_MCP_HOME reads a tilde: as the retired Mail MCP read it
+
+- **Status:** **RATIFIED 2026-09-30: read it as the retired Mail MCP did (option A); APPLIED
+  2026-09-30** in the commit that records this entry.
+- **Context.** Bringing four operator-supplied paths under the shared tilde policy
+  (`TildeSpelling`), the controller's first version also refused another account's `~name/…` in
+  `APPLE_MAIL_MCP_HOME`, the Mail template root. The critic's read of oracle A (apple-mail-mcp
+  0.6.0, `templates.py`: `base = Path(home_override) if home_override else Path.home() /
+  ".apple_mail_mcp"`) showed that the oracle never expanded a tilde there: `~alice/tpl`, `~/tpl`
+  and a bare `~` each named a folder literally so called, under the working directory, and an
+  empty value counted as unset. Refusing a spelling the oracle accepted is the D12/D22 class, so
+  the controller asked before landing it. Before this ruling the CLI's reading depended on the
+  macOS release: `~/…` meant the home folder on macOS 26 and 27; another account's `~name/…`
+  became the running user's home on macOS 26 and a folder under the working directory on macOS
+  15 and 27; an empty value named the working directory. (macOS 27 was observed directly; macOS
+  26 and 15 are inferred from Foundation behaviour observed on those releases, recorded in the
+  hosted-CI learnings.)
+- **Options considered.** (A) read the value as the oracle did; (B) the shared tilde policy
+  (refuse another account's `~name/…`, expand `~` and `~/…` to the home folder), recorded as a
+  narrowing; (C) leave it unchanged and hold this surface open.
+- **Ruling.** (A). No tilde expansion: a relative value, `~`, `~/…` and `~name/…` included,
+  names a folder under the working directory on every macOS release, and an empty value means
+  unset. Scope: the VALUE of `APPLE_MAIL_MCP_HOME` only. The default location when the variable
+  is unset is unchanged (the account's home directory, where the oracle's `Path.home()` followed
+  `$HOME`; a pre-existing difference this ruling does not address). The other three surfaces of
+  the same change (`contacts … --file`, `APPLE_SEND_RATELIMIT_STATE`,
+  `APPLE_REPLY_RATELIMIT_STATE`) have no oracle counterpart, follow the shared policy, and were
+  not part of this question.
+- **Applied (2026-09-30).** `TemplateStore.init` joins a relative value to the working directory
+  before Foundation sees it and treats an empty value as unset; `TemplateStoreTests` pins the
+  exact path for every spelling above. Recorded in CHANGELOG `[Unreleased]` as BREAKING with
+  `schema_version` unchanged.
+- **Filed:** 2026-09-30 · **Category:** parity vs consistency (D12 class)
+
+**Why it needed you.** Both non-oracle options drop or reinterpret a spelling the retired oracle
+accepted on a shipped surface, the class D12 reserves to you.
+
+**Blocking?** No; it settled the one surface of the tilde change that had an oracle counterpart.
 
 ---

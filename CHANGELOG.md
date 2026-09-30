@@ -255,6 +255,35 @@ JSON output are stable per the versioning policy — breaking changes bump
   user's home, while an unknown user was left unexpanded and failed later; on macOS 15 an
   unknown user was silently replaced by the running user's home. `schema_version` is
   unchanged at 1 for the same reason.
+- **Tilde spellings in `contacts … --file`, the rate-limit state variables and
+  `APPLE_MAIL_MCP_HOME` now mean the same thing on every macOS release.**
+  - Old shape, by release (macOS 27 observed; macOS 26 and 15 inferred from Foundation
+    behaviour observed on those releases; other releases not observed):
+    `contacts` `--file` (note, photo and vCard input) and `APPLE_MAIL_MCP_HOME` took another
+    user's `~user/…` relative to the working directory on macOS 15 and 27, but as the running
+    user's own home on macOS 26. `APPLE_SEND_RATELIMIT_STATE` and `APPLE_REPLY_RATELIMIT_STATE`
+    took a real account's `~user/…` as THAT account's home on macOS 27; an unknown account became
+    the running user's home on macOS 15 and stayed relative to the working directory on macOS 27.
+    `APPLE_MAIL_MCP_HOME=~/…` meant your home folder on macOS 26 and 27, and an empty value named
+    the working directory. `--file ~/…` (on macOS 26 and 27) and a `--file` path with a
+    trailing slash skipped the 25 MB check and were read in full.
+  - New shape: `--file` and both rate-limit variables refuse a `~user` naming any account other
+    than your own, or a tilde followed by a combining mark, as a `validation_error` (exit 64);
+    `~`, `~/…` and your own `~name/…` mean your home folder. A refused rate-limit variable stops
+    `mail forward`, `mail draft send`, `mail reply`, and `mail send` in the modes that spend the
+    send budget (the default mode without `--html`, or `--gui-send`), on the dry-run path as
+    well, before anything is read, written or sent, and never falls back to the default state
+    file.
+    `APPLE_MAIL_MCP_HOME` is read as the retired Mail MCP read it (operator ruling D39): no tilde
+    expansion, so any relative value, `~/…` included, names a folder under the working directory,
+    and an empty value counts as unset; spell it as an absolute path to name a folder in your
+    home. Saving a template with a relative value such as `~/tpl` creates a folder literally
+    named `~` under the working directory: remove it as `./~`, never as `~`. The `--file` size check measures the
+    path that is read, so a `~/…` or trailing-slash file over 25 MB is now refused (exit 64); a
+    final symbolic link is still measured as the link, not its target.
+  - `schema_version` is unchanged at 1: no field, type, enum or exit-code meaning changes;
+    previously accepted inputs now take the existing validation exit, and the template root
+    moves only for the spellings listed above.
 
 ### Changed
 
@@ -336,6 +365,12 @@ JSON output are stable per the versioning policy — breaking changes bump
   home instead (other supported releases were not observed). The accepted tilde forms are
   `~`, `~/…`, and your own account's `~name` / `~name/…`, which now always mean the same
   directory as `~` / `~/…`.
+- **`contacts … --file` no longer skips its 25 MB limit for a `~/…` or trailing-slash
+  spelling.** Either used to skip the check (`~/…` on macOS 26 and 27), so a larger file was
+  read into memory in full; it is now refused. A final symbolic link is still measured as the
+  link, not its target. `--file`, the two rate-limit state variables and `APPLE_MAIL_MCP_HOME`
+  each read a tilde consistently across macOS releases. Both changes are described under
+  BREAKING.
 
 - **Capability checks accept escaped quotes in ordinary multiline Swift test literals.**
   Literal contents remain excluded from test discovery. xUnit evidence now requires UTF-8

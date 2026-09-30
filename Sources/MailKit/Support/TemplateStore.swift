@@ -34,10 +34,33 @@ public struct TemplateStore {
     /// Header keys the format recognizes — mirrors the oracle's `_KNOWN_HEADER_KEYS`.
     static let knownHeaderKeys: Set<String> = ["subject"]
 
-    public init(homeOverride: String? = nil) {
-        let base = homeOverride
-            ?? ProcessInfo.processInfo.environment["APPLE_MAIL_MCP_HOME"]
-            ?? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".apple_mail_mcp").path
+    /// `APPLE_MAIL_MCP_HOME` is read the way oracle A read it (`Path(home_override)` in its
+    /// `templates.py`; operator ruling D39): no tilde expansion, so a relative value — `~`, `~/…`
+    /// and `~name/…` included — names a directory under the working directory, and an empty value
+    /// counts as unset. A relative value is joined to the working directory HERE, so Foundation
+    /// never sees a leading tilde: `URL(fileURLWithPath:)` treats one differently by macOS release
+    /// (the process home on macOS 26; `~/…` the home on macOS 27 too). The absolute test reads the
+    /// first unicode SCALAR, so a slash followed by a combining mark is still absolute. When the
+    /// working directory has been deleted, `currentDirectoryPath` is empty; the value then stays
+    /// relative behind a `./` (still never a leading tilde), so its I/O fails as the oracle's did
+    /// instead of landing under `/`. `environment` and `currentDirectory` are test seams.
+    public init(homeOverride: String? = nil,
+                environment: [String: String] = ProcessInfo.processInfo.environment,
+                currentDirectory: String = FileManager.default.currentDirectoryPath) {
+        let base: String
+        if let homeOverride {
+            base = homeOverride
+        } else if let configured = environment["APPLE_MAIL_MCP_HOME"], !configured.isEmpty {
+            if configured.unicodeScalars.first == "/" {
+                base = configured
+            } else if currentDirectory.isEmpty {
+                base = "./" + configured
+            } else {
+                base = (currentDirectory.hasSuffix("/") ? currentDirectory : currentDirectory + "/") + configured
+            }
+        } else {
+            base = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".apple_mail_mcp").path
+        }
         root = URL(fileURLWithPath: base).appendingPathComponent("templates")
     }
 

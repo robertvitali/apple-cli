@@ -78,11 +78,11 @@ public enum SendRateLimiter {
     /// `HOME=$(mktemp -d)` still resolves the operator's real home). Without an env seam the
     /// limiter is untestable end-to-end and any CLI-tier test would consume the operator's real
     /// send budget. Precedence: explicit parameter (logic tier) → env var (CLI tier) → real home.
-    public static func stateURL(override: URL? = nil) -> URL {
+    public static func stateURL(override: URL? = nil,
+                                environment: [String: String] = ProcessInfo.processInfo.environment) throws -> URL {
         if let override { return override }
-        if let env = ProcessInfo.processInfo.environment["APPLE_SEND_RATELIMIT_STATE"],
-           !env.isEmpty {
-            return URL(fileURLWithPath: (env as NSString).expandingTildeInPath)
+        if let env = environment["APPLE_SEND_RATELIMIT_STATE"], !env.isEmpty {
+            return URL(fileURLWithPath: try rateLimitStatePath("APPLE_SEND_RATELIMIT_STATE", env))
         }
         let base = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".apple-cli", isDirectory: true)
@@ -93,8 +93,8 @@ public enum SendRateLimiter {
     /// mechanism to `RateLimitStore` so the `sends` and `expensive_ops` tiers share ONE
     /// implementation of the subtle edge cases (future-stamp prune, fail-open, atomic write).
     @discardableResult
-    public static func consume(now: Date = Date(), stateURL url: URL? = nil) -> Decision {
-        RateLimitStore.consume(now: now, stateURL: stateURL(override: url),
+    public static func consume(now: Date = Date(), stateURL url: URL? = nil) throws -> Decision {
+        RateLimitStore.consume(now: now, stateURL: try stateURL(override: url),
                                maxCalls: maxCalls, windowSeconds: windowSeconds)
     }
 
@@ -123,11 +123,11 @@ public enum ReplyRateLimiter {
     /// (`APPLE_REPLY_RATELIMIT_STATE`) so the reply window is independent of the send window —
     /// they are distinct oracle tiers with distinct caps. Precedence mirrors `SendRateLimiter`:
     /// explicit parameter (logic tier) → env var (CLI tier) → real home.
-    public static func stateURL(override: URL? = nil) -> URL {
+    public static func stateURL(override: URL? = nil,
+                                environment: [String: String] = ProcessInfo.processInfo.environment) throws -> URL {
         if let override { return override }
-        if let env = ProcessInfo.processInfo.environment["APPLE_REPLY_RATELIMIT_STATE"],
-           !env.isEmpty {
-            return URL(fileURLWithPath: (env as NSString).expandingTildeInPath)
+        if let env = environment["APPLE_REPLY_RATELIMIT_STATE"], !env.isEmpty {
+            return URL(fileURLWithPath: try rateLimitStatePath("APPLE_REPLY_RATELIMIT_STATE", env))
         }
         let base = FileManager.default.homeDirectoryForCurrentUser
             .appendingPathComponent(".apple-cli", isDirectory: true)
@@ -135,8 +135,8 @@ public enum ReplyRateLimiter {
     }
 
     @discardableResult
-    public static func consume(now: Date = Date(), stateURL url: URL? = nil) -> Decision {
-        RateLimitStore.consume(now: now, stateURL: stateURL(override: url),
+    public static func consume(now: Date = Date(), stateURL url: URL? = nil) throws -> Decision {
+        RateLimitStore.consume(now: now, stateURL: try stateURL(override: url),
                                maxCalls: maxCalls, windowSeconds: windowSeconds)
     }
 
@@ -332,4 +332,19 @@ public enum RateLimitStore {
         // half — the lock serializes writers, the atomic write keeps each writer's file un-torn.
         do { try data.write(to: path, options: .atomic); return true } catch { return false }
     }
+}
+
+/// An env-supplied rate-limiter state path under the shared tilde policy (`TildeSpelling`).
+/// Another user's `~user` spelling, or a tilde followed by a combining mark, is refused as a
+/// `validation_error`. It fails CLOSED because it is a deterministic configuration error the
+/// operator can fix, like a malformed `APPLE_SCRIPT_MAX_OUTPUT_BYTES` or a non-boolean
+/// `APPLE_TEST_MODE`; `RateLimitStore`'s degraded fail-open path is for runtime I/O failures the
+/// operator cannot fix mid-call. Failing open here would leave every send uncapped for as long as
+/// the variable stays set, the runaway-loop exposure D8 closed. Callers resolve it on the preview
+/// path too (`stateURL()`), so a dry-run refuses what --execute refuses.
+fileprivate func rateLimitStatePath(_ variable: String, _ raw: String) throws -> String {
+    guard let expanded = TildeSpelling.expandedOwnHome(raw) else {
+        throw AppleError.validation("\(variable) is " + TildeSpelling.refusalMessage(raw))
+    }
+    return expanded
 }

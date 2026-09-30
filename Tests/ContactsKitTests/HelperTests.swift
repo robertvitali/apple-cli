@@ -1,5 +1,6 @@
 import Testing
 import Foundation
+import TestSupport
 @testable import ContactsKit
 import AppleKit
 
@@ -78,6 +79,56 @@ struct InputBoundsTests {
             #expect(e.type == "validation_error")
         } catch {
             Issue.record("expected AppleError, got \(error)")
+        }
+    }
+}
+
+@Suite("readBoundedFile under the shared tilde policy")
+struct ReadBoundedFileTildeTests {
+    private let scratch = ScratchDirs("contacts-bounded-file")
+
+    /// Asserted as an exact refusal, not "does not read the other home", so the test fails on
+    /// every macOS release, including those whose Foundation leaves the spelling cwd-relative.
+    @Test("another user's ~user spelling, or a tilde with a combining mark, is refused before any read")
+    func refusesForeignSpellings() {
+        let other = NSUserName() == "root" ? "~daemon" : "~root"
+        for raw in [other + "/.profile", "~no-such-user-apple-cli/x", "~\u{0301}/x"] {
+            do {
+                _ = try readBoundedFile(raw, "note")
+                Issue.record("expected a refusal for \(raw)")
+            } catch let error as AppleError {
+                #expect(error.type == "validation_error")
+                #expect(error.message == "cannot read the note file: " + TildeSpelling.refusalMessage(raw))
+            } catch {
+                Issue.record("expected AppleError, got \(error)")
+            }
+        }
+    }
+
+    /// The ceiling is measured on the path that is read. The trailing-slash spelling is the
+    /// regression case: `attributesOfItem(atPath:)` finds nothing for `…/big.bin/` while the read
+    /// resolves it, so measuring the raw spelling skipped the limit. `~/…` skipped it the same way,
+    /// but a test cannot place a 25 MB file in the account's real home.
+    @Test("the size ceiling is measured on the path that is read, including a trailing-slash spelling")
+    func sizeCeilingIsMeasuredOnTheReadPath() throws {
+        let dir = try scratch.directory()
+        let small = dir.appendingPathComponent("note.txt")
+        try Data("hello".utf8).write(to: small)
+        #expect(try readBoundedFile(small.path, "note") == Data("hello".utf8))
+
+        let big = dir.appendingPathComponent("big.bin")
+        FileManager.default.createFile(atPath: big.path, contents: nil)
+        let handle = try FileHandle(forWritingTo: big)
+        try handle.truncate(atOffset: UInt64(maxContactsInputBytes + 1))
+        try handle.close()
+        for spelling in [big.path, big.path + "/"] {
+            do {
+                _ = try readBoundedFile(spelling, "image")
+                Issue.record("expected the size ceiling to refuse \(spelling)")
+            } catch let error as AppleError {
+                #expect(error.type == "validation_error")
+                #expect(error.message.hasPrefix("image file exceeds the 25 MB limit"))
+            }
         }
     }
 }

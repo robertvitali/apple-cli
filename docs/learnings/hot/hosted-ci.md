@@ -2,7 +2,7 @@
 topic: hosted-ci
 importance: high
 last-used: 2026-09-30
-uses: 8
+uses: 9
 ---
 
 # Hosted CI (public, free GitHub-hosted runners)
@@ -216,11 +216,11 @@ guard delegates to it. Mail's `save-attachments` destination helpers
 (`WriteManageCommands.swift`) expand through the same policy so a foreign spelling reaches
 confinement unexpanded and is refused there. The complete list of remaining raw
 `expandingTildeInPath` calls: `Sources/NotesKit/AttachmentFS.swift` `resolvedPath` (internal;
-every caller has already passed the guard or supplies an allowed-root constant), and the two
-lowest-consequence sites that take no command-line argument — `Sources/MessagesKit/ChatDB.swift`
-(store-sourced existence probe) and `Sources/AppleKit/RateLimiter.swift` (state paths from
-environment variables the operator sets; the 2026-09-30 follow-up below counts them among the
-surfaces outside the shared policy).
+every caller has already passed the guard or supplies an allowed-root constant), and the
+lowest-consequence site that takes no command-line argument, `Sources/MessagesKit/ChatDB.swift`
+(store-sourced existence probe). `Sources/AppleKit/RateLimiter.swift` (state paths from
+environment variables the operator sets) was also on this list until 2026-09-30, when it moved
+under the shared policy (see the follow-up below).
 
 **Follow-up 2026-09-30 — the audit after the first `macos-26` run.** A read-only audit asked,
 for every site under `Sources/` (outside `TestSupport`) that calls `URL(fileURLWithPath:)`,
@@ -245,19 +245,39 @@ directly.
   (inferred from the table); on macOS 15 and 27 a path relative to the working directory. The
   25 MB size check runs `attributesOfItem(atPath:)` on the raw spelling, which never expands a
   tilde, so for a foreign spelling it finds nothing and the cap is skipped before the read
-  resolves elsewhere. Attachment sources refuse the same spelling (validation, 64).
+  resolves elsewhere. The same held for `~/…` and for a trailing slash, which the read still
+  resolved (observed on macOS 27 when the change below landed), so an oversized file there was
+  read in full. Attachment sources refuse the foreign spelling (validation, 64).
 - `Sources/MailKit/Support/TemplateStore.swift`: `APPLE_MAIL_MCP_HOME`, the template root that
   list, get, render, save and delete all use, also goes to `URL(fileURLWithPath:)`, with the
   same per-release outcomes.
 - `Sources/AppleKit/RateLimiter.swift`: `APPLE_SEND_RATELIMIT_STATE` and
   `APPLE_REPLY_RATELIMIT_STATE`, the two state paths listed above as deliberate exceptions, go to
   `expandingTildeInPath` first: an unknown user became the home on macOS 15 (observed), a known
-  other account presumably becomes that account's home (inferred), and macOS 26 is not observed.
+  other account becomes that account's home (observed on macOS 27 when the change below landed:
+  `~root/x` gave `/var/root/x`), and macOS 26 is not observed.
   The result then goes to `URL(fileURLWithPath:)`, so a tilde that survives the first step becomes
   the process home on macOS 26 (inferred from item 6) and a cwd-relative path on macOS 27.
 Every other site was judged safe (confined or refused first, or only ever handed an absolute
 path) or not operator input (store-owned values, constants). Bringing the four under the shared
 policy changes what those commands accept, so it is its own change with its own release note.
+That change landed on 2026-09-30 for three of the four. `contacts` `--file` and the two
+rate-limit variables resolve through `TildeSpelling.expandedOwnHome` and refuse another user's
+`~user`, or a tilde followed by a combining mark, as a `validation_error`; `mail send`,
+`forward`, `draft send` and `reply` resolve their variable on the dry-run path too, so a preview
+refuses what `--execute` refuses. The rate limiters fail closed because a malformed variable is a
+deterministic configuration error (like a malformed `APPLE_SCRIPT_MAX_OUTPUT_BYTES`); their
+degraded fail-open path is for runtime I/O failures. The `--file` reader measures its size limit
+on the path it reads (a trailing slash is handled because `expandingTildeInPath` drops it); a
+final symbolic link is still measured as the link, not its target, and devices, FIFOs and growth
+between the check and the read are open follow-ups. The fourth, `APPLE_MAIL_MCP_HOME`, went the
+other way (operator ruling D39): oracle A never expanded a tilde there, so the value is read
+literally, a relative value joined to the working directory before Foundation sees it (or, when
+the working directory has been deleted and `currentDirectoryPath` is empty, kept relative behind
+`./` so its I/O fails as the oracle's did), and an empty value treated as unset. The first draft
+of that release note claimed the oracles expanded `~alice` to that account's home; the critic
+read oracle A's source and found no expansion at all. State an oracle's behaviour only from its
+source.
 
 **Lessons.**
 

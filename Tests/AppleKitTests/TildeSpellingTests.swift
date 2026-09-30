@@ -25,4 +25,17 @@ struct TildeSpellingTests {
         #expect(TildeSpelling.ownHome("~alice/x", account: "") == nil)
         #expect(TildeSpelling.ownHome("~\u{0301}/x", account: "alice") == nil)
     }
+
+    @Test("expandedOwnHome expands the operator's own spellings to the directory ~ names and refuses every other ~user")
+    func expandedOwnHomeExpandsOwnAndRefusesForeign() {
+        let home = ("~" as NSString).expandingTildeInPath
+        #expect(TildeSpelling.expandedOwnHome("~", account: "alice") == home)
+        #expect(TildeSpelling.expandedOwnHome("~/x", account: "alice") == home + "/x")
+        #expect(TildeSpelling.expandedOwnHome("~ALICE/x", account: "alice") == home + "/x")
+        #expect(TildeSpelling.expandedOwnHome("/abs/x", account: "alice") == "/abs/x")
+        #expect(TildeSpelling.expandedOwnHome("rel/x", account: "alice") == "rel/x")
+        #expect(TildeSpelling.expandedOwnHome("~bob/x", account: "alice") == nil)
+        #expect(TildeSpelling.expandedOwnHome("~root/x", account: "alice") == nil)
+        #expect(TildeSpelling.expandedOwnHome("~\u{0301}/x", account: "alice") == nil)
+    }
 }

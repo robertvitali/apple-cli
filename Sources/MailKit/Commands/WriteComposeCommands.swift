@@ -369,6 +369,11 @@ struct SendCommand: ParsableCommand {
                 guard html != nil else { throw AppleError.validation("--gui-send only applies to an --html send.") }
                 guard mode == "send" else { throw AppleError.validation("--gui-send requires --mode send.") }
             }
+            // PREVIEW HONESTY for `APPLE_SEND_RATELIMIT_STATE`: resolve it on BOTH paths of every
+            // mode whose --execute consumes the send budget (the auto-send and GUI-send branches
+            // below), so a dry-run refuses a spelling --execute refuses. Resolving has no
+            // filesystem side effects; the consume that spends budget stays execute-only.
+            if mode == "send" && (html == nil || guiSend) { _ = try SendRateLimiter.stateURL() }
 
             // Live actions across the three delivery modes:
             //  send  — plain/attachment AUTO-SEND (reliable AppleScript), HTML GUI auto-send
@@ -494,7 +499,7 @@ struct SendCommand: ParsableCommand {
             // mail on the wire consume budget; every preview path is excluded because each `will*`
             // predicate folds in `willExecute`.
             if willGuiSend || willAutoSend {
-                let rl = SendRateLimiter.consume()
+                let rl = try SendRateLimiter.consume()
                 guard rl.allowed else { throw AppleError.validation(SendRateLimiter.refusal(rl)) }
                 if rl.degraded {
                     Output.writeError(Data(
@@ -646,6 +651,10 @@ struct ReplyCommand: ParsableCommand {
             if guiSend {
                 guard html != nil else { throw AppleError.validation("--gui-send only applies to an --html reply.") }
             }
+            // PREVIEW HONESTY for `APPLE_REPLY_RATELIMIT_STATE`: every live reply consumes the
+            // reply budget, so the variable is resolved on BOTH paths here, before the store
+            // opens; a dry-run refuses a spelling --execute refuses. Consuming stays execute-only.
+            _ = try ReplyRateLimiter.stateURL()
             // Attachment paths resolved ONCE, in BOTH modes, and BEFORE the store opens:
             // existence, the 25 MB cap, the executable-extension blocklist, the sensitive-dir
             // refusal and the control-char rejection are filesystem/string checks that depend
@@ -752,7 +761,7 @@ struct ReplyCommand: ParsableCommand {
                 // sending to route around the `sends` cap. Only the EXECUTE path reaches here (the
                 // preview returns before willLiveOutbound), so a dry-run consumes no budget. The
                 // reply window is SEPARATE from the send window (distinct oracle tiers).
-                let rl = ReplyRateLimiter.consume()
+                let rl = try ReplyRateLimiter.consume()
                 guard rl.allowed else { throw AppleError.validation(ReplyRateLimiter.refusal(rl)) }
                 if rl.degraded {
                     Output.writeError(Data(
@@ -905,6 +914,9 @@ struct ForwardCommand: ParsableCommand {
             if let subject, subject.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
                 throw AppleError.validation("--subject must not be empty or whitespace; an empty keyword matches every message in the store.")
             }
+            // PREVIEW HONESTY for `APPLE_SEND_RATELIMIT_STATE`: every executed forward consumes
+            // the send budget, so the variable is resolved on BOTH paths, before the store opens.
+            _ = try SendRateLimiter.stateURL()
             // Outbound guard fires BEFORE any resolve/emit → one envelope. BOTH modes (preview
             // honesty): a sandboxed dry-run to a non-allowlisted recipient must refuse exactly
             // as --execute would; recipients come from flags, so no Mail access is needed.
@@ -956,7 +968,7 @@ struct ForwardCommand: ParsableCommand {
                 // ORACLE-MIRRORED SEND RATE LIMIT — `forward_message` is in the oracle's "sends"
                 // tier alongside send_email (OPERATION_TIERS). This is the execute path; the
                 // preview returns before reaching here, so a dry-run consumes no budget.
-                let rl = SendRateLimiter.consume()
+                let rl = try SendRateLimiter.consume()
                 guard rl.allowed else { throw AppleError.validation(SendRateLimiter.refusal(rl)) }
                 if rl.degraded {
                     Output.writeError(Data(
@@ -1408,6 +1420,9 @@ struct DraftCommand: ParsableCommand {
             guard ["list", "create", "send", "open", "delete"].contains(action) else {
                 throw AppleError.validation("draft action must be list, create, send, open, or delete.")
             }
+            // PREVIEW HONESTY for `APPLE_SEND_RATELIMIT_STATE`: `draft send` consumes the send
+            // budget on --execute, so the variable is resolved on BOTH paths of that action.
+            if action == "send" { _ = try SendRateLimiter.stateURL() }
             let script = scriptFactory()
 
             // list — a live READ of Mail's real Drafts mailbox (no gate).
@@ -1504,7 +1519,7 @@ struct DraftCommand: ParsableCommand {
                     // and pass oracle A's 100-recipient cap into the script (enforced BEFORE the
                     // open/send). Consuming before dispatch matches `forward`, where an in-script
                     // refusal after `consume` also spends a slot — deliberately stricter, and rare.
-                    let rl = SendRateLimiter.consume()
+                    let rl = try SendRateLimiter.consume()
                     guard rl.allowed else { throw AppleError.validation(SendRateLimiter.refusal(rl)) }
                     if rl.degraded {
                         Output.writeError(Data(

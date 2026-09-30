@@ -50,15 +50,26 @@ func unionSummariesByID(_ lists: [[ContactSummary]], cap: Int) -> [ContactSummar
 /// pathological file or string from blowing up memory before we ever touch the store.
 let maxContactsInputBytes = 25 * 1024 * 1024
 
-/// Read a file into memory only after confirming it is under the size ceiling.
-func readBoundedFile(_ path: String, _ what: String) throws -> Data {
+/// Read a file into memory only after confirming it is under the size ceiling. The spelling is
+/// resolved ONCE, under the shared tilde policy (`TildeSpelling`): another user's `~user` is
+/// refused before anything is read, and `~/…` expands to the operator's own home directory (the
+/// same directory as `~`), so the size check and the read see the same path on every macOS
+/// release. Measuring the raw spelling, as this once did, skipped the limit for `~/…` and for a
+/// trailing slash: `attributesOfItem(atPath:)` found nothing for either spelling, while the read
+/// resolved both. The trailing slash is handled because `expandingTildeInPath` also drops a
+/// trailing slash (and collapses `//`). Residual: a final symbolic link is still measured as the
+/// link itself, not its target.
+func readBoundedFile(_ raw: String, _ what: String) throws -> Data {
+    guard let path = TildeSpelling.expandedOwnHome(raw) else {
+        throw AppleError.validation("cannot read the \(what) file: " + TildeSpelling.refusalMessage(raw))
+    }
     let attrs = try? FileManager.default.attributesOfItem(atPath: path)
     if let size = attrs?[.size] as? Int, size > maxContactsInputBytes {
         throw AppleError.validation(
             "\(what) file exceeds the \(maxContactsInputBytes / (1024 * 1024)) MB limit (\(size) bytes)")
     }
     do { return try Data(contentsOf: URL(fileURLWithPath: path)) }
-    catch { throw AppleError.validation("failed to read \(what) file \(path): \(error.localizedDescription)") }
+    catch { throw AppleError.validation("failed to read \(what) file \(raw): \(error.localizedDescription)") }
 }
 
 /// Reject an oversized inline string input (`--base64` / `--json`) before parsing it.

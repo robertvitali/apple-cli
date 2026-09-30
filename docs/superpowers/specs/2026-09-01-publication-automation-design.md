@@ -208,6 +208,16 @@ the failing step was the driver's cleanup, which did not handle a mount under it
 handled forward rather than reverted. Both are in the
 hosted-CI learnings.
 
+**Amendment 2026-09-30 (operator-path surfaces).** The four operator-path surfaces named in the
+first 2026-09-30 amendment no longer read a tilde differently by macOS release. Three of them (the
+`contacts` `--file` reader and the two rate-limiter state variables) follow the shared tilde
+policy: another user's `~user` spelling, or a tilde followed by a combining mark, is refused as a
+`validation_error` on every release (the check runs on the spelling before Foundation sees it),
+and `~/…` expands to the account's own home directory. The fourth, `APPLE_MAIL_MCP_HOME`, is read
+literally, as oracle A read it (HUMAN-DECISIONS D39): no tilde expansion, a relative value under
+the working directory, an empty value treated as unset. The preceding amendment's statement that
+these surfaces stand is superseded; the 2026-09-29 amendment's three residuals still stand.
+
 ### 4.2 Contribution model
 
 - After bootstrap activation, pull requests are the normal path to `main`.

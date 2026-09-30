@@ -39,15 +39,15 @@ struct SendRateLimiterTests {
     }
 
     @Test("the first three sends pass and the fourth is refused inside the window")
-    func capFiresOnFourth() {
+    func capFiresOnFourth() throws {
         let url = tmpState("cap")
         let t0 = Date()
         for i in 1...3 {
-            let d = SendRateLimiter.consume(now: t0.addingTimeInterval(Double(i)), stateURL: url)
+            let d = try SendRateLimiter.consume(now: t0.addingTimeInterval(Double(i)), stateURL: url)
             #expect(d.allowed == true, "send \(i) should be allowed")
             #expect(d.degraded == false)
         }
-        let fourth = SendRateLimiter.consume(now: t0.addingTimeInterval(4), stateURL: url)
+        let fourth = try SendRateLimiter.consume(now: t0.addingTimeInterval(4), stateURL: url)
         #expect(fourth.allowed == false)
         #expect(fourth.retryAfter > 0)
     }
@@ -56,35 +56,35 @@ struct SendRateLimiterTests {
     /// while this CLI is a fresh process per invocation. Each `consume` call here stands in for a
     /// separate process; if state did not persist, the fourth would wrongly pass.
     @Test("the window persists ACROSS invocations — a fresh process does not reset it")
-    func persistsAcrossProcesses() {
+    func persistsAcrossProcesses() throws {
         let url = tmpState("persist")
         let t0 = Date()
-        _ = SendRateLimiter.consume(now: t0, stateURL: url)
-        _ = SendRateLimiter.consume(now: t0.addingTimeInterval(1), stateURL: url)
-        _ = SendRateLimiter.consume(now: t0.addingTimeInterval(2), stateURL: url)
+        _ = try SendRateLimiter.consume(now: t0, stateURL: url)
+        _ = try SendRateLimiter.consume(now: t0.addingTimeInterval(1), stateURL: url)
+        _ = try SendRateLimiter.consume(now: t0.addingTimeInterval(2), stateURL: url)
         // A brand-new "process" reading the same state file must still see a full window.
-        #expect(SendRateLimiter.consume(now: t0.addingTimeInterval(3), stateURL: url).allowed == false)
+        #expect(try SendRateLimiter.consume(now: t0.addingTimeInterval(3), stateURL: url).allowed == false)
         #expect(FileManager.default.fileExists(atPath: url.path), "state must have been written")
     }
 
     @Test("the window SLIDES: once the oldest call ages out, a send is allowed again")
-    func windowSlides() {
+    func windowSlides() throws {
         let url = tmpState("slide")
         let t0 = Date()
-        for i in 0..<3 { _ = SendRateLimiter.consume(now: t0.addingTimeInterval(Double(i)), stateURL: url) }
+        for i in 0..<3 { _ = try SendRateLimiter.consume(now: t0.addingTimeInterval(Double(i)), stateURL: url) }
         // Still inside 60s → refused.
-        #expect(SendRateLimiter.consume(now: t0.addingTimeInterval(30), stateURL: url).allowed == false)
+        #expect(try SendRateLimiter.consume(now: t0.addingTimeInterval(30), stateURL: url).allowed == false)
         // Past the window from the oldest → allowed. Mirrors the oracle's
         // `while q and q[0] <= now - window: q.popleft()`.
-        #expect(SendRateLimiter.consume(now: t0.addingTimeInterval(61), stateURL: url).allowed == true)
+        #expect(try SendRateLimiter.consume(now: t0.addingTimeInterval(61), stateURL: url).allowed == true)
     }
 
     @Test("a refusal reports a positive retryAfter bounded by the window")
-    func retryAfterIsSane() {
+    func retryAfterIsSane() throws {
         let url = tmpState("retry")
         let t0 = Date()
-        for i in 0..<3 { _ = SendRateLimiter.consume(now: t0.addingTimeInterval(Double(i)), stateURL: url) }
-        let d = SendRateLimiter.consume(now: t0.addingTimeInterval(10), stateURL: url)
+        for i in 0..<3 { _ = try SendRateLimiter.consume(now: t0.addingTimeInterval(Double(i)), stateURL: url) }
+        let d = try SendRateLimiter.consume(now: t0.addingTimeInterval(10), stateURL: url)
         #expect(d.allowed == false)
         #expect(d.retryAfter > 0 && d.retryAfter <= SendRateLimiter.windowSeconds)
         #expect(SendRateLimiter.refusal(d).contains("Rate limit exceeded: 3 calls per 60s"))
@@ -94,10 +94,10 @@ struct SendRateLimiterTests {
     /// send rather than bricking the CLI, but flags `degraded` so the command warns instead of
     /// silently dropping the cap.
     @Test("an unwritable state path fails OPEN and reports degraded")
-    func failsOpenWhenUnwritable() {
+    func failsOpenWhenUnwritable() throws {
         // /dev/null/... can never be a directory, so the create+write both fail.
         let unwritable = URL(fileURLWithPath: "/dev/null/apple-cli/state.json")
-        let d = SendRateLimiter.consume(stateURL: unwritable)
+        let d = try SendRateLimiter.consume(stateURL: unwritable)
         #expect(d.allowed == true, "must not brick sending")
         #expect(d.degraded == true, "must be visible, not silent")
     }
@@ -108,7 +108,7 @@ struct SendRateLimiterTests {
         try FileManager.default.createDirectory(at: url.deletingLastPathComponent(),
                                                 withIntermediateDirectories: true)
         try Data("not json at all".utf8).write(to: url)
-        let d = SendRateLimiter.consume(stateURL: url)
+        let d = try SendRateLimiter.consume(stateURL: url)
         #expect(d.allowed == true)
         // Reset-to-empty (allowed) rather than bricking sends — but NOW flagged degraded so the
         // caller warns on stderr. A persistently-unparseable file must not silently reset the cap to
@@ -133,7 +133,7 @@ struct SendRateLimiterTests {
         let future = (1...3).map { now.timeIntervalSince1970 + 86_400 + Double($0) }
         try JSONEncoder().encode(future).write(to: url)
 
-        let d = SendRateLimiter.consume(now: now, stateURL: url)
+        let d = try SendRateLimiter.consume(now: now, stateURL: url)
         #expect(d.allowed == true, "a stamp that has not happened yet cannot evidence a sent message")
         #expect(d.retryAfter == 0)
 
@@ -144,14 +144,14 @@ struct SendRateLimiterTests {
     }
 
     @Test("a refusal never reports a retryAfter longer than the window")
-    func retryAfterClamped() {
+    func retryAfterClamped() throws {
         let url = tmpState("clamp")
         let t0 = Date()
-        for i in 0..<3 { _ = SendRateLimiter.consume(now: t0.addingTimeInterval(Double(i)), stateURL: url) }
+        for i in 0..<3 { _ = try SendRateLimiter.consume(now: t0.addingTimeInterval(Double(i)), stateURL: url) }
         // Query at or after the newest stamp. Querying EARLIER would be time travel, and the
         // future-stamp prune would (correctly) discard the not-yet-happened stamp and allow the
         // send — which is how the first draft of this test failed.
-        let d = SendRateLimiter.consume(now: t0.addingTimeInterval(3), stateURL: url)
+        let d = try SendRateLimiter.consume(now: t0.addingTimeInterval(3), stateURL: url)
         #expect(d.allowed == false)
         #expect(d.retryAfter > 0 && d.retryAfter <= SendRateLimiter.windowSeconds)
     }
@@ -160,14 +160,14 @@ struct SendRateLimiterTests {
     /// reads the passwd entry and ignores it — so without an env seam the limiter is untestable
     /// end-to-end and any CLI-tier test would spend the operator's real send budget.
     @Test("APPLE_SEND_RATELIMIT_STATE redirects the state file for the CLI tier")
-    func envOverrideIsHonored() {
-        TestEnvironment.withoutRateLimitOverrides {
-            let real = SendRateLimiter.stateURL()
+    func envOverrideIsHonored() throws {
+        try TestEnvironment.withoutRateLimitOverrides {
+            let real = try SendRateLimiter.stateURL()
             #expect(real.path.hasSuffix(".apple-cli/send-rate-limit.json"))
         }
         // The explicit parameter must still win over the env var (logic tier beats CLI tier).
         let explicit = tmpState("precedence")
-        #expect(SendRateLimiter.stateURL(override: explicit) == explicit)
+        #expect(try SendRateLimiter.stateURL(override: explicit) == explicit)
     }
 
     /// The refusal path must still PRUNE, or a hot loop against a full window would append
@@ -176,10 +176,42 @@ struct SendRateLimiterTests {
     func refusalDoesNotGrowState() throws {
         let url = tmpState("bound")
         let t0 = Date()
-        for i in 0..<3 { _ = SendRateLimiter.consume(now: t0.addingTimeInterval(Double(i)), stateURL: url) }
-        for i in 0..<50 { _ = SendRateLimiter.consume(now: t0.addingTimeInterval(10 + Double(i) * 0.01), stateURL: url) }
+        for i in 0..<3 { _ = try SendRateLimiter.consume(now: t0.addingTimeInterval(Double(i)), stateURL: url) }
+        for i in 0..<50 { _ = try SendRateLimiter.consume(now: t0.addingTimeInterval(10 + Double(i) * 0.01), stateURL: url) }
         let stamps = try JSONDecoder().decode([TimeInterval].self, from: Data(contentsOf: url))
         #expect(stamps.count == SendRateLimiter.maxCalls,
                 "window should hold exactly the cap, found \(stamps.count)")
+    }
+
+    /// A refusal, never a fall-back to the default path: a malformed variable is a deterministic
+    /// configuration error, so it fails closed (see `rateLimitStatePath`). Before this policy, on
+    /// macOS 27 `~root/…` expanded to that account's real home, and an unknown account or a tilde
+    /// with a combining mark stayed a path relative to the working directory.
+    @Test("both state-path env vars follow the shared tilde policy and never fall back to the real file")
+    func envStatePathsFollowTheTildePolicy() throws {
+        let other = NSUserName() == "root" ? "~daemon" : "~root"
+        for raw in [other + "/state.json", "~no-such-user-apple-cli/state.json", "~\u{0301}/state.json"] {
+            do {
+                _ = try SendRateLimiter.stateURL(environment: ["APPLE_SEND_RATELIMIT_STATE": raw])
+                Issue.record("expected a send-state refusal for \(raw)")
+            } catch let error as AppleError {
+                #expect(error.type == "validation_error")
+                #expect(error.message == "APPLE_SEND_RATELIMIT_STATE is " + TildeSpelling.refusalMessage(raw))
+            }
+            do {
+                _ = try ReplyRateLimiter.stateURL(environment: ["APPLE_REPLY_RATELIMIT_STATE": raw])
+                Issue.record("expected a reply-state refusal for \(raw)")
+            } catch let error as AppleError {
+                #expect(error.type == "validation_error")
+                #expect(error.message == "APPLE_REPLY_RATELIMIT_STATE is " + TildeSpelling.refusalMessage(raw))
+            }
+        }
+        let home = ("~" as NSString).expandingTildeInPath
+        #expect(try SendRateLimiter.stateURL(environment: ["APPLE_SEND_RATELIMIT_STATE": "~/s.json"]).path
+                == home + "/s.json")
+        #expect(try ReplyRateLimiter.stateURL(environment: ["APPLE_REPLY_RATELIMIT_STATE": "~/r.json"]).path
+                == home + "/r.json")
+        #expect(try SendRateLimiter.stateURL(environment: ["APPLE_SEND_RATELIMIT_STATE": ""]).path
+                .hasSuffix(".apple-cli/send-rate-limit.json"))
     }
 }
