@@ -48,13 +48,14 @@ Versions are **platform-keyed**, not classic SemVer (tags carry a `v` prefix:
 | **MINOR** | Feature additions (and any breaking-flagged change) | `26.1.0` |
 | **PATCH** | Bug fixes, docs, small non-feature updates | `26.0.1` |
 
-MAJOR is a validation target, not a deployment minimum — the binary currently
-runs on macOS 14+ (`Package.swift` declares the minimum independently). Breaking
-changes to the agent-facing JSON contract never bump MAJOR — they bump the
-envelope's `schema_version` and ship in at least a MINOR flagged `BREAKING:` in
-the [CHANGELOG](./CHANGELOG.md). At runtime, `apple version` emits both
-`version` and `schema_version` as JSON (`apple --version` prints the bare
-string). Release binaries are attached to
+MAJOR is a validation target, not a deployment minimum. `Package.swift` declares
+macOS 14 as the technical minimum, so the binary installs on macOS 14 and later,
+but only macOS 26 and 27 are tested and supported; macOS 14 through 25 are
+untested and unsupported. Breaking changes to the agent-facing JSON contract
+never bump MAJOR — they bump the envelope's `schema_version` and ship in at
+least a MINOR flagged `BREAKING:` in the [CHANGELOG](./CHANGELOG.md). At
+runtime, `apple version` emits both `version` and `schema_version` as JSON
+(`apple --version` prints the bare string). Release binaries are attached to
 [GitHub Releases](https://github.com/robertvitali/apple-cli/releases). Full
 policy: [`docs/versioning-policy.md`](./docs/versioning-policy.md).
 

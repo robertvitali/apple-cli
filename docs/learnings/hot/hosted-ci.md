@@ -1,8 +1,8 @@
 ---
 topic: hosted-ci
 importance: high
-last-used: 2026-09-26
-uses: 4
+last-used: 2026-09-29
+uses: 5
 ---
 
 # Hosted CI (public, free GitHub-hosted runners)
@@ -83,11 +83,12 @@ red step had been unexercised since the last hosted run on 2026-09-02; the local
      when the assertion is about where a write lands, not about the URL's directory-ness.
    - `NSString.expandingTildeInPath` on an unknown `~user/…` returns the spelling unchanged on
      macOS 27 but substitutes the PROCESS HOME on macOS 15 (only those two releases were
-     observed; the package floor is macOS 14, so 14, 16 and 26 are unverified either way). A
-     guard that relied on the "unchanged" behaviour to refuse the form let `~nosuchuser/x.bin`
-     resolve to `$HOME/x.bin` there. The Notes attachment guard now refuses any `~user` form
-     other than the current account's own name before expanding, checked on unicode scalars
-     (a combining mark after the tilde is one grapheme to Swift but still a tilde to Foundation).
+     observed; the package floor is macOS 14, so 14 and 26 are unverified either way; 26
+     becomes the hosted lane on 2026-09-29). A guard that relied on the "unchanged" behaviour
+     to refuse the form let `~nosuchuser/x.bin` resolve to `$HOME/x.bin` there. The Notes
+     attachment guard now refuses any `~user` form other than the current account's own name
+     before expanding, checked on unicode scalars (a combining mark after the tilde is one
+     grapheme to Swift but still a tilde to Foundation).
    - Diagnostic method worth reusing: the parameterised test's failure line named the one
      argument combination that failed (`dirlink`, the only directory target), which is what
      isolated the directory-flag difference without a macOS 15 host. A throwing expression
@@ -150,9 +151,9 @@ paths).
 
 **Lessons.**
 
-- Hosted CI is Ubuntu plus `macos-15`; local development tracks the current macOS. A green local
-  run is not evidence for the hosted lanes, and vice versa (recorded in AGENTS.md
-  "Toolchain + testing").
+- Hosted CI is Ubuntu plus `macos-26` (`macos-15` until 2026-09-29); local development tracks
+  the current macOS. A green local run is not evidence for the hosted lanes, and vice versa
+  (recorded in AGENTS.md "Toolchain + testing").
 - Reproduce hosted Python failures locally in a Linux container before pushing a fix: Colima and
   `docker run --rm -v <copy>:/work -w /work ubuntu:24.04` with `apt-get install python3` gives
   the same 3.12 interpreter. Mount a copy under `$HOME` (Colima shares only home paths; a mount

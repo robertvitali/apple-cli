@@ -7,10 +7,10 @@ tests keep that text restorable as it stands:
   * it parses with the static scan's own parser, and the static scan and the action-pin check
     both pass over it beside the tracked workflows, with no exception for it;
   * its shape stays read-only: a push trigger on `main` only, `contents: read` at workflow and
-    job level, one job guarded to release commits, a checkout without persisted credentials, no
-    remote action beyond checkout and upload-artifact, and the upload as the last step with no
-    step or job allowed to skip or tolerate a failure (so an artifact exists only when every
-    check before it passed);
+    job level, one job on `macos-26` guarded to release commits, a checkout without persisted
+    credentials, no remote action beyond checkout and upload-artifact, and the upload as the
+    last step with no step or job allowed to skip or tolerate a failure (so an artifact exists
+    only when every check before it passed);
   * restored beside the tracked workflows, it adds exactly the action references the exact
     inventory in test_action_pins.py expects of it, so a restoration keeps the tier green;
   * its drift gate, mechanical re-render and notes step, run from the recorded text with the
@@ -128,6 +128,9 @@ class RecordedWorkflowTests(unittest.TestCase):
         self.assertEqual(list(document["jobs"]), ["verify"])
         job = document["jobs"]["verify"]
         self.assertEqual(job["permissions"], {"contents": "read"})
+        # The runner design section 12's table names for `main` at 26.x (an urgent release is
+        # 26.x-only).
+        self.assertEqual(job["runs-on"], "macos-26")
         self.assertEqual(job["if"], "startsWith(github.event.head_commit.message, 'chore(release): v')")
         for key in ("environment", "secrets", "container", "services", "uses"):
             self.assertNotIn(key, job)

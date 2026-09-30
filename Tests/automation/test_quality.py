@@ -228,6 +228,12 @@ class QualityDriverTests(unittest.TestCase):
             stages=tuple(stages),
         )
 
+    def test_docs_manual_freshness_runs_on_the_recorded_macos_image(self) -> None:
+        # Every macOS hosted job runs on `macos-26` (design section 4.1, 2026-09-29 amendment);
+        # the CI jobs are pinned below, and this pins the one macOS job in the Docs workflow.
+        workflow = (REPO_ROOT / ".github" / "workflows" / "docs.yml").read_text(encoding="utf-8")
+        self.assertIn("runs-on: macos-26", workflow_job(workflow, "manual-fresh"))
+
     def test_ci_runs_the_full_hosted_quality_gate_with_exact_sha_bindings(self) -> None:
         workflow = CI_WORKFLOW_PATH.read_text(encoding="utf-8")
         job = workflow_job(workflow, "build-test")
@@ -238,7 +244,7 @@ class QualityDriverTests(unittest.TestCase):
         self.assertNotIn("pull_request_target", workflow)
         self.assertRegex(workflow, r"(?m)^permissions:\n  contents: read$")
         for hosted_job in (job, bats_build_job, bats_job):
-            self.assertIn("runs-on: macos-15", hosted_job)
+            self.assertIn("runs-on: macos-26", hosted_job)
             self.assertNotIn("self-hosted", hosted_job)
             self.assertNotRegex(hosted_job, r"\$\{\{\s*secrets\.")
             self.assertNotRegex(hosted_job, r"(?m)^    environment:")

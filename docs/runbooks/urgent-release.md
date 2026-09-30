@@ -491,7 +491,7 @@ jobs:
     name: urgent release verify
     # Runs for the release commit only; every other push to main skips the job.
     if: "startsWith(github.event.head_commit.message, 'chore(release): v')"
-    runs-on: macos-15
+    runs-on: macos-26
     permissions:
       contents: read
     timeout-minutes: 45

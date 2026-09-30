@@ -128,6 +128,42 @@ tier on `macos-15`. The release itself still waits on the Section 18 phase 3 pub
 steps 4a and 5), and the canonical suite and the path-free packaging check are re-established
 on the exact release commit and its shipped artifact when that publisher runs.
 
+**Amendment 2026-09-29.** A stable hosted `macos-26` image now exists: GitHub's
+runner-images catalogue lists macOS 26 Arm64 as generally available under the `macos-26`
+label (read 2026-09-29; only the Xcode 27 image carries a preview badge). Every macOS
+hosted job therefore moves from `macos-15` to `macos-26`, as Section 12's `main` at 26.x
+row and Section 18 step 5 direct, so the hosted lanes will gate the logic tier and the
+hosted-safe Bats partition on macOS 26 itself. The hosted basis starts with a recorded run,
+not with the image. The baseline is, for each workflow, the first push run on `main` after
+the move whose first attempt completes with every job green (CI's six jobs, Docs' four); a
+red, cancelled or re-run attempt does not qualify and is recorded as such, and the CI and
+Docs baseline runs may come from different commits. Because both workflows cancel an
+in-progress run on the same ref, no further push lands until those runs finish. Each is to
+be recorded in the readiness evidence with the runner image name, image version and OS
+version as its job log's "Set up job" section reports them, and the default Xcode, Swift
+and `python3` versions from the Included Software page that log links for that exact image
+version; the jobs select no Xcode, so the image default applies. This amendment also
+corrects the basis Section 12 and Section 18 step 5 name for the interval: no local macOS
+26 canonical run is recorded in the readiness evidence. Every canonical run it records,
+from 2026-09-21 on, ran on the operator's macOS 27 host, whose install history dates the
+macOS 27.0 install before the first of them. Until the baseline runs are recorded, the
+macOS 26 claim therefore has no recorded per-commit basis, and that gap is recorded here.
+If a first attempt is red or cancelled, the fix lands forward on `main` and the gap stays
+open until a qualifying run is recorded. If the image itself fails (withdrawn, broken, or
+jobs left queued), reverting this change is the sanctioned fallback; a revert restores the
+`runs-on` values and the runner allowlist together. `macos-15` is not kept as an extra
+lane: it matches neither tested baseline (macOS 26 and 27), and macOS 14 through 25
+remain untested and unsupported. Three things are left with no hosted observation, and
+they are recorded here as residuals. First, the binary still installs on macOS 14 through
+25 (`Package.swift`'s floor) where no lane runs it; the path guards refuse the
+OS-divergent `~user` spellings before Foundation expands them, so the known macOS 15
+difference no longer depends on which macOS runs the binary. Second, the
+`swift-tools-version: 6.0` declaration, because no lane builds with a compiler older than
+the image's default Xcode. Third, the interpreter under the macOS jobs' drivers, which is
+the image's default `python3` (3.14 per the catalogue), while `Tests/automation` runs only
+on Ubuntu with 3.12. No stable hosted `macos-27` image exists, so the macOS 27 claim still
+rests on the local run D25 accepted.
+
 ### 4.2 Contribution model
 
 - After bootstrap activation, pull requests are the normal path to `main`.
@@ -856,7 +892,8 @@ aggregate, changed-line, and per-target policies against the recorded baseline.
 The full canonical local gate remains separate and required before every push.
 After visibility, the recorded validated hosted lane (macOS 26 once a stable
 hosted image exists; until then the `macos-15` lane recorded under Section 18
-step 5) runs
+step 5; amendment 2026-09-29: the image exists, and the `macos-26` lane counts
+as validated once its baseline runs are recorded, Section 4.1) runs
 SwiftPM with code coverage enabled and exports LLVM's machine-readable
 coverage data. A line enters the denominator only when
 LLVM reports an executable region for that line. Comments, blank lines,
@@ -909,6 +946,12 @@ reviewed rebuild rehearsal as that alternative for macOS 27; see Section 4.1. Un
 `macos-26`/`macos-27` hosted images exist, the "macOS 27 adoption" and "`main` at 27.x" rows'
 hosted matrices are likewise the recorded `macos-15` lane plus that local run, and the
 "Artifact runner" column stays "no publish" until the Section 18 phase 3 publisher exists.)
+(Amendment 2026-09-29: a stable `macos-26` hosted image now exists and is the `main` row's
+hosted matrix, replacing the recorded `macos-15` lane. The local macOS 26 run the paragraph
+above names is not recorded in the readiness evidence (Section 4.1 records the gap), so the
+macOS 26 claim rests on that lane once its baseline runs are recorded there, and on no
+recorded per-commit basis before then. The macOS 27 rows' hosted matrices are that
+`macos-26` lane plus the local run D25 accepted until a stable `macos-27` image exists.)
 
 Before accepting macOS 27, first run the full path-confinement test file
 (`Tests/AppleKitTests/PathConfinementTests.swift`) on that stable environment,
@@ -1763,7 +1806,10 @@ Numbered implementation and verification requirements:
    exists, otherwise record `macos-15` as the validated hosted lane until it
    does, in which case the macOS 26 support-baseline claim rests on the
    operator's local macOS 26 canonical run recorded in the readiness evidence
-   (Sections 11.2 and 12). Update every tracked document that describes the
+   (Sections 11.2 and 12). (Amendment 2026-09-29: the stable image exists and every macOS job
+   has moved to `macos-26`; no local macOS 26 canonical run is recorded in the readiness
+   evidence, so the claim has no recorded basis until the `macos-26` baseline runs are
+   recorded; Section 4.1.) Update every tracked document that describes the
    replaced release workflow or the Pages job (`AGENTS.md`, `CHANGELOG.md`,
    `docs/DESIGN.md`, and the versioning policy) in the same change, so
    canonical documentation never describes a publisher that no longer exists

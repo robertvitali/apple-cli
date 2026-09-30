@@ -97,12 +97,16 @@ ALLOWED_TRIGGERS = {"push", "pull_request", "pull_request_target", "schedule", "
 FORBIDDEN_PERMISSION_SCOPES = {"id-token", "pages", "deployments", "attestations", "packages"}
 READ_ONLY_PERMISSION_VALUES = {"read", "none"}
 # CONTROL PLANE — hosted runner labels this repository may target. `macos-latest` is absent
-# because a macOS image change moves the Xcode/Swift toolchain under the build jobs, which the
-# repository pins to a named image on purpose; `ubuntu-latest` is admitted because the Python
-# tooling it runs has no such dependency. Any label outside this set — including a custom label
-# that could name a self-hosted runner — fails the scan; a GitHub image retirement is handled by
+# because a macOS image change moves the Xcode/Swift toolchain under the build jobs, so the
+# repository names the macOS major on purpose. A named label pins only that major: GitHub moves
+# the default Xcode inside a label over time, so the toolchain behind a run is read from the
+# image version its job log names, not from this set. `ubuntu-latest` is admitted because the
+# Python tooling it runs has no such dependency. The macOS set holds only the image the recorded
+# workflows use; `macos-14` and `macos-15` left it on 2026-09-29 when every macOS job moved to
+# `macos-26`. Any label outside this set — including a custom label that could name a
+# self-hosted runner — fails the scan; a GitHub image retirement or adoption is handled by
 # editing this set in a reviewed commit.
-ADMITTED_RUNNER_LABELS = {"ubuntu-latest", "ubuntu-24.04", "ubuntu-22.04", "macos-15", "macos-14", "macos-26"}
+ADMITTED_RUNNER_LABELS = {"ubuntu-latest", "ubuntu-24.04", "ubuntu-22.04", "macos-26"}
 # Actions that publish, deploy, attest, or write refs. The first group is an explicit denylist of
 # known write actions; the second refuses any path segment that names a publish/deploy/attest/
 # Pages capability. Generic words such as `commit` or `push` are NOT substring-matched, because

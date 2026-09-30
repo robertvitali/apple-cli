@@ -291,6 +291,14 @@ class ScanTests(unittest.TestCase):
             body = mutate(QUALITY, JOB_HEADER, JOB_HEADER.replace("ubuntu-latest", label))
             with self.subTest(label=label):
                 self.assert_ci_violation(body, "job `build`: `runs-on")
+        # The macOS set holds only the image the recorded workflows use, so a move back to a
+        # retired image is refused by the scan, not only by the per-job pins in the other tests.
+        for label in ("macos-15", "macos-14"):
+            body = mutate(QUALITY, JOB_HEADER, JOB_HEADER.replace("ubuntu-latest", label))
+            with self.subTest(retired=label):
+                self.assert_ci_violation(body, "job `build`: `runs-on")
+        body = mutate(QUALITY, JOB_HEADER, JOB_HEADER.replace("ubuntu-latest", "macos-26"))
+        self.assertEqual(self.scan_ci(body), [])
 
     def test_checkout_must_disable_persisted_credentials_explicitly(self) -> None:
         for replacement in ("      - uses: " + CHECKOUT + "\n        with:\n          fetch-depth: 0\n",

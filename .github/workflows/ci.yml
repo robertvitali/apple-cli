@@ -57,7 +57,7 @@ jobs:
     # While public, fork PRs execute untrusted code (Package.swift manifests, test bodies) on these
     # runners; the read-only token bounds that to compute abuse. Keep "require approval for
     # outside-contributor runs" enabled in repo Actions settings.
-    runs-on: macos-15
+    runs-on: macos-26
     permissions:
       contents: read
     timeout-minutes: 30
@@ -114,7 +114,7 @@ jobs:
   hosted-bats-build:
     # Separate runner from hosted-bats: PR-controlled Swift build code cannot mutate the
     # trusted policy checkout or pinned Bats executable used by the hosted Bats partition.
-    runs-on: macos-15
+    runs-on: macos-26
     permissions:
       contents: read
     timeout-minutes: 30
@@ -196,7 +196,7 @@ jobs:
     # Runs on a fresh runner after hosted-bats-build. The only cross-job input is the
     # candidate binary artifact, which is untrusted and exercised by hosted-safe Bats tests.
     needs: hosted-bats-build
-    runs-on: macos-15
+    runs-on: macos-26
     permissions:
       contents: read
     timeout-minutes: 30
