@@ -164,6 +164,24 @@ the image's default `python3` (3.14 per the catalogue), while `Tests/automation`
 on Ubuntu with 3.12. No stable hosted `macos-27` image exists, so the macOS 27 claim still
 rests on the local run D25 accepted.
 
+**Amendment 2026-09-30.** The first push runs after the move did not complete the baseline. Docs
+passed on its first attempt and is recorded as the Docs half. CI failed on its first attempt in
+`build-test`: on macOS 26, `URL(fileURLWithPath:)` substituted the process home for a foreign
+`~user` spelling, so one Mail destination helper (`normalizeDestinationPath`) broke its own
+invariant. Every production caller confines before normalizing, and the confinement refusals
+held on macOS 26, so no command was affected; the helper now returns a foreign spelling
+unchanged. The first residual above overstated the case. The shared guards (confinement and
+attachment sources) do refuse before Foundation expands, but a surface outside the shared tilde
+policy still sees the per-release difference. A read-only audit of every
+`URL(fileURLWithPath:)` and tilde-expansion site found four such surfaces, each taking a path
+only from the operator: a `contacts` `--file` argument and three environment variables. They are
+recorded in the hosted-CI learnings and scheduled to adopt the shared policy. The CI half of the
+baseline comes from the first qualifying run after the fix. Two clarifications to the recording
+rule above. The Included Software page lists no separate Swift version, so Swift is recorded as
+the default Xcode's bundled toolchain. The CI record gives the image version and OS of each of
+its three macOS jobs, or states that they match (on `1f8f3ab` all four macOS jobs, CI's three
+and Docs' `manual-fresh`, ran on the same image, `macos-26-arm64` 20260907.0351.1, macOS 26.6.2).
+
 ### 4.2 Contribution model
 
 - After bootstrap activation, pull requests are the normal path to `main`.

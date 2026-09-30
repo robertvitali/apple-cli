@@ -763,8 +763,14 @@ struct AttachmentsSave: ParsableCommand {
         }
     }
 
+    /// A foreign `~user` spelling is returned exactly as written. `URL(fileURLWithPath:)` expands
+    /// a leading tilde itself on some releases (on macOS 26 it substituted the process home for
+    /// another or unknown user), so routing that spelling through it would hand a later check an
+    /// already-substituted path. Production callers normalize only paths `confineWriteDestination`
+    /// has returned, or absolute paths derived from them, which never start with a tilde.
     static func normalizeDestinationPath(_ path: String) -> String {
-        URL(fileURLWithPath: Self.ownHomeExpanded(path)).standardizedFileURL.path
+        guard let own = TildeSpelling.ownHome(path) else { return path }
+        return URL(fileURLWithPath: (own as NSString).expandingTildeInPath).standardizedFileURL.path
     }
 
     /// Tilde expansion under the shared policy: the operator's own home expands, any other

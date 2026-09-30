@@ -1,8 +1,8 @@
 ---
 topic: hosted-ci
 importance: high
-last-used: 2026-09-29
-uses: 5
+last-used: 2026-09-30
+uses: 6
 ---
 
 # Hosted CI (public, free GitHub-hosted runners)
@@ -83,12 +83,12 @@ red step had been unexercised since the last hosted run on 2026-09-02; the local
      when the assertion is about where a write lands, not about the URL's directory-ness.
    - `NSString.expandingTildeInPath` on an unknown `~user/…` returns the spelling unchanged on
      macOS 27 but substitutes the PROCESS HOME on macOS 15 (only those two releases were
-     observed; the package floor is macOS 14, so 14 and 26 are unverified either way; 26
-     becomes the hosted lane on 2026-09-29). A guard that relied on the "unchanged" behaviour
-     to refuse the form let `~nosuchuser/x.bin` resolve to `$HOME/x.bin` there. The Notes
-     attachment guard now refuses any `~user` form other than the current account's own name
-     before expanding, checked on unicode scalars (a combining mark after the tilde is one
-     grapheme to Swift but still a tilde to Foundation).
+     observed then; the package floor is macOS 14, so 14 stays unverified; macOS 26 later
+     substituted the home too, through `URL(fileURLWithPath:)`, item 6). A guard that relied on
+     the "unchanged" behaviour to refuse the form let `~nosuchuser/x.bin` resolve to
+     `$HOME/x.bin` there. The Notes attachment guard now refuses any `~user` form other than the
+     current account's own name before expanding, checked on unicode scalars (a combining mark
+     after the tilde is one grapheme to Swift but still a tilde to Foundation).
    - Diagnostic method worth reusing: the parameterised test's failure line named the one
      argument combination that failed (`dirlink`, the only directory target), which is what
      isolated the directory-flag difference without a macOS 15 host. A throwing expression
@@ -110,6 +110,20 @@ red step had been unexercised since the last hosted run on 2026-09-02; the local
    (written only on the voluntary branch) says whether the root ever got that far. A hosted
    failure on unchanged code is a timing margin: replace the stopwatch with the event order
    it was standing in for.
+
+6. **`build-test` (`macos-26`) — the first run on the new image, 2026-09-30** (image
+   `macos-26-arm64` 20260907.0351.1, macOS 26.6.2). One logic-tier test failed on a Foundation
+   difference: on macOS 26, `URL(fileURLWithPath:)` turns a leading foreign `~user` spelling
+   (another account, an unknown one, or a tilde plus a combining mark) into the PROCESS home, as
+   `expandingTildeInPath` did for an unknown user on macOS 15; macOS 27 leaves it as a
+   cwd-relative spelling, and on macOS 15 it kept the tilde (the follow-up's table below). Mail's
+   `normalizeDestinationPath` routed such a spelling through `URL(fileURLWithPath:)`, so it no
+   longer kept the tilde its test demands. No command was affected, because every production
+   caller confines before normalizing and the confinement refusals passed on the same run. The
+   helper now returns a foreign spelling unchanged, and the test asserts exact equality, which
+   the old helper fails on macOS 27 too; its "still contains a tilde" check could only fail on a
+   release that substitutes. Lesson: when a test pins a release-dependent behaviour, assert the
+   exact value, so every release, the local one included, can fail it.
 
 **Follow-up 2026-09-26 — the order check flaked too, and the residual in item 5 was incomplete.**
 Hosted CI failed the same test again, on a commit that changed no Swift code, now at the order
@@ -145,9 +159,47 @@ guard delegates to it. Mail's `save-attachments` destination helpers
 confinement unexpanded and is refused there. The complete list of remaining raw
 `expandingTildeInPath` calls: `Sources/NotesKit/AttachmentFS.swift` `resolvedPath` (internal;
 every caller has already passed the guard or supplies an allowed-root constant), and the two
-lowest-consequence sites that take no operator argument — `Sources/MessagesKit/ChatDB.swift`
-(store-sourced existence probe) and `Sources/AppleKit/RateLimiter.swift` (env-supplied state
-paths).
+lowest-consequence sites that take no command-line argument — `Sources/MessagesKit/ChatDB.swift`
+(store-sourced existence probe) and `Sources/AppleKit/RateLimiter.swift` (state paths from
+environment variables the operator sets; the 2026-09-30 follow-up below counts them among the
+surfaces outside the shared policy).
+
+**Follow-up 2026-09-30 — the audit after the first `macos-26` run.** A read-only audit asked,
+for every site under `Sources/` (outside `TestSupport`) that calls `URL(fileURLWithPath:)`,
+`expandingTildeInPath`, `standardizingPath`, `standardizedFileURL` or `resolvingSymlinksInPath`,
+whether an operator-supplied value can still start with a tilde when Foundation sees it; every
+exposure it reported went through an adversarial check. At `1f8f3ab`, `git grep -nE
+'URL\(fileURLWithPath:|expandingTildeInPath|standardizingPath|standardizedFileURL|resolvingSymlinksInPath'
+1f8f3ab -- Sources ':!Sources/TestSupport'` matches 43 code lines (55 with comments) in 19 files;
+the audit assessed them as 41 sites, counting related calls (a chain, or one helper's several
+calls) as one. What each API does with a foreign `~user` spelling, by release:
+
+| API | macOS 15 | macOS 26 | macOS 27 |
+|---|---|---|---|
+| `expandingTildeInPath` | unknown user: the process home (observed, item 4) | not observed | unknown user: unchanged (observed, item 4) |
+| `URL(fileURLWithPath:)` | tilde kept: the old "still contains a tilde" assertion passed on every hosted `macos-15` build from `8e9be32` through `e011d83` (observed) | another account, an unknown one, or a tilde plus a combining mark: the process home (observed, item 6) | a cwd-relative spelling that keeps the tilde (observed locally) |
+
+Four surfaces, in three places, take such a value outside the shared policy. Each is LOW: only the operator can
+supply the spelling, and every outcome is a read or write the operator's own account could make
+directly.
+- `Sources/ContactsKit/ContactsOutput.swift` `readBoundedFile`: the `contacts` `--file`
+  argument goes to `URL(fileURLWithPath:)`. On macOS 26 that reads a file in the operator's home
+  (inferred from the table); on macOS 15 and 27 a path relative to the working directory. The
+  25 MB size check runs `attributesOfItem(atPath:)` on the raw spelling, which never expands a
+  tilde, so for a foreign spelling it finds nothing and the cap is skipped before the read
+  resolves elsewhere. Attachment sources refuse the same spelling (validation, 64).
+- `Sources/MailKit/Support/TemplateStore.swift`: `APPLE_MAIL_MCP_HOME`, the template root that
+  list, get, render, save and delete all use, also goes to `URL(fileURLWithPath:)`, with the
+  same per-release outcomes.
+- `Sources/AppleKit/RateLimiter.swift`: `APPLE_SEND_RATELIMIT_STATE` and
+  `APPLE_REPLY_RATELIMIT_STATE`, the two state paths listed above as deliberate exceptions, go to
+  `expandingTildeInPath` first: an unknown user became the home on macOS 15 (observed), a known
+  other account presumably becomes that account's home (inferred), and macOS 26 is not observed.
+  The result then goes to `URL(fileURLWithPath:)`, so a tilde that survives the first step becomes
+  the process home on macOS 26 (inferred from item 6) and a cwd-relative path on macOS 27.
+Every other site was judged safe (confined or refused first, or only ever handed an absolute
+path) or not operator input (store-owned values, constants). Bringing the four under the shared
+policy changes what those commands accept, so it is its own change with its own release note.
 
 **Lessons.**
 

@@ -262,7 +262,8 @@ struct WriteDestinationConfinementTests {
     func attachmentSaveRefusesAForeignTildeUserDestination() throws {
         // The two destination helpers used to expand the tilde themselves, so a `--dir ~user/…`
         // reached `confineWriteDestination` as an already-substituted absolute path — on
-        // macOS 15 the process home for an unknown user — and the shared refusal never fired.
+        // macOS 15 (and, through `URL(fileURLWithPath:)`, macOS 26) the process home for an
+        // unknown user — and the shared refusal never fired.
         // Both now leave a foreign spelling alone; the refusal comes from confinement (77).
         let otherAccount = NSUserName() == "root" ? "daemon" : "root"
         for spelling in ["~\(otherAccount)/apple-cli-test", "~apple-cli-test-nosuchuser/out",
@@ -270,15 +271,24 @@ struct WriteDestinationConfinementTests {
             let lexical = AttachmentsSave.lexicalDestinationPath(spelling)
             let normalized = AttachmentsSave.normalizeDestinationPath(spelling)
             #expect(lexical.unicodeScalars.first == "~", "lexical kept the tilde: \(spelling)")
-            #expect(normalized.unicodeScalars.contains("~"), "normalize kept the tilde: \(spelling)")
-            for allowOutsideHome in [false, true] {
-                let error = try #require(throws: AppleError.self,
-                                         "\(spelling) allowOutsideHome=\(allowOutsideHome)") {
-                    try confineWriteDestination(lexical, action: "save attachments",
-                                                allowOutsideHome: allowOutsideHome)
+            // Exact equality, not "still contains a tilde": macOS 27 turns the spelling into a
+            // cwd-relative path that keeps its tilde, macOS 26 substitutes the process home, and
+            // only equality fails both, so the invariant is checked on every release.
+            #expect(normalized == spelling,
+                    "normalize returned the spelling unchanged: \(spelling)")
+            // Both orders refuse: confining the lexical spelling (what production does) and
+            // confining the normalized one (what a future caller that normalized first would do).
+            for candidate in [lexical, normalized] {
+                for allowOutsideHome in [false, true] {
+                    let error = try #require(
+                        throws: AppleError.self,
+                        "\(spelling) via \(candidate) allowOutsideHome=\(allowOutsideHome)") {
+                        try confineWriteDestination(candidate, action: "save attachments",
+                                                    allowOutsideHome: allowOutsideHome)
+                    }
+                    #expect(error.exitCode == AppleExit.permissionDenied)
+                    #expect(error.type == AppleErrorType.safetyViolation)
                 }
-                #expect(error.exitCode == AppleExit.permissionDenied)
-                #expect(error.type == AppleErrorType.safetyViolation)
             }
         }
         // The operator's own account name and the bare `~` still expand to the home.
