@@ -171,6 +171,54 @@ class AppLifecyclePlannerTests(unittest.TestCase):
                 results.append(self.engine.parse_info_output("mail", "ASN:0x0-0x40c40c", path))
             self.assertEqual(results[0], results[1])
 
+    def test_info_parser_accepts_macos27_recent_checkin_prefix(self):
+        # Shape recorded from macOS 27.0 (26A428) for an app checked in about 90 seconds
+        # earlier: the launch and check-in lines put a relative age before the timestamp.
+        fixture = textwrap.dedent('''\
+            "Mail" ASN:0x0-0x40c40c:
+                bundleID="com.apple.mail"
+                bundle path="/System/Applications/Mail.app"
+                executable path="/System/Applications/Mail.app/Contents/MacOS/Mail"
+                pid = 4242 token=[sess=1 pid=4242 uid:1,1,1 g:1,1 pV:1] type="Foreground" flavor=3
+                coalition: 6680
+                launch time =  90 seconds ago, 2026/09/20 19:17:21 ( 1 minutes, 30.0489 seconds ago )
+                checkin time = 90 seconds ago, 2026/09/20 19:17:21 ( 1 minutes, 29.9816 seconds ago )
+                launch to checkin time: 0.0673323 seconds
+
+        ''')
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "info"
+            self.write_private(path, fixture)
+            digest = hashlib.sha256(b"2026/09/20 19:17:21").hexdigest()
+            self.assertEqual(
+                self.engine.parse_info_output("mail", "ASN:0x0-0x40c40c", path),
+                f"ASN:0x0-0x40c40c\t4242\t{digest}",
+            )
+
+    def test_info_parser_identity_is_stable_across_the_prefix_boundary(self):
+        # A process renders with the prefix for its first minutes and without it afterwards, and
+        # setup and teardown can straddle that switch, so every rendering must give one identity.
+        def block(checkin_line: str) -> str:
+            return (
+                '"Mail" ASN:0x0-0x40c40c: \n'
+                '    bundleID="com.apple.mail"\n'
+                '    pid = 4242 token=[x]\n'
+                f'    checkin time = {checkin_line}\n'
+            )
+        renderings = (
+            "1 second ago, 2026/09/20 19:17:21 ( 1.2 seconds ago )",
+            "299 seconds ago, 2026/09/20 19:17:21 ( 4 minutes, 59.1 seconds ago )",
+            "2026/09/20 19:17:21 ( 5 minutes, 50.3 seconds ago )",
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            results = set()
+            for index, line in enumerate(renderings):
+                path = Path(directory) / str(index)
+                self.write_private(path, block(line))
+                results.add(self.engine.parse_info_output("mail", "ASN:0x0-0x40c40c", path))
+        digest = hashlib.sha256(b"2026/09/20 19:17:21").hexdigest()
+        self.assertEqual(results, {f"ASN:0x0-0x40c40c\t4242\t{digest}"})
+
     def test_info_parser_block_layout_rejects_identity_defects(self):
         good = (
             '"Mail" ASN:0x0-0x40c40c: \n'
@@ -206,6 +254,27 @@ class AppLifecyclePlannerTests(unittest.TestCase):
                     self.write_private(path, payload)
                     with self.assertRaises(self.engine.LifecycleError):
                         self.engine.parse_info_output("mail", "ASN:0x0-0x40c40c", path)
+        # The relative-age prefix is accepted only in the observed shape. Each case changes only
+        # the check-in line, so the refusal must come from the check-in pattern not matching.
+        checkin_shape_cases = {
+            "prefix-unobserved-unit": good.replace("= 2026/", "= 5 minutes ago, 2026/"),
+            "prefix-without-count": good.replace("= 2026/", "= seconds ago, 2026/"),
+            "prefix-without-separator": good.replace("= 2026/", "= 90 seconds ago 2026/"),
+            "prefix-without-timestamp": good.replace(
+                "checkin time = 2026/09/20 19:17:21 ( 1 seconds ago )",
+                "checkin time = 90 seconds ago, ( 1 minutes, 30.0 seconds ago )",
+            ),
+            "age-after-timestamp": good.replace("( 1 seconds ago )", "90 seconds ago"),
+        }
+        with tempfile.TemporaryDirectory() as directory:
+            for name, payload in checkin_shape_cases.items():
+                with self.subTest(name=name):
+                    self.assertNotEqual(payload, good)
+                    path = Path(directory) / name
+                    self.write_private(path, payload)
+                    with self.assertRaises(self.engine.LifecycleError) as caught:
+                        self.engine.parse_info_output("mail", "ASN:0x0-0x40c40c", path)
+                    self.assertEqual(caught.exception.code, "info-fields-missing")
 
     def test_info_parser_rejects_oversize_output_with_fixed_token(self):
         with tempfile.TemporaryDirectory() as directory:

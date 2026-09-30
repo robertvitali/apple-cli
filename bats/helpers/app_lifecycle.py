@@ -129,9 +129,14 @@ ASN_PATTERN = re.compile(r"ASN:0x[0-9A-Fa-f]+-0x[0-9A-Fa-f]+")
 CHECKIN_TIMESTAMP_PATTERN = (
     r"[0-9]{4}/[0-9]{2}/[0-9]{2} [0-9]{2}:[0-9]{2}:[0-9]{2}"
 )
+# For a check-in in its first five minutes or so, LaunchServices puts a relative age before the
+# absolute timestamp ("90 seconds ago, YYYY/MM/DD HH:MM:SS"), in both the compact and the block
+# layout, so the same process renders both ways across a run. Only seconds were ever seen in the
+# prefix; any other unit is refused. It is never captured: identity is the timestamp alone.
+CHECKIN_AGE_PREFIX_PATTERN = r"(?:[0-9]+ seconds? ago, )?"
 CHECKIN_DISPLAY_PATTERN = re.compile(
-    rf'^(?:"(?:[0-9]+ seconds? ago, )?({CHECKIN_TIMESTAMP_PATTERN})"|'
-    rf'(?:[0-9]+ seconds? ago, )?({CHECKIN_TIMESTAMP_PATTERN}))$'
+    rf'^(?:"{CHECKIN_AGE_PREFIX_PATTERN}({CHECKIN_TIMESTAMP_PATTERN})"|'
+    rf'{CHECKIN_AGE_PREFIX_PATTERN}({CHECKIN_TIMESTAMP_PATTERN}))$'
 )
 
 
@@ -184,8 +189,11 @@ BLOCK_INFO_HEADER_PATTERN = re.compile(
 )
 BLOCK_INFO_BUNDLE_PATTERN = re.compile(r'^[ \t]+bundleID="(?P<bundle>[A-Za-z0-9.\-]{1,255})"[ \t]*$')
 BLOCK_INFO_PID_PATTERN = re.compile(r'^[ \t]+pid = (?P<pid>[0-9]{1,10})(?: .*)?$')
+# The block layout carries the same optional age prefix as the compact one (see
+# CHECKIN_AGE_PREFIX_PATTERN); the 2026-09-21 port to this layout had dropped it.
 BLOCK_INFO_CHECKIN_PATTERN = re.compile(
-    rf'^[ \t]+checkin time = (?P<checkin>{CHECKIN_TIMESTAMP_PATTERN})(?: \(.*\))?[ \t]*$'
+    rf'^[ \t]+checkin time = {CHECKIN_AGE_PREFIX_PATTERN}'
+    rf'(?P<checkin>{CHECKIN_TIMESTAMP_PATTERN})(?: \(.*\))?[ \t]*$'
 )
 INFO_FIELD_NAMES = ("LSDisplayName", "pid", "CFBundleIdentifier", "LSCheckInTime*")
 
