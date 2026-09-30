@@ -2,7 +2,7 @@
 topic: hosted-ci
 importance: high
 last-used: 2026-09-30
-uses: 7
+uses: 8
 ---
 
 # Hosted CI (public, free GitHub-hosted runners)
@@ -170,6 +170,18 @@ red step had been unexercised since the last hosted run on 2026-09-02; the local
    the same failure. Lesson: an isolated HOME keeps a tool's writes out of the runner's real
    home, but a tool can also mount there, so cleanup must handle filesystems it did not
    create, and must do so without trusting paths the code under test can change.
+
+8. **`build-test` (`macos-26`) — a stopwatch bound equal to the deadline it guards,
+   2026-09-30** (same image). The re-run of item 7's failed jobs failed one logic-tier test,
+   "overflow aborts while stdin is pending and the empty sibling stream remains open": it took
+   3.35 s against a 3 s bound, with the overflow correctly reported. The bound was the same
+   number as the stdin delivery deadline, and the stopwatch starts before the spawn while the
+   deadline starts after it, so interpreter start-up on a loaded runner could cross the bound
+   with no behaviour change at all. The test now uses a 30 s deadline, a 20 s alarm in the
+   fixture and a 10 s bound. Checked red against a launcher that stops reading output while
+   stdin is pending: the test fails after about 20 s with the wrong error. Lesson: a
+   wall-clock bound needs headroom below the deadline it stands in for; when the two are the
+   same number, the test measures the runner, not the code.
 
 **Follow-up 2026-09-26 — the order check flaked too, and the residual in item 5 was incomplete.**
 Hosted CI failed the same test again, on a commit that changed no Swift code, now at the order

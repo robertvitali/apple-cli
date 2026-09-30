@@ -1144,11 +1144,17 @@ struct ScriptOutputLimitBoundaryTests {
 
     @Test("overflow aborts while stdin is pending and the empty sibling stream remains open")
     func overflowDuringPendingInput() throws {
+        // The stopwatch bound sits well below both the 30 s deadline and the fixture's own
+        // 20 s alarm, so a launcher that waited on the pending write takes at least 20 s and
+        // fails it, while interpreter start-up on a loaded hosted runner does not: the bound
+        // once equalled a 3 s deadline and a hosted run missed it at 3.35 s with the overflow
+        // correctly reported. The error type below is the primary check; the stopwatch only
+        // guards a regression that reports the overflow late.
         let program = #"""
 import os, signal
 signal.signal(signal.SIGALRM, signal.SIG_DFL)
 signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGALRM})
-signal.alarm(5)
+signal.alarm(20)
 os.write(1, b"123456789")
 signal.pause()
 """#
@@ -1157,11 +1163,11 @@ signal.pause()
         let failure = try #require(#expect(throws: ScriptOutputLimitExceeded.self) {
             _ = try launcher.launch(ScriptInvocation(executablePath: "/usr/bin/python3",
                 arguments: ["-I", "-S", "-c", program],
-                delivery: .timedStdin(script: String(repeating: "x", count: 262_144), seconds: 3),
+                delivery: .timedStdin(script: String(repeating: "x", count: 262_144), seconds: 30),
                 maximumOutputBytes: 8))
         })
         #expect(failure.maximumOutputBytes == 8)
-        #expect(Date().timeIntervalSince(started) < 3,
+        #expect(Date().timeIntervalSince(started) < 10,
                 "overflow must stop the pending write without waiting for the script deadline")
     }
     // Harmless fixed Python fixture, no subprocesses or Apple operations. Its independent
