@@ -63,7 +63,7 @@ struct MailRuleTemplateCommandInjectionTests {
     /// tree behind on every run — the exact leak `ScratchDirs` exists to stop. The suite instance
     /// owns the reclaim now (swift-testing builds a fresh one per test).
     private func templateStore() throws -> TemplateStore {
-        TemplateStore(homeOverride: try scratch.directory().path)
+        try TemplateStore(homeOverride: scratch.directory().path)
     }
 
     @Test func rulesListUsesInjectedScript() throws {
@@ -191,6 +191,48 @@ struct MailRuleTemplateCommandInjectionTests {
             #expect(decoded.contains("\"count\" : 1"))
             #expect(decoded.contains("Hello Alice"))
             #expect(decoded.contains("\"would_delete_template\" : \"reply\""))
+        }
+    }
+
+    /// A refused `APPLE_MAIL_TEMPLATES_DIR` spelling refuses every template command with a
+    /// validation error before any store I/O: `save --dry-run` exactly like `save --execute`
+    /// (preview honesty), and `render --message-id` before the Mail store opens. The real factory
+    /// (`TemplateStore()`) runs, so the environment variable is what is under test.
+    @Test func templateCommandsRefuseAForeignTemplatesDir() throws {
+        let other = (NSUserName() == "root" ? "~daemon" : "~root") + "/tpl"
+        for raw in [other, "~no-such-user-apple-cli/tpl"] {
+            try TestEnvironment.withoutWriteModeOverrides {
+                try TestEnvironment.with(["APPLE_MAIL_TEMPLATES_DIR": raw]) {
+                    var contextOpened = false
+                    let runs: [(String, () throws -> Void)] = [
+                        ("save --dry-run", { try TemplatesSave.parse(["apple-cli-test-t", "--body", "b", "--dry-run"]).run() }),
+                        ("save --execute", { try TemplatesSave.parse(["apple-cli-test-t", "--body", "b", "--execute"]).run() }),
+                        ("list", { try TemplatesList.parse([]).run() }),
+                        ("get", { try TemplatesGet.parse(["apple-cli-test-t"]).run() }),
+                        ("delete --dry-run", { try TemplatesDelete.parse(["apple-cli-test-t", "--dry-run"]).run() }),
+                        ("render --message-id", {
+                            try TemplatesRender.parse(["apple-cli-test-t", "--message-id", "10"])
+                                .run(storeFactory: { try TemplateStore() },
+                                     contextFactory: { contextOpened = true; throw AppleError.notFound("unused") })
+                        }),
+                    ]
+                    // `save --execute` stays AFTER a non-writing case, and the `#require` below is
+                    // load-bearing: if the refusal ever regressed, the test stops at the first run
+                    // that did not refuse instead of reaching a real write.
+                    for (label, body) in runs {
+                        let (streams, stdout) = streams()
+                        var exit: ExitCode?
+                        do { try Output.withStreams(streams) { try body() } } catch let code as ExitCode { exit = code }
+                        #expect(exit?.rawValue == AppleExit.usage, Comment(rawValue: label))
+                        let error = try #require(try payload(from: stdout)["error"] as? [String: Any])
+                        #expect(error["type"] as? String == AppleErrorType.validation, Comment(rawValue: label))
+                        #expect(error["message"] as? String
+                                == "APPLE_MAIL_TEMPLATES_DIR is " + TildeSpelling.refusalMessage(raw),
+                                Comment(rawValue: label))
+                    }
+                    #expect(!contextOpened, "the refusal must precede the Mail store")
+                }
+            }
         }
     }
 

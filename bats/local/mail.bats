@@ -464,7 +464,7 @@ if len(attachments) != int(sys.argv[1]):
   run env -u APPLE_ALLOW_PERMANENT_DELETE "$BIN" mail delete 1 --permanent --dry-run --account " "
   [ "$status" -eq 64 ]
   # templates save: the preview runs the same pure validations the write does (round 7).
-  export APPLE_MAIL_MCP_HOME="$BATS_TEST_TMPDIR/preview-validate"
+  export APPLE_MAIL_TEMPLATES_DIR="$BATS_TEST_TMPDIR/preview-validate"
   run "$BIN" mail templates save --dry-run "../evil" --body x
   [ "$status" -eq 64 ]
   run "$BIN" mail templates save --dry-run goodname --body "   "
@@ -749,7 +749,7 @@ if len(attachments) != int(sys.argv[1]):
 # `{recipient_name}` could flow straight into outbound subject/body text.
 @test "mail templates render with an unresolvable --message-id is message_not_found (exit 65)" {
   require_index
-  export APPLE_MAIL_MCP_HOME="$BATS_TEST_TMPDIR/tpl-mnf"
+  export APPLE_MAIL_TEMPLATES_DIR="$BATS_TEST_TMPDIR/tpl-mnf"
   run "$BIN" mail templates save --execute apple-cli-test-mnf --body 'Body {today}.'
   [ "$status" -eq 0 ]
   run "$BIN" mail templates render apple-cli-test-mnf --message-id 999999999

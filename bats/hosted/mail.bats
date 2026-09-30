@@ -8,7 +8,7 @@ HELPERS="$BATS_SUITE_ROOT/helpers"
 
 setup() {
   BIN="${APPLE_CLI_TEST_BINARY:-$(swift build --show-bin-path)/apple}"
-  export APPLE_MAIL_MCP_HOME="$BATS_TEST_TMPDIR/template-text"
+  export APPLE_MAIL_TEMPLATES_DIR="$BATS_TEST_TMPDIR/template-text"
 }
 
 teardown() {
@@ -117,7 +117,7 @@ teardown() {
 
 @test "mail reads are IDENTICAL with the sandbox on and off (spec: the sandbox affects writes only)" {
   # Deterministic read over a fixture temp store (search results could change between runs).
-  export APPLE_MAIL_MCP_HOME="$BATS_TEST_TMPDIR/read-parity"
+  export APPLE_MAIL_TEMPLATES_DIR="$BATS_TEST_TMPDIR/read-parity"
   run "$BIN" mail templates save --execute apple-cli-test-readparity --body y
   [ "$status" -eq 0 ]
   a=$("$BIN" mail templates list)
@@ -238,7 +238,7 @@ teardown() {
 # while changing what flagless invocations do to real data (review-caught gap). The swift tier
 # additionally pins the two trash-surface statics.
 @test "v2 default: a flagless general write EXECUTES (templates save, temp store)" {
-  export APPLE_MAIL_MCP_HOME="$BATS_TEST_TMPDIR/pin-default"
+  export APPLE_MAIL_TEMPLATES_DIR="$BATS_TEST_TMPDIR/pin-default"
   run "$BIN" mail templates save apple-cli-test-pin --body y  # flagless-on-purpose
   [ "$status" -eq 0 ]
   echo "$output" | grep -q '"name" : "apple-cli-test-pin"'
@@ -246,7 +246,7 @@ teardown() {
 }
 
 @test "mail templates render fills placeholders from a temp store" {
-  export APPLE_MAIL_MCP_HOME="$BATS_TEST_TMPDIR/mcp-home"
+  export APPLE_MAIL_TEMPLATES_DIR="$BATS_TEST_TMPDIR/tpl-render"
   run "$BIN" mail templates save --execute greet --body "Hi {name}" --subject "Hello"
   [ "$status" -eq 0 ]
   run "$BIN" mail templates render greet --var name=World
@@ -256,7 +256,7 @@ teardown() {
 
 @test "mail templates save --dry-run previews without writing (fixed bucket-2 defect)" {
   # TemplatesSave used to write DESPITE --dry-run (no willExecute branch); pin the fix.
-  export APPLE_MAIL_MCP_HOME="$BATS_TEST_TMPDIR/mcp-home-drypreview"
+  export APPLE_MAIL_TEMPLATES_DIR="$BATS_TEST_TMPDIR/tpl-drypreview"
   run "$BIN" mail templates save --dry-run apple-cli-test-drypreview --body y
   [ "$status" -eq 0 ]
   echo "$output" | grep -q '"would_save_template"'
@@ -971,7 +971,7 @@ assert 'would refuse' not in note, note
 # flag index -1, so a caller porting `flag_message(ids, flag_color="none")` expects an UNFLAG.
 # The CLI previously treated `--color none` as a colorless FLAG, inverting that intent.
 @test "mail templates render raises missing_template_variable naming all unresolved (exit 64)" {
-  export APPLE_MAIL_MCP_HOME="$BATS_TEST_TMPDIR/tpl-missing"
+  export APPLE_MAIL_TEMPLATES_DIR="$BATS_TEST_TMPDIR/tpl-missing"
   run "$BIN" mail templates save --execute apple-cli-test-miss --body 'Hi {zeta}, re {alpha}.'
   [ "$status" -eq 0 ]
   run "$BIN" mail templates render apple-cli-test-miss
@@ -982,7 +982,7 @@ assert 'would refuse' not in note, note
 }
 
 @test "mail templates render succeeds once every placeholder is supplied" {
-  export APPLE_MAIL_MCP_HOME="$BATS_TEST_TMPDIR/tpl-ok"
+  export APPLE_MAIL_TEMPLATES_DIR="$BATS_TEST_TMPDIR/tpl-ok"
   run "$BIN" mail templates save --execute apple-cli-test-ok --body 'Hi {who}.' --subject 'S {who}'
   [ "$status" -eq 0 ]
   run "$BIN" mail templates render apple-cli-test-ok --var who=Ada
@@ -994,7 +994,7 @@ assert 'would refuse' not in note, note
 # `{today}` is auto-filled, so it must NOT be reported missing — and it must be the LOCAL
 # calendar date (oracle A uses Python's local `date.today()`, not UTC).
 @test "mail templates render auto-fills today without reporting it missing" {
-  export APPLE_MAIL_MCP_HOME="$BATS_TEST_TMPDIR/tpl-today"
+  export APPLE_MAIL_TEMPLATES_DIR="$BATS_TEST_TMPDIR/tpl-today"
   run "$BIN" mail templates save --execute apple-cli-test-today --body 'Sent {today}.'
   [ "$status" -eq 0 ]
   run "$BIN" mail templates render apple-cli-test-today
@@ -1429,7 +1429,7 @@ import json,sys;print(json.load(sys.stdin)['data']['eml_path'])")
 # accounts) print store-derived strings. An ESC in a stored template body must be neutralized to
 # caret notation, never reach the terminal raw. Uses the file-based template store (CI-safe).
 @test "mail templates get --text neutralizes terminal control sequences (Q12 [17])" {
-  export APPLE_MAIL_MCP_HOME="$BATS_TEST_TMPDIR/text-neutralize"
+  export APPLE_MAIL_TEMPLATES_DIR="$BATS_TEST_TMPDIR/text-neutralize"
   body=$(printf 'line1\033[31mRED\033[0m line2')
   run "$BIN" mail templates save apple-cli-test-esc --body "$body" --execute
   [ "$status" -eq 0 ]

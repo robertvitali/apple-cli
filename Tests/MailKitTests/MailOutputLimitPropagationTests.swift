@@ -435,7 +435,7 @@ struct MailOutputLimitPropagationTests {
                     return "Example Account\(MailScript.US)INBOX\(MailScript.US)1\(MailScript.RS)"
                 }
                 let output = try confined.directory().appendingPathComponent("result")
-                let store = TemplateStore(homeOverride: try scratch.directory().path)
+                let store = try TemplateStore(homeOverride: scratch.directory().path)
                 _ = try store.save(name: "synthetic", body: "Reply to {original_subject}", subject: nil)
                 var storeCalls = 0
                 let outcome = try MailLimitOutcome.capture {
@@ -459,7 +459,10 @@ struct MailOutputLimitPropagationTests {
                 if marked { try outcome.expectMarked(error) } else { outcome.expectSuccess() }
                 #expect(accountRunner.calls.count == 1)
                 #expect(runner.calls.count == ((enrichment == .export || enrichment == .template) ? 0 : 1))
-                if enrichment == .template { #expect(storeCalls == (marked ? 0 : 1)) }
+                // `render` builds the template store FIRST (no I/O), so a refused
+                // `APPLE_MAIL_TEMPLATES_DIR` refuses before the Mail store opens; the marked
+                // failure still surfaces above and precedes `render`, so nothing is rendered.
+                if enrichment == .template { #expect(storeCalls == 1) }
                 if marked { #expect(!FileManager.default.fileExists(atPath: output.path)) }
             }
         }

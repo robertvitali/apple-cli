@@ -705,7 +705,7 @@ func emitRulePreview(_ rule: RuleSchema.Rule, willExecute: Bool, json: Bool,
     }
 }
 
-// MARK: templates (file-based; ~/.apple_mail_mcp/templates/<name>.md)
+// MARK: templates (file-based; ~/.apple-cli/mail-templates/<name>.md)
 
 struct TemplatesCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
@@ -719,10 +719,10 @@ struct TemplatesList: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "list", abstract: "List stored templates.")
     @OptionGroup var global: GlobalOptions
     func run() throws {
-        try run(storeFactory: { TemplateStore() })
+        try run(storeFactory: { try TemplateStore() })
     }
 
-    func run(storeFactory: () -> TemplateStore) throws {
+    func run(storeFactory: () throws -> TemplateStore) throws {
         try runGuarded(tool: "mail") {
             let list = try storeFactory().list()
             if global.json {
@@ -739,10 +739,10 @@ struct TemplatesGet: ParsableCommand {
     @OptionGroup var global: GlobalOptions
     @Argument var name: String
     func run() throws {
-        try run(storeFactory: { TemplateStore() })
+        try run(storeFactory: { try TemplateStore() })
     }
 
-    func run(storeFactory: () -> TemplateStore) throws {
+    func run(storeFactory: () throws -> TemplateStore) throws {
         try runGuarded(tool: "mail") {
             let tpl = try storeFactory().get(name)
             if global.json { try Output.emit(tool: "mail", data: tpl) }
@@ -761,10 +761,10 @@ struct TemplatesSave: ParsableCommand {
     @Option(name: .long, help: "Template body (may contain {placeholder} tokens).") var body: String
     @Option(name: .long, help: "Optional subject template.") var subject: String?
     func run() throws {
-        try run(storeFactory: { TemplateStore() })
+        try run(storeFactory: { try TemplateStore() })
     }
 
-    func run(storeFactory: () -> TemplateStore) throws {
+    func run(storeFactory: () throws -> TemplateStore) throws {
         try runGuarded(tool: "mail") {
             // Write-model v2 preamble. This command was the spec's named bucket-2 defect: it had
             // NO willExecute branch and wrote despite --dry-run. It now previews faithfully; the
@@ -778,12 +778,15 @@ struct TemplatesSave: ParsableCommand {
             // adding the willExecute branch had made `--dry-run` skip them, so a preview could
             // name a save execute refuses with 64 (review-caught).
             try TemplateStore.validateSave(name: name, body: body, subject: subject)
+            // The store is built on BOTH paths too: a refused `APPLE_MAIL_TEMPLATES_DIR` spelling
+            // must refuse the preview exactly as it refuses the write. Building it touches no file.
+            let store = try storeFactory()
             guard willExecute else {
                 try Output.emit(tool: "mail", data: ["would_save_template": AnyEncodableBox(name),
                     "has_subject": AnyEncodableBox(subject != nil), "dry_run": AnyEncodableBox(true)], text: global.text, sandboxActive: sandboxActive)
                 return
             }
-            let tpl = try storeFactory().save(name: name, body: body, subject: subject)
+            let tpl = try store.save(name: name, body: body, subject: subject)
             // Q12: the execute envelope stamps `dry_run: false` (additive) — the template
             // object's own fields are unchanged; "original shape" no longer trumps the v2
             // execute-envelope rule the other 20 Mail writes follow.
@@ -798,10 +801,10 @@ struct TemplatesDelete: ParsableCommand {
     @OptionGroup var global: GlobalOptions
     @Argument var name: String
     func run() throws {
-        try run(storeFactory: { TemplateStore() })
+        try run(storeFactory: { try TemplateStore() })
     }
 
-    func run(storeFactory: () -> TemplateStore) throws {
+    func run(storeFactory: () throws -> TemplateStore) throws {
         try runGuarded(tool: "mail") {
             // Write-model v2 preamble. Oracle A wraps delete_template in MCP elicitation; a CLI
             // has no elicitation channel — the explicit invocation is the accept (documented
@@ -810,7 +813,7 @@ struct TemplatesDelete: ParsableCommand {
             let sandboxActive = try TestMode.sandboxActive(flag: global.testMode)
             let willExecute = try global.willExecute(defaultDryRun: false)
 
-            let store = storeFactory()
+            let store = try storeFactory()
             _ = try store.get(name)   // 404 if missing
             if willExecute {
                 try store.delete(name)
@@ -835,12 +838,15 @@ struct TemplatesRender: ParsableCommand {
     @Option(name: .long, help: "Variable override 'key=value' (repeatable).") var `var`: [String] = []
 
     func run() throws {
-        try run(storeFactory: { TemplateStore() }, contextFactory: { try MailContext() })
+        try run(storeFactory: { try TemplateStore() }, contextFactory: { try MailContext() })
     }
 
-    func run(storeFactory: () -> TemplateStore,
+    func run(storeFactory: () throws -> TemplateStore,
              contextFactory: () throws -> MailContext) throws {
         try runGuarded(tool: "mail") {
+            // Built first, so a refused `APPLE_MAIL_TEMPLATES_DIR` spelling refuses before the
+            // Mail store is opened for --message-id.
+            let store = try storeFactory()
             var autoVars = ["today": TemplateStore.todayString()]
             if let messageId {
                 let ctx = try contextFactory()
@@ -869,7 +875,7 @@ struct TemplatesRender: ParsableCommand {
                 guard let eq = kv.firstIndex(of: "=") else { throw AppleError.validation("--var must be 'key=value'; got '\(kv)'.") }
                 userVars[String(kv[kv.startIndex..<eq])] = String(kv[kv.index(after: eq)...])
             }
-            let result = try storeFactory().render(name: name, autoVars: autoVars, userVars: userVars)
+            let result = try store.render(name: name, autoVars: autoVars, userVars: userVars)
             if global.json { try Output.emit(tool: "mail", data: result) }
             else {
                 if let subj = result.subject { Output.printText("subject: \(subj)") }

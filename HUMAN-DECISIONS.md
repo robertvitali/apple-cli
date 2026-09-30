@@ -86,7 +86,8 @@ publication action.
 | D36 | The outside contributor's own session link in the descriptions of PRs 3–5 | **RATIFIED 2026-09-26: accept as the contributor's own disclosure (option A)** | One session link of the contributor's, in those three descriptions and their edit histories only; never copied into a tracked file, commit or prose; the same link elsewhere is a finding, among them two commit messages on pull request 3's own branch, found after the ruling |
 | D37 | Workflow-run objects served pre-rewrite commit messages | **ANSWERED 2026-09-27; APPLIED 2026-09-27T04:43Z (option A)** | A scan of the public run listing found one run storing a pre-rewrite message with personal data and 90 with tracker identifiers or session links. All 168 runs whose head commit is not on `main` were deleted and read back (205 remain, none off-main, each deleted id answers 404); a re-scan of the listing found no personal data, denylist term or tracker identifier, and copies of the eight D35 messages remain for the fresh round. The commits themselves stay fetchable by id (D38); at least 29 off-main commit ids stay listed in the public Events feed until they age out (about 2026-12-13 at the latest), and third-party check suites keep copies of their messages by commit id. Irreversible |
 | D38 | A pre-rewrite commit with personal data stays fetchable by id | **RATIFIED 2026-09-28: accept under D19 (option C), re-confirmed on corrected facts** | The 2026-07-23 pre-rewrite commit D37 found still answers by id with two denylist terms, a provider mailbox and two personal email addresses in its message. It was public 2026-07-23 to 2026-08-19 (the D9 period), and its message was readable in the run listing 2026-09-21 to 2026-09-27. Accepted as a residual scoped to that one commit object and the stored copies of its message by commit id; no Support purge filed; any other personal-data object is a finding |
-| D39 | How APPLE_MAIL_MCP_HOME reads a tilde | **RATIFIED 2026-09-30: read it as the retired Mail MCP did (option A); APPLIED 2026-09-30** | No tilde expansion: a relative value, `~/…` and `~name/…` included, names a folder under the working directory on every macOS release, and an empty value means unset. This replaces the CLI's release-dependent reading (macOS 26 and 27 sent `~/…` to the home folder). Recorded as BREAKING with `schema_version` unchanged |
+| D39 | How APPLE_MAIL_MCP_HOME reads a tilde | **SUPERSEDED 2026-09-30 by D40** (RATIFIED 2026-09-30: read it as the retired Mail MCP did (option A); APPLIED 2026-09-30) | No tilde expansion: a relative value, `~/…` and `~name/…` included, names a folder under the working directory on every macOS release, and an empty value means unset. This replaces the CLI's release-dependent reading (macOS 26 and 27 sent `~/…` to the home folder). Recorded as BREAKING with `schema_version` unchanged |
+| D40 | The two public names that still say "mcp" | **RATIFIED 2026-09-30: rename both outright (option A)** | `APPLE_MAIL_MCP_HOME` is replaced by `APPLE_MAIL_TEMPLATES_DIR` (the template folder itself; the shared tilde policy applies) and the default folder moves from `~/.apple_mail_mcp/templates/` to `~/.apple-cli/mail-templates/`. Neither old name is read any more. A recorded narrowing of the retired Mail MCP (its variable and folder); D39 lapses with the variable it governed. BREAKING with `schema_version` unchanged; the release note gives the move command |
 
 ---
 
@@ -1952,8 +1953,8 @@ it, is yours alone to decide (D9, D19).
 
 ## D39 — How APPLE_MAIL_MCP_HOME reads a tilde: as the retired Mail MCP read it
 
-- **Status:** **RATIFIED 2026-09-30: read it as the retired Mail MCP did (option A); APPLIED
-  2026-09-30** in the commit that records this entry.
+- **Status:** **SUPERSEDED 2026-09-30 by D40** (was RATIFIED 2026-09-30: read it as the retired
+  Mail MCP did (option A); APPLIED 2026-09-30 in the commit that recorded this entry).
 - **Context.** Bringing four operator-supplied paths under the shared tilde policy
   (`TildeSpelling`), the controller's first version also refused another account's `~name/…` in
   `APPLE_MAIL_MCP_HOME`, the Mail template root. The critic's read of oracle A (apple-mail-mcp
@@ -1988,5 +1989,45 @@ it, is yours alone to decide (D9, D19).
 accepted on a shipped surface, the class D12 reserves to you.
 
 **Blocking?** No; it settled the one surface of the tilde change that had an oracle counterpart.
+
+**Resolution (2026-09-30):** superseded by D40 the same day. `APPLE_MAIL_MCP_HOME` is no longer
+read, so the reading ruled here no longer applies; this entry stands as the record of it.
+
+---
+
+## D40 — The two public names that still say "mcp": rename both outright
+
+- **Status:** **RATIFIED 2026-09-30: rename both outright (option A).** Applied by the commit
+  that records this entry.
+- **Context.** On 2026-09-30 the operator asked that the CLI's code stop mentioning MCP,
+  comments included. Two mentions are public names that callers depend on: the
+  `APPLE_MAIL_MCP_HOME` environment variable and the default template folder
+  `~/.apple_mail_mcp/templates/`, both oracle A's own names (so the CLI and oracle A shared one
+  template store). Renaming either one breaks existing configurations or hides saved templates
+  until they are moved, and dropping oracle A's variable and folder is the D12 class, so the
+  controller asked. The release freeze keeps the CLI at `v26.0.0`, so few installs exist.
+- **Options considered.** (A) rename both outright; (B) rename both but keep reading the old
+  names while the new ones are absent, with a stderr notice, until a later ruling ends the
+  transition; (C) keep both names as the only recorded MCP mentions.
+- **Ruling.** (A). `APPLE_MAIL_TEMPLATES_DIR` names the template folder itself and follows the
+  shared tilde policy (another account's `~name`, or a tilde with a combining mark, refused as a
+  `validation_error`; `~`, `~/…` and the account's own `~name/…` expand to its home; an empty
+  value counts as unset). The default folder is `~/.apple-cli/mail-templates/`. Neither
+  `APPLE_MAIL_MCP_HOME` nor `~/.apple_mail_mcp/` is read any more. This is a recorded narrowing
+  of the retired Mail oracle: the CLI no longer shares oracle A's template store or honours its
+  variable; the on-disk template format is unchanged. D39, which governed how
+  `APPLE_MAIL_MCP_HOME` read a tilde, lapses with the variable (its entry stands as the record).
+- **Applied (2026-09-30).** `TemplateStore.init` reads the new variable and default; every
+  `mail templates` command, `save --dry-run` and `render --message-id` included, refuses a
+  refused spelling before any store or Mail access. The deviation is recorded in
+  `docs/port-specs/mail.md`, the hosted and local Bats templates use the new variable (both
+  inventory digests and the trusted hosted pin updated), and CHANGELOG `[Unreleased]` records it
+  as BREAKING with `schema_version` unchanged and the move command.
+- **Filed:** 2026-09-30 · **Category:** parity vs cleanup (D12 class)
+
+**Why it needed you.** It drops oracle A's variable and folder, a narrowing on a shipped
+surface, and it breaks existing setups.
+
+**Blocking?** No; it settles the one part of the MCP cleanup that is caller-visible.
 
 ---

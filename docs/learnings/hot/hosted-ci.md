@@ -277,7 +277,9 @@ the working directory has been deleted and `currentDirectoryPath` is empty, kept
 `./` so its I/O fails as the oracle's did), and an empty value treated as unset. The first draft
 of that release note claimed the oracles expanded `~alice` to that account's home; the critic
 read oracle A's source and found no expansion at all. State an oracle's behaviour only from its
-source.
+source. Later the same day D40 replaced `APPLE_MAIL_MCP_HOME` with `APPLE_MAIL_TEMPLATES_DIR`,
+which follows the shared policy, and moved the default folder to `~/.apple-cli/mail-templates/`;
+D39's literal reading lapsed with the variable.
 
 **Lessons.**
 

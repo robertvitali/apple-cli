@@ -255,35 +255,63 @@ JSON output are stable per the versioning policy — breaking changes bump
   user's home, while an unknown user was left unexpanded and failed later; on macOS 15 an
   unknown user was silently replaced by the running user's home. `schema_version` is
   unchanged at 1 for the same reason.
-- **Tilde spellings in `contacts … --file`, the rate-limit state variables and
-  `APPLE_MAIL_MCP_HOME` now mean the same thing on every macOS release.**
+- **Tilde spellings in `contacts … --file` and the two rate-limit state variables now mean the
+  same thing on every macOS release.**
   - Old shape, by release (macOS 27 observed; macOS 26 and 15 inferred from Foundation
-    behaviour observed on those releases; other releases not observed):
-    `contacts` `--file` (note, photo and vCard input) and `APPLE_MAIL_MCP_HOME` took another
-    user's `~user/…` relative to the working directory on macOS 15 and 27, but as the running
-    user's own home on macOS 26. `APPLE_SEND_RATELIMIT_STATE` and `APPLE_REPLY_RATELIMIT_STATE`
-    took a real account's `~user/…` as THAT account's home on macOS 27; an unknown account became
-    the running user's home on macOS 15 and stayed relative to the working directory on macOS 27.
-    `APPLE_MAIL_MCP_HOME=~/…` meant your home folder on macOS 26 and 27, and an empty value named
-    the working directory. `--file ~/…` (on macOS 26 and 27) and a `--file` path with a
-    trailing slash skipped the 25 MB check and were read in full.
+    behaviour observed on those releases; other releases not observed): `contacts` `--file`
+    (note, photo and vCard input) took another user's `~user/…` relative to the working
+    directory on macOS 15 and 27, but as the running user's own home on macOS 26.
+    `APPLE_SEND_RATELIMIT_STATE` and `APPLE_REPLY_RATELIMIT_STATE` took a real account's
+    `~user/…` as THAT account's home on macOS 27; an unknown account became the running user's
+    home on macOS 15 and stayed relative to the working directory on macOS 27. `--file ~/…` (on
+    macOS 26 and 27) and a `--file` path with a trailing slash skipped the 25 MB check and were
+    read in full.
   - New shape: `--file` and both rate-limit variables refuse a `~user` naming any account other
     than your own, or a tilde followed by a combining mark, as a `validation_error` (exit 64);
     `~`, `~/…` and your own `~name/…` mean your home folder. A refused rate-limit variable stops
     `mail forward`, `mail draft send`, `mail reply`, and `mail send` in the modes that spend the
     send budget (the default mode without `--html`, or `--gui-send`), on the dry-run path as
     well, before anything is read, written or sent, and never falls back to the default state
-    file.
-    `APPLE_MAIL_MCP_HOME` is read as the retired Mail MCP read it (operator ruling D39): no tilde
-    expansion, so any relative value, `~/…` included, names a folder under the working directory,
-    and an empty value counts as unset; spell it as an absolute path to name a folder in your
-    home. Saving a template with a relative value such as `~/tpl` creates a folder literally
-    named `~` under the working directory: remove it as `./~`, never as `~`. The `--file` size check measures the
-    path that is read, so a `~/…` or trailing-slash file over 25 MB is now refused (exit 64); a
-    final symbolic link is still measured as the link, not its target.
+    file. The `--file` size check measures the path that is read, so a `~/…` or trailing-slash
+    file over 25 MB is now refused (exit 64); a final symbolic link is still measured as the
+    link, not its target.
   - `schema_version` is unchanged at 1: no field, type, enum or exit-code meaning changes;
-    previously accepted inputs now take the existing validation exit, and the template root
-    moves only for the spellings listed above.
+    previously accepted inputs now take the existing validation exit.
+- **Mail templates move to `~/.apple-cli/mail-templates/`, and `APPLE_MAIL_TEMPLATES_DIR`
+  replaces `APPLE_MAIL_MCP_HOME`** (operator ruling D40).
+  - Old shape (macOS 27 observed; macOS 26 and 15 inferred from Foundation behaviour observed
+    on those releases; other releases not observed): templates lived in
+    `~/.apple_mail_mcp/templates/`, the folder the retired Mail MCP used, and
+    `APPLE_MAIL_MCP_HOME` named a base folder whose `templates` subfolder held them. How that
+    variable read a tilde depended on the release: `~/…` meant your home folder on macOS 26 and
+    27; another account's `~name/…` became your own home on macOS 26 and a folder under the
+    working directory on macOS 15 and 27; a bare `~` and your own `~name/…` were folders under
+    the working directory on macOS 27; an empty value named the working directory.
+  - New shape: templates live in `~/.apple-cli/mail-templates/`, next to the CLI's other state
+    in `~/.apple-cli/`. `APPLE_MAIL_TEMPLATES_DIR` names the template folder itself (no
+    `templates` subfolder is added) and reads a tilde like the paths in the entry above:
+    another account's `~name`, or a tilde followed by a combining mark, is a `validation_error`
+    (exit 64) on every `mail templates` command, `save --dry-run` and `render --message-id`
+    included; `~`, `~/…` and your own `~name/…` mean your home folder; any other relative value
+    is under the working directory; an empty value means the default folder.
+    `APPLE_MAIL_MCP_HOME` and `~/.apple_mail_mcp/` are no longer read. Because the variable
+    names the folder itself, `save` and `delete` act directly on the `*.md` files in it: point
+    it at a folder used only for templates.
+  - Migration: move existing templates once with
+    `mkdir -p ~/.apple-cli/mail-templates && mv -n ~/.apple_mail_mcp/templates/*.md ~/.apple-cli/mail-templates/ && rmdir ~/.apple_mail_mcp/templates`.
+    It works whether or not the new folder already exists and never overwrites. If `rmdir`
+    reports the old folder is not empty, list what is left with
+    `ls -A ~/.apple_mail_mcp/templates`: a `*.md` file still there has a template of the same
+    name in the new folder, so compare the two and move it by hand; anything else, such as
+    Finder's `.DS_Store`, can be deleted. An error that no `*.md` file matched means there was
+    nothing to move. To keep a copy for another tool, use `cp -n` in place of `mv -n`, leave out
+    the `rmdir`, and run `diff -rq ~/.apple_mail_mcp/templates ~/.apple-cli/mail-templates`: a
+    line saying two files differ names a template that was not copied. If you set
+    `APPLE_MAIL_MCP_HOME=<dir>` to an absolute folder, set
+    `APPLE_MAIL_TEMPLATES_DIR=<dir>/templates`.
+  - `schema_version` is unchanged at 1: no field, type, enum or exit-code meaning changes;
+    templates are looked up in a different folder, and a refused spelling takes the existing
+    validation exit.
 
 ### Changed
 
@@ -368,9 +396,9 @@ JSON output are stable per the versioning policy — breaking changes bump
 - **`contacts … --file` no longer skips its 25 MB limit for a `~/…` or trailing-slash
   spelling.** Either used to skip the check (`~/…` on macOS 26 and 27), so a larger file was
   read into memory in full; it is now refused. A final symbolic link is still measured as the
-  link, not its target. `--file`, the two rate-limit state variables and `APPLE_MAIL_MCP_HOME`
-  each read a tilde consistently across macOS releases. Both changes are described under
-  BREAKING.
+  link, not its target. `--file` and the two rate-limit state variables each read a tilde
+  consistently across macOS releases, as does `APPLE_MAIL_TEMPLATES_DIR`. These changes are
+  described under BREAKING.
 
 - **Capability checks accept escaped quotes in ordinary multiline Swift test literals.**
   Literal contents remain excluded from test discovery. xUnit evidence now requires UTF-8

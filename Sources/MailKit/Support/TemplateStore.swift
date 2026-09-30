@@ -1,9 +1,9 @@
 import Foundation
 import AppleKit
 
-/// File-backed email templates at the SAME location MCP A uses —
-/// `~/.apple_mail_mcp/templates/<name>.md` (override with `APPLE_MAIL_MCP_HOME`) — so the two
-/// share a store. Both subject and body may contain `{placeholder}` tokens filled by `render`.
+/// File-backed email templates at `~/.apple-cli/mail-templates/<name>.md` (override the folder
+/// with `APPLE_MAIL_TEMPLATES_DIR`; operator ruling D40 moved both off the retired oracle's
+/// names). Both subject and body may contain `{placeholder}` tokens filled by `render`.
 ///
 /// ON-DISK FORMAT — byte-matched to MCP A's `save_template` OPERATION (apple-mail-mcp
 /// `server.py` + `templates.py`), so a template written by either tool is read by the other:
@@ -34,34 +34,27 @@ public struct TemplateStore {
     /// Header keys the format recognizes — mirrors the oracle's `_KNOWN_HEADER_KEYS`.
     static let knownHeaderKeys: Set<String> = ["subject"]
 
-    /// `APPLE_MAIL_MCP_HOME` is read the way oracle A read it (`Path(home_override)` in its
-    /// `templates.py`; operator ruling D39): no tilde expansion, so a relative value — `~`, `~/…`
-    /// and `~name/…` included — names a directory under the working directory, and an empty value
-    /// counts as unset. A relative value is joined to the working directory HERE, so Foundation
-    /// never sees a leading tilde: `URL(fileURLWithPath:)` treats one differently by macOS release
-    /// (the process home on macOS 26; `~/…` the home on macOS 27 too). The absolute test reads the
-    /// first unicode SCALAR, so a slash followed by a combining mark is still absolute. When the
-    /// working directory has been deleted, `currentDirectoryPath` is empty; the value then stays
-    /// relative behind a `./` (still never a leading tilde), so its I/O fails as the oracle's did
-    /// instead of landing under `/`. `environment` and `currentDirectory` are test seams.
+    /// `APPLE_MAIL_TEMPLATES_DIR` names the template folder itself and is read under the shared
+    /// tilde policy (`TildeSpelling`): another account's `~user`, or a tilde followed by a
+    /// combining mark, is refused as a `validation_error`, and `~`, `~/…` and the account's own
+    /// `~name/…` expand to its home directory, so Foundation never sees a leading tilde. Any other
+    /// relative value is relative to the working directory; an empty value counts as unset, as it
+    /// does for the rate-limit state variables. `homeOverride` (tests only) is a base directory
+    /// with the templates under its `templates` folder. `environment` is a test seam.
     public init(homeOverride: String? = nil,
-                environment: [String: String] = ProcessInfo.processInfo.environment,
-                currentDirectory: String = FileManager.default.currentDirectoryPath) {
-        let base: String
+                environment: [String: String] = ProcessInfo.processInfo.environment) throws {
         if let homeOverride {
-            base = homeOverride
-        } else if let configured = environment["APPLE_MAIL_MCP_HOME"], !configured.isEmpty {
-            if configured.unicodeScalars.first == "/" {
-                base = configured
-            } else if currentDirectory.isEmpty {
-                base = "./" + configured
-            } else {
-                base = (currentDirectory.hasSuffix("/") ? currentDirectory : currentDirectory + "/") + configured
+            root = URL(fileURLWithPath: homeOverride).appendingPathComponent("templates")
+        } else if let configured = environment["APPLE_MAIL_TEMPLATES_DIR"], !configured.isEmpty {
+            guard let expanded = TildeSpelling.expandedOwnHome(configured) else {
+                throw AppleError.validation("APPLE_MAIL_TEMPLATES_DIR is " + TildeSpelling.refusalMessage(configured))
             }
+            root = URL(fileURLWithPath: expanded)
         } else {
-            base = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".apple_mail_mcp").path
+            root = FileManager.default.homeDirectoryForCurrentUser
+                .appendingPathComponent(".apple-cli", isDirectory: true)
+                .appendingPathComponent("mail-templates", isDirectory: true)
         }
-        root = URL(fileURLWithPath: base).appendingPathComponent("templates")
     }
 
     // MARK: Models

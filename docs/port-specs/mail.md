@@ -47,7 +47,7 @@ Class legend: **CORE** = primitive Mail operation · **DERIVED** = computed on t
 | 28 | Update rule (patch) | A `update_rule` | CORE | rule_index, name/conditions/actions/match_logic/enabled (conditions & actions REPLACE wholesale; elicit; refuses run-AppleScript/redirect/reply/sound/color actions) | **A-only.** DIVERGENCE (gap32, deliberate): update with NO fields is a validation_error/64 where the oracle returns a no-op success — fail-loud kept, bats-locked. Existing-action probe failures map to the TYPED `unsupported_rule_action` (oracle A's error_type), exit 77 unchanged (extra24). |
 | 29 | Delete rule | A `delete_rule(rule_index)` | CORE | 1-based index (elicit) | **A-only.** |
 | 30 | Enable/disable rule | A `set_rule_enabled(rule_index, enabled)` | CORE | 1-based index | **A-only.** |
-| 31 | List templates | A `list_templates` | CORE | — (files at `~/.apple_mail_mcp/templates/<name>.md`) | **A-only.** |
+| 31 | List templates | A `list_templates` | CORE | — (files at `~/.apple-cli/mail-templates/<name>.md`; oracle A used `~/.apple_mail_mcp/templates/`, overridable with `APPLE_MAIL_MCP_HOME`) | **A-only.** Recorded deviation (HUMAN-DECISIONS D40, 2026-09-30): the CLI no longer shares oracle A's folder or reads its variable; it reads `APPLE_MAIL_TEMPLATES_DIR` (the folder itself, under the shared tilde policy). The file format is unchanged. |
 | 32 | Get template | A `get_template(name)` | CORE | name (alnum/_/-, 1–64) | **A-only.** |
 | 33 | Save template | A `save_template(name, body, subject)` | CORE | `{placeholder}` tokens in body/subject | **A-only.** |
 | 34 | Delete template | A `delete_template(name)` | CORE | name (elicit) | **A-only.** |

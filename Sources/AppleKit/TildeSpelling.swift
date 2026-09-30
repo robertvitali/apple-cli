@@ -2,12 +2,11 @@ import Foundation
 
 /// The one tilde policy for OPERATOR-SUPPLIED paths, applied BEFORE `expandingTildeInPath`:
 /// attachment sources, confined write destinations, Mail's `save-attachments` directory, Notes
-/// attachment saves, the `contacts` `--file` reader (`ContactsOutput.readBoundedFile`) and the
-/// env-supplied rate-limiter state paths (`APPLE_SEND_RATELIMIT_STATE`,
-/// `APPLE_REPLY_RATELIMIT_STATE`). Deliberately outside it: the Mail template root
-/// (`APPLE_MAIL_MCP_HOME`), which expands no tilde at all, as the retired Mail oracle did
-/// (operator ruling D39; `TemplateStore.init`); paths
-/// read out of the Messages database (`ChatDB`, an existence probe on store-owned values);
+/// attachment saves, the `contacts` `--file` reader (`ContactsOutput.readBoundedFile`), the Mail
+/// template folder (`APPLE_MAIL_TEMPLATES_DIR`, `TemplateStore.init`) and the env-supplied
+/// rate-limiter state paths (`APPLE_SEND_RATELIMIT_STATE`, `APPLE_REPLY_RATELIMIT_STATE`).
+/// Deliberately outside it: paths read out of the Messages database (`ChatDB`, an existence
+/// probe on store-owned values);
 /// `AttachmentFS.resolvedPath` expands raw but only ever receives an already-guarded spelling or
 /// an allowed-root constant. `rawFinalLeafPath` applies the
 /// policy too but, refused or not, never expands a foreign spelling: its job is to inspect

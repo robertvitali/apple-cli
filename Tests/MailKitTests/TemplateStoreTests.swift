@@ -16,7 +16,7 @@ struct TemplateStoreTests {
     /// there is no meaningful recovery, it fails loudly, and it keeps the helper callable from the
     /// non-throwing test bodies.
     private func tempStore() -> TemplateStore {
-        TemplateStore(homeOverride: try! scratch.directory().path)
+        try! TemplateStore(homeOverride: scratch.directory().path)
     }
 
     private func rawFile(_ store: TemplateStore, _ name: String) throws -> String {
@@ -308,37 +308,35 @@ struct TemplateStoreTests {
         #expect(throws: AppleError.self) { try TemplateStore.validateSave(name: "n", body: "b", subject: "a\nb") }
     }
 
-    /// D39: the value is read as the retired Mail oracle read it (`Path(home_override)`), so the
-    /// expectations are exact paths under a fixed working directory, the same on every macOS
-    /// release. Before D39 `~/tpl` resolved to the home directory on macOS 26 and 27, and an
-    /// empty value named the working directory itself.
-    @Test("APPLE_MAIL_MCP_HOME is read literally: no tilde expansion, relative to the working directory, empty is unset")
-    func environmentHomeIsReadAsTheOracleReadIt() {
-        let cwd = "/work/dir"
-        func root(_ raw: String?) -> String {
-            TemplateStore(environment: raw.map { ["APPLE_MAIL_MCP_HOME": $0] } ?? [:],
-                          currentDirectory: cwd).root.path
+    /// D40: `APPLE_MAIL_TEMPLATES_DIR` names the template folder itself, under the shared tilde
+    /// policy; empty or unset means `~/.apple-cli/mail-templates`.
+    @Test("APPLE_MAIL_TEMPLATES_DIR names the folder, follows the tilde policy, and empty means the default")
+    func templatesDirFollowsTheTildePolicy() throws {
+        let other = NSUserName() == "root" ? "~daemon" : "~root"
+        for raw in [other + "/tpl", "~no-such-user-apple-cli/tpl", "~\u{0301}/tpl"] {
+            do {
+                _ = try TemplateStore(environment: ["APPLE_MAIL_TEMPLATES_DIR": raw])
+                Issue.record("expected a refusal for \(raw)")
+            } catch let error as AppleError {
+                #expect(error.type == "validation_error")
+                #expect(error.message == "APPLE_MAIL_TEMPLATES_DIR is " + TildeSpelling.refusalMessage(raw))
+            }
         }
-        #expect(root("~/tpl") == "/work/dir/~/tpl/templates")
-        #expect(root("~") == "/work/dir/~/templates")
-        #expect(root("~root/tpl") == "/work/dir/~root/tpl/templates")
-        #expect(root("~no-such-user-apple-cli/tpl") == "/work/dir/~no-such-user-apple-cli/tpl/templates")
-        #expect(root("~\u{0301}/tpl") == "/work/dir/~\u{0301}/tpl/templates")
-        #expect(root("rel/tpl") == "/work/dir/rel/tpl/templates")
-        #expect(root("/abs/tpl") == "/abs/tpl/templates")
-        #expect(root("/\u{0301}abs") == "/\u{0301}abs/templates")
-        let unset = root(nil)
-        #expect(unset.hasSuffix("/.apple_mail_mcp/templates"))
-        #expect(root("") == unset)
-        #expect(TemplateStore(environment: ["APPLE_MAIL_MCP_HOME": "tpl"], currentDirectory: "/").root.path
-                == "/tpl/templates")
-        #expect(TemplateStore(homeOverride: "/override", environment: ["APPLE_MAIL_MCP_HOME": "~/tpl"],
-                              currentDirectory: cwd).root.path == "/override/templates")
-        // A deleted working directory reads as "": the value stays relative (so its I/O fails, as
-        // the oracle's did) rather than being anchored at the filesystem root.
-        for raw in ["tmp/x", "~/tpl"] {
-            let relative = TemplateStore(environment: ["APPLE_MAIL_MCP_HOME": raw], currentDirectory: "").root
-            #expect(relative.relativePath == "./\(raw)/templates")
+        let home = ("~" as NSString).expandingTildeInPath
+        func root(_ raw: String?) throws -> URL {
+            try TemplateStore(environment: raw.map { ["APPLE_MAIL_TEMPLATES_DIR": $0] } ?? [:]).root
         }
+        #expect(try root("~/tpl").path == home + "/tpl")
+        #expect(try root("~").path == home)
+        #expect(try root("/abs/tpl").path == "/abs/tpl")
+        #expect(try root("rel/tpl").relativePath == "rel/tpl")
+        let unset = try root(nil)
+        #expect(unset.path == FileManager.default.homeDirectoryForCurrentUser.path + "/.apple-cli/mail-templates")
+        #expect(try root("").path == unset.path)
+        // Neither old name is read any more (D40): the retired variable is simply ignored.
+        #expect(try TemplateStore(environment: ["APPLE_MAIL_MCP_HOME": "/abs/old"]).root.path == unset.path)
+        #expect(try TemplateStore(homeOverride: "/override",
+                                  environment: ["APPLE_MAIL_TEMPLATES_DIR": other + "/tpl"]).root.path
+                == "/override/templates")
     }
 }

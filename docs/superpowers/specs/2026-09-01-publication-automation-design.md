@@ -216,7 +216,9 @@ policy: another user's `~user` spelling, or a tilde followed by a combining mark
 and `~/…` expands to the account's own home directory. The fourth, `APPLE_MAIL_MCP_HOME`, is read
 literally, as oracle A read it (HUMAN-DECISIONS D39): no tilde expansion, a relative value under
 the working directory, an empty value treated as unset. The preceding amendment's statement that
-these surfaces stand is superseded; the 2026-09-29 amendment's three residuals still stand.
+these surfaces stand is superseded; the 2026-09-29 amendment's three residuals still stand. Later
+the same day HUMAN-DECISIONS D40 replaced `APPLE_MAIL_MCP_HOME` with `APPLE_MAIL_TEMPLATES_DIR`,
+which follows the shared tilde policy like the other three, so D39's literal reading lapsed.
 
 ### 4.2 Contribution model
 
