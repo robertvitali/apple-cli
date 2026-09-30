@@ -1,7 +1,9 @@
+import gc
 import importlib.util
 import io
 import os
 from pathlib import Path
+import plistlib
 import math
 import re
 import shutil
@@ -11,8 +13,10 @@ import subprocess
 import sys
 import tempfile
 import textwrap
+import types
 import unittest
 from unittest import mock
+import weakref
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -26,6 +30,22 @@ TRUSTED_HOSTED_ENVIRONMENT = {
     "RUNNER_OS": "macOS",
     "RUNNER_ENVIRONMENT": "github-hosted",
 }
+
+
+def _force_remove(path) -> None:
+    """Remove a test tree even where a test left directories without owner access."""
+    if not os.path.lexists(path):
+        return
+    if os.path.islink(path):
+        os.unlink(path)
+        return
+    for directory, subdirectories, _files in os.walk(path):
+        for name in subdirectories:
+            candidate = os.path.join(directory, name)
+            if not os.path.islink(candidate):
+                os.chmod(candidate, 0o700)
+    os.chmod(path, 0o700)
+    shutil.rmtree(path)
 
 
 def load_quality():
@@ -894,6 +914,609 @@ class QualityDriverTests(unittest.TestCase):
                 ):
                     self.assertTrue(Path(environment[variable]).is_relative_to(isolated_root))
         self.assertEqual(len(isolated_homes), 3)
+
+    def _green_hosted_runner(self, status_by_stage=None, write_xunit=True):
+        def runner(stage, command, cwd, timeout, grace, env):
+            status = (status_by_stage or {}).get(stage.name, 0)
+            if status == 0 and stage.requires_xunit and write_xunit:
+                self.quality.xunit_output_path(command).write_text(
+                    "<testsuite><testcase name='synthetic'/></testsuite>",
+                    encoding="utf-8",
+                )
+            return self.quality.CommandResult(status=status)
+
+        return runner
+
+    def _run_hosted(self, runner):
+        inherited = {**TRUSTED_HOSTED_ENVIRONMENT, "HOME": "/synthetic/operator-home"}
+        with mock.patch.dict(self.quality.os.environ, inherited, clear=True):
+            return self.quality.run_quality(
+                ["--mode", "hosted", "--hosted-context", "pull-request", "--candidate-sha", FULL_SHA],
+                runner=runner,
+                git_validator=lambda request: None,
+            )
+
+    def _temporary_root(self):
+        root = self.quality.create_temporary_root()
+        self.addCleanup(_force_remove, root.path)
+        return root
+
+    def _foreign(self, device, relative):
+        return self.quality.ForeignMount(device, relative)
+
+    def _image(self, root, whole, *relatives):
+        return self.quality.DiskImage(whole, tuple(os.path.join(root.real_path, r) for r in relatives))
+
+    def test_scan_lists_outermost_foreign_directories_and_never_follows_a_symlink(self) -> None:
+        root = self._temporary_root()
+        base = Path(root.path)
+        mount = "hosted-build/home/Library/Developer/DVTDownloads/MetalToolchain/mounts/abc"
+        (base / mount / "nested").mkdir(parents=True)
+        (base / "hosted-test" / "home").mkdir(parents=True)
+        (base / "link").symlink_to(base / "hosted-test")
+        (base / "devlink").symlink_to("/dev")
+        foreign = {mount: 99, f"{mount}/nested": 98, "link/home": 97}
+
+        found = self.quality.scan_temporary_root(
+            root, lambda relative, status: foreign.get(relative, status.st_dev)
+        )
+
+        self.assertEqual(found, [self._foreign(99, mount)])
+
+    def test_scan_holds_one_descriptor_per_level_not_per_directory(self) -> None:
+        resource = __import__("resource")
+        root = self._temporary_root()
+        wide = Path(root.path) / "hosted-test" / "tmp"
+        for index in range(200):
+            (wide / f"d{index:03d}" / "inner").mkdir(parents=True)
+        soft, hard = resource.getrlimit(resource.RLIMIT_NOFILE)
+        resource.setrlimit(resource.RLIMIT_NOFILE, (min(64, hard), hard))
+        try:
+            found = self.quality.scan_temporary_root(root)
+            self.quality.delete_temporary_root(root)
+        finally:
+            resource.setrlimit(resource.RLIMIT_NOFILE, (soft, hard))
+
+        self.assertEqual(found, [])
+        self.assertFalse(os.path.exists(root.path))
+
+    def test_scan_refuses_a_replaced_or_symlinked_root_and_cleanup_touches_nothing(self) -> None:
+        for replacement in ("symlink", "directory"):
+            with self.subTest(replacement=replacement):
+                root = self._temporary_root()
+                moved = root.path + "-moved"
+                self.addCleanup(_force_remove, moved)
+                Path(root.path, "kept").write_text("x", encoding="utf-8")
+                os.rename(root.path, moved)
+                if replacement == "symlink":
+                    os.symlink(moved, root.path)
+                else:
+                    os.mkdir(root.path)
+                    Path(root.path, "sentinel").write_text("x", encoding="utf-8")
+                calls = []
+
+                failure = self.quality.remove_temporary_root(
+                    root,
+                    images=lambda: calls.append("images") or {},
+                    detach=lambda device, force: calls.append(("detach", device, force)),
+                )
+
+                self.assertIsNotNone(failure)
+                self.assertNotIn(root.path, failure)
+                self.assertEqual(calls, [])
+                self.assertTrue(Path(moved, "kept").exists(), "nothing is done through a symlinked root")
+                if replacement == "directory":
+                    self.assertTrue(Path(root.path, "sentinel").exists())
+
+    def test_delete_refuses_a_root_swapped_after_the_scan(self) -> None:
+        root = self._temporary_root()
+        moved = root.path + "-moved"
+        self.addCleanup(_force_remove, moved)
+        Path(root.path, "kept").write_text("x", encoding="utf-8")
+        swapped = []
+
+        def scan_then_swap(scanned_root):
+            found = self.quality.scan_temporary_root(scanned_root)
+            if not swapped:
+                os.rename(root.path, moved)
+                os.mkdir(root.path)
+                Path(root.path, "sentinel").write_text("x", encoding="utf-8")
+                swapped.append(True)
+            return found
+
+        with mock.patch("sys.stderr", new_callable=io.StringIO):
+            failure = self.quality.remove_temporary_root(root, scan=scan_then_swap)
+
+        self.assertIsNotNone(failure)
+        self.assertTrue(Path(root.path, "sentinel").exists())
+        self.assertTrue(Path(moved, "kept").exists())
+
+    def test_delete_never_crosses_onto_another_filesystem(self) -> None:
+        root = self._temporary_root()
+        (Path(root.path) / "a" / "m").mkdir(parents=True)
+        (Path(root.path) / "a" / "m" / "file").write_text("x", encoding="utf-8")
+        (Path(root.path) / "b").write_text("x", encoding="utf-8")
+        foreign = {"a/m": 99}
+
+        with self.assertRaisesRegex(OSError, "<tmp>/a/m is a mounted filesystem"):
+            self.quality.delete_temporary_root(
+                root, lambda relative, status: foreign.get(relative, status.st_dev)
+            )
+
+        self.assertTrue((Path(root.path) / "a" / "m" / "file").exists())
+
+    def test_delete_unlinks_symlinks_and_special_files_without_following_them(self) -> None:
+        root = self._temporary_root()
+        outside = self._temporary_root()
+        Path(outside.path, "kept").write_text("x", encoding="utf-8")
+        base = Path(root.path)
+        (base / "d").mkdir()
+        (base / "d" / "to-directory").symlink_to(outside.path)
+        (base / "d" / "to-file").symlink_to(Path(outside.path, "kept"))
+        (base / "d" / "to-dev").symlink_to("/dev")
+        (base / "d" / "dangling").symlink_to(Path(outside.path, "missing"))
+        os.mkfifo(base / "d" / "fifo")
+
+        self.quality.delete_temporary_root(root)
+
+        self.assertFalse(os.path.lexists(root.path))
+        self.assertEqual(os.listdir(outside.path), ["kept"])
+
+    def test_delete_refuses_a_root_swapped_before_its_final_rmdir(self) -> None:
+        root = self._temporary_root()
+        moved = root.path + "-moved"
+        self.addCleanup(_force_remove, moved)
+
+        def device_of(relative, status):
+            return status.st_dev
+
+        (Path(root.path) / "a").mkdir()
+        real_rmdir = os.rmdir
+        swapped = []
+
+        def swap_then_rmdir(path, *args, **kwargs):
+            if kwargs.get("dir_fd") is not None and path == "a" and not swapped:
+                result = real_rmdir(path, *args, **kwargs)
+                os.rename(root.path, moved)
+                os.mkdir(root.path)
+                swapped.append(True)
+                return result
+            return real_rmdir(path, *args, **kwargs)
+
+        with mock.patch.object(self.quality.os, "rmdir", swap_then_rmdir):
+            with self.assertRaises(self.quality.TemporaryRootReplaced):
+                self.quality.delete_temporary_root(root, device_of)
+
+        self.assertTrue(os.path.isdir(root.path), "the swapped-in directory must not be removed")
+        self.assertTrue(os.path.isdir(moved))
+
+    def test_cleanup_refuses_an_image_hdiutil_does_not_record_at_the_scanned_path(self) -> None:
+        root = self._temporary_root()
+        mount = self._foreign(99, "hosted-build/home/mounts/abc")
+        events = []
+        for image in (
+            self.quality.DiskImage("/dev/disk6", ()),
+            self._image(root, "/dev/disk6", "hosted-build/home/mounts/other"),
+        ):
+            with self.subTest(mount_points=image.mount_points):
+                failure = self.quality.remove_temporary_root(
+                    root,
+                    scan=lambda _root: [mount],
+                    images=lambda: {99: image},
+                    detach=lambda device, force: events.append((device, force)),
+                    describe=lambda path: "described",
+                    remove=lambda removed_root: events.append("removed"),
+                )
+                self.assertEqual(
+                    failure,
+                    "<tmp>/hosted-build/home/mounts/abc is on disk image /dev/disk6, but hdiutil "
+                    "records no volume of it mounted there (described)",
+                )
+        self.assertEqual(events, [])
+
+    def test_scan_refuses_a_directory_swapped_between_its_stat_and_its_open(self) -> None:
+        for replacement in ("directory", "symlink"):
+            with self.subTest(replacement=replacement):
+                root = self._temporary_root()
+                base = Path(root.path)
+                (base / "a" / "b").mkdir(parents=True)
+                elsewhere = self._temporary_root()
+
+                def swap_after_stat(relative, status):
+                    if relative == "a":
+                        os.rename(base / "a", base / "a-moved")
+                        if replacement == "directory":
+                            (base / "a").mkdir()
+                        else:
+                            (base / "a").symlink_to(elsewhere.path)
+                    return status.st_dev
+
+                with self.assertRaises(OSError):
+                    self.quality.scan_temporary_root(root, swap_after_stat)
+
+    def test_temporary_root_is_never_registered_for_automatic_deletion(self) -> None:
+        root = self._temporary_root()
+
+        registered = [
+            info for info in weakref.finalize._registry.values()
+            if root.path in (str(argument) for argument in info.args)
+        ]
+
+        self.assertEqual(registered, [])
+        self.assertEqual(root.identity, (os.lstat(root.path).st_dev, os.lstat(root.path).st_ino))
+        self.assertEqual(root.real_path, os.path.realpath(root.path))
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root ignores directory modes")
+    def test_scan_opens_unreadable_directories_instead_of_skipping_them(self) -> None:
+        root = self._temporary_root()
+        base = Path(root.path)
+        for directory, mode in (("unlistable", 0o000), ("unsearchable", 0o600), ("write-only", 0o300)):
+            (base / directory / "inner").mkdir(parents=True)
+            os.chmod(base / directory, mode)
+        foreign = {"unlistable/inner": 91, "unsearchable/inner": 92, "write-only/inner": 93}
+
+        found = self.quality.scan_temporary_root(
+            root, lambda relative, status: foreign.get(relative, status.st_dev)
+        )
+
+        self.assertEqual(
+            sorted((mount.device, mount.relative) for mount in found),
+            [(91, "unlistable/inner"), (92, "unsearchable/inner"), (93, "write-only/inner")],
+        )
+
+    @unittest.skipIf(hasattr(os, "geteuid") and os.geteuid() == 0, "root ignores directory modes")
+    def test_cleanup_removes_a_tree_with_unreadable_directories(self) -> None:
+        root = self._temporary_root()
+        base = Path(root.path)
+        (base / "a" / "b").mkdir(parents=True)
+        (base / "a" / "b" / "file").write_text("x", encoding="utf-8")
+        os.chmod(base / "a" / "b", 0o500)
+        os.chmod(base / "a", 0o000)
+
+        self.assertIsNone(self.quality.remove_temporary_root(root))
+        self.assertFalse(base.exists())
+
+    def test_disk_images_resolve_hfs_and_apfs_shapes_to_the_image_whole_disk(self) -> None:
+        container = "EF57347C-0000-11AA-AA11-00306543ECAC"
+        listing = {
+            "images": [
+                {"system-entities": [
+                    {"dev-entry": "/dev/disk6", "content-hint": "GUID_partition_scheme"},
+                    {"dev-entry": "/dev/disk6s1", "mount-point": "/x/hfs"},
+                ]},
+                {"system-entities": [
+                    {"dev-entry": "/dev/disk8", "content-hint": "GUID_partition_scheme"},
+                    {"dev-entry": "/dev/disk8s1", "content-hint": "7C3457EF-0000-11AA-AA11-00306543ECAC"},
+                    {"dev-entry": "/dev/disk9", "content-hint": container},
+                    {"dev-entry": "/dev/disk9s1", "content-hint": "41504653-0000-11AA-AA11-00306543ECAC", "mount-point": "/x/apfs"},
+                ]},
+                {"system-entities": [
+                    {"dev-entry": "/dev/disk10"},
+                    {"dev-entry": "/dev/disk11", "content-hint": container},
+                    {"dev-entry": "/dev/disk11s1", "mount-point": "/x/flat"},
+                ]},
+                {"system-entities": [{"dev-entry": "/dev/disk7s1"}]},
+                {"system-entities": [{"dev-entry": "/dev/disk12"}, {"dev-entry": "/dev/disk13"}]},
+                {"system-entities": [{"dev-entry": "/dev/disk14"}, {"dev-entry": "/tmp/../dev/disk14s1"}]},
+                {"system-entities": [{"dev-entry": "/dev/disk15"}, {"dev-entry": "/dev/disk15s1"}, {"dev-entry": "/dev/disk15s2"}]},
+                {"system-entities": "not a list"},
+                "not an image",
+            ]
+        }
+        numbers = {
+            "/dev/disk6": 600, "/dev/disk6s1": 601,
+            "/dev/disk8": 800, "/dev/disk8s1": 801, "/dev/disk9": 900, "/dev/disk9s1": 901,
+            "/dev/disk10": 1000, "/dev/disk11": 1100, "/dev/disk11s1": 1101,
+            "/dev/disk7s1": 701, "/dev/disk12": 1200, "/dev/disk13": 1300,
+            "/dev/disk14": 1400, "/dev/disk15": 1500,
+        }
+        calls = []
+
+        def run_tool(arguments, merge_stderr=True):
+            calls.append((arguments, merge_stderr))
+            return subprocess.CompletedProcess(arguments, 0, stdout=plistlib.dumps(listing), stderr=b"hdiutil: WARNING: deprecated")
+
+        def device_of_entry(entry):
+            if entry == "/dev/disk15s1":
+                raise FileNotFoundError(entry)
+            if entry == "/dev/disk15s2":
+                return types.SimpleNamespace(st_mode=stat.S_IFCHR | 0o640, st_rdev=1502)
+            return types.SimpleNamespace(st_mode=stat.S_IFBLK | 0o640, st_rdev=numbers[entry])
+
+        with mock.patch.object(self.quality, "_run_cleanup_tool", run_tool):
+            mapping = self.quality.attached_disk_images(device_of_entry)
+
+        hfs = self.quality.DiskImage("/dev/disk6", ("/x/hfs",))
+        apfs = self.quality.DiskImage("/dev/disk8", ("/x/apfs",))
+        flat = self.quality.DiskImage("/dev/disk10", ("/x/flat",))
+        self.assertEqual(
+            mapping,
+            {
+                600: hfs, 601: hfs,
+                800: apfs, 801: apfs, 900: apfs, 901: apfs,
+                1000: flat, 1100: flat, 1101: flat,
+                1400: self.quality.DiskImage("/dev/disk14", ()),
+                1500: self.quality.DiskImage("/dev/disk15", ()),
+            },
+        )
+        self.assertEqual(calls, [(("/usr/bin/hdiutil", "info", "-plist"), False)])
+
+        def failing_tool(arguments, merge_stderr=True):
+            return subprocess.CompletedProcess(arguments, 1, stdout=b"", stderr=b"no")
+
+        with mock.patch.object(self.quality, "_run_cleanup_tool", failing_tool):
+            with self.assertRaisesRegex(OSError, "hdiutil info exited 1: no"):
+                self.quality.attached_disk_images(device_of_entry)
+
+    def test_malformed_hdiutil_output_is_a_reported_failure(self) -> None:
+        root = self._temporary_root()
+        for output in (b"not a plist", b"", plistlib.dumps(["a", "list"])):
+            with self.subTest(output=output[:12]):
+                with mock.patch.object(
+                    self.quality, "_run_cleanup_tool",
+                    lambda arguments, merge_stderr=True: subprocess.CompletedProcess(arguments, 0, stdout=output, stderr=b""),
+                ):
+                    failure = self.quality.remove_temporary_root(
+                        root,
+                        scan=lambda _root: [self._foreign(99, "m")],
+                        describe=lambda path: "described",
+                        remove=lambda removed: self.fail("must not delete around a mount"),
+                    )
+                self.assertIsNotNone(failure)
+
+    def test_cleanup_tools_run_with_closed_stdin_a_fixed_environment_and_a_timeout(self) -> None:
+        captured = []
+
+        def run(argv, **kwargs):
+            captured.append((argv, kwargs))
+            return subprocess.CompletedProcess(argv, 1, stdout=b"busy")
+
+        with mock.patch.object(self.quality.subprocess, "run", run), mock.patch(
+            "sys.stderr", new_callable=io.StringIO
+        ) as stderr:
+            self.quality.detach_disk_image("/dev/disk6", False)
+            self.quality.detach_disk_image("/dev/disk6", True)
+            self.quality._run_cleanup_tool(("/usr/bin/hdiutil", "info", "-plist"), merge_stderr=False)
+
+        self.assertEqual(
+            [argv for argv, _kwargs in captured],
+            [
+                ("/usr/bin/hdiutil", "detach", "/dev/disk6"),
+                ("/usr/bin/hdiutil", "detach", "-force", "/dev/disk6"),
+                ("/usr/bin/hdiutil", "info", "-plist"),
+            ],
+        )
+        for _argv, kwargs in captured:
+            self.assertIs(kwargs["stdin"], subprocess.DEVNULL)
+            self.assertEqual(kwargs["env"], self.quality.CLEANUP_TOOL_ENVIRONMENT)
+            self.assertEqual(kwargs["timeout"], self.quality.CLEANUP_TOOL_TIMEOUT_SECONDS)
+        self.assertEqual([kwargs["stderr"] for _argv, kwargs in captured],
+                         [subprocess.STDOUT, subprocess.STDOUT, subprocess.PIPE])
+        self.assertIn("hdiutil detach -force /dev/disk6 exited 1: busy", stderr.getvalue())
+
+    def test_mount_table_summary_reports_who_mounted_it_without_the_name(self) -> None:
+        table = (
+            b"/dev/disk3s1 on / (apfs, sealed, local, read-only, journaled)\n"
+            b"/dev/disk6s1 on /private/var/t/a b (hfs, local, read-only, noowners, mounted by runner)\n"
+            b"/dev/disk7s1 on /private/var/t/c (apfs, local, read-only, mounted by someone-else)\n"
+        )
+        with mock.patch.object(
+            self.quality, "_run_cleanup_tool",
+            lambda arguments, merge_stderr=True: subprocess.CompletedProcess(arguments, 0, stdout=table),
+        ), mock.patch.object(
+            self.quality.pwd, "getpwuid", lambda uid: types.SimpleNamespace(pw_name="runner")
+        ):
+            self.assertEqual(
+                self.quality.mount_table_summary("/private/var/t/a b"),
+                "/dev/disk6s1, hfs, local, read-only, noowners; mounted by this user: yes",
+            )
+            self.assertEqual(
+                self.quality.mount_table_summary("/private/var/t/c"),
+                "/dev/disk7s1, apfs, local, read-only; mounted by this user: no",
+            )
+            self.assertEqual(
+                self.quality.mount_table_summary("/"),
+                "/dev/disk3s1, apfs, sealed, local, read-only, journaled; mounted by this user: unknown",
+            )
+            self.assertEqual(self.quality.mount_table_summary("/elsewhere"), "no mount-table entry")
+
+    def test_cleanup_detaches_by_device_and_forces_only_when_a_rescan_still_finds_it(self) -> None:
+        mount = self._foreign(99, "hosted-build/home/mounts/abc")
+        for scans, expected_detaches, removed in (
+            ([[mount], []], [("/dev/disk6", False)], True),
+            ([[mount], [mount], []], [("/dev/disk6", False), ("/dev/disk6", True)], True),
+            ([[mount], [mount], [mount]], [("/dev/disk6", False), ("/dev/disk6", True)], False),
+        ):
+            with self.subTest(scans=len(scans), removed=removed):
+                root = self._temporary_root()
+                pending = list(scans)
+                events = []
+
+                with mock.patch("sys.stderr", new_callable=io.StringIO):
+                    failure = self.quality.remove_temporary_root(
+                        root,
+                        scan=lambda _root: pending.pop(0),
+                        images=lambda: {99: self._image(root, "/dev/disk6", mount.relative)},
+                        detach=lambda device, force: events.append((device, force)),
+                        describe=lambda path: "hfs, read-only",
+                        remove=lambda removed_root: events.append("removed"),
+                    )
+
+                self.assertEqual([e for e in events if e != "removed"], expected_detaches)
+                if removed:
+                    self.assertIsNone(failure)
+                    self.assertEqual(events[-1], "removed")
+                else:
+                    self.assertEqual(
+                        failure,
+                        "<tmp>/hosted-build/home/mounts/abc is still mounted after hdiutil detach "
+                        "and detach -force of /dev/disk6",
+                    )
+                    self.assertNotIn("removed", events)
+
+    def test_cleanup_tries_every_mount_and_refuses_what_it_cannot_safely_detach(self) -> None:
+        root = self._temporary_root()
+        graft = self._foreign(98, "hosted-build/home/graft")
+        shared = self._foreign(97, "hosted-build/home/shared")
+        image = self._foreign(99, "hosted-test/home/image")
+        pending = [[graft, shared, image], [graft, shared]]
+        events = []
+        outside = self.quality.DiskImage("/dev/disk7", (os.path.join(root.real_path, shared.relative), "/Volumes/other"))
+
+        with mock.patch("sys.stderr", new_callable=io.StringIO):
+            failure = self.quality.remove_temporary_root(
+                root,
+                scan=lambda _root: pending.pop(0),
+                images=lambda: {99: self._image(root, "/dev/disk6", image.relative), 97: outside},
+                detach=lambda device, force: events.append((device, force)),
+                describe=lambda path: f"described {path == os.path.join(root.real_path, graft.relative) or path.endswith('shared')}",
+                remove=lambda removed_root: events.append("removed"),
+            )
+
+        self.assertEqual(events, [("/dev/disk6", False)])
+        self.assertEqual(
+            failure,
+            "<tmp>/hosted-build/home/graft is a mounted filesystem but not an attached disk image "
+            "(described True); <tmp>/hosted-build/home/shared belongs to disk image /dev/disk7, which "
+            "also has a volume mounted outside the temporary directory (described True)",
+        )
+
+    def test_cleanup_rescans_once_when_the_delete_fails(self) -> None:
+        root = self._temporary_root()
+        for failures_before_success, expect_none in ((1, True), (2, False)):
+            with self.subTest(failures_before_success=failures_before_success):
+                attempts = []
+                scans = []
+
+                def remove(removed_root):
+                    attempts.append(removed_root)
+                    if len(attempts) <= failures_before_success:
+                        raise OSError(30, "Read-only file system", f"{root.real_path}/hosted-build/home/m")
+
+                with mock.patch("sys.stderr", new_callable=io.StringIO):
+                    failure = self.quality.remove_temporary_root(
+                        root,
+                        scan=lambda _root: scans.append(1) or [],
+                        remove=remove,
+                    )
+
+                self.assertEqual(len(scans), min(failures_before_success + 1, 2))
+                if expect_none:
+                    self.assertIsNone(failure)
+                else:
+                    self.assertEqual(
+                        failure,
+                        "OSError: [Errno 30] Read-only file system: '<tmp>/hosted-build/home/m'",
+                    )
+
+    def test_cleanup_never_raises_and_keeps_names_on_one_escaped_line(self) -> None:
+        root = self._temporary_root()
+
+        def scan(_root):
+            raise OSError(f"{root.path}/a\n::error::b")
+
+        failure = self.quality.remove_temporary_root(root, scan=scan)
+
+        self.assertEqual(failure, "OSError: <tmp>/a\\n::error::b")
+
+    def test_hosted_cleanup_failure_is_a_warning_and_keeps_the_stage_verdict(self) -> None:
+        for status_by_stage, expected_status in (({}, 0), ({"hosted-build": 7}, 7)):
+            with self.subTest(status_by_stage=status_by_stage):
+                roots = []
+
+                def failing_cleanup(root):
+                    roots.append(root.path)
+                    self.addCleanup(_force_remove, root.path)
+                    return "synthetic 50% mount\nleft behind"
+
+                with mock.patch.object(self.quality, "remove_temporary_root", failing_cleanup), mock.patch(
+                    "sys.stderr", new_callable=io.StringIO
+                ), mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                    result = self._run_hosted(self._green_hosted_runner(status_by_stage))
+                gc.collect()
+
+                self.assertEqual(result.status, expected_status)
+                self.assertEqual(result.stderr[-1], "cleanup failed: synthetic 50% mount\nleft behind")
+                self.assertIn(
+                    "::warning title=quality cleanup::synthetic 50%25 mount%0Aleft behind\n",
+                    stdout.getvalue(),
+                )
+                self.assertTrue(os.path.isdir(roots[0]), "nothing but the cleanup may delete the tree")
+
+    def test_local_cleanup_failure_fails_a_green_run_without_an_annotation(self) -> None:
+        for status, expected in ((0, self.quality.ASSERTION_FAILURE_STATUS), (7, 7)):
+            with self.subTest(status=status), mock.patch(
+                "sys.stderr", new_callable=io.StringIO
+            ), mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+                result = self.quality.apply_cleanup_failure(
+                    self.quality.Mode.LOCAL,
+                    self.quality.QualityResult(status, stderr=("stage line",)),
+                    "synthetic",
+                )
+            self.assertEqual(result.status, expected)
+            self.assertEqual(result.stderr, ("stage line", "cleanup failed: synthetic"))
+            self.assertEqual(stdout.getvalue(), "")
+
+    def test_cleanup_failure_is_reported_when_a_stage_raises(self) -> None:
+        runner = self._green_hosted_runner(write_xunit=False)
+        with mock.patch("sys.stderr", new_callable=io.StringIO):
+            baseline = self._run_hosted(runner)
+        self.assertNotEqual(baseline.status, 0)
+
+        with mock.patch.object(
+            self.quality, "remove_temporary_root",
+            lambda root: _force_remove(root.path) or "synthetic",
+        ), mock.patch("sys.stderr", new_callable=io.StringIO), mock.patch(
+            "sys.stdout", new_callable=io.StringIO
+        ):
+            result = self._run_hosted(runner)
+
+        self.assertEqual(result.status, baseline.status)
+        self.assertEqual(result.stderr, baseline.stderr + ("cleanup failed: synthetic",))
+
+    def test_cleanup_failure_is_reported_when_a_stage_raises_a_policy_error(self) -> None:
+        def runner(stage, command, cwd, timeout, grace, env):
+            raise self.quality.PolicyError("synthetic policy")
+
+        with mock.patch.object(
+            self.quality, "remove_temporary_root",
+            lambda root: _force_remove(root.path) or "synthetic",
+        ), mock.patch("sys.stderr", new_callable=io.StringIO), mock.patch(
+            "sys.stdout", new_callable=io.StringIO
+        ):
+            result = self._run_hosted(runner)
+
+        self.assertEqual(result.status, self.quality.POLICY_FAILURE_STATUS)
+        self.assertEqual(result.stderr, ("synthetic policy", "cleanup failed: synthetic"))
+
+    def test_cleanup_failure_is_printed_even_when_an_unexpected_exception_escapes(self) -> None:
+        def runner(stage, command, cwd, timeout, grace, env):
+            raise RuntimeError("synthetic crash")
+
+        with mock.patch.object(
+            self.quality, "remove_temporary_root",
+            lambda root: _force_remove(root.path) or "synthetic",
+        ), mock.patch("sys.stderr", new_callable=io.StringIO) as stderr:
+            with self.assertRaisesRegex(RuntimeError, "synthetic crash"):
+                self._run_hosted(runner)
+
+        self.assertIn("quality: cleanup failed: synthetic\n", stderr.getvalue())
+
+    def test_hosted_run_removes_its_temporary_root_after_green_stages(self) -> None:
+        roots = []
+        runner = self._green_hosted_runner()
+
+        def recording_runner(stage, command, cwd, timeout, grace, env):
+            if env.get("HOME") != "/synthetic/operator-home":
+                roots.append(Path(env["HOME"]).parents[1])
+            return runner(stage, command, cwd, timeout, grace, env)
+
+        with mock.patch("sys.stderr", new_callable=io.StringIO):
+            result = self._run_hosted(recording_runner)
+
+        self.assertEqual(result.status, 0)
+        self.assertEqual(len(set(roots)), 1)
+        self.assertFalse(roots[0].exists())
 
     def test_sha_validation_is_full_lowercase_hex_only(self) -> None:
         for bad_sha in (

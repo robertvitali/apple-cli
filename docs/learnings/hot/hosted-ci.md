@@ -2,7 +2,7 @@
 topic: hosted-ci
 importance: high
 last-used: 2026-09-30
-uses: 6
+uses: 7
 ---
 
 # Hosted CI (public, free GitHub-hosted runners)
@@ -124,6 +124,52 @@ red step had been unexercised since the last hosted run on 2026-09-02; the local
    the old helper fails on macOS 27 too; its "still contains a tilde" check could only fail on a
    release that substitutes. Lesson: when a test pins a release-dependent behaviour, assert the
    exact value, so every release, the local one included, can fail it.
+
+7. **`build-test` (`macos-26`) — every test green, job red: a read-only filesystem inside the
+   isolated HOME, 2026-09-30** (same image). On attempt 1 of one CI run, all 1968 Swift tests
+   passed, then `scripts/ci/quality.py` failed to delete its temporary root: `OSError: [Errno
+   30] Read-only file system` under
+   `hosted-build/home/Library/Developer/DVTDownloads/MetalToolchain/mounts/`. The cause is
+   inferred, not observed: SwiftPM runs `xcrun --find metal` whenever it sets up its toolchain
+   on Darwin (swiftlang/swift-package-manager#9434, so in `swift test` as well as `swift build`),
+   and public reports describe Xcode 26 mounting its downloadable Metal toolchain on demand, so
+   the most likely reading is that this lookup mounted the toolchain's image under the stage's
+   isolated HOME, which sits inside the tree the driver deletes. Whether Xcode 26.6's bundled
+   SwiftPM carries that change, and who owns the mount, were not established. It is
+   intermittent: the same attempt's `hosted-bats-build` job ran the same isolated-HOME build
+   through the driver and cleaned up; the previous commit's run on the same image version
+   cleaned up; and the re-run of the failed jobs failed on an unrelated timing flake and also
+   cleaned up. "Cleaned up" is all those runs show; the driver did not log mounts then.
+
+   Prevention was rejected: SwiftPM's lookup has no switch; dropping HOME isolation for the
+   build stages gives up the isolation to fix a flake; pre-running the lookup with the real
+   HOME assumes Xcode reuses that mount; and redirecting `DVTDownloads` hard-codes an Xcode
+   path. The driver now tolerates the mount instead. It creates its root with `mkdtemp` and
+   records the root's identity, and it walks and deletes the tree by descriptor from that
+   root: a replaced root is refused, no symlink is followed, each directory gets owner access
+   so nothing unreadable hides a mount, and the delete never crosses onto another filesystem.
+   It detaches only an attached disk image, matched by device number through `hdiutil info`
+   and detached by the image's whole-disk node (for APFS, the image rather than the container
+   macOS synthesizes for it), never by a path a stage could redirect, and not at all unless
+   `hdiutil` records a volume of that image mounted at the scanned path and none outside the
+   root; it forces a detach only when a rescan still finds the mount. It logs the mount-table
+   device, type and flags and whether the runner user mounted it (not the name), so the next
+   occurrence settles who mounted the filesystem and what it is. Anything that stays mounted
+   is reported and the rest of the tree is left in place.
+   On a hosted runner, which is discarded after the job, that report is a warning annotation
+   and the stage verdict stands; in local mode it fails the run. Verified on the local macOS
+   27 host, by calling the functions directly against read-only images this session attached
+   as the same user: HFS+ and APFS images (GUID and flat layouts) were detached from inside the
+   root, and an APFS image from under a mode-000 directory; a root swapped for a symlink to a
+   directory holding a mount was refused with that mount left alone. Not verified: detaching
+   the mount Xcode itself makes on `macos-26`. macOS 27 prints a deprecation warning for
+   `hdiutil detach` and suggests `diskutil eject`; it still works, and a removed verb would
+   surface as a reported cleanup failure, not a silent skip. Known gap:
+   `scripts/ci/capability_policy.py` also runs `swift build` and `swift test` under a HOME
+   inside a `TemporaryDirectory`; no workflow runs it today, but on an Xcode 26 host it can hit
+   the same failure. Lesson: an isolated HOME keeps a tool's writes out of the runner's real
+   home, but a tool can also mount there, so cleanup must handle filesystems it did not
+   create, and must do so without trusting paths the code under test can change.
 
 **Follow-up 2026-09-26 — the order check flaked too, and the residual in item 5 was incomplete.**
 Hosted CI failed the same test again, on a commit that changed no Swift code, now at the order

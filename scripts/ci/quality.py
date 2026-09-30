@@ -10,6 +10,8 @@ import io
 import math
 import os
 from pathlib import Path
+import plistlib
+import pwd
 import re
 import selectors
 import signal
@@ -855,6 +857,383 @@ def validate_hosted_runner_context(
         raise PolicyError("hosted mode requires a GitHub-hosted macOS runner")
 
 
+HDIUTIL = "/usr/bin/hdiutil"
+MOUNT = "/sbin/mount"
+CLEANUP_TOOL_TIMEOUT_SECONDS = 60
+CLEANUP_TOOL_ENVIRONMENT = {
+    "PATH": "/usr/bin:/bin:/usr/sbin:/sbin",
+    "LC_ALL": "C",
+    "LANG": "C",
+}
+DISK_ENTRY_RE = re.compile(r"^/dev/disk[0-9]+(?:s[0-9]+)*$")
+WHOLE_DISK_RE = re.compile(r"^/dev/disk[0-9]+$")
+# The container disk macOS synthesizes for an APFS image is listed as a second whole disk;
+# the image itself is the other one, and detaching it takes the container with it.
+SYNTHESIZED_APFS_CONTAINER_HINT = "EF57347C-0000-11AA-AA11-00306543ECAC"
+MOUNT_LINE_RE = re.compile(r"^(\S+) on (.+) \((.*)\)$")
+DIRECTORY_OPEN_FLAGS = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+
+class TemporaryRootReplaced(OSError):
+    pass
+
+
+@dataclass(frozen=True)
+class TemporaryRoot:
+    path: str
+    real_path: str
+    identity: Tuple[int, int]
+
+
+@dataclass(frozen=True)
+class ForeignMount:
+    device: int
+    relative: str
+
+
+@dataclass(frozen=True)
+class DiskImage:
+    whole_disk: str
+    mount_points: Tuple[str, ...]
+
+
+def create_temporary_root() -> TemporaryRoot:
+    # mkdtemp rather than TemporaryDirectory: nothing may delete this tree except
+    # remove_temporary_root, which refuses to delete around a mount it left in place.
+    path = tempfile.mkdtemp(prefix="apple-cli-quality-")
+    status = os.lstat(path)
+    return TemporaryRoot(path, os.path.realpath(path), (status.st_dev, status.st_ino))
+
+
+def log_safe(text: str) -> str:
+    """Escape control and non-ASCII characters, so no name can start a new log line."""
+    return text.encode("unicode_escape").decode("ascii")
+
+
+def _identity(status: os.stat_result) -> Tuple[int, int]:
+    return (status.st_dev, status.st_ino)
+
+
+def _default_device(_relative: str, status: os.stat_result) -> int:
+    return status.st_dev
+
+
+def _open_verified_root(root: TemporaryRoot) -> int:
+    root_fd = os.open(root.path, DIRECTORY_OPEN_FLAGS)
+    if _identity(os.fstat(root_fd)) != root.identity:
+        os.close(root_fd)
+        raise TemporaryRootReplaced("the temporary directory was replaced during the run")
+    return root_fd
+
+
+def _directory_names(directory_fd: int) -> List[str]:
+    # The tree is the driver's own: give the owner access so nothing unreadable is skipped.
+    mode = stat.S_IMODE(os.fstat(directory_fd).st_mode)
+    if mode & stat.S_IRWXU != stat.S_IRWXU:
+        os.fchmod(directory_fd, mode | stat.S_IRWXU)
+    with os.scandir(directory_fd) as entries:
+        return sorted(entry.name for entry in entries)
+
+
+def _open_child_directory(parent_fd: int, name: str, expected: os.stat_result) -> int:
+    try:
+        child_fd = os.open(name, DIRECTORY_OPEN_FLAGS, dir_fd=parent_fd)
+    except PermissionError:
+        # Where chmod cannot refuse a symlink (Linux), the O_NOFOLLOW open and the
+        # identity check below still refuse one swapped in after the stat.
+        mode = stat.S_IMODE(expected.st_mode) | stat.S_IRWXU
+        nofollow = os.chmod in os.supports_follow_symlinks
+        os.chmod(name, mode, dir_fd=parent_fd, follow_symlinks=not nofollow)
+        child_fd = os.open(name, DIRECTORY_OPEN_FLAGS, dir_fd=parent_fd)
+    if _identity(os.fstat(child_fd)) != _identity(expected):
+        os.close(child_fd)
+        raise OSError(f"a directory named {name} changed while it was being walked")
+    return child_fd
+
+
+def _scan_directory(
+    directory_fd: int,
+    relative: str,
+    root_device: int,
+    device_of: Callable[[str, os.stat_result], int],
+    found: List[ForeignMount],
+) -> None:
+    for name in _directory_names(directory_fd):
+        status = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        if not stat.S_ISDIR(status.st_mode):
+            continue
+        child = f"{relative}/{name}" if relative else name
+        device = device_of(child, status)
+        if device != root_device:
+            found.append(ForeignMount(device, child))
+            continue
+        child_fd = _open_child_directory(directory_fd, name, status)
+        try:
+            _scan_directory(child_fd, child, root_device, device_of, found)
+        finally:
+            os.close(child_fd)
+
+
+def scan_temporary_root(
+    root: TemporaryRoot,
+    device_of: Callable[[str, os.stat_result], int] = _default_device,
+) -> List[ForeignMount]:
+    """Every directory below the root that sits on another filesystem; outermost only.
+
+    Walks depth-first by descriptor (one open descriptor per level) from the root created
+    for this run: a replaced root is refused, no symlink is followed, and every directory
+    is given owner access first, so an unreadable subtree cannot hide a mount. Any error
+    propagates: a scan that could not finish is never reported as "no mounts".
+    """
+    found: List[ForeignMount] = []
+    root_fd = _open_verified_root(root)
+    try:
+        _scan_directory(root_fd, "", root.identity[0], device_of, found)
+    finally:
+        os.close(root_fd)
+    return found
+
+
+def _empty_directory(
+    directory_fd: int,
+    relative: str,
+    root_device: int,
+    device_of: Callable[[str, os.stat_result], int],
+) -> None:
+    for name in _directory_names(directory_fd):
+        status = os.stat(name, dir_fd=directory_fd, follow_symlinks=False)
+        child = f"{relative}/{name}" if relative else name
+        if not stat.S_ISDIR(status.st_mode):
+            os.unlink(name, dir_fd=directory_fd)
+            continue
+        if device_of(child, status) != root_device:
+            raise OSError(f"<tmp>/{child} is a mounted filesystem; not deleting across it")
+        child_fd = _open_child_directory(directory_fd, name, status)
+        try:
+            _empty_directory(child_fd, child, root_device, device_of)
+        finally:
+            os.close(child_fd)
+        os.rmdir(name, dir_fd=directory_fd)
+
+
+def delete_temporary_root(
+    root: TemporaryRoot,
+    device_of: Callable[[str, os.stat_result], int] = _default_device,
+) -> None:
+    """Delete the tree by descriptor from the verified root, never across a mount.
+
+    The root's own entry goes last, through `rmdir`, which removes only an empty
+    directory, so a directory swapped in at that path after the check is never emptied.
+    """
+    parent_fd = os.open(os.path.dirname(root.path), os.O_RDONLY | os.O_DIRECTORY)
+    try:
+        name = os.path.basename(root.path)
+        root_fd = _open_verified_root(root)
+        try:
+            _empty_directory(root_fd, "", root.identity[0], device_of)
+        finally:
+            os.close(root_fd)
+        if _identity(os.stat(name, dir_fd=parent_fd, follow_symlinks=False)) != root.identity:
+            raise TemporaryRootReplaced("the temporary directory was replaced during the delete")
+        os.rmdir(name, dir_fd=parent_fd)
+    finally:
+        os.close(parent_fd)
+
+
+def _run_cleanup_tool(arguments: Tuple[str, ...], merge_stderr: bool = True) -> subprocess.CompletedProcess:
+    return subprocess.run(
+        arguments,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT if merge_stderr else subprocess.PIPE,
+        env=CLEANUP_TOOL_ENVIRONMENT,
+        timeout=CLEANUP_TOOL_TIMEOUT_SECONDS,
+        check=False,
+    )
+
+
+def attached_disk_images(
+    device_of_entry: Callable[[str], os.stat_result] = os.stat,
+) -> dict[int, DiskImage]:
+    """Device number of each attached disk image's entries, mapped to that image.
+
+    The image is detached through its one whole-disk node: the whole disk that is not the
+    container macOS synthesizes for an APFS image. An image with no such single node is
+    left out, and so is any entry that is not a block device when it is checked.
+    """
+    completed = _run_cleanup_tool((HDIUTIL, "info", "-plist"), merge_stderr=False)
+    if completed.returncode != 0:
+        detail = completed.stderr.decode("utf-8", "replace").strip()[-400:]
+        raise OSError(f"hdiutil info exited {completed.returncode}: {detail}")
+    images = plistlib.loads(completed.stdout).get("images", [])
+    devices: dict[int, DiskImage] = {}
+    for image in images if isinstance(images, list) else []:
+        entities = image.get("system-entities") if isinstance(image, dict) else None
+        if not isinstance(entities, list):
+            continue
+        entities = [
+            entity for entity in entities
+            if isinstance(entity, dict)
+            and isinstance(entity.get("dev-entry"), str)
+            and DISK_ENTRY_RE.match(entity["dev-entry"])
+        ]
+        whole = [
+            entity["dev-entry"] for entity in entities
+            if WHOLE_DISK_RE.match(entity["dev-entry"])
+            and entity.get("content-hint") != SYNTHESIZED_APFS_CONTAINER_HINT
+        ]
+        if len(whole) != 1:
+            continue
+        points = tuple(
+            entity["mount-point"] for entity in entities
+            if isinstance(entity.get("mount-point"), str)
+        )
+        for entity in entities:
+            try:
+                status = device_of_entry(entity["dev-entry"])
+            except OSError:
+                continue
+            if stat.S_ISBLK(status.st_mode):
+                devices[status.st_rdev] = DiskImage(whole[0], points)
+    return devices
+
+
+def detach_disk_image(device: str, force: bool) -> None:
+    """One `hdiutil detach` of a whole-disk node; the caller's rescan decides the outcome."""
+    arguments = (HDIUTIL, "detach", *(("-force",) if force else ()), device)
+    command = " ".join(arguments[1:])
+    try:
+        completed = _run_cleanup_tool(arguments)
+    except (OSError, subprocess.TimeoutExpired) as error:
+        print(f"quality: hdiutil {command} failed: {type(error).__name__}", file=sys.stderr)
+        return
+    if completed.returncode != 0:
+        detail = log_safe(completed.stdout.decode("utf-8", "replace").strip()[-400:])
+        print(f"quality: hdiutil {command} exited {completed.returncode}: {detail}", file=sys.stderr)
+
+
+def mount_table_summary(real_path: str) -> str:
+    """The mount table's device, type and flags for one mount point, and whether this user
+    mounted it (the name itself is not logged)."""
+    try:
+        completed = _run_cleanup_tool((MOUNT,))
+    except (OSError, subprocess.TimeoutExpired) as error:
+        return f"mount table unavailable: {type(error).__name__}"
+    try:
+        me: Optional[str] = pwd.getpwuid(os.getuid()).pw_name
+    except KeyError:
+        me = None
+    for line in completed.stdout.decode("utf-8", "replace").splitlines():
+        match = MOUNT_LINE_RE.match(line)
+        if not match or match.group(2) != real_path:
+            continue
+        fields = [field.strip() for field in match.group(3).split(",")]
+        owners = [field[len("mounted by "):] for field in fields if field.startswith("mounted by ")]
+        kept = [field for field in fields if not field.startswith("mounted by")]
+        if len(owners) != 1 or me is None:
+            by_me = "unknown"
+        else:
+            by_me = "yes" if owners[0] == me else "no"
+        return f"{match.group(1)}, {', '.join(kept)}; mounted by this user: {by_me}"
+    return "no mount-table entry"
+
+
+def _under(path: str, root: str) -> bool:
+    try:
+        return os.path.commonpath([root, path]) == root
+    except ValueError:
+        return False
+
+
+def remove_temporary_root(
+    root: TemporaryRoot,
+    scan: Callable[[TemporaryRoot], List[ForeignMount]] = scan_temporary_root,
+    images: Callable[[], dict[int, DiskImage]] = attached_disk_images,
+    detach: Callable[[str, bool], None] = detach_disk_image,
+    describe: Callable[[str], str] = mount_table_summary,
+    remove: Callable[[TemporaryRoot], None] = delete_temporary_root,
+) -> Optional[str]:
+    """Remove the run's temporary root; a message instead of an exception on failure.
+
+    Most likely through `xcrun --find metal`, which SwiftPM runs on Darwin for both `swift
+    build` and `swift test`, Xcode 26 can mount its downloadable Metal toolchain under a
+    stage's isolated HOME (`Library/Developer/DVTDownloads/MetalToolchain/mounts/...`), and
+    a recursive delete then fails on that read-only filesystem. So every mount below the
+    root is detached first: only an attached disk image that hdiutil records as mounted at
+    that very path and nowhere outside the root, matched by device number and detached by
+    its whole-disk node (never by a path a stage could redirect), forcing only if a rescan
+    still finds it. Anything that stays mounted is reported and the rest of the tree is left
+    in place; a delete that fails, as it would on a mount that appears after the scan, gets
+    one rescan before giving up.
+    """
+
+    def mask(text: str) -> str:
+        for path in (root.real_path, root.path):
+            text = text.replace(path, "<tmp>")
+        return log_safe(text)
+
+    try:
+        for attempt in (1, 2):
+            failures = []
+            mounts = scan(root)
+            available = images() if mounts else {}
+            for mount in mounts:
+                where = f"<tmp>/{mount.relative}"
+                facts = describe(os.path.join(root.real_path, mount.relative))
+                image = available.get(mount.device)
+                if image is None:
+                    failures.append(f"{where} is a mounted filesystem but not an attached disk image ({facts})")
+                    continue
+                if os.path.join(root.real_path, mount.relative) not in image.mount_points:
+                    failures.append(
+                        f"{where} is on disk image {image.whole_disk}, but hdiutil records no volume "
+                        f"of it mounted there ({facts})"
+                    )
+                    continue
+                if not all(_under(point, root.real_path) for point in image.mount_points):
+                    failures.append(
+                        f"{where} belongs to disk image {image.whole_disk}, which also has a volume "
+                        f"mounted outside the temporary directory ({facts})"
+                    )
+                    continue
+                print(mask(f"quality: detaching {image.whole_disk}, the disk image mounted at {where} ({facts})"), file=sys.stderr)
+                for force in (False, True):
+                    detach(image.whole_disk, force)
+                    if all(other.device != mount.device for other in scan(root)):
+                        break
+                else:
+                    failures.append(
+                        f"{where} is still mounted after hdiutil detach and detach -force of {image.whole_disk}"
+                    )
+            if failures:
+                return mask("; ".join(failures))
+            try:
+                remove(root)
+                return None
+            except OSError:
+                if attempt == 2:
+                    raise
+                print("quality: removing the temporary directory failed; rescanning it once", file=sys.stderr)
+    except Exception as error:  # cleanup must report, never raise over the stage verdict
+        return mask(f"{type(error).__name__}: {error}")
+    return None
+
+
+def apply_cleanup_failure(mode: Mode, result: QualityResult, message: str) -> QualityResult:
+    """Fold a cleanup failure into the verdict; a failed stage keeps its own status.
+
+    A hosted runner is discarded after the job, so there the leftover is reported as a
+    warning annotation and a green verdict stands. Locally it is a leak on the operator's
+    machine, so it fails the run.
+    """
+    stderr = result.stderr + (f"cleanup failed: {message}",)
+    if mode is Mode.HOSTED:
+        annotation = message.replace("%", "%25").replace("\r", "%0D").replace("\n", "%0A")
+        print(f"::warning title=quality cleanup::{annotation}", flush=True)
+        return QualityResult(result.status, stdout=result.stdout, stderr=stderr)
+    return QualityResult(result.status or ASSERTION_FAILURE_STATUS, stdout=result.stdout, stderr=stderr)
+
+
 def _run_quality_request(
     request: QualityRequest,
     runner: Callable[[Stage, Tuple[str, ...], Path, float, float, dict[str, str]], CommandResult] = default_runner,
@@ -862,13 +1241,16 @@ def _run_quality_request(
     environment: Optional[dict[str, str]] = None,
 ) -> QualityResult:
     stderr: List[str] = []
+    cleanup_failure: Optional[str] = None
     try:
         base_environment = dict(environment if environment is not None else os.environ)
         validate_hosted_runner_context(request, base_environment)
         git_validator(request)
         selected = [stage for stage in STAGES if stage.name in request.stages]
-        with tempfile.TemporaryDirectory(prefix="apple-cli-quality-") as tempdir:
-            xunit_dir = Path(tempdir)
+        root = create_temporary_root()
+        outcome: Optional[QualityResult] = None
+        try:
+            xunit_dir = Path(root.path)
 
             def execute_stage(stage: Stage) -> Optional[QualityResult]:
                 command = stage.command(
@@ -923,19 +1305,27 @@ def _run_quality_request(
             for stage in selected:
                 if stage.name in ("bats-local", "bats-hosted"):
                     git_validator(request)
-                    inventory_failure = execute_stage(STAGE_BY_NAME["bats-inventory"])
-                    if inventory_failure is not None:
-                        return inventory_failure
-                failure = execute_stage(stage)
-                if failure is not None:
-                    return failure
+                    outcome = execute_stage(STAGE_BY_NAME["bats-inventory"])
+                    if outcome is not None:
+                        break
+                outcome = execute_stage(stage)
+                if outcome is not None:
+                    break
+        finally:
+            cleanup_failure = remove_temporary_root(root)
+            if cleanup_failure is not None:
+                # Printed here so that even an unexpected exception still reports it.
+                print(f"quality: cleanup failed: {cleanup_failure}", file=sys.stderr)
+        result = outcome if outcome is not None else QualityResult(0, stderr=tuple(stderr))
     except PolicyError as error:
         print(f"quality: policy error: {error}", file=sys.stderr)
-        return QualityResult(POLICY_FAILURE_STATUS, stderr=(str(error),))
+        result = QualityResult(POLICY_FAILURE_STATUS, stderr=(str(error),))
     except AssertionFailure as error:
         print(f"quality: assertion failed: {error}", file=sys.stderr)
-        return QualityResult(ASSERTION_FAILURE_STATUS, stderr=(str(error),))
-    return QualityResult(0, stderr=tuple(stderr))
+        result = QualityResult(ASSERTION_FAILURE_STATUS, stderr=(str(error),))
+    if cleanup_failure is not None:
+        return apply_cleanup_failure(request.mode, result, cleanup_failure)
+    return result
 
 
 def run_quality(
