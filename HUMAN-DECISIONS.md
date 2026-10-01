@@ -88,6 +88,7 @@ publication action.
 | D38 | A pre-rewrite commit with personal data stays fetchable by id | **RATIFIED 2026-09-28: accept under D19 (option C), re-confirmed on corrected facts** | The 2026-07-23 pre-rewrite commit D37 found still answers by id with two denylist terms, a provider mailbox and two personal email addresses in its message. It was public 2026-07-23 to 2026-08-19 (the D9 period), and its message was readable in the run listing 2026-09-21 to 2026-09-27. Accepted as a residual scoped to that one commit object and the stored copies of its message by commit id; no Support purge filed; any other personal-data object is a finding |
 | D39 | How APPLE_MAIL_MCP_HOME reads a tilde | **SUPERSEDED 2026-09-30 by D40** (RATIFIED 2026-09-30: read it as the retired Mail MCP did (option A); APPLIED 2026-09-30) | No tilde expansion: a relative value, `~/…` and `~name/…` included, names a folder under the working directory on every macOS release, and an empty value means unset. This replaces the CLI's release-dependent reading (macOS 26 and 27 sent `~/…` to the home folder). Recorded as BREAKING with `schema_version` unchanged |
 | D40 | The two public names that still say "mcp" | **RATIFIED 2026-09-30: rename both outright (option A)** | `APPLE_MAIL_MCP_HOME` is replaced by `APPLE_MAIL_TEMPLATES_DIR` (the template folder itself; the shared tilde policy applies) and the default folder moves from `~/.apple_mail_mcp/templates/` to `~/.apple-cli/mail-templates/`. Neither old name is read any more. A recorded narrowing of the retired Mail MCP (its variable and folder); D39 lapses with the variable it governed. BREAKING with `schema_version` unchanged; the release note gives the move command |
+| D41 | Two message texts and a search term from a live oracle run in a Messages test | **RATIFIED 2026-09-30: redact at HEAD, accept history (option A)** | `Tests/MessagesKitTests/MessagesKitTests.swift` carried two message texts and a search term sampled from the operator's Messages store during a live oracle run (committed 2026-07-15 in `23c9afc`, public in the periods D9 and D17 record). Replaced at HEAD with synthetic text; history keeps the originals as an accepted residual, as D38 did for its commit |
 
 ---
 
@@ -2029,5 +2030,41 @@ read, so the reading ruled here no longer applies; this entry stands as the reco
 surface, and it breaks existing setups.
 
 **Blocking?** No; it settles the one part of the MCP cleanup that is caller-visible.
+
+---
+
+## D41 — Two message texts and a search term from a live oracle run in a Messages test: redact at HEAD, accept history
+
+- **Status:** **RATIFIED 2026-09-30: redact at HEAD, accept history (option A).** The redaction is
+  applied by the commit that records this entry.
+- **Finding.** While rewording test comments on 2026-09-30, the controller found that the WRatio
+  tests in `Tests/MessagesKitTests/MessagesKitTests.swift` pinned two message texts, and used as
+  their query a search term, that a comment attributed to a live oracle run: the texts were results
+  the Messages oracle returned from the operator's real store, and the term was also part of one
+  test's name. They were committed on 2026-07-15 in `23c9afc` (the original Messages port) and were
+  public from its first push until the 2026-08-19 containment (D9), and publicly in the default
+  branch's tree from the 2026-09-21 visibility change (D17) until this commit. They are the class
+  of the D9 fixture in `PartialRatioParityTests.swift` (text taken from a live store into a
+  fixture); neither the D9 passes nor any later audit round had recorded them. The operator
+  confirmed that they are real. The values are not repeated in this file or in any commit message.
+- **Options considered.** (A) replace them at HEAD and accept history as a recorded residual; (B)
+  replace them at HEAD and remove them from history with a targeted rewrite and force-push (which
+  reaches neither forks, existing clones nor GitHub's stored objects); (C) record them as synthetic
+  if the operator did not recognise them.
+- **Ruling.** (A). The test now uses a placeholder query and invented texts. The replacements keep
+  its property: the oracle's WRatio (thefuzz 0.22.1) scores the two borderline texts 68 and 72 and
+  the unrelated control 36, and the port passes the same assertions, with the two borderline scores
+  now pinned exactly. History keeps the originals as an accepted residual, scoped to every version
+  of that one test file that carries them (including any pre-rewrite version GitHub serves by
+  commit id) and to the removed side of this commit's own diff; no history rewrite. The fresh
+  privacy round records them as ACCEPTED, not as a finding, and still reads the test tree for other
+  samples of the class (text taken from a live store into a fixture). Any other such sample is a
+  finding.
+- **Filed:** 2026-09-30 · **Category:** privacy disposition / residual in history
+
+**Why it needed you.** Leaving personal data in public history, or rewriting that history, is yours
+alone to decide (D9, D19, D38).
+
+**Blocking?** No; the HEAD redaction does not wait on it.
 
 ---

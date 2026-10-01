@@ -115,7 +115,7 @@ struct NormalizationTests {
 struct WRatioTests {
     @Test func identicalStringsScore100() {
         #expect(Fuzzy.wRatio("hello world", "hello world") == 100.0)
-        #expect(Fuzzy.wRatio("ramsay", "ramsay") == 100.0)
+        #expect(Fuzzy.wRatio("alice", "alice") == 100.0)
     }
 
     @Test func emptyScoresZero() {
@@ -124,14 +124,21 @@ struct WRatioTests {
     }
 
     @Test func unrelatedScoresLow() {
-        #expect(Fuzzy.wRatio("ramsay", "the quick brown fox jumps") < 60.0)
+        #expect(Fuzzy.wRatio("alice", "the quick brown fox jumps") < 60.0)
     }
 
-    @Test func matchesLiveOracleRamsayCases() {
-        // Live MCP parity (docs the oracle run): both borderline messages score ≥ 60
-        // (threshold 0.6) so they are RETURNED, matching the MCP's 4-result set.
-        #expect(Fuzzy.wRatio("ramsay", "translate mcp to cli then public repo") >= 60.0)
-        #expect(Fuzzy.wRatio("ramsay", "we had squash producer duo dreams") >= 60.0)
+    /// Borderline partial matches where the query is not a substring of the text: the oracle's
+    /// WRatio (thefuzz 0.22.1) scores these two 68 and 72, so at threshold 0.6 it returns them and
+    /// the port must too. The exact scores are pinned as well: the first is won by the partial
+    /// token scorers (token-sort and token-set tie at 68.4 for a one-word query) and the second by
+    /// the plain partial ratio (72.0), so dropping the plain partial ratio, dropping both token
+    /// scorers, or changing a scale moves a value; neither token scorer is pinned alone.
+    /// Synthetic text (HUMAN-DECISIONS D41).
+    @Test func borderlinePartialMatchesClearTheThreshold() {
+        #expect(Fuzzy.wRatio("alice", "a little ice on the porch steps") >= 60.0)
+        #expect(Fuzzy.wRatio("alice", "police cleared the road by ten") >= 60.0)
+        #expect(Fuzzy.wRatio("alice", "a little ice on the porch steps") == 68.0)
+        #expect(Fuzzy.wRatio("alice", "police cleared the road by ten") == 72.0)
     }
 }
 
