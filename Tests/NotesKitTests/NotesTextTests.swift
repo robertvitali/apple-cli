@@ -116,14 +116,14 @@ struct HtmlConversionTests {
     }
 
     /// NOTES-L1, measured live 2026-08-19: Notes.app serialized a literal unterminated "&amp "
-    /// mid-sentence in a real note ("coolers &amp mugs"), and the oracle's markdown — turndown
-    /// over a real DOM, whose HTML5 tokenizer decodes named refs in text content by longest match
-    /// with or without semicolons — yielded "& mugs" where the old semicolon-required decode left
-    /// "&amp mugs" (user text corrupted on read). Revert-red: restore the strict `"&amp;"`-only
-    /// replace and these fail.
+    /// mid-sentence in a real note (its text is not reproduced here; HUMAN-DECISIONS D42), and the
+    /// oracle's markdown — turndown over a real DOM, whose HTML5 tokenizer decodes named refs in
+    /// text content by longest match with or without semicolons — yielded "& " where the old
+    /// semicolon-required decode left "&amp " (user text corrupted on read). Revert-red: restore
+    /// the strict `"&amp;"`-only replace and these fail.
     @Test("decodeEntities decodes HTML5 legacy names without semicolons (DOM behavior)")
     func legacyEntitiesWithoutSemicolon() {
-        #expect(NotesText.decodeEntities("coolers &amp mugs") == "coolers & mugs")
+        #expect(NotesText.decodeEntities("salt &amp pepper") == "salt & pepper")
         // nbsp → U+00A0, NOT U+0020: the DOM's textContent carries U+00A0 and turndown's
         // collapseWhitespace folds only [ \r\n\t], so U+00A0 survives into the oracle's markdown
         // (measured). htmlToPlaintext's U+0020 is the OTHER path's parity, pinned separately.

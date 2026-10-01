@@ -89,6 +89,7 @@ publication action.
 | D39 | How APPLE_MAIL_MCP_HOME reads a tilde | **SUPERSEDED 2026-09-30 by D40** (RATIFIED 2026-09-30: read it as the retired Mail MCP did (option A); APPLIED 2026-09-30) | No tilde expansion: a relative value, `~/…` and `~name/…` included, names a folder under the working directory on every macOS release, and an empty value means unset. This replaces the CLI's release-dependent reading (macOS 26 and 27 sent `~/…` to the home folder). Recorded as BREAKING with `schema_version` unchanged |
 | D40 | The two public names that still say "mcp" | **RATIFIED 2026-09-30: rename both outright (option A)** | `APPLE_MAIL_MCP_HOME` is replaced by `APPLE_MAIL_TEMPLATES_DIR` (the template folder itself; the shared tilde policy applies) and the default folder moves from `~/.apple_mail_mcp/templates/` to `~/.apple-cli/mail-templates/`. Neither old name is read any more. A recorded narrowing of the retired Mail MCP (its variable and folder); D39 lapses with the variable it governed. BREAKING with `schema_version` unchanged; the release note gives the move command |
 | D41 | Two message texts and a search term from a live oracle run in a Messages test | **RATIFIED 2026-09-30: redact at HEAD, accept history (option A)** | `Tests/MessagesKitTests/MessagesKitTests.swift` carried two message texts and a search term sampled from the operator's Messages store during a live oracle run (committed 2026-07-15 in `23c9afc`, public in the periods D9 and D17 record). Replaced at HEAD with synthetic text; history keeps the originals as an accepted residual, as D38 did for its commit |
+| D42 | A note fragment from a live run in a Notes test | **RATIFIED 2026-09-30: redact at HEAD, accept history (option A)** | `Tests/NotesKitTests/NotesTextTests.swift` quoted a three-word fragment of one of the operator's notes, measured live on 2026-08-19 (NOTES-L1) and committed that day in `50c30f0`; public since the visibility change D17 records. Replaced at HEAD with synthetic text; history keeps the original as an accepted residual, as D41 did for the Messages test |
 
 ---
 
@@ -2064,6 +2065,39 @@ surface, and it breaks existing setups.
 
 **Why it needed you.** Leaving personal data in public history, or rewriting that history, is yours
 alone to decide (D9, D19, D38).
+
+**Blocking?** No; the HEAD redaction does not wait on it.
+
+---
+
+## D42 — A note fragment from a live run in a Notes test: redact at HEAD, accept history
+
+- **Status:** **RATIFIED 2026-09-30: redact at HEAD, accept history (option A).** The redaction is
+  applied by the commit that records this entry.
+- **Finding.** The independent review of D41's redaction found a second sample of the class D41
+  names. The NOTES-L1 test in `Tests/NotesKitTests/NotesTextTests.swift` quoted a three-word
+  fragment of one of the operator's real notes, in its doc comment and in an assertion (four
+  lines, the fragment in its original, decoded and corrupted forms). The comment said it was
+  measured in a real note on 2026-08-19. It was committed that day in `50c30f0`, the day the
+  repository was made private (D9); whether it reached GitHub before that day's containment is not
+  established, and if it did, it was also public for part of that day. It has been public in the
+  default branch's tree since the 2026-09-21 visibility change (D17). It is in no commit message.
+  The value is not repeated in this file or in any commit message.
+- **Options considered.** (A) replace it at HEAD and accept history as a recorded residual; (B)
+  replace it at HEAD and remove it from history with a targeted rewrite and force-push (which
+  reaches neither forks, existing clones nor GitHub's stored objects); (C) record it as not
+  personal data, had the operator identified the note as test data.
+- **Ruling.** (A). The assertion now uses invented words and the comment no longer quotes the
+  note; the behaviour the test pins (an unterminated `&amp ` mid-sentence decodes to `& `, as the
+  oracle's DOM does) does not depend on the words. History keeps the original as an accepted
+  residual, scoped to every version of that one test file that carries it (including any
+  pre-rewrite version GitHub serves by commit id) and to the removed side of this commit's own
+  diff; no history rewrite. The fresh privacy round records it as ACCEPTED, not as a finding. Any
+  other such sample is still a finding.
+- **Filed:** 2026-09-30 · **Category:** privacy disposition / residual in history
+
+**Why it needed you.** Leaving personal data in public history, or rewriting that history, is yours
+alone to decide (D9, D19, D38, D41).
 
 **Blocking?** No; the HEAD redaction does not wait on it.
 
