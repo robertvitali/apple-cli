@@ -20,6 +20,7 @@
 - [bats-app-lifecycle](learnings/hot/bats-app-lifecycle.md)
 - [hosted-ci](learnings/hot/hosted-ci.md)
 - [mail-automation](learnings/hot/mail-automation.md)
+- [privacy-audits](learnings/hot/privacy-audits.md)
 
 ### medium
 - _(empty)_

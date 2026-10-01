@@ -90,6 +90,7 @@ publication action.
 | D40 | The two public names that still say "mcp" | **RATIFIED 2026-09-30: rename both outright (option A)** | `APPLE_MAIL_MCP_HOME` is replaced by `APPLE_MAIL_TEMPLATES_DIR` (the template folder itself; the shared tilde policy applies) and the default folder moves from `~/.apple_mail_mcp/templates/` to `~/.apple-cli/mail-templates/`. Neither old name is read any more. A recorded narrowing of the retired Mail MCP (its variable and folder); D39 lapses with the variable it governed. BREAKING with `schema_version` unchanged; the release note gives the move command |
 | D41 | Two message texts and a search term from a live oracle run in a Messages test | **RATIFIED 2026-09-30: redact at HEAD, accept history (option A)** | `Tests/MessagesKitTests/MessagesKitTests.swift` carried two message texts and a search term sampled from the operator's Messages store during a live oracle run (committed 2026-07-15 in `23c9afc`, public in the periods D9 and D17 record). Replaced at HEAD with synthetic text; history keeps the originals as an accepted residual, as D38 did for its commit |
 | D42 | A note fragment from a live run in a Notes test | **RATIFIED 2026-09-30: redact at HEAD, accept history (option A)** | `Tests/NotesKitTests/NotesTextTests.swift` quoted a three-word fragment of one of the operator's notes, measured live on 2026-08-19 (NOTES-L1) and committed that day in `50c30f0`; public since the visibility change D17 records. Replaced at HEAD with synthetic text; history keeps the original as an accepted residual, as D41 did for the Messages test |
+| D43 | CI job logs print the removed Messages test's name, which carried D41's search term | **RATIFIED 2026-09-30: leave the logs to expire (option A), re-confirmed on corrected facts** | Hosted build-test job logs print every test name: 61 job logs in 57 CI runs (2026-09-01 to 2026-09-30) carry the removed test's name, two lines each; a scan of all 322 retrievable logs found neither the message texts nor D42's note fragment. Accepted as a residual until GitHub's 90-day log retention removes them (the last about 2026-12-29, later if a run from before the D41 commit is re-run or a pull request on an older head runs) |
 
 ---
 
@@ -2100,5 +2101,45 @@ alone to decide (D9, D19, D38).
 alone to decide (D9, D19, D38, D41).
 
 **Blocking?** No; the HEAD redaction does not wait on it.
+
+---
+
+## D43 — CI job logs print the removed Messages test's name, which carried D41's search term: leave the logs to expire
+
+- **Status:** **RATIFIED 2026-09-30: leave the logs to expire (option A), re-confirmed on corrected
+  facts.** Nothing is applied; the copies age out on their own.
+- **Finding.** The critic lane of D41's review noticed that the removed test's name contained the
+  search term D41 redacts, and hosted `build-test` job logs print every test name. A value-free
+  scan of the job logs of every retained CI run (2026-09-30, 18:09 to 18:31Z: 104 runs and 589
+  jobs, whose 322 logs were all retrieved; counts only, no value printed) searched each log for the
+  old test name, the term, both message texts and the note fragment's original, decoded and
+  corrupted forms. It found the name in 61 job logs across 57 runs, from 2026-09-01 to 2026-09-30,
+  on two lines of each, and the term nowhere outside those lines; none of the texts and none of the
+  fragment's forms appeared in any log. The other 267 jobs never started (no steps; failed or
+  skipped), so they have no log. Docs, Governance and dependency-update runs were not scanned: none
+  of them runs the test suite.
+- **Correction before ratification.** The operator first approved this row with 60 logs, from an
+  earlier scan that searched only the name and the term and ran while one run's third attempt was
+  finishing; that attempt's log carries the name too. The rescan above corrected the count and
+  tested the texts directly, and the operator re-confirmed the ruling on those facts the same day,
+  as D38 was re-confirmed.
+- **Options considered.** (A) leave the logs to expire under GitHub's 90-day log retention; (B)
+  delete the 57 runs' log archives through the API and read them back, as D21 did, which would also
+  remove the runner-image facts the readiness evidence (Section 4) read from some of those logs.
+- **Ruling.** (A). D41 already keeps the term in public git history for good, so deleting the logs
+  would remove only a temporary extra copy, at the cost of evidence. The copies are an accepted
+  residual until retention removes them, the last about 2026-12-29. A later log can carry the name
+  again: a re-run of a CI run made before D41's commit (GitHub allows re-runs for 30 days) or a
+  pull-request run on a head that predates it (the open pull request 7's head does) prints the old
+  test name with a fresh 90-day clock. Such logs fall under this ruling and push the date later;
+  not re-running pre-D41 runs, and no new run on a pre-D41 pull-request head, keeps it. Runs on
+  D41's commit and later print the new name. The fresh privacy round records these logs as
+  ACCEPTED, not as a finding.
+- **Filed:** 2026-09-30 · **Category:** privacy disposition / residual in workflow logs
+
+**Why it needed you.** Deleting run logs is destructive and outward-facing (D21), and leaving
+personal data public is yours alone to decide (D38, D41).
+
+**Blocking?** No.
 
 ---
