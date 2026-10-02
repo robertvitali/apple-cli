@@ -1,6 +1,6 @@
 # apple notes get-link
 
-notes:// deep link for a note, by id (preferred) or title. → get-note-link
+notes:// deep link for a note, by id (preferred) or title.
 
 ## Synopsis
 

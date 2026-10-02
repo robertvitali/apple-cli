@@ -10,13 +10,13 @@ apple contacts groups
 
 ## Subcommands
 
-- [`add`](./add.md) — Add a contact to a group, additive (EXECUTES; --dry-run previews). → add_contact_to_group
-- [`create`](./create.md) — Create a contact group (EXECUTES by default; --dry-run previews). → create_group
-- [`delete`](./delete.md) — Delete a group, members persist (requires APPLE_TEST_MODE=1, like the MCP). → delete_group
-- [`list`](./list.md) — List all contact groups across all containers. → list_groups
-- [`members`](./members.md) — List contacts in a group (distinct not_found vs empty). → get_contacts_in_group
-- [`remove`](./remove.md) — Remove a contact from a group (EXECUTES; --dry-run previews). → remove_contact_from_group
-- [`rename`](./rename.md) — Rename a contact group (EXECUTES by default; --dry-run previews). → rename_group
+- [`add`](./add.md) — Add a contact to a group, additive (EXECUTES; --dry-run previews).
+- [`create`](./create.md) — Create a contact group (EXECUTES by default; --dry-run previews).
+- [`delete`](./delete.md) — Delete a group, members persist (requires APPLE_TEST_MODE=1).
+- [`list`](./list.md) — List all contact groups across all containers.
+- [`members`](./members.md) — List contacts in a group (distinct not_found vs empty).
+- [`remove`](./remove.md) — Remove a contact from a group (EXECUTES; --dry-run previews).
+- [`rename`](./rename.md) — Rename a contact group (EXECUTES by default; --dry-run previews).
 
 ## Inherited options
 

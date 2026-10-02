@@ -13,7 +13,7 @@ apple mail flag [<ids>...] [flags]
 - `<ids>`
 - `--account` `<account>`
 - `--all`
-  <br>Operate on the WHOLE mailbox with no subject/sender filter required (MCP B apply_to_all); if a --match filter is also given, that filter still narrows the set. Bounded by --max. MUTATES REAL MAIL when unsandboxed — preview with --dry-run first. Inside the sandbox it stays per-message label-gated: a batch containing any unlabeled real message aborts before mutating anything.
+  <br>Operate on the WHOLE mailbox with no subject/sender filter required; if a --match filter is also given, that filter still narrows the set. Bounded by --max. MUTATES REAL MAIL when unsandboxed — preview with --dry-run first. Inside the sandbox it stays per-message label-gated: a batch containing any unlabeled real message aborts before mutating anything.
 - `--color` `<color>`
   <br>Flag color: none/orange/red/yellow/blue/green/purple/gray.
 - `--mailbox` `<mailbox>`
@@ -21,9 +21,9 @@ apple mail flag [<ids>...] [flags]
 - `--match-sender` `<match-sender>`
   <br>Match sender substring.
 - `--match-subject` `<match-subject>` *(repeatable)*
-  <br>Match subject keyword (repeatable — matches ANY, MCP B subject_keywords).
+  <br>Match subject keyword (repeatable — matches ANY).
 - `--max` `<max>`
-  <br>Max messages to affect (safety cap). Per-op defaults mirror MCP B: move 50 (max_moves), mark/flag 10 (max_updates), delete 5 (max_deletes).
+  <br>Max messages to affect (safety cap). Per-op defaults: move 50, mark/flag 10, delete 5.
 - `--older-than-days` `<older-than-days>`
   <br>Only messages older than N days.
 - `--only-read`

@@ -1,6 +1,6 @@
 # apple calendar calendars
 
-Calendar collections (ports calendar_calendars).
+Calendar collections.
 
 ## Synopsis
 

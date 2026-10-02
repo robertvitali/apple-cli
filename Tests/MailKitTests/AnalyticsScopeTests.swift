@@ -2,7 +2,7 @@ import Testing
 import Foundation
 @testable import MailKit
 
-/// `analytics stats` scope semantics, pinned against oracle B (`apple_mail_mcp/tools/analytics.py`).
+/// `analytics stats` scope semantics, pinned against oracle B (`tools/analytics.py`).
 ///
 /// The three scopes differ on THREE independent axes — which mailboxes are scanned, whether
 /// SKIP_FOLDERS are excluded, and whether `days_back` applies — and the shipped implementation had

@@ -82,12 +82,12 @@ CLI_BINARY_MARKER = "__apple_cli_binary__"
 MAX_SHELL_VARIANTS = 256
 TRUSTED_HOSTED_FILE_SHA256 = {
     "bats/hosted/bounded_exec.bats": "13e4976b41a295182873e45c7f33c84dd7712e2ee16399fc6c0fe561056d4c26",
-    "bats/hosted/calendar.bats": "78feed6a5cd530cc1a3f922c45f5ceb482db45fd36d00ee9fdfe816a87a9b6e4",
-    "bats/hosted/contacts.bats": "1409f8be307f75364f8738a9943b994b63f61e92ed3c03f8113d9a749ad90c68",
-    "bats/hosted/mail.bats": "088d28bc7b18b084517dd9c732c20bcf659b62efeb1377fe838bca63519bac37",
+    "bats/hosted/calendar.bats": "f9959a2b94f5869d46d20c1be5500f4e244f1d0e5e3dd198f16f6e712ab11613",
+    "bats/hosted/contacts.bats": "e9a4adf121fa3d78a7890aedbd1fe6a4d2737bd86efa91f96fde9880a0cec03b",
+    "bats/hosted/mail.bats": "01b6a2d4ed8bf364bc7c79009a76bccf609d4a2d2f2d7296ffdf6d3ed8378bbd",
     "bats/hosted/messages.bats": "23a087ee666d59ad74899ca98186feebd5b20f2db24b0804c5a5c456b8c5cf40",
-    "bats/hosted/notes.bats": "e7b8342937711212df38cf9e0a636d63a69379d5baa11ca5b464cb0192b978a3",
-    "bats/hosted/reminders.bats": "1b6c08b75acce52bc714e822c8cb652e8917e963eb18804b1a86e0fa95e6aa40",
+    "bats/hosted/notes.bats": "342858717b6fa006c2ab7222dfec2653d8b2632d002af6edacf7a82e4bf89611",
+    "bats/hosted/reminders.bats": "e195ea49c1205b3fbe15d275a109f4591776093f3e743f21e36cb9c7682de3f4",
     "bats/hosted/smoke.bats": "7bd533f47c3271ae141be9e4d95b93b5b476cd5bd68e46908d5a634cf53095e1",
 }
 TRUSTED_HOSTED_HELPER_SHA256 = {
@@ -100,7 +100,7 @@ TRUSTED_HOSTED_HELPER_SHA256 = {
     "bats/helpers/messages_db_probe.py": "da7daca3cf7fd967f3b00cea30724ea8b99411d6879458ee8caeb143ffc290e2",
     "bats/helpers/no_flagless_writes.py": "6c238da220f8c599afda95741a93142ab02febc6f35890100e7711d408534c39",
     "bats/helpers/queue_table_wellformed.py": "4adbf9c0eee8e15c12cb131177bd7fcda12edcd1e286d93eb2756525b6a60369",
-    "bats/helpers/quoted_not_found.py": "ae039a574d4af4a22dd4ba83499639883b15a644a9f51ee61d66881c825beac5",
+    "bats/helpers/quoted_not_found.py": "3a32f34ffa0ef59cff0c29d1df29affddb26bb7b8840b142d1a951f90b826d21",
     "bats/helpers/subcommand_allowlist.py": "31f24f90a3a7865f7de99bdcab45170ab147bf0d477059969b92c3e34e93c6c2",
 }
 

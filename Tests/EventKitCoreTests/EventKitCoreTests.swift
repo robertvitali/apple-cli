@@ -67,7 +67,7 @@ struct DateParsingTests {
     /// a month out of 1…12 IS rejected ("2026-13-45" fails both engines), but a day past the
     /// month's end ROLLS OVER (Feb 30 → Mar 2), because a non-lenient DateFormatter
     /// bounds-checks the month yet rolls the day. Strict superset + this repo's doctrine
-    /// (reject only where the MCP also rejects) means we match both halves, typo risk and all.
+    /// (reject only where the oracle also rejects) means we match both halves, typo risk and all.
     @Test("impossible dates: month 13 rejects, Feb 30 rolls to Mar 2 — the oracle's exact split")
     func impossibleDatesOracleSplit() throws {
         let utc = TimeZone(identifier: "UTC")!
@@ -862,13 +862,13 @@ struct EKEnumTests {
         #expect(EKEnum.availability(from: "bogus") == nil)
     }
 
-    @Test("proximity matches the MCP write default (unknown → enter)")
+    @Test("proximity matches the EventKit oracle write default (unknown → enter)")
     func proximity() {
         #expect(EKEnum.proximity(from: "enter") == .enter)
         #expect(EKEnum.proximity(from: "leave") == .leave)
-        #expect(EKEnum.proximity(from: "depart") == .leave)   // MCP alias
-        #expect(EKEnum.proximity(from: "exit") == .leave)     // MCP alias
-        #expect(EKEnum.proximity(from: "whatever") == .enter) // MCP default
+        #expect(EKEnum.proximity(from: "depart") == .leave)   // oracle alias
+        #expect(EKEnum.proximity(from: "exit") == .leave)     // oracle alias
+        #expect(EKEnum.proximity(from: "whatever") == .enter) // oracle default
         #expect(EKEnum.proximityString(EKAlarmProximity.none) == "none")
     }
 
@@ -881,7 +881,7 @@ struct EKEnumTests {
         #expect(EKEnum.frequency(from: "fortnightly") == nil)
     }
 
-    @Test("span maps the MCP strings")
+    @Test("span maps the EventKit oracle strings")
     func span() {
         #expect(EKEnum.span(from: "this-event") == .thisEvent)
         #expect(EKEnum.span(from: "future-events") == .futureEvents)

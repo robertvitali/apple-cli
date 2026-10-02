@@ -1,6 +1,6 @@
 # apple contacts vcard export
 
-Export contacts as one atomic vCard 3.0 payload. → export_vcard
+Export contacts as one atomic vCard 3.0 payload.
 
 ## Synopsis
 
@@ -13,7 +13,7 @@ apple contacts vcard export [<identifiers>...] [flags]
 - `<identifiers>`
   <br>One or more contact CN identifiers.
 - `--out` `<out>`
-  <br>Extra: also write the vCard text to this file path.
+  <br>Also write the vCard text to this file path.
 
 ## Inherited options
 

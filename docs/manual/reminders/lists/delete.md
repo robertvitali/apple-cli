@@ -1,6 +1,6 @@
 # apple reminders lists delete
 
-Delete a reminder list AND its items (executes on call, like the MCP; --dry-run previews).
+Delete a reminder list AND its items (executes on call; --dry-run previews).
 
 ## Synopsis
 

@@ -3,7 +3,7 @@ import ArgumentParser
 import AppleKit
 
 // P2 compose surface: send, reply, forward, draft, draft-rich. Write-model v2
-// (docs/write-model-v2.md): outbound verbs EXECUTE when invoked — the CLI replaces the MCP
+// (docs/write-model-v2.md): outbound verbs EXECUTE when invoked — the CLI replaces the
 // oracles, which send on call. `--dry-run` previews; `APPLE_DRY_RUN=1` restores
 // dry-run-by-default. The opt-in SANDBOX (APPLE_TEST_MODE truthy OR --test-mode) restricts
 // recipients to the self-only allowlist and drafts to labeled test items. Live delivery is
@@ -56,7 +56,7 @@ func outboundAddressFromIndex(_ raw: String) throws -> String {
 }
 
 /// Common outbound guard (write-model v2, docs/write-model-v2.md): a live send EXECUTES when
-/// invoked — the CLI is a replacement for the MCP servers, and the oracle's send_email sends
+/// invoked — the CLI is a replacement for the oracles, and the oracle's send_email sends
 /// on call. The self-only recipient allowlist is the SANDBOX's restriction (bucket 3): inside
 /// the opt-in sandbox every recipient must be the operator's own allowlisted address; outside
 /// it, recipients are unrestricted. Sandbox refusals stay `safety_violation` (exit 77) so
@@ -503,7 +503,7 @@ struct SendCommand: ParsableCommand {
                 guard rl.allowed else { throw AppleError.validation(SendRateLimiter.refusal(rl)) }
                 if rl.degraded {
                     Output.writeError(Data(
-                        ("warning: send rate-limit state is unwritable — the oracle's 3-sends/60s cap "
+                        ("warning: send rate-limit state is unwritable — the 3-sends-per-60-seconds cap "
                          + "is NOT being enforced for this call (failing open).\n").utf8))
                 }
             }
@@ -588,7 +588,7 @@ struct ReplyCommand: ParsableCommand {
     @OptionGroup var global: GlobalOptions
     @Argument(help: "Message id to reply to (ROWID / RFC Message-ID); or use --subject.") var id: String?
     @Option(name: .long, help: "Reply to the newest message matching this subject keyword.") var subject: String?
-    @Option(name: .long, help: "Mailbox to scope the --subject lookup (default INBOX — oracle B searches only the inbox; use 'All' for the previous store-wide sweep).") var mailbox: String = "INBOX"
+    @Option(name: .long, help: "Mailbox to scope the --subject lookup (default INBOX; use 'All' for a store-wide sweep).") var mailbox: String = "INBOX"
     @Option(name: .long, help: "Account (name or UUID) — used for --subject lookup AND as the send-from identity.") var account: String?
     @Option(name: .long) var body: String
     @Flag(name: .long, help: "Reply to all recipients.") var all = false
@@ -765,8 +765,8 @@ struct ReplyCommand: ParsableCommand {
                 guard rl.allowed else { throw AppleError.validation(ReplyRateLimiter.refusal(rl)) }
                 if rl.degraded {
                     Output.writeError(Data(
-                        ("warning: reply rate-limit state is unwritable — the oracle's 20-replies/60s "
-                         + "(expensive_ops) cap is NOT being enforced for this call (failing open).\n").utf8))
+                        ("warning: reply rate-limit state is unwritable — the 20-replies-per-60-seconds "
+                         + "cap is NOT being enforced for this call (failing open).\n").utf8))
                 }
                 // Quoted original, escaped into the HTML part (willOpenHtml only — the
                 // willNativeHtml path pastes the BARE fragment on top of Mail's native reply,
@@ -809,8 +809,8 @@ struct ReplyCommand: ParsableCommand {
                         replyID = newID
                         if !actual.isEmpty { recipients = actual }
                         note = html != nil
-                            ? "HTML reply sent via Mail's native reply verb + pasteboard paste (needed Accessibility, stole focus); threading + Mail's HTML quote layer preserved. NOTE: --body is not carried on this path (oracle parity — the HTML fragment IS the reply body)."
-                            : "replied via Mail's native reply verb + pasteboard paste (needed Accessibility, stole focus); threading headers, replied-to state, and Mail's HTML quote layer preserved (--body pasted as HTML per oracle B)."
+                            ? "HTML reply sent via Mail's native reply verb + pasteboard paste (needed Accessibility, stole focus); threading + Mail's HTML quote layer preserved. NOTE: --body is not carried on this path (the HTML fragment IS the reply body)."
+                            : "replied via Mail's native reply verb + pasteboard paste (needed Accessibility, stole focus); threading headers, replied-to state, and Mail's HTML quote layer preserved (--body pasted as HTML)."
                     case .drafted(let newID, let actual):
                         // executed stays false: nothing left the machine (matches
                         // `mail send --mode draft`'s contract — review caught the two verbs
@@ -870,7 +870,7 @@ struct ForwardCommand: ParsableCommand {
     @Argument(help: "Message id to forward; or use --subject.") var id: String?
     @Option(name: .long, help: "Forward the newest message matching this subject keyword.") var subject: String?
     @Option(name: .long, help: "Account (name or UUID) — used for --subject lookup AND as the send-from identity.") var account: String?
-    @Option(name: .long, help: "Mailbox to scope the --subject lookup (default INBOX — oracle B forward_email's default; use 'All' for a store-wide sweep).") var mailbox: String = "INBOX"
+    @Option(name: .long, help: "Mailbox to scope the --subject lookup (default INBOX; use 'All' for a store-wide sweep).") var mailbox: String = "INBOX"
     @Option(name: .long, help: "Recipient (repeatable).") var to: [String] = []
     @Option(name: .long) var cc: [String] = []
     @Option(name: .long) var bcc: [String] = []
@@ -972,7 +972,7 @@ struct ForwardCommand: ParsableCommand {
                 guard rl.allowed else { throw AppleError.validation(SendRateLimiter.refusal(rl)) }
                 if rl.degraded {
                     Output.writeError(Data(
-                        ("warning: send rate-limit state is unwritable — the oracle's 3-sends/60s cap "
+                        ("warning: send rate-limit state is unwritable — the 3-sends-per-60-seconds cap "
                          + "is NOT being enforced for this call (failing open).\n").utf8))
                 }
                 // gap17/extra15 (D8 item 5): a --body prepend is pasted as HTML (oracle B
@@ -1066,8 +1066,8 @@ enum RichDraft {
 
     /// `_default_rich_draft_path` (compose.py:36-40): a DETERMINISTIC subject-named cache file,
     /// idempotently overwritten — preview and execute name the SAME path, unlike the old
-    /// per-run temp UUID. Root is the CLI's own cache dir (the oracle writes into
-    /// `apple-mail-mcp/rich-drafts` — writing into another tool's cache would be rude;
+    /// per-run temp UUID. Root is the CLI's own cache dir (oracle B writes into its own
+    /// `rich-drafts` — writing into another tool's cache would be rude;
     /// disclosed on port-spec row 18).
     static func defaultPath(subject: String) -> URL {
         FileManager.default.homeDirectoryForCurrentUser
@@ -1376,7 +1376,7 @@ struct DraftRichCommand: ParsableCommand {
                     let ok = try scriptFactory().saveOpenDraftChecked(subject: subject)
                     saved = ok
                     note = ok
-                        ? "compose window opened and auto-filed to Drafts (oracle save verb)."
+                        ? "compose window opened and auto-filed to Drafts."
                         : "compose window opened — the auto-save found no matching outgoing message (Mail often doesn't register a LaunchServices-opened .eml); press Cmd-S to file it in Drafts."
                 } else {
                     note = "compose window opened for review (not sent)."
@@ -1523,7 +1523,7 @@ struct DraftCommand: ParsableCommand {
                     guard rl.allowed else { throw AppleError.validation(SendRateLimiter.refusal(rl)) }
                     if rl.degraded {
                         Output.writeError(Data(
-                            ("warning: send rate-limit state is unwritable — the oracle's 3-sends/60s cap "
+                            ("warning: send rate-limit state is unwritable — the 3-sends-per-60-seconds cap "
                              + "is NOT being enforced for this call (failing open).\n").utf8))
                     }
                     switch try script.sendDraft(subject: s, prefix: sandboxActive ? TestMode.sandboxPrefix : "",

@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """Lint: every Contacts not-found message must quote the identifier, like the oracle's !r.
 
-`apple-contacts-mcp` formats identifiers with Python `!r` at fifteen not-found sites
+The Contacts oracle formats identifiers with Python `!r` at fifteen not-found sites
 (server.py 258/479/1309; contacts_connector.py 146/175/370/401/570/652/676/710/748/786/793/1013),
 so a caller sees `Contact not found: 'X'`. Sixteen of our eighteen sites are only reachable past
 the Contacts authorization gate, so no CLI-tier test can pin them on a machine without TCC —

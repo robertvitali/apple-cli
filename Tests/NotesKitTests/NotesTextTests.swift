@@ -190,6 +190,8 @@ struct HtmlConversionTests {
         let stripped = NotesText.stripLargeInlineImages(html, maxBytes: 256 * 1024)
         #expect(stripped.count == 1)
         #expect(stripped.html.contains("[inline image omitted"))
+        #expect(stripped.html.contains("use apple notes attachments to find it"))
+        #expect(!stripped.html.contains("list-attachments"))
         #expect(stripped.html.contains("keep"))
 
         let small = "<img src=\"data:image/png;base64,QUJD\">x"

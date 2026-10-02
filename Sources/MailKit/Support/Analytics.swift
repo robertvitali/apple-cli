@@ -1,9 +1,9 @@
 import Foundation
 
-/// Derived analytics computed over Envelope Index rows (the MCP B "DERIVED" capabilities:
-/// top-senders, statistics, needs-response, awaiting-reply). MCP B returns these as human
+/// Derived analytics computed over Envelope Index rows (the oracle B "DERIVED" capabilities:
+/// top-senders, statistics, needs-response, awaiting-reply). Oracle B returns these as human
 /// TEXT blobs; we compute STRUCTURED JSON (a strict superset) over the fast SQLite path —
-/// notably `awaiting_reply`, which times out via MCP B's AppleScript but is instant here.
+/// notably `awaiting_reply`, which times out via oracle B's AppleScript but is instant here.
 ///
 /// All functions are PURE (operate on decoded rows) so the ranking/heuristic math is
 /// unit-testable with synthetic data.
@@ -79,7 +79,7 @@ public enum Analytics {
         /// the mailbox they meant from an empty result for one they mistyped. `TopSendersResult`
         /// already carries the same field. (Additive optional ⇒ MINOR, per versioning-policy.md.)
         public var mailbox: String? = nil
-        /// Whether MCP B's SKIP_FOLDERS were excluded from these counts. Analytics is a
+        /// Whether oracle B's SKIP_FOLDERS were excluded from these counts. Analytics is a
         /// counts-only payload, so silent filtering here is indistinguishable from a sparse
         /// store — worse than on `search`, where the caller at least sees the rows. Mirrors
         /// `MailMessagesResult.system_folders_excluded`; `--include-system-folders` flips it.
@@ -340,7 +340,7 @@ public enum Analytics {
         return a.contains(b) || b.contains(a)
     }
 
-    /// Unread mail plausibly awaiting a personal reply (MCP B `get_needs_response`).
+    /// Unread mail plausibly awaiting a personal reply (oracle B `get_needs_response`).
     ///
     /// `sentSubjects` are the account's recent Sent subjects (B reads the first 200); a candidate
     /// whose thread already appears there is dropped as answered. Pass an empty array to skip
@@ -409,7 +409,7 @@ public enum Analytics {
 
     /// Sent messages with no matching inbound reply: no received message from a recipient
     /// matching the subject (oracle's bidirectional containment), dated at/after the send.
-    /// MCP B's `get_awaiting_reply`, but computed over the index (MCP B's AppleScript version
+    /// Oracle B's `get_awaiting_reply`, but computed over the index (oracle B's AppleScript version
     /// times out). TWO deliberate, disclosed divergences in the reply test (port-spec row 38):
     /// the `>=` DATE constraint (the oracle has none — a "reply" predating the send would count
     /// for it) and the received set being windowed to --days (lossless GIVEN the date test:

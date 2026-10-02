@@ -87,7 +87,7 @@ struct SendRateLimiterTests {
         let d = try SendRateLimiter.consume(now: t0.addingTimeInterval(10), stateURL: url)
         #expect(d.allowed == false)
         #expect(d.retryAfter > 0 && d.retryAfter <= SendRateLimiter.windowSeconds)
-        #expect(SendRateLimiter.refusal(d).contains("Rate limit exceeded: 3 calls per 60s"))
+        #expect(SendRateLimiter.refusal(d).contains("Rate limit exceeded: 3 calls per 60s for send operations"))
     }
 
     /// FAIL-OPEN, and the caller must be able to SEE it. An unwritable state location permits the

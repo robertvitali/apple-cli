@@ -1,25 +1,25 @@
 import Foundation
 import AppleKit
 
-/// The send path — the one WRITE capability. Ports `mac_messages_mcp.send_message`
+/// The send path — the one WRITE capability. Ports the Messages oracle's `send_message`
 /// (recipient resolution: phone | email | contact-name fuzzy | group chat id) and
 /// `_send_message_direct` (iMessage-first with automatic SMS/RCS fallback).
 ///
 /// Two CLI extras ride on the same path (port-spec §5, both listed there as
 /// WORTH-INCLUDING): explicit service control (`--service auto|imessage|sms`,
 /// where `auto` IS the ported behaviour, nesting included) and file attachments
-/// (`--file`, repeatable; the MCP is text-only, so nothing it could do is dropped).
+/// (`--file`, repeatable; the oracle is text-only, so nothing it could do is dropped).
 /// Attachment paths are vetted by the SHARED `AppleKit.AttachmentSource.resolve` —
 /// the same guard Mail's `--attach` uses — so the two outbound surfaces cannot drift
 /// into two containment policies.
 ///
 /// SECURITY: recipient, body AND every attachment path are passed to osascript as
-/// `on run argv` arguments, NEVER interpolated into the script source (the MCP
+/// `on run argv` arguments, NEVER interpolated into the script source (the oracle
 /// interpolates-with-escaping; argv is the injection-proof port per AppleKit's
 /// AppleScriptRunner contract). Only the SHAPE of a send — does it carry a body,
 /// which service — varies the emitted source, and that shape comes from the CLI's
 /// own flags, never from operator text.
-/// The MCP's stateful `"contact:N"` selector is replaced by stateless ranked
+/// The oracle's stateful `"contact:N"` selector is replaced by stateless ranked
 /// candidates + an explicit `--handle`.
 public enum Send {
 
@@ -30,7 +30,7 @@ public enum Send {
         case notFound(String)
     }
 
-    /// Classify + resolve a recipient exactly as the MCP does (minus contact:N):
+    /// Classify + resolve a recipient exactly as the oracle does (minus contact:N):
     /// group chat id (verbatim), phone (`[0-9 +\-()]`), email (`@`), else fuzzy name.
     public static func resolve(recipient raw: String, groupChat: Bool, book: AddressBook) -> Resolution {
         let recipient = raw.trimmingCharacters(in: .whitespaces)
@@ -71,7 +71,7 @@ public enum Send {
     /// here, given `resolve()` digit-normalizes phones.)
     ///
     /// WRITE-MODEL v2: outside the sandbox this is a NO-OP, because
-    /// `mac_messages_mcp`'s `tool_send_message` sends to any recipient on call — it goes straight
+    /// the Messages oracle's `tool_send_message` sends to any recipient on call — it goes straight
     /// to `send_message(recipient, message, group_chat)` (server.py:58-77) with no gate, no
     /// confirmation and no environment check; the only `os.environ` read in the whole non-test
     /// source is `USE_TEST_DATA` (messages.py:375), a fixture switch, not a write gate. So the
@@ -130,11 +130,11 @@ public enum Send {
 
     /// Which Messages service a 1:1 send is allowed to use.
     ///
-    /// `auto` is the ported `mac_messages_mcp` behaviour and stays the default: iMessage first,
-    /// with the automatic SMS fallback for phone-shaped recipients. `imessage` and `sms` are the
-    /// CLI's own explicit override (port-spec §5 "Explicit service control" — the MCP's routing
-    /// is implicit and uncontrollable), so neither narrows the parity floor: `auto` still reaches
-    /// exactly what the oracle reached.
+    /// `auto` is the behaviour ported from the Messages oracle and stays the default: iMessage
+    /// first, with the automatic SMS fallback for phone-shaped recipients. `imessage` and `sms` are
+    /// the CLI's own explicit override (port-spec §5 "Explicit service control" — the oracle's
+    /// routing is implicit and uncontrollable), so neither narrows the parity floor: `auto` still
+    /// reaches exactly what the oracle reached.
     ///
     /// A RAW-VALUE enum rather than three branches: the flag's accepted values, the validation
     /// message, and the `service_requested` wire value all derive from `allCases`, so a fourth
@@ -254,8 +254,8 @@ public enum Send {
 
     // MARK: - AppleScript builders (pure — argv-driven, unit-testable)
 
-    /// The MCP's phone-shaped test, reproduced character-for-character (it is what decides whether
-    /// the `auto` fallback may try SMS at all). Built from `smsDigits`, the same list
+    /// The oracle's phone-shaped test, reproduced character-for-character (it is what decides
+    /// whether the `auto` fallback may try SMS at all). Built from `smsDigits`, the same list
     /// `smsReachable` uses, so the script and the CLI pre-validation cannot drift.
     private static let recipientHasDigit = smsDigits
         .map { "targetRecipient contains \"\($0)\"" }
@@ -330,13 +330,13 @@ public enum Send {
     /// Individual (1:1) send. `service` picks the routing; `includeMessage` says whether argv
     /// carries a body at all.
     ///
-    /// `auto` keeps the MCP's `_send_message_direct` routing verbatim, INCLUDING ITS NESTING: the
-    /// iMessage SERVICE lookup sits in an outer `try` whose handler returns an error and attempts
-    /// no SMS, and only the participant lookup and the delivery sit in the inner `try` that falls
-    /// back. That distinction is behavioural, not cosmetic — flattening the two makes a Mac signed
-    /// out of iMessage send a real SMS where the oracle sent nothing. `imessage` and `sms` are
-    /// single-service: a failure is a failure, which is the whole point of asking for one, so they
-    /// need only one `try`.
+    /// `auto` keeps the oracle's `_send_message_direct` routing verbatim, INCLUDING ITS NESTING:
+    /// the iMessage SERVICE lookup sits in an outer `try` whose handler returns an error and
+    /// attempts no SMS, and only the participant lookup and the delivery sit in the inner `try`
+    /// that falls back. That distinction is behavioural, not cosmetic — flattening the two makes a
+    /// Mac signed out of iMessage send a real SMS where the oracle sent nothing. `imessage` and
+    /// `sms` are single-service: a failure is a failure, which is the whole point of asking for
+    /// one, so they need only one `try`.
     public static func directScript(service: Service, includeMessage: Bool) -> String {
         var lines = preamble(target: "targetRecipient", includeMessage: includeMessage)
         lines.append("\ttell application \"Messages\"")

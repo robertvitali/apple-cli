@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """Golden generator for PyFormat (gap37): executes THE ORACLE'S OWN engine —
-string.Formatter().vformat, exactly what apple-mail-mcp templates.py _substitute calls —
+string.Formatter().vformat, exactly what oracle A's templates.py _substitute calls —
 over a synthetic matrix and records output or the raised error's message. Never reasoned;
 regenerate with: python3 gen-goldens.py > goldens.json
 Synthetic inputs only (repo rule: no real data in fixtures)."""

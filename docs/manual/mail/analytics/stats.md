@@ -13,11 +13,11 @@ apple mail analytics stats [flags]
 - `--account` `<account>`
   <br>Account name or UUID.
 - `--days` `<days>`
-  <br>Look back this many days (0 = all time). Ignored by mailbox_breakdown, which the oracle counts over all time; the response's days_back reports what was actually applied.
+  <br>Look back this many days (0 = all time). Ignored by mailbox_breakdown, which always counts over all time; the response's days_back reports what was actually applied.
 - `--include-system-folders`
-  <br>Include Trash/Junk/Sent/Drafts/Spam in the totals (MCP B excludes them; CLI extra).
+  <br>Include Trash/Junk/Sent/Drafts/Spam in the totals (excluded by default when the scan spans the whole account; a mailbox named with --mailbox is always counted).
 - `--mailbox` `<mailbox>`
-  <br>Mailbox — mailbox_breakdown only (default INBOX; 'All' is a CLI extra spanning every mailbox). Ignored by account_overview/sender_stats, which always span the account as the oracle does.
+  <br>Mailbox — mailbox_breakdown only (default INBOX; 'All' spans every mailbox). Ignored by account_overview/sender_stats, which always span the whole account.
 - `--scope` `<scope>`
   <br>Scope: account_overview | sender_stats | mailbox_breakdown.
 - `--sender` `<sender>`

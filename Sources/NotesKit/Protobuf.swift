@@ -2,7 +2,7 @@ import Foundation
 import Compression
 
 /// Minimal protobuf wire-format reader + gzip inflate, ported from
-/// `apple-notes-mcp@2.5.12` `src/utils/protobuf.ts`. Apple Notes stores each note's
+/// the Notes oracle @2.5.12 `src/utils/protobuf.ts`. Apple Notes stores each note's
 /// rich text as a gzipped protobuf in `ZICNOTEDATA.ZDATA`; the checklist done-state
 /// lives ONLY there (AppleScript's `body` strips it), so decoding this blob is the
 /// only way to answer `get-checklist`. This file is pure (no I/O) so it is fully

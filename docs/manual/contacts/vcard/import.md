@@ -1,6 +1,6 @@
 # apple contacts vcard import
 
-Import contacts from vCard 3.0/4.0 text, atomic (EXECUTES; --dry-run previews). → import_vcard
+Import contacts from vCard 3.0/4.0 text, atomic (EXECUTES; --dry-run previews).
 
 ## Synopsis
 

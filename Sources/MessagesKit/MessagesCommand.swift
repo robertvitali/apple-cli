@@ -4,16 +4,16 @@ import Foundation
 
 /// `apple messages …` — iMessage / SMS.
 ///
-/// Ports `mac_messages_mcp` (@ 99388d2, 9 tools + 2 resources) to a strict superset.
+/// Ports the Messages oracle (@ 99388d2, 9 tools + 2 resources) to a strict superset.
 /// Mechanism: `SQLiteReader` over chat.db (WAL-aware, copyToTemp) for ALL reads +
 /// AddressBook `*.abcddb` for contacts (FDA, no Contacts prompt) + `AppleScriptRunner`
-/// (argv, injection-proof) for sends. The MCP's stateful `"contact:N"` selector is
+/// (argv, injection-proof) for sends. The oracle's stateful `"contact:N"` selector is
 /// replaced by stateless ranked JSON candidates + an explicit `--handle`.
 ///
 public struct MessagesCommand: ParsableCommand {
     public static let configuration = CommandConfiguration(
         commandName: "messages",
-        abstract: "iMessage / SMS — send, read, search (ports mac_messages_mcp).",
+        abstract: "iMessage / SMS — send, read, search.",
         subcommands: [
             Recent.self, Send_.self, FindContact.self, Chats.self, Search.self,
             CheckAvailability.self, CheckDB.self, CheckContacts.self, CheckAddressBook.self,
@@ -111,13 +111,14 @@ enum MessagesWriteGuard {
         let allowedRecipients: [String]
     }
 
-    /// Resolve a messages write under write-model v2: **it sends when invoked**, exactly as calling
-    /// `mac_messages_mcp`'s `tool_send_message` does. `--dry-run` previews; `APPLE_DRY_RUN` truthy
-    /// restores dry-run-by-default; `APPLE_TEST_MODE` truthy or `--test-mode` engages the opt-in
-    /// sandbox, which confines recipients to `APPLE_TEST_RECIPIENTS`.
+    /// Resolve a messages write under write-model v2: **it sends when invoked**, exactly as
+    /// calling the Messages oracle's `tool_send_message` does. `--dry-run` previews;
+    /// `APPLE_DRY_RUN` truthy restores dry-run-by-default; `APPLE_TEST_MODE` truthy or
+    /// `--test-mode` engages the opt-in sandbox, which confines recipients to
+    /// `APPLE_TEST_RECIPIENTS`.
     ///
-    /// ORACLE EVIDENCE (`mac_messages_mcp` @ 99388d2, source read on disk at
-    /// ~/.cache/uv/git-v0/checkouts/08d6af4000976dfd/99388d2, both `mac_messages_mcp/` and
+    /// ORACLE EVIDENCE (the Messages oracle @ 99388d2, source read on disk at
+    /// ~/.cache/uv/git-v0/checkouts/08d6af4000976dfd/99388d2, both its package directory and
     /// `main.py` confirmed non-empty before believing any negative): `tool_send_message`
     /// (server.py:58-77) calls `send_message(recipient, message, group_chat)` and returns — no
     /// gate, no confirmation, no elicitation. `send_message` (messages.py:602) does
@@ -166,7 +167,7 @@ struct Recent: ParsableCommand {
     @Option(name: .long, help: "Hours to look back (default 24).") var hours: Int = 24
     @Option(name: .long, help: "Max messages (default 100).") var limit: Int = 100
     @Option(name: .long, help: "Filter by contact name, phone, or email.") var contact: String?
-    @Option(name: .long, help: "Explicit handle (phone/email) — stateless replacement for the MCP's contact:N.") var handle: String?
+    @Option(name: .long, help: "Explicit handle (phone/email) — skips fuzzy contact matching.") var handle: String?
     @Flag(name: .long, help: "Only 1:1 conversations — exclude messages sent in a group chat.") var directOnly = false
 
     func run() throws {
@@ -219,7 +220,7 @@ struct Recent: ParsableCommand {
                         return
                     } else if matches.count == 1 {
                         // A single fuzzy match may resolve to an email handle, not a
-                        // phone — branch like the MCP does (get_recent_messages).
+                        // phone — branch like the oracle does (get_recent_messages).
                         let h = matches[0].phone
                         rowIds = h.contains("@") ? db.handleRowIds(forEmail: h)
                                                  : db.handleRowIds(forPhone: h)
@@ -391,7 +392,7 @@ private func sendFailure(_ outcome: Send.Outcome, message: String?, files: [Stri
 struct Send_: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "send",
-        abstract: "Send an iMessage/SMS (sends on call, like the MCP; --dry-run previews).")
+        abstract: "Send an iMessage/SMS (sends on call; --dry-run previews).")
     @OptionGroup var global: GlobalOptions
     @Argument(help: "Recipient: phone, email, contact name, or (with --group) a chat id.") var recipient: String
     @Option(name: [.short, .long],
@@ -762,7 +763,7 @@ struct CheckContacts: ParsableCommand {
             let book = dependencies.loadAddressBook()
             // Order samples by (last name, first name) to match the oracle's SQL
             // `ORDER BY ZLASTNAME, ZFIRSTNAME`. `count` is the contract; this aligns the
-            // illustrative "first 10" sample set with the MCP's too (handle-key tiebreak).
+            // illustrative "first 10" sample set with the oracle's too (handle-key tiebreak).
             let samples = book.contacts.keys.sorted { a, b in
                 let la = (book.details[a]?.lastName ?? "").lowercased()
                 let lb = (book.details[b]?.lastName ?? "").lowercased()

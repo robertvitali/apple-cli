@@ -1,6 +1,6 @@
 # apple reminders subtasks delete
 
-Remove a subtask (executes on call, like the MCP; --dry-run previews).
+Remove a subtask (executes on call; --dry-run previews).
 
 ## Synopsis
 

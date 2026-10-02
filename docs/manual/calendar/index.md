@@ -4,7 +4,7 @@ title: Calendar
 
 # apple calendar
 
-Calendar — events CRUD + calendars (EventKit; ports apple-events calendar half).
+Calendar — events CRUD + calendars (EventKit).
 
 ## Synopsis
 
@@ -14,9 +14,9 @@ apple calendar
 
 ## Subcommands
 
-- [`calendars`](./calendars/index.md) — Calendar collections (ports calendar_calendars).
+- [`calendars`](./calendars/index.md) — Calendar collections.
 - [`doctor`](./doctor.md) — Report EventKit (Calendar/Reminders) authorization + Full Disk Access.
-- [`events`](./events/index.md) — Calendar events — read/create/update/delete (ports calendar_events).
+- [`events`](./events/index.md) — Calendar events — read/create/update/delete.
 
 ## Inherited options
 

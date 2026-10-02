@@ -4,7 +4,7 @@ import AppleKit
 
 /// `apple notes …` — Notes.app.
 ///
-/// Ports `apple-notes-mcp` to a strict superset. The spec was written against v2.5.12 (34
+/// Ports the Notes oracle to a strict superset. The spec was written against v2.5.12 (34
 /// tools); the oracle INSTALLED on this fleet is v2.7.5 (verified against the npx cache
 /// 2026-08-18 — earlier drafts of this comment said 2.6.12, itself stale), and nothing pins
 /// or drift-checks the two — see COMPLETION-LOOP Q20. The transient-retry wrapper and the
@@ -18,7 +18,7 @@ import AppleKit
 public struct NotesCommand: ParsableCommand {
     public static let configuration = CommandConfiguration(
         commandName: "notes",
-        abstract: "Notes — notes/folders/attachments/checklists/export (ports apple-notes-mcp).",
+        abstract: "Notes — notes/folders/attachments/checklists/export.",
         subcommands: [
             // Notes: read
             GetCmd.self, GetPlaintextCmd.self, GetMarkdownCmd.self, GetByIdCmd.self,
@@ -97,7 +97,7 @@ struct NotesWriteGate: Equatable {
 }
 
 /// Resolve a notes write under write-model v2: **it executes by default**, exactly as calling
-/// the equivalent apple-notes-mcp tool does. `--dry-run` previews; `APPLE_DRY_RUN` truthy
+/// the equivalent Notes oracle tool does. `--dry-run` previews; `APPLE_DRY_RUN` truthy
 /// restores dry-run-by-default.
 ///
 /// Notes is the simplest of the six mappings: the oracle ENFORCES no write gate of any kind, so
@@ -107,12 +107,12 @@ struct NotesWriteGate: Equatable {
 /// EVIDENCE (re-derived; the first version of this comment cited a grep of `dist/` and `src/`,
 /// directories the shipped package does not contain — that grep matched nothing *vacuously* and
 /// proved nothing. Reviewers caught it. The real package ships a single bundle,
-/// `apple-notes-mcp/build/index.js`):
+/// the Notes oracle's `build/index.js`):
 ///   - the ONLY `process.env` reads in the whole bundle are `DEBUG` and `VERBOSE`, so no
 ///     test-mode/confirmation environment variable exists to mirror;
-///   - every `elicit*` hit is bundled MCP-SDK protocol schema, not server code — the Notes
-///     server never issues an elicitation (contrast Mail's oracle A, which wraps six tools in
-///     `_elicit_confirmation`);
+///   - every `elicit*` hit is protocol schema from the SDK bundled with it, not server code —
+///     the Notes server never issues an elicitation (contrast Mail's oracle A, which wraps six
+///     tools in `_elicit_confirmation`);
 ///   - `delete-note`'s handler goes straight from `getNoteById` to `deleteNoteById` with no
 ///     gate. Its description does say "Safety: requires explicit user confirmation before
 ///     deleting", but that is ADVISORY PROSE aimed at the calling model, not server-side
@@ -257,7 +257,7 @@ func currentSyncWarning(_ store: any NotesStoreReading) -> String? {
     return status.warning ?? "iCloud sync is in progress; results may be incomplete or change shortly."
 }
 
-/// A generic dry-run preview payload (apple-cli safety extra; not part of MCP parity output).
+/// A generic dry-run preview payload (apple-cli safety extra; not part of oracle parity output).
 /// Write-model v2: writes EXECUTE by default — this payload is emitted only when the run is
 /// a preview: the caller opted into `--dry-run` (or `APPLE_DRY_RUN=1`), or the surface is
 /// `folders delete`, whose per-surface `surfaceDefaultDryRun = true` makes preview the
@@ -274,7 +274,7 @@ struct DryRunPreview: Encodable {
 
 /// SANDBOX target confinement (write-model v2). Outside the sandbox this is a NO-OP — the
 /// oracle has no counterpart gate (see `resolveNotesWrite`), so under v2 a Notes write reaches
-/// whatever the caller named, exactly as the MCP tool does. Inside the sandbox the target must
+/// whatever the caller named, exactly as the oracle tool does. Inside the sandbox the target must
 /// be a labeled `apple-cli-test…` item.
 ///
 /// `sandboxActive` is a PARAMETER, never re-read from the environment here: the flag-only path
@@ -423,7 +423,7 @@ func guardLiveFolderPath(_ path: String, sandboxActive: Bool, prefix: String? = 
 /// the cascade then destroys. Notes.app exposes no transactional delete and no way to hold a
 /// subtree, so the window cannot be closed from here — the only "fix" available is refusing
 /// sandboxed `delete-folder` outright, which would remove the operator's only sandboxed cleanup
-/// path for a folder tree AND drop a capability the MCP oracle has (parity is a strict superset,
+/// path for a folder tree AND drop a capability the oracle has (parity is a strict superset,
 /// so a refusal is a parity break, not a hardening). Enumeration, selected-ID resolution, and
 /// deletion are separate calls with no transactional boundary or fixed timing bound. Members can
 /// change during that interval; verifying the selected ID does not close that accepted race.

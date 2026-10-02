@@ -4,7 +4,7 @@ import AppleKit
 
 // P3: static HTML dashboard + email export to files.
 
-// MARK: dashboard (static HTML — MCP B's inbox_dashboard without the mcp-ui dependency)
+// MARK: dashboard (static HTML — oracle B's inbox_dashboard without its UI-widget dependency)
 
 struct AnalyticsDashboard: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "dashboard", abstract: "Write a static HTML inbox dashboard (EXECUTES by default; --dry-run previews).")
@@ -61,8 +61,8 @@ struct ExportCommand: ParsableCommand {
     @Option(name: .long, help: "Directory to save exports (default ~/Desktop).") var dir: String = "~/Desktop"
     @Option(name: .long, help: "Format: txt or html.") var format: String = "txt"
     @Option(name: .long, help: "Max messages for entire_mailbox (safety cap).") var max: Int = 1000
-    @Option(name: .long, help: "File layout: 'oracle' (default, oracle B's — single_email: <dir>/<subject>.<fmt>; entire_mailbox: <dir>/<mailbox>_export/<n>_<subject>.<fmt>, 1-based, '/' replaced by '-') or 'flat' (legacy CLI extra: <dir>/<id>-<subject:60>.<fmt>, collision-proof). NOTE: like the oracle, an existing file of the same name is OVERWRITTEN — the single_email name comes from the matched message's subject; pass --no-clobber to refuse instead.") var layout: String = "oracle"
-    @Flag(name: .long, help: "Refuse to overwrite an existing file (the oracle, and the default, overwrite silently — oracle parity).") var noClobber = false
+    @Option(name: .long, help: "File layout: 'oracle' (default): single_email: <dir>/<subject>.<fmt>; entire_mailbox: <dir>/<mailbox>_export/<n>_<subject>.<fmt>, 1-based, '/' replaced by '-'; or 'flat' (legacy: <dir>/<id>-<subject:60>.<fmt>, collision-proof). NOTE: an existing file of the same name is OVERWRITTEN by default — the single_email name comes from the matched message's subject; pass --no-clobber to refuse instead.") var layout: String = "oracle"
+    @Flag(name: .long, help: "Refuse to overwrite an existing file (the default is to overwrite silently).") var noClobber = false
 
     /// gap45 pure core (pinned): the exported file names, oracle layout by default.
     /// Oracle transforms (analytics.py, verified verbatim): '/' → '-' is the ONLY character
@@ -178,7 +178,7 @@ struct ExportCommand: ParsableCommand {
             }
 
             // single_email exports the FULL body (AppleScript, bounded to one message = a strict
-            // superset of MCP B); entire_mailbox uses the fast indexed preview (documented).
+            // superset of oracle B); entire_mailbox uses the fast indexed preview (documented).
             // The LIVE fetch is execute-only (Q12 [12]: a preview that writes nothing still
             // paid Mail's unindexed body scan — a preview with side costs is not a preview);
             // the preview REPORTS the planned source, which can only differ from execute's if

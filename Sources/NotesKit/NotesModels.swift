@@ -1,7 +1,7 @@
 import Foundation
 
 // Encodable payloads for the `data` field of the apple-cli envelope. Each mirrors the
-// corresponding `apple-notes-mcp` tool's `structuredContent`, with camelCase MCP keys
+// corresponding Notes oracle tool's `structuredContent`, with camelCase oracle keys
 // mapped to apple-cli snake_case (docs/DESIGN.md: "name payload fields in snake_case").
 // The camelCase→snake_case map is 1:1 and information-preserving (a strict superset):
 //   passwordProtected→password_protected, wasShared→was_shared, savedPath→saved_path,
@@ -23,7 +23,7 @@ struct CreatedNote: Encodable {
     let warning: String?
 }
 
-/// A search hit. The MCP's `searchNotes()` pushes exactly `{id, title, content:"", tags:[],
+/// A search hit. The oracle's `searchNotes()` pushes exactly `{id, title, content:"", tags:[],
 /// created, modified, folder, account}` per match (build/index.js ~39810: `content: "", // Not
 /// fetched in search` and `tags: []` — both hardcoded, never populated, on every hit, permanently
 /// — while `created`/`modified` ARE the note's real dates, read per-hit in the same single search
@@ -33,7 +33,7 @@ struct CreatedNote: Encodable {
 /// fields. This costs NO extra AppleScript round trip: the oracle itself never fetches real
 /// content/tags for a search hit, so mirroring it exactly means emitting the same literal `""`/
 /// `[]`, not a per-hit content fetch. (An earlier revision dropped created/modified too, on the
-/// mistaken belief the MCP fabricated them at response time — review disproved that against the
+/// mistaken belief the oracle fabricated them at response time — review disproved that against the
 /// oracle source, so they were ported. A later revision dropped content/tags as "useless
 /// placeholders"; the operator has since ruled that strict parity outweighs that rationale.)
 struct NoteSummary: Encodable {
@@ -47,9 +47,9 @@ struct NoteSummary: Encodable {
     let modified: Date
 }
 
-/// `sync_warning` is apple-cli's structured equivalent of the MCP's `withSyncAwareness` text
+/// `sync_warning` is apple-cli's structured equivalent of the oracle's `withSyncAwareness` text
 /// warning: populated (else omitted) when an iCloud sync is in progress and results may be
-/// incomplete. Present on the three MCP tools the reference wraps: search / list / folders.
+/// incomplete. Present on the three oracle tools the reference wraps: search / list / folders.
 struct NoteList: Encodable {
     let notes: [NoteSummary]
     let count: Int
@@ -115,7 +115,7 @@ struct NoteMetaByLookup: Encodable {
     let account: String?
 }
 
-/// `get-selected-notes`. The MCP's `getSelectedNotes()` pushes `{id, title, content:"", tags:[],
+/// `get-selected-notes`. The oracle's `getSelectedNotes()` pushes `{id, title, content:"", tags:[],
 /// created, modified, shared, passwordProtected, folder, account}` per selected note
 /// (build/index.js:40717-40728: `content: "",` / `tags: [],` — both hardcoded, never fetched, same
 /// as search — while `created`/`modified`/`shared`/`passwordProtected`/`folder`/`account` are all
@@ -141,7 +141,7 @@ struct SelectedNoteList: Encodable {
     let count: Int
 }
 
-/// `list-shared-notes`. The MCP's `listSharedNotes()` pushes `{id, title, content:"", tags:[],
+/// `list-shared-notes`. The oracle's `listSharedNotes()` pushes `{id, title, content:"", tags:[],
 /// created, modified, account, shared, passwordProtected}` per shared note (build/index.js:
 /// 40371-40381: `content: "",` / `tags: [],` — both hardcoded, never fetched, same as search —
 /// while `created`/`modified`/`account`/`shared`/`passwordProtected` are all real). Note the

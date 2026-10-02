@@ -69,7 +69,7 @@ struct ContactSerializationTests {
 
 @Suite("birthdayParts filtering (NSNotFound guard)")
 struct BirthdayPartsTests {
-    @Test("nil components → nil (MCP birthday: null)") func allNil() {
+    @Test("nil components → nil (Contacts oracle birthday: null)") func allNil() {
         #expect(birthdayParts(nil) == nil)
         #expect(birthdayParts(DateComponents()) == nil)
     }

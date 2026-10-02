@@ -12,7 +12,7 @@ import TestSupport
 // stays `.serialized`.
 //
 // The v2 CONTRACT under test: UNSANDBOXED, the gates impose no restriction (the CLI behaves
-// like the MCP — sends to any recipient, mutates any message); SANDBOXED, the self-only
+// like the oracle — sends to any recipient, mutates any message); SANDBOXED, the self-only
 // allowlist and the label gate hold exactly as v1's did.
 
 @Suite("Mail write-safety gates (write-model v2)", .serialized)
@@ -36,7 +36,7 @@ struct MailWriteSafetyTests {
 
     // MARK: guardOutbound (send / reply / forward)
 
-    @Test("UNSANDBOXED outbound is unrestricted — any recipient is allowed (MCP parity)")
+    @Test("UNSANDBOXED outbound is unrestricted — any recipient is allowed (oracle parity)")
     func outboundUnsandboxedUnrestricted() {
         withEnv(recipients: nil) {
             #expect(throws: Never.self) {
@@ -156,7 +156,7 @@ struct MailWriteSafetyTests {
         }
     }
 
-    @Test("UNSANDBOXED: a mixed batch applies to every addressable target (MCP parity)")
+    @Test("UNSANDBOXED: a mixed batch applies to every addressable target (oracle parity)")
     func batchUnsandboxedAppliesAll() {
         withEnv(recipients: nil) {
             var opCalls = 0

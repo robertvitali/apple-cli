@@ -76,13 +76,13 @@ setup() {
   echo "$output" | grep -q '"span" : "all"'
 }
 
-@test "all-day is NOT inferred from bare dates (MCP parity)" {
+@test "all-day is NOT inferred from bare dates (oracle parity)" {
   run $BIN calendar events create --dry-run --title "apple-cli-test x" --start 2026-07-15 --end 2026-07-16
   [ "$status" -eq 0 ]
   echo "$output" | grep -q '"is_all_day" : false'
 }
 
-@test "title-only structured location is accepted (MCP parity)" {
+@test "title-only structured location is accepted (oracle parity)" {
   run $BIN calendar events create --dry-run --title "apple-cli-test y" \
     --start 2026-07-15T09:00:00Z --end 2026-07-15T10:00:00Z --geo-title "Conference Room B"
   [ "$status" -eq 0 ]

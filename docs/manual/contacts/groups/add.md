@@ -1,6 +1,6 @@
 # apple contacts groups add
 
-Add a contact to a group, additive (EXECUTES; --dry-run previews). → add_contact_to_group
+Add a contact to a group, additive (EXECUTES; --dry-run previews).
 
 ## Synopsis
 

@@ -1,10 +1,10 @@
 import Foundation
 
-// Ported verbatim from mcp-server-apple-events (FradSer/event) EventKitCLI.swift @1.4.0,
+// Ported verbatim from the EventKit oracle (FradSer/event) EventKitCLI.swift @1.4.0,
 // MIT License, Copyright (c) 2025 Frad LEE — see NOTICE.
 
-/// Verbatim port of the oracle's date-input pipeline (`mcp-server-apple-events`
-/// EventKitCLI.swift: `detectExplicitTimezone` :419, `formatterWithBaseLocale` :462,
+/// Verbatim port of the oracle's date-input pipeline (EventKitCLI.swift:
+/// `detectExplicitTimezone` :419, `formatterWithBaseLocale` :462,
 /// `normalizedComponents` :469, `componentsSet` :476, `parseDateComponents` :483, the
 /// instance `parseDate` :1115, and `formatDueDateWithTimezone` :1130) — REM-02/03/04: the
 /// hand-written `DateParsing` accepted a fraction of the oracle's input formats, could not

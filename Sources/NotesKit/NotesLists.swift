@@ -3,7 +3,7 @@ import Foundation
 /// Structural `<ul>`/`<ol>` → Markdown rendering, ported from the oracle's turndown 7.2.4 rules
 /// (NOTES-M2).
 ///
-/// WHY THIS IS NOT REGEX. The oracle (`apple-notes-mcp` 2.6.12) converts note HTML with
+/// WHY THIS IS NOT REGEX. The oracle (v2.6.12) converts note HTML with
 /// **turndown**, configured at `build/index.js:41466-41477` as
 /// `{ headingStyle: "atx", codeBlockStyle: "fenced", bulletListMarker: "-" }` plus one `notesDivs`
 /// rule. Turndown walks a DOM, so its list output depends on the tree shape and on an item's index

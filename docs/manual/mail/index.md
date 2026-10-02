@@ -4,7 +4,7 @@ title: Mail
 
 # apple mail
 
-Mail.app — send, search, rules, templates, analytics (union of both mail MCPs).
+Mail.app — send, search, rules, templates, analytics.
 
 ## Synopsis
 
@@ -25,7 +25,7 @@ apple mail
 - [`flag`](./flag.md) — Flag/unflag messages by id or --match, with optional color (EXECUTES by default; --dry-run previews).
 - [`forward`](./forward.md) — Forward a message by id or --subject (EXECUTES by default; --dry-run previews).
 - [`get`](./get.md) — Get one message by ROWID, RFC Message-ID, or message:// link.
-- [`list`](./list.md) — List recent inbox messages (MCP B list_inbox_emails).
+- [`list`](./list.md) — List recent inbox messages.
 - [`mailboxes`](./mailboxes/index.md) — List and create mailboxes.
 - [`mark`](./mark.md) — Mark messages read/unread by id or --match (EXECUTES by default; --dry-run previews).
 - [`move`](./move.md) — Move messages by id or --match to a mailbox (EXECUTES by default; --dry-run previews).

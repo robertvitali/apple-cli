@@ -14,7 +14,7 @@ apple mail attachments save [<id>] [flags]
   <br>Message id (ROWID / RFC Message-ID); or use --subject.
 - `--account` `<account>`
 - `--allow-outside-home`
-  <br>Allow a destination outside $HOME (e.g. /tmp, /Volumes/...). Oracle A's save_attachments has no confinement, so this restores that reach. Credential directories (~/.ssh, ~/.aws, ...) stay blocked either way.
+  <br>Allow a destination outside $HOME (e.g. /tmp, /Volumes/...). Credential directories (~/.ssh, ~/.aws, ...) stay blocked either way.
 - `--dir` `<dir>`
   <br>Destination directory for multiple attachments (mutually exclusive with --out).
 - `--indices` `<indices>`

@@ -397,7 +397,7 @@ public struct MailScript {
             } catch is AppleScriptRunner.TimeoutError {
                 let seconds = Int(exactly: hostTimeout).map(String.init) ?? String(hostTimeout)
                 throw AppleError.upstream(
-                    "Mail body search exceeded its \(seconds)-second aggregate deadline; no partial results returned. Narrow with --mailbox/--account, raise the cap with --body-live-timeout <seconds>, pass 0 for oracle B's unbounded aggregate behavior, or drop --body-live.")
+                    "Mail body search exceeded its \(seconds)-second aggregate deadline; no partial results returned. Narrow with --mailbox/--account, raise the cap with --body-live-timeout <seconds>, pass 0 to disable the deadline entirely, or drop --body-live.")
             }
         } else {
             out = try untimedRun(MailScript.bodySearchScript, arguments)
@@ -687,13 +687,12 @@ public struct MailScript {
 
     // MARK: Send with attachments (outbound + file attachments)
 
-    /// Compose + send a message carrying one or more file attachments. Every user value —
-    /// subject, body, recipients, AND each attachment path — is US-delimited argv (never
-    /// interpolated into source; injection-safe). Attachments are placed `at after the last
-    /// paragraph of content` (the well-supported Mail form used by the parity oracle
-    /// patrickfreyer apple-mail-mcp); a `delay` after each lets Mail finish loading the file
-    /// before `send` fires. The CALLER MUST have passed the self-only `guardOutbound` first;
-    /// this method performs NO gating.
+    /// Compose + send a message carrying one or more file attachments. Every user value — subject,
+    /// body, recipients, AND each attachment path — is US-delimited argv (never interpolated into
+    /// source; injection-safe). Attachments are placed `at after the last paragraph of content`
+    /// (the well-supported Mail form oracle B uses); a `delay` after each lets Mail
+    /// finish loading the file before `send` fires. The CALLER MUST have passed the self-only
+    /// `guardOutbound` first; this method performs NO gating.
     private static let sendWithAttachmentsScript = """
     on run argv
         set theSubject to item 1 of argv
@@ -804,7 +803,7 @@ public struct MailScript {
         -- `address` coerces with an error (e.g. `missing value`).
         --
         -- WILDCARD (write-model v2): an allowList entry "*" means the SANDBOX IS OFF — the
-        -- allowlist comparison is skipped entirely (the CLI behaves like the MCP, which sends to
+        -- allowlist comparison is skipped entirely (the CLI behaves like the oracles, which send to
         -- whatever Mail composed). The empty-address block above still applies: a blank recipient
         -- is a broken compose, not a sandbox restriction. "*" is never a valid email address, so
         -- the sentinel cannot collide with a real allowlist entry. Swift passes it ONLY when
@@ -1845,11 +1844,11 @@ public struct MailScript {
         }
     }
 
-    // MARK: Unread counts (Mail.app live property — matches the MCP oracle)
+    // MARK: Unread counts (Mail.app live property — matches the oracle)
 
-    /// The Envelope Index `read` bit diverges from server-synced seen-state (observed: the index count ran
-    /// far above Mail's live count on one server-synced INBOX). MCP A/B source unread from Mail's live
-    /// `unread count` property, so we do too for parity.
+    /// The Envelope Index `read` bit diverges from server-synced seen-state (observed: the index
+    /// count ran far above Mail's live count on one server-synced INBOX). Both oracles source
+    /// unread from Mail's live `unread count` property, so we do too for parity.
     /// Internal (not private): UnreadSummaryTests pins the oracle-B arms (Inbox fallback,
     /// -1 sentinel, one-level descent) as source text, since the script only runs live.
     static var unreadScriptSource: String { unreadScript }
@@ -2541,12 +2540,12 @@ public struct MailScript {
     // de-collided destination paths. This script does NO name matching and NO path composition —
     // matching by name would let a message with two identically-named attachments have BOTH match
     // a single --indices/--name request (wrong bytes silently landing under the wrong/colliding
-    // path). Positional selection via `item (idx + 1) of (mail attachments of msg)` mirrors MCP
-    // A's own `items {i} of mail attachments of msg`. Pairs are pre-parsed OUTSIDE the `tell`
-    // block (mirrors createRuleScript's caution: list/delimiter manipulation stays outside `tell
-    // application "Mail"`). Each `save` is wrapped in `try` so one un-fetchable attachment doesn't
-    // abort the rest; the RS-joined list of successfully-saved indices is returned so the caller
-    // can reconcile requested vs actually-saved (a short save is signal, never silent success).
+    // path). Positional selection via `item (idx + 1) of (mail attachments of msg)` mirrors
+    // oracle A's own `items {i} of mail attachments of msg`. Pairs are pre-parsed OUTSIDE the
+    // `tell` block (mirrors createRuleScript's caution: list/delimiter manipulation stays outside
+    // `tell application "Mail"`). Each `save` is wrapped in `try` so one un-fetchable attachment
+    // doesn't abort the rest; the RS-joined list of successfully-saved indices is returned so the
+    // caller can reconcile requested vs actually-saved (a short save is reported, never silent).
     private static let saveAttachmentsScript = """
     on run argv
         set msg to my findMsg(item 1 of argv, item 2 of argv)
@@ -2588,7 +2587,7 @@ public struct MailScript {
     /// path)]`, fully resolved by the caller (index selection, basename safety, and de-collision
     /// all happen in Swift — see CommandHelpers.swift). `index` is passed straight through to
     /// AppleScript's `item (index + 1) of (mail attachments of msg)` — i.e. it addresses Mail.app's
-    /// OWN live attachment order, matching MCP A's `items {i} of mail attachments of msg`.
+    /// OWN live attachment order, matching oracle A's `items {i} of mail attachments of msg`.
     /// The caller's master list MUST therefore be the LIVE enumeration (`listAttachments`) —
     /// the old assumption that the Envelope-Index `ORDER BY name` list matches Mail's live
     /// order was MEASURED FALSE on 8/8 multi-attachment messages sampled (extra32): an
@@ -2944,7 +2943,7 @@ public struct MailScript {
             end repeat
             -- Apply the pre-resolved move/copy targets + flag color. `should move/copy message` is the
             -- boolean that ACTIVATES the action; `move/copy message` only names the target mailbox
-            -- (setting the target ALONE leaves the action inactive). Mirrors the MCP oracle's
+            -- (setting the target ALONE leaves the action inactive). Mirrors oracle A's
             -- _build_action_lines, which pairs `set should move message … to true` with the target.
             if mvMailbox is not missing value then
                 set should move message of r to true
@@ -3091,7 +3090,7 @@ public struct MailScript {
                 set all conditions must be met of r to matchAll
             end if
             if hasActs then
-                -- actions REPLACE wholesale (mirror the MCP oracle's update_rule reset): the
+                -- actions REPLACE wholesale (mirror oracle A's update_rule reset): the
                 -- `should move/copy message` booleans are what CLEAR the move/copy actions — Mail
                 -- REFUSES `set move message … to missing value` (-1700 "can't make missing value into
                 -- type mailbox") and `delete move message …` is a silent no-op, so the boolean is the
@@ -3253,7 +3252,7 @@ public struct MailScript {
         set bad to {}
         tell application "Mail"
             set r to rule idx
-            -- Probe the rule-action properties the CLI does NOT model (mirrors the MCP oracle's
+            -- Probe the rule-action properties the CLI does NOT model (mirrors oracle A's
             -- `_check_supported_actions`, mail_connector.py) PLUS `forward message` (the auto-forward
             -- recipients — a named dangerous action; the oracle only checks its sibling `forward text`
             -- and clears `forward message` on action-update, but an enable-only update would leave it

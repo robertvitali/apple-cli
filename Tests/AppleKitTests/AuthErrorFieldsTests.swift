@@ -4,8 +4,8 @@ import Foundation
 
 /// `error.status` / `error.remediation` on the JSON error envelope (CONTACTS-M2).
 ///
-/// THE GAP. Every Apple MCP this CLI replaces returns an authorization failure as FOUR keys —
-/// `error_type`, `error`, `status`, `remediation` (`apple_contacts_mcp/server.py:113-126`) — and
+/// THE GAP. Every Apple oracle this CLI replaces returns an authorization failure as FOUR keys —
+/// `error_type`, `error`, `status`, `remediation` (the Contacts oracle's `server.py:113-126`) — and
 /// documents that a client should branch on `status`: `notDetermined` means prompt, `denied` means
 /// send the user to System Settings, `restricted` means MDM forbids it and retrying is pointless.
 /// Our envelope carried only `type` + `message`, and the domains concatenated the other two into

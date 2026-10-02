@@ -19,7 +19,7 @@ Returns recent Messages rows with the same JSON envelope as the rest of the CLI.
 - `--direct-only`
   <br>Only 1:1 conversations — exclude messages sent in a group chat.
 - `--handle` `<handle>`
-  <br>Explicit handle (phone/email) — stateless replacement for the MCP's contact:N.
+  <br>Explicit handle (phone/email) — skips fuzzy contact matching.
 - `--hours` `<hours>`
   <br>Hours to look back (default 24).
 - `--limit` `<limit>`

@@ -3,7 +3,7 @@ import Testing
 
 /// D8 item 5: oracle B's reply/forward HTML-fragment wrappers (`tools/compose.py`), ported PURE.
 /// The fragment is what preserves Mail's HTML quote layer on a PLAIN reply/forward, and it is pasted
-/// into a live compose window (there is no MCP-diff over this exact string), so these byte-exact
+/// into a live compose window (there is no oracle-diff over this exact string), so these byte-exact
 /// pins lock the oracle's shape directly. Escaping is Python `html.escape` with quote=True: `&`
 /// first, then `<` `>` `"` `'`, with the apostrophe as `&#x27;` (NOT `EmlBuilder.escapeHTML`'s
 /// `&#39;`). Revert-red: flip a wrapper and one of these fails.

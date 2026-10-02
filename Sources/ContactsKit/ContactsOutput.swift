@@ -27,7 +27,7 @@ func emitContactsWrite<T: Encodable>(_ global: GlobalOptions, _ data: T, sandbox
 
 // MARK: - Pure list helpers (unit-testable without a store)
 
-/// Clamp a requested page size to the hard cap (mirrors `min(limit, MAX)` in the MCP).
+/// Clamp a requested page size to the hard cap (mirrors `min(limit, MAX)` in the oracle).
 func effectiveLimit(_ requested: Int, cap: Int) -> Int { min(requested, cap) }
 
 /// Union several summary lists preserving first-seen order, de-duped by `id`, capped.
@@ -90,7 +90,7 @@ struct WriteGate {
 }
 
 /// Resolve a contacts write under write-model v2: **it executes by default**, exactly as
-/// calling the equivalent apple-contacts-mcp tool does. `--dry-run` previews; `APPLE_DRY_RUN`
+/// calling the equivalent Contacts oracle tool does. `--dry-run` previews; `APPLE_DRY_RUN`
 /// truthy restores dry-run-by-default (precedence: `--dry-run` > `--execute` > `APPLE_DRY_RUN`
 /// > execute).
 ///
@@ -129,7 +129,7 @@ func resolveWrite(_ global: GlobalOptions, labeledName: String? = nil,
 /// Whether the operator has granted the oracle-mirrored delete gate.
 ///
 /// ORACLE-MIRRORED (bucket 1 — kept UNCONDITIONALLY under write-model v2, sandbox or not).
-/// apple-contacts-mcp refuses `delete_contact` (server.py:965) and `delete_group`
+/// The Contacts oracle refuses `delete_contact` (server.py:965) and `delete_group`
 /// (server.py:1715) outside `CONTACTS_TEST_MODE=true` via `require_test_mode_for`
 /// (security.py:161-179): the destructive path has no confirmation UX, so it is "only safe to
 /// expose in test mode". That gate is part of the behavior being replicated, not a CLI-only
@@ -157,11 +157,10 @@ func contactsDeleteEnvGranted(_ envVar: String = TestMode.testModeVar) -> Bool {
 /// The refusal text for an ungranted delete — shared by the execute path (thrown) and the
 /// preview (reported in `gate_note`), so a preview can never claim clean for a call the
 /// execute path refuses.
-func contactsDeleteGateMessage(_ operation: String) -> String {
-    "\(operation) is only available with \(TestMode.testModeVar)=1 in the environment — "
-    + "mirroring apple-contacts-mcp's require_test_mode_for/CONTACTS_TEST_MODE gate on this "
-    + "op (its destructive path has no confirmation UX). A --test-mode FLAG deliberately does "
-    + "NOT satisfy it: the oracle keys this gate to the environment, so the replacement does too."
+func contactsDeleteGateMessage(_ command: String) -> String {
+    "\(command) is only available with \(TestMode.testModeVar)=1 in the environment — "
+    + "this command's destructive path has no confirmation UX. A --test-mode FLAG "
+    + "deliberately does NOT satisfy it: this gate is keyed to the environment only."
 }
 
 /// WHY THE DELETES LABEL-CHECK `sandboxPrefix` AND NOT `canonicalSandboxPrefix`.
@@ -210,7 +209,7 @@ func joinedGateNote(_ parts: [String?]) -> String? {
     return kept.isEmpty ? nil : kept.joined(separator: " ")
 }
 
-/// Dry-run preview payload (a CLI extra — the MCP has no dry-run). Only the fields
+/// Dry-run preview payload (a CLI extra — the oracle has no dry-run). Only the fields
 /// relevant to each operation are populated; the rest omit via encodeIfPresent.
 ///
 /// `note` is the write_note payload (the note text being set). `gate_note` is the

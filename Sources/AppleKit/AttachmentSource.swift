@@ -10,8 +10,8 @@ import Foundation
 /// containment policies, which is exactly what the first draft of the Messages flag did: it
 /// checked existence and readability and nothing else, so
 /// `apple messages send <number> --file ~/.ssh/id_ed25519` was accepted and delivered
-/// unrecallably from one command line, on a surface that (matching the MCP, per write-model v2)
-/// reaches any recipient outside the sandbox.
+/// unrecallably from one command line, on a surface that (matching the oracles, per write-model
+/// v2) reaches any recipient outside the sandbox.
 ///
 /// **CONTAINMENT NOTE (write-model v2).** Outside the sandbox recipients are unrestricted, so the
 /// sensitive-directory blocklist and the executable-extension blocklist below ARE the containment
@@ -23,11 +23,11 @@ import Foundation
 /// mounted volume. Only the parts that are about CONTENT — the credential blocklist and the
 /// control-character rule — carry over.
 ///
-/// **No parity is narrowed by this.** For Mail the blocklists ARE the oracle's behaviour
-/// (s-morgan `validate_attachment_type` + its 25 MB cap, patrickfreyer `sensitive_dirs`). For
-/// Messages, `mac_messages_mcp` is text-only — it cannot send a file at all — so a refusal here
-/// cannot drop a capability the oracle had. The Notes D12 carve-out does not reach this surface
-/// either: that one exists because the Notes oracle PERMITS the write being discussed.
+/// **No parity is narrowed by this.** For Mail the blocklists ARE the oracle's behaviour (s-morgan
+/// `validate_attachment_type` + its 25 MB cap, patrickfreyer `sensitive_dirs`). For Messages, the
+/// Messages oracle is text-only — it cannot send a file at all — so a refusal here cannot drop a
+/// capability the oracle had. The Notes D12 carve-out does not reach this surface either: that one
+/// exists because the Notes oracle PERMITS the write being discussed.
 ///
 /// **WHAT THIS DOES NOT STOP.** Stated plainly, because a guard read as stronger than it is, is
 /// worse than no guard:

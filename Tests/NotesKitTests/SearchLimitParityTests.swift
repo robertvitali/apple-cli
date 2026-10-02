@@ -3,14 +3,14 @@ import Testing
 @testable import NotesKit
 @testable import AppleKit
 
-/// `search-notes` limit semantics against apple-notes-mcp 2.6.12 (NOTES-M7 + NOTES-L2).
+/// `search-notes` limit semantics against the Notes oracle @2.6.12 (NOTES-M7 + NOTES-L2).
 ///
 /// Two oracle layers, and they disagree about non-positive limits — which is the whole of L2.
 /// The JSON SCHEMA is the outer gate: `"limit": {"exclusiveMinimum": 0, "type": "integer"}`, read
-/// from the live tool definition, so the MCP refuses `limit: 0` before any handler runs. The
-/// INNER `resolveSearchLimit` also guards `limit > 0`, but that path is unreachable through MCP.
-/// Porting the schema gate is what makes `--limit 0` a validation error here; porting only the
-/// inner function would have made it silently mean "50", which is NOT what a caller sees.
+/// from the live tool definition, so the oracle refuses `limit: 0` before any handler runs. The
+/// INNER `resolveSearchLimit` also guards `limit > 0`, but that path is unreachable through the
+/// oracle. Porting the schema gate is what makes `--limit 0` a validation error here; porting only
+/// the inner function would have made it silently mean "50", which is NOT what a caller sees.
 @Suite("search limit parity")
 struct SearchLimitParityTests {
 

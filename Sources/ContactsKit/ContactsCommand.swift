@@ -3,13 +3,13 @@ import AppleKit
 
 /// `apple contacts …` — Contacts.
 ///
-/// Ports `apple-contacts-mcp` (@ 1cd8789, v0.3.0, 21 tools) to a strict superset over
+/// Ports the Contacts oracle (@ 1cd8789, v0.3.0, 21 tools) to a strict superset over
 /// Contacts.framework (`CNContactStore`) with an AppleScript fallback for the two
 /// entitlement-gated ops (contact notes, group remove-member). Adds curated extras:
 /// `search --deep` (all-field), `--dry-run`/`--execute` write gating, `--out`/`--file`
 /// file I/O for vCard and photos, and `--json` full-fidelity create/update.
 ///
-/// Command surface (each maps to an MCP tool):
+/// Command surface (each maps to an oracle tool):
 ///   auth · list · get · search · create · update · delete
 ///   note {get,set} · photo {get,set}
 ///   groups {list,members,create,rename,delete,add,remove}
@@ -18,7 +18,7 @@ import AppleKit
 public struct ContactsCommand: ParsableCommand {
     public static let configuration = CommandConfiguration(
         commandName: "contacts",
-        abstract: "Contacts — CRUD, groups, vCard, notes, photos (ports apple-contacts-mcp).",
+        abstract: "Contacts — CRUD, groups, vCard, notes, photos.",
         subcommands: [
             AuthCommand.self,
             ListCommand.self,

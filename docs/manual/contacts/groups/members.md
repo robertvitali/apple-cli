@@ -1,6 +1,6 @@
 # apple contacts groups members
 
-List contacts in a group (distinct not_found vs empty). → get_contacts_in_group
+List contacts in a group (distinct not_found vs empty).
 
 ## Synopsis
 

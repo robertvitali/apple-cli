@@ -1,6 +1,6 @@
 # apple contacts update
 
-Update a contact, None=skip/""=clear/value=set (EXECUTES; --dry-run previews). → update_contact
+Update a contact: omit a field to keep it, "" clears it, a value sets it (EXECUTES; --dry-run previews).
 
 ## Synopsis
 
@@ -15,7 +15,7 @@ apple contacts update <identifier> [flags]
 - `--clear` `<clear>` *(repeatable)*
   <br>Clear a field to empty (repeatable).
 - `--group` `<group>`
-  <br>Group assertion; accepted and echoed for MCP parity, not enforced.
+  <br>Group assertion; accepted and echoed in --dry-run previews, not enforced.
 - `--json` `<json>`
   <br>Full field set as a JSON blob (presence = touch; ""/[] = clear).
 - `--set` `<set>` *(repeatable)*

@@ -1,6 +1,6 @@
 # apple reminders subtasks toggle
 
-Flip a subtask's completion (executes on call, like the MCP; --dry-run previews).
+Flip a subtask's completion (executes on call; --dry-run previews).
 
 ## Synopsis
 

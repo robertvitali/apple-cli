@@ -52,8 +52,8 @@ struct TemplateStoreTests {
 
     // MARK: on-disk format — byte parity with the oracle's save_template OPERATION
 
-    /// The bytes must match what MCP A's `save_template` writes, since both tools share the store.
-    /// Note the trailing newline: the oracle normalizes the body (`server.py`), so asserting
+    /// The bytes must match what oracle A's `save_template` writes, so a copied file reads the
+    /// same. Note the trailing newline: the oracle normalizes the body (`server.py`), so asserting
     /// against `serialize_template` alone would lock bytes the oracle never actually produces.
     @Test func onDiskFormatMatchesOracle() throws {
         let store = tempStore()
@@ -66,9 +66,9 @@ struct TemplateStoreTests {
         #expect(try rawFile(store, "s3") == "\nEnds already\n")
     }
 
-    /// The CLI must read files MCP A writes: body-only (leading blank line), lowercase `subject:`,
-    /// a subject value containing a colon, and a body with INTERNAL blank lines + trailing newline
-    /// (the properties the header/body slice could silently regress).
+    /// The CLI must read files oracle A writes: body-only (leading blank line), lowercase
+    /// `subject:`, a subject value containing a colon, and a body with INTERNAL blank lines +
+    /// trailing newline (the properties the header/body slice could silently regress).
     @Test func parsesOracleWrittenFiles() {
         let (s1, b1) = TemplateStore.parse("\nJust the body")
         #expect(s1 == nil && b1 == "Just the body")
@@ -160,7 +160,7 @@ struct TemplateStoreTests {
 
     // MARK: save-side validation (mirrors the oracle's save_template)
 
-    /// Writing a file the oracle can never read back would poison the SHARED store, so the
+    /// Writing a file the oracle can never read back would break format parity, so the
     /// invariant is: `parse(save(s, b)) == (s, b)`, or `save` throws.
     @Test func saveRefusesInputsTheOracleWouldReject() {
         let store = tempStore()
@@ -268,7 +268,7 @@ struct TemplateStoreTests {
         #expect(throws: Error.self) { try TemplateStore.validateName("") }
         #expect(throws: Error.self) { try TemplateStore.validateName(String(repeating: "a", count: 65)) }
         #expect(throws: Never.self) { try TemplateStore.validateName("ok_name-1") }
-        // ASCII-only, matching the oracle — a Unicode name would be unreachable by MCP A.
+        // ASCII-only, matching the oracle — a Unicode name would be unreachable by oracle A.
         #expect(throws: Error.self) { try TemplateStore.validateName("café") }
         #expect(throws: Error.self) { try TemplateStore.validateName("日本語") }
         // Traversal payloads stay rejected.

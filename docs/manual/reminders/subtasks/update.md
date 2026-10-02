@@ -1,6 +1,6 @@
 # apple reminders subtasks update
 
-Update a subtask's title/completion (executes on call, like the MCP; --dry-run previews).
+Update a subtask's title/completion (executes on call; --dry-run previews).
 
 ## Synopsis
 

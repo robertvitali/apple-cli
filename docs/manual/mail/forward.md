@@ -19,7 +19,7 @@ apple mail forward [<id>] [flags]
   <br>Text to prepend before the forwarded content.
 - `--cc` `<cc>` *(repeatable)*
 - `--mailbox` `<mailbox>`
-  <br>Mailbox to scope the --subject lookup (default INBOX — oracle B forward_email's default; use 'All' for a store-wide sweep).
+  <br>Mailbox to scope the --subject lookup (default INBOX; use 'All' for a store-wide sweep).
 - `--subject` `<subject>`
   <br>Forward the newest message matching this subject keyword.
 - `--to` `<to>` *(repeatable)*

@@ -4,7 +4,7 @@ import EventKitCore
 
 /// `apple calendar …` — Calendar (EventKit).
 ///
-/// Ports the Calendar half of `mcp-server-apple-events` (@ 1.4.0) to a strict superset:
+/// Ports the Calendar half of the EventKit oracle (@ 1.4.0) to a strict superset:
 ///   calendar calendars list          → calendar_calendars (collections)
 ///   calendar events read             → calendar_events read  (window/filters/--id)
 ///   calendar events create           → calendar_events create
@@ -20,7 +20,7 @@ import EventKitCore
 public struct CalendarCommand: ParsableCommand {
     public static let configuration = CommandConfiguration(
         commandName: "calendar",
-        abstract: "Calendar — events CRUD + calendars (EventKit; ports apple-events calendar half).",
+        abstract: "Calendar — events CRUD + calendars (EventKit).",
         subcommands: [CalendarsCommand.self, EventsCommand.self, CalendarDoctor.self],
         defaultSubcommand: EventsCommand.self
     )

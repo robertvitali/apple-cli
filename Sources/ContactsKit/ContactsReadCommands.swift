@@ -2,8 +2,8 @@ import Foundation
 import ArgumentParser
 import AppleKit
 
-// Read commands — safe to compare freely against the live MCP oracle. Each maps 1:1
-// to an apple-contacts-mcp @ 1cd8789 (v0.3.0) read tool.
+// Read commands — safe to compare freely against the oracle. Each maps 1:1 to a read
+// tool of the Contacts oracle @ 1cd8789 (v0.3.0).
 
 private let contactsCap = 200
 private let groupsCap = 200
@@ -14,7 +14,7 @@ private let containersCap = 10
 struct AuthCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "auth",
-        abstract: "Report Contacts TCC authorization status (never prompts). → check_authorization")
+        abstract: "Report Contacts TCC authorization status (never prompts).")
     @OptionGroup var global: GlobalOptions
     func run() throws {
         try run(storeFactory: { ContactsStore() })
@@ -37,7 +37,7 @@ struct AuthCommand: ParsableCommand {
 struct ListCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "list",
-        abstract: "List contacts (paged, 4-field summaries). → list_contacts")
+        abstract: "List contacts (paged, 4-field summaries).")
     @OptionGroup var global: GlobalOptions
     @Option(name: .long, help: "Number of contacts to skip (>= 0).") var offset = 0
     @Option(name: .long, help: "Max contacts to return (default 50, capped at 200).") var limit = 50
@@ -66,7 +66,7 @@ struct ListCommand: ParsableCommand {
 struct GetCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "get",
-        abstract: "Fetch one contact by identifier (full P1 fields). → get_contact")
+        abstract: "Fetch one contact by identifier (--niche adds dates, social profiles, relations and instant messages).")
     @OptionGroup var global: GlobalOptions
     @Argument(help: "The contact's CN identifier.") var identifier: String
     @Flag(name: .long, help: "Also fetch niche families (dates, social_profiles, relations, instant_messages).")
@@ -97,14 +97,14 @@ struct GetCommand: ParsableCommand {
 struct SearchCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "search",
-        abstract: "Find contacts by name|phone|email|org (exactly one). → search_contacts")
+        abstract: "Find contacts by name|phone|email|org (exactly one).")
     @OptionGroup var global: GlobalOptions
     @Option(name: .long, help: "Substring to match against contact names.") var name: String?
     @Option(name: .long, help: "Phone number to match (any format).") var phone: String?
     @Option(name: .long, help: "Email address to match.") var email: String?
     @Option(name: [.customLong("org"), .customLong("organization")], help: "Substring to match against organization.")
     var organization: String?
-    @Flag(name: .long, help: "Extra: match the given value across ALL fields (name/phone/email/org), unioned.")
+    @Flag(name: .long, help: "Match the given value across ALL fields (name/phone/email/org) and return the union of matches.")
     var deep = false
 
     func run() throws {
@@ -142,7 +142,7 @@ struct SearchCommand: ParsableCommand {
 struct ContainersListCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "list",
-        abstract: "List all contact containers (accounts). → list_containers")
+        abstract: "List all contact containers (accounts).")
     @OptionGroup var global: GlobalOptions
     func run() throws {
         try run(storeFactory: { ContactsStore() })
@@ -167,7 +167,7 @@ struct ContainersListCommand: ParsableCommand {
 struct GroupsListCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "list",
-        abstract: "List all contact groups across all containers. → list_groups")
+        abstract: "List all contact groups across all containers.")
     @OptionGroup var global: GlobalOptions
     func run() throws {
         try run(storeFactory: { ContactsStore() })
@@ -191,7 +191,7 @@ struct GroupsListCommand: ParsableCommand {
 struct GroupsMembersCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "members",
-        abstract: "List contacts in a group (distinct not_found vs empty). → get_contacts_in_group")
+        abstract: "List contacts in a group (distinct not_found vs empty).")
     @OptionGroup var global: GlobalOptions
     @Argument(help: "The group's CN identifier.") var identifier: String
     func run() throws {
@@ -222,10 +222,10 @@ struct GroupsMembersCommand: ParsableCommand {
 struct VCardExportCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "export",
-        abstract: "Export contacts as one atomic vCard 3.0 payload. → export_vcard")
+        abstract: "Export contacts as one atomic vCard 3.0 payload.")
     @OptionGroup var global: GlobalOptions
     @Argument(help: "One or more contact CN identifiers.") var identifiers: [String] = []
-    @Option(name: .long, help: "Extra: also write the vCard text to this file path.") var out: String?
+    @Option(name: .long, help: "Also write the vCard text to this file path.") var out: String?
     func run() throws {
         try run(storeFactory: { ContactsStore() })
     }
@@ -243,7 +243,7 @@ struct VCardExportCommand: ParsableCommand {
             // Confine the operator-supplied --out path UP FRONT (Q13): reject control chars +
             // credential/config dirs so `--out ~/.ssh/authorized_keys` can't overwrite an SSH key
             // with vCard text. Bound before the store touch so a bad path fails fast (and without
-            // TCC). `allowOutsideHome` — this `--out` is a CLI extra (the MCP returns the text
+            // TCC). `allowOutsideHome` — this `--out` is a CLI extra (the oracle returns the text
             // inline), so /tmp and external volumes stay legitimate, matching Mail's attachments save.
             let dest = try out.map {
                 try refuseFinalLeafSymlink($0, action: "write the vCard to")
@@ -278,7 +278,7 @@ struct VCardExportCommand: ParsableCommand {
 struct NoteGetCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "get",
-        abstract: "Read a contact's note (AppleScript; needs :ABPerson-suffixed id). → read_note")
+        abstract: "Read a contact's note (AppleScript; needs :ABPerson-suffixed id).")
     @OptionGroup var global: GlobalOptions
     @Argument(help: "The contact's full CN identifier including the :ABPerson suffix.") var identifier: String
     func run() throws {
@@ -305,10 +305,10 @@ struct NoteGetCommand: ParsableCommand {
 struct PhotoGetCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "get",
-        abstract: "Read a contact's photo (base64 + detected format). → read_photo")
+        abstract: "Read a contact's photo (base64 + detected format).")
     @OptionGroup var global: GlobalOptions
     @Argument(help: "The contact's CN identifier.") var identifier: String
-    @Option(name: .long, help: "Extra: write the raw photo bytes to this file path.") var out: String?
+    @Option(name: .long, help: "Also write the raw photo bytes to this file path (the response still carries image_data).") var out: String?
     func run() throws {
         try run(storeFactory: { ContactsStore() })
     }
@@ -323,7 +323,7 @@ struct PhotoGetCommand: ParsableCommand {
             // Confine --out up front (Q13) — same guard as the vCard --out: reject control chars +
             // credential/config dirs so raw photo bytes can't overwrite an SSH key / keychain. Bound
             // before the store touch (fail fast, testable without TCC). CLI-extra path, so
-            // allowOutsideHome (the MCP returns bytes inline).
+            // allowOutsideHome (the oracle returns bytes inline).
             let dest = try out.map {
                 try refuseFinalLeafSymlink($0, action: "write the photo to")
                 return try confineWriteDestination($0, action: "write the photo to", allowOutsideHome: true).path

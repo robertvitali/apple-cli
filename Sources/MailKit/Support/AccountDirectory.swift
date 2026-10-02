@@ -67,7 +67,7 @@ public final class AccountDirectory {
     /// Primary send (From) email address for an account selector (name or UUID), or nil if the
     /// selector is unknown to the directory (Mail unavailable / typo) or the account has no
     /// address on file. Callers set this as the outgoing message `sender` / the `.eml` `From:`
-    /// so `--account` selects the sending identity — matching the reference MCPs, which set the
+    /// so `--account` selects the sending identity — matching the reference oracles, which set the
     /// sender to the account's first email address. A BARE address (never "Name <addr>") so it
     /// matches a configured account for Mail's account selection.
     public func sendAddress(for selector: String) -> String? {

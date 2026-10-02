@@ -103,7 +103,10 @@ struct NotesStorePathSeamTests {
         let outcome = NotesStore.checklistItems(noteId: fixtureNoteID(1), dbPath: missingStore)
         #expect(outcome.error == .noFDA)
         #expect(outcome.message == NotesStore.fdaChecklistMessage)
-        #expect(NotesStore.fdaChecklistMessage.contains(NotesStore.fdaGuideURL))
+        #expect(NotesStore.fdaChecklistMessage.contains("System Settings > Privacy & Security > Full Disk Access"))
+        #expect(!NotesStore.fdaChecklistMessage.contains("http"))
+        #expect(!NotesStore.fdaMetadataMessage.contains("http"))
+        #expect(NotesStore.fdaChecklistMessage.contains("apple notes doctor"))
     }
 
     @Test func checklistReportsAParseErrorWhenTheStoreCannotBeQueried() {

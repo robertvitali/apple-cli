@@ -17,13 +17,13 @@ apple mail export [flags]
 - `--format` `<format>`
   <br>Format: txt or html.
 - `--layout` `<layout>`
-  <br>File layout: 'oracle' (default, oracle B's — single_email: <dir>/<subject>.<fmt>; entire_mailbox: <dir>/<mailbox>_export/<n>_<subject>.<fmt>, 1-based, '/' replaced by '-') or 'flat' (legacy CLI extra: <dir>/<id>-<subject:60>.<fmt>, collision-proof). NOTE: like the oracle, an existing file of the same name is OVERWRITTEN — the single_email name comes from the matched message's subject; pass --no-clobber to refuse instead.
+  <br>File layout: 'oracle' (default): single_email: <dir>/<subject>.<fmt>; entire_mailbox: <dir>/<mailbox>_export/<n>_<subject>.<fmt>, 1-based, '/' replaced by '-'; or 'flat' (legacy: <dir>/<id>-<subject:60>.<fmt>, collision-proof). NOTE: an existing file of the same name is OVERWRITTEN by default — the single_email name comes from the matched message's subject; pass --no-clobber to refuse instead.
 - `--mailbox` `<mailbox>`
   <br>Mailbox to export from (default INBOX).
 - `--max` `<max>`
   <br>Max messages for entire_mailbox (safety cap).
 - `--no-clobber`
-  <br>Refuse to overwrite an existing file (the oracle, and the default, overwrite silently — oracle parity).
+  <br>Refuse to overwrite an existing file (the default is to overwrite silently).
 - `--scope` `<scope>`
   <br>Scope: single_email (needs --subject) or entire_mailbox.
 - `--subject` `<subject>`

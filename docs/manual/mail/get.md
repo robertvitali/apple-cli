@@ -13,15 +13,15 @@ apple mail get <id> [flags]
 - `<id>`
   <br>Message id (Envelope Index ROWID, RFC-5322 Message-ID, or message:// link).
 - `--account` `<account>`
-  <br>Scope the lookup to this account (name or UUID; MCP A account param). Rejects if the message is elsewhere.
+  <br>Scope the lookup to this account (name or UUID). Rejects if the message is elsewhere.
 - `--content`
   <br>Fetch the full body via Mail.app (slow AppleScript scan; default returns the indexed preview).
 - `--headers-only`
   <br>Return headers/metadata only (skip recipients + preview).
 - `--mailbox` `<mailbox>`
-  <br>Scope the lookup to this mailbox (MCP A mailbox param). Rejects if the message is elsewhere.
+  <br>Scope the lookup to this mailbox. Rejects if the message is elsewhere.
 - `--no-content`
-  <br>Alias/compat: never fetch the full body (default behavior).
+  <br>Never fetch the full body, even with --content (the default already skips it).
 
 ## Inherited options
 

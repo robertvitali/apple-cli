@@ -62,6 +62,7 @@
   "Tests/automation/test_release_prep.py",
   "Tests/automation/test_site_assembly.py",
   "Tests/automation/test_urgent_release_runbook.py",
+  "Tests/automation/test_user_facing_text.py",
   "Tests/automation/test_workflow_policy.py",
   "Tests/automation/test_write_posture_pins.py",
   "bats/helpers/app_lifecycle.bash",

@@ -1,6 +1,6 @@
 # apple reminders lists update
 
-Rename/recolor a reminder list (executes on call, like the MCP; --dry-run previews).
+Rename/recolor a reminder list (executes on call; --dry-run previews).
 
 ## Synopsis
 

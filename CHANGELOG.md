@@ -315,6 +315,26 @@ JSON output are stable per the versioning policy — breaking changes bump
 
 ### Changed
 
+- **Help text, messages and the manual no longer refer to the retired servers this CLI
+  replaced:** command summaries and option help describe the behaviour directly, and three kinds
+  of message change wording without changing their type or exit code. Notes: the Full Disk
+  Access errors (`notes get-checklist`, `notes get-metadata`, `notes get-link`) and the
+  `notes get-link` not-found message name `apple notes doctor` and `apple notes search` and no
+  longer link to the retired Notes server's setup guide; the folder and account not-found
+  messages name `apple notes folders` and `apple notes accounts`; and the placeholder that
+  `notes get` writes for an omitted oversized inline image names `apple notes attachments`.
+  Contacts: the test-mode refusal for `contacts delete` and `contacts groups delete` (also shown
+  as a preview's `gate_note`) names the command, and the failure and validation messages for
+  container, group, note, photo and vCard operations no longer use the retired server's names.
+  Mail: the rate-limit refusals say `send operations` (`mail send`, `mail forward`,
+  `mail draft send`) and `reply operations` (`mail reply`); the rate-limit warnings, the note on
+  skipped out-of-scope ids, the `mail rules update` note on a recreated rule, the notes that
+  `mail reply` and `mail draft-rich --save-as-draft` return, the body-search deadline error and
+  the `mail attachments save` refusal to save by index-order positions describe the CLI's own
+  behaviour. The `mail templates` manual page now says where templates
+  live and how `APPLE_MAIL_TEMPLATES_DIR` reads. Option names, accepted values, JSON fields and
+  machine values such as a Contacts preview's `operation` are unchanged;
+  `mail export --layout oracle` keeps its name.
 - **The pull-request metadata check is now named `governance / required`** (workflow
   `governance.yml`, replacing `pr-metadata.yml`'s `metadata / required`). It still validates only
   a pull request's title and body from the base branch's own code; the name is the one the
@@ -352,6 +372,10 @@ JSON output are stable per the versioning policy — breaking changes bump
   an existing error class.
 
 ### Fixed
+- **`apple notes append` points to a command that exists.** Its help and its `--dry-run`
+  preview told callers to run `notes attachments list` before appending, and no such command
+  exists; they now say to run `apple notes attachments` with the same `--id`, or the same
+  `--title` and `--account`.
 - **`apple notes recent --text` no longer prints a fresh timestamp for a note whose date
   could not be read.** Such a note is ranked last on purpose and its JSON `modified` is the
   documented read-time placeholder; the text line used to render that placeholder as if it

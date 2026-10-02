@@ -163,9 +163,9 @@ struct EnvelopeIndexTests {
         #expect(try idx.queryMessages(f).count == 1)      // only msg 10 is flagged
     }
 
-    // References/In-Reply-To threading (MCP A get_thread): msgs 10 & 12 share reference 9000, msg 13
-    // is on its own chain. referencesThread groups by the shared message_references chain, distinct
-    // from conversation_id grouping.
+    // References/In-Reply-To threading (oracle A get_thread): msgs 10 & 12 share reference 9000,
+    // msg 13 is on its own chain. referencesThread groups by the shared message_references chain,
+    // distinct from conversation_id grouping.
     @Test func referencesThreadGroupsBySharedChain() throws {
         let idx = try index()
         let thread10 = try idx.referencesThread(rowid: 10, limit: 50)
@@ -177,7 +177,7 @@ struct EnvelopeIndexTests {
         #expect(noRefs.isEmpty)                           // msg 11 has no message_references rows
     }
 
-    // subject_keywords OR-match (MCP B): the union clause matches ANY keyword, ANDs with other
+    // subject_keywords OR-match (oracle B): the union clause matches ANY keyword, ANDs with other
     // filters, and drops empty keywords (never "match all"). Locks the OR semantics so an OR→AND
     // regression or a dropped bind fails CI (the singular path above never exercised the OR clause).
     @Test func subjectKeywordsOrMatch() throws {

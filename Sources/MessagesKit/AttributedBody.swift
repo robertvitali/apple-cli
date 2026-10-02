@@ -6,7 +6,7 @@ import Foundation
 /// load-bearing for `recent`/`search` parity (the overwhelming majority of rows on the
 /// measured live store had NULL text + non-NULL attributedBody).
 ///
-/// Port of `mac_messages_mcp.extract_body_from_attributed`: locate the first
+/// Port of the Messages oracle's `extract_body_from_attributed`: locate the first
 /// `NSString` class marker, skip a 5-byte header, read a variable-length integer
 /// length, then decode that many UTF-8 bytes.
 public enum AttributedBody {

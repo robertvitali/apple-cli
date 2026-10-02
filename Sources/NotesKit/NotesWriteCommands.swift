@@ -3,7 +3,7 @@ import Foundation
 import AppleKit
 
 // Write commands. Under write-model v2 (docs/write-model-v2.md) each behaves like the
-// equivalent apple-notes-mcp tool: invoking it MUTATES Notes.app. `--dry-run` previews;
+// equivalent Notes oracle tool: invoking it MUTATES Notes.app. `--dry-run` previews;
 // `APPLE_DRY_RUN` truthy restores dry-run-by-default.
 //
 // `resolveNotesWrite` is the single chokepoint (validates the v2 environment, resolves
@@ -19,7 +19,7 @@ func validateFormat(_ format: String) throws -> Bool {
     }
 }
 
-/// Mirror the MCP's zod input bounds so oversized input yields the same validation-error class
+/// Mirror the oracle's zod input bounds so oversized input yields the same validation-error class
 /// (not a downstream AppleScript failure). Lengths are character counts, matching the reference.
 enum NotesLimits {
     static let title = 2000
@@ -38,8 +38,8 @@ enum NotesLimits {
 }
 
 /// Oracle schema for search-notes AND list-notes carries `"limit": {"exclusiveMinimum": 0}`, so a
-/// non-positive limit is refused at the MCP boundary before any handler runs. Mirroring that here
-/// is what makes `--limit 0` a validation error instead of the 1 result the AppleScript guard
+/// non-positive limit is refused at the oracle boundary before any handler runs. Mirroring that
+/// here is what makes `--limit 0` a validation error instead of the 1 result the AppleScript guard
 /// happened to yield (the `exit repeat` check sits after the append, so 0 behaved as 1).
 enum SearchLimit {
     /// Oracle `resolveSearchLimit` + `limitWasDefault`. Absent means the default, NOT unbounded.
@@ -261,8 +261,8 @@ struct AppendCmd: ParsableCommand {
 
     static let configuration = CommandConfiguration(commandName: "append",
         abstract: """
-            Add to a note's body without replacing it. → append-to-note (EXECUTES; --dry-run previews).
-            Safety: reads the existing body, concatenates, then writes the WHOLE body back; that rewrite can drop embedded attachments, so run `notes attachments list` first if unsure.
+            Add to a note's body without replacing it (EXECUTES; --dry-run previews).
+            Safety: reads the existing body, concatenates, then writes the WHOLE body back; that rewrite can drop embedded attachments, so run `apple notes attachments` with the same --id, or the same --title and --account, first if unsure.
             """)
     @OptionGroup var global: GlobalOptions
     @Option(name: .long, help: "Note id (preferred).") var id: String?
@@ -304,7 +304,7 @@ struct AppendCmd: ParsableCommand {
                 // tell the caller that --position before is about to PREPEND instead.
                 let where_ = prepend ? "prepend before" : "append after"
                 let sepDesc = separator == "\n\n" ? "a blank line" : "\"\(separator)\""
-                try emitNotesWrite(DryRunPreview("append", "Would \(where_) the existing body, separated by \(sepDesc). This rewrites the WHOLE body, which can drop embedded attachments — run `notes attachments list` first if unsure. Re-run without --dry-run.\(extra)"),
+                try emitNotesWrite(DryRunPreview("append", "Would \(where_) the existing body, separated by \(sepDesc). This rewrites the WHOLE body, which can drop embedded attachments — run `apple notes attachments` with the same --id, or the same --title and --account, first if unsure. Re-run without --dry-run.\(extra)"),
                                    json: global.json, sandboxActive: gate.sandboxActive,
                                    human: "[dry-run] would append.")
                 return

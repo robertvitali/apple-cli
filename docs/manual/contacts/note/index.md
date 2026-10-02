@@ -10,8 +10,8 @@ apple contacts note
 
 ## Subcommands
 
-- [`get`](./get.md) — Read a contact's note (AppleScript; needs :ABPerson-suffixed id). → read_note
-- [`set`](./set.md) — Write/replace a contact's note, --clear empties it (EXECUTES; --dry-run previews). → write_note
+- [`get`](./get.md) — Read a contact's note (AppleScript; needs :ABPerson-suffixed id).
+- [`set`](./set.md) — Write/replace a contact's note, --clear empties it (EXECUTES; --dry-run previews).
 
 ## Inherited options
 

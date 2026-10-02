@@ -1,6 +1,6 @@
 # apple contacts list
 
-List contacts (paged, 4-field summaries). → list_contacts
+List contacts (paged, 4-field summaries).
 
 ## Synopsis
 

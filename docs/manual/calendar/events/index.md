@@ -1,6 +1,6 @@
 # apple calendar events
 
-Calendar events — read/create/update/delete (ports calendar_events).
+Calendar events — read/create/update/delete.
 
 ## Synopsis
 
@@ -10,10 +10,10 @@ apple calendar events
 
 ## Subcommands
 
-- [`create`](./create.md) — Create an event (executes on call, like the MCP; --dry-run previews).
-- [`delete`](./delete.md) — Delete an event (executes on call, like the MCP; --dry-run previews).
+- [`create`](./create.md) — Create an event (executes on call; --dry-run previews).
+- [`delete`](./delete.md) — Delete an event (executes on call; --dry-run previews).
 - [`read`](./read.md) — Read events in a window (default today … +14d) or a single event by --id.
-- [`update`](./update.md) — Update an event (executes on call, like the MCP; --dry-run previews).
+- [`update`](./update.md) — Update an event (executes on call; --dry-run previews).
 
 ## Inherited options
 

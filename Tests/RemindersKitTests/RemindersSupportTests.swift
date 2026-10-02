@@ -12,7 +12,7 @@ import TestSupport
 // (there is no in-memory substitute for `EKReminder(eventStore:)`), and access/fetch/save/
 // remove/commit is NEVER issued against it — every such call routes through `FakeReminderStore`.
 // Construction alone neither prompts nor reads TCC. Covers priority parsing, dueWithin windows,
-// the notes-field tag + subtask model (parity with the apple-events MCP tagUtils.ts /
+// the notes-field tag + subtask model (parity with the EventKit oracle's tagUtils.ts /
 // subtaskUtils.ts), the update notes-rebuild, alarm/recurrence spec parsing, the write-preview
 // envelope shapes, and the commands driven through the injected store.
 
@@ -43,7 +43,7 @@ struct PriorityTests {
         #expect(throws: AppleError.self) { _ = try ReminderPriority.parse("urgent") }
     }
 
-    @Test func filterValueMapsMcpWords() throws {
+    @Test func filterValueMapsOracleWords() throws {
         #expect(try ReminderPriority.filterValue("none") == 0)
         #expect(try ReminderPriority.filterValue("high") == 1)
         #expect(try ReminderPriority.filterValue("medium") == 5)
@@ -185,8 +185,8 @@ struct SubtaskTests {
         #expect(throws: AppleError.self) { _ = try ReminderSubtasks.update(id: "aaaa1111", title: "  ", completed: nil, notes: sample) }
     }
 
-    @Test func notesFormatIsByteCompatibleWithMcp() {
-        // The serialized block must match the apple-events MCP subtaskUtils.ts format verbatim so
+    @Test func notesFormatIsByteCompatibleWithOracle() {
+        // The serialized block must match the EventKit oracle's subtaskUtils.ts format verbatim so
         // read output diffs cleanly against the oracle.
         let subs = [Subtask(id: "abcd1234", title: "Task one", completed: false),
                     Subtask(id: "ef567890", title: "Task two", completed: true)]
@@ -236,7 +236,7 @@ struct SubtaskTests {
         #expect(p.completed == 1)
         #expect(p.total == 2)
         #expect(p.percentage == 50)
-        // empty → 100% per the MCP convention
+        // empty → 100% per the oracle convention
         #expect(ReminderSubtasks.progress([]).percentage == 100)
     }
 
@@ -284,8 +284,8 @@ struct NotesRebuildTests {
     }
 
     @Test func newNoteCarryingMarkersIsSanitized() {
-        // A newNote that itself contains tag/subtask markers must have them stripped (the MCP does
-        // stripSubtasks(stripTags(newNote))); existing tags + subtasks win, injected ones dropped.
+        // A newNote that itself contains tag/subtask markers must have them stripped (the oracle
+        // does stripSubtasks(stripTags(newNote))); existing tags + subtasks win over injected ones.
         let current = "[#keep] old\n\n---SUBTASKS---\n[ ] {aaaa1111} Sub\n---END SUBTASKS---"
         let injected = "[#injected] fresh\n---SUBTASKS---\n[ ] {ffff9999} X\n---END SUBTASKS---"
         let rebuilt = ReminderNotes.rebuildForUpdate(current: current, newNote: injected, tags: nil, addTags: nil, removeTags: nil)

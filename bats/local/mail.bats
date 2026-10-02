@@ -534,7 +534,7 @@ if len(attachments) != int(sys.argv[1]):
 }
 
 # ── subject_keywords OR-match (audit gap C) + apply_to_all (gap D) — CI-safe ─────────────────────
-@test "mail search accepts repeatable --subject (OR-match; MCP B subject_keywords) and previews (exit 0)" {
+@test "mail search accepts repeatable --subject (OR-match; oracle B subject_keywords) and previews (exit 0)" {
   require_index
   run "$BIN" mail search --account iCloud --mailbox All --subject apple-cli-nope-a --subject apple-cli-nope-b --limit 1 --no-content
   [ "$status" -eq 0 ]
@@ -644,7 +644,7 @@ if len(attachments) != int(sys.argv[1]):
   echo "$output" | grep -q '"type" : "not_found"'
 }
 
-# ── Missing MCP read/scoping params (audit gaps E/F/G) — CI-safe ─────────────────────────────────
+# ── Missing oracle read/scoping params (audit gaps E/F/G) — CI-safe ──────────────────────────────
 @test "mail search --max-content-length rejects a negative value (exit 64)" {
   require_index
   run "$BIN" mail search --max-content-length -1
@@ -652,7 +652,7 @@ if len(attachments) != int(sys.argv[1]):
   echo "$output" | grep -q '"validation_error"'
 }
 
-@test "mail search accepts --max-content-length (MCP B max_content_length) and previews (exit 0)" {
+@test "mail search accepts --max-content-length (oracle B max_content_length) and previews (exit 0)" {
   require_index
   run "$BIN" mail search --account iCloud --limit 1 --max-content-length 20
   [ "$status" -eq 0 ]
@@ -844,7 +844,7 @@ if len(attachments) != int(sys.argv[1]):
 # is the only automated coverage that tier has. It found two real defects on introduction:
 # `repeat with it in …` (`it` is reserved) and `set before to …` in the already-committed
 # emptyTrashScript (`before` is reserved — that script could never have run).
-@test "mail search emits content_preview alongside snippet (MCP B dual key)" {
+@test "mail search emits content_preview alongside snippet (oracle B dual key)" {
   require_index
   # Both keys are omitted when a message has no indexed preview, so assert on a message that
   # actually has one, and assert the two carry the SAME text.
@@ -1055,7 +1055,7 @@ import json,sys; print(json.load(sys.stdin)['data']['messages'][0]['subject'][:2
 # FINAL colon-segment of user input, so this is reachable straight from the command line. The
 # unit test covers the guard; this covers the CALLER actually invoking it (the create preview
 # initially did not).
-# Count result rows whose mailbox LEAF is one of MCP B's SKIP_FOLDERS. Reads a JSON envelope on
+# Count result rows whose mailbox LEAF is one of oracle B's SKIP_FOLDERS. Reads a JSON envelope on
 # stdin. File-scope so every exclusion test asserts against the same definition of "system
 # folder" instead of hand-copying the list per test.
 count_sys_folder_rows() {
@@ -1076,7 +1076,7 @@ assert_numeric() {
   }
 }
 
-# MCP B excludes SKIP_FOLDERS from a broad "All" sweep (search.py:236, All-branch only), so an
+# Oracle B excludes SKIP_FOLDERS from a broad "All" sweep (search.py:236, All-branch only), so an
 # All-search used to return Trash/Sent/Junk hits the oracle never would. The exclusion changes
 # only what "All" MEANS — naming a system mailbox explicitly must still search it.
 #
@@ -1117,7 +1117,7 @@ assert_numeric() {
   [ "$c" = "None" ]
 }
 
-# MCP B applies SKIP_FOLDERS in `_search_mail_records` (tools/search.py:167, skip literal at
+# Oracle B applies SKIP_FOLDERS in `_search_mail_records` (tools/search.py:167, skip literal at
 # :236, All-only) and in tools/analytics.py:139 — NOT in get_email_thread, which lives in the
 # SAME module at tools/search.py:595 and builds its own mailbox script with no skip. Excluding
 # there dropped the account's own Sent replies out of their own conversation: a silent

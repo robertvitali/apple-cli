@@ -1,6 +1,6 @@
 # apple contacts groups rename
 
-Rename a contact group (EXECUTES by default; --dry-run previews). → rename_group
+Rename a contact group (EXECUTES by default; --dry-run previews).
 
 ## Synopsis
 
@@ -15,7 +15,7 @@ apple contacts groups rename <identifier> <new-name> [flags]
 - `<new-name>`
   <br>The new name.
 - `--group` `<group>`
-  <br>Group assertion; accepted and echoed for MCP parity, not enforced.
+  <br>Group assertion; accepted and echoed in --dry-run previews, not enforced.
 
 ## Inherited options
 

@@ -1,9 +1,9 @@
 import Foundation
 
-/// Live tests + MCP-parity comparisons write to the REAL Apple stores (there is no
+/// Live tests + oracle-parity comparisons write to the REAL Apple stores (there is no
 /// separate sandbox), under a track-and-cleanup discipline: create only clearly-labeled
 /// test items (name-prefixed `sandboxPrefix`), log each to TEST-CLEANUP.md, and delete
-/// only those tracked items via the MCP afterward. This type provides the FAIL-CLOSED
+/// only those tracked items afterward, by exact id. This type provides the FAIL-CLOSED
 /// guard that turns that discipline into enforcement — call it before any live write.
 public enum TestMode {
     /// The two write-model v2 environment variables, named ONCE so the preamble

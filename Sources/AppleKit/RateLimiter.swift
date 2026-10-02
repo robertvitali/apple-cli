@@ -1,7 +1,7 @@
 import Foundation
 
 /// Oracle-mirrored SEND rate limit — the anti-spam cap from oracle A
-/// (`apple_mail_mcp/security.py`: `TIER_LIMITS["sends"] = (3, 60.0)`, enforced by
+/// (oracle A's `security.py`: `TIER_LIMITS["sends"] = (3, 60.0)`, enforced by
 /// `RateLimiter.check` / `check_rate_limit`).
 ///
 /// BUCKET 1 (oracle-mirrored ⇒ applies UNCONDITIONALLY, sandbox or not).
@@ -98,10 +98,10 @@ public enum SendRateLimiter {
                                maxCalls: maxCalls, windowSeconds: windowSeconds)
     }
 
-    /// The oracle's refusal text, adapted: `"Rate limit exceeded: {max} calls per {window}s for
-    /// {tier} operations"` (security.py:192).
+    /// The oracle's refusal shape (`"Rate limit exceeded: {max} calls per {window}s for {tier}
+    /// operations"`, security.py:192) with the CLI's own tier label, `send`.
     public static func refusal(_ d: Decision) -> String {
-        RateLimitStore.refusal(d, maxCalls: maxCalls, windowSeconds: windowSeconds, tier: "sends")
+        RateLimitStore.refusal(d, maxCalls: maxCalls, windowSeconds: windowSeconds, tier: "send")
     }
 }
 
@@ -140,11 +140,11 @@ public enum ReplyRateLimiter {
                                maxCalls: maxCalls, windowSeconds: windowSeconds)
     }
 
-    /// Oracle's refusal text with the `expensive_ops` tier name, matching `check_rate_limit`'s
-    /// `f"...for {tier} operations"` (security.py:192).
+    /// The oracle's refusal shape (`check_rate_limit`'s `f"...for {tier} operations"`,
+    /// security.py:192) with the CLI's own tier label, `reply`.
     public static func refusal(_ d: Decision) -> String {
         RateLimitStore.refusal(d, maxCalls: maxCalls, windowSeconds: windowSeconds,
-                               tier: "expensive_ops")
+                               tier: "reply")
     }
 }
 

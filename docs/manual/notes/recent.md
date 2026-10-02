@@ -1,6 +1,6 @@
 # apple notes recent
 
-Notes by modification date, newest first (default 10). CLI-only superset.
+Notes by modification date, newest first (default 10).
 
 ## Synopsis
 

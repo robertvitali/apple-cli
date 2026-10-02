@@ -4,7 +4,7 @@ title: Messages
 
 # apple messages
 
-iMessage / SMS — send, read, search (ports mac_messages_mcp).
+iMessage / SMS — send, read, search.
 
 ## Synopsis
 
@@ -23,7 +23,7 @@ apple messages
 - [`find-contact`](./find-contact.md) — Fuzzy-search contacts by name/nickname; ranked candidates with confidence scores.
 - [`recent`](./recent.md) — Recent messages across ALL chats in the last N hours (optionally by contact).
 - [`search`](./search.md) — Search messages: fuzzy (WRatio) + threshold + time window (or contains/exact).
-- [`send`](./send.md) — Send an iMessage/SMS (sends on call, like the MCP; --dry-run previews).
+- [`send`](./send.md) — Send an iMessage/SMS (sends on call; --dry-run previews).
 
 ## Inherited options
 

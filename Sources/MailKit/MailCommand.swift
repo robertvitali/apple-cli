@@ -3,16 +3,16 @@ import AppleKit
 
 /// `apple mail …` — Mail.app.
 ///
-/// Ports the UNION of both fleet mail MCPs (s-morgan-jeffries@v0.6.0 + patrickfreyer@v3.1.3)
+/// Ports the UNION of both fleet mail oracles (s-morgan-jeffries@v0.6.0 + patrickfreyer@v3.1.3)
 /// — 42 capabilities — to a strict superset. Mechanism: `EnvelopeIndex` (SQLite) over the
 /// Envelope Index for fast read/search/analytics + `MailScript` (AppleScript) for
 /// send/manage/rules/templates + multipart `.eml` for HTML send. Dual targeting model:
-/// ID-precise (MCP A) AND subject/sender/date `--match` filters (MCP B).
+/// ID-precise (oracle A) AND subject/sender/date `--match` filters (oracle B).
 ///
 public struct MailCommand: ParsableCommand {
     public static let configuration = CommandConfiguration(
         commandName: "mail",
-        abstract: "Mail.app — send, search, rules, templates, analytics (union of both mail MCPs).",
+        abstract: "Mail.app — send, search, rules, templates, analytics.",
         subcommands: [
             // P1 — reads (Envelope Index + AppleScript)
             AccountsCommand.self,
@@ -27,7 +27,7 @@ public struct MailCommand: ParsableCommand {
             RulesCommand.self,
             TemplatesCommand.self,
             MailDoctor.self,
-            // P3 — derived analytics + export (structured supersets of MCP B's text blobs)
+            // P3 — derived analytics + export (structured supersets of oracle B's text blobs)
             AnalyticsCommand.self,
             ExportCommand.self,
             // P2 — write/manage (dry-run default; live mutation gated + not wired for safety)

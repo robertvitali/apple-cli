@@ -2,7 +2,7 @@ import Foundation
 import ArgumentParser
 import AppleKit
 
-// P3 derived analytics over the Envelope Index (fast; MCP B returns these as text blobs —
+// P3 derived analytics over the Envelope Index (fast; oracle B returns these as text blobs —
 // we emit structured JSON supersets). Parent `analytics` + top-level `export`.
 
 struct AnalyticsCommand: ParsableCommand {
@@ -94,9 +94,9 @@ struct AnalyticsStats: ParsableCommand {
     @Option(name: .long, help: "Account name or UUID.") var account: String
     @Option(name: .long, help: "Scope: account_overview | sender_stats | mailbox_breakdown.") var scope: String = "account_overview"
     @Option(name: .long, help: "Sender filter (for sender_stats).") var sender: String?
-    @Option(name: .long, help: "Mailbox — mailbox_breakdown only (default INBOX; 'All' is a CLI extra spanning every mailbox). Ignored by account_overview/sender_stats, which always span the account as the oracle does.") var mailbox: String = "INBOX"
-    @Option(name: .long, help: "Look back this many days (0 = all time). Ignored by mailbox_breakdown, which the oracle counts over all time; the response's days_back reports what was actually applied.") var days: Int = 30
-    @Flag(name: .long, help: "Include Trash/Junk/Sent/Drafts/Spam in the totals (MCP B excludes them; CLI extra).") var includeSystemFolders = false
+    @Option(name: .long, help: "Mailbox — mailbox_breakdown only (default INBOX; 'All' spans every mailbox). Ignored by account_overview/sender_stats, which always span the whole account.") var mailbox: String = "INBOX"
+    @Option(name: .long, help: "Look back this many days (0 = all time). Ignored by mailbox_breakdown, which always counts over all time; the response's days_back reports what was actually applied.") var days: Int = 30
+    @Flag(name: .long, help: "Include Trash/Junk/Sent/Drafts/Spam in the totals (excluded by default when the scan spans the whole account; a mailbox named with --mailbox is always counted).") var includeSystemFolders = false
 
     func run() throws {
         try run(contextFactory: { try MailContext() })
@@ -225,7 +225,7 @@ struct AnalyticsNeedsResponse: ParsableCommand {
     }
 }
 
-// MARK: awaiting-reply (index cross-ref; MCP B's AppleScript version times out)
+// MARK: awaiting-reply (index cross-ref; oracle B's AppleScript version times out)
 
 struct AnalyticsAwaitingReply: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "awaiting-reply", abstract: "Sent messages with no reply yet (Sent↔Inbox cross-ref).")

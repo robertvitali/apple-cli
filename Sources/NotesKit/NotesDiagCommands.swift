@@ -219,7 +219,7 @@ struct RenderedExport: Encodable {
 
 struct ExportCmd: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "export",
-        abstract: "Export the whole library. --format json (structured, default) | md | txt (curated extras).")
+        abstract: "Export the whole library. --format json (structured, default) | md | txt (every note rendered into one Markdown or plain-text document).")
     @OptionGroup var global: GlobalOptions
     @Option(name: .long, help: "Export format: json|md|txt.") var format: String = "json"
 

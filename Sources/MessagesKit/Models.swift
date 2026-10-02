@@ -2,8 +2,8 @@ import Foundation
 
 /// Encodable payloads for the `data` field of the JSON envelope. Property names are
 /// the wire keys verbatim (snake_case) — the machine contract. Each is a strict
-/// superset of the corresponding `mac_messages_mcp` tool's (unstructured string)
-/// output: every fact the MCP put in its formatted string is a field here, plus
+/// superset of the corresponding Messages oracle tool's (unstructured string)
+/// output: every fact the oracle put in its formatted string is a field here, plus
 /// structured extras.
 enum MessagesModels {}
 

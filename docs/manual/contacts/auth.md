@@ -1,6 +1,6 @@
 # apple contacts auth
 
-Report Contacts TCC authorization status (never prompts). → check_authorization
+Report Contacts TCC authorization status (never prompts).
 
 ## Synopsis
 

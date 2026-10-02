@@ -2,16 +2,16 @@ import Foundation
 import AppleKit
 
 // Input models + validators for create_contact / update_contact, ported from
-// apple-contacts-mcp @ 1cd8789 (v0.3.0) server.py validators. Pure (no
+// the Contacts oracle @ 1cd8789 (v0.3.0) server.py validators. Pure (no
 // Contacts.framework) so they are unit-testable in CI.
 //
-// Three-state field semantics for UPDATE (matching the MCP's None/""/value):
+// Three-state field semantics for UPDATE (matching the oracle's None/""/value):
 //   - absent / JSON null  ⇒ Swift nil  ⇒ "don't touch"
 //   - ""  (or [])         ⇒ "clear"
 //   - value               ⇒ "set / replace"
 // Swift's synthesized Decodable distinguishes nil (absent-or-null) from ""/[]
 // (present-empty), which is exactly the distinction the update path needs.
-// For CREATE the MCP uses truthy checks, so nil-or-empty both mean "skip".
+// For CREATE the oracle uses truthy checks, so nil-or-empty both mean "skip".
 
 // MARK: - Labeled-value inputs (one struct per CN family)
 
@@ -64,7 +64,7 @@ public struct IMInput: Codable {
     public var username: String?
 }
 
-/// The full field set accepted by create/update (mirrors the MCP's `fields` dict).
+/// The full field set accepted by create/update (mirrors the oracle's `fields` dict).
 /// All-optional so the same struct serves create (truthy-set) and update (presence).
 public struct ContactFields: Codable {
     public var given_name: String?

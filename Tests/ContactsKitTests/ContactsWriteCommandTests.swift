@@ -324,7 +324,8 @@ struct ContactsDeleteCommandTests {
                                                 type: AppleErrorType.safetyViolation) {
             try DeleteCommand.parse(["c1"]).run(storeFactory: factory.make, deleteEnvVar: self.envName("refused"))
         }
-        #expect((payload["message"] as? String)?.contains("delete_contact") == true)
+        #expect((payload["message"] as? String)?.contains("apple contacts delete") == true)
+        #expect((payload["message"] as? String)?.contains("delete_contact") == false)
         #expect(factory.backend.executed.isEmpty)
         #expect(factory.built == 0)
     }
@@ -349,6 +350,8 @@ struct ContactsDeleteCommandTests {
         let note = try #require(data["gate_note"] as? String)
         #expect(note.contains("APPLE_TEST_MODE=1"))
         #expect(note.contains("the target contact"))
+        #expect(note.contains("apple contacts delete"))
+        #expect(!note.contains("delete_contact"))
     }
 
     @Test("WITH the env grant the delete executes; a missing contact is not_found")
@@ -531,6 +534,11 @@ struct ContactsPhotoSetCommandTests {
                 try PhotoSetCommand.parse(["--dry-run"] + args).run(storeFactory: StoreFactory().make)
             }
         }
+        let payload = try expectContactsFailure(exit: AppleExit.usage, type: AppleErrorType.validation) {
+            try PhotoSetCommand.parse(["--dry-run", "c1", "--base64", "not valid base64!!"])
+                .run(storeFactory: StoreFactory().make)
+        }
+        #expect(payload["message"] as? String == "the --base64 value is not valid base64")
     }
 
     @Test("executing writes the photo and echoes the identifier")
@@ -594,6 +602,10 @@ struct ContactsVCardImportCommandTests {
                 try VCardImportCommand.parse(["--dry-run"] + args).run(storeFactory: StoreFactory().make)
             }
         }
+        let payload = try expectContactsFailure(exit: AppleExit.usage, type: AppleErrorType.validation) {
+            try VCardImportCommand.parse(["--dry-run", "--vcard", "   "]).run(storeFactory: StoreFactory().make)
+        }
+        #expect(payload["message"] as? String == "the vCard text from --vcard or --file must not be empty")
     }
 
     @Test("executing imports every card atomically and echoes the new identifiers")
@@ -695,6 +707,10 @@ struct ContactsGroupsRenameCommandTests {
                 try GroupsRenameCommand.parse(["--dry-run"] + args).run(storeFactory: StoreFactory().make)
             }
         }
+        let payload = try expectContactsFailure(exit: AppleExit.usage, type: AppleErrorType.validation) {
+            try GroupsRenameCommand.parse(["--dry-run", "g1", "  "]).run(storeFactory: StoreFactory().make)
+        }
+        #expect(payload["message"] as? String == "the new group name must be a non-empty string")
     }
 
     @Test("a missing group is not_found")
@@ -737,7 +753,8 @@ struct ContactsGroupsDeleteCommandTests {
             try GroupsDeleteCommand.parse(["g1"]).run(storeFactory: factory.make,
                                                       deleteEnvVar: self.envName("gated"))
         }
-        #expect((payload["message"] as? String)?.contains("delete_group") == true)
+        #expect((payload["message"] as? String)?.contains("apple contacts groups delete") == true)
+        #expect((payload["message"] as? String)?.contains("delete_group") == false)
         #expect(factory.backend.executed.isEmpty)
 
         let preview = try runContacts {
@@ -745,7 +762,8 @@ struct ContactsGroupsDeleteCommandTests {
                 .run(storeFactory: StoreFactory().make, deleteEnvVar: self.envName("gated"))
         }
         let note = try #require(preview["gate_note"] as? String)
-        #expect(note.contains("delete_group"))
+        #expect(note.contains("apple contacts groups delete"))
+        #expect(!note.contains("delete_group"))
         #expect(note.contains("the target group"))
     }
 
@@ -820,6 +838,14 @@ struct ContactsGroupMembershipCommandTests {
                 try GroupsRemoveCommand.parse(["--dry-run"] + args).run(storeFactory: StoreFactory().make)
             }
         }
+        let contact = try expectContactsFailure(exit: AppleExit.usage, type: AppleErrorType.validation) {
+            try GroupsAddCommand.parse(["--dry-run", " ", "g1"]).run(storeFactory: StoreFactory().make)
+        }
+        #expect(contact["message"] as? String == "the contact id must be a non-empty string")
+        let group = try expectContactsFailure(exit: AppleExit.usage, type: AppleErrorType.validation) {
+            try GroupsRemoveCommand.parse(["--dry-run", "c1", " "]).run(storeFactory: StoreFactory().make)
+        }
+        #expect(group["message"] as? String == "the group id must be a non-empty string")
     }
 
     @Test("a missing contact or group is not_found on execute")

@@ -1,7 +1,7 @@
 # apple notes append
 
-Add to a note's body without replacing it. → append-to-note (EXECUTES; --dry-run previews).
-Safety: reads the existing body, concatenates, then writes the WHOLE body back; that rewrite can drop embedded attachments, so run `notes attachments list` first if unsure.
+Add to a note's body without replacing it (EXECUTES; --dry-run previews).
+Safety: reads the existing body, concatenates, then writes the WHOLE body back; that rewrite can drop embedded attachments, so run `apple notes attachments` with the same --id, or the same --title and --account, first if unsure.
 
 ## Synopsis
 

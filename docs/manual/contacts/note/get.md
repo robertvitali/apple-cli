@@ -1,6 +1,6 @@
 # apple contacts note get
 
-Read a contact's note (AppleScript; needs :ABPerson-suffixed id). → read_note
+Read a contact's note (AppleScript; needs :ABPerson-suffixed id).
 
 ## Synopsis
 

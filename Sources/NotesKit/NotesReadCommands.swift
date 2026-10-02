@@ -111,24 +111,25 @@ struct GetByIdCmd: ParsableCommand {
 /// `note link` as the macOS 12-15 fallback, exactly as the oracle orders them.
 struct GetNoteLinkCmd: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "get-link",
-        abstract: "notes:// deep link for a note, by id (preferred) or title. → get-note-link")
+        abstract: "notes:// deep link for a note, by id (preferred) or title.")
     @OptionGroup var global: GlobalOptions
     @Option(name: .long, help: "Note id (preferred - more reliable than title).") var id: String?
     @Option(name: .long, help: "Note title (use id instead when available).") var title: String?
     @Option(name: .long, help: "Account containing the note (ignored if id is provided).") var account: String?
 
-    /// Verbatim from the oracle's title-path miss.
+    /// The oracle's title-path miss, with the CLI's search command named in place of its tool.
     static func titleNotFound(_ title: String) -> String {
-        "Note \"\(title)\" not found. Use search-notes to find notes, then use the note's ID "
-        + "for reliable operations."
+        "Note \"\(title)\" not found. Use apple notes search to find notes, then use the note's "
+        + "ID for reliable operations."
     }
 
-    /// Verbatim from the oracle, including the trailing macOS-12-15 parenthetical.
+    /// The oracle's message, reworded for the CLI (your terminal, `apple notes doctor`) and without
+    /// its link to the retired server's setup guide; the macOS 12-15 parenthetical is kept.
     static func linkFailure(_ name: String) -> String {
         "Failed to get note link for \"\(name)\". The Notes database may not be accessible — grant "
-        + "Full Disk Access to the app that launches the server, fully quit and relaunch, then run "
-        + "the doctor tool. See: \(NotesStore.fdaGuideURL). (On macOS 12–15 this also falls back to "
-        + "the AppleScript note link property.)"
+        + "Full Disk Access to your terminal, fully quit and relaunch it, then run "
+        + "apple notes doctor. (On macOS 12–15 this also falls back to the AppleScript note link "
+        + "property.)"
     }
 
     /// The message tells the operator to grant Full Disk Access, so the TYPE has to agree:
@@ -437,8 +438,8 @@ struct SearchCmd: ParsableCommand {
     @Option(name: .long, help: "Account to search.") var account: String?
     @Option(name: .long, help: "Limit search to a folder.") var folder: String?
     @Option(name: .customLong("modified-since"), help: "ISO-8601 date filter.") var modifiedSince: String?
-    @Option(name: .long, help: "Max results (default 50, like the MCP).") var limit: Int?
-    @Flag(name: .long, help: "Return every match, no limit. CLI-only superset — the MCP always caps.")
+    @Option(name: .long, help: "Max results (default 50).") var limit: Int?
+    @Flag(name: .long, help: "Return every match, no limit; overrides the default cap.")
     var all = false
 
     func run() throws {
@@ -509,7 +510,7 @@ struct SearchCmd: ParsableCommand {
 /// as `applied_limit`, so a second flag would tell a caller nothing.
 struct RecentCmd: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "recent",
-        abstract: "Notes by modification date, newest first (default 10). CLI-only superset.")
+        abstract: "Notes by modification date, newest first (default 10).")
     @OptionGroup var global: GlobalOptions
     @Option(name: .long, help: "Account to enumerate.") var account: String?
     @Option(name: .long, help: "Limit to a folder (nested paths ok).") var folder: String?

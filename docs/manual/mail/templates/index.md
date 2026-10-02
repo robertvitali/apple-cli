@@ -8,6 +8,10 @@ Manage email templates (list/get/save/delete/render).
 apple mail templates
 ```
 
+## Description
+
+Templates are `*.md` text files, one per template, in `~/.apple-cli/mail-templates/`. Set `APPLE_MAIL_TEMPLATES_DIR` to use another folder: it names the template folder itself, so `save` and `delete` act directly on the `*.md` files in it, and it should be a folder used only for templates. A leading `~` follows the same rules as the CLI's other path settings: `~`, `~/…` and `~yourname/…` mean your home folder, any other `~` form is refused as a `validation_error` (exit 64), and any other relative value is under the working directory.
+
 ## Subcommands
 
 - [`delete`](./delete.md) — Delete a template (irreversible; EXECUTES by default; --dry-run previews).

@@ -1,7 +1,7 @@
 import Testing
 @testable import NotesKit
 
-/// `append-to-note` body assembly against apple-notes-mcp 2.6.12 (NOTES-H4).
+/// `append-to-note` body assembly against the Notes oracle @2.6.12 (NOTES-H4).
 ///
 /// GOLDEN VALUES, produced by running the ORACLE'S OWN JavaScript — `contentToHtml`,
 /// `separatorToHtml` and the title-div split transcribed verbatim out of `build/index.js` and

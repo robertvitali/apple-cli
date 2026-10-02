@@ -560,6 +560,17 @@ struct NotesAppendCommandTests {
         let detail = try #require(data["detail"] as? String)
         #expect(detail.contains("append after"))
         #expect(detail.contains("a blank line"))
+        // The preview names a command that exists; `notes attachments list` never did.
+        #expect(detail.contains("`apple notes attachments` with the same --id, or the same --title and --account"))
+        #expect(!detail.contains("attachments list"))
+    }
+
+    @Test func appendHelpNamesTheAttachmentsCommandThatExists() throws {
+        let abstract = AppendCmd.configuration.abstract
+        #expect(abstract.contains("`apple notes attachments` with the same --id, or the same --title and --account"))
+        #expect(!abstract.contains("attachments list"))
+        _ = try AttachmentsCmd.parse(["--id", "x"])
+        #expect(throws: (any Error).self) { try AttachmentsCmd.parse(["list"]) }
     }
 
     @Test func appendRefusesTheInputTheOracleSchemaRefuses() throws {
@@ -999,7 +1010,7 @@ struct NotesDeleteMoveCommandTests {
 struct NotesWriteGateTests {
 
     @Test func aWriteExecutesByDefaultWhenNeitherFlagIsPassed() throws {
-        // Write-model v2 parity: invoking the command mutates, exactly as calling the MCP tool does.
+        // Write-model v2 parity: invoking the command mutates, as calling the oracle tool does.
         let runner = FakeNotesRunner(results: ["note id \(fixtureNoteID(1))"])
         let command = try CreateCmd.parse(["apple-cli-test note", "--content", "c"])
 

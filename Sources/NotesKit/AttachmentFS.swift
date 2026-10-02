@@ -1,7 +1,7 @@
 import Foundation
 import AppleKit
 
-/// Filesystem guards for attachment save/fetch, ported from `apple-notes-mcp@2.5.12`
+/// Filesystem guards for attachment save/fetch, ported from the Notes oracle @2.5.12
 /// `attachmentFs.ts`. The path-traversal guard (`assertSafeSavePath`) is the security-critical
 /// piece: Notes writes wherever it is told, so we confine writes to the home dir, temp dirs, or
 /// `/Volumes` before AppleScript runs. Pure/`FileManager`-only — the traversal guard is

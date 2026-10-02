@@ -1,6 +1,6 @@
 # apple contacts groups list
 
-List all contact groups across all containers. → list_groups
+List all contact groups across all containers.
 
 ## Synopsis
 

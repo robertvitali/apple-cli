@@ -34,16 +34,16 @@ struct MailDecodeTests {
 
     @Test func unionFieldsPopulated() {
         let m = MailDecode.message(row: Self.syntheticRow, mailboxPath: "INBOX", accountLabel: "iCloud")
-        // Identifier union: MCP A `id` == MCP B `message_id` == ROWID
+        // Identifier union: oracle A `id` == oracle B `message_id` == ROWID
         #expect(m.id == "11111")
         #expect(m.message_id == "11111")
         #expect(m.rowid == 11111)
         #expect(m.internet_message_id == "33333333@host.local")
         #expect(m.mail_link == "message://%3C33333333@host.local%3E")
-        // Read-status union: MCP A `read_status` + MCP B `is_read`
+        // Read-status union: oracle A `read_status` + oracle B `is_read`
         #expect(m.read_status == false)
         #expect(m.is_read == false)
-        // Date union: MCP A `date_received` + MCP B `received_date`, both ISO-8601 UTC
+        // Date union: oracle A `date_received` + oracle B `received_date`, both ISO-8601 UTC
         #expect(m.date_received == "2026-01-02T03:04:05Z")
         #expect(m.received_date == "2026-01-02T03:04:05Z")
         // Flags
@@ -67,7 +67,7 @@ struct MailDecodeTests {
     }
 
     /// Golden shape: the encoded envelope carries schema_version + tool + both union field
-    /// names, so a consumer written against either MCP finds its keys.
+    /// names, so a consumer written against either oracle finds its keys.
     @Test func envelopeGoldenShape() throws {
         let m = MailDecode.message(row: Self.syntheticRow, mailboxPath: "INBOX", accountLabel: "iCloud")
         let result = MailMessageResult(message: m)

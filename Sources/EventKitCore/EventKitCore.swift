@@ -18,7 +18,7 @@ import Foundation
 ///                            StructuredLocation, Participant).
 ///   - `Mapping.swift`      — EK ⇄ model conversions (recurrence, alarms, participants,
 ///                            locations, availability/status/type enums).
-///   - `DateParsing.swift`  — MCP-compatible date parsing + all-day inference.
+///   - `DateParsing.swift`  — oracle-compatible date parsing + all-day inference.
 public enum EventKitCore {
     /// The shared engine is built. Retained as a lightweight readiness marker so the
     /// pre-rebase RemindersKit stub (which references it) keeps compiling; the real entry

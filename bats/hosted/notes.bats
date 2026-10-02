@@ -309,7 +309,7 @@ raise SystemExit(0 if matches else 1)
 }
 
 @test "notes create with an over-length title → validation error, exit 64 (input-bounds parity)" {
-  # Bounds are checked before the dry-run/execute gate, mirroring the MCP's zod input validation.
+  # Bounds are checked before the dry-run/execute gate, mirroring the oracle's zod input validation.
   local long_title="apple-cli-test $(printf 'x%.0s' {1..2001})"
   run "$BIN" notes create --dry-run "$long_title" --content "b"
   [ "$status" -eq 64 ]
@@ -383,7 +383,7 @@ raise SystemExit(0 if matches else 1)
   echo "$output" | grep -q '"type" : "validation_error"'
   # get-link is registered as a subcommand at all — the gap was that it did not exist.
   run "$BIN" notes get-link --help
-  [ "$status" -eq 0 ]; echo "$output" | grep -q 'get-note-link'
+  [ "$status" -eq 0 ]; echo "$output" | grep -q 'USAGE: apple notes get-link'
 }
 
 @test "NOTES-H1 classifiers accept only exact private failures" {
@@ -422,14 +422,14 @@ raise SystemExit(0 if matches else 1)
     '{ "type" : "upstream_error", "message" : "Notes.app timed out. It may be unresponsive or busy syncing; try again." }'
   [ "$status" -eq 1 ]
 
-  local exact_missing="Note \"ZZZ-no-such-note-xyz\" not found. Use search-notes to find notes, then use the note's ID for reliable operations."
+  local exact_missing="Note \"ZZZ-no-such-note-xyz\" not found. Use apple notes search to find notes, then use the note's ID for reliable operations."
   run notes_h1_exact_not_found \
-    '{ "error" : { "type" : "not_found", "message" : "Note \"ZZZ-no-such-note-xyz\" not found. Use search-notes to find notes, then use the note'"'"'s ID for reliable operations." } }' \
+    '{ "error" : { "type" : "not_found", "message" : "Note \"ZZZ-no-such-note-xyz\" not found. Use apple notes search to find notes, then use the note'"'"'s ID for reliable operations." } }' \
     "$exact_missing"
   [ "$status" -eq 0 ]
   [ -z "$output" ]
   run notes_h1_exact_not_found \
-    $'synthetic stderr diagnostic\n{ "error" : { "type" : "not_found", "message" : "Note \\"ZZZ-no-such-note-xyz\\" not found. Use search-notes to find notes, then use the note'"'"'s ID for reliable operations." } }' \
+    $'synthetic stderr diagnostic\n{ "error" : { "type" : "not_found", "message" : "Note \\"ZZZ-no-such-note-xyz\\" not found. Use apple notes search to find notes, then use the note'"'"'s ID for reliable operations." } }' \
     "$exact_missing"
   [ "$status" -eq 0 ]
   [ -z "$output" ]

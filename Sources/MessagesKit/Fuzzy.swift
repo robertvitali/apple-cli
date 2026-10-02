@@ -1,7 +1,7 @@
 import Foundation
 
-/// Fuzzy-matching + text-normalization primitives ported from `mac_messages_mcp`
-/// (the parity oracle). Two independent algorithms, because the MCP uses two:
+/// Fuzzy-matching + text-normalization primitives ported from the Messages oracle. Two
+/// independent algorithms, because it uses two:
 ///
 ///  - **Contacts** (`find_contact`): Python `difflib.SequenceMatcher.ratio()`
 ///    (Ratcliff/Obershelp) wrapped in token-based scoring rules. Ported EXACTLY —
@@ -16,7 +16,7 @@ public enum Fuzzy {
 
     // MARK: - Text normalization
 
-    /// Emoji ranges the MCP's `_EMOJI_PATTERN` strips before matching.
+    /// Emoji ranges the oracle's `_EMOJI_PATTERN` strips before matching.
     private static func stripEmoji(_ s: String) -> String {
         String(s.unicodeScalars.filter { scalar in
             let v = scalar.value
@@ -37,7 +37,7 @@ public enum Fuzzy {
         s.split(whereSeparator: \.isWhitespace).joined(separator: " ")
     }
 
-    /// Port of the MCP's `clean_name` (`_clean_text(strip_punctuation=True)`):
+    /// Port of the oracle's `clean_name` (`_clean_text(strip_punctuation=True)`):
     /// strip emoji, drop every char that is not word-char / whitespace / `'` / `-`,
     /// collapse whitespace, trim. Used for CONTACT-name matching.
     public static func cleanName(_ name: String) -> String {
@@ -71,7 +71,7 @@ public enum Fuzzy {
         scalar.properties.isWhitespace || (0x1C...0x1F).contains(scalar.value)
     }
 
-    /// Port of the MCP's `_clean_text(strip_punctuation=False)`: strip emoji +
+    /// Port of the oracle's `_clean_text(strip_punctuation=False)`: strip emoji +
     /// collapse whitespace only. Used for MESSAGE fuzzy search pre-cleaning.
     public static func cleanText(_ text: String) -> String {
         collapseWhitespace(stripEmoji(text))
@@ -184,12 +184,12 @@ public enum Fuzzy {
         return total
     }
 
-    // MARK: - Contact token-scoring (MCP `fuzzy_match`)
+    // MARK: - Contact token-scoring (oracle `fuzzy_match`)
 
     public struct ContactCandidate { public let name: String; public let value: String }
     public struct ScoredCandidate { public let name: String; public let value: String; public let score: Double }
 
-    /// Exact port of the MCP `fuzzy_match(query, candidates, threshold)`.
+    /// Exact port of the oracle's `fuzzy_match(query, candidates, threshold)`.
     /// Token rules: exact-full 1.0 · exact-token .95 · query-prefix-of-token
     /// .85·(|q|/|t|) · token-prefix-of-query .80·(|t|/|q|) · else SequenceMatcher.
     /// Multi-word query OR sub-threshold also tries full-name SequenceMatcher.

@@ -1,6 +1,6 @@
 # apple contacts groups delete
 
-Delete a group, members persist (requires APPLE_TEST_MODE=1, like the MCP). → delete_group
+Delete a group, members persist (requires APPLE_TEST_MODE=1).
 
 ## Synopsis
 
@@ -13,7 +13,7 @@ apple contacts groups delete <identifier> [flags]
 - `<identifier>`
   <br>The group's CN identifier.
 - `--group` `<group>`
-  <br>Group assertion; accepted and echoed for MCP parity, not enforced.
+  <br>Group assertion; accepted and echoed in --dry-run previews, not enforced.
 
 ## Inherited options
 

@@ -1,6 +1,6 @@
 # apple contacts photo set
 
-Set/clear a contact's photo, --file|--base64|--clear (EXECUTES; --dry-run previews). → write_photo
+Set/clear a contact's photo, --file|--base64|--clear (EXECUTES; --dry-run previews).
 
 ## Synopsis
 
@@ -19,7 +19,7 @@ apple contacts photo set <identifier> [flags]
 - `--file` `<file>`
   <br>Read image bytes from this file.
 - `--group` `<group>`
-  <br>Group assertion; accepted and echoed for MCP parity, not enforced.
+  <br>Group assertion; accepted and echoed in --dry-run previews, not enforced.
 
 ## Inherited options
 

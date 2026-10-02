@@ -184,7 +184,7 @@ struct SearchExportParityTests {
         let upstream = try #require(error)
         #expect(upstream.type == AppleErrorType.upstream)
         #expect(upstream.exitCode == AppleExit.upstream)
-        #expect(upstream.message == "Mail body search exceeded its 12-second aggregate deadline; no partial results returned. Narrow with --mailbox/--account, raise the cap with --body-live-timeout <seconds>, pass 0 for oracle B's unbounded aggregate behavior, or drop --body-live.")
+        #expect(upstream.message == "Mail body search exceeded its 12-second aggregate deadline; no partial results returned. Narrow with --mailbox/--account, raise the cap with --body-live-timeout <seconds>, pass 0 to disable the deadline entirely, or drop --body-live.")
     }
 
     @Test func bodySearchPreservesNonTimeoutFailures() {

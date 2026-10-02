@@ -1,6 +1,6 @@
 # apple calendar events delete
 
-Delete an event (executes on call, like the MCP; --dry-run previews).
+Delete an event (executes on call; --dry-run previews).
 
 ## Synopsis
 

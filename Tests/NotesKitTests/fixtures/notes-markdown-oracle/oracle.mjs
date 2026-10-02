@@ -1,8 +1,8 @@
 // Ground-truth generator for NOTES-M2: the oracle's HTML -> Markdown conversion.
 //
-// Replicates apple-notes-mcp 2.6.12 `NotesManager.htmlToMarkdown` EXACTLY, transcribed from the
+// Replicates the Notes oracle @2.6.12 `NotesManager.htmlToMarkdown` EXACTLY, transcribed from the
 // installed bundle at
-//   ~/.npm/_npx/67daf39574608aa2/node_modules/apple-notes-mcp/build/index.js:41464-41487
+//   the oracle package's build/index.js:41464-41487 (local npx cache copy)
 // which is:
 //
 //   new TurndownService({ headingStyle: "atx", codeBlockStyle: "fenced", bulletListMarker: "-" })

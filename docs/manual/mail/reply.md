@@ -26,7 +26,7 @@ apple mail reply [<id>] [flags]
 - `--html` `<html>`
   <br>HTML reply body. Default opens a rendered compose window for review; add --gui-send to auto-send.
 - `--mailbox` `<mailbox>`
-  <br>Mailbox to scope the --subject lookup (default INBOX — oracle B searches only the inbox; use 'All' for the previous store-wide sweep).
+  <br>Mailbox to scope the --subject lookup (default INBOX; use 'All' for a store-wide sweep).
 - `--mode` `<mode>`
   <br>Delivery mode: send | draft | open.
 - `--subject` `<subject>`

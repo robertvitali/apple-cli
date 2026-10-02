@@ -8,13 +8,13 @@ import EventKit
 /// read/create/update/delete/toggle/reorder).
 ///
 /// Subtasks live in the parent reminder's notes field (`---SUBTASKS---` block, `[ ] {id} title`
-/// lines), byte-compatible with the apple-events MCP. EventKit's public API exposes no native
+/// lines), byte-compatible with the EventKit oracle. EventKit's public API exposes no native
 /// subtask/parent surface (see RemindersSupport.swift), so op-parity is preserved via notes-field
-/// storage; the storage model matches the MCP verbatim so read output diffs cleanly against it.
+/// storage; the storage model matches the oracle verbatim so read output diffs cleanly against it.
 public struct SubtasksCommand: ParsableCommand {
     public static let configuration = CommandConfiguration(
         commandName: "subtasks",
-        abstract: "Reminder subtasks — read/create/update/delete/toggle/reorder (ports reminders_subtasks).",
+        abstract: "Reminder subtasks — read/create/update/delete/toggle/reorder.",
         subcommands: [SubtasksRead.self, SubtasksCreate.self, SubtasksUpdate.self,
                       SubtasksDelete.self, SubtasksToggle.self, SubtasksReorder.self],
         defaultSubcommand: SubtasksRead.self
@@ -62,7 +62,7 @@ public struct SubtasksRead: ParsableCommand {
 
 public struct SubtasksCreate: ParsableCommand {
     public static let configuration = CommandConfiguration(
-        commandName: "create", abstract: "Add a subtask (executes on call, like the MCP; --dry-run previews).")
+        commandName: "create", abstract: "Add a subtask (executes on call; --dry-run previews).")
 
     @OptionGroup public var global: GlobalOptions
     @Option(name: .customLong("reminder-id"), help: "Parent reminder identifier (required).") public var reminderId: String
@@ -103,7 +103,7 @@ public struct SubtasksCreate: ParsableCommand {
 
 public struct SubtasksUpdate: ParsableCommand {
     public static let configuration = CommandConfiguration(
-        commandName: "update", abstract: "Update a subtask's title/completion (executes on call, like the MCP; --dry-run previews).")
+        commandName: "update", abstract: "Update a subtask's title/completion (executes on call; --dry-run previews).")
 
     @OptionGroup public var global: GlobalOptions
     @Option(name: .customLong("reminder-id"), help: "Parent reminder identifier (required).") public var reminderId: String
@@ -148,7 +148,7 @@ public struct SubtasksUpdate: ParsableCommand {
 
 public struct SubtasksDelete: ParsableCommand {
     public static let configuration = CommandConfiguration(
-        commandName: "delete", abstract: "Remove a subtask (executes on call, like the MCP; --dry-run previews).")
+        commandName: "delete", abstract: "Remove a subtask (executes on call; --dry-run previews).")
 
     @OptionGroup public var global: GlobalOptions
     @Option(name: .customLong("reminder-id"), help: "Parent reminder identifier (required).") public var reminderId: String
@@ -190,7 +190,7 @@ public struct SubtasksDelete: ParsableCommand {
 
 public struct SubtasksToggle: ParsableCommand {
     public static let configuration = CommandConfiguration(
-        commandName: "toggle", abstract: "Flip a subtask's completion (executes on call, like the MCP; --dry-run previews).")
+        commandName: "toggle", abstract: "Flip a subtask's completion (executes on call; --dry-run previews).")
 
     @OptionGroup public var global: GlobalOptions
     @Option(name: .customLong("reminder-id"), help: "Parent reminder identifier (required).") public var reminderId: String
@@ -232,7 +232,7 @@ public struct SubtasksToggle: ParsableCommand {
 
 public struct SubtasksReorder: ParsableCommand {
     public static let configuration = CommandConfiguration(
-        commandName: "reorder", abstract: "Reorder subtasks (executes on call, like the MCP; --dry-run previews).")
+        commandName: "reorder", abstract: "Reorder subtasks (executes on call; --dry-run previews).")
 
     @OptionGroup public var global: GlobalOptions
     @Option(name: .customLong("reminder-id"), help: "Parent reminder identifier (required).") public var reminderId: String

@@ -5,20 +5,20 @@ import EventKit
 
 // Shared helpers for the Reminders command surface. Everything here is PURE + unit-testable
 // (no EKEventStore, no TCC): CLI-native alarm/recurrence spec parsers (a friendlier superset of
-// the MCP's JSON-blob inputs), the priority word↔int bridge, the dueWithin windows, the native
-// tag + subtask model (notes-field storage, byte-compatible with the apple-events MCP), the
+// the oracle's JSON-blob inputs), the priority word↔int bridge, the dueWithin windows, the native
+// tag + subtask model (notes-field storage, byte-compatible with the EventKit oracle), the
 // phase write-guard, and the Encodable output DTOs.
 //
-// SUBTASK / TAG STORAGE — intentional model note. The apple-events MCP stores subtasks and tags
+// SUBTASK / TAG STORAGE — intentional model note. The EventKit oracle stores subtasks and tags
 // INSIDE the reminder notes field (`---SUBTASKS---` block + `[#tag]` markers) because EventKit's
 // PUBLIC API exposes NO native subtask/parent or tag surface on EKReminder / EKCalendarItem
 // (verified against the macOS SDK headers: EKReminder only adds start/due components, completed,
 // completionDate, priority; EKCalendarItem exposes title/notes/url/location/calendar/alarms/
 // recurrenceRules/timeZone — nothing else). A "native parent-linkage" subtask model is therefore
 // not reachable through the public framework (only via private API or an Apple-Shortcuts
-// dependency, neither safe nor verifiable for an autonomous run). This port matches the MCP's
+// dependency, neither safe nor verifiable for an autonomous run). This port matches the oracle's
 // notes-field storage: it preserves 100% operation-parity for all six subtask ops AND stays
-// byte-compatible with the live MCP oracle so read output diffs cleanly. `Reminder.tags` is
+// byte-compatible with the oracle so read output diffs cleanly. `Reminder.tags` is
 // populated from the notes markers on read; `Reminder.parent_id` stays nil (no native linkage
 // exists to populate it).
 //
@@ -28,26 +28,26 @@ import EventKit
 // wrappers delegate to shared code where it exists. The names stay Reminder-prefixed to avoid
 // cross-module ambiguity in `apple`.)
 //
-// URL — intentional deviation. The reference MCP Swift backend ALSO mirrors a reminder's URL into
-// its notes as a "URLs:\n- <url>" line (so a notes search matches the URL). This port stores the
-// URL ONLY in the native `reminder.url` field (no notes pollution) and instead adds `reminder.url`
-// to the `tasks read --search` predicate — so URL search-parity is preserved WITHOUT the notes
-// mutation. The `url` output field is never dropped, so consumers keying on it are unaffected.
+// URL — intentional deviation. The oracle's reference Swift backend ALSO mirrors a reminder's URL
+// into its notes as a "URLs:\n- <url>" line (so a notes search matches the URL). This port stores
+// the URL ONLY in the native `reminder.url` field (no notes pollution) and instead adds
+// `reminder.url` to the `tasks read --search` predicate — so URL search-parity is preserved WITHOUT
+// the notes mutation. The `url` output field is never dropped, so its consumers are unaffected.
 //
-// INPUT VALIDATION — superset posture. The MCP imposes length caps (title 200 / note 2000 / …),
+// INPUT VALIDATION — superset posture. The oracle imposes length caps (title 200 / note 2000 / …),
 // a printable-Unicode charset, and an SSRF/non-http URL blocklist. This CLI deliberately does NOT
-// replicate those *rejections*: a strict superset must ACCEPT everything the MCP accepts, and
+// replicate those *rejections*: a strict superset must ACCEPT everything the oracle accepts, and
 // accepting MORE (a longer title, a non-http URL) is a valid superset. There is no injection or
 // SSRF sink here — writes go straight to EventKit (no AppleScript/shell/SQL), and a stored URL is
-// NEVER dereferenced — so relaxing the MCP's input rejections adds capability without risk. The
+// NEVER dereferenced — so relaxing the oracle's input rejections adds capability without risk. The
 // few places we DO reject (empty subtask title, out-of-range priority/recurrence) are cases the
-// MCP also rejects AND where acceptance would silently corrupt data.
+// oracle also rejects AND where acceptance would silently corrupt data.
 
-// MARK: - Priority (0 none · 1 high · 5 medium · 9 low — the MCP convention)
+// MARK: - Priority (0 none · 1 high · 5 medium · 9 low — the oracle convention)
 
 public enum ReminderPriority {
     /// Parse a `--priority` value (int 0…9 or word none|high|medium|low) into EventKit's 0…9.
-    /// The MCP enum is {0,1,5,9}; the CLI accepts any 0…9 int + the words as a documented superset.
+    /// The oracle's enum is {0,1,5,9}; the CLI also accepts any other 0…9 int and the words.
     public static func parse(_ raw: String) throws -> Int {
         guard let v = EKEnum.priorityInt(from: raw) else {
             throw AppleError.validation("bad --priority '\(raw)' (0|1|5|9 or none|high|medium|low)")
@@ -59,7 +59,7 @@ public enum ReminderPriority {
     }
 
     /// Map a `--filter-priority` word to the EventKit integer it filters on (none0/high1/med5/low9).
-    /// Mirrors the MCP's PRIORITY_FILTER_MAP exactly.
+    /// Mirrors the oracle's PRIORITY_FILTER_MAP exactly.
     public static func filterValue(_ word: String) throws -> Int {
         switch word.lowercased() {
         case "none": return 0
@@ -111,13 +111,13 @@ public enum DueWithin {
     }
 }
 
-// MARK: - Tags (notes-field `[#tag]` markers — parity with the MCP tagUtils.ts)
+// MARK: - Tags (notes-field `[#tag]` markers — parity with the oracle's tagUtils.ts)
 
 public enum ReminderTags {
     // /\[#([^\]]+)\]/g
     private static let tagRegex = try! NSRegularExpression(pattern: "\\[#([^\\]]+)\\]")
 
-    /// Validate a tag against the MCP's rule: `^#?[a-zA-Z0-9_-]+$`, 1…50 chars (after optional #).
+    /// Validate a tag against the oracle's rule: `^#?[a-zA-Z0-9_-]+$`, 1…50 chars after any `#`.
     public static func validate(_ tag: String) throws {
         let bare = tag.hasPrefix("#") ? String(tag.dropFirst()) : tag
         guard (1...50).contains(bare.count),
@@ -212,7 +212,7 @@ public enum ReminderTags {
     }
 }
 
-// MARK: - Subtasks (notes-field `---SUBTASKS---` block — parity with the MCP subtaskUtils.ts)
+// MARK: - Subtasks (notes-field `---SUBTASKS---` block — parity with the oracle's subtaskUtils.ts)
 //
 // `Subtask` + `SubtaskProgress` are defined in EventKitCore (so the shared `Reminder` model can
 // carry `subtasks`/`subtask_progress` on read); this enum is the pure notes-field engine over them.
@@ -285,7 +285,7 @@ public enum ReminderSubtasks {
         return clean
     }
 
-    /// Reject an empty/whitespace subtask title (mirrors the MCP's min-1 rule). An empty title
+    /// Reject an empty/whitespace subtask title (mirrors the oracle's min-1 rule). An empty title
     /// would serialize to `[ ] {id} ` and then silently VANISH on re-parse (the line regex needs
     /// ≥1 title char), so this fails loudly instead of losing the subtask.
     static func validatedTitle(_ raw: String) throws -> String {
@@ -367,7 +367,7 @@ public enum ReminderSubtasks {
 
 public enum ReminderNotes {
     /// Rebuild a reminder's notes for an update, preserving its subtasks and reconciling tags,
-    /// exactly mirroring the MCP's `rebuildNotesForUpdate`. `current` is the reminder's existing
+    /// exactly mirroring the oracle's `rebuildNotesForUpdate`. `current` is the reminder's existing
     /// notes. Returns the new notes string. Only call when note/tags/addTags/removeTags changed.
     public static func rebuildForUpdate(
         current: String?, newNote: String?, tags: [String]?, addTags: [String]?, removeTags: [String]?
@@ -401,7 +401,7 @@ func replaceAll(_ re: NSRegularExpression, in s: String, with template: String) 
     return re.stringByReplacingMatches(in: s, range: range, withTemplate: template)
 }
 
-// MARK: - Alarm spec parsing (--alarm, repeatable) — superset of the MCP alarm JSON
+// MARK: - Alarm spec parsing (--alarm, repeatable) — superset of the oracle's alarm JSON
 
 public enum ReminderAlarmSpec {
     /// Parse one `--alarm` spec into an `Alarm`:
@@ -496,7 +496,7 @@ public enum ReminderURLUpdate {
     }
 }
 
-// MARK: - Recurrence spec parsing (--recurrence, repeatable) — superset of the MCP recurrence JSON
+// MARK: - Recurrence spec parsing (--recurrence, repeatable), a superset of the oracle's JSON
 
 public enum ReminderRecurrenceSpec {
     /// Parse one `--recurrence` spec (`key=value;key=value`) into a `RecurrenceRule`:
@@ -571,11 +571,11 @@ public enum ReminderWriteGuard {
     }
 
     /// Resolve a reminders write under write-model v2: **it executes by default**, exactly as
-    /// calling the equivalent `mcp-server-apple-events` `reminders_*` action does. `--dry-run`
+    /// calling the equivalent EventKit oracle's `reminders_*` action does. `--dry-run`
     /// previews; `APPLE_DRY_RUN` truthy restores dry-run-by-default; `--test-mode` or
     /// `APPLE_TEST_MODE` truthy engages the opt-in sandbox.
     ///
-    /// ORACLE EVIDENCE (`mcp-server-apple-events@1.4.0` — the same bundle Calendar cites; see
+    /// ORACLE EVIDENCE (the EventKit oracle @1.4.0 — the same bundle Calendar cites; see
     /// `CalendarWriteGuard.resolve` for the full derivation): no runtime env gate exists to mirror,
     /// `tools/index.ts` is pure routing, and `reminderRepository.deleteReminder` /
     /// `deleteReminderList` shell straight to the Swift CLI with no confirmation step. All eleven
@@ -658,7 +658,7 @@ public enum ReminderRead {
     /// Map an EKReminder-derived base model and populate the notes-parsed enrichments the shared
     /// `ReminderMapping.reminder` leaves nil: `tags` (from `[#tag]` markers) plus `subtasks` +
     /// `subtask_progress` (from the `---SUBTASKS---` block) — so `tasks read` surfaces structured
-    /// subtasks per reminder exactly like the MCP does, not just raw notes.
+    /// subtasks per reminder exactly like the oracle does, not just raw notes.
     public static func enrich(_ base: Reminder) -> Reminder {
         let tags = ReminderTags.extract(base.notes)
         let subs = ReminderSubtasks.parse(base.notes)
@@ -706,7 +706,7 @@ func requireLabeledReminder(_ reminder: EKReminder, sandboxActive: Bool,
 
 // MARK: - Output DTOs (the reminders wire shapes)
 
-/// `tasks read` (no id): lists + reminders, mirroring the MCP's ReadResult.
+/// `tasks read` (no id): lists + reminders, mirroring the oracle's ReadResult.
 public struct RemindersReadData: Encodable {
     public let lists: [ReminderList]
     public let reminders: [Reminder]

@@ -1,7 +1,7 @@
 import Testing
 @testable import MessagesKit
 
-/// `matchContacts` / `cleanName` against `mac_messages_mcp.fuzzy_match` (COMPLETION-LOOP Q5d).
+/// `matchContacts` / `cleanName` against the Messages oracle's `fuzzy_match` (COMPLETION-LOOP Q5d).
 ///
 /// Every expected value was read off the live oracle. All fixtures are synthetic.
 ///

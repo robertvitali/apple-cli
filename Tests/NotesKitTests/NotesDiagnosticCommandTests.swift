@@ -51,11 +51,11 @@ struct NotesDiagnosticCommandTests {
         Diagnostic(
             key: "folder-name", stderr: "Notes got an error: Can’t get folder \"Synthetic MiXeD Folder\". (-1728)",
             code: AppleExit.notFound, type: AppleErrorType.notFound,
-            message: "Folder \"Synthetic MiXeD Folder\" not found. Use list-folders to see available folders."),
+            message: "Folder \"Synthetic MiXeD Folder\" not found. Use apple notes folders to see available folders."),
         Diagnostic(
             key: "account-name", stderr: "Notes got an error: Can’t get account \"Synthetic MiXeD Account\". (-1728)",
             code: AppleExit.notFound, type: AppleErrorType.notFound,
-            message: "Account \"Synthetic MiXeD Account\" not found. Use list-accounts to see available accounts."),
+            message: "Account \"Synthetic MiXeD Account\" not found. Use apple notes accounts to see available accounts."),
         Diagnostic(
             key: "already-exists", stderr: "Notes got an error: A synthetic folder already exists. (-48)",
             code: AppleExit.usage, type: AppleErrorType.validation,

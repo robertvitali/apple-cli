@@ -1,6 +1,6 @@
 # apple reminders subtasks reorder
 
-Reorder subtasks (executes on call, like the MCP; --dry-run previews).
+Reorder subtasks (executes on call; --dry-run previews).
 
 ## Synopsis
 

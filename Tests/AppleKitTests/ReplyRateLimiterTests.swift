@@ -6,7 +6,7 @@ import TestSupport
 /// Oracle A's `expensive_ops` tier (`TIER_LIMITS["expensive_ops"] = (20, 60.0)`), ported for
 /// `reply` per HUMAN-DECISIONS.md D8 (SAFETY WINS). The sliding-window mechanism is single-sourced
 /// in `RateLimitStore` (its edge cases are exhaustively pinned by SendRateLimiterTests); these pins
-/// guard the tier-specific constants, the SEPARATE state file, and the `expensive_ops` refusal text.
+/// guard the tier-specific constants, the SEPARATE state file, and the `reply` refusal text.
 /// Every test drives an INJECTED state URL so it never touches the operator's real reply budget and
 /// cannot race the other suites (they all run in one process in parallel).
 @Suite("Reply rate limiter (oracle A expensive_ops tier)")
@@ -39,7 +39,7 @@ struct ReplyRateLimiterTests {
         #expect(refused.retryAfter > 0 && refused.retryAfter <= ReplyRateLimiter.windowSeconds)
     }
 
-    @Test("the refusal names the expensive_ops tier and the 20-call cap")
+    @Test("the refusal names reply operations and the 20-call cap")
     func refusalNamesTheTier() throws {
         let url = tmpState("refuse")
         let t0 = Date()
@@ -47,7 +47,7 @@ struct ReplyRateLimiterTests {
         let d = try ReplyRateLimiter.consume(now: t0.addingTimeInterval(3), stateURL: url)
         #expect(d.allowed == false)
         #expect(ReplyRateLimiter.refusal(d)
-                .contains("Rate limit exceeded: 20 calls per 60s for expensive_ops operations"))
+                .contains("Rate limit exceeded: 20 calls per 60s for reply operations"))
     }
 
     /// The whole point of D8: a reply and a send draw on SEPARATE budgets (distinct oracle tiers),

@@ -6,18 +6,18 @@ import Foundation
 // conversion). Dates encode as ISO-8601 (Output sets `.iso8601`). Optionals that are `nil`
 // are omitted by JSONEncoder, keeping payloads compact; consumers are tolerant readers.
 //
-// These shapes read the FULL apple-events MCP surface (verified field-by-field against the
+// These shapes read the FULL EventKit oracle surface (verified field-by-field against the
 // reference EventKitCLI.swift @1.4.0): events carry attendees/organizer/status/availability/
 // recurrence/alarms/structuredLocation/occurrenceDate/externalId; reminders carry due/start/
 // priority/url/location/timeZone/locationTrigger/recurrence/alarms/externalId. The apple-cli
-// contract re-cases the MCP's camelCase keys to snake_case by design — semantic parity, not
+// contract re-cases the oracle's camelCase keys to snake_case by design — semantic parity, not
 // byte-identical keys — AND, honestly (REM-13), four keys are RENAMED beyond re-casing:
-// `Reminder.completed` (MCP `isCompleted` — re-casing would give `is_completed`),
-// `Reminder.last_modified` / `CalendarEvent.last_modified` (MCP `lastModifiedDate` — would be
-// `last_modified_date`), `Alarm.type` (MCP `alarmType` — would be `alarm_type`), and
-// `Subtask.completed` (same as Reminder's). These shipped in the first cut and are load-bearing
+// `Reminder.completed` (the oracle's `isCompleted` — re-casing would give `is_completed`),
+// `Reminder.last_modified` / `CalendarEvent.last_modified` (the oracle's `lastModifiedDate` —
+// would be `last_modified_date`), `Alarm.type` (the oracle's `alarmType` — would be `alarm_type`),
+// and `Subtask.completed` (same as Reminder's). These shipped in the first cut and are load-bearing
 // wire keys now; renaming them is a MAJOR bump, so they are documented instead of "fixed".
-// Enum VALUES (availability/status/participant/source strings) DO match the MCP verbatim so a
+// Enum VALUES (availability/status/participant/source strings) DO match the oracle verbatim so a
 // consumer keying on a value survives the swap.
 //
 // STABILITY: RemindersKit imports these unchanged. All optional init params carry `= nil`
@@ -26,7 +26,7 @@ import Foundation
 
 // MARK: - Calendar collection (EKCalendar for events; `calendar_calendars`)
 
-/// A calendar collection (the container an event lives in). MCP parity: id/title/account/
+/// A calendar collection (the container an event lives in). Oracle parity: id/title/account/
 /// account_type; plus color + mutability + type as supersets.
 public struct CalendarCollection: Encodable, Sendable, Equatable {
     public let id: String
@@ -59,7 +59,7 @@ public struct CalendarCollection: Encodable, Sendable, Equatable {
 // MARK: - Reminder list (EKCalendar for reminders; `reminders_lists`)
 
 /// A reminder list (the EKCalendar of `.reminder` entity type). Used by the Reminders lane;
-/// lives here because both domains share the EKCalendar mapping. MCP parity: id/title/color.
+/// lives here because both domains share the EKCalendar mapping. Oracle parity: id/title/color.
 public struct ReminderList: Encodable, Sendable, Equatable {
     public let id: String
     public let title: String
@@ -109,7 +109,7 @@ public struct Participant: Encodable, Sendable, Equatable {
 // MARK: - Recurrence
 
 /// A recurrence rule. Round-trips with EKRecurrenceRule (see Mapping.swift). `days_of_week`
-/// uses 1=Sunday … 7=Saturday (EKWeekday / the MCP convention, verified against the reference
+/// uses 1=Sunday … 7=Saturday (EKWeekday / the oracle convention, verified against the reference
 /// EventKitCLI.swift @1.4.0).
 public struct RecurrenceRule: Sendable, Equatable {
     public let frequency: String            // daily | weekly | monthly | yearly
@@ -260,7 +260,7 @@ public struct Alarm: Encodable, Sendable, Equatable {
 
 // MARK: - Calendar event
 
-/// A calendar event (EKEvent), reading the full MCP surface plus extras. Attendees/organizer/
+/// A calendar event (EKEvent), reading the full oracle surface plus extras. Attendees/organizer/
 /// status/availability are READ-only per EventKit (attendee writes are impossible).
 ///
 /// The five date fields are pre-formatted STRINGS in the oracle's rendering (CAL-03), not
@@ -337,10 +337,10 @@ public struct CalendarEvent: Encodable, Sendable, Equatable {
 // MARK: - Subtask (notes-field checklist item; RemindersKit populates these on read)
 
 /// A reminder subtask/checklist item. EventKit's public API exposes NO native subtask surface,
-/// so both the apple-events MCP and this port store subtasks inside the reminder notes field
+/// so both the EventKit oracle and this port store subtasks inside the reminder notes field
 /// (`---SUBTASKS---` block, `[ ] {id} title` lines). RemindersKit parses that block and populates
 /// `Reminder.subtasks` + `Reminder.subtask_progress` on read. `completed` is the snake_case wire
-/// key (there is no MCP JSON subtask contract to byte-match; the MCP surfaces subtasks in markdown).
+/// key (the oracle has no JSON subtask contract to byte-match; it surfaces subtasks in markdown).
 public struct Subtask: Encodable, Sendable, Equatable {
     public let id: String
     public let title: String
@@ -352,7 +352,7 @@ public struct Subtask: Encodable, Sendable, Equatable {
     }
 }
 
-/// Subtask completion progress (mirrors the MCP's SubtaskProgress; empty → 100%).
+/// Subtask completion progress (mirrors the oracle's SubtaskProgress; empty → 100%).
 public struct SubtaskProgress: Encodable, Sendable, Equatable {
     public let completed: Int
     public let total: Int
@@ -367,10 +367,10 @@ public struct SubtaskProgress: Encodable, Sendable, Equatable {
 // MARK: - Reminder
 
 /// A reminder (EKReminder). Used by the Reminders lane; modeled here because it shares the
-/// EventKit alarm/recurrence/priority machinery. `priority` follows the MCP convention
+/// EventKit alarm/recurrence/priority machinery. `priority` follows the oracle convention
 /// (0 none, 1 high, 5 medium, 9 low — EventKit stores 0…9, surfaced raw).
 ///
-/// `tags`, `subtasks`, and `subtask_progress` extend the MCP's read output; EventKit has no
+/// `tags`, `subtasks`, and `subtask_progress` extend the oracle's read output; EventKit has no
 /// native tag/subtask API, so RemindersKit parses them from the notes field (`[#tag]` markers /
 /// `---SUBTASKS---` block) and populates them on read. `parent_id` is reserved for a future native
 /// parent/child linkage (none exists in the public EventKit API today) and stays nil. All of these

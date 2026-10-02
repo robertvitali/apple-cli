@@ -134,8 +134,8 @@ public enum EKEnum {
         }
     }
 
-    /// Parse a proximity for a WRITE. Mirrors the MCP: "leave"/"depart"/"exit" → leave, and
-    /// anything else (including empty/unknown) → enter (the MCP's default for a geofence write).
+    /// Parse a proximity for a WRITE. Mirrors the oracle: "leave"/"depart"/"exit" → leave, and
+    /// anything else (including empty/unknown) → enter (the oracle's default for a geofence write).
     public static func proximity(from s: String) -> EKAlarmProximity {
         switch s.lowercased() {
         case "leave", "depart", "exit": return .leave
@@ -164,7 +164,7 @@ public enum EKEnum {
         }
     }
 
-    // Span (EKSpan) ⇄ string. The MCP accepts "this-event"/"future-events"; the CLI also
+    // Span (EKSpan) ⇄ string. The oracle accepts "this-event"/"future-events"; the CLI also
     // accepts "all" (delete-whole-series) at the command layer — EKSpan itself has no "all",
     // so that superset is handled above this mapper.
     public static func span(from s: String) -> EKSpan? {
@@ -175,7 +175,7 @@ public enum EKEnum {
         }
     }
 
-    // Priority word ⇄ int (0 none, 1 high, 5 medium, 9 low — the MCP convention). EventKit
+    // Priority word ⇄ int (0 none, 1 high, 5 medium, 9 low — the oracle convention). EventKit
     // stores 0…9 raw; these help the Reminders lane accept/emit the word form as a superset.
     public static func priorityInt(from word: String) -> Int? {
         switch word.lowercased() {
@@ -235,7 +235,7 @@ public enum RecurrenceMapping {
 
     /// model → EKRecurrenceRule (write). Throws `AppleError.validation` on an unknown frequency,
     /// a non-positive interval, or any out-of-range by-part value (a strict superset REJECTS
-    /// input the MCP would silently corrupt rather than swallowing it).
+    /// input the oracle would silently corrupt rather than swallowing it).
     public static func ekRule(from m: RecurrenceRule) throws -> EKRecurrenceRule {
         guard let freq = EKEnum.frequency(from: m.frequency) else {
             throw AppleError.validation("recurrence frequency '\(m.frequency)' (use daily|weekly|monthly|yearly)")
@@ -447,7 +447,7 @@ public enum ReadMapping {
         return String(format: "#%02X%02X%02X", clamp(r), clamp(g), clamp(b))
     }
 
-    /// `#RRGGBB` → CGColor (list/calendar color WRITE). Mirrors the MCP's `CGColor.fromHex`.
+    /// `#RRGGBB` → CGColor (list/calendar color WRITE). Mirrors the oracle's `CGColor.fromHex`.
     /// Accepts an optional leading `#`; returns nil on a malformed hex.
     public static func cgColor(fromHex hex: String) -> CGColor? {
         var s = hex.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -550,7 +550,7 @@ public enum ReminderMapping {
         let start = OracleDates.dueDateString(from: r.startDateComponents, timeZoneHint: r.timeZone)
         // Oracle `EKReminder.toJSON`: alarms render with `preferredTimeZone = timeZone ?? current`.
         let alarmTZ = r.timeZone ?? TimeZone.current
-        // Convenience: the first location-based alarm (mirrors the MCP's `locationTrigger`).
+        // Convenience: the first location-based alarm (mirrors the oracle's `locationTrigger`).
         let locationTrigger: LocationTrigger? = r.alarms?
             .first(where: { $0.structuredLocation != nil })
             .map { AlarmMapping.alarm(from: $0, preferredTimeZone: alarmTZ).location_trigger } ?? nil

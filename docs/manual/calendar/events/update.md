@@ -1,6 +1,6 @@
 # apple calendar events update
 
-Update an event (executes on call, like the MCP; --dry-run previews).
+Update an event (executes on call; --dry-run previews).
 
 ## Synopsis
 

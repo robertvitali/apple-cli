@@ -34,7 +34,7 @@ private func expectAppleError(_ type: String,
 
 @Suite("ContactsStore authorization")
 struct ContactsStoreAuthTests {
-    @Test("every CNAuthorizationStatus raw value maps to the MCP's status string")
+    @Test("every CNAuthorizationStatus raw value maps to the Contacts oracle's status string")
     func statusMapping() {
         let expected = [0: "notDetermined", 1: "restricted", 2: "denied",
                         3: "authorized", 4: "limited", 99: "notDetermined"]
@@ -272,7 +272,7 @@ struct ContactsStoreReadTests {
         #expect(s.unifiedContact("missing", includeNiche: false) == nil)
     }
 
-    @Test("searchContacts accepts the four MCP fields and rejects anything else")
+    @Test("searchContacts accepts the four oracle fields and rejects anything else")
     func searchFields() throws {
         let backend = FakeContactsBackend()
         backend.matchingContacts = [fakeContact(given: "Bob", family: "Doe")]
@@ -396,7 +396,7 @@ struct ContactsStoreGroupTests {
         expectAppleError("unknown") { _ = try store(failing).listContainers() }
     }
 
-    @Test("container type strings match the MCP's vocabulary, unknown included")
+    @Test("container type strings match the Contacts oracle's vocabulary, unknown included")
     func containerTypeStrings() {
         #expect(ContactsStore.containerType(.local) == "local")
         #expect(ContactsStore.containerType(.exchange) == "exchange")
@@ -725,7 +725,7 @@ struct ContactsStoreScriptTests {
         } catch let e as AppleError {
             #expect(e.type == "unknown")
             #expect(e.message.contains(secret) == false)
-            #expect(e.message.contains("read_note failed"))
+            #expect(e.message.contains("reading the note failed"))
             #expect(e.message.contains("Automation"))
         }
         expectAppleError("unknown") { try s.writeNote("c1", note: "x") }

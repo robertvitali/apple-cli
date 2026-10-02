@@ -108,7 +108,7 @@ public final class EnvelopeIndex {
     /// `mailboxName == "All"` (case-insensitive) → every real (source-NULL) mailbox of the
     /// account(s), so each message is counted exactly once. A specific name matches on the
     /// full path or the leaf (case-insensitive), across all accounts when `accountUUID` nil.
-    /// `includeSystemFolders` applies ONLY to the "All" wildcard: MCP B excludes its
+    /// `includeSystemFolders` applies ONLY to the "All" wildcard: oracle B excludes its
     /// `SKIP_FOLDERS` (Trash/Junk/Sent*/Drafts/Spam/Deleted*) from broad scans, so an "All"
     /// search that swept them returned hits the oracle never would. Naming a system mailbox
     /// EXPLICITLY (`--mailbox Trash`) is unaffected — the exclusion is about what "everything"
@@ -166,7 +166,7 @@ public final class EnvelopeIndex {
         /// does not opt in; the search/thread commands set it from `--include-system-folders`.
         public var includeSystemFolders: Bool = true
         public var subjectContains: String?
-        public var subjectContainsAny: [String] = []   // OR-match list (MCP B subject_keywords); ANY matches
+        public var subjectContainsAny: [String] = []   // OR-match list (oracle B subject_keywords); ANY matches
         public var senderContains: String?
         public var bodyContains: String?     // matches the Envelope Index summary/preview
         public var conversationID: Int?      // Apple thread id (for `thread <id>`)
@@ -192,7 +192,7 @@ public final class EnvelopeIndex {
         let resolved = resolveMailboxes(accountUUID: f.accountUUID, mailboxName: f.mailboxName,
                                         includeSystemFolders: f.includeSystemFolders)
         where_.append(EnvelopeIndex.mailboxPredicate(direct: resolved.direct, label: resolved.label))
-        // subject_keywords OR-match (MCP B): match ANY of the keywords. Non-empty list takes
+        // subject_keywords OR-match (oracle B): match ANY of the keywords. Non-empty list takes
         // precedence over the single `subjectContains`; each keyword is a parameter-bound LIKE.
         let subjKeywords = f.subjectContainsAny.filter { !$0.isEmpty }
         if !subjKeywords.isEmpty {
@@ -267,11 +267,12 @@ public final class EnvelopeIndex {
         return try reader.query(sql, filter.binds)
     }
 
-    /// Messages sharing a References/In-Reply-To chain with `rowid` (MCP A get_thread's
+    /// Messages sharing a References/In-Reply-To chain with `rowid` (oracle A get_thread's
     /// header-threading), via the Envelope Index `message_references` table: gather the message's
-    /// own reference set (its originator global-id + referenced ancestors), then every message whose
-    /// reference set intersects it. Chronological. This differs from `conversationID` grouping (Apple
-    /// also folds in subject/participants) — it is the RFC References-chain membership MCP A returns.
+    /// own reference set (its originator global-id + referenced ancestors), then every message
+    /// whose reference set intersects it. Chronological. This differs from `conversationID`
+    /// grouping (Apple also folds in subject/participants) — it is the RFC References-chain
+    /// membership oracle A returns.
     /// Empty if the message has no `message_references` rows (caller falls back to the singleton).
     /// `rowid`/`limit` are validated Ints, inlined — no user text reaches the SQL.
     public func referencesThread(rowid: Int, limit: Int) throws -> [[String: String?]] {

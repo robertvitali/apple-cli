@@ -4,23 +4,26 @@ import Testing
 @testable import AppleKit
 
 /// `get-note-link` (NOTES-H1) and the not-found classification it depends on (NOTES-M3),
-/// against apple-notes-mcp 2.6.12.
+/// against the Notes oracle @2.6.12.
 @Suite("get-note-link parity")
 struct NoteLinkParityTests {
 
-    /// Verbatim from the oracle (build/index.js, the `get-note-link` handler). Reproduced here as
-    /// a literal so a reword on either side fails loudly rather than drifting silently.
+    /// The oracle's message (build/index.js, the `get-note-link` handler), reworded for the CLI on
+    /// 2026-10-01: your terminal instead of the app that launched the retired server,
+    /// `apple notes doctor` instead of its doctor tool, and no link to its setup guide. Reproduced
+    /// here as a literal so a reword on either side fails loudly rather than drifting silently.
     static let oracleLinkFailure =
         "Failed to get note link for \"MyNote\". The Notes database may not be accessible — grant "
-        + "Full Disk Access to the app that launches the server, fully quit and relaunch, then run "
-        + "the doctor tool. See: https://github.com/sweetrb/apple-notes-mcp/blob/main/docs/FULL-DISK-ACCESS.md. "
-        + "(On macOS 12–15 this also falls back to the AppleScript note link property.)"
+        + "Full Disk Access to your terminal, fully quit and relaunch it, then run "
+        + "apple notes doctor. (On macOS 12–15 this also falls back to the AppleScript note link "
+        + "property.)"
 
-    /// Verbatim from the oracle's title-path miss. The synthetic title matches the bounded live
-    /// probe without requiring Notes.app or AppleEvents in the default test tier.
+    /// The oracle's title-path miss, with the CLI's `apple notes search` named in place of its
+    /// search tool (2026-10-01). The synthetic title matches the bounded live probe without
+    /// requiring Notes.app or AppleEvents in the default test tier.
     static let oracleTitleNotFound =
-        "Note \"ZZZ-no-such-note-xyz\" not found. Use search-notes to find notes, then use the "
-        + "note's ID for reliable operations."
+        "Note \"ZZZ-no-such-note-xyz\" not found. Use apple notes search to find notes, then use "
+        + "the note's ID for reliable operations."
 
     @Test("an exactly empty id is absent and falls through to a nonempty title")
     func emptyIdFallsThroughToTitle() throws {
@@ -95,12 +98,12 @@ struct NoteLinkParityTests {
         }
     }
 
-    @Test("the link-failure message matches the oracle verbatim, including the macOS 12-15 note")
+    @Test("the link-failure message keeps the oracle's guidance in the CLI's words, including the macOS 12-15 note")
     func linkFailureMessage() {
         #expect(GetNoteLinkCmd.linkFailure("MyNote") == Self.oracleLinkFailure)
     }
 
-    @Test("the title-path not-found message matches the oracle verbatim")
+    @Test("the title-path not-found message keeps the oracle's wording, naming apple notes search")
     func titleNotFoundMessage() {
         #expect(GetNoteLinkCmd.titleNotFound("ZZZ-no-such-note-xyz") == Self.oracleTitleNotFound)
     }

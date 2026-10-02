@@ -28,12 +28,12 @@ struct AlarmSpecTests {
         #expect(try AlarmSpec.parse("30s").relative_offset == -30)
     }
 
-    @Test("explicit sign is honored; bare number is raw-signed (MCP relativeOffset)")
+    @Test("explicit sign is honored; bare number is raw-signed (EventKit oracle relativeOffset)")
     func signed() throws {
         #expect(try AlarmSpec.parse("+30m").relative_offset == 1800)
         #expect(try AlarmSpec.parse("-15m").relative_offset == -900)
         #expect(try AlarmSpec.parse("-900").relative_offset == -900)
-        #expect(try AlarmSpec.parse("900").relative_offset == 900)  // bare unsigned = raw (+), matches MCP
+        #expect(try AlarmSpec.parse("900").relative_offset == 900)  // bare unsigned = raw (+), matches the EventKit oracle
     }
 
     @Test("geofence spec parses coords/radius/proximity/title")
@@ -126,15 +126,15 @@ struct RecurrenceSpecTests {
         #expect(throws: AppleError.self) { _ = try RecurrenceMapping.ekRule(from: r) }
     }
 
-    @Test("count + until together → until wins (MCP precedence)")
+    @Test("count + until together → until wins (EventKit oracle precedence)")
     func countUntilPrecedence() throws {
         let r = try RecurrenceSpec.parse("freq=daily;count=10;until=2026-12-31")
         #expect(r.end_date != nil)
-        #expect(r.occurrence_count == nil) // dropped so endDate wins, matching the MCP
+        #expect(r.occurrence_count == nil) // dropped so endDate wins, matching the EventKit oracle
     }
 }
 
-// MARK: - Read window default (parity with the MCP's resolveReadDateRange)
+// MARK: - Read window default (parity with the EventKit oracle's resolveReadDateRange)
 
 @Suite("ReadWindow")
 struct ReadWindowTests {
@@ -288,7 +288,7 @@ struct PreviewTests {
 
 @Suite("StructuredLocationArg")
 struct StructuredLocationArgTests {
-    @Test("title-only structured location is allowed (MCP parity)")
+    @Test("title-only structured location is allowed (EventKit oracle parity)")
     func titleOnly() throws {
         let loc = try #require(try StructuredLocationArg.parse(lat: nil, lon: nil, radius: nil, title: "Conference Room B"))
         #expect(loc.title == "Conference Room B")

@@ -9,7 +9,7 @@ public enum MailFormat {
     /// Apple's Envelope Index stores `date_received`/`date_sent`/`display_date` as Unix
     /// epoch seconds (verified: today's mail decodes correctly with `unixepoch`). We render
     /// ISO-8601 in UTC (`…Z`) — deterministic for golden snapshots and a strict quality
-    /// superset of MCP A's human string ("Friday, September 5, 2014 …") and MCP B's naive
+    /// superset of oracle A's human string ("Friday, September 5, 2014 …") and oracle B's naive
     /// local "YYYY-MM-DDTHH:MM:SS".
     public static func iso(fromUnix seconds: Int?) -> String? {
         guard let seconds, seconds != 0 else { return nil }
@@ -28,7 +28,7 @@ public enum MailFormat {
     }()
 
     /// Parse an ISO `YYYY-MM-DD` (date-only) bound to a Unix epoch. `endOfDay` pushes to
-    /// 23:59:59 so a `date_to` bound includes the whole day (MCP parity: "full day included").
+    /// 23:59:59 so a `date_to` bound includes the whole day (oracle parity: "full day included").
     public static func unix(fromISODate iso: String, endOfDay: Bool = false) -> Int? {
         let parts = iso.split(separator: "-")
         guard parts.count == 3, parts[0].count == 4,
@@ -52,7 +52,7 @@ public enum MailFormat {
 
     // MARK: Senders / addresses
 
-    /// Render a sender/recipient as MCP B does: `"Display Name <email>"` when a display name
+    /// Render a sender/recipient as oracle B does: `"Display Name <email>"` when a display name
     /// exists, else the bare address. `name`/`address` come from the `addresses` table
     /// (`comment` = display name, `address` = email).
     public static func person(name: String?, address: String?) -> String {
@@ -73,7 +73,7 @@ public enum MailFormat {
     // MARK: RFC 5322 Message-ID
 
     /// The Envelope Index stores the RFC-5322 Message-ID header WITH angle brackets
-    /// (`<abc@host>`). MCP B strips them for `internet_message_id` and percent-wraps them for
+    /// (`<abc@host>`). Oracle B strips them for `internet_message_id` and percent-wraps them for
     /// the `message://` deep link. Return the bracket-stripped form.
     public static func stripAngleBrackets(_ header: String?) -> String? {
         guard var h = header?.trimmingCharacters(in: .whitespacesAndNewlines), !h.isEmpty else { return nil }
@@ -82,11 +82,11 @@ public enum MailFormat {
         return h.isEmpty ? nil : h
     }
 
-    /// MCP B's `mail_link`: `message://%3C<percent-encoded message-id>%3E`. Mirrors Mail.app's
+    /// Oracle B's `mail_link`: `message://%3C<percent-encoded message-id>%3E`. Mirrors Mail.app's
     /// own deep-link scheme so the value round-trips into `open`/Mail.
     public static func mailLink(internetMessageID: String?) -> String? {
         guard let id = internetMessageID, !id.isEmpty else { return nil }
-        // Leave `@` unencoded to match MCP B's `mail_link` byte-for-byte (Mail accepts both).
+        // Leave `@` unencoded to match oracle B's `mail_link` byte-for-byte (Mail accepts both).
         let allowed = CharacterSet(charactersIn:
             "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789-._~@")
         let encoded = id.addingPercentEncoding(withAllowedCharacters: allowed) ?? id

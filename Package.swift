@@ -3,7 +3,7 @@ import PackageDescription
 
 // apple — one CLI for Apple's native apps (Messages, Mail, Contacts, Notes,
 // Calendar, Reminders). See docs/DESIGN.md for architecture, versioning, and the
-// per-domain MCP-parity contract.
+// per-domain parity contract.
 
 let argparse: Target.Dependency = .product(name: "ArgumentParser", package: "swift-argument-parser")
 

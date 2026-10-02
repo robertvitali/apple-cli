@@ -1,7 +1,7 @@
 import Foundation
 
 // Output models for `apple mail`. Field names ARE the wire keys (snake_case, no case
-// conversion — see docs/DESIGN.md). Where MCP A and MCP B name the same concept differently
+// conversion — see docs/DESIGN.md). Where oracle A and oracle B name the same concept differently
 // (A `id` vs B `message_id`; A `read_status` vs B `is_read`; A `date_received` vs B
 // `received_date`), the union model carries BOTH names so the CLI is a strict superset of
 // each. Extra fields (rowid, structured sender, flag_color, mail_link, …) are additive.
@@ -53,10 +53,10 @@ public struct MailMailboxesResult: Encodable {
 public struct MailMessage: Encodable {
     // Identifiers (union of A `id` + B `message_id`/`internet_message_id`/`mail_link`)
     public var id: String                 // Envelope Index ROWID (fast, stable-in-store)
-    public var message_id: String         // == ROWID (MCP B field name)
+    public var message_id: String         // == ROWID (oracle B field name)
     public var rowid: Int
     public var internet_message_id: String?   // RFC-5322 Message-ID (bracket-stripped)
-    public var mail_link: String?             // message://… deep link (MCP B)
+    public var mail_link: String?             // message://… deep link (oracle B)
     public var applescript_id: String?        // Mail.app AppleScript id (nil on SQLite path)
 
     // Core
@@ -66,13 +66,13 @@ public struct MailMessage: Encodable {
     public var sender_address: String?
     public var mailbox: String                // path
     public var account: String                // name or UUID
-    public var read_status: Bool              // MCP A field name
-    public var is_read: Bool                  // MCP B field name
+    public var read_status: Bool              // oracle A field name
+    public var is_read: Bool                  // oracle B field name
     public var flagged: Bool
     public var flag_color: Int?               // meaningful only when flagged
     public var flag_color_name: String?
-    public var date_received: String?         // ISO-8601 UTC (MCP A field name)
-    public var received_date: String?         // ISO-8601 UTC (MCP B field name)
+    public var date_received: String?         // ISO-8601 UTC (oracle A field name)
+    public var received_date: String?         // ISO-8601 UTC (oracle B field name)
     public var date_sent: String?
     public var has_attachments: Bool
     public var attachment_count: Int
@@ -81,7 +81,7 @@ public struct MailMessage: Encodable {
 
     // Detail (get / selected / include_content)
     public var snippet: String?               // Envelope Index summary preview
-    /// MCP B's name for the same preview text. Carried alongside `snippet` per this file's
+    /// Oracle B's name for the same preview text. Carried alongside `snippet` per this file's
     /// dual-key rule — a consumer ported from B looks for `content_preview` and previously
     /// found nothing, which is exactly the drop the rule exists to prevent.
     public var content_preview: String?
@@ -101,7 +101,7 @@ public struct MailMessagesResult: Encodable {
     public let has_more: Bool?
     public let next_offset: Int?
     public let sort: String?
-    /// True when a `mailbox: "All"` query dropped the MCP B `SKIP_FOLDERS` system mailboxes.
+    /// True when a `mailbox: "All"` query dropped the oracle B `SKIP_FOLDERS` system mailboxes.
     /// Without this the narrowing is INVISIBLE to a machine consumer: pagination stays internally
     /// consistent (count and has_more share one filter), so nothing else in the envelope reveals
     /// that ~2k messages were excluded from "All". nil when the query was not an "All" sweep.
@@ -138,7 +138,7 @@ public struct MailThreadResult: Encodable {
 // MARK: Unread counts
 
 public struct MailUnreadCountsResult: Encodable {
-    // Mirrors MCP B: summary = flat {account: count}; full = nested {account: {path: count}}.
+    // Mirrors oracle B: summary = flat {account: count}; full = nested {account: {path: count}}.
     public let summary: [String: Int]?
     public let by_account: [String: [MailboxUnread]]?
     public let total_unread: Int

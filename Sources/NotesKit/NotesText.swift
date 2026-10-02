@@ -1,6 +1,6 @@
 import Foundation
 
-/// Text/HTML transforms ported from `apple-notes-mcp@2.5.12` (`hashtags.ts`,
+/// Text/HTML transforms ported from the Notes oracle @2.5.12 (`hashtags.ts`,
 /// `inlineImages.ts`, the manager's `htmlToPlaintext`/`htmlToMarkdown`/checklist enrichment,
 /// and the body-escaping helpers). Pure functions — fully unit-testable.
 ///
@@ -177,7 +177,7 @@ enum NotesText {
                 count += 1
                 bytes += decoded
                 result += "<div>[inline image omitted: \(mediaType), ~\(formatBytes(decoded)); "
-                    + "use list-attachments and save-attachment or fetch-attachment to export it]</div>"
+                    + "use apple notes attachments to find it, then apple notes save-attachment or apple notes fetch-attachment to export it]</div>"
             }
             last = m.range.location + m.range.length
         }

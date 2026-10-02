@@ -4,7 +4,7 @@ import Testing
 /// `wRatio` + `fullProcess` against the ORACLE'S OWN scorer (COMPLETION-LOOP Q5b).
 ///
 /// The oracle for message search is `thefuzz.fuzz.WRatio` — NOT rapidfuzz directly — called by
-/// `mac_messages_mcp.fuzzy_search_messages` on `_clean_text(x).lower()`. Every expected value
+/// the Messages oracle's `fuzzy_search_messages` on `_clean_text(x).lower()`. Every expected value
 /// below was read off `thefuzz.fuzz.WRatio` (0.22.1) on this machine. All inputs are synthetic.
 ///
 /// These exist because an end-to-end diff against the live oracle over 10 terms was returning 2

@@ -1,7 +1,7 @@
 import Foundation
 import AppleKit
 
-// Pure, TCC-free helpers ported 1:1 from apple-contacts-mcp @ 1cd8789 (v0.3.0):
+// Pure, TCC-free helpers ported 1:1 from the Contacts oracle @ 1cd8789 (v0.3.0):
 // utils.py (label translation, image-format sniffing, AppleScript escaping) and
 // security.py (test-mode safety gate). Kept free of Contacts.framework so they are
 // unit-testable in CI without a Contacts TCC grant.
@@ -10,12 +10,12 @@ import AppleKit
 
 /// Escape `s` for safe interpolation inside an AppleScript `"..."` literal.
 /// Backslash-first ordering matters — escaping `"` before `\` would double-escape
-/// the inserted backslashes. Mirrors the MCP's `escape_applescript_string`.
+/// the inserted backslashes. Mirrors the oracle's `escape_applescript_string`.
 ///
 /// NOTE: the shipping AppleScript paths (readNote / writeNote / removeContactFromGroup in
 /// ContactsStore) bind CN identifiers + note text via osascript ARGV (`on run argv`) and do
 /// NOT call this — argv binding is strictly safer (no interpolation at all). This is a
-/// ported-for-parity utility (the MCP interpolates an escaped id) kept for tests/reference;
+/// ported-for-parity utility (the oracle interpolates an escaped id) kept for tests/reference;
 /// it is not on the shipping path.
 public func escapeAppleScriptString(_ s: String) -> String {
     s.replacingOccurrences(of: "\\", with: "\\\\")
@@ -23,7 +23,7 @@ public func escapeAppleScriptString(_ s: String) -> String {
 }
 
 /// True when osascript stderr indicates the referenced person/group doesn't exist.
-/// Mirrors the MCP's `_APPLESCRIPT_NOT_FOUND_PATTERN` (`Can(?:'|’)t get|Invalid index`,
+/// Mirrors the oracle's `_APPLESCRIPT_NOT_FOUND_PATTERN` (`Can(?:'|’)t get|Invalid index`,
 /// case-insensitive) — the curly apostrophe is what AppleScript actually emits.
 public func isAppleScriptNotFound(_ stderr: String) -> Bool {
     let s = stderr.lowercased()
@@ -34,7 +34,7 @@ public func isAppleScriptNotFound(_ stderr: String) -> Bool {
 
 /// Apple's built-in label tokens, keyed by the lowercase human form that
 /// `CNLabeledValue.localizedString(forLabel:)` returns in en_US. Verbatim from the
-/// MCP's `_HUMAN_LABEL_TO_APPLE_TOKEN` (probed against macOS 26.3.1, MCP issue #22).
+/// oracle's `_HUMAN_LABEL_TO_APPLE_TOKEN` (probed against macOS 26.3.1; oracle issue #22).
 let humanLabelToAppleToken: [String: String] = [
     "mobile": "_$!<Mobile>!$_",
     "work": "_$!<Work>!$_",
@@ -51,7 +51,7 @@ let humanLabelToAppleToken: [String: String] = [
 ]
 
 /// Translate a label input to the form Contacts.framework expects. Three cases,
-/// mirroring the MCP's `label_to_apple_token`:
+/// mirroring the oracle's `label_to_apple_token`:
 /// - Human form (case-insensitive, whitespace-trimmed): `"mobile"` → `_$!<Mobile>!$_`.
 /// - Apple token (`_$!<Mobile>!$_`): passed through unchanged.
 /// - Custom string (`"Spotify"`): passed through unchanged (stored as a custom label).
@@ -72,7 +72,7 @@ private let heicFtypBrands: Set<[UInt8]> = [
 
 /// Identify an image format from its leading magic bytes. Returns one of
 /// `"jpeg"`, `"png"`, `"gif"`, `"heic"`, or `"unknown"`. Pure; robust against
-/// short/empty input (never traps). Mirrors the MCP's `detect_image_format`.
+/// short/empty input (never traps). Mirrors the oracle's `detect_image_format`.
 public func detectImageFormat(_ data: [UInt8]) -> String {
     if data.count >= 3, Array(data[0..<3]) == [0xFF, 0xD8, 0xFF] { return "jpeg" }
     if data.count >= 8, Array(data[0..<8]) == [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A] { return "png" }
@@ -109,7 +109,7 @@ public enum ContactsLabel {
 
 // MARK: - Domain errors + error-type parity
 //
-// The `safety_violation` refusal (the MCP's test-mode signal, exit 77) is now the shared
+// The `safety_violation` refusal (the oracle's test-mode signal, exit 77) is now the shared
 // `AppleError.safetyViolation` in AppleKit — the contacts write guards call it directly. The
 // former ContactsKit-local `AppleError.safetyViolation` + `ContactsErrorType` were removed when
 // it was promoted (Q13); a second same-signature extension would make the call ambiguous.

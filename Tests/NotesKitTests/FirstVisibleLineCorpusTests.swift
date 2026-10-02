@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import NotesKit
 
-/// Corpus differential for `firstVisibleHtmlLine` against apple-notes-mcp 2.6.12.
+/// Corpus differential for `firstVisibleHtmlLine` against the Notes oracle @2.6.12.
 ///
 /// WHY THIS EXISTS. NOTES-M6 originally shipped 52 hand-selected golden rows. Three reviewers
 /// independently found ICU-vs-JS divergences that all 52 rows passed straight through, and the

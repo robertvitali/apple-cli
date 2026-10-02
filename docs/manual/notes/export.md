@@ -1,6 +1,6 @@
 # apple notes export
 
-Export the whole library. --format json (structured, default) | md | txt (curated extras).
+Export the whole library. --format json (structured, default) | md | txt (every note rendered into one Markdown or plain-text document).
 
 ## Synopsis
 

@@ -1,13 +1,13 @@
 # notes-markdown-oracle — ground truth for `notes get-markdown` list rendering
 
 `ListMarkdownParityTests.swift` asserts that this port's HTML→Markdown list rendering is
-byte-identical to the MCP server it replaces. The expected values in that file are **not
+byte-identical to the oracle it replaces. The expected values in that file are **not
 hand-written** — they are produced by running the oracle's own conversion engine, and this
 directory is that generator, checked in so the claim is reproducible rather than a story.
 
 ## What the oracle actually is
 
-`apple-notes-mcp` 2.6.12 converts note HTML with **turndown 7.2.4**, configured in its bundle at
+The Notes oracle @2.6.12 converts note HTML with **turndown 7.2.4**, configured in its bundle at
 `build/index.js:41466-41477`:
 
 ```js

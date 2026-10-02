@@ -1,8 +1,8 @@
 // Golden generator for OracleDates (REM-02/03/04). Run: swift gen-goldens.swift.txt > goldens.json
 //
-// MIT License, Copyright (c) 2025 Frad LEE (mcp-server-apple-events / FradSer/event) — see NOTICE.
+// MIT License, Copyright (c) 2025 Frad LEE (the EventKit oracle / FradSer/event) — see NOTICE.
 // The functions below are COPIED VERBATIM from the oracle
-// (~/.npm/_npx/c40e2e94b791912c/node_modules/mcp-server-apple-events/src/swift/EventKitCLI.swift:
+// (the oracle package's src/swift/EventKitCLI.swift, from the local npx cache:
 // detectExplicitTimezone :419, formatterWithBaseLocale :462, normalizedComponents :469,
 // componentsSet :476, parseDateComponents :483, parseDate :1115, formatDueDateWithTimezone :1130)
 // with one SEMANTIC edit — the `TimeZone.current` mentions in parseDateComponents and

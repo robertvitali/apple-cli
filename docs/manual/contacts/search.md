@@ -1,6 +1,6 @@
 # apple contacts search
 
-Find contacts by name|phone|email|org (exactly one). → search_contacts
+Find contacts by name|phone|email|org (exactly one).
 
 ## Synopsis
 
@@ -11,7 +11,7 @@ apple contacts search [flags]
 ## Options
 
 - `--deep`
-  <br>Extra: match the given value across ALL fields (name/phone/email/org), unioned.
+  <br>Match the given value across ALL fields (name/phone/email/org) and return the union of matches.
 - `--email` `<email>`
   <br>Email address to match.
 - `--name` `<name>`

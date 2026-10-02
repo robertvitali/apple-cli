@@ -434,10 +434,10 @@ struct RulesUpdate: ParsableCommand {
             // name that ALREADY EXISTS silently mangles the new rule's conditions. So delete the old
             // rule FIRST (name becomes unique), create a fresh rule DISABLED, VERIFY its conditions
             // attached, and only THEN re-enable it (a silently-condition-less rule would match ALL
-            // mail). Two documented divergences from the MCP's in-place update (see CHANGELOG): the
-            // rule MOVES TO THE END of the list, and its actions are RESET to the carried
-            // mark_read/mark_flagged/delete set (2026-08-19, review-caught: `delete` joined the mark
-            // flags once `readRuleScalars` started reading `delete message` back) — a move_to/
+            // mail). Two documented divergences from oracle A's in-place update (see CHANGELOG):
+            // the rule MOVES TO THE END of the list, and its actions are RESET to the carried
+            // mark_read/mark_flagged/delete set (2026-08-19, review-caught: `delete` joined the
+            // mark flags once `readRuleScalars` started reading `delete message` back) — a move_to/
             // copy_to/flag_color action set manually in Mail.app is still NOT preserved
             // (readRuleScalars doesn't read those back). ----
             let old = try script.readRuleScalars(index: target.index)
@@ -536,7 +536,7 @@ struct RulesUpdate: ParsableCommand {
                 // the MERGED plan, not the requested --action: a recreate RESETS the action set, so
                 // the merged plan is what the rebuilt rule actually carries.
                 "warnings": AnyEncodableBox(RuleLiveGuards.liveActionWarnings(plan: mergedPlan)),
-                "note": AnyEncodableBox("condition change → delete-and-recreated (Mail can't delete a rule condition); created disabled, conditions verified, re-enabled if it was enabled. DIVERGES from the MCP in-place update: rule MOVED TO END of list, and actions RESET to [\(mergedPlan.tokens.joined(separator: ", "))] — pass --action (move_to/copy_to/mark_read/mark_flagged/flag_color/delete) to set them explicitly, since a prior action NOT re-passed is not read back off the old rule."
+                "note": AnyEncodableBox("condition change → delete-and-recreated (Mail can't delete a rule condition); created disabled, conditions verified, re-enabled if it was enabled. Unlike an in-place update, the rule is MOVED TO THE END of the list and its actions are RESET to [\(mergedPlan.tokens.joined(separator: ", "))] — pass --action (move_to/copy_to/mark_read/mark_flagged/flag_color/delete) to set them explicitly, since a prior action NOT re-passed is not read back off the old rule."
                     + (mergedPlan.delete ? " WARNING: this rule's delete action will auto-trash matching mail (move it to Trash) once enabled — unattended, no confirmation step." : ""))], text: global.text, sandboxActive: sandboxActive)
         }
     }
@@ -806,7 +806,7 @@ struct TemplatesDelete: ParsableCommand {
 
     func run(storeFactory: () throws -> TemplateStore) throws {
         try runGuarded(tool: "mail") {
-            // Write-model v2 preamble. Oracle A wraps delete_template in MCP elicitation; a CLI
+            // Write-model v2 preamble. Oracle A wraps delete_template in an elicitation; a CLI
             // has no elicitation channel — the explicit invocation is the accept (documented
             // divergence, docs/write-model-v2.md bucket 4). Executes by default.
             try TestMode.validateWriteEnvironment()

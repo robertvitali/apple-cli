@@ -4,8 +4,8 @@ import Testing
 @testable import AppleKit
 
 /// notes-#8 (transient-failure retry) + notes-#9 (richer entity-specific error mapping), pinned
-/// against apple-notes-mcp@2.7.5 (`build/index.js`: `RETRYABLE_ERROR_PATTERNS` / `isRetryableError`
-/// and the `ERROR_MAPPINGS` table). Pure — no live Notes.app.
+/// against the Notes oracle @2.7.5 (`build/index.js`: `RETRYABLE_ERROR_PATTERNS` /
+/// `isRetryableError` and the `ERROR_MAPPINGS` table). Pure — no live Notes.app.
 @Suite("NotesScript — transient-retry predicate (notes-#8)")
 struct NotesScriptRetryTests {
 
@@ -82,7 +82,7 @@ struct NotesScriptErrorMappingTests {
     @Test("folder-not-found by name echoes the folder, type not_found/65")
     func folderByName() {
         let e = map("Notes got an error: Can’t get folder \"Work\". (-1728)")
-        #expect(e.message == "Folder \"Work\" not found. Use list-folders to see available folders.")
+        #expect(e.message == "Folder \"Work\" not found. Use apple notes folders to see available folders.")
         #expect(e.type == AppleErrorType.notFound)
         #expect(e.exitCode == AppleExit.notFound)
     }
@@ -90,7 +90,7 @@ struct NotesScriptErrorMappingTests {
     @Test("account-not-found by name echoes the account, type not_found/65")
     func accountByName() {
         let e = map("Notes got an error: Can’t get account \"Gmail\". (-1728)")
-        #expect(e.message == "Account \"Gmail\" not found. Use list-accounts to see available accounts.")
+        #expect(e.message == "Account \"Gmail\" not found. Use apple notes accounts to see available accounts.")
         #expect(e.type == AppleErrorType.notFound)
         #expect(e.exitCode == AppleExit.notFound)
     }

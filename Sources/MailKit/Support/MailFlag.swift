@@ -1,13 +1,13 @@
 import Foundation
 
-/// Mail flag colors — reconciles MCP A's 8-token palette (`none/orange/red/yellow/blue/
-/// green/purple/gray`) with MCP B's binary flag/unflag into one model.
+/// Mail flag colors — reconciles oracle A's 8-token palette (`none/orange/red/yellow/blue/
+/// green/purple/gray`) with oracle B's binary flag/unflag into one model.
 ///
 /// The Envelope Index `flag_color` integer and AppleScript's `set flag index` use macOS
 /// Mail's ACTUAL (non-obvious) index order: orange=0, red=1, yellow=2, blue=3, green=4,
 /// purple=5, gray=6 — NOT the intuitive rainbow order (the naive red=0 guess is wrong, and
-/// red↔orange / green↔blue are the two swaps people miss). This matches the MCP parity
-/// oracle's `get_flag_index` (apple-mail-mcp `utils.py`), the source of truth for the port:
+/// red↔orange / green↔blue are the two swaps people miss). This matches the parity
+/// oracle's `get_flag_index` (oracle A's `utils.py`), the source of truth for the port:
 /// a drop-in replacement MUST set the SAME index the oracle would for a given color name.
 /// `none` maps to "unflag" (no color). Both the write path (`flag --color <name>` and rule
 /// `flag_color` → `set flag index`) and the read path (`flag_color` int → name) share this
@@ -27,7 +27,7 @@ public enum MailFlagColor: Int, CaseIterable, Sendable {
         }
     }
 
-    /// The 8 tokens MCP A accepts on `flag_message`, `none` included (== unflag).
+    /// The 8 tokens oracle A accepts on `flag_message`, `none` included (== unflag).
     public static let acceptedTokens = ["none", "orange", "red", "yellow", "blue", "green", "purple", "gray"]
 
     /// Parse a `--color` token. Returns `nil` for `none`/`unflag` (caller unflags instead).

@@ -1,6 +1,6 @@
 # apple contacts photo get
 
-Read a contact's photo (base64 + detected format). → read_photo
+Read a contact's photo (base64 + detected format).
 
 ## Synopsis
 
@@ -13,7 +13,7 @@ apple contacts photo get <identifier> [flags]
 - `<identifier>`
   <br>The contact's CN identifier.
 - `--out` `<out>`
-  <br>Extra: write the raw photo bytes to this file path.
+  <br>Also write the raw photo bytes to this file path (the response still carries image_data).
 
 ## Inherited options
 

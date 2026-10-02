@@ -10,8 +10,8 @@ apple contacts photo
 
 ## Subcommands
 
-- [`get`](./get.md) — Read a contact's photo (base64 + detected format). → read_photo
-- [`set`](./set.md) — Set/clear a contact's photo, --file|--base64|--clear (EXECUTES; --dry-run previews). → write_photo
+- [`get`](./get.md) — Read a contact's photo (base64 + detected format).
+- [`set`](./set.md) — Set/clear a contact's photo, --file|--base64|--clear (EXECUTES; --dry-run previews).
 
 ## Inherited options
 

@@ -2,7 +2,7 @@ import Foundation
 import AppleKit
 
 /// Reads the macOS AddressBook `*.abcddb` SQLite stores directly (Full Disk Access,
-/// no Contacts TCC prompt) — the SAME mechanism as `mac_messages_mcp`. Builds the
+/// no Contacts TCC prompt) — the SAME mechanism as the Messages oracle. Builds the
 /// normalized `handle → name` map and the fuzzy contact index. Ports
 /// `get_addressbook_contacts` / `process_contacts` / `find_contact_by_name` /
 /// `get_contact_name` (AddressBook half) / `check_addressbook_access`.
@@ -71,7 +71,7 @@ public struct AddressBook: Sendable {
         """
 
     /// Load + merge every accessible AddressBook source. Inaccessible sources are
-    /// skipped (mirrors the MCP's per-source try/except), never fatal.
+    /// skipped (mirrors the oracle's per-source try/except), never fatal.
     public static func load() -> AddressBook {
         load(paths: databasePaths())
     }
@@ -149,7 +149,7 @@ public struct AddressBook: Sendable {
         }
     }
 
-    // MARK: Fuzzy find (MCP `find_contact_by_name`)
+    // MARK: Fuzzy find (oracle `find_contact_by_name`)
 
     public struct Match: Sendable { public let name: String; public let phone: String; public let score: Double; public let matchedOn: String }
 
@@ -181,7 +181,7 @@ public struct AddressBook: Sendable {
             .map { Match(name: $0.name, phone: $0.phone, score: $0.score, matchedOn: $0.matchedOn) }
     }
 
-    // MARK: Handle → name (MCP `get_contact_name`, AddressBook portion)
+    // MARK: Handle → name (oracle `get_contact_name`, AddressBook portion)
 
     /// Resolve a handle id (phone or email) to a contact name via AddressBook only,
     /// trying US country-code variants. Returns nil if not found (caller falls back

@@ -146,6 +146,8 @@ struct BulkTargetingTests {
         #expect(upstream.exitCode == 69)
         #expect(upstream.message.contains("osascript timed out after 30s"))
         #expect(upstream.message.contains("refusing to save by index-order positions"))
+        #expect(upstream.message.hasSuffix(
+            "— refusing to save by index-order positions (they routinely differ from Mail's own order)."))
 
         #expect(throws: Never.self) {
             try AttachmentsSave.requireLiveAttachmentMasterForExecute(

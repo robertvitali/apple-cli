@@ -4,7 +4,7 @@ import EventKitCore
 
 /// `apple reminders …` — Reminders (EventKit).
 ///
-/// Ports the Reminders half of `mcp-server-apple-events` (@ 1.4.0) to a strict superset:
+/// Ports the Reminders half of the EventKit oracle (@ 1.4.0) to a strict superset:
 ///   reminders tasks read      → reminders_tasks read   (filters/--id → lists + reminders)
 ///   reminders tasks create    → reminders_tasks create (recurrence/alarms/tags/subtasks/…)
 ///   reminders tasks update    → reminders_tasks update (+ completionDate, cross-list move, tag add/remove)
@@ -22,13 +22,13 @@ import EventKitCore
 /// safety gate.
 ///
 /// SUBTASKS + TAGS are stored in the reminder notes field (`---SUBTASKS---` block / `[#tag]`
-/// markers), byte-compatible with the apple-events MCP — EventKit's public API exposes no
+/// markers), byte-compatible with the EventKit oracle — EventKit's public API exposes no
 /// native subtask/parent or tag surface (see RemindersSupport.swift for the full rationale).
 ///
 public struct RemindersCommand: ParsableCommand {
     public static let configuration = CommandConfiguration(
         commandName: "reminders",
-        abstract: "Reminders — tasks/lists/subtasks (EventKit; ports apple-events reminders half).",
+        abstract: "Reminders — tasks/lists/subtasks (EventKit).",
         subcommands: [TasksCommand.self, ListsCommand.self, SubtasksCommand.self, RemindersDoctor.self],
         defaultSubcommand: TasksCommand.self
     )

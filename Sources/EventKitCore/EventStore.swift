@@ -307,7 +307,7 @@ public final class EventStore {
     //      BY DEFAULT (mirroring the oracle), so the old "dry-run unless --execute" reading of
     //      this contract no longer holds; `--dry-run` is what opts out; and
     //   2. apply the label check ONLY when `gate.sandboxActive` — the sandbox is opt-in, and
-    //      outside it the CLI mutates real data on call exactly as the MCP does.
+    //      outside it the CLI mutates real data on call exactly as the oracle does.
     //
     // `remove(_:span:.futureEvents)` and `removeCalendar` are DANGEROUS ACTIONS (irreversible on
     // the user's live store — a whole recurring series / an entire calendar). They are reachable

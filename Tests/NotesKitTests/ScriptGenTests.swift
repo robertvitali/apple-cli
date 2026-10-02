@@ -5,7 +5,7 @@ import Foundation
 /// Regression guards on GENERATED AppleScript text. The bugs below passed osacompile (the
 /// broken forms are syntactically valid) and produced ok:true envelopes with silently wrong
 /// data, so the only cheap tier that can hold them is an assertion on the emitted script.
-/// All were verified live against the apple-notes-mcp oracle before these tests were written.
+/// All were verified live against the Notes oracle before these tests were written.
 @Suite("NotesScript generation — data-correctness regressions")
 struct ScriptGenTests {
 
@@ -134,7 +134,7 @@ struct ScriptGenTests {
         let body = makeBody()
         // The oracle's search loop reads BOTH dates per hit (independent try-blocks, "" on a
         // failed read) and appends them to the row; a 3-field row drops two real fields the
-        // MCP returns, which the strict-superset rule forbids.
+        // oracle returns, which the strict-superset rule forbids.
         #expect(body.contains("set noteCreated to creation date of n"))
         #expect(body.contains("set noteModified to modification date of n"))
         #expect(body.contains("set createdParts to \"\""))

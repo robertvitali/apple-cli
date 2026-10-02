@@ -1,6 +1,6 @@
 # apple mail list
 
-List recent inbox messages (MCP B list_inbox_emails).
+List recent inbox messages.
 
 ## Synopsis
 
@@ -13,13 +13,13 @@ apple mail list [flags]
 - `--account` `<account>`
   <br>Account name or UUID; omit for all accounts.
 - `--content`
-  <br>Include the indexed body preview (default on; MCP B include_content).
+  <br>Include the indexed body preview (default on).
 - `--limit` `<limit>`
-  <br>Max messages GLOBALLY (default 50; 0 = all). CLI extra — oracle B's max_emails caps per account; see --limit-per-account.
+  <br>Max messages across all accounts (default 50; 0 = all). See --limit-per-account for a per-account cap.
 - `--limit-per-account` `<limit-per-account>`
-  <br>Cap messages PER ACCOUNT (oracle B max_emails semantics: the cap counts inbox messages EXAMINED, so with --unread fewer rows than the cap can return; 0 = no per-account cap). Accounts are merged newest-first (the oracle groups per account — disclosed); the global --limit still applies, pass --limit 0 for all.
+  <br>Cap messages PER ACCOUNT (the cap counts inbox messages EXAMINED, so with --unread fewer rows than the cap can return; 0 = no per-account cap). Rows from all accounts are merged into one newest-first list (not grouped by account); the global --limit still applies, pass --limit 0 for all.
 - `--no-content`
-  <br>Include the indexed body preview (default on; MCP B include_content).
+  <br>Include the indexed body preview (default on).
 - `--unread`
   <br>Only unread messages.
 

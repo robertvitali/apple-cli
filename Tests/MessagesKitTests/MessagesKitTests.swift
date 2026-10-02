@@ -5,7 +5,7 @@ import AppleKit
 import TestSupport
 
 // Reference values were computed from the parity oracle: Python `difflib.
-// SequenceMatcher.ratio`, the MCP `fuzzy_match` token rules, and the MCP
+// SequenceMatcher.ratio`, the oracle's `fuzzy_match` token rules, and the oracle's
 // `extract_body_from_attributed` byte format. See docs/port-specs/messages.md.
 
 // MARK: - difflib.SequenceMatcher.ratio (contacts)
@@ -39,7 +39,7 @@ struct SequenceRatioTests {
     }
 }
 
-// MARK: - Contact token scoring (MCP fuzzy_match)
+// MARK: - Contact token scoring (oracle fuzzy_match)
 
 @Suite("Contact fuzzy_match parity")
 struct ContactMatchTests {
@@ -384,7 +384,7 @@ struct SendTests {
     }
 }
 
-// MARK: - Service selection + attachments (CLI extras over the MCP surface)
+// MARK: - Service selection + attachments (CLI extras over the oracle surface)
 
 /// The two send extras port-spec §5 listed as WORTH-INCLUDING: explicit service control and file
 /// attachments. Every assertion here is on the PURE builders — the emitted AppleScript source and

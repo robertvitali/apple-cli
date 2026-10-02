@@ -1,6 +1,6 @@
 # apple reminders tasks
 
-Reminder tasks — read/create/update/delete (ports reminders_tasks).
+Reminder tasks — read/create/update/delete.
 
 ## Synopsis
 
@@ -10,10 +10,10 @@ apple reminders tasks
 
 ## Subcommands
 
-- [`create`](./create.md) — Create a reminder (executes on call, like the MCP; --dry-run previews).
-- [`delete`](./delete.md) — Delete a reminder (executes on call, like the MCP; --dry-run previews).
+- [`create`](./create.md) — Create a reminder (executes on call; --dry-run previews).
+- [`delete`](./delete.md) — Delete a reminder (executes on call; --dry-run previews).
 - [`read`](./read.md) — Read reminders (lists + reminders) with filters, or a single reminder by --id.
-- [`update`](./update.md) — Update a reminder (executes on call, like the MCP; --dry-run previews).
+- [`update`](./update.md) — Update a reminder (executes on call; --dry-run previews).
 
 ## Inherited options
 

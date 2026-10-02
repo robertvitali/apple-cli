@@ -140,8 +140,8 @@ public struct AppleError: Error, CustomReflectable {
     }
     /// A policy-based safety refusal — a write the guard deliberately declines (a sandbox /
     /// label / recipient gate, or a write-destination confinement). Emits `error.type =
-    /// "safety_violation"` (the string the Contacts MCP uses) at exit 77 (EX_NOPERM), so a client
-    /// can tell a deliberate refusal from a real failure. Canonical home for what MailKit's
+    /// "safety_violation"` (the string the Contacts oracle uses) at exit 77 (EX_NOPERM), so a
+    /// client can tell a deliberate refusal from a real failure. Canonical home for what MailKit's
     /// `mailSafety` and the former ContactsKit `safetyViolation` each spelled separately.
     ///
     /// Pass `sandbox: true` ONLY at the sandbox-policy gates (unlabeled target / non-self recipient

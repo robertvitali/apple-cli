@@ -179,7 +179,7 @@ struct MessagesCommandDependencyTests {
         #expect(data["count"] as? Int == 0)
     }
 
-    /// MCP-PARITY BRANCH (`get_recent_messages`). A single fuzzy `--contact` match resolves
+    /// ORACLE-PARITY BRANCH (`get_recent_messages`). A single fuzzy `--contact` match resolves
     /// through the contact's HANDLE, and the handle decides the lookup: a phone goes to the
     /// phone-format expansion, an email to an exact-id lookup. Covered as a pair because the two
     /// branches are one `contains("@")` apart and only the pair proves which one ran.
@@ -512,7 +512,7 @@ struct MessagesCommandDependencyTests {
         #expect(unsandboxed.hasPrefix("Message sent successfully"))
     }
 
-    // MARK: - --service / --file (CLI extras over the MCP surface)
+    // MARK: - --service / --file (CLI extras over the oracle surface)
 
     /// A misspelled service is a BAD ARGUMENT, not a routing surprise: exit 64,
     /// `validation_error`, and the sender is never reached.
@@ -1528,7 +1528,7 @@ struct MessagesCommandDependencyTests {
         #expect(availability.contains("iMessage available"))
     }
 
-    /// The ranked-candidate `--text` renderings. These are the human half of the MCP's stateful
+    /// The ranked-candidate `--text` renderings. These are the human half of the oracle's stateful
     /// `contact:N` replacement — the list a caller reads before re-running with an explicit
     /// handle — so a renderer that dropped the number, the handle or the score would leave the
     /// disambiguation unusable while the JSON path stayed green.

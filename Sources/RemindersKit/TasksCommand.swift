@@ -8,7 +8,7 @@ import EventKit
 public struct TasksCommand: ParsableCommand {
     public static let configuration = CommandConfiguration(
         commandName: "tasks",
-        abstract: "Reminder tasks — read/create/update/delete (ports reminders_tasks).",
+        abstract: "Reminder tasks — read/create/update/delete.",
         subcommands: [TasksRead.self, TasksCreate.self, TasksUpdate.self, TasksDelete.self],
         defaultSubcommand: TasksRead.self
     )
@@ -64,7 +64,7 @@ public struct TasksRead: ParsableCommand {
                 if let term = search?.lowercased(), !term.isEmpty {
                     let inTitle = r.title?.lowercased().contains(term) ?? false
                     let inNotes = r.notes?.lowercased().contains(term) ?? false
-                    // The MCP mirrors the url into notes so search matches it; we keep the url
+                    // The oracle mirrors the url into notes so search matches it; we keep the url
                     // structured (never in notes) and search reminder.url directly for parity.
                     let inUrl = r.url?.absoluteString.lowercased().contains(term) ?? false
                     if !inTitle && !inNotes && !inUrl { return false }
@@ -93,7 +93,7 @@ public struct TasksRead: ParsableCommand {
 public struct TasksCreate: ParsableCommand {
     public static let configuration = CommandConfiguration(
         commandName: "create",
-        abstract: "Create a reminder (executes on call, like the MCP; --dry-run previews).")
+        abstract: "Create a reminder (executes on call; --dry-run previews).")
 
     @OptionGroup public var global: GlobalOptions
     @Option(name: .long, help: "Reminder title (required).") public var title: String
@@ -188,7 +188,7 @@ public struct TasksCreate: ParsableCommand {
             if let location { reminder.location = location.isEmpty ? nil : location }
             if let url, !url.isEmpty { reminder.url = URL(string: url) }
 
-            // Notes = tags (prepended) + user note, then subtasks (appended). Mirrors the MCP order.
+            // Notes = tags (prepended) + user note, then subtasks (appended): oracle order.
             var notes: String? = tag.isEmpty ? note : ReminderTags.combine(tags: tag, notes: note)
             if !subtask.isEmpty {
                 notes = ReminderSubtasks.combine(subtasks: try ReminderSubtasks.fromTitles(subtask), notes: notes)
@@ -201,7 +201,7 @@ public struct TasksCreate: ParsableCommand {
             if let dueParsed { reminder.dueDateComponents = dueParsed.components }
             if let resolvedTZ { reminder.timeZone = resolvedTZ }
 
-            // Alarms: explicit --alarm wins; else the --geo-* location trigger (mirrors MCP create).
+            // Alarms: explicit --alarm wins, else the --geo-* location trigger (as oracle create).
             if !alarms.isEmpty {
                 for a in alarms { reminder.addAlarm(try AlarmMapping.ekAlarm(from: a)) }
             } else if let locTrigger {
@@ -237,7 +237,7 @@ public struct TasksCreate: ParsableCommand {
 public struct TasksUpdate: ParsableCommand {
     public static let configuration = CommandConfiguration(
         commandName: "update",
-        abstract: "Update a reminder (executes on call, like the MCP; --dry-run previews).")
+        abstract: "Update a reminder (executes on call; --dry-run previews).")
 
     @OptionGroup public var global: GlobalOptions
     @Option(name: .long, help: "Reminder identifier (required).") public var id: String
@@ -373,7 +373,7 @@ public struct TasksUpdate: ParsableCommand {
                 for rule in rules { reminder.addRecurrenceRule(try RecurrenceMapping.ekRule(from: rule)) }
             }
 
-            // Alarms first (replace-all), then the location trigger (location-only), mirroring MCP.
+            // As the oracle does: alarms (replace-all), then the location trigger (location-only).
             if clearAlarms {
                 reminder.alarms?.forEach { reminder.removeAlarm($0) }
             } else if !alarms.isEmpty {
@@ -429,7 +429,7 @@ public struct TasksUpdate: ParsableCommand {
 public struct TasksDelete: ParsableCommand {
     public static let configuration = CommandConfiguration(
         commandName: "delete",
-        abstract: "Delete a reminder (executes on call, like the MCP; --dry-run previews).")
+        abstract: "Delete a reminder (executes on call; --dry-run previews).")
 
     @OptionGroup public var global: GlobalOptions
     @Option(name: .long, help: "Reminder identifier (required).") public var id: String

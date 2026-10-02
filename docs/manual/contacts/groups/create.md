@@ -1,6 +1,6 @@
 # apple contacts groups create
 
-Create a contact group (EXECUTES by default; --dry-run previews). → create_group
+Create a contact group (EXECUTES by default; --dry-run previews).
 
 ## Synopsis
 
@@ -15,7 +15,7 @@ apple contacts groups create <name> [flags]
 - `--container` `<container>`
   <br>Create in this container id (default: the default container).
 - `--group` `<group>`
-  <br>Group assertion; accepted and echoed for MCP parity, not enforced.
+  <br>Group assertion; accepted and echoed in --dry-run previews, not enforced.
 
 ## Inherited options
 

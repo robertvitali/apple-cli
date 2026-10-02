@@ -1,6 +1,6 @@
 # apple reminders lists create
 
-Create a reminder list (executes on call, like the MCP; --dry-run previews).
+Create a reminder list (executes on call; --dry-run previews).
 
 ## Synopsis
 

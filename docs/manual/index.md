@@ -14,12 +14,12 @@ apple
 
 ## Subcommands
 
-- [`calendar`](./calendar/index.md) — Calendar — events CRUD + calendars (EventKit; ports apple-events calendar half).
-- [`contacts`](./contacts/index.md) — Contacts — CRUD, groups, vCard, notes, photos (ports apple-contacts-mcp).
-- [`mail`](./mail/index.md) — Mail.app — send, search, rules, templates, analytics (union of both mail MCPs).
-- [`messages`](./messages/index.md) — iMessage / SMS — send, read, search (ports mac_messages_mcp).
-- [`notes`](./notes/index.md) — Notes — notes/folders/attachments/checklists/export (ports apple-notes-mcp).
-- [`reminders`](./reminders/index.md) — Reminders — tasks/lists/subtasks (EventKit; ports apple-events reminders half).
+- [`calendar`](./calendar/index.md) — Calendar — events CRUD + calendars (EventKit).
+- [`contacts`](./contacts/index.md) — Contacts — CRUD, groups, vCard, notes, photos.
+- [`mail`](./mail/index.md) — Mail.app — send, search, rules, templates, analytics.
+- [`messages`](./messages/index.md) — iMessage / SMS — send, read, search.
+- [`notes`](./notes/index.md) — Notes — notes/folders/attachments/checklists/export.
+- [`reminders`](./reminders/index.md) — Reminders — tasks/lists/subtasks (EventKit).
 - [`version`](./version.md) — Print version + JSON schema_version (for runtime capability detection).
 
 ## Options

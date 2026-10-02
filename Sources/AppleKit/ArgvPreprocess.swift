@@ -5,10 +5,10 @@ import Foundation
 /// ArgumentParser refuses to consume a `-`-prefixed token as an option's VALUE in the
 /// space-separated form: `--geo-lon -122.4` fails with "Missing value for '--geo-lon'" because
 /// `-122.4` reads as an (unknown) option; only the attached form `--geo-lon=-122.4` parses.
-/// The oracle these commands replace (`mcp-server-apple-events`) is an MCP server receiving
-/// `geo_lon: -122.4` as a JSON NUMBER — it has no argv layer and no such restriction — so a
-/// strict superset must accept the natural space-separated CLI form too. REM-10 is sharper
-/// still: `--alarm -15m` is documented in the CLI's OWN `--help` yet fails to parse.
+/// The EventKit oracle these commands replace is a server receiving `geo_lon: -122.4` as a JSON
+/// NUMBER — it has no argv layer and no such restriction — so a strict superset must accept the
+/// natural space-separated CLI form too. REM-10 is sharper still: `--alarm -15m` is documented in
+/// the CLI's OWN `--help` yet fails to parse.
 ///
 /// The fix rewrites exactly `--<name> <neg>` → `--<name>=<neg>` for an explicit allowlist of
 /// options that legitimately take a negative value, and ONLY when the following token is

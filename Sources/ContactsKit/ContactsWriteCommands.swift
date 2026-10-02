@@ -2,9 +2,9 @@ import Foundation
 import ArgumentParser
 import AppleKit
 
-// Write commands — each maps 1:1 to an apple-contacts-mcp @ 1cd8789 (v0.3.0) write tool, and
+// Write commands — each maps 1:1 to a Contacts oracle @ 1cd8789 (v0.3.0) write tool, and
 // under write-model v2 (docs/write-model-v2.md) each BEHAVES like that tool: invoking it
-// mutates real data, because calling the MCP tool does. `--dry-run` previews; `APPLE_DRY_RUN`
+// mutates real data, because calling the oracle tool does. `--dry-run` previews; `APPLE_DRY_RUN`
 // truthy restores dry-run-by-default.
 //
 // `resolveWrite` is the single chokepoint: it validates the v2 environment, resolves
@@ -63,7 +63,7 @@ private func primaryName(_ f: ContactFields) -> String {
 struct CreateCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "create",
-        abstract: "Create a contact (EXECUTES by default; --dry-run previews). → create_contact")
+        abstract: "Create a contact (EXECUTES by default; --dry-run previews).")
     @OptionGroup var global: GlobalOptions
     @Option(name: [.customLong("first"), .customLong("given")], help: "Given name.") var first: String?
     @Option(name: [.customLong("last"), .customLong("family")], help: "Family name.") var last: String?
@@ -131,7 +131,7 @@ struct CreateCommand: ParsableCommand {
 struct UpdateCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "update",
-        abstract: "Update a contact, None=skip/\"\"=clear/value=set (EXECUTES; --dry-run previews). → update_contact")
+        abstract: "Update a contact: omit a field to keep it, \"\" clears it, a value sets it (EXECUTES; --dry-run previews).")
     @OptionGroup var global: GlobalOptions
     @Argument(help: "The contact's CN identifier.") var identifier: String
     @Option(name: .long, parsing: .upToNextOption, help: "Set a simple field: key=value (repeatable).") var set: [String] = []
@@ -145,7 +145,7 @@ struct UpdateCommand: ParsableCommand {
     // Not "inert": in test mode the oracle REFUSES when the parameter is absent (security.py:86-99)
     // and we proceed. REJECTING it was the actual defect — the oracle takes this parameter on all
     // eleven write tools, so exit-64'ing narrowed the parameter domain.
-    @Option(name: .long, help: "Group assertion; accepted and echoed for MCP parity, not enforced.")
+    @Option(name: .long, help: "Group assertion; accepted and echoed in --dry-run previews, not enforced.")
     var group: String?
 
     func run() throws {
@@ -207,12 +207,12 @@ struct UpdateCommand: ParsableCommand {
     }
 }
 
-// MARK: - delete → delete_contact (env-gated, mirroring the MCP's require_test_mode_for)
+// MARK: - delete → delete_contact (env-gated, mirroring the oracle's require_test_mode_for)
 
 struct DeleteCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "delete",
-        abstract: "Delete a contact (requires APPLE_TEST_MODE=1, like the MCP). → delete_contact")
+        abstract: "Delete a contact (requires APPLE_TEST_MODE=1).")
     @OptionGroup var global: GlobalOptions
     @Argument(help: "The contact's CN identifier.") var identifier: String
     // Accepted and echoed, NOT enforced — a deliberate divergence, documented in
@@ -220,7 +220,7 @@ struct DeleteCommand: ParsableCommand {
     // compared to CONTACTS_TEST_GROUP and never checked against the target contact
     // (check_test_mode_safety, security.py:83-101), so honoring it literally would add no
     // target scoping. This CLI confines the TARGET itself instead, which the oracle never does.
-    @Option(name: .long, help: "Group assertion; accepted and echoed for MCP parity, not enforced.")
+    @Option(name: .long, help: "Group assertion; accepted and echoed in --dry-run previews, not enforced.")
     var group: String?
     func run() throws {
         try run(storeFactory: { ContactsStore() })
@@ -242,12 +242,12 @@ struct DeleteCommand: ParsableCommand {
                 try emitContactsWrite(global, DryRunPreview(
                     operation: "delete_contact", identifier: identifier, group_id: group,
                     gate_note: joinedGateNote([
-                        envGranted ? nil : contactsDeleteGateMessage("delete_contact"),
+                        envGranted ? nil : contactsDeleteGateMessage("apple contacts delete"),
                         gate.sandboxActive ? sandboxTargetUncheckedNote("the target contact") : nil,
                     ])), sandboxActive: gate.sandboxActive)
                 return
             }
-            guard envGranted else { throw AppleError.safetyViolation(contactsDeleteGateMessage("delete_contact")) }
+            guard envGranted else { throw AppleError.safetyViolation(contactsDeleteGateMessage("apple contacts delete")) }
             let store = storeFactory()
             try store.requireAuthorization()
             // The env gate above implies the sandbox is engaged (sandboxActive = flag || env),
@@ -265,7 +265,7 @@ struct DeleteCommand: ParsableCommand {
 struct NoteSetCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "set",
-        abstract: "Write/replace a contact's note, --clear empties it (EXECUTES; --dry-run previews). → write_note")
+        abstract: "Write/replace a contact's note, --clear empties it (EXECUTES; --dry-run previews).")
     @OptionGroup var global: GlobalOptions
     @Argument(help: "The contact's CN identifier.") var identifier: String
     // `--note`, not `--text`: `--text` is the repo-wide human-output global (GlobalOptions).
@@ -280,7 +280,7 @@ struct NoteSetCommand: ParsableCommand {
     // Not "inert": in test mode the oracle REFUSES when the parameter is absent (security.py:86-99)
     // and we proceed. REJECTING it was the actual defect — the oracle takes this parameter on all
     // eleven write tools, so exit-64'ing narrowed the parameter domain.
-    @Option(name: .long, help: "Group assertion; accepted and echoed for MCP parity, not enforced.")
+    @Option(name: .long, help: "Group assertion; accepted and echoed in --dry-run previews, not enforced.")
     var group: String?
     func run() throws {
         try run(storeFactory: { ContactsStore() })
@@ -325,7 +325,7 @@ struct NoteSetCommand: ParsableCommand {
 struct PhotoSetCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "set",
-        abstract: "Set/clear a contact's photo, --file|--base64|--clear (EXECUTES; --dry-run previews). → write_photo")
+        abstract: "Set/clear a contact's photo, --file|--base64|--clear (EXECUTES; --dry-run previews).")
     @OptionGroup var global: GlobalOptions
     @Argument(help: "The contact's CN identifier.") var identifier: String
     @Option(name: .long, help: "Read image bytes from this file.") var file: String?
@@ -339,7 +339,7 @@ struct PhotoSetCommand: ParsableCommand {
     // Not "inert": in test mode the oracle REFUSES when the parameter is absent (security.py:86-99)
     // and we proceed. REJECTING it was the actual defect — the oracle takes this parameter on all
     // eleven write tools, so exit-64'ing narrowed the parameter domain.
-    @Option(name: .long, help: "Group assertion; accepted and echoed for MCP parity, not enforced.")
+    @Option(name: .long, help: "Group assertion; accepted and echoed in --dry-run previews, not enforced.")
     var group: String?
     func run() throws {
         try run(storeFactory: { ContactsStore() })
@@ -377,7 +377,7 @@ struct PhotoSetCommand: ParsableCommand {
         if let base64 {
             try checkBoundedInput(base64, "--base64")
             guard let d = Data(base64Encoded: base64, options: []) else {
-                throw AppleError.validation("image_data is not valid base64")
+                throw AppleError.validation("the --base64 value is not valid base64")
             }
             return d
         }
@@ -390,7 +390,7 @@ struct PhotoSetCommand: ParsableCommand {
 struct VCardImportCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "import",
-        abstract: "Import contacts from vCard 3.0/4.0 text, atomic (EXECUTES; --dry-run previews). → import_vcard")
+        abstract: "Import contacts from vCard 3.0/4.0 text, atomic (EXECUTES; --dry-run previews).")
     @OptionGroup var global: GlobalOptions
     @Option(name: .long, help: "Read vCard text from this file.") var file: String?
     // `--vcard`, not `--text`: `--text` is the repo-wide human-output global (GlobalOptions).
@@ -406,7 +406,7 @@ struct VCardImportCommand: ParsableCommand {
         try runGuarded(tool: "contacts") {
             let vcardText = try resolveVCardText()
             if vcardText.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
-                throw AppleError.validation("vcard_text must be a non-empty string")
+                throw AppleError.validation("the vCard text from --vcard or --file must not be empty")
             }
             let gate = try resolveWrite(global)
             // Sandbox card-label check: every imported card must be labeled test data, or the
@@ -425,7 +425,7 @@ struct VCardImportCommand: ParsableCommand {
             }
             guard gate.willExecute else {
                 // Validate the payload parses (TCC-free) so a dry-run catches malformed
-                // vCard exactly as the execute path would — the MCP always parses.
+                // vCard exactly as the execute path would — the oracle always parses.
                 let count = try ContactsStore.validateVCard(text: vcardText)
                 try emitContactsWrite(global, DryRunPreview(
                     operation: "import_vcard", group_id: group, parsed_count: count,
@@ -458,7 +458,7 @@ struct VCardImportCommand: ParsableCommand {
 struct GroupsCreateCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "create",
-        abstract: "Create a contact group (EXECUTES by default; --dry-run previews). → create_group")
+        abstract: "Create a contact group (EXECUTES by default; --dry-run previews).")
     @OptionGroup var global: GlobalOptions
     @Argument(help: "The new group's name.") var name: String
     @Option(name: .long, help: "Create in this container id (default: the default container).") var container: String?
@@ -470,7 +470,7 @@ struct GroupsCreateCommand: ParsableCommand {
     // Not "inert": in test mode the oracle REFUSES when the parameter is absent (security.py:86-99)
     // and we proceed. REJECTING it was the actual defect — the oracle takes this parameter on all
     // eleven write tools, so exit-64'ing narrowed the parameter domain.
-    @Option(name: .long, help: "Group assertion; accepted and echoed for MCP parity, not enforced.")
+    @Option(name: .long, help: "Group assertion; accepted and echoed in --dry-run previews, not enforced.")
     var group: String?
     func run() throws {
         try run(storeFactory: { ContactsStore() })
@@ -503,7 +503,7 @@ struct GroupsCreateCommand: ParsableCommand {
 struct GroupsRenameCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "rename",
-        abstract: "Rename a contact group (EXECUTES by default; --dry-run previews). → rename_group")
+        abstract: "Rename a contact group (EXECUTES by default; --dry-run previews).")
     @OptionGroup var global: GlobalOptions
     @Argument(help: "The group's CN identifier.") var identifier: String
     @Argument(help: "The new name.") var newName: String
@@ -515,7 +515,7 @@ struct GroupsRenameCommand: ParsableCommand {
     // Not "inert": in test mode the oracle REFUSES when the parameter is absent (security.py:86-99)
     // and we proceed. REJECTING it was the actual defect — the oracle takes this parameter on all
     // eleven write tools, so exit-64'ing narrowed the parameter domain.
-    @Option(name: .long, help: "Group assertion; accepted and echoed for MCP parity, not enforced.")
+    @Option(name: .long, help: "Group assertion; accepted and echoed in --dry-run previews, not enforced.")
     var group: String?
     func run() throws {
         try run(storeFactory: { ContactsStore() })
@@ -529,7 +529,7 @@ struct GroupsRenameCommand: ParsableCommand {
                 throw AppleError.validation("identifier must be a non-empty string")
             }
             if newName.trimmingCharacters(in: .whitespaces).isEmpty {
-                throw AppleError.validation("new_name must be a non-empty string")
+                throw AppleError.validation("the new group name must be a non-empty string")
             }
             let gate = try resolveWrite(global)
             // Result must STAY labeled — a sandbox rename to an unlabeled name would create
@@ -558,12 +558,12 @@ struct GroupsRenameCommand: ParsableCommand {
     }
 }
 
-// MARK: - groups delete → delete_group (env-gated, mirroring the MCP's require_test_mode_for)
+// MARK: - groups delete → delete_group (env-gated, mirroring the oracle's require_test_mode_for)
 
 struct GroupsDeleteCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "delete",
-        abstract: "Delete a group, members persist (requires APPLE_TEST_MODE=1, like the MCP). → delete_group")
+        abstract: "Delete a group, members persist (requires APPLE_TEST_MODE=1).")
     @OptionGroup var global: GlobalOptions
     @Argument(help: "The group's CN identifier.") var identifier: String
     // Accepted and echoed, NOT enforced — the divergence `contacts delete` states in full above;
@@ -574,7 +574,7 @@ struct GroupsDeleteCommand: ParsableCommand {
     // Not "inert": in test mode the oracle REFUSES when the parameter is absent (security.py:86-99)
     // and we proceed. REJECTING it was the actual defect — the oracle takes this parameter on all
     // eleven write tools, so exit-64'ing narrowed the parameter domain.
-    @Option(name: .long, help: "Group assertion; accepted and echoed for MCP parity, not enforced.")
+    @Option(name: .long, help: "Group assertion; accepted and echoed in --dry-run previews, not enforced.")
     var group: String?
     func run() throws {
         try run(storeFactory: { ContactsStore() })
@@ -594,12 +594,12 @@ struct GroupsDeleteCommand: ParsableCommand {
                 try emitContactsWrite(global, DryRunPreview(
                     operation: "delete_group", identifier: identifier, group_id: group,
                     gate_note: joinedGateNote([
-                        envGranted ? nil : contactsDeleteGateMessage("delete_group"),
+                        envGranted ? nil : contactsDeleteGateMessage("apple contacts groups delete"),
                         gate.sandboxActive ? sandboxTargetUncheckedNote("the target group") : nil,
                     ])), sandboxActive: gate.sandboxActive)
                 return
             }
-            guard envGranted else { throw AppleError.safetyViolation(contactsDeleteGateMessage("delete_group")) }
+            guard envGranted else { throw AppleError.safetyViolation(contactsDeleteGateMessage("apple contacts groups delete")) }
             let store = storeFactory()
             try store.requireAuthorization()
             if gate.sandboxActive { try store.requireLabeledGroupTarget(identifier, prefix: TestMode.sandboxPrefix) }
@@ -614,7 +614,7 @@ struct GroupsDeleteCommand: ParsableCommand {
 struct GroupsAddCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "add",
-        abstract: "Add a contact to a group, additive (EXECUTES; --dry-run previews). → add_contact_to_group")
+        abstract: "Add a contact to a group, additive (EXECUTES; --dry-run previews).")
     @OptionGroup var global: GlobalOptions
     @Argument(help: "The contact's CN identifier.") var contactId: String
     @Argument(help: "The group's CN identifier.") var groupId: String
@@ -656,7 +656,7 @@ struct GroupsAddCommand: ParsableCommand {
 struct GroupsRemoveCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "remove",
-        abstract: "Remove a contact from a group (EXECUTES; --dry-run previews). → remove_contact_from_group")
+        abstract: "Remove a contact from a group (EXECUTES; --dry-run previews).")
     @OptionGroup var global: GlobalOptions
     @Argument(help: "The contact's CN identifier.") var contactId: String
     @Argument(help: "The group's CN identifier.") var groupId: String
@@ -689,9 +689,9 @@ struct GroupsRemoveCommand: ParsableCommand {
 
 private func requireNonEmptyPair(_ contactId: String, _ groupId: String) throws {
     if contactId.trimmingCharacters(in: .whitespaces).isEmpty {
-        throw AppleError.validation("contact_identifier must be a non-empty string")
+        throw AppleError.validation("the contact id must be a non-empty string")
     }
     if groupId.trimmingCharacters(in: .whitespaces).isEmpty {
-        throw AppleError.validation("group_identifier must be a non-empty string")
+        throw AppleError.validation("the group id must be a non-empty string")
     }
 }

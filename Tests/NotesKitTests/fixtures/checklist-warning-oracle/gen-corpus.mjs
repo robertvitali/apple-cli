@@ -1,4 +1,4 @@
-// The oracle's three rules, verbatim from apple-notes-mcp's bundle (contentWarnings.ts).
+// The oracle's three rules, verbatim from the Notes oracle's bundle (contentWarnings.ts).
 const detect = (c) =>
   /<input\b[^>]*\btype\s*=\s*["']checkbox["']/i.test(c) ||
   /^[ \t]*[-*]\s+\[[ xX]\]/m.test(c) ||

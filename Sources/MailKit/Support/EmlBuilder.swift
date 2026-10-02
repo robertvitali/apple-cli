@@ -2,7 +2,7 @@ import Foundation
 
 /// Generates a multipart RFC-5322 / MIME `.eml` message. Used for reliable HTML sending +
 /// rich drafts: Mail.app renders `.eml` content correctly, whereas setting raw HTML through
-/// AppleScript stores literal markup (MCP B's documented workaround).
+/// AppleScript stores literal markup (oracle B's documented workaround).
 ///
 /// Pure string generation (no I/O, no Mail.app) — fully unit-testable. The caller writes the
 /// result to disk and/or opens it in Mail behind the `--execute`/test-mode guards.
@@ -119,8 +119,8 @@ public struct EmlBuilder {
         headers.append("MIME-Version: 1.0")
         // X-Unsent:1 marks the message as an editable OUTGOING draft, so opening the .eml in
         // Mail (`open`) yields a compose window / outgoing message the send path can then deliver,
-        // rather than a read-only received-message viewer. Matches the parity oracle
-        // (patrickfreyer apple-mail-mcp `create_rich_email_draft`, which always sets X-Unsent:1).
+        // rather than a read-only received-message viewer. Matches oracle B's parity behavior
+        // (`create_rich_email_draft`, which always sets X-Unsent:1).
         headers.append("X-Unsent: 1")
 
         let text = textBody ?? htmlBody.map { EmlBuilder.stripHTML($0) } ?? ""

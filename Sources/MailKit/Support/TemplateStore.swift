@@ -5,13 +5,13 @@ import AppleKit
 /// with `APPLE_MAIL_TEMPLATES_DIR`; operator ruling D40 moved both off the retired oracle's
 /// names). Both subject and body may contain `{placeholder}` tokens filled by `render`.
 ///
-/// ON-DISK FORMAT — byte-matched to MCP A's `save_template` OPERATION (apple-mail-mcp
-/// `server.py` + `templates.py`), so a template written by either tool is read by the other:
+/// ON-DISK FORMAT — byte-matched to oracle A's `save_template` OPERATION (its `server.py` +
+/// `templates.py`), so a template file copied between the two tools reads the same in each:
 ///   • With a subject: `subject: <s>\n\n<body>` — a lowercase `subject:` header line, a blank
 ///     separator line, then the body.
 ///   • Body-only (no subject): `\n<body>` — a LEADING blank line, then the body. The leading
-///     blank is REQUIRED: MCP A splits header-from-body on the first blank line and rejects a
-///     file that has none, so a body-only template still needs it to be readable by MCP A.
+///     blank is REQUIRED: oracle A splits header-from-body on the first blank line and rejects a
+///     file that has none, so a body-only template still needs it to be readable by oracle A.
 ///   • The body is normalized to end with a newline, and an empty/whitespace-only body is
 ///     REFUSED — both mirror the oracle's `save_template`, whose parser rejects a bodyless file.
 ///     `nil` vs `""` is the real subject distinction: an empty subject still writes the header.
@@ -93,8 +93,8 @@ public struct TemplateStore {
 
     public static func validateName(_ name: String) throws {
         // ASCII-only, matching the oracle's regex exactly. A Unicode-named template would be
-        // invisible to the oracle's `list_templates` and unreachable by its get/delete on the
-        // SHARED store, so accepting one here would create files MCP A can never address.
+        // invisible to the oracle's `list_templates` and unreachable by its get/delete, so
+        // accepting one here would create files oracle A could never address if copied to it.
         let ok = !name.isEmpty && name.count <= 64 && name.allSatisfy {
             ("a"..."z").contains($0) || ("A"..."Z").contains($0) || ("0"..."9").contains($0)
                 || $0 == "_" || $0 == "-"
@@ -145,7 +145,7 @@ public struct TemplateStore {
         try TemplateStore.validateName(name)
         // Mirror the oracle's `save_template` validation: an empty/whitespace-only body is
         // REFUSED, because the oracle's parser rejects such a file outright — writing one would
-        // poison the shared store with a template MCP A can never read back.
+        // create a template file oracle A could never read back.
         guard !body.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty else {
             throw AppleError.validation("template body must be a non-empty string.")
         }
@@ -345,7 +345,7 @@ public struct TemplateStore {
     }
 
     /// Render a template. `autoVars` (today, recipient_name/email, original_subject) are
-    /// merged UNDER `userVars` (user overrides win), matching MCP A's contract.
+    /// merged UNDER `userVars` (user overrides win), matching oracle A's contract.
     public func render(name: String, autoVars: [String: String], userVars: [String: String]) throws -> RenderResult {
         let tpl = try get(name)
         var vars = autoVars
@@ -364,7 +364,7 @@ public struct TemplateStore {
         return RenderResult(name: name, subject: subject, body: body, variables: vars, used_vars: vars)
     }
 
-    /// Today's date (YYYY-MM-DD) in the machine's LOCAL calendar — MCP A auto-fills `{today}`
+    /// Today's date (YYYY-MM-DD) in the machine's LOCAL calendar — oracle A auto-fills `{today}`
     /// from Python's `date.today()`, which is local, not UTC. This was UTC before, so every
     /// render made during the local-evening UTC-offset window substituted TOMORROW's date into
     /// outbound subject/body text (e.g. 20:00 in America/New_York is already the next UTC day).

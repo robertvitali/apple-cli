@@ -5,7 +5,7 @@ import AppleKit
 /// the four capabilities AppleScript cannot serve: `get-checklist` (gzip+protobuf done-state),
 /// `get-metadata` (scalar columns AppleScript never exposes), `sync-status` (WAL + pending
 /// count), and the checklist enrichment inside `get-markdown`. Ported from
-/// `apple-notes-mcp@2.5.12` (`checklistParser.ts`, `noteMetadata.ts`, `syncDetection.ts`),
+/// the Notes oracle @2.5.12 (`checklistParser.ts`, `noteMetadata.ts`, `syncDetection.ts`),
 /// using AppleKit's `SQLiteReader` (read-only, WAL-aware, snapshot-to-temp) instead of the
 /// reference's `sqlite3 -readonly` subprocess.
 public enum NotesStore {
@@ -87,16 +87,15 @@ public enum NotesStore {
         public let message: String?
     }
 
-    static let fdaGuideURL = "https://github.com/sweetrb/apple-notes-mcp/blob/main/docs/FULL-DISK-ACCESS.md"
     static var fdaChecklistMessage: String {
         "Full Disk Access is required to read checklist state. In System Settings > Privacy & "
             + "Security > Full Disk Access, grant access to your terminal, then fully quit and relaunch "
-            + "it. Setup guide: \(fdaGuideURL) — run the doctor tool to verify."
+            + "it. Run apple notes doctor to verify."
     }
     static var fdaMetadataMessage: String {
         "Full Disk Access is required to read note metadata. In System Settings > Privacy & "
             + "Security > Full Disk Access, grant access to your terminal, then fully quit and relaunch "
-            + "it. Setup guide: \(fdaGuideURL) — run the doctor tool to verify."
+            + "it. Run apple notes doctor to verify."
     }
 
     /// Read a note's checklist done-state from `ZICNOTEDATA.ZDATA` (gzipped protobuf).
@@ -217,8 +216,8 @@ public enum NotesStore {
     // MARK: - Note metadata (scalar columns; schema-guarded)
 
     /// (jsonKey, column, isBool) — the reference's COLUMN_MAP, ordered. `hasChecklist` etc.
-    /// map to camelCase in the MCP; apple-cli emits snake_case per docs/DESIGN.md, so the
-    /// keys here are the apple-cli wire keys (semantic 1:1 with the MCP fields).
+    /// map to camelCase in the oracle; apple-cli emits snake_case per docs/DESIGN.md, so the
+    /// keys here are the apple-cli wire keys (semantic 1:1 with the oracle fields).
     static let metadataColumns: [(key: String, column: String, isBool: Bool)] = [
         ("pinned", "ZISPINNED", true),
         ("has_checklist", "ZHASCHECKLIST", true),

@@ -1,6 +1,6 @@
 # apple reminders subtasks create
 
-Add a subtask (executes on call, like the MCP; --dry-run previews).
+Add a subtask (executes on call; --dry-run previews).
 
 ## Synopsis
 

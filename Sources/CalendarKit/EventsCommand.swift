@@ -8,7 +8,7 @@ import EventKit
 public struct EventsCommand: ParsableCommand {
     public static let configuration = CommandConfiguration(
         commandName: "events",
-        abstract: "Calendar events — read/create/update/delete (ports calendar_events).",
+        abstract: "Calendar events — read/create/update/delete.",
         subcommands: [EventsRead.self, EventsCreate.self, EventsUpdate.self, EventsDelete.self],
         defaultSubcommand: EventsRead.self
     )
@@ -50,7 +50,7 @@ public struct EventsRead: ParsableCommand {
                 return
             }
 
-            // Bare-date bounds floor to start-of-day (midnight), matching the MCP's date-only bounds.
+            // Bare-date bounds floor to start-of-day, like the oracle's date-only bounds.
             let window = ReadWindow.resolve(
                 start: try start.map { try DateArg.windowBound($0) },
                 end: try end.map { try DateArg.windowBound($0) })
@@ -109,7 +109,7 @@ public struct EventsRead: ParsableCommand {
 public struct EventsCreate: ParsableCommand {
     public static let configuration = CommandConfiguration(
         commandName: "create",
-        abstract: "Create an event (executes on call, like the MCP; --dry-run previews).")
+        abstract: "Create an event (executes on call; --dry-run previews).")
 
     @OptionGroup public var global: GlobalOptions
     @Option(name: .long, help: "Event title (required).") public var title: String
@@ -141,7 +141,7 @@ public struct EventsCreate: ParsableCommand {
             guard endParsed.date >= startParsed.date else {
                 throw AppleError.validation("end date must be on or after start date")
             }
-            // Match the MCP: is_all_day comes ONLY from the explicit flag (no inference).
+            // Match the oracle: is_all_day comes ONLY from the explicit flag (no inference).
             let isAllDay = allDay
             if let availability, EKEnum.availability(from: availability) == nil {
                 throw AppleError.validation("bad --availability '\(availability)' (busy|free|tentative|unavailable)")
@@ -208,7 +208,7 @@ public struct EventsCreate: ParsableCommand {
 public struct EventsUpdate: ParsableCommand {
     public static let configuration = CommandConfiguration(
         commandName: "update",
-        abstract: "Update an event (executes on call, like the MCP; --dry-run previews).")
+        abstract: "Update an event (executes on call; --dry-run previews).")
 
     @OptionGroup public var global: GlobalOptions
     @Option(name: .long, help: "Event identifier (required).") public var id: String
@@ -359,7 +359,7 @@ public struct EventsUpdate: ParsableCommand {
 public struct EventsDelete: ParsableCommand {
     public static let configuration = CommandConfiguration(
         commandName: "delete",
-        abstract: "Delete an event (executes on call, like the MCP; --dry-run previews).")
+        abstract: "Delete an event (executes on call; --dry-run previews).")
 
     @OptionGroup public var global: GlobalOptions
     @Option(name: .long, help: "Event identifier (required).") public var id: String
@@ -401,7 +401,7 @@ public struct EventsDelete: ParsableCommand {
 
     /// this|this-event → .thisEvent; future|future-events → .futureEvents; all → .futureEvents
     /// (EventKit has no "all" span; deleting with futureEvents from the series master removes the
-    /// whole series — the CLI's documented superset of the MCP's this/future).
+    /// whole series — the CLI's documented superset of the oracle's this/future).
     func resolveSpan() throws -> (EKSpan, String) {
         guard let span else { return (.thisEvent, "this-event") }
         switch span.lowercased() {

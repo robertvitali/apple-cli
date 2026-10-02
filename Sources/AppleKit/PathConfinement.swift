@@ -5,20 +5,20 @@ import Foundation
 /// through `confineWriteDestination` first.
 ///
 /// Promoted to `AppleKit` from its original Mail-only home so the Contacts `--out` writes (a CLI
-/// superset extra — the Contacts MCP returns the bytes in its response and never takes an output
+/// superset extra — the Contacts oracle returns the bytes in its response and never takes an output
 /// path) get the same guards; without them a `contacts photo … --out ~/.ssh/authorized_keys` would
 /// overwrite an SSH key with photo bytes, the exact hazard the Mail `save_email_attachment` fix
 /// closed (patrickfreyer manage.py:197-220 / analytics.py:428-443 refuse two path classes before
 /// touching the store: outside `$HOME`, and at/under a credential-config directory).
 ///
 /// NOT (yet) universal: **Notes `save-attachment`** deliberately uses its OWN guard
-/// (`NotesKit.AttachmentFS.assertSafeSavePath`), a verbatim port of `apple-notes-mcp@2.5.12`
-/// `attachmentFs.ts` that confines to home / temp / `/Volumes` but has NO credential-dir blocklist —
-/// so `notes save-attachment --path ~/.ssh/authorized_keys` is currently accepted, MATCHING that
-/// oracle. Routing it through `sensitiveWriteDir` would add the blocklist but NARROW the
-/// strict-superset (drop a write the Notes oracle permits), so it is a separate parity-vs-safety
-/// decision (HUMAN-DECISIONS.md D12) — not silently folded in here. Do not extend this doc's
-/// coverage claim to Notes until that lands.
+/// (`NotesKit.AttachmentFS.assertSafeSavePath`), a verbatim port of the Notes oracle's
+/// `attachmentFs.ts` (@2.5.12) that confines to home / temp / `/Volumes` but has NO credential-dir
+/// blocklist — so `notes save-attachment --path ~/.ssh/authorized_keys` is currently accepted,
+/// MATCHING that oracle. Routing it through `sensitiveWriteDir` would add the blocklist but NARROW
+/// the strict-superset (drop a write the Notes oracle permits), so it is a separate
+/// parity-vs-safety decision (HUMAN-DECISIONS.md D12) — not silently folded in here. Do not extend
+/// this doc's coverage claim to Notes until that lands.
 
 /// Directories whose contents are credentials/config and must never be a write destination,
 /// regardless of mode. Returns the matched sensitive dir (for the refusal message) or nil.

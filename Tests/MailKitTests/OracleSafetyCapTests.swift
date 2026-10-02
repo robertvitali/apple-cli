@@ -102,7 +102,7 @@ struct OracleSafetyCapTests {
     /// The two oracle ops refuse with DIFFERENT text — `mark_as_read` goes through
     /// `validate_bulk_operation` ("Too many items (N), maximum is M", security.py:111) while
     /// `delete_messages` uses its own inline string (server.py:1722). AGENTS.md prescribes
-    /// MCP-diff parity, which compares the error payload, so collapsing them into one message
+    /// oracle-diff parity, which compares the error payload, so collapsing them into one message
     /// would be a silent wire divergence.
     @Test("each capped verb reports the oracle's own refusal text, not a shared one")
     func perVerbRefusalText() {

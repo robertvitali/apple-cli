@@ -9,7 +9,7 @@ import CoreGraphics
 public struct ListsCommand: ParsableCommand {
     public static let configuration = CommandConfiguration(
         commandName: "lists",
-        abstract: "Reminder lists — read/create/update/delete + color (ports reminders_lists).",
+        abstract: "Reminder lists — read/create/update/delete + color.",
         subcommands: [ListsRead.self, ListsCreate.self, ListsUpdate.self, ListsDelete.self],
         defaultSubcommand: ListsRead.self
     )
@@ -46,7 +46,7 @@ public struct ListsRead: ParsableCommand {
 public struct ListsCreate: ParsableCommand {
     public static let configuration = CommandConfiguration(
         commandName: "create",
-        abstract: "Create a reminder list (executes on call, like the MCP; --dry-run previews).")
+        abstract: "Create a reminder list (executes on call; --dry-run previews).")
 
     @OptionGroup public var global: GlobalOptions
     @Option(name: .long, help: "List name (required).") public var name: String
@@ -94,7 +94,7 @@ public struct ListsCreate: ParsableCommand {
 public struct ListsUpdate: ParsableCommand {
     public static let configuration = CommandConfiguration(
         commandName: "update",
-        abstract: "Rename/recolor a reminder list (executes on call, like the MCP; --dry-run previews).")
+        abstract: "Rename/recolor a reminder list (executes on call; --dry-run previews).")
 
     @OptionGroup public var global: GlobalOptions
     @Option(name: .long, help: "Current list name (required).") public var name: String
@@ -157,7 +157,7 @@ public struct ListsUpdate: ParsableCommand {
 public struct ListsDelete: ParsableCommand {
     public static let configuration = CommandConfiguration(
         commandName: "delete",
-        abstract: "Delete a reminder list AND its items (executes on call, like the MCP; --dry-run previews).")
+        abstract: "Delete a reminder list AND its items (executes on call; --dry-run previews).")
 
     @OptionGroup public var global: GlobalOptions
     @Option(name: .long, help: "List name (required).") public var name: String

@@ -4,7 +4,7 @@ title: Reminders
 
 # apple reminders
 
-Reminders — tasks/lists/subtasks (EventKit; ports apple-events reminders half).
+Reminders — tasks/lists/subtasks (EventKit).
 
 ## Synopsis
 
@@ -15,9 +15,9 @@ apple reminders
 ## Subcommands
 
 - [`doctor`](./doctor.md) — Report EventKit (Reminders/Calendar) authorization + Full Disk Access.
-- [`lists`](./lists/index.md) — Reminder lists — read/create/update/delete + color (ports reminders_lists).
-- [`subtasks`](./subtasks/index.md) — Reminder subtasks — read/create/update/delete/toggle/reorder (ports reminders_subtasks).
-- [`tasks`](./tasks/index.md) — Reminder tasks — read/create/update/delete (ports reminders_tasks).
+- [`lists`](./lists/index.md) — Reminder lists — read/create/update/delete + color.
+- [`subtasks`](./subtasks/index.md) — Reminder subtasks — read/create/update/delete/toggle/reorder.
+- [`tasks`](./tasks/index.md) — Reminder tasks — read/create/update/delete.
 
 ## Inherited options
 

@@ -3,7 +3,7 @@ import Foundation
 @testable import ContactsKit
 import AppleKit
 
-// Logic-tier tests for the pure helpers ported from apple-contacts-mcp utils.py /
+// Logic-tier tests for the pure helpers ported from the Contacts oracle's utils.py /
 // security.py. No Contacts TCC required (swift-testing, runnable in CI).
 
 @Suite("Label translation (label_to_apple_token)")
@@ -79,12 +79,12 @@ struct AppleScriptHelperTests {
 
 @Suite("Domain error mapping")
 struct ErrorMappingTests {
-    @Test("safety_violation carries the MCP error.type + exit 77") func safety() {
+    @Test("safety_violation carries the Contacts oracle's error.type + exit 77") func safety() {
         let e = AppleError.safetyViolation("nope")
         #expect(e.type == "safety_violation")
         #expect(e.exitCode == AppleExit.permissionDenied) // 77
     }
-    @Test("validation / not_found map to MCP types + exit codes") func others() {
+    @Test("validation / not_found map to Contacts oracle types + exit codes") func others() {
         #expect(AppleError.validation("x").type == "validation_error")
         #expect(AppleError.validation("x").exitCode == 64)
         #expect(AppleError.notFound("x").type == "not_found")

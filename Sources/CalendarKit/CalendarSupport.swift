@@ -3,21 +3,21 @@ import AppleKit
 import EventKitCore
 
 // Shared helpers for the Calendar command surface: CLI-native parsers for alarms / recurrence
-// (a friendlier superset of the MCP's JSON-blob inputs — every MCP parameter is expressible),
-// the read-window default that mirrors the apple-events MCP (today … today+14d), timezone
-// detection, structured-location + URL validation, the phase write-guard, and the Encodable
-// output DTOs. Kept pure + unit-testable (no EKEventStore).
+// (a friendlier superset of the oracle's JSON-blob inputs — every oracle parameter is
+// expressible), the read-window default that mirrors the EventKit oracle (today … today+14d),
+// timezone detection, structured-location + URL validation, the phase write-guard, and the
+// Encodable output DTOs. Kept pure + unit-testable (no EKEventStore).
 
 // MARK: - Date argument parsing
 // `DateArg` (ParseError → AppleError.validation/64) moved to EventKitCore so CalendarKit and
 // RemindersKit share one mapping instead of drifting apart.
 
-// MARK: - Timezone detection (parity: MCP sets event.timeZone from the input's offset)
+// MARK: - Timezone detection (parity: the oracle sets event.timeZone from the input's offset)
 
 public enum TZDetect {
     /// Detect an explicit timezone in a timed date string (trailing `Z`, or `±HH:MM`/`±HHMM`/
     /// `±HH`). Returns nil for a no-offset (local) input — the caller uses `TimeZone.current`,
-    /// exactly as the MCP does. A bare date's trailing `-15` (a day) is NOT read as an offset:
+    /// exactly as the oracle does. A bare date's trailing `-15` (a day) is NOT read as an offset:
     /// detection only runs on strings that carry a time component.
     public static func from(_ raw: String) -> TimeZone? {
         let s = raw.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -86,9 +86,9 @@ public enum URLArg {
 
 public enum StructuredLocationArg {
     /// Build a `StructuredLocation` from the `--geo-*` flags. A title-only location (no coords)
-    /// is VALID and matches the MCP (its `structuredLocation` requires only `title`). When either
-    /// coordinate is given, BOTH are required and are range-checked. Returns nil when no geo flag
-    /// was supplied.
+    /// is VALID and matches the oracle (its `structuredLocation` requires only `title`). When
+    /// either coordinate is given, BOTH are required and are range-checked. Returns nil when no geo
+    /// flag was supplied.
     public static func parse(lat: Double?, lon: Double?, radius: Double?, title: String?) throws -> StructuredLocation? {
         if lat == nil && lon == nil && radius == nil && title == nil { return nil }
         if lat != nil || lon != nil {
@@ -121,7 +121,7 @@ public enum StructuredLocationArg {
 public enum ReadWindow {
     public static let defaultDays = 14
 
-    /// Resolve the [start, end] event query window from optional bounds, matching the MCP's
+    /// Resolve the [start, end] event query window from optional bounds, matching the oracle's
     /// `resolveReadDateRange`: neither → [startOfToday, +14d]; start only → [start, start+14d];
     /// end only → [end-14d, end]; both → as given. `now`/`calendar` injectable for tests.
     public static func resolve(
@@ -147,7 +147,7 @@ public enum ReadWindow {
 public enum AlarmSpec {
     /// Parse one `--alarm` spec into an `Alarm` model:
     ///   relative  : `15m`, `2h`, `1d` (unit form, unsigned ⇒ BEFORE start); `+30m` after;
-    ///               a bare number is raw seconds with the MCP's `relativeOffset` sign
+    ///               a bare number is raw seconds with the oracle's `relativeOffset` sign
     ///               (`900` = +900 = after; `-900` = before).
     ///   geofence  : `geo:<lat>,<lon>[,<radius>][,enter|leave][,<title>]`
     ///   absolute  : any date string DateParsing accepts (e.g. `2026-07-15T09:00:00`)
@@ -176,8 +176,8 @@ public enum AlarmSpec {
     }
 
     /// Unit form (`15m`/`2h`/`1d`): unsigned ⇒ BEFORE (negative), `+`/`-` honored. Bare number:
-    /// raw seconds carrying its own sign (`900` = +900, matching MCP `relativeOffset`). nil if
-    /// not a relative form.
+    /// raw seconds carrying its own sign (`900` = +900, matching the oracle's `relativeOffset`).
+    /// nil if not a relative form.
     static func parseRelativeOffset(_ s: String) -> Double? {
         var body = Substring(s)
         var explicitSign = false
@@ -246,7 +246,7 @@ public enum RecurrenceSpec {
             endDate = try DateArg.date(until)
         }
         // RFC-5545 forbids COUNT and UNTIL together; if both are given, endDate wins — matching
-        // the MCP (its recurrenceRuleFromJSON checks endDate first). EventKitCore's ekRule would
+        // the oracle (its recurrenceRuleFromJSON checks endDate first). EventKitCore's ekRule would
         // otherwise let count win, so normalize here rather than diverge from the oracle.
         if endDate != nil { count = nil }
         return RecurrenceRule(
@@ -274,7 +274,7 @@ public enum RecurrenceSpec {
 
 // MARK: - Output DTOs (the calendar wire shapes)
 
-/// `events read` (no id): calendars + events, mirroring the MCP's EventsReadResult.
+/// `events read` (no id): calendars + events, mirroring the oracle's EventsReadResult.
 public struct EventsReadData: Encodable {
     public let calendars: [CalendarCollection]
     public let events: [CalendarEvent]
@@ -394,11 +394,11 @@ public enum CalendarWriteGuard {
     }
 
     /// Resolve a calendar write under write-model v2: **it executes by default**, exactly as
-    /// calling the equivalent `mcp-server-apple-events` `calendar_events` action does. `--dry-run`
+    /// calling the equivalent EventKit oracle's `calendar_events` action does. `--dry-run`
     /// previews; `APPLE_DRY_RUN` truthy restores dry-run-by-default; `--test-mode` or
     /// `APPLE_TEST_MODE` truthy engages the opt-in sandbox.
     ///
-    /// ORACLE EVIDENCE (`mcp-server-apple-events@1.4.0`, re-derived from BOTH `src/` and `dist/`,
+    /// ORACLE EVIDENCE (the EventKit oracle @1.4.0, re-derived from BOTH `src/` and `dist/`,
     /// each verified non-empty first): the only runtime `process.env` reads in non-test sources are
     /// `NODE_ENV`, `DEBUG` and `SWIFT_BINARY_HASH` (`utils/errorHandling.ts`, `utils/projectUtils.ts`,
     /// `utils/binaryValidator.ts`) — none is a write gate, so there is NO env-keyed oracle gate to

@@ -15,11 +15,11 @@ apple mail thread [<id>] [flags]
 - `--account` `<account>`
   <br>Account name or UUID (for subject-based lookup).
 - `--limit` `<limit>`
-  <br>Max messages. Default: by id, the COMPLETE thread (oracle A get_thread is uncapped); by --subject, 50 (oracle B max_messages). 0 = the complete thread.
+  <br>Max messages. Default: by id, the COMPLETE thread (uncapped); by --subject, 50. 0 = the complete thread.
 - `--mailbox` `<mailbox>`
   <br>Mailbox for subject-based lookup (default All).
 - `--references`
-  <br>Thread by RFC References/In-Reply-To headers (MCP A get_thread) instead of Apple's conversation grouping.
+  <br>Thread by RFC References/In-Reply-To headers instead of Apple's conversation grouping.
 - `--subject` `<subject>`
   <br>Subject keyword identifying the thread.
 

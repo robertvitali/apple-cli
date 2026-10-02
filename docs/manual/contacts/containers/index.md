@@ -10,7 +10,7 @@ apple contacts containers
 
 ## Subcommands
 
-- [`list`](./list.md) — List all contact containers (accounts). → list_containers
+- [`list`](./list.md) — List all contact containers (accounts).
 
 ## Inherited options
 

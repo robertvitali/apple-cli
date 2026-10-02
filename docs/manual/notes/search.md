@@ -19,13 +19,13 @@ Searches note titles, or note bodies instead of titles with `--content`, across 
 - `--account` `<account>`
   <br>Account to search.
 - `--all`
-  <br>Return every match, no limit. CLI-only superset — the MCP always caps.
+  <br>Return every match, no limit; overrides the default cap.
 - `--content`
   <br>Search note bodies instead of titles.
 - `--folder` `<folder>`
   <br>Limit search to a folder.
 - `--limit` `<limit>`
-  <br>Max results (default 50, like the MCP).
+  <br>Max results (default 50).
 - `--modified-since` `<modified-since>`
   <br>ISO-8601 date filter.
 

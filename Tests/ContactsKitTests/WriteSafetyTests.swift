@@ -152,13 +152,14 @@ struct ContactsWriteModelV2Tests {
     func deleteGateIsEnvKeyed() {
         // `contactsDeleteEnvGranted` takes only an environment-variable NAME, so a --test-mode
         // flag is structurally incapable of satisfying it; with APPLE_TEST_MODE pinned absent it
-        // is false. This mirrors apple-contacts-mcp's require_test_mode_for/CONTACTS_TEST_MODE,
+        // is false. This mirrors the Contacts oracle's require_test_mode_for/CONTACTS_TEST_MODE,
         // which the oracle likewise reserves to the environment. The read is pinned rather than
         // live: an operator (or a concurrent suite) with APPLE_TEST_MODE set would otherwise flip
         // this assertion and it would read as a product regression.
         withPinnedWriteEnv { #expect(contactsDeleteEnvGranted() == false) }
-        let msg = contactsDeleteGateMessage("delete_contact")
-        #expect(msg.contains("delete_contact"))
+        let msg = contactsDeleteGateMessage("apple contacts delete")
+        #expect(msg.contains("apple contacts delete"))
+        #expect(!msg.contains("delete_contact"))
         #expect(msg.contains("APPLE_TEST_MODE=1"))
         #expect(msg.contains("FLAG deliberately does NOT satisfy"))
     }

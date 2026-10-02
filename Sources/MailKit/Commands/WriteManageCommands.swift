@@ -30,14 +30,14 @@ func joinNotes(_ parts: String?...) -> String? {
     return xs.isEmpty ? nil : xs.joined(separator: " | ")
 }
 
-/// Filter selector for bulk ops (MCP B move/update/trash filter model).
+/// Filter selector for bulk ops (oracle B move/update/trash filter model).
 struct MatchOptions: ParsableArguments {
-    @Option(name: .long, help: "Match subject keyword (repeatable — matches ANY, MCP B subject_keywords).") var matchSubject: [String] = []
+    @Option(name: .long, help: "Match subject keyword (repeatable — matches ANY).") var matchSubject: [String] = []
     @Option(name: .long, help: "Match sender substring.") var matchSender: String?
     @Option(name: .long, help: "Only messages older than N days.") var olderThanDays: Int?
     @Flag(name: .long, help: "Only already-read messages.") var onlyRead = false
-    @Flag(name: .long, help: "Operate on the WHOLE mailbox with no subject/sender filter required (MCP B apply_to_all); if a --match filter is also given, that filter still narrows the set. Bounded by --max. MUTATES REAL MAIL when unsandboxed — preview with --dry-run first. Inside the sandbox it stays per-message label-gated: a batch containing any unlabeled real message aborts before mutating anything.") var all = false
-    @Option(name: .long, help: "Max messages to affect (safety cap). Per-op defaults mirror MCP B: move 50 (max_moves), mark/flag 10 (max_updates), delete 5 (max_deletes).") var max: Int?
+    @Flag(name: .long, help: "Operate on the WHOLE mailbox with no subject/sender filter required; if a --match filter is also given, that filter still narrows the set. Bounded by --max. MUTATES REAL MAIL when unsandboxed — preview with --dry-run first. Inside the sandbox it stays per-message label-gated: a batch containing any unlabeled real message aborts before mutating anything.") var all = false
+    @Option(name: .long, help: "Max messages to affect (safety cap). Per-op defaults: move 50, mark/flag 10, delete 5.") var max: Int?
     // Count only NON-BLANK keywords: a lone `--match-subject ""` is not an active filter (buildFilter
     // drops empty keywords), so it must not silently mean "whole mailbox" — that intent needs --all.
     var isActive: Bool {
@@ -75,7 +75,7 @@ let bulkOperationCap = 100
 ///
 /// The per-verb wording is the oracle's own, and it differs by op: `mark_as_read` refuses through
 /// `validate_bulk_operation` ("Too many items (N), maximum is M", security.py:111) while
-/// `delete_messages` uses its own inline string (server.py:1722). MCP-diff parity compares error
+/// `delete_messages` uses its own inline string (server.py:1722). Oracle-diff parity compares error
 /// text, so the two are not unified here.
 func enforceBulkCap(_ ids: [String], verb: String) throws {
     guard ids.count > bulkOperationCap else { return }
@@ -143,7 +143,7 @@ func resolveTargets(ctx: MailContext, ids: [String], match: MatchOptions, accoun
             out.append(m)
         }
         let note = outOfScope.isEmpty ? nil
-            : "\(outOfScope.count) id(s) outside the --account/mailbox scope (or with an unresolvable account) were skipped, not mutated (oracle A's scoped-loop semantics): \(outOfScope.joined(separator: ", "))"
+            : "\(outOfScope.count) id(s) outside the --account/mailbox scope (or with an unresolvable account) were skipped, not mutated: \(outOfScope.joined(separator: ", "))"
         return (out, false, note)
     }
     guard match.isActive else { throw AppleError.validation("provide message ids, a --match filter, or --all.") }
@@ -153,13 +153,13 @@ func resolveTargets(ctx: MailContext, ids: [String], match: MatchOptions, accoun
     // EXPLICIT, and load-bearing: bulk mutation scope keeps the INCLUSIVE meaning of "All".
     // `delete --permanent` resolves its mailbox to "All" and its targets are BY DEFINITION in
     // Trash, so excluding system folders here would silently make it match nothing. `search`
-    // defaults to EXCLUDING them for MCP B parity, so the two surfaces genuinely differ — the
+    // defaults to EXCLUDING them for oracle B parity, so the two surfaces genuinely differ — the
     // BulkPreview note below discloses that, because `search` is what an operator previews a
     // mutation with. Relying on the struct's default here would make a future default flip
     // silently break the irreversible path.
     f.includeSystemFolders = true
     // --all leaves subject/sender unset → the query returns every message in the mailbox (bounded
-    // by --max). subject keywords match ANY (MCP B subject_keywords OR-semantics).
+    // by --max). subject keywords match ANY (oracle B subject_keywords OR-semantics).
     f.subjectContainsAny = match.matchSubject
     f.senderContains = match.matchSender
     // Oracle B seeds the ACTION-INVERSE predicate before subject/sender (manage.py:419-427:
@@ -180,7 +180,7 @@ func resolveTargets(ctx: MailContext, ids: [String], match: MatchOptions, accoun
 /// Scope warning for a FILTER-BASED bulk mutation. Two cases warrant one:
 ///
 /// 1. Scope "All" means something WIDER here than what `search --mailbox All` shows. `search`
-///    excludes MCP B's SKIP_FOLDERS by default; bulk mutation deliberately does not
+///    excludes oracle B's SKIP_FOLDERS by default; bulk mutation deliberately does not
 ///    (`delete --permanent` must reach Trash). An operator who previews with `search` and then
 ///    runs the mutation would otherwise be surprised by the extra targets — on this store the
 ///    two differ by ~1.6k messages.
@@ -588,8 +588,8 @@ struct TrashEmpty: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "empty", abstract: "Empty an account's Trash (IRREVERSIBLE; dry-run by default; operator-gated — see --confirm).")
     @OptionGroup var global: GlobalOptions
     @Option(name: .long) var account: String
-    @Flag(name: .long, help: "Required confirmation for the destructive empty (oracle `confirm_empty`).") var confirm = false
-    @Option(name: .long, help: "Safety cap on how many messages to erase (oracle `max_deletes`).") var max: Int = 5
+    @Flag(name: .long, help: "Required confirmation for the destructive empty.") var confirm = false
+    @Option(name: .long, help: "Safety cap on how many messages to erase.") var max: Int = 5
     @Option(name: .long, help: "Which trash mailbox to empty (required when the account has more than one non-empty).") var trashMailbox: String?
 
     /// The operator-only trigger. Unlike every other write in this tool, emptying the Trash CANNOT
@@ -708,7 +708,7 @@ struct AttachmentsSave: ParsableCommand {
     @Option(name: .long, help: "Exact destination file path — rename-on-save; requires exactly one selected attachment (mutually exclusive with --dir).") var out: String?
     @Option(name: .long, help: "0-based attachment indices to save (comma-separated); default all. Mutually exclusive with --name.") var indices: String?
     @Option(name: .long, help: "Save only the attachment with this name. Mutually exclusive with --indices.") var name: String?
-    @Flag(name: .long, help: "Allow a destination outside $HOME (e.g. /tmp, /Volumes/...). Oracle A's save_attachments has no confinement, so this restores that reach. Credential directories (~/.ssh, ~/.aws, ...) stay blocked either way.") var allowOutsideHome = false
+    @Flag(name: .long, help: "Allow a destination outside $HOME (e.g. /tmp, /Volumes/...). Credential directories (~/.ssh, ~/.aws, ...) stay blocked either way.") var allowOutsideHome = false
 
     // `out_path` / `saved_paths` / `not_saved` (added MINOR). `directory`/`out_path` are the
     // normalized destination(s) — IDENTICAL in the dry-run preview and the --execute envelope, so
@@ -759,7 +759,7 @@ struct AttachmentsSave: ParsableCommand {
             throw AppleError.upstream(
                 "cannot save attachments of message '\(rowid)': "
                 + "\(failure ?? "live enumeration unavailable") — refusing to save by "
-                + "index-order positions (they routinely differ from Mail's own order — extra32).")
+                + "index-order positions (they routinely differ from Mail's own order).")
         }
     }
 
@@ -1069,9 +1069,9 @@ struct AttachmentsSave: ParsableCommand {
                     pairs.append((index: idx, destPath: destPath))
                 }
             } else if let absOut, let idx = wanted.first {
-                // --out (single exact path, MCP B style, rename-on-save): the operator-chosen path
-                // when it already resolves to a directory (can't save a file's bytes onto a dir).
-                // is-a-directory already validated above the dry-run guard. The shared final
+                // --out (single exact path, oracle B style, rename-on-save): the operator-chosen
+                // path when it already resolves to a directory (can't save a file's bytes onto a
+                // dir). is-a-directory already validated above the dry-run guard. The shared final
                 // validation repeats the raw-path check immediately before Mail.app saves.
                 pairs.append((index: idx, destPath: absOut))
             }

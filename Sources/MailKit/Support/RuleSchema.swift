@@ -1,14 +1,14 @@
 import Foundation
 import AppleKit
 
-/// Mail rule condition/action schema (MCP A `create_rule`/`update_rule`). Parsing +
+/// Mail rule condition/action schema (oracle A `create_rule`/`update_rule`). Parsing +
 /// validation are pure so they're unit-testable without Mail.app. The AppleScript that
 /// actually creates/updates rules is gated behind `--execute` and not run in tests.
 public enum RuleSchema {
 
     public static let conditionFields = ["from", "to", "subject", "body", "any_recipient", "header_name"]
     public static let conditionOperators = ["contains", "does_not_contain", "begins_with", "ends_with", "equals"]
-    /// Action verbs MCP A's update_rule REFUSES to touch (outside the supported schema).
+    /// Action verbs oracle A's update_rule REFUSES to touch (outside the supported schema).
     public static let unsupportedActionVerbs = ["run_applescript", "redirect", "reply", "play_sound", "highlight_color", "set_color"]
 
     public struct Condition: Encodable, Equatable {

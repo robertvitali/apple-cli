@@ -1,6 +1,6 @@
 # apple contacts create
 
-Create a contact (EXECUTES by default; --dry-run previews). → create_contact
+Create a contact (EXECUTES by default; --dry-run previews).
 
 ## Synopsis
 

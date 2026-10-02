@@ -125,7 +125,7 @@ func requireISODate(_ iso: String, name: String, endOfDay: Bool = false) throws 
 
 // MARK: Attachment save selection (pure, testable — see Tests/MailKitTests/AttachmentSelectionTests.swift)
 //
-// `attachments save` selects POSITIONALLY (matches MCP A's own `items {i} of mail attachments of
+// `attachments save` selects POSITIONALLY (matches oracle A's own `items {i} of mail attachments of
 // msg`), never by name — a message with two identically-named attachments must not let an
 // `--indices 0` request silently also grab index 2 (or a --name request silently save both when
 // only one was meant). Index resolution, the --dir/--out mode choice, and de-collision of
@@ -153,7 +153,7 @@ func requireDirXorOut(dir: String?, out: String?) throws {
 }
 
 /// When --out is given, the selection MUST resolve to exactly one attachment — an exact
-/// destination path is a rename of ONE file (MCP B `save_email_attachment`), not a fan-out.
+/// destination path is a rename of ONE file (oracle B `save_email_attachment`), not a fan-out.
 func requireSingleForOut(out: String?, selectedCount: Int) throws {
     guard out != nil else { return }
     guard selectedCount == 1 else {

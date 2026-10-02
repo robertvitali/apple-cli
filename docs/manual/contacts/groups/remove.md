@@ -1,6 +1,6 @@
 # apple contacts groups remove
 
-Remove a contact from a group (EXECUTES; --dry-run previews). → remove_contact_from_group
+Remove a contact from a group (EXECUTES; --dry-run previews).
 
 ## Synopsis
 

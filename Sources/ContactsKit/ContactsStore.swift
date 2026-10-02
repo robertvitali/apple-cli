@@ -4,14 +4,14 @@ import AppleKit
 
 // Contacts engine — the shipping mechanism for every operation except the two
 // entitlement-gated ones (contact NOTES and group REMOVE-member), which fall back to
-// AppleScript exactly as apple-contacts-mcp @ 1cd8789 (v0.3.0) does. Mirrors
+// AppleScript exactly as the Contacts oracle @ 1cd8789 (v0.3.0) does. Mirrors
 // contacts_connector.py + the server-layer error dispatch. Every framework call goes
 // through a `ContactsStoreBackend`; in production that is always the file-private
 // `LiveContactsStoreBackend`, which owns the one `CNContactStore` + `AppleScriptRunner`.
 //
 // SECURITY: the AppleScript fallbacks bind user/CN data via osascript ARGV
 // (`on run argv`), never string-interpolated into the script source — strictly safer
-// than the MCP (which interpolates an escaped id). Injection is RCE-class; argv closes it.
+// than the oracle (which interpolates an escaped id). Injection is RCE-class; argv closes it.
 
 /// Photo read result: nil ⇒ contact not found; else availability + raw bytes.
 struct PhotoData {
@@ -111,7 +111,7 @@ public final class ContactsStore {
     // MARK: - Authorization
 
     /// TCC status string, mapped from the CNAuthorizationStatus raw value exactly as
-    /// the MCP's `_CN_AUTHORIZATION_STATUS` (0..4). Switching on rawValue avoids SDK
+    /// the oracle's `_CN_AUTHORIZATION_STATUS` (0..4). Switching on rawValue avoids SDK
     /// enum-case availability differences for `.limited`.
     public func authorizationStatus() -> String {
         switch backend.authorizationStatusRawValue {
@@ -356,7 +356,7 @@ public final class ContactsStore {
         do {
             groups = try backend.groups(matching: nil)
         } catch {
-            throw AppleError.unknown("list_groups failed: \(error.localizedDescription)")
+            throw AppleError.unknown("listing groups failed: \(error.localizedDescription)")
         }
         return groups.map { g in
             Group(id: g.identifier, name: g.name, container_id: resolveContainerId(forGroup: g.identifier))
@@ -369,7 +369,7 @@ public final class ContactsStore {
         do {
             results = try backend.unifiedContacts(matching: pred, keysToFetch: Self.summaryKeys)
         } catch {
-            throw AppleError.unknown("get_contacts_in_group failed: \(error.localizedDescription)")
+            throw AppleError.unknown("listing group members failed: \(error.localizedDescription)")
         }
         return results.prefix(limit).map(serializeSummary)
     }
@@ -379,7 +379,7 @@ public final class ContactsStore {
         do {
             containers = try backend.containers(matching: nil)
         } catch {
-            throw AppleError.unknown("list_containers failed: \(error.localizedDescription)")
+            throw AppleError.unknown("listing containers failed: \(error.localizedDescription)")
         }
         let defaultId = backend.defaultContainerIdentifier()
         return containers.map { c in
@@ -449,7 +449,7 @@ public final class ContactsStore {
             return try backend.runScript(script, arguments: [identifier])
         } catch let e as AppleScriptRunner.RunError {
             throw Self.mapAppleScriptError(e, notFoundMessage: "Contact not found: '\(identifier)'",
-                                           genericPrefix: "read_note failed")
+                                           genericPrefix: "reading the note failed")
         }
     }
 
@@ -469,7 +469,7 @@ public final class ContactsStore {
             _ = try backend.runScript(script, arguments: [identifier, note])
         } catch let e as AppleScriptRunner.RunError {
             throw Self.mapAppleScriptError(e, notFoundMessage: "Contact not found: '\(identifier)'",
-                                           genericPrefix: "write_note failed")
+                                           genericPrefix: "writing the note failed")
         }
     }
 
@@ -563,7 +563,7 @@ public final class ContactsStore {
         do {
             try backend.execute(save)
         } catch {
-            throw AppleError.unknown("import_vcard failed: \(error.localizedDescription)")
+            throw AppleError.unknown("importing the vCard failed: \(error.localizedDescription)")
         }
         return mutables.map { $0.identifier }
     }
@@ -575,12 +575,12 @@ public final class ContactsStore {
         do {
             try backend.execute(save)
         } catch {
-            throw AppleError.unknown("add_contact_to_group failed: \(error.localizedDescription)")
+            throw AppleError.unknown("adding the contact to the group failed: \(error.localizedDescription)")
         }
     }
 
     /// Remove-member via AppleScript — `CNSaveRequest.removeMember(_:from:)` silently
-    /// no-ops (empirically verified by the MCP); `remove p from g` + `save` persists.
+    /// no-ops (empirically verified by the oracle); `remove p from g` + `save` persists.
     public func removeContactFromGroup(contactIdentifier: String, groupIdentifier: String) throws {
         _ = try loadContactAndGroup(contactIdentifier, groupIdentifier) // preflight → clean not_found
         let script = """
@@ -601,7 +601,7 @@ public final class ContactsStore {
             throw Self.mapAppleScriptError(
                 e,
                 notFoundMessage: "Contact or group not found (contact='\(contactIdentifier)', group='\(groupIdentifier)')",
-                genericPrefix: "remove_contact_from_group failed")
+                genericPrefix: "removing the contact from the group failed")
         }
     }
 
@@ -629,7 +629,7 @@ public final class ContactsStore {
         do {
             try backend.execute(save)
         } catch {
-            throw AppleError.unknown("write_photo failed: \(error.localizedDescription)")
+            throw AppleError.unknown("updating the photo failed: \(error.localizedDescription)")
         }
         return identifier
     }
@@ -642,7 +642,7 @@ public final class ContactsStore {
         do {
             try backend.execute(save)
         } catch {
-            throw AppleError.unknown("create_group failed: \(error.localizedDescription)")
+            throw AppleError.unknown("creating the group failed: \(error.localizedDescription)")
         }
         return Group(id: mutable.identifier, name: mutable.name,
                      container_id: resolveContainerId(forGroup: mutable.identifier))
@@ -658,7 +658,7 @@ public final class ContactsStore {
         do {
             try backend.execute(save)
         } catch {
-            throw AppleError.unknown("rename_group failed: \(error.localizedDescription)")
+            throw AppleError.unknown("renaming the group failed: \(error.localizedDescription)")
         }
         return Group(id: identifier, name: mutable.name, container_id: resolveContainerId(forGroup: identifier))
     }
@@ -672,7 +672,7 @@ public final class ContactsStore {
         do {
             try backend.execute(save)
         } catch {
-            throw AppleError.unknown("delete_group failed: \(error.localizedDescription)")
+            throw AppleError.unknown("deleting the group failed: \(error.localizedDescription)")
         }
         return identifier
     }
@@ -687,7 +687,7 @@ public final class ContactsStore {
         }
         // Stable, locale-independent classification. Raw osascript stderr is kept OUT of the
         // JSON envelope (it is unstable/locale-variable, and AppleScriptRunner deliberately
-        // keeps it off `.description`). `error.type` stays `unknown` to match the MCP oracle
+        // keeps it off `.description`). `error.type` stays `unknown` to match the oracle
         // (generic AppleScript failures surface as `unknown` there). The common real causes are
         // named so the message is actionable without leaking raw stderr.
         return AppleError.unknown(

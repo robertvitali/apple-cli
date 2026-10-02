@@ -1,6 +1,6 @@
 # apple contacts note set
 
-Write/replace a contact's note, --clear empties it (EXECUTES; --dry-run previews). → write_note
+Write/replace a contact's note, --clear empties it (EXECUTES; --dry-run previews).
 
 ## Synopsis
 
@@ -17,7 +17,7 @@ apple contacts note set <identifier> [flags]
 - `--file` `<file>`
   <br>Read the note text from this file.
 - `--group` `<group>`
-  <br>Group assertion; accepted and echoed for MCP parity, not enforced.
+  <br>Group assertion; accepted and echoed in --dry-run previews, not enforced.
 - `--note` `<note>`
   <br>The note text.
 

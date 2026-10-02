@@ -1,6 +1,6 @@
 # apple reminders tasks update
 
-Update a reminder (executes on call, like the MCP; --dry-run previews).
+Update a reminder (executes on call; --dry-run previews).
 
 ## Synopsis
 

@@ -662,11 +662,11 @@ struct MailComposeCommandInjectionTests {
     }
 
     private static let sendWarning =
-        "warning: send rate-limit state is unwritable — the oracle's 3-sends/60s cap "
+        "warning: send rate-limit state is unwritable — the 3-sends-per-60-seconds cap "
         + "is NOT being enforced for this call (failing open).\n"
     private static let replyWarning =
-        "warning: reply rate-limit state is unwritable — the oracle's 20-replies/60s "
-        + "(expensive_ops) cap is NOT being enforced for this call (failing open).\n"
+        "warning: reply rate-limit state is unwritable — the 20-replies-per-60-seconds "
+        + "cap is NOT being enforced for this call (failing open).\n"
 
     /// The LaunchServices half of the Mail.app boundary, fail-closed. `openEml` does not route
     /// through the AppleScript runner, so a fake runner alone leaves the real
@@ -845,7 +845,7 @@ struct MailComposeCommandInjectionTests {
         #expect(error["type"] as? String == AppleErrorType.validation)
         let message = error["message"] as? String ?? ""
         #expect(message.contains("Rate limit exceeded"), Comment(rawValue: message))
-        #expect(message.contains(tier), Comment(rawValue: message))
+        #expect(message.contains("for \(tier) operations"), Comment(rawValue: message))
     }
 
     @Test func sendExecuteIsRefusedWhenTheSendWindowIsFull() throws {
@@ -862,7 +862,7 @@ struct MailComposeCommandInjectionTests {
                 ])
                 let (streams, stdout, _) = streams()
 
-                try expectRateLimitRefusal(tier: "sends", stdout: stdout) {
+                try expectRateLimitRefusal(tier: "send", stdout: stdout) {
                     try Output.withStreams(streams) {
                         try command.run(scriptFactory: { MailScript(runner: fake, opener: noOpen) },
                                         directoryFactory: { directory() })
@@ -890,7 +890,7 @@ struct MailComposeCommandInjectionTests {
                 ])
                 let (streams, stdout, _) = streams()
 
-                try expectRateLimitRefusal(tier: "sends", stdout: stdout) {
+                try expectRateLimitRefusal(tier: "send", stdout: stdout) {
                     try Output.withStreams(streams) {
                         try command.run(contextFactory: { try context() },
                                         scriptFactory: { MailScript(runner: fake, opener: noOpen) },
@@ -918,7 +918,7 @@ struct MailComposeCommandInjectionTests {
                 ])
                 let (streams, stdout, _) = streams()
 
-                try expectRateLimitRefusal(tier: "expensive_ops", stdout: stdout) {
+                try expectRateLimitRefusal(tier: "reply", stdout: stdout) {
                     try Output.withStreams(streams) {
                         try command.run(contextFactory: { try context() },
                                         scriptFactory: { MailScript(runner: fake, opener: noOpen) },
@@ -945,7 +945,7 @@ struct MailComposeCommandInjectionTests {
                 ])
                 let (streams, stdout, _) = streams()
 
-                try expectRateLimitRefusal(tier: "sends", stdout: stdout) {
+                try expectRateLimitRefusal(tier: "send", stdout: stdout) {
                     try withTestRecipients("recipient@example.com") {
                         try Output.withStreams(streams) {
                             try command.run(scriptFactory: { MailScript(runner: fake, opener: noOpen) },

@@ -1,6 +1,6 @@
 # apple calendar events create
 
-Create an event (executes on call, like the MCP; --dry-run previews).
+Create an event (executes on call; --dry-run previews).
 
 ## Synopsis
 

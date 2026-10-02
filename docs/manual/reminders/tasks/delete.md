@@ -1,6 +1,6 @@
 # apple reminders tasks delete
 
-Delete a reminder (executes on call, like the MCP; --dry-run previews).
+Delete a reminder (executes on call; --dry-run previews).
 
 ## Synopsis
 

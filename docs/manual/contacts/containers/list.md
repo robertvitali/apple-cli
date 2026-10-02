@@ -1,6 +1,6 @@
 # apple contacts containers list
 
-List all contact containers (accounts). → list_containers
+List all contact containers (accounts).
 
 ## Synopsis
 

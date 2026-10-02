@@ -1,7 +1,7 @@
 import Foundation
 import Contacts
 
-// CNContact ↔ model translation, ported 1:1 from apple-contacts-mcp @ 1cd8789
+// CNContact ↔ model translation, ported 1:1 from the Contacts oracle @ 1cd8789
 // (v0.3.0) contacts_connector.py serializers/builders. Building/serializing
 // CN*Contact objects needs the framework LINKED but no CNContactStore access,
 // so these are unit-testable in CI without a Contacts TCC grant.
@@ -23,7 +23,7 @@ private func safeComponent(_ v: Int?) -> Int? {
     return v
 }
 
-/// Birthday → `DateParts?`; nil when no component survives (MCP `birthday: null`).
+/// Birthday → `DateParts?`; nil when no component survives (oracle `birthday: null`).
 func birthdayParts(_ dc: DateComponents?) -> DateParts? {
     guard let dc else { return nil }
     let p = DateParts(year: safeComponent(dc.year), month: safeComponent(dc.month), day: safeComponent(dc.day))

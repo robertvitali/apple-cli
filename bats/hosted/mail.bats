@@ -383,20 +383,20 @@ teardown() {
   echo "$output" | grep -q '"validation_error"'
 }
 
-@test "mail thread exposes --references (MCP A header-threading) mode" {
+@test "mail thread exposes --references (oracle A header-threading) mode" {
   run "$BIN" mail thread --help
   [ "$status" -eq 0 ]
   echo "$output" | grep -q -- '--references'
 }
 
-@test "mail get exposes --account/--mailbox scoping params (MCP A get_message params)" {
+@test "mail get exposes --account/--mailbox scoping params (oracle A get_message params)" {
   run "$BIN" mail get --help
   [ "$status" -eq 0 ]
   echo "$output" | grep -q -- '--account'
   echo "$output" | grep -q -- '--mailbox'
 }
 
-@test "mail forward exposes --mailbox subject-scope param (MCP B forward_email mailbox)" {
+@test "mail forward exposes --mailbox subject-scope param (oracle B forward_email mailbox)" {
   run "$BIN" mail forward --help
   [ "$status" -eq 0 ]
   echo "$output" | grep -q -- '--mailbox'
@@ -1086,7 +1086,7 @@ PY
 }
 
 # --- Oracle-parity: reads (batch 4) --------------------------------------------
-# MCP B names the indexed preview `content_preview`; this repo's own dual-key rule
+# Oracle B names the indexed preview `content_preview`; this repo's own dual-key rule
 # (Sources/MailKit/Support/MailModels.swift header) requires carrying BOTH names, and it was
 # carrying only `snippet` — so a consumer ported from B found nothing.
 @test "mail rules create refuses a header name containing a US/RS delimiter (exit 64)" {

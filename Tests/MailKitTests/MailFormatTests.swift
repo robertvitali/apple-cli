@@ -48,8 +48,8 @@ struct MailFormatTests {
         #expect(MailFormat.stripAngleBrackets(nil) == nil)
     }
 
-    @Test func mailLinkMatchesMCPB() {
-        // MCP B leaves @ unencoded, wraps in %3C … %3E.
+    @Test func mailLinkMatchesOracleB() {
+        // Oracle B leaves @ unencoded, wraps in %3C … %3E.
         #expect(MailFormat.mailLink(internetMessageID: "abc@host.local")
                 == "message://%3Cabc@host.local%3E")
         #expect(MailFormat.mailLink(internetMessageID: nil) == nil)
@@ -71,8 +71,8 @@ struct MailFlagColorTests {
         #expect(MailFlagColor.readName(flagged: true, flagColor: nil) == nil)
     }
 
-    /// STRICT-SUPERSET PARITY: each color token must map to the SAME `mark flag index` the MCP oracle
-    /// (`apple-mail-mcp` `utils.py` `get_flag_index`) writes, so `flag --color X` and rule `flag_color=X`
+    /// STRICT-SUPERSET PARITY: each color token must map to the SAME `mark flag index` oracle A's
+    /// `utils.py` `get_flag_index` writes, so `flag --color X` and rule `flag_color=X`
     /// set the color the oracle would (and the read path names it back the same). Pinned to LITERAL
     /// oracle values — NOT `MailFlagColor.X.rawValue`, which is self-referential and can't catch enum
     /// drift. macOS Mail's real order is non-obvious (orange=0, red=1, and green/blue swapped). If this

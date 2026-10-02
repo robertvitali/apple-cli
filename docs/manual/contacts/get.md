@@ -1,6 +1,6 @@
 # apple contacts get
 
-Fetch one contact by identifier (full P1 fields). → get_contact
+Fetch one contact by identifier (--niche adds dates, social profiles, relations and instant messages).
 
 ## Synopsis
 

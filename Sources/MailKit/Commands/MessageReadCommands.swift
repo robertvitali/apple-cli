@@ -54,11 +54,11 @@ struct SearchCommand: ParsableCommand {
     @OptionGroup var global: GlobalOptions
     @Option(name: .long, help: "Account name or UUID; omit to search all accounts.") var account: String?
     @Option(name: .long, help: "Mailbox name (default INBOX; use 'All' for every mailbox).") var mailbox: String = "INBOX"
-    @Option(name: .long, help: "Substring match on subject (repeatable — matches ANY, MCP B subject_keywords).") var subject: [String] = []
+    @Option(name: .long, help: "Substring match on subject (repeatable — matches ANY).") var subject: [String] = []
     @Option(name: .long, help: "Substring match on sender name/email.") var sender: String?
-    @Option(name: .long, help: "Substring match on the message body. Default: fast match on the indexed body preview (CLI extra — Mail caches previews for only some messages). Add --body-live for oracle B's semantics: a live Mail.app scan of the FULL content of every candidate message (slow; the oracle-aligned script keeps its per-Apple-event 180s timeout; the CLI's default 195s aggregate host deadline fails as upstream_error/69 with no partial results; pass --body-live-timeout 0 for oracle B's unbounded aggregate behavior; Mail may remain busy with an in-flight event; narrow with --mailbox/--account — a lower --limit helps only when matches are plentiful — or drop --body-live).") var body: String?
-    @Flag(name: .long, help: "With --body: scan live full message content via Mail.app (oracle B body_text semantics) instead of the indexed preview. The collected window is sorted per --sort and sliced, exactly as the oracle's response builder does.") var bodyLive = false
-    @Option(name: .long, help: "Overall --body-live host deadline in seconds (default 195; positive values customize it; 0 disables the host deadline and restores oracle B's unbounded aggregate scan). Requires --body-live; maximum \(Int(AppleScriptRunner.maximumTimeoutSeconds)) seconds.") var bodyLiveTimeout: String?
+    @Option(name: .long, help: "Substring match on the message body. Default: fast match on the indexed body preview (Mail caches previews for only some messages). Add --body-live for a live Mail.app scan of the FULL content of every candidate message (slow; the underlying script keeps its per-Apple-event 180s timeout; the CLI's default 195s aggregate host deadline fails as upstream_error/69 with no partial results; pass --body-live-timeout 0 to disable the aggregate deadline; Mail may remain busy with an in-flight event; narrow with --mailbox/--account — a lower --limit helps only when matches are plentiful — or drop --body-live).") var body: String?
+    @Flag(name: .long, help: "With --body: scan live full message content via Mail.app instead of the indexed preview. Paging follows Mail's scan order: --offset skips that many matches, and the window collected after them is sorted per --sort and cut to --limit before being returned, so --sort orders matches within a page, not across all matches.") var bodyLive = false
+    @Option(name: .long, help: "Overall --body-live host deadline in seconds (default 195; positive values customize it; 0 disables the host deadline, allowing an unbounded aggregate scan). Requires --body-live; maximum \(Int(AppleScriptRunner.maximumTimeoutSeconds)) seconds.") var bodyLiveTimeout: String?
     @Option(name: .long, help: "Lower bound on date received (YYYY-MM-DD).") var fromDate: String?
     @Option(name: .long, help: "Upper bound on date received (YYYY-MM-DD, inclusive).") var toDate: String?
     @Flag(name: .long, help: "Only read messages.") var read = false
@@ -71,8 +71,8 @@ struct SearchCommand: ParsableCommand {
     @Option(name: .long, help: "Results to skip (pagination).") var offset: Int = 0
     @Option(name: .long, help: "Sort order: date_desc (default) or date_asc.") var sort: String = "date_desc"
     @Flag(name: .long, inversion: .prefixedNo, help: "Include the indexed body preview (default on).") var content = true
-    @Option(name: .long, help: "Truncate each included body preview to N chars (0 = unlimited; MCP B max_content_length).") var maxContentLength: Int?
-    @Flag(name: .long, help: "With --mailbox All, also sweep the system mailboxes MCP B skips. Excluded by leaf name: Trash, Junk, Junk Email, Deleted Items, Deleted Messages, Sent, Sent Items, Sent Messages, Drafts, Spam. Provider-specific names outside that list (notably Gmail's '[Gmail]/Sent Mail' and '[Gmail]/All Mail') are NOT excluded.") var includeSystemFolders = false
+    @Option(name: .long, help: "Truncate each included body preview to N chars (0 = unlimited).") var maxContentLength: Int?
+    @Flag(name: .long, help: "With --mailbox All, also sweep the system mailboxes normally skipped. Excluded by leaf name: Trash, Junk, Junk Email, Deleted Items, Deleted Messages, Sent, Sent Items, Sent Messages, Drafts, Spam. Provider-specific names outside that list (notably Gmail's '[Gmail]/Sent Mail' and '[Gmail]/All Mail') are NOT excluded.") var includeSystemFolders = false
 
     /// Pure option resolver. `nil` means use AppleScriptRunner's untimed overload, selected only
     /// by an explicit zero; the omitted option retains the bounded agent-safe default.
@@ -139,7 +139,7 @@ struct SearchCommand: ParsableCommand {
             // indistinguishable from a genuinely empty mailbox — while the unknown-ACCOUNT path
             // throws not_found. Oracle A's `mailbox "X" of account` errors on an unknown name.
             try requireMailboxKnown(ctx: ctx, name: mailbox, accountUUID: f.accountUUID)
-            // MCP B excludes SKIP_FOLDERS from a broad "All" sweep, so an All-search used to
+            // Oracle B excludes SKIP_FOLDERS from a broad "All" sweep, so an All-search used to
             // return Trash/Sent/Junk hits the oracle never would. Naming a system mailbox
             // explicitly still searches it — the exclusion only changes what "All" means.
             f.includeSystemFolders = includeSystemFolders
@@ -277,7 +277,7 @@ struct SearchCommand: ParsableCommand {
                     messages[i].content_preview = nil
                 }
             }
-            // MCP B max_content_length: cap each included preview (0 = unlimited → no cap).
+            // Oracle B max_content_length: cap each included preview (0 = unlimited → no cap).
             else if let cap = maxContentLength, cap > 0 {
                 for i in messages.indices where (messages[i].snippet?.count ?? 0) > cap {
                     let capped = String(messages[i].snippet!.prefix(cap))
@@ -302,16 +302,16 @@ struct SearchCommand: ParsableCommand {
     }
 }
 
-// MARK: list (recent inbox — MCP B list_inbox_emails)
+// MARK: list (recent inbox — oracle B list_inbox_emails)
 
 struct ListCommand: ParsableCommand {
-    static let configuration = CommandConfiguration(commandName: "list", abstract: "List recent inbox messages (MCP B list_inbox_emails).")
+    static let configuration = CommandConfiguration(commandName: "list", abstract: "List recent inbox messages.")
     @OptionGroup var global: GlobalOptions
     @Option(name: .long, help: "Account name or UUID; omit for all accounts.") var account: String?
     @Flag(name: .long, help: "Only unread messages.") var unread = false
-    @Option(name: .long, help: "Max messages GLOBALLY (default 50; 0 = all). CLI extra — oracle B's max_emails caps per account; see --limit-per-account.") var limit: Int = 50
-    @Option(name: .long, help: "Cap messages PER ACCOUNT (oracle B max_emails semantics: the cap counts inbox messages EXAMINED, so with --unread fewer rows than the cap can return; 0 = no per-account cap). Accounts are merged newest-first (the oracle groups per account — disclosed); the global --limit still applies, pass --limit 0 for all.") var limitPerAccount: Int?
-    @Flag(name: .long, inversion: .prefixedNo, help: "Include the indexed body preview (default on; MCP B include_content).") var content = true
+    @Option(name: .long, help: "Max messages across all accounts (default 50; 0 = all). See --limit-per-account for a per-account cap.") var limit: Int = 50
+    @Option(name: .long, help: "Cap messages PER ACCOUNT (the cap counts inbox messages EXAMINED, so with --unread fewer rows than the cap can return; 0 = no per-account cap). Rows from all accounts are merged into one newest-first list (not grouped by account); the global --limit still applies, pass --limit 0 for all.") var limitPerAccount: Int?
+    @Flag(name: .long, inversion: .prefixedNo, help: "Include the indexed body preview (default on).") var content = true
 
     /// gap9 pure core (pinned; review H2): the oracle's per-account window. `max_emails`
     /// counts messages EXAMINED — the newest `per` inbox rows are taken FIRST and the unread
@@ -388,11 +388,11 @@ struct GetCommand: ParsableCommand {
     static let configuration = CommandConfiguration(commandName: "get", abstract: "Get one message by ROWID, RFC Message-ID, or message:// link.")
     @OptionGroup var global: GlobalOptions
     @Argument(help: "Message id (Envelope Index ROWID, RFC-5322 Message-ID, or message:// link).") var id: String
-    @Option(name: .long, help: "Scope the lookup to this account (name or UUID; MCP A account param). Rejects if the message is elsewhere.") var account: String?
-    @Option(name: .long, help: "Scope the lookup to this mailbox (MCP A mailbox param). Rejects if the message is elsewhere.") var mailbox: String?
+    @Option(name: .long, help: "Scope the lookup to this account (name or UUID). Rejects if the message is elsewhere.") var account: String?
+    @Option(name: .long, help: "Scope the lookup to this mailbox. Rejects if the message is elsewhere.") var mailbox: String?
     @Flag(name: .long, help: "Return headers/metadata only (skip recipients + preview).") var headersOnly = false
     @Flag(name: .long, help: "Fetch the full body via Mail.app (slow AppleScript scan; default returns the indexed preview).") var content = false
-    @Flag(name: .long, help: "Alias/compat: never fetch the full body (default behavior).") var noContent = false
+    @Flag(name: .long, help: "Never fetch the full body, even with --content (the default already skips it).") var noContent = false
 
     func run() throws {
         try run(contextFactory: { try MailContext() }, scriptFactory: { MailScript() })
@@ -406,10 +406,10 @@ struct GetCommand: ParsableCommand {
                 throw AppleError.notFound("no message for id '\(id)'.")
             }
             var msg = try ctx.checkedDecodeSummary(row)
-            // MCP A get_message account/mailbox: the CLI resolves by globally-unique id, so these
-            // are SCOPING assertions — the returned message must be in that account/mailbox, else
-            // not_found. Account compares canonically (name-or-UUID → UUID both sides); mailbox
-            // matches the full path or its leaf component, case-insensitively.
+            // Oracle A get_message account/mailbox: the CLI resolves by globally-unique id, so
+            // these are SCOPING assertions — the returned message must be in that account/mailbox,
+            // else not_found. Account compares canonically (name-or-UUID → UUID both sides);
+            // mailbox matches the full path or its leaf component, case-insensitively.
             if let account {
                 let wantUUID = try ctx.requireAccountUUID(account)
                 let msgUUID = (try MailScript.bestEffort { try ctx.requireAccountUUID(msg.account) }) ?? ""
@@ -441,7 +441,7 @@ struct GetCommand: ParsableCommand {
                 msg.content_preview = nil
             }
             // Full body is opt-in: the AppleScript scan is slow (Mail has no body index,
-            // mirroring MCP A's own slow-path caveat). The indexed `snippet` covers the fast case.
+            // mirroring oracle A's own slow-path caveat). The indexed `snippet` is the fast path.
             if content && !noContent && !headersOnly, let internetID = msg.internet_message_id {
                 msg.content = try scriptFactory().body(internetMessageID: internetID, accountName: msg.account)
             }
@@ -520,15 +520,15 @@ struct ThreadCommand: ParsableCommand {
     @Option(name: .long, help: "Subject keyword identifying the thread.") var subject: String?
     @Option(name: .long, help: "Account name or UUID (for subject-based lookup).") var account: String?
     @Option(name: .long, help: "Mailbox for subject-based lookup (default All).") var mailbox: String = "All"
-    @Option(name: .long, help: "Max messages. Default: by id, the COMPLETE thread (oracle A get_thread is uncapped); by --subject, 50 (oracle B max_messages). 0 = the complete thread.") var limit: Int?
-    // NO --include-system-folders here, deliberately. MCP B applies SKIP_FOLDERS only in
+    @Option(name: .long, help: "Max messages. Default: by id, the COMPLETE thread (uncapped); by --subject, 50. 0 = the complete thread.") var limit: Int?
+    // NO --include-system-folders here, deliberately. Oracle B applies SKIP_FOLDERS only in
     // `search_emails` and analytics (tools/search.py `_search_mail_records`); its
     // `get_email_thread` has NO skip script and iterates every mailbox. Excluding here was both a
     // parity DROP and wrong on its own terms: Sent/Sent Messages/Drafts hold the operator's OWN
     // half of the conversation, so a "thread" missing your replies is not the thread. It also made
     // the two addressing modes disagree — the by-id conversation branch never applied the flag, so
     // the same thread returned 10 by id and 9 by subject.
-    @Flag(name: .long, help: "Thread by RFC References/In-Reply-To headers (MCP A get_thread) instead of Apple's conversation grouping.") var references = false
+    @Flag(name: .long, help: "Thread by RFC References/In-Reply-To headers instead of Apple's conversation grouping.") var references = false
 
     func run() throws {
         try run(contextFactory: { try MailContext() })
@@ -558,7 +558,7 @@ struct ThreadCommand: ParsableCommand {
                 }
                 let rowid = intVal(row["rowid"]) ?? 0
                 if references {
-                    // MCP A header-threading: messages sharing this one's References/In-Reply-To
+                    // Oracle A header-threading: messages sharing this one's References/In-Reply-To
                     // chain (via the Envelope Index message_references table), chronologically.
                     matchedBy = "references"
                     messages = try ctx.index.referencesThread(rowid: rowid, limit: effectiveLimit).map { try ctx.checkedDecodeSummary($0) }
@@ -659,9 +659,9 @@ struct AttachmentsList: ParsableCommand {
     @OptionGroup var global: GlobalOptions
     @Argument(help: "Message id (ROWID / RFC Message-ID / message:// link).") var id: String?
     @Option(name: .long, help: "Subject keyword to find messages.") var subject: String?
-    @Option(name: .long, help: "Account name or UUID. With an id: scope assertion (rejects if the message is elsewhere — same posture as `get`, see docs/port-specs/mail.md; oracle A treats it as a perf hint). With --subject: which account to search.") var account: String?
-    @Option(name: .long, help: "Mailbox. With an id: scope assertion (oracle A's mailbox param, hint there; 'All' is the no-op wildcard). With --subject: where to match (default INBOX, oracle B's scope; 'All' widens). Ignored-with-an-id note: --max-results applies to --subject only (the id path is oracle A's get_attachments, which has no cap).") var mailbox: String?
-    @Option(name: .long, help: "Max messages to inspect for --subject (default 1, oracle B's default — each match costs a live Mail.app locator scan, bounded at 30s per Message-ID spelling / 60s per match; raise deliberately). Inert on the id path.") var maxResults: Int = 1
+    @Option(name: .long, help: "Account name or UUID. With an id: scope assertion (rejects if the message is elsewhere, as `get` does). With --subject: which account to search.") var account: String?
+    @Option(name: .long, help: "Mailbox. With an id: scope assertion (rejects if the message is elsewhere; 'All' is the no-op wildcard). With --subject: where to match (default INBOX; 'All' widens). Ignored-with-an-id note: --max-results applies to --subject only (the id path has no cap).") var mailbox: String?
+    @Option(name: .long, help: "Max messages to inspect for --subject (default 1 — each match costs a live Mail.app locator scan, bounded at 30s per Message-ID spelling / 60s per match; raise deliberately). Inert on the id path.") var maxResults: Int = 1
     @Flag(name: .long, help: "Skip the live Mail.app metadata enrichment (fast Envelope-Index rows only; mime_type/size/downloaded omitted, disclosed via note).") var noLive = false
 
     /// A live lookup failure is a disclosed index fallback, not a command failure. Keep the

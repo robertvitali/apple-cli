@@ -3,7 +3,7 @@ import AppleKit
 
 /// AppleScript bridge to Notes.app — the mechanism behind ~28 of the 34 capabilities (CRUD,
 /// folders, accounts, selection, attachments, export, reveal-in-UI). Ported from
-/// `apple-notes-mcp@2.5.12` `appleNotesManager.ts`.
+/// the Notes oracle @2.5.12 `appleNotesManager.ts`.
 ///
 /// SECURITY — the load-bearing difference from the reference: the reference string-interpolates
 /// user data (titles, ids, bodies, folder names) into the AppleScript source with hand-rolled
@@ -56,7 +56,7 @@ struct NotesScript {
 
     // MARK: script execution + error mapping
 
-    // MARK: transient-failure retry (ported from apple-notes-mcp@2.7.5 executeAppleScript)
+    // MARK: transient-failure retry (ported from the Notes oracle @2.7.5 executeAppleScript)
 
     /// How many TIMES a READ script is attempted (NOT the retry count). Mirrors the oracle's
     /// `executeAppleScript` default `maxRetries = 2` — its loop is `for attempt <= maxRetries`,
@@ -218,9 +218,10 @@ struct NotesScript {
     }
 
     /// Port of the oracle's `ERROR_MAPPINGS` table + `parseErrorMessage` (build/index.js), evaluated
-    /// in the oracle's ORDER (first match wins). Messages match the oracle VERBATIM where ported;
-    /// the CLI keeps its own `error.type`/exit-code assignment — this is MESSAGE RICHNESS ONLY, no
-    /// exit-code changes. Every branch that previously fell through to the generic
+    /// in the oracle's ORDER (first match wins). Messages keep the oracle's wording where ported,
+    /// with its tool names replaced by the CLI's commands; the CLI keeps its own
+    /// `error.type`/exit-code assignment — this is MESSAGE RICHNESS ONLY, no exit-code changes.
+    /// Every branch that previously fell through to the generic
     /// `.upstream("Notes.app returned an error.")` fallback (app-not-running, lost-connection,
     /// cannot-delete, changed-during-listing, syntax) keeps that upstream/69 classification, only
     /// with a specific message; the not-found variants keep notFound/65; password + already-exists
@@ -283,11 +284,11 @@ struct NotesScript {
             }
             // Not-found, specific: folder by name. /can't get folder "([^"]+)"/i.
             if let name = Self.capture("can't get folder \"([^\"]+)\"", in: normalized) {
-                return .notFound("Folder \"\(name)\" not found. Use list-folders to see available folders.")
+                return .notFound("Folder \"\(name)\" not found. Use apple notes folders to see available folders.")
             }
             // Not-found, specific: account by name. /can't get account "([^"]+)"/i.
             if let name = Self.capture("can't get account \"([^\"]+)\"", in: normalized) {
-                return .notFound("Account \"\(name)\" not found. Use list-accounts to see available accounts.")
+                return .notFound("Account \"\(name)\" not found. Use apple notes accounts to see available accounts.")
             }
             if s.contains("already exists") {
                 return .validation("A folder with that name already exists.")
@@ -556,7 +557,7 @@ struct NotesScript {
     ///
     /// The per-note `created`/`modified` reads mirror the oracle's search loop exactly (three
     /// independent try-blocks, `""` on a failed date read): the oracle returns the note's REAL
-    /// dates on every search hit, so a 3-field row would drop two fields the MCP emits.
+    /// dates on every search hit, so a 3-field row would drop two fields the oracle emits.
     static func searchBody(preamble: String, notesSource: String,
                            whereClause: String?, limitCheck: String) -> String {
         let matchSource = whereClause.map { "\(notesSource) where \($0)" } ?? notesSource

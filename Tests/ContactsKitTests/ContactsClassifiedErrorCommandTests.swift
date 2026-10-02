@@ -95,14 +95,14 @@ struct ContactsClassifiedErrorCommandTests {
             let rawStderr = "\(prefix)\n\(diagnostic)\n\(suffix)"
             let commands: [(operation: String, notFoundMessage: String,
                             run: (ContactsStore) throws -> Void)] = [
-                ("read_note", "Contact not found: 'c1'", { store in
+                ("reading the note", "Contact not found: 'c1'", { store in
                     try NoteGetCommand.parse(["c1"]).run(storeFactory: { store })
                 }),
-                ("write_note", "Contact not found: 'c1'", { store in
+                ("writing the note", "Contact not found: 'c1'", { store in
                     try NoteSetCommand.parse(["c1", "--note", "synthetic note"])
                         .run(storeFactory: { store })
                 }),
-                ("remove_contact_from_group", "Contact or group not found (contact='c1', group='g1')", { store in
+                ("removing the contact from the group", "Contact or group not found (contact='c1', group='g1')", { store in
                     try GroupsRemoveCommand.parse(["c1", "g1"]).run(storeFactory: { store })
                 }),
             ]

@@ -128,7 +128,7 @@ setup() {
 }
 
 # ── ORACLE-MIRRORED HARD GATE on the two deletes ─────────────────────────────────────
-# apple-contacts-mcp refuses delete_contact (server.py:965) and delete_group (:1715)
+# The Contacts oracle refuses delete_contact (server.py:965) and delete_group (:1715)
 # outside CONTACTS_TEST_MODE=true via require_test_mode_for (security.py:161). That gate
 # is part of the behavior being replicated, so v2 KEEPS it unconditionally — and mirrors
 # its ENV keying exactly. These two cases are the only v1 "→ 77" refusals that survive
@@ -417,7 +417,7 @@ END:VCARD"
   echo "$output" | grep -q 'u001b'
 }
 
-# Q13: the Contacts --out writes (a CLI extra — the MCP returns bytes inline) now route through
+# Q13: the Contacts --out writes (a CLI extra — the oracle returns bytes inline) now route through
 # the shared AppleKit.confineWriteDestination, bound UP FRONT so the path refusal fires before any
 # store touch (CI-safe, no TCC). Without it, `--out ~/.ssh/authorized_keys` would overwrite an SSH
 # key with vCard/photo bytes. Revert-red: drop the confineWriteDestination call → the write reaches

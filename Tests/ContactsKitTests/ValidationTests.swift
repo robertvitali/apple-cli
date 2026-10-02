@@ -3,7 +3,7 @@ import Foundation
 @testable import ContactsKit
 import AppleKit
 
-// Validators ported from apple-contacts-mcp server.py (_validate_*), plus the
+// Validators ported from the Contacts oracle's server.py (_validate_*), plus the
 // search-selection and update None/""/value logic. Pure — no Contacts TCC.
 
 /// Assert `body` throws an `AppleError` whose type is `validation_error`.

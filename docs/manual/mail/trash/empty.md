@@ -12,9 +12,9 @@ apple mail trash empty [flags]
 
 - `--account` `<account>`
 - `--confirm`
-  <br>Required confirmation for the destructive empty (oracle `confirm_empty`).
+  <br>Required confirmation for the destructive empty.
 - `--max` `<max>`
-  <br>Safety cap on how many messages to erase (oracle `max_deletes`).
+  <br>Safety cap on how many messages to erase.
 - `--trash-mailbox` `<trash-mailbox>`
   <br>Which trash mailbox to empty (required when the account has more than one non-empty).
 

@@ -199,7 +199,7 @@ struct AnalyticsTests {
     }
 }
 
-/// MCP B excludes `SKIP_FOLDERS` (constants.py) from broad scans. Counting them made every CLI
+/// Oracle B excludes `SKIP_FOLDERS` (constants.py) from broad scans. Counting them made every CLI
 /// volume metric disagree with the oracle: on a live account over 7 days the CLI
 /// reported a higher total than the oracle; with this filter the totals match exactly — an exact
 /// live-oracle match on total/unread/read/flagged/with_attachments.
@@ -237,7 +237,7 @@ struct SkipFoldersTests {
     }
 }
 
-/// Needs-response parity with MCP B (`tools/smart_inbox.py` + `constants.py`): the four exact
+/// Needs-response parity with oracle B (`tools/smart_inbox.py` + `constants.py`): the four exact
 /// priority labels, the newsletter suppression list, and the already-replied cross-reference.
 /// All three were absent, so the CLI surfaced newsletters and already-answered threads as mail
 /// awaiting a personal reply, and reported an unflagged question as HIGH.

@@ -13,11 +13,11 @@ apple mail attachments list [<id>] [flags]
 - `<id>`
   <br>Message id (ROWID / RFC Message-ID / message:// link).
 - `--account` `<account>`
-  <br>Account name or UUID. With an id: scope assertion (rejects if the message is elsewhere — same posture as `get`, see docs/port-specs/mail.md; oracle A treats it as a perf hint). With --subject: which account to search.
+  <br>Account name or UUID. With an id: scope assertion (rejects if the message is elsewhere, as `get` does). With --subject: which account to search.
 - `--mailbox` `<mailbox>`
-  <br>Mailbox. With an id: scope assertion (oracle A's mailbox param, hint there; 'All' is the no-op wildcard). With --subject: where to match (default INBOX, oracle B's scope; 'All' widens). Ignored-with-an-id note: --max-results applies to --subject only (the id path is oracle A's get_attachments, which has no cap).
+  <br>Mailbox. With an id: scope assertion (rejects if the message is elsewhere; 'All' is the no-op wildcard). With --subject: where to match (default INBOX; 'All' widens). Ignored-with-an-id note: --max-results applies to --subject only (the id path has no cap).
 - `--max-results` `<max-results>`
-  <br>Max messages to inspect for --subject (default 1, oracle B's default — each match costs a live Mail.app locator scan, bounded at 30s per Message-ID spelling / 60s per match; raise deliberately). Inert on the id path.
+  <br>Max messages to inspect for --subject (default 1 — each match costs a live Mail.app locator scan, bounded at 30s per Message-ID spelling / 60s per match; raise deliberately). Inert on the id path.
 - `--no-live`
   <br>Skip the live Mail.app metadata enrichment (fast Envelope-Index rows only; mime_type/size/downloaded omitted, disclosed via note).
 - `--subject` `<subject>`

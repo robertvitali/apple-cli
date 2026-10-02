@@ -4,7 +4,7 @@ import Darwin
 
 /// Read layer over `~/Library/Messages/chat.db` (WAL-aware, via the shared
 /// `SQLiteReader` with `copyToTemp` for hot/locked data reads). Ports the SQL +
-/// row-shaping of `mac_messages_mcp`'s `get_recent_messages`, `fuzzy_search_messages`,
+/// row-shaping of the Messages oracle's `get_recent_messages`, `fuzzy_search_messages`,
 /// `get_chats`, `_check_imessage_availability`, `find_handles_by_phone`,
 /// `get_contact_name` (chat-fallback half), and `check_messages_db_access`.
 public struct ChatDB {
@@ -27,7 +27,7 @@ public struct ChatDB {
     /// so a concurrently-writing Messages.app can't corrupt the read.
     ///
     /// PERF NOTE: `copyToTemp: true` copies the whole store (~hundreds of MB) on every
-    /// invocation — the CLI pays per call what the long-running MCP paid once. It is a
+    /// invocation — the CLI pays per call what the long-running oracle paid once. It is a
     /// deliberate WAL-safety tradeoff and is correct; the diagnostic-only commands
     /// (`chats`, `check-availability`) touch tiny tables yet still copy. A future
     /// shared-core optimization (an `immutable=1` URI open, or `copyToTemp:false` for
@@ -40,7 +40,7 @@ public struct ChatDB {
         self.homeDirectoryForTilde = homeDirectoryForTilde
     }
 
-    // MARK: - Phone/handle resolution (MCP `_get_phone_formats` / `find_handles_by_phone`)
+    // MARK: - Phone/handle resolution (oracle `_get_phone_formats` / `find_handles_by_phone`)
 
     /// US-number format variants tried against `handle.id`.
     public static func phoneFormats(_ normalized: String) -> [String] {
@@ -71,7 +71,7 @@ public struct ChatDB {
         return rows.compactMap { $0.int("ROWID") }
     }
 
-    // MARK: - Group-chat name mapping (MCP `get_chat_mapping`)
+    // MARK: - Group-chat name mapping (oracle `get_chat_mapping`)
 
     /// room_name → display_name, for annotating group messages.
     public func chatMapping() -> [String: String] {
@@ -84,7 +84,7 @@ public struct ChatDB {
         return map
     }
 
-    // MARK: - Sender resolution (MCP `get_contact_name`)
+    // MARK: - Sender resolution (oracle `get_contact_name`)
 
     /// Chat-table display-name fallback (second stage of `get_contact_name`).
     private mutating func chatDisplayName(forAddress address: String) -> String? {
@@ -112,7 +112,7 @@ public struct ChatDB {
         return address
     }
 
-    // MARK: - Recent (MCP `get_recent_messages`)
+    // MARK: - Recent (oracle `get_recent_messages`)
 
     /// One received/sent attachment, joined from `message_attachment_join` + `attachment`.
     ///
@@ -179,7 +179,7 @@ public struct ChatDB {
     public struct Message: Encodable {
         public let rowid: Int64
         public let date: Date          // ISO-8601 in JSON
-        public let date_local: String  // MCP-format local string, for parity
+        public let date_local: String  // oracle-format local string, for parity
         public let timestamp: Int64     // raw Apple ns
         public let is_from_me: Bool
         public let sender: String
@@ -573,7 +573,7 @@ public struct ChatDB {
         return nil
     }
 
-    // MARK: - Fuzzy search (MCP `fuzzy_search_messages`)
+    // MARK: - Fuzzy search (oracle `fuzzy_search_messages`)
 
     public struct ScoredMessage: Encodable {
         public let rowid: Int64
@@ -733,7 +733,7 @@ public struct ChatDB {
             .replacingOccurrences(of: "_", with: "\\_")
     }
 
-    // MARK: - Named group chats (MCP `get_chats`)
+    // MARK: - Named group chats (oracle `get_chats`)
 
     public struct Chat: Encodable {
         public let chat_identifier: String
@@ -886,7 +886,7 @@ public struct ChatDB {
         return out
     }
 
-    // MARK: - iMessage availability (MCP `_check_imessage_availability`)
+    // MARK: - iMessage availability (oracle `_check_imessage_availability`)
 
     public struct Availability: Encodable {
         public let recipient: String
@@ -942,7 +942,7 @@ public struct ChatDB {
         if hasIMessage {
             service = "iMessage"
             recommendation = "✅ \(recipient) has iMessage available - messages will be sent via iMessage"
-        } else if recipient.contains(where: { $0.isASCII && $0.isNumber }) { // MCP uses ASCII isdigit()
+        } else if recipient.contains(where: { $0.isASCII && $0.isNumber }) { // oracle uses ASCII isdigit()
             service = "SMS"
             recommendation = "📱 \(recipient) does not have iMessage - messages will automatically fall back to SMS/RCS"
         } else {
@@ -953,7 +953,7 @@ public struct ChatDB {
                             is_email: isEmail, recommendation: recommendation, handles: handleStats)
     }
 
-    // MARK: - DB access diagnostic (MCP `check_messages_db_access`)
+    // MARK: - DB access diagnostic (oracle `check_messages_db_access`)
 
     public struct DBCheck: Encodable {
         public let path: String
@@ -967,7 +967,7 @@ public struct ChatDB {
         public let message_count: Int?
     }
 
-    /// Diagnose chat.db access WITHOUT a temp copy (mirrors the MCP's direct open —
+    /// Diagnose chat.db access WITHOUT a temp copy (mirrors the oracle's direct open —
     /// the point is whether direct access works).
     public static func diagnose(path: String = ChatDB.defaultPath()) -> DBCheck {
         let exists = FileManager.default.fileExists(atPath: path)

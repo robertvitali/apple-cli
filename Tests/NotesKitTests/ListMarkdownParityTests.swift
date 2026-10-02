@@ -2,7 +2,7 @@ import Foundation
 import Testing
 @testable import NotesKit
 
-/// `get-note-markdown` list rendering against apple-notes-mcp 2.6.12 (NOTES-M2).
+/// `get-note-markdown` list rendering against the Notes oracle @2.6.12 (NOTES-M2).
 ///
 /// GOLDEN VALUES PRODUCED BY THE ORACLE'S OWN ENGINE, not by hand and not by recording what this
 /// port happens to emit. The oracle converts note HTML with **turndown 7.2.4** configured at

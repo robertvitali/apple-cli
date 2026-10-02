@@ -2,8 +2,8 @@ import Foundation
 
 // Encodable payload structs — the `data` object of the `apple contacts` JSON
 // envelope. Field names ARE the wire keys (snake_case, no case conversion), matching
-// apple-contacts-mcp @ 1cd8789 (v0.3.0) verbatim so the CLI's JSON is a strict
-// superset of the MCP's per-tool response (every MCP field preserved inside `data`).
+// the Contacts oracle @ 1cd8789 (v0.3.0) verbatim so the CLI's JSON is a strict
+// superset of the oracle's per-tool response (every oracle field preserved inside `data`).
 
 // MARK: - Labeled-value leaves (mirror _serialize_labeled_values entries)
 
@@ -55,7 +55,7 @@ public struct LabeledIM: Encodable {
 }
 
 /// `{year?, month?, day?}` — birthday sub-object; each component omitted when unset
-/// (synthesized Encodable uses encodeIfPresent for optionals). Mirrors the MCP's
+/// (synthesized Encodable uses encodeIfPresent for optionals). Mirrors the oracle's
 /// NSNotFound filtering (`0 < n < 10000`) applied in the serializer.
 public struct DateParts: Encodable {
     public let year: Int?
@@ -64,7 +64,7 @@ public struct DateParts: Encodable {
     public init(year: Int?, month: Int?, day: Int?) {
         self.year = year; self.month = month; self.day = day
     }
-    /// True when no component survived filtering — the MCP maps this to `null`.
+    /// True when no component survived filtering — the oracle maps this to `null`.
     public var isEmpty: Bool { year == nil && month == nil && day == nil }
 }
 
@@ -80,7 +80,7 @@ public struct LabeledDate: Encodable {
 
 // MARK: - Contact record (mirror _serialize_contact)
 
-/// Full contact record. Custom `encode(to:)` reproduces two MCP behaviors exactly:
+/// Full contact record. Custom `encode(to:)` reproduces two oracle behaviors exactly:
 /// `birthday` is ALWAYS present (null or object), and the four niche families are
 /// present ONLY when `include_niche` was requested.
 public struct Contact: Encodable {
@@ -128,7 +128,7 @@ public struct Contact: Encodable {
         try c.encode(emails, forKey: .emails)
         try c.encode(urls, forKey: .urls)
         try c.encode(postal_addresses, forKey: .postal_addresses)
-        // birthday: key ALWAYS present; null when no components (MCP `birthday: null`).
+        // birthday: key ALWAYS present; null when no components (oracle `birthday: null`).
         if let birthday, !birthday.isEmpty {
             try c.encode(birthday, forKey: .birthday)
         } else {
@@ -223,7 +223,7 @@ public struct ExportVCardResult: Encodable {
 public struct ImportVCardResult: Encodable {
     public let identifiers: [String]
     public let count: Int
-    public let group_id: String?  // id-echo: ALWAYS present (null when absent), per MCP.
+    public let group_id: String?  // id-echo: ALWAYS present (null when absent), per the oracle.
     /// Write-model v2: every execute-path envelope states `dry_run: false` explicitly, because
     /// under execute-by-default that key is how a caller tells "previewed" from "done".
     public let dry_run = false
@@ -238,7 +238,7 @@ public struct ImportVCardResult: Encodable {
 }
 
 /// Encode an optional String as its value or an explicit JSON `null` (never omit) —
-/// for id-echo / nullable fields the MCP always emits as a present key.
+/// for id-echo / nullable fields the oracle always emits as a present key.
 private func encodeOrNull<K: CodingKey>(
     _ c: inout KeyedEncodingContainer<K>, _ value: String?, _ key: K
 ) throws {
@@ -252,8 +252,8 @@ public struct ReadNoteResult: Encodable {
 
 public struct ReadPhotoResult: Encodable {
     public let identifier: String
-    public let image_data: String?  // ALWAYS present (null on no-photo), per MCP.
-    public let format: String?      // ALWAYS present (null on no-photo), per MCP.
+    public let image_data: String?  // ALWAYS present (null on no-photo), per the oracle.
+    public let format: String?      // ALWAYS present (null on no-photo), per the oracle.
     public let size_bytes: Int
     // Superset extra: file path when --out used (raw bytes written there); omit when nil.
     public let written_to: String?
@@ -272,8 +272,8 @@ public struct ReadPhotoResult: Encodable {
 /// fields null when the corresponding input was absent).
 public struct CreateContactResult: Encodable {
     public let identifier: String
-    public let group_id: String?      // id-echo: ALWAYS present (null when absent), per MCP.
-    public let container_id: String?  // id-echo: ALWAYS present (null when absent), per MCP.
+    public let group_id: String?      // id-echo: ALWAYS present (null when absent), per the oracle.
+    public let container_id: String?  // id-echo: ALWAYS present (null when absent), per the oracle.
     /// See `ImportVCardResult.dry_run` — the v2 executed/previewed discriminator.
     public let dry_run = false
     enum CodingKeys: String, CodingKey { case identifier, group_id, container_id, dry_run }

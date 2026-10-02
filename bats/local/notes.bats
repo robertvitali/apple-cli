@@ -144,7 +144,7 @@ raise SystemExit(0 if matches else 1)
   [ "${APPLE_LIVE_NOTES:-0}" = "1" ] \
     || skip "set APPLE_LIVE_NOTES=1 to run live Notes automation"
   local probe_title="ZZZ-no-such-note-xyz"
-  local expected_message="Note \"$probe_title\" not found. Use search-notes to find notes, then use the note's ID for reliable operations."
+  local expected_message="Note \"$probe_title\" not found. Use apple notes search to find notes, then use the note's ID for reliable operations."
   # NotesScript.swift:31,45,55 define a 45s attempt timeout, two read attempts, and a 1000ms
   # backoff; lines 102 and 117-120 apply them. The 91s retried-transient upper bound fits this cap;
   # a coincidental title hit may need a second link lookup and intentionally reaches the 124 skip.

@@ -3,10 +3,9 @@
 One CLI for Apple's native apps — **Messages, Mail, Contacts, Notes, Calendar,
 Reminders** — on macOS. A single Swift binary (`apple`) with JSON-first output,
 built so AI CLIs (and humans) can drive Apple apps from the command line instead
-of a stack of always-on MCP servers.
+of a stack of always-on background servers.
 
-> Status: **released — `v26.0.0`** (2026-08-30). Every domain is a verified strict
-> superset of the Apple MCP server it replaced; the six MCPs are retired. See
+> Status: **released — `v26.0.0`** (2026-08-30). See
 > [Versioning](#versioning) below and the
 > [releases page](https://github.com/robertvitali/apple-cli/releases).
 

@@ -110,7 +110,7 @@ struct UnreadCountsCommand: ParsableCommand {
     func run(scriptFactory: () -> MailScript,
              directoryFactory: () -> AccountDirectory) throws {
         try runGuarded(tool: "mail") {
-            // Sourced from Mail.app's live `unread count` (matches the MCP oracle; the
+            // Sourced from Mail.app's live `unread count` (matches the oracle; the
             // Envelope Index read-bit diverges from server-synced seen-state).
             // The AppleScript matches accounts by NAME, so map a UUID selector to its name first.
             var accountFilter = account

@@ -1,6 +1,6 @@
 # apple reminders lists
 
-Reminder lists — read/create/update/delete + color (ports reminders_lists).
+Reminder lists — read/create/update/delete + color.
 
 ## Synopsis
 
@@ -10,10 +10,10 @@ apple reminders lists
 
 ## Subcommands
 
-- [`create`](./create.md) — Create a reminder list (executes on call, like the MCP; --dry-run previews).
-- [`delete`](./delete.md) — Delete a reminder list AND its items (executes on call, like the MCP; --dry-run previews).
+- [`create`](./create.md) — Create a reminder list (executes on call; --dry-run previews).
+- [`delete`](./delete.md) — Delete a reminder list AND its items (executes on call; --dry-run previews).
 - [`read`](./read.md) — List all reminder lists (id/title/account/account_type/color/…).
-- [`update`](./update.md) — Rename/recolor a reminder list (executes on call, like the MCP; --dry-run previews).
+- [`update`](./update.md) — Rename/recolor a reminder list (executes on call; --dry-run previews).
 
 ## Inherited options
 

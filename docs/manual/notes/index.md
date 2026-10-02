@@ -4,7 +4,7 @@ title: Notes
 
 # apple notes
 
-Notes — notes/folders/attachments/checklists/export (ports apple-notes-mcp).
+Notes — notes/folders/attachments/checklists/export.
 
 ## Synopsis
 
@@ -15,8 +15,8 @@ apple notes
 ## Subcommands
 
 - [`accounts`](./accounts.md) — List Notes accounts (iCloud, Gmail, Exchange…) with default folder + upgraded flag.
-- [`append`](./append.md) — Add to a note's body without replacing it. → append-to-note (EXECUTES; --dry-run previews).
-Safety: reads the existing body, concatenates, then writes the WHOLE body back; that rewrite can drop embedded attachments, so run `notes attachments list` first if unsure.
+- [`append`](./append.md) — Add to a note's body without replacing it (EXECUTES; --dry-run previews).
+Safety: reads the existing body, concatenates, then writes the WHOLE body back; that rewrite can drop embedded attachments, so run `apple notes attachments` with the same --id, or the same --title and --account, first if unsure.
 - [`attachments`](./attachments.md) — List a note's attachments (name, content type, id), by --id or --title.
 - [`batch-delete`](./batch-delete.md) — Delete multiple notes by id to Recently Deleted, ≤500 (EXECUTES; --dry-run previews).
 - [`batch-move`](./batch-move.md) — Move multiple notes by id to one folder, ≤500 (EXECUTES; --dry-run previews).
@@ -26,21 +26,21 @@ Safety: reads the existing body, concatenates, then writes the WHOLE body back; 
 - [`delete`](./delete.md) — Delete ONE note to Recently Deleted, by --id or --title (EXECUTES; --dry-run previews).
 - [`delete-folder`](./delete-folder.md) — Delete a folder AND EVERY NOTE IN IT, permanently (previews by default; --execute performs it).
 - [`doctor`](./doctor.md) — Detailed setup diagnostics (automation permission, accounts, Full Disk Access, binary signature).
-- [`export`](./export.md) — Export the whole library. --format json (structured, default) | md | txt (curated extras).
+- [`export`](./export.md) — Export the whole library. --format json (structured, default) | md | txt (every note rendered into one Markdown or plain-text document).
 - [`fetch-attachment`](./fetch-attachment.md) — Return one attachment's bytes inline as base64 (25 MB cap).
 - [`folders`](./folders.md) — List all folders (with full nested paths) for an account.
 - [`get`](./get.md) — Full HTML body of a note (by --id or --title) plus parsed hashtags.
 - [`get-by-id`](./get-by-id.md) — Note metadata by id (id, title, dates, shared, password_protected).
 - [`get-checklist`](./get-checklist.md) — Read a note's checklist items + done-state from NoteStore.sqlite (needs Full Disk Access).
 - [`get-details`](./get-details.md) — Note metadata by title (adds account).
-- [`get-link`](./get-link.md) — notes:// deep link for a note, by id (preferred) or title. → get-note-link
+- [`get-link`](./get-link.md) — notes:// deep link for a note, by id (preferred) or title.
 - [`get-markdown`](./get-markdown.md) — Note as Markdown, checklist items annotated [x]/[ ] when Full Disk Access is granted.
 - [`get-metadata`](./get-metadata.md) — [BETA] Read note metadata AppleScript can't expose (pinned, snippet, flags) from NoteStore.sqlite.
 - [`get-plaintext`](./get-plaintext.md) — Native plaintext body of a note (by --id or --title).
 - [`health`](./health.md) — Quick pass/fail: Notes.app reachable + Full Disk Access for checklist features.
 - [`list`](./list.md) — List note titles in an account/folder (supports --modified-since, --limit).
 - [`move`](./move.md) — Move ONE note to a folder, by --id or --title (EXECUTES; --dry-run previews).
-- [`recent`](./recent.md) — Notes by modification date, newest first (default 10). CLI-only superset.
+- [`recent`](./recent.md) — Notes by modification date, newest first (default 10).
 - [`save-attachment`](./save-attachment.md) — Write one attachment to disk, path must be under home/temp/Volumes (EXECUTES; --dry-run previews).
 - [`search`](./search.md) — Search notes by title (or body with --content); returns id/title/folder.
 - [`selected`](./selected.md) — Notes currently selected in the Notes.app UI.

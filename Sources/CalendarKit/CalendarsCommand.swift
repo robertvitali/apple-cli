@@ -8,7 +8,7 @@ import EventKitCore
 public struct CalendarsCommand: ParsableCommand {
     public static let configuration = CommandConfiguration(
         commandName: "calendars",
-        abstract: "Calendar collections (ports calendar_calendars).",
+        abstract: "Calendar collections.",
         subcommands: [CalendarsList.self],
         defaultSubcommand: CalendarsList.self
     )
