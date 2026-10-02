@@ -895,14 +895,22 @@ read-only freshness fallback applies only if native Swift 6 updates fail empiric
 `target-branch` names the default branch, GitHub documents that each configured ecosystem's
 commit-message pattern also governs its security-update pull requests; that stops holding once
 step 13 points `target-branch` at the disposable ref. It does not reach the unconfigured npm
-fixture, whose security-update pull requests would carry Dependabot's default title. Two
-GitHub-managed dynamic workflows run on this repository outside `.github/workflows/`: "Dependabot
-Updates", since 2026-09-01, and "Dependency Graph", first run on 2026-09-26 at 20:03Z, when the
-alerts were switched on. GitHub defines them, not a tracked file, so the step 17 static scan does
-not see them and the row 5 inventory covers the tracked workflows only. Their job logs show a
-token with contents, metadata and packages read and no secrets; Dependabot's branches and pull
-requests are created by Dependabot's own GitHub App identity, not that token (three such pull
-requests to date, all closed). Both run a GitHub-owned action at the floating ref `@main`,
+fixture, whose security-update pull requests would carry Dependabot's default title. **Correction
+2026-10-02 (D45):** that reading did not hold. Pull request 8, the first security update since D33,
+carries Dependabot's default `build(deps)` prefix and default labels rather than the `/docs`
+configuration's. GitHub's "Dependabot options reference" disagrees with itself: the `commit-message`
+and `labels` sections say they apply to security updates unless `target-branch` names a non-default
+branch, while the `target-branch` section says that once `target-branch` is defined, the ecosystem's
+options no longer apply to security updates; pull request 8 behaves as the latter, so
+security-update pull requests keep Dependabot's defaults in every ecosystem while `target-branch` is
+set. Two GitHub-managed dynamic workflows run on this repository outside `.github/workflows/`:
+"Dependabot Updates", since 2026-09-01, and "Dependency Graph", first run on 2026-09-26 at 20:03Z,
+when the alerts were switched on. GitHub defines them, not a tracked file, so the step 17 static
+scan does not see them and the row 5 inventory covers the tracked workflows only. Their job logs
+show a token with contents, metadata and packages read and no secrets; Dependabot's branches and
+pull requests are created by Dependabot's own GitHub App identity, not that token (three such pull
+requests by 2026-09-27, all closed; pull requests 7 and 8 opened later). Both run a GitHub-owned
+action at the floating ref `@main`,
 admitted by the selected-actions policy's GitHub-owned allowance; the Dependency Graph run fetched
 it at 20:03Z, after D32 had turned `sha_pinning_required` on at 01:40Z, so that requirement did
 not stop it.

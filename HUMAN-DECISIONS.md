@@ -92,6 +92,7 @@ publication action.
 | D42 | A note fragment from a live run in a Notes test | **RATIFIED 2026-09-30: redact at HEAD, accept history (option A)** | `Tests/NotesKitTests/NotesTextTests.swift` quoted a three-word fragment of one of the operator's notes, measured live on 2026-08-19 (NOTES-L1) and committed that day in `50c30f0`; public since the visibility change D17 records. Replaced at HEAD with synthetic text; history keeps the original as an accepted residual, as D41 did for the Messages test |
 | D43 | CI job logs print the removed Messages test's name, which carried D41's search term | **RATIFIED 2026-09-30: leave the logs to expire (option A), re-confirmed on corrected facts** | Hosted build-test job logs print every test name: 61 job logs in 57 CI runs (2026-09-01 to 2026-09-30) carry the removed test's name, two lines each; a scan of all 322 retrievable logs found neither the message texts nor D42's note fragment. Accepted as a residual until GitHub's 90-day log retention removes them (the last about 2026-12-29, later if a run from before the D41 commit is re-run or a pull request on an older head runs) |
 | D44 | Narrow main-only reversal for a parallel session's worktree | **RATIFIED 2026-10-01** | One local git worktree, `~/workspace/apple-cli-governance` on the local branch `26/governance`, for a second agent session working the supply-chain and governance queue in parallel. The branch is never pushed and never merged: each change is rebased onto the current `main`, passes the same review, scan and canonical gates, and lands by a fast-forward push to `main`, one landing at a time. Removed when that queue is done. Ordinary work otherwise stays main-only; D16 is unchanged |
+| D45 | Open Dependabot pull requests 7 and 8 while the Dependabot governance path is built | **ANSWERED 2026-10-02: supersede both on main (option A)** | Two reviewed commits on `main` take the same updates: urllib3 2.7.0 → 2.8.0 in `docs/requirements.txt`, which clears the three open alerts, and astral-sh/setup-uv 10.1.0 → 10.2.0, with its new SHA added to the reviewed Action allowlist. Dependabot then closes both pull requests itself. No agent action on either pull request, and no new CI run on pull request 7's pre-D41 head (D43) |
 | D46 | Interim protection for `main` before the design's ruleset | **APPLIED 2026-10-02T05:04Z on the operator's instruction; no-bypass shape RATIFIED 2026-10-02 (option A)** | One active ruleset on `main` only, with two rules, block force pushes and restrict deletion, and no bypass actor: while it is active nothing, the operator's credentials included, can force-update or delete `main`, and an authorized history rewrite needs the operator to disable it first. It guards against mistakes, not a misused admin credential, which can disable it. Neither rule applies to fast-forward pushes, pull requests, Dependabot's branches or the current read-only CI workflows; the first push under it (`9cd2260`) passed. At design §18 step 20 the operator decides whether it is deleted or kept; keeping it needs design amendments |
 
 ---
@@ -2220,6 +2221,65 @@ personal data public is yours alone to decide (D38, D41).
 exception.
 
 **Blocking?** No. It records the authority under which the second session lands its work.
+
+---
+
+## D45 — Open Dependabot pull requests 7 and 8 while the Dependabot governance path is built: supersede both on main
+
+- **Status:** **ANSWERED 2026-10-02: supersede both on main (option A).** This commit takes the
+  urllib3 update; the setup-uv update follows in its own commit.
+- **Finding.** Two Dependabot pull requests were open against `main`, and both failed CI. Pull
+  request 8 is a Dependabot security update, urllib3 2.7.0 → 2.8.0 in `docs/requirements.txt`, for
+  three Dependabot alerts opened at 2026-10-02T02:08Z: GHSA-8988-9cw3-xx77 and GHSA-vxq7-64xx-v4gw
+  (high) and GHSA-gh4c-6fx4-qh6g (medium), each first patched in 2.8.0. urllib3 serves only the
+  documentation toolchain in CI and is not part of the shipped CLI. Pull request 8 failed two
+  checks: `governance / required`, because the description after its title's type starts with a
+  capital letter and its body carries no template section; and `Supply-chain policy`, whose
+  lock-regeneration check found a single differing comment line, because Dependabot regenerates the
+  lock from inside `docs/`, so its `# via` comment names `requirements.in` where CI's, run from the
+  repository root, names `docs/requirements.in`. The version resolution matched; the same comment
+  difference recurs on every Dependabot update of that lock until the Dependabot governance path
+  accounts for it. Pull request 7 is a version update, astral-sh/setup-uv 10.1.0 → 10.2.0. Its
+  `Supply-chain policy` job ran the new Action, which the server-side Actions allowlist admits at
+  any ref, and failed because the repository's tests pin the reviewed Action commits and the new one
+  is not among them; that is expected until the design §10.5 Dependabot pin exception exists. It
+  failed `governance / required` for the same two reasons as pull request 8 and also because its
+  title is longer than 72 characters. On both pull requests the `quality / required` rollup, which
+  aggregates the CI jobs, failed only because `Supply-chain policy` did. Pull request 7's head
+  predates D41's commit, so a new CI run on it would print D41's search term again and, under D43,
+  push that residual's expiry later; because `ci.yml` also runs on the `edited` event and builds the
+  pull request's head commit, even an edit of its title or body would start one. No ruleset requires
+  a status check, so neither failure blocked a merge, but merging either pull request as it stood
+  would have turned `main`'s own `Supply-chain policy` red.
+- **Correction to D33's record.** D33 says that, because `target-branch` names the default branch,
+  each configured ecosystem's commit-message pattern also governs its security-update pull requests.
+  Pull request 8, the first security update since D33, carries Dependabot's default `build(deps)`
+  prefix and default labels, not the `build(docs)` prefix and the labels configured for `/docs`, so
+  the configuration did not govern it. GitHub's "Dependabot options reference" disagrees with itself
+  here: its `commit-message` and `labels` sections say they apply to security updates unless
+  `target-branch` names a non-default branch, which is the reading D33 relied on, while its
+  `target-branch` section says that once `target-branch` is defined, the ecosystem's options no
+  longer apply to security updates. Pull request 8 behaves as the `target-branch` section says, and
+  `scripts/ci/dependency_policy.py` requires `target-branch: "main"`, so security-update pull
+  requests keep Dependabot's default title and labels in every ecosystem. D33's ruling does not
+  depend on that statement; the readiness evidence carries the same correction.
+- **Options considered.** (A) take both updates in reviewed commits on `main` and let Dependabot
+  close the pull requests itself; (B) the same for urllib3 only, leaving pull request 7 open and
+  untouched until the §10.5 pin exception exists; (C) leave both open and untouched until the
+  Dependabot governance path lands, with the three alerts open meanwhile.
+- **Ruling.** (A), as the ledger row states.
+- **Applied.** The urllib3 lock is regenerated with the repository's own lock command at the uv
+  version CI pins, adding `--upgrade-package urllib3==2.8.0`; the plain command then reproduces the
+  result byte for byte. Only the urllib3 lines change, and the new hashes match PyPI's and those in
+  pull request 8. The setup-uv commit that follows checks the new Action commit against the upstream
+  `v10.2.0` release tag before adding it to the reviewed Action allowlist; no repository setting
+  changes.
+- **Filed:** 2026-10-02 · **Category:** dependency updates / Dependabot
+
+**Why it needed you.** Acting on a pull request is outward-facing, and overtaking Dependabot's
+pull requests on `main` instead of waiting for the governance path was a choice of scope.
+
+**Blocking?** No.
 
 ---
 
