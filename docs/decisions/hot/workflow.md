@@ -1,8 +1,8 @@
 ---
 topic: workflow
-last-used: 2026-09-26
+last-used: 2026-10-02
 importance: pinned
-uses: 4
+uses: 5
 ---
 
 # Workflow decisions
@@ -61,3 +61,16 @@ CLOSED 2026-08-31 across the tracked documents; the fresh pre-publication privac
 separate, still-pending launch gate and the repo stays private until it and readiness pass.
 (Update 2026-09-26: superseded for visibility on 2026-09-21 by D17; readiness and the audit
 still gate every publication action beyond visibility.)
+
+## 2026-10-02 — D46 interim `main` ruleset: no force-push, no deletion, no bypass
+
+At the operator's request to protect `main` without affecting the agents' work, one repository
+ruleset now targets only `main` with two rules, block force pushes and restrict deletion, and no
+bypass actor (read back: `current_user_can_bypass` never). Fast-forward pushes, pull requests,
+Dependabot and the current read-only CI workflows are unaffected; it requires no review or check,
+so it is not the step 20
+activation D16 reserves. Because the agents push with the operator's credentials, an operator
+bypass would have left the guarded mistake open, and the operator ratified the no-bypass shape;
+an authorized history rewrite therefore needs the operator to disable the ruleset first. It stops
+mistakes, not a misused admin credential. Whether it is deleted or kept at step 20, whose reviewed
+ruleset exempts the operator's user, is the operator's decision then.

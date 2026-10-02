@@ -449,6 +449,15 @@ automation never treats bypass as quality evidence: at future public launch, an
 exact candidate still must pass the full publisher preflight before any
 outward-facing action.
 
+**Amendment 2026-10-02 (HUMAN-DECISIONS D46).** Before this activation an
+interim ruleset already protects `main`: it targets only `refs/heads/main`,
+blocks force pushes and deletion, and has no bypass actor, the operator
+included. It requires no review or check, so it is not this section's
+activation and does not satisfy Section 15's precondition. While it is active
+the operator's force-push authority on `main` (Section 6.2, and the bypass
+above) is exercised only by disabling it first. Its disposition at step 20 is
+in that step's amendment.
+
 Repository merge settings permit squash merge only: merge commits and rebase
 merges are disabled. The configured squash title source is `PR_TITLE`, and the
 squash message source is `PR_BODY`. GitHub permits editing the proposed merge
@@ -2098,7 +2107,8 @@ Numbered implementation and verification requirements:
 18. Restore `.github/dependabot.yml` by removing the disposable
     `target-branch` set in step 13, through the still-binding main-only review gate
     that is the reviewed path at this point (the rehearsal ruleset is gone
-    and the `main` ruleset is not yet active), verify the committed file
+    and the `main` ruleset is not yet active; amendment 2026-10-02: D46's
+    interim ruleset on `main` requires no review), verify the committed file
     through the contents API, and record that no endpoint exposes
     Dependabot's effective target. The step completes on the contents-API
     verification plus that recorded limitation; the base ref of the next
@@ -2137,6 +2147,24 @@ Numbered implementation and verification requirements:
     independent approval or the recorded exact operator bypass (Section 14.2).
     Until that instruction, the main-only ruling stands and every earlier step
     exercises only disposable refs.
+
+    **Amendment 2026-10-02 (HUMAN-DECISIONS D46).** At this step the operator
+    decides whether D46's interim `main` ruleset (force push and deletion
+    blocked, no bypass actor) is deleted or kept beside the reviewed ruleset.
+    The reviewed ruleset exempts the operator's exact user, and agent sessions
+    that push with the operator's credentials are exempt with it, so deleting
+    the interim ruleset restores force push for them unless they first move to
+    an identity without bypass. If it is deleted, that happens after the
+    reviewed ruleset is active and read back and before the force-push
+    confirmation above, and the rulesets are read back again. Keeping it is a
+    design change: Section 7.3 gives `main` one ruleset with the operator as
+    sole bypass actor, and Section 15.1's launch read-back and the step 17
+    expected set compare against that, so a kept interim ruleset makes the
+    launch preflight refuse until the change that records the decision amends
+    them, together with Sections 4.2, 5, 6.2, 7.2 and 19, which then keep
+    "disable it first" for as long as it exists; this step's force-push
+    confirmation would read each ruleset's verdict from the rule-suite
+    evaluation.
 
 Read-only release preparation may transform a temporary exact-SHA tree and
 compute the predicted next version from branch-reachable Conventional Commit
@@ -2186,7 +2214,7 @@ governance run after its installation.
 | Required check can never allocate a runner after ruleset activation | `main` is locked behind a check that cannot start | Exact-user operator bypass lands a dedicated policy PR that fixes or relabels the runner; the ruleset is not weakened and the bypass use is logged |
 | Hosted Actions unavailable while the repository is private | Reviewed main-only implementation continues under exact-SHA full local gates; required rulesets remain inactive | Defer mandatory hosted runs and dependent rehearsals until after the conditional visibility transition, not a quota-reset date; preserve every pending criterion, use steps 6 and 8–9 for disposable-rule rehearsals, and require every mandatory hosted job to allocate and pass before final `main` or maintenance ruleset activation |
 | A merged policy PR breaks `governance / required` so the fix PR is itself blocked | `main` is red; releases and merges stop | Exact-user operator bypass lands the corrective policy PR; post-merge exact quality must pass before any later merge |
-| Personal data discovered in already-merged `main` history | Published-history rules (linear history, no force push) collide with the remediation | Redact at HEAD immediately; a history rewrite is an operator decision that uses the exact-user bypass with `--force-with-lease`, recorded in `HUMAN-DECISIONS.md`, and never reaches forks or existing clones |
+| Personal data discovered in already-merged `main` history | Published-history rules (linear history, no force push) collide with the remediation | Redact at HEAD immediately; a history rewrite is an operator decision that uses the exact-user bypass with `--force-with-lease`, recorded in `HUMAN-DECISIONS.md`, and never reaches forks or existing clones (amendment 2026-10-02, D46: while D46's interim ruleset is on `main`, the operator disables it first and re-enables it after) |
 | No qualified independent reviewer is available for a change | The normal path cannot complete | The exact-user bypass is the recorded normal path for that change, each use is logged, and Goal 2 is reported as unmet until a reviewer exists |
 
 The future public publisher's resume path refuses:

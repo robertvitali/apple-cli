@@ -31,7 +31,7 @@ recorded, scoped evidence).
 
 ---
 
-## LEDGER — every decision at a glance (updated 2026-10-01)
+## LEDGER — every decision at a glance (updated 2026-10-02)
 
 **Still needs you: D2 (the Homebrew tap), D18 (the `v27.0.0` release, which waits on the phase-3
 publisher) and D22 (two parity narrowings).** D9 was reopened 2026-08-31 and finally closed the
@@ -92,6 +92,7 @@ publication action.
 | D42 | A note fragment from a live run in a Notes test | **RATIFIED 2026-09-30: redact at HEAD, accept history (option A)** | `Tests/NotesKitTests/NotesTextTests.swift` quoted a three-word fragment of one of the operator's notes, measured live on 2026-08-19 (NOTES-L1) and committed that day in `50c30f0`; public since the visibility change D17 records. Replaced at HEAD with synthetic text; history keeps the original as an accepted residual, as D41 did for the Messages test |
 | D43 | CI job logs print the removed Messages test's name, which carried D41's search term | **RATIFIED 2026-09-30: leave the logs to expire (option A), re-confirmed on corrected facts** | Hosted build-test job logs print every test name: 61 job logs in 57 CI runs (2026-09-01 to 2026-09-30) carry the removed test's name, two lines each; a scan of all 322 retrievable logs found neither the message texts nor D42's note fragment. Accepted as a residual until GitHub's 90-day log retention removes them (the last about 2026-12-29, later if a run from before the D41 commit is re-run or a pull request on an older head runs) |
 | D44 | Narrow main-only reversal for a parallel session's worktree | **RATIFIED 2026-10-01** | One local git worktree, `~/workspace/apple-cli-governance` on the local branch `26/governance`, for a second agent session working the supply-chain and governance queue in parallel. The branch is never pushed and never merged: each change is rebased onto the current `main`, passes the same review, scan and canonical gates, and lands by a fast-forward push to `main`, one landing at a time. Removed when that queue is done. Ordinary work otherwise stays main-only; D16 is unchanged |
+| D46 | Interim protection for `main` before the design's ruleset | **APPLIED 2026-10-02T05:04Z on the operator's instruction; no-bypass shape RATIFIED 2026-10-02 (option A)** | One active ruleset on `main` only, with two rules, block force pushes and restrict deletion, and no bypass actor: while it is active nothing, the operator's credentials included, can force-update or delete `main`, and an authorized history rewrite needs the operator to disable it first. It guards against mistakes, not a misused admin credential, which can disable it. Neither rule applies to fast-forward pushes, pull requests, Dependabot's branches or the current read-only CI workflows; the first push under it (`9cd2260`) passed. At design §18 step 20 the operator decides whether it is deleted or kept; keeping it needs design amendments |
 
 ---
 
@@ -2219,5 +2220,83 @@ personal data public is yours alone to decide (D38, D41).
 exception.
 
 **Blocking?** No. It records the authority under which the second session lands its work.
+
+---
+
+## D46 — Interim protection for `main` before the design's ruleset
+
+- **Status:** **APPLIED 2026-10-02T05:04Z** on the operator's instruction; the no-bypass shape,
+  chosen by the controller, **RATIFIED in session the same day (option A)**, after it was applied.
+- **Instruction.** The operator asked, in session: "let's protect the main branch but lets make
+  sure it doesn't affect us". The rule shape was the controller's choice within that instruction.
+  Review then flagged that the no-bypass choice limits the operator's own emergency path, and the
+  operator ratified it in session the same day.
+- **Options considered.** (A) two rules, block force pushes and restrict deletion, on `main` only,
+  with no bypass actor. (B) The same rules with the operator's exact user as bypass actor, the
+  step 20 bypass shape: both agent sessions (D44) push with the operator's credentials, so that
+  bypass would be theirs too, and as only the operator's credentials can push to `main` today
+  (D31) the rule would stop nothing. (C) Nothing until design §18 step 20, the design's order,
+  which does not meet the instruction. Only (A), recommended, and (B) were put to the operator;
+  (C) was not.
+- **Ruling.** (A). Applied through the API 2026-10-02T05:04:58Z and read back 05:05Z (readiness
+  evidence §4): one ruleset, "main: block force-push and deletion (interim, D46)", enforcement
+  active, target exactly `refs/heads/main`, rules `deletion` and `non_fast_forward`, no bypass
+  actor, `current_user_can_bypass` never; the rules GitHub reports for `main` are exactly those
+  two; rulesets 0 before, 1 after. It requires no pull request, review, status check, linear
+  history or code-owner approval.
+- **What it stops and what it does not.** While it is active nothing, the operator's credentials
+  included, can force-update or delete `main`. GitHub's ruleset documentation adds that an
+  administrator without bypass also cannot rename the default branch or change it while force
+  pushes are blocked; that was not exercised here, so it is recorded as documented, not observed.
+  Fast-forward pushes, pull requests and their squash merges, Dependabot's branches and the
+  current read-only CI workflows are untouched: the first push under it, `9cd2260` at 05:19:37Z
+  (D44's commit), passed its rule evaluation. Any credential with repository administration, the
+  operator's token that both agent sessions use included, can still disable or delete the
+  ruleset, so it guards against mistakes, not against a misused credential (design §6.2 says the
+  same of the owner). Its history records each update while it
+  exists; a deletion removes it with its history and shows only as a divergence from the
+  readiness evidence's expected set, which records its creation time and history length. Agents
+  change a ruleset only on the operator's own explicit instruction in session (`AGENTS.md`,
+  Branch model, which states that posture for every repository setting).
+- **History repair.** A rewrite the operator authorizes (D9's kind) runs in this order: (1) both
+  agent sessions pause; (2) the operator sets the ruleset's enforcement to disabled, not deleted,
+  so its history stays; (3) the rewrite pushes with `--force-with-lease` against the expected
+  object; (4) the operator re-enables it and the controller reads back the values above and the
+  new history version, recorded in the readiness evidence; (5) each session keeps any unpushed
+  work aside, then fetches and resets to `origin/main`. D44's take-`main`-by-rebase rule does not
+  apply here: a session re-applies only its own commits, with `git rebase --onto origin/main` and
+  the pre-rewrite tip as the old base, after checking they carry none of the purged content.
+  Rebasing or merging old local commits onto the rewritten tip would bring purged commits back
+  as a fast-forward this rule cannot stop.
+- **Departures named.** Design §7.2 activates `main` protection only after the steps 8–14
+  rehearsal, in the reviewed shape with the operator's exact-user bypass (§6.2). D46 puts a
+  two-rule subset on `main` first, with no bypass, so while it is active the operator's
+  force-push authority on `main` is exercised only by disabling it. It is not the step 20
+  activation that D16 reserves for a separate instruction, does not satisfy §15's precondition of
+  an active step 20 `main` ruleset (D27), and engages no required check. The catch-all branch
+  ruleset of §7.3 excludes `main` and the step 8 rehearsal ruleset targets a disposable ref, so
+  neither overlaps it. The design carries dated amendments at §7.2, steps 18 and 20, and its
+  history-repair row.
+- **At step 20.** The reviewed `main` ruleset contains both rules but exempts the operator's exact
+  user, as whom the agent sessions push, so deleting this ruleset then restores force push for
+  them. Whether to delete it (accepting that, or first moving the agent sessions to an identity
+  without bypass) or keep it beside the reviewed ruleset as a standing no-bypass layer is the
+  operator's decision at that step. If it is deleted: activate the reviewed ruleset, read it back,
+  delete this one, read back that only the designed rulesets remain, then run step 20's
+  force-push confirmation. Keeping it is a design change: §7.3 gives `main` one ruleset with the
+  operator as sole bypass actor and §15.1's launch read-back compares against that, so a kept
+  ruleset makes the launch preflight refuse until the change recording that ruling amends design
+  §§4.2, 5, 6.2, 7.2, 7.3, 15.1 and 19 and the step 17 expected set; step 20's force-push
+  confirmation would then read each ruleset's verdict from the rule-suite evaluation.
+- **Other entries.** D31's re-open triggers do not fire: no bypass actor is added and this is not
+  step 20. D33's remark that a failing Dependabot title/body check "binds no merge while no
+  ruleset exists" still holds in substance: no ruleset requires a check.
+- **Filed:** 2026-10-02 · **Category:** repository settings / branch protection
+
+**Why it needed you.** Repository settings are outward-facing state only the operator may
+authorize changing, the design schedules `main` protection for §18 step 20, and the no-bypass
+shape constrains the operator's own emergency path.
+
+**Blocking?** No.
 
 ---
