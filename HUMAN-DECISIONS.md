@@ -31,7 +31,7 @@ recorded, scoped evidence).
 
 ---
 
-## LEDGER — every decision at a glance (updated 2026-09-30)
+## LEDGER — every decision at a glance (updated 2026-10-01)
 
 **Still needs you: D2 (the Homebrew tap), D18 (the `v27.0.0` release, which waits on the phase-3
 publisher) and D22 (two parity narrowings).** D9 was reopened 2026-08-31 and finally closed the
@@ -91,6 +91,7 @@ publication action.
 | D41 | Two message texts and a search term from a live oracle run in a Messages test | **RATIFIED 2026-09-30: redact at HEAD, accept history (option A)** | `Tests/MessagesKitTests/MessagesKitTests.swift` carried two message texts and a search term sampled from the operator's Messages store during a live oracle run (committed 2026-07-15 in `23c9afc`, public in the periods D9 and D17 record). Replaced at HEAD with synthetic text; history keeps the originals as an accepted residual, as D38 did for its commit |
 | D42 | A note fragment from a live run in a Notes test | **RATIFIED 2026-09-30: redact at HEAD, accept history (option A)** | `Tests/NotesKitTests/NotesTextTests.swift` quoted a three-word fragment of one of the operator's notes, measured live on 2026-08-19 (NOTES-L1) and committed that day in `50c30f0`; public since the visibility change D17 records. Replaced at HEAD with synthetic text; history keeps the original as an accepted residual, as D41 did for the Messages test |
 | D43 | CI job logs print the removed Messages test's name, which carried D41's search term | **RATIFIED 2026-09-30: leave the logs to expire (option A), re-confirmed on corrected facts** | Hosted build-test job logs print every test name: 61 job logs in 57 CI runs (2026-09-01 to 2026-09-30) carry the removed test's name, two lines each; a scan of all 322 retrievable logs found neither the message texts nor D42's note fragment. Accepted as a residual until GitHub's 90-day log retention removes them (the last about 2026-12-29, later if a run from before the D41 commit is re-run or a pull request on an older head runs) |
+| D44 | Narrow main-only reversal for a parallel session's worktree | **RATIFIED 2026-10-01** | One local git worktree, `~/workspace/apple-cli-governance` on the local branch `26/governance`, for a second agent session working the supply-chain and governance queue in parallel. The branch is never pushed and never merged: each change is rebased onto the current `main`, passes the same review, scan and canonical gates, and lands by a fast-forward push to `main`, one landing at a time. Removed when that queue is done. Ordinary work otherwise stays main-only; D16 is unchanged |
 
 ---
 
@@ -2141,5 +2142,82 @@ alone to decide (D9, D19, D38, D41).
 personal data public is yours alone to decide (D38, D41).
 
 **Blocking?** No.
+
+---
+
+## D44 — Narrow main-only reversal for a parallel session's worktree
+
+- **Status:** **RATIFIED 2026-10-01: the narrow reversal (option A).** Ledger dates are the
+  operator's local date (D32): the operator chose this option on 2026-10-01, shortly before the
+  worktree and its local branch were created at 23:57 local (2026-10-02T03:57Z). The row as first
+  drafted carried the UTC date 2026-10-02; its substance is unchanged. Unlike D16 and design §18
+  step 8, the reversal was not recorded on `main` before the branch was cut: this entry's commit,
+  made from the worktree, is the first landing under it.
+- **Context.** The operator asked to run two agent sessions in parallel: one in the primary
+  checkout, and one in a second local worktree working the supply-chain and governance queue. That
+  queue is the Dependabot governance path, the CI readers' handling of non-ASCII whitespace, the
+  committed Action allowlist, the release runbook's toolchain record and the launch
+  specification (design §8, §10.5, §15, §17 and §18).
+- **Options considered.** (A) This narrow reversal, with `AGENTS.md` unchanged. (B) A general
+  relaxation letting any future parallel session work in its own worktree, with an `AGENTS.md`
+  amendment. Not put to the operator: serial work in the primary checkout alone; a second clone on
+  `main`; a detached-HEAD worktree; (A) with a one-line `AGENTS.md` pointer to this ledger.
+- **Ruling.** (A), as the ledger row states: one local git worktree,
+  `~/workspace/apple-cli-governance`, on the local branch `26/governance`, removed when that queue
+  is done. Ordinary work otherwise stays main-only; D16 is unchanged.
+- **Working rules.** Recorded by the two sessions to carry out the ruling. They only narrow it and
+  are not part of the operator's ratified text; both sessions are bound by them, and only the
+  operator may relax them.
+  - Scope: only that queue's changes land from the worktree; product changes land from the primary
+    checkout. The worktree grants nothing a session in the primary checkout lacks, and nothing
+    toward D16: D16's disposable refs are never created from this branch.
+  - Users: the agent session the operator assigns to that queue, or a successor the operator
+    assigns after it ends, one at a time. The operator may also work there.
+  - The branch has no upstream, and no ref of its name is ever pushed. It takes `main` only by
+    rebase, so no merge commit is created in either direction. Its commits reach `main` only by
+    `git push origin <gated commit ID>:refs/heads/main`, a fast-forward of the exact gated commit;
+    never a push that names the branch, `--all`, `--mirror`, a force push or a tag.
+  - Each change is first rebased onto the current `main`. The review, the personal-data scan and the
+    full local canonical suite then run on that exact rebased commit. If `main` moves before the
+    push, the change is rebased again and the scan and the suite re-run on the new commit. A rebase
+    that changes the diff, a conflict resolved in this file included, is reviewed again. After each
+    rebase, the ledger number, CHANGELOG `[Unreleased]` and the readiness-evidence tallies are
+    re-checked. The session in the primary checkout follows the same rule, since `main` can now move
+    under it too.
+  - One landing at a time: a session pushes to `main` only after the latest push there, by either
+    session, has finished its hosted CI and Docs runs. Both workflows cancel an in-progress `main`
+    run when a new push arrives, so an overlapping push would leave the earlier commit without one.
+  - The two sessions never overlap a local Bats run (a single file included) or the canonical
+    suite. While either session runs Bats, the other runs nothing that opens Mail, Notes, Messages,
+    Contacts, Calendar or Reminders. Each Bats file snapshots those six apps and quits the ones it
+    launched, so overlapping runs race (`AGENTS.md`, Toolchain + testing), and timing-sensitive
+    tests can flake under load. The sessions serialize these runs with one lock directory outside
+    the repository, taken with `mkdir` before the run, with the session, purpose and start time
+    written inside, and removed after it; a lock whose owner process is gone is removed only after
+    that is confirmed, and the removal is reported.
+  - The arrangement ends when the operator says the queue is done, or earlier on the operator's
+    word. Commits not yet landed are then either landed under these rules or discarded on the
+    operator's word. The worktree is removed with `git worktree remove` and the branch is deleted.
+    The Status then flips to CLOSED with a dated `Resolution:` line naming the last commit landed
+    from the worktree and the read-backs showing that `git worktree list` lists only the primary
+    checkout, that `git branch --list 26/governance` is empty and that `origin` has no
+    `26/governance` ref; the ledger row's status cell is updated to match. If the branch ever
+    reaches `origin`, the session stops and reports it to the operator, and the remote ref is
+    deleted only on the operator's go-ahead, then read back as absent and recorded here.
+- **Why `AGENTS.md` is not amended.** Its "Main-only workflow" section lets the operator reverse
+  the ruling explicitly, and this entry records that reversal. The operator chose (A), which leaves
+  `AGENTS.md` unchanged. That departs from the practice D16 and design §18 step 8 set, where a
+  reversal is recorded in `AGENTS.md` by a reviewed commit on `main` before the first branch exists.
+  While the worktree exists, `AGENTS.md`'s statements that all work happens in the primary checkout
+  and that the repository has exactly one branch do not describe the local repository. The second
+  is already untrue on the remote, which holds Dependabot's head branches. For work in or alongside
+  the worktree, this entry governs.
+- **Filed:** 2026-10-01 (raised when the operator asked to run two agent sessions in parallel) ·
+  **Category:** branch topology / parallel sessions
+
+**Why it needed you.** The main-only ruling is yours and repo-local; only you can carve out an
+exception.
+
+**Blocking?** No. It records the authority under which the second session lands its work.
 
 ---
