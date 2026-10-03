@@ -490,6 +490,40 @@ def signal_group(process_group: int, sig: signal.Signals) -> None:
     try_signal_group(process_group, sig)
 
 
+CLEANUP_PERMISSION_WARNING = (
+    "quality: cleanup could not signal the stage's process group (EPERM); exited members not "
+    "yet reaped, or a member under other credentials, may remain"
+)
+
+
+def try_signal_leader_group(
+    process: subprocess.Popen, sig: signal.Signals, *, cleanup: bool = False
+) -> bool:
+    try:
+        return try_signal_group(process.pid, sig)
+    except PermissionError:
+        # EPERM means no member could be signalled. Darwin's killpg reports it, where Linux
+        # succeeds, when every member has exited but some are not yet reaped: the leader, a
+        # child of this driver, or orphans that launchd has not reaped yet. A cancellation
+        # SIGKILL during cleanup, a child exiting as its deadline expires, or cleanup's own
+        # SIGTERM ending the leader together with its children leaves such a group; a member
+        # under other credentials would explain the error too. An unreaped
+        # exited leader is reaped here and nothing is reported sent (2026-10-02). In cleanup
+        # the stage's status is already a failure, so any other EPERM is reported as nothing
+        # sent and can never turn a stage green; a warning keeps the evidence that a member
+        # under other credentials may have survived, which the error used to carry. At a
+        # completed stage's sweep the leader is already reaped, and the error still fails the
+        # run loudly, so a passing stage whose descendants exit just before the sweep can
+        # still fail on macOS, erring closed (cleanup-wide since 2026-10-03, after a canonical
+        # run met it once cleanup's own wait had reaped the leader).
+        if process.returncode is None and process.poll() is not None:
+            return False
+        if cleanup:
+            print(CLEANUP_PERMISSION_WARNING, file=sys.stderr)
+            return False
+        raise
+
+
 def reap_leader(process: subprocess.Popen, grace: float) -> None:
     if process.returncode is not None:
         return
@@ -525,24 +559,28 @@ def drain_output(process: subprocess.Popen, grace: float) -> Tuple[Optional[byte
         return None, process.returncode is not None
 
 
-def kill_remaining_group(process: subprocess.Popen, sent_sigkill: List[bool]) -> None:
+def kill_remaining_group(
+    process: subprocess.Popen, sent_sigkill: List[bool], *, cleanup: bool = False
+) -> None:
     if sent_sigkill[0]:
         return
-    sent_sigkill[0] = try_signal_group(process.pid, signal.SIGKILL)
+    sent_sigkill[0] = try_signal_leader_group(process, signal.SIGKILL, cleanup=cleanup)
 
 
+# Called only from cleanup_process, whose callers are on a failing path (they set 124, 126 or
+# 128+n after it returns) or re-raising, so it signals with cleanup forgiveness (2026-10-03).
 def stop_process_group(process: subprocess.Popen, grace: float, sent_sigkill: List[bool]) -> Optional[bytes]:
-    signal_group(process.pid, signal.SIGTERM)
+    try_signal_leader_group(process, signal.SIGTERM, cleanup=True)
     output, complete = drain_output(process, grace)
     if not complete:
-        kill_remaining_group(process, sent_sigkill)
+        kill_remaining_group(process, sent_sigkill, cleanup=True)
         output, complete = drain_output(process, grace)
         if not complete:
             close_output(process)
             output = None
             reap_leader(process, grace)
     else:
-        kill_remaining_group(process, sent_sigkill)
+        kill_remaining_group(process, sent_sigkill, cleanup=True)
     return output
 
 
@@ -637,6 +675,9 @@ def run_command(
                         or cleanup_sent_sigkill[0]
                     )
                 except PermissionError:
+                    # A signal handler must not poll the leader or print. Cleanup's own
+                    # signals, which follow unless they already ran, meet the same group and
+                    # warn on an EPERM an exited leader does not explain (2026-10-03).
                     pass
             return
         if requested_signal[0] is None:

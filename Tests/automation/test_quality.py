@@ -1,3 +1,4 @@
+import errno
 import gc
 import importlib.util
 import io
@@ -2383,6 +2384,228 @@ class QualityDriverTests(unittest.TestCase):
         self.assertEqual(calls, [(12345, signal.SIGKILL)])
         self.assertEqual(sent, [True])
 
+    def test_group_signal_permission_error_is_forgiven_for_an_unreaped_exited_leader_or_in_cleanup(
+        self,
+    ) -> None:
+        # Darwin's killpg fails with EPERM for a group whose members have all exited while the
+        # leader is unreaped; Linux, where this tier runs in CI, never returns it, so the
+        # handling is pinned with stand-ins here (2026-10-02).
+        class Process:
+            pid = 12345
+
+            def __init__(self, returncode, exit_status):
+                self.returncode = returncode
+                self.exit_status = exit_status
+
+            def poll(self):
+                if self.returncode is None:
+                    self.returncode = self.exit_status
+                return self.returncode
+
+        error = PermissionError(errno.EPERM, os.strerror(errno.EPERM))
+        with mock.patch.object(self.quality.os, "killpg", side_effect=error) as killpg:
+            # The leader has exited but is unreaped: reaped through Popen, nothing sent.
+            zombie = Process(None, -signal.SIGKILL)
+            self.assertFalse(self.quality.try_signal_leader_group(zombie, signal.SIGTERM))
+            self.assertEqual(zombie.returncode, -signal.SIGKILL)
+            zombie = Process(None, 0)
+            sent = [False]
+            self.quality.kill_remaining_group(zombie, sent)
+            self.assertEqual((sent, zombie.returncode), ([False], 0))
+
+            # The leader is still running: nothing explains the error, so it stands.
+            running = Process(None, None)
+            with self.assertRaises(PermissionError):
+                self.quality.try_signal_leader_group(running, signal.SIGTERM)
+
+            # The leader was reaped before the signal, as at every completed stage's sweep:
+            # the error stands, and nothing is recorded as sent.
+            reaped = Process(0, 0)
+            sent = [False]
+            with self.assertRaises(PermissionError):
+                self.quality.kill_remaining_group(reaped, sent)
+            self.assertEqual(sent, [False])
+
+            # In cleanup the same error is forgiven with a warning: the stage's status is
+            # already a failure.
+            with mock.patch.object(self.quality.sys, "stderr", io.StringIO()) as warnings:
+                self.quality.kill_remaining_group(reaped, sent, cleanup=True)
+            self.assertEqual(sent, [False])
+            self.assertEqual(warnings.getvalue(), self.quality.CLEANUP_PERMISSION_WARNING + "\n")
+
+            # The pid-only helpers forgive nothing.
+            with self.assertRaises(PermissionError):
+                self.quality.try_signal_group(12345, signal.SIGTERM)
+
+        self.assertEqual(
+            killpg.call_args_list,
+            [
+                mock.call(12345, signal.SIGTERM),
+                mock.call(12345, signal.SIGKILL),
+                mock.call(12345, signal.SIGTERM),
+                mock.call(12345, signal.SIGKILL),
+                mock.call(12345, signal.SIGKILL),
+                mock.call(12345, signal.SIGTERM),
+            ],
+        )
+
+    def test_cleanup_stop_forgives_permission_error_from_an_unreaped_exited_leader(self) -> None:
+        # Cleanup's first signal, stop_process_group's SIGTERM, is where the macOS flake was
+        # reproduced. The integration test below cannot show it on Linux, so this pins, with
+        # stand-ins, that both of cleanup's signals go through try_signal_leader_group and that
+        # the error is forgiven there (2026-10-03).
+        class Process:
+            pid = 12345
+            stdout = None
+            returncode = None
+
+            def poll(self):
+                if self.returncode is None:
+                    self.returncode = -signal.SIGKILL
+                return self.returncode
+
+            def wait(self, timeout=None):
+                return self.poll()
+
+        # The leader is the group's only member here, so once it is reaped the group is gone and
+        # the sweep's SIGKILL finds nothing.
+        effects = [
+            PermissionError(errno.EPERM, os.strerror(errno.EPERM)),
+            ProcessLookupError(errno.ESRCH, os.strerror(errno.ESRCH)),
+        ]
+        zombie = Process()
+        sent = [False]
+        helper = self.quality.try_signal_leader_group
+        warnings = io.StringIO()
+        spy = mock.patch.object(self.quality, "try_signal_leader_group", wraps=helper)
+        with mock.patch.object(self.quality.os, "killpg", side_effect=effects) as killpg, \
+                spy as routed, mock.patch.object(self.quality.sys, "stderr", warnings):
+            self.assertIsNone(self.quality.stop_process_group(zombie, 0.1, sent))
+
+        # An unreaped exited leader explains the error fully, so nothing is warned.
+        self.assertEqual(warnings.getvalue(), "")
+
+        self.assertEqual(
+            routed.call_args_list,
+            [
+                mock.call(zombie, signal.SIGTERM, cleanup=True),
+                mock.call(zombie, signal.SIGKILL, cleanup=True),
+            ],
+        )
+        self.assertEqual((sent, zombie.returncode), ([False], -signal.SIGKILL))
+        self.assertEqual(
+            killpg.call_args_list,
+            [mock.call(12345, signal.SIGTERM), mock.call(12345, signal.SIGKILL)],
+        )
+
+    def test_cleanup_escalation_forgives_permission_error_from_a_leader_still_unreaped(
+        self,
+    ) -> None:
+        # The escalation branch (drain_output did not complete): the leader is still running
+        # or caught mid-exit when its group's SIGKILL meets EPERM. Cleanup forgives it with a
+        # warning instead of raising; without the flag the error would stand (2026-10-03).
+        class Process:
+            pid = 12345
+            stdout = None
+            returncode = None
+            waits = 0
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                self.waits += 1
+                if self.waits == 1:
+                    raise subprocess.TimeoutExpired(("leader",), timeout)
+                self.returncode = -signal.SIGKILL
+                return self.returncode
+
+        effects = [None, PermissionError(errno.EPERM, os.strerror(errno.EPERM))]
+        leader = Process()
+        sent = [False]
+        helper = self.quality.try_signal_leader_group
+        warnings = io.StringIO()
+        spy = mock.patch.object(self.quality, "try_signal_leader_group", wraps=helper)
+        with mock.patch.object(self.quality.os, "killpg", side_effect=effects), \
+                spy as routed, mock.patch.object(self.quality.sys, "stderr", warnings):
+            self.assertIsNone(self.quality.stop_process_group(leader, 0.1, sent))
+
+        self.assertEqual(
+            routed.call_args_list,
+            [
+                mock.call(leader, signal.SIGTERM, cleanup=True),
+                mock.call(leader, signal.SIGKILL, cleanup=True),
+            ],
+        )
+        self.assertEqual((sent, leader.waits), ([False], 2))
+        self.assertEqual(warnings.getvalue(), self.quality.CLEANUP_PERMISSION_WARNING + "\n")
+
+    def test_cleanup_forgives_permission_error_after_its_wait_reaped_the_leader(self) -> None:
+        # A canonical run's failure (2026-10-03): cleanup's SIGTERM reached a live leader, its
+        # own wait reaped it, and the sweep's SIGKILL met EPERM from exited orphans launchd
+        # had not reaped yet. The stage's status is already a failure, so the error is reported
+        # as nothing sent; the completed-stage sweep still raises (the next test).
+        class Process:
+            pid = 12345
+            stdout = None
+            returncode = None
+
+            def poll(self):
+                return self.returncode
+
+            def wait(self, timeout=None):
+                self.returncode = -signal.SIGTERM
+                return self.returncode
+
+        effects = [None, PermissionError(errno.EPERM, os.strerror(errno.EPERM))]
+        leader = Process()
+        sent = [False]
+        warnings = io.StringIO()
+        with mock.patch.object(self.quality.os, "killpg", side_effect=effects) as killpg, \
+                mock.patch.object(self.quality.sys, "stderr", warnings):
+            self.assertIsNone(self.quality.stop_process_group(leader, 0.1, sent))
+
+        self.assertEqual((sent, leader.returncode), ([False], -signal.SIGTERM))
+        # The forgiven error still leaves its evidence, as a warning, not a failure.
+        self.assertEqual(warnings.getvalue(), self.quality.CLEANUP_PERMISSION_WARNING + "\n")
+        self.assertEqual(
+            killpg.call_args_list,
+            [mock.call(12345, signal.SIGTERM), mock.call(12345, signal.SIGKILL)],
+        )
+
+    def test_completed_stage_sweep_permission_error_fails_closed(self) -> None:
+        # A completed stage's leader is reaped before the sweep, so EPERM there means an
+        # exited orphan or a member under other credentials, never the zombie-leader group
+        # cleanup forgives; it must not let the stage's own status 0 stand (2026-10-02).
+        calls = []
+
+        # Every SIGKILL meets EPERM and every SIGTERM finds the group gone, so nothing here
+        # reaches the real kernel: the sweep raises, and the cleanup that follows forgives its
+        # own SIGKILL's EPERM with a warning before the sweep's error is re-raised.
+        def killpg(_process_group, sig):
+            calls.append(sig)
+            if sig == signal.SIGKILL:
+                raise PermissionError(errno.EPERM, os.strerror(errno.EPERM))
+            raise ProcessLookupError(errno.ESRCH, os.strerror(errno.ESRCH))
+
+        warnings = io.StringIO()
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            with mock.patch.object(self.quality.os, "killpg", side_effect=killpg), \
+                    mock.patch.object(self.quality.sys, "stderr", warnings):
+                with self.assertRaises(PermissionError) as raised:
+                    self.quality.run_command(
+                        (sys.executable, "-c", "pass"),
+                        Path(temporary_directory),
+                        60,
+                        0.2,
+                    )
+
+        # A first SIGKILL proves the run took the completed path; a deadline would start
+        # with cleanup's SIGTERM. The error raised is the sweep's own, not cleanup's.
+        self.assertEqual(calls, [signal.SIGKILL, signal.SIGTERM, signal.SIGKILL])
+        self.assertIsNone(raised.exception.__context__)
+        self.assertEqual(warnings.getvalue(), self.quality.CLEANUP_PERMISSION_WARNING + "\n")
+
     def test_external_cancellation_suppresses_output_kills_descendant_and_cleans_xunit(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             root = Path(temporary_directory)
@@ -2474,6 +2697,9 @@ class QualityDriverTests(unittest.TestCase):
             runner = root / "runner.py"
             child = root / "child.py"
             marker = root / "cleanup-started"
+            exited = root / "child-exited-unreaped"
+            # The child ignores SIGTERM and ends on its own after 60 s, twice the runner's
+            # bound below, so a runner that hangs leaves nothing running for long.
             write_executable(
                 child,
                 textwrap.dedent(
@@ -2481,24 +2707,57 @@ class QualityDriverTests(unittest.TestCase):
                     #!/usr/bin/env python3
                     import signal, time
                     signal.signal(signal.SIGTERM, lambda *_args: None)
-                    while True:
+                    deadline = time.monotonic() + 60
+                    while time.monotonic() < deadline:
                         time.sleep(1)
                     """
                 ),
             )
+            # The child never ends inside the 0.05 s timeout, so cleanup always starts on the
+            # timeout path; the runner then signals itself, and the handler, seeing a
+            # cancellation during cleanup, sends the group SIGKILL. The wrapper then holds
+            # cleanup's own first signal until the child has exited but is still unreaped
+            # (waitid with WNOWAIT, or ps where os.waitid is missing), for up to 10 s of room
+            # for a starved runner; only the handler's SIGKILL can end the child before then,
+            # so the exited marker also proves the escalation. That order used to arise by
+            # chance, in about one run in thirty on macOS: Darwin's killpg fails with EPERM on
+            # such a group, and the error ended the runner with status 1 (2026-10-02). Linux
+            # signals such a group without error, so there this test passes either way; the
+            # stand-in tests above pin the handling, cleanup's routing through it and the path
+            # a canonical run met (2026-10-03).
             write_executable(
                 runner,
                 textwrap.dedent(
                     f"""\
                     #!/usr/bin/env python3
-                    import os, pathlib, signal, sys
+                    import os, pathlib, signal, subprocess, sys, time
                     sys.path.insert(0, {str(QUALITY_PATH.parent)!r})
                     import quality
                     original = quality.stop_process_group
+                    exited = pathlib.Path({str(exited)!r})
+
+                    def exited_unreaped(pid):
+                        if hasattr(os, "waitid"):
+                            flags = os.WEXITED | os.WNOHANG | os.WNOWAIT
+                            return os.waitid(os.P_PID, pid, flags) is not None
+                        # macOS has os.waitid only from Python 3.13; ps shows the zombie.
+                        state = subprocess.run(
+                            ["ps", "-o", "stat=", "-p", str(pid)],
+                            stdout=subprocess.PIPE,
+                            stderr=subprocess.DEVNULL,
+                            text=True,
+                        ).stdout
+                        return state.strip().startswith("Z")
 
                     def wrapped(process, grace, sent):
                         pathlib.Path({str(marker)!r}).write_text("started", encoding="utf-8")
                         os.kill(os.getpid(), signal.SIGTERM)
+                        deadline = time.monotonic() + 10
+                        while time.monotonic() < deadline:
+                            if exited_unreaped(process.pid):
+                                exited.write_text("exited", encoding="utf-8")
+                                break
+                            time.sleep(0.01)
                         return original(process, grace, sent)
 
                     quality.stop_process_group = wrapped
@@ -2507,6 +2766,9 @@ class QualityDriverTests(unittest.TestCase):
                     """
                 ),
             )
+            # The bound only catches a runner that never returns: unloaded it finishes in
+            # well under a second, and the room is for interpreter start-up on a starved
+            # runner (it was 5 s until 2026-10-02).
             completed = subprocess.run(
                 ["python3", str(runner)],
                 cwd=root,
@@ -2516,11 +2778,15 @@ class QualityDriverTests(unittest.TestCase):
                 stderr=subprocess.PIPE,
                 text=True,
                 env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
-                timeout=5,
+                timeout=30,
             )
 
-            self.assertTrue(marker.exists())
-            self.assertEqual(completed.returncode, 128 + signal.SIGTERM)
+            self.assertTrue(marker.exists(), completed.stderr)
+            self.assertTrue(
+                exited.exists(),
+                f"child not seen exited before cleanup signalled it\n{completed.stderr}",
+            )
+            self.assertEqual(completed.returncode, 128 + signal.SIGTERM, completed.stderr)
 
     def test_xml_assertion_counts_only_non_skipped_testcases(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
