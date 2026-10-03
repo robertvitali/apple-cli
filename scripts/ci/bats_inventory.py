@@ -91,7 +91,7 @@ TRUSTED_HOSTED_FILE_SHA256 = {
     "bats/hosted/smoke.bats": "7bd533f47c3271ae141be9e4d95b93b5b476cd5bd68e46908d5a634cf53095e1",
 }
 TRUSTED_HOSTED_HELPER_SHA256 = {
-    "bats/helpers/app_lifecycle.bash": "a7d0a9305ec7b8c45edc44c5edeca355e495e0f32d40d770ac8a7dad745037ba",
+    "bats/helpers/app_lifecycle.bash": "4e9689b18532ad592e3e6166a141ad0cae16a2d1bfe0d02b3160ca9c3753781a",
     "bats/helpers/app_lifecycle.py": "bb8f8cbcc78f821fe9a4d59c984f7aa4b3c4fa2719a9885796bea40d0446ead5",
     "bats/helpers/applescript_syntax_check.py": "40f56f5659dfb3bbc4c8b4b36d30ac12ad943f7c3fd78981800f3da46343e996",
     "bats/helpers/bounded_exec.py": "84260117f0505f2f2883fa2ec1b5fc5a577d4a05cc1ba268ae26e8948ab475c9",

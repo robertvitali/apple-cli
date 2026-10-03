@@ -47,6 +47,83 @@ def quote(value: object) -> str:
     return shlex.quote(str(value))
 
 
+def default_signal_dispositions() -> None:
+    """Runs in the child before exec. 2026-10-02: a runner started under nohup hands its children
+    SIGHUP already ignored, and one started as a background job of a non-interactive shell hands
+    them SIGINT and SIGQUIT already ignored; the starvation harness was started both ways, so all
+    three arrived ignored. bash cannot trap a signal ignored at entry, so a latch under test would
+    silently never install. Resetting them keeps such a test about the hook, not the runner. A
+    real Bats run started either way has the same gap: the latches for the signals it inherited
+    ignored never install. SIGTERM is reset too, so a test that wants it ignored from entry, as
+    ignore_term_from_entry does, starts from the default."""
+    for number in (signal.SIGHUP, signal.SIGINT, signal.SIGQUIT, signal.SIGTERM):
+        signal.signal(number, signal.SIG_DFL)
+
+
+def ignore_term_from_entry() -> None:
+    """Runs in the child before exec: TERM ignored at entry is inherited by every job the shell
+    starts and cannot be trapped, which is how a real timer comes to ignore its cancellation."""
+    default_signal_dispositions()
+    signal.signal(signal.SIGTERM, signal.SIG_IGN)
+
+
+def kill_process_group(group: int) -> None:
+    try:
+        os.killpg(group, signal.SIGKILL)
+    except (ProcessLookupError, PermissionError):
+        pass
+
+
+def run_in_own_session(
+    argv: list[str], *, timeout: float, env: dict[str, str] | None = None, preexec_fn=None,
+) -> subprocess.CompletedProcess:
+    """2026-10-02: runs a fixture as the leader of a new session and KILLs its whole process group
+    when the bound expires, on any other exception, and once it has returned. subprocess.run
+    kills only the direct child, so a timed-out probe left its forked loop running for good
+    (eighteen were found on one machine). A shell without job control keeps its jobs in its own
+    group, so the group holds whatever a fixture forks. The sweep after a normal return can only
+    find a process that closed both pipes, because communicate waits for every other holder."""
+    with subprocess.Popen(
+        argv, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, env=env,
+        start_new_session=True, preexec_fn=preexec_fn,
+    ) as process:
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired:
+            kill_process_group(process.pid)
+            try:
+                process.communicate(timeout=10)
+            except subprocess.TimeoutExpired:
+                pass
+            raise
+        except BaseException:
+            kill_process_group(process.pid)
+            raise
+        kill_process_group(process.pid)
+    return subprocess.CompletedProcess(argv, process.returncode, stdout, stderr)
+
+
+def ps_field(pid: int, field: str) -> str:
+    """2026-10-02: one ps field for pid, or "" once no process has that pid. Only the answer ps
+    gives for a missing pid, status 1 with nothing on either stream, counts as gone. Any other
+    failure raises, so a ps that cannot report never passes for a process that has exited."""
+    completed = subprocess.run(
+        ["ps", "-o", f"{field}=", "-p", str(pid)], capture_output=True, text=True, timeout=60,
+    )
+    if completed.returncode == 1 and not completed.stdout and not completed.stderr:
+        return ""
+    value = completed.stdout.strip()
+    if completed.returncode != 0 or completed.stderr or not value or "\n" in value:
+        raise AssertionError(f"ps could not report {field} for a fixture process")
+    return value
+
+
+def process_is_running(pid: int) -> bool:
+    """A zombie still waiting for its reaper counts as gone."""
+    state = ps_field(pid, "stat")
+    return bool(state) and not state.startswith("Z")
+
+
 class AppLifecyclePlannerTests(unittest.TestCase):
     def setUp(self):
         self.engine = load_engine()
@@ -485,12 +562,71 @@ class AppLifecyclePlannerTests(unittest.TestCase):
 
 
 class AppLifecycleShellTests(unittest.TestCase):
-    def run_shell(self, body: str, *, env: dict[str, str] | None = None, timeout: float = 10) -> subprocess.CompletedProcess:
+    # 2026-10-02: the default bound is 60 s, up from 10 s. It only catches a hook that never
+    # returns: under a starvation harness the bodies that start the Python helper a few times
+    # overran 10 s while behaving correctly (subprocess.TimeoutExpired, no assertion failed).
+    # Where waiting out a fixture's natural end would still pass, that end sits at least twice
+    # beyond the bound in use, as the default 120 s phase timer does under the default bound.
+    # Each body runs in its own session, and nothing it forks that stays in that session's
+    # process group outlives the run.
+    def run_shell(
+        self, body: str, *, env: dict[str, str] | None = None, timeout: float = 60,
+        preexec_fn=None,
+    ) -> subprocess.CompletedProcess:
         script = f"source {quote(HOOK_PATH)}\n{body}"
         merged = os.environ.copy()
         if env:
             merged.update(env)
-        return subprocess.run(["/bin/bash", "-c", script], capture_output=True, text=True, env=merged, timeout=timeout)
+        return run_in_own_session(
+            ["/bin/bash", "-c", script], timeout=timeout, env=merged, preexec_fn=preexec_fn,
+        )
+
+    def assert_forked_process_gone(self, record: Path, command: str) -> None:
+        # 2026-10-03: the fixture records its fork's pid and start time while the fork is known
+        # to run. The fork is followed only while both match: the start time survives its exec
+        # but not a reuse of the pid by another process, so such a process is never followed,
+        # and the KILL also requires the fixture's command.
+        pid_text, _, started = record.read_text(encoding="utf-8").partition(" ")
+        pid, started = int(pid_text), " ".join(started.split())
+        self.assertTrue(started, "the fixture recorded no start time for its fork")
+        deadline = time.monotonic() + 20
+        while process_is_running(pid) and " ".join(ps_field(pid, "lstart").split()) == started:
+            if time.monotonic() > deadline:
+                if ps_field(pid, "args") == command:
+                    try:
+                        os.kill(pid, signal.SIGKILL)
+                    except ProcessLookupError:
+                        pass
+                self.fail("a process the fixture forked outlived its run")
+            time.sleep(0.05)
+
+    def test_shell_runner_leaves_no_forked_process_running(self):
+        # 2026-10-02: whatever a body forks dies with its run, whether the shell returns while the
+        # fork still runs or the bound cuts both off. Each fork is a 120 s sleep, six times the
+        # 20 s it gets to vanish, so a runner that leaves it to end on its own still fails.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            returned, cut, staged = root / "returned", root / "cut", root / "cut.tmp"
+            completed = self.run_shell(textwrap.dedent(f"""\
+                /bin/sleep 120 > /dev/null 2>&1 &
+                printf '%s %s\\n' "$!" "$(ps -o lstart= -p "$!")" > {quote(returned)}
+            """))
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assert_forked_process_gone(returned, "/bin/sleep 120")
+            # The bound grows until the fork is on record, so a slow shell start-up cannot leave
+            # this half with nothing to check.
+            for bound in (1, 4, 16):
+                with self.assertRaises(subprocess.TimeoutExpired):
+                    self.run_shell(textwrap.dedent(f"""\
+                        /bin/sleep 120 &
+                        printf '%s %s\\n' "$!" "$(ps -o lstart= -p "$!")" > {quote(staged)}
+                        /bin/mv {quote(staged)} {quote(cut)}
+                        exec /bin/sleep 120
+                    """), timeout=bound)
+                if cut.exists():
+                    break
+            self.assertTrue(cut.exists(), "the shell never put its fork on record")
+            self.assert_forked_process_gone(cut, "/bin/sleep 120")
 
     def test_python_wrapper_rejects_unexpected_stderr_without_echoing_it(self):
         fixtures = (
@@ -644,12 +780,16 @@ class AppLifecycleShellTests(unittest.TestCase):
                 app_lifecycle_teardown_file_impl() {{ printf '%s\n' teardown >> "$LOG_PATH"; }}
                 @test "hook body" {{ printf '%s\n' test >> "$LOG_PATH"; }}
             """), encoding="utf-8")
-            completed = subprocess.run(
+            # 2026-10-02: 300 s, up from 10 s, as for the age-drift run below. Bats start-up
+            # alone can outgrow 10 s on a starved runner, and this bound only catches a hook that
+            # never returns: a stall in a polled step ends at the hook's own 120 s phase
+            # deadline and fails the return-code check, and an unpolled one is caught by this
+            # bound. An expired timer is reaped, never cancelled, so the 30 s timer-exit patience
+            # does not add to that.
+            completed = run_in_own_session(
                 [str(bats), str(test_file)],
-                capture_output=True,
-                text=True,
                 env={**os.environ, "LOG_PATH": str(log)},
-                timeout=10,
+                timeout=300,
             )
             self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
             self.assertEqual(log.read_text(encoding="utf-8").splitlines(), ["setup", "test", "teardown"])
@@ -706,12 +846,14 @@ class AppLifecycleShellTests(unittest.TestCase):
                 }}
                 @test "body" {{ true; }}
             """), encoding="utf-8")
-            completed = subprocess.run(
+            # 2026-10-02: 300 s, up from 10 s. Teardown here runs the real quiet window, about
+            # 4 s on a busy host and well past 10 s on a starved one; the bound only catches a
+            # hook that never returns. A stall in a polled step ends at the 120 s phase deadline,
+            # and an unpolled one is caught by this bound.
+            completed = run_in_own_session(
                 [str(bats), str(test_file)],
-                capture_output=True,
-                text=True,
                 env={**os.environ, "LOG_PATH": str(log)},
-                timeout=10,
+                timeout=300,
             )
 
             self.assertEqual(completed.returncode, 0, completed.stdout + completed.stderr)
@@ -837,13 +979,25 @@ class AppLifecycleShellTests(unittest.TestCase):
             APPLE_CLI_BATS_APP_FIND_INFO_DISAGREE_notes='$(printf INJECTED >&2)'
             app_lifecycle_note_find_info_disagreement notes && exit 1  # inherited junk refused, never evaluated
             printf 'GUARDS:ok\\n'
+            # 2026-10-02: an 08 assigned after the helper is sourced is eight, past the limit, not
+            # an octal error that aborts the command and leaves the reason unset.
+            APPLE_CLI_BATS_APP_FIND_INFO_DISAGREE_messages=08 APPLE_CLI_BATS_APP_LAST_REASON=
+            app_lifecycle_note_find_info_disagreement messages && exit 1
+            printf 'BASE10:%s\\n' "$APPLE_CLI_BATS_APP_LAST_REASON"
         """))
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertNotIn("INJECTED", completed.stderr)
-        self.assertEqual(completed.stdout.splitlines(), ["REASON:observe:mail:find-info-disagree", "RESET:ok", "GUARDS:ok"])
+        self.assertEqual(completed.stdout.splitlines(), [
+            "REASON:observe:mail:find-info-disagree", "RESET:ok", "GUARDS:ok",
+            "BASE10:observe:messages:find-info-disagree",
+        ])
+        self.assertEqual(completed.stderr, "")
 
     def test_observe_reports_find_info_disagreement_after_three_rounds(self):
         # find always names a live Mail ASN; info always prints nothing (macOS 27 stopped/malformed shape).
+        # 2026-10-02: a 300 s bound. Eleven observations start the Python parser about seventy
+        # times (8.5 s on a busy host, beyond 10 s in every starvation run); the fake answers at
+        # once and nothing here waits on a clock, so the bound only catches a hook that hangs.
         completed = self.run_shell(textwrap.dedent(f"""\
             tmp=$(mktemp -d)
             trap 'rm -rf "$tmp"' EXIT
@@ -872,7 +1026,7 @@ class AppLifecycleShellTests(unittest.TestCase):
             app_lifecycle_observe "$tmp/b1" true && app_lifecycle_observe "$tmp/b2" true || exit 1
             FAKE_MAIL_INFO_LIVE=1; app_lifecycle_observe "$tmp/b3" true || exit 1
             FAKE_MAIL_INFO_LIVE=""; app_lifecycle_observe "$tmp/b4" true && printf 'AFTER-IDENTITY:ok\\n' || printf 'AFTER-IDENTITY:fail:%s\\n' "$APPLE_CLI_BATS_APP_LAST_REASON"
-        """))
+        """), timeout=300)
         self.assertEqual(completed.returncode, 0, completed.stderr)
         self.assertEqual(completed.stdout.splitlines(), [
             "ROUND:1:ok", "ROUND:2:ok", "ROUND:3:fail:observe:mail:find-info-disagree", "AFTER-NONE:ok",
@@ -917,7 +1071,16 @@ class AppLifecycleShellTests(unittest.TestCase):
                     app_lifecycle_run_lsappinfo {quote(Path(directory) / 'out')} find name=Mail
                     printf 'STATUS:%s CHILD:%s\n' "$?" "$APPLE_CLI_BATS_APP_CHILD_PID"
                 """), encoding="utf-8")
-                completed = subprocess.run(["/bin/bash", str(script)], capture_output=True, text=True, timeout=5)
+                # 2026-10-02: the probe starts with default dispositions. Under a harness run
+                # through nohup in the background, INT, HUP and QUIT arrived ignored, the latch
+                # could not install, and those three subtests timed out in every starvation run
+                # while TERM passed. 60 s, up from 5 s: the child loops forever, so the bound
+                # still catches a watchdog that never stops it. The probe has its own session,
+                # so a timed-out run no longer leaves that loop behind once its shell is KILLed.
+                completed = run_in_own_session(
+                    ["/bin/bash", str(script)], timeout=60,
+                    preexec_fn=default_signal_dispositions,
+                )
                 self.assertEqual(completed.stdout.strip(), f"STATUS:{status} CHILD:", completed.stderr)
 
     def test_watchdog_timeout_terminates_its_child(self):
@@ -939,12 +1102,20 @@ class AppLifecycleShellTests(unittest.TestCase):
                   [ -e {quote(ready)} ]
                 }}
                 APPLE_CLI_BATS_APP_TIMEOUT_TICKS=0
-                APPLE_CLI_BATS_APP_TERM_TICKS=5
+                # 2026-10-02: the TERM grace was 5 ticks (50 ms), so a busy-looping child
+                # starved of CPU could still be waiting to run its trap when the KILL came, and
+                # leave no marker with the watchdog behaving correctly. 500 ticks (at least 5 s)
+                # is a ceiling, not a delay: cleanup stops waiting once the trapped child exits.
+                # A watchdog that skips TERM and goes straight to KILL still leaves no marker.
+                APPLE_CLI_BATS_APP_TERM_TICKS=500
                 APPLE_CLI_BATS_APP_POLL_SECONDS=0.01
                 app_lifecycle_run_lsappinfo {quote(Path(directory) / 'out')} find name=Mail
                 printf 'STATUS:%s CHILD:%s READY:%s MARKER:%s\n' "$?" "$APPLE_CLI_BATS_APP_CHILD_PID" "$(test -e {quote(ready)}; printf '%s' $?)" "$(test -e {quote(marker)}; printf '%s' $?)"
             """)
-            completed = self.run_shell(body, timeout=5)
+            # 2026-10-02: 60 s, the default, up from 5 s. The child loops until signalled, so the
+            # bound only catches a watchdog that never stops it; it must clear bash start-up, the
+            # ready wait above and the 5 s TERM ceiling with room to spare.
+            completed = self.run_shell(body)
             self.assertEqual(completed.stdout, "STATUS:124 CHILD: READY:0 MARKER:0\n", completed.stderr)
 
     def test_setup_failure_sentinel_and_valid_opt_out_make_no_queries(self):
@@ -1232,14 +1403,26 @@ class AppLifecycleShellTests(unittest.TestCase):
         )
         self.assertEqual(completed.stderr, "app lifecycle operation failed: teardown:restore-status=1:mail:round=0:\n")
 
-    def test_setup_aggregate_timeout_spans_individually_fast_observations(self):
+    def test_setup_aggregate_timeout_stops_a_call_its_own_watchdog_allows(self):
         body = textwrap.dedent(f"""\
             tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
             BATS_FILE_TMPDIR="$tmp"; HELPERS={quote(HOOK_PATH.parent)}
+            # 2026-10-03: expiry on cue instead of a race. The first call answers at once using only
+            # builtins. The second records itself, ends the phase timer as its expiry would, and
+            # never ends on its own (its natural end, 120 s, is twice the run's bound), so the
+            # phase timer's expiry is the only thing that can stop it; that one deadline spans
+            # several steps is pinned by the teardown aggregate test. Earlier fixtures raced a
+            # 0.4 s, then a 2 s, deadline against the calls' forks, and a starved runner could spend
+            # the whole deadline on the first call (CALLS:1) with the hook behaving correctly.
+            # The timer is ended by SIGPIPE, the one fatal signal besides SIGINT whose job death
+            # a non-interactive bash never reports on stderr; reaped outside a silenced wait, a
+            # KILLed timer printed "Killed: 9" and broke the exact stderr check.
             app_lifecycle_lsappinfo_exec() {{
-              count=0; [ ! -e "$tmp/calls" ] || count=$(wc -l < "$tmp/calls")
+              if [ -e "$tmp/calls" ]; then
+                printf '%s\n' call >> "$tmp/calls"
+                kill -PIPE "$APPLE_CLI_BATS_APP_TIMER_PID"; exec /bin/sleep 120
+              fi
               printf '%s\n' call >> "$tmp/calls"
-              if [ "$count" -eq 0 ]; then sleep 0.05; else sleep 0.8; fi
               printf '%s\n' success
             }}
             app_lifecycle_observe() {{
@@ -1248,10 +1431,11 @@ class AppLifecycleShellTests(unittest.TestCase):
               APPLE_CLI_BATS_APP_RESULT=000000
             }}
             APPLE_CLI_BATS_APP_POLL_SECONDS=0.005
-            # 10x the original margins: a loaded host or hosted runner could expire the
-            # 40 ms window before the first observation even started. The poll granularity
-            # is deliberately left unscaled; it only sets how often the wait loop looks.
-            APPLE_CLI_BATS_APP_SETUP_TIMEOUT_SECONDS=0.4
+            # The per-call watchdog is put out of reach: each call stays within its own, so it
+            # cannot be what stops the second call; only the phase timer's expiry can.
+            APPLE_CLI_BATS_APP_TIMEOUT_TICKS=1000000
+            # The phase keeps its default 120 s deadline. Promptness is pinned where it is the
+            # subject, in test_setup_honours_a_short_deadline_promptly.
             setup_file; status=$?
             printf 'STATUS:%s READY:%s CHILD:%s TIMER:%s STATE:%s CALLS:%s\n' "$status" \
               "$APPLE_CLI_BATS_APP_SNAPSHOT_READY" "$APPLE_CLI_BATS_APP_CHILD_PID" \
@@ -1272,25 +1456,35 @@ class AppLifecycleShellTests(unittest.TestCase):
             BATS_FILE_TMPDIR="$tmp"; HELPERS={quote(HOOK_PATH.parent)}
             /usr/bin/python3 "$HELPERS/app_lifecycle.py" write-snapshot --state "$tmp/apple-cli-app-state.json" --running 000000
             APPLE_CLI_BATS_APP_SNAPSHOT_READY=true
-            app_lifecycle_observe() {{ sleep 0.03; APPLE_CLI_BATS_APP_RESULT=000000; }}
-            APPLE_CLI_BATS_APP_QUIET_TICKS=5
-            APPLE_CLI_BATS_APP_SETTLE_TICKS=10
+            # 2026-10-03: each rescan (0.2 s) fits inside the 0.5 s deadline, so only a deadline
+            # spanning the rescans stops the phase, and the ten quiet rescans leave 1.5 s after it
+            # for a starved runner to start the timer late (it was 0.05 s against 5 x 0.03 s).
+            app_lifecycle_observe() {{ /bin/sleep 0.2; APPLE_CLI_BATS_APP_RESULT=000000; }}
+            APPLE_CLI_BATS_APP_QUIET_TICKS=10
+            APPLE_CLI_BATS_APP_SETTLE_TICKS=20
             APPLE_CLI_BATS_APP_POLL_SECONDS=0
-            APPLE_CLI_BATS_APP_TEARDOWN_TIMEOUT_SECONDS=0.05
+            APPLE_CLI_BATS_APP_TEARDOWN_TIMEOUT_SECONDS=0.5
             teardown_file; status=$?
             printf 'STATUS:%s TIMER:%s STATE:%s\n' "$status" "$APPLE_CLI_BATS_APP_TIMER_PID" \
               "$(test -e "$tmp/apple-cli-app-state.json"; printf '%s' $?)"
         """)
         completed = self.run_shell(body)
         self.assertEqual(completed.stdout, "STATUS:124 TIMER: STATE:0\n", completed.stderr)
-        self.assertEqual(completed.stderr, "app lifecycle operation failed: teardown:phase-timer:round=0:124\n")
+        # The round the expiry lands in depends on host speed: round 0 holds a 0.2 s rescan and a
+        # Python start, so a starved runner can still see round 0 (2026-10-03).
+        self.assertRegex(
+            completed.stderr,
+            r"\Aapp lifecycle operation failed: teardown:phase-timer:round=[0-9]+:124\n\Z",
+        )
 
     def test_phase_timer_is_cancelled_and_reaped_after_normal_success(self):
         body = textwrap.dedent(f"""\
             tmp=$(mktemp -d); trap 'rm -rf "$tmp"' EXIT
             BATS_FILE_TMPDIR="$tmp"; HELPERS={quote(HOOK_PATH.parent)}
             APPLE_CLI_BATS_PRESERVE_APPS=1
-            APPLE_CLI_BATS_APP_SETUP_TIMEOUT_SECONDS=2
+            # 2026-10-02: the default 120 s deadline, not 2 s: the phase starts the Python
+            # helper, which a starved runner can keep past 2 s. Any cleanup that fails to cancel
+            # the timer still ends in 124, and one that waits it out overruns the 60 s bound.
             setup_file; status=$?
             jobs -pr > "$tmp/jobs"
             printf 'STATUS:%s TIMER:%s JOBS:%s\n' "$status" "$APPLE_CLI_BATS_APP_TIMER_PID" \
@@ -1329,14 +1523,17 @@ class AppLifecycleShellTests(unittest.TestCase):
                 printf 'STATUS:%s SHADOW:%s\n' "$?" \
                   "$(test -e {quote(root / 'shadowed')}; printf '%s' $?)"
             """)
-            completed = self.run_shell(body, timeout=1)
+            # 2026-10-03: 30 s, up from 1 s. A shell sleep reached through the shadow never
+            # returns, so any bound catches it, and 1 s left a starved runner too little to start
+            # bash and source the hook.
+            completed = self.run_shell(body, timeout=30)
             self.assertEqual(completed.stdout, "STATUS:0 SHADOW:1\n", completed.stderr)
 
     def test_stopped_ls_child_is_bounded_and_reaped(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             body = textwrap.dedent(f"""\
-                app_lifecycle_lsappinfo_exec() {{ exec /bin/sleep 10; }}
+                app_lifecycle_lsappinfo_exec() {{ exec /bin/sleep 120; }}
                 app_lifecycle_after_spawn() {{
                   FAKE_JOB_PID="$APPLE_CLI_BATS_APP_CHILD_PID"
                   FAKE_JOB_STATE=stopped
@@ -1359,7 +1556,10 @@ class AppLifecycleShellTests(unittest.TestCase):
                   "$APPLE_CLI_BATS_APP_CHILD_PID" \
                   "$(wc -l < {quote(root / 'jobs')} | tr -d ' ')"
             """)
-            completed = self.run_shell(body, timeout=1)
+            # 2026-10-03: the stopped child's natural end, 120 s, is four times the 30 s bound (it
+            # was 10 s against 1 s), so a cleanup that waits it out still fails, and a starved
+            # runner gets room to start bash.
+            completed = self.run_shell(body, timeout=30)
             self.assertEqual(completed.stdout, "STATUS:124 CHILD: JOBS:0\n", completed.stderr)
 
     def test_stopped_timer_fails_closed_and_is_bounded_and_reaped(self):
@@ -1383,14 +1583,16 @@ class AppLifecycleShellTests(unittest.TestCase):
                 }}
                 FAKE_JOB_STATE=running
                 APPLE_CLI_BATS_APP_TERM_TICKS=0
-                APPLE_CLI_BATS_APP_SETUP_TIMEOUT_SECONDS=2
                 setup_file; status=$?
                 jobs -p > {quote(root / 'jobs')}
                 printf 'STATUS:%s READY:%s TIMER:%s JOBS:%s\n' "$status" \
                   "$APPLE_CLI_BATS_APP_SNAPSHOT_READY" "$APPLE_CLI_BATS_APP_TIMER_PID" \
                   "$(wc -l < {quote(root / 'jobs')} | tr -d ' ')"
             """)
-            completed = self.run_shell(body, timeout=1)
+            # 2026-10-03: the stopped timer keeps the default 120 s deadline, four times the 30 s
+            # bound (it was 2 s against 1 s), so a cleanup that waits it out still fails, and a
+            # starved runner gets room to start bash.
+            completed = self.run_shell(body, timeout=30)
             self.assertEqual(
                 completed.stdout,
                 "STATUS:124 READY:false TIMER: JOBS:0\n",
@@ -1407,11 +1609,14 @@ class AppLifecycleShellTests(unittest.TestCase):
                   while app_lifecycle_child_is_running_job "$APPLE_CLI_BATS_APP_TIMER_PID" \
                       "$APPLE_CLI_BATS_APP_TIMER_JOB_FILE"; do :; done
                 }}
-                APPLE_CLI_BATS_APP_SETUP_TIMEOUT_SECONDS=0.01
+                APPLE_CLI_BATS_APP_SETUP_TIMEOUT_SECONDS=1
                 setup_file; status=$?
                 printf 'STATUS:%s READY:%s TIMER:%s\n' "$status" \
                   "$APPLE_CLI_BATS_APP_SNAPSHOT_READY" "$APPLE_CLI_BATS_APP_TIMER_PID"
             """)
+            # 2026-10-03: a 1 s deadline, up from 0.01 s. The timer must still run at the check
+            # after the phase, which a shell descheduled for 10 ms missed, and then end on its own
+            # while cleanup waits for it.
             completed = self.run_shell(body)
             self.assertEqual(completed.stdout, "STATUS:124 READY:false TIMER:\n", completed.stderr)
             self.assertEqual(completed.stderr, "app lifecycle operation failed: cleanup:interrupt:124\n")
@@ -1435,23 +1640,216 @@ class AppLifecycleShellTests(unittest.TestCase):
             self.assertEqual(completed.stdout, "STATUS:124 READY:false TIMER:\n", completed.stderr)
             self.assertEqual(completed.stderr, "app lifecycle operation failed: cleanup:interrupt:124\n")
 
+    def test_cancelled_timer_whose_first_term_is_lost_is_not_reported_as_timed_out(self):
+        # 2026-10-02 regression, the mechanism behind the field failures: a TERM sent soon after
+        # the timer's fork reaches the child before it execs /bin/sleep, the latch trap it
+        # inherited takes the signal, and the sleep runs on. One TERM and ten polls then KILLed the
+        # timer and reported 124 for a phase that had finished in time. The seam drops the first
+        # TERM, as that window does, and delivers the rest: cleanup must re-send, not escalate.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            body = textwrap.dedent(f"""\
+                BATS_FILE_TMPDIR={quote(root)}
+                app_lifecycle_setup_file_impl() {{
+                  APPLE_CLI_BATS_APP_SNAPSHOT_READY=true; return 0
+                }}
+                app_lifecycle_signal_job() {{
+                  printf '%s\n' "$1" >> {quote(root / 'signals')}
+                  if [ "$1" = TERM ] && [ ! -e {quote(root / 'dropped')} ]; then
+                    : > {quote(root / 'dropped')}; return 0
+                  fi
+                  kill "-$1" -- "$2"
+                }}
+                setup_file; status=$?
+                jobs -p > {quote(root / 'jobs')}
+                printf 'STATUS:%s READY:%s TIMER:%s JOBS:%s\n' "$status" \
+                  "$APPLE_CLI_BATS_APP_SNAPSHOT_READY" "$APPLE_CLI_BATS_APP_TIMER_PID" \
+                  "$(wc -l < {quote(root / 'jobs')} | tr -d ' ')"
+                sort -u {quote(root / 'signals')}
+            """)
+            completed = self.run_shell(body)
+            self.assertEqual(
+                completed.stdout.splitlines(),
+                ["STATUS:0 READY:true TIMER: JOBS:0", "TERM"],
+                completed.stderr,
+            )
+            self.assertEqual(completed.stderr, "")
+
+    def test_slow_exiting_cancelled_timer_is_not_reported_as_timed_out(self):
+        # 2026-10-02: the timer gets a wall-clock patience to exit, not a count of polls. Here the
+        # cancellation reaches the real timer a second or two late: the seam drops every TERM
+        # until SECONDS has moved on two from the first, and while the timer has not yet exec'd
+        # /bin/sleep (sent then, the inherited latch trap would take it), then lets cleanup's next
+        # re-send through. TERM_TICKS and POLL_SECONDS are pinned tiny, so a poll-counted wait
+        # would KILL long before then and latch 124; the patience must wait. Delivery comes from
+        # cleanup's own re-sends, not a background process, so no second clock races the 30 s
+        # patience on a starved runner (2026-10-03).
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            body = textwrap.dedent(f"""\
+                BATS_FILE_TMPDIR={quote(root)}
+                app_lifecycle_setup_file_impl() {{
+                  APPLE_CLI_BATS_APP_SNAPSHOT_READY=true; return 0
+                }}
+                app_lifecycle_signal_job() {{
+                  printf '%s\n' "$1" >> {quote(root / 'signals')}
+                  if [ "$1" = TERM ]; then
+                    local first={quote(root / 'first')}
+                    [ -e "$first" ] || printf '%s\n' "$SECONDS" > "$first"
+                    [ "$((SECONDS - $(cat "$first")))" -ge 2 ] || return 0
+                    case "$(ps -o args= -p "$2")" in /bin/sleep*) ;; *) return 0 ;; esac
+                  fi
+                  kill "-$1" -- "$2"
+                }}
+                APPLE_CLI_BATS_APP_TERM_TICKS=1
+                APPLE_CLI_BATS_APP_POLL_SECONDS=0.01
+                setup_file; status=$?
+                jobs -p > {quote(root / 'jobs')}
+                printf 'STATUS:%s READY:%s TIMER:%s JOBS:%s\n' "$status" \
+                  "$APPLE_CLI_BATS_APP_SNAPSHOT_READY" "$APPLE_CLI_BATS_APP_TIMER_PID" \
+                  "$(wc -l < {quote(root / 'jobs')} | tr -d ' ')"
+                sort -u {quote(root / 'signals')}
+            """)
+            completed = self.run_shell(body)
+            self.assertEqual(
+                completed.stdout.splitlines(),
+                ["STATUS:0 READY:true TIMER: JOBS:0", "TERM"],
+                completed.stderr,
+            )
+            self.assertEqual(completed.stderr, "")
+
+    def test_timer_ignoring_term_is_killed_after_patience_and_fails_closed(self):
+        # 2026-10-02: a timer that never answers TERM is KILLed once the patience is spent, and
+        # that KILL latches 124: the helper does not vouch for a deadline whose timer it could not
+        # cancel. TERM ignored from shell entry is inherited by the real timer and cannot be
+        # trapped. The timer's natural end, the default 120 s deadline, is twice the run's bound,
+        # so a cleanup that waits it out instead of KILLing still fails.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            body = textwrap.dedent(f"""\
+                BATS_FILE_TMPDIR={quote(root)}
+                app_lifecycle_setup_file_impl() {{
+                  APPLE_CLI_BATS_APP_SNAPSHOT_READY=true; return 0
+                }}
+                app_lifecycle_signal_job() {{
+                  printf '%s\n' "$1" >> {quote(root / 'signals')}
+                  kill "-$1" -- "$2"
+                }}
+                APPLE_CLI_BATS_APP_TIMER_EXIT_SECONDS=2
+                setup_file; status=$?
+                jobs -p > {quote(root / 'jobs')}
+                printf 'STATUS:%s READY:%s TIMER:%s JOBS:%s\n' "$status" \
+                  "$APPLE_CLI_BATS_APP_SNAPSHOT_READY" "$APPLE_CLI_BATS_APP_TIMER_PID" \
+                  "$(wc -l < {quote(root / 'jobs')} | tr -d ' ')"
+                sed -n '1p;$p' {quote(root / 'signals')}
+                printf 'KILLS:%s\n' "$(grep -c '^KILL$' {quote(root / 'signals')})"
+            """)
+            completed = self.run_shell(body, preexec_fn=ignore_term_from_entry)
+            self.assertEqual(
+                completed.stdout.splitlines(),
+                ["STATUS:124 READY:false TIMER: JOBS:0", "TERM", "KILL", "KILLS:1"],
+                completed.stderr,
+            )
+            self.assertEqual(
+                completed.stderr, "app lifecycle operation failed: cleanup:interrupt:124\n"
+            )
+
+    def test_timer_patience_refuses_non_decimal_seconds_without_evaluating_it(self):
+        # 2026-10-02: once SECONDS is unset it is an ordinary variable, and bash arithmetic would
+        # evaluate a value like a[$(...)]. The patience reads it through a decimal match first:
+        # a refused value ends the wait, the still-listed timer is KILLed, and the phase fails
+        # closed with nothing evaluated.
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            body = textwrap.dedent(f"""\
+                BATS_FILE_TMPDIR={quote(root)}; marker={quote(root / 'evaluated')}
+                app_lifecycle_setup_file_impl() {{
+                  APPLE_CLI_BATS_APP_SNAPSHOT_READY=true
+                  unset SECONDS
+                  SECONDS='a[$(: > "$marker")]'
+                }}
+                app_lifecycle_signal_job() {{
+                  printf '%s\n' "$1" >> {quote(root / 'signals')}
+                  [ "$1" = TERM ] || kill "-$1" -- "$2"
+                }}
+                setup_file; status=$?
+                printf 'STATUS:%s TIMER:%s EVALUATED:%s\n' "$status" \
+                  "$APPLE_CLI_BATS_APP_TIMER_PID" "$(test -e "$marker"; printf '%s' $?)"
+                sed -n '1,99p' {quote(root / 'signals')}
+            """)
+            completed = self.run_shell(body)
+            self.assertEqual(
+                completed.stdout.splitlines(),
+                ["STATUS:124 TIMER: EVALUATED:1", "TERM", "KILL"],
+                completed.stderr,
+            )
+            self.assertEqual(
+                completed.stderr, "app lifecycle operation failed: cleanup:interrupt:124\n"
+            )
+
+    def test_timer_patience_reads_leading_zero_seconds_in_base_ten(self):
+        # 2026-10-02: an unset SECONDS holding 08 or 09 passes the decimal match, and plain
+        # arithmetic would take it for octal and abort the wrapper ("value too great for base"):
+        # setup_file would never return, leaving its timer, latch trap and the caller's umask
+        # behind. The seam drops the first TERM so the patience loop runs, and delivers the next;
+        # with SECONDS frozen, only the timer's exit can end the wait. Jobs still listed are
+        # KILLed after being counted, so a broken wrapper fails on the line, not on the bound.
+        for value in ("08", "09"):
+            with self.subTest(value=value), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                body = textwrap.dedent(f"""\
+                    BATS_FILE_TMPDIR={quote(root)}
+                    app_lifecycle_setup_file_impl() {{
+                      APPLE_CLI_BATS_APP_SNAPSHOT_READY=true
+                      unset SECONDS
+                      SECONDS={value}
+                    }}
+                    app_lifecycle_signal_job() {{
+                      printf '%s\n' "$1" >> {quote(root / 'signals')}
+                      if [ "$1" = TERM ] && [ ! -e {quote(root / 'dropped')} ]; then
+                        : > {quote(root / 'dropped')}; return 0
+                      fi
+                      kill "-$1" -- "$2"
+                    }}
+                    umask 027
+                    setup_file; status=$?
+                    jobs -p > {quote(root / 'jobs')}
+                    printf 'STATUS:%s READY:%s TIMER:%s JOBS:%s UMASK:%s TRAP:%s\n' "$status" \
+                      "$APPLE_CLI_BATS_APP_SNAPSHOT_READY" "$APPLE_CLI_BATS_APP_TIMER_PID" \
+                      "$(wc -l < {quote(root / 'jobs')} | tr -d ' ')" "$(umask)" "$(trap -p TERM)"
+                    sort -u {quote(root / 'signals')}
+                    while IFS= read -r job; do kill -KILL "$job"; done < {quote(root / 'jobs')}
+                """)
+                completed = self.run_shell(body)
+                self.assertEqual(
+                    completed.stdout.splitlines(),
+                    ["STATUS:0 READY:true TIMER: JOBS:0 UMASK:0027 TRAP:", "TERM"],
+                    completed.stderr,
+                )
+                self.assertEqual(completed.stderr, "")
+
     def test_phase_timer_and_current_ls_child_are_cleaned_after_cancellation(self):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
+            # 2026-10-02: the default 120 s deadline, not 2 s. The TERM latched here outlives any
+            # later 124, so a timer cleanup that merely waited out a 2 s timer still passed; one
+            # that waits out 120 s overruns the default 60 s bound.
             body = textwrap.dedent(f"""\
                 BATS_FILE_TMPDIR={quote(root)}; HELPERS={quote(HOOK_PATH.parent)}
                 app_lifecycle_lsappinfo_exec() {{ while :; do sleep 1; done; }}
                 app_lifecycle_after_spawn() {{ kill -TERM $$; }}
                 APPLE_CLI_BATS_APP_POLL_SECONDS=0.01
                 APPLE_CLI_BATS_APP_TERM_TICKS=1
-                APPLE_CLI_BATS_APP_SETUP_TIMEOUT_SECONDS=2
                 setup_file; status=$?
                 jobs -pr > {quote(root / 'jobs')}
                 printf 'STATUS:%s READY:%s CHILD:%s TIMER:%s JOBS:%s\n' "$status" \
                   "$APPLE_CLI_BATS_APP_SNAPSHOT_READY" "$APPLE_CLI_BATS_APP_CHILD_PID" \
                   "$APPLE_CLI_BATS_APP_TIMER_PID" "$(wc -l < {quote(root / 'jobs')} | tr -d ' ')"
             """)
-            completed = self.run_shell(body, timeout=5)
+            # 2026-10-02: the default 60 s, up from 5 s. The child loops forever, so the bound
+            # still catches a cleanup that hangs, and on a busy host the timer's cancellation may
+            # use part of its 30 s patience.
+            completed = self.run_shell(body)
             self.assertEqual(
                 completed.stdout,
                 "STATUS:143 READY:false CHILD: TIMER: JOBS:0\n",
@@ -1500,9 +1898,17 @@ class AppLifecycleShellTests(unittest.TestCase):
             with self.subTest(wrapper=wrapper), tempfile.TemporaryDirectory() as directory:
                 implementation = f"app_lifecycle_{wrapper}_file_impl"
                 timeout_variable = f"APPLE_CLI_BATS_APP_{wrapper.upper()}_TIMEOUT_SECONDS"
+                # 2026-10-03: the phase outlasts its 0.01 s deadline by waiting until the timer has
+                # ended on its own, not by sleeping past it, so a timer that starts late cannot be
+                # cancelled first. Promptness is pinned in the next test.
                 body = textwrap.dedent(f"""\
                     BATS_FILE_TMPDIR={quote(directory)}
-                    {implementation}() {{ umask 077; sleep 0.03; return 0; }}
+                    {implementation}() {{
+                      umask 077
+                      while app_lifecycle_child_is_running_job "$APPLE_CLI_BATS_APP_TIMER_PID" \
+                          "$APPLE_CLI_BATS_APP_TIMER_JOB_FILE"; do :; done
+                      return 0
+                    }}
                     {timeout_variable}=0.01
                     umask 027
                     {wrapper}_file; status=$?
@@ -1510,6 +1916,22 @@ class AppLifecycleShellTests(unittest.TestCase):
                 """)
                 completed = self.run_shell(body)
                 self.assertEqual(completed.stdout, "STATUS:124 UMASK:0027\n", completed.stderr)
+
+    def test_setup_honours_a_short_deadline_promptly(self):
+        # 2026-10-03: promptness is this test's subject. The deadline is checked when the phase
+        # returns, so a 0.5 s deadline must have expired by the end of a 3 s phase. One honoured
+        # six or more times late lets the phase finish first: the timer is cancelled and the run
+        # ends with status 0. The 2.5 s gap is room for a starved runner to start the timer late.
+        with tempfile.TemporaryDirectory() as directory:
+            body = textwrap.dedent(f"""\
+                BATS_FILE_TMPDIR={quote(directory)}
+                app_lifecycle_setup_file_impl() {{ /bin/sleep 3; return 0; }}
+                APPLE_CLI_BATS_APP_SETUP_TIMEOUT_SECONDS=0.5
+                setup_file; status=$?
+                printf 'STATUS:%s TIMER:%s\n' "$status" "$APPLE_CLI_BATS_APP_TIMER_PID"
+            """)
+            completed = self.run_shell(body)
+            self.assertEqual(completed.stdout, "STATUS:124 TIMER:\n", completed.stderr)
 
     def test_setup_restores_caller_umask_without_weakening_private_snapshot(self):
         with tempfile.TemporaryDirectory() as directory:

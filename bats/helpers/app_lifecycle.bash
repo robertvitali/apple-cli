@@ -13,6 +13,7 @@ APPLE_CLI_BATS_APP_GRACE_TICKS=50
 APPLE_CLI_BATS_APP_QUIET_TICKS=10
 APPLE_CLI_BATS_APP_SETTLE_TICKS=50
 APPLE_CLI_BATS_APP_POLL_SECONDS=0.1
+APPLE_CLI_BATS_APP_TIMER_EXIT_SECONDS=30
 APPLE_CLI_BATS_APP_SETUP_TIMEOUT_SECONDS=120
 APPLE_CLI_BATS_APP_TEARDOWN_TIMEOUT_SECONDS=120
 APPLE_CLI_BATS_APP_OBSERVED_MAIL=""
@@ -155,15 +156,46 @@ app_lifecycle_check_phase_timer() {
   return 124
 }
 
+app_lifecycle_is_small_decimal() {
+  case "$1" in ''|*[!0-9]*) return 1 ;; esac
+  [ "${#1}" -le 9 ]
+}
+
+# 2026-10-02: cancelling the timer survives a lost TERM and a slow exit. A TERM sent soon after
+# the fork can reach the child while it is still bash, before it execs /bin/sleep: the latch trap
+# it inherited takes the signal, and the sleep then runs to its natural end (in a probe with a TERM
+# trap set, 99 of 100 immediate TERMs were lost this way; none without the trap). With one TERM
+# and ten 0.1 s polls, a phase that finished in time had its timer KILLed and reported 124, more
+# often on a busy host, where the child execs later. TERM is now re-sent while the job table still
+# lists the timer as running, for at most TIMER_EXIT_SECONDS of SECONDS. SECONDS is matched as a
+# decimal before any arithmetic, so a non-numeric value is refused, never evaluated, and ends the
+# wait; one that stopped advancing leaves it bounded by the cancelled sleep's own end. A matched
+# value is read in base 10: plain arithmetic takes a leading zero for octal, and an 08 or 09 left
+# in an unset SECONDS would abort the whole wrapper, leaving the timer, traps and umask behind. The
+# fail-closed cases are unchanged: an expired timer was not active, so never cancelled; one the
+# job table lists as stopped leaves the wait at once and is KILLed if still listed. A timer KILLed
+# after the full patience latches 124 too: TERM unanswered that long means the cancellation failed
+# (TERM ignored since shell start, which also disables the TERM latch), and the helper does not
+# vouch for a deadline it could not cancel. In practice only such a timer spends the patience.
+# A real SIGSTOP of the timer is neither case: non-interactive bash lists the stopped timer as
+# running, and a stopped sleep dies on its first TERM, so cleanup returns success at once although
+# the deadline could not fire during the stop. That gap predates the patience and stays open.
 app_lifecycle_cleanup_phase_timer() {
-  local pid="$APPLE_CLI_BATS_APP_TIMER_PID" cancelled=false forced=false status ticks=0
+  local pid="$APPLE_CLI_BATS_APP_TIMER_PID" cancelled=false forced=false status start now
   [ -n "$pid" ] || return 0
   if app_lifecycle_child_is_active_job "$pid" "$APPLE_CLI_BATS_APP_TIMER_JOB_FILE"; then
     if app_lifecycle_signal_job TERM "$pid" 2>/dev/null; then cancelled=true; fi
   fi
-  while app_lifecycle_child_is_active_job "$pid" "$APPLE_CLI_BATS_APP_TIMER_JOB_FILE" && [ "$ticks" -lt "$APPLE_CLI_BATS_APP_TERM_TICKS" ]; do
+  start="$SECONDS"
+  while [ "$cancelled" = true ] && app_lifecycle_is_small_decimal "$start" &&
+      app_lifecycle_child_is_running_job "$pid" "$APPLE_CLI_BATS_APP_TIMER_JOB_FILE"; do
+    now="$SECONDS"
+    app_lifecycle_is_small_decimal "$now" || break
+    [ "$((10#$now - 10#$start))" -lt "$APPLE_CLI_BATS_APP_TIMER_EXIT_SECONDS" ] || break
     /bin/sleep "$APPLE_CLI_BATS_APP_POLL_SECONDS"
-    ticks=$((ticks + 1))
+    if app_lifecycle_child_is_running_job "$pid" "$APPLE_CLI_BATS_APP_TIMER_JOB_FILE"; then
+      app_lifecycle_signal_job TERM "$pid" 2>/dev/null || true
+    fi
   done
   if app_lifecycle_child_is_active_job "$pid" "$APPLE_CLI_BATS_APP_TIMER_JOB_FILE"; then
     if app_lifecycle_signal_job KILL "$pid" 2>/dev/null; then forced=true; fi
@@ -338,12 +370,13 @@ app_lifecycle_set_find_info_disagreement_count() {
     *) return 1 ;;
   esac
 }
+# 2026-10-02: a matched count is read in base 10, so an 08 assigned after the helper is sourced
+# counts as eight instead of aborting the observation as an invalid octal number.
 app_lifecycle_note_find_info_disagreement() {
   local key="$1" count
   count="$(app_lifecycle_find_info_disagreement_count "$key")" || return 1
-  case "$count" in ''|*[!0-9]*) return 1 ;; esac
-  [ "${#count}" -le 9 ] || return 1
-  count=$((count + 1))
+  app_lifecycle_is_small_decimal "$count" || return 1
+  count=$((10#$count + 1))
   app_lifecycle_set_find_info_disagreement_count "$key" "$count" || return 1
   if [ "$count" -ge "$APPLE_CLI_BATS_APP_FIND_INFO_DISAGREE_LIMIT" ]; then
     APPLE_CLI_BATS_APP_LAST_REASON="observe:${key}:find-info-disagree"
