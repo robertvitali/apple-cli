@@ -191,6 +191,8 @@ happens.
   - the mechanical re-render: release preparation, re-run on `R`'s parent with the same version,
     date and bump level, reproduces both files byte for byte;
   - the released-section notes contract (`check-release-notes.py --version X.Y.Z`);
+  - a log of the OS and toolchain the build uses (`sw_vers`, `xcodebuild -version`,
+    `swift --version`), which is a record, not a check;
   - the arm64 release build, and a check that the built binary's `--version` prints `X.Y.Z`;
   - the packaging standard of D18 step (4), checked as an outcome: no `N_OSO` debug-map entry
     and no home-directory path in the binary, and an archive whose one regular member is owned
@@ -392,8 +394,9 @@ Do this the same day the release is published or abandoned.
    and passes. A published Release whose tag is not a strict `vMAJOR.MINOR.PATCH`, or whose
    commit carries no tracked manual, turns that job red on every later commit.
 4. Close the step 1 entry with an appended amendment: the tag, the release commit, the asset
-   digests, the packaging-check outcome, the removal commit, and the hosted runs as salted
-   commitments. Append the same runs to the readiness evidence file's hosted-run table, in its
+   digests, the packaging-check outcome, the OS and toolchain the bound run logged (macOS
+   version and build, Xcode version and build, Swift version), the removal commit, and the
+   hosted runs as salted commitments. Append the same runs to the readiness evidence file's hosted-run table, in its
    convention. D18 step (4) asks for the packaging check to be recorded in the evidence file
    before publication; here the record made before publication is the bound run's own log and
    the operator's step 4 re-check, and the evidence file follows at closure, because this
@@ -450,11 +453,18 @@ Do this the same day the release is published or abandoned.
   notes step run from the recorded text, with the environment its `env:` mappings declare,
   against synthetic repositories, and a real YAML loader (libyaml, through Ruby) must accept
   the recorded text where Ruby is installed; on macOS its packaging step runs against small
-  compiled binaries. Not exercised before the day: the release build itself, the upload, the
-  checkout action's behaviour and GitHub's evaluation of the job's `if:`. A failure there
+  compiled binaries. Not exercised before the day: the toolchain log, the release build itself,
+  the upload, the checkout action's behaviour and GitHub's evaluation of the job's `if:`. A failure there
   publishes nothing and follows step 7.
 - The run binding in step 4 rests on the Actions API's report of a run's workflow path, event,
   branch, head commit and repository; the artifact's own checksum file proves transport only.
+- The workflow logs the OS and toolchain it builds with (`sw_vers`, `xcodebuild -version`,
+  `swift --version`) but does not pin the toolchain: the runner image's default Xcode builds the
+  release, and GitHub changes that default within a label over time. Whether to pin
+  `DEVELOPER_DIR` to an exact Xcode path is an open question for the design's publisher, which
+  does not yet address it; this runbook does not, because an image update that replaced the
+  pinned Xcode would fail the one hosted run that matters. The log lasts only as long as the
+  run's logs, so step 6.4 copies the toolchain lines into the step 1 entry.
 - Step 7's `gh release upload`, the one command that addresses a draft by its tag, relies on
   gh's lookup of draft Releases; if that lookup fails, it fails closed, and step 5.4 then reads
   the object back by its id before anything is published.
@@ -595,6 +605,16 @@ jobs:
         env:
           NEW: ${{ steps.release.outputs.version }}
         run: python3 -I -S -B scripts/check-release-notes.py --version "$NEW"
+
+      - name: Record build toolchain
+        # Log only. A runner label pins the macOS major, not the Xcode inside the image, which
+        # GitHub updates over time; this log records the toolchain behind the artifact until
+        # step 6.4 of the runbook copies it into the release's ledger entry.
+        run: |
+          set -euo pipefail
+          sw_vers
+          xcodebuild -version
+          swift --version
 
       - name: Release build and runtime version check
         id: build

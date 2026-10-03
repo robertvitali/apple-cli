@@ -10,7 +10,8 @@ tests keep that text restorable as it stands:
     job level, one job on `macos-26` guarded to release commits, a checkout without persisted
     credentials, no remote action beyond checkout and upload-artifact, and the upload as the
     last step with no step or job allowed to skip or tolerate a failure (so an artifact exists
-    only when every check before it passed);
+    only when every check before it passed), and a log-only toolchain record (`sw_vers`,
+    `xcodebuild -version`, `swift --version`) as the step immediately before the release build;
   * restored beside the tracked workflows, it adds exactly the action references the exact
     inventory in test_action_pins.py expects of it, so a restoration keeps the tier green;
   * its drift gate, mechanical re-render and notes step, run from the recorded text with the
@@ -142,6 +143,15 @@ class RecordedWorkflowTests(unittest.TestCase):
         self.assertTrue(job["steps"][-1].get("uses", "").startswith("actions/upload-artifact@"))
         self.assertNotIn("env", job)
         by_name = {step.get("name"): step for step in job["steps"]}
+        # The toolchain behind the artifact is logged before the build: a runner label pins the
+        # macOS major, not the image's Xcode. The step only reads; it sets nothing.
+        names = [step.get("name") for step in job["steps"]]
+        self.assertEqual(names.index("Record build toolchain") + 1,
+                         names.index("Release build and runtime version check"))
+        toolchain = by_name["Record build toolchain"]
+        self.assertEqual(set(toolchain), {"name", "run"})
+        self.assertEqual(toolchain["run"].split("\n"),
+                         ["set -euo pipefail", "sw_vers", "xcodebuild -version", "swift --version", ""])
         build = by_name["Release build and runtime version check"]
         self.assertEqual(build["id"], "build")
         self.assertIn('echo "bin=$bin" >> "$GITHUB_OUTPUT"', build["run"])
