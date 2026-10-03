@@ -1,4 +1,5 @@
 import importlib.util
+import json
 import os
 from pathlib import Path
 import re
@@ -11,8 +12,15 @@ import unittest
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 CHECKER_PATH = REPO_ROOT / "scripts" / "ci" / "action_pins.py"
+POLICY_PATH = REPO_ROOT / "scripts" / "ci" / "workflow_policy.py"
 WORKFLOWS_ROOT = REPO_ROOT / ".github" / "workflows"
+ALLOWLIST_PATH = REPO_ROOT / ".github" / "actions-allowlist.json"
 
+# How often each Action is used: an expectation of workflow usage kept independently of the
+# allowlist. The allowlist, .github/actions-allowlist.json, is the only list of pins; fixtures
+# across Tests/automation (this file, test_workflow_policy, test_pr_metadata, test_quality) and
+# the runbook's recorded workflow still quote individual live pins (checkout's above all) and
+# move with a bump of that Action.
 EXPECTED_ACTION_COUNTS = {
     "actions/checkout": 10,
     "actions/setup-python": 2,
@@ -27,19 +35,20 @@ EXPECTED_ACTION_COUNTS = {
 URGENT_RELEASE_WORKFLOW = WORKFLOWS_ROOT / "urgent-release-verify.yml"
 URGENT_RELEASE_ACTION_COUNTS = {"actions/checkout": 1, "actions/upload-artifact": 1}
 
-EXPECTED_ACTION_PINS = {
-    "actions/checkout": ("3d3c42e5aac5ba805825da76410c181273ba90b1", "v7.0.1"),
-    "actions/setup-python": ("5fda3b95a4ea91299a34e894583c3862153e4b97", "v7.0.0"),
-    "astral-sh/setup-uv": ("c18668ad3cf93ea998bef934396af7bb5c839dc7", "v10.2.0"),
-    "actions/upload-artifact": ("043fb46d1a93c77aae656e7c1c64a875d1fc6a0a", "v7.0.1"),
-    "actions/download-artifact": ("3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c", "v8.0.1"),
-}
-
 
 def load_checker() -> ModuleType:
     spec = importlib.util.spec_from_file_location("action_pins", CHECKER_PATH)
     if spec is None or spec.loader is None:
         raise RuntimeError("unable to load action pin checker")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module
+
+
+def load_policy() -> ModuleType:
+    spec = importlib.util.spec_from_file_location("workflow_policy", POLICY_PATH)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("unable to load workflow policy")
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
@@ -519,6 +528,8 @@ class RepositoryActionInventoryTests(unittest.TestCase):
     def test_remote_action_inventory_is_exact_and_version_annotated(self) -> None:
         checker = load_checker()
 
+        # collect_references returns only references whose pin matched the allowlist, so the pin
+        # values need no second comparison here; the counts are the independent expectation.
         references = checker.collect_references(REPO_ROOT)
         remote = [reference for reference in references if reference.kind == "remote"]
 
@@ -531,10 +542,6 @@ class RepositoryActionInventoryTests(unittest.TestCase):
         counts = {}
         for reference in remote:
             counts[reference.name] = counts.get(reference.name, 0) + 1
-            self.assertEqual(
-                (reference.revision, reference.version_comment),
-                EXPECTED_ACTION_PINS[reference.name],
-            )
         self.assertEqual(counts, expected)
 
     def test_all_checkouts_disable_persisted_credentials(self) -> None:
@@ -578,12 +585,10 @@ class RepositoryActionInventoryTests(unittest.TestCase):
             "- commit-lint",
         ):
             self.assertIn(dependency, aggregate_job)
-        self.assertIn(
-            "uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10.2.0",
-            job,
-        )
+        uv_sha, uv_version = load_checker().load_allowlist()["astral-sh/setup-uv"]
+        self.assertIn(f"uses: astral-sh/setup-uv@{uv_sha} # {uv_version}", job)
         setup_uv_block = re.compile(
-            r"(?m)^\s*- uses: astral-sh/setup-uv@c18668ad3cf93ea998bef934396af7bb5c839dc7 # v10\.2\.0\n"
+            r"(?m)^\s*- uses: astral-sh/setup-uv@" + re.escape(f"{uv_sha} # {uv_version}") + r"\n"
             r"\s+with:\n"
             r'\s+version: "0\.11\.27"\n'
             r"\s+enable-cache: false$"
@@ -603,6 +608,205 @@ class RepositoryActionInventoryTests(unittest.TestCase):
             "python -m pip install --require-hashes -r docs/requirements.txt",
         ):
             self.assertIn(command, docs_step)
+
+
+def synthetic_allowlist() -> dict:
+    return {
+        "schema_version": 1,
+        "actions": [
+            {"name": "example/one", "sha": "1" * 40, "version": "v1.0.0"},
+            {"name": "example/two", "sha": "2" * 40, "version": "v2.0.0"},
+        ],
+    }
+
+
+def dump(document: object) -> str:
+    return json.dumps(document, indent=2) + "\n"
+
+
+def with_first_entry(field: str, value: object) -> str:
+    document = synthetic_allowlist()
+    document["actions"][0][field] = value
+    return dump(document)
+
+
+def with_top_level(field: str, value: object) -> str:
+    document = synthetic_allowlist()
+    document[field] = value
+    return dump(document)
+
+
+VALID_ALLOWLIST = dump(synthetic_allowlist())
+ENTRY_ONE = '{"name": "example/one", "sha": "' + "1" * 40 + '", "version": "v1.0.0"}'
+# A value from the synthetic file: a message that quotes one is not value-free.
+FILE_VALUE_RE = re.compile(r"example|[0-9a-f]{8}|v[0-9]+\.[0-9]+", re.I)
+
+
+class AllowlistTests(unittest.TestCase):
+    """`.github/actions-allowlist.json`, the single approved-Actions source, and its loader."""
+
+    def refusal(self, content: bytes) -> str:
+        """The loader's message for `content` as the allowlist; it must refuse, value-free, naming
+        the file, and the real workflows must then fail the repository check with that message."""
+        checker = load_checker()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "actions-allowlist.json"
+            path.write_bytes(content)
+            with self.assertRaises(ValueError) as caught:
+                checker.load_allowlist(path)
+            message = str(caught.exception)
+            self.assertEqual(checker.validate_repository(REPO_ROOT, path), [message])
+        self.assertTrue(message.startswith(".github/actions-allowlist.json"), message)
+        self.assertIsNone(FILE_VALUE_RE.search(message), message)
+        return message
+
+    def test_the_synthetic_allowlist_loads(self) -> None:
+        # The baseline every refusal below departs from by one change.
+        checker = load_checker()
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "actions-allowlist.json"
+            path.write_text(VALID_ALLOWLIST, encoding="utf-8")
+            self.assertEqual(checker.load_allowlist(path),
+                             {"example/one": ("1" * 40, "v1.0.0"), "example/two": ("2" * 40, "v2.0.0")})
+
+    def test_the_tracked_allowlist_lists_exactly_the_actions_the_workflows_use(self) -> None:
+        checker = load_checker()
+        self.assertEqual(checker.ALLOWLIST_PATH, ALLOWLIST_PATH)
+        allowlist = checker.load_allowlist()
+        used = {reference.name for reference in checker.collect_references(REPO_ROOT) if reference.kind == "remote"}
+        # The urgent-release runbook's recorded workflow is restored for one release at a time; its
+        # Actions stay listed (test_urgent_release_runbook.py pins its references to these counts).
+        used |= set(URGENT_RELEASE_ACTION_COUNTS)
+        self.assertEqual(set(allowlist), used)
+
+    def test_neither_script_embeds_an_allowlist(self) -> None:
+        # Design section 18 step 4: the scripts read the file rather than carrying a second list.
+        for script, module in ((CHECKER_PATH, load_checker()), (POLICY_PATH, load_policy())):
+            with self.subTest(script=script.name):
+                source = script.read_text(encoding="utf-8")
+                self.assertIsNone(re.search(r"(?<![0-9A-Fa-f])[0-9A-Fa-f]{40}(?![0-9A-Fa-f])", source))
+                self.assertNotIn("APPROVED_REMOTE_ACTIONS", source)
+                self.assertFalse(hasattr(module, "APPROVED_REMOTE_ACTIONS"))
+
+    def test_a_narrowed_or_repinned_allowlist_turns_the_real_workflows_red(self) -> None:
+        checker = load_checker()
+        tracked = json.loads(ALLOWLIST_PATH.read_text(encoding="utf-8"))
+        narrowed = dict(tracked, actions=[entry for entry in tracked["actions"] if entry["name"] != "astral-sh/setup-uv"])
+        repinned = dict(tracked, actions=[dict(entry, sha="0" * 40) if entry["name"] == "actions/checkout" else entry
+                                          for entry in tracked["actions"]])
+        for label, document, needle in (("narrowed", narrowed, "is not in the reviewed allowlist"),
+                                        ("repinned", repinned, "does not match the reviewed allowlist")):
+            with self.subTest(allowlist=label), tempfile.TemporaryDirectory() as directory:
+                path = Path(directory) / "actions-allowlist.json"
+                path.write_text(dump(document), encoding="utf-8")
+                errors = checker.validate_repository(REPO_ROOT, path)
+                self.assertTrue(errors)
+                self.assertTrue(all(needle in error for error in errors), errors)
+
+    def test_the_scanned_root_cannot_approve_its_own_actions(self) -> None:
+        # The list is read from the scripts' own checkout; one planted in the tree under scan is
+        # ignored by both checkers.
+        checker = load_checker()
+        policy = load_policy()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            planted = root / ".github" / "actions-allowlist.json"
+            write_workflow(root, "own.yml",
+                           "jobs:\n  test:\n    steps:\n      - uses: example/one@" + "1" * 40 + " # v1.0.0\n")
+            planted.write_text(VALID_ALLOWLIST, encoding="utf-8")
+            self.assertIn("example/one", checker.load_allowlist(planted))
+            errors = checker.validate_repository(root)
+            self.assertTrue(any("own.yml:4:" in error and "reviewed allowlist" in error for error in errors), errors)
+            violations = policy.scan_repository(root)
+            self.assertTrue(any("own.yml" in v and "reviewed action-pin allowlist" in v for v in violations), violations)
+            # Nor does the inventory helper collect the planted list's Action.
+            self.assertEqual([ref for ref in checker.collect_references(root) if ref.kind == "remote"], [])
+
+    def test_a_missing_symlinked_or_nonregular_allowlist_fails_closed(self) -> None:
+        checker = load_checker()
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            target = root / "target.json"
+            target.write_text(VALID_ALLOWLIST, encoding="utf-8")
+            link = root / "linked.json"
+            link.symlink_to(target)
+            self.assertIn("example/one", checker.load_allowlist(target))
+            for label, path, expected in (
+                ("missing", root / "absent.json", "file is missing"),
+                ("symlink", link, "must be a readable regular file (a symlink is refused)"),
+                ("directory", root, "file must be regular"),
+            ):
+                with self.subTest(allowlist=label):
+                    with self.assertRaises(ValueError) as caught:
+                        checker.load_allowlist(path)
+                    message = str(caught.exception)
+                    self.assertEqual(message, ".github/actions-allowlist.json: " + expected)
+                    self.assertEqual(checker.validate_repository(REPO_ROOT, path), [message])
+
+    def test_malformed_allowlists_fail_closed_with_a_value_free_message(self) -> None:
+        checker = load_checker()
+        oversized = VALID_ALLOWLIST + " " * (checker.MAX_ALLOWLIST_BYTES + 1 - len(VALID_ALLOWLIST))
+        cases = (
+            ("over the size limit", oversized.encode("utf-8"), "size limit"),
+            ("not UTF-8", VALID_ALLOWLIST.encode("utf-8").replace(b"v1.0.0", b"v1.0.0\xff"), "must be UTF-8"),
+            ("byte-order mark", ("\ufeff" + VALID_ALLOWLIST).encode("utf-8"), "U+FEFF is refused"),
+            # A carriage return is JSON whitespace, so only the character rule refuses it.
+            ("carriage return", VALID_ALLOWLIST.replace("\n", "\r\n").encode("utf-8"), "U+000D is refused"),
+            # Raw in the file, not a JSON escape: the character rule reads the text before parsing.
+            ("bidirectional control", VALID_ALLOWLIST.replace("example/one", "example/o\u202ene", 1).encode("utf-8"),
+             "U+202E is refused"),
+            ("invalid JSON", VALID_ALLOWLIST.replace("\n  ]", ",\n  ]").encode("utf-8"), "not valid JSON"),
+            ("repeated top-level key",
+             ('{"schema_version": 1, "schema_version": 1, "actions": [' + ENTRY_ONE + "]}\n").encode("utf-8"),
+             "repeats a key"),
+            ("repeated entry key",
+             ('{"schema_version": 1, "actions": [' + ENTRY_ONE.replace("{", '{"sha": "' + "1" * 40 + '", ', 1)
+              + "]}\n").encode("utf-8"),
+             "repeats a key"),
+            # A list holding the two key names has the right set of members but is no object.
+            ("a list at the top level", b'["schema_version", "actions"]\n',
+             "exactly the keys `schema_version` and `actions`"),
+            ("an extra top-level key", with_top_level("note", "x").encode("utf-8"),
+             "exactly the keys `schema_version` and `actions`"),
+            ("a missing top-level key", dump({"schema_version": 1}).encode("utf-8"),
+             "exactly the keys `schema_version` and `actions`"),
+            ("schema_version true", with_top_level("schema_version", True).encode("utf-8"), "the integer 1"),
+            ("schema_version 1.0", with_top_level("schema_version", 1.0).encode("utf-8"), "the integer 1"),
+            ("schema_version a string", with_top_level("schema_version", "1").encode("utf-8"), "the integer 1"),
+            ("schema_version 2", with_top_level("schema_version", 2).encode("utf-8"), "the integer 1"),
+            ("actions an object", with_top_level("actions", {"x": 1}).encode("utf-8"), "non-empty list"),
+            ("actions empty", with_top_level("actions", []).encode("utf-8"), "non-empty list"),
+            ("an entry that is not an object", with_top_level("actions", [["name", "sha", "version"]]).encode("utf-8"),
+             "exactly the keys `name`, `sha` and `version`"),
+            ("an extra entry key", with_first_entry("pinned_by", "x").encode("utf-8"),
+             "exactly the keys `name`, `sha` and `version`"),
+            ("a missing entry key",
+             dump(dict(synthetic_allowlist(), actions=[{"name": "example/one", "sha": "1" * 40}])).encode("utf-8"),
+             "exactly the keys `name`, `sha` and `version`"),
+            ("name not a string", with_first_entry("name", 1).encode("utf-8"), "`name` must be"),
+            ("sha not a string", with_first_entry("sha", None).encode("utf-8"), "`sha` must be"),
+            ("version not a string", with_first_entry("version", 1).encode("utf-8"), "`version` must be"),
+            ("uppercase sha", with_first_entry("sha", "A" * 40).encode("utf-8"), "`sha` must be"),
+            ("short sha", with_first_entry("sha", "1" * 39).encode("utf-8"), "`sha` must be"),
+            ("long sha", with_first_entry("sha", "1" * 41).encode("utf-8"), "`sha` must be"),
+            ("non-hexadecimal sha", with_first_entry("sha", "g" * 40).encode("utf-8"), "`sha` must be"),
+            ("a repeated name", dump(dict(synthetic_allowlist(), actions=[synthetic_allowlist()["actions"][0]] * 2))
+             .encode("utf-8"), "`name` repeats an earlier entry"),
+            ("unsorted names", dump(dict(synthetic_allowlist(), actions=synthetic_allowlist()["actions"][::-1]))
+             .encode("utf-8"), "sorted by `name`"),
+        )
+        bad_names = ("Example/one", "example", "example/one/sub", "example/..", "../one", "example/../one",
+                     "example/.one", "-example/one", "example-/one", "example/one ", " example/one",
+                     "example /one", "example/one\t", "")
+        bad_versions = ("1.0.0", "v1.0", "v1.0.0-rc.1", "V1.0.0", "v1.0.0 ", "")
+        cases += tuple(("name " + repr(name), with_first_entry("name", name).encode("utf-8"), "`name` must be")
+                       for name in bad_names)
+        cases += tuple(("version " + repr(version), with_first_entry("version", version).encode("utf-8"),
+                        "`version` must be") for version in bad_versions)
+        for label, content, needle in cases:
+            with self.subTest(case=label):
+                self.assertIn(needle, self.refusal(content))
+
 
 if __name__ == "__main__":
     unittest.main()

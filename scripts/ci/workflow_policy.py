@@ -41,7 +41,9 @@ What must hold for every workflow (exit 0), each named in the violations otherwi
   equals the recorded one at activity-type / branch-filter granularity (Section 7.2);
 - every `uses:` is a remote action pinned to a full commit SHA (a local `./` composite
   action or a `docker://` image would place steps outside this scan), and every step's
-  `uses:` is the reviewed pin (name and SHA) in `action_pins.py`'s allowlist; no
+  `uses:` is the reviewed pin (name and SHA) in `.github/actions-allowlist.json`, read
+  through `action_pins.load_allowlist` from this script's own checkout (an allowlist that
+  does not load is a violation, never a pass); no
   `container:` or `services:` image; an `actions/github-script` body is checked for write
   calls;
 - literal and folded block scalars are read with YAML's rules: the indentation of the
@@ -932,22 +934,32 @@ def _unapproved_pins(display: str, document: Dict[str, Any], approved: Dict[str,
             pin = approved.get(name)
             if pin is None or pin[0] != revision:
                 violations.append("{}: job `{}` step {}: `uses` is not in the reviewed action-pin allowlist "
-                                  "(scripts/ci/action_pins.py)".format(display, job_id, index + 1))
+                                  "(.github/actions-allowlist.json)".format(display, job_id, index + 1))
     return violations
 
 
-def scan_repository(root: Path) -> List[str]:
+def scan_repository(root: Path, allowlist: Optional[Path] = None) -> List[str]:
+    """Violations for every workflow under `root`. Each step's `uses` is judged against the list
+    `action_pins.load_allowlist` reads from this script's own checkout (its docstring says why not
+    from `root`); `allowlist` names another file for tests only, and the CLI has no such option."""
     violations: List[str] = []
     try:
         pins = _load_action_pins()
     except Exception as error:  # noqa: BLE001 — any loader failure is a scan failure, reported not raised
         return ["scripts/ci/action_pins.py could not be loaded: {}".format(error)]
+    approved: Optional[Dict[str, Tuple[str, str]]] = None
+    try:
+        approved = pins.load_allowlist() if allowlist is None else pins.load_allowlist(allowlist)
+    except Exception as error:  # noqa: BLE001; an allowlist that does not load is a violation, never a pass
+        # The loader's ValueError messages are value-free by construction; anything else is not quoted.
+        violations.append(str(error) if isinstance(error, ValueError)
+                          else "{}: could not be loaded".format(pins.ALLOWLIST_DISPLAY))
     checks_seen: Dict[str, str] = {}
     triggers_by_check: Dict[str, Dict[str, Any]] = {}
     prt_workflows: List[str] = []
     paths = pins.workflow_paths(root)
     if not paths:
-        return ["no workflows found under .github/workflows"]
+        return violations + ["no workflows found under .github/workflows"]
     for path in paths:
         display = path.relative_to(root).as_posix()
         try:
@@ -958,7 +970,8 @@ def scan_repository(root: Path) -> List[str]:
             continue
         file_violations, facts = scan_workflow(display, document)
         violations.extend(file_violations)
-        violations.extend(_unapproved_pins(display, document, pins.APPROVED_REMOTE_ACTIONS))
+        if approved is not None:
+            violations.extend(_unapproved_pins(display, document, approved))
         if facts["pull_request_target"]:
             prt_workflows.append(display)
         for check_name in facts["checks"]:

@@ -3,11 +3,16 @@
 
 The accepted subset uses block mappings and scalar-only flow sequences. Quote complex
 scalar values containing YAML structural characters such as colons.
+
+Every remote reference must be the exact pin (name, full commit SHA and version annotation)
+recorded in `.github/actions-allowlist.json`, the single approved-Actions source (design
+section 18 step 4); `load_allowlist` states its format and which checkout it is read from.
 """
 
 from __future__ import annotations
 
 import argparse
+import json
 import os
 from pathlib import Path
 import re
@@ -37,40 +42,18 @@ ANCHOR_ALIAS_PATTERN = re.compile(
 EXPLICIT_KEY_PATTERN = re.compile(r"(?:^|[\s\[{,])\?(?=\s|$)")
 
 MAX_WORKFLOW_BYTES = 1024 * 1024
-APPROVED_REMOTE_ACTIONS = {
-    "actions/checkout": (
-        "3d3c42e5aac5ba805825da76410c181273ba90b1",
-        "v7.0.1",
-    ),
-    "actions/setup-python": (
-        "5fda3b95a4ea91299a34e894583c3862153e4b97",
-        "v7.0.0",
-    ),
-    "astral-sh/setup-uv": (
-        "c18668ad3cf93ea998bef934396af7bb5c839dc7",
-        "v10.2.0",
-    ),
-    "actions/configure-pages": (
-        "45bfe0192ca1faeb007ade9deae92b16b8254a0d",
-        "v6.0.0",
-    ),
-    "actions/upload-pages-artifact": (
-        "fc324d3547104276b827a68afc52ff2a11cc49c9",
-        "v5.0.0",
-    ),
-    "actions/deploy-pages": (
-        "cd2ce8fcbc39b97be8ca5fce6e763baed58fa128",
-        "v5.0.0",
-    ),
-    "actions/upload-artifact": (
-        "043fb46d1a93c77aae656e7c1c64a875d1fc6a0a",
-        "v7.0.1",
-    ),
-    "actions/download-artifact": (
-        "3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c",
-        "v8.0.1",
-    ),
-}
+
+POLICY_ROOT = Path(__file__).resolve().parents[2]
+ALLOWLIST_DISPLAY = ".github/actions-allowlist.json"
+ALLOWLIST_PATH = POLICY_ROOT / ".github" / "actions-allowlist.json"
+MAX_ALLOWLIST_BYTES = 64 * 1024
+ALLOWLIST_KEYS = frozenset({"schema_version", "actions"})
+ALLOWLIST_ENTRY_KEYS = frozenset({"name", "sha", "version"})
+# Lowercase `owner/repository` only: a GitHub owner (alphanumerics and inner hyphens, at most 39
+# characters) and a repository that starts with an alphanumeric, so no `.` or `..` segment, no
+# path below the repository, no whitespace and no second spelling of a listed name.
+ALLOWLIST_NAME_PATTERN = re.compile(r"[a-z0-9](?:[a-z0-9-]{0,37}[a-z0-9])?/[a-z0-9][a-z0-9_.-]{0,99}")
+FULL_SHA_PATTERN = re.compile(r"[0-9a-f]{40}")
 
 
 class ActionReference(NamedTuple):
@@ -254,6 +237,7 @@ def _classify(
     line_number: int,
     scalar: str,
     comment: Optional[str],
+    approved: dict[str, tuple[str, str]],
 ) -> ActionReference:
     if not scalar or scalar in {"|", ">", "|-", ">-", "|+", ">+"}:
         raise ValueError("uses value must be a single-line scalar")
@@ -268,10 +252,10 @@ def _classify(
         raise ValueError("remote action must use a full lowercase commit SHA")
     if comment is None or VERSION_PATTERN.fullmatch(comment) is None:
         raise ValueError("remote action must have an adjacent semantic-version annotation")
-    approved = APPROVED_REMOTE_ACTIONS.get(match.group("name"))
-    if approved is None:
+    pin = approved.get(match.group("name"))
+    if pin is None:
         raise ValueError("remote action is not in the reviewed allowlist")
-    if approved != (match.group("revision"), comment):
+    if pin != (match.group("revision"), comment):
         raise ValueError("remote action pin does not match the reviewed allowlist")
     return ActionReference(
         path,
@@ -330,7 +314,107 @@ def _refused_character(character: str) -> bool:
             or 0x2066 <= code <= 0x2069 or code in (0x061C, 0x200E, 0x200F, 0xFEFF, 0xFFFE, 0xFFFF))
 
 
-def _scan_file(path: Path) -> tuple[list[ActionReference], list[tuple[int, str]]]:
+class _DuplicateKey(Exception):
+    """A JSON object repeats a key; `json` would otherwise keep the last value silently."""
+
+
+def _refuse_duplicate_keys(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    keys = [key for key, _ in pairs]
+    if len(set(keys)) != len(keys):
+        raise _DuplicateKey()
+    return dict(pairs)
+
+
+def load_allowlist(path: Path = ALLOWLIST_PATH) -> dict[str, tuple[str, str]]:
+    """Read the approved-Actions allowlist as {name: (full commit SHA, version label)}.
+
+    Format, schema_version 1, every rule fail-closed: a regular file (a symlink is refused) of at
+    most MAX_ALLOWLIST_BYTES, UTF-8 holding no character `_refused_character` refuses (so no
+    byte-order mark and no carriage return); one JSON object, no key repeated at any level, with
+    exactly the keys `schema_version` (the integer 1) and `actions`, a non-empty list of objects
+    with exactly the keys `name` (ALLOWLIST_NAME_PATTERN), `sha` (40 lowercase hexadecimal
+    characters) and `version` (the `vMAJOR.MINOR.PATCH` annotation every `uses:` of that pin
+    carries); names unique and in sorted order. A failure raises ValueError with a value-free
+    message naming the file.
+
+    WHICH CHECKOUT. The file is read from this script's own checkout (POLICY_ROOT), never from the
+    `--root` under scan, as `quality.py` reads its policy from the policy root and the proposal from
+    a separate candidate root: the allowlist is policy, the workflows are what it judges, and a tree
+    under scan must not approve its own Actions. Today the two are one checkout wherever the checks
+    run: `--root` defaults to this checkout, and on a pull request the Supply-chain policy job checks
+    out the proposal, so the proposal's copy of this script reads the proposal's copy of the list (a
+    residual design section 10.5 records; until that job's trusted-base conversion, an allowlist
+    change rests on control-plane review, which CODEOWNERS names and no ruleset requires yet). Under
+    that conversion the base checkout's scripts scan the proposal as data, and reading the list
+    beside the script is what makes it the base's committed list. A temporary root that tests fill
+    with copied workflows (the urgent-release runbook test's among them) is judged against the
+    tracked list, and a scanned root's own `.github/actions-allowlist.json` is ignored. No
+    command-line option substitutes another list; callers that need one (tests) pass `path`."""
+    label = ALLOWLIST_DISPLAY
+    try:
+        text = _read_regular_utf8(path, MAX_ALLOWLIST_BYTES)
+    except FileNotFoundError:
+        raise ValueError(f"{label}: file is missing") from None
+    except OSError:
+        raise ValueError(f"{label}: must be a readable regular file (a symlink is refused)") from None
+    except UnicodeError:
+        raise ValueError(f"{label}: must be UTF-8") from None
+    except ValueError as error:  # not a regular file, or over the size limit; no value in either
+        raise ValueError(f"{label}: {error}") from None
+    for line_number, line in enumerate(text.split("\n"), start=1):
+        for character in line:
+            if _refused_character(character):
+                raise ValueError(
+                    f"{label}:{line_number}: character U+{ord(character):04X} is refused (only space, "
+                    "tab and line feed may be whitespace; no control character, byte-order mark, "
+                    "bidirectional control or noncharacter)"
+                )
+    try:
+        document = json.loads(text, object_pairs_hook=_refuse_duplicate_keys)
+    except _DuplicateKey:
+        raise ValueError(f"{label}: a JSON object repeats a key") from None
+    except (ValueError, RecursionError) as error:
+        position = ""
+        if isinstance(error, json.JSONDecodeError):
+            position = f" (line {error.lineno}, column {error.colno})"
+        raise ValueError(f"{label}: not valid JSON{position}") from None
+    if not isinstance(document, dict) or set(document) != ALLOWLIST_KEYS:
+        raise ValueError(
+            f"{label}: must be one JSON object with exactly the keys `schema_version` and `actions`"
+        )
+    # `type(...) is int`, not isinstance: JSON `true` loads as a bool, which is an int equal to 1.
+    if type(document["schema_version"]) is not int or document["schema_version"] != 1:
+        raise ValueError(f"{label}: `schema_version` must be the integer 1")
+    actions = document["actions"]
+    if not isinstance(actions, list) or not actions:
+        raise ValueError(f"{label}: `actions` must be a non-empty list")
+    approved: dict[str, tuple[str, str]] = {}
+    names: list[str] = []
+    for number, entry in enumerate(actions, start=1):
+        where = f"{label}: `actions` entry {number}"
+        if not isinstance(entry, dict) or set(entry) != ALLOWLIST_ENTRY_KEYS:
+            raise ValueError(
+                f"{where} must be an object with exactly the keys `name`, `sha` and `version`"
+            )
+        name, sha, version = entry["name"], entry["sha"], entry["version"]
+        if not isinstance(name, str) or ALLOWLIST_NAME_PATTERN.fullmatch(name) is None:
+            raise ValueError(f"{where}: `name` must be a lowercase owner/repository")
+        if not isinstance(sha, str) or FULL_SHA_PATTERN.fullmatch(sha) is None:
+            raise ValueError(f"{where}: `sha` must be 40 lowercase hexadecimal characters")
+        if not isinstance(version, str) or VERSION_PATTERN.fullmatch(version) is None:
+            raise ValueError(f"{where}: `version` must be a vMAJOR.MINOR.PATCH label")
+        if name in approved:
+            raise ValueError(f"{where}: `name` repeats an earlier entry")
+        approved[name] = (sha, version)
+        names.append(name)
+    if names != sorted(names):
+        raise ValueError(f"{label}: `actions` entries must be sorted by `name`")
+    return approved
+
+
+def _scan_file(
+    path: Path, approved: dict[str, tuple[str, str]]
+) -> tuple[list[ActionReference], list[tuple[int, str]]]:
     references: list[ActionReference] = []
     errors: list[tuple[int, str]] = []
     active_mapping_keys: dict[int, int] = {}
@@ -396,21 +480,28 @@ def _scan_file(path: Path) -> tuple[list[ActionReference], list[tuple[int, str]]
             active_mapping_keys[indent] = line_number
         try:
             scalar, comment = _split_scalar_and_comment(match.group("rest"))
-            references.append(_classify(path, line_number, scalar, comment))
+            references.append(_classify(path, line_number, scalar, comment, approved))
         except ValueError as error:
             errors.append((line_number, str(error)))
     return references, errors
 
 
-def collect_references(root: Path) -> list[ActionReference]:
+def collect_references(root: Path, allowlist: Path = ALLOWLIST_PATH) -> list[ActionReference]:
+    """The references whose pins match the allowlist; an unreadable allowlist raises ValueError
+    (this helper serves tests and inventories; `validate_repository` is the fail-closed check)."""
+    approved = load_allowlist(allowlist)
     references: list[ActionReference] = []
     for path in workflow_paths(root):
-        found, _ = _scan_file(path)
+        found, _ = _scan_file(path, approved)
         references.extend(found)
     return references
 
 
-def validate_repository(root: Path) -> list[str]:
+def validate_repository(root: Path, allowlist: Path = ALLOWLIST_PATH) -> list[str]:
+    try:
+        approved = load_allowlist(allowlist)
+    except ValueError as error:
+        return [str(error)]
     workflows = _workflow_root(root)
     try:
         workflows_stat = workflows.lstat()
@@ -427,7 +518,7 @@ def validate_repository(root: Path) -> list[str]:
                     f"{_display_path(root, path)}: workflow directory must not be a symlink"
                 )
     for path in workflow_paths(root):
-        _, file_errors = _scan_file(path)
+        _, file_errors = _scan_file(path, approved)
         display = _display_path(root, path)
         errors.extend(
             f"{display}:{line_number}: {message}"
@@ -438,7 +529,7 @@ def validate_repository(root: Path) -> list[str]:
 
 def main(argv: Optional[list[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--root", type=Path, default=Path(__file__).resolve().parents[2])
+    parser.add_argument("--root", type=Path, default=POLICY_ROOT)
     arguments = parser.parse_args(argv)
     errors = validate_repository(arguments.root.resolve())
     for error in errors:

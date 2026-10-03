@@ -10,6 +10,7 @@
  "paths": [
   ".github/CODEOWNERS",
   ".github/PULL_REQUEST_TEMPLATE.md",
+  ".github/actions-allowlist.json",
   ".github/control-plane-manifest.json",
   ".github/dependabot.yml",
   ".github/workflows/ci.yml",

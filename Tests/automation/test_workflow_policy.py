@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import importlib.util
+import json
 import subprocess
 import sys
 import tempfile
@@ -11,11 +12,13 @@ from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "scripts" / "ci" / "workflow_policy.py"
+PINS_SCRIPT = REPO_ROOT / "scripts" / "ci" / "action_pins.py"
+ALLOWLIST = REPO_ROOT / ".github" / "actions-allowlist.json"
 CHECKOUT = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1"
 
 
-def load_module():
-    spec = importlib.util.spec_from_file_location("workflow_policy", SCRIPT)
+def load_module(name: str = "workflow_policy", script: Path = SCRIPT):
+    spec = importlib.util.spec_from_file_location(name, script)
     module = importlib.util.module_from_spec(spec)
     assert spec.loader is not None
     spec.loader.exec_module(module)
@@ -23,6 +26,7 @@ def load_module():
 
 
 policy = load_module()
+pins = load_module("action_pins", PINS_SCRIPT)
 
 
 QUALITY = textwrap.dedent(
@@ -665,8 +669,9 @@ class ScanTests(unittest.TestCase):
                                 violations)
 
     def test_every_uses_is_checked_against_the_reviewed_pin_allowlist(self) -> None:
-        # One source of truth: the scan checks each parsed `uses` against action_pins.py's
-        # allowlist, so a line the action-pin line scan skips is still judged here.
+        # One source of truth: the scan checks each parsed `uses` against
+        # .github/actions-allowlist.json, read through action_pins.load_allowlist, so a line the
+        # action-pin line scan skips is still judged here.
         sha = "0123456789abcdef0123456789abcdef01234567"
         body = mutate(QUALITY, CHECKOUT_STEP, "      - uses: actions/cache@{} # v1.0.0\n".format(sha) + CHECKOUT_STEP)
         self.assert_ci_violation(body, "not in the reviewed action-pin allowlist")
@@ -695,6 +700,73 @@ class ScanTests(unittest.TestCase):
     def test_unparseable_workflow_is_a_violation_not_a_pass(self) -> None:
         violations = self.scan({"ci.yml": QUALITY, "governance.yml": METADATA, "odd.yml": "name: x\non: push\njobs: {a: b}\n"})
         self.assertTrue(any("odd.yml: refused" in v for v in violations), violations)
+
+
+class AllowlistTests(unittest.TestCase):
+    """The scan and the action-pin check judge every `uses` against the same allowlist file."""
+
+    def setUp(self) -> None:
+        self._tmp = tempfile.TemporaryDirectory()
+        self.root = Path(self._tmp.name) / "tree"
+        self.lists = Path(self._tmp.name) / "lists"
+        self.lists.mkdir()
+        write_tree(self.root, {"ci.yml": QUALITY, "governance.yml": METADATA})
+
+    def tearDown(self) -> None:
+        self._tmp.cleanup()
+
+    def allowlist(self, name: str, document: dict) -> Path:
+        path = self.lists / name
+        path.write_text(json.dumps(document, indent=2) + "\n", encoding="utf-8")
+        return path
+
+    def test_both_checkers_refuse_an_unlisted_action_and_a_listed_action_at_another_sha(self) -> None:
+        self.assertEqual(policy.scan_repository(self.root), [])
+        self.assertEqual(pins.validate_repository(self.root), [])
+        sha = "0123456789abcdef0123456789abcdef01234567"
+        for fragment in ("      - uses: example/unlisted@{} # v1.0.0\n".format(sha),
+                         "      - uses: actions/checkout@{} # v7.0.1\n".format(sha)):
+            with self.subTest(fragment=fragment):
+                write_tree(self.root, {"ci.yml": mutate(QUALITY, CHECKOUT_STEP, fragment + CHECKOUT_STEP)})
+                self.assertTrue(any("ci.yml" in v and "reviewed action-pin allowlist" in v
+                                    for v in policy.scan_repository(self.root)))
+                self.assertTrue(any("ci.yml" in e and "reviewed allowlist" in e
+                                    for e in pins.validate_repository(self.root)))
+
+    def test_a_narrowed_or_repinned_allowlist_turns_both_checkers_red(self) -> None:
+        tracked = json.loads(ALLOWLIST.read_text(encoding="utf-8"))
+        narrowed = dict(tracked, actions=[entry for entry in tracked["actions"] if entry["name"] != "actions/checkout"])
+        repinned = dict(tracked, actions=[dict(entry, sha="0" * 40) if entry["name"] == "actions/checkout" else entry
+                                          for entry in tracked["actions"]])
+        for label, document in (("narrowed", narrowed), ("repinned", repinned)):
+            with self.subTest(allowlist=label):
+                path = self.allowlist(label + ".json", document)
+                self.assertEqual(policy.scan_repository(self.root, path),
+                                 ["{}: job `{}` step 1: `uses` is not in the reviewed action-pin allowlist "
+                                  "(.github/actions-allowlist.json)".format(name, job)
+                                  for name, job in ((".github/workflows/ci.yml", "build"),
+                                                    (".github/workflows/governance.yml", "required"))])
+                errors = pins.validate_repository(self.root, path)
+                self.assertEqual(len(errors), 2, errors)
+                self.assertTrue(all("reviewed allowlist" in error for error in errors), errors)
+
+    def test_an_allowlist_that_does_not_load_is_a_violation_not_a_pass(self) -> None:
+        # The scan reports exactly the loader's own value-free message, so both checkers read the
+        # file through one loader, and a list that does not load never lets a tree pass.
+        tracked = json.loads(ALLOWLIST.read_text(encoding="utf-8"))
+        bad = {
+            "missing": self.lists / "absent.json",
+            "schema_version true": self.allowlist("bool.json", dict(tracked, schema_version=True)),
+            "unsorted": self.allowlist("unsorted.json", dict(tracked, actions=tracked["actions"][::-1])),
+        }
+        for label, path in bad.items():
+            with self.subTest(allowlist=label):
+                with self.assertRaises(ValueError) as caught:
+                    pins.load_allowlist(path)
+                message = str(caught.exception)
+                self.assertTrue(message.startswith(".github/actions-allowlist.json: "), message)
+                self.assertEqual(policy.scan_repository(self.root, path), [message])
+                self.assertEqual(pins.validate_repository(self.root, path), [message])
 
 
 class RepositoryTests(unittest.TestCase):

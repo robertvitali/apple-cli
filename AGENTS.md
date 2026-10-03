@@ -344,8 +344,10 @@ above; the branch rules below govern the cases where a branch exists at all.
   changes the verdict, which rests on the title and body alone. Dependabot updates of
   GitHub Actions pins still fail the Supply-chain policy job until the design's Dependabot
   workflow-pin exception (§10.5) exists; never merge one before then, but take its update on
-  `main` in a reviewed commit that also adds the Action's new commit to the reviewed allowlist,
-  as D45 did.
+  `main` in a reviewed commit that also records the Action's new commit and version label in
+  the reviewed allowlist, `.github/actions-allowlist.json` (D45 did so when that list still
+  lived in `scripts/ci/action_pins.py`), and moves any test fixture or runbook text that quotes
+  the old pin.
 - **Fork-PR safety (restated from CI workflows so agents see it here):** fork PRs execute untrusted
   code (`Package.swift` manifests, test bodies) on hosted runners; ordinary build/test stays
   on `pull_request` with a read-only token and no secrets. The sole

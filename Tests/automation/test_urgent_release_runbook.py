@@ -5,7 +5,9 @@ release restores under `.github/workflows/` for one release (design section 18 s
 tests keep that text restorable as it stands:
   * the runbook holds exactly one recorded workflow, at the recorded path;
   * it parses with the static scan's own parser, and the static scan and the action-pin check
-    both pass over it beside the tracked workflows, with no exception for it;
+    both pass over it beside the tracked workflows, with no exception for it, judging it against
+    the tracked `.github/actions-allowlist.json` (the checks read the list from their own
+    checkout, never from the temporary root the workflows are copied into);
   * its shape stays read-only: a push trigger on `main` only, `contents: read` at workflow and
     job level, one job on `macos-26` guarded to release commits, a checkout without persisted
     credentials, no remote action beyond checkout and upload-artifact, and the upload as the
@@ -104,6 +106,9 @@ class RecordedWorkflowTests(unittest.TestCase):
                 if tracked.name != pathlib.Path(RESTORED_PATH).name:
                     shutil.copyfile(tracked, workflows / tracked.name)
             (root / RESTORED_PATH).write_text(self.text, encoding="utf-8")
+            # No allowlist is copied: both checks read the tracked one beside their own scripts.
+            self.assertFalse((root / ".github" / "actions-allowlist.json").exists())
+            self.assertEqual(pins.ALLOWLIST_PATH, ROOT / ".github" / "actions-allowlist.json")
             self.assertEqual(policy.scan_repository(root), [])
             self.assertEqual(pins.validate_repository(root), [])
 
@@ -114,10 +119,8 @@ class RecordedWorkflowTests(unittest.TestCase):
             (root / RESTORED_PATH).write_text(self.text, encoding="utf-8")
             references = [ref for ref in pins.collect_references(root) if ref.kind == "remote"]
         counts = {}
-        for reference in references:
+        for reference in references:  # each already matched its allowlist pin to be collected
             counts[reference.name] = counts.get(reference.name, 0) + 1
-            self.assertEqual((reference.revision, reference.version_comment),
-                             inventory.EXPECTED_ACTION_PINS[reference.name])
         self.assertEqual(counts, inventory.URGENT_RELEASE_ACTION_COUNTS)
         self.assertEqual(pathlib.Path(RESTORED_PATH).name, inventory.URGENT_RELEASE_WORKFLOW.name)
 

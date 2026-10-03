@@ -373,6 +373,20 @@ JSON output are stable per the versioning policy — breaking changes bump
   the capability policy ends a Swift `//` comment at a carriage return as Swift does. **For anyone
   running the binary, nothing changes:** no `apple` command, output field, error type, or exit code
   is affected, and `schema_version` stays `1`.
+- **The GitHub Actions the workflows may use are now listed in one committed file,
+  `.github/actions-allowlist.json`.** It records each permitted Action's name, full commit SHA and
+  version label, and replaces the list `scripts/ci/action_pins.py` carried in its source. The
+  action-pin check and the workflow scan both judge every `uses:` against it, so a workflow using an
+  Action the file does not list, or a listed Action at another commit, fails both, and a missing or
+  malformed file fails both instead of passing. Both read the file from their own checkout, never
+  from the tree they scan. It lists exactly the five Actions the tracked workflows and the
+  urgent-release runbook's recorded workflow use; three GitHub Pages Actions no workflow uses were
+  dropped. A pin update now edits this file beside the workflows (and any test or runbook text that
+  quotes the live pin). On a pull request the Supply-chain policy job still checks out the pull
+  request's merge commit, so it reads that tree's copy of the file until the job is converted to
+  read the base branch's; until then a change to the file rests on code-owner review, which no
+  ruleset requires yet. **For anyone running the binary, nothing changes:** no `apple` command,
+  output field, error type, or exit code is affected, and `schema_version` stays `1`.
 
 - **macOS 27 is now a tested and supported runtime baseline, alongside macOS 26.** The full
   local canonical suite (the logic, Python automation and local CLI tiers; the live tier is
