@@ -596,8 +596,9 @@ class RepositoryActionInventoryTests(unittest.TestCase):
             "python scripts/ci/workflow_policy.py",
         ):
             self.assertIn(command, validation_step)
+        self.assertRegex(docs_step, r'(?m)^        env:\n          UV_NO_CONFIG: "1"\n        run: \|$')
         for command in (
-            "uv pip compile docs/requirements.in --python-version 3.12 --python-platform x86_64-unknown-linux-gnu --generate-hashes --output-file docs/requirements.txt",
+            "(cd docs && uv pip compile requirements.in --python-version 3.12 --python-platform x86_64-unknown-linux-gnu --generate-hashes --output-file requirements.txt)",
             "git diff --exit-code -- docs/requirements.txt",
             "python -m pip install --require-hashes -r docs/requirements.txt",
         ):

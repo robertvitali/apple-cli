@@ -43,10 +43,15 @@ jobs:
           python scripts/ci/dependency_policy.py
           python scripts/ci/workflow_policy.py
 
+      # The lock is compiled from inside docs/, where Dependabot compiles it, so the lock's
+      # `# via` comment matches Dependabot's; any other difference still fails this step.
+      # UV_NO_CONFIG keeps a uv.toml or pyproject.toml under docs/ from steering the compile.
       - name: Prove documentation lock closure
+        env:
+          UV_NO_CONFIG: "1"
         run: |
           set -euo pipefail
-          uv pip compile docs/requirements.in --python-version 3.12 --python-platform x86_64-unknown-linux-gnu --generate-hashes --output-file docs/requirements.txt
+          (cd docs && uv pip compile requirements.in --python-version 3.12 --python-platform x86_64-unknown-linux-gnu --generate-hashes --output-file requirements.txt)
           git diff --exit-code -- docs/requirements.txt
           python -m pip install --require-hashes -r docs/requirements.txt
 

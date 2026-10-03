@@ -335,14 +335,26 @@ above; the branch rules below govern the cases where a branch exists at all.
   `commit-lint` run on main is the title backstop). Because squash discards branch-commit
   trailers, the merger adds the `Reviewed-by:` / `Co-Authored-By:` trailer block to the PR
   DESCRIPTION before merging — the description is the squash body, so that is where
-  provenance survives.
+  provenance survives. Dependabot pull requests get no exemption: before merging one, the
+  merger replaces its generated title and description with the template, filled in the same
+  way (design §8). Replace, not edit: Dependabot's text carries upstream release notes and
+  commit lists that name third-party contributors, and the description becomes a public
+  commit body. When the event's author account and head repository identify Dependabot,
+  `governance / required` names that rewrite in an extra diagnostic; the identity never
+  changes the verdict, which rests on the title and body alone. Dependabot updates of
+  GitHub Actions pins still fail the Supply-chain policy job until the design's Dependabot
+  workflow-pin exception (§10.5) exists; never merge one before then, but take its update on
+  `main` in a reviewed commit that also adds the Action's new commit to the reviewed allowlist,
+  as D45 did.
 - **Fork-PR safety (restated from CI workflows so agents see it here):** fork PRs execute untrusted
   code (`Package.swift` manifests, test bodies) on hosted runners; ordinary build/test stays
   on `pull_request` with a read-only token and no secrets. The sole
   `pull_request_target` workflow is `governance.yml`, producing `governance / required` (design
   §18 step 5 fold, 2026-09-25): its base-owned workflow checks out and executes only the
   base-owned metadata validator, with `contents: read`, no secrets, and PR title/body inspection
-  only; it must never checkout, execute, download, or cache PR code or artifacts. No other
+  only for its verdict (the event's author account, by login, type and id, and its repository
+  ids select one explanatory diagnostic and never change it); it must never checkout, execute,
+  download, or cache PR code or artifacts. No other
   `pull_request_target` use is permitted — `scripts/ci/workflow_policy.py` (design §18 step 17),
   run by the `Supply-chain policy` job, refuses a second one, any reference to the proposal head
   or an artifact download inside it, and any checkout in it without an explicit base-pinned

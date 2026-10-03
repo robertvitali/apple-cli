@@ -342,6 +342,18 @@ JSON output are stable per the versioning policy — breaking changes bump
   implemented, so a green check proves metadata hygiene and nothing more. **For anyone running
   the binary, nothing changes:** no `apple` command, output field, error type, or exit code is
   affected, and `schema_version` stays `1`.
+- **Dependabot updates of the documentation lock no longer fail CI's lock check on the `# via`
+  comment, and every Dependabot pull request has a stated path through `governance / required`.**
+  The lock is compiled from inside `docs/`, where Dependabot compiles it, so its `# via` comment
+  matches Dependabot's instead of failing the Supply-chain policy job on that one line; any other
+  difference still fails. Dependabot pull requests get no exemption from `governance / required`:
+  before merging one, the merger replaces its generated title and description with the pull-request
+  template, and the check now says so in an extra diagnostic when the event's author account and
+  head repository identify Dependabot. That identity never changes the check's verdict, which rests
+  on the title and body alone. Dependabot updates of GitHub Actions pins still fail the Supply-chain
+  policy job, by design, until the design's Dependabot workflow-pin exception (§10.5) exists.
+  **For anyone running the binary, nothing changes:** no `apple` command, output field, error
+  type, or exit code is affected, and `schema_version` stays `1`.
 
 - **macOS 27 is now a tested and supported runtime baseline, alongside macOS 26.** The full
   local canonical suite (the logic, Python automation and local CLI tiers; the live tier is

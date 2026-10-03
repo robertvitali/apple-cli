@@ -38,6 +38,16 @@ TRAILER_LINE_PATTERN = re.compile(
 UNCHECKED_ITEM_PATTERN = re.compile(r"^[-*+]\s+\[\s\]\s+.+$")
 TABLE_SEPARATOR_CELL_PATTERN = re.compile(r"^:?-{3,}:?$")
 PLACEHOLDER_LINES = {"...", "describe here", "n/a", "na", "none", "tbd", "todo"}
+# Dependabot authorship is asserted from the author account and the head repository, never
+# from a branch name (design §10.5). The id is GitHub's public account id for that bot user.
+DEPENDABOT_LOGIN = "dependabot[bot]"
+DEPENDABOT_ACCOUNT_ID = 49699333
+DEPENDABOT_REWRITE_DIAGNOSTIC = (
+    "Dependabot pull request: Dependabot authorship is not an exemption; before merging, "
+    "replace the generated title and description entirely with the filled-in pull-request "
+    "template, keeping none of Dependabot's release notes or commit list, with its provenance "
+    "trailers (design §8)"
+)
 _INTERNAL_TRACKER_NAME = "asa" + "na"
 INTERNAL_TRACKER_PATTERNS = (
     re.compile(rf"\b{re.escape(_INTERNAL_TRACKER_NAME)}\s*:", flags=re.IGNORECASE),
@@ -266,14 +276,50 @@ def validate_metadata(title: str, body: str) -> list[str]:
     return validate_title(title) + validate_body(body)
 
 
-def _read_event(path: Path) -> tuple[str, str]:
+def _is_exact_int(value: object) -> bool:
+    return type(value) is int
+
+
+def is_dependabot_proposal(pull_request: object) -> bool:
+    """Return whether the event names a Dependabot pull request from this repository.
+
+    Every field must be present with the exact expected type and value, or the answer is
+    False. The answer only selects an explanatory diagnostic: it never changes the verdict,
+    which depends on the title and body alone.
+    """
+    if not isinstance(pull_request, dict):
+        return False
+    user = pull_request.get("user")
+    head = pull_request.get("head")
+    base = pull_request.get("base")
+    if not (isinstance(user, dict) and isinstance(head, dict) and isinstance(base, dict)):
+        return False
+    head_repo = head.get("repo")
+    base_repo = base.get("repo")
+    if not (isinstance(head_repo, dict) and isinstance(base_repo, dict)):
+        return False
+    head_id = head_repo.get("id")
+    base_id = base_repo.get("id")
+    account_id = user.get("id")
+    return (
+        user.get("login") == DEPENDABOT_LOGIN
+        and user.get("type") == "Bot"
+        and _is_exact_int(account_id)
+        and account_id == DEPENDABOT_ACCOUNT_ID
+        and _is_exact_int(head_id)
+        and _is_exact_int(base_id)
+        and head_id == base_id
+    )
+
+
+def _read_event(path: Path) -> tuple[str, str, bool]:
     payload = json.loads(path.read_text(encoding="utf-8"))
     pull_request = payload["pull_request"]
     title = pull_request["title"]
     body = pull_request.get("body") or ""
     if not isinstance(title, str) or not isinstance(body, str):
         raise ValueError("invalid pull-request metadata types")
-    return title, body
+    return title, body, is_dependabot_proposal(pull_request)
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -283,6 +329,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--body-file", type=Path)
     arguments = parser.parse_args(argv)
     direct_input = arguments.title is not None or arguments.body_file is not None
+    dependabot = False
     if direct_input:
         if (
             arguments.event_file is not None
@@ -303,13 +350,15 @@ def main(argv: list[str] | None = None) -> int:
             print("error: pull-request event path is required", file=sys.stderr)
             return 2
         try:
-            title, body = _read_event(Path(event_path_value))
+            title, body, dependabot = _read_event(Path(event_path_value))
         except (OSError, KeyError, TypeError, ValueError):
             print("error: unable to read pull-request metadata input", file=sys.stderr)
             return 2
     errors = validate_metadata(title, body)
     for error in errors:
         print(f"error: {error}", file=sys.stderr)
+    if errors and dependabot:
+        print(f"error: {DEPENDABOT_REWRITE_DIAGNOSTIC}", file=sys.stderr)
     return 1 if errors else 0
 
 

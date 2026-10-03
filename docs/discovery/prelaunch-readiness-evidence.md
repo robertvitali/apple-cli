@@ -915,6 +915,35 @@ admitted by the selected-actions policy's GitHub-owned allowance; the Dependency
 it at 20:03Z, after D32 had turned `sha_pinning_required` on at 01:40Z, so that requirement did
 not stop it.
 
+**Dependabot governance path, recorded 2026-10-02.** A GET-only read-back at 2026-10-02T05:41Z found
+D33's settings unchanged: vulnerability alerts on (the endpoint answers 204), automated security
+fixes enabled and not paused, Dependabot security updates enabled in `security_and_analysis`, and
+the Actions settings as D32 left them (selected actions, `sha_pinning_required` on, GitHub-owned
+actions allowed, one pattern). Pull request 8, the first security update since D33 (see the D45
+correction above), met two failures that any Dependabot update of the documentation lock would meet,
+both addressed in the commit that adds this record. First, lock closure: Dependabot compiles the
+lock inside `docs/`, so its `# via` comment named `requirements.in` where CI's, compiled from the
+repository root, named `docs/requirements.in`. CI now compiles inside `docs/` (with uv's
+configuration-file discovery turned off), and the lock's header and comment follow; a lock
+regenerated that way with pull request 8's update is byte-identical to Dependabot's apart from the
+header line, which Dependabot preserves. Any other difference, for example from a different uv in
+Dependabot, still fails the check. Second, `governance / required`, which every Dependabot pull
+request fails as Dependabot generates it: the description after the title's type starts with a
+capital letter and the body has no template section, and Dependabot pull requests stay unexempt
+(design §8): the merger replaces the generated title and description with the filled-in template
+before merging, which also keeps Dependabot's upstream release notes, and the third-party names in
+them, out of the squash commit body. The validator names that rewrite in an extra diagnostic when
+the event's author account (`dependabot[bot]`, type Bot, GitHub's public account id for it) and head
+repository identify Dependabot; the identity never changes the verdict, and a mutation run of the
+Dependabot path (ten identity-check mutants, including one dropping each repository-id type check,
+and three diagnostic-gating mutants) killed all thirteen against a clean baseline. Dependabot
+updates of GitHub Actions pins still fail the Supply-chain policy job by design until the design's
+Dependabot workflow-pin exception (§10.5) exists. Dependabot's current head branches target `main`;
+D16's third class covers only the Dependabot head refs created when design §18 step 13 points
+`target-branch` at the disposable ref, and its other two classes are rehearsal refs, so these
+branches are none of D16's classes; they exist under `.github/dependabot.yml` (version updates,
+since 2026-09-01) and the security-update setting D33 enabled.
+
 **D46 interim `main` ruleset, applied 2026-10-02T05:04:58Z and read back 05:05Z** (controller,
 interactively through the CLI on the operator's in-session instruction to protect `main` without
 affecting the agents' work; the no-bypass shape was the controller's and the operator ratified it

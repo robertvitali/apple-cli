@@ -284,6 +284,8 @@ class PullRequestWorkflowTests(unittest.TestCase):
             "sole `pull_request_target` workflow",
             "base-owned workflow checks out and executes only the base-owned metadata validator",
             "`contents: read`, no secrets, and PR title/body inspection only",
+            "PR title/body inspection only for its verdict",
+            "select one explanatory diagnostic and never change it",
             "never checkout, execute, download, or cache PR code or artifacts",
             "No other `pull_request_target` use is permitted",
             "proves metadata hygiene and nothing more",
@@ -749,6 +751,152 @@ class CommandLineTests(unittest.TestCase):
         self.assertEqual(result.stdout, "")
         self.assertNotIn(body_marker, result.stderr)
         self.assertNotIn(title_marker, result.stderr)
+
+
+# Synthetic stand-ins for the metadata Dependabot generates: a capitalised "Bump" title and a
+# release-notes body with none of the template's sections. No real package or account.
+DEPENDABOT_TITLE = "build(deps): Bump examplepkg from 1.0.0 to 1.1.0 in /docs"
+DEPENDABOT_BODY = (
+    "Bumps [examplepkg](https://example.com/examplepkg) from 1.0.0 to 1.1.0.\n"
+    "<details>\n<summary>Release notes</summary>\n\nSynthetic release notes.\n"
+    "</details>\n\n---\n\nDependabot will resolve any conflicts with this PR.\n"
+)
+REWRITTEN_DEPENDABOT_TITLE = "build(docs): bump examplepkg from 1.0.0 to 1.1.0"
+# Ids no GitHub account or repository can hold, so no real account or repository is named.
+SYNTHETIC_REPOSITORY_ID = -101
+
+
+def dependabot_pull_request(title: str, body: str) -> dict:
+    return {
+        "title": title,
+        "body": body,
+        "user": {"login": "dependabot[bot]", "type": "Bot", "id": 49699333},
+        "head": {"repo": {"id": SYNTHETIC_REPOSITORY_ID}},
+        "base": {"repo": {"id": SYNTHETIC_REPOSITORY_ID}},
+    }
+
+
+def forged_identities() -> dict[str, dict]:
+    """Each entry changes exactly one identity property of a genuine Dependabot event."""
+    variants: dict[str, dict] = {}
+
+    def variant(name: str, mutate) -> None:
+        pull_request = dependabot_pull_request(DEPENDABOT_TITLE, DEPENDABOT_BODY)
+        mutate(pull_request)
+        variants[name] = pull_request
+
+    variant("login without bot suffix", lambda pr: pr["user"].update(login="dependabot"))
+    variant("login with other case", lambda pr: pr["user"].update(login="Dependabot[bot]"))
+    variant("user account type", lambda pr: pr["user"].update(type="User"))
+    variant("other account id", lambda pr: pr["user"].update(id=0))
+    variant("account id as text", lambda pr: pr["user"].update(id="49699333"))
+    variant("account id as float", lambda pr: pr["user"].update(id=49699333.0))
+    variant("missing account id", lambda pr: pr["user"].pop("id"))
+    variant("missing user", lambda pr: pr.pop("user"))
+    variant("fork head repository", lambda pr: pr["head"]["repo"].update(id=SYNTHETIC_REPOSITORY_ID + 1))
+    variant("deleted head repository", lambda pr: pr["head"].update(repo=None))
+    variant("missing head", lambda pr: pr.pop("head"))
+    variant("head repository id as text", lambda pr: pr["head"]["repo"].update(id=str(SYNTHETIC_REPOSITORY_ID)))
+    variant("repository ids as booleans", lambda pr: (pr["base"]["repo"].update(id=True), pr["head"]["repo"].update(id=True)))
+    variant("head repository id as boolean", lambda pr: (pr["head"]["repo"].update(id=False), pr["base"]["repo"].update(id=0)))
+    variant("base repository id as boolean", lambda pr: (pr["head"]["repo"].update(id=0), pr["base"]["repo"].update(id=False)))
+    variant("missing base repository", lambda pr: pr["base"].pop("repo"))
+    return variants
+
+
+class DependabotPathTests(unittest.TestCase):
+    """Dependabot pull requests get no exemption: the merger rewrites their metadata (design §8)."""
+
+    def run_event(self, pull_request: dict) -> tuple[int, str, str]:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            event_path = Path(temporary_directory) / "event.json"
+            event_path.write_text(json.dumps({"pull_request": pull_request}), encoding="utf-8")
+            result = subprocess.run(
+                [sys.executable, "-I", "-S", "-B", str(VALIDATOR_PATH), "--event", str(event_path)],
+                cwd=REPO_ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+        return result.returncode, result.stdout, result.stderr
+
+    def test_identity_requires_every_field_exactly(self) -> None:
+        validator = load_validator()
+        genuine = dependabot_pull_request(DEPENDABOT_TITLE, DEPENDABOT_BODY)
+        self.assertTrue(validator.is_dependabot_proposal(genuine))
+        for name, pull_request in forged_identities().items():
+            with self.subTest(name=name):
+                self.assertFalse(validator.is_dependabot_proposal(pull_request))
+        for value in (None, [], "dependabot[bot]", 49699333):
+            with self.subTest(value=value):
+                self.assertFalse(validator.is_dependabot_proposal(value))
+
+    def test_default_dependabot_metadata_fails_and_names_the_rewrite(self) -> None:
+        validator = load_validator()
+        returncode, stdout, stderr = self.run_event(
+            dependabot_pull_request(DEPENDABOT_TITLE, DEPENDABOT_BODY)
+        )
+
+        self.assertEqual(returncode, 1)
+        self.assertEqual(stdout, "")
+        self.assertIn("title description must start with a lowercase letter", stderr)
+        self.assertIn("body must contain exactly the required H2 sections in order", stderr)
+        self.assertEqual(stderr.count(validator.DEPENDABOT_REWRITE_DIAGNOSTIC), 1)
+        self.assertTrue(stderr.rstrip("\n").endswith(validator.DEPENDABOT_REWRITE_DIAGNOSTIC))
+        for echoed in ("examplepkg", "Synthetic release notes", "Bump"):
+            self.assertNotIn(echoed, stderr)
+
+    def test_rewritten_dependabot_metadata_passes(self) -> None:
+        returncode, stdout, stderr = self.run_event(
+            dependabot_pull_request(REWRITTEN_DEPENDABOT_TITLE, valid_body())
+        )
+
+        self.assertEqual((returncode, stdout, stderr), (0, "", ""))
+
+    def test_forged_identity_never_receives_the_dependabot_diagnostic(self) -> None:
+        validator = load_validator()
+        for name, pull_request in forged_identities().items():
+            with self.subTest(name=name):
+                returncode, _, stderr = self.run_event(pull_request)
+                self.assertEqual(returncode, 1)
+                self.assertNotIn(validator.DEPENDABOT_REWRITE_DIAGNOSTIC, stderr)
+
+    def test_identity_never_changes_the_verdict(self) -> None:
+        validator = load_validator()
+        cases = {
+            "rewritten": (REWRITTEN_DEPENDABOT_TITLE, valid_body()),
+            "default": (DEPENDABOT_TITLE, DEPENDABOT_BODY),
+            "bad title only": (DEPENDABOT_TITLE, valid_body()),
+            "bad body only": (REWRITTEN_DEPENDABOT_TITLE, DEPENDABOT_BODY),
+        }
+        for name, (title, body) in cases.items():
+            with self.subTest(case=name):
+                genuine = self.run_event(dependabot_pull_request(title, body))
+                anonymous = self.run_event({"title": title, "body": body})
+                self.assertEqual(genuine[0], anonymous[0])
+                expected_extra = (
+                    f"error: {validator.DEPENDABOT_REWRITE_DIAGNOSTIC}\n" if genuine[0] else ""
+                )
+                self.assertEqual(genuine[2], anonymous[2] + expected_extra)
+
+    def test_direct_input_never_names_dependabot(self) -> None:
+        validator = load_validator()
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            body_path = Path(temporary_directory) / "body.md"
+            body_path.write_text(DEPENDABOT_BODY, encoding="utf-8")
+            result = subprocess.run(
+                [
+                    sys.executable, "-I", "-S", "-B", str(VALIDATOR_PATH),
+                    "--title", DEPENDABOT_TITLE, "--body-file", str(body_path),
+                ],
+                cwd=REPO_ROOT,
+                text=True,
+                capture_output=True,
+                check=False,
+            )
+
+        self.assertEqual(result.returncode, 1)
+        self.assertNotIn(validator.DEPENDABOT_REWRITE_DIAGNOSTIC, result.stderr)
 
 
 if __name__ == "__main__":
