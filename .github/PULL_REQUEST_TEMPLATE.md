@@ -51,6 +51,7 @@ Use only commands, counts, hashes, field names, and pass/fail results as evidenc
 <!--
 The final PR description becomes the squash commit body.
 End it with one or more contiguous Reviewed-by: trailers, followed by any Co-Authored-By: trailers.
+Leave one empty line before the first trailer: git reads trailers only as a paragraph of their own.
 Put no blank line between trailer lines. Do not add an Asana or other internal
 tracker trailer. Use only reserved example.com or example.org addresses in
 Co-Authored-By email values.

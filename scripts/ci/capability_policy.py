@@ -77,6 +77,7 @@ _SWIFT_ID = re.compile(
     r"^swift:(?P<path>Tests/(?:[A-Za-z0-9_.-]+/)*[A-Za-z0-9_.-]+\.swift):"
     r"(?P<symbol>[A-Za-z_][A-Za-z0-9_]*):(?P<occurrence>[1-9][0-9]*)$"
 )
+_SWIFT_LINE_END = re.compile(r"[\r\n]")
 _ORIGIN_ID = re.compile(r"^(?:port|extra):[a-z0-9][a-z0-9._-]*$")
 _ORIGIN_ANCHOR = re.compile(
     r"<!-- capability-id: ((?:port|extra):[a-z0-9][a-z0-9._-]*) -->"
@@ -959,11 +960,17 @@ def _swift_code_mask(source: str) -> str:
                 index += 1
             continue
         if source.startswith("//", index):
-            end = source.find("\n", index)
-            end = length if end < 0 else end
+            # Swift's lexer ends a line comment at a carriage return as well as at a line
+            # feed, so swiftc compiles code after a lone CR; ending the comment only at a line
+            # feed hid that code here. A CR ends neither a block comment nor a multi-line string
+            # literal to Swift, so those branches keep it as content (left unmasked for offsets);
+            # in a single-line string literal swiftc rejects a lone CR as unterminated.
+            # No other separator ends a line comment: swiftc keeps U+2028, U+2029, U+0085,
+            # VT and FF inside it.
+            line_end = _SWIFT_LINE_END.search(source, index)
+            end = length if line_end is None else line_end.start()
             for offset in range(index, end):
-                if source[offset] != "\r":
-                    masked[offset] = " "
+                masked[offset] = " "
             index = end
             continue
         if source.startswith("/*", index):
@@ -1012,8 +1019,11 @@ def _swift_code_mask(source: str) -> str:
 
 def _swift_function_tests(source: str) -> Dict[str, list[bool]]:
     masked = _swift_code_mask(source)
+    # A Swift line starts after a line feed or a lone carriage return; `(?m)^` alone matches
+    # only after a line feed.
     markers = [
-        match.start() for match in re.finditer(r"(?m)^[ \t]*@Test\b", masked)
+        match.start()
+        for match in re.finditer(r"(?m)(?:^|(?<=\r))[ \t]*@Test\b", masked)
     ]
     functions = list(
         re.finditer(r"\bfunc[ \t]+([A-Za-z_][A-Za-z0-9_]*)\b", masked)

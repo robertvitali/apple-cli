@@ -15,8 +15,17 @@ from typing import NamedTuple, Optional
 PACKAGE_NAME = r"[A-Za-z0-9][A-Za-z0-9._-]*"
 VERSION = r"[A-Za-z0-9][A-Za-z0-9.+_-]*"
 INPUT_PIN_PATTERN = re.compile(rf"(?P<name>{PACKAGE_NAME})==(?P<version>{VERSION})\Z")
-LOCK_START_PATTERN = re.compile(rf"(?P<name>{PACKAGE_NAME})==(?P<version>{VERSION})(?:\s*\\)?\Z")
-HASH_PATTERN = re.compile(r"--hash=sha256:([0-9a-f]{64})(?:\s*\\)?\Z")
+# Only a space or a tab may sit before a continuation backslash. pip splits a requirement line's
+# tokens on a space, so whatever else sits there stays inside the requirement string, and the
+# requirement grammar admits only space and tab as whitespace. Both patterns match the line as
+# written, after any indentation, never a stripped copy: pip continues a line only when its last
+# character is the backslash (`line.endswith("\\")`), so a space or a tab after the backslash
+# ends the continuation and leaves the backslash in pip's requirement or options. Trailing
+# spaces and tabs are admitted only where no backslash precedes them.
+LOCK_START_PATTERN = re.compile(
+    rf"(?P<name>{PACKAGE_NAME})==(?P<version>{VERSION})(?:[ \t]*\\|[ \t]*)\Z"
+)
+HASH_PATTERN = re.compile(r"--hash=sha256:([0-9a-f]{64})(?:[ \t]*\\|[ \t]*)\Z")
 MAX_REQUIREMENTS_INPUT_BYTES = 64 * 1024
 MAX_LOCK_BYTES = 2 * 1024 * 1024
 MAX_DEPENDABOT_BYTES = 256 * 1024
@@ -42,7 +51,43 @@ def _canonical_package(name: str) -> str:
     return re.sub(r"[-_.]+", "-", name).lower()
 
 
+def _refused_character(character: str) -> bool:
+    """Whitespace other than space and tab, a character outside YAML's printable set, U+FEFF,
+    or a bidirectional control (U+061C, U+200E, U+200F, U+202A-U+202E, U+2066-U+2069).
+
+    COUPLING: `workflow_policy.refused_character(character, " \t")` is the same rule; keep the
+    two in step (`Tests/automation/test_dependency_policy.py` checks they agree)."""
+    if character.isspace():
+        return character not in " \t"
+    code = ord(character)
+    return (code < 0x20 or 0x7F <= code <= 0x9F or 0xD800 <= code <= 0xDFFF or 0x202A <= code <= 0x202E
+            or 0x2066 <= code <= 0x2069 or code in (0x061C, 0x200E, 0x200F, 0xFEFF, 0xFFFE, 0xFFFF))
+
+
+def _refuse_characters(text: str) -> None:
+    """Raise, naming only the line number and code point, at the first refused character.
+
+    CONTROL PLANE — the readers below use `splitlines()`, `strip()` and `isspace()`, which
+    also accept the no-break space, the other Unicode spaces and several line separators. pip
+    splits a requirement line's tokens on a space and continues a line only at a trailing
+    backslash, so a no-break space this reader skipped as indentation, or before the
+    backslash, stays inside pip's requirement string. Such a character is refused before
+    parsing, never interpreted; a carriage return is refused as well, since the tracked files
+    use line feeds only. That makes this reader stricter than pip, whose own line splitting is
+    Python's `splitlines()`: a lock or input pip would accept can be refused here, never the
+    reverse."""
+    for number, line in enumerate(text.split("\n"), start=1):
+        for character in line:
+            if _refused_character(character):
+                raise ValueError(
+                    "line {}: character U+{:04X} is refused (only space, tab and line feed may be "
+                    "whitespace; no control character, byte-order mark, bidirectional control, "
+                    "surrogate, U+FFFE or U+FFFF)".format(number, ord(character))
+                )
+
+
 def parse_input_pins(text: str) -> dict[str, str]:
+    _refuse_characters(text)
     pins: dict[str, str] = {}
     for raw_line in text.splitlines():
         line = raw_line.strip()
@@ -61,6 +106,7 @@ def parse_input_pins(text: str) -> dict[str, str]:
 
 
 def parse_hash_lock(text: str) -> dict[str, LockedRequirement]:
+    _refuse_characters(text)
     requirements: dict[str, LockedRequirement] = {}
     current_name: Optional[str] = None
     current_version: Optional[str] = None
@@ -82,22 +128,60 @@ def parse_hash_lock(text: str) -> dict[str, LockedRequirement]:
         current_version = None
         current_hashes = []
 
-    for raw_line in text.splitlines():
+    # Whether the previous line ended with a continuation backslash. pip joins lines only there
+    # (`join_lines`), not by indentation: a blank or comment line ends a continuation, a hash
+    # line that continues nothing is dropped with a warning ("has --hash but no requirement"),
+    # and a requirement line after a continued line is glued into the previous requirement's
+    # options. Each of those is refused here, so the hashes read below are the ones pip attaches.
+    continued = False
+    # After the refusal the only line break left is a line feed, so these line numbers match the
+    # refusal's.
+    for number, raw_line in enumerate(text.splitlines(), start=1):
         stripped = raw_line.strip()
         if not stripped or stripped.startswith("#"):
+            continued = False
             continue
-        if raw_line[:1].isspace():
-            hash_match = HASH_PATTERN.fullmatch(stripped)
+        if stripped.endswith("\\") and not raw_line.endswith("\\"):
+            raise ValueError(
+                "line {}: a continuation backslash must be the last character on its "
+                "line".format(number)
+            )
+        indentation = raw_line[: len(raw_line) - len(raw_line.lstrip(" \t"))]
+        if indentation:
+            # pip joins a continued line onto the requirement and splits the tokens on a space,
+            # so a tab directly before the first hash option glues onto `--hash` and the option
+            # stays inside the requirement string, which pip refuses. uv indents with spaces; a
+            # tab anywhere in a continuation's indentation is refused, which is stricter than
+            # pip wherever a space has already split the option off (a later hash line, or a
+            # tab followed by spaces).
+            if indentation.strip(" "):
+                raise ValueError(
+                    "line {}: locked docs requirement continuation must be indented with spaces "
+                    "only".format(number)
+                )
+            hash_match = HASH_PATTERN.fullmatch(raw_line[len(indentation):])
             if hash_match is None or current_name is None:
                 raise ValueError("locked docs requirement continuation is malformed")
+            if not continued:
+                raise ValueError(
+                    "line {}: a hash line must follow a line that ends with a continuation "
+                    "backslash".format(number)
+                )
             current_hashes.append(hash_match.group(1))
+            continued = raw_line.endswith("\\")
             continue
+        if continued:
+            raise ValueError(
+                "line {}: a requirement line must not follow a line that ends with a "
+                "continuation backslash".format(number)
+            )
         finish()
-        match = LOCK_START_PATTERN.fullmatch(stripped)
+        match = LOCK_START_PATTERN.fullmatch(raw_line)
         if match is None:
             raise ValueError("every locked docs requirement must be exactly pinned")
         current_name = _canonical_package(match.group("name"))
         current_version = match.group("version")
+        continued = raw_line.endswith("\\")
     finish()
     if not requirements:
         raise ValueError("docs requirements lock is empty")
@@ -159,17 +243,21 @@ def validate_docs_dependencies(root: Path) -> list[str]:
     except (OSError, UnicodeError, ValueError) as error:
         errors.append(f"docs/requirements.in: {error}")
         pins = {}
+    locked: Optional[dict[str, LockedRequirement]]
     try:
         locked = parse_hash_lock(lock_text) if lock_text else {}
     except (OSError, UnicodeError, ValueError) as error:
         errors.append(f"docs/requirements.txt: {error}")
-        locked = {}
+        locked = None
     if lock_text and not lock_text.startswith(LOCK_HEADER + "\n"):
         errors.append("docs requirements lock must record the Python 3.12 Linux hash contract")
-    for name, version in pins.items():
-        requirement = locked.get(name)
-        if requirement is None or requirement.version != version:
-            errors.append("docs requirements top-level lock is stale")
+    # A lock that failed to parse is not compared with the pins: against no lock, every pin
+    # would add a stale-lock error that the lock's own fix may not need.
+    if locked is not None:
+        for name, version in pins.items():
+            requirement = locked.get(name)
+            if requirement is None or requirement.version != version:
+                errors.append("docs requirements top-level lock is stale")
     return errors
 
 

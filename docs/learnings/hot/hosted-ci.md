@@ -1,11 +1,34 @@
 ---
 topic: hosted-ci
 importance: high
-last-used: 2026-09-30
-uses: 9
+last-used: 2026-10-03
+uses: 10
 ---
 
 # Hosted CI (public, free GitHub-hosted runners)
+
+## 2026-10-03 — Sweeping the other CI readers: refuse what a parser misreads, never history
+
+**What.** The sweep of the hand-written readers in `scripts/ci/` (readiness evidence, 2026-10-03)
+found verdict-changing differences in six of them. Three lessons came out of the review rounds
+rather than the audit.
+
+**Never refuse an input nobody can correct.** The first fix refused commit subjects holding a
+refused character, as the other readers refuse their files. Reviewers showed the trap: a subject is
+published history, so one no-break space typed into a subject would have failed every later
+release rehearsal and the urgent-release path for good, curable only by a new tag or a history
+rewrite. Refusal suits text the next commit can fix; history is read exactly as git reads it (one
+subject per line feed) and never refused.
+
+**An oracle must read the way the real reader does.** The pull-request check's git oracle ran
+`interpret-trailers --parse` in its default mode, which stops at a `---` line as if a patch began;
+git reads a commit's own trailers with no such divider. The oracle now passes `--no-divider`, and
+its corpus holds a body with a `---` rule.
+
+**Editing tools can write escapes as raw characters.** Several implementer agents typed `\u00a0`
+or `\u202e` into test sources and their tool wrote the invisible character itself. The tests still
+passed, so nothing failed; only a scan of the added lines by Unicode category caught it. Scan every
+diff that touches Unicode handling before it lands.
 
 ## 2026-09-26 — Python's idea of whitespace is not YAML's: a no-break space hid a write from the workflow scan
 
@@ -33,9 +56,9 @@ that the copies agree for every code point.
 **Lesson.** A parser-based check is only as faithful as the parser. When a scan's verdict
 matters, refuse input the parser might read differently instead of trying to interpret it,
 and say in the record that the refusals narrow the residual rather than remove it. Other
-hand-rolled readers in `scripts/ci/` (`pr_metadata.py`'s trailer split, `dependency_policy.py`)
-use the same helpers and are a follow-up, as are the scan parser's own paths outside block
-scalars (flow sequences and sequence entries), which no differential has covered yet. The same review found the structural cousin: block
+hand-rolled readers in `scripts/ci/` were swept on 2026-10-03 (entry above). Still open are the
+scan parser's own paths outside block scalars (flow sequences and sequence entries), which no
+differential has covered yet. The same review found the structural cousin: block
 scalars read with a different indentation rule than YAML's hid a line from the scan. Check a
 parser's structural rules against a real YAML loader (libyaml via Ruby's Psych was on hand),
 not only its character handling: a seeded differential over generated block scalars found 983

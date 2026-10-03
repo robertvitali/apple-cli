@@ -268,7 +268,11 @@ def refused_character(character: str, whitespace: str) -> bool:
     there), so it is refused, never interpreted. A carriage return is refused as well, although
     YAML reads it as a line break (and YAML 1.1 loaders also break lines at U+0085, U+2028 and
     U+2029): this parser splits on line feeds only, and the tracked files use them. COUPLING:
-    `action_pins.py` applies the same rule to a workflow's text.
+    `action_pins.py` applies the same rule to a workflow's text, and `pr_metadata.py`,
+    `dependency_policy.py`, `bats_inventory.py` and `coverage_policy.py` keep copies for the text
+    they read; each copy has a test that it agrees with this one for every code point.
+    (`release_prep.py` reads commit subjects on line feeds only but refuses none: a subject is
+    history no later commit can correct.)
     """
     if character.isspace():
         return character not in whitespace

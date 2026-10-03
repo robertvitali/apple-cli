@@ -2263,6 +2263,49 @@ class CapabilityPolicyHardeningTests(unittest.TestCase):
             with self.assertRaisesRegex(policy.PolicyError, "bats-catalog-too-large"):
                 policy._bats_catalog(fixture["repository_root"], inventory)
 
+    def test_bats_catalog_refuses_misleading_characters_before_parsing(self) -> None:
+        # bats_inventory's parser refuses whitespace other than space and tab, controls, a
+        # byte-order mark and bidirectional controls before it tokenises; the catalog maps that
+        # refusal to the value-free `bats-inventory-invalid`. Synthetic text only.
+        policy = load_module(POLICY_PATH, "capability_policy_bats_refused_character")
+        title = "synthetic behavior"
+        real = '@test "' + title + '" {\n  true\n}\n'
+        cases = {
+            # Its line-feed reading declares the inventory's one test, so only the refusal stops it.
+            "separator in a comment": (
+                '#!/usr/bin/env bats\n\n# \u2028@test "phantom" {\n# \u2028}\n' + real
+            ),
+            # Tokenised first, this would be `bats-inventory-declaration-invalid`.
+            "carriage return in the declaration": real.replace(" {\n", " {\r\n"),
+            # Tokenised first, this would be `bats-inventory-title-drift` (no tests found).
+            "only test behind a separator": (
+                '#!/usr/bin/env bats\n\n# \u2028@test "' + title + '" {\n# \u2028}\n'
+            ),
+        }
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            fixture = write_candidate_fixture(Path(temporary_directory).resolve(), include_bats=True)
+            root = fixture["repository_root"]
+            bats_path = root / "bats" / "hosted" / "capability.bats"
+            inventory = json.loads(fixture["bats_inventory"].read_text(encoding="utf-8"))
+            entry = inventory["tiers"]["hosted"]["files"][0]
+            self.assertTrue(policy._bats_catalog(root, inventory))
+            for name, source in cases.items():
+                with self.subTest(case=name):
+                    bats_path.write_bytes(source.encode("utf-8"))
+                    entry["file_sha256"] = hashlib.sha256(bats_path.read_bytes()).hexdigest()
+                    with self.assertRaisesRegex(policy.PolicyError, "^bats-inventory-invalid$"):
+                        policy._bats_catalog(root, inventory)
+                    if name == "separator in a comment":
+                        # Control: with the refusal bypassed, the catalog accepts the file.
+                        with mock.patch.object(
+                            policy.bats_inventory, "_first_refused_character", return_value=None
+                        ), mock.patch.object(
+                            policy.bats_evidence.bats_inventory,
+                            "_first_refused_character",
+                            return_value=None,
+                        ):
+                            self.assertTrue(policy._bats_catalog(root, inventory))
+
     def test_unclassified_bats_files_cannot_escape_the_fixed_inventory(self) -> None:
         policy = load_module(POLICY_PATH, "capability_policy_bats_inventory_closure")
         with tempfile.TemporaryDirectory() as temporary_directory:

@@ -129,6 +129,39 @@ class BatsEvidenceTests(unittest.TestCase):
                 self.reject(self.api.build_file_plan, payload, **{**good, **change},
                             code="bats-plan-invalid")
 
+    def test_source_with_misleading_whitespace_or_control_refuses_before_tokenising(self):
+        # The canonical extractor refuses whitespace other than space and tab, controls, a
+        # byte-order mark and bidirectional controls before it tokenises. Each source below plans
+        # cleanly from its line-feed reading (one test, "real"), so only that refusal stops it.
+        real = '@test "real" {\n  true\n}\n'
+        sources = {
+            "U+2028 in a comment": '#!/usr/bin/env bats\n# \u2028@test "phantom" {\n# \u2028}\n'
+                                   + real,
+            "U+FEFF before the shebang": "\ufeff#!/usr/bin/env bats\n" + real,
+            "U+00A0 before a comment": '#!/usr/bin/env bats\n@test "real" {\n  \u00a0# || true\n}\n',
+        }
+        hashes = (digest(b"real"),)
+        for name, text in sources.items():
+            payload = text.encode("utf-8")
+            kwargs = dict(tier="hosted", path="bats/hosted/synthetic.bats",
+                          content_sha256=digest(payload), ordered_title_sha256=hashes)
+            with self.subTest(source=name):
+                with patch.object(self.api.bats_inventory, "_first_refused_character",
+                                  return_value=None):
+                    self.assertEqual(self.api.build_file_plan(payload, **kwargs).raw_titles,
+                                     ("real",))
+                with patch.object(self.api.bats_inventory, "_scan_shell_line",
+                                  side_effect=AssertionError("tokenising must not start")):
+                    self.reject(self.api.build_file_plan, payload, **kwargs,
+                                code="bats-plan-invalid")
+        # A CRLF declaration line is refused the same way, before it could be tokenised.
+        payload = '#!/usr/bin/env bats\n@test "real" {\r\n  true\n}\n'.encode("utf-8")
+        with patch.object(self.api.bats_inventory, "_scan_shell_line",
+                          side_effect=AssertionError("tokenising must not start")):
+            self.reject(self.api.build_file_plan, payload, tier="hosted",
+                        path="bats/hosted/synthetic.bats", content_sha256=digest(payload),
+                        ordered_title_sha256=hashes, code="bats-plan-invalid")
+
     def test_source_exact_byte_bound_and_oversize_refuses_before_extraction(self):
         self.assertEqual(self.api.MAX_SOURCE_BYTES, 1024 * 1024)
         prefix = source_for(("first",))

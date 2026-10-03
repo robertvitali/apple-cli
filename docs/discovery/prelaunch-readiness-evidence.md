@@ -944,6 +944,53 @@ D16's third class covers only the Dependabot head refs created when design §18 
 branches are none of D16's classes; they exist under `.github/dependabot.yml` (version updates,
 since 2026-09-01) and the security-update setting D33 enabled.
 
+**Wide-whitespace sweep of the hand-written CI readers, recorded 2026-10-03.** The 2026-09-26
+refusal (row 17) covered the workflow scan and the action-pin check. On 2026-10-02 a read-only audit
+probed the other readers in `scripts/ci/` whose verdicts depend on whitespace or line splitting
+against the tool each stands in for (git's `interpret-trailers`, `diff` and `log`, pip 26.2.1's
+requirements reader, bash and bats, and `swiftc`), grep-reviewed the rest (`quality.py`,
+`site_assembly.py`, `bats_evidence.py` and the capability process and schema files; no impact
+found), and found verdict-changing differences in six readers. Four now refuse, before parsing, the
+characters the shared rule refuses (whitespace other than space, tab and line feed; controls;
+bidirectional controls; a byte-order mark), each with its own copy of the rule and a test that the
+copy agrees with `workflow_policy.refused_character` for every code point. In
+`dependency_policy.py`, `bats_inventory.py` and `coverage_policy.py` the `splitlines()` and
+`strip()` calls left in them now see only line feeds, spaces and tabs, because the refusal runs
+first; in `pr_metadata.py` they also see the Unicode spaces prose admits, where a wider reading only
+decides whether a prose line is blank. `pr_metadata.py`: a U+2028 between two trailers had passed
+the check while git read one garbled trailer. Prose admits Unicode spaces; lines whose first
+character after any leading spaces or tabs is `#`, and every line from `## Checklist` on, admit only
+space and tab and no invisible format character; the title admits only the space and no format
+character; CRLF descriptions are accepted; and the empty line git needs before the trailer block is
+now required, with a test that for each accepted body in its corpus the trailers git reads from a
+commit message (`interpret-trailers --no-divider`) are exactly the validator's.
+`dependency_policy.py`: also continuation indentation of spaces only, a continuation backslash as
+the last character of its line, and hash lines attached only through a backslash, after pip 26.2.1
+was shown dropping a package or a hash in five shapes the check had accepted; pins are no longer
+compared against a lock that failed to parse. It is deliberately stricter than pip, whose own line
+splitting is Python's: it refuses every refused character, tab-indented continuations, and (as
+before) indented requirement lines. `bats_inventory.py`: the refusal runs inside the shared parser
+before it tokenises, so the capability and Bats-evidence paths are covered too. `coverage_policy.py`
+(latent: no workflow runs it): it refuses changed head blobs only, since a base blob reaches it only
+through git's diff, and its count column admits ASCII spaces only (llvm-cov's text layout is taken
+from LLVM's source and is to be probed before a workflow runs this reader); its unused
+`_read_source_lines` is gone.
+
+The other two readers do not refuse. `release_prep.py` had turned a patch bump into a minor one on a
+U+2028 in a subject; it now reads subjects one per line feed, as git and the commit-lint job do,
+matches release tag names exactly, one per line feed (a tag ending in a no-break space is no longer
+read as a release tag), and refuses no subject, because a subject is history no later commit can
+correct and a refusal would block every later rehearsal and release. `capability_policy.py` (latent:
+no workflow runs it) cannot refuse the same set, because a tracked Swift test file legitimately
+contains such characters; it now ends a `//` comment where Swift does, at a lone carriage return
+too, after the audit hid a `@Test` from it that `swiftc` compiled. Every fix carries regression
+tests that its revert turns red (for the five Python readers, a revert to `splitlines()`,
+`isspace()` or `strip()`; for the capability policy, a comment that ends only at a line feed),
+checked by mutation runs against clean baselines and by independent re-verification. Invisible
+format characters (category Cf) are refused in pull-request titles and structural body lines from
+this commit; refusing them in workflow and Bats files is a separate follow-up commit. Still open:
+the workflow scan's parser paths outside block scalars (see the learnings note).
+
 **D46 interim `main` ruleset, applied 2026-10-02T05:04:58Z and read back 05:05Z** (controller,
 interactively through the CLI on the operator's in-session instruction to protect `main` without
 affecting the agents' work; the no-bypass shape was the controller's and the operator ratified it

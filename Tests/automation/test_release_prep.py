@@ -16,6 +16,21 @@ SCRIPT = REPO_ROOT / "scripts" / "ci" / "release_prep.py"
 REPOSITORY = "example-owner/example-cli"
 CONSTANT_REL = Path("Sources/AppleKit/CommandSupport.swift")
 CHANGELOG_REL = Path("CHANGELOG.md")
+# Scratch repositories are built with no global or system git configuration (a developer's hooks
+# path, signing or default-branch setting must not shape a fixture) and a synthetic identity.
+GIT_TEST_ENVIRONMENT = dict(
+    os.environ,
+    GIT_CONFIG_GLOBAL="/dev/null",
+    GIT_CONFIG_NOSYSTEM="1",
+    GIT_AUTHOR_NAME="Automation Example",
+    GIT_AUTHOR_EMAIL="automation@example.com",
+    GIT_COMMITTER_NAME="Automation Example",
+    GIT_COMMITTER_EMAIL="automation@example.com",
+)
+# Characters git keeps inside one subject (it ends a subject at a line feed only) that Python's
+# `splitlines()` treats as a line boundary: the line and paragraph separators, NEL, a vertical
+# tab, a form feed, the file, group and record separators, and a lone carriage return.
+SUBJECT_LINE_BREAKS = ("\u2028", "\u2029", "\x85", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\r")
 
 
 def load_module():
@@ -33,6 +48,7 @@ def git(args, cwd):
     completed = subprocess.run(
         ["git", *args],
         cwd=str(cwd),
+        env=GIT_TEST_ENVIRONMENT,
         check=True,
         stdin=subprocess.DEVNULL,
         stdout=subprocess.PIPE,
@@ -242,6 +258,87 @@ class ReleasePrepTests(unittest.TestCase):
         result = self.rehearse(sha)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertIn("26.0.1 (UNASSIGNED", result.stderr)
+
+    # --- subjects and tag names are read as git writes them ---------------------
+
+    def raw_subjects(self) -> str:
+        # Bytes decoded explicitly: the fixture check must see exactly what git printed.
+        completed = subprocess.run(
+            ["git", "log", "--format=%s", "v26.0.0..HEAD"], cwd=str(self.root), env=GIT_TEST_ENVIRONMENT,
+            check=True, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        )
+        return completed.stdout.decode("utf-8")
+
+    def test_subject_holding_a_line_break_character_is_read_as_one_subject(self) -> None:
+        # R1: git ends a subject at a line feed only, so it (and the commit-lint job's
+        # `read -r`) sees ONE `fix:` subject here, a PATCH bump; `splitlines()` read two
+        # subjects, the second a `feat:`, and the rehearsal predicted a MINOR bump. The subject
+        # is read, never refused: it is history that no later commit can change.
+        for index, character in enumerate(SUBJECT_LINE_BREAKS):
+            codepoint = "U+{:04X}".format(ord(character))
+            with self.subTest(codepoint=codepoint):
+                subject = "fix: repair parsing" + character + "feat: add thing"
+                sha = commit(self.root, subject)
+                try:
+                    self.assertEqual(self.raw_subjects(), subject + "\n")  # git's view: one subject
+                    scratch = Path(self._tmp.name) / "scratch-{}".format(index)
+                    report = Path(self._tmp.name) / "out" / "report-{}.json".format(index)
+                    result = run_script(
+                        "--candidate-root", str(self.root), "--candidate-sha", sha,
+                        "--repository", REPOSITORY, "--scratch", str(scratch), "--report", str(report),
+                        "--date", "2026-09-23", cwd=self.root,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    self.assertIn("predicted next version 26.0.1 (UNASSIGNED", result.stderr)
+                    for fragment in ("repair parsing", "add thing"):  # value-free: never the subject
+                        self.assertNotIn(fragment, result.stderr)
+                        self.assertNotIn(fragment, report.read_text(encoding="utf-8"))
+                finally:
+                    git(["reset", "-q", "--hard", self.base], self.root)
+
+    def test_subject_of_only_a_no_break_space_is_a_commit_not_empty(self) -> None:
+        # `strip()` removed the no-break space, so this commit read as "no commits since the
+        # last release tag" (an advisory exit 3) although git holds a non-empty subject.
+        sha = commit(self.root, "\u00a0")
+        self.assertEqual(self.raw_subjects(), "\u00a0\n")
+        result = self.rehearse(sha)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("predicted next version 26.0.1 (UNASSIGNED", result.stderr)
+        self.assertNotIn("NOTHING TO RELEASE", result.stderr)
+
+    def test_ordinary_non_ascii_subjects_compute_the_same_bump(self) -> None:
+        # Printable non-ASCII text and an ASCII tab read as ordinary subject text.
+        commit(self.root, "docs: explain the caf\u00e9 \u2014 r\u00e9sum\u00e9 flow")
+        sha = commit(self.root, "fix(mail):\thandle \u201cquoted\u201d names")
+        result = self.rehearse(sha)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("predicted next version 26.0.1 (UNASSIGNED", result.stderr)
+
+    def side_release_tag(self, name: str) -> None:
+        """A real `v26.9.0` on an unreachable branch, and the tag `name` on the candidate's
+        history. Only the real tag is a release tag to git, and it is not reachable."""
+        git(["checkout", "-q", "-b", "side"], self.root)
+        commit(self.root, "feat: side feature", filename="side.txt")
+        git(["tag", "-a", "v26.9.0", "-m", "side"], self.root)
+        git(["checkout", "-q", "-"], self.root)
+        git(["tag", name], self.root)
+
+    def test_tag_name_ending_in_a_no_break_space_is_not_a_release_tag(self) -> None:
+        # `strip()` read this tag as `v26.9.0`, a reachable release that git does not have, and
+        # the rehearsal then measured from the unreachable real `v26.9.0` and predicted 26.9.1.
+        self.side_release_tag("v26.9.0\u00a0")
+        sha = commit(self.root, "fix(mail): mainline fix")
+        result = self.rehearse(sha)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("predicted next version 26.0.1 (UNASSIGNED", result.stderr)
+
+    def test_tag_name_holding_a_line_separator_is_not_a_release_tag(self) -> None:
+        # `splitlines()` read this one tag as two names, the second the release tag `v26.9.0`.
+        self.side_release_tag("v26\u2028v26.9.0")
+        sha = commit(self.root, "fix(mail): mainline fix")
+        result = self.rehearse(sha)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("predicted next version 26.0.1 (UNASSIGNED", result.stderr)
 
     def test_declared_version_mismatch_fails_closed(self) -> None:
         sha = commit(self.root, "feat(notes): add search")
@@ -610,6 +707,81 @@ class ReleasePrepTests(unittest.TestCase):
         self.assertEqual(release_prep.compute_bump(["feature: a"], []), "patch")
         self.assertEqual(release_prep.compute_bump(["fix: a"], ["not a BREAKING CHANGE line\n"]), "patch")
         self.assertEqual(release_prep.compute_bump(["fix: a"], ["BREAKING CHANGES ahead\n"]), "patch")
+
+    def test_commit_subjects_splits_on_line_feeds_only(self) -> None:
+        for output in ("", "\n", "fix: a\n", "fix: a\nfeat(x)!: b\n", "docs: caf\u00e9 \u2014 note\n", "fix:\ttab\n"):
+            with self.subTest(output=output):
+                self.assertEqual(release_prep.commit_subjects(output), output.splitlines())
+        for character in SUBJECT_LINE_BREAKS + ("\u00a0", "\u3000", "\x1f", "\x00", "\ufeff", "\u202e"):
+            codepoint = "U+{:04X}".format(ord(character))
+            with self.subTest(codepoint=codepoint):
+                subjects = release_prep.commit_subjects("docs: first\nfix: repair" + character + "feat: add\n")
+                self.assertEqual(subjects, ["docs: first", "fix: repair" + character + "feat: add"])
+                self.assertEqual(release_prep.compute_bump(subjects, []), "patch")
+
+    def test_every_commit_since_the_tag_counts_whatever_its_subject(self) -> None:
+        # A subject may be blank to `strip()` (a tab, a no-break space) or empty (git's
+        # `--allow-empty-message`); it is still a commit since the tag. Only no commit at all
+        # is nothing to release.
+        def fake_git(log_output):
+            def run(args, cwd):
+                if args[:2] == ["tag", "--list"]:
+                    return "v26.0.0\n"
+                if args[:2] == ["log", "--format=%s"]:
+                    return log_output
+                if args[:2] == ["log", "--format=%B%x00"]:
+                    return log_output.replace("\n", "\x00")
+                raise AssertionError(args)
+            return run
+
+        for log_output in ("\t\n", "\u00a0\n", "\n", " \n\n"):
+            with self.subTest(log_output=ascii(log_output)):
+                version, label, last = release_prep.compute_version(Path("/nonexistent"), fake_git(log_output), None, None)
+                self.assertEqual((version, label, last), ((26, 0, 1), "patch", "v26.0.0"))
+        with self.assertRaises(release_prep.NothingToRelease):
+            release_prep.compute_version(Path("/nonexistent"), fake_git(""), None, None)
+
+    def test_release_tags_are_matched_exactly(self) -> None:
+        def fake_git(listing):
+            return lambda args, cwd: listing
+
+        listing = "v26.0.0\nv26.9.0\u00a0\nv26\u2028v26.8.0\nv26.7.0\u2029\n"
+        self.assertEqual(release_prep.reachable_release_tags(Path("/nonexistent"), fake_git(listing)),
+                         [((26, 0, 0), "v26.0.0")])
+        for listing, present in (
+            ("v26.0.1\n", True), ("", False), ("v26.0.1\u00a0\n", False), ("x\u2028v26.0.1\n", False),
+        ):
+            with self.subTest(listing=listing):
+                self.assertEqual(release_prep.tag_exists(Path("/nonexistent"), "v26.0.1", fake_git(listing)), present)
+
+    def test_subjects_are_never_refused(self) -> None:
+        # Refusing a subject would block every later rehearsal and release for good, since
+        # history cannot be corrected by a follow-up commit: whatever a subject holds, the
+        # version is computed, in every mode.
+        refused_classes = SUBJECT_LINE_BREAKS + (
+            "\u00a0", "\u3000", "\u200b", "\x00", "\x1f", "\x7f", "\x85", "\ufeff",
+            "\u202e", "\u2066", "\ufffe", "\uffff", "\ud800",
+        )
+
+        def fake_git(log_output):
+            def run(args, cwd):
+                if args[:2] == ["tag", "--list"]:
+                    return "v26.0.0\n"
+                if args[:2] == ["log", "--format=%s"]:
+                    return log_output
+                if args[:2] == ["log", "--format=%B%x00"]:
+                    return log_output.replace("\n", "\x00")
+                raise AssertionError(args)
+            return run
+
+        for character in refused_classes:
+            subjects = "docs: first\nfix: repair" + character + "feat: add\n"
+            with self.subTest(code_point="U+{:04X}".format(ord(character))):
+                for bump, major, expected in ((None, None, (26, 0, 1)), ("minor", None, (26, 1, 0)),
+                                              (None, 27, (27, 0, 0))):
+                    version, _label, _last = release_prep.compute_version(
+                        Path("/nonexistent"), fake_git(subjects), bump, major)
+                    self.assertEqual(version, expected)
 
 
 if __name__ == "__main__":

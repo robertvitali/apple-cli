@@ -146,6 +146,73 @@ class CapabilitySwiftMaskTests(unittest.TestCase):
                     self.policy._swift_code_mask(source)
                 self.assertEqual(str(caught.exception), "test-catalog-source-invalid")
 
+    def test_line_comment_ends_at_a_lone_carriage_return_as_swift_reads_it(self):
+        # Swift's lexer ends a `//` comment at a carriage return as well as at a line feed, so
+        # swiftc compiles the code after a lone CR; ending the comment only at a line feed hid it.
+        self.assertEqual(self.policy._swift_function_tests("// note\r@Test func hidden() {}\n"),
+                         {"hidden": [True]})
+        # Line-feed and CRLF controls read as before.
+        for ending in ("\n", "\r\n"):
+            with self.subTest(ending=ending.encode("unicode_escape").decode("ascii")):
+                source = "// note" + ending + "@Test func hidden() {}" + ending
+                self.assertEqual(self.policy._swift_function_tests(source), {"hidden": [True]})
+
+    def test_other_line_separators_do_not_end_a_line_comment(self):
+        # Only a line feed or a carriage return ends a Swift `//` comment: swiftc keeps U+2028,
+        # U+2029, U+0085, U+000B and U+000C inside it, so the code after them is comment text
+        # and the fake test stays hidden. Ending the comment at any of them would expose it.
+        for separator in ("\u2028", "\u2029", "\x85", "\x0b", "\x0c"):
+            with self.subTest(separator="U+{:04X}".format(ord(separator))):
+                source = ("// note" + separator + "@Test func fakeTest() {}\n"
+                          "@Test func realTest() {}\n")
+                masked = self.assert_only_real(source)
+                self.assertEqual(set(masked[:source.index("\n")]), {" "})
+
+    def test_test_attribute_after_a_lone_carriage_return_starts_its_line(self):
+        # A lone CR ends a Swift line, so an attribute after one is at the start of its line.
+        self.assertEqual(
+            self.policy._swift_function_tests("func helper() {}\r@Test func realTest() {}\r"),
+            {"helper": [False], "realTest": [True]},
+        )
+
+    def test_lone_carriage_returns_in_comments_and_literals_read_as_swift_reads_them(self):
+        # A lone CR ends a line comment but neither a block comment nor a multi-line string
+        # literal; inside both it is content to swiftc as well. Each fake test stays hidden.
+        controls = [
+            '// comment\r',
+            '/* outer /* @Test func fakeTest() {}\r */ still comment */\r',
+            'let text = """\r@Test func fakeTest() {}\r"""\r',
+            'let text = #"""\r"""\r@Test func fakeTest() {}\r"""#\r',
+            'let text = "escaped \\" quote" // @Test func fakeTest() {}\r',
+        ]
+        for index, prefix in enumerate(controls):
+            with self.subTest(case=index):
+                self.assert_only_real(prefix + '@Test\rfunc realTest() {}\r')
+
+    def test_catalog_reads_a_lone_carriage_return_as_a_line_end(self):
+        # Before the fix the comment ran on to the line feed: `realTest` was invisible and its
+        # `@Test` passed to the next function, so a catalog entry naming the helper was accepted
+        # as a test declaration although swiftc compiles `realTest` as the test.
+        source = '@Test\n// note\rfunc realTest() {}\nfunc helperOnly() {}\n'
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory).resolve()
+            path = root / "Tests" / "Synthetic.swift"
+            path.parent.mkdir()
+            path.write_bytes(source.encode("utf-8"))
+            catalog = {"schema_version": 2, "bindings": [], "tests": [{
+                "file_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
+                "id": "swift:Tests/Synthetic.swift:helperOnly:1", "occurrence": 1,
+                "path": "Tests/Synthetic.swift", "runtime_id": "Synthetic::helperOnly",
+                "symbol": "helperOnly", "tier": "logic",
+            }]}
+            with self.assertRaises(self.policy.PolicyError) as caught:
+                self.policy._swift_catalog(root, catalog, frozenset(("Synthetic::helperOnly",)))
+            self.assertEqual(str(caught.exception), "test-catalog-symbol-not-test")
+            catalog["tests"][0].update(id="swift:Tests/Synthetic.swift:realTest:1",
+                                        symbol="realTest", runtime_id="Synthetic::realTest")
+            records = self.policy._swift_catalog(root, catalog, frozenset(("Synthetic::realTest",)))
+            self.assertEqual(set(records), {"swift:Tests/Synthetic.swift:realTest:1"})
+
 
 class CapabilityDiagnosticTests(unittest.TestCase):
     def assert_diagnostic(self, mutate, expected):

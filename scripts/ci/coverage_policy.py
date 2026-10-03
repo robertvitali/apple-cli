@@ -74,6 +74,7 @@ DECLARATION_ONLY_COVERAGE_EXCLUSIONS = {
 LINE_STATUSES = frozenset(("covered", "uncovered", "non_coverable"))
 PUBLIC_POLICY_ERROR_MESSAGES = frozenset(
     (
+        "changed source contains a refused character",
         "changed-line input is invalid",
         "checkout identity is invalid",
         "coverage input is invalid",
@@ -82,7 +83,7 @@ PUBLIC_POLICY_ERROR_MESSAGES = frozenset(
     )
 )
 ABBREVIATED_POSITIVE_RE = re.compile(r"^(?:[1-9][0-9]*(?:\.[0-9]+)?|[0-9]*\.[0-9]*[1-9][0-9]*)[kKmMgGtT]$")
-DIFF_HUNK_RE = re.compile(r"^@@ -\d+(?:,\d+)? \+(\d+)(?:,(\d+))? @@")
+DIFF_HUNK_RE = re.compile(r"^@@ -[0-9]+(?:,[0-9]+)? \+([0-9]+)(?:,([0-9]+))? @@")
 
 
 class PolicyError(Exception):
@@ -295,7 +296,8 @@ def _secure_read_text(path: Path, *, max_bytes: int, error_message: str) -> Tupl
 
 
 def _parse_nonnegative_int(raw: str) -> int:
-    if not raw or len(raw) > MAX_DECIMAL_DIGITS or not raw.isdigit():
+    # ASCII digits only: `str.isdigit` and `int` also accept other scripts' digits ("\u0665").
+    if not raw or len(raw) > MAX_DECIMAL_DIGITS or not (raw.isascii() and raw.isdigit()):
         raise PolicyError("coverage input is invalid")
     try:
         return int(raw)
@@ -514,7 +516,8 @@ def _parse_lcov_text(text: str, repository_root: Path) -> LcovReport:
         )
         line_coverage[current.rel] = {line: hits > 0 for line, hits in current.da.items()}
 
-    for raw_line in text.splitlines():
+    # llvm-cov writes LCOV lines ending in line feeds; `splitlines` would also break at U+2028.
+    for raw_line in text.split("\n"):
         if raw_line == "":
             continue
         if raw_line == "end_of_record":
@@ -652,7 +655,9 @@ def _verify_snapshot_identities(snapshots: CoverageToolSnapshots, *, error_messa
 def _classify_llvm_cov_count(raw: str) -> str:
     if len(raw) > MAX_LINE_COUNT_FIELD_CHARS:
         raise PolicyError("line-status input is invalid")
-    token = raw.strip()
+    # llvm-cov pads its count column with ASCII spaces only (read from LLVM's source, not yet probed
+    # against `llvm-cov show` itself); any other whitespace is not a count.
+    token = raw.strip(" ")
     if token == "":
         return "non_coverable"
     if len(token) > MAX_DECIMAL_DIGITS + 2:
@@ -672,12 +677,16 @@ def _classify_llvm_cov_count(raw: str) -> str:
 def parse_llvm_cov_show(text: str) -> Dict[int, str]:
     statuses: Dict[int, str] = {}
     parsed_any = False
-    for raw_line in text.splitlines():
+    # llvm-cov prints each source line verbatim after its own `N|count|` columns and ends it with a
+    # line feed, so only a line feed starts a new entry; a U+2028 in source text must not start
+    # one. The columns hold ASCII spaces and digits only. (This layout is read from LLVM's source
+    # and has not yet been probed against `llvm-cov show`; probe it before a workflow runs this.)
+    for raw_line in text.split("\n"):
         if raw_line == "":
             continue
-        if re.match(r"^\s*\^", raw_line):
+        if re.match(r"^[ ]*\^", raw_line):
             continue
-        match = re.match(r"^\s*(\d+)\|([^|]*)\|", raw_line)
+        match = re.match(r"^[ ]*([0-9]+)\|([^|]*)\|", raw_line)
         if not match:
             raise PolicyError("line-status input is invalid")
         parsed_any = True
@@ -898,7 +907,9 @@ def _run_git_diff(base_path: Path, head_path: Path) -> str:
 
 def _changed_lines_from_unified_diff(diff_text: str) -> List[int]:
     changed: List[int] = []
-    for raw_line in diff_text.splitlines():
+    # git ends every diff line with a line feed; a U+2028 inside a changed line must not start
+    # a line that could read as a hunk header.
+    for raw_line in diff_text.split("\n"):
         match = DIFF_HUNK_RE.match(raw_line)
         if match is None:
             continue
@@ -966,14 +977,6 @@ def _line_status_from_llvm_cov(
     return statuses
 
 
-def _read_source_lines(path: Path) -> List[str]:
-    data = _secure_read_bytes(path, max_bytes=MAX_SOURCE_BYTES, error_message="checkout identity is invalid")
-    try:
-        return data.decode("utf-8").splitlines()
-    except UnicodeDecodeError as exc:
-        raise PolicyError("checkout identity is invalid") from exc
-
-
 def _read_blob_bytes(root: Path, source: SourceFile) -> bytes:
     if not SHA_RE.match(source.blob_sha):
         raise PolicyError("checkout identity is invalid")
@@ -999,12 +1002,48 @@ def _read_blob_bytes(root: Path, source: SourceFile) -> bytes:
     return data
 
 
-def _read_blob_lines(root: Path, source: SourceFile) -> List[str]:
-    data = _read_blob_bytes(root, source)
+def _refused_character(character: str) -> bool:
+    """Whitespace other than space and tab, a C0 control (carriage return and NUL included), DEL,
+    a C1 control, a surrogate, U+FFFE, U+FFFF, U+FEFF, or a bidirectional control (U+061C,
+    U+200E, U+200F, U+202A-U+202E, U+2066-U+2069). Line feeds are admitted by the caller.
+
+    COUPLING: `workflow_policy.refused_character(character, " \t")` is the same rule; keep the
+    two in step (`Tests/automation/test_coverage_policy.py` checks they agree)."""
+    if character.isspace():
+        return character not in " \t"
+    code = ord(character)
+    return (code < 0x20 or 0x7F <= code <= 0x9F or 0xD800 <= code <= 0xDFFF or 0x202A <= code <= 0x202E
+            or 0x2066 <= code <= 0x2069 or code in (0x061C, 0x200E, 0x200F, 0xFEFF, 0xFFFE, 0xFFFF))
+
+
+def _decode_source_text(data: bytes, *, error_message: str, refuse: bool = True) -> str:
+    """A changed Swift blob's text, refused when it holds a character `_refused_character` names.
+
+    CONTROL PLANE -- git numbers a diff's lines by line feeds, and llvm-cov prints source text
+    verbatim after its own `N|count|` columns, while Python's `str.splitlines` also breaks lines
+    at a carriage return, a vertical tab, a form feed, U+001C-U+001E, U+0085, U+2028 and U+2029.
+    A Swift comment holding U+2028 and then `@@ -1 +200,90 @@`, or U+2028 and then `N|count|`,
+    would make this policy count changed lines and line statuses that git and llvm-cov never
+    report. Such text is refused before any line is counted, never interpreted; the diagnostic
+    names neither the file nor the character. A base blob is decoded with `refuse=False`: only
+    git reads it, its removed lines reach the policy prefixed with `-`, and refusing it would
+    block the very change that removes such a character."""
     try:
-        return data.decode("utf-8").splitlines()
+        text = data.decode("utf-8")
     except UnicodeDecodeError as exc:
-        raise PolicyError("checkout identity is invalid") from exc
+        raise PolicyError(error_message) from exc
+    if refuse and any(character != "\n" and _refused_character(character) for character in set(text)):
+        raise PolicyError("changed source contains a refused character")
+    return text
+
+
+def _read_blob_lines(root: Path, source: SourceFile) -> List[str]:
+    text = _decode_source_text(_read_blob_bytes(root, source), error_message="checkout identity is invalid")
+    # Lines as git and llvm-cov number them: split at line feeds only.
+    lines = text.split("\n")
+    if lines[-1] == "":
+        lines.pop()
+    return lines
 
 
 def _write_temp_blob(data: bytes) -> Path:
@@ -1042,6 +1081,8 @@ def _derive_changed_head_lines(
             continue
         base_blob = _read_blob_bytes(base_root, base_source)
         head_blob = _read_blob_bytes(head_root, head_source)
+        _decode_source_text(base_blob, error_message="changed-line input is invalid", refuse=False)
+        _decode_source_text(head_blob, error_message="changed-line input is invalid")
         temp_paths: List[Path] = []
         try:
             base_path = _write_temp_blob(base_blob)

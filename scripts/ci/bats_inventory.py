@@ -143,6 +143,57 @@ def _read_bounded_regular(path: Path, *, label: str, maximum: int) -> bytes:
     return payload
 
 
+def _refused_character(character: str) -> bool:
+    """Whitespace other than space and tab, a C0 or C1 control (a carriage return included),
+    DEL, a surrogate, U+FFFE, U+FFFF, U+FEFF, or a bidirectional control (U+061C, U+200E,
+    U+200F, U+202A-U+202E, U+2066-U+2069).
+
+    CONTROL PLANE — bash reads lines at a line feed only and treats only a space and a tab as
+    blanks, so a no-break space before `#` does not start a comment there. Python's
+    `str.isspace`, `str.strip`, `str.splitlines` and regex `\\s` also accept the no-break space,
+    the other Unicode spaces and several line separators, which would let this inventory read
+    a different file than bash and bats do. Such a character is refused, never interpreted.
+    COUPLING: `workflow_policy.refused_character(character, " \\t")` is the same rule; keep the
+    two in step (`Tests/automation/test_bats_inventory.py` checks they agree)."""
+    if character.isspace():
+        return character not in " \t"
+    code = ord(character)
+    return (code < 0x20 or 0x7F <= code <= 0x9F or 0xD800 <= code <= 0xDFFF or 0x202A <= code <= 0x202E
+            or 0x2066 <= code <= 0x2069 or code in (0x061C, 0x200E, 0x200F, 0xFEFF, 0xFFFE, 0xFFFF))
+
+
+def _first_refused_character(source: str) -> Optional[tuple[int, int]]:
+    """(line number, code point) of the first refused character, else None. Line feeds split
+    the lines; inside a line only a space and a tab are admitted whitespace."""
+    for line_number, line in enumerate(source.split("\n"), 1):
+        for character in line:
+            if _refused_character(character):
+                return line_number, ord(character)
+    return None
+
+
+def _refuse_characters(source: str, label: str) -> None:
+    """Raise before any tokenising; the diagnostic names the line and code point, never text."""
+    refused = _first_refused_character(source)
+    if refused is not None:
+        line_number, code = refused
+        raise InventoryError(
+            f"{label} line {line_number} contains refused character U+{code:04X} "
+            "(only space, tab and line feed may be whitespace; no control, byte-order mark "
+            "or bidirectional control)"
+        )
+
+
+def _lf_lines(source: str) -> list[str]:
+    """The lines bash reads: split at line feeds only, with no final empty line after a trailing
+    line feed (as `str.splitlines` gives). `str.splitlines` also breaks at U+2028, U+2029,
+    U+0085, a carriage return and other characters that bash keeps inside one line."""
+    lines = source.split("\n")
+    if lines[-1] == "":
+        lines.pop()
+    return lines
+
+
 def _strict_object(pairs: Iterable[tuple[str, Any]]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, value in pairs:
@@ -273,7 +324,13 @@ def _scan_shell_line(
 
 
 def _parse_bats_source(source: str, relative: str) -> tuple[str, ...]:
-    lines = source.splitlines()
+    """The ordered `@test` titles bats declares in `source`.
+
+    The character refusal runs first, before any tokenising, so every caller is covered:
+    `read_bats_file` here, and `capability_policy` and `bats_evidence`, which call this parser
+    directly (a refusal is an `InventoryError` that each maps to its own value-free code)."""
+    _refuse_characters(source, "Bats file")
+    lines = _lf_lines(source)
     titles: list[str] = []
     quote: Optional[str] = None
     heredocs: list[tuple[str, bool]] = []
@@ -313,7 +370,7 @@ def _local_lifecycle_errors(source: str, relative: str) -> tuple[str, ...]:
     has_top_level_load = False
     executable_lines: list[str] = []
 
-    for line_number, line in enumerate(source.splitlines(), 1):
+    for line_number, line in enumerate(_lf_lines(source), 1):
         if heredocs:
             delimiter, strip_tabs = heredocs[0]
             candidate = line.lstrip("\t") if strip_tabs else line
@@ -330,8 +387,8 @@ def _local_lifecycle_errors(source: str, relative: str) -> tuple[str, ...]:
             ):
                 has_top_level_load = True
             elif (
-                line.strip() == ""
-                or line.lstrip().startswith("#")
+                line.strip(" \t") == ""
+                or line.lstrip(" \t").startswith("#")
             ):
                 pass
             elif (
@@ -375,6 +432,8 @@ def read_bats_file(path: Path, relative: str) -> tuple[bytes, str, tuple[str, ..
         source = payload.decode("utf-8")
     except UnicodeError as error:
         raise InventoryError("unable to read Bats file") from error
+    # `_parse_bats_source` refuses a misleading character before it tokenises, and the source
+    # is returned for the other readers only after that refusal has passed.
     return payload, source, _parse_bats_source(source, relative)
 
 
@@ -387,11 +446,12 @@ def _discover_bats_count(path: Path, relative: str) -> int:
         ).decode("utf-8")
     except UnicodeError as error:
         raise InventoryError("unable to read Bats file") from error
+    _refuse_characters(source, "Bats file")
 
     count = 0
     quote: Optional[str] = None
     heredocs: list[tuple[str, bool]] = []
-    for line_number, line in enumerate(source.splitlines(), 1):
+    for line_number, line in enumerate(_lf_lines(source), 1):
         if heredocs:
             delimiter, strip_tabs = heredocs[0]
             candidate = line.lstrip("\t") if strip_tabs else line
@@ -599,11 +659,11 @@ def _expanded_scalar_strings(source: str) -> tuple[set[str], bool]:
 
 def _hosted_has_live_state_access(source: str) -> bool:
     executable_lines = [
-        line for line in source.splitlines() if not line.lstrip().startswith("#")
+        line for line in _lf_lines(source) if not line.lstrip(" \t").startswith("#")
     ]
     executable = re.sub(r"\\[ \t]*\n", " ", "\n".join(executable_lines))
     policy_source = "\n".join(
-        line for line in executable.splitlines() if line not in SHARED_ROOT_CONTRACT
+        line for line in _lf_lines(executable) if line not in SHARED_ROOT_CONTRACT
     )
     if "$(" in policy_source or "`" in policy_source:
         return True
@@ -753,6 +813,11 @@ def _validate_live(root: Path, manifest: dict[str, Any]) -> list[str]:
         except (InventoryError, UnicodeError):
             errors.append("unable to read live file")
             continue
+        try:
+            _refuse_characters(source, "live file")
+        except InventoryError as error:
+            errors.append(str(error))
+            continue
         if any(
             line.lstrip().startswith("@test")
             or ALTERNATE_TEST_DECLARATION.match(line.lstrip())
@@ -826,7 +891,7 @@ def validate_repository(root: Path, manifest_path: Path) -> tuple[str, ...]:
                     errors.append("file content drift in inventory file")
                 if RESERVED_ROOT_ASSIGNMENT.search(source):
                     errors.append("inventory file overwrites reserved BATS_ROOT")
-                source_lines = set(source.splitlines())
+                source_lines = set(_lf_lines(source))
                 if (
                     any(line not in source_lines for line in SHARED_ROOT_CONTRACT)
                     or STALE_NESTED_PATH.search(source)

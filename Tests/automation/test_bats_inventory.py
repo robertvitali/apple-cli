@@ -11,7 +11,7 @@ import textwrap
 from types import ModuleType
 from typing import Optional
 import unittest
-from contextlib import redirect_stderr, redirect_stdout
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
@@ -127,6 +127,111 @@ def write_fixture_manifest(
         encoding="utf-8",
     )
     return manifest_path
+
+
+def install_rehashed_source(root: Path, manifest_path: Path, tier: str, source: str) -> Path:
+    """Replace the fixture's `tier` file and re-pin its digest, so only the reading is tested."""
+    path = root / "bats" / tier / "sample.bats"
+    path.write_text(source, encoding="utf-8")
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["tiers"][tier]["files"][0]["file_sha256"] = hashlib.sha256(
+        path.read_bytes()
+    ).hexdigest()
+    manifest_path.write_text(
+        json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+        encoding="utf-8",
+    )
+    return path
+
+
+def refusal_message(label: str, line: int, code: int) -> str:
+    return (
+        f"{label} line {line} contains refused character U+{code:04X} "
+        "(only space, tab and line feed may be whitespace; no control, byte-order mark "
+        "or bidirectional control)"
+    )
+
+
+@contextmanager
+def refusal_bypassed(checker: ModuleType):
+    """Stub out the character refusal, so a test reaches the tokenisers behind it."""
+    original = checker._first_refused_character
+    checker._first_refused_character = lambda _source: None
+    try:
+        yield
+    finally:
+        checker._first_refused_character = original
+
+
+# Each fixture reads differently to Python's wide whitespace and line-break rules than to bash
+# and bats, which split lines at a line feed only and treat only a space and a tab as blanks.
+# Synthetic text only; `echo` and `osascript -e 'return 1'` stand in for real commands.
+LIFECYCLE_LOAD = 'load "$HELPERS/app_lifecycle"'
+FIXTURE_HEADER = "#!/usr/bin/env bats\n\n" + "\n".join(ROOT_CONTRACT) + "\n"
+WHITESPACE_FIXTURES = {
+    # A no-break space before `#` is not a comment to bash, which runs the command after `||`.
+    "B1": (
+        "hosted",
+        FIXTURE_HEADER + '\n@test "hosted example" {\n  \u00a0# || osascript -e \'return 1\'\n}\n',
+        8,
+        0x00A0,
+    ),
+    # The lifecycle load sits inside a comment to bash (U+2028 is no line break there).
+    "B2": (
+        "local",
+        FIXTURE_HEADER + "#\u2028" + LIFECYCLE_LOAD + '\n\n@test "local example" {\n  true\n}\n',
+        6,
+        0x2028,
+    ),
+    # Two comments ending in U+2028 and a quote flip a splitlines() reader's quote state, hiding a
+    # lifecycle override and a test that bats counts.
+    "B3": (
+        "local",
+        FIXTURE_HEADER
+        + LIFECYCLE_LOAD
+        + '\n# a \u2028"\nteardown_file() { :; }\n@test "hidden" {\n  true\n}\n'
+        + '# b \u2028"\n@test "local example" {\n  true\n}\n',
+        7,
+        0x2028,
+    ),
+    # An executable line before the lifecycle load that a wide strip reads as a comment.
+    "B4": (
+        "local",
+        FIXTURE_HEADER + "\u00a0# || echo PRE\n" + LIFECYCLE_LOAD
+        + '\n\n@test "local example" {\n  true\n}\n',
+        6,
+        0x00A0,
+    ),
+    # A no-break-space-only line before the load is a command to bash, not a blank line.
+    "B4b": (
+        "local",
+        FIXTURE_HEADER + "\u00a0\n" + LIFECYCLE_LOAD + '\n\n@test "local example" {\n  true\n}\n',
+        6,
+        0x00A0,
+    ),
+    # A test declaration bats never sees (it is inside a comment to bash).
+    "B5": (
+        "hosted",
+        FIXTURE_HEADER + '\n# \u2028@test "phantom" {\n# \u2028}\n@test "hosted example" {\n  true\n}\n',
+        7,
+        0x2028,
+    ),
+    # Every shared-root contract line inside a comment to bash, so none of them runs.
+    "B7": (
+        "hosted",
+        "#!/usr/bin/env bats\n\n"
+        + "".join(f"#\u2028{line}\n" for line in ROOT_CONTRACT)
+        + '\n@test "hosted example" {\n  true\n}\n',
+        3,
+        0x2028,
+    ),
+}
+# Python treats each of these as whitespace or a line break; bash and bats treat none of them as
+# a blank or a line feed, and the rest are controls, the byte-order mark or a bidirectional control.
+REFUSED_SAMPLES = (
+    "\u00a0", "\u1680", "\u2000", "\u2007", "\u200a", "\u2028", "\u2029", "\u202f", "\u205f",
+    "\u3000", "\u0085", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x1f", "\r", "\ufeff", "\u202e",
+)
 
 
 class BatsInventoryTests(unittest.TestCase):
@@ -1216,6 +1321,248 @@ class BatsInventoryTests(unittest.TestCase):
                 checker.load_manifest(manifest_path)
 
         self.assertNotIn(sentinel, str(raised.exception))
+
+    def test_refused_character_rule_matches_the_workflow_scan(self) -> None:
+        # The inventory carries a copy of the workflow scan's rule; every code point must agree.
+        checker = load_checker()
+        spec = importlib.util.spec_from_file_location(
+            "workflow_policy", REPO_ROOT / "scripts" / "ci" / "workflow_policy.py"
+        )
+        policy = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(policy)
+        disagreements = [
+            code for code in range(0x110000)
+            if checker._refused_character(chr(code)) != policy.refused_character(chr(code), " \t")
+        ]
+        self.assertEqual(disagreements, [])
+        self.assertFalse(checker._refused_character(" "))
+        self.assertFalse(checker._refused_character("\t"))
+        self.assertTrue(checker._refused_character("\n"))  # line feeds are split out before the check
+
+    def test_bats_readers_refuse_unicode_whitespace_and_controls_before_tokenising(self) -> None:
+        checker = load_checker()
+        sentinel = "private-candidate-text"
+        for character in REFUSED_SAMPLES:
+            with self.subTest(code_point=f"U+{ord(character):04X}"), tempfile.TemporaryDirectory() as temporary_directory:
+                candidate = Path(temporary_directory) / "sample.bats"
+                candidate.write_text(
+                    FIXTURE_HEADER + f"# {sentinel}{character}x\n"
+                    + '\n@test "hosted example" {\n  true\n}\n',
+                    encoding="utf-8",
+                )
+                expected = refusal_message("Bats file", 6, ord(character))
+
+                with self.assertRaises(checker.InventoryError) as parse_refusal:
+                    checker._parse_bats_source(
+                        candidate.read_bytes().decode("utf-8"), "bats/hosted/sample.bats"
+                    )
+                with self.assertRaises(checker.InventoryError) as read_refusal:
+                    checker.read_bats_file(candidate, "bats/hosted/sample.bats")
+                with self.assertRaises(checker.InventoryError) as discovery_refusal:
+                    checker._discover_bats_count(candidate, "bats/hosted/sample.bats")
+
+            self.assertEqual(str(parse_refusal.exception), expected)
+            self.assertEqual(str(read_refusal.exception), expected)
+            self.assertEqual(str(discovery_refusal.exception), expected)
+            self.assertNotIn(sentinel, expected)
+        self.assertEqual(checker._first_refused_character("a\tb \nc\n"), None)
+        self.assertEqual(checker._first_refused_character("a\nb\u2028c\n"), (2, 0x2028))
+
+    def test_misleading_whitespace_fixtures_are_refused_end_to_end(self) -> None:
+        checker = load_checker()
+        for name, (tier, source, line, code) in WHITESPACE_FIXTURES.items():
+            with self.subTest(fixture=name), tempfile.TemporaryDirectory() as temporary_directory:
+                root = Path(temporary_directory)
+                manifest_path = write_fixture_manifest(root)
+                install_rehashed_source(root, manifest_path, tier, source)
+                stdout = io.StringIO()
+                stderr = io.StringIO()
+
+                errors = checker.validate_repository(root, manifest_path)
+                with redirect_stdout(stdout), redirect_stderr(stderr):
+                    status = checker.run(["--root", str(root), "--manifest", str(manifest_path)])
+
+            self.assertIn(refusal_message("Bats file", line, code), errors)
+            self.assertEqual(status, 1)
+            rendered = stdout.getvalue() + stderr.getvalue()
+            self.assertIn(f"U+{code:04X}", rendered)
+            for fixture_line in source.split("\n"):
+                if any(checker._refused_character(character) for character in fixture_line):
+                    self.assertNotIn(fixture_line, rendered)
+            self.assertNotIn("osascript", rendered)
+            self.assertNotIn("phantom", rendered)
+
+    def test_live_file_with_refused_character_is_rejected(self) -> None:
+        checker = load_checker()
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            manifest_path = write_fixture_manifest(root)
+            live = root / "bats" / "live" / "manual.sh"
+            # To sh the no-break space starts a command word, so `# @test` is not a comment.
+            live.write_text("#!/bin/sh\n\u00a0# @test\nexit 0\n", encoding="utf-8")
+
+            errors = checker.validate_repository(root, manifest_path)
+
+        self.assertEqual(errors, (refusal_message("live file", 2, 0x00A0),))
+
+    def test_line_splitting_follows_line_feeds_only(self) -> None:
+        checker = load_checker()
+        for sample in ("", "\n", "a", "a\n", "a\n\n", "a\nb", "a\n\nb\n", "\n\na\n"):
+            with self.subTest(sample=sample):
+                self.assertEqual(checker._lf_lines(sample), sample.splitlines())
+        self.assertEqual(
+            checker._lf_lines("a\u2028b\u2029c\x85d\re\x0bf\x0cg\x1ch\ni\n"),
+            ["a\u2028b\u2029c\x85d\re\x0bf\x0cg\x1ch", "i"],
+        )
+
+    def test_tokenizer_keeps_shell_state_across_unicode_separators_in_comments(self) -> None:
+        # Called with the refusal bypassed: a U+2028 inside a comment or a heredoc body ends
+        # nothing for bash, so neither the quote state, the heredoc nor the declared tests change.
+        checker = load_checker()
+        _, b3, _, _ = WHITESPACE_FIXTURES["B3"]
+        _, b5, _, _ = WHITESPACE_FIXTURES["B5"]
+        _, b2, _, _ = WHITESPACE_FIXTURES["B2"]
+        # Bash keeps `x<U+2028>EOF` as one heredoc body line, so the heredoc runs on past the
+        # quote to the real `EOF`; a reader that broke the line there would end the heredoc early
+        # and then read the quote as opening an unterminated string.
+        heredoc_body = 'cat <<EOF\nx\u2028EOF\n"\nEOF\n@test "hosted example" {\n  true\n}\n'
+        heredoc = FIXTURE_HEADER + heredoc_body
+        heredoc_split_there = FIXTURE_HEADER + heredoc_body.replace("\u2028", "\n")
+
+        with refusal_bypassed(checker), tempfile.TemporaryDirectory() as temporary_directory:
+            self.assertEqual(
+                checker._parse_bats_source(b3, "bats/local/sample.bats"),
+                ("hidden", "local example"),
+            )
+            self.assertEqual(
+                checker._parse_bats_source(b5, "bats/hosted/sample.bats"),
+                ("hosted example",),
+            )
+            self.assertEqual(
+                checker._parse_bats_source(heredoc, "bats/hosted/sample.bats"),
+                ("hosted example",),
+            )
+            candidate = Path(temporary_directory) / "sample.bats"
+            candidate.write_text(heredoc, encoding="utf-8")
+            self.assertEqual(checker._discover_bats_count(candidate, "bats/hosted/sample.bats"), 1)
+            with self.assertRaisesRegex(checker.InventoryError, "^unterminated shell construct"):
+                checker._parse_bats_source(heredoc_split_there, "bats/hosted/sample.bats")
+            self.assertIn(
+                "local file overrides app lifecycle hook",
+                checker._local_lifecycle_errors(b3, "bats/local/sample.bats"),
+            )
+            self.assertIn(
+                "local file does not load executable top-level app lifecycle hook after ordered header",
+                checker._local_lifecycle_errors(b2, "bats/local/sample.bats"),
+            )
+
+    def test_bats_parser_refuses_before_it_tokenises(self) -> None:
+        # The refusal lives in `_parse_bats_source` itself, so `capability_policy` and
+        # `bats_evidence`, which call it directly, are covered as well as `read_bats_file`. Each
+        # fixture gives a different error when tokenised first, so the refusal must come first.
+        checker = load_checker()
+        fixtures = {
+            # A CRLF declaration line: tokenised first, it is an unknown declaration.
+            "carriage return": (
+                FIXTURE_HEADER + '\n@test "hosted example" {\r\n  true\n}\n',
+                7,
+                0x000D,
+                "unknown @test declaration syntax in Bats file",
+            ),
+            # The only test sits behind `# ` and U+2028: tokenised first, the file has no tests.
+            "only test behind a separator": (
+                FIXTURE_HEADER + '\n# \u2028@test "hosted example" {\n# \u2028}\n',
+                7,
+                0x2028,
+                "inventory file contains no tests",
+            ),
+        }
+        for name, (source, line, code, tokenised_error) in fixtures.items():
+            expected = refusal_message("Bats file", line, code)
+            with self.subTest(fixture=name), tempfile.TemporaryDirectory() as temporary_directory:
+                candidate = Path(temporary_directory) / "sample.bats"
+                candidate.write_bytes(source.encode("utf-8"))
+                original_scan = checker._scan_shell_line
+
+                def tokenising_started(*_arguments, **_keywords):
+                    raise AssertionError("tokenising must not start before the refusal")
+
+                checker._scan_shell_line = tokenising_started
+                try:
+                    readers = (
+                        lambda: checker._parse_bats_source(source, "bats/hosted/sample.bats"),
+                        lambda: checker.read_bats_file(candidate, "bats/hosted/sample.bats"),
+                        lambda: checker._discover_bats_count(candidate, "bats/hosted/sample.bats"),
+                    )
+                    for reader in readers:
+                        with self.assertRaises(checker.InventoryError) as refusal:
+                            reader()
+                        self.assertEqual(str(refusal.exception), expected)
+                finally:
+                    checker._scan_shell_line = original_scan
+
+                with refusal_bypassed(checker), self.assertRaises(checker.InventoryError) as tokenised:
+                    checker._parse_bats_source(source, "bats/hosted/sample.bats")
+                self.assertEqual(str(tokenised.exception), tokenised_error)
+
+    def test_comment_and_blank_filters_admit_only_space_and_tab(self) -> None:
+        # Called directly, without the refusal: a no-break space before `#` keeps the line
+        # executable, as it is to bash, and a no-break-space-only line is not blank.
+        checker = load_checker()
+        no_load = "local file does not load executable top-level app lifecycle hook after ordered header"
+        for name in ("B4", "B4b"):
+            with self.subTest(fixture=name):
+                _, source, _, _ = WHITESPACE_FIXTURES[name]
+                self.assertIn(
+                    no_load,
+                    checker._local_lifecycle_errors(source, "bats/local/sample.bats"),
+                )
+        _, b1, _, _ = WHITESPACE_FIXTURES["B1"]
+        hidden_after_separator = (
+            FIXTURE_HEADER
+            + '\n@test "hosted example" {\n  : \u2028# x; osascript -e \'return 1\'\n}\n'
+        )
+        substitution_beside_contract = (
+            FIXTURE_HEADER + "true\u2028" + ROOT_CONTRACT[0] + '\n@test "hosted example" {\n  true\n}\n'
+        )
+        for source in (b1, hidden_after_separator, substitution_beside_contract):
+            with self.subTest(source=ascii(source)):
+                self.assertTrue(checker._hosted_has_live_state_access(source))
+        self.assertFalse(checker._hosted_has_live_state_access(bats_source("hosted example")))
+
+    def test_inventory_reads_like_bash_even_if_the_refusal_were_bypassed(self) -> None:
+        # Defence in depth: with the refusal stubbed out, every reader still reads the fixtures as
+        # bash and bats do instead of accepting them.
+        checker = load_checker()
+        with refusal_bypassed(checker):
+            with tempfile.TemporaryDirectory() as temporary_directory:
+                root = Path(temporary_directory)
+                counts = {}
+                for name in ("B3", "B5"):
+                    candidate = root / f"{name}.bats"
+                    candidate.write_text(WHITESPACE_FIXTURES[name][1], encoding="utf-8")
+                    counts[name] = checker._discover_bats_count(candidate, "private-candidate-path")
+            self.assertEqual(counts, {"B3": 2, "B5": 1})
+
+            expected = {
+                "B1": "hosted file contains live-state access",
+                "B2": "local file does not load executable top-level app lifecycle hook",
+                "B3": "local file overrides app lifecycle hook",
+                "B4": "local file does not load executable top-level app lifecycle hook",
+                "B7": "inventory file violates the shared-root contract",
+            }
+            for name, message in expected.items():
+                with self.subTest(fixture=name), tempfile.TemporaryDirectory() as temporary_directory:
+                    root = Path(temporary_directory)
+                    manifest_path = write_fixture_manifest(root)
+                    tier, source, _, _ = WHITESPACE_FIXTURES[name]
+                    install_rehashed_source(root, manifest_path, tier, source)
+
+                    errors = checker.validate_repository(root, manifest_path)
+
+                self.assertTrue(any(message in error for error in errors), errors)
+                self.assertFalse(any("refused character" in error for error in errors), errors)
 
 
 if __name__ == "__main__":

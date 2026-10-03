@@ -32,7 +32,8 @@ What it checks and produces, in order:
     (the same hardened `git` invocation the quality driver uses).
 2.  The last release is the HIGHEST (not the nearest) strict `vMAJOR.MINOR.PATCH`
     tag reachable from the candidate (branch-reachable, per design section 14.2);
-    at least one commit exists since it.
+    at least one commit exists since it (subjects are read as git writes them, one
+    per line feed).
 3.  The next version: `--macos-major NN` forces `NN.0.0` and must exceed the current
     major (the only way MAJOR moves; required for a first release, and exclusive
     with `--bump`); otherwise MINOR when any subject since the last tag is `feat` or
@@ -198,12 +199,35 @@ def validate_checkout(root: Path, candidate_sha: str, git: GitRunner) -> None:
         raise AssertionFailure("candidate worktree is not clean")
 
 
+def commit_subjects(output: str) -> List[str]:
+    """The subjects in `git log --format=%s` output, one per commit, newest first.
+
+    CONTROL PLANE — git ends each subject with a line feed and nothing else, and the
+    commit-lint job reads them with `read -r`, which splits on line feeds only. Python's
+    `splitlines()` also breaks at U+2028, U+2029, U+0085, a vertical tab, a form feed, U+001C-
+    U+001E and a lone carriage return, and `strip()` also removes a no-break space: one `fix:`
+    subject holding U+2028 read as two subjects here (a MINOR bump where git's single subject
+    gave PATCH), and a subject of only a no-break space read as empty. So the output is split
+    on line feeds only, and every subject is kept as git wrote it, one per commit, even one that
+    is empty or blank. A subject is never refused here: it is published history that no later
+    commit can change, so refusing one would block every later rehearsal and release with no
+    way out short of a new tag or a history rewrite. `FEATURE_SUBJECT_RE` matches at the start
+    of a subject only, so no character inside one can change the bump."""
+    subjects = output.split("\n")
+    if subjects and subjects[-1] == "":
+        subjects.pop()  # the line feed that terminates the last subject
+    return subjects
+
+
 def reachable_release_tags(root: Path, git: GitRunner) -> List[Tuple[Tuple[int, int, int], str]]:
-    """Strict `vMAJOR.MINOR.PATCH` tags reachable from HEAD, highest first."""
+    """Strict `vMAJOR.MINOR.PATCH` tags reachable from HEAD, highest first.
+
+    Names are split on line feeds only and matched exactly: git allows a no-break space or
+    U+2028 in a tag name, and `strip()` or `splitlines()` would turn such a name into a strict
+    release tag git does not have."""
     listing = git(["tag", "--list", "--merged", "HEAD", "v[0-9]*"], root)
     tags: List[Tuple[Tuple[int, int, int], str]] = []
-    for line in listing.splitlines():
-        name = line.strip()
+    for name in listing.split("\n"):
         match = TAG_RE.fullmatch(name)
         if match is None:
             continue
@@ -214,7 +238,7 @@ def reachable_release_tags(root: Path, git: GitRunner) -> List[Tuple[Tuple[int, 
 
 def tag_exists(root: Path, tag: str, git: GitRunner) -> bool:
     listing = git(["tag", "--list", tag], root)
-    return any(line.strip() == tag for line in listing.splitlines())
+    return any(line == tag for line in listing.split("\n"))
 
 
 def compute_bump(subjects: Sequence[str], bodies: Sequence[str]) -> str:
@@ -238,8 +262,8 @@ def compute_version(
     last_tag: Optional[str] = None
     if last is not None:
         last_tag = last[1]
-        subjects = git(["log", "--format=%s", "{}..HEAD".format(last_tag)], root).splitlines()
-        if not any(line.strip() for line in subjects):
+        subjects = commit_subjects(git(["log", "--format=%s", "{}..HEAD".format(last_tag)], root))
+        if not subjects:
             raise NothingToRelease("no commits since the last reachable release tag")
     if macos_major is not None:
         if last is not None and macos_major <= last[0][0]:

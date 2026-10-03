@@ -9,6 +9,7 @@ import os
 from pathlib import Path
 import re
 import sys
+import unicodedata
 
 
 APPROVED_TYPES = (
@@ -109,6 +110,91 @@ REQUIRED_CHECKLIST_ITEMS = (
     "Every inapplicable item is explained under Details.",
     "The author reviewed the final diff after the latest push.",
 )
+# Unicode space separators (general category Zs) other than the space itself. Prose may hold
+# them (Option+Space types a no-break space on macOS); headings, the Checklist section and its
+# trailers may not, because git, Markdown and this validator would not agree on their meaning.
+UNICODE_SPACE_SEPARATORS = (
+    "\u00a0\u1680"
+    + "".join(chr(code) for code in range(0x2000, 0x200B))
+    + "\u202f\u205f\u3000"
+)
+TITLE_WHITESPACE = " "
+PROSE_WHITESPACE = " \t" + UNICODE_SPACE_SEPARATORS
+STRUCTURAL_WHITESPACE = " \t"
+REFUSED_TITLE_DIAGNOSTIC = (
+    "title character U+{:04X} is refused (only a space may be whitespace; no line break, "
+    "control character, byte-order mark, bidirectional control or invisible format character)"
+)
+REFUSED_BODY_DIAGNOSTIC = (
+    "body line {}: character U+{:04X} is refused (only a line feed, alone or after a carriage "
+    "return, may end a line; no other line break, no control character other than a tab, and no "
+    "byte-order mark, bidirectional control, surrogate, U+FFFE or U+FFFF)"
+)
+REFUSED_STRUCTURAL_DIAGNOSTIC = (
+    "body line {}: character U+{:04X} is refused on a line whose first character after any "
+    "leading spaces or tabs is # or in the Checklist section (only space and tab may be "
+    "whitespace there, and no invisible format character)"
+)
+
+
+def _refused_character(character: str, whitespace: str) -> bool:
+    """Whitespace outside `whitespace`, a character outside YAML's printable set (C0 controls,
+    a carriage return included, DEL, C1 controls, surrogates, U+FFFE, U+FFFF), a byte-order mark
+    (U+FEFF), or a bidirectional control (U+061C, U+200E, U+200F, U+202A-U+202E, U+2066-U+2069).
+
+    CONTROL PLANE — Python's `str.isspace`, `str.strip`, `str.splitlines` and regex `\\s` accept
+    line separators and Unicode spaces that git and Markdown do not, so a title or body holding
+    one could pass here while the squash commit git records reads differently (two trailers here,
+    one to `git interpret-trailers`). Such text is refused, never interpreted. COUPLING:
+    `workflow_policy.refused_character` is the same rule, kept as a copy because the governance
+    job executes only this file; `Tests/automation/test_pr_metadata.py` checks they agree.
+    """
+    if character.isspace():
+        return character not in whitespace
+    code = ord(character)
+    return (code < 0x20 or 0x7F <= code <= 0x9F or 0xD800 <= code <= 0xDFFF or 0x202A <= code <= 0x202E
+            or 0x2066 <= code <= 0x2069 or code in (0x061C, 0x200E, 0x200F, 0xFEFF, 0xFFFE, 0xFFFF))
+
+
+def _first_refused_title_character(title: str) -> int | None:
+    """Code point of the first refused title character, else None.
+
+    The title becomes the squash commit's subject line, so it must stay one line to every
+    reader: only a space may be whitespace. Invisible format characters (category Cf) are
+    refused too, since a reviewer cannot see them in the one line every reader trusts."""
+    for character in title:
+        if (
+            _refused_character(character, TITLE_WHITESPACE)
+            or unicodedata.category(character) == "Cf"
+        ):
+            return ord(character)
+    return None
+
+
+def _first_refused_body_character(body: str) -> tuple[int, int, bool] | None:
+    """(line number, code point, structural) of the first refused character in a body whose
+    CRLF pairs are already line feeds, else None.
+
+    Lines are split at line feeds only. Prose admits space, tab and the Unicode space
+    separators; a structural line (one starting with `#` after spaces and tabs, or any line from
+    the `## Checklist` heading on, which holds the checklist items and the terminal trailer
+    paragraph) admits only space and tab, and no invisible format character (category Cf), so a
+    zero-width character cannot hide inside a heading, a checklist item or a trailer's name."""
+    in_checklist = False
+    for number, line in enumerate(body.split("\n"), start=1):
+        if not in_checklist:
+            heading = H2_PATTERN.fullmatch(line)
+            in_checklist = heading is not None and heading.group(1) == "Checklist"
+        structural = in_checklist or line.lstrip(" \t").startswith("#")
+        for character in line:
+            if _refused_character(character, PROSE_WHITESPACE):
+                return number, ord(character), False
+            if structural and (
+                _refused_character(character, STRUCTURAL_WHITESPACE)
+                or unicodedata.category(character) == "Cf"
+            ):
+                return number, ord(character), True
+    return None
 
 
 def _contains_internal_tracker_metadata(value: str) -> bool:
@@ -179,14 +265,28 @@ def _has_valid_coauthor_value(value: str) -> bool:
 
 
 def _terminal_trailers(body: str) -> list[re.Match[str]]:
+    # Lines end at line feeds only and only ASCII blanks are trimmed, as git reads them.
     trailers: list[re.Match[str]] = []
-    for line in reversed(body.rstrip().splitlines()):
+    for line in reversed(body.rstrip(" \t\n").split("\n")):
         match = TRAILER_LINE_PATTERN.fullmatch(line)
         if match is None:
             break
         trailers.append(match)
     trailers.reverse()
     return trailers
+
+
+def _trailers_follow_an_empty_line(body: str, count: int) -> bool:
+    """Whether the last `count` lines are a paragraph of their own: git reads trailers only from
+    the final paragraph, so a trailer block joined to the checklist is no trailers to it."""
+    lines = body.rstrip(" \t\n").split("\n")
+    return len(lines) > count and lines[-count - 1].strip(" \t") == ""
+
+
+def _without_terminal_lines(content: str, count: int) -> str:
+    """`content` without its last `count` lines, split at line feeds only."""
+    lines = content.rstrip(" \t\n").split("\n")
+    return "\n".join(lines[:-count])
 
 
 def _has_valid_provenance_order(trailer_keys: list[str]) -> bool:
@@ -208,6 +308,9 @@ def _has_valid_provenance_order(trailer_keys: list[str]) -> bool:
 
 def validate_title(title: str) -> list[str]:
     """Return value-free diagnostics for a pull-request title."""
+    refused = _first_refused_title_character(title)
+    if refused is not None:
+        return [REFUSED_TITLE_DIAGNOSTIC.format(refused)]
     errors = ["title must be at most 72 characters"] if len(title) > 72 else []
     if _contains_internal_tracker_metadata(title):
         errors.append("title contains prohibited internal tracker metadata")
@@ -226,6 +329,14 @@ def validate_title(title: str) -> list[str]:
 
 def validate_body(body: str) -> list[str]:
     """Return value-free diagnostics for a pull-request description."""
+    # A CRLF pair is one line ending to git and Markdown, whichever input path delivered it;
+    # any carriage return left after that is refused below, before anything is parsed.
+    body = body.replace("\r\n", "\n")
+    refused = _first_refused_body_character(body)
+    if refused is not None:
+        number, code, structural = refused
+        template = REFUSED_STRUCTURAL_DIAGNOSTIC if structural else REFUSED_BODY_DIAGNOSTIC
+        return [template.format(number, code)]
     errors: list[str] = []
     if _contains_internal_tracker_metadata(body):
         errors.append("body contains prohibited internal tracker metadata")
@@ -243,8 +354,7 @@ def validate_body(body: str) -> list[str]:
         )
         section_content = body[match.end() : end]
         if heading == "Checklist" and trailers:
-            section_lines = section_content.rstrip().splitlines()
-            section_content = "\n".join(section_lines[: -len(trailers)])
+            section_content = _without_terminal_lines(section_content, len(trailers))
         if not _has_substantive_content(section_content):
             errors.append(f"body {heading} section must contain substantive content")
         if heading == "Checklist" and not _has_complete_required_checklist(
@@ -256,6 +366,8 @@ def validate_body(body: str) -> list[str]:
     trailer_keys = [match.group("key") for match in trailers]
     if not _has_valid_provenance_order(trailer_keys):
         errors.append("body must end with contiguous provenance trailers in required order")
+    if trailers and not _trailers_follow_an_empty_line(body, len(trailers)):
+        errors.append("body trailers must follow an empty line, as a paragraph of their own")
     if any(
         not _has_valid_coauthor_value(trailer.group("value"))
         for trailer in trailers
@@ -339,8 +451,10 @@ def main(argv: list[str] | None = None) -> int:
             print("error: direct input requires both title and body file", file=sys.stderr)
             return 2
         try:
-            body = arguments.body_file.read_text(encoding="utf-8")
-        except OSError:
+            # Bytes, then UTF-8: `read_text` would turn a lone carriage return into a line feed,
+            # which the event path's JSON keeps, and the two paths must reach one verdict.
+            body = arguments.body_file.read_bytes().decode("utf-8")
+        except (OSError, UnicodeDecodeError):
             print("error: unable to read pull-request metadata input", file=sys.stderr)
             return 2
         title = arguments.title

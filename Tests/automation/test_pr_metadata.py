@@ -8,6 +8,7 @@ import subprocess
 import sys
 import tempfile
 from types import ModuleType
+import unicodedata
 import unittest
 
 
@@ -722,6 +723,38 @@ class CommandLineTests(unittest.TestCase):
         self.assertEqual(result.stdout, "")
         self.assertEqual(result.stderr, "")
 
+    def test_undecodable_body_file_is_unreadable_input(self) -> None:
+        # The body file is read as bytes and decoded as UTF-8; bytes that are not UTF-8 are
+        # unreadable input (exit 2, one value-free diagnostic), never a traceback.
+        cases = {
+            "UTF-16 byte-order mark alone": b"\xff\xfe",
+            "UTF-16 body": b"\xff\xfe" + valid_body().encode("utf-16-le"),
+            "stray continuation byte": valid_body().encode("utf-8") + b"\x80",
+            "encoded surrogate": b"\xed\xa0\x80",
+        }
+        for name, content in cases.items():
+            with self.subTest(case=name), tempfile.TemporaryDirectory() as temporary_directory:
+                body_path = Path(temporary_directory) / "body.md"
+                body_path.write_bytes(content)
+                result = subprocess.run(
+                    [
+                        sys.executable, "-I", "-S", "-B", str(VALIDATOR_PATH),
+                        "--title", "ci: validate pull request metadata",
+                        "--body-file", str(body_path),
+                    ],
+                    cwd=REPO_ROOT,
+                    text=True,
+                    capture_output=True,
+                    check=False,
+                )
+
+                self.assertEqual(result.returncode, 2)
+                self.assertEqual(result.stdout, "")
+                self.assertEqual(
+                    result.stderr, "error: unable to read pull-request metadata input\n"
+                )
+                self.assertNotIn("Traceback", result.stderr)
+
     def test_failure_diagnostics_do_not_echo_metadata_contents(self) -> None:
         body_marker = "SENTINEL_BODY_CONTENT_MUST_NOT_BE_PRINTED"
         title_marker = "SENTINEL_TITLE_CONTENT_MUST_NOT_BE_PRINTED"
@@ -897,6 +930,532 @@ class DependabotPathTests(unittest.TestCase):
 
         self.assertEqual(result.returncode, 1)
         self.assertNotIn(validator.DEPENDABOT_REWRITE_DIAGNOSTIC, result.stderr)
+
+
+REVIEWED_TRAILER = "Reviewed-by: automated reviewer (test-source) — approve"
+COAUTHORED_TRAILER = "Co-Authored-By: Automation Example <automation@example.com>"
+# Each one ends a line for Python's `str.splitlines()` but not for git, which splits at line
+# feeds only (a lone carriage return is a line ending to Markdown, never to git's trailers).
+PYTHON_ONLY_LINE_BREAKS = (
+    "\u2028", "\u2029", "\x85", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\r",
+)
+
+
+def line_number_of(body: str, needle: str) -> int:
+    return body[: body.index(needle)].count("\n") + 1
+
+
+def replaced(text: str, old: str, new: str) -> str:
+    """`text` with its one occurrence of `old` replaced by `new`. A fixture whose anchor is
+    missing or repeated raises, so a drifted `valid_body()` cannot turn a case into a test of
+    the unedited body (an acceptance case would then pass for the wrong reason)."""
+    count = text.count(old)
+    if count != 1:
+        raise AssertionError(f"fixture anchor {ascii(old)} occurs {count} times, not once")
+    return text.replace(old, new)
+
+
+def with_crlf_line_endings(body: str) -> str:
+    """`body` with every line feed made a CRLF pair; it must hold line feeds and no carriage
+    return, so the result really is a CRLF body."""
+    if "\r" in body or "\n" not in body:
+        raise AssertionError("a CRLF fixture needs a line-feed body with no carriage return")
+    return body.replace("\n", "\r\n")
+
+
+def joined_trailers_body(separator: str) -> str:
+    """The audit's P1: the last two trailers joined by something other than a line feed."""
+    return replaced(
+        valid_body(),
+        f"{REVIEWED_TRAILER}\n{COAUTHORED_TRAILER}",
+        f"{REVIEWED_TRAILER}{separator}{COAUTHORED_TRAILER}",
+    )
+
+
+def template_filled_body(before_trailers: str = "\n") -> str:
+    """The PR template as a contributor fills it in: comments kept, prose added, every box
+    checked, and the trailers appended after the template's closing comment."""
+    template = TEMPLATE_PATH.read_text(encoding="utf-8")
+    for old, new in (
+        ("-->\n\n## Details", "-->\n\nGive callers deterministic pull-request feedback.\n\n## Details"),
+        ("-->\n\n## Testing", "-->\n\nAdd a repository-owned metadata validator.\n\n## Testing"),
+        (
+            "| <!-- Replace with an exact command. --> | <!-- Replace with a value-free result. --> |",
+            "| `python3 -m unittest` | All targeted tests passed. |",
+        ),
+    ):
+        if template.count(old) != 1:
+            raise AssertionError("the PR template no longer has the expected shape")
+        template = template.replace(old, new)
+    if not template.endswith("-->\n"):
+        raise AssertionError("the PR template no longer ends with its trailer guidance comment")
+    return (
+        template.replace("- [ ] ", "- [x] ")
+        + before_trailers
+        + f"{REVIEWED_TRAILER}\n{COAUTHORED_TRAILER}\n"
+    )
+
+
+def run_both_input_paths(
+    title: str, body: str
+) -> tuple[subprocess.CompletedProcess, subprocess.CompletedProcess]:
+    """Run the validator on the same metadata through `--event` and through `--body-file`."""
+    with tempfile.TemporaryDirectory() as temporary_directory:
+        event_path = Path(temporary_directory) / "event.json"
+        event_path.write_text(
+            json.dumps({"pull_request": {"title": title, "body": body}}),
+            encoding="utf-8",
+        )
+        body_path = Path(temporary_directory) / "body.md"
+        body_path.write_bytes(body.encode("utf-8"))
+        command = [sys.executable, "-I", "-S", "-B", str(VALIDATOR_PATH)]
+        event = subprocess.run(
+            command + ["--event", str(event_path)],
+            cwd=REPO_ROOT, text=True, capture_output=True, check=False,
+        )
+        direct = subprocess.run(
+            command + ["--title", title, "--body-file", str(body_path)],
+            cwd=REPO_ROOT, text=True, capture_output=True, check=False,
+        )
+    return event, direct
+
+
+def git_trailer_lines(body: str) -> list[str]:
+    """The trailers git reads from the squash commit message this body would become."""
+    with tempfile.TemporaryDirectory() as temporary_directory:
+        environment = {
+            "PATH": os.environ.get("PATH", ""),
+            "HOME": temporary_directory,
+            "LC_ALL": "C",
+            "GIT_CONFIG_GLOBAL": os.devnull,
+            "GIT_CONFIG_NOSYSTEM": "1",
+            "GIT_CEILING_DIRECTORIES": str(Path(temporary_directory).parent),
+        }
+        result = subprocess.run(
+            # `--no-divider`: git reads a commit's own trailers without treating a `---` line
+            # as the start of a patch, so the oracle must too.
+            ["git", "interpret-trailers", "--parse", "--no-divider"],
+            input=f"ci: validate pull request metadata\n\n{body}".encode("utf-8"),
+            cwd=temporary_directory,
+            env=environment,
+            capture_output=True,
+            check=True,
+            timeout=30,
+        )
+    return [line for line in result.stdout.decode("utf-8").split("\n") if line]
+
+
+class RefusedCharacterTests(unittest.TestCase):
+    """Text Python would split, strip or match differently from git and Markdown is refused."""
+
+    def test_refused_character_rule_matches_the_workflow_scan(self) -> None:
+        # The governance job executes only the validator, so it carries its own copy of the
+        # workflow scan's rule; every code point must agree for every whitespace set it uses.
+        validator = load_validator()
+        policy = load_validator_path(WORKFLOW_POLICY_PATH, "workflow_policy")
+        for whitespace in (
+            validator.TITLE_WHITESPACE,
+            validator.STRUCTURAL_WHITESPACE,
+            validator.PROSE_WHITESPACE,
+        ):
+            with self.subTest(whitespace=[hex(ord(character)) for character in whitespace]):
+                disagreements = [
+                    code
+                    for code in range(0x110000)
+                    if validator._refused_character(chr(code), whitespace)
+                    != policy.refused_character(chr(code), whitespace)
+                ]
+                self.assertEqual(disagreements, [])
+        self.assertEqual(validator.STRUCTURAL_WHITESPACE, " \t")
+        self.assertFalse(validator._refused_character(" ", validator.TITLE_WHITESPACE))
+        self.assertTrue(validator._refused_character("\t", validator.TITLE_WHITESPACE))
+        self.assertTrue(validator._refused_character("\n", validator.PROSE_WHITESPACE))
+
+    def test_prose_admits_exactly_the_unicode_space_separators(self) -> None:
+        validator = load_validator()
+        space_separators = {
+            chr(code)
+            for code in range(0x110000)
+            if unicodedata.category(chr(code)) == "Zs"
+        }
+
+        self.assertEqual(set(validator.UNICODE_SPACE_SEPARATORS), space_separators - {" "})
+        self.assertEqual(
+            set(validator.PROSE_WHITESPACE), {" ", "\t"} | set(validator.UNICODE_SPACE_SEPARATORS)
+        )
+
+    def test_rejects_title_characters_that_split_or_hide_the_subject_line(self) -> None:
+        # The audit's P6: each of these passed, so one PR title could be one commit subject to
+        # git and two to Python's `splitlines()` (a `fix:` read as a `feat:` bump).
+        validator = load_validator()
+        for character in (
+            "\u2028", "\u2029", "\x85", "\x0c", "\x0b", "\x1c", "\r", "\n", "\t", "\x00",
+            "\x7f", "\u00a0", "\u3000", "\ufeff", "\u202e", "\u200f", "\u200b", "\u2060",
+            "\u00ad", "\U000e0041",
+        ):
+            title = f"fix: repair parsing{character}feat: add thing"
+            with self.subTest(codepoint=f"U+{ord(character):04X}"):
+                errors = validator.validate_title(title)
+
+                self.assertEqual(
+                    errors, [validator.REFUSED_TITLE_DIAGNOSTIC.format(ord(character))]
+                )
+                self.assertFalse(any("repair parsing" in error for error in errors))
+
+    def test_title_still_admits_spaces_and_visible_non_ascii(self) -> None:
+        validator = load_validator()
+        for title in (
+            "fix: repair parsing feat: add thing",
+            "fix(mail): keep caf\u00e9 names intact — safely",
+        ):
+            with self.subTest(title=title):
+                self.assertEqual(validator.validate_title(title), [])
+
+    def test_rejects_trailers_joined_by_a_python_only_line_break(self) -> None:
+        # The audit's P1: the validator read two trailers where git reads one.
+        validator = load_validator()
+        for separator in PYTHON_ONLY_LINE_BREAKS:
+            body = joined_trailers_body(separator)
+            with self.subTest(codepoint=f"U+{ord(separator):04X}"):
+                errors = validator.validate_body(body)
+
+                self.assertEqual(
+                    errors,
+                    [
+                        validator.REFUSED_BODY_DIAGNOSTIC.format(
+                            line_number_of(body, REVIEWED_TRAILER), ord(separator)
+                        )
+                    ],
+                )
+                self.assertFalse(any("automated reviewer" in error for error in errors))
+
+    def test_rejects_refused_characters_anywhere_in_the_body(self) -> None:
+        validator = load_validator()
+        prose = "Give callers deterministic pull-request feedback."
+        for character in PYTHON_ONLY_LINE_BREAKS + (
+            "\x1f", "\x00", "\x7f", "\x86", "\ufeff", "\ufffe", "\u202e", "\u200f",
+            "\u061c", "\u2066",
+        ):
+            body = replaced(valid_body(), prose, f"Give callers{character}deterministic feedback.")
+            with self.subTest(codepoint=f"U+{ord(character):04X}"):
+                self.assertEqual(
+                    validator.validate_body(body),
+                    [
+                        validator.REFUSED_BODY_DIAGNOSTIC.format(
+                            line_number_of(body, "Give callers"), ord(character)
+                        )
+                    ],
+                )
+
+    def test_prose_admits_unicode_spaces_and_tabs(self) -> None:
+        # A no-break space is what Option+Space types on macOS; outside headings and the
+        # Checklist section it changes no reading, so prose keeps it.
+        validator = load_validator()
+        prose = "Give callers deterministic pull-request feedback."
+        for replacement in (
+            "Give callers 10\u00a0MB of deterministic feedback.",
+            "Give callers\u2003deterministic\u3000feedback.",
+            "Give callers\tdeterministic feedback.",
+            # Only spaces and tabs before a `#` make a structural line; a no-break space is
+            # not indentation to Markdown, so this line is prose and keeps its no-break space.
+            "Give callers deterministic feedback.\n\n\u00a0# is prose, not a heading.",
+        ):
+            with self.subTest(replacement=ascii(replacement)):
+                self.assertEqual(
+                    validator.validate_body(replaced(valid_body(), prose, replacement)), []
+                )
+
+    def test_rejects_unicode_spaces_on_headings_checklist_lines_and_trailers(self) -> None:
+        validator = load_validator()
+        body = valid_body()
+        item = template_checklist_items()[0]
+        prose = "Give callers deterministic pull-request feedback."
+        cases = {
+            # The audit's P7: the item reads the same once Python strips it, but only space and
+            # tab may surround a checklist item.
+            "checklist item": (
+                replaced(body, f"- [x] {item}", f"- [x]\u2003{item}\u00a0"), item, 0x2003,
+            ),
+            "heading-like line in prose": (
+                replaced(body, prose, f"{prose}\n\n#\u00a0Note"), "#\u00a0Note", 0xA0,
+            ),
+            # A `#` after leading spaces or tabs still makes the line structural.
+            "space-indented heading-like line in prose": (
+                replaced(body, prose, f"{prose}\n\n ##\u00a0Note"), " ##\u00a0Note", 0xA0,
+            ),
+            "tab-indented heading-like line in prose": (
+                replaced(body, prose, f"{prose}\n\n\t#\u2003Note"), "\t#\u2003Note", 0x2003,
+            ),
+            # Invisible format characters (category Cf) are refused on structural lines too.
+            "zero-width space in a coauthor name": (
+                replaced(body, "Co-Authored-By: ", "Co-Authored-By: \u200b"), "Co-Authored-By:", 0x200B,
+            ),
+            "zero-width joiner in a checklist item": (
+                replaced(body, f"- [x] {item}", f"- [x] {item}\u200d"), item, 0x200D,
+            ),
+            "word joiner in a heading-like line": (
+                replaced(body, prose, f"{prose}\n\n# Note\u2060"), "# Note\u2060", 0x2060,
+            ),
+            "middle trailer value": (
+                replaced(body, "automated reviewer", "automated\u00a0reviewer"),
+                "Reviewed-by:",
+                0xA0,
+            ),
+            # The audit's P2c: git reads this last value with the no-break space kept.
+            "last trailer value": (
+                replaced(body, "example.com>\n", "example.com>\u00a0\n"), "Co-Authored-By:", 0xA0,
+            ),
+            # The audit's P2 and P2b: git's blank-line test is ASCII-only, so this paragraph is
+            # not trailers to git.
+            "no-break space line after the trailers": (body + "\u00a0\n", "\u00a0\n", 0xA0),
+            "ideographic space line after the trailers": (body + "\u3000\n", "\u3000\n", 0x3000),
+        }
+        for name, (case_body, needle, code) in cases.items():
+            with self.subTest(case=name):
+                self.assertEqual(
+                    validator.validate_body(case_body),
+                    [
+                        validator.REFUSED_STRUCTURAL_DIAGNOSTIC.format(
+                            line_number_of(case_body, needle), code
+                        )
+                    ],
+                )
+
+    def test_rejects_a_lone_carriage_return_hiding_a_heading(self) -> None:
+        # The audit's P4: Markdown ends a line at a lone carriage return, so GitHub renders a
+        # fifth H2 the validator's line-feed regex never saw.
+        validator = load_validator()
+        body = replaced(
+            valid_body(),
+            "Give callers deterministic pull-request feedback.",
+            "Give callers deterministic pull-request feedback.\r## Extra section\rMore text.",
+        )
+
+        self.assertEqual(
+            validator.validate_body(body),
+            [
+                validator.REFUSED_BODY_DIAGNOSTIC.format(
+                    line_number_of(body, "Give callers"), 0x0D
+                )
+            ],
+        )
+
+    def test_rejects_a_required_item_hidden_inside_an_unchecked_item(self) -> None:
+        # The audit's P7c: to Markdown this is one unchecked task item; rejoining Python's
+        # lines with line feeds made the required item look checked on its own line.
+        validator = load_validator()
+        item = template_checklist_items()[0]
+        body = replaced(valid_body(), f"- [x] {item}", f"- [ ] pending\u2028- [x] {item}")
+
+        self.assertEqual(
+            validator.validate_body(body),
+            [
+                validator.REFUSED_BODY_DIAGNOSTIC.format(
+                    line_number_of(body, "- [ ] pending"), 0x2028
+                )
+            ],
+        )
+
+    def test_accepts_crlf_line_endings(self) -> None:
+        # The audit's P3: a CRLF body was refused because its headings read as `Rationale\r`.
+        validator = load_validator()
+
+        self.assertEqual(validator.validate_body(with_crlf_line_endings(valid_body())), [])
+        self.assertEqual(
+            validator.validate_metadata(
+                "ci: validate pull request metadata", with_crlf_line_endings(valid_body())
+            ),
+            [],
+        )
+
+    def test_event_and_body_file_inputs_reach_the_same_verdict(self) -> None:
+        # The audit's P3b: the body file was read with universal newlines and the event's JSON
+        # was not, so one body passed through one path and failed through the other.
+        title = "ci: validate pull request metadata"
+        prose = "Give callers deterministic pull-request feedback."
+        cases = {
+            "crlf": (with_crlf_line_endings(valid_body()), 0),
+            "lone carriage return in prose": (
+                replaced(valid_body(), prose, "Give callers\rdeterministic pull-request feedback."),
+                1,
+            ),
+            "lone carriage return hiding a heading": (
+                replaced(valid_body(), prose, "Give callers.\r## Extra section\rMore text."),
+                1,
+            ),
+            "trailers joined by a line separator": (joined_trailers_body("\u2028"), 1),
+        }
+        for name, (body, expected_returncode) in cases.items():
+            with self.subTest(case=name):
+                event, direct = run_both_input_paths(title, body)
+
+                self.assertEqual(event.returncode, expected_returncode, event.stderr)
+                self.assertEqual(
+                    (direct.returncode, direct.stdout, direct.stderr),
+                    (event.returncode, event.stdout, event.stderr),
+                )
+                if expected_returncode:
+                    self.assertIn("is refused", event.stderr)
+                    self.assertNotIn("Give callers", event.stderr)
+
+    def test_terminal_trailers_split_at_line_feeds_only(self) -> None:
+        # Direct reader tests: once the refusal runs first, a revert to `splitlines()` or a
+        # bare `rstrip()` is invisible end to end, so the reader is pinned on its own.
+        validator = load_validator()
+
+        joined = validator._terminal_trailers(f"{REVIEWED_TRAILER}\u2028{COAUTHORED_TRAILER}\n")
+        self.assertEqual([match.group("key") for match in joined], ["Reviewed-by"])
+        self.assertIn("\u2028", joined[0].group("value"))
+        self.assertEqual(
+            validator._terminal_trailers(f"{REVIEWED_TRAILER}\n{COAUTHORED_TRAILER}\n\u00a0\n"),
+            [],
+        )
+        self.assertEqual(
+            [
+                match.group("key")
+                for match in validator._terminal_trailers(
+                    f"{REVIEWED_TRAILER}\n{COAUTHORED_TRAILER}\n \t\n"
+                )
+            ],
+            ["Reviewed-by", "Co-Authored-By"],
+        )
+
+    def test_checklist_trailer_removal_splits_at_line_feeds_only(self) -> None:
+        validator = load_validator()
+        section = (
+            "\n\n- [ ] pending\u2028- [x] Required item.\n\n"
+            f"{REVIEWED_TRAILER}\n{COAUTHORED_TRAILER}\n"
+        )
+
+        remaining = validator._without_terminal_lines(section, 2)
+
+        self.assertEqual(remaining, "\n\n- [ ] pending\u2028- [x] Required item.\n")
+        self.assertEqual(
+            validator._without_terminal_lines(f"- [x] Item.\n\n{REVIEWED_TRAILER}\n\u00a0\n", 1),
+            f"- [x] Item.\n\n{REVIEWED_TRAILER}",
+        )
+
+
+class TrailerParagraphTests(unittest.TestCase):
+    def test_rejects_trailers_joined_to_the_checklist(self) -> None:
+        # The audit's P5: git reads trailers only from the final paragraph, so with no empty
+        # line before them it reads none.
+        validator = load_validator()
+        body = replaced(valid_body(), f"\n\n{REVIEWED_TRAILER}", f"\n{REVIEWED_TRAILER}")
+
+        self.assertEqual(
+            validator.validate_body(body),
+            ["body trailers must follow an empty line, as a paragraph of their own"],
+        )
+
+    def test_paragraph_check_reads_lines_and_blanks_as_git_does(self) -> None:
+        # Direct: a line separator does not end a line for git, so the empty line still
+        # precedes this one-trailer block; a no-break-space line is not blank to git.
+        validator = load_validator()
+
+        self.assertTrue(
+            validator._trailers_follow_an_empty_line(
+                f"- [x] Item.\n\n{REVIEWED_TRAILER}\u2028{COAUTHORED_TRAILER}\n", 1
+            )
+        )
+        self.assertFalse(
+            validator._trailers_follow_an_empty_line(f"- [x] Item.\n{REVIEWED_TRAILER}\n", 1)
+        )
+        self.assertFalse(
+            validator._trailers_follow_an_empty_line(
+                f"- [x] Item.\n\u00a0\n{REVIEWED_TRAILER}\n", 1
+            )
+        )
+
+    def test_accepts_a_blank_line_holding_spaces_or_tabs(self) -> None:
+        validator = load_validator()
+        body = replaced(valid_body(), f"\n\n{REVIEWED_TRAILER}", f"\n \t\n{REVIEWED_TRAILER}")
+
+        self.assertEqual(validator.validate_body(body), [])
+
+    def test_filled_pull_request_template_passes(self) -> None:
+        validator = load_validator()
+
+        self.assertEqual(validator.validate_body(template_filled_body()), [])
+
+    def test_filled_template_with_trailers_joined_to_its_closing_comment_fails(self) -> None:
+        validator = load_validator()
+
+        self.assertEqual(
+            validator.validate_body(template_filled_body(before_trailers="")),
+            ["body trailers must follow an empty line, as a paragraph of their own"],
+        )
+
+    @unittest.skipIf(shutil.which("git") is None, "git is not installed")
+    def test_accepted_bodies_carry_exactly_the_trailers_git_reads(self) -> None:
+        # Oracle: whenever the validator accepts a body, the squash commit's trailers as git
+        # reads them are exactly the trailers the validator checked.
+        validator = load_validator()
+        item = template_checklist_items()[0]
+        corpus = {
+            "valid": valid_body(),
+            "valid with CRLF line endings": with_crlf_line_endings(valid_body()),
+            "blank line of spaces and a tab": replaced(
+                valid_body(), f"\n\n{REVIEWED_TRAILER}", f"\n \t\n{REVIEWED_TRAILER}"
+            ),
+            "conventional trailer first": replaced(
+                valid_body(),
+                REVIEWED_TRAILER,
+                f"BREAKING-CHANGE: callers use the new field.\n{REVIEWED_TRAILER}",
+            ),
+            "two coauthors": replaced(
+                valid_body(),
+                COAUTHORED_TRAILER,
+                f"{COAUTHORED_TRAILER}\nCo-Authored-By: Second Automation <second@example.org>",
+            ),
+            "trailing spaces on a middle trailer": replaced(
+                valid_body(), REVIEWED_TRAILER, f"{REVIEWED_TRAILER}  "
+            ),
+            "filled template": template_filled_body(),
+            "thematic break in the Testing section": replaced(
+                valid_body(), "\n\n## Checklist", "\n\n---\n\n## Checklist"
+            ),
+            "filled template, trailers joined to its comment": template_filled_body(""),
+            "trailers joined to the checklist": replaced(
+                valid_body(), f"\n\n{REVIEWED_TRAILER}", f"\n{REVIEWED_TRAILER}"
+            ),
+            "no-break space line after the trailers": valid_body() + "\u00a0\n",
+            "ideographic space line after the trailers": valid_body() + "\u3000\n",
+            "no-break space after the last trailer": replaced(
+                valid_body(), "example.com>\n", "example.com>\u00a0\n"
+            ),
+            "required item inside an unchecked item": replaced(
+                valid_body(), f"- [x] {item}", f"- [ ] pending\u2028- [x] {item}"
+            ),
+        }
+        for separator in PYTHON_ONLY_LINE_BREAKS:
+            corpus[f"trailers joined by U+{ord(separator):04X}"] = joined_trailers_body(separator)
+
+        accepted = []
+        for name, body in corpus.items():
+            if validator.validate_body(body):
+                continue
+            accepted.append(name)
+            with self.subTest(case=name):
+                expected = []
+                for match in validator._terminal_trailers(body.replace("\r\n", "\n")):
+                    value = match.group("value").rstrip(" \t")
+                    expected.append(f"{match.group('key')}: {value}")
+                self.assertEqual(git_trailer_lines(body), expected)
+
+        self.assertEqual(
+            accepted,
+            [
+                "valid",
+                "valid with CRLF line endings",
+                "blank line of spaces and a tab",
+                "conventional trailer first",
+                "two coauthors",
+                "trailing spaces on a middle trailer",
+                "filled template",
+                "thematic break in the Testing section",
+            ],
+        )
 
 
 if __name__ == "__main__":

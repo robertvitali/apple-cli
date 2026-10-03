@@ -110,6 +110,26 @@ def show_output(statuses):
     return "\n".join(rendered) + "\n"
 
 
+REFUSED_SOURCE = "changed source contains a refused character"
+# A Swift comment that, read by `str.splitlines`, ends at U+2028 and leaves a hunk header behind.
+FORGED_HUNK_COMMENT = "// note\u2028@@ -1 +200,90 @@"
+
+
+def separator_source() -> str:
+    """A new Swift file of 100 lines by line feed: ten uncovered functions, then 90 comment
+    lines that each hold U+2028 and an llvm-cov `N|count|` prefix (190 lines to `splitlines`)."""
+    functions = "".join(f"func f{index}() {{}}\n" for index in range(1, 11))
+    return functions + "".join(f"// pad\u2028   {100 + index}|      9|\n" for index in range(1, 91))
+
+
+def separator_show() -> str:
+    """llvm-cov `show` text for `separator_source`, assuming it prints source text verbatim."""
+    functions = "".join(f"{index:5d}|      0|func f{index}() {{}}\n" for index in range(1, 11))
+    return functions + "".join(
+        f"{10 + index:5d}|       |// pad\u2028   {100 + index}|      9|\n" for index in range(1, 91)
+    )
+
+
 class CoverageTool:
     def __init__(self, base_binary, head_binary, base_lcov, head_lcov, statuses):
         self.base_binary = str(base_binary)
@@ -498,7 +518,9 @@ class CoveragePolicyTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertIn("changed-line coverage is below 90%", result.diagnostics)
 
-    def test_nul_containing_swift_uses_text_diff_for_changed_lines(self):
+    def test_nul_containing_swift_is_refused_before_changed_lines(self):
+        # NUL is a C0 control, which the shared refusal rule refuses like every other one, so
+        # a changed blob holding it is refused before git ever diffs it.
         write_bytes(self.base_repo / "Sources" / "AppleKit" / "NulComment.swift", b"let value = 1\n// comment\x00\n")
         write_bytes(self.head_repo / "Sources" / "AppleKit" / "NulComment.swift", b"let value = 2\n// comment\x00\n")
         for repo in (self.base_repo, self.head_repo):
@@ -514,7 +536,116 @@ class CoveragePolicyTests(unittest.TestCase):
         result, _tool = self.evaluate(base_lcov, head_lcov, statuses)
 
         self.assertFalse(result.ok)
-        self.assertIn("changed-line coverage is below 90%", result.diagnostics)
+        self.assertEqual(result.diagnostics, REFUSED_SOURCE)
+
+    def test_refused_character_rule_matches_the_workflow_scan(self):
+        # The coverage policy carries the workflow scan's rule as a local copy; every code point
+        # must agree, as action_pins.py's copy must.
+        spec = importlib.util.spec_from_file_location(
+            "workflow_policy", REPO_ROOT / "scripts" / "ci" / "workflow_policy.py"
+        )
+        workflow_policy = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(workflow_policy)
+        disagreements = [
+            code for code in range(0x110000)
+            if self.policy._refused_character(chr(code)) != workflow_policy.refused_character(chr(code), " \t")
+        ]
+        self.assertEqual(disagreements, [])
+        # Space, tab and line feed are the only whitespace a source may hold.
+        text = self.policy._decode_source_text(b"let a\t= 1 \n", error_message="checkout identity is invalid")
+        self.assertEqual(text, "let a\t= 1 \n")
+
+    def test_changed_swift_holding_a_refused_character_is_refused(self):
+        rel = "Sources/AppleKit/Synthetic.swift"
+        cov = {target: (10, 10) for target in TARGETS}
+        for character in ("\u2028", "\u2029", "\u0085", "\u000b", "\u000c", "\u001c", "\r", "\u00a0",
+                          "\u3000", "\ufeff", "\u202e"):
+            with self.subTest(code_point=f"U+{ord(character):04X}"):
+                comment = FORGED_HUNK_COMMENT.replace("\u2028", character)
+                self.head_sha = commit_file(self.head_repo, rel, f"line one {comment}\nline two\n")
+
+                result, _tool = self.evaluate(
+                    lcov_for(self.base_repo, cov), lcov_for(self.head_repo, cov), {rel: [(1, "covered")]}
+                )
+
+                self.assertFalse(result.ok)
+                self.assertEqual(result.diagnostics, REFUSED_SOURCE)
+                self.assertNotIn(comment, result.diagnostics)
+
+    def test_base_swift_holding_a_refused_character_may_be_cleaned_up(self):
+        # Only git reads the base blob, and its removed lines reach the policy prefixed with `-`,
+        # so the forged hunk header in the removed comment changes nothing: the change that
+        # removes the character passes, with exactly git's two changed lines.
+        rel = "Sources/AppleKit/Synthetic.swift"
+        self.base_sha = commit_file(self.base_repo, rel, f"line one {FORGED_HUNK_COMMENT}\nline two\n")
+        self.head_sha = commit_file(self.head_repo, rel, "line one\nline two changed\n")
+        cov = {target: (10, 10) for target in TARGETS}
+
+        result, _tool = self.evaluate(
+            lcov_for(self.base_repo, cov),
+            lcov_for(self.head_repo, cov),
+            {rel: [(1, "covered"), (2, "covered")]},
+        )
+
+        self.assertTrue(result.ok, result.diagnostics)
+        self.assertEqual((result.changed_coverage.covered, result.changed_coverage.count), (2, 2))
+
+    def test_new_swift_file_holding_line_separators_cannot_pass_changed_coverage(self):
+        rel = "Sources/AppleKit/NewFile.swift"
+        self.head_sha = commit_file(self.head_repo, rel, separator_source())
+        cov = {target: (10, 10) for target in TARGETS}
+        head_lcov = lcov_for(self.head_repo, cov) + lcov_record(
+            self.head_repo / rel, [(line, 0) for line in range(1, 11)], lf=10, lh=0
+        )
+
+        result, _tool = self.evaluate(
+            lcov_for(self.base_repo, cov), head_lcov, llvm_cov_show_runner=lambda _command, _cwd: separator_show()
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.diagnostics, REFUSED_SOURCE)
+        self.assertNotEqual(result.changed_coverage.status, "PASS")
+
+    def test_new_file_lines_are_numbered_by_line_feeds_even_without_the_refusal(self):
+        # Defence in depth: with the refusal patched out, the new file is still numbered as git
+        # and llvm-cov number it (100 lines, not 190), so its ten uncovered functions fail.
+        rel = "Sources/AppleKit/NewFile.swift"
+        self.head_sha = commit_file(self.head_repo, rel, separator_source())
+        source = self.policy._git_tree_source_files(self.head_repo, self.head_sha)[rel]
+        cov = {target: (10, 10) for target in TARGETS}
+        head_lcov = lcov_for(self.head_repo, cov) + lcov_record(
+            self.head_repo / rel, [(line, 0) for line in range(1, 11)], lf=10, lh=0
+        )
+
+        with mock.patch.object(self.policy, "_refused_character", return_value=False):
+            lines = self.policy._read_blob_lines(self.head_repo, source)
+            result, _tool = self.evaluate(
+                lcov_for(self.base_repo, cov), head_lcov, llvm_cov_show_runner=lambda _command, _cwd: separator_show()
+            )
+
+        self.assertEqual(len(lines), 100)
+        self.assertEqual(result.changed_coverage, self.policy.ChangedCoverage(covered=0, count=10, status="FAIL"))
+
+    def test_changed_lines_follow_git_line_feeds_not_unicode_line_separators(self):
+        base = "".join(f"let v{index} = {index}\n" for index in range(1, 301))
+        head = base.replace("let v5 = 5\n", f"let v5 = 5 {FORGED_HUNK_COMMENT}\n", 1)
+        base_path = write(self.root / "diff-base.swift", base)
+        head_path = write(self.root / "diff-head.swift", head)
+
+        diff = self.policy._run_git_diff(base_path, head_path)
+
+        hunks = [line for line in diff.split("\n") if line.startswith("@@")]
+        self.assertEqual(len(hunks), 1)
+        self.assertTrue(hunks[0].startswith("@@ -5 +5 @@"))
+        self.assertEqual(self.policy._changed_lines_from_unified_diff(diff), [5])
+
+    def test_hunk_header_pattern_reads_ascii_digits_only(self):
+        self.assertIsNotNone(self.policy.DIFF_HUNK_RE.match("@@ -1,2 +3,4 @@ context"))
+        # git writes hunk ranges in ASCII digits; `\d` would also match other scripts' digits.
+        for header in ("@@ -1 +\u0665 @@", "@@ -1 +5,\u0665 @@", "@@ -\uff11 +5 @@", "@@ -1,\u0661 +5 @@"):
+            with self.subTest(header=ascii(header)):
+                self.assertIsNone(self.policy.DIFF_HUNK_RE.match(header))
 
     def test_changed_content_without_hunks_fails_closed(self):
         self.head_sha = commit_file(self.head_repo, "Sources/AppleKit/Synthetic.swift", "changed\nline two\n")
@@ -830,6 +961,17 @@ class CoveragePolicyTests(unittest.TestCase):
 
         self.assertEqual(str(raised.exception), "coverage input is invalid")
 
+    def test_lcov_lines_are_split_at_line_feeds_only(self):
+        # llvm-cov ends LCOV lines with line feeds: a U+2028 inside a test name does not start
+        # an `SF:` line, so the record that follows has no source and is refused.
+        source = self.base_repo / "Sources" / "AppleKit" / "Synthetic.swift"
+        body = f"TN:\u2028SF:{source}\nDA:1,1\nLF:1\nLH:1\nend_of_record\n"
+
+        with self.assertRaises(self.policy.PolicyError) as raised:
+            self.policy.parse_lcov_text_for_test(body, self.base_repo)
+
+        self.assertEqual(str(raised.exception), "coverage input is invalid")
+
     def test_lcov_ignores_test_support_records_without_counting_them_as_production(self):
         support = write(self.base_repo / "Sources" / "TestSupport" / "ScratchDirs.swift", "one\n")
         report = self.policy.parse_lcov_text_for_test(lcov_record(support, [(1, 1)]), self.base_repo)
@@ -934,6 +1076,46 @@ class CoveragePolicyTests(unittest.TestCase):
         statuses = self.policy.parse_llvm_cov_show("    1|     00|synthetic\n")
 
         self.assertEqual(statuses, {1: "uncovered"})
+
+    def test_llvm_show_parser_numbers_entries_by_line_feed_only(self):
+        statuses = self.policy.parse_llvm_cov_show("    1|      0|// pad\u2028    2|      9|\n    3|       |x\n")
+
+        self.assertEqual(statuses, {1: "uncovered", 3: "non_coverable"})
+        self.assertEqual(sorted(self.policy.parse_llvm_cov_show(separator_show())), list(range(1, 101)))
+
+    def test_llvm_show_parser_admits_only_ascii_spaces_and_digits_in_its_columns(self):
+        bodies = (
+            "\u00a0   1|      7|synthetic\n",
+            "\u3000   1|      7|synthetic\n",
+            "    1|      7|synthetic\n\u00a0      ^7\n",
+            "   \u0667|      9|synthetic\n",
+            "   \uff15|      9|synthetic\n",
+            # The count column is padded with ASCII spaces only.
+            "    1|\u00a0     7|synthetic\n",
+            "    1|\t     7|synthetic\n",
+            "    1|      7\u2028|synthetic\n",
+            "    1|      7\r|synthetic\n",
+            "    1|\u00a0|synthetic\n",
+        )
+        for body in bodies:
+            with self.subTest(body=ascii(body)):
+                with self.assertRaises(self.policy.PolicyError) as raised:
+                    self.policy.parse_llvm_cov_show(body)
+                self.assertEqual(str(raised.exception), "line-status input is invalid")
+        # A region-marker line indented with ASCII spaces is still skipped.
+        self.assertEqual(self.policy.parse_llvm_cov_show("    1|      7|synthetic\n       ^7\n"), {1: "covered"})
+
+    def test_nonnegative_int_parser_accepts_only_ascii_digits(self):
+        self.assertEqual(self.policy._parse_nonnegative_int("5"), 5)
+        for raw in ("\u0665", "\uff15", "5\u0665"):
+            with self.subTest(raw=ascii(raw)):
+                with self.assertRaises(self.policy.PolicyError) as raised:
+                    self.policy._parse_nonnegative_int(raw)
+                self.assertEqual(str(raised.exception), "coverage input is invalid")
+        source = self.base_repo / "Sources" / "AppleKit" / "Synthetic.swift"
+        with self.assertRaises(self.policy.PolicyError) as raised:
+            self.policy.parse_lcov_text_for_test(f"TN:\nSF:{source}\nDA:\u0665,1\nLF:1\nLH:1\nend_of_record\n", self.base_repo)
+        self.assertEqual(str(raised.exception), "coverage input is invalid")
 
     def test_llvm_show_parser_rejects_oversized_integer_count_value_free(self):
         body = f"    1|{'9' * 5_000}|synthetic\n"

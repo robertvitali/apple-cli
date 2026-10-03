@@ -354,6 +354,25 @@ JSON output are stable per the versioning policy — breaking changes bump
   policy job, by design, until the design's Dependabot workflow-pin exception (§10.5) exists.
   **For anyone running the binary, nothing changes:** no `apple` command, output field, error
   type, or exit code is affected, and `schema_version` stays `1`.
+- **The CI checks now read pull-request text, lock files, Bats files, Swift sources and commit
+  subjects the way git, pip, bash and Swift do.** Python's own idea of whitespace and line breaks is
+  wider than those tools', so a check could reach a different verdict than the tool it stands in
+  for. `governance / required` now accepts a description with Windows line endings. In the
+  description it refuses line breaks other than a line feed, control characters other than a tab,
+  bidirectional controls and a byte-order mark; on lines whose first character after any leading
+  spaces or tabs is `#`, and everywhere from the `## Checklist` heading on (its items, comments and
+  trailers), it also refuses Unicode spaces other than the space and tab, and invisible format
+  characters. The title admits only the space as whitespace and refuses invisible format characters
+  too. The check also requires an empty line before the trailer block, because git reads trailers
+  from a message's last paragraph; the pull-request template now says so. The documentation-lock
+  check now agrees with pip on where a hash continuation starts and ends, and refuses Unicode
+  spaces, line breaks other than a line feed, control characters other than a tab, bidirectional
+  controls and a byte-order mark in the files it reads. The Bats inventory and the coverage policy
+  refuse the same characters as the workflow scan before they parse, the release-preparation
+  rehearsal reads commit subjects and release tag names one per line feed as git writes them, and
+  the capability policy ends a Swift `//` comment at a carriage return as Swift does. **For anyone
+  running the binary, nothing changes:** no `apple` command, output field, error type, or exit code
+  is affected, and `schema_version` stays `1`.
 
 - **macOS 27 is now a tested and supported runtime baseline, alongside macOS 26.** The full
   local canonical suite (the logic, Python automation and local CLI tiers; the live tier is
