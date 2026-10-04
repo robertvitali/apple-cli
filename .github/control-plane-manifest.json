@@ -86,6 +86,7 @@
   "docs/runbooks/.gitkeep",
   "docs/runbooks/urgent-release.md",
   "docs/superpowers/specs/2026-09-01-publication-automation-design.md",
+  "docs/superpowers/specs/2026-10-03-launch-specification.md",
   "mkdocs.yml",
   "scripts/check-release-notes.py",
   "scripts/ci/action_pins.py",
