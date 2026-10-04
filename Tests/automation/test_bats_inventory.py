@@ -156,6 +156,14 @@ def refusal_message(label: str, line: int, code: int) -> str:
     )
 
 
+def invisible_refusal_message(label: str, line: int, code: int) -> str:
+    return (
+        f"{label} line {line} contains refused character U+{code:04X} "
+        "(an invisible format, private-use, unassigned, default-ignorable or blank character, "
+        "which a reviewer cannot see, such as a variation selector after an emoji)"
+    )
+
+
 @contextmanager
 def refusal_bypassed(checker: ModuleType):
     """Stub out the character refusal, so a test reaches the tokenisers behind it."""
@@ -235,6 +243,15 @@ WHITESPACE_FIXTURES = {
 REFUSED_SAMPLES = (
     "\u00a0", "\u1680", "\u2000", "\u2007", "\u200a", "\u2028", "\u2029", "\u202f", "\u205f",
     "\u3000", "\u0085", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x1f", "\r", "\ufeff", "\u202e",
+)
+
+# Characters a reviewer cannot see: format characters (Cf, the tag character U+E0041 among them),
+# private use (Co), unassigned (Cn: U+0378 in every Unicode version), and the default-ignorable code
+# points and the blank outside those categories.
+INVISIBLE_SAMPLES = (
+    "\u200b", "\u200c", "\u200d", "\u2060", "\u00ad", "\u2062", "\U000e0041", "\ue000", "\U000f0000",
+    "\u0378", "\u3164", "\uffa0", "\u115f", "\u1160", "\u2800", "\u034f", "\ufe0f", "\U000e0101",
+    "\u180b", "\u17b4",
 )
 
 # The pin-regeneration contract, written out here rather than read from the checker, so a change
@@ -1415,6 +1432,55 @@ class BatsInventoryTests(unittest.TestCase):
         self.assertFalse(checker._refused_character("\t"))
         self.assertTrue(checker._refused_character("\n"))  # line feeds are split out before the check
 
+    def test_invisible_character_rule_matches_the_workflow_scan(self) -> None:
+        # The second rule, too, is a copy of the workflow scan's; every code point must agree under
+        # one interpreter (category Cn follows its Unicode database).
+        checker = load_checker()
+        spec = importlib.util.spec_from_file_location(
+            "workflow_policy", REPO_ROOT / "scripts" / "ci" / "workflow_policy.py"
+        )
+        policy = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(policy)
+        disagreements = [
+            code for code in range(0x110000)
+            if checker._invisible_character(chr(code)) != policy.invisible_character(chr(code))
+        ]
+        self.assertEqual(disagreements, [])
+        self.assertEqual(checker._INVISIBLE_OUTSIDE_FORMAT, policy.INVISIBLE_OUTSIDE_FORMAT)
+
+    def test_bats_readers_refuse_invisible_characters_before_tokenising(self) -> None:
+        checker = load_checker()
+        sentinel = "private-candidate-text"
+        for character in INVISIBLE_SAMPLES:
+            with self.subTest(code_point=f"U+{ord(character):04X}"), tempfile.TemporaryDirectory() as temporary_directory:
+                candidate = Path(temporary_directory) / "sample.bats"
+                candidate.write_text(
+                    FIXTURE_HEADER + f"# {sentinel}{character}x\n"
+                    + '\n@test "hosted example" {\n  true\n}\n',
+                    encoding="utf-8",
+                )
+                expected = invisible_refusal_message("Bats file", 6, ord(character))
+
+                # Tokenising must not start: the refusal comes first.
+                with mock.patch.object(checker, "_scan_shell_line",
+                                       side_effect=AssertionError("tokenising started")), \
+                        self.assertRaises(checker.InventoryError) as parse_refusal:
+                    checker._parse_bats_source(
+                        candidate.read_bytes().decode("utf-8"), "bats/hosted/sample.bats"
+                    )
+                with self.assertRaises(checker.InventoryError) as read_refusal:
+                    checker.read_bats_file(candidate, "bats/hosted/sample.bats")
+                with self.assertRaises(checker.InventoryError) as discovery_refusal:
+                    checker._discover_bats_count(candidate, "bats/hosted/sample.bats")
+
+            self.assertEqual(str(parse_refusal.exception), expected)
+            self.assertEqual(str(read_refusal.exception), expected)
+            self.assertEqual(str(discovery_refusal.exception), expected)
+            self.assertNotIn(sentinel, expected)
+        self.assertIsNone(checker._first_invisible_character("a\tb \nc\n"))
+        self.assertEqual(checker._first_invisible_character("a\nb\u200bc\n"), (2, 0x200B))
+
     def test_bats_readers_refuse_unicode_whitespace_and_controls_before_tokenising(self) -> None:
         checker = load_checker()
         sentinel = "private-candidate-text"
@@ -1480,6 +1546,41 @@ class BatsInventoryTests(unittest.TestCase):
             errors = checker.validate_repository(root, manifest_path)
 
         self.assertEqual(errors, (refusal_message("live file", 2, 0x00A0),))
+
+    def test_live_file_with_invisible_character_is_rejected(self) -> None:
+        checker = load_checker()
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            manifest_path = write_fixture_manifest(root)
+            live = root / "bats" / "live" / "manual.sh"
+            live.write_text("#!/bin/sh\n# @test\u200b\nexit 0\n", encoding="utf-8")
+
+            errors = checker.validate_repository(root, manifest_path)
+
+        self.assertEqual(errors, (invisible_refusal_message("live file", 2, 0x200B),))
+
+    def test_invisible_character_is_refused_end_to_end_without_echoing_the_line(self) -> None:
+        checker = load_checker()
+        sentinel = "private-candidate-text"
+        source = (FIXTURE_HEADER + f"# {sentinel}\u200bx\n"
+                  + '\n@test "hosted example" {\n  true\n}\n')
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            manifest_path = write_fixture_manifest(root)
+            install_rehashed_source(root, manifest_path, "hosted", source)
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+
+            errors = checker.validate_repository(root, manifest_path)
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                status = checker.run(["--root", str(root), "--manifest", str(manifest_path)])
+
+        self.assertIn(invisible_refusal_message("Bats file", 6, 0x200B), errors)
+        self.assertEqual(status, 1)
+        rendered = stdout.getvalue() + stderr.getvalue()
+        self.assertIn("U+200B", rendered)
+        self.assertNotIn(sentinel, rendered)
+        self.assertNotIn("\u200b", rendered)
 
     def test_line_splitting_follows_line_feeds_only(self) -> None:
         checker = load_checker()

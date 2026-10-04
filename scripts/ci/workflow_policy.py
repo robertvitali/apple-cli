@@ -76,8 +76,9 @@ explicit read-only `permissions` requirement on every job (backed by the reposit
 SHA pinning enforced by `action_pins.py` are the controls that bound what such a path
 could do. Every check also reads the file through this hand-written parser: the character
 refusals below (only space, tab and line feed as whitespace; no control character,
-byte-order mark, bidirectional control or other character outside YAML's printable set, in
-the text or after decoding an escape) narrow the constructs it could read differently from GitHub's loader,
+byte-order mark, bidirectional control or other character outside YAML's printable set, and
+none of the recorded invisible characters of `invisible_character`, in the text or after
+decoding an escape) narrow the constructs it could read differently from GitHub's loader,
 but do not prove there are none. A no-break space before `#` was one until 2026-09-26: it
 ended a comment here, and a write command after it passed. The recorded sets below are
 control plane: changing a trigger, a required check name or an admitted runner label edits
@@ -89,6 +90,7 @@ import argparse
 import importlib.util
 import re
 import sys
+import unicodedata
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Sequence, Tuple
 
@@ -259,8 +261,9 @@ def refused_character(character: str, whitespace: str) -> bool:
     mark (U+FEFF), which YAML loaders may skip silently where this parser would not, or one of
     Unicode's bidirectional controls (U+061C, U+200E, U+200F, U+202A-U+202E, U+2066-U+2069),
     which can make the text a reviewer sees differ from the text every parser reads. Zero-width
-    and other invisible characters are NOT refused: they are not whitespace to either reader, so
-    they change no parse, but a reviewer cannot see them.
+    and other invisible characters are not refused here: they are not whitespace to either reader,
+    so they change no parse, and `invisible_character` refuses them in a separate pass, which
+    leaves this rule, and its copies in readers of other text, unchanged.
 
     CONTROL PLANE — YAML starts a comment and separates tokens only at a space or a tab.
     Python's `str.isspace`, `str.strip`, `str.splitlines` and regex `\\s` also accept the
@@ -283,6 +286,50 @@ def refused_character(character: str, whitespace: str) -> bool:
             or 0x2066 <= code <= 0x2069 or code in (0x061C, 0x200E, 0x200F, 0xFEFF, 0xFFFE, 0xFFFF))
 
 
+# Default-ignorable code points outside categories Cf and Cn (Unicode's derived core properties):
+# the combining grapheme joiner, the Hangul fillers, the Khmer inherent vowels, the Mongolian free
+# variation selectors and the variation selectors; and U+2800 BRAILLE PATTERN BLANK, which most
+# fonts draw as nothing.
+INVISIBLE_OUTSIDE_FORMAT = frozenset(
+    [0x034F, 0x115F, 0x1160, 0x17B4, 0x17B5, 0x180B, 0x180C, 0x180D, 0x180F, 0x2800, 0x3164, 0xFFA0]
+    + list(range(0xFE00, 0xFE10))
+    + list(range(0xE0100, 0xE01F0))
+)
+
+
+def invisible_character(character: str) -> bool:
+    """True for a character in the recorded set a reviewer cannot see: a format character
+    (Unicode category Cf: the zero-width space, the joiners, the soft hyphen, the word joiner,
+    the invisible operators and the tag characters among them), a private-use (Co) or
+    unassigned (Cn) code point, or one in INVISIBLE_OUTSIDE_FORMAT. It overlaps
+    `refused_character` (both refuse the byte-order mark, the bidirectional controls, U+FFFE and
+    U+FFFF); every reader runs that rule first over a file's text, so this pass reports only what
+    the first admits there, while in a decoded scalar the two are checked together under one
+    message.
+    Such a character is not whitespace or a line break to this parser, but it can make the file
+    a code owner reviews look different from the file every reader runs, so it is refused, never
+    interpreted. Cn follows the running interpreter's Unicode database
+    (`unicodedata.unidata_version`): a code point assigned in a later Unicode version than that
+    interpreter's is refused, which fails closed. The other direction is an accepted residual:
+    the reserved default-ignorable ranges are refused only as Cn, so a later Unicode version
+    that assigns one of them a category outside Cf would admit it until it is added to
+    INVISIBLE_OUTSIDE_FORMAT. The set is not every character that can render blank: U+1D159
+    MUSICAL SYMBOL NULL NOTEHEAD and U+16FE4 KHITAN SMALL SCRIPT FILLER, for two, are admitted.
+    COUPLING: `action_pins.py` and `bats_inventory.py` keep copies; each has a test that it
+    agrees with this one for every code point under one interpreter."""
+    category = unicodedata.category(character)
+    return category in ("Cf", "Co", "Cn") or ord(character) in INVISIBLE_OUTSIDE_FORMAT
+
+
+def first_invisible_character(text: str) -> Optional[Tuple[int, int]]:
+    """(line number, code point) of the first character `invisible_character` refuses, else None."""
+    for number, line in enumerate(text.split("\n"), start=1):
+        for character in line:
+            if invisible_character(character):
+                return number, ord(character)
+    return None
+
+
 def first_refused_character(text: str) -> Optional[Tuple[int, int]]:
     """(line number, code point) of the first refused character in a file's text, else None.
 
@@ -300,7 +347,8 @@ def _first_refused_in_scalars(node: Any) -> Optional[int]:
     A double-quoted scalar's escapes (`\\_` is a no-break space, `\\N`, `\\L`, `\\P`, `\\r`,
     `\\u...`) produce characters the file's text never held, so the parsed document is checked
     again. A line feed and a tab are admitted here: block scalars carry line feeds, and both
-    mean the same thing to YAML, Python and the shell."""
+    mean the same thing to YAML, Python and the shell. An invisible character (`\\u200b`, for
+    one) is refused here as well."""
     if isinstance(node, dict):
         for key, value in node.items():
             for part in (key, value):
@@ -314,7 +362,7 @@ def _first_refused_in_scalars(node: Any) -> Optional[int]:
                 return found
     elif isinstance(node, str):
         for character in node:
-            if refused_character(character, " \t\n"):
+            if refused_character(character, " \t\n") or invisible_character(character):
                 return ord(character)
     return None
 
@@ -678,6 +726,11 @@ def parse_workflow(text: str) -> Dict[str, Any]:
         raise ParseError("line {}: character U+{:04X} is refused (only space, tab and line feed may be "
                          "whitespace; no control character, byte-order mark, bidirectional control or "
                          "other character outside YAML's printable set)".format(*refused))
+    invisible = first_invisible_character(text)
+    if invisible is not None:
+        raise ParseError("line {}: character U+{:04X} is refused (an invisible format, private-use, "
+                         "unassigned, default-ignorable or blank character, which a reviewer cannot "
+                         "see, such as a variation selector after an emoji)".format(*invisible))
     lines = _Lines(text)
     if lines.peek() is None:
         raise ParseError("empty workflow")

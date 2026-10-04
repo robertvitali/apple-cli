@@ -18,6 +18,7 @@ from pathlib import Path
 import re
 import stat
 import sys
+import unicodedata
 from typing import NamedTuple, Optional
 
 
@@ -314,6 +315,25 @@ def _refused_character(character: str) -> bool:
             or 0x2066 <= code <= 0x2069 or code in (0x061C, 0x200E, 0x200F, 0xFEFF, 0xFFFE, 0xFFFF))
 
 
+# COUPLING: `workflow_policy.INVISIBLE_OUTSIDE_FORMAT` is the same set.
+_INVISIBLE_OUTSIDE_FORMAT = frozenset(
+    [0x034F, 0x115F, 0x1160, 0x17B4, 0x17B5, 0x180B, 0x180C, 0x180D, 0x180F, 0x2800, 0x3164, 0xFFA0]
+    + list(range(0xFE00, 0xFE10))
+    + list(range(0xE0100, 0xE01F0))
+)
+
+
+def _invisible_character(character: str) -> bool:
+    """A character a reviewer cannot see: Unicode category Cf, Co or Cn, or one in
+    _INVISIBLE_OUTSIDE_FORMAT (the default-ignorable code points outside those categories, and
+    U+2800). Refused in a separate pass after `_refused_character`.
+
+    COUPLING: `workflow_policy.invisible_character` is the same rule; keep the two in step
+    (`Tests/automation/test_action_pins.py` checks they agree)."""
+    category = unicodedata.category(character)
+    return category in ("Cf", "Co", "Cn") or ord(character) in _INVISIBLE_OUTSIDE_FORMAT
+
+
 class _DuplicateKey(Exception):
     """A JSON object repeats a key; `json` would otherwise keep the last value silently."""
 
@@ -330,12 +350,12 @@ def load_allowlist(path: Path = ALLOWLIST_PATH) -> dict[str, tuple[str, str]]:
 
     Format, schema_version 1, every rule fail-closed: a regular file (a symlink is refused) of at
     most MAX_ALLOWLIST_BYTES, UTF-8 holding no character `_refused_character` refuses (so no
-    byte-order mark and no carriage return); one JSON object, no key repeated at any level, with
-    exactly the keys `schema_version` (the integer 1) and `actions`, a non-empty list of objects
-    with exactly the keys `name` (ALLOWLIST_NAME_PATTERN), `sha` (40 lowercase hexadecimal
-    characters) and `version` (the `vMAJOR.MINOR.PATCH` annotation every `uses:` of that pin
-    carries); names unique and in sorted order. A failure raises ValueError with a value-free
-    message naming the file.
+    byte-order mark and no carriage return) and no invisible character (`_invisible_character`);
+    one JSON object, no key repeated at any level, with exactly the keys `schema_version` (the
+    integer 1) and `actions`, a non-empty list of objects with exactly the keys `name`
+    (ALLOWLIST_NAME_PATTERN), `sha` (40 lowercase hexadecimal characters) and `version` (the
+    `vMAJOR.MINOR.PATCH` annotation every `uses:` of that pin carries); names unique and in sorted
+    order. A failure raises ValueError with a value-free message naming the file.
 
     WHICH CHECKOUT. The file is read from this script's own checkout (POLICY_ROOT), never from the
     `--root` under scan, as `quality.py` reads its policy from the policy root and the proposal from
@@ -368,6 +388,14 @@ def load_allowlist(path: Path = ALLOWLIST_PATH) -> dict[str, tuple[str, str]]:
                     f"{label}:{line_number}: character U+{ord(character):04X} is refused (only space, "
                     "tab and line feed may be whitespace; no control character, byte-order mark, "
                     "bidirectional control or noncharacter)"
+                )
+    for line_number, line in enumerate(text.split("\n"), start=1):
+        for character in line:
+            if _invisible_character(character):
+                raise ValueError(
+                    f"{label}:{line_number}: character U+{ord(character):04X} is refused (an "
+                    "invisible format, private-use, unassigned, default-ignorable or blank character, "
+                    "which a reviewer cannot see, such as a variation selector after an emoji)"
                 )
     try:
         document = json.loads(text, object_pairs_hook=_refuse_duplicate_keys)
@@ -427,7 +455,8 @@ def _scan_file(
     # another Unicode space, a Unicode line separator, a carriage return), a byte-order mark, a
     # bidirectional control and any character outside YAML's printable set are refused before
     # the line scan, so `splitlines()` and the
-    # comment boundary below cannot read a different document than GitHub does.
+    # comment boundary below cannot read a different document than GitHub does. An invisible
+    # character (`_invisible_character`) is refused next, so a reviewer sees what runs.
     for line_number, line in enumerate(text.split("\n"), start=1):
         for character in line:
             if _refused_character(character):
@@ -436,6 +465,15 @@ def _scan_file(
                     "character U+{:04X} is refused (only space, tab and line feed may be whitespace; "
                     "no control character, byte-order mark, bidirectional control or other character "
                     "outside YAML's printable set)".format(ord(character)),
+                )]
+    for line_number, line in enumerate(text.split("\n"), start=1):
+        for character in line:
+            if _invisible_character(character):
+                return references, [(
+                    line_number,
+                    "character U+{:04X} is refused (an invisible format, private-use, unassigned, "
+                    "default-ignorable or blank character, which a reviewer cannot see, such as a "
+                    "variation selector after an emoji)".format(ord(character)),
                 )]
     lines = text.splitlines()
 

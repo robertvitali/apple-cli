@@ -13,6 +13,7 @@ import re
 import stat
 import sys
 import tempfile
+import unicodedata
 from typing import Any, Callable, Iterable, Optional
 
 
@@ -213,6 +214,37 @@ def _refused_character(character: str) -> bool:
             or 0x2066 <= code <= 0x2069 or code in (0x061C, 0x200E, 0x200F, 0xFEFF, 0xFFFE, 0xFFFF))
 
 
+# COUPLING: `workflow_policy.INVISIBLE_OUTSIDE_FORMAT` is the same set.
+_INVISIBLE_OUTSIDE_FORMAT = frozenset(
+    [0x034F, 0x115F, 0x1160, 0x17B4, 0x17B5, 0x180B, 0x180C, 0x180D, 0x180F, 0x2800, 0x3164, 0xFFA0]
+    + list(range(0xFE00, 0xFE10))
+    + list(range(0xE0100, 0xE01F0))
+)
+
+
+def _invisible_character(character: str) -> bool:
+    """A character a reviewer cannot see: Unicode category Cf (the zero-width space, the joiners,
+    the soft hyphen and the rest), a private-use (Co) or unassigned (Cn) code point, or one in
+    _INVISIBLE_OUTSIDE_FORMAT (the default-ignorable code points outside those categories, and
+    U+2800). bash treats it as neither a blank nor a line break, so it moves no token boundary,
+    but it can make the file a code owner reviews look different from what runs, so it is
+    refused, never interpreted.
+
+    COUPLING: `workflow_policy.invisible_character` is the same rule; keep the two in step
+    (`Tests/automation/test_bats_inventory.py` checks they agree)."""
+    category = unicodedata.category(character)
+    return category in ("Cf", "Co", "Cn") or ord(character) in _INVISIBLE_OUTSIDE_FORMAT
+
+
+def _first_invisible_character(source: str) -> Optional[tuple[int, int]]:
+    """(line number, code point) of the first invisible character, else None."""
+    for line_number, line in enumerate(source.split("\n"), 1):
+        for character in line:
+            if _invisible_character(character):
+                return line_number, ord(character)
+    return None
+
+
 def _first_refused_character(source: str) -> Optional[tuple[int, int]]:
     """(line number, code point) of the first refused character, else None. Line feeds split
     the lines; inside a line only a space and a tab are admitted whitespace."""
@@ -232,6 +264,14 @@ def _refuse_characters(source: str, label: str) -> None:
             f"{label} line {line_number} contains refused character U+{code:04X} "
             "(only space, tab and line feed may be whitespace; no control, byte-order mark "
             "or bidirectional control)"
+        )
+    invisible = _first_invisible_character(source)
+    if invisible is not None:
+        line_number, code = invisible
+        raise InventoryError(
+            f"{label} line {line_number} contains refused character U+{code:04X} "
+            "(an invisible format, private-use, unassigned, default-ignorable or blank character, "
+            "which a reviewer cannot see, such as a variation selector after an emoji)"
         )
 
 

@@ -304,8 +304,11 @@ anything, the parser refuses (for every Bats file, and for the files under `bats
 whitespace other than a space, a tab and a line feed (so a carriage return, which rules out CRLF
 line endings, a no-break space or any other Unicode space, U+2028, U+2029 and U+0085), any other
 control character, a surrogate code point, the noncharacters U+FFFE and U+FFFF, a byte-order mark
-anywhere in the file, and the bidirectional controls U+061C, U+200E, U+200F, U+202A–U+202E and
-U+2066–U+2069; the error names the line and the code point, never the text.
+anywhere in the file, the bidirectional controls U+061C, U+200E, U+200F, U+202A–U+202E and
+U+2066–U+2069, and these characters a reviewer cannot see: an invisible format character (Unicode
+category Cf, such as a zero-width space or joiner), a private-use or unassigned code point, a
+variation selector, a Hangul filler, another default-ignorable code point, or U+2800; the error
+names the line and the code point, never the text.
 
 **Hosted files and the helpers they run are pinned by SHA-256** in the script's
 `TRUSTED_HOSTED_FILE_SHA256` and `TRUSTED_HOSTED_HELPER_SHA256`. A hosted-file pin exempts that
@@ -696,8 +699,8 @@ CLI actually accepts.
   every selected commit: it is parsed with the same fail-closed YAML subset the workflow scan
   uses (no anchors, tags, flow mappings or multi-document files, no whitespace but space, tab
   and line feed (a carriage return is read as a line feed on this path), and no byte-order
-  mark, bidirectional control or character outside YAML's printable set, no explicit block
-  indentation indicator, and no tab in a line's leading whitespace) and must fit a recorded
+  mark, bidirectional control, invisible character or character outside YAML's printable set,
+  no explicit block indentation indicator, and no tab in a line's leading whitespace) and must fit a recorded
   allowlist — known top-level keys only, `docs_dir` present and exactly `docs/manual`, `use_directory_urls` absent or
   true, no `hooks`, no plugin but `search`, no `theme.custom_dir`, Markdown extensions and their
   options from the recorded set (`pymdownx.snippets` is refused), relative asset paths. A

@@ -422,6 +422,38 @@ jobs:
         self.assertFalse(checker._refused_character("\t"))
         self.assertTrue(checker._refused_character("\n"))  # line feeds are split out before the check
 
+    def test_invisible_character_rule_matches_the_workflow_scan(self) -> None:
+        # The second rule, too, is carried in both scanners; every code point must agree under
+        # one interpreter (category Cn follows its Unicode database).
+        checker = load_checker()
+        spec = importlib.util.spec_from_file_location(
+            "workflow_policy", REPO_ROOT / "scripts" / "ci" / "workflow_policy.py"
+        )
+        policy = importlib.util.module_from_spec(spec)
+        assert spec.loader is not None
+        spec.loader.exec_module(policy)
+        disagreements = [
+            code for code in range(0x110000)
+            if checker._invisible_character(chr(code)) != policy.invisible_character(chr(code))
+        ]
+        self.assertEqual(disagreements, [])
+        self.assertEqual(checker._INVISIBLE_OUTSIDE_FORMAT, policy.INVISIBLE_OUTSIDE_FORMAT)
+        self.assertFalse(checker._invisible_character(" "))
+        self.assertFalse(checker._invisible_character("a"))
+
+    def test_rejects_invisible_characters(self) -> None:
+        checker = load_checker()
+        pinned = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1"
+        for character in INVISIBLE_SAMPLES:
+            codepoint = "U+{:04X}".format(ord(character))
+            with self.subTest(codepoint=codepoint), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                write_workflow(root, "odd.yml",
+                               "jobs:\n  test:\n    steps:\n      - run: echo ok{}x\n      - uses: {}\n".format(character, pinned))
+                errors = checker.validate_repository(root)
+                self.assertTrue(any("odd.yml" in error and codepoint in error and "invisible" in error
+                                    for error in errors), errors)
+
     def test_rejects_nonregular_workflow_without_blocking(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -610,6 +642,16 @@ class RepositoryActionInventoryTests(unittest.TestCase):
             self.assertIn(command, docs_step)
 
 
+# Characters a reviewer cannot see: format characters (Cf, the tag character U+E0041 among them),
+# private use (Co), unassigned (Cn: U+0378 in every Unicode version), and the default-ignorable code
+# points and the blank outside those categories.
+INVISIBLE_SAMPLES = (
+    "\u200b", "\u200c", "\u200d", "\u2060", "\u00ad", "\u2062", "\U000e0041", "\ue000", "\U000f0000",
+    "\u0378", "\u3164", "\uffa0", "\u115f", "\u1160", "\u2800", "\u034f", "\ufe0f", "\U000e0101",
+    "\u180b", "\u17b4",
+)
+
+
 def synthetic_allowlist() -> dict:
     return {
         "schema_version": 1,
@@ -755,6 +797,11 @@ class AllowlistTests(unittest.TestCase):
             # Raw in the file, not a JSON escape: the character rule reads the text before parsing.
             ("bidirectional control", VALID_ALLOWLIST.replace("example/one", "example/o\u202ene", 1).encode("utf-8"),
              "U+202E is refused"),
+            # An invisible character, raw in the file, is refused by the second character rule.
+            ("zero-width space", VALID_ALLOWLIST.replace("example/one", "example/o\u200bne", 1).encode("utf-8"),
+             "U+200B is refused (an invisible format"),
+            ("variation selector", VALID_ALLOWLIST.replace("v1.0.0", "v1.0.0\ufe0f", 1).encode("utf-8"),
+             "U+FE0F is refused (an invisible format"),
             ("invalid JSON", VALID_ALLOWLIST.replace("\n  ]", ",\n  ]").encode("utf-8"), "not valid JSON"),
             ("repeated top-level key",
              ('{"schema_version": 1, "schema_version": 1, "actions": [' + ENTRY_ONE + "]}\n").encode("utf-8"),

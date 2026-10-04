@@ -174,6 +174,16 @@ JOB_HEADER = "    runs-on: ubuntu-latest\n    permissions:\n      contents: read
 CHECKOUT_STEP = "      - uses: " + CHECKOUT + "\n        with:\n          persist-credentials: false\n"
 
 
+# Characters a reviewer cannot see: format characters (Cf, the tag character U+E0041 among them),
+# private use (Co), unassigned (Cn: U+0378 in every Unicode version), and the default-ignorable code
+# points and the blank outside those categories.
+INVISIBLE_SAMPLES = (
+    "\u200b", "\u200c", "\u200d", "\u2060", "\u00ad", "\u2062", "\U000e0041", "\ue000", "\U000f0000",
+    "\u0378", "\u3164", "\uffa0", "\u115f", "\u1160", "\u2800", "\u034f", "\ufe0f", "\U000e0101",
+    "\u180b", "\u17b4",
+)
+
+
 def mutate(source: str, old: str, new: str) -> str:
     """Replace exactly one occurrence, refusing a silent no-op (a fixture typo must not pass as a scan pass)."""
     if source.count(old) != 1:
@@ -562,6 +572,51 @@ class ScanTests(unittest.TestCase):
             with self.subTest(codepoint=codepoint):
                 violations = self.scan_ci(body)
                 self.assertTrue(any("ci.yml: refused" in v and codepoint in v for v in violations), violations)
+
+    def test_invisible_characters_are_refused_in_text_and_decoded_scalars(self) -> None:
+        # A zero-width space, a variation selector or a Hangul filler changes no parse here, but
+        # the file a code owner reviews then differs from the file every reader runs.
+        for character in INVISIBLE_SAMPLES:
+            codepoint = "U+{:04X}".format(ord(character))
+            body = mutate(QUALITY, CHECKOUT_STEP, "      - run: echo ok{}x\n".format(character) + CHECKOUT_STEP)
+            with self.subTest(codepoint=codepoint):
+                violations = self.scan_ci(body)
+                self.assertTrue(any("ci.yml: refused" in v and codepoint in v and "invisible" in v
+                                    for v in violations), violations)
+        # A double-quoted escape decodes to one as well.
+        build_runner = "  build:\n    runs-on: ubuntu-latest\n"
+        for escape, codepoint in (("\\u200b", "U+200B"), ("\\ue000", "U+E000"), ("\\u3164", "U+3164"),
+                                  ("\\U000e0041", "U+E0041"), ("\\ufe0f", "U+FE0F")):
+            body = mutate(QUALITY, build_runner, "  build:\n    runs-on: \"ubuntu-latest{}\"\n".format(escape))
+            with self.subTest(escape=escape):
+                violations = self.scan_ci(body)
+                self.assertTrue(any("ci.yml: refused" in v and codepoint in v for v in violations), violations)
+        # A decoded scalar has no source line of its own, so only its code point is named.
+        with self.assertRaises(policy.ParseError) as decoded:
+            policy.parse_workflow('on: push\nname: "a\\u200bb"\n')
+        self.assertEqual(str(decoded.exception), "a scalar decodes to character U+200B, which is refused")
+        with self.assertRaises(policy.ParseError) as refusal:
+            policy.parse_workflow("on: push\n# a\u200bb\n")
+        self.assertEqual(
+            str(refusal.exception),
+            "line 2: character U+200B is refused (an invisible format, private-use, unassigned, "
+            "default-ignorable or blank character, which a reviewer cannot see, such as a variation "
+            "selector after an emoji)",
+        )
+        # Visible text, a space and a tab pass; the extra set holds no format or unassigned code
+        # point, which category alone would cover.
+        self.assertIsNone(policy.first_invisible_character("a b\tc\n\u00e9\n"))
+        self.assertEqual(policy.first_invisible_character("a\nb\u2060c\n"), (2, 0x2060))
+        import unicodedata
+        self.assertFalse(any(unicodedata.category(chr(code)) in ("Cf", "Co", "Cn")
+                             for code in policy.INVISIBLE_OUTSIDE_FORMAT))
+        # The set itself, written out independently: the copies in action_pins.py and
+        # bats_inventory.py only agree with this one, so an edit to all three needs this to change.
+        expected = {0x034F, 0x115F, 0x1160, 0x17B4, 0x17B5, 0x180B, 0x180C, 0x180D, 0x180F, 0x2800,
+                    0x3164, 0xFFA0}
+        expected |= {code for code in range(0xFE00, 0xFE0F + 1)}
+        expected |= {code for code in range(0xE0100, 0xE01EF + 1)}
+        self.assertEqual(set(policy.INVISIBLE_OUTSIDE_FORMAT), expected)
 
     def test_a_pin_hidden_behind_a_no_break_space_is_refused(self) -> None:
         # With the no-break space read as a comment start and then stripped, both scanners saw the

@@ -384,6 +384,7 @@ class SiteAssemblyTests(unittest.TestCase):
             ("site_name: t\ndocs_dir: docs/manual\nmarkdown_extensions:\n  - evil.module\n", "markdown_extensions not admitted"),
             ("site_name: t\ndocs_dir: docs/manual\nextra_javascript:\n  - https://example.com/x.js\n", "relative path inside the manual"),
             ("site_name: t\ndocs_dir: docs/manual\ntheme: &a material\n", "outside the accepted YAML subset"),
+            ("site_name: t\u200b\ndocs_dir: docs/manual\n", "U+200B is refused (an invisible format"),
             ("site_name: t\ndocs_dir: docs/manual\nmarkdown_extensions:\n  - pymdownx.snippets\n", "markdown_extensions not admitted: pymdownx.snippets"),
             ("site_name: t\ndocs_dir: docs/manual\nmarkdown_extensions:\n  - admonition:\n      base_path: /\n", "option(s) not admitted for admonition"),
             ("site_name: t\ndocs_dir: docs/manual\nmarkdown_extensions:\n  - toc:\n      slugify: pymdownx.slugs.slugify\n", "names a Python callable"),

@@ -147,7 +147,9 @@ class BatsEvidenceTests(unittest.TestCase):
                           content_sha256=digest(payload), ordered_title_sha256=hashes)
             with self.subTest(source=name):
                 with patch.object(self.api.bats_inventory, "_first_refused_character",
-                                  return_value=None):
+                                  return_value=None), \
+                        patch.object(self.api.bats_inventory, "_first_invisible_character",
+                                     return_value=None):
                     self.assertEqual(self.api.build_file_plan(payload, **kwargs).raw_titles,
                                      ("real",))
                 with patch.object(self.api.bats_inventory, "_scan_shell_line",

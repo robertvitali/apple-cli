@@ -373,6 +373,17 @@ JSON output are stable per the versioning policy — breaking changes bump
   the capability policy ends a Swift `//` comment at a carriage return as Swift does. **For anyone
   running the binary, nothing changes:** no `apple` command, output field, error type, or exit code
   is affected, and `schema_version` stays `1`.
+- **The workflow scan, the Action-pin check and the Bats inventory now refuse a recorded set of
+  characters a reviewer cannot see.** A zero-width space or joiner, a soft hyphen or another
+  invisible format character (Unicode category Cf), a private-use or unassigned code point, a
+  variation selector (such as the one after an emoji), a Hangul filler, another default-ignorable
+  code point or the braille blank is not whitespace or a line break to these checks, but it can make
+  the file a code owner reviews differ from the file that runs. Each is now refused, naming only its
+  code point and, where it is written out rather than decoded from an escape, its line: in every
+  workflow file and every scalar a workflow's escapes decode to, in `mkdocs.yml`, in
+  `.github/actions-allowlist.json`, and in every Bats file and every file under `bats/live/`. None
+  of those files holds one today. **For anyone running the binary, nothing changes:** no `apple`
+  command, output field, error type, or exit code is affected, and `schema_version` stays `1`.
 - **The GitHub Actions the workflows may use are now listed in one committed file,
   `.github/actions-allowlist.json`.** It records each permitted Action's name, full commit SHA and
   version label, and replaces the list `scripts/ci/action_pins.py` carried in its source. The
