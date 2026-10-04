@@ -435,9 +435,10 @@ value-free scan of every retained CI run (104 runs and 589 jobs; the 322 jobs th
 logs) found the name in 61 job logs across 57 runs (2026-09-01 to 2026-09-30), and found neither
 D41's message texts nor any form of D42's fragment in any log. The operator ruled (D43),
 re-confirmed on that corrected count, to leave the logs to expire under the 90-day retention (the
-last about 2026-12-29, later if a pre-D41 run is re-run or a pull request on an older head runs)
-rather than delete them, since history keeps the term anyway and several of those logs back the
-runner-image facts in Section 4. The fresh round records them as ACCEPTED under D43.
+last about 2027-01-01, after one later copy on 2026-10-03 that D43's amendment records, and later
+if a CI run on a pre-D41 head is re-run or a pull request on such a head runs) rather than delete
+them, since history keeps the term anyway and several of those logs back the runner-image facts in
+Section 4. The fresh round records them as ACCEPTED under D43.
 
 ## 3. Local verification for the visibility-step commit and its successors
 

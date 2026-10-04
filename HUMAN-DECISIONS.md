@@ -31,7 +31,7 @@ recorded, scoped evidence).
 
 ---
 
-## LEDGER — every decision at a glance (updated 2026-10-03)
+## LEDGER — every decision at a glance (updated 2026-10-04)
 
 **Still needs you: D2 (the Homebrew tap), D18 (the `v27.0.0` release, which waits on the phase-3
 publisher) and D22 (two parity narrowings).** D9 was reopened 2026-08-31 and finally closed the
@@ -90,9 +90,9 @@ publication action.
 | D40 | The two public names that still say "mcp" | **RATIFIED 2026-09-30: rename both outright (option A)** | `APPLE_MAIL_MCP_HOME` is replaced by `APPLE_MAIL_TEMPLATES_DIR` (the template folder itself; the shared tilde policy applies) and the default folder moves from `~/.apple_mail_mcp/templates/` to `~/.apple-cli/mail-templates/`. Neither old name is read any more. A recorded narrowing of the retired Mail MCP (its variable and folder); D39 lapses with the variable it governed. BREAKING with `schema_version` unchanged; the release note gives the move command |
 | D41 | Two message texts and a search term from a live oracle run in a Messages test | **RATIFIED 2026-09-30: redact at HEAD, accept history (option A)** | `Tests/MessagesKitTests/MessagesKitTests.swift` carried two message texts and a search term sampled from the operator's Messages store during a live oracle run (committed 2026-07-15 in `23c9afc`, public in the periods D9 and D17 record). Replaced at HEAD with synthetic text; history keeps the originals as an accepted residual, as D38 did for its commit |
 | D42 | A note fragment from a live run in a Notes test | **RATIFIED 2026-09-30: redact at HEAD, accept history (option A)** | `Tests/NotesKitTests/NotesTextTests.swift` quoted a three-word fragment of one of the operator's notes, measured live on 2026-08-19 (NOTES-L1) and committed that day in `50c30f0`; public since the visibility change D17 records. Replaced at HEAD with synthetic text; history keeps the original as an accepted residual, as D41 did for the Messages test |
-| D43 | CI job logs print the removed Messages test's name, which carried D41's search term | **RATIFIED 2026-09-30: leave the logs to expire (option A), re-confirmed on corrected facts** | Hosted build-test job logs print every test name: 61 job logs in 57 CI runs (2026-09-01 to 2026-09-30) carry the removed test's name, two lines each; a scan of all 322 retrievable logs found neither the message texts nor D42's note fragment. Accepted as a residual until GitHub's 90-day log retention removes them (the last about 2026-12-29, later if a run from before the D41 commit is re-run or a pull request on an older head runs) |
+| D43 | CI job logs print the removed Messages test's name, which carried D41's search term | **RATIFIED 2026-09-30: leave the logs to expire (option A), re-confirmed on corrected facts** (amended 2026-10-04: one later copy, the last now about 2027-01-01) | Hosted build-test job logs print every test name: 61 job logs in 57 CI runs (2026-09-01 to 2026-09-30) carry the removed test's name, two lines each; a scan of all 322 retrievable logs found neither the message texts nor D42's note fragment. Accepted as a residual until GitHub's 90-day log retention removes them (the last about 2026-12-29, later if a run from before the D41 commit is re-run or a pull request on an older head runs) |
 | D44 | Narrow main-only reversal for a parallel session's worktree | **RATIFIED 2026-10-01** (amended 2026-10-03: the branch reached `origin` once and was deleted on the operator's word) | One local git worktree, `~/workspace/apple-cli-governance` on the local branch `26/governance`, for a second agent session working the supply-chain and governance queue in parallel. The branch is never pushed and never merged: each change is rebased onto the current `main`, passes the same review, scan and canonical gates, and lands by a fast-forward push to `main`, one landing at a time. Removed when that queue is done. Ordinary work otherwise stays main-only; D16 is unchanged |
-| D45 | Open Dependabot pull requests 7 and 8 while the Dependabot governance path is built | **ANSWERED 2026-10-02: supersede both on main (option A)** | Two reviewed commits on `main` take the same updates: urllib3 2.7.0 → 2.8.0 in `docs/requirements.txt`, which clears the three open alerts, and astral-sh/setup-uv 10.1.0 → 10.2.0, with its new SHA added to the reviewed Action allowlist. Dependabot then closes both pull requests itself. No agent action on either pull request, and no new CI run on pull request 7's pre-D41 head (D43) |
+| D45 | Open Dependabot pull requests 7 and 8 while the Dependabot governance path is built | **ANSWERED 2026-10-02: supersede both on main (option A); APPLIED 2026-10-03** (resolved 2026-10-03: Dependabot closed both; its edits started two CI runs on pull request 7's pre-D41 head, one of which ran the Swift suite and added a log copy under D43) | Two reviewed commits on `main` take the same updates: urllib3 2.7.0 → 2.8.0 in `docs/requirements.txt`, which clears the three open alerts, and astral-sh/setup-uv 10.1.0 → 10.2.0, with its new SHA added to the reviewed Action allowlist. Dependabot then closes both pull requests itself. No agent action on either pull request, and no new CI run on pull request 7's pre-D41 head (D43) |
 | D46 | Interim protection for `main` before the design's ruleset | **APPLIED 2026-10-02T05:04Z on the operator's instruction; no-bypass shape RATIFIED 2026-10-02 (option A)** | One active ruleset on `main` only, with two rules, block force pushes and restrict deletion, and no bypass actor: while it is active nothing, the operator's credentials included, can force-update or delete `main`, and an authorized history rewrite needs the operator to disable it first. It guards against mistakes, not a misused admin credential, which can disable it. Neither rule applies to fast-forward pushes, pull requests, Dependabot's branches or the current read-only CI workflows; the first push under it (`9cd2260`) passed. At design §18 step 20 the operator decides whether it is deleted or kept; keeping it needs design amendments |
 
 ---
@@ -2145,6 +2145,22 @@ personal data public is yours alone to decide (D38, D41).
 
 **Blocking?** No.
 
+**Amended 2026-10-04 (one later copy, from a 2026-10-03 run):** as Dependabot closed pull request 7
+on 2026-10-03, its edits started two CI runs on that pull request's pre-D41 head `af46d81` (D45's
+resolution). The first (10:21:27Z) was cancelled before any Swift test ran, 57 seconds into its
+hosted-quality step while it was still building (its Python policy tests had passed, printing no
+test names); the second (10:22:30Z) ran the full Swift suite. A count-only check of all eleven job
+logs the two runs left, which printed nothing, found the old name on two lines of the second run's
+`build-test` log and in no other, the term nowhere outside those lines, and neither D41's message
+texts nor D42's note fragment, as those commits removed them, in any of them. That log falls under
+this ruling and moves the last copy's expiry to about 2027-01-01. Every other CI run since this
+entry's scan, re-runs included, built a head that contains D41's commit. No pull request remains
+open, but another copy could still come from a re-run of a CI run on a head that predates D41's
+commit (the runs made before that commit until about 2026-10-30, and the two 2026-10-03 runs until
+about 2026-11-02), from an edit of the title or body of a closed pull request whose head predates it
+(pull requests 1 to 7 all do, and `ci.yml` runs on `edited` whether or not the pull request is
+open), or from a new or reopened pull request whose head predates it.
+
 ---
 
 ## D44 — Narrow main-only reversal for a parallel session's worktree
@@ -2260,8 +2276,10 @@ block a fast-forward, to `main`.
 
 ## D45 — Open Dependabot pull requests 7 and 8 while the Dependabot governance path is built: supersede both on main
 
-- **Status:** **ANSWERED 2026-10-02: supersede both on main (option A).** This commit takes the
-  urllib3 update; the setup-uv update follows in its own commit.
+- **Status:** **ANSWERED 2026-10-02: supersede both on main (option A); APPLIED 2026-10-03
+  (urllib3 on `main` 2026-10-02, setup-uv 2026-10-03); both pull requests closed by Dependabot by
+  2026-10-03 (see Resolution).** This commit takes the urllib3 update; the setup-uv update follows
+  in its own commit.
 - **Finding.** Two Dependabot pull requests were open against `main`, and both failed CI. Pull
   request 8 is a Dependabot security update, urllib3 2.7.0 → 2.8.0 in `docs/requirements.txt`, for
   three Dependabot alerts opened at 2026-10-02T02:08Z: GHSA-8988-9cw3-xx77 and GHSA-vxq7-64xx-v4gw
@@ -2308,6 +2326,26 @@ block a fast-forward, to `main`.
   pull request 8. The setup-uv commit that follows checks the new Action commit against the upstream
   `v10.2.0` release tag before adding it to the reviewed Action allowlist; no repository setting
   changes.
+- **Resolution (2026-10-03):** `0d0b40d` took urllib3 2.8.0 and reached `main` at 2026-10-02T10:57Z;
+  `a26a19a` took setup-uv 10.2.0 and reached it at 2026-10-03T10:20Z. GitHub marked the three
+  urllib3 alerts fixed at 2026-10-02T10:58Z. Dependabot closed pull request 8 at 10:59:59Z that day
+  and pull request 7 at 2026-10-03T10:22:27Z, each about two minutes after its update reached
+  `main`, and deleted each head branch within seconds. No agent acted on either pull request; the
+  project did not edit, re-run, review or merge either. The ledger row's other expectation did not
+  hold. Dependabot edited each pull request about a minute before closing it and again as it closed
+  it (each second run started two to three seconds after the close), and `ci.yml` and
+  `governance.yml` both run on the `edited` event; no other trigger they list fired (neither head
+  changed, and neither pull request was reopened or a draft), each run's triggering actor is
+  Dependabot, and Docs, which does not run on `edited`, did not run. Those edits started CI and
+  Governance runs on each head: pull request 8's, which contains D41's commit, and pull request 7's
+  `af46d81`, which predates it. On pull request 7 the first CI run (2026-10-03T10:21:27Z) was
+  cancelled 57 seconds into its hosted-quality step, in the build stage, before the test stage
+  started; the second (10:22:30Z) ran the full Swift suite. A count-only check of all eleven job
+  logs the two runs left found the removed test's old name on two lines of the second run's
+  `build-test` log, as in each log D43 counted, and in no other, D41's search term nowhere outside
+  those lines, and neither D41's message texts nor D42's note fragment, as those commits removed
+  them, in any of them. That log falls under D43's ruling (its 2026-10-04 amendment). The finding
+  above noted that an edit would start such a run, but not that Dependabot's own close makes one.
 - **Filed:** 2026-10-02 · **Category:** dependency updates / Dependabot
 
 **Why it needed you.** Acting on a pull request is outward-facing, and overtaking Dependabot's
