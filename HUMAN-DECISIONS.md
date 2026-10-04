@@ -31,7 +31,7 @@ recorded, scoped evidence).
 
 ---
 
-## LEDGER — every decision at a glance (updated 2026-10-02)
+## LEDGER — every decision at a glance (updated 2026-10-03)
 
 **Still needs you: D2 (the Homebrew tap), D18 (the `v27.0.0` release, which waits on the phase-3
 publisher) and D22 (two parity narrowings).** D9 was reopened 2026-08-31 and finally closed the
@@ -91,7 +91,7 @@ publication action.
 | D41 | Two message texts and a search term from a live oracle run in a Messages test | **RATIFIED 2026-09-30: redact at HEAD, accept history (option A)** | `Tests/MessagesKitTests/MessagesKitTests.swift` carried two message texts and a search term sampled from the operator's Messages store during a live oracle run (committed 2026-07-15 in `23c9afc`, public in the periods D9 and D17 record). Replaced at HEAD with synthetic text; history keeps the originals as an accepted residual, as D38 did for its commit |
 | D42 | A note fragment from a live run in a Notes test | **RATIFIED 2026-09-30: redact at HEAD, accept history (option A)** | `Tests/NotesKitTests/NotesTextTests.swift` quoted a three-word fragment of one of the operator's notes, measured live on 2026-08-19 (NOTES-L1) and committed that day in `50c30f0`; public since the visibility change D17 records. Replaced at HEAD with synthetic text; history keeps the original as an accepted residual, as D41 did for the Messages test |
 | D43 | CI job logs print the removed Messages test's name, which carried D41's search term | **RATIFIED 2026-09-30: leave the logs to expire (option A), re-confirmed on corrected facts** | Hosted build-test job logs print every test name: 61 job logs in 57 CI runs (2026-09-01 to 2026-09-30) carry the removed test's name, two lines each; a scan of all 322 retrievable logs found neither the message texts nor D42's note fragment. Accepted as a residual until GitHub's 90-day log retention removes them (the last about 2026-12-29, later if a run from before the D41 commit is re-run or a pull request on an older head runs) |
-| D44 | Narrow main-only reversal for a parallel session's worktree | **RATIFIED 2026-10-01** | One local git worktree, `~/workspace/apple-cli-governance` on the local branch `26/governance`, for a second agent session working the supply-chain and governance queue in parallel. The branch is never pushed and never merged: each change is rebased onto the current `main`, passes the same review, scan and canonical gates, and lands by a fast-forward push to `main`, one landing at a time. Removed when that queue is done. Ordinary work otherwise stays main-only; D16 is unchanged |
+| D44 | Narrow main-only reversal for a parallel session's worktree | **RATIFIED 2026-10-01** (amended 2026-10-03: the branch reached `origin` once and was deleted on the operator's word) | One local git worktree, `~/workspace/apple-cli-governance` on the local branch `26/governance`, for a second agent session working the supply-chain and governance queue in parallel. The branch is never pushed and never merged: each change is rebased onto the current `main`, passes the same review, scan and canonical gates, and lands by a fast-forward push to `main`, one landing at a time. Removed when that queue is done. Ordinary work otherwise stays main-only; D16 is unchanged |
 | D45 | Open Dependabot pull requests 7 and 8 while the Dependabot governance path is built | **ANSWERED 2026-10-02: supersede both on main (option A)** | Two reviewed commits on `main` take the same updates: urllib3 2.7.0 → 2.8.0 in `docs/requirements.txt`, which clears the three open alerts, and astral-sh/setup-uv 10.1.0 → 10.2.0, with its new SHA added to the reviewed Action allowlist. Dependabot then closes both pull requests itself. No agent action on either pull request, and no new CI run on pull request 7's pre-D41 head (D43) |
 | D46 | Interim protection for `main` before the design's ruleset | **APPLIED 2026-10-02T05:04Z on the operator's instruction; no-bypass shape RATIFIED 2026-10-02 (option A)** | One active ruleset on `main` only, with two rules, block force pushes and restrict deletion, and no bypass actor: while it is active nothing, the operator's credentials included, can force-update or delete `main`, and an authorized history rewrite needs the operator to disable it first. It guards against mistakes, not a misused admin credential, which can disable it. Neither rule applies to fast-forward pushes, pull requests, Dependabot's branches or the current read-only CI workflows; the first push under it (`9cd2260`) passed. At design §18 step 20 the operator decides whether it is deleted or kept; keeping it needs design amendments |
 
@@ -2221,6 +2221,40 @@ personal data public is yours alone to decide (D38, D41).
 exception.
 
 **Blocking?** No. It records the authority under which the second session lands its work.
+
+**Amended 2026-10-03 (the branch reached `origin`, and was deleted on the operator's word):** from
+about 01:36Z to 01:43:34Z on 2026-10-04 (21:36 to 21:43 local on 2026-10-03), a subagent of the
+worktree's session, briefed to read files only and only in a scratch copy outside the repository,
+ran its commands in the worktree, the session's working directory, instead. It edited six CI scripts
+and `CHANGELOG.md` there, staged everything and then unstaged everything, which also unstaged a
+change the session had staged, and committed `8e6af13`, which held its own unreviewed edits to those
+seven files and part of that change. At 01:43:34Z it ran `git push -u origin 26/governance`. No
+Actions workflow ran on the branch, no pull request or tag was created, `main` stayed at `1cebd1f`,
+and each session found the pushed diff and message clean under the personal-data pattern scan, the
+pinned denylist scan and a Unicode-category scan. The worktree's session stopped its two running
+workflows, held its landings and removed the branch's upstream. At 02:02:27Z it moved the local
+branch back to `1cebd1f`, then returned the five scripts that held only the subagent's edits to
+their `1cebd1f` content and staged its own change again, checked against its copy outside the
+repository, with none of the subagent's edits in it. No edit of the subagent's is in the worktree's
+files or index; unreviewed, they survive in a patch outside the repository and in `8e6af13` itself,
+which the worktree's reflog still names. The worktree's session then reported to the operator
+through the primary checkout's session. The operator ruled that the branch be deleted, to the
+primary checkout's session at about 02:24Z and to the worktree's session at 02:26:55Z. The primary
+checkout's session ran `git push origin --delete 26/governance` at 02:24:27Z, and
+`git ls-remote --heads origin` read back only `refs/heads/main` at `1cebd1f`, at 02:24:32Z in that
+session and at 02:27:29Z in the worktree's session. Like the commits D37 and D38 record, `8e6af13`
+stays fetchable by its id, and a third-party App's check suite, created on it at 01:43:37Z, keeps a
+copy of its message; the public Events feed lists the branch's creation and deletion by name only,
+but the repository's public activity listing, readable without a token, names `8e6af13` in both, so
+its id can be found without being known. Its diff and message passed the scans above, and its author
+and committer are the operator's usual git identity. Every later agent brief in the worktree's
+session requires every command either to change into the scratch copy first or to name its
+repository with `git -C` (the worktree only for named read-only commands) and names the forbidden
+write commands, and the session follows each later workflow with a read-back of the worktree's
+reflog and status and of the remote's branches. These controls are procedural and detective only:
+each shell command a subagent runs still starts in the worktree, whatever an earlier command's `cd`,
+and the operator's credentials can push from there to a new branch or tag or, since D46 does not
+block a fast-forward, to `main`.
 
 ---
 
