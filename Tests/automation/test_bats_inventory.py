@@ -2,8 +2,11 @@ import hashlib
 import importlib.util
 import io
 import json
+import os
 from pathlib import Path
+import re
 import shutil
+import stat
 import subprocess
 import sys
 import tempfile
@@ -11,6 +14,7 @@ import textwrap
 from types import ModuleType
 from typing import Optional
 import unittest
+from unittest import mock
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 
 
@@ -232,6 +236,77 @@ REFUSED_SAMPLES = (
     "\u00a0", "\u1680", "\u2000", "\u2007", "\u200a", "\u2028", "\u2029", "\u202f", "\u205f",
     "\u3000", "\u0085", "\x0b", "\x0c", "\x1c", "\x1d", "\x1e", "\x1f", "\r", "\ufeff", "\u202e",
 )
+
+# The pin-regeneration contract, written out here rather than read from the checker, so a change
+# to the advice or to the literal format turns these tests red.
+REGENERATE_HINT = (
+    "if the change is reviewed and intended, re-pin locally, never in CI: run "
+    "`python3 scripts/ci/bats_inventory.py --update-shas` from the repository root, after bringing "
+    "bats/tier-inventory.json up to date if it reports manifest drift, and review the diff"
+)
+LIVE_STATE_ADVICE = f"a test that reads live state belongs in the local tier; {REGENERATE_HINT}"
+PULL_REQUEST_NOTE = (
+    "in a pull request the base branch's copy of this script and its pins judge the candidate, "
+    "and a pull request cannot change a hosted file or a pinned helper: re-pinning lands only "
+    "through a reviewed change on main"
+)
+EXEMPTION_NOTE = " (its pin exempts this content from the live-state heuristic)"
+
+
+def ambiguous_reference(line_number: int) -> str:
+    return (
+        f"hosted file bats/hosted/sample.bats line {line_number} names the helper directory in a "
+        'form the inventory cannot resolve (write "$HELPERS/<file name>" outside any '
+        "substitution; the word helpers is refused anywhere else, comments included, and the "
+        "line is read with quotes and backslashes removed, so helper's spells it too)"
+    )
+
+
+PIN_LITERAL = re.compile(r"(?ms)^(TRUSTED_HOSTED_(?:FILE|HELPER)_SHA256) = \{\n.*?^\}\n")
+# The 8 helpers the hosted files run, and the 3 pinned on purpose for the local tier only.
+HOSTED_HELPERS = {
+    "applescript_syntax_check.py", "bounded_exec.py", "execute_envelope_lint.py",
+    "md_tables_wellformed.py", "no_flagless_writes.py", "queue_table_wellformed.py",
+    "quoted_not_found.py", "subcommand_allowlist.py",
+}
+LOCAL_ONLY_PINNED_HELPERS = {
+    "bats/helpers/app_lifecycle.bash", "bats/helpers/app_lifecycle.py",
+    "bats/helpers/messages_db_probe.py",
+}
+
+
+def pin_literal(name: str, pins: dict) -> str:
+    return f"{name} = {{\n" + "".join(
+        f'    "{path}": "{pins[path]}",\n' for path in sorted(pins)
+    ) + "}\n"
+
+
+def sha256_of(path: Path) -> str:
+    return hashlib.sha256(path.read_bytes()).hexdigest()
+
+
+def copy_checker(directory: Path) -> Path:
+    """A private copy of the checker for `--update-shas` to rewrite; the real one is never touched."""
+    script = directory / "scripts" / "ci" / "bats_inventory.py"
+    script.parent.mkdir(parents=True)
+    script.write_bytes(CHECKER_PATH.read_bytes())
+    return script
+
+
+def run_update_shas(script: Path, root: Path, manifest_path: Path, **environment: str):
+    """`--update-shas` in a subprocess, with CI's own markers removed unless a test sets them."""
+    env = {key: value for key, value in os.environ.items() if key not in ("CI", "GITHUB_ACTIONS")}
+    env.update(environment)
+    return subprocess.run(
+        [sys.executable, str(script), "--root", str(root), "--manifest", str(manifest_path),
+         "--update-shas"],
+        check=False,
+        stdin=subprocess.DEVNULL,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        env=env,
+    )
 
 
 class BatsInventoryTests(unittest.TestCase):
@@ -1563,6 +1638,1085 @@ class BatsInventoryTests(unittest.TestCase):
 
                 self.assertTrue(any(message in error for error in errors), errors)
                 self.assertFalse(any("refused character" in error for error in errors), errors)
+
+    def test_helper_reference_reader_resolves_plain_forms_and_refuses_ambiguous_ones(self) -> None:
+        checker = load_checker()
+        resolved = {
+            '  run python3 "$HELPERS/x.py"': {"x.py"},
+            '  run python3 "${HELPERS}/x.py" --flag': {"x.py"},
+            '  run python3 "$HELPERS"/x.py': {"x.py"},
+            "  run bash -c 'python3 \"$0/helpers/x.py\"' \"$BATS_SUITE_ROOT\"": {"x.py"},
+            '  python3 "$BATS_SUITE_ROOT/helpers/x.py"; true': {"x.py"},
+            # macOS paths ignore case, so a case variant of the directory is still the directory.
+            '  python3 "$REPO_ROOT/bats/Helpers/x.py"': {"x.py"},
+            'load "$HELPERS/x"': {"x"},
+            # Unquoted, bash reads `hel\pers` as `helpers`, so the backslash-free reading resolves it.
+            "  python3 $BATS_SUITE_ROOT/hel\\pers/x.py": {"x.py"},
+            # A subshell's `)` ends the name; only a command substitution makes a line ambiguous.
+            '  (cd /tmp && python3 "$HELPERS/x.py")': {"x.py"},
+        }
+        for line, expected in resolved.items():
+            with self.subTest(line=line):
+                # The header carries the shared-root definition line, which is not a reference.
+                names, ambiguous = checker._helper_references(FIXTURE_HEADER + line + "\n")
+                self.assertEqual(names, expected)
+                self.assertEqual(ambiguous, ())
+        refused = (
+            '  dir="$HELPERS"',
+            '  run python3 "$HELPERS/$name"',
+            "  HELPERS=/tmp",
+            "  export HELPERS",
+            '  run ls "$BATS_SUITE_ROOT/helpers"',
+            '  run python3 "$HELPERS/sub/x.py"',
+            '  run python3 "$HELPERS"/*.py',
+            '  run python3 "${HELPERS:-/tmp}/x.py"',
+            '  run python3 "$HELPERS/../x.py"',
+            '  run python3 "$HELPERS/x.py$suffix"',
+            '  run python3 "$HELPERS/"',
+            # A bare word is refused anywhere, never read as prose.
+            "  dir=helpers",
+            "  cd helpers",
+            "  helpers=/tmp",
+            "  run true  # the helpers below, in a trailing comment",
+            # A comment is no exception: the reader cannot be sure which lines bash reads as one.
+            "# the helpers below are pure classifiers",
+            "  # the helpers below, in an indented whole-line comment",
+            "# see $HELPERS for the helpers",
+            "# the bats/helpers directory",
+            "# helpers/ holds the classifiers",
+            # Only the exact variable HELPERS is the helper directory; `$helpers` is another one.
+            '  run python3 "$helpers/x.py"',
+            '  run python3 "${Helpers}/x.py"',
+            # bash reads `HEL\PERS` as `HELPERS`.
+            "  HEL\\PERS=/tmp",
+            # A file name must end at a blank, a shell operator or the end of the line.
+            '  run python3 "$HELPERS/x.py,"',
+            '  run python3 "$HELPERS/x.py}"',
+            '  run python3 "$HELPERS/x.py#c"',
+            # A command substitution's output can extend or replace the path the name spells, on
+            # this line or, through a variable, on a later one.
+            '  run python3 "$(dirname "$HELPERS/x.py")/y.py"',
+            '  run python3 "$(dirname "$HELPERS/x.py" )/y.py"',
+            '  run python3 "$(dirname "$HELPERS/x.py")$suffix"',
+            '  d=$(dirname "$HELPERS/x.py")',
+            '  d=`dirname "$HELPERS/x.py"`',
+            '  d=`dirname "$HELPERS/x.py" `',
+            '  out="$(python3 "$HELPERS/x.py")"',
+            # A process substitution hands its output on the same way, as does bash 5.3's `${ }`.
+            '  read -r d < <(dirname "$HELPERS/x.py")',
+            '  run diff <(python3 "$HELPERS/x.py") /dev/null',
+            '  run tee >(python3 "$HELPERS/x.py") </dev/null',
+            '  d=${ dirname "$HELPERS/x.py"; }',
+            '  d=${| dirname "$HELPERS/x.py"; }',
+            '  d=${\tdirname "$HELPERS/x.py"; }',
+        )
+        for line in refused:
+            with self.subTest(line=line):
+                source = FIXTURE_HEADER + line + "\n"
+                names, ambiguous = checker._helper_references(source)
+                self.assertEqual(ambiguous, (source.split("\n").index(line) + 1,))
+                self.assertEqual(names, frozenset())
+        # (body, the line that must be refused, which is the first line of its logical line): a
+        # leading `#` exempts nothing, whatever bash makes of the line.
+        not_comments = (
+            # Inside a multi-line string the line is text, which `${d##* }` can turn into a path.
+            ('  d="\n# helpers"\n  run python3 "$BATS_SUITE_ROOT/${d##* }/x.py"', '# helpers"'),
+            # Inside a heredoc body the line is data to bash.
+            ("  run python3 - <<'PY'\n# helpers\nPY", "# helpers"),
+            # Quotes are removed before the word is read, so a possessive in a heredoc spells it.
+            ("  run python3 - <<'PY'\n# The helper's guard\nPY", "# The helper's guard"),
+            # After a line ending in a backslash, bash joins the lines, so `#` starts no comment.
+            ("  run echo x\\\n#helpers", "  run echo x\\"),
+            # A substitution later on the logical line refuses a reference before it.
+            ('  run python3 "$HELPERS/x.py" \\\n  "$(date)"', '  run python3 "$HELPERS/x.py" \\'),
+            # A substitution an earlier line opened is still open on this one.
+            ('  d=$(\n  dirname "$HELPERS/x.py"\n)', '  dirname "$HELPERS/x.py"'),
+            ('  d=`\n  dirname "$HELPERS/x.py"\n`', '  dirname "$HELPERS/x.py"'),
+            # An escaped backtick inside it is literal to bash and does not close it.
+            ('  d=`\n  echo \\`\n  dirname "$HELPERS/x.py"\n`', '  dirname "$HELPERS/x.py"'),
+            # The `)` that closes it, followed by more path, extends what the name spells.
+            ('  d=$(dirname \\\n  "$HELPERS/x.py")/y.py', '  d=$(dirname \\'),
+            ("  d=$(printf '%s' \")\" \\\n  \"$HELPERS/x.py\")/y.py", "  d=$(printf '%s' \")\" \\"),
+            # An opener split by a line continuation is read on the joined line.
+            ('  d=$\\\n(dirname "$HELPERS/x.py")', '  d=$\\'),
+            # A function substitution an earlier line left open.
+            ('  d=${ \n  dirname "$HELPERS/x.py"; }', '  dirname "$HELPERS/x.py"; }'),
+            # A bare `${` that ends the line opens a function substitution on it.
+            (
+                '  run python3 "$HELPERS/x.py" ${\n  echo --flag; }',
+                '  run python3 "$HELPERS/x.py" ${',
+            ),
+            # A substitution opened mid-line without a continuation is not seen as open, but the
+            # `)` that closes it, followed by more path, still refuses the reference before it.
+            ('  d=$(cd /tmp; dirname\n  "$HELPERS/x.py")/y.py', '  "$HELPERS/x.py")/y.py'),
+        )
+        for body, line in not_comments:
+            with self.subTest(body=body):
+                source = FIXTURE_HEADER + body + "\n"
+                names, ambiguous = checker._helper_references(source)
+                self.assertEqual(ambiguous, (source.split("\n").index(line) + 1,))
+                self.assertEqual(names, frozenset())
+        # A line that ends with an opener (blanks or a `(` may follow it) or holds an odd number of
+        # unescaped backticks refuses every reference after it, even once the substitution has
+        # closed: the reader does not look for its end. A lone quoted backtick looks open too, which
+        # fails closed.
+        reference = '  run python3 "$HELPERS/x.py"'
+        for body in ('  d=$(\n  date\n)\n' + reference,
+                     '  d=`\n  date\n`\n' + reference,
+                     '  d=${ \n  date\n}\n' + reference,
+                     '  d=$( \\\n\n  date\n)\n' + reference,
+                     "  echo 'a`b'\n" + reference,
+                     # Two backticks, one escaped: the other opens a substitution.
+                     "  echo \\` `\n" + reference,
+                     # Process substitutions, and a subshell opened inside a substitution.
+                     "  diff <(\n  date\n) /dev/null\n" + reference,
+                     "  tee >(\n  cat\n) </dev/null\n" + reference,
+                     "  d=$( (\n  date\n) )\n" + reference,
+                     "  d=${|\n  date\n}\n" + reference):
+            with self.subTest(after_unclosed=body):
+                source = FIXTURE_HEADER + body + "\n"
+                names, ambiguous = checker._helper_references(source)
+                self.assertEqual(names, frozenset())
+                self.assertEqual(ambiguous, (source.split("\n").index(reference) + 1,))
+        # A substitution closed on its own line opens nothing for the lines after it, a quoted
+        # `(` inside it included, and neither does an escaped backtick, which is literal.
+        names, ambiguous = checker._helper_references(
+            FIXTURE_HEADER
+            + '  out="$(date)"\n  stamp=`date`\n  calls="$(grep -c \'f(\' "$src")"\n'
+            + "  echo \\`\n"
+            + reference
+            + "\n"
+        )
+        self.assertEqual((names, ambiguous), (frozenset({"x.py"}), ()))
+
+    def test_real_hosted_files_reference_only_pinned_helpers(self) -> None:
+        checker = load_checker()
+        referenced = set()
+        for path in sorted((REPO_ROOT / "bats" / "hosted").glob("*.bats")):
+            with self.subTest(path=path.relative_to(REPO_ROOT).as_posix()):
+                names, ambiguous = checker._helper_references(path.read_text(encoding="utf-8"))
+                self.assertEqual(ambiguous, ())
+                referenced.update(names)
+        self.assertEqual(referenced, HOSTED_HELPERS)
+        pinned = set(checker.TRUSTED_HOSTED_HELPER_SHA256)
+        referenced_paths = {f"bats/helpers/{name}" for name in referenced}
+        self.assertLessEqual(referenced_paths, pinned)
+        self.assertEqual(pinned - referenced_paths, LOCAL_ONLY_PINNED_HELPERS)
+
+    def test_hosted_file_referencing_an_unpinned_helper_is_refused(self) -> None:
+        checker = load_checker()
+        cases = (
+            # (line in the hosted test, helper files to create, helper the error must name)
+            ('  run python3 "$HELPERS/synthetic_probe.py"', ("synthetic_probe.py",),
+             "bats/helpers/synthetic_probe.py"),
+            ('  run python3 "$HELPERS/absent_probe.py"', (), "bats/helpers/absent_probe.py"),
+            ('  load "$HELPERS/synthetic"', ("synthetic.bash",), "bats/helpers/synthetic.bash"),
+            # A pinned name does not excuse an unpinned file bats `load` would prefer.
+            ('  run python3 "$HELPERS/bounded_exec.py"', ("bounded_exec.py.bash",),
+             "bats/helpers/bounded_exec.py.bash"),
+            # macOS paths ignore case, so a case variant on disk is that file.
+            ('  load "$HELPERS/bounded_exec.py"', ("Bounded_Exec.py.bash",),
+             "bats/helpers/Bounded_Exec.py.bash"),
+            ('  run python3 "$HELPERS/synthetic_probe.py"', ("Synthetic_Probe.py",),
+             "bats/helpers/Synthetic_Probe.py"),
+        )
+        for line, created, unpinned in cases:
+            with self.subTest(line=line), tempfile.TemporaryDirectory() as temporary_directory:
+                root = Path(temporary_directory)
+                manifest_path = write_fixture_manifest(root)
+                for name in created:
+                    (root / "bats" / "helpers" / name).write_text("# synthetic\n", encoding="utf-8")
+                install_rehashed_source(
+                    root, manifest_path, "hosted", bats_source("hosted example").replace("  true", line)
+                )
+
+                errors = checker.validate_repository(root, manifest_path)
+
+            self.assertIn(
+                f"hosted file bats/hosted/sample.bats references helper {unpinned}, which "
+                f"TRUSTED_HOSTED_HELPER_SHA256 does not pin ({REGENERATE_HINT})",
+                errors,
+            )
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            manifest_path = write_fixture_manifest(root)
+            pinned_run = '  run python3 "$HELPERS/bounded_exec.py"'
+            install_rehashed_source(
+                root, manifest_path, "hosted", bats_source("hosted example").replace("  true", pinned_run)
+            )
+            self.assertEqual(checker.validate_repository(root, manifest_path), ())
+
+            install_rehashed_source(
+                root,
+                manifest_path,
+                "hosted",
+                bats_source("hosted example").replace("  true", '  dir="$HELPERS"'),
+            )
+            self.assertEqual(
+                checker.validate_repository(root, manifest_path), (ambiguous_reference(8),)
+            )
+
+    def test_bare_helpers_word_is_refused_end_to_end(self) -> None:
+        # Each body runs a helper through the bare word `helpers`, which the reader used to skip
+        # as prose: the hosted file's own pin then covered the line, and a later edit to the
+        # helper alone went unpinned.
+        checker = load_checker()
+        cases = (
+            ('  dir=helpers\n  run python3 "$BATS_SUITE_ROOT/$dir/bounded_exec.py"', 8),
+            ('  cd "$BATS_SUITE_ROOT"\n  cd helpers\n  run python3 ./bounded_exec.py', 9),
+            (
+                "  run python3 - \"$BATS_SUITE_ROOT\" <<'PY'\n"
+                "import os, runpy, sys\n"
+                "runpy.run_path(os.path.join(sys.argv[1], 'helpers', 'bounded_exec.py'))\n"
+                "PY",
+                10,
+            ),
+        )
+        for body, line_number in cases:
+            with self.subTest(line_number=line_number), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                manifest_path = write_fixture_manifest(root)
+                source = bats_source("hosted example").replace("  true", body)
+                install_rehashed_source(root, manifest_path, "hosted", source)
+
+                errors = checker.validate_repository(root, manifest_path)
+
+            self.assertIn(ambiguous_reference(line_number), errors)
+            self.assertFalse(any("references helper" in error for error in errors), errors)
+
+    def test_a_reference_after_an_unclosed_substitution_names_that_line(self) -> None:
+        checker = load_checker()
+        run = '  run python3 "$HELPERS/bounded_exec.py"'
+        # (body, line of the reference): the advice names the first line left open, and holds
+        # when a later line leaves one open too.
+        cases = (
+            ("  d=$(\n  date\n)\n" + run, 11),
+            ("  d=$( (\n  date\n) )\n" + run, 11),
+            ("  d=$(\n  date\n)\n  e=$(\n  date\n)\n" + run, 14),
+        )
+        for body, line_number in cases:
+            with self.subTest(body=body), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                manifest_path = write_fixture_manifest(root)
+                source = bats_source("hosted example").replace("  true", body)
+                install_rehashed_source(root, manifest_path, "hosted", source)
+
+                errors = checker.validate_repository(root, manifest_path)
+
+            self.assertIn(
+                ambiguous_reference(line_number)
+                + "; line 8 leaves a substitution open for the lines after it (it ends with a "
+                "substitution opener, which blanks or a ( may follow, or holds an odd number of "
+                "unescaped backticks), so no later line may name a helper: close it there and on "
+                "any later line that leaves one open, or name the helper above line 8",
+                errors,
+            )
+        # A line refused for a reason of its own gets no such advice: closing line 8 would not
+        # clear it.
+        body = "  d=$(\n  date\n)\n  cd helpers"
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            manifest_path = write_fixture_manifest(root)
+            source = bats_source("hosted example").replace("  true", body)
+            install_rehashed_source(root, manifest_path, "hosted", source)
+
+            errors = checker.validate_repository(root, manifest_path)
+
+        self.assertIn(ambiguous_reference(11), errors)
+        self.assertFalse(any("leaves a substitution open" in error for error in errors), errors)
+
+    def test_helper_file_a_quoted_reference_could_name_is_refused(self) -> None:
+        # `"$HELPERS/bounded_exec.py other"` runs a file named `bounded_exec.py other`; with the
+        # quotes removed the reader sees the pinned `bounded_exec.py`, so the other file must not
+        # exist beside it.
+        checker = load_checker()
+        cases = (
+            ("bounded_exec.py other", "bounded_exec.py other"),
+            ("bounded_exec.py)", "bounded_exec.py)"),
+            # macOS paths ignore case: this reference runs `BOUNDED_EXEC.py other` there.
+            ("BOUNDED_EXEC.py other", "bounded_exec.py other"),
+        )
+        for file_name, reference in cases:
+            with self.subTest(file_name=file_name), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                manifest_path = write_fixture_manifest(root)
+                (root / "bats" / "helpers" / file_name).write_text("# synthetic\n", encoding="utf-8")
+                install_rehashed_source(
+                    root,
+                    manifest_path,
+                    "hosted",
+                    bats_source("hosted example").replace(
+                        "  true", f'  run python3 "$HELPERS/{reference}"'
+                    ),
+                )
+
+                errors = checker.validate_repository(root, manifest_path)
+
+            self.assertEqual(
+                errors,
+                (
+                    "hosted file bats/hosted/sample.bats references helper "
+                    "bats/helpers/bounded_exec.py, and a file in bats/helpers extends that name "
+                    "with a character outside [A-Za-z0-9_./-], which a quoted reference could run "
+                    "instead (rename that file)",
+                ),
+            )
+
+    def test_drift_messages_name_the_path_and_how_to_regenerate(self) -> None:
+        checker = load_checker()
+        live_read = '  run sqlite3 "$HOME/Library/Messages/chat.db" "select private_value"'
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            manifest_path = write_fixture_manifest(root)
+            install_rehashed_source(
+                root, manifest_path, "hosted", bats_source("hosted example").replace("  true", live_read)
+            )
+            unpinned_errors = checker.validate_repository(root, manifest_path)
+            original_pins = checker.TRUSTED_HOSTED_FILE_SHA256
+            checker.TRUSTED_HOSTED_FILE_SHA256 = {"bats/hosted/sample.bats": "0" * 64}
+            try:
+                drifted_errors = checker.validate_repository(root, manifest_path)
+            finally:
+                checker.TRUSTED_HOSTED_FILE_SHA256 = original_pins
+            stdout = io.StringIO()
+            stderr = io.StringIO()
+            with redirect_stdout(stdout), redirect_stderr(stderr):
+                status = checker.run(["--root", str(root), "--manifest", str(manifest_path)])
+
+            helper = root / "bats" / "helpers" / "bounded_exec.py"
+            helper.write_bytes(helper.read_bytes() + b"\n# private helper edit\n")
+            (root / "bats" / "helpers" / "messages_db_probe.py").unlink()
+            helper_errors = checker._validate_trusted_hosted_helpers(root)
+            same_root_errors = checker.validate_candidate_repository(
+                root, manifest_path, root, manifest_path
+            )
+
+            # In a pull request the base's copy judges, so its errors also say re-pinning cannot
+            # happen from inside the pull request.
+            policy_root = root / "policy"
+            candidate_root = root / "candidate"
+            policy_manifest = write_fixture_manifest(policy_root)
+            candidate_manifest = write_fixture_manifest(candidate_root)
+            candidate_helper = candidate_root / "bats" / "helpers" / "bounded_exec.py"
+            candidate_helper.write_bytes(candidate_helper.read_bytes() + b"\n# helper edit\n")
+            pull_request_errors = checker.validate_candidate_repository(
+                policy_root, policy_manifest, candidate_root, candidate_manifest
+            )
+
+        self.assertIn(
+            "hosted file contains live-state access: bats/hosted/sample.bats is not pinned in "
+            f"TRUSTED_HOSTED_FILE_SHA256 ({LIVE_STATE_ADVICE})",
+            unpinned_errors,
+        )
+        self.assertIn(
+            "hosted file contains live-state access: bats/hosted/sample.bats no longer matches its "
+            f"pin in TRUSTED_HOSTED_FILE_SHA256 ({LIVE_STATE_ADVICE})",
+            drifted_errors,
+        )
+        self.assertTrue(any(REGENERATE_HINT in error for error in same_root_errors))
+        self.assertNotIn(PULL_REQUEST_NOTE, same_root_errors)
+        self.assertEqual(
+            pull_request_errors,
+            (
+                "candidate inventory: hosted helper catalog drift: bats/helpers/bounded_exec.py "
+                f"does not match its pin in TRUSTED_HOSTED_HELPER_SHA256 ({REGENERATE_HINT})",
+                PULL_REQUEST_NOTE,
+            ),
+        )
+        self.assertIn(
+            "hosted helper catalog drift: bats/helpers/bounded_exec.py does not match its pin in "
+            f"TRUSTED_HOSTED_HELPER_SHA256 ({REGENERATE_HINT})",
+            helper_errors,
+        )
+        self.assertIn(
+            "hosted helper catalog drift: bats/helpers/messages_db_probe.py is missing or not a "
+            "regular file (restore it, or remove its pin by hand in a reviewed change; "
+            "--update-shas never removes a helper pin)",
+            helper_errors,
+        )
+        rendered = stdout.getvalue() + stderr.getvalue()
+        self.assertEqual(status, 1)
+        self.assertIn("bats/hosted/sample.bats", rendered)
+        self.assertIn("--update-shas", rendered)
+        for private in ("select private_value", "chat.db", "hosted example", str(root)):
+            self.assertNotIn(private, rendered)
+
+    def test_drift_message_never_echoes_an_unprintable_path(self) -> None:
+        checker = load_checker()
+        sentinel = "private\x1b[31m"
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            manifest_path = write_fixture_manifest(root)
+            install_rehashed_source(
+                root,
+                manifest_path,
+                "hosted",
+                bats_source("hosted example").replace("  true", '  run osascript -e "return 1"'),
+            )
+            hosted = root / "bats" / "hosted" / "sample.bats"
+            hosted.rename(hosted.with_name(f"{sentinel}.bats"))
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["tiers"]["hosted"]["files"][0]["path"] = f"bats/hosted/{sentinel}.bats"
+            manifest_path.write_text(
+                json.dumps(manifest, indent=2, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+            errors = checker.validate_repository(root, manifest_path)
+
+        # --update-shas refuses such a path, so the advice is to rename it, not to re-pin it.
+        self.assertIn(
+            "hosted file contains live-state access: a path outside [A-Za-z0-9_./-] is not pinned "
+            "in TRUSTED_HOSTED_FILE_SHA256 (a test that reads live state belongs in the local "
+            "tier; rename it to plain [A-Za-z0-9_./-] path text first: --update-shas pins no "
+            "other)",
+            errors,
+        )
+        self.assertFalse(any(sentinel in error or "\x1b" in error for error in errors), errors)
+        self.assertEqual(checker._display_path("bats/hosted/smoke.bats"), "bats/hosted/smoke.bats")
+        for unsafe in ("bats/hosted/a b.bats", "bats/hosted/\"q\".bats", "../x", "/abs", "bats//x"):
+            self.assertEqual(checker._display_path(unsafe), "a path outside [A-Za-z0-9_./-]")
+
+    def test_update_shas_pins_a_case_variant_under_its_spelling_on_disk(self) -> None:
+        # macOS paths ignore case, so `"$HELPERS/synthetic_probe.py"` runs `Synthetic_Probe.py`:
+        # that file is the one pinned, the tree then validates, and the report does not call it
+        # unreferenced.
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            manifest_path = write_fixture_manifest(root)
+            script = copy_checker(root)
+            (root / "bats" / "helpers" / "Synthetic_Probe.py").write_text(
+                "# synthetic\n", encoding="utf-8"
+            )
+            install_rehashed_source(
+                root,
+                manifest_path,
+                "hosted",
+                bats_source("hosted example").replace(
+                    "  true", '  run python3 "$HELPERS/synthetic_probe.py"'
+                ),
+            )
+
+            completed = run_update_shas(script, root, manifest_path)
+            verified = subprocess.run(
+                [sys.executable, str(script), "--root", str(root), "--manifest", str(manifest_path)],
+                check=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            rewritten = script.read_text(encoding="utf-8")
+
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        self.assertIn("- helper added: bats/helpers/Synthetic_Probe.py\n", completed.stdout)
+        self.assertNotIn("references it: bats/helpers/Synthetic_Probe.py", completed.stdout)
+        self.assertIn('    "bats/helpers/Synthetic_Probe.py": "', rewritten)
+        self.assertNotIn('"bats/helpers/synthetic_probe.py"', rewritten)
+        self.assertEqual(verified.returncode, 0, verified.stderr)
+
+    def test_update_shas_repins_adds_referenced_helpers_and_is_idempotent(self) -> None:
+        real_checker = sha256_of(CHECKER_PATH)
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            root = directory / "root"
+            manifest_path = write_fixture_manifest(root, hosted_titles=["private hosted title"])
+            # `--update-shas` rewrites only the copy inside the tree it pins.
+            script = copy_checker(root)
+            script.chmod(0o640)
+            original = script.read_text(encoding="utf-8")
+            outputs = []
+
+            first = run_update_shas(script, root, manifest_path)
+            outputs.append(first.stdout + first.stderr)
+            after_first = script.read_text(encoding="utf-8")
+            rewritten_mode = stat.S_IMODE(script.stat().st_mode)
+            left_beside = sorted(path.name for path in script.parent.iterdir())
+
+            helper = root / "bats" / "helpers" / "bounded_exec.py"
+            helper.write_bytes(helper.read_bytes() + b"\n# private-helper-text\n")
+            probe = root / "bats" / "helpers" / "synthetic_probe.py"
+            probe.write_text("# private-helper-text\n", encoding="utf-8")
+            hosted = install_rehashed_source(
+                root,
+                manifest_path,
+                "hosted",
+                bats_source("private hosted title").replace(
+                    "  true", '  run python3 "$HELPERS/synthetic_probe.py"'
+                ),
+            )
+            second = run_update_shas(script, root, manifest_path)
+            outputs.append(second.stdout + second.stderr)
+            after_second = script.read_text(encoding="utf-8")
+            pinned_helpers = [*load_checker().TRUSTED_HOSTED_HELPER_SHA256]
+            expected_helpers = {
+                relative: sha256_of(root / relative)
+                for relative in [*pinned_helpers, "bats/helpers/synthetic_probe.py"]
+            }
+            expected_files = {"bats/hosted/sample.bats": sha256_of(hosted)}
+
+            third = run_update_shas(script, root, manifest_path)
+            outputs.append(third.stdout + third.stderr)
+            after_third = script.read_text(encoding="utf-8")
+            verified = subprocess.run(
+                [sys.executable, str(script), "--root", str(root), "--manifest", str(manifest_path)],
+                check=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+
+        for completed in (first, second, third):
+            self.assertEqual(completed.returncode, 0, completed.stderr)
+            self.assertEqual(completed.stderr, "")
+        self.assertIn("- hosted file added: bats/hosted/sample.bats\n", first.stdout)
+        self.assertIn("- hosted file removed: bats/hosted/mail.bats\n", first.stdout)
+        self.assertNotIn("- helper", first.stdout.replace("- helper kept", ""))
+        # The rewrite keeps the file's mode and leaves no temporary file beside it.
+        self.assertEqual(rewritten_mode, 0o640)
+        self.assertEqual(left_beside, ["bats_inventory.py"])
+        self.assertIn("- hosted file re-pinned: bats/hosted/sample.bats\n", second.stdout)
+        self.assertIn("- helper re-pinned: bats/helpers/bounded_exec.py\n", second.stdout)
+        self.assertIn("- helper added: bats/helpers/synthetic_probe.py\n", second.stdout)
+        self.assertIn(
+            "- helper kept although no hosted file references it: "
+            "bats/helpers/messages_db_probe.py\n",
+            second.stdout,
+        )
+        self.assertNotIn("references it: bats/helpers/synthetic_probe.py", second.stdout)
+        self.assertIn(
+            "Rewrote the pin maps in scripts/ci/bats_inventory.py (3 pin(s) changed); review the "
+            "diff",
+            second.stdout,
+        )
+        self.assertIn(pin_literal("TRUSTED_HOSTED_FILE_SHA256", expected_files), after_second)
+        self.assertIn(pin_literal("TRUSTED_HOSTED_HELPER_SHA256", expected_helpers), after_second)
+        # Nothing outside the two literals moves, and a second run on the same tree is a no-op.
+        for text in (after_first, after_second):
+            self.assertEqual(PIN_LITERAL.sub(r"\1", text), PIN_LITERAL.sub(r"\1", original))
+            self.assertEqual(len(PIN_LITERAL.findall(text)), 2)
+        self.assertEqual(after_third, after_second)
+        self.assertIn("No pin changed: both maps already match the files on disk.\n", third.stdout)
+        # Keys come out sorted whatever order the manifest lists the hosted files in.
+        unsorted = {"bats/hosted/b.bats": "1" * 64, "bats/hosted/a.bats": "2" * 64}
+        self.assertEqual(
+            load_checker()._render_pin_literal("TRUSTED_HOSTED_FILE_SHA256", unsorted),
+            pin_literal("TRUSTED_HOSTED_FILE_SHA256", unsorted),
+        )
+        self.assertEqual(verified.returncode, 0, verified.stderr)
+        self.assertEqual(verified.stdout, "Bats tier inventory: 2 tests verified\n")
+        for output in outputs:
+            self.assertNotIn("private hosted title", output)
+            self.assertNotIn("private-helper-text", output)
+            self.assertNotIn(str(directory), output)
+            self.assertIsNone(re.search(r"[0-9a-f]{64}", output), output)
+        self.assertEqual(sha256_of(CHECKER_PATH), real_checker)
+
+    def test_update_shas_changes_nothing_on_the_real_tree(self) -> None:
+        checker = load_checker()
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            script = copy_checker(Path(temporary_directory))
+            before = script.read_bytes()
+
+            report, errors = checker.update_trusted_shas(REPO_ROOT, MANIFEST_PATH, script)
+
+            after = script.read_bytes()
+        self.assertEqual(errors, ())
+        self.assertEqual(after, before)
+        self.assertEqual(report[-1], "No pin changed: both maps already match the files on disk.")
+        self.assertEqual(
+            {line.rsplit(": ", 1)[1] for line in report[:-1]},
+            LOCAL_ONLY_PINNED_HELPERS,
+        )
+
+    def test_every_real_hosted_file_trips_the_live_state_heuristic(self) -> None:
+        # AGENTS.md says all eight hosted files are flagged today, so each hosted pin is the
+        # exemption that admits its file. If a hosted file stops tripping the heuristic, its pin
+        # no longer matters, and that sentence needs updating along with this test.
+        checker = load_checker()
+        manifest = checker.load_manifest(MANIFEST_PATH)
+        hosted = sorted(entry["path"] for entry in checker._manifest_entries(manifest, "hosted"))
+        self.assertEqual(len(hosted), 8)
+        self.assertEqual(hosted, sorted(checker.TRUSTED_HOSTED_FILE_SHA256))
+        for relative in hosted:
+            with self.subTest(path=relative):
+                _payload, source, _titles = checker.read_bats_file(REPO_ROOT / relative, relative)
+                self.assertTrue(checker._hosted_has_live_state_access(source))
+
+    def test_update_shas_marks_a_hosted_pin_that_waives_the_live_state_heuristic(self) -> None:
+        # The pin is what admits a flagged file, so the reviewer must see that it does.
+        checker = load_checker()
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            manifest_path = write_fixture_manifest(root)
+            install_rehashed_source(
+                root,
+                manifest_path,
+                "hosted",
+                bats_source("hosted example").replace("  true", '  run osascript -e "return 1"'),
+            )
+            script = copy_checker(root)
+
+            report, errors = checker.update_trusted_shas(root, manifest_path, script)
+
+            rewritten = script.read_text(encoding="utf-8")
+        self.assertEqual(errors, ())
+        self.assertIn("- hosted file added: bats/hosted/sample.bats" + EXEMPTION_NOTE, report)
+        self.assertIn('    "bats/hosted/sample.bats": "', rewritten)
+
+    def test_update_shas_leaves_no_temporary_file_and_ignores_a_stale_one(self) -> None:
+        checker = load_checker()
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory)
+            manifest_path = write_fixture_manifest(root)
+            script = copy_checker(root)
+            before = script.read_bytes()
+            with mock.patch.object(checker.os, "replace", side_effect=OSError("synthetic")):
+                failed = checker.update_trusted_shas(root, manifest_path, script)
+            after_failure = script.read_bytes()
+            left_after_failure = sorted(path.name for path in script.parent.iterdir())
+
+            # A sibling left by a run killed between its write and its rename blocks no rerun.
+            stale = script.parent / ".bats_inventory.py.stale1.update-shas"
+            stale.write_text("stale\n", encoding="utf-8")
+            report, errors = checker.update_trusted_shas(root, manifest_path, script)
+            after_rerun = script.read_bytes()
+            left_after_rerun = sorted(path.name for path in script.parent.iterdir())
+
+        self.assertEqual(failed, ((), ("could not rewrite scripts/ci/bats_inventory.py",)))
+        self.assertEqual(after_failure, before)
+        self.assertEqual(left_after_failure, ["bats_inventory.py"])
+        self.assertEqual(errors, ())
+        self.assertNotEqual(after_rerun, before)
+        self.assertEqual(
+            left_after_rerun, [".bats_inventory.py.stale1.update-shas", "bats_inventory.py"]
+        )
+        self.assertTrue(
+            report[-1].startswith("Rewrote the pin maps in scripts/ci/bats_inventory.py"), report
+        )
+
+    def test_update_shas_refuses_a_missing_duplicated_or_reformatted_literal(self) -> None:
+        checker = load_checker()
+        original = CHECKER_PATH.read_text(encoding="utf-8")
+        helper_literal = next(
+            match.group(0) for match in PIN_LITERAL.finditer(original)
+            if match.group(1) == "TRUSTED_HOSTED_HELPER_SHA256"
+        )
+        file_literal = next(
+            match.group(0) for match in PIN_LITERAL.finditer(original)
+            if match.group(1) == "TRUSTED_HOSTED_FILE_SHA256"
+        )
+        # One entry line of the file literal, duplicated in place: the literal still appears
+        # exactly once, but the same path is now pinned twice inside it.
+        file_entry_line = re.search(r'    "[^"\\\n]*": "[0-9a-f]{64}",\n', file_literal).group(0)
+        mutations = {
+            "missing": original.replace(helper_literal, ""),
+            "duplicated": original + "\n" + file_literal,
+            "reformatted": original.replace(
+                "TRUSTED_HOSTED_FILE_SHA256 = {", "TRUSTED_HOSTED_FILE_SHA256: dict = {", 1
+            ),
+            # The last file entry loses its trailing comma.
+            "entry reformatted": original.replace(
+                '",\n}\nTRUSTED_HOSTED_HELPER', '"\n}\nTRUSTED_HOSTED_HELPER', 1
+            ),
+            "duplicate entry": original.replace(
+                file_literal, file_literal.replace(file_entry_line, file_entry_line * 2, 1), 1
+            ),
+            # The text check sees one literal at the start of a line in each of these; only the
+            # parsed module shows a second binding that would win at run time.
+            "assigned again in a block": original
+            + "\nif True:\n    TRUSTED_HOSTED_FILE_SHA256 = {}\n",
+            "assigned again on one line": original
+            + "\n_unused = {}; TRUSTED_HOSTED_FILE_SHA256 = {}\n",
+            "annotated reassignment": original
+            + "\nif True:\n    TRUSTED_HOSTED_HELPER_SHA256: dict = {}\n",
+            "tuple target": original
+            + "\nif True:\n    _unused, TRUSTED_HOSTED_HELPER_SHA256 = 0, {}\n",
+            "augmented assignment": original
+            + "\ndef _extend() -> None:\n    global TRUSTED_HOSTED_FILE_SHA256\n"
+            + "    TRUSTED_HOSTED_FILE_SHA256 |= {}\n",
+            # Every other form that binds or deletes a name counts as a second binding too.
+            "deleted": original
+            + "\ndef _drop() -> None:\n    global TRUSTED_HOSTED_FILE_SHA256\n"
+            + "    del TRUSTED_HOSTED_FILE_SHA256\n",
+            "redefined as a function": original
+            + "\ndef TRUSTED_HOSTED_FILE_SHA256() -> None:\n    pass\n",
+            "redefined as a class": original + "\nclass TRUSTED_HOSTED_HELPER_SHA256:\n    pass\n",
+            "imported over": original
+            + "\nif True:\n    import json as TRUSTED_HOSTED_FILE_SHA256\n",
+            "bound by an except clause": original
+            + "\ntry:\n    pass\nexcept ValueError as TRUSTED_HOSTED_FILE_SHA256:\n    pass\n",
+            "parameter": original
+            + "\ndef _shadow(TRUSTED_HOSTED_FILE_SHA256: dict) -> None:\n    pass\n",
+            "lambda parameter": original
+            + "\n_shadow = lambda TRUSTED_HOSTED_HELPER_SHA256: None\n",
+            # One binding, but the value the script uses is not the literal any more.
+            "item assignment": original
+            + '\nif True:\n    TRUSTED_HOSTED_FILE_SHA256["bats/hosted/x.bats"] = "0" * 64\n',
+            "item deletion": original
+            + '\nif True:\n    del TRUSTED_HOSTED_HELPER_SHA256["bats/helpers/x.py"]\n',
+            "update call": original + "\nif True:\n    TRUSTED_HOSTED_FILE_SHA256.update({})\n",
+            "clear call": original + "\nif True:\n    TRUSTED_HOSTED_HELPER_SHA256.clear()\n",
+            "unbound method call": original
+            + "\nif True:\n    dict.update(TRUSTED_HOSTED_FILE_SHA256, {})\n",
+            "attribute taken": original
+            + "\nif True:\n    _pop = TRUSTED_HOSTED_HELPER_SHA256.pop\n",
+            "passed starred": original + "\nif True:\n    print(*TRUSTED_HOSTED_FILE_SHA256)\n",
+            "star import": original + "\nfrom os.path import *\n",
+            # The literal the text check finds is a copy inside a string: the one binding is
+            # elsewhere, inside a block in one case and after another statement in the other.
+            "literal only in a string": original.replace(
+                file_literal,
+                '_COPY = """\n'
+                + file_literal
+                + '"""\nif True:\n    TRUSTED_HOSTED_FILE_SHA256 = {}\n',
+                1,
+            ),
+            "literal copied into a string": original.replace(
+                file_literal,
+                '_COPY = """\n' + file_literal + '"""\n_unused = 0; ' + file_literal,
+                1,
+            ),
+        }
+        expected_error = {
+            "assigned again in a block": "TRUSTED_HOSTED_FILE_SHA256: expected exactly one "
+            "assignment in the script, found 2",
+            "assigned again on one line": "TRUSTED_HOSTED_FILE_SHA256: expected exactly one "
+            "assignment in the script, found 2",
+            "annotated reassignment": "TRUSTED_HOSTED_HELPER_SHA256: expected exactly one "
+            "assignment in the script, found 2",
+            "tuple target": "TRUSTED_HOSTED_HELPER_SHA256: expected exactly one assignment in the "
+            "script, found 2",
+            "augmented assignment": "TRUSTED_HOSTED_FILE_SHA256: expected exactly one assignment "
+            "in the script, found 2",
+            **{
+                name: f"{map_name}: expected exactly one assignment in the script, found 2"
+                for name, map_name in (
+                    ("deleted", "TRUSTED_HOSTED_FILE_SHA256"),
+                    ("redefined as a function", "TRUSTED_HOSTED_FILE_SHA256"),
+                    ("redefined as a class", "TRUSTED_HOSTED_HELPER_SHA256"),
+                    ("imported over", "TRUSTED_HOSTED_FILE_SHA256"),
+                    ("bound by an except clause", "TRUSTED_HOSTED_FILE_SHA256"),
+                    ("match capture", "TRUSTED_HOSTED_FILE_SHA256"),
+                    ("match star", "TRUSTED_HOSTED_HELPER_SHA256"),
+                    ("match rest", "TRUSTED_HOSTED_FILE_SHA256"),
+                    ("parameter", "TRUSTED_HOSTED_FILE_SHA256"),
+                    ("lambda parameter", "TRUSTED_HOSTED_HELPER_SHA256"),
+                    ("star import", "TRUSTED_HOSTED_FILE_SHA256"),
+                )
+            },
+            **{
+                name: f"{map_name}: the script may change the map in place (an item assignment or "
+                "deletion, an attribute of the map, or the map passed to a call), so the rewritten "
+                "literal might not be what it uses"
+                for name, map_name in (
+                    ("item assignment", "TRUSTED_HOSTED_FILE_SHA256"),
+                    ("item deletion", "TRUSTED_HOSTED_HELPER_SHA256"),
+                    ("update call", "TRUSTED_HOSTED_FILE_SHA256"),
+                    ("clear call", "TRUSTED_HOSTED_HELPER_SHA256"),
+                    ("unbound method call", "TRUSTED_HOSTED_FILE_SHA256"),
+                    ("attribute taken", "TRUSTED_HOSTED_HELPER_SHA256"),
+                    ("passed starred", "TRUSTED_HOSTED_FILE_SHA256"),
+                )
+            },
+            "literal only in a string": "TRUSTED_HOSTED_FILE_SHA256: its one assignment is not "
+            "the module-level literal the rewrite replaces",
+            "literal copied into a string": "TRUSTED_HOSTED_FILE_SHA256: its one assignment is "
+            "not the module-level literal the rewrite replaces",
+            "missing": "TRUSTED_HOSTED_HELPER_SHA256: expected exactly one literal in the "
+            "existing format",
+            "duplicated": "TRUSTED_HOSTED_FILE_SHA256: expected exactly one literal in the "
+            "existing format",
+            "reformatted": "TRUSTED_HOSTED_FILE_SHA256: expected exactly one literal in the "
+            "existing format",
+            "entry reformatted": "TRUSTED_HOSTED_FILE_SHA256: expected exactly one literal in "
+            "the existing format",
+            "duplicate entry": "TRUSTED_HOSTED_FILE_SHA256: the literal pins a path twice",
+        }
+        if sys.version_info >= (3, 10):
+            # `match` parses from Python 3.10; the script itself still runs on older interpreters.
+            mutations.update(
+                {
+                    "match capture": original
+                    + "\nmatch 0:\n    case TRUSTED_HOSTED_FILE_SHA256:\n        pass\n",
+                    "match star": original
+                    + "\nmatch []:\n    case [*TRUSTED_HOSTED_HELPER_SHA256]:\n        pass\n",
+                    "match rest": original
+                    + "\nmatch {}:\n    case {**TRUSTED_HOSTED_FILE_SHA256}:\n        pass\n",
+                }
+            )
+        for name, text in mutations.items():
+            self.assertNotEqual(text, original, name)
+            with self.subTest(mutation=name), tempfile.TemporaryDirectory() as temporary_directory:
+                directory = Path(temporary_directory)
+                root = directory / "root"
+                manifest_path = write_fixture_manifest(root)
+                script = copy_checker(directory / "tool")
+                script.write_text(text, encoding="utf-8")
+
+                report, errors = checker.update_trusted_shas(root, manifest_path, script)
+
+                self.assertEqual(script.read_text(encoding="utf-8"), text)
+            self.assertEqual(report, ())
+            self.assertEqual(errors, (expected_error[name],))
+        # A longer name that merely starts with a map's name is neither literal nor binding.
+        lookalike = "\nTRUSTED_HOSTED_FILE_SHA256_OLD = {}\n"
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            root = directory / "root"
+            manifest_path = write_fixture_manifest(root)
+            script = copy_checker(directory / "tool")
+            script.write_text(original + lookalike, encoding="utf-8")
+
+            report, errors = checker.update_trusted_shas(root, manifest_path, script)
+
+            rewritten = script.read_text(encoding="utf-8")
+        self.assertEqual(errors, ())
+        self.assertTrue(rewritten.endswith(lookalike), rewritten[-200:])
+        self.assertIn("- hosted file added: bats/hosted/sample.bats", report)
+
+    def test_update_shas_refuses_trees_it_cannot_pin_and_never_drops_a_helper(self) -> None:
+        checker = load_checker()
+
+        def missing_pinned_helper(root: Path, _manifest_path: Path) -> None:
+            (root / "bats" / "helpers" / "messages_db_probe.py").unlink()
+
+        def hosted_body(body: str) -> str:
+            return bats_source("hosted example").replace("  true", body)
+
+        def stale_manifest(root: Path, _manifest_path: Path) -> None:
+            hosted = root / "bats" / "hosted" / "sample.bats"
+            hosted.write_text(hosted_body("  false"), encoding="utf-8")
+
+        def ambiguous_helper_reference(root: Path, manifest_path: Path) -> None:
+            install_rehashed_source(root, manifest_path, "hosted", hosted_body('  dir="$HELPERS"'))
+
+        def absent_helper(root: Path, manifest_path: Path) -> None:
+            install_rehashed_source(
+                root, manifest_path, "hosted", hosted_body('  run python3 "$HELPERS/absent_probe.py"')
+            )
+
+        def symlinked_new_helper(root: Path, manifest_path: Path) -> None:
+            # A newly referenced helper that resolves to a symlink, not a regular file: `present`
+            # includes it (the scan does not look past the symlink), but `_safe_file` refuses it.
+            (root / "bats" / "helpers" / "synthetic_probe.py").symlink_to(
+                root / "bats" / "helpers" / "bounded_exec.py"
+            )
+            install_rehashed_source(
+                root, manifest_path, "hosted",
+                hosted_body('  run python3 "$HELPERS/synthetic_probe.py"'),
+            )
+
+        cases = (
+            (
+                missing_pinned_helper,
+                "helper bats/helpers/messages_db_probe.py is missing or not a regular file "
+                "(restore it, or remove its pin by hand in a reviewed change; --update-shas never "
+                "removes a helper pin)",
+            ),
+            (stale_manifest, "file content drift in inventory file bats/hosted/sample.bats"),
+            (ambiguous_helper_reference, ambiguous_reference(8)),
+            (
+                absent_helper,
+                "hosted file bats/hosted/sample.bats references helper "
+                "bats/helpers/absent_probe.py, which is not a file in bats/helpers",
+            ),
+            (
+                symlinked_new_helper,
+                "helper bats/helpers/synthetic_probe.py is not a regular file",
+            ),
+        )
+        for mutate, expected in cases:
+            with self.subTest(case=mutate.__name__), tempfile.TemporaryDirectory() as temporary_directory:
+                directory = Path(temporary_directory)
+                root = directory / "root"
+                manifest_path = write_fixture_manifest(root)
+                script = copy_checker(directory / "tool")
+                before = script.read_bytes()
+                mutate(root, manifest_path)
+
+                report, errors = checker.update_trusted_shas(root, manifest_path, script)
+
+                self.assertEqual(script.read_bytes(), before)
+            self.assertEqual(report, ())
+            self.assertIn(expected, errors)
+            if mutate is stale_manifest:
+                self.assertEqual(
+                    errors[0],
+                    "the tree fails the inventory even with regenerated pins; fix these first "
+                    "(an edited Bats file needs its bats/tier-inventory.json entry brought up to "
+                    "date):",
+                )
+            if mutate is symlinked_new_helper:
+                # The plain message, never the restore-or-remove phrasing reserved for a helper
+                # that was already pinned.
+                self.assertNotIn("restore it, or remove its pin by hand", " ".join(errors))
+
+    def test_update_shas_refuses_to_pin_a_hosted_path_with_an_unsafe_character(self) -> None:
+        # This refusal is all that keeps a path out of the rewritten Python literal, so each file
+        # really exists and is listed: without the refusal the tree would pass, and a quote or a
+        # backslash would be written into the script's source.
+        checker = load_checker()
+        for character, label in (
+            (" ", "a space"),
+            ("\x1b", "a control character"),
+            ('"', "a double quote"),
+            ("\\", "a backslash"),
+        ):
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temporary_directory:
+                directory = Path(temporary_directory)
+                root = directory / "root"
+                manifest_path = write_fixture_manifest(root)
+                script = copy_checker(directory / "tool")
+                before = script.read_bytes()
+                relative = f"bats/hosted/a{character}b.bats"
+                (root / "bats" / "hosted" / "sample.bats").rename(root / relative)
+                manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+                manifest["tiers"]["hosted"]["files"][0]["path"] = relative
+                manifest_path.write_text(
+                    json.dumps(manifest, indent=2, sort_keys=True) + "\n", encoding="utf-8"
+                )
+
+                report, errors = checker.update_trusted_shas(root, manifest_path, script)
+
+                self.assertEqual(script.read_bytes(), before)
+            self.assertEqual(report, ())
+            self.assertEqual(
+                errors,
+                ("hosted file a path outside [A-Za-z0-9_./-] cannot be pinned",),
+            )
+
+    def test_update_shas_refuses_to_pin_a_pre_existing_helper_with_an_unsafe_character(
+        self,
+    ) -> None:
+        # A name `_helper_references` extracts can never carry an unsafe character --
+        # `HELPER_REFERENCE_NAME` only ever captures `[A-Za-z0-9_.-]`, so a *referenced* helper
+        # can never reach `_display_path`'s mismatch branch below. The only other way a path
+        # lands in `helper_paths` is a pre-existing entry already in the script's own pinned
+        # literal, which `_pin_literal` parses from any quoted text (space and control
+        # characters included); this test reaches the helper side of the same check that way.
+        checker = load_checker()
+        for character, label in ((" ", "a space"), ("\x1b", "a control character")):
+            with self.subTest(label=label), tempfile.TemporaryDirectory() as temporary_directory:
+                directory = Path(temporary_directory)
+                root = directory / "root"
+                manifest_path = write_fixture_manifest(root)
+                script = copy_checker(directory / "tool")
+                original = script.read_text(encoding="utf-8")
+                helper_literal = next(
+                    match.group(0) for match in PIN_LITERAL.finditer(original)
+                    if match.group(1) == "TRUSTED_HOSTED_HELPER_SHA256"
+                )
+                unsafe_entry = f'    "bats/helpers/a{character}b.py": "{"0" * 64}",\n'
+                mutated_literal = helper_literal[:-2] + unsafe_entry + helper_literal[-2:]
+                mutated = original.replace(helper_literal, mutated_literal, 1)
+                script.write_text(mutated, encoding="utf-8")
+
+                report, errors = checker.update_trusted_shas(root, manifest_path, script)
+
+                self.assertEqual(script.read_text(encoding="utf-8"), mutated)
+            self.assertEqual(report, ())
+            self.assertEqual(
+                errors,
+                ("helper a path outside [A-Za-z0-9_./-] cannot be pinned",),
+            )
+
+    def test_update_shas_never_runs_in_ci_or_beside_a_policy_root(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            directory = Path(temporary_directory)
+            root = directory / "root"
+            manifest_path = write_fixture_manifest(root)
+            script = copy_checker(root)
+            before = script.read_bytes()
+            # The guard tests presence, not value: "1" is not the string "true", and an empty
+            # value is still set, so a guard narrowed to `== "true"` or to a truthy value would
+            # let these through and turn them red.
+            refusals = {
+                (flag, value): run_update_shas(script, root, manifest_path, **{flag: value})
+                for flag in ("CI", "GITHUB_ACTIONS")
+                for value in ("true", "1", "")
+            }
+            # A copy outside --root would write --root's digests into a script that does not
+            # sit beside those files.
+            outside_script = copy_checker(directory / "tool")
+            outside_before = outside_script.read_bytes()
+            outside = run_update_shas(outside_script, root, manifest_path)
+            outside_after = outside_script.read_bytes()
+            # --root's copy as a symlink to that outside copy: both paths resolve to one file, so
+            # comparing resolved paths alone would let the rewrite land outside --root.
+            linked_root = directory / "linked-root"
+            linked_manifest = write_fixture_manifest(linked_root)
+            linked_script = linked_root / "scripts" / "ci" / "bats_inventory.py"
+            linked_script.parent.mkdir(parents=True)
+            linked_script.symlink_to(outside_script)
+            linked = {
+                "through the link": run_update_shas(linked_script, linked_root, linked_manifest),
+                "from the target": run_update_shas(outside_script, linked_root, linked_manifest),
+            }
+            linked_after = outside_script.read_bytes()
+            with_policy_root = subprocess.run(
+                [sys.executable, str(script), "--root", str(root), "--update-shas",
+                 "--policy-root", str(root)],
+                check=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            with_policy_manifest = subprocess.run(
+                [sys.executable, str(script), "--root", str(root), "--manifest",
+                 str(manifest_path), "--update-shas", "--policy-manifest", str(manifest_path)],
+                check=False,
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
+                text=True,
+            )
+            after = script.read_bytes()
+
+            # A synthetic root and a synthetic copy, never the real script: with CI and
+            # GITHUB_ACTIONS both absent from the environment the guard must step aside and let
+            # --update-shas run, so narrowing it to `== "true"` leaves CI=1 above refused while
+            # this still proceeds, rather than turning red for the right reason.
+            proceeding_root = directory / "proceeding-root"
+            proceeding_manifest = write_fixture_manifest(proceeding_root)
+            proceeding_script = copy_checker(proceeding_root)
+            proceeds = run_update_shas(proceeding_script, proceeding_root, proceeding_manifest)
+
+        self.assertEqual(after, before)
+        for (flag, value), refusal in refusals.items():
+            with self.subTest(flag=flag, value=value):
+                self.assertEqual(refusal.returncode, 1)
+                self.assertEqual(refusal.stdout, "")
+                self.assertIn(
+                    "it never runs in CI (CI or GITHUB_ACTIONS is set, even to an empty value)",
+                    refusal.stderr,
+                )
+        self.assertEqual(outside.returncode, 1)
+        self.assertEqual(outside.stdout, "")
+        self.assertIn(
+            "it rewrites the script it runs from, which must be scripts/ci/bats_inventory.py "
+            "inside --root",
+            outside.stderr,
+        )
+        self.assertEqual(outside_after, outside_before)
+        for label, refusal in linked.items():
+            with self.subTest(symlinked_script=label):
+                self.assertEqual(refusal.returncode, 1)
+                self.assertEqual(refusal.stdout, "")
+                self.assertIn("inside --root, a regular file and not a symlink", refusal.stderr)
+        self.assertEqual(linked_after, outside_before)
+        for guard, with_policy in (
+            ("policy-root", with_policy_root), ("policy-manifest", with_policy_manifest)
+        ):
+            with self.subTest(guard=guard):
+                self.assertEqual(with_policy.returncode, 2)
+                self.assertIn("--update-shas takes --root and --manifest only", with_policy.stderr)
+        self.assertEqual(proceeds.returncode, 0, proceeds.stderr)
+        self.assertEqual(proceeds.stderr, "")
+        self.assertNotIn("never runs in CI", proceeds.stdout)
+        self.assertIn("Bats tier inventory --update-shas:", proceeds.stdout)
 
 
 if __name__ == "__main__":

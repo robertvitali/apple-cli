@@ -4,6 +4,7 @@
 from __future__ import annotations
 
 import argparse
+import ast
 import hashlib
 import json
 import os
@@ -11,6 +12,7 @@ from pathlib import Path, PurePosixPath
 import re
 import stat
 import sys
+import tempfile
 from typing import Any, Callable, Iterable, Optional
 
 
@@ -80,15 +82,56 @@ SHELL_WORD = re.compile(
 SHELL_SEGMENT = re.compile(r"[;\n]|&&?|\|\|?")
 CLI_BINARY_MARKER = "__apple_cli_binary__"
 MAX_SHELL_VARIANTS = 256
+HELPER_DIRECTORY = "bats/helpers"
+HELPERS_DEFINITION = SHARED_ROOT_CONTRACT[2]
+HELPER_WORD = re.compile(r"(?<![A-Za-z0-9_])helpers(?![A-Za-z0-9_])", re.IGNORECASE)
+# What may end a helper file name: a blank, a shell operator or the end of the line.
+REFERENCE_END = r"[ \t;|&)<>]|$"
+HELPER_REFERENCE_NAME = re.compile(r"/([A-Za-z0-9_][A-Za-z0-9_.-]*)(?=" + REFERENCE_END + ")")
+REFERENCE_TERMINATOR = re.compile(REFERENCE_END)
+# Command and process substitutions, and bash 5.3's `${ cmd; }` and `${| cmd; }` (whose opener
+# may also end a line).
+FUNCTION_SUBSTITUTION_OPENERS = ("${ ", "${\t", "${|")
+SUBSTITUTION_OPENERS = ("$(", "<(", ">(", *FUNCTION_SUBSTITUTION_OPENERS)
+# A logical line ending in an opener continues the substitution onto the lines after it; blanks
+# or a `(` may follow the opener, as in `$( (`.
+SUBSTITUTION_OPENED_AT_END = re.compile(r"(?:\$\(|<\(|>\(|\$\{[ \t|]?)[ \t(]*$")
+# A line that ends in an odd run of backslashes continues on the next one.
+CONTINUED_LINE = re.compile(r"(?<!\\)(?:\\\\)*\\$")
+# A backtick no backslash escapes: an even run of backslashes before it escapes nothing.
+UNESCAPED_BACKTICK = re.compile(r"(?<!\\)(?:\\\\)*`")
+PLAIN_PATH_CHARACTER = re.compile(r"[A-Za-z0-9_./-]")
+SAFE_REPOSITORY_PATH = re.compile(
+    r"[A-Za-z0-9_][A-Za-z0-9_.-]*(?:/[A-Za-z0-9_][A-Za-z0-9_.-]*)*"
+)
+INVENTORY_SCRIPT = "scripts/ci/bats_inventory.py"
+PIN_MAP_NAMES = ("TRUSTED_HOSTED_FILE_SHA256", "TRUSTED_HOSTED_HELPER_SHA256")
+CI_ENVIRONMENT_FLAGS = ("CI", "GITHUB_ACTIONS")
+UPDATE_HINT = (
+    "if the change is reviewed and intended, re-pin locally, never in CI: run "
+    f"`python3 {INVENTORY_SCRIPT} --update-shas` from the repository root, after bringing "
+    "bats/tier-inventory.json up to date if it reports manifest drift, and review the diff"
+)
+RENAME_HINT = "rename it to plain [A-Za-z0-9_./-] path text first: --update-shas pins no other"
+PULL_REQUEST_PIN_NOTE = (
+    "in a pull request the base branch's copy of this script and its pins judge the candidate, "
+    "and a pull request cannot change a hosted file or a pinned helper: re-pinning lands only "
+    "through a reviewed change on main"
+)
+# Both maps are rewritten by `--update-shas` (see `update_trusted_shas` for its trust model);
+# keep each one a single literal in this exact format, one sorted entry per line, bind neither
+# name anywhere else in this script, and read each only by its bare name, never through an
+# attribute, an item store or a call argument (`_verified_pin_literals` refuses otherwise). An
+# alias is beyond that check, so keep any alias read-only.
 TRUSTED_HOSTED_FILE_SHA256 = {
     "bats/hosted/bounded_exec.bats": "13e4976b41a295182873e45c7f33c84dd7712e2ee16399fc6c0fe561056d4c26",
     "bats/hosted/calendar.bats": "f9959a2b94f5869d46d20c1be5500f4e244f1d0e5e3dd198f16f6e712ab11613",
     "bats/hosted/contacts.bats": "e9a4adf121fa3d78a7890aedbd1fe6a4d2737bd86efa91f96fde9880a0cec03b",
-    "bats/hosted/mail.bats": "01b6a2d4ed8bf364bc7c79009a76bccf609d4a2d2f2d7296ffdf6d3ed8378bbd",
+    "bats/hosted/mail.bats": "e120826145b1ecfa2ffb6f9aee9fd9f91f96c6aea0ed055d7ea37483f07e93b6",
     "bats/hosted/messages.bats": "23a087ee666d59ad74899ca98186feebd5b20f2db24b0804c5a5c456b8c5cf40",
-    "bats/hosted/notes.bats": "342858717b6fa006c2ab7222dfec2653d8b2632d002af6edacf7a82e4bf89611",
+    "bats/hosted/notes.bats": "489bf4d9a7e1d1dea5e038e36c58e200f35f1b299c058ace927f4a1865db5580",
     "bats/hosted/reminders.bats": "e195ea49c1205b3fbe15d275a109f4591776093f3e743f21e36cb9c7682de3f4",
-    "bats/hosted/smoke.bats": "7bd533f47c3271ae141be9e4d95b93b5b476cd5bd68e46908d5a634cf53095e1",
+    "bats/hosted/smoke.bats": "31b1904e4aed2228876f052c1e7e74c8d1530fd24230b2812015159b35710edc",
 }
 TRUSTED_HOSTED_HELPER_SHA256 = {
     "bats/helpers/app_lifecycle.bash": "4e9689b18532ad592e3e6166a141ad0cae16a2d1bfe0d02b3160ca9c3753781a",
@@ -107,6 +150,14 @@ TRUSTED_HOSTED_HELPER_SHA256 = {
 
 class InventoryError(ValueError):
     """Raised when inventory input is malformed."""
+
+
+def _display_path(relative: str) -> str:
+    """A repository path for a diagnostic: shown only when it is plain ASCII path text, so no
+    control, quote or other character a terminal could act on is ever echoed."""
+    if SAFE_REPOSITORY_PATH.fullmatch(relative):
+        return relative
+    return "a path outside [A-Za-z0-9_./-]"
 
 
 def _read_bounded_regular(path: Path, *, label: str, maximum: int) -> bytes:
@@ -680,6 +731,207 @@ def _hosted_has_live_state_access(source: str) -> bool:
     return _has_live_cli_operation(executable) or _has_live_cli_operation(dequoted)
 
 
+def _logical_lines(source: str) -> list[tuple[int, str]]:
+    """(first line number, text) for each logical line: a line ending in an odd run of
+    backslashes continues on the next, and the backslash and line feed go, as bash joins them."""
+    logical: list[tuple[int, str]] = []
+    start, pieces = 0, []
+    for line_number, line in enumerate(_lf_lines(source), 1):
+        if not pieces:
+            start = line_number
+        if CONTINUED_LINE.search(line):
+            pieces.append(line[:-1])
+            continue
+        logical.append((start, "".join(pieces) + line))
+        pieces = []
+    if pieces:
+        logical.append((start, "".join(pieces)))
+    return logical
+
+
+def _substitution_reading(text: str) -> tuple[bool, bool]:
+    """(the logical line holds a substitution, it leaves one open for the lines after it: it
+    ends with an opener, which blanks or a `(` may follow, or holds an odd number of unescaped
+    backticks)."""
+    holds = "`" in text or any(opener in text for opener in SUBSTITUTION_OPENERS)
+    opens = SUBSTITUTION_OPENED_AT_END.search(text) is not None or (
+        len(UNESCAPED_BACKTICK.findall(text)) % 2 == 1
+    )
+    return holds or opens, opens
+
+
+def _first_unclosed_substitution(source: str) -> Optional[int]:
+    """The first line of the first logical line that leaves a substitution open for later lines."""
+    for start, text in _logical_lines(source):
+        if _substitution_reading(text)[1]:
+            return start
+    return None
+
+
+def _helper_references(
+    source: str, *, sticky: bool = True
+) -> tuple[frozenset[str], tuple[int, ...]]:
+    """(file names a hosted file runs from `bats/helpers`, lines using the word otherwise).
+
+    The reader works on logical lines (a line ending in a backslash joined to the next, as bash
+    joins them; a refused line is reported by the first line of its logical line), comments,
+    strings and heredoc bodies included, in two readings: with quotes removed, and with quotes
+    and backslashes removed (bash reads an unquoted `hel\\pers` as `helpers`); `${NAME}` reads as
+    `$NAME` in both, so `"$HELPERS"/x.py` and `${HELPERS}/x.py` read as `$HELPERS/x.py`. Each
+    occurrence of the word `helpers`, in any case (macOS paths ignore case), must be a reference:
+    the variable `$HELPERS` (that exact name) or a path component (`.../helpers`, or `helpers`
+    followed by `/`), then `/` and one plain file name (a letter, digit or `_`, then letters,
+    digits, `_`, `.` and `-`) that ends the word, as in `"$HELPERS/x.py"` or `"$0/helpers/x.py"`,
+    outside any substitution, since a substitution's output can extend or replace the path the
+    name spells (`$(dirname "$HELPERS/x.py")/y.py` runs `y.py`). A logical line that holds `$(`,
+    `<(`, `>(`, `${` and a blank, `${|` or a backtick refuses every reference on it, and so does
+    any name followed by `)` and more than a terminator. A logical line that ends with one of those
+    openers (blanks or a `(` may follow it, as in `$( (`), or holds an odd number of unescaped
+    backticks, continues a substitution onto the lines after it, and refuses every reference
+    after it in the file, since the reader does not look for where it ends. `sticky=False`
+    reads each line as if no earlier line had left one open: diagnostics use it to tell which
+    lines that refusal alone stops, and it never decides what is credited. The shared-root
+    definition line is the one other place the word may appear. A comment is no exception: the
+    reader does not model every bash quoting form, so it cannot be sure which lines bash reads as
+    comments.
+    FAIL-CLOSED: every other occurrence is an ambiguous line, refused and never resolved:
+    `"$HELPERS"` alone, `$HELPERS/$name`, a subdirectory, a glob, the bare directory, another
+    variable such as `$helpers`, `dir=helpers`, `cd helpers`, an assignment to `HELPERS`, a
+    quoted 'helpers' in an embedded script, a reference inside or beside a substitution or after
+    a line that leaves one open, or the word in any comment.
+    RESIDUAL: the reader credits the file NAME a reference spells. It does not prove that what
+    precedes `/helpers/` is the suite's helper directory; it does not follow a reference used as the
+    input of a command outside a substitution (`sed` or `xargs` in a pipeline), whose output is what
+    runs; it does not see a substitution opened mid-line that continues onto later lines (its first
+    line ends with other text, as a multi-line `python3 -c '...'` argument inside `$(...)` does, or
+    as an opener does that a continuation joins to more text), or one whose opener quotes split; a
+    backtick that is not shell syntax (quoted, or in a comment or heredoc body) counts, so it can
+    refuse later lines or pair with a real one and hide the substitution that one opens, and a line
+    ending in a backslash is joined to the next even in a comment, inside single quotes or in a
+    quoted heredoc body, where bash does not join it; and a path that never spells the word (built
+    from pieces or an encoding, a glob over the suite root, a file outside `bats/helpers`) is beyond
+    it too. The hosted file's own content pin is what makes such a change visible to review. A
+    helper's own source is Python or bash this reader does not parse, so a helper that runs another
+    is not traced: each helper's content pin covers what it runs."""
+    names: set[str] = set()
+    ambiguous: set[int] = set()
+    unclosed = False
+    for line_number, line in _logical_lines(source):
+        holds, opens = _substitution_reading(line)
+        refused = holds or (unclosed and sticky)
+        unclosed = unclosed or opens
+        if line == HELPERS_DEFINITION:
+            continue
+        dequoted = line.replace("'", "").replace('"', "")
+        readings = {
+            _normalize_parameter_expansions(dequoted),
+            _normalize_parameter_expansions(dequoted.replace("\\", "")),
+        }
+        for text in readings:
+            for match in HELPER_WORD.finditer(text):
+                start, end = match.span()
+                before = text[start - 1 : start]
+                reference = None
+                if text.startswith("/", end) and (before != "$" or match.group(0) == "HELPERS"):
+                    reference = HELPER_REFERENCE_NAME.match(text, end)
+                if (
+                    reference is not None
+                    and not refused
+                    and (
+                        not text.startswith(")", reference.end())
+                        or REFERENCE_TERMINATOR.match(text, reference.end() + 1)
+                    )
+                ):
+                    names.add(reference.group(1))
+                else:
+                    ambiguous.add(line_number)
+    return frozenset(names), tuple(sorted(ambiguous))
+
+
+def _helper_candidates(name: str) -> tuple[str, str]:
+    """The files a reference to `name` can run: bats `load` prefers `name.bash`."""
+    return f"{HELPER_DIRECTORY}/{name}", f"{HELPER_DIRECTORY}/{name}.bash"
+
+
+def _candidates_on_disk(name: str, present: set[str]) -> list[str]:
+    """The files in `present` (a listing of `bats/helpers`) a reference to `name` can run. macOS
+    paths ignore case, so a case variant of a candidate is that candidate."""
+    folded = {candidate.casefold() for candidate in _helper_candidates(name)}
+    return sorted(path for path in present if path.casefold() in folded)
+
+
+def _helper_files(root: Path) -> set[str]:
+    return _bounded_recursive_files(
+        root,
+        root / "bats" / "helpers",
+        label="helper scan",
+        include=lambda _name: True,
+    )
+
+
+def _helper_reference_errors(
+    root: Path, relative: str, source: str, helper_pins: dict[str, str]
+) -> list[str]:
+    """A hosted file may run only helpers `helper_pins` pins: a referenced name needs a pinned
+    candidate, and no candidate on disk may be unpinned. The names on disk come from a directory
+    listing and are compared without case, since macOS paths ignore it, so a case variant of a
+    candidate counts as one and must itself be pinned under its exact name. No other file there
+    may extend the name, compared the same way, with a character a quoted reference can carry
+    (`"$HELPERS/x.py y"` runs a file named `x.py y`, which a reader that removes quotes cannot tell
+    from `x.py`)."""
+    names, ambiguous = _helper_references(source)
+    shown = _display_path(relative)
+    unclosed = _first_unclosed_substitution(source)
+    # The lines the unclosed line alone stops: the suffix's advice fixes only those.
+    stopped = set(ambiguous) - set(_helper_references(source, sticky=False)[1])
+    errors = [
+        f"hosted file {shown} line {line_number} names the helper directory in a form the "
+        'inventory cannot resolve (write "$HELPERS/<file name>" outside any substitution; the '
+        "word helpers is refused anywhere else, comments included, and the line is read with "
+        "quotes and backslashes removed, so helper's spells it too)"
+        + (
+            f"; line {unclosed} leaves a substitution open for the lines after it (it ends "
+            "with a substitution opener, which blanks or a ( may follow, or holds an odd number "
+            "of unescaped backticks), so no later line may name a helper: close it there and on "
+            f"any later line that leaves one open, or name the helper above line {unclosed}"
+            if unclosed is not None and line_number in stopped
+            else ""
+        )
+        for line_number in ambiguous
+    ]
+    if not names:
+        return errors
+    try:
+        present = _helper_files(root)
+    except InventoryError as error:
+        return errors + [str(error)]
+    for name in sorted(names):
+        candidates = _helper_candidates(name)
+        on_disk = _candidates_on_disk(name, present)
+        unpinned = [path for path in on_disk if path not in helper_pins]
+        # A name needs a pinned candidate: its exact spelling, or the variant on disk.
+        if not unpinned and not any(item in helper_pins for item in (*candidates, *on_disk)):
+            unpinned = [candidates[0]]
+        errors.extend(
+            f"hosted file {shown} references helper {candidate}, which "
+            f"TRUSTED_HOSTED_HELPER_SHA256 does not pin ({UPDATE_HINT})"
+            for candidate in unpinned
+        )
+        prefix = candidates[0]
+        if any(
+            path.casefold().startswith(prefix.casefold())
+            and len(path) > len(prefix)
+            and not PLAIN_PATH_CHARACTER.match(path, len(prefix))
+            for path in present
+        ):
+            errors.append(
+                f"hosted file {shown} references helper {prefix}, and a file in "
+                f"{HELPER_DIRECTORY} extends that name with a character outside "
+                "[A-Za-z0-9_./-], which a quoted reference could run instead (rename that file)"
+            )
+    return errors
+
+
 def _integer(value: Any, label: str, *, allow_zero: bool = False) -> int:
     minimum = 0 if allow_zero else 1
     if isinstance(value, bool) or not isinstance(value, int) or value < minimum:
@@ -827,7 +1079,16 @@ def _validate_live(root: Path, manifest: dict[str, Any]) -> list[str]:
     return errors
 
 
-def validate_repository(root: Path, manifest_path: Path) -> tuple[str, ...]:
+def validate_repository(
+    root: Path,
+    manifest_path: Path,
+    pins: Optional[tuple[dict[str, str], dict[str, str]]] = None,
+) -> tuple[str, ...]:
+    """Check `root` against `manifest_path`; `pins` (hosted-file map, helper map) replaces this
+    script's TRUSTED_HOSTED_FILE_SHA256 and TRUSTED_HOSTED_HELPER_SHA256 for one call."""
+    file_pins, helper_pins = (
+        pins if pins is not None else (TRUSTED_HOSTED_FILE_SHA256, TRUSTED_HOSTED_HELPER_SHA256)
+    )
     root = root.resolve()
     errors: list[str] = []
     try:
@@ -882,13 +1143,16 @@ def validate_repository(root: Path, manifest_path: Path) -> tuple[str, ...]:
                     raise InventoryError("file identity is malformed")
                 path = _safe_file(root, relative)
                 payload, source, titles = read_bats_file(path, relative)
+                shown_entry = _display_path(relative)
                 if len(titles) != declared_count:
-                    errors.append("test-count drift in inventory file")
+                    errors.append(f"test-count drift in inventory file {shown_entry}")
                 if _title_digests(titles) != tuple(identities):
-                    errors.append("ordered test-title identity drift in inventory file")
+                    errors.append(
+                        f"ordered test-title identity drift in inventory file {shown_entry}"
+                    )
                 payload_identity = hashlib.sha256(payload).hexdigest()
                 if payload_identity != file_identity:
-                    errors.append("file content drift in inventory file")
+                    errors.append(f"file content drift in inventory file {shown_entry}")
                 if RESERVED_ROOT_ASSIGNMENT.search(source):
                     errors.append("inventory file overwrites reserved BATS_ROOT")
                 source_lines = set(_lf_lines(source))
@@ -901,10 +1165,24 @@ def validate_repository(root: Path, manifest_path: Path) -> tuple[str, ...]:
                     if LIVE_ONLY_HELPER_PATTERN.search(source):
                         errors.append("hosted file references live-only helper")
                     if (
-                        TRUSTED_HOSTED_FILE_SHA256.get(relative) != payload_identity
+                        file_pins.get(relative) != payload_identity
                         and _hosted_has_live_state_access(source)
                     ):
-                        errors.append("hosted file contains live-state access")
+                        shown = _display_path(relative)
+                        pin_state = (
+                            "no longer matches its pin"
+                            if relative in file_pins
+                            else "is not pinned"
+                        )
+                        advice = UPDATE_HINT if shown == relative else RENAME_HINT
+                        errors.append(
+                            f"hosted file contains live-state access: {shown} {pin_state} in "
+                            "TRUSTED_HOSTED_FILE_SHA256 (a test that reads live state belongs "
+                            f"in the local tier; {advice})"
+                        )
+                    errors.extend(
+                        _helper_reference_errors(root, relative, source, helper_pins)
+                    )
                 else:
                     errors.extend(_local_lifecycle_errors(source, relative))
                 # Same-source consistency canary (NOT an independent oracle):
@@ -945,7 +1223,7 @@ def validate_repository(root: Path, manifest_path: Path) -> tuple[str, ...]:
         errors.append(str(error))
 
     errors.extend(_validate_live(root, manifest))
-    errors.extend(_validate_trusted_hosted_helpers(root))
+    errors.extend(_validate_trusted_hosted_helpers(root, helper_pins))
     return tuple(errors)
 
 
@@ -1002,9 +1280,13 @@ def _validate_trusted_catalog(
     return tuple(errors)
 
 
-def _validate_trusted_hosted_helpers(root: Path) -> tuple[str, ...]:
+def _validate_trusted_hosted_helpers(
+    root: Path, helper_pins: Optional[dict[str, str]] = None
+) -> tuple[str, ...]:
     errors: list[str] = []
-    for relative, expected in TRUSTED_HOSTED_HELPER_SHA256.items():
+    pins = TRUSTED_HOSTED_HELPER_SHA256 if helper_pins is None else helper_pins
+    for relative, expected in pins.items():
+        shown = _display_path(relative)
         try:
             path = _safe_file(root, relative)
             payload = _read_bounded_regular(
@@ -1013,10 +1295,17 @@ def _validate_trusted_hosted_helpers(root: Path) -> tuple[str, ...]:
                 maximum=MAX_BATS_BYTES,
             )
         except InventoryError:
-            errors.append("hosted helper catalog drift")
+            errors.append(
+                f"hosted helper catalog drift: {shown} is missing or not a regular file "
+                "(restore it, or remove its pin by hand in a reviewed change; "
+                "--update-shas never removes a helper pin)"
+            )
             continue
         if hashlib.sha256(payload).hexdigest() != expected:
-            errors.append("hosted helper catalog drift")
+            errors.append(
+                f"hosted helper catalog drift: {shown} does not match its pin in "
+                f"TRUSTED_HOSTED_HELPER_SHA256 ({UPDATE_HINT})"
+            )
     return tuple(errors)
 
 
@@ -1038,17 +1327,360 @@ def validate_candidate_repository(
     candidate_errors = validate_repository(candidate_root, candidate_manifest_path)
     errors = [f"trusted policy inventory: {error}" for error in policy_errors]
     errors.extend(f"candidate inventory: {error}" for error in candidate_errors)
-    if errors:
-        return tuple(errors)
-
-    try:
-        policy_manifest = load_manifest(policy_manifest_path)
-        candidate_manifest = load_manifest(candidate_manifest_path)
-        errors.extend(_validate_trusted_catalog(policy_manifest, candidate_manifest))
-        errors.extend(_validate_trusted_hosted_helpers(candidate_root))
-    except InventoryError as error:
-        errors.append(str(error))
+    if not errors:
+        try:
+            policy_manifest = load_manifest(policy_manifest_path)
+            candidate_manifest = load_manifest(candidate_manifest_path)
+            errors.extend(_validate_trusted_catalog(policy_manifest, candidate_manifest))
+            errors.extend(_validate_trusted_hosted_helpers(candidate_root))
+        except InventoryError as error:
+            errors.append(str(error))
+    # Here the base branch's copy of this script judges the candidate with its own pins, so the
+    # re-pin advice in a drift message cannot help from inside the pull request.
+    if any(UPDATE_HINT in error for error in errors):
+        errors.append(PULL_REQUEST_PIN_NOTE)
     return tuple(errors)
+
+
+def _pin_literal_pattern(name: str) -> re.Pattern[str]:
+    return re.compile(
+        r"(?m)^" + re.escape(name) + r' = \{\n((?:    "[^"\\\n]*": "[0-9a-f]{64}",\n)*)\}\n'
+    )
+
+
+def _pin_literal(text: str, name: str) -> tuple[re.Match[str], dict[str, str]]:
+    """The one literal of `name` in the existing format, and its entries."""
+    starts = re.findall(r"(?m)^" + re.escape(name) + r"(?![A-Za-z0-9_])", text)
+    match = _pin_literal_pattern(name).search(text)
+    if len(starts) != 1 or match is None:
+        raise InventoryError(f"{name}: expected exactly one literal in the existing format")
+    pins: dict[str, str] = {}
+    for path, digest in re.findall(r'    "([^"\\\n]*)": "([0-9a-f]{64})",\n', match.group(1)):
+        if path in pins:
+            raise InventoryError(f"{name}: the literal pins a path twice")
+        pins[path] = digest
+    return match, pins
+
+
+def _bound_names(node: ast.AST) -> tuple[str, ...]:
+    """Every name `node` binds or deletes, so a pin map bound a second time in any form counts:
+    an assignment, annotated or augmented assignment, walrus, loop, `with` or comprehension
+    target at any depth (tuple targets included), a `del`, a definition, a function or lambda
+    parameter, an import (a star import counts as binding every map), an `except` name or a
+    pattern capture."""
+    if isinstance(node, ast.Name) and isinstance(node.ctx, (ast.Store, ast.Del)):
+        return (node.id,)
+    if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef)):
+        return (node.name,)
+    if isinstance(node, (ast.Import, ast.ImportFrom)):
+        if any(alias.name == "*" for alias in node.names):
+            return PIN_MAP_NAMES  # a star import may bind any name
+        return tuple((alias.asname or alias.name).split(".")[0] for alias in node.names)
+    if isinstance(node, ast.ExceptHandler) and node.name:
+        return (node.name,)
+    if isinstance(node, ast.arg):
+        return (node.arg,)
+    # Pattern matching (Python 3.10+); the script itself still parses on older interpreters.
+    captures = tuple(getattr(ast, kind) for kind in ("MatchAs", "MatchStar") if hasattr(ast, kind))
+    if captures and isinstance(node, captures) and node.name:
+        return (node.name,)
+    if hasattr(ast, "MatchMapping") and isinstance(node, ast.MatchMapping) and node.rest:
+        return (node.rest,)
+    return ()
+
+
+def _mutated_names(node: ast.AST) -> tuple[str, ...]:
+    """The names a node may change in place or hand to code that can: an item assignment or
+    deletion (`NAME[key] = ...`, `del NAME[key]`), any attribute of the name (`NAME.update(...)`,
+    `NAME.__init__(...)`, `f = NAME.pop`), or the name passed to a call (`dict.update(NAME, ...)`,
+    `operator.setitem(NAME, ...)`, `f(*NAME)`), each written directly on the name. The script
+    itself only reads each map by its bare name."""
+    if (
+        isinstance(node, ast.Subscript)
+        and isinstance(node.ctx, (ast.Store, ast.Del))
+        and isinstance(node.value, ast.Name)
+    ):
+        return (node.value.id,)
+    if isinstance(node, ast.Attribute) and isinstance(node.value, ast.Name):
+        return (node.value.id,)
+    if isinstance(node, ast.Call):
+        values = [*node.args, *(keyword.value for keyword in node.keywords)]
+        values = [value.value if isinstance(value, ast.Starred) else value for value in values]
+        return tuple(value.id for value in values if isinstance(value, ast.Name))
+    return ()
+
+
+def _verified_pin_literals(text: str) -> dict[str, tuple[re.Match[str], dict[str, str]]]:
+    """Each pin map's one literal in the existing format and its entries, checked with `ast`:
+    the script binds each name exactly once anywhere (`_bound_names`), never stores into it,
+    takes an attribute of it or passes it to a call directly by name (`_mutated_names`), and that
+    one binding is the module-level `NAME = {...}` statement whose source span the text match
+    covers, so the rewrite replaces the value the script really uses. A change through an alias
+    (`pins = NAME; pins[key] = ...`), an expression that yields the map (`(NAME or {}).clear()`,
+    `[NAME][0][key] = ...`), `globals()`, `vars()` or `setattr` is beyond a static check; the
+    review of the script's diff covers it."""
+    literals = {name: _pin_literal(text, name) for name in PIN_MAP_NAMES}
+    try:
+        tree = ast.parse(text)
+    except (SyntaxError, ValueError) as error:
+        raise InventoryError("inventory script is not valid Python") from error
+    bindings = dict.fromkeys(PIN_MAP_NAMES, 0)
+    mutated: set[str] = set()
+    for node in ast.walk(tree):
+        for bound in _bound_names(node):
+            if bound in bindings:
+                bindings[bound] += 1
+        mutated.update(name for name in _mutated_names(node) if name in bindings)
+    line_starts = [0, *(match.end() for match in re.finditer(r"\r\n|\r|\n", text))]
+
+    def offset(line: int, column: int) -> int:
+        # `ast` counts columns in UTF-8 bytes and breaks lines where Python's tokenizer does.
+        start = line_starts[line - 1]
+        end = line_starts[line] if line < len(line_starts) else len(text)
+        return start + len(text[start:end].encode("utf-8")[:column].decode("utf-8"))
+
+    for name, (match, pins) in literals.items():
+        if bindings[name] != 1:
+            raise InventoryError(
+                f"{name}: expected exactly one assignment in the script, found {bindings[name]}"
+            )
+        if name in mutated:
+            raise InventoryError(
+                f"{name}: the script may change the map in place (an item assignment or "
+                "deletion, an attribute of the map, or the map passed to a call), so the rewritten "
+                "literal might not be what it uses"
+            )
+        statements = [
+            statement
+            for statement in tree.body
+            if isinstance(statement, ast.Assign)
+            and len(statement.targets) == 1
+            and isinstance(statement.targets[0], ast.Name)
+            and statement.targets[0].id == name
+            and isinstance(statement.value, ast.Dict)
+        ]
+        if (
+            len(statements) != 1
+            or offset(statements[0].lineno, statements[0].col_offset) != match.start()
+            or offset(statements[0].end_lineno, statements[0].end_col_offset) != match.end() - 1
+            or ast.literal_eval(statements[0].value) != pins
+        ):
+            raise InventoryError(
+                f"{name}: its one assignment is not the module-level literal the rewrite replaces"
+            )
+    return literals
+
+
+def _render_pin_literal(name: str, pins: dict[str, str]) -> str:
+    entries = "".join(f'    "{path}": "{pins[path]}",\n' for path in sorted(pins))
+    return f"{name} = {{\n{entries}}}\n"
+
+
+def _write_replacing(path: Path, payload: bytes) -> None:
+    """Replace `path` by a uniquely named sibling written in full, keeping its mode. The sibling
+    is removed if anything fails, and one left by a killed run never blocks a later run."""
+    mode = stat.S_IMODE(os.stat(path).st_mode)
+    descriptor, name = tempfile.mkstemp(
+        prefix=f".{path.name}.", suffix=".update-shas", dir=str(path.parent)
+    )
+    temporary = Path(name)
+    try:
+        try:
+            view = memoryview(payload)
+            while view:
+                view = view[os.write(descriptor, view) :]
+            os.fchmod(descriptor, mode)
+        finally:
+            os.close(descriptor)
+        os.replace(temporary, path)
+    except BaseException:
+        temporary.unlink(missing_ok=True)
+        raise
+
+
+def update_trusted_shas(
+    root: Path,
+    manifest_path: Path,
+    script_path: Path,
+) -> tuple[tuple[str, ...], tuple[str, ...]]:
+    """Recompute TRUSTED_HOSTED_FILE_SHA256 and TRUSTED_HOSTED_HELPER_SHA256 from the files under
+    `root` and rewrite their two literals in `script_path`; returns (report, errors).
+
+    TRUST MODEL: an authoring convenience, never an approval. `run` refuses `--update-shas` while
+    `CI` or `GITHUB_ACTIONS` is in the environment at all (even empty), and unless the running
+    script is `<--root>/scripts/ci/bats_inventory.py`, a regular file inside --root and not a
+    symlink: this function rewrites `script_path` (under
+    `run`, the running script), never --root's copy on its own, so a run from another checkout
+    would leave one tree's pins in the other tree's script. The pins exist so that a reviewer, not
+    this script, decides which hosted-file content may skip the live-state heuristic and which
+    helper content the hosted runner may execute. A hosted-file pin exempts that exact content from
+    the heuristic, and it matters only for a file the heuristic flags; every hosted file in the
+    tree today is flagged (seven through the command substitutions they contain, such as the
+    `$(swift build ...)` binary default, and `bounded_exec.bats`, which has none, through its
+    CLI-operation reading: a line whose first word is `"$bounded"`, the argument after a multi-line
+    `python3 -c` script, reads as a command run through a variable the heuristic cannot resolve),
+    so every hosted pin is in force. This function pins whatever is on disk, so the diff it leaves
+    in `script_path` is exactly what a reviewer must read, including whether a re-pinned hosted
+    file reads live state (the report marks each pin that exempts its file). Who judges: in
+    pull-request CI `quality.py` runs the base commit's copy of this script (its `--policy-root` is
+    a worktree of the base), so the base's pins judge the candidate and a candidate cannot bless
+    itself by regenerating them; a push to `main` is judged by the pushed copy with its own pins.
+    `scripts/**` is listed in CODEOWNERS, but no ruleset requires code-owner review yet (D46's
+    interim ruleset on `main` blocks only force-pushes and deletion), so on `main` the review of
+    the diff is the only gate.
+
+    SCOPE (how each map is regenerated):
+    - TRUSTED_HOSTED_FILE_SHA256 is an exemption. It is re-derived from exactly the files the
+      manifest lists as hosted, so the entry of a file no longer hosted is removed (dropping an
+      exemption narrows nothing a check needs).
+    - TRUSTED_HOSTED_HELPER_SHA256 is a restriction (a pinned helper must keep its content).
+      Every existing entry is kept and re-pinned and every helper a hosted file references
+      (`_helper_references`) is added. An entry is never removed: a missing pinned helper
+      refuses, and a removal is a hand edit in a reviewed change. A pinned helper no hosted file
+      references is reported, not refused: the lifecycle and Messages-database helpers are
+      pinned on purpose for the local tier, and refusing would force their pins out.
+    - It writes only when the tree passes `validate_repository` with the new pins, that is with
+      the live-state heuristic waived for the pinned hosted content and every other check in
+      force (so it never pins a hosted file another check rejects, and the manifest must already
+      be current), and only when `_verified_pin_literals` accepts `script_path`; everything
+      outside the two literals is left byte for byte.
+    - The report and errors name repository paths only, never file contents or digests."""
+    root = root.resolve()
+    try:
+        script_bytes = _read_bounded_regular(
+            script_path, label="inventory script", maximum=MAX_BATS_BYTES
+        )
+        try:
+            text = script_bytes.decode("utf-8")
+        except UnicodeError as error:
+            raise InventoryError("inventory script is not valid UTF-8") from error
+        literals = _verified_pin_literals(text)
+        old = {name: pins for name, (_match, pins) in literals.items()}
+        manifest = load_manifest(manifest_path)
+        hosted_paths = [
+            _relative_manifest_path(entry.get("path"), "hosted")
+            for entry in _manifest_entries(manifest, "hosted")
+        ]
+    except InventoryError as error:
+        return (), (str(error),)
+
+    errors: list[str] = []
+    files: dict[str, str] = {}
+    exempted: set[str] = set()
+    referenced: dict[str, str] = {}
+    for relative in hosted_paths:
+        shown = _display_path(relative)
+        if shown != relative:
+            errors.append(f"hosted file {shown} cannot be pinned")
+            continue
+        try:
+            payload, source, _titles = read_bats_file(_safe_file(root, relative), relative)
+        except InventoryError as error:
+            errors.append(f"hosted file {shown}: {error}")
+            continue
+        files[relative] = hashlib.sha256(payload).hexdigest()
+        if _hosted_has_live_state_access(source):
+            exempted.add(relative)
+        # An ambiguous reference adds no name here; the validation below refuses it.
+        for name in _helper_references(source)[0]:
+            referenced.setdefault(name, relative)
+    present: set[str] = set()
+    if referenced:
+        try:
+            present = _helper_files(root)
+        except InventoryError as error:
+            errors.append(str(error))
+    helper_paths = set(old["TRUSTED_HOSTED_HELPER_SHA256"])
+    for name, relative in sorted(referenced.items()):
+        candidates = _candidates_on_disk(name, present)
+        if not candidates and not helper_paths.intersection(_helper_candidates(name)):
+            errors.append(
+                f"hosted file {_display_path(relative)} references helper "
+                f"{HELPER_DIRECTORY}/{name}, which is not a file in {HELPER_DIRECTORY}"
+            )
+        helper_paths.update(candidates)
+    helpers: dict[str, str] = {}
+    for relative in sorted(helper_paths):
+        shown = _display_path(relative)
+        if shown != relative:
+            errors.append(f"helper {shown} cannot be pinned")
+            continue
+        try:
+            payload = _read_bounded_regular(
+                _safe_file(root, relative), label="hosted helper", maximum=MAX_BATS_BYTES
+            )
+        except InventoryError:
+            errors.append(
+                f"helper {shown} is missing or not a regular file (restore it, or remove its "
+                "pin by hand in a reviewed change; --update-shas never removes a helper pin)"
+                if relative in old["TRUSTED_HOSTED_HELPER_SHA256"]
+                else f"helper {shown} is not a regular file"
+            )
+            continue
+        helpers[relative] = hashlib.sha256(payload).hexdigest()
+    if errors:
+        return (), tuple(errors)
+
+    remaining = validate_repository(root, manifest_path, (files, helpers))
+    if remaining:
+        return (), (
+            "the tree fails the inventory even with regenerated pins; fix these first (an "
+            "edited Bats file needs its bats/tier-inventory.json entry brought up to date):",
+            *remaining,
+        )
+
+    new = dict(zip(PIN_MAP_NAMES, (files, helpers)))
+    updated = text
+    # Last literal first, so the offsets of the earlier one still hold.
+    for name, (match, _pins) in sorted(
+        literals.items(), key=lambda item: item[1][0].start(), reverse=True
+    ):
+        updated = (
+            updated[: match.start()] + _render_pin_literal(name, new[name]) + updated[match.end() :]
+        )
+    report: list[str] = []
+    for name, label in zip(PIN_MAP_NAMES, ("hosted file", "helper")):
+        before, after = old[name], new[name]
+        kept = set(before) & set(after)
+        for action, paths in (
+            ("added", set(after) - set(before)),
+            ("removed", set(before) - set(after)),
+            ("re-pinned", {path for path in kept if before[path] != after[path]}),
+        ):
+            report.extend(
+                f"- {label} {action}: {_display_path(path)}"
+                + (
+                    " (its pin exempts this content from the live-state heuristic)"
+                    if label == "hosted file" and action != "removed" and path in exempted
+                    else ""
+                )
+                for path in sorted(paths)
+            )
+    changed = len(report)
+    reachable = {
+        candidate.casefold() for name in referenced for candidate in _helper_candidates(name)
+    }
+    report.extend(
+        f"- helper kept although no hosted file references it: {path}"
+        for path in sorted(helpers)
+        if path.casefold() not in reachable
+    )
+    try:
+        shown_script = _display_path(script_path.resolve().relative_to(root).as_posix())
+    except ValueError:
+        shown_script = _display_path(script_path.name)
+    if updated == text:
+        report.append("No pin changed: both maps already match the files on disk.")
+        return tuple(report), ()
+    try:
+        _write_replacing(script_path, updated.encode("utf-8"))
+    except OSError:
+        return (), (f"could not rewrite {shown_script}",)
+    report.append(
+        f"Rewrote the pin maps in {shown_script} ({changed} pin(s) changed); review the diff "
+        "before committing: it is not an approval."
+    )
+    return tuple(report), ()
 
 
 def parse_args(argv: list[str]) -> argparse.Namespace:
@@ -1058,13 +1690,58 @@ def parse_args(argv: list[str]) -> argparse.Namespace:
     parser.add_argument("--manifest", type=Path)
     parser.add_argument("--policy-root", type=Path)
     parser.add_argument("--policy-manifest", type=Path)
-    return parser.parse_args(argv)
+    parser.add_argument(
+        "--update-shas",
+        action="store_true",
+        help=(
+            "rewrite TRUSTED_HOSTED_FILE_SHA256 and TRUSTED_HOSTED_HELPER_SHA256 in this running "
+            "script from the hosted files and helpers under --root; refused unless this script "
+            "is --root's own scripts/ci/bats_inventory.py, and refused in CI (while CI or "
+            "GITHUB_ACTIONS is set, even to an empty value). An authoring convenience whose "
+            "diff must be reviewed, never an approval: run it from the repository root"
+        ),
+    )
+    arguments = parser.parse_args(argv)
+    if arguments.update_shas and (arguments.policy_root or arguments.policy_manifest):
+        parser.error("--update-shas takes --root and --manifest only")
+    return arguments
 
 
 def run(argv: list[str]) -> int:
     arguments = parse_args(argv)
     root = arguments.root.resolve()
     manifest_path = arguments.manifest or root / "bats" / "tier-inventory.json"
+    if arguments.update_shas:
+        script = Path(__file__).resolve()
+        try:
+            # --root's own copy must be a regular file inside --root: through a symlink, the
+            # rewrite would land in whatever file the link names.
+            own_script: Optional[Path] = _safe_file(root, INVENTORY_SCRIPT).resolve()
+        except InventoryError:
+            own_script = None
+        # Presence, not value: CI=false, CI=0 and CI= all refuse.
+        if any(name in os.environ for name in CI_ENVIRONMENT_FLAGS):
+            errors: tuple[str, ...] = (
+                "it never runs in CI (CI or GITHUB_ACTIONS is set, even to an empty value); run "
+                "it locally from the repository root and review the diff",
+            )
+        elif script != own_script:
+            errors = (
+                f"it rewrites the script it runs from, which must be {INVENTORY_SCRIPT} inside "
+                "--root, a regular file and not a symlink; run that tree's own copy from its "
+                "repository root",
+            )
+        else:
+            report, errors = update_trusted_shas(root, manifest_path, script)
+        if errors:
+            print("Bats tier inventory --update-shas refused:", file=sys.stderr)
+            for error in errors:
+                print(f"- {error}", file=sys.stderr)
+            return 1
+        print("Bats tier inventory --update-shas:")
+        for line in report:
+            print(line)
+        return 0
     policy_root = (arguments.policy_root or root).resolve()
     policy_manifest_path = (
         arguments.policy_manifest

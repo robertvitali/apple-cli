@@ -387,6 +387,31 @@ JSON output are stable per the versioning policy — breaking changes bump
   read the base branch's; until then a change to the file rests on code-owner review, which no
   ruleset requires yet. **For anyone running the binary, nothing changes:** no `apple` command,
   output field, error type, or exit code is affected, and `schema_version` stays `1`.
+- **The Bats tier inventory now names the pinned file that drifted and how to re-pin it, refuses a
+  hosted test file that names an unpinned helper, and can regenerate its own pins.** An edit to a
+  hosted Bats file or to a pinned helper used to fail with a bare
+  `hosted file contains live-state access` or `hosted helper catalog drift`; the message now names
+  the repository path that drifted (never its content) and how to re-pin it, and in a pull request
+  adds that the base branch's pins apply. A hosted file that names a helper under `bats/helpers/`
+  which the inventory does not pin now fails, where before only the hosted file's own pin covered
+  the helper. A hosted file may write the word `helpers` only as a `"$HELPERS/<file name>"` or
+  `.../helpers/<file name>` path or in the shared-root `HELPERS=` definition line; any other use,
+  comments included, and any reference inside or beside a command or process substitution, or after
+  a line that leaves one open, are refused rather than guessed at (the check reads lines, not shell
+  syntax, so a substitution it cannot see from its lines escapes it), and because a line is read
+  with quotes removed, a possessive such as `helper's` counts as the word. A path a pipeline or
+  `sed` derives from a helper reference, a path that never spells the word, and a support file
+  outside `bats/helpers/` are still covered only by the hosted file's own pin.
+  `python3 scripts/ci/bats_inventory.py --update-shas`, run from the repository root, recomputes
+  both pin maps from the files on disk and rewrites them in the script: it refuses to run in CI or
+  from any copy but the regular file inside the tree it pins, never removes a helper pin, writes
+  only when every other inventory check then passes, marks each hosted pin that exempts its file
+  from the live-state heuristic (every current hosted file trips it), and leaves a diff that still
+  has to be reviewed. The test-tier section of `AGENTS.md` now documents how strict the Bats parser
+  is: the one `@test "title" {` declaration form it accepts, the forms it refuses, and the
+  characters it refuses before reading a file. **For anyone running the binary, nothing changes:**
+  no `apple` command, output field, error type, or exit code is affected, and `schema_version` stays
+  `1`.
 
 - **macOS 27 is now a tested and supported runtime baseline, alongside macOS 26.** The full
   local canonical suite (the logic, Python automation and local CLI tiers; the live tier is

@@ -1013,7 +1013,7 @@ import sys
 
 spec = importlib.util.spec_from_file_location("applescript_syntax_check", sys.argv[1])
 module = importlib.util.module_from_spec(spec)
-# The helper's __main__ guard keeps this import from running the full osacompile sweep.
+# The __main__ guard in the helper keeps this import from running the full osacompile sweep.
 spec.loader.exec_module(module)
 
 def expect_equal(label, actual, expected):

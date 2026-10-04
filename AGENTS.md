@@ -289,6 +289,57 @@ execution is unsupported because independent snapshots can race.
 Name-only queries are deliberately excluded: LaunchServices may resolve an app's helper process
 for the shared display name even when the canonical app bundle is not running.
 
+**Bats files are read by a strict, fail-closed parser** (`scripts/ci/bats_inventory.py`, which
+checks every file against `bats/tier-inventory.json`; the capability policy reuses the same
+parser). Write each test as the canonical `@test "title" {`: at the start of the line, one space
+on each side of the quoted title, nothing after the `{`, and a non-empty title without a double
+quote. Any other line whose first non-blank text is `@test` — indented, single-quoted, an
+escaped `\"` inside the title, a trailing comment, extra spaces — and a line starting
+`function test_name {` or `test_name() {` fail as `unknown @test declaration syntax in Bats
+file` instead of being guessed at (`function test_name() {` is not refused: it is an ordinary
+function, which is all bats makes of any of the three). A declaration behind `#`, inside a
+heredoc body or inside a multi-line string is not a test, as it is not to bats. Duplicate titles,
+a file with no tests and an unterminated quote or heredoc are refused too. Before it tokenises
+anything, the parser refuses (for every Bats file, and for the files under `bats/live/`) any
+whitespace other than a space, a tab and a line feed (so a carriage return, which rules out CRLF
+line endings, a no-break space or any other Unicode space, U+2028, U+2029 and U+0085), any other
+control character, a surrogate code point, the noncharacters U+FFFE and U+FFFF, a byte-order mark
+anywhere in the file, and the bidirectional controls U+061C, U+200E, U+200F, U+202A–U+202E and
+U+2066–U+2069; the error names the line and the code point, never the text.
+
+**Hosted files and the helpers they run are pinned by SHA-256** in the script's
+`TRUSTED_HOSTED_FILE_SHA256` and `TRUSTED_HOSTED_HELPER_SHA256`. A hosted-file pin exempts that
+exact content from the live-state heuristic and matters only for a file the heuristic flags; all
+eight hosted files are flagged today (seven through command substitutions such as the
+`$(swift build ...)` binary default, `bounded_exec.bats` through lines whose first word is a
+variable the heuristic cannot resolve), so each hosted pin is an exemption a reviewer grants: check
+a hosted-file diff for live-state access before re-pinning it, since a test that really reads live
+state belongs in the local tier. A hosted file may write the word `helpers` only in a
+`"$HELPERS/<file name>"` or `.../helpers/<file name>` path to a pinned helper and in the shared-root
+`HELPERS=` definition line; any other use, a comment included (`dir=helpers`, `cd helpers`,
+`$helpers/x`, a quoted `'helpers'` in an embedded script, `# the helpers below`), is refused, and so
+is a reference inside or beside a substitution, whose output could extend or replace the path
+(`$(dirname "$HELPERS/x.py")/y.py`): one on a logical line (backslash continuations joined) holding
+`$(`, `<(`, `>(`, `${` and a space or tab, `${|` or a backtick, one before a `)` followed by more
+path, and every one after a line that ends with a substitution opener (blanks or a `(` may follow
+it) or holds an odd number of unescaped backticks. A line is read with quotes and backslashes
+removed, so a possessive `helper's` spells the word too, and names on disk are compared without
+case. The check credits the file name a reference spells: it does not prove that the prefix is the
+suite's helper directory or follow a reference into a pipeline (`sed`, `xargs`) whose output is what
+runs; it reads lines, not shell syntax, so a substitution opened mid-line that continues onto later
+lines, or one whose opener quotes split, escapes it, and a backtick that is not shell syntax still
+counts, so it can refuse later lines or pair with a real one and hide the substitution that one
+opens; and a path that never spells the word (built from pieces or an encoding, or a glob) or a
+support file outside `bats/helpers/` is covered only by the hosted file's own pin. After a reviewed
+edit to a hosted file or a pinned helper, bring `bats/tier-inventory.json` up to date for any edited
+Bats file, then regenerate the pins from the repository root with
+`python3 scripts/ci/bats_inventory.py --update-shas`. It refuses while `CI` or `GITHUB_ACTIONS` is
+set (even to an empty value) and from any copy but the regular file inside `--root`, never removes a
+helper pin, and marks each hosted pin that exempts its file; review the diff it leaves: the
+regenerated pins are the approval a reviewer gives, not something the script grants. In a pull
+request the base branch's copy of the script and its pins judge the candidate, so a hosted file or a
+pinned helper changes only through a reviewed change on `main`.
+
 ## Main-only workflow
 
 **Operator ruling, 2026-08-23:** all apple-cli work happens directly in the primary checkout on

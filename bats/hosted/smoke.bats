@@ -525,7 +525,7 @@ for s in walk(json.load(sys.stdin)):
 }
 
 # Q12-A / review H3: write-model v2's `dry_run:false` execute-envelope rule is convention-only
-# (the plain emit helpers stay callable with an execute payload). This source-lint gives it
+# (the plain emit functions stay callable with an execute payload). This source-lint gives it
 # teeth: a bare read/domain payload on a plain emitNotesWrite/emitRemindersWrite/
 # emitCalendarWrite is the drift that silently dropped the key across 27 sites.
 @test "lint: execute-path envelopes route through the dry_run-stamping emit" {

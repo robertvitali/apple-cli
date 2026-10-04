@@ -4,7 +4,7 @@ BATS_SUITE_ROOT="$(cd "$BATS_TEST_DIRNAME/.." && pwd -P)"
 REPO_ROOT="$(cd "$BATS_SUITE_ROOT/.." && pwd -P)"
 HELPERS="$BATS_SUITE_ROOT/helpers"
 # Hosted-safe CLI smoke tests for the `notes` domain. Every command path resolves before Notes
-# automation; the NOTES-H1 helpers below are exercised only as pure error classifiers.
+# automation; the NOTES-H1 helper functions below are exercised only as pure error classifiers.
 #
 # WRITE-MODEL v2 (docs/write-model-v2.md): notes writes EXECUTE by default. That makes
 # automation-freedom a SAFETY property here, not just a portability one — a case that reaches
