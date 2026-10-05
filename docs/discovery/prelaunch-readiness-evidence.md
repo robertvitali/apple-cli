@@ -1,7 +1,7 @@
 ---
 title: Pre-launch readiness evidence
 last-used: 2026-10-05
-uses: 7
+uses: 8
 ---
 
 # Pre-launch readiness evidence
@@ -31,7 +31,7 @@ so until evidence is appended.
 | Design §18 item | Phase | Status in this file | Evidence |
 |---|---|---|---|
 | 1 Implementation in reviewed, test-green commits | pre-visibility | PENDING (not evidenced here) | — |
-| 2 Production-coverage baseline per target | pre-visibility | **RECORDED 2026-10-05 (UTC) for step 2's local baseline; the hosted coverage lane of design §11.2 PENDING (not implemented: no workflow runs `scripts/ci/coverage_policy.py`; owner: controller); the policy's changed-line path FIXED in `d61ab4e` for the local toolchain (Command Line Tools 26.5; the hosted toolchain's `llvm-cov show` is not probed) and exercised on PRs 3–5; its reading of wrapped counts as covered PENDING an operator decision (owner: operator; Section 3b).** Measured locally after the D17 visibility step, so not literally "before visibility" (design §11.2), and it does not replace the hosted evidence §11.2 assigns after visibility. Two fresh clean-clone SwiftPM coverage runs on `6541c8d8bf2a`, in the third and last attempt the controller's cap allows, give IDENTICAL per-target and aggregate totals (totals sha256 `658efc94349813de` in both runs; per-line covered sets identical); attempt 2 on the same commit gave MISMATCH (CalendarKit 881 vs 884 of 950). The only production lines whose covered status differed in attempt 2 were `Sources/CalendarKit/CalendarSupport.swift` lines 103, 105 and 106, whose count is derived by subtraction from an entry counter that read 20 in one run and 22 in the other, best explained by a counter race under concurrent tests (the function is pure and synchronous, and both serial runs count 22 entries). Attempt 3 therefore ran `swift test --no-parallel`: swift-testing otherwise runs tests concurrently in one process (up to 1808 in flight at once in attempt 2's log, one at a time in attempt 3's), and LLVM's profile counters are not atomic. Aggregate 26284/28171 (93.30%), floor met; targets below 90%: none. Attempt 1 COVERAGE_EXIT=30 (the Command Line Tools toolchain has no `Testing` module; crash class). Refused invocations (stopped before `swift test` started): 0; none discarded. Changed-line N/A (0 coverable lines): base == head. The baseline holds only for serial measurements on the recorded toolchains, and an AppleKit line seen to change covered status across the ten serial builds can move it by one line (Section 3b). PR 3–5 per-target no-regression, measured twice: PR 3 yes; PR 4 no (code moved from MailKit to AppleKit); PR 5 no in the first run and yes in the second (that timing-dependent AppleKit line; neither answer is relied on); changed-line coverage under `d61ab4e` PASS for all three, none relying on a wrapped count (Section 3b). | Section 3b |
+| 2 Production-coverage baseline per target | pre-visibility | **RECORDED 2026-10-05 (UTC) for step 2's local baseline, re-measured the same day on `4494e1d`, where a new test reaches the one line seen to change covered status across serial builds on every passing run; the hosted coverage lane of design §11.2 PENDING (not implemented: no workflow runs `scripts/ci/coverage_policy.py`; owner: controller); the policy's changed-line path FIXED in `d61ab4e` for the local toolchain (Command Line Tools 26.5; the hosted toolchain's `llvm-cov show` is not probed) and exercised on PRs 3–5; its reading of wrapped counts as covered PENDING an operator decision (owner: operator; Section 3b).** Measured locally after the D17 visibility step, so not literally "before visibility" (design §11.2), and it does not replace the hosted evidence §11.2 assigns after visibility. Two fresh clean-clone SwiftPM coverage runs on `6541c8d8bf2a`, in the third and last attempt the controller's cap allows, give IDENTICAL per-target and aggregate totals (totals sha256 `658efc94349813de` in both runs; per-line covered sets identical); attempt 2 on the same commit gave MISMATCH (CalendarKit 881 vs 884 of 950). The only production lines whose covered status differed in attempt 2 were `Sources/CalendarKit/CalendarSupport.swift` lines 103, 105 and 106, whose count is derived by subtraction from an entry counter that read 20 in one run and 22 in the other, best explained by a counter race under concurrent tests (the function is pure and synchronous, and both serial runs count 22 entries). Attempt 3 therefore ran `swift test --no-parallel`: swift-testing otherwise runs tests concurrently in one process (up to 1808 in flight at once in attempt 2's log, one at a time in attempt 3's), and LLVM's profile counters are not atomic. Aggregate at `6541c8d` 26284/28171 (93.30%), floor met; targets below 90%: none. Attempt 1 COVERAGE_EXIT=30 (the Command Line Tools toolchain has no `Testing` module; crash class). Refused invocations (stopped before `swift test` started): 0; none discarded. Changed-line N/A (0 coverable lines): base == head. The baseline holds only for serial measurements on the recorded toolchains. The one AppleKit line seen to change covered status across the ten serial builds (two baseline runs and eight `pr345` builds) is reached by a test on every passing run from `4494e1d`, where two more serial runs gave IDENTICAL totals and line sets with that line covered in both: AppleKit 2054/2175, every other target unchanged, aggregate 26285/28171, and covered sets that differ from `6541c8d`'s in that line only. That pair meets design §11.2 against the `6541c8d` record and is the baseline of record from `4494e1d` (Section 3b). PR 3–5 per-target no-regression, measured twice: PR 3 yes; PR 4 no (code moved from MailKit to AppleKit); PR 5 no in the first run and yes in the second (that then timing-dependent AppleKit line; neither answer is relied on); changed-line coverage under `d61ab4e` PASS for all three, none relying on a wrapped count (Section 3b). | Section 3b |
 | 3 Full local canonical suite + independent reviews on the exact SHA | pre-visibility | Suite: evidenced for 38 of the 42 commits pushed from `053b56e` (2026-09-21) through `675eebb` (2026-09-30 UTC). Eleven were recorded at the time: `08cc984`, the visibility-step commit `bdbbe9d`, the two hosted-CI fixes `7b46b8d` and `0ff7442`, the Round 2 record `3e46e82`, `3b1fbef`, `8ba43b1`, `dd2114f`, `e011d83`, `1f8f3ab` and `675eebb`. Three more, `53eae85`, `ca4392d` and `a4de516`, were recorded late but the same day, from retained run outputs, together with `675eebb` in the commit after it, because none of their successors (`ca4392d`, `a4de516`, `675eebb`) touched this file. The other 24, `7953268` included, were backfilled on 2026-09-26 from retained run outputs (Section 3, backfill table). Four have no green run on record for their exact commit: `053b56e` and `a52c44e` ran red and reached `origin` in the same push as `08cc984`, whose suite is recorded green across a run and a full Bats re-run; `7049736` has no retained outputs and `19f48a2` only partial logs, and the controller's private notes record both red in Bats on two live-Mail cases (Section 3). Reviews: not assessed here beyond the trailers, which name codex plus the code, security and critic reviewers on 38 of the 42, codex and the security reviewer only on `afc6779` and `3e46e82`, and codex only on `7049736` and on `675eebb` (22 added and 4 removed lines, changing one test's timing constants and the hosted-CI learnings; its message records codex only). (Correction 2026-09-26: this row previously said all five commits then recorded at the time carried the four review lanes; `3e46e82` carries codex and the security reviewer only.) | Section 3 |
 | 4 External-Action allowlist committed and validated | pre-visibility | **COMMITTED AND VALIDATED 2026-10-03; the trusted-base half PENDING.** `.github/actions-allowlist.json` (format version 1: each Action's lowercase `owner/repository` name, full commit SHA and version label, entries unique and sorted) replaces the list embedded in `scripts/ci/action_pins.py`. `action_pins.py` loads it fail-closed (a regular file, no symlink, a 64 KiB cap, UTF-8 holding none of the characters the workflow checks refuse, no repeated JSON key, exact keys and types, format version exactly 1) and `scripts/ci/workflow_policy.py` reads it through that loader, so both checks judge every step `uses:` against one list, and a list that does not load is a violation in both, never a pass; neither script carries a pin of its own. It holds exactly the five Actions the tracked workflows and the urgent-release runbook's recorded workflow use, with the pins carried over unchanged; the three GitHub Pages entries no workflow used were dropped. Both checks exit 0 on the tree that adds it. A job-level `uses:` (a reusable workflow) is refused outright by the workflow scan, and `docker://` by both. The list is read from the scripts' own checkout, never from the tree under scan, which is the shape the design's trusted-base check needs; but the Supply-chain policy job still checks out the proposal on a pull request until its trusted-base conversion (design §10.5 amendment of 2026-09-25), so there the proposal's scripts read the proposal's own copy, and a change to the list rests on control-plane review: the file is in `.github/control-plane-manifest.json` and owned under CODEOWNERS' `/.github/` rule, a review no ruleset requires yet (§4). Step 4's owner-type and account-plan reads remain PENDING; the repository-level settings are in the Actions-settings row; owner: controller | `.github/actions-allowlist.json`; `scripts/ci/action_pins.py`; `scripts/ci/workflow_policy.py`; `Tests/automation/test_action_pins.py`; `Tests/automation/test_workflow_policy.py` |
 | 5 Workflow inventory: publishers converted or removed | pre-visibility | Partially evidenced: `.github/workflows/` holds `ci.yml`, `docs.yml`, `governance.yml` (the metadata check folded into `governance / required` on 2026-09-25 — the fold half of step 5; the check still runs only the base-owned metadata validator, the design's control-plane enforcement for that name is not implemented, and the urgent-release runbook with its `AGENTS.md` exception, owed since `release.yml` was removed on 2026-09-07, landed on 2026-09-26 as `docs/runbooks/urgent-release.md` (the build-and-verify workflow it records is checked on every Python-tier run by `Tests/automation/test_urgent_release_runbook.py`: it parses, passes the static scan and the action-pin check beside the tracked workflows, and keeps a read-only-token shape whose one write is its own run's artifact; a restored copy must be byte-identical to it; it cannot cut a release from current `main` until the operator decides how a release relates to the macOS 27 adoption, which the runbook's step 2 names); the check will need `checks` and `actions` read permissions when its control-plane half lands (the workflow scan already accepts any read scope outside its forbidden set, so what refuses a new scope today is `test_pr_metadata.py`, which pins the whole workflow as parsed by the scan's own parser (so the pin is exactly as faithful to GitHub's reading as that parser), both `permissions` blocks at exactly `contents: read` included, and the edits then fall to that expectation and the AGENTS.md `contents: read` policy sentence); no pull request has run the renamed check yet, so it has no hosted first-run evidence; separately from step 5, the `Supply-chain policy` lane is still a proposal checkout on pull requests, see row 17); no `release.yml`; all three declare `contents: read` only and none carries `workflow_dispatch`, `pages`, `id-token`, or an `environment`; no repository secrets or variables (read back 2026-09-20). 2026-09-23: `docs.yml` gained `release-prep-rehearsal`, a read-only job (`contents: read`, no secrets, no artifact upload) that runs `scripts/ci/release_prep.py` — the design §14.1 rehearsal — in a throwaway clone against the commit the workflow builds (on `push`, the commit on `main`; on `pull_request`, the synthetic merge commit); only the script's nothing-to-release status is advisory, every other failure fails the job; it covers the default-bump path, the macOS-adoption shape being exercised locally before a cut. This is a smoke check toward step 15, not step 15 itself: the explicit-SHA hosted rehearsal with its three-way evidence binding is still PENDING. Static scan of step 17 EVIDENCED 2026-09-23 (step 17 row). Hosted runner lane: every macOS job (`build-test`, `hosted-bats-build`, `hosted-bats`, the Docs `manual-fresh` job, and the urgent-release runbook's recorded workflow) moved from `macos-15` to the stable `macos-26` image on 2026-09-29 (design §4.1 amendment), with no extra `macos-15` lane; GitHub's runner-images catalogue (the `actions/runner-images` README, read 2026-09-29) lists macOS 26 Arm64 as generally available under that label. The hosted macOS 26 baseline is RECORDED (Section 4): the Docs half from the first push run after the move (`1f8f3ab`), and the CI half from `53eae85`, whose CI run passed all six jobs on its first attempt; `1f8f3ab`'s CI run had failed its first attempt in `build-test` on a macOS 26 Foundation difference and did not qualify, and `53eae85` fixed it forward. The definition: for each workflow, the first push run on `main` after the move whose first attempt completes with every job green (CI six, Docs four; a red, cancelled or re-run attempt does not qualify and is recorded as such; the two may come from different commits), recorded in Section 4 with the runner image name, image version and OS version from the job log's "Set up job" section and the default Xcode, Swift and `python3` versions from the Included Software page that log links for that image version. No local macOS 26 canonical run is recorded in this file: every canonical run it records, from 2026-09-21 on, ran on the operator's macOS 27 host. Before `53eae85` the macOS 26 claim therefore had no recorded per-commit basis; from `53eae85` on it rests on the hosted lane, where each commit's own hosted run is its per-commit basis and a red one is recorded as such and fixed forward (design §4.1 amendments). One commit in that range, `ca4392d`, has no green hosted CI run: attempt 1 passed every Swift test and then failed its cleanup, attempt 2 failed one timing test; it changes no product source, so its product is the one `53eae85`'s run covered. An image failure is handled by reverting the move | this row (read back 2026-09-20) |
@@ -859,8 +859,9 @@ status. The claim rests on the totals and line sets, not on identical binaries.
   without the flag and about 3.4 with it). In serial mode CalendarKit read 884/950 in all ten builds
   (both baseline runs and the eight `pr345` builds, across their source trees:
   `CalendarSupport.swift` changed between the `pr345` commits and `6541c8d` without changing its
-  coverable count), and the entry counter read 22 in both baseline runs. Serial runs are still not
-  fully reproducible: see the line-496 residual.
+  coverable count), and the entry counter read 22 in both baseline runs. Before `4494e1d` serial
+  runs were not fully reproducible (line 496 differed between the two `pr345` invocations;
+  `6541c8d`'s two runs happened to agree): see the line-496 residual, fixed in `4494e1d`.
 - Validity: the baseline holds for measurements made with `--no-parallel` on swiftly Swift 6.3.3 and
   its `llvm-profdata` (LLVM 21.0.0), exported with `xcrun llvm-cov` from Command Line Tools 26.5
   (Apple LLVM 21.0.0), and policy blob `6f67dc49d085`, or `b3b4f0436abc` from `d61ab4e`, which
@@ -868,20 +869,36 @@ status. The claim rests on the totals and line sets, not on identical binaries.
   declaration-only pins. A parallel measurement is not comparable (attempt 2). A policy change that
   alters counting, a pin change, or a change to either toolchain (a Command Line Tools update
   included) needs a new measurement. The hosted coverage lane, when built, must pass `--no-parallel`
-  and record its own two-run baseline on its own toolchain before any per-target comparison uses it,
-  and that two-run check can fail on the timing-dependent line below until it is fixed; design §11.2
-  does not say so yet, so the requirement goes into that lane's specification (owner: controller).
+  and record its own two-run baseline on its own toolchain before any per-target comparison uses it
+  (the formerly timing-dependent line below, which could have failed that check, is reached by a
+  test on every passing run from `4494e1d`), and its two runs must show identical per-line covered
+  sets as well as identical totals, because flips can cancel in a total. Design §11.2 says none of
+  this yet, so these requirements go into that lane's specification (owner: controller).
 - Residuals:
-  - `Sources/AppleKit/OwnedScriptProcess.swift:496` (the timeout throw of the deadline check inside
-    the per-event poll loop; the file is unchanged from `19f48a2` to `6541c8d`) is timing-dependent:
-    uncovered in all four runs of attempts 2 and 3, and covered in three of the eight `pr345` builds
-    (`7fc4a49` and `6f8b852` in invocation 1, `57984cf` in invocation 2). The two serial invocations
-    therefore gave different AppleKit totals for three of the four commits; it is the only line
-    whose covered status differed between them. Until this is fixed, design §11.2's identical-totals
-    condition and the hosted lane's two-run baseline (Validity above) can fail on this line alone,
-    and design §11.3's per-target condition can fail a pull request that touches no AppleKit file,
-    as PR 5's first run shows. Owed (owner: controller): a test that reaches that throw
-    deterministically, or a reviewed exclusion under design §11.3.
+  - FIXED in `4494e1d` (2026-10-05). `Sources/AppleKit/OwnedScriptProcess.swift:496` (the timeout
+    throw of the deadline check inside the per-event poll loop; the file is unchanged from `19f48a2`
+    to `4494e1d`) was timing-dependent: uncovered in all four runs of attempts 2 and 3, and covered
+    in three of the eight `pr345` builds (`7fc4a49` and `6f8b852` in invocation 1, `57984cf` in
+    invocation 2). The two serial invocations therefore gave different AppleKit totals for three of
+    the four commits; it was the only line whose covered status differed between them. Before the
+    fix, design §11.2's identical-totals condition and the hosted lane's two-run baseline (Validity
+    above) could fail on this line alone, and design §11.3's per-target condition could fail a pull
+    request that touches no AppleKit file, as PR 5's first run shows. `4494e1d` adds a logic-tier
+    test over the synthetic process backend that stalls the first read past a two-second deadline,
+    so the throw runs whenever the test passes; with the check removed the test fails (a mutation
+    run on a clean copy of the commit, before it landed, removed lines 495–497 and the test failed
+    with three issues; its log is kept with the private evidence). The test re-runs an attempt, at
+    most twice, only when no descriptor was served and the timeout's SIGTERM came no sooner than the
+    deadline could have passed, so three such runner stalls in a row would fail a correct launcher.
+    The re-measurement below shows the line covered in both serial runs. Twelve serial builds do not
+    prove that no other line can change status, so every later two-run check must require identical
+    line sets as well as identical totals (the local controller compares them as
+    `LINE_SET_IDENTICAL` but reports a mismatch without failing the run; until it fails,
+    `LINE_SET_IDENTICAL=no` is read as a failed baseline). The test has one hosted run behind it
+    (`4494e1d`'s first CI attempt, where it passed without a re-run), and hosted runners have
+    withheld the test process for about 43 to 47 seconds (the 2026-10-05 entry in
+    `docs/learnings/hot/hosted-ci.md`), so a long stall before the test's first read is the hosted
+    case to watch.
   - 68 lines in six production files (ContactsKit 22, EventKitCore 2, MailKit 38, RemindersKit 6)
     carry wrapped 64-bit, that is negative, counts in every build, serial or not: the same per-file
     counts in every build, and the same lines in every build of one commit. llvm-cov reports them as
@@ -922,6 +939,55 @@ status. The claim rests on the totals and line sets, not on identical binaries.
     baseline; for the baseline, `llvm-cov show` (the changed-line path) is not exercised because
     base == head.
 
+#### Re-measurement on `4494e1d` (2026-10-05)
+
+`4494e1d` adds one logic-tier test (`ProcessResourceTests`, "a deadline that passes while one
+descriptor is served ends that turn") that reaches the line-496 throw on every passing run. At
+`6541c8d` AppleKit's figure was one sample of a quantity that timing could move by one line; from
+`4494e1d` it is not, so the baseline is re-measured. No Validity condition changed (the same
+toolchains and pins; policy blob `b3b4f0436abc`, unchanged from `d61ab4e`), and product code is
+unchanged. A commit that only adds covered lines does not by itself require a new baseline.
+
+- Commit: `4494e1d791819a2d41da241c0420f5ad0b0a5b2d`. Each run used its own clean detached clone of
+  the primary; HEAD was verified, and the policy's own status check was empty after cloning and
+  after the tests. The primary's head, refs and status were the same before and after the run.
+- Invocation `20261005T132923Z-baseline-swiftly`, attempt 1 for this commit and mode; refused
+  invocations: 0. Controller, driver and signal-reset wrapper as above (`594835ecc7a0615e`,
+  `13a14a06b18a4ced`, `6f867fd5937c2ff0`). The same `TOOLCHAIN` and `TOOLCHAIN_LLVM` lines as
+  baseline attempt 3, on the same host and Command Line Tools package, with `--no-parallel`
+  (`serial=1`). The same pins: `AppleScriptRunning.swift` matches and is excluded; `Models.swift`
+  is still drifted and counted as an ordinary MessagesKit file.
+
+| | Run 1 | Run 2 |
+|---|---|---|
+| `swift test` UTC start – end | 13:29:29Z – 13:33:09Z | 13:33:15Z – 13:36:56Z |
+| `swift test` exit; `xunit.xml` testcases / failures / errors / skipped | 0; 1980 / 0 / 0 / 0 | 0; 1980 / 0 / 0 / 0 |
+| Test payload sha256 (bytes) | `71200871d547726e` (75622232) | `fc88ce30108f3997` (75622216) |
+| `default.profdata` sha256 | `e8988c940da63eb1` | `7dc40bd1dd9fc8c5` |
+| Policy CLI verdict line | `coverage policy passed (aggregate 26285/28171; changed N/A)` | `coverage policy passed (aggregate 26285/28171; changed N/A)` |
+| Totals sha256 | `db36537de28b011f` | `db36537de28b011f` |
+| Per-line covered-set sha256 (repository-relative) | `bc8972e46455f52f` | `bc8972e46455f52f` |
+| `PARSER_CROSSCHECK` | `match (files=92 targets=9)` | `match (files=92 targets=9)` |
+| `CROSS_TOOL_SUMMARY` | match (count=84039 covered=74384) | match (count=84039 covered=74384) |
+
+- Per target, in both runs: AppleKit 2054/2175 (2053/2175 at `6541c8d`); the other eight targets
+  exactly as in the baseline table above; aggregate 26285/28171 (93.30%); targets below 90%: none.
+  Result: `BASELINE MATCH`, `LINE_SET_IDENTICAL=yes`, `EVIDENCE_ELIGIBLE=yes`, `COVERAGE_EXIT=0`.
+- Against the recorded `6541c8d` baseline the pair meets design §11.2: identical totals; aggregate
+  floor met; changed-line N/A (no production source changed between the two commits, and the policy
+  ran base == head); per target, none lower, and AppleKit 2053/2175 → 2054/2175 by
+  cross-multiplication. The per-line covered sets differ from the `6541c8d` runs in exactly one of
+  the 19738 distinct production lines, `OwnedScriptProcess.swift:496`, in both pairings (run 1 with
+  run 1, run 2 with run 2). Superseding the record raises one target's figure and lowers none
+  (design §10.5's trusted check rejects a lower target baseline). The `6541c8d` record above is kept
+  as history.
+- Line 496 is covered in both runs, with hit counts 2 and 1. The new test passed in each run without
+  a re-run (no "scenario missed" line in either log, and 3.07 s and 3.06 s, one attempt's length),
+  so it hit the line once. Run 1's second hit is consistent with another test reaching the line by
+  timing, as in three `pr345` builds; no per-test coverage was taken.
+- From `4494e1d` this is the baseline of record; the validity conditions above apply to it
+  unchanged, with policy blob `b3b4f0436abc`.
+
 #### PR 3–5 per-target no-regression check (landed pairs, base = first parent)
 
 The toolchain and profile provenance of both `pr345` invocations is listed above. Each built one
@@ -958,10 +1024,10 @@ The table shows run 1. Run 2 is identical except AppleKit at the last three comm
 - PRs 3–5 merged on 2026-09-22 (UTC) while no workflow ran the policy, so design §11.3's per-PR gate
   never applied to them; this records what its per-target condition would have said. §11.3 is a
   pre-merge gate and names no remediation for a regression already on `main`. PR 4's regressed
-  target, MailKit, is above its pre-regression ratio at the baseline (10210/11040 against
-  10184/11031), and AppleKit's baseline ratio is above either run's `6f8b852` value (2053/2175
-  against 2003/2124 or 2002/2124), by cross-multiplication; every PR head's aggregate is at or above
-  90%.
+  target, MailKit, is above its pre-regression ratio at the `6541c8d` baseline (10210/11040 against
+  10184/11031), and AppleKit's ratio at that baseline is above either run's `6f8b852` value
+  (2053/2175 against 2003/2124 or 2002/2124), by cross-multiplication; every PR head's aggregate is
+  at or above 90%.
 - Policy defect, FIXED in `d61ab4e` (2026-10-05): invocation 1's pair evaluations raised
   `line-status input is invalid` for all three PRs. Re-run by hand on the retained builds, `xcrun
   llvm-cov show` exited 0 for all 15 changed production files (13 distinct); the policy's
@@ -986,14 +1052,16 @@ The table shows run 1. Run 2 is identical except AppleKit at the last three comm
   files under `Sources/MailKit` (5 insertions, 65 deletions), and the whole delta is in
   `WriteComposeCommands.swift`, whose attachment-path resolver PR 4 moved into AppleKit's new
   `AttachmentSource.swift` (AppleKit gained 30 coverable lines, all covered).
-- PR 5's AppleKit result turns on one line, the timing-dependent `OwnedScriptProcess.swift:496`
-  above. In run 1 it was covered in the `6f8b852` build and not in the `57984cf` build (AppleKit
-  2003/2124 → 2002/2124, "no"); in run 2 it was covered only in the `57984cf` build (2002/2124 →
-  2003/2124, "yes"). In run 1 the same line also moves PR 3's AppleKit by one (1972 → 1973); in run
-  2 it is uncovered in both PR 3 builds. PR 5 changed no file under `Sources/AppleKit`. Disposition:
-  PR 5's per-target answer is indeterminate at one-line resolution; this record relies on neither
-  run's answer and treats PR 5 as making no AppleKit change of its own. PR 4's MailKit result, "no"
-  in both runs, is the only regression the record relies on.
+- PR 5's AppleKit result turns on one line, the then timing-dependent `OwnedScriptProcess.swift:496`
+  above (reached by a test on every passing run from `4494e1d`; the PR 3–5 trees predate that test,
+  so re-running this check on them would still be indeterminate). In run 1 it was covered in the
+  `6f8b852` build and not in the `57984cf` build (AppleKit 2003/2124 → 2002/2124, "no"); in run 2 it
+  was covered only in the `57984cf` build (2002/2124 → 2003/2124, "yes"). In run 1 the same line
+  also moves PR 3's AppleKit by one (1972 → 1973); in run 2 it is uncovered in both PR 3 builds. PR
+  5 changed no file under `Sources/AppleKit`. Disposition: PR 5's per-target answer is indeterminate
+  at one-line resolution; this record relies on neither run's answer and treats PR 5 as making no
+  AppleKit change of its own. PR 4's MailKit result, "no" in both runs, is the only regression the
+  record relies on.
 - The figures in the pull requests were measured on branches forked from `715745f` with
   Xcode-beta Swift 6.4, so they describe different trees and are not compared here.
 - Attempts: invocations 1 and 2 are attempts 1 and 2 for `pr345`, under a cap of three; refused

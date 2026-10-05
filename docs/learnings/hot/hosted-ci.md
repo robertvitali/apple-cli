@@ -2,7 +2,7 @@
 topic: hosted-ci
 importance: high
 last-used: 2026-10-05
-uses: 13
+uses: 14
 ---
 
 # Hosted CI (public, free GitHub-hosted runners)

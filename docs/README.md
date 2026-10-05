@@ -18,6 +18,7 @@
 
 ### hot
 - [bats-app-lifecycle](learnings/hot/bats-app-lifecycle.md)
+- [coverage](learnings/hot/coverage.md)
 - [hosted-ci](learnings/hot/hosted-ci.md)
 - [mail-automation](learnings/hot/mail-automation.md)
 - [privacy-audits](learnings/hot/privacy-audits.md)
