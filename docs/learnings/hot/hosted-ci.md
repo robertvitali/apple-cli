@@ -1,11 +1,174 @@
 ---
 topic: hosted-ci
 importance: high
-last-used: 2026-10-03
-uses: 10
+last-used: 2026-10-05
+uses: 13
 ---
 
 # Hosted CI (public, free GitHub-hosted runners)
+
+## 2026-10-05 — Hosted runners withhold the test process: gate the start, re-run only on evidence
+
+**Symptom.** On 2026-10-04 three pushes to `main` failed hosted `build-test` on the first attempt
+and passed on a re-run with no code change. All three failures were in the `owned process group
+cleanup` suite (`OwnedProcessCleanupTests`):
+
+- `67fefbd`: "a timeout stops the TERM-ignoring root and its TERM-ignoring descendant" could not
+  read its root's marker file (Cocoa error 260), in both stdin cases. Most likely the launcher's
+  deadline ran out before the root had started.
+- `c1ca338`: "completed timed capture preserves background work" (status 0) failed with
+  `osascript timed out after 2s`, 50.8 s after it started.
+- `54d7dd9`: "completed stdin delivery preserves background work" failed the same way after 47.3 s.
+
+The old code path waits at most about four seconds (a two-second deadline, a one-second TERM pause
+and a one-second reap), so about 47 and 43 seconds of the last two runs are unexplained. The logs
+show only that the runner did not run the test, or the thread driving the launcher, for that long;
+they cannot say which. Loaded local runs had failed tests in the same suite, and in
+`ScriptLauncherTests`, `ProcessResourceTests` and `LauncherIsolationTests`, the same way since
+2026-09-30.
+
+**Cause.** These tests start a real child (`/bin/sh` or Python) and then hold the launcher to a
+short deadline or a wall-clock bound. A deadline that starts before the child runs charges the
+child's start-up to the product, and a wall-clock bound charges every second the runner did not run
+the test. Neither measures the launcher on a runner that withholds the process.
+
+**Fix (tests only; the product is unchanged).** The gated process tests in
+`OwnedProcessCleanupTests`, `ScriptLauncherTests` and `ProcessResourceTests` share one method;
+`LauncherIsolationTests`, which has no gate and no probe, follows the same re-run rule with its own
+evidence (item 4).
+
+1. **Readiness gate.** A decorator over the launcher's child operations waits inside `spawn`, once
+   the real spawn has returned, until the child publishes that it is running, so the product's
+   deadline starts after start-up. The gate also watches the child without reaping it: one that
+   exits before publishing fails the attempt as a possible spawn regression, unless it died of its
+   own alarm no sooner than that alarm was due after the spawn call. That death is a miss on
+   attempts 1 and 2. A runner that withheld the fixture produces it, and so would a product `spawn`
+   that took the fixture's whole expiry to return, which the third attempt still fails.
+2. **Misses.** An attempt is re-run, at most twice, only on evidence that a correct launcher leaves
+   on a runner that withheld the process. The evidence does not prove a stall: some of it a slow
+   launcher leaves too. That is why the third attempt sets nothing aside and runs every check, so a
+   steady regression still fails, while an intermittent one can pass on a re-run. A miss is printed
+   with its figures and can only re-run an attempt, never pass one. The kinds:
+   - Before the launcher acts: the gate ran out with the child alive and unpublished, or the
+     child's own alarm had used up the life the scenario needs. In the cleanup and resource tests a
+     timeout that follows such a gate can be re-run with it. A slow product `spawn` leaves the same
+     shape.
+   - From the launcher's own turns, counted only after every check a stall cannot fail has passed:
+     a window with too few turns to measure, or a scenario that was not reached (no exit seen
+     inside the deadline and before the first signal). A launcher that waits blindly, or never sees
+     the exit, leaves these with no stall at all.
+   - From `DeschedulingProbe`: a crossed stopwatch bound, set aside in `ProcessResourceTests` and
+     the output-limit, timeout and drain tests only when the time withheld over the bound's own
+     span covers the overrun, and in `ScriptLauncherTests` and the completion tests when it reaches
+     the bound's headroom over the launcher's worst case; a `TimeoutError` in the completion and
+     output-limit tests when all but a second of the deadline was withheld between the spawn stamp
+     and the first signal; a failed liveness check in the completion tests decided no sooner than
+     the descendant's expiry, with the window withheld; and, in `eventualReapTransfer`, a fake
+     child that became reapable by itself after a stall the probe saw, which skips only the
+     obligation checks.
+3. **Other product checks are never re-run.** Apart from the timeout, liveness and reap cases above
+   and the isolation misses in item 4, a wrong error or error type, the signals sent and their
+   order, whether the process group stopped, the descriptors a child inherited, exit status and
+   output fail the attempt on any attempt. An inherited stdin write end in `LauncherIsolationTests`
+   is one of these, although a probe stalled for its whole eight-second alarm leaves the same shape.
+4. **`LauncherIsolationTests`.** An attempt that left no usable evidence for a reason starvation
+   explains is a miss: a child killed at its 300-second patience or ended by its own expiry, a
+   launch deadline, a probe cut short by its eight-second alarm, or a late EPIPE. A hung or slow
+   launcher leaves these too. Misses are re-run at most twice per scenario and six times per test.
+5. **`DeschedulingProbe`.** A thread at user-interactive quality of service sleeps in 50 ms ticks
+   and records each wake-up more than 100 ms late as a lapse. What it records is a lower bound on
+   the time the runner withheld the process; it sees only its own thread.
+6. **Bounds sized for a starved runner.** Gates hold up to 60 s. Deadlines and fixture alarms are
+   set per test, so that most sit at least twice above the end they wait for; a few short fixture
+   alarms remain where a test needs its fixture to end early. The `/bin/sh` fixtures that ignore
+   SIGTERM end by themselves after about ninety seconds, and in `ScriptLauncherTests` the gated
+   launches of looping shells run under a 120-second watchdog; the Python fixtures end through
+   their own alarms or stop handshakes.
+
+Three FIFO tests in two Python modules (`test_action_pins.py` and `test_dependency_policy.py`) ran
+their checker under a one-second subprocess timeout and now allow thirty seconds. A checker that
+blocks on a FIFO still never returns, so the check is unchanged.
+
+**Evidence.** On an unloaded local Mac with the swiftly toolchain, the four process suites (94
+tests) passed on three separate runs and the full `swift test` (1979 tests) on one, with no miss
+printed. Five runs of those suites under contention (a `yes` on every core, the tests at default
+quality of service) also passed with no miss, in about the unloaded time: this load does not
+reproduce the hosted stalls, so it shows only that the change holds under CPU contention.
+
+The hosted shape was reproduced directly. A test-only injection stopped the whole test process for
+46 seconds inside the launcher's first observation in each completion test. The 30-second deadline
+fired during the stall, the launch timed out, and the probe recorded all 46 seconds as withheld, so
+attempt 1 printed a miss and attempt 2 passed. The same stop placed after the launch returned was
+set aside through the liveness check instead.
+
+Thirty-three mutations, each applied to a clean copy, built and run on its own, came out as
+planned:
+
+- 19 failed at once with no re-run. Among them were a launcher that waits 1.1 s too long between
+  SIGTERM and SIGKILL, an 11-second stall in the launcher's own cleanup, a launcher that returns
+  31 s late on EPIPE, a stdin write end leaked into the isolation probe, gated children that exit
+  before publishing, and a deleted SIGKILL with the TERM-deaf fixtures now bounded.
+- 8 re-ran on attempts 1 and 2 and failed on the third, with a forced set-aside or a real SIGSTOP
+  on every attempt, so the last attempt never sets anything aside.
+- 6 re-ran once and passed: the four 46-second stops above, a real 12-second stop after the gate
+  in the timeout test, and a fixture killed by its alarm signal before it published with the
+  alarm's due time forced to zero.
+
+One mutation first exposed an ordering defect: the overflow test checked the error type before its
+early-exit rule, so a genuine alarm miss could never re-run to green. It was fixed before landing.
+The two changed Python modules (63 tests) passed locally; only the Ubuntu job runs them in CI. The
+change is pushed only after the canonical local suite (both toolchains and `bats -r bats/`) passes
+on its exact commit. Hosted CI remains the acceptance: if one of these suites fails there again
+instead of printing a miss, read the residuals below first.
+
+**Residuals.**
+
+- `DeschedulingProbe` sees only its own thread and records a lower bound. A runner that withholds
+  only the thread driving the launcher, or slows every thread by less than 100 ms at a time, can
+  still fail a correct launcher.
+- Stamps are taken on `CLOCK_MONOTONIC`, while the launcher's deadlines use `DispatchTime`
+  (uptime). The slack constants cover frequency slew over the two- and twelve-second spans they
+  guard, but not over the 30- and 60-second fixture alarms at the 5500 ppm rate their comments
+  assume (about 165 and 330 ms against 100 ms), so under strong slew a genuine on-time alarm can be
+  classed as a product failure. Moving the stamps to `CLOCK_UPTIME_RAW` would remove the mismatch
+  with `DispatchTime`; the fixtures' Python arm stamps read `CLOCK_MONOTONIC` too and would have to
+  move with them, and whether the kernel's alarm timer then matches needs checking. A follow-up.
+- `OwnedProcessCleanupTests`' three-second post-return stop and group-settle windows have no
+  allowance, and nothing bounds when their deciding observation is made. A test-thread stall just
+  before it can let a survivor's own alarm read as a stop, a false pass, and for a backend that
+  signals only the root that window is the only guard.
+- In the output-limit test's live-pipe phase and in `completedStdin`, a stall that starts in the
+  millisecond before the launcher writes stdin and ends after the fixture's alarm but before the
+  30-second deadline yields neither the expected result nor a timeout, and fails a correct launcher
+  with no re-run. `detachedSurvivorDoesNotRetainParentDescriptors` keeps a 60-second deadline over
+  a real backend, so a stall of 60 s or more after its gate turns the EPIPE into a `TimeoutError`
+  that is never set aside.
+- In `ProcessResourceTests` the spawn stamp is taken when the gate notices the ready file, after
+  the fixtures armed their alarms. A stall between the two shortens what the EPIPE test's
+  30-second bound measures, so a slow launcher can pass on such an attempt.
+- Tests with a thirty-second deadline over a synthetic backend still report a `TimeoutError` after
+  a stall of thirty seconds or more in the moment between the deadline being set and its first
+  check, and `readFailureClosesResources` and `signalOutcome` keep the root's start-up inside an
+  ungated 120-second deadline.
+- In `LauncherIsolationTests` a probe withheld between its last echo and its end-of-file read for
+  its whole eight-second alarm now fails a correct launcher: that is the price of never re-running
+  the inherited-stdin shape. A late `TimeoutError` whose witness has that shape is still classed as
+  a miss.
+- A fixture withheld for its whole expiry between arming its alarm and publishing is a miss only
+  where the test classifies it: `OwnedProcessCleanupTests.starvedGate`, the `ProcessResourceTests`
+  gated roots and the pending-input overflow fixture. The overflow fixture's alarm usually fires
+  after its gate has already run out, and then the attempt fails on the error type. The `/bin/sh`
+  fixtures arm no alarm.
+- Re-run chains (a sixty-second gate, then a deadline of up to 120 seconds) can take a heavily
+  starved run past `scripts/ci/quality.py`'s 1200-second stage timeout. On a timeout that script
+  discards the captured output, so the test names and the printed misses are both lost; a
+  stage-timeout failure may be such a chain.
+
+**Lesson.** A test that times a real child on a shared runner measures the runner unless it starts
+its clock when the child runs and can tell a stall from a slow product. Decide in advance which
+evidence may re-run an attempt, prefer evidence the product cannot influence, and never re-run a
+failed product check without its own evidence: a re-run rule written to fit the first misses will
+hide the next regression.
 
 ## 2026-10-03 — Sweeping the other CI readers: refuse what a parser misreads, never history
 
@@ -126,7 +289,8 @@ red step had been unexercised since the last hosted run on 2026-09-02; the local
    decorator over the real child operations stamps, on the same `CLOCK_MONOTONIC` the fixture
    uses, when `spawn` returned and when cleanup first signalled the group, and the test
    asserts event order — spawn ≤ observed exit < first cleanup signal, and first signal ≥
-   spawn + the 2 s deadline. Start-up latency on a slow runner moves every stamp together.
+   spawn + the 2 s deadline (1.98 s since 2026-10-05, keeping 20 ms for clock slew). Start-up
+   latency on a slow runner moves every stamp together.
    Residual, stated: the root must still exit inside the same 2 s drain deadline the
    production path uses; a runner too slow for that fails as a missing
    `root-observed-exited` read, not as a timing assertion, and the `root-exiting` marker
@@ -202,9 +366,11 @@ red step had been unexercised since the last hosted run on 2026-09-02; the local
    deadline starts after it, so interpreter start-up on a loaded runner could cross the bound
    with no behaviour change at all. The test now uses a 30 s deadline, a 20 s alarm in the
    fixture and a 10 s bound. Checked red against a launcher that stops reading output while
-   stdin is pending: the test fails after about 20 s with the wrong error. Lesson: a
-   wall-clock bound needs headroom below the deadline it stands in for; when the two are the
-   same number, the test measures the runner, not the code.
+   stdin is pending: the test fails after about 20 s with the wrong error. (The 10 s bound now
+   starts after start-up, and the deadline and alarm are 120 s and 60 s; see the 2026-10-05
+   entry.) Lesson: a wall-clock bound needs headroom below the deadline
+   it stands in for; when the two are the same number, the test measures the runner, not the
+   code.
 
 **Follow-up 2026-09-26 — the order check flaked too, and the residual in item 5 was incomplete.**
 Hosted CI failed the same test again, on a commit that changed no Swift code, now at the order
@@ -230,6 +396,12 @@ start-up exposure; the decorator's readiness gate would apply to them directly, 
 plain launcher and do not use it yet. General lesson: an event-order assertion is only as good as
 the observer that stamps the event. Stamp it where the product sees it, and keep what the
 scenario needs before the product's own deadline starts outside that deadline.
+
+**Follow-up 2026-09-30 to 2026-10-05 — the siblings timed out too, and so did tests in three
+other suites.** A loaded local run and hosted CI failed every sibling named above, and tests in
+`ScriptLauncherTests`, `ProcessResourceTests` and `LauncherIsolationTests` failed the same way. The
+method they now share, and its evidence and residuals, is the 2026-10-05 entry at the top of this
+file.
 
 **Follow-up — the tilde-expansion sites.** Landed 2026-09-22 as ONE shared helper,
 `AppleKit.TildeSpelling.ownHome`, applied by the attachment resolver (`AttachmentSource.resolve`,

@@ -31,6 +31,14 @@ REFUSED_SAMPLES = (
     "\x7f", "\x86", "\ufeff", "\u202e",
 )
 
+# The bound the FIFO ("without blocking") tests hand to subprocess.run. It stands in for "never
+# returns": a blocking open of a FIFO that has no writer waits forever, so any finite bound still
+# catches that regression (the run raises TimeoutExpired, the child is killed, and the test
+# errors). A bound of a second or so would mostly measure a fresh interpreter's start-up and
+# imports, which a starved hosted runner can spend most of; 30 s matches test_action_pins.py's
+# bound for its checker subprocess runs.
+NONBLOCKING_RUN_TIMEOUT_SECONDS = 30
+
 
 def load_checker() -> ModuleType:
     spec = importlib.util.spec_from_file_location("dependency_policy", CHECKER_PATH)
@@ -166,7 +174,7 @@ class DocsDependencyPolicyTests(unittest.TestCase):
                 check=False,
                 capture_output=True,
                 text=True,
-                timeout=1,
+                timeout=NONBLOCKING_RUN_TIMEOUT_SECONDS,
             )
 
             self.assertNotEqual(result.returncode, 0)
@@ -756,7 +764,7 @@ class DependabotPolicyTests(unittest.TestCase):
                 check=False,
                 capture_output=True,
                 text=True,
-                timeout=1,
+                timeout=NONBLOCKING_RUN_TIMEOUT_SECONDS,
             )
 
             self.assertNotEqual(result.returncode, 0)

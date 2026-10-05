@@ -455,6 +455,13 @@ jobs:
                                     for error in errors), errors)
 
     def test_rejects_nonregular_workflow_without_blocking(self) -> None:
+        # The timeout stands in for "never returns". A blocking open of a FIFO that has no writer
+        # waits forever, so any finite bound still catches that regression (the run raises
+        # TimeoutExpired and the child is killed). A bound of a second or so would mostly measure a
+        # fresh interpreter's start-up and imports, which a starved runner can spend most of; 30 s
+        # matches the file's other checker subprocess run (the printed-errors test). The checker
+        # opens with O_NONBLOCK and refuses a non-regular file after fstat; dropping that flag is
+        # the regression, and it blocks forever rather than for some bounded time.
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             workflow_root = root / ".github" / "workflows"
@@ -466,7 +473,7 @@ jobs:
                 check=False,
                 capture_output=True,
                 text=True,
-                timeout=1,
+                timeout=30,
             )
 
             self.assertNotEqual(result.returncode, 0)
