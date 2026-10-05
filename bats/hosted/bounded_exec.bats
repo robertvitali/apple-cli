@@ -92,7 +92,7 @@ assert status == 143, (status, len(block_calls))
   local bounded="$HELPERS/bounded_exec.py"
 
   run /usr/bin/python3 -c '
-import importlib.util, os, signal, subprocess, sys
+import contextlib, importlib.util, io, os, signal, subprocess, sys
 spec = importlib.util.spec_from_file_location("bounded_exec", sys.argv[1])
 module = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(module)
@@ -108,30 +108,41 @@ module.stop_process_group(process, 0.05)
 module.stop_process_group(process, 0.05)
 assert process.returncode == 0
 
-real_signal_group = module.signal_group
+real_killpg = module.os.killpg
 real_drain_output = module.drain_output
+permission_warning = module.CLEANUP_PERMISSION_WARNING + "\n"
+
+# Cleanup forgives EPERM from a live leader with a warning instead of raising: every group signal
+# is denied here, so only the pid-level SIGKILL of the leader reap ends the command.
 active = subprocess.Popen(
-    ["/bin/sleep", "5"],
+    ["/bin/sleep", "30"],
     stdout=subprocess.PIPE,
     stderr=subprocess.STDOUT,
     start_new_session=True,
 )
-module.signal_group = lambda _process_group, _item: (_ for _ in ()).throw(
-    PermissionError(1, "injected active-group denial")
-)
+active_calls = []
+def deny_every_group_signal(_process_group, item):
+    active_calls.append(item)
+    raise PermissionError(1, "injected active-group denial")
+module.os.killpg = deny_every_group_signal
+captured = io.StringIO()
 try:
-    try:
-        module.stop_process_group(active, 0.05)
-    except PermissionError:
-        pass
-    else:
-        raise AssertionError("active-group EPERM must remain loud")
+    with contextlib.redirect_stderr(captured):
+        assert module.stop_process_group(active, 0.05) is None
+    # The wrapper ended the leader itself, before the safety net below could.
+    assert active.wait(timeout=5) == -signal.SIGKILL, active.returncode
 finally:
-    real_signal_group(active.pid, signal.SIGKILL)
-    active.communicate(timeout=1)
+    module.os.killpg = real_killpg
+    if active.poll() is None:
+        active.kill()
+        active.wait(timeout=5)
+assert active_calls == [signal.SIGTERM, signal.SIGKILL], active_calls
+assert captured.getvalue() == permission_warning * 2, captured.getvalue()
 
+# The same after the grace: the TERM is reported sent without reaching the leader, which stays
+# live, and the escalating KILL is denied.
 active_after_grace = subprocess.Popen(
-    ["/bin/sleep", "5"],
+    ["/bin/sleep", "30"],
     stdout=subprocess.PIPE,
     stderr=subprocess.STDOUT,
     start_new_session=True,
@@ -142,24 +153,23 @@ def active_after_grace_eperm(_process_group, item):
     signal_calls.append(item)
     if len(signal_calls) == 2:
         raise PermissionError(1, "injected active-group denial after grace")
-module.signal_group = active_after_grace_eperm
+module.os.killpg = active_after_grace_eperm
+captured = io.StringIO()
 try:
-    try:
-        module.stop_process_group(active_after_grace, 0.05)
-    except PermissionError:
-        pass
-    else:
-        raise AssertionError("post-grace active-group EPERM must remain loud")
+    with contextlib.redirect_stderr(captured):
+        assert module.stop_process_group(active_after_grace, 0.05) is None
+    assert active_after_grace.wait(timeout=5) == -signal.SIGKILL, active_after_grace.returncode
 finally:
     module.drain_output = real_drain_output
-    real_signal_group(active_after_grace.pid, signal.SIGKILL)
-    active_after_grace.communicate(timeout=1)
-
-module.signal_group = real_signal_group
+    module.os.killpg = real_killpg
+    if active_after_grace.poll() is None:
+        active_after_grace.kill()
+        active_after_grace.wait(timeout=5)
+assert signal_calls == [signal.SIGTERM, signal.SIGKILL], signal_calls
+assert captured.getvalue() == permission_warning, captured.getvalue()
 
 run_calls = []
 run_drain_calls = []
-real_killpg = module.os.killpg
 def run_handler_success_drain(process, grace):
     run_drain_calls.append(1)
     if len(run_drain_calls) == 1:

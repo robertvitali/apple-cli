@@ -125,7 +125,7 @@ PULL_REQUEST_PIN_NOTE = (
 # attribute, an item store or a call argument (`_verified_pin_literals` refuses otherwise). An
 # alias is beyond that check, so keep any alias read-only.
 TRUSTED_HOSTED_FILE_SHA256 = {
-    "bats/hosted/bounded_exec.bats": "13e4976b41a295182873e45c7f33c84dd7712e2ee16399fc6c0fe561056d4c26",
+    "bats/hosted/bounded_exec.bats": "ccfbd511de8bcd38e3c8f0eb73e2b4a051b1585c6b3a34ae09faf8d906a6bc95",
     "bats/hosted/calendar.bats": "f9959a2b94f5869d46d20c1be5500f4e244f1d0e5e3dd198f16f6e712ab11613",
     "bats/hosted/contacts.bats": "e9a4adf121fa3d78a7890aedbd1fe6a4d2737bd86efa91f96fde9880a0cec03b",
     "bats/hosted/mail.bats": "e120826145b1ecfa2ffb6f9aee9fd9f91f96c6aea0ed055d7ea37483f07e93b6",
@@ -138,7 +138,7 @@ TRUSTED_HOSTED_HELPER_SHA256 = {
     "bats/helpers/app_lifecycle.bash": "4e9689b18532ad592e3e6166a141ad0cae16a2d1bfe0d02b3160ca9c3753781a",
     "bats/helpers/app_lifecycle.py": "bb8f8cbcc78f821fe9a4d59c984f7aa4b3c4fa2719a9885796bea40d0446ead5",
     "bats/helpers/applescript_syntax_check.py": "40f56f5659dfb3bbc4c8b4b36d30ac12ad943f7c3fd78981800f3da46343e996",
-    "bats/helpers/bounded_exec.py": "84260117f0505f2f2883fa2ec1b5fc5a577d4a05cc1ba268ae26e8948ab475c9",
+    "bats/helpers/bounded_exec.py": "cc3f72c2cc407e51b637a459b530d6767c1a8649d2c47be8073ef3a1d6adfaf0",
     "bats/helpers/execute_envelope_lint.py": "430eba15fea468da6415441657087f7f2b70b0e6853ae70777c7b52a652454ba",
     "bats/helpers/md_tables_wellformed.py": "2ee916ec014906507474d7a63d89eb2538d277b628aedf404a87fbb448e4f49a",
     "bats/helpers/messages_db_probe.py": "da7daca3cf7fd967f3b00cea30724ea8b99411d6879458ee8caeb143ffc290e2",

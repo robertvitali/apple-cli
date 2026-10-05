@@ -2388,8 +2388,8 @@ class QualityDriverTests(unittest.TestCase):
         self,
     ) -> None:
         # Darwin's killpg fails with EPERM for a group whose members have all exited while the
-        # leader is unreaped; Linux, where this tier runs in CI, never returns it, so the
-        # handling is pinned with stand-ins here (2026-10-02).
+        # leader is unreaped; Linux, where this tier runs in CI, does not fail for such a group,
+        # so the handling is pinned with stand-ins here (2026-10-02).
         class Process:
             pid = 12345
 
@@ -2403,8 +2403,12 @@ class QualityDriverTests(unittest.TestCase):
                 return self.returncode
 
         error = PermissionError(errno.EPERM, os.strerror(errno.EPERM))
-        with mock.patch.object(self.quality.os, "killpg", side_effect=error) as killpg:
-            # The leader has exited but is unreaped: reaped through Popen, nothing sent.
+        gone = ProcessLookupError(errno.ESRCH, os.strerror(errno.ESRCH))
+        # The leader has exited but is unreaped, and was its group's only member: it is reaped
+        # through Popen, the retried signal finds the group gone, and nothing is sent.
+        with mock.patch.object(
+            self.quality.os, "killpg", side_effect=[error, gone, error, gone]
+        ) as killpg:
             zombie = Process(None, -signal.SIGKILL)
             self.assertFalse(self.quality.try_signal_leader_group(zombie, signal.SIGTERM))
             self.assertEqual(zombie.returncode, -signal.SIGKILL)
@@ -2412,7 +2416,39 @@ class QualityDriverTests(unittest.TestCase):
             sent = [False]
             self.quality.kill_remaining_group(zombie, sent)
             self.assertEqual((sent, zombie.returncode), ([False], 0))
+        self.assertEqual(
+            [call.args[1] for call in killpg.call_args_list],
+            [signal.SIGTERM, signal.SIGTERM, signal.SIGKILL, signal.SIGKILL],
+        )
 
+        # A member the reap does not explain survives it: the retry signals that member and
+        # reports the signal sent, or meets EPERM again, which stands outside cleanup and is
+        # forgiven with a warning in cleanup (2026-10-05).
+        with mock.patch.object(self.quality.os, "killpg", side_effect=[error, None]):
+            zombie = Process(None, 0)
+            sent = [False]
+            self.quality.kill_remaining_group(zombie, sent)
+            self.assertEqual((sent, zombie.returncode), ([True], 0))
+        first = PermissionError(errno.EPERM, os.strerror(errno.EPERM))
+        retried = PermissionError(errno.EPERM, os.strerror(errno.EPERM))
+        with mock.patch.object(self.quality.os, "killpg", side_effect=[first, retried]):
+            zombie = Process(None, 0)
+            with self.assertRaises(PermissionError) as raised:
+                self.quality.try_signal_leader_group(zombie, signal.SIGKILL)
+            # The original error is the one that stands, with nothing chained to it.
+            self.assertIs(raised.exception, first)
+            self.assertIsNone(raised.exception.__context__)
+            self.assertEqual(zombie.returncode, 0)
+        with mock.patch.object(self.quality.os, "killpg", side_effect=error) as killpg:
+            zombie = Process(None, 0)
+            sent = [False]
+            with mock.patch.object(self.quality.sys, "stderr", io.StringIO()) as warnings:
+                self.quality.kill_remaining_group(zombie, sent, cleanup=True)
+            self.assertEqual((sent, zombie.returncode), ([False], 0))
+            self.assertEqual(warnings.getvalue(), self.quality.CLEANUP_PERMISSION_WARNING + "\n")
+        self.assertEqual(killpg.call_count, 2)
+
+        with mock.patch.object(self.quality.os, "killpg", side_effect=error) as killpg:
             # The leader is still running: nothing explains the error, so it stands.
             running = Process(None, None)
             with self.assertRaises(PermissionError):
@@ -2442,8 +2478,6 @@ class QualityDriverTests(unittest.TestCase):
             [
                 mock.call(12345, signal.SIGTERM),
                 mock.call(12345, signal.SIGKILL),
-                mock.call(12345, signal.SIGTERM),
-                mock.call(12345, signal.SIGKILL),
                 mock.call(12345, signal.SIGKILL),
                 mock.call(12345, signal.SIGTERM),
             ],
@@ -2467,10 +2501,11 @@ class QualityDriverTests(unittest.TestCase):
             def wait(self, timeout=None):
                 return self.poll()
 
-        # The leader is the group's only member here, so once it is reaped the group is gone and
-        # the sweep's SIGKILL finds nothing.
+        # The leader is the group's only member here, so once it is reaped the group is gone:
+        # the retried SIGTERM and the sweep's SIGKILL find nothing.
         effects = [
             PermissionError(errno.EPERM, os.strerror(errno.EPERM)),
+            ProcessLookupError(errno.ESRCH, os.strerror(errno.ESRCH)),
             ProcessLookupError(errno.ESRCH, os.strerror(errno.ESRCH)),
         ]
         zombie = Process()
@@ -2495,7 +2530,11 @@ class QualityDriverTests(unittest.TestCase):
         self.assertEqual((sent, zombie.returncode), ([False], -signal.SIGKILL))
         self.assertEqual(
             killpg.call_args_list,
-            [mock.call(12345, signal.SIGTERM), mock.call(12345, signal.SIGKILL)],
+            [
+                mock.call(12345, signal.SIGTERM),
+                mock.call(12345, signal.SIGTERM),
+                mock.call(12345, signal.SIGKILL),
+            ],
         )
 
     def test_cleanup_escalation_forgives_permission_error_from_a_leader_still_unreaped(
@@ -2605,6 +2644,71 @@ class QualityDriverTests(unittest.TestCase):
         self.assertEqual(calls, [signal.SIGKILL, signal.SIGTERM, signal.SIGKILL])
         self.assertIsNone(raised.exception.__context__)
         self.assertEqual(warnings.getvalue(), self.quality.CLEANUP_PERMISSION_WARNING + "\n")
+
+    def test_the_cancellation_accelerator_ignores_permission_and_lookup_errors(self) -> None:
+        class Process:
+            pid = 12345
+
+        for effect in (
+            PermissionError(errno.EPERM, os.strerror(errno.EPERM)),
+            ProcessLookupError(errno.ESRCH, os.strerror(errno.ESRCH)),
+            None,
+        ):
+            with self.subTest(effect=type(effect).__name__), \
+                    mock.patch.object(self.quality.os, "killpg", side_effect=effect) as killpg:
+                self.assertIsNone(self.quality.kill_group_after_cancellation(Process()))
+            killpg.assert_called_once_with(12345, signal.SIGKILL)
+
+    def test_repeated_cancellation_outside_cleanup_keeps_its_status(self) -> None:
+        # A first SIGTERM raises the cancellation; a second, before cleanup has started, takes
+        # the handler's accelerating SIGKILL, which meets EPERM. Raising there used to replace
+        # 128+SIGTERM with a traceback (2026-10-05). The signals are raised from inside the
+        # completed stage's sweep, which run_command calls with cancellation unblocked and no
+        # cleanup active, so the order is exact.
+        real_kill_remaining_group = self.quality.kill_remaining_group
+        raised = []
+
+        def kill_remaining_group(process, sent_sigkill, *, cleanup=False):
+            if not raised:
+                # Raising SIGTERM with no handler installed would end the whole test process.
+                if signal.getsignal(signal.SIGTERM) in (signal.SIG_DFL, signal.SIG_IGN):
+                    raise AssertionError("the sweep ran outside the cancellation handler's scope")
+                try:
+                    signal.raise_signal(signal.SIGTERM)
+                except self.quality.CancellationRequested:
+                    raised.append("first")
+                    signal.raise_signal(signal.SIGTERM)
+                    raised.append("second")
+                    raise
+            return real_kill_remaining_group(process, sent_sigkill, cleanup=cleanup)
+
+        def killpg(_process_group, _sig):
+            raise PermissionError(errno.EPERM, os.strerror(errno.EPERM))
+
+        warnings = io.StringIO()
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            with mock.patch.object(
+                self.quality, "kill_remaining_group", side_effect=kill_remaining_group
+            ), mock.patch.object(self.quality.os, "killpg", side_effect=killpg) as group_kill, \
+                    mock.patch.object(self.quality.sys, "stderr", warnings):
+                result = self.quality.run_command(
+                    (sys.executable, "-c", "pass"),
+                    Path(temporary_directory),
+                    60,
+                    0.2,
+                )
+
+        self.assertEqual(raised, ["first", "second"])
+        self.assertEqual(result.status, 128 + signal.SIGTERM)
+        # The handler's SIGKILL first, then cleanup's SIGTERM and sweep, each forgiven with a
+        # warning because the leader had already been reaped.
+        self.assertEqual(
+            [call.args[1] for call in group_kill.call_args_list],
+            [signal.SIGKILL, signal.SIGTERM, signal.SIGKILL],
+        )
+        self.assertEqual(
+            warnings.getvalue(), (self.quality.CLEANUP_PERMISSION_WARNING + "\n") * 2
+        )
 
     def test_external_cancellation_suppresses_output_kills_descendant_and_cleans_xunit(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:

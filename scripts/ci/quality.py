@@ -507,21 +507,46 @@ def try_signal_leader_group(
         # child of this driver, or orphans that launchd has not reaped yet. A cancellation
         # SIGKILL during cleanup, a child exiting as its deadline expires, or cleanup's own
         # SIGTERM ending the leader together with its children leaves such a group; a member
-        # under other credentials would explain the error too. An unreaped
-        # exited leader is reaped here and nothing is reported sent (2026-10-02). In cleanup
-        # the stage's status is already a failure, so any other EPERM is reported as nothing
-        # sent and can never turn a stage green; a warning keeps the evidence that a member
-        # under other credentials may have survived, which the error used to carry. At a
+        # under other credentials would explain the error too. An unreaped exited leader is
+        # reaped here (2026-10-02) and the signal retried once (2026-10-05): the retry tells a
+        # group the leader alone kept (ESRCH, nothing reported sent) from one where something
+        # remains (EPERM again, handled as any other below; a member the first call could not
+        # reach is unlikely to accept the second, but would be reported sent). Any other EPERM
+        # comes with the leader running or already reaped and is handled below at once. In
+        # cleanup the stage's status is already a failure, so any other EPERM is reported as
+        # nothing sent and can never turn a stage green; a warning keeps the evidence that a
+        # member under other credentials may have survived, which the error used to carry. At a
         # completed stage's sweep the leader is already reaped, and the error still fails the
-        # run loudly, so a passing stage whose descendants exit just before the sweep can
-        # still fail on macOS, erring closed (cleanup-wide since 2026-10-03, after a canonical
-        # run met it once cleanup's own wait had reaped the leader).
+        # run loudly, so a passing stage whose descendants exit just before the sweep can still
+        # fail on macOS, erring closed (cleanup-wide since 2026-10-03, after a canonical run met
+        # it once cleanup's own wait had reaped the leader).
         if process.returncode is None and process.poll() is not None:
-            return False
+            try:
+                return try_signal_group(process.pid, sig)
+            except PermissionError:
+                pass
         if cleanup:
             print(CLEANUP_PERMISSION_WARNING, file=sys.stderr)
             return False
         raise
+
+
+def kill_group_after_cancellation(process: subprocess.Popen) -> None:
+    """A repeated cancellation's SIGKILL outside active cleanup; EPERM changes nothing."""
+    try:
+        signal_group(process.pid, signal.SIGKILL)
+    except PermissionError:
+        # This SIGKILL only accelerates cleanup. A signal handler must not poll the leader or
+        # print, so it cannot tell an exited leader's EPERM from any other, and a warning
+        # deferred to later would print on the cancellation path even in the benign case.
+        # Raising would replace the cancellation's 128+n with a traceback and status 1, and one
+        # landing in the `except CancellationRequested` block before its cleanup starts would
+        # skip that cleanup. Cleanup's own signals have run, against an earlier state of the
+        # group, or will run, and warn on an EPERM an exited leader does not explain. The one
+        # exception is a first cancellation that lands as the defensive-timeout or
+        # BaseException handler is entered, before its cleanup starts: that escapes with a
+        # traceback, as before (2026-10-05).
+        pass
 
 
 def reap_leader(process: subprocess.Popen, grace: float) -> None:
@@ -676,15 +701,16 @@ def run_command(
                     )
                 except PermissionError:
                     # A signal handler must not poll the leader or print. Cleanup's own
-                    # signals, which follow unless they already ran, meet the same group and
-                    # warn on an EPERM an exited leader does not explain (2026-10-03).
+                    # signals follow, or already ran against an earlier state of the group,
+                    # and warn on an EPERM an exited leader does not explain (2026-10-03;
+                    # reworded 2026-10-05).
                     pass
             return
         if requested_signal[0] is None:
             requested_signal[0] = signum
             raise CancellationRequested(signum)
         if process is not None:
-            signal_group(process.pid, signal.SIGKILL)
+            kill_group_after_cancellation(process)
 
     def cleanup_process(process: subprocess.Popen, cleanup_grace: float) -> Optional[bytes]:
         cleanup_active[0] = True

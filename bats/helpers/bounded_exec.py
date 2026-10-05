@@ -65,6 +65,65 @@ def signal_group(process_group: int, sig: signal.Signals) -> None:
     try_signal_group(process_group, sig)
 
 
+CLEANUP_PERMISSION_WARNING = (
+    "bounded_exec: cleanup could not signal the command's process group (EPERM); exited members "
+    "not yet reaped, or a member under other credentials, may remain"
+)
+
+
+def try_signal_cleanup_group(process: subprocess.Popen, sig: signal.Signals) -> bool:
+    """Signal the command's group from cleanup, forgiving EPERM; returns whether it was sent.
+
+    This wrapper never signals the group on a completed run, so unlike scripts/ci/quality.py no
+    strict path exists; outside cleanup only the cancellation handler signals it. Not for the
+    future local lease backend, which must not forgive EPERM; see
+    docs/discovery/capability-local-owner-protocol.md.
+    """
+    try:
+        return try_signal_group(process.pid, sig)
+    except PermissionError:
+        # EPERM means no member could be signalled. Darwin's killpg reports it, where Linux
+        # succeeds, when every member has exited but some are not yet reaped: the leader, a
+        # child of this wrapper, or orphans that launchd has not reaped yet. Cleanup's own
+        # SIGTERM ending the leader together with its children leaves such a group, and so does
+        # a child exiting as its deadline expires; a member under other credentials would
+        # explain the error too. An unreaped exited leader is reaped here and the signal is
+        # retried once: the retry tells a group the leader alone kept (ESRCH, nothing to report)
+        # from one where something remains (EPERM again, warned below; a member the first call
+        # could not reach is unlikely to accept the second, but would be reported sent). Any
+        # other EPERM, with the leader running or already reaped, is reported as nothing sent
+        # with a warning at once: cleanup runs only on a deadline (124), a cancellation (128+n)
+        # or an error being re-raised, so forgiving it cannot turn a run green, and the warning
+        # keeps the evidence that a member under other credentials may have survived
+        # (scripts/ci/quality.py since 2026-10-03; here, and the retry in both, since
+        # 2026-10-05).
+        if process.returncode is None and process.poll() is not None:
+            try:
+                return try_signal_group(process.pid, sig)
+            except PermissionError:
+                pass
+        print(CLEANUP_PERMISSION_WARNING, file=sys.stderr)
+        return False
+
+
+def kill_group_after_cancellation(process: subprocess.Popen) -> None:
+    """A repeated cancellation's SIGKILL outside active cleanup; EPERM changes nothing."""
+    try:
+        signal_group(process.pid, signal.SIGKILL)
+    except PermissionError:
+        # This SIGKILL only accelerates cleanup. A signal handler must not poll the leader or
+        # print, so it cannot tell an exited leader's EPERM from any other, and a warning
+        # deferred to later would print on the cancellation path, whose output the caller
+        # asserts is empty, even in the benign case. Raising would replace the cancellation's
+        # 128+n with a traceback and status 1, and one landing in the `except
+        # CancellationRequested` block before its cleanup starts would skip that cleanup.
+        # Cleanup's own signals have run, against an earlier state of the group, or will run,
+        # and warn on an EPERM an exited leader does not explain. The one exception is a first
+        # cancellation that lands as the defensive-timeout or BaseException handler is
+        # entered, before its cleanup starts: that escapes with a traceback, as before.
+        pass
+
+
 def emit(output: Optional[bytes]) -> None:
     if output:
         sys.stdout.buffer.write(output)
@@ -122,7 +181,7 @@ def kill_remaining_group(
     """KILL the group unless the active cleanup handler already did so successfully."""
     if sigkill_already_sent is not None and sigkill_already_sent[0]:
         return
-    signal_group(process.pid, signal.SIGKILL)
+    try_signal_cleanup_group(process, signal.SIGKILL)
 
 
 def stop_process_group(
@@ -131,7 +190,7 @@ def stop_process_group(
     sigkill_already_sent: Optional[List[bool]] = None,
 ) -> Optional[bytes]:
     """TERM the group, then KILL it after `grace`; return drained combined output."""
-    signal_group(process.pid, signal.SIGTERM)
+    try_signal_cleanup_group(process, signal.SIGTERM)
     output, complete = drain_output(process, grace)
     if not complete:
         kill_remaining_group(process, sigkill_already_sent)
@@ -145,9 +204,10 @@ def stop_process_group(
             reap_leader(process, grace)
     else:
         # The leader exited after TERM, but a descendant may have closed the inherited output
-        # pipe and remained alive. KILL the now-orphaned remainder before returning. The same-stack
-        # PGID-reuse window after reap is negligible; omitting this sweep would knowingly leave an
-        # inherited descendant alive, and any EPERM here still fails loudly.
+        # pipe and remained alive. KILL the now-orphaned remainder before returning. The window
+        # in which the reaped leader's PGID could be reused before this call is negligible;
+        # omitting this sweep would knowingly leave an inherited descendant alive. An EPERM
+        # here is handled as in try_signal_cleanup_group.
         kill_remaining_group(process, sigkill_already_sent)
     return output
 
@@ -186,17 +246,19 @@ def run(argv: Optional[List[str]] = None) -> int:
                         or cleanup_sent_sigkill[0]
                     )
                 except PermissionError:
-                    # Do not raise through active cleanup. Leaving the flag false makes the main
-                    # cleanup path retry the KILL and surface a real active-group denial.
+                    # A signal handler must not poll the leader or print. Cleanup's own
+                    # signals follow, or already ran against an earlier state of the group,
+                    # and warn on an EPERM an exited leader does not explain (2026-10-05).
                     pass
             return
         if requested_signal[0] is None:
             requested_signal[0] = signum
             raise CancellationRequested(signum)
-        # Cleanup is already running. A repeated signal accelerates it without recursively
-        # raising through `communicate()` and abandoning the isolated group.
+        # A cancellation is already being handled, and its cleanup has run or is about to. A
+        # repeated signal accelerates it without raising again through `communicate()` and
+        # abandoning the isolated group.
         if process is not None:
-            signal_group(process.pid, signal.SIGKILL)
+            kill_group_after_cancellation(process)
 
     def cleanup_process(process: subprocess.Popen, grace: float) -> Optional[bytes]:
         """Run group cleanup without letting a concurrent cancellation abandon it."""

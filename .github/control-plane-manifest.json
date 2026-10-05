@@ -40,6 +40,7 @@
   "Tests/automation/test_app_lifecycle.py",
   "Tests/automation/test_bats_evidence.py",
   "Tests/automation/test_bats_inventory.py",
+  "Tests/automation/test_bounded_exec.py",
   "Tests/automation/test_capability_authority_shim.py",
   "Tests/automation/test_capability_claim_bindings.py",
   "Tests/automation/test_capability_policy.py",

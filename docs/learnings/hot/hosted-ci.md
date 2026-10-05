@@ -2,10 +2,41 @@
 topic: hosted-ci
 importance: high
 last-used: 2026-10-05
-uses: 15
+uses: 16
 ---
 
 # Hosted CI (public, free GitHub-hosted runners)
+
+## 2026-10-05 — Darwin's `killpg` fails with EPERM for a group of exited, unreaped members
+
+**The surprise.** On macOS, `killpg` returns EPERM, not ESRCH, when every member of the group has
+exited but some are not yet reaped: the leader, which is the driver's own child, or orphans that
+launchd has not reaped yet. Linux reports success for such a group, so CI's Ubuntu lanes never see
+it. A cancellation during cleanup, a child exiting as its deadline expires, or cleanup's own
+SIGTERM ending the leader with its children leaves exactly that group. The quality driver's
+external-cancellation test met it about one run in thirty locally and a canonical run met it once
+on unreaped orphans; each time the driver ended with status 1 instead of the stage's own status
+(`scripts/ci/quality.py`, fixed in `e340710`). `bats/helpers/bounded_exec.py` had the same pattern
+and is now ported.
+
+**The rule in both drivers.** A cleanup signal (deadline, cancellation, or an error being re-raised)
+that meets EPERM while the leader has exited unreaped reaps it and retries once. The retry's job is
+to tell a group the leader alone kept (ESRCH, nothing reported) from one where something remains:
+EPERM again leaves a fixed warning on stderr and reports nothing sent, and a member that accepts the
+retry, though unlikely, is reported sent. With the leader still running or already reaped, the
+warning comes at once. None of this can turn a run green, because cleanup only runs on a failing
+path. `quality.py`'s completed-stage sweep stays strict and errs closed. Signal handlers never poll
+or print, so the repeated-cancellation SIGKILL swallows EPERM: raising there replaced 128+n with a
+traceback, and could skip cleanup entirely. Accepted residual: Bats callers that skip on 124 clear
+`$output`, warning included, by design.
+
+**Testing what CI cannot produce.** The logic tier pins the handling with stand-in leaders and
+mocked `os.killpg`, and orders repeated cancellations exactly by raising the signals from inside a
+function the run calls with the handler installed. Two lessons from the port: a monkeypatch of a
+wrapper (`signal_group`) silently stopped intercepting once cleanup was routed around it, and a
+hosted Bats contract still asserting the old behaviour went unnoticed because the mutation
+baseline ran only the two unittest modules. Inject at the system-call boundary, and include every
+tier that exercises the code in a mutation baseline.
 
 ## 2026-10-05 — follow-up: the process tests stamp on `CLOCK_UPTIME_RAW`, the launcher's own clock
 
