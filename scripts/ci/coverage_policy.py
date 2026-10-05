@@ -82,7 +82,13 @@ PUBLIC_POLICY_ERROR_MESSAGES = frozenset(
         "line-status input is invalid",
     )
 )
-ABBREVIATED_POSITIVE_RE = re.compile(r"^(?:[1-9][0-9]*(?:\.[0-9]+)?|[0-9]*\.[0-9]*[1-9][0-9]*)[kKmMgGtT]$")
+# llvm-cov prints a count of four or more digits as its first three significant digits and a
+# power-of-1000 suffix (LLVM's formatCount: d.ddk, dd.dk or dddk). A 64-bit count stops at
+# 2**64 - 1, printed 18.4E, so no E shape above that and no suffix past E is a count.
+ABBREVIATED_POSITIVE_RE = re.compile(
+    r"^(?:(?:[1-9]\.[0-9]{2}|[1-9][0-9]\.[0-9]|[1-9][0-9]{2})[kMGTP]"
+    r"|(?:[1-9]\.[0-9]{2}|1[0-7]\.[0-9]|18\.[0-4])E)$"
+)
 DIFF_HUNK_RE = re.compile(r"^@@ -[0-9]+(?:,[0-9]+)? \+([0-9]+)(?:,([0-9]+))? @@")
 
 
@@ -655,8 +661,8 @@ def _verify_snapshot_identities(snapshots: CoverageToolSnapshots, *, error_messa
 def _classify_llvm_cov_count(raw: str) -> str:
     if len(raw) > MAX_LINE_COUNT_FIELD_CHARS:
         raise PolicyError("line-status input is invalid")
-    # llvm-cov pads its count column with ASCII spaces only (read from LLVM's source, not yet probed
-    # against `llvm-cov show` itself); any other whitespace is not a count.
+    # llvm-cov pads its count column with ASCII spaces only (probed on 2026-10-05 against real
+    # `llvm-cov show` output); any other whitespace is not a count.
     token = raw.strip(" ")
     if token == "":
         return "non_coverable"
@@ -669,6 +675,10 @@ def _classify_llvm_cov_count(raw: str) -> str:
     digit_count = sum(character.isascii() and character.isdigit() for character in token)
     if digit_count > MAX_DECIMAL_DIGITS:
         raise PolicyError("line-status input is invalid")
+    # A wrapped (negative) 64-bit count prints in the E range (18.4E for a small negative), and
+    # its true value is unknown and may be zero. LLVM reports such a line as executed, as do the
+    # LCOV totals the aggregate uses, so this reader follows LLVM's report; the design does not
+    # address wrapped counts (readiness evidence, Section 3b).
     if ABBREVIATED_POSITIVE_RE.fullmatch(token):
         return "covered"
     raise PolicyError("line-status input is invalid")
@@ -679,8 +689,12 @@ def parse_llvm_cov_show(text: str) -> Dict[int, str]:
     parsed_any = False
     # llvm-cov prints each source line verbatim after its own `N|count|` columns and ends it with a
     # line feed, so only a line feed starts a new entry; a U+2028 in source text must not start
-    # one. The columns hold ASCII spaces and digits only. (This layout is read from LLVM's source
-    # and has not yet been probed against `llvm-cov show`; probe it before a workflow runs this.)
+    # one. The line-number column holds ASCII spaces and digits only, and the count column ASCII
+    # spaces and a count. The show command passes --show-instantiations=false, so a line is printed
+    # once with the count merged over every instantiation and no `  |` instantiation sub-views
+    # appear; any such text is refused. (Probed on 2026-10-05 against `xcrun llvm-cov show` from
+    # Command Line Tools 26.5, Apple LLVM 21.0.0: on the 15 changed production files of PRs 3-5
+    # (13 distinct), the statuses read here equal the line data of `llvm-cov export -format=lcov`.)
     for raw_line in text.split("\n"):
         if raw_line == "":
             continue
@@ -947,6 +961,8 @@ def _line_status_from_llvm_cov(
             "llvm-cov",
             "show",
             "--show-line-counts-or-regions",
+            # Without this, llvm-cov follows a line with one sub-view per instantiation.
+            "--show-instantiations=false",
             "-instr-profile=" + str(profdata_path),
             str(binary_path),
             rel,

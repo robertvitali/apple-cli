@@ -155,7 +155,7 @@ class CoverageTool:
     def show(self, command, cwd):
         self.commands.append((tuple(command), cwd))
         self._assert_xcrun(command)
-        if command[1:4] != ["llvm-cov", "show", "--show-line-counts-or-regions"]:
+        if command[1:5] != ["llvm-cov", "show", "--show-line-counts-or-regions", "--show-instantiations=false"]:
             raise AssertionError("wrong show command")
         rel = command[-1]
         if rel not in self.statuses:
@@ -666,6 +666,76 @@ class CoveragePolicyTests(unittest.TestCase):
         self.assertFalse(result.ok)
         self.assertEqual(result.diagnostics, "line-status input is invalid")
 
+    def test_changed_line_missing_from_show_output_fails_closed(self):
+        rel = "Sources/AppleKit/Synthetic.swift"
+        self.head_sha = commit_file(self.head_repo, rel, "line one\nline two\nline three\n")
+        cov = {target: (10, 9) for target in TARGETS}
+        show = "    1|      2|synthetic\n    2|      7|synthetic\n"
+
+        result, _tool = self.evaluate(
+            lcov_for(self.base_repo, cov),
+            lcov_for(self.head_repo, cov),
+            llvm_cov_show_runner=lambda command, cwd: show,
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.diagnostics, "line-status input is invalid")
+
+    def test_show_command_suppresses_instantiation_subviews(self):
+        rel = "Sources/AppleKit/Synthetic.swift"
+        self.head_sha = commit_file(self.head_repo, rel, "line one\nline two\nline three\n")
+        cov = {target: (10, 9) for target in TARGETS}
+        commands = []
+
+        def show(command, cwd):
+            commands.append(list(command))
+            return "    1|      2|synthetic\n    2|      7|synthetic\n    3|      7|synthetic\n"
+
+        result, _tool = self.evaluate(lcov_for(self.base_repo, cov), lcov_for(self.head_repo, cov), llvm_cov_show_runner=show)
+
+        self.assertTrue(result.ok, result.diagnostics)
+        self.assertEqual(len(commands), 1)
+        self.assertIn("--show-instantiations=false", commands[0])
+        self.assertEqual(commands[0][-1], rel)
+
+    def test_show_output_with_instantiation_subviews_fails_closed(self):
+        rel = "Sources/AppleKit/Synthetic.swift"
+        self.head_sha = commit_file(self.head_repo, rel, "line one\nline two\nline three\n")
+        cov = {target: (10, 9) for target in TARGETS}
+        show = (
+            "    1|      2|synthetic\n"
+            "    2|      7|synthetic\n"
+            "    3|      7|synthetic\n"
+            "  ------------------\n"
+            "  | $s9Synthetic1fyyxlFSi_Tg5:\n"
+            "  |    3|      7|synthetic\n"
+            "  ------------------\n"
+            "  | Unexecuted instantiation: $s9Synthetic1fyyxlFSS_Tg5\n"
+            "  ------------------\n"
+        )
+
+        result, _tool = self.evaluate(
+            lcov_for(self.base_repo, cov), lcov_for(self.head_repo, cov), llvm_cov_show_runner=lambda command, cwd: show
+        )
+
+        self.assertFalse(result.ok)
+        self.assertEqual(result.diagnostics, "line-status input is invalid")
+
+    def test_changed_line_with_a_wrapped_count_is_covered_end_to_end(self):
+        rel = "Sources/AppleKit/Synthetic.swift"
+        self.head_sha = commit_file(self.head_repo, rel, "line one\nline two\nline three\n")
+        cov = {target: (10, 9) for target in TARGETS}
+        for count, expected in (("  18.4E", (1, 1, "PASS")), ("      0", (0, 1, "FAIL"))):
+            show = f"    1|      2|synthetic\n    2|      7|synthetic\n    3|{count}|synthetic\n"
+            with self.subTest(count=count):
+                result, _tool = self.evaluate(
+                    lcov_for(self.base_repo, cov),
+                    lcov_for(self.head_repo, cov),
+                    llvm_cov_show_runner=lambda command, cwd, show=show: show,
+                )
+                changed = result.changed_coverage
+                self.assertEqual((changed.covered, changed.count, changed.status), expected)
+
     def test_changed_non_coverable_lines_are_classified_and_can_be_na(self):
         self.head_sha = commit_file(self.head_repo, "Sources/AppleKit/Synthetic.swift", "line one\nline two\ncomment only\n")
         cov = {target: (10, 9) for target in TARGETS}
@@ -952,6 +1022,15 @@ class CoveragePolicyTests(unittest.TestCase):
                     self.policy.parse_lcov_text_for_test(body, self.base_repo)
                 self.assertEqual(str(raised.exception), "coverage input is invalid")
 
+    def test_lcov_counts_a_wrapped_64_bit_count_as_covered(self):
+        # The changed-line reader classes a wrapped count (18.4E) as covered because this path does.
+        source = self.base_repo / "Sources" / "AppleKit" / "Synthetic.swift"
+        body = f"TN:\nSF:{source}\nDA:1,{2**64 - 1}\nDA:2,0\nLF:2\nLH:1\nend_of_record\n"
+
+        report = self.policy.parse_lcov_text_for_test(body, self.base_repo)
+
+        self.assertEqual(report.line_coverage["Sources/AppleKit/Synthetic.swift"], {1: True, 2: False})
+
     def test_lcov_rejects_nul_bearing_source_path_value_free(self):
         source = self.base_repo / "Sources" / "AppleKit" / "Synthetic.swift"
         body = lcov_record(Path(f"{source}\x00suffix"), [(1, 1)], lf=1, lh=1)
@@ -1071,6 +1150,49 @@ class CoveragePolicyTests(unittest.TestCase):
         statuses = self.policy.parse_llvm_cov_show("    1|  2.00k|synthetic\n    2|  1.25M|synthetic\n")
 
         self.assertEqual(statuses, {1: "covered", 2: "covered"})
+
+    def test_llvm_show_parser_accepts_only_the_abbreviated_shapes_llvm_prints(self):
+        accepted = (
+            "1.00k", "99.9k", "999k", "2.50M", "1.00G", "1.00T", "999P",
+            "1.00E", "9.99E", "10.0E", "18.4E",
+        )
+        body = "".join(f"{index:5}|{token:>7}|synthetic\n" for index, token in enumerate(accepted, start=1))
+
+        self.assertEqual(
+            self.policy.parse_llvm_cov_show(body),
+            {index: "covered" for index in range(1, len(accepted) + 1)},
+        )
+        refused = (
+            # Suffixes LLVM's formatCount never prints for a 64-bit count.
+            "1.20K", "2.50m", "1.00g", "1.00t", "1.50Z", "2.00Y",
+            # Shapes it never prints: it always shows three significant digits.
+            "1.2k", ".5k", "0.50k", "1.234k", "12.34k", "1000k", "1.2kB", "k",
+            # E values above the largest 64-bit count, 2**64 - 1 (18.4E).
+            "18.5E", "19.0E", "99.9E", "999E",
+            # E shapes formatCount never prints.
+            "0.50E", "1.0E",
+        )
+        for token in refused:
+            with self.subTest(token=token):
+                with self.assertRaises(self.policy.PolicyError) as raised:
+                    self.policy.parse_llvm_cov_show(f"    1|{token:>7}|synthetic\n")
+                self.assertEqual(str(raised.exception), "line-status input is invalid")
+
+    def test_llvm_show_parser_refuses_instantiation_subviews(self):
+        # The show command suppresses sub-views, so any of their text is an unexpected layout.
+        top = "    1|      2|x\n"
+        bodies = (
+            top + "  ------------------\n",
+            top + "  | $s9Synthetic1fyyxlFSi_Tg5:\n",
+            top + "  |    1|      2|x\n",
+            top + "  | Unexecuted instantiation: $s9Synthetic1fyyxlFSS_Tg5\n",
+            top + "  |      ^0\n",
+        )
+        for body in bodies:
+            with self.subTest(body=ascii(body)):
+                with self.assertRaises(self.policy.PolicyError) as raised:
+                    self.policy.parse_llvm_cov_show(body)
+                self.assertEqual(str(raised.exception), "line-status input is invalid")
 
     def test_llvm_show_parser_treats_zero_integer_forms_as_uncovered(self):
         statuses = self.policy.parse_llvm_cov_show("    1|     00|synthetic\n")
