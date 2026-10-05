@@ -280,9 +280,10 @@ struct AppleScriptOutcomeTests {
 /// the scenario exists (interpreter start-up, installing a trap, publishing its pid) would
 /// otherwise run inside that deadline, and on a starved runner it could still be running when the
 /// deadline fires. `spawn` therefore holds the launcher until the child has published `readyFile`,
-/// then stamps, on `CLOCK_MONOTONIC`, when it returned. Elapsed bounds start at that stamp, so they
-/// measure the launcher rather than start-up. With no `readyFile` there is no hold: `spawn` stamps
-/// as soon as the real spawn returns, for a child that has nothing to publish.
+/// then stamps, on `CLOCK_UPTIME_RAW` (the clock the launcher's `DispatchTime` deadline reads),
+/// when it returned. Elapsed bounds start at that stamp, so they measure the launcher rather than
+/// start-up. With no `readyFile` there is no hold: `spawn` stamps as soon as the real spawn
+/// returns, for a child that has nothing to publish.
 ///
 /// The hold is bounded at `gateSeconds`, sixty seconds. While it holds, the launcher is still
 /// inside `spawn` (no deadline, delivery, observation or signal yet), so its length says nothing
@@ -332,7 +333,7 @@ private final class ReadyGatedChildren: ScriptProcessChildren, @unchecked Sendab
     private let readyFile: String?
     private let lock = NSLock()
     private var spawned: (pid: pid_t, at: UInt64?, ready: Bool, exitedUnready: Bool,
-                          alarmAfterCall: UInt64?)?
+                          alarmAfterCall: UInt64?, called: UInt64?)?
     private var exitObserved: UInt64?
     private var sent: [SentSignal] = []
     private var turns: [Turn] = []
@@ -340,12 +341,13 @@ private final class ReadyGatedChildren: ScriptProcessChildren, @unchecked Sendab
 
     init(readyFile: URL?) { self.readyFile = readyFile?.path }
 
-    /// `CLOCK_MONOTONIC` in nanoseconds, or `nil` if the clock could not be read. It does not
-    /// throw, so a clock failure after a successful `spawn` cannot strand a child the launcher has
-    /// not yet taken ownership of; a missing stamp fails the test at its `#require` instead.
-    static func monotonicNanoseconds() -> UInt64? {
+    /// `CLOCK_UPTIME_RAW` in nanoseconds, the clock `DispatchTime` and `DeschedulingProbe` read, or
+    /// `nil` if the clock could not be read. It does not throw, so a clock failure after a
+    /// successful `spawn` cannot strand a child the launcher has not yet taken ownership of; a
+    /// missing stamp fails the test at its `#require` instead.
+    static func uptimeNanoseconds() -> UInt64? {
         var value = timespec()
-        guard clock_gettime(CLOCK_MONOTONIC, &value) == 0 else { return nil }
+        guard clock_gettime(CLOCK_UPTIME_RAW, &value) == 0 else { return nil }
         return UInt64(value.tv_sec) * 1_000_000_000 + UInt64(value.tv_nsec)
     }
 
@@ -371,6 +373,8 @@ private final class ReadyGatedChildren: ScriptProcessChildren, @unchecked Sendab
 
     /// When `spawn` returned, after the readiness gate. `nil` before a spawn or on a clock failure.
     var spawnedAt: UInt64? { lock.withLock { spawned?.at } }
+    /// When `spawn` was called, before the real spawn. `nil` before a spawn or on a clock failure.
+    var calledAt: UInt64? { lock.withLock { spawned?.called } }
     /// The root `spawn` returned, which leads its own process group.
     var spawnedPID: pid_t? { lock.withLock { spawned?.pid } }
     /// Whether `readyFile` existed when the gate released (true with no gate); false means the gate
@@ -392,7 +396,7 @@ private final class ReadyGatedChildren: ScriptProcessChildren, @unchecked Sendab
 
     func spawn(_ invocation: ScriptInvocation, input: Int32, output: Int32,
                error: Int32) throws -> pid_t {
-        let called = Self.monotonicNanoseconds()
+        let called = Self.uptimeNanoseconds()
         let pid = try real.spawn(invocation, input: input, output: output, error: error)
         var ready = true
         var exitedUnready = false
@@ -406,7 +410,7 @@ private final class ReadyGatedChildren: ScriptProcessChildren, @unchecked Sendab
                     ready = FileManager.default.fileExists(atPath: readyFile)
                     exitedUnready = !ready
                     if exitedUnready, ended.si_code == CLD_KILLED, ended.si_status == SIGALRM,
-                       let called, let seen = Self.monotonicNanoseconds(), seen >= called {
+                       let called, let seen = Self.uptimeNanoseconds(), seen >= called {
                         alarmAfterCall = seen - called
                     }
                     break
@@ -415,9 +419,11 @@ private final class ReadyGatedChildren: ScriptProcessChildren, @unchecked Sendab
                 ready = FileManager.default.fileExists(atPath: readyFile)
             }
         }
-        let at = Self.monotonicNanoseconds()
+        let at = Self.uptimeNanoseconds()
         lock.withLock {
-            if spawned == nil { spawned = (pid, at, ready, exitedUnready, alarmAfterCall) }
+            if spawned == nil {
+                spawned = (pid, at, ready, exitedUnready, alarmAfterCall, called)
+            }
         }
         return pid
     }
@@ -426,14 +432,14 @@ private final class ReadyGatedChildren: ScriptProcessChildren, @unchecked Sendab
         let turn = DispatchTime.now()
         lock.withLock { turns.append(Turn(signal: nil, at: turn)) }
         let status = try real.observe(pid)
-        if status != nil, let at = Self.monotonicNanoseconds() {
+        if status != nil, let at = Self.uptimeNanoseconds() {
             lock.withLock { if exitObserved == nil { exitObserved = at } }
         }
         return status
     }
 
     func signal(group: pid_t, signal number: Int32) throws {
-        let at = Self.monotonicNanoseconds()
+        let at = Self.uptimeNanoseconds()
         let turn = DispatchTime.now()
         lock.withLock { turns.append(Turn(signal: number, at: turn)) }
         do {
@@ -600,7 +606,7 @@ struct OsascriptLauncherTests {
                                                     arguments: ["30"],
                                                     delivery: .timed(seconds: 0.05)))
         }
-        let returnedAt = try #require(ReadyGatedChildren.monotonicNanoseconds())
+        let returnedAt = try #require(ReadyGatedChildren.uptimeNanoseconds())
         let seconds = try #require(error).seconds
         let spawnedAt = try #require(children.spawnedAt, "the launcher never spawned the child")
 
@@ -702,7 +708,7 @@ struct OsascriptLauncherTests {
                 delivery: .timedStdin(script: "read whole, then stall", seconds: 2)),
                                   pidFile: pidFile, seconds: 120, using: gated)
         }
-        let returnedAt = try #require(ReadyGatedChildren.monotonicNanoseconds())
+        let returnedAt = try #require(ReadyGatedChildren.uptimeNanoseconds())
         if children.exitedBeforeReady {
             Issue.record("the child exited before publishing its pid, so the scenario never began")
             return true
@@ -825,7 +831,7 @@ struct OsascriptLauncherTests {
                                       seconds: 2)),
                                   pidFile: pidFile, seconds: 120, using: gated)
         }
-        let returnedAt = try #require(ReadyGatedChildren.monotonicNanoseconds())
+        let returnedAt = try #require(ReadyGatedChildren.uptimeNanoseconds())
         if children.exitedBeforeReady {
             Issue.record("the child exited before publishing its pid, so the scenario never began")
             return true
@@ -987,7 +993,7 @@ struct OsascriptLauncherTests {
                 delivery: .timed(seconds: 2)),
                                   pidFile: pidFile, seconds: 120, using: gated)
         }
-        let returnedAt = try #require(ReadyGatedChildren.monotonicNanoseconds())
+        let returnedAt = try #require(ReadyGatedChildren.uptimeNanoseconds())
         if children.exitedBeforeReady {
             Issue.record("the child exited before publishing its pid, so the scenario never began")
             return true
@@ -1084,8 +1090,9 @@ struct OsascriptLauncherTests {
         // last attempt fails on it. The TERM marker is the only pass condition.
         //
         // Three checks bound the grace's length on every attempt: SIGKILL's turn comes a full
-        // second or more after SIGTERM's on the launcher's own clock, which holds under any load
-        // and fails a shortened grace; the grace's pause stops observing within that second; and
+        // second or more after SIGTERM's on the launcher's own clock, which holds for a full grace
+        // under any load and fails a grace shortened by more than one pause turn (its 10 ms poll
+        // plus that poll's lateness); the grace's pause stops observing within that second; and
         // SIGTERM to SIGKILL takes under two seconds on the decorator's stamps. Only the last can
         // fail a correct launcher under a stall, so its crossing is a missed scenario when a
         // `DeschedulingProbe` saw the runner withhold at least the bound's headroom over the
@@ -1098,19 +1105,26 @@ struct OsascriptLauncherTests {
         Issue.record("TERM-before-KILL scenario: the last attempt returned without a verdict")
     }
 
-    /// The launcher's TERM grace before SIGKILL on a timeout, less 50 ms for rounding between the
-    /// decorator's `CLOCK_MONOTONIC` stamps and the launcher's own clock. The launcher waits the
-    /// full second (`OwnedScriptProcess.cancel(timeout:)`) after its SIGTERM call returns.
-    private static let terminateGraceNanoseconds: UInt64 = 950_000_000
+    /// The launcher's TERM grace before SIGKILL on a timeout, one second, less the rounding that
+    /// `DeschedulingProbe.clockRoundingNanoseconds` covers. The SIGTERM stamp is taken inside the
+    /// launcher's SIGTERM call, before `kill`, so it precedes that call's return and the pause
+    /// deadline the launcher sets after it (`OwnedScriptProcess.cancel(timeout:)`: `DispatchTime`
+    /// now plus a second). The SIGKILL stamp is taken inside the SIGKILL call, which the launcher
+    /// makes only after its pause found that deadline passed. Both stamps read the clock
+    /// `DispatchTime` reads, so a full grace puts at least a second between them by construction,
+    /// less rounding, under any load. `waitedOut`, on the launcher's own turns, checks the same
+    /// second before this is read.
+    private static let terminateGraceNanoseconds: UInt64 =
+        1_000_000_000 - DeschedulingProbe.clockRoundingNanoseconds
 
     /// The same grace as the launcher sets it: its pause runs to `DispatchTime.now()` plus this,
     /// taken once its SIGTERM call has returned.
     private static let terminateGraceSeconds: Double = 1.0
 
-    /// The bound on SIGTERM to SIGKILL on a timeout, on the decorator's `CLOCK_MONOTONIC` stamps. A
-    /// correct launcher takes the one-second grace, the ten-millisecond pause turn that crosses its
-    /// end and SIGKILL's own check, so this leaves about a second; a launcher that waits a second
-    /// or more beyond the grace crosses it.
+    /// The bound on SIGTERM to SIGKILL on a timeout, on the decorator's `CLOCK_UPTIME_RAW` stamps.
+    /// A correct launcher takes the one-second grace, the ten-millisecond pause turn that crosses
+    /// its end and SIGKILL's own check, so this leaves about a second; a launcher that waits a
+    /// second or more beyond the grace crosses it.
     private static let graceBoundNanoseconds: UInt64 = 2_000_000_000
 
     /// How far `graceBoundNanoseconds` sits above the launcher's own worst case on that span,
@@ -1196,7 +1210,8 @@ struct OsascriptLauncherTests {
         // stamped before that signal is sent; the launcher sets its pause deadline once the signal
         // call has returned, with the same `DispatchTime` arithmetic as here; and its SIGKILL turn
         // comes only after a check that found that deadline passed. So this holds under any load,
-        // whether or not the trap fired, and a shortened grace fails it at once.
+        // whether or not the trap fired, and a grace shortened by more than one pause turn (its
+        // 10 ms poll plus that poll's lateness) fails it at once.
         let graceStart = timeline[termTurn].at
         let graceEnd = timeline[killTurn].at
         let waitedOut = graceEnd >= graceStart + Self.terminateGraceSeconds
@@ -1222,7 +1237,7 @@ struct OsascriptLauncherTests {
         }
 
         // Product check, on every attempt: SIGTERM to SIGKILL ends inside its bound, on the
-        // decorator's `CLOCK_MONOTONIC` stamps, the probe's clock. The checks above cannot see a
+        // decorator's `CLOCK_UPTIME_RAW` stamps, the probe's clock. The checks above cannot see a
         // wait outside the pause's observing turns; this bound can. It is the one grace check a
         // stall can make a correct launcher fail, and a correct launcher crosses it only when the
         // runner withholds at least the headroom (`graceHeadroomNanoseconds`) of the span, so a
@@ -1255,8 +1270,8 @@ struct OsascriptLauncherTests {
             // grace. Anything else (SIGKILL first, no SIGTERM at all, a SIGTERM that missed the
             // child's group, or a shortened grace) is the regression, whether or not the child had
             // armed its trap: the record is the launcher's, not the child's. The order and the
-            // grace on the launcher's clock were checked above; this adds the target group,
-            // `kill`'s answer and the span on `CLOCK_MONOTONIC`.
+            // grace on the launcher's turns were checked above; this adds the target group,
+            // `kill`'s answer and the span on the decorator's stamps.
             let graceDelivered: Bool
             if let root = children.spawnedPID,
                let termIndex = sent.firstIndex(where: { $0.number == SIGTERM }),
@@ -1609,7 +1624,7 @@ struct OsascriptLauncherTests {
                 delivery: .stdin(script: String(repeating: "a", count: 256 * 1024))),
                                   pidFile: pidFile, seconds: 120, using: gated)
         }
-        let returnedAt = try #require(ReadyGatedChildren.monotonicNanoseconds())
+        let returnedAt = try #require(ReadyGatedChildren.uptimeNanoseconds())
         if children.exitedBeforeReady {
             Issue.record("the child exited before it closed stdin, so the scenario never began")
             return true
@@ -1722,7 +1737,7 @@ struct OsascriptLauncherTests {
                 delivery: .stdin(script: String(repeating: "a", count: 256 * 1024))),
                                   pidFile: pidFile, seconds: 120, using: gated)
         }
-        let returnedAt = try #require(ReadyGatedChildren.monotonicNanoseconds())
+        let returnedAt = try #require(ReadyGatedChildren.uptimeNanoseconds())
         if children.exitedBeforeReady {
             Issue.record("the child exited before it closed stdin, so the scenario never began")
             return true
@@ -1835,7 +1850,7 @@ struct OsascriptLauncherTests {
                                       seconds: 120)),
                                   pidFile: pidFile, seconds: 120, using: gated)
         }
-        let returnedAt = try #require(ReadyGatedChildren.monotonicNanoseconds())
+        let returnedAt = try #require(ReadyGatedChildren.uptimeNanoseconds())
         if children.exitedBeforeReady {
             Issue.record("the child exited before it closed stdin, so the scenario never began")
             return true
@@ -1931,15 +1946,17 @@ struct OsascriptLauncherTests {
     /// launcher's thread; `DeschedulingProbe` sees only part of that (see there).
     private static let drainHeadroomNanoseconds: UInt64 = 6_000_000_000
 
-    /// The tenth of a second the drain's scenario check keeps in hand where it holds a
-    /// `CLOCK_MONOTONIC` stamp to the deadline the launcher times on `DispatchTime`, with the
-    /// figure and the reason of `OwnedProcessCleanupTests.slewSlack`.
-    private static let slewSlack: UInt64 = 100_000_000
+    /// The tenth of a second the drain's scenario check keeps in hand where it infers, from the
+    /// decorator's stamp of the root's exit, that the launcher saw that exit before its deadline.
+    /// The stamp and the deadline read one clock; the margin covers the gap between the stamp and
+    /// the launcher's next deadline check, with the figure and the reason of
+    /// `OwnedProcessCleanupTests.drainScenarioMargin`.
+    private static let drainScenarioMargin: UInt64 = 100_000_000
 
     /// Nanoseconds as seconds with two decimals, for the drain check's offsets from the gated
     /// stamp. `DeschedulingProbe.seconds` keeps one decimal, which would print an exit stamped 1.95
     /// seconds after the gated stamp as "1.9 s" beside "not seen by 1.9 s", and an exit in the
-    /// upper half of the slack band as "2.0 s", the same as a late one.
+    /// upper half of the margin band as "2.0 s", the same as a late one.
     private static func offsetSeconds(_ nanoseconds: UInt64) -> String {
         String(format: "%.2f", Double(nanoseconds) / 1_000_000_000)
     }
@@ -1948,9 +1965,9 @@ struct OsascriptLauncherTests {
     /// check (its recorded issues fail the test), after a descendant that did not stop, or after
     /// asserting the scenario; returns false only when every product check that applied held,
     /// another attempt remains, and the scenario was missed: no descendant pid, the root's exit not
-    /// seen before cleanup and under 1.9 seconds after the gated stamp (`slewSlack` short of the
-    /// deadline), or the bound crossed while the runner withheld at least the headroom from the
-    /// process.
+    /// seen before cleanup and under 1.9 seconds after the gated stamp (`drainScenarioMargin` short
+    /// of the deadline), or the bound crossed while the runner withheld at least the headroom from
+    /// the process.
     private func boundsTheDrainAfterExit(attempt: Int, lastAttempt: Bool) throws -> Bool {
         let dir = try scratch.directory()
         let pidFile = dir.appendingPathComponent("pid")
@@ -1971,7 +1988,7 @@ struct OsascriptLauncherTests {
                 delivery: .timedStdin(script: "x", seconds: 2)),
                                   pidFile: pidFile, seconds: 120, using: gated)
         }
-        let returnedAt = try #require(ReadyGatedChildren.monotonicNanoseconds())
+        let returnedAt = try #require(ReadyGatedChildren.uptimeNanoseconds())
         if children.exitedBeforeReady {
             Issue.record("the child exited before publishing its pid, so the scenario never began")
             return true
@@ -2019,12 +2036,13 @@ struct OsascriptLauncherTests {
         // just before that signal, so a root that exited after the deadline fired, in the wait for
         // exit, but before cleanup began is also stamped first, and would count as a drain timeout
         // it was not. The exit must also have been seen less than the two-second deadline after the
-        // gated stamp. The launcher sets its deadline after that stamp, on `DispatchTime`, while
-        // the exit is stamped on `CLOCK_MONOTONIC`, which runs on through sleep but can run slower
-        // than `DispatchTime` while awake, by frequency slew
-        // (`OwnedProcessCleanupTests.slewSlack`). So the check keeps `slewSlack` in hand, as that
-        // file's `insideDeadline` does: slew is far less than a tenth of a second, so an exit
-        // stamped under 1.9 seconds after the gated stamp was seen before the deadline, in the
+        // gated stamp. The launcher sets its deadline after that stamp, on `DispatchTime`, which
+        // reads the uptime clock the exit is stamped on, so the two differ only by rounding (and a
+        // host's sleep pauses both). What the check keeps in hand, `drainScenarioMargin`, as that
+        // file's `insideDeadline` does, is for the gap between the decorator's exit stamp and the
+        // launcher's next deadline check: the launch loop checks its deadline right after the
+        // observation the decorator stamps, so a correct launcher spends microseconds there, and an
+        // exit stamped under 1.9 seconds after the gated stamp was seen before the deadline, in the
         // launcher's main loop. A correct root exits milliseconds after stdin EOF, far inside that,
         // so an exit seen later is a missed scenario, printed and re-run, that fails only the last
         // attempt.
@@ -2032,7 +2050,7 @@ struct OsascriptLauncherTests {
         // A residual remains: the inference does not hold if the launcher's thread was withheld for
         // most of that tenth between the decorator's stamp and its deadline check. Both messages
         // give the exit's and the first signal's offsets from the gated stamp to a hundredth of a
-        // second (`offsetSeconds`), so a log can tell the slack band from a late exit.
+        // second (`offsetSeconds`), so a log can tell the margin band from a late exit.
         let exitSeenFirst: Bool
         let signals = children.signals
         let observed = children.exitObservedAt
@@ -2040,7 +2058,7 @@ struct OsascriptLauncherTests {
             let beforeCleanup = signals.isEmpty
                 || (signals[0].at.map { observed < $0 } ?? false)
             exitSeenFirst = beforeCleanup
-                && observed + Self.slewSlack < spawnedAt + 2_000_000_000
+                && observed + Self.drainScenarioMargin < spawnedAt + 2_000_000_000
         } else {
             exitSeenFirst = false
         }
@@ -2432,16 +2450,18 @@ struct ScriptOutputLimitBoundaryTests {
         // well below the fixture's sixty-second alarm and the 120-second deadline: the alarm is
         // armed after the fixture's stamp, so a launcher that waits on the pending write ends at
         // least sixty seconds after that stamp, far past the bound whenever the bound starts near
-        // it. The bound starts after the child's start-up, at the later of two `CLOCK_MONOTONIC`
+        // it. The bound starts after the child's start-up, at the later of two `CLOCK_UPTIME_RAW`
         // stamps. One is the gated launcher's stamp when `spawn` returns, which waits until the
         // fixture publishes its ready file (its path is in argv) or sixty seconds pass. The other
         // is the fixture's own stamp, read before it arms its alarm and published as the ready
         // file's content by write-then-rename so the gate never sees a partial file; it can be the
-        // later one only when the gate expired while Python was still starting. Neither stamp moves
-        // product work out of the bound, because the launcher cannot detect the overflow before the
-        // fixture writes it, after both stamps. Correct work inside the bound is little more than
-        // the overflow ladder: the fixture's write, detection, the half-second TERM grace, SIGKILL
-        // and at most a one-second reap.
+        // later one only when the gate expired while Python was still starting. The fixture names
+        // that clock rather than calling `time.monotonic_ns()`, which on the 3.9
+        // `/usr/bin/python3` checked here counts from the interpreter's own start and so cannot be
+        // compared across processes. Neither stamp moves product work out of the bound, because
+        // the launcher cannot detect the overflow before the fixture writes it, after both stamps.
+        // Correct work inside the bound is little more than the overflow ladder: the fixture's
+        // write, detection, the half-second TERM grace, SIGKILL and at most a one-second reap.
         //
         // The deadline is not the subject here, only what the launcher must not wait for. It starts
         // when the gate releases, and Python start-up under starvation has taken more than thirty
@@ -2520,7 +2540,7 @@ struct ScriptOutputLimitBoundaryTests {
 import os, signal, sys, time
 signal.signal(signal.SIGALRM, signal.SIG_DFL)
 signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGALRM})
-stamp = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+stamp = time.clock_gettime_ns(time.CLOCK_UPTIME_RAW)
 signal.alarm(60)
 with open(sys.argv[1] + ".partial", "w") as partial:
     partial.write(str(stamp))
@@ -2544,14 +2564,16 @@ signal.pause()
                                       seconds: 120),
                 maximumOutputBytes: 8))
         }
-        let returnedAt = try #require(ReadyGatedChildren.monotonicNanoseconds())
+        let returnedAt = try #require(ReadyGatedChildren.uptimeNanoseconds())
         if children.exitedBeforeReady {
             // The fixture arms its sixty-second alarm before it publishes, so a death by SIGALRM
-            // seen no sooner than that (less a tenth for slew) after the call into `spawn` is the
-            // alarm firing on time while the runner withheld the fixture: a miss, never on the
-            // last attempt. Any other early exit fails at once.
+            // seen no sooner than that after the call into `spawn` is the alarm firing on time
+            // while the runner withheld the fixture: a miss, never on the last attempt. The stamps
+            // and the kernel's alarm timer read one clock, so "no sooner" keeps only
+            // `DeschedulingProbe.clockRoundingNanoseconds` in hand, for the microsecond the kernel
+            // truncates when it arms the alarm. Any other early exit fails at once.
             if !lastAttempt, let after = children.earlyAlarmAfterCall,
-               after >= 60_000_000_000 - 100_000_000 {
+               after >= 60_000_000_000 - DeschedulingProbe.clockRoundingNanoseconds {
                 print("pending-input overflow scenario missed on attempt \(attempt) of 3: the "
                       + "fixture died of its own 60-second alarm before it published, "
                       + "\(DeschedulingProbe.seconds(after)) s after the spawn call")
@@ -2576,6 +2598,29 @@ signal.pause()
         let stampText = try String(contentsOf: ready, encoding: .utf8)
         let fixtureAt = try #require(UInt64(stampText),
                                      "the ready file did not hold the fixture's stamp")
+        // The fixture's stamp and the decorator's stamps read one clock, so the stamp falls in the
+        // window they bound by construction: after the call into `spawn`, before which the fixture
+        // cannot run; before `launch` returned, since the overflow it writes after publishing was
+        // detected; and, when the gate released on the ready file, before `spawnedAt`. A stamp
+        // outside that window is on another clock (a partial migration, off by the host's
+        // accumulated sleep or slew), a harness defect rather than a launcher fault, so it fails
+        // the attempt on any attempt, before the bound below can misread it.
+        let calledAt = try #require(children.calledAt,
+                                    "the gated launcher never stamped the call into spawn")
+        func sinceCall(_ stamp: UInt64) -> String {
+            stamp >= calledAt ? "\((stamp - calledAt) / 1_000_000) ms"
+                : "-\((calledAt - stamp) / 1_000_000) ms"
+        }
+        let onOneClock = calledAt <= fixtureAt && fixtureAt <= returnedAt
+            && (!children.wasReadyAtSpawn || fixtureAt <= spawnedAt)
+        try #require(onOneClock, """
+            the fixture's stamp and the decorator's stamps are not on one clock: the fixture \
+            stamped \(sinceCall(fixtureAt)) after the call into spawn, which returned \
+            \(sinceCall(spawnedAt)) after it (the gate \
+            \(children.wasReadyAtSpawn ? "released on the ready file" : "timed out")), and the \
+            launch returned \(sinceCall(returnedAt)) after it; the decorator reads \
+            CLOCK_UPTIME_RAW, so the fixture must read time.CLOCK_UPTIME_RAW
+            """)
         // The launcher stopped the fixture before the fixture could end by itself: its first group
         // signal came before its first observation of the exit.
         let firstSignal = children.signals.first?.at

@@ -19,27 +19,22 @@ struct OwnedProcessCleanupTests {
             : "-\((origin - stamp) / 1_000_000) ms"
     }
 
-    /// The tenth of a second kept in hand where a `CLOCK_MONOTONIC` stamp is held to a fixture
-    /// alarm timed on another clock, or where it narrows the drain test's scenario. It is used in
-    /// `starvedGate`, in the drain test's `insideDeadline` and in the completion tests' liveness
-    /// set-aside, and nowhere else: the completion margins, `stopWindow` and `startMiss` keep none,
-    /// and `signalledAtDeadline` keeps its own `deadlineSlewSlack`. Frequency slew can let
-    /// `CLOCK_MONOTONIC` run slower than the launcher's `DispatchTime` or the kernel's alarm timer,
-    /// so an event those clocks put at its due time can be stamped a few milliseconds early, and a
-    /// check with no slack would fail it. At the 5500 ppm rate `deadlineSlewSlack` allows, a
-    /// twelve-second alarm slews by about 66 ms, inside this tenth.
+    /// The tenth of a second the drain test keeps in hand where it infers, from the decorator's
+    /// stamp of the root's exit, that the launcher saw that exit before its two-second deadline
+    /// (`insideDeadline`). The stamp and the deadline read one clock (`CLOCK_UPTIME_RAW`, which
+    /// `DispatchTime` reads), so the margin is not for rounding: it covers the gap between the
+    /// stamp and the launcher's next deadline check. The decorator stamps the exit as its `observe`
+    /// returns and the launch loop checks its deadline right after that observation, so a correct
+    /// launcher spends microseconds there; a runner that withholds the launcher's thread for most
+    /// of a tenth between the two can still make the inference wrong, a residual.
+    /// `ScriptLauncherTests` keeps the same margin for the same inference.
     ///
-    /// Residual: a thirty-second alarm could slew by about 165 ms, past this tenth, and
-    /// `starvedGate` would then fail a genuine alarm, a false red.
-    private static let slewSlack: UInt64 = 100_000_000
-
-    /// The 20 ms kept in hand where the drain test holds its first-signal stamp to the launcher's
-    /// two-second `DispatchTime` deadline (`signalledAtDeadline`). It allows 500 ppm of frequency
-    /// correction plus a 5000 ppm adjtime slew, about 11 ms over two seconds, so 20 ms covers it
-    /// with room, while a deadline more than about 1% short still fails. That check is the file's
-    /// only lower bound on a deadline's length, which is why its slack is kept this small:
-    /// `slewSlack`'s tenth would let a deadline 5% short pass.
-    private static let deadlineSlewSlack: UInt64 = 20_000_000
+    /// Every other place in this file where a stamp is held to an event the launcher or the kernel
+    /// timed on that clock (`starvedGate`, `signalledAtDeadline` and the completion tests' liveness
+    /// set-aside) keeps only `DeschedulingProbe.clockRoundingNanoseconds`; the completion margins,
+    /// the cleanup tests' margins (`returnedAt + cleanupMarginNanoseconds < expiresAt`),
+    /// `cleanupSetAside`, `stopWindow` and `startMiss` keep none.
+    private static let drainScenarioMargin: UInt64 = 100_000_000
 
     /// Why an attempt missed its scenario before the launcher's deadline started, or nil when it
     /// did not. Every gated test shares it. An attempt misses when the readiness gate released
@@ -84,6 +79,34 @@ struct OwnedProcessCleanupTests {
             + "under the \(seconds) s the checks need"
     }
 
+    /// Requires, on every attempt whose gate saw readiness, that the fixture's arm stamps fall in
+    /// the window the decorator's own stamps bound, as they do by construction when both read one
+    /// clock: the call into `spawn` precedes the root's start, so its arm stamp; the root arms
+    /// before it forks the descendant, which arms after the fork; and the descendant publishes its
+    /// arm stamp before the identity file the gate waits for, so before `spawnedAt`. The decorator
+    /// reads `CLOCK_UPTIME_RAW`; a fixture stamp on another clock (a partial migration, such as
+    /// `time.CLOCK_MONOTONIC`) is off by the host's accumulated sleep or slew and lands outside the
+    /// window whenever that offset exceeds the window's own slack. That is a harness defect, not a
+    /// launcher fault, so it fails the attempt on any attempt, before `startMiss` or a timed check
+    /// can misread the stamps. A gate that released without readiness is left to `starvedGate`.
+    private static func requireOneClock(_ children: SpawnStampingChildren, _ fixture: Fixture,
+                                        spawnedAt: UInt64,
+                                        sourceLocation: SourceLocation = #_sourceLocation) throws {
+        guard children.readyAt != nil, let called = children.gateRecord.called else { return }
+        let rootArmed = try fixture.armedAt("root")
+        let descendantArmed = try fixture.armedAt("descendant")
+        let ordered = called <= rootArmed && rootArmed <= descendantArmed
+            && descendantArmed <= spawnedAt
+        try #require(ordered, """
+            the fixture's arm stamps and the decorator's stamps are not on one clock: expected \
+            the spawn call <= the root's arm stamp <= the descendant's <= the spawn return, got \
+            the root armed \(offset(rootArmed, from: called)) and the descendant armed \
+            \(offset(descendantArmed, from: called)) after the spawn call, which returned \
+            \(offset(spawnedAt, from: called)) after it; the decorator reads CLOCK_UPTIME_RAW, \
+            so the fixture must read time.CLOCK_UPTIME_RAW
+            """, sourceLocation: sourceLocation)
+    }
+
     /// Whether a gate that released without readiness did so in a shape only starvation produces,
     /// and the evidence either way. Two shapes qualify. The bound ran out while every observation
     /// found the root alive: start-up was still running. Or the exit was a fixture alarm firing on
@@ -98,12 +121,12 @@ struct OwnedProcessCleanupTests {
     /// time out, fail its delivery or report the alarm's status, so the result cannot tell
     /// starvation from a regression.
     ///
-    /// "No sooner" keeps `slewSlack` in hand. These stamps run on `CLOCK_MONOTONIC`, which
-    /// frequency adjustment can let run slower than the clock the kernel's alarm timer uses, so a
-    /// genuine alarm can be stamped a few milliseconds before its computed due time, and a hard
-    /// comparison would fail a correct launcher on attempt 1 or 2. No exit the product's `spawn`
-    /// causes lands that close to a twelve- or thirty-second alarm, so the slack re-runs nothing a
-    /// regression produces.
+    /// "No sooner" keeps `DeschedulingProbe.clockRoundingNanoseconds` in hand. These stamps and the
+    /// kernel's alarm timer read one clock (uptime), but per XNU's published source the kernel arms
+    /// the alarm from the uptime truncated to whole microseconds, so a genuine alarm can fire up to
+    /// about a microsecond before its computed due time, and a hard comparison could fail a correct
+    /// launcher on attempt 1 or 2. No exit the product's `spawn` causes lands that close to a
+    /// twelve- or thirty-second alarm, so the allowance re-runs nothing a regression produces.
     private static func starvedGate(_ children: SpawnStampingChildren, _ fixture: Fixture)
         -> (starved: Bool, reason: String) {
         let gate = children.gateRecord
@@ -120,7 +143,7 @@ struct OwnedProcessCleanupTests {
                 return (false, "the root died of SIGALRM, but no stamp bounds when it armed")
             }
             let due = armed + UInt64(fixture.expiry(of: "root")) * second
-            guard exited + slewSlack >= due else {
+            guard exited + DeschedulingProbe.clockRoundingNanoseconds >= due else {
                 return (false, "SIGALRM seen \(offset(due, from: exited)) before the root's "
                     + "alarm was due")
             }
@@ -132,7 +155,7 @@ struct OwnedProcessCleanupTests {
                 return (false, "the handshake failed, but no stamp bounds the descendant's arming")
             }
             let due = armed + UInt64(fixture.expiry(of: "descendant")) * second
-            guard exited + slewSlack >= due else {
+            guard exited + DeschedulingProbe.clockRoundingNanoseconds >= due else {
                 return (false, "the handshake failed \(offset(due, from: exited)) before the "
                     + "descendant's alarm was due")
             }
@@ -208,7 +231,7 @@ struct OwnedProcessCleanupTests {
         return ended
     }
 
-    /// Test-only decorator over the real child operations that stamps, on `CLOCK_MONOTONIC` (the
+    /// Test-only decorator over the real child operations that stamps, on `CLOCK_UPTIME_RAW` (the
     /// clock the fixture's own observations use), when `spawn` returned, when the launcher first
     /// observed the root's exit, and when cleanup first signalled the group. Timing assertions then
     /// compare event order on one clock instead of a stopwatch that also measures process start-up
@@ -270,10 +293,10 @@ struct OwnedProcessCleanupTests {
 
         init(readyFile: String? = nil) { self.readyFile = readyFile }
 
-        /// Nanoseconds on `CLOCK_MONOTONIC`, as `RecordedChildren` reads them. It cannot throw, so
+        /// Nanoseconds on `CLOCK_UPTIME_RAW`, as `RecordedChildren` reads them. It cannot throw, so
         /// nothing between a successful spawn and its return can strand the child; a failed read
         /// returns zero, which fails the elapsed checks instead of passing.
-        private static func now() -> UInt64 { clock_gettime_nsec_np(CLOCK_MONOTONIC) }
+        private static func now() -> UInt64 { clock_gettime_nsec_np(CLOCK_UPTIME_RAW) }
 
         /// The `si_code` of the root's exit (`CLD_EXITED`, `CLD_KILLED`, ...), read with `WNOWAIT`
         /// like the backend's observation, so the root stays waitable for the launcher; nil when
@@ -746,10 +769,11 @@ struct OwnedProcessCleanupTests {
             try children.launcher.launch(fixture.invocation(
                 mode: mode, status: 0, delivery: delivery, maximumOutputBytes: 32))
         }
-        let returnedAt = try fixture.monotonicNanoseconds()
+        let returnedAt = try fixture.uptimeNanoseconds()
         let spawnedAt = try #require(children.spawnedAt,
                                      "the stamping decorator must have spawned the root")
         let missed = "output-limit scenario missed on attempt \(attempt) of 3 (phase \(phase))"
+        try Self.requireOneClock(children, fixture, spawnedAt: spawnedAt)
         if !lastAttempt, let miss = try Self.startMiss(children, fixture,
                                                        spawnedAt: spawnedAt, lifeNeeded: 14) {
             print("\(missed): \(miss)")
@@ -910,10 +934,11 @@ struct OwnedProcessCleanupTests {
                 mode: "wait", status: 0,
                 delivery: stdin ? .timedStdin(script: "x", seconds: 2) : .timed(seconds: 2)))
         }
-        let returnedAt = try fixture.monotonicNanoseconds()
+        let returnedAt = try fixture.uptimeNanoseconds()
         let spawnedAt = try #require(children.spawnedAt,
                                      "the stamping decorator must have spawned the root")
         let missed = "timeout scenario missed on attempt \(attempt) of 3 (stdin \(stdin))"
+        try Self.requireOneClock(children, fixture, spawnedAt: spawnedAt)
         if !lastAttempt, let miss = try Self.startMiss(children, fixture,
                                                        spawnedAt: spawnedAt, lifeNeeded: 14) {
             print("\(missed): \(miss)")
@@ -1046,7 +1071,7 @@ struct OwnedProcessCleanupTests {
         let fixture = try Fixture(directory: scratch.directory(),
                                   rootExpiry: 30, descendantExpiry: 30)
         defer { fixture.waitForNaturalExpiry() }
-        let monotonicStart = try fixture.monotonicNanoseconds()
+        let startedAt = try fixture.uptimeNanoseconds()
         let children = SpawnStampingChildren(readyFile: fixture.path("descendant"))
         var dependencies = ScriptProcessDependencies()
         dependencies.children = children
@@ -1058,9 +1083,10 @@ struct OwnedProcessCleanupTests {
             try stampingLauncher.launch(fixture.invocation(
                 mode: "exit", status: 0, delivery: .timedStdin(script: "x", seconds: 2)))
         }
-        let returnedAt = try fixture.monotonicNanoseconds()
+        let returnedAt = try fixture.uptimeNanoseconds()
         let pid = try #require(children.spawnedPID, "the stamping decorator must have spawned the root")
         let spawnedAt = try #require(children.spawnedAt)
+        try Self.requireOneClock(children, fixture, spawnedAt: spawnedAt)
         if !lastAttempt, let miss = try Self.startMiss(children, fixture,
                                                        spawnedAt: spawnedAt, lifeNeeded: 14) {
             print("drain-timeout scenario missed on attempt \(attempt) of 3: \(miss)")
@@ -1084,27 +1110,30 @@ struct OwnedProcessCleanupTests {
         }
         let leadsGroup = children.spawnedGroup == pid
         let timeoutReported = seconds == 2
-        let stampedInOrder = monotonicStart <= spawnedAt && spawnedAt <= returnedAt
+        let stampedInOrder = startedAt <= spawnedAt && spawnedAt <= returnedAt
         // A timed check, not a product check: see the set-aside below.
         let endedBeforeExpiry = stampedInOrder
             && returnedAt - spawnedAt < Self.cleanupBoundNanoseconds
             && returnedAt + Self.cleanupMarginNanoseconds < expiresAt
-        // The first signal is stamped on `CLOCK_MONOTONIC`, while the deadline it must not precede
-        // runs on the launcher's `DispatchTime`, so the check keeps `deadlineSlewSlack`, 20 ms, in
-        // hand. With no slack, frequency slew could fail a correct launcher on any attempt, and
-        // nothing would re-run it. Slew over two seconds, 500 ppm of frequency correction plus a
-        // 5000 ppm adjtime slew, comes to about 11 ms, which 20 ms covers with room. So a first
-        // signal under 1.98 s after the spawn stamp fails, and only a deadline about 1% short or
-        // less can pass; nothing else in this file bounds a deadline from below.
-        // `drainedToDeadline` needs no slack, because a correct launcher returns more than a second
-        // past its deadline, after the pause that follows SIGTERM.
-        let signalledAtDeadline =
-            firstSignalAt + Self.deadlineSlewSlack >= spawnedAt + 2_000_000_000
+        // The first signal is stamped on the uptime clock the launcher's `DispatchTime` deadline
+        // reads, and the spawn stamp precedes the deadline's start, so a correct launcher's first
+        // signal comes at least two seconds after the spawn stamp, less the rounding of
+        // `DispatchTime` arithmetic, a tick or so. The check keeps only
+        // `DeschedulingProbe.clockRoundingNanoseconds`, a millisecond, in hand for that, since a
+        // failure here is never re-run. So a first signal under 1.999 s after the spawn stamp
+        // fails: a deadline short by more than a millisecond passes only as far as the gap from the
+        // spawn stamp to the deadline's start, the launch loop's overshoot of the deadline and the
+        // observation that revalidates before the signal make up for the shortfall. Nothing else in
+        // this file bounds a deadline from below. `drainedToDeadline` needs no slack, because a
+        // correct launcher returns more than a second past its deadline, after the pause that
+        // follows SIGTERM.
+        let signalledAtDeadline = firstSignalAt + DeschedulingProbe.clockRoundingNanoseconds
+            >= spawnedAt + 2_000_000_000
         let drainedToDeadline = returnedAt >= spawnedAt + 2_000_000_000
         let groupRead = children.spawnedGroup.map { $0 < 0 ? "getpgid failed: the root was gone" : "another group" } ?? "not read"
         #expect(leadsGroup, "the root must lead its own process group, or the group check is vacuous (\(groupRead))")
         #expect(timeoutReported, "the timeout must report the configured two seconds, not \(seconds)")
-        #expect(stampedInOrder, "the spawn stamp must fall between the attempt's start and the launch's return (start \(offset(monotonicStart)), return \(offset(returnedAt)))")
+        #expect(stampedInOrder, "the spawn stamp must fall between the attempt's start and the launch's return (start \(offset(startedAt)), return \(offset(returnedAt)))")
         #expect(signalledAtDeadline, "cleanup's first signal must not precede the two-second drain deadline (first signal \(offset(firstSignalAt)))")
         #expect(drainedToDeadline, "the pending drain must reach its deadline rather than fail early (returned \(offset(returnedAt)))")
         #expect(survivors.isEmpty, "cleanup must stop every member of the owned group, published or not")
@@ -1141,13 +1170,14 @@ struct OwnedProcessCleanupTests {
         // immediate-exit branch, and the launcher saw the root's exit after its spawn returned,
         // inside the two-second deadline and before cleanup's first group signal. So the exit was
         // the root's own; no signal had been sent when the product saw it. The spawn stamp precedes
-        // the deadline's start. While the machine is awake, `CLOCK_MONOTONIC` keeps pace with the
-        // launcher's `DispatchTime`, differing only by frequency slew, which is far less than the
-        // tenth of a second kept in hand (`slewSlack`), and it runs on through sleep. So an exit
-        // stamped under 1.9 s after the spawn stamp was seen before the deadline.
+        // the deadline's start, and the exit stamp and the deadline read one clock, which a host's
+        // sleep pauses for both. The launch loop checks its deadline right after the observation
+        // the decorator stamps, so an exit stamped under 1.9 s after the spawn stamp was seen
+        // before the deadline, unless the runner withheld the launcher's thread for most of the
+        // tenth kept in hand (`drainScenarioMargin`) between that stamp and the check.
         let exiting = FileManager.default.fileExists(atPath: fixture.path("root-exiting"))
         let exitSeenAt = children.exitObservedAt
-        let insideDeadline = spawnedAt + 2_000_000_000 - Self.slewSlack
+        let insideDeadline = spawnedAt + 2_000_000_000 - Self.drainScenarioMargin
         let ordered = exitSeenAt.map {
             spawnedAt <= $0 && $0 < insideDeadline && $0 < firstSignalAt
         } == true
@@ -1214,8 +1244,9 @@ struct OwnedProcessCleanupTests {
         // - The bound and margin need 4.9 s withheld from the spawn stamp to the return
         //   (`completionBoundWithheldNanoseconds`).
         // - A failed liveness check needs its deciding observation no sooner than the descendant's
-        //   expiry less `slewSlack`, with the window withheld for all but 0.2 s of the time from
-        //   its end to that expiry (`livenessAllowanceNanoseconds`).
+        //   expiry less a millisecond of rounding (`DeschedulingProbe.clockRoundingNanoseconds`),
+        //   with the window withheld for all but 0.2 s of the time from its end to that expiry
+        //   (`livenessAllowanceNanoseconds`).
         //
         // Each constant's doc gives its derivation. The probe never observes the launcher, so on a
         // runner that is running the test, a launcher that waits too long or kills its background
@@ -1225,14 +1256,14 @@ struct OwnedProcessCleanupTests {
         //
         // Residuals: a correct launcher still fails on a stall the probe does not see (of the test
         // thread alone, of the fixture's root after the gate, or in lapses under the probe's
-        // tolerance), on a stall between `keepsRunning`'s stamp and its observation, and on any
-        // stall on the last attempt. On the last attempt, a gate released late can also fail the
-        // margin or the liveness check. In the other direction, the bound's evidence counts only
-        // time withheld, not time the launcher had. So on a withholding runner, a launcher that
-        // waits for its background work until the descendant's expiry is set aside on attempt 1 or
-        // 2 whenever 4.9 s of withheld time fell anywhere in that wait, since its liveness check,
-        // decided at that expiry, qualifies too. An intermittent regression that coincides with a
-        // stall is re-run, but a steady one still fails on the last attempt.
+        // tolerance) and on any stall on the last attempt. On the last attempt, a gate released
+        // late can also fail the margin or the liveness check. In the other direction, the bound's
+        // evidence counts only time withheld, not time the launcher had. So on a withholding
+        // runner, a launcher that waits for its background work until the descendant's expiry is
+        // set aside on attempt 1 or 2 whenever 4.9 s of withheld time fell anywhere in that wait,
+        // since its liveness check, decided at that expiry, qualifies too. An intermittent
+        // regression that coincides with a stall is re-run, but a steady one still fails on the
+        // last attempt.
         for attempt in 1...3 {
             if try completedCapture(status: status, attempt: attempt, lastAttempt: attempt == 3) {
                 return
@@ -1265,15 +1296,21 @@ struct OwnedProcessCleanupTests {
 
     /// How much of the time left from the liveness window's end to the descendant's expiry may go
     /// unseen by the probe in the window before a failed liveness check is set aside on attempt 1
-    /// or 2. A correct launcher's descendant lives until its alarm, which may fire up to
-    /// `slewSlack` before that computed expiry on this clock, so the check fails that launcher only
-    /// when the deciding observation came at the expiry less `slewSlack` or later. The observation
-    /// before that one, stamped before the window's end, found the descendant alive, and
-    /// `keepsRunning` then slept its own 20 ms poll, so a correct launcher fails only after a stall
-    /// between the two of at least the time left less `slewSlack`, the poll, the observation's own
-    /// cost and the poll's overshoot (longer still when the deciding observation was the first),
-    /// and the probe, when it records that stall, misses at most one 50 ms tick of it. `slewSlack`,
-    /// the poll and the tick make 0.17 s; the other 30 ms covers the observation and the overshoot.
+    /// or 2. A correct launcher's descendant lives until its alarm, which on this clock fires no
+    /// sooner than that computed expiry less the kernel's rounding
+    /// (`DeschedulingProbe.clockRoundingNanoseconds` covers it), so the check fails that launcher
+    /// only when the deciding observation, and so the stamp `keepsRunning` reads after it, came at
+    /// that point or later. The observation before that one, stamped before the window's end, found
+    /// the descendant alive, and `keepsRunning` then slept its own 20 ms poll, so a correct
+    /// launcher fails only after a stall between the two of at least the time left less that
+    /// rounding, the poll, the two observations' own cost and the poll's overshoot (longer still
+    /// when the deciding observation was the first), and the probe, when it records that stall,
+    /// misses at most one 50 ms tick of it. The rounding, the poll and the tick make about 71 ms;
+    /// the rest of the 0.2 s, about 0.13 s, is headroom for the observations' own cost and the
+    /// poll's overshoot, which a loaded runner stretches. It is not tightened to the sum: a larger
+    /// allowance only lets a smaller recorded stall excuse a failure decided no sooner than the
+    /// descendant's expiry, never one decided before it, so a launcher that kills its background
+    /// work on time still fails.
     private static let livenessAllowanceNanoseconds: UInt64 = 200_000_000
 
     /// A completion test's outcome, or nil when the launch timed out on attempt 1 or 2 while the
@@ -1322,10 +1359,11 @@ struct OwnedProcessCleanupTests {
     /// nil when any failed check lacks its own evidence: the bound and margin need
     /// `completionBoundWithheldNanoseconds` withheld from the spawn stamp to the return; a failed
     /// liveness check needs its deciding observation no sooner than the descendant's expiry less
-    /// `slewSlack`, and the window from the return to the last observation withheld for all but
-    /// `livenessAllowanceNanoseconds` of the time left from `windowEnd` to that expiry. A launcher
-    /// that kills or stops its background work on time is seen by an observation inside the window,
-    /// before that expiry, so it still fails. Each reason carries its elapsed and withheld seconds.
+    /// `DeschedulingProbe.clockRoundingNanoseconds`, and the window from the return to the last
+    /// observation withheld for all but `livenessAllowanceNanoseconds` of the time left from
+    /// `windowEnd` to that expiry. A launcher that kills or stops its background work on time is
+    /// seen by an observation inside the window, before that expiry, so it still fails. Each reason
+    /// carries its elapsed and withheld seconds.
     private static func completionSetAside(returnHeld: Bool, spawnedAt: UInt64,
                                            returnedAt: UInt64, returnWithheld: UInt64,
                                            liveness: (kept: Bool, decidedAt: UInt64),
@@ -1343,7 +1381,8 @@ struct OwnedProcessCleanupTests {
         }
         if !liveness.kept {
             let left = descendantExpiresAt > windowEnd ? descendantExpiresAt - windowEnd : 0
-            guard liveness.decidedAt + slewSlack >= descendantExpiresAt,
+            guard liveness.decidedAt + DeschedulingProbe.clockRoundingNanoseconds
+                      >= descendantExpiresAt,
                   windowWithheld + livenessAllowanceNanoseconds >= left else { return nil }
             let window = returnedAt <= checkedAt ? checkedAt - returnedAt : 0
             // Each figure names its side; `left`, clamped at zero when the margin also failed,
@@ -1377,11 +1416,12 @@ struct OwnedProcessCleanupTests {
             try children.launcher.launch(fixture.invocation(
                 mode: "exit", status: status, delivery: .timed(seconds: 30)))
         }
-        let returnedAt = try fixture.monotonicNanoseconds()
+        let returnedAt = try fixture.uptimeNanoseconds()
         let spawnedAt = try #require(children.spawnedAt,
                                      "the stamping decorator must have spawned the root")
         let missed = "completed-capture scenario missed on attempt \(attempt) of 3 "
             + "(status \(status))"
+        try Self.requireOneClock(children, fixture, spawnedAt: spawnedAt)
         if !lastAttempt, let miss = try Self.startMiss(children, fixture,
                                                        spawnedAt: spawnedAt, lifeNeeded: 9) {
             print("\(missed): \(miss)")
@@ -1406,7 +1446,7 @@ struct OwnedProcessCleanupTests {
         let margin = returnedAt + 3_000_000_000 < descendantExpiresAt
         let windowEnd = returnedAt + 2_000_000_000
         let liveness = try fixture.keepsRunning(fixture.identity("descendant"), until: windowEnd)
-        let checkedAt = try fixture.monotonicNanoseconds()
+        let checkedAt = try fixture.uptimeNanoseconds()
         // Read only now: `lapsed` stops the probe, which must also watch the liveness window.
         let returnWithheld = runner.lapsed(from: spawnedAt, to: returnedAt)
         let windowWithheld = runner.lapsed(from: returnedAt, to: checkedAt)
@@ -1463,27 +1503,26 @@ struct OwnedProcessCleanupTests {
         // product's own `spawn` (see `startMiss`). The `DeschedulingProbe` sets aside a
         // `TimeoutError` with 29 s withheld from the spawn stamp to cleanup's first group signal, a
         // crossed bound or margin with 4.9 s withheld from the spawn stamp to the return, and a
-        // failed liveness check decided no sooner than the descendant's expiry less `slewSlack`
-        // with the window withheld for all but 0.2 s of the time from its end to that expiry (the
-        // constants give each derivation). Stdin delivery adds milliseconds before the root's exit,
-        // inside the second the 29 s threshold keeps for correct work. The probe never observes the
-        // launcher, so a launcher that waits too long, or kills its background work, on a runner
-        // that is running the test still fails at once. Status and output are checked on every
-        // attempt with an outcome, a failed check without its own evidence keeps the attempt
-        // failing, and the last attempt requires readiness, sets nothing aside and runs every
-        // check.
+        // failed liveness check decided no sooner than the descendant's expiry less a millisecond
+        // of rounding (`DeschedulingProbe.clockRoundingNanoseconds`) with the window withheld for
+        // all but 0.2 s of the time from its end to that expiry (the constants give each
+        // derivation). Stdin delivery adds milliseconds before the root's exit, inside the second
+        // the 29 s threshold keeps for correct work. The probe never observes the launcher, so a
+        // launcher that waits too long, or kills its background work, on a runner that is running
+        // the test still fails at once. Status and output are checked on every attempt with an
+        // outcome, a failed check without its own evidence keeps the attempt failing, and the last
+        // attempt requires readiness, sets nothing aside and runs every check.
         //
         // Residuals: a stall the probe does not see (of the test thread alone, of the fixture's
-        // root after the gate, or in lapses under its tolerance), a stall between `keepsRunning`'s
-        // stamp and its observation, and any stall on the last attempt can still fail a correct
-        // launcher, either by pushing the return past the bound (which charges stdin delivery, the
-        // root's read and exit and the launcher's return to the product) or by landing the window's
-        // last observation after the descendant's alarm, which the margin can leave as little as a
-        // second away. On the last attempt a gate released late can also fail the margin with the
-        // product correct. The other way round, on a runner that is withholding, a launcher that
-        // waits for its background work until the descendant's expiry is set aside on attempt 1 or
-        // 2 whenever 4.9 s of withheld time fell in that wait; a steady regression still fails on
-        // the last attempt.
+        // root after the gate, or in lapses under its tolerance) and any stall on the last attempt
+        // can still fail a correct launcher, either by pushing the return past the bound (which
+        // charges stdin delivery, the root's read and exit and the launcher's return to the
+        // product) or by landing the window's last observation after the descendant's alarm, which
+        // the margin can leave as little as a second away. On the last attempt a gate released late
+        // can also fail the margin with the product correct. The other way round, on a runner that
+        // is withholding, a launcher that waits for its background work until the descendant's
+        // expiry is set aside on attempt 1 or 2 whenever 4.9 s of withheld time fell in that wait;
+        // a steady regression still fails on the last attempt.
         for attempt in 1...3 {
             if try completedStdin(attempt: attempt, lastAttempt: attempt == 3) { return }
         }
@@ -1506,10 +1545,11 @@ struct OwnedProcessCleanupTests {
             try children.launcher.launch(fixture.invocation(
                 mode: "closed-output", status: 0, delivery: .timedStdin(script: "x", seconds: 30)))
         }
-        let returnedAt = try fixture.monotonicNanoseconds()
+        let returnedAt = try fixture.uptimeNanoseconds()
         let spawnedAt = try #require(children.spawnedAt,
                                      "the stamping decorator must have spawned the root")
         let missed = "completed-stdin scenario missed on attempt \(attempt) of 3"
+        try Self.requireOneClock(children, fixture, spawnedAt: spawnedAt)
         if !lastAttempt, let miss = try Self.startMiss(children, fixture,
                                                        spawnedAt: spawnedAt, lifeNeeded: 9) {
             print("\(missed): \(miss)")
@@ -1535,7 +1575,7 @@ struct OwnedProcessCleanupTests {
         let windowEnd = returnedAt + 2_000_000_000
         let descendant = try fixture.identity("descendant")
         let liveness = try fixture.keepsRunning(descendant, until: windowEnd)
-        let checkedAt = try fixture.monotonicNanoseconds()
+        let checkedAt = try fixture.uptimeNanoseconds()
         // Read only now: `lapsed` stops the probe, which must also watch the liveness window.
         let returnWithheld = runner.lapsed(from: spawnedAt, to: returnedAt)
         let windowWithheld = runner.lapsed(from: returnedAt, to: checkedAt)
@@ -1594,10 +1634,10 @@ struct OwnedProcessCleanupTests {
         // forked descendant arms its own alarm: alarms are not inherited by fork. /usr/bin/python3
         // is also used by the existing SnapshotLifetimeTests process fixture.
         //
-        // Each process publishes `<name>-armed`, the monotonic time it read just before `alarm()`,
-        // ahead of its identity, so a test knows the earliest moment each could expire on its own.
-        // The root forks and waits for the descendant's ready byte BEFORE reading stdin: the
-        // launcher delivers stdin only after `spawn` returns, so a readiness gate on the
+        // Each process publishes `<name>-armed`, the `CLOCK_UPTIME_RAW` time it read just before
+        // `alarm()`, ahead of its identity, so a test knows the earliest moment each could expire
+        // on its own. The root forks and waits for the descendant's ready byte BEFORE reading
+        // stdin: the launcher delivers stdin only after `spawn` returns, so a readiness gate on the
         // descendant's file would otherwise hold until its bound on every stdin delivery. Both
         // alarms are armed before stdin is read, and every mode reads stdin to EOF before it writes
         // or exits.
@@ -1606,7 +1646,7 @@ struct OwnedProcessCleanupTests {
         def arm_expiry(seconds):
             signal.signal(signal.SIGALRM, signal.SIG_DFL)
             signal.pthread_sigmask(signal.SIG_UNBLOCK, {signal.SIGALRM})
-            armed = time.clock_gettime_ns(time.CLOCK_MONOTONIC)
+            armed = time.clock_gettime_ns(time.CLOCK_UPTIME_RAW)
             signal.alarm(seconds)
             signal.signal(signal.SIGTERM, signal.SIG_IGN)
             signal.signal(signal.SIGHUP, signal.SIG_IGN)
@@ -1663,7 +1703,7 @@ struct OwnedProcessCleanupTests {
             if mode not in ("wait", "overflow-live"):
                 while os.getppid() == root_pid:
                     time.sleep(0.01)
-                publish("root-observed-exited", time.clock_gettime_ns(time.CLOCK_MONOTONIC))
+                publish("root-observed-exited", time.clock_gettime_ns(time.CLOCK_UPTIME_RAW))
                 if mode == "overflow-after-exit":
                     os.write(1, b"x" * 64)
             while True:
@@ -1707,11 +1747,11 @@ struct OwnedProcessCleanupTests {
                              delivery: delivery, maximumOutputBytes: maximumOutputBytes)
         }
 
-        /// The monotonic time a fixture process read just before arming its alarm.
+        /// The `CLOCK_UPTIME_RAW` time a fixture process read just before arming its alarm.
         func armedAt(_ name: String) throws -> UInt64 {
             let text = try String(contentsOfFile: path("\(name)-armed"), encoding: .utf8)
             return try #require(UInt64(text.trimmingCharacters(in: .whitespacesAndNewlines)),
-                                "\(name)-armed must hold a monotonic nanosecond stamp")
+                                "\(name)-armed must hold an uptime nanosecond stamp")
         }
 
         /// The earliest moment a published fixture process can die of its own alarm. The stamp is
@@ -1733,7 +1773,11 @@ struct OwnedProcessCleanupTests {
         /// A window for observing, after the launch returned, that cleanup stopped the fixture:
         /// `preferred` seconds, cut short to close at least one second before the earliest natural
         /// expiry. A process cleanup never signalled is therefore still live when the window
-        /// closes, so the check fails instead of being rescued by the alarm.
+        /// closes, so the check fails instead of being rescued by the alarm. The one-second margin
+        /// survives a host's sleep only because the fixtures' `alarm()` runs on uptime as these
+        /// stamps do: per XNU's published source, `setitimer(ITIMER_REAL)` arms from `microuptime`
+        /// through a thread call that is not continuous-time, so a sleep pauses the alarm and the
+        /// window alike. That has not been measured across a real sleep.
         ///
         /// Residual: nothing bounds when the observation that decides `stops` or `liveMembers` is
         /// made, so a stall of this thread just before it can move it past the earliest natural
@@ -1745,15 +1789,19 @@ struct OwnedProcessCleanupTests {
         /// window is that regression's only guard.
         func stopWindow(_ preferred: TimeInterval) throws -> TimeInterval {
             let closesBy = try earliestNaturalExpiry() - 1_000_000_000
-            let now = try monotonicNanoseconds()
+            let now = try uptimeNanoseconds()
             guard now < closesBy else { return 0 }
             return min(preferred, Double(closesBy - now) / 1_000_000_000)
         }
 
-        // Python and Swift explicitly use the same named OS clock and nanosecond units.
-        func monotonicNanoseconds() throws -> UInt64 {
+        // Python and Swift explicitly use the same named OS clock, `CLOCK_UPTIME_RAW`, and
+        // nanosecond units; it is also the clock the launcher's `DispatchTime` deadlines and the
+        // kernel's alarm timer read, and `DeschedulingProbe`'s. The fixtures name it rather than
+        // calling `time.monotonic_ns()`, which on the 3.9 `/usr/bin/python3` checked here counts
+        // from the interpreter's own start and so cannot be compared across processes.
+        func uptimeNanoseconds() throws -> UInt64 {
             var value = timespec()
-            guard clock_gettime(CLOCK_MONOTONIC, &value) == 0 else {
+            guard clock_gettime(CLOCK_UPTIME_RAW, &value) == 0 else {
                 throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
             }
             return UInt64(value.tv_sec) * 1_000_000_000 + UInt64(value.tv_nsec)
@@ -1812,33 +1860,40 @@ struct OwnedProcessCleanupTests {
             return Int32(info.kp_proc.p_stat)
         }
 
-        /// Whether a preserved process keeps executing until `end`, a `CLOCK_MONOTONIC` stamp the
-        /// caller sets from the launch's return, observed every 20 ms. It also returns `decidedAt`,
-        /// the stamp read just before the observation that decided the result (the first to find
-        /// the process gone or stopped, else the last). One observation right after the return
-        /// could read a process that a regression had just SIGKILLed as still running, because the
-        /// kill completes only when that process next runs; observing through the window closes
-        /// that gap. The window is never cut short: the last observation comes at or after `end`,
-        /// so a stall of this thread can drop observations but never move the last one earlier.
-        /// Callers check separately that `end` leaves a second before natural expiry. Read-only: it
-        /// never signals.
+        /// Whether a preserved process keeps executing until `end`, a `CLOCK_UPTIME_RAW` stamp the
+        /// caller sets from the launch's return, observed every 20 ms. It also returns `decidedAt`:
+        /// when an observation found the process gone or stopped, a stamp read just after that
+        /// observation; otherwise the stamp read just before the last one, which came at or after
+        /// `end`. One observation right after the return could read a process that a regression had
+        /// just SIGKILLed as still running, because the kill completes only when that process next
+        /// runs; observing through the window closes that gap. The window is never cut short: the
+        /// last observation comes at or after `end`, so a stall of this thread can drop
+        /// observations but never move the last one earlier. Callers check separately that `end`
+        /// leaves a second before natural expiry. Read-only: it never signals.
         ///
-        /// The completion tests set a failure aside on attempts 1 and 2 only when the deciding
-        /// observation came no sooner than the descendant's expiry less `slewSlack` and a
-        /// `DeschedulingProbe` saw the window withheld (`livenessAllowanceNanoseconds`). The stamp
-        /// precedes its observation, so it never makes an on-time observation look late.
+        /// The completion tests set a failure aside on attempts 1 and 2 only when `decidedAt` came
+        /// no sooner than the descendant's expiry less `DeschedulingProbe.clockRoundingNanoseconds`
+        /// and a `DeschedulingProbe` saw the window withheld (`livenessAllowanceNanoseconds`). A
+        /// failure's stamp follows the observation that found the process gone, so the process was
+        /// gone by then: a stall of this thread before or during that observation can only move the
+        /// stamp later, which can only make the failure eligible for a set-aside (which still needs
+        /// the probe's evidence and only re-runs an attempt), and never makes a death look sooner
+        /// than it was.
         ///
         /// Residual: a stall can move the last observation later. The callers' margin can leave
         /// `end` as little as a second before natural expiry, so a stall at the window's end longer
         /// than the margin left can land that observation after the descendant's own alarm and fail
-        /// a correct launcher. That remains only for a stall the probe does not see, a stall
-        /// between the stamp and its observation (a span of microseconds), and the last attempt,
-        /// which is never re-run.
+        /// a correct launcher. That remains only for a stall the probe does not see and for the
+        /// last attempt, which is never re-run.
         func keepsRunning(_ identity: Identity, until end: UInt64) throws
             -> (kept: Bool, decidedAt: UInt64) {
             while true {
-                let at = try monotonicNanoseconds()
-                if try !isExecuting(identity) { return (false, at) }
+                let at = try uptimeNanoseconds()
+                if try !isExecuting(identity) {
+                    // Read after the observation, so it bounds the death from above.
+                    let after = try uptimeNanoseconds()
+                    return (false, after)
+                }
                 if at >= end { return (true, at) }
                 usleep(20_000)
             }
@@ -1848,10 +1903,10 @@ struct OwnedProcessCleanupTests {
         /// time passes. Read-only: it never signals. A reused group id can only add members, so it
         /// can cause a false failure, never a false pass; the fixture never leaves its group.
         func liveMembers(ofGroup group: pid_t, settlingWithin seconds: TimeInterval) throws -> [pid_t] {
-            let deadline = try monotonicNanoseconds() + UInt64(seconds * 1_000_000_000)
+            let deadline = try uptimeNanoseconds() + UInt64(seconds * 1_000_000_000)
             while true {
                 let members = try liveMembers(ofGroup: group)
-                let now = try monotonicNanoseconds()
+                let now = try uptimeNanoseconds()
                 if members.isEmpty || now >= deadline { return members }
                 usleep(20_000)
             }
@@ -1877,7 +1932,7 @@ struct OwnedProcessCleanupTests {
         func stops(_ identity: Identity, within seconds: TimeInterval) throws -> Bool {
             try stops(identity, within: seconds,
                       wallNow: { Date().timeIntervalSinceReferenceDate },
-                      monotonicNow: { Double(try monotonicNanoseconds()) / 1_000_000_000 },
+                      monotonicNow: { Double(try uptimeNanoseconds()) / 1_000_000_000 },
                       observe: { try isRunning($0) }, pause: { usleep(20_000) })
         }
 
@@ -1913,9 +1968,9 @@ struct OwnedProcessCleanupTests {
                 for name in ["descendant", "root"] {
                     guard FileManager.default.fileExists(atPath: path(name)) else { continue }
                     let window = expiry(of: name) + 48
-                    let start = try monotonicNanoseconds()
+                    let start = try uptimeNanoseconds()
                     let stopped = try stops(identity(name), within: TimeInterval(window))
-                    let waited = try monotonicNanoseconds() - start
+                    let waited = try uptimeNanoseconds() - start
                     #expect(stopped, Comment(rawValue:
                             "the self-expiring synthetic fixture remained live (\(name), waited "
                             + "\(waited / 1_000_000) ms of a \(window)-second teardown window)"))

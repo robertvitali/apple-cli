@@ -553,8 +553,14 @@ struct LauncherIsolationTests {
     /// A child killed here (`expired`, `unreaped`) is a starvation shape. A SIGALRM counts as the
     /// child's own expiry only once the child has run that long: it arms `alarm(childExpiry)` after
     /// spawn, so an earlier SIGALRM is not a starvation shape and is judged as a failure. The span
-    /// is uptime, which a host's sleep pauses while the alarm may count on, so a run that spans a
-    /// sleep can fail this way.
+    /// is uptime (`DispatchTime`). Per XNU's published source the alarm's expiry is scheduled on
+    /// uptime too (`alarm()` is `setitimer(ITIMER_REAL)`, armed from `microuptime`, truncated to
+    /// whole microseconds), so a host's sleep pauses the span and the alarm alike and does not by
+    /// itself make an on-time expiry look early. The span starts once `posix_spawn` returns,
+    /// normally before the child reaches its `alarm()` (its start-up comes first), and ends after
+    /// the reaped exit. Residual: a parent withheld between `posix_spawn` returning and its stamp
+    /// for longer than the child's start-up shortens the span below the alarm's life, so an
+    /// on-time SIGALRM is judged a failure: a false red, never a false pass.
     private func processMiss(_ end: End, seconds: Double) -> String? {
         switch end {
         case .expired, .unreaped: "the child was \(end)"
@@ -1026,8 +1032,10 @@ struct LauncherIsolationTests {
     /// the other one's line), or any byte the launcher read from a descriptor that carries neither
     /// stream. `LaunchWitness` keeps all three, including what the launcher never read.
     ///
-    /// Residual: the elapsed checks use uptime, which a host's sleep pauses while the probe's alarm
-    /// may count on, so a launch that spans a sleep can fail this way.
+    /// The elapsed checks use uptime (`DispatchTime`). Per XNU's published source the probe's alarm
+    /// is scheduled on uptime too, truncated to whole microseconds, far less than the probe's own
+    /// start-up before it arms, so a host's sleep pauses both alike and does not by itself make an
+    /// on-time alarm look early.
     private static func launchProbe(_ invocation: ScriptInvocation,
                                     healthy: OutcomeRecord) throws -> ScriptOutcome {
         let witness = LaunchWitness()

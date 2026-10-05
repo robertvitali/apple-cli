@@ -2,10 +2,152 @@
 topic: hosted-ci
 importance: high
 last-used: 2026-10-05
-uses: 14
+uses: 15
 ---
 
 # Hosted CI (public, free GitHub-hosted runners)
+
+## 2026-10-05 — follow-up: the process tests stamp on `CLOCK_UPTIME_RAW`, the launcher's own clock
+
+**What changed (tests only).** The entry below left a residual: the process tests stamped on
+`CLOCK_MONOTONIC` while the launcher times its deadlines on `DispatchTime`. Every stamp helper the
+gated process suites use now reads `CLOCK_UPTIME_RAW` instead: `DeschedulingProbe`,
+`RecordedChildren.now()`, `ReadyGatedChildren.uptimeNanoseconds()`,
+`SpawnStampingChildren.now()` and `Fixture.uptimeNanoseconds()` (the three helpers named
+`monotonicNanoseconds()` were renamed). Every Python stamp compared across processes moved in the
+same change, to `time.clock_gettime_ns(time.CLOCK_UPTIME_RAW)`: the gated fixtures' arm stamps and
+the pending-input fixture's stamp. `root-observed-exited` moved too, for consistency, although no
+check reads its content. `eventualReapTransfer` no longer keeps a second clock for its probe span;
+it reads the span from its `DispatchTime` stamps.
+
+**Why one clock.** `CLOCK_UPTIME_RAW` and `DispatchTime.uptimeNanoseconds` are both
+`mach_absolute_time` converted to nanoseconds (libdispatch `Time.swift`, Libc `clock_gettime.c`,
+`man clock_gettime`). A local probe found `DispatchTime.now().uptimeNanoseconds` between two
+`CLOCK_UPTIME_RAW` reads in every one of 200,000 tries. XNU's published source (its `main`
+branch, not necessarily the shipping build) schedules the `alarm()` (`setitimer(ITIMER_REAL)`)
+expiry on the same uptime, from `microuptime`, through a thread call that is not continuous-time.
+`CLOCK_MONOTONIC` is wall-clock time minus boot time instead: it has microsecond resolution, it
+keeps counting through sleep, and it follows frequency correction (at most 500 ppm) plus adjtime
+slew (500 ppm, or 5000 ppm while more than a second of adjustment is outstanding), so at most about
+1000 ppm while under a second of adjustment is outstanding, and 5500 ppm at worst. After the move,
+the gaps left are truncation only: the kernel arms an alarm from uptime truncated to whole
+microseconds (so an alarm can fire about a microsecond before a nanosecond stamp plus its seconds),
+and `DispatchTime` arithmetic rounds by at most one tick (about 42 ns on the Apple silicon
+measured). Alarm lateness also remains, but it only ever delays. A system sleep now pauses the
+stamps, the deadlines and the alarms together, so `DeschedulingProbe` no longer records a sleep as a
+lapse, which is correct. A SIGSTOP of the process does not pause uptime, so the stall-injection miss
+path still records the stall.
+
+That the alarm runs on uptime was read from the source, not measured, and a rate measurement cannot
+tell the two clocks apart here: `CLOCK_MONOTONIC` runs slower than uptime on this host, so even a
+`CLOCK_MONOTONIC`-timed alarm would fire late against uptime stamps, never early, and the alarm's
+own lateness hides the difference anyway. The tell-tale on a hosted run would be a starved-gate
+message reporting a SIGALRM seen some milliseconds before its due time, or an early-exit failure
+whose time after the spawn call falls short of the fixture's expiry, with the gap growing with the
+expiry.
+
+**Gotchas.**
+
+- The move cannot be partial. `CLOCK_MONOTONIC` and `CLOCK_UPTIME_RAW` differ by the host's
+  accumulated sleep since boot, which can be hours or days, so a Swift stamp on one clock against a
+  Python stamp on the other is off by that much, not by milliseconds. Each gated test whose fixture
+  publishes a stamp now requires that its stamps fall inside the window the decorator's stamps bound
+  by construction (`OwnedProcessCleanupTests.requireOneClock`, on attempts that saw readiness: the
+  call into `spawn` <= the root's arm stamp <= the descendant's <= the spawn return; the
+  pending-input test, on every attempt that reached the overflow: the call into `spawn` <= the
+  fixture's stamp <= the return, and <= the spawn return when the gate released on the ready file).
+  A violation fails the attempt on any attempt, naming the clock both sides must read. On a host
+  that has slept, a partial migration is caught at once. On one that has not, the clocks differ only
+  by accumulated slew, which the check still catches whenever that offset puts a stamp outside the
+  window.
+- `time.monotonic_ns()` is not a substitute. On the Command Line Tools `/usr/bin/python3` (3.9.6)
+  it counts from the interpreter's own start, so it cannot be compared across processes. Name the
+  clock: `time.clock_gettime_ns(time.CLOCK_UPTIME_RAW)`. `time.CLOCK_UPTIME_RAW` is documented as
+  new in Python 3.8; an interpreter without it raises `AttributeError` before the fixture arms its
+  alarm, so it fails loudly and can never pass. The `ProcessResourceTests` heartbeat keeps
+  `time.monotonic_ns()`, because it compares only two values from the same process.
+
+**Constants.** One shared rounding allowance, `DeschedulingProbe.clockRoundingNanoseconds` (1 ms),
+derived from that truncation and not from slew, replaces every slack that existed only for slew:
+
+- `ProcessResourceTests.earlyExit`'s "less a tenth for clock slew" (100 ms);
+- the pending-input overflow test's 100 ms in `ScriptLauncherTests`;
+- `OwnedProcessCleanupTests.slewSlack` (100 ms) in `starvedGate` and the completion tests'
+  liveness set-aside;
+- `OwnedProcessCleanupTests.deadlineSlewSlack` (20 ms) in `signalledAtDeadline`.
+
+A first signal under 1.999 s after the spawn stamp now fails that check. This supersedes the
+"1.98 s since 2026-10-05, keeping 20 ms for clock slew" note in item 5 of the 2026-09-21 entry.
+`ProcessResourceTests`' two literal 1 ms allowances use the same constant, and so does
+`terminateGraceNanoseconds`, now one second less 1 ms (was 950 ms): the SIGTERM stamp is taken
+before `kill`, inside the call after whose return the launcher sets its one-second pause, so a full
+grace puts at least a second, less rounding, between the two stamps by construction.
+
+What stays:
+
+- The drain scenario's tenth stays 100 ms, renamed `drainScenarioMargin` in both
+  `OwnedProcessCleanupTests` and `ScriptLauncherTests`. It never was only slew: it covers the gap
+  between the decorator's exit stamp and the launcher's next deadline check.
+- `livenessAllowanceNanoseconds` stays 0.2 s. The rounding, the 20 ms poll and the 50 ms probe tick
+  make about 71 ms, and the rest is headroom.
+
+The liveness set-aside's "no sooner than the descendant's expiry" guard now reads a stamp taken
+after the observation that found the descendant gone, not before it. The later stamp bounds the
+death from above, so a stall around that observation can only make a failure eligible for a
+set-aside, which still needs the probe's evidence and only re-runs; the old residual for a stall
+between the stamp and its observation is gone.
+
+**What the residual understated.**
+
+- `ProcessResourceTests.earlyExit` held `CLOCK_MONOTONIC` stamps to fixture alarms of 180 s (the
+  detached-survivor scenario) and 240 s (the output-limit scenario), not only 30 s and 60 s. At
+  5500 ppm that is about 0.99 s and 1.32 s of slew against its 100 ms.
+- `startupRanIntoDeadline` and the detached-survivor miss each allowed 1 ms between
+  `CLOCK_MONOTONIC` stamps and the launcher's 120 s and 60 s `DispatchTime` deadlines. The drift
+  measured -14 to -40 ppm in two local samples (1.7 to 4.8 ms over 120 s, 0.9 to 2.4 ms over 60 s),
+  so 1 ms was already too tight for the 120 s deadline at either rate, and for the 60 s one at the
+  higher: a correct launcher could be refused its re-run, though only when the gate ran out and the
+  deadline then expired. With one clock, 1 ms is a genuine rounding allowance.
+- Two `LauncherIsolationTests` residuals said the child's and the probe's alarms may keep counting
+  through a host's sleep while uptime pauses. Per XNU's published source the alarms run on uptime
+  too; both comments were reworded. The child's span starts once `posix_spawn` returns, so a parent
+  withheld between that return and its stamp for longer than the child's start-up can still judge
+  an on-time SIGALRM a failure: a false red, never a false pass.
+
+Not measured: a real system sleep. The sleep behaviour above comes from the man page and the
+source.
+
+**Red checks.** On a clean copy of the change, each of 29 mutations was applied alone, built and run
+on its own; the four process suites first passed there unmutated (95 tests, no miss). All 29 came
+out as planned:
+
+- Early alarms: a pending-input fixture that signals itself SIGALRM right after arming, and a
+  fairness root whose alarm comes five seconds sooner than its test classifies it, each fail at
+  once. With the early-alarm threshold lowered to zero, each misses on attempts 1 and 2 and fails on
+  the third, and a self-signal on attempt 1 only misses there and passes on attempt 2.
+- New boundary checks: the fairness root's alarm fired 30 ms or 50 ms early, and a starved-gate
+  root's alarm 50 ms early, each fail at once, where the old 100 ms slack read all three as on time.
+  The same alarms exactly on time, with nothing published, miss on attempts 1 and 2 and fail on the
+  third.
+- The stall-injection miss path: a 46-second SIGSTOP of the test process inside the launcher's first
+  observation, in both completion tests, misses on attempt 1 with the withheld-time reason and
+  passes on attempt 2. The same stall after the launch returns lands in the liveness window, misses
+  with the liveness reason and then passes. A 12-second stop just after the spawn misses and then
+  passes when it hits attempt 1 only, and misses twice and then fails when it hits every attempt.
+- The deadline's lower bound: a launcher whose deadline is 50, 10 or 5 ms short fails at once (the
+  10 and 5 ms cases passed under the old 20 ms allowance), and one 0.5 ms short passes with no miss.
+- The grace: a TERM pause 30 ms short fails at once, and 10 ms short failed too, though that case
+  passes whenever the pause's last poll overshoots by 10 ms or more. A cancel that sleeps 1.1 s more
+  before SIGKILL fails at once, and with the stall headroom set to zero it misses twice and then
+  fails.
+- A partial migration fails at once with the one-clock message: the gated fixtures' arm stamps, or
+  the pending-input fixture's stamp, put back on `CLOCK_MONOTONIC`.
+- The drain margin is unchanged: an exit treated as stamped 1.95 s after the gated stamp misses and
+  then passes on attempt 1 only, and misses twice and then fails on every attempt; 1.85 s passes
+  with no miss, and 2.05 s misses twice and then fails.
+
+The four suites also passed three runs with every core busy (the default-QoS harness of the entry
+below), with no miss and no issue. The canonical local suite on the exact commit gates the push.
 
 ## 2026-10-05 — Hosted runners withhold the test process: gate the start, re-run only on evidence
 
@@ -133,6 +275,7 @@ instead of printing a miss, read the residuals below first.
   classed as a product failure. Moving the stamps to `CLOCK_UPTIME_RAW` would remove the mismatch
   with `DispatchTime`; the fixtures' Python arm stamps read `CLOCK_MONOTONIC` too and would have to
   move with them, and whether the kernel's alarm timer then matches needs checking. A follow-up.
+  Addressed by the follow-up above (stamps on `CLOCK_UPTIME_RAW`).
 - `OwnedProcessCleanupTests`' three-second post-return stop and group-settle windows have no
   allowance, and nothing bounds when their deciding observation is made. A test-thread stall just
   before it can let a survivor's own alarm read as a stop, a false pass, and for a backend that

@@ -21,12 +21,35 @@ import Foundation
 /// thread ran is an overcount; it can only re-run an attempt, and the last attempt sets nothing
 /// aside.
 ///
-/// It has internal access so tests in any file can use it. It reads `CLOCK_MONOTONIC` through
-/// `clock_gettime_nsec_np`, because `ReadyGatedChildren.monotonicNanoseconds()` is private to
-/// ScriptLauncherTests.swift; it is the same clock that decorator stamps on and that the `now()`
-/// helpers in `OwnedProcessCleanupTests` and `ProcessResourceTests` read, so a caller hands
-/// `lapsed(from:to:)` its own stamps.
+/// It has internal access so tests in any file can use it. It reads `CLOCK_UPTIME_RAW` through
+/// `clock_gettime_nsec_np`, because `ReadyGatedChildren.uptimeNanoseconds()` is private to
+/// ScriptLauncherTests.swift; it is the same clock that decorator stamps on, that the `now()`
+/// helpers in `OwnedProcessCleanupTests` and `ProcessResourceTests` and the former's
+/// `Fixture.uptimeNanoseconds()` read, and that every Python stamp compared across processes reads
+/// as `time.CLOCK_UPTIME_RAW` (the `root-observed-exited` stamp moved too, for consistency,
+/// although no check reads its content), so a caller hands `lapsed(from:to:)` its own stamps. It is
+/// also the clock the launcher's deadlines read: `CLOCK_UPTIME_RAW` and
+/// `DispatchTime.uptimeNanoseconds` are both `mach_absolute_time` converted to nanoseconds, so a
+/// `DispatchTime` value's `uptimeNanoseconds` is a stamp on this clock too. Per XNU's published
+/// source, the kernel's `alarm()` timer, which the Python fixtures arm, runs on the same uptime
+/// base.
+///
+/// A system sleep pauses this clock, together with the launcher's `DispatchTime` deadlines and the
+/// fixtures' alarms, so the probe does not record a sleep as a lapse, which is correct: a sleep
+/// moves none of them apart. Stopping the process (SIGSTOP) does not pause it, so a stall injected
+/// that way is still recorded.
 final class DeschedulingProbe: @unchecked Sendable {
+    /// The 1 ms a check keeps in hand where it holds a stamp on this clock to an event another
+    /// reader of the same clock timed: a launcher deadline set with `DispatchTime`, or a fixture's
+    /// kernel alarm. All of them read `mach_absolute_time`, so no frequency slew separates them;
+    /// what remains is truncation. `DispatchTime` arithmetic and `uptimeNanoseconds` convert
+    /// between nanoseconds and the clock's ticks (about 42 ns each on the Apple silicon measured)
+    /// and round by at most a tick. Per XNU's published source the kernel arms an alarm from the
+    /// uptime truncated to whole microseconds and converts the expiry to ticks with truncation, so
+    /// an alarm can fire up to about a microsecond before a nanosecond stamp read just before it
+    /// was armed, plus its seconds. A millisecond covers both many times over, while an event
+    /// stamped more than a millisecond before its due time still fails the check.
+    static let clockRoundingNanoseconds: UInt64 = 1_000_000
     private static let tickMicroseconds: useconds_t = 50_000
     /// Lateness below this is scheduling jitter rather than the process being withheld.
     private static let toleranceNanoseconds: UInt64 = 100_000_000
@@ -38,20 +61,20 @@ final class DeschedulingProbe: @unchecked Sendable {
     private var stopping = false
     private var lapses: [(from: UInt64, to: UInt64)] = []
 
-    /// `CLOCK_MONOTONIC` in nanoseconds, or `nil` if the clock could not be read, which
+    /// `CLOCK_UPTIME_RAW` in nanoseconds, or `nil` if the clock could not be read, which
     /// `clock_gettime_nsec_np` reports as zero. A failed read records no lapse.
-    private static func monotonicNanoseconds() -> UInt64? {
-        let value = clock_gettime_nsec_np(CLOCK_MONOTONIC)
+    private static func uptimeNanoseconds() -> UInt64? {
+        let value = clock_gettime_nsec_np(CLOCK_UPTIME_RAW)
         return value == 0 ? nil : value
     }
 
     init() {
         let thread = Thread { [self] in
             let tick = UInt64(Self.tickMicroseconds) * 1_000
-            var last = Self.monotonicNanoseconds()
+            var last = Self.uptimeNanoseconds()
             while !lock.withLock({ stopping }) {
                 usleep(Self.tickMicroseconds)
-                let now = Self.monotonicNanoseconds()
+                let now = Self.uptimeNanoseconds()
                 if let previous = last, let now,
                    now > previous + tick + Self.toleranceNanoseconds {
                     lock.withLock { lapses.append((from: previous + tick, to: now)) }
@@ -73,8 +96,8 @@ final class DeschedulingProbe: @unchecked Sendable {
         if first { _ = finished.wait(timeout: .now() + Self.stopWaitSeconds) }
     }
 
-    /// Stops the probe, then returns how much of `start...end` (`CLOCK_MONOTONIC` nanoseconds) fell
-    /// inside recorded lapses.
+    /// Stops the probe, then returns how much of `start...end` (`CLOCK_UPTIME_RAW` nanoseconds)
+    /// fell inside recorded lapses.
     func lapsed(from start: UInt64, to end: UInt64) -> UInt64 {
         stop()
         return lock.withLock {

@@ -147,9 +147,9 @@ private final class RecordedReaper: ScriptProcessReaping, @unchecked Sendable {
 }
 
 /// Forwards every child operation to the Darwin backend and records it in the trace. It also
-/// stamps, on `CLOCK_MONOTONIC`, when `spawn` returned and when cleanup first signalled the group,
-/// so an elapsed bound can start where the launcher's deadline starts instead of before process
-/// start-up.
+/// stamps, on `CLOCK_UPTIME_RAW` (the clock the launcher's `DispatchTime` deadline reads), when
+/// `spawn` returned and when cleanup first signalled the group, so an elapsed bound can start where
+/// the launcher's deadline starts instead of before process start-up.
 ///
 /// With `readyFile`, `spawn` also holds the launcher until the root has published that file, for at
 /// most `holdSeconds` (sixty by default; a hold ends as soon as the file appears or the root
@@ -198,9 +198,10 @@ private final class RecordedChildren: ScriptProcessChildren, @unchecked Sendable
         recordedReaper = RecordedReaper(trace)
     }
 
-    /// Nanoseconds on `CLOCK_MONOTONIC`. It cannot throw, so a stamp taken after a successful spawn
-    /// can never strand the child; a failed clock read returns zero and fails the bound.
-    static func now() -> UInt64 { clock_gettime_nsec_np(CLOCK_MONOTONIC) }
+    /// Nanoseconds on `CLOCK_UPTIME_RAW`, the clock `DispatchTime`, the kernel's alarm timer and
+    /// `DeschedulingProbe` read. It cannot throw, so a stamp taken after a successful spawn can
+    /// never strand the child; a failed clock read returns zero and fails the bound.
+    static func now() -> UInt64 { clock_gettime_nsec_np(CLOCK_UPTIME_RAW) }
 
     var spawnedAt: UInt64? { lock.withLock { stamps.spawned } }
     var firstSignalAt: UInt64? { lock.withLock { stamps.firstSignal } }
@@ -547,16 +548,19 @@ struct ProcessResourceTests {
     /// Classifies a gate that saw the root exit while the ready file was still missing. The
     /// launcher was still inside `spawn` and had started nothing, so the root died in start-up, of a
     /// fault in the product's `spawn` setup or of its own expiry. A death by SIGALRM seen no sooner
-    /// than `expiry` seconds (less a tenth for clock slew) after the call into `spawn` is the root's
-    /// own alarm firing on time, which only a runner that withheld the root for its whole expiry
-    /// produces, so on an attempt that is not the last it is a miss. Any other early exit, and that
-    /// one on the last attempt, records an issue at the caller's line (through the
-    /// `#_sourceLocation` default) and fails the attempt; it is never re-run.
+    /// than `expiry` seconds after the call into `spawn` is the root's own alarm firing on time,
+    /// which only a runner that withheld the root for its whole expiry produces, so on an attempt
+    /// that is not the last it is a miss. The stamps and the kernel's alarm timer read one clock,
+    /// so "no sooner" keeps only `DeschedulingProbe.clockRoundingNanoseconds` in hand, for the
+    /// microsecond the kernel truncates when it arms the alarm; that holds for every expiry the
+    /// callers pass, six seconds to 240. Any other early exit, and that one on the last attempt,
+    /// records an issue at the caller's line (through the `#_sourceLocation` default) and fails the
+    /// attempt; it is never re-run.
     private static func earlyExit(_ children: RecordedChildren, _ scenario: String,
                                   expiry: UInt64, lastAttempt: Bool,
                                   sourceLocation: SourceLocation = #_sourceLocation) -> EarlyExit {
         guard children.exitedBeforeReady == true else { return .none }
-        let due = expiry * 1_000_000_000 - 100_000_000
+        let due = expiry * 1_000_000_000 - DeschedulingProbe.clockRoundingNanoseconds
         if !lastAttempt, let after = children.earlyAlarmAfterCall, after >= due {
             return .missed(String(format: "the root died of its own %llu-second alarm before it "
                 + "published, %.2f s after the spawn call", expiry, Double(after) / 1e9))
@@ -573,10 +577,11 @@ struct ProcessResourceTests {
     /// the gate's hold ran out without `ready` with the root still running, decided while the
     /// launcher was still inside `spawn`; the launcher's first signal came at least `seconds` after
     /// the spawn stamp, so it held its whole deadline (the stamp precedes the deadline's start and
-    /// the signal follows its expiry; a millisecond is allowed for clock rounding); and the trace
-    /// shows the root's exit observed at most twice before that signal. A launcher that acts on an
-    /// observed exit leaves at most the observation on its last turn and the one its first signal
-    /// makes to revalidate; one that sat on an observed exit observes it again on every turn.
+    /// the signal follows its expiry, all on the clock `DispatchTime` reads, so only the rounding
+    /// `DeschedulingProbe.clockRoundingNanoseconds` covers is allowed); and the trace shows the
+    /// root's exit observed at most twice before that signal. A launcher that acts on an observed
+    /// exit leaves at most the observation on its last turn and the one its first signal makes to
+    /// revalidate; one that sat on an observed exit observes it again on every turn.
     ///
     /// Whether the root published `ready` by the return is deliberately not asked: a root still in
     /// start-up when the deadline expires is stopped by the timeout's group signals before it can
@@ -590,7 +595,8 @@ struct ProcessResourceTests {
               children.sawReady == false, children.exitedBeforeReady == false,
               let spawnedAt = children.spawnedAt,
               let signalledAt = children.firstSignalAt,
-              signalledAt >= spawnedAt + seconds * 1_000_000_000 - 1_000_000
+              signalledAt + DeschedulingProbe.clockRoundingNanoseconds
+                  >= spawnedAt + seconds * 1_000_000_000
         else { return false }
         let beforeSignal = children.trace.events.prefix(while: { !$0.hasPrefix("signal") })
         return beforeSignal.filter { $0 == "observed" }.count <= 2
@@ -1003,13 +1009,15 @@ struct ProcessResourceTests {
             }
             // The miss is decided before any product check, from the gate and from what was in
             // place at the first group signal. The spawn stamp precedes the launcher's deadline and
-            // that signal follows its expiry, so a full deadline puts at least sixty seconds
-            // between them (a millisecond is allowed for clock rounding).
+            // that signal follows its expiry, both stamped on the clock `DispatchTime` reads, so a
+            // full deadline puts at least sixty seconds between them, less the rounding that
+            // `DeschedulingProbe.clockRoundingNanoseconds` allows for.
             var missed = false
             if case .failure(let failure) = result, failure is AppleScriptRunner.TimeoutError,
                children.sawReady == false, children.exitedBeforeReady == false,
-               let spawnedAt = children.spawnedAt,
-               let signalledAt = children.firstSignalAt, signalledAt >= spawnedAt + 59_999_000_000 {
+               let spawnedAt = children.spawnedAt, let signalledAt = children.firstSignalAt,
+               signalledAt + DeschedulingProbe.clockRoundingNanoseconds
+                   >= spawnedAt + 60_000_000_000 {
                 missed = children.readyAtFirstSignal == false
             }
             if missed && attempt < 3 {
@@ -1219,17 +1227,18 @@ struct ProcessResourceTests {
         // The elapsed time from the launch is the "never returns" bound, thirty seconds on a
         // monotonic clock. A stall can fail it, so it is not checked on an attempt re-run for an
         // unmeasured window, and on attempts 1 and 2 a crossed bound is set aside, printed and
-        // re-run when the probe recorded a stall in the launch and the time it did not see
-        // withheld stays under thirty seconds, granted one probe tick (`crossedOnlyByStall`); the
-        // span is the launch, on the probe's clock, while the bound reads `DispatchTime`. The fake
-        // child becomes reapable by itself sixty seconds after the launch begins (`reapableAt`;
-        // cleared before the polls below, and nothing else reaps in between) and the delivery
-        // deadline is 120 seconds, so a cleanup that waits for the child returns at about sixty
-        // and one that waits for the deadline at about 120, each at least twice the bound and
-        // spent on the launcher's own thread; the first also fails the reap window and the
-        // transfer check. Residual: a wait outside both windows (before the pause, between them,
-        // or after the reap loop) leaves the turns unchanged and is caught only by that bound, as
-        // is a window lengthened by less than one of its own turns.
+        // re-run when the probe recorded a stall in the launch and the time it did not see withheld
+        // stays under thirty seconds, granted one probe tick (`crossedOnlyByStall`); the span is
+        // the launch, read from the same `DispatchTime` stamps as the bound, whose
+        // `uptimeNanoseconds` are on the clock the probe reads. The fake child becomes reapable by
+        // itself sixty seconds after the launch begins (`reapableAt`; cleared before the polls
+        // below, and nothing else reaps in between) and the delivery deadline is 120 seconds, so a
+        // cleanup that waits for the child returns at about sixty and one that waits for the
+        // deadline at about 120, each at least twice the bound and spent on the launcher's own
+        // thread; the first also fails the reap window and the transfer check. Residual: a wait
+        // outside both windows (before the pause, between them, or after the reap loop) leaves the
+        // turns unchanged and is caught only by that bound, as is a window lengthened by less than
+        // one of its own turns.
         for attempt in 1...3 {
             if try eventualReapAttempt(lost: lost, attempt: attempt, lastAttempt: attempt == 3) {
                 return
@@ -1264,24 +1273,23 @@ struct ProcessResourceTests {
         let runner = DeschedulingProbe()
         defer { runner.stop() }
         let start = DispatchTime.now()
-        // The probe's span, on its own clock (`CLOCK_MONOTONIC`), which `DispatchTime` is not.
-        let launchedAt = RecordedChildren.now()
         let reapableAt = start + 60
         children.fakeReaper.reapableAt = reapableAt
         let result = Result<ScriptOutcome, any Error> {
             try launcher.launch(ScriptInvocation(arguments: [], delivery: .timed(seconds: 120)))
         }
-        let returnedAt = RecordedChildren.now()
         let returned = DispatchTime.now()
-        let elapsed = Double(returned.uptimeNanoseconds - start.uptimeNanoseconds) / 1e9
+        // One clock for the bound and the probe: `uptimeNanoseconds` is on `CLOCK_UPTIME_RAW`, the
+        // clock `DeschedulingProbe` reads, and `DispatchTime` never runs backwards.
+        let span = returned.uptimeNanoseconds - start.uptimeNanoseconds
+        let elapsed = Double(span) / 1e9
         children.fakeReaper.reapableAt = nil
         let reaps = children.fakeReaper.reapTimes
         let pause = Self.pauseTurns(children.timeline)
         // Decided before any check, from the turn counts alone. Missing or misordered signals are
         // never a miss: the checks below fail them.
         let missed = pause.map { $0.count < 3 || reaps.count < 3 } ?? false
-        let span = launchedAt <= returnedAt ? returnedAt - launchedAt : 0
-        let withheld = runner.lapsed(from: launchedAt, to: returnedAt)
+        let withheld = runner.lapsed(from: start.uptimeNanoseconds, to: returned.uptimeNanoseconds)
         let timing = "\(DeschedulingProbe.seconds(span)) s from the launch to the return, "
             + "\(DeschedulingProbe.seconds(withheld)) s of it withheld by the runner"
         // Decided before the obligation checks: nothing transferred, a return at or after the time
