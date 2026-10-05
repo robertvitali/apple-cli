@@ -1644,6 +1644,73 @@ class CapabilityPolicyBootstrapTests(unittest.TestCase):
         policy = load_module(POLICY_PATH, "capability_policy_cli_canonical")
         self.assertEqual(completed.stdout, policy.canonical_json(snapshot))
 
+    def test_snapshot_cli_reads_a_dump_under_a_symlinked_directory(self) -> None:
+        # macOS's /tmp and the TMPDIR under /var are symlinked ancestors; only the dump's
+        # directory is resolved, so the dump itself still may not be a symlink (2026-10-05).
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            root = Path(temporary_directory).resolve()
+            real = root / "real"
+            real.mkdir()
+            write_json(real / "dump.json", sample_dump())
+            (root / "link").symlink_to(real, target_is_directory=True)
+            (real / "alias.json").symlink_to(real / "dump.json")
+            (root / "dangling").symlink_to(root / "nowhere", target_is_directory=True)
+
+            def snapshot(path):
+                return subprocess.run(
+                    [sys.executable, str(POLICY_PATH), "snapshot", "--dump", str(path)],
+                    stdin=subprocess.DEVNULL,
+                    stdout=subprocess.PIPE,
+                    stderr=subprocess.PIPE,
+                    text=True,
+                    check=False,
+                    env={**os.environ, "PYTHONDONTWRITEBYTECODE": "1"},
+                )
+
+            direct = snapshot(real / "dump.json")
+            through_link = snapshot(root / "link" / "dump.json")
+            symlinked_file = snapshot(root / "link" / "alias.json")
+            # The trusted entry point takes the same path; snapshot prepares no session there.
+            policy = load_module(POLICY_PATH, "capability_policy_symlinked_dump")
+            trusted = run_policy_main(
+                policy,
+                ["snapshot", "--dump", str(root / "link" / "dump.json")],
+                process_session=object(),
+            )
+            trusted_refusal = run_policy_main(
+                policy,
+                ["snapshot", "--dump", str(root / "link" / "alias.json")],
+                process_session=object(),
+            )
+            # A directory that cannot be resolved is refused with the fixed code, never with the
+            # resolver's own message, which names the path.
+            unresolvable = []
+            for directory in (root / "absent", root / "dangling"):
+                unresolvable.append(snapshot(directory / "dump.json"))
+                unresolvable.append(
+                    run_policy_main(
+                        policy,
+                        ["snapshot", "--dump", str(directory / "dump.json")],
+                        process_session=object(),
+                    )
+                )
+
+        for refused in unresolvable:
+            self.assertEqual(refused.returncode, 2)
+            self.assertEqual(refused.stdout, "")
+            self.assertEqual(refused.stderr, "capability-policy: input-not-regular\n")
+        self.assertEqual(trusted.returncode, 0, trusted.stderr)
+        self.assertEqual(trusted.stdout, direct.stdout)
+        self.assertEqual(trusted_refusal.returncode, 2)
+        self.assertEqual(trusted_refusal.stderr, "capability-policy: input-not-regular\n")
+        self.assertEqual(direct.returncode, 0, direct.stderr)
+        self.assertEqual(through_link.returncode, 0, through_link.stderr)
+        self.assertEqual(through_link.stderr, "")
+        self.assertEqual(through_link.stdout, direct.stdout)
+        self.assertEqual(symlinked_file.returncode, 2)
+        self.assertEqual(symlinked_file.stdout, "")
+        self.assertEqual(symlinked_file.stderr, "capability-policy: input-not-regular\n")
+
     def test_cli_argument_errors_are_stable_and_do_not_echo_values(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             dump_path = Path(temporary_directory) / "dump.json"

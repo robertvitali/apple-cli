@@ -200,6 +200,24 @@ def _without_symlink_components(path: Path) -> Path:
     return absolute
 
 
+def _dump_path(raw: str) -> Path:
+    """Resolve the directory of snapshot's --dump, never the file itself.
+
+    Every other input refuses any symlinked component. The dump is the operator's own local file
+    and snapshot only prints a draft, so its directory may sit under a symlinked ancestor such as
+    macOS's /tmp or a TMPDIR under /var; the file itself must still not be a symlink, which
+    _read_regular_bytes enforces (2026-10-05).
+    """
+    path = Path(raw)
+    try:
+        absolute = path if path.is_absolute() else Path.cwd() / path
+        directory = absolute.parent.resolve(strict=True)
+    except (OSError, RuntimeError, ValueError) as error:
+        # The error text names the path, so only the fixed code is reported.
+        raise PolicyError("input-not-regular") from error
+    return directory / absolute.name
+
+
 def _read_regular_bytes(path: Path, maximum: int = MAX_JSON_BYTES) -> bytes:
     absolute = _without_symlink_components(path)
     flags = os.O_RDONLY
@@ -2159,7 +2177,7 @@ def main(argv: Optional[list[str]] = None) -> int:
         namespace = _parse_arguments(argv)
         if namespace.operation != "snapshot":
             raise PolicyError("process-session-unavailable")
-        result = snapshot_manifest(_load_json(Path(namespace.dump)))
+        result = snapshot_manifest(_load_json(_dump_path(namespace.dump)))
         decision = _decision(result=result)
     except (PolicyError, schema.SchemaError) as error:
         decision = _decision(error=error)
@@ -2175,7 +2193,7 @@ def run_trusted(argv, *, context: TrustedEntryContext) -> int:
         admitted = require_trusted_entry_context(context)
         namespace = _parse_arguments(argv)
         if namespace.operation == "snapshot":
-            result = snapshot_manifest(_load_json(Path(namespace.dump)))
+            result = snapshot_manifest(_load_json(_dump_path(namespace.dump)))
         else:
             session = QualifiedProcessSession.prepare(admitted.trusted_root, admitted.profile_id)
             _admit_session(session)
