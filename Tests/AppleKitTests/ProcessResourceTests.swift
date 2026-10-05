@@ -35,7 +35,13 @@ private final class RecordingProcessIO: ScriptProcessIO, @unchecked Sendable {
     /// deadline cannot shorten it.
     var syntheticReadSeconds: Double?
     private var syntheticReadEnd: DispatchTime?
+    /// With a value, the first `read` waits that many seconds from when it was called before it
+    /// reads. A launch sets its deadline before its first read, so a wait at least as long as the
+    /// deadline's span ends with the deadline passed. Not combined with `syntheticReadSeconds`,
+    /// whose window would run during the stall.
+    var firstReadStallSeconds: Double?
     private var readStamps: [DispatchTime] = []
+    private var writeCalls = 0
     var capturePayloads: [Data] = []
     var captureSizeFailure: NSError?
     var captureGrowthBeforeSnapshot: Data?
@@ -49,6 +55,8 @@ private final class RecordingProcessIO: ScriptProcessIO, @unchecked Sendable {
     var allocationCount: Int { lock.withLock { created } }
     /// When each `read` was called, on the clock the launcher's deadline reads (`DispatchTime`).
     var readTimes: [DispatchTime] { lock.withLock { readStamps } }
+    /// How many times `write` was called, failed calls included.
+    var writeCount: Int { lock.withLock { writeCalls } }
     private func record(_ fd: Int32) -> Int32 {
         lock.withLock {
             #expect(liveDescriptors.insert(fd).inserted)
@@ -76,13 +84,15 @@ private final class RecordingProcessIO: ScriptProcessIO, @unchecked Sendable {
     }
     func read(_ fd: Int32, into buffer: UnsafeMutableRawBufferPointer) throws -> Int {
         let calledAt = DispatchTime.now()
-        let syntheticEnd: DispatchTime? = lock.withLock {
+        let (syntheticEnd, stallEnd): (DispatchTime?, DispatchTime?) = lock.withLock {
             readStamps.append(calledAt)
             if let seconds = syntheticReadSeconds, syntheticReadEnd == nil {
                 syntheticReadEnd = calledAt + seconds
             }
-            return syntheticReadEnd
+            let stall = readStamps.count == 1 ? firstReadStallSeconds.map { calledAt + $0 } : nil
+            return (syntheticReadEnd, stall)
         }
+        if let stallEnd { while DispatchTime.now() < stallEnd { usleep(5_000) } }
         readBufferSizes.append(buffer.count)
         if let readFailure, fd == failedReadFD { throw DarwinScriptProcessIO.posixError(readFailure) }
         if let until = syntheticEnd {
@@ -93,7 +103,10 @@ private final class RecordingProcessIO: ScriptProcessIO, @unchecked Sendable {
         }
         return try live.read(fd, into: buffer)
     }
-    func write(_ fd: Int32, from buffer: UnsafeRawBufferPointer) throws -> Int { try live.write(fd, from: buffer) }
+    func write(_ fd: Int32, from buffer: UnsafeRawBufferPointer) throws -> Int {
+        lock.withLock { writeCalls += 1 }
+        return try live.write(fd, from: buffer)
+    }
     func captureSize(_ fd: Int32) throws -> off_t {
         sizeObservations += 1
         trace.add("size")
@@ -1498,6 +1511,71 @@ struct ProcessResourceTests {
         }
         // The last attempt never misses or sets aside, so reaching here is a defect in the
         // attempt, never a pass.
+        Issue.record("the last attempt returned without a verdict")
+    }
+
+    @Test("a deadline that passes while one descriptor is served ends that turn")
+    func deadlinePassingMidTurn() throws {
+        // Over the synthetic backend no child inherits the pipes, and the launcher closes their
+        // child-side ends right after the fake spawn. So on the first poll stdout and stderr are at
+        // end of file and the stdin write end, whose reader is closed, reports an event: one turn
+        // with three descriptors to serve, in the launcher's order (stdout, stderr, stdin; a change
+        // to that order means reshaping this test). The first read waits out the whole two-second
+        // deadline, which the launcher set before it, so the deadline has passed when stderr comes
+        // up. The launcher must time out there, before it serves stderr or stdin: one read and no
+        // write. A launcher that checks the deadline only once per turn reads stderr, then fails to
+        // write stdin (the pipe has no reader) and reports a delivery failure. No process is
+        // involved. Besides the stalled read, the only wait is the timeout's one-second pause
+        // between SIGTERM and SIGKILL, which the fake root, still running, never ends early.
+        //
+        // An attempt with no read served no descriptor: the deadline passed before the first read,
+        // so the launcher timed out at the turn's own check or at the first descriptor's. That is a
+        // miss only when the timeout's SIGTERM came no sooner than the deadline could have passed,
+        // two seconds after a stamp taken before the launch: then the runner withheld the test
+        // process past the deadline. A launch that timed out sooner fails at once. The miss is
+        // decided before any check; the attempt still runs every check a stall cannot fail, prints
+        // why and is re-run, at most twice. The last attempt sets nothing aside.
+        for attempt in 1...3 {
+            let lastAttempt = attempt == 3
+            let children = NoSpawnChildren()
+            children.observation = .pending // still running, as a stalled launch's root would be
+            children.fakeReaper.reply = .exited
+            let io = RecordingProcessIO()
+            io.firstReadStallSeconds = 2.05
+            let sink = HeldReaps()
+            let launcher = OsascriptLauncher(captureDirectory: try scratch.directory(),
+                                             dependencies: .init(io: io, children: children,
+                                                                 deferred: sink))
+            let startedAt = DispatchTime.now()
+            let result = Result<ScriptOutcome, any Error> {
+                try launcher.launch(ScriptInvocation(
+                    arguments: [], delivery: .timedStdin(script: "x", seconds: 2)))
+            }
+            // Decided before any check, from the read count and the time of the first SIGTERM.
+            let reads = io.readTimes.count
+            let terminatedAt = children.timeline.first { $0.signal == SIGTERM }?.at
+            let termAfterDeadline = terminatedAt.map { $0 >= startedAt + 2.0 } ?? false
+            #expect(throws: AppleScriptRunner.TimeoutError.self) { _ = try result.get() }
+            #expect(io.writeCount == 0, "stdin was written after the deadline had passed")
+            #expect(children.signals == [SIGTERM, SIGKILL])
+            #expect(io.outstanding.isEmpty)
+            #expect(sink.obligations.isEmpty)
+            if reads == 0 {
+                if termAfterDeadline && !lastAttempt {
+                    print("mid-turn deadline scenario missed on attempt \(attempt) of 3: the "
+                          + "deadline passed before the first descriptor was served")
+                    continue
+                }
+                Issue.record(termAfterDeadline
+                    ? "the deadline passed before the first descriptor was served on every attempt"
+                    : "the launch timed out before its deadline, with no descriptor served")
+                return
+            }
+            #expect(reads == 1, "stderr was read after the deadline had passed")
+            return
+        }
+        // The last attempt never misses, so reaching here is a defect in the attempt, never a
+        // pass.
         Issue.record("the last attempt returned without a verdict")
     }
 
