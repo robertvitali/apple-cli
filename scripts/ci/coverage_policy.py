@@ -66,10 +66,6 @@ DECLARATION_ONLY_COVERAGE_EXCLUSIONS = {
         "blob_sha": "2da806f8fb987a9c2b043b2ad35556cee43dc437",
         "reason": "protocol-only seam with no executable coverage regions",
     },
-    "Sources/MessagesKit/Models.swift": {
-        "blob_sha": "f87952838dd753807ede5e1d7162da297a99e86d",
-        "reason": "payload type declarations with no executable coverage regions",
-    },
 }
 LINE_STATUSES = frozenset(("covered", "uncovered", "non_coverable"))
 PUBLIC_POLICY_ERROR_MESSAGES = frozenset(
