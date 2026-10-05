@@ -2,10 +2,35 @@
 topic: hosted-ci
 importance: high
 last-used: 2026-10-05
-uses: 16
+uses: 17
 ---
 
 # Hosted CI (public, free GitHub-hosted runners)
+
+## 2026-10-05 — "Re-run failed jobs" cannot pass hosted-bats: its artifact is per attempt
+
+**What happened.** On `71dfb50` no runner picked up hosted-bats or Supply-chain policy, so
+`quality / required`, which aggregates them, failed; every other job that ran was green. "Re-run
+failed jobs" re-ran hosted-bats as attempt 2 without re-running hosted-bats-build, which had
+succeeded on the first attempt. hosted-bats then failed before any test ran: `Unable to download
+artifact(s): Artifact not found for name: hosted-bats-apple-<run id>-2`.
+
+**Why.** `ci.yml` names the built-binary artifact `hosted-bats-apple-${{ github.run_id }}-${{
+github.run_attempt }}` on both the upload and the download, so a later attempt can never consume a
+binary another attempt built. That is deliberate and worth keeping, but it means a re-run has to
+include hosted-bats-build.
+
+**What to do.** Whenever hosted-bats has to run again, for whatever reason, its own tests included,
+re-run the whole workflow (`gh run rerun <id>`, without `--failed`), not only the failed jobs; a
+failed `quality / required` behind it is the same case. No other workflow passes an artifact between
+jobs, so `--failed` is fine for those, Docs included.
+
+**Re-run one run per workflow at a time.** CI and Docs each cancel by ref (`ci-${{ github.ref }}`,
+`docs-${{ github.ref }}`, `cancel-in-progress: true`), and a re-run joins its run's group, so the
+later request wins whatever the commits' order. The same day, a re-run of `71dfb50`'s Docs jobs was
+cancelled a second after it was queued, when a re-run of `3d7ebcb`'s Docs run was requested
+("Canceling since a higher priority waiting request for docs-refs/heads/main exists"). Wait for one
+re-run to finish before requesting the next on the same branch.
 
 ## 2026-10-05 — Darwin's `killpg` fails with EPERM for a group of exited, unreaped members
 
