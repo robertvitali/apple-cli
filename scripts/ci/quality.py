@@ -321,6 +321,15 @@ def stage_names_for_mode(mode: Mode) -> Tuple[str, ...]:
     return tuple(stage.name for stage in STAGES if mode in stage.modes)
 
 
+def selected_stages(request: QualityRequest) -> Tuple[Stage, ...]:
+    """The stages a run selects, in registry order; --list-stages prints their names.
+
+    A run executes these, and runs a fresh bats-inventory again just before each Bats stage; the
+    listing shows the selection, not that repeated guard.
+    """
+    return tuple(stage for stage in STAGES if stage.name in request.stages)
+
+
 def full_sha(raw: Optional[str], label: str) -> Optional[str]:
     if raw is None:
         return None
@@ -1313,7 +1322,7 @@ def _run_quality_request(
         base_environment = dict(environment if environment is not None else os.environ)
         validate_hosted_runner_context(request, base_environment)
         git_validator(request)
-        selected = [stage for stage in STAGES if stage.name in request.stages]
+        selected = list(selected_stages(request))
         root = create_temporary_root()
         outcome: Optional[QualityResult] = None
         try:
@@ -1404,7 +1413,8 @@ def run_quality(
     try:
         request = parse_request(argv)
         if request.list_stages:
-            listed = stage_names_for_mode(request.mode)
+            # The selection a run makes, so --stage and --hosted-phase apply here too.
+            listed = tuple(stage.name for stage in selected_stages(request))
             emitted = stdout(listed)
             if emitted is None:
                 emitted = listed

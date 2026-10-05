@@ -731,6 +731,41 @@ class QualityDriverTests(unittest.TestCase):
             ("bats-inventory", "swiftly-build", "swiftly-test", "clt-build", "bats-local"),
         )
 
+    def test_list_stages_lists_the_selection_a_run_makes(self) -> None:
+        # --hosted-phase and --stage narrow the run, so they narrow the listing too, in the
+        # registry order a run takes (2026-10-05; the listing used to ignore both).
+        cases = (
+            (["--mode", "hosted", "--hosted-phase", "swift"], ("hosted-build", "hosted-test")),
+            (["--mode", "hosted", "--hosted-phase", "build"], ("hosted-build",)),
+            (["--mode", "hosted", "--hosted-phase", "bats"], ("bats-inventory", "bats-hosted")),
+            (
+                ["--mode", "local", "--stage", "bats-local", "--stage", "swiftly-build"],
+                ("swiftly-build", "bats-local"),
+            ),
+        )
+        for argv, expected in cases:
+            with self.subTest(argv=argv):
+                calls = []
+                result = self.quality.run_quality(
+                    [*argv, "--list-stages"],
+                    runner=lambda *args, **kwargs: calls.append(args),
+                    stdout=list,
+                )
+                self.assertEqual(result.status, 0)
+                self.assertEqual(result.stdout, expected)
+                self.assertEqual(calls, [])
+        calls = []
+        hosted = self.quality.run_quality(
+            ["--mode", "hosted", "--list-stages"],
+            runner=lambda *args, **kwargs: calls.append(args),
+            git_validator=lambda request: None,
+            stdout=list,
+        )
+        self.assertEqual(
+            hosted.stdout, ("bats-inventory", "hosted-build", "hosted-test", "bats-hosted")
+        )
+        self.assertEqual(calls, [])
+
     def test_cli_list_stages_prints_names_without_checkout_validation(self) -> None:
         completed = subprocess.run(
             ["python3", str(QUALITY_PATH), "--mode", "local", "--list-stages"],
