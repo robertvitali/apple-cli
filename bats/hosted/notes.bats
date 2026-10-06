@@ -79,10 +79,10 @@ raise SystemExit(0 if matches else 1)
 @test "notes --help lists the core subcommands" {
   run "$BIN" notes --help
   [ "$status" -eq 0 ]
-  for c in get get-checklist get-metadata list search create update delete move \
+  for c in get get-checklist get-metadata list search recent create update delete move \
            folders accounts attachments save-attachment batch-delete export stats \
            sync-status health doctor; do
-    echo "$output" | grep -q "$c"
+    echo "$output" | grep -qE "^  $c( |\$)"
   done
 }
 
@@ -327,15 +327,18 @@ raise SystemExit(0 if matches else 1)
   # Guards against a local @Option/@Flag whose long name collides with GlobalOptions
   # (--text/--dry-run/--execute/--test-mode): ArgumentParser rejects the dupe at PARSE time,
   # so that subcommand's --help exits 1 with empty stdout and the tool is silently 100% dead
-  # while build + logic tests stay green. This asserts none of the 35 are dead.
+  # while build + logic tests stay green. This asserts none of the 37 are dead.
   local subs=(get get-plaintext get-markdown get-by-id get-details get-metadata get-checklist \
-    list search selected create update append delete move folders create-folder delete-folder \
-    accounts default-location shared attachments save-attachment fetch-attachment show-attachment \
-    batch-delete batch-move export stats sync-status health doctor show-note show-folder show-account)
+    get-link list search recent selected create update append delete move folders create-folder \
+    delete-folder accounts default-location shared attachments save-attachment fetch-attachment \
+    show-attachment batch-delete batch-move export stats sync-status health doctor show-note \
+    show-folder show-account)
   for s in "${subs[@]}"; do
     run "$BIN" notes "$s" --help
     [ "$status" -eq 0 ] || { echo "DEAD subcommand: notes $s (exit $status)"; false; }
     [ -n "$output" ] || { echo "EMPTY --help: notes $s"; false; }
+    # An unknown leaf prints the parent's help and exits 0, so also require this leaf's usage.
+    echo "$output" | grep -q "USAGE: apple notes $s " || { echo "NOT A LEAF: notes $s"; false; }
   done
 }
 
@@ -504,4 +507,28 @@ raise SystemExit(0 if matches else 1)
   [ "$status" -eq 0 ]
   echo "$output" | grep -q '\^\[\[31mRED'
   ! printf '%s' "$output" | grep -q "$(printf '\033')"
+}
+
+# --- notes recent, added by outside pull request 5 (refused before Notes is contacted) --------
+
+@test "recent refuses a non-positive --limit (exit 64)" {
+  run "$BIN" notes recent --limit 0
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q '"type" : "validation_error"'
+  echo "$output" | grep -q 'Expected an integer greater than 0'
+  run "$BIN" notes recent --limit=-1
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q '"type" : "validation_error"'
+  echo "$output" | grep -q 'Expected an integer greater than 0'
+}
+
+@test "recent refuses an empty or slash-only --folder (exit 64)" {
+  run "$BIN" notes recent --folder ""
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q '"type" : "validation_error"'
+  echo "$output" | grep -q -- '--folder must be a non-empty string'
+  run "$BIN" notes recent --folder "///"
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q '"type" : "validation_error"'
+  echo "$output" | grep -q -- '--folder must be a non-empty string'
 }

@@ -124,3 +124,39 @@ setup() {
   run "$BIN" messages recent --limit 0
   [ "$status" -eq 64 ]
 }
+
+# --- surfaces added by outside pull requests 3 and 4 (no TCC) -------------------------------
+
+@test "recent --help and search --help list --direct-only" {
+  run "$BIN" messages recent --help
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q -- '--direct-only'
+  run "$BIN" messages search --help
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q -- '--direct-only'
+}
+
+@test "chats --help lists --name and --limit" {
+  run "$BIN" messages chats --help
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q -- '--name'
+  echo "$output" | grep -q -- '--limit'
+}
+
+@test "chats --limit 0 and --limit 10001 → validation error (exit 64)" {
+  run "$BIN" messages chats --limit 0
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q '"type" : "validation_error"'
+  echo "$output" | grep -q 'limit must be between 1 and 10000'
+  run "$BIN" messages chats --limit 10001
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q '"type" : "validation_error"'
+  echo "$output" | grep -q 'limit must be between 1 and 10000'
+}
+
+@test "send --help lists --service and --file" {
+  run "$BIN" messages send --help
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q -- '--service <service>'
+  echo "$output" | grep -q -- '--file <file>'
+}

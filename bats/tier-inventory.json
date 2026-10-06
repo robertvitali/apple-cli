@@ -6,7 +6,7 @@
     "test_count": 0
   },
   "schema_version": 1,
-  "test_count": 455,
+  "test_count": 482,
   "tiers": {
     "hosted": {
       "files": [
@@ -234,7 +234,7 @@
           "test_count": 120
         },
         {
-          "file_sha256": "23a087ee666d59ad74899ca98186feebd5b20f2db24b0804c5a5c456b8c5cf40",
+          "file_sha256": "3901c95767ea34906009e0234c6f0f3dfa32a191a445d683704b3a1ca4296297",
           "ordered_title_sha256": [
             "870c68fa8ee2d8122f86c0dc014553e8a91898052d0d8e2c28f6370eb238ee4e",
             "14b64d1228d9cf37902a03de8b5d86abd671bcbbec37dcaeecf83c3ccaee489b",
@@ -246,13 +246,17 @@
             "af6285e031f8d79023b684862e0663b6353ccec1c22e384d46ee3a687fbbd98e",
             "8daff29ad7fe883002254dce63649c49ec442ad345a1a75f6e02bfd6de369e9f",
             "cf082fe9a59be2d1d5b17342401317f442121fd06954b6d430c4fb316d5c50a1",
-            "dc03f1d11aed222d8cb724eda1e2618fcb0aa80d9fba57512ae9252b85b02524"
+            "dc03f1d11aed222d8cb724eda1e2618fcb0aa80d9fba57512ae9252b85b02524",
+            "f2d2297a93ff1fa675d171ade7a30738e9d732d5d40b02783a9c38e19b671abb",
+            "4423f1c2e71b864a640f6ece29fbb0c1d5fd3582cfc668e2ddce1eac20b38ba1",
+            "ab07d00c50b5fe593ccf5e1119f03c126334f29cb8a608bc5c423f57c314a7d5",
+            "7d0d05ce2cd8b0934279b170ebaf2480b440ffe933bddbf18d9b9a69230e6407"
           ],
           "path": "bats/hosted/messages.bats",
-          "test_count": 11
+          "test_count": 15
         },
         {
-          "file_sha256": "489bf4d9a7e1d1dea5e038e36c58e200f35f1b299c058ace927f4a1865db5580",
+          "file_sha256": "d896abb29ece664f148f0abecfa951eb8bae47062e4ee9f6f81d446e2870cf62",
           "ordered_title_sha256": [
             "47d8ccc1158938404ec2ce019136bd4189bf69bf9b202c3225d20a9babc5e9b1",
             "94c3f3e297c22a4a2ce7ea57636b7189f9a4265d2f434918cf637b0f5a176089",
@@ -292,10 +296,12 @@
             "48c0e7af64770a00ecc4ef340ef77ca1d61128594f70395d2624a9f06f5b02aa",
             "4525b347750dd62ea2304c2a39004c542a56f00da39a67ff698185710bb9a90b",
             "c45aea27e0404d81e3997ff293d16896f503dc227f0285c79998165e000d60c9",
-            "a3d86af592c1b8d6c46013644d6329919f79976d71a908202048c5ba307c8fce"
+            "a3d86af592c1b8d6c46013644d6329919f79976d71a908202048c5ba307c8fce",
+            "d2e14ad434209087b4df6d52e4c8c06a19e42af5bf0751500e05f9ee5240b1c9",
+            "1b813b832dad6ebddada97d5822792be5a6cf0760d495754230cbb2e99a203ea"
           ],
           "path": "bats/hosted/notes.bats",
-          "test_count": 39
+          "test_count": 41
         },
         {
           "file_sha256": "e195ea49c1205b3fbe15d275a109f4591776093f3e743f21e36cb9c7682de3f4",
@@ -376,7 +382,7 @@
           "test_count": 26
         }
       ],
-      "test_count": 309
+      "test_count": 315
     },
     "local": {
       "files": [
@@ -524,7 +530,7 @@
           "test_count": 113
         },
         {
-          "file_sha256": "f7a70749f36f6f05f7dbc1c579d94e834819cb1bbe94664ebd0c806f0ee6eaa6",
+          "file_sha256": "0b25f4cf2ae9816a6f364792adb4c2ca96513958572bcd2fb1ba3d9c708f6a40",
           "ordered_title_sha256": [
             "421694f4437d54b99621e748fcfa13bb607fd447cd34a3b2ece072e134441eda",
             "b499aa91a70ed2b30272e113eaf0ce4421b6a2055a65cd3eef3a0732221c781f",
@@ -540,10 +546,31 @@
             "69b0c8d8e04192f43a9678ec5b7d6c5acc93a648f0ebd4417b19a1896d744d76",
             "1758f77465623dd28ab43540c190501a534edeadd3f4337d3a58e2c390736892",
             "11bf9daa7f64966fd8023a5f392690503e714cae2191865ff08ad85fb65e422d",
+            "423ca0e89cb05e9d65f8c88d6f1f506e681e2a28027241c71e1cbf1dacf398d1",
+            "8b7cc34823394d6342d22cd7064fbe20775063e5a5b72af656649d3b3b2d3f0a",
+            "6a164a582392d288621ef7de39950b93440c5635bb4c352344e209488b4f245f",
+            "3b9cdcfe9411995cada1df124b736415349b1e440c8c4f6a4ceb8b94aab9ef59",
+            "8e71857c379735746a3560a371adcf50e5cbf88d88514f86a2748e5816cfab1d",
+            "6afa7eddd2b521670861abd9470b7ee2bc092d2e775df67fb58d79168c3184c7",
+            "e368dfb7b52b6dbe0c73f67f66e53e8327575c1ecc7564426319259bf4edd333",
+            "3505157225e1779b350b0b203f4d99b713b44a26881441f0a632d4c0171118b0",
+            "4abaccd5414274ee817ef543b3e4d56687d8fd48255f3f10c0477f1d49a52c0b",
+            "801751ab6a026cfd640fb84b92a1370b00c8d3a54beab15718d61718f6193225",
+            "2205744c396028d5dfe9960ee68d729f0b67b429556740e4caca3c2a25ddf409",
+            "9faf8b1e30ba4bbb9952e651727551ec168efcad4c7d1df72558db2a60a9bdd7",
+            "42d85f3cd6115d7422e866adbda0e5864e9b4abecde8ccd3ed9f10966ec9b42c",
+            "5a1c2300a262b87fd3e89a96dd7e921a919dd54f3101c0b34157c6b1d4bf9603",
+            "c161ac5ce3f23d569d5bdcc04ac43814c52a71f628920ef95c20150eac7efa8b",
+            "b3b9277e63ad5d151b8f05350048ba8602187ee92d435b526d16f3c4ea9232f0",
+            "64bc0a81102aeb15d2e30bac011edc4e39440b346845069ffb43f0da01c4fb7b",
+            "2b2992b44ccf9f881f8fe818babf5f416ad6cd53420b29e222c99d6a29367700",
+            "bb03762c6c75f7e0ae7d11561f18ad7d9bab7947f77f6050cb0369c37846e705",
+            "5e7bb16e6abfcf9270903e873e2c83321d2a91469b35ac0a563687550eb8a0d8",
+            "11e0df0ba464f52522ffded7805769eadeff3ef8a0ef2961dd66ca0df96268aa",
             "032a59cfd99fa9bf29a9b5cb07e8562267e118806e16d89ee1513cc9e7437535"
           ],
           "path": "bats/local/messages.bats",
-          "test_count": 15
+          "test_count": 36
         },
         {
           "file_sha256": "e5db91b8454a650ed23a3febd7db5b1543818370d435f9aa0811446c0baff307",
@@ -576,7 +603,7 @@
           "test_count": 3
         }
       ],
-      "test_count": 146
+      "test_count": 167
     }
   }
 }

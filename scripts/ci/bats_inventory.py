@@ -129,8 +129,8 @@ TRUSTED_HOSTED_FILE_SHA256 = {
     "bats/hosted/calendar.bats": "f9959a2b94f5869d46d20c1be5500f4e244f1d0e5e3dd198f16f6e712ab11613",
     "bats/hosted/contacts.bats": "e9a4adf121fa3d78a7890aedbd1fe6a4d2737bd86efa91f96fde9880a0cec03b",
     "bats/hosted/mail.bats": "e120826145b1ecfa2ffb6f9aee9fd9f91f96c6aea0ed055d7ea37483f07e93b6",
-    "bats/hosted/messages.bats": "23a087ee666d59ad74899ca98186feebd5b20f2db24b0804c5a5c456b8c5cf40",
-    "bats/hosted/notes.bats": "489bf4d9a7e1d1dea5e038e36c58e200f35f1b299c058ace927f4a1865db5580",
+    "bats/hosted/messages.bats": "3901c95767ea34906009e0234c6f0f3dfa32a191a445d683704b3a1ca4296297",
+    "bats/hosted/notes.bats": "d896abb29ece664f148f0abecfa951eb8bae47062e4ee9f6f81d446e2870cf62",
     "bats/hosted/reminders.bats": "e195ea49c1205b3fbe15d275a109f4591776093f3e743f21e36cb9c7682de3f4",
     "bats/hosted/smoke.bats": "31b1904e4aed2228876f052c1e7e74c8d1530fd24230b2812015159b35710edc",
 }
