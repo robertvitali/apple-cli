@@ -15,7 +15,7 @@ apple contacts note set <identifier> [flags]
 - `--clear`
   <br>Clear the note (empty string).
 - `--file` `<file>`
-  <br>Read the note text from this file.
+  <br>Read the note text from this file (at most 25 MB): a regular file outside the credential folders, or a pipe given as /dev/stdin.
 - `--group` `<group>`
   <br>Group assertion; accepted and echoed in --dry-run previews, not enforced.
 - `--note` `<note>`

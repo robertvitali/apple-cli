@@ -307,7 +307,10 @@ a literal MCP transcription, and why:
   link planted after the final check is replaced rather than followed; a
   residual time-of-check race remains after the final host check and before the filesystem write),
   `--file` (note/vcard/photo/base64 inputs), `--json` (full-fidelity create/update); `--text`
-  human output. File / base64 / json inputs are size-bounded (25 MB) as a DoS guard.
+  human output. File / base64 / json inputs are size-bounded (25 MB) as a DoS guard. `--file`
+  reads a regular file (measured through symbolic links) or a pipe given as `/dev/stdin`; it
+  refuses other file kinds, and the credential directories and control characters that the
+  attachment sources refuse.
 - **Parse-layer input** (e.g. space-form `--limit -1`, missing required args, wrong types)
   emits the human-readable detail on stderr AND a JSON envelope on stdout (exit 64):
   `{"error":{"message":"invalid arguments (see stderr for details)","type":"validation_error"},

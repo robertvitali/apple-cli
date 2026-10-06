@@ -6,6 +6,7 @@
 
 ### hot
 - [foundational](decisions/hot/foundational.md)
+- [input-safety](decisions/hot/input-safety.md)
 - [workflow](decisions/hot/workflow.md)
 
 ### medium

@@ -468,6 +468,18 @@ struct ContactsNoteSetCommandTests {
         }
     }
 
+    @Test("--file refuses a directory (exit 64) and a path with a control character (exit 77)")
+    func fileRefusalExits() throws {
+        try expectContactsFailure(exit: AppleExit.usage, type: AppleErrorType.validation) {
+            try NoteSetCommand.parse(["--dry-run", "c1", "--file", NSTemporaryDirectory()])
+                .run(storeFactory: StoreFactory().make)
+        }
+        try expectContactsFailure(exit: AppleExit.permissionDenied, type: AppleErrorType.safetyViolation) {
+            try NoteSetCommand.parse(["--dry-run", "c1", "--file", "a\u{1B}b"])
+                .run(storeFactory: StoreFactory().make)
+        }
+    }
+
     @Test("executing writes the note through the AppleScript path and echoes the identifier")
     func executes() throws {
         let factory = StoreFactory(loadedBackend())

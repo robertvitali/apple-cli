@@ -273,10 +273,47 @@ JSON output are stable per the versioning policy — breaking changes bump
     send budget (the default mode without `--html`, or `--gui-send`), on the dry-run path as
     well, before anything is read, written or sent, and never falls back to the default state
     file. The `--file` size check measures the path that is read, so a `~/…` or trailing-slash
-    file over 25 MB is now refused (exit 64); a final symbolic link is still measured as the
-    link, not its target.
+    file over 25 MB is now refused (exit 64). The next entry covers symbolic links and files
+    that are not regular files.
   - `schema_version` is unchanged at 1: no field, type, enum or exit-code meaning changes;
     previously accepted inputs now take the existing validation exit.
+- **`contacts note set`, `contacts photo set` and `contacts vcard import` read `--file` from a
+  regular file outside the credential folders, or from a pipe given as `/dev/stdin`.**
+  - Old shape: `--file` read whatever path it was given, in full. `/dev/zero` and piped input
+    through `/dev/stdin` had no size limit, and a named pipe with no writer hung the command. A
+    symbolic link was measured as the link itself, so a link to a file over 25 MB passed the
+    size check and the whole target was read, and a file that grew after the check was read in
+    full. A file in `~/.ssh`, `~/.gnupg`, `~/.config`, `~/.aws`, `~/.claude`,
+    `~/Library/Keychains`, `~/Library/LaunchAgents` or `~/Library/LaunchDaemons` was read and
+    copied into the contact, which can sync to iCloud, and a path containing a control character
+    was accepted.
+  - New shape: the file is opened once, and its kind, size and content are read from that open
+    file. A regular file is read, measured through any symbolic link. Input handed over as exactly
+    `/dev/stdin` or `/dev/fd/N` is still read when it is a pipe (a shell pipe) or a socket (Node's
+    and Bun's spawn input). Either way the read stops one byte past 25 MB, so input over the limit
+    is refused (exit 64), even a file that grows during the read. Anything else (a named pipe,
+    device, directory, a socket opened by path, or a terminal on stdin) is a `validation_error`
+    (exit 64). A regular file inside one of the credential folders above, a link out of one, or a
+    path that passes through one (including a relative path from a working directory inside one),
+    however the path to it is spelled, and a path containing a control character are a
+    `safety_violation` (exit 77), with the same folder list and control-character rule as
+    `mail send --attach` and `messages send --file`.
+  - What it does not stop: the check reads paths. A copy or hard link of a credential file made
+    elsewhere, the target of a link out of a credential folder named directly or through a
+    further link, content piped from any of these or redirected onto stdin, and a file or folder
+    not on the list (such as `~/.netrc` or `~/.docker`) are read, and a credential file or folder
+    moved while the command runs can escape the check. It guards against accidents, not against a
+    deliberate copy. A handed-over pipe or socket whose writer stays open without writing is
+    waited on, as any reader of stdin would.
+  - Migration: none for pipes, or for regular files outside the credential folders. A file
+    inside one of those folders has to be copied elsewhere deliberately or passed inline, a path
+    that only passes through one (such as `~/.config/../notes.txt`) spelled without it, and a
+    path containing a control character renamed. For a named pipe or a device, save the content
+    to a regular file first; for typed input, use a here-document. A here-document or here-string
+    reaches `/dev/stdin` as a regular file in zsh and macOS's `/bin/bash` (observed), so it is
+    read; another shell may use a pipe, which is read too.
+  - `schema_version` is unchanged at 1: no field, type, enum or exit-code meaning changes;
+    previously accepted inputs now take the existing validation and safety exits.
 - **Mail templates move to `~/.apple-cli/mail-templates/`, and `APPLE_MAIL_TEMPLATES_DIR`
   replaces `APPLE_MAIL_MCP_HOME`** (operator ruling D40).
   - Old shape (macOS 27 observed; macOS 26 and 15 inferred from Foundation behaviour observed
@@ -500,10 +537,9 @@ JSON output are stable per the versioning policy — breaking changes bump
   directory as `~` / `~/…`.
 - **`contacts … --file` no longer skips its 25 MB limit for a `~/…` or trailing-slash
   spelling.** Either used to skip the check (`~/…` on macOS 26 and 27), so a larger file was
-  read into memory in full; it is now refused. A final symbolic link is still measured as the
-  link, not its target. `--file` and the two rate-limit state variables each read a tilde
-  consistently across macOS releases, as does `APPLE_MAIL_TEMPLATES_DIR`. These changes are
-  described under BREAKING.
+  read into memory in full; it is now refused. `--file` and the two rate-limit state variables
+  each read a tilde consistently across macOS releases, as does `APPLE_MAIL_TEMPLATES_DIR`.
+  These changes are described under BREAKING.
 
 - **Capability checks accept escaped quotes in ordinary multiline Swift test literals.**
   Literal contents remain excluded from test discovery. xUnit evidence now requires UTF-8

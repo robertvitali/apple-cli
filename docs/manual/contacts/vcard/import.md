@@ -11,7 +11,7 @@ apple contacts vcard import [flags]
 ## Options
 
 - `--file` `<file>`
-  <br>Read vCard text from this file.
+  <br>Read vCard text from this file (at most 25 MB): a regular file outside the credential folders, or a pipe given as /dev/stdin.
 - `--group` `<group>`
   <br>Add every imported contact to this group id.
 - `--vcard` `<vcard>`

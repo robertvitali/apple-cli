@@ -6,7 +6,7 @@
     "test_count": 0
   },
   "schema_version": 1,
-  "test_count": 452,
+  "test_count": 455,
   "tiers": {
     "hosted": {
       "files": [
@@ -381,15 +381,18 @@
     "local": {
       "files": [
         {
-          "file_sha256": "ff770c2afe2e9330322cbce63228c8122929aea111c1f9ed51320006ba41cf81",
+          "file_sha256": "1a4bd778398ae482b27f725fa0fe8423631c0d9b82c5b638323b7abe5d0a4dc8",
           "ordered_title_sha256": [
             "838a4fa362d4058938a13302ea855b9a32fe4ffe778ce4a481e13513103d9f86",
             "c32eaa975d413a524353a5119d06d0fb78c964e878e4d14d302472265404db66",
             "2c56526b06cee261ced809ca01a8df962e811cbf19a34a93f6bc82bffaf0d740",
-            "e2914a43416006ae0d1758b52fd2e73bc9f568bc72fca821a82923cf86d53e2f"
+            "e2914a43416006ae0d1758b52fd2e73bc9f568bc72fca821a82923cf86d53e2f",
+            "a8f8ba5c3985b361eaf96f5010ff2fa72563291d7f42749323bbc01669bec9b1",
+            "ce662026379deef1ada4c4091aa5e822d62e1111452b41d64676309c2cef6aaf",
+            "23d84ed1c6270fcf2e1bff7ef324ae41a13214ba7f300eecf655abb8545f84c6"
           ],
           "path": "bats/local/contacts.bats",
-          "test_count": 4
+          "test_count": 7
         },
         {
           "file_sha256": "a3f21451dcf722b2e3df4b8181f67f70125c1f8c6338bd53de3f8af3aa23480c",
@@ -573,7 +576,7 @@
           "test_count": 3
         }
       ],
-      "test_count": 143
+      "test_count": 146
     }
   }
 }

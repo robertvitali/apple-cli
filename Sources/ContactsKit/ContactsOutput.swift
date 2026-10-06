@@ -50,26 +50,242 @@ func unionSummariesByID(_ lists: [[ContactSummary]], cap: Int) -> [ContactSummar
 /// pathological file or string from blowing up memory before we ever touch the store.
 let maxContactsInputBytes = 25 * 1024 * 1024
 
-/// Read a file into memory only after confirming it is under the size ceiling. The spelling is
-/// resolved ONCE, under the shared tilde policy (`TildeSpelling`): another user's `~user` is
-/// refused before anything is read, and `~/…` expands to the operator's own home directory (the
-/// same directory as `~`), so the size check and the read see the same path on every macOS
-/// release. Measuring the raw spelling, as this once did, skipped the limit for `~/…` and for a
-/// trailing slash: `attributesOfItem(atPath:)` found nothing for either spelling, while the read
-/// resolved both. The trailing slash is handled because `expandingTildeInPath` also drops a
-/// trailing slash (and collapses `//`). Residual: a final symbolic link is still measured as the
-/// link itself, not its target.
-func readBoundedFile(_ raw: String, _ what: String) throws -> Data {
+/// Read a `contacts … --file` input of at most `maxContactsInputBytes`: a regular file outside
+/// the credential directories, or a pipe or socket the caller hands over as `/dev/stdin` or
+/// `/dev/fd/N`. The credential-directory list and the control-character rule are those of the
+/// attachment sources (`AttachmentSource.resolve`), because a file read here is copied into a
+/// contact, which can sync off the machine.
+///
+/// 1. A control character (C0 or DEL) anywhere in the spelling → `safety_violation`.
+/// 2. Another user's `~user` spelling → `validation_error`, under the shared tilde policy
+///    (`TildeSpelling`). `~/…` means the operator's own home, and `expandingTildeInPath` drops a
+///    trailing slash and collapses `//`.
+/// 3. Exactly `/dev/stdin` or `/dev/fd/N` names a descriptor the caller handed over, which is
+///    duplicated (`F_DUPFD_CLOEXEC`) rather than opened by path, so no spelling elsewhere can pass
+///    for it; the duplicate keeps the caller's flags, so a pipe read that way blocks as stdin does.
+///    Any other spelling is opened in two steps: its directory, then the last component inside
+///    that open directory (`openat`), so the directory checked in step 5 is the one the file was
+///    found in. `O_NONBLOCK` keeps the open from waiting for a writer on a named pipe, `O_NOCTTY`
+///    keeps a terminal from becoming the controlling terminal, and a regular file opened this way
+///    drops `O_NONBLOCK` before the read. The file's kind, size and content come from that one
+///    descriptor, so a file swapped or relinked after the open cannot change what is read.
+/// 4. A regular file is read. A pipe or socket is read only when handed over (a shell pipe hands
+///    over a pipe; Node's and Bun's spawn input, a socket): a named pipe opened by path reads as
+///    empty when nothing writes to it. Anything else (a named pipe, device, directory, or a socket
+///    opened by path) → `validation_error`.
+/// 5. A regular file inside a credential directory (`sensitiveDirectories`), whose directory
+///    entry is inside one (a link out of it), or whose path passes through one →
+///    `safety_violation`, however the path is spelled.
+///    The directories are compared by identity (`st_dev`, `st_ino`, following links) with every
+///    ancestor of the opened file's path (`F_GETPATH`) and of the directory it was found in, so a
+///    directory that is itself a link, such as a dotfiles checkout, is covered too. So is every
+///    directory the spelling passes through, made absolute and resolved as the kernel walks it,
+///    for a path that enters a credential directory and leaves it again through `..` after a link.
+/// 6. A size over the ceiling → `validation_error`. The read stops one byte past the ceiling,
+///    so a pipe, or a file that grows after the size check, is refused without being read in full.
+///
+/// **What this does not stop** (as on `AttachmentSource`): it is a guard against accidents and
+/// naive commands, not an exfiltration control. A hard link to a credential file made outside
+/// those directories is read under the name it was opened by; so is a copy, the target of a link
+/// out of a credential directory named directly or through a further link, and content piped or
+/// redirected onto stdin from any of these. The directories are compared by path as they are at that moment, so a
+/// credential directory or file moved while the command runs can evade the comparison. The list
+/// is `sensitiveWriteDir`'s and is not exhaustive (`~/.netrc`, `~/.git-credentials`, `~/.docker`,
+/// anything outside `home`), and `home` is Foundation's home directory, which
+/// `CFFIXED_USER_HOME` moves. A handed-over pipe or socket whose writer stays open without writing
+/// is waited on, as any reader of stdin would. Opening a device before refusing it can have side
+/// effects (a serial port's DTR line), as reading it did before.
+///
+/// - Parameter home: the home directory the credential directories are measured against. A seam
+///   for the logic tier, as on `AttachmentSource.resolve`; production takes the default.
+func readBoundedFile(_ raw: String, _ what: String,
+                     home: String = FileManager.default.homeDirectoryForCurrentUser.path) throws -> Data {
+    if let bad = raw.unicodeScalars.first(where: { $0.value < 0x20 || $0.value == 0x7F }) {
+        throw AppleError.safetyViolation(
+            "cannot read the \(what) file from a path containing a control character "
+            + "(U+\(String(format: "%04X", bad.value))) — refusing.")
+    }
     guard let path = TildeSpelling.expandedOwnHome(raw) else {
         throw AppleError.validation("cannot read the \(what) file: " + TildeSpelling.refusalMessage(raw))
     }
-    let attrs = try? FileManager.default.attributesOfItem(atPath: path)
-    if let size = attrs?[.size] as? Int, size > maxContactsInputBytes {
-        throw AppleError.validation(
-            "\(what) file exceeds the \(maxContactsInputBytes / (1024 * 1024)) MB limit (\(size) bytes)")
+    let failed = { (code: Int32) in
+        AppleError.validation("failed to read \(what) file \(raw): \(String(cString: strerror(code)))")
     }
-    do { return try Data(contentsOf: URL(fileURLWithPath: path)) }
-    catch { throw AppleError.validation("failed to read \(what) file \(raw): \(error.localizedDescription)") }
+    let refuseKind = { (kind: String) in
+        AppleError.validation(
+            "\(what) file is \(kind), not a regular file or a pipe given as /dev/stdin: \(raw); "
+            + "save the content to a regular file, or pass small content inline with \(inlineFlag(what))")
+    }
+
+    let handedOver = handedOverDescriptor(path)
+    var directory: Int32 = -1
+    defer { if directory >= 0 { close(directory) } }
+    let fd: Int32
+    if let caller = handedOver {
+        fd = fcntl(caller, F_DUPFD_CLOEXEC, 0)
+        guard fd >= 0 else { throw failed(errno) }
+    } else {
+        let parent = (path as NSString).deletingLastPathComponent
+        // Search access is enough (`O_SEARCH`), as for an ordinary open of a path inside it; a
+        // kernel that refuses `O_EXEC` on a directory gets the read-only open instead.
+        let parentPath = parent.isEmpty ? "." : parent
+        directory = open(parentPath, O_EXEC | O_DIRECTORY | O_CLOEXEC)
+        if directory < 0, errno == EINVAL {
+            directory = open(parentPath, O_RDONLY | O_DIRECTORY | O_CLOEXEC)
+        }
+        guard directory >= 0 else { throw failed(errno) }
+        fd = openat(directory, (path as NSString).lastPathComponent,
+                    O_RDONLY | O_NONBLOCK | O_NOCTTY | O_CLOEXEC)
+        guard fd >= 0 else {
+            if errno == EOPNOTSUPP { throw refuseKind("a socket") }
+            throw failed(errno)
+        }
+    }
+    defer { close(fd) }
+
+    var info = stat()
+    guard fstat(fd, &info) == 0 else { throw failed(errno) }
+    let kind = info.st_mode & S_IFMT
+    guard kind == S_IFREG || ((kind == S_IFIFO || kind == S_IFSOCK) && handedOver != nil) else {
+        throw refuseKind(handedOver != nil && kind == S_IFCHR ? "a terminal or other character device"
+                                                            : fileKind(kind))
+    }
+    let limitMB = maxContactsInputBytes / (1024 * 1024)
+    if kind == S_IFREG {
+        // A handed-over descriptor shares the caller's flags; only a file opened here is changed.
+        if handedOver == nil {
+            let flags = fcntl(fd, F_GETFL)
+            guard flags >= 0, fcntl(fd, F_SETFL, flags & ~O_NONBLOCK) == 0 else { throw failed(errno) }
+        }
+        var found = [String]()
+        for descriptor in [fd, directory] where descriptor >= 0 {
+            var name = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+            guard fcntl(descriptor, F_GETPATH, &name) != -1 else { throw failed(errno) }
+            found.append(String(cString: name))
+        }
+        // The file's own path is walked from its parent; the directory's path from itself.
+        let chains = [(found[0] as NSString).deletingLastPathComponent] + found.dropFirst()
+        if let dir = credentialDirectory(chains: chains, passed: directoriesPassed(absoluteSpelling(path)),
+                                         home: home) {
+            throw AppleError.safetyViolation(
+                "cannot read the \(what) file from a sensitive directory (\(dir)) — refusing.")
+        }
+        if info.st_size > off_t(maxContactsInputBytes) {
+            throw AppleError.validation("\(what) file exceeds the \(limitMB) MB limit (\(info.st_size) bytes)")
+        }
+    }
+    let data: Data?
+    do { data = try readAtMost(fd, limit: maxContactsInputBytes, expected: Int(info.st_size)) }
+    catch let error as POSIXError { throw failed(error.code.rawValue) }
+    guard let data else {
+        throw AppleError.validation(
+            "\(what) file exceeds the \(limitMB) MB limit (more than \(maxContactsInputBytes) bytes were read)")
+    }
+    return data
+}
+
+/// The descriptor a spelling hands over: 0 for exactly `/dev/stdin`, `N` for exactly `/dev/fd/N`
+/// with a decimal `N`, nil for anything else.
+private func handedOverDescriptor(_ path: String) -> Int32? {
+    if path == "/dev/stdin" { return 0 }
+    guard path.hasPrefix("/dev/fd/") else { return nil }
+    let number = path.dropFirst("/dev/fd/".count)
+    guard !number.isEmpty, number.allSatisfy({ $0.isASCII && $0.isNumber }) else { return nil }
+    return Int32(number)
+}
+
+/// `path` made absolute against `directory` (the working directory), with nothing else changed:
+/// its `..` components stay, so every directory the spelling passes through can be checked.
+func absoluteSpelling(_ path: String,
+                      in directory: String = FileManager.default.currentDirectoryPath) -> String {
+    path.hasPrefix("/") ? path : (directory as NSString).appendingPathComponent(path)
+}
+
+/// The credential directory under `home` that holds the file, or nil. Each of `chains` is a
+/// directory whose path and every ancestor are compared with the credential directories by
+/// identity; each of `passed` is a directory the caller's spelling passes through, compared
+/// itself.
+private func credentialDirectory(chains: [String], passed: [String], home: String) -> String? {
+    var folders: [(device: dev_t, inode: ino_t, path: String)] = []
+    for dir in sensitiveDirectories(home: home) {
+        var folder = stat()
+        if stat(dir, &folder) == 0 { folders.append((folder.st_dev, folder.st_ino, dir)) }
+    }
+    guard !folders.isEmpty else { return nil }
+    func match(_ candidate: String) -> String? {
+        var node = stat()
+        guard stat(candidate, &node) == 0 else { return nil }
+        return folders.first(where: { $0.device == node.st_dev && $0.inode == node.st_ino })?.path
+    }
+    for start in chains {
+        var ancestor = start
+        while !ancestor.isEmpty {
+            if let hit = match(ancestor) { return hit }
+            if ancestor == "/" { break }
+            ancestor = (ancestor as NSString).deletingLastPathComponent
+        }
+    }
+    return passed.lazy.compactMap(match).first
+}
+
+/// The directories an absolute spelling passes through on the way to its last component, each
+/// spelled as given (`/a/../b/c` gives `/a`, `/a/..`, `/a/../b`), so `stat` resolves each as the
+/// kernel walks it.
+private func directoriesPassed(_ path: String) -> [String] {
+    var prefix = ""
+    return path.split(separator: "/").dropLast().map { component in
+        prefix += "/" + component
+        return prefix
+    }
+}
+
+/// Read `fd` to its end, but never more than `limit + 1` bytes: nil means the input was longer
+/// than `limit`, and the descriptor is left just past that extra byte. `expected` only sizes the
+/// buffer. A non-blocking descriptor with nothing to read yet is waited on with `poll`; any other
+/// read error but `EINTR` throws its `POSIXError`.
+func readAtMost(_ fd: Int32, limit: Int, expected: Int = 0) throws -> Data? {
+    var data = Data()
+    data.reserveCapacity(min(max(expected, 0), limit))
+    var chunk = [UInt8](repeating: 0, count: 64 * 1024)
+    while true {
+        let want = min(chunk.count, limit + 1 - data.count)
+        let count = chunk.withUnsafeMutableBytes { Darwin.read(fd, $0.baseAddress, want) }
+        if count < 0 {
+            let code = errno
+            if code == EINTR { continue }
+            if code == EAGAIN {
+                var ready = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+                _ = poll(&ready, 1, 1000)
+                continue
+            }
+            throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
+        }
+        if count == 0 { return data }
+        data.append(contentsOf: chunk[..<count])
+        if data.count > limit { return nil }
+    }
+}
+
+/// How a refused `--file` input is named in the error.
+private func fileKind(_ kind: mode_t) -> String {
+    switch kind {
+    case S_IFIFO: return "a named pipe"
+    case S_IFDIR: return "a directory"
+    case S_IFCHR: return "a character device"
+    case S_IFBLK: return "a block device"
+    case S_IFSOCK: return "a socket"
+    default: return "a special file"
+    }
+}
+
+/// The inline flag that takes the same content as `--file` for each reader.
+private func inlineFlag(_ what: String) -> String {
+    switch what {
+    case "note": return "--note"
+    case "image": return "--base64 (the bytes base64-encoded)"
+    case "vcard": return "--vcard"
+    default: return "an inline flag"
+    }
 }
 
 /// Reject an oversized inline string input (`--base64` / `--json`) before parsing it.

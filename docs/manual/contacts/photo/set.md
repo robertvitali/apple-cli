@@ -17,7 +17,7 @@ apple contacts photo set <identifier> [flags]
 - `--clear`
   <br>Clear the existing photo.
 - `--file` `<file>`
-  <br>Read image bytes from this file.
+  <br>Read image bytes from this file (at most 25 MB): a regular file outside the credential folders, or a pipe given as /dev/stdin.
 - `--group` `<group>`
   <br>Group assertion; accepted and echoed in --dry-run previews, not enforced.
 

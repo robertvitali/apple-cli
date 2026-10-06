@@ -25,14 +25,19 @@ import Foundation
 /// The match is case-insensitive and boundary-aware: `~/.ssh/id_rsa` and `~/.ssh` match, but
 /// `~/.sshfoo/x` does not (prefix, not a path boundary).
 public func sensitiveWriteDir(_ resolvedPath: String, home: String) -> String? {
-    let dirs = [".ssh", ".gnupg", ".config", ".aws", ".claude",
-                "Library/Keychains", "Library/LaunchAgents", "Library/LaunchDaemons"]
-        .map { home + "/" + $0 }
+    let dirs = sensitiveDirectories(home: home)
     let lowered = resolvedPath.lowercased()
     return dirs.first(where: {
         let d = $0.lowercased()
         return lowered == d || lowered.hasPrefix(d + "/")
     })
+}
+
+/// The credential/config directories `sensitiveWriteDir` matches, spelled under `home`.
+public func sensitiveDirectories(home: String) -> [String] {
+    [".ssh", ".gnupg", ".config", ".aws", ".claude",
+     "Library/Keychains", "Library/LaunchAgents", "Library/LaunchDaemons"]
+        .map { home + "/" + $0 }
 }
 
 /// Lexically reduce only terminal slash / dot spellings before checking the raw final leaf.

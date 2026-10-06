@@ -87,3 +87,29 @@ assert_no_group_named() {
   [ "$status" -eq 65 ]
   echo "$output" | grep -q "No group found with identifier 'BOGUS-GROUP:ABGroup'"
 }
+
+# `--file` is read before the write gate and before the store is built, so these cases need no
+# Contacts TCC and never write: each is a --dry-run preview or a refusal.
+@test "note set --file reads piped input given as /dev/stdin" {
+  run bash -c 'printf "piped note" | "$1" contacts note set --dry-run SOME-ID --file /dev/stdin' _ "$BIN"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"note" : "piped note"'
+}
+
+@test "note set --file reads /dev/stdin redirected from a regular file" {
+  printf 'redirected note' > "$BATS_TEST_TMPDIR/note.txt"
+  run bash -c '"$1" contacts note set --dry-run SOME-ID --file /dev/stdin < "$2"' _ "$BIN" "$BATS_TEST_TMPDIR/note.txt"
+  [ "$status" -eq 0 ]
+  echo "$output" | grep -q '"note" : "redirected note"'
+}
+
+@test "note set --file refuses a named pipe (exit 64) and a control character (exit 77)" {
+  mkfifo "$BATS_TEST_TMPDIR/fifo"
+  run "$BIN" contacts note set --dry-run SOME-ID --file "$BATS_TEST_TMPDIR/fifo"
+  [ "$status" -eq 64 ]
+  echo "$output" | grep -q 'is a named pipe'
+  echo "$output" | grep -q -- '--note'
+  run "$BIN" contacts note set --dry-run SOME-ID --file "$(printf 'a\033b')"
+  [ "$status" -eq 77 ]
+  echo "$output" | grep -q '"type" : "safety_violation"'
+}

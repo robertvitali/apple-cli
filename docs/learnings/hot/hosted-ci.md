@@ -664,7 +664,9 @@ deterministic configuration error (like a malformed `APPLE_SCRIPT_MAX_OUTPUT_BYT
 degraded fail-open path is for runtime I/O failures. The `--file` reader measures its size limit
 on the path it reads (a trailing slash is handled because `expandingTildeInPath` drops it); a
 final symbolic link is still measured as the link, not its target, and devices, FIFOs and growth
-between the check and the read are open follow-ups. The fourth, `APPLE_MAIL_MCP_HOME`, went the
+between the check and the read are open follow-ups (closed 2026-10-05: the reader opens the file
+once and measures and reads through that descriptor; see the CHANGELOG's BREAKING entry).
+The fourth, `APPLE_MAIL_MCP_HOME`, went the
 other way (operator ruling D39): oracle A never expanded a tilde there, so the value is read
 literally, a relative value joined to the working directory before Foundation sees it (or, when
 the working directory has been deleted and `currentDirectoryPath` is empty, kept relative behind

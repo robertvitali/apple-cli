@@ -270,7 +270,7 @@ struct NoteSetCommand: ParsableCommand {
     @Argument(help: "The contact's CN identifier.") var identifier: String
     // `--note`, not `--text`: `--text` is the repo-wide human-output global (GlobalOptions).
     @Option(name: .long, help: "The note text.") var note: String?
-    @Option(name: .long, help: "Read the note text from this file.") var file: String?
+    @Option(name: .long, help: "Read the note text from this file (at most 25 MB): a regular file outside the credential folders, or a pipe given as /dev/stdin.") var file: String?
     @Flag(name: .long, help: "Clear the note (empty string).") var clear = false
     // Accepted and echoed, NOT enforced — the divergence `contacts delete` states in full above;
     // docs/port-specs/contacts.md §group_identifier is canonical, including the two-way
@@ -328,7 +328,7 @@ struct PhotoSetCommand: ParsableCommand {
         abstract: "Set/clear a contact's photo, --file|--base64|--clear (EXECUTES; --dry-run previews).")
     @OptionGroup var global: GlobalOptions
     @Argument(help: "The contact's CN identifier.") var identifier: String
-    @Option(name: .long, help: "Read image bytes from this file.") var file: String?
+    @Option(name: .long, help: "Read image bytes from this file (at most 25 MB): a regular file outside the credential folders, or a pipe given as /dev/stdin.") var file: String?
     @Option(name: .long, help: "Image bytes as a base64 string.") var base64: String?
     @Flag(name: .long, help: "Clear the existing photo.") var clear = false
     // Accepted and echoed, NOT enforced — the divergence `contacts delete` states in full above;
@@ -392,7 +392,7 @@ struct VCardImportCommand: ParsableCommand {
         commandName: "import",
         abstract: "Import contacts from vCard 3.0/4.0 text, atomic (EXECUTES; --dry-run previews).")
     @OptionGroup var global: GlobalOptions
-    @Option(name: .long, help: "Read vCard text from this file.") var file: String?
+    @Option(name: .long, help: "Read vCard text from this file (at most 25 MB): a regular file outside the credential folders, or a pipe given as /dev/stdin.") var file: String?
     // `--vcard`, not `--text`: `--text` is the repo-wide human-output global (GlobalOptions).
     @Option(name: .long, help: "vCard text inline.") var vcard: String?
     @Option(name: .long, help: "Add every imported contact to this group id.") var group: String?
