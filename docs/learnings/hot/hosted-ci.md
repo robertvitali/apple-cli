@@ -1,11 +1,40 @@
 ---
 topic: hosted-ci
 importance: high
-last-used: 2026-10-05
-uses: 17
+last-used: 2026-10-06
+uses: 18
 ---
 
 # Hosted CI (public, free GitHub-hosted runners)
+
+## 2026-10-06 — commit-lint refuses a comma in the scope, and main keeps the red
+
+**What happened.** `e886380`, headed `test(messages,notes): …`, went red on its CI push run:
+`commit-lint`, and `quality / required` with it, failed while every other job passed. `9a86125`
+(`docs(messages,notes): …`) had failed the same way on 2026-09-22. Its readiness-evidence row said
+this lesson was recorded here, but no entry existed until this one, so the repeat met no recorded
+warning.
+
+**Why.** The lint (`.github/workflows/ci.yml`, the `commit-lint` job) accepts a scope only as
+`\([a-z0-9._-]+\)`: one token of lowercase letters, digits, `.`, `_` and `-`, so a comma, a space,
+an uppercase letter or a slash fails it. Conventional Commits itself does not define multi-value
+scopes, and the lint does not allow them.
+
+**What it costs.** The red stays on `main`: the header cannot be corrected without rewriting
+history, which a force-push would need and the ruleset on `main` refuses. The lint reads only the
+pushed range (`BEFORE_SHA..HEAD` on a push), so the next push is unaffected; a force-push or
+initial push, which the ruleset refuses unless the operator lifts it for a rewrite, lints the last
+20 subjects instead. Release preparation
+is unaffected too: `scripts/ci/release_prep.py` (`FEATURE_SUBJECT_RE`) accepts any scope, and a
+`test:` or `docs:` subject counts as a patch-level change.
+
+**What to do.** Check the header against the lint's pattern before committing:
+
+```sh
+head -1 msg.txt | grep -qE '^(feat|fix|docs|style|refactor|perf|test|build|ci|chore|revert)(\([a-z0-9._-]+\))?!?: .{1,}$' && echo ok || echo NOT-CONVENTIONAL
+```
+
+For a change that spans domains, use one scope that names the shared part (`test(bats)`), or none.
 
 ## 2026-10-05 — "Re-run failed jobs" cannot pass hosted-bats: its artifact is per attempt
 
