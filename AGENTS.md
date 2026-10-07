@@ -108,8 +108,10 @@ a leak there survives the obvious fix.
 
 **If you find personal data already committed: STOP and tell the operator immediately.** Redact at
 HEAD right away (cheap, always correct, forecloses nothing), and treat history rewriting as the
-operator's decision alone — it force-pushes published history and never reaches forks, caches, or
-existing clones. Never rewrite or force-push without an explicit instruction (and since D46 the
+operator's decision alone — it force-pushes published history and never reaches forks,
+caches, existing clones, or pull-request refs, nor does it remove the pre-rewrite commits
+GitHub itself still serves by id, some of which the public Activity view lists (D19, D35,
+D38, D47). Never rewrite or force-push without an explicit instruction (and since D46 the
 operator first disables D46's interim ruleset on `main`, see Branch model). The standing record
 of such incidents is `HUMAN-DECISIONS.md` (D7, D9). The repo was made private on 2026-08-19
 (containment); D9 remediation was applied 2026-08-23, and on 2026-08-29 the operator authorized
