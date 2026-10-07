@@ -83,8 +83,14 @@ but do not prove there are none. A no-break space before `#` was one until 2026-
 ended a comment here, and a write command after it passed. A single-quoted scalar ending in
 `''` was another until 2026-10-07: YAML reads `''` as an escaped quote and folds the lines
 below into the scalar, so a write command, or a `permissions:` block GitHub never saw, could
-sit in what read here as separate keys. A quoted scalar must now close on its own line. The
-recorded sets below are control plane: changing a trigger, a required check name or an
+sit in what read here as separate keys. A quoted scalar must now close on its own line. A
+plain flow-sequence item holding `key: value`, a plain sequence entry whose key this parser
+does not admit, a lone `- -` entry and a plain key starting with `*` were others until the same
+day: each was a string or a literal key here and a mapping, a nested sequence or an alias to
+YAML. They are refused now, as are a plain flow item holding any `:`, `[`, `]`, `{` or `}` and a
+plain value holding a colon followed by a space or a tab, or ending in one, which YAML loaders
+read as a mapping, refuse, or disagree on.
+The recorded sets below are control plane: changing a trigger, a required check name or an
 admitted runner label edits them in the same reviewed commit.
 """
 from __future__ import annotations
@@ -440,7 +446,10 @@ def _decode_double_quoted(body: str) -> str:
             digits = body[index + 2:index + 2 + width]
             if len(digits) != width or not re.fullmatch(r"[0-9A-Fa-f]+", digits):
                 raise ParseError("malformed \\{} escape in double-quoted scalar".format(code))
-            out.append(chr(int(digits, 16)))
+            value = int(digits, 16)
+            if value > 0x10FFFF:
+                raise ParseError("malformed \\{} escape in double-quoted scalar".format(code))
+            out.append(chr(value))
             index += 2 + width
             continue
         raise ParseError("unsupported escape \\{} in double-quoted scalar".format(code))
@@ -473,6 +482,8 @@ def _expression_bodies(key: Optional[str], text: str) -> List[str]:
 
 
 SINGLE_QUOTED_BODY_RE = re.compile(r"(?:[^']|'')*+")
+# A colon followed by a space, a tab or the end makes a mapping in YAML, wherever plain text sits.
+PLAIN_PAIR_RE = re.compile(r":(?:[ \t]|$)")
 
 
 def _scalar(raw: str) -> Any:
@@ -502,12 +513,19 @@ def _scalar(raw: str) -> Any:
         items = []
         for item in inner.split(","):
             item = item.strip()
-            if item == "" or item[0] in "[{" or "{" in item:
-                raise ParseError("flow sequences may hold scalars only")
+            # YAML reads a plain item holding `key: value` or `key:` as a one-pair mapping, and loaders
+            # disagree on other plain items with a colon (libyaml 0.2.1 refuses `[a:b]`, 0.2.5 reads a
+            # string), so a plain item holds none of `:`, `[`, `]`, `{` or `}`.
+            if item == "" or item[0] in "[{" or "{" in item or (item[0] not in "'\"" and any(c in item for c in ":[]}")):
+                raise ParseError("flow sequences may hold scalars only (a plain item holds no `:`, `[`, `]`, `{` or `}`)")
             items.append(_scalar(item))
         return items
     if text[0] in "{&*!?%@`|>":
         raise ParseError("flow mappings, anchors, aliases, tags and bare block indicators are refused")
+    if PLAIN_PAIR_RE.search(text):
+        # A plain value holding a colon and a space or a tab (or ending in `:`) is a mapping or a YAML
+        # error, never this string.
+        raise ParseError("a plain scalar may not hold a colon followed by a space or a tab, or end in one")
     if text in {"true", "True", "TRUE"}:
         return True
     if text in {"false", "False", "FALSE"}:
@@ -517,7 +535,8 @@ def _scalar(raw: str) -> Any:
     return text
 
 
-KEY_RE = re.compile(r"^(?P<key>[A-Za-z0-9_.\-/*]+|\"[^\"]*\"|'[^']*')\s*:(?:\s+(?P<value>.*))?$")
+# A plain key may not start with `*`: YAML reads `*name :` as an alias, the key an anchor names.
+KEY_RE = re.compile(r"^(?P<key>[A-Za-z0-9_.\-/][A-Za-z0-9_.\-/*]*|\"[^\"]*\"|'[^']*')\s*:(?:\s+(?P<value>.*))?$")
 
 
 class _Lines:
@@ -664,7 +683,7 @@ def _parse_sequence(lines: _Lines, indent: int, under_key: bool = False) -> List
         if rest.strip() == "":
             items.append(_parse_block(lines, item_indent) if _next_deeper(lines, indent) else None)
             continue
-        if rest.strip().startswith("- "):
+        if rest.strip().startswith("- ") or rest.strip() == "-":
             raise ParseError("line {}: nested sequences are refused".format(row[1]))
         match = KEY_RE.match(rest.strip())
         if match and not rest.strip().startswith(("'", '"', "[")):
@@ -673,6 +692,10 @@ def _parse_sequence(lines: _Lines, indent: int, under_key: bool = False) -> List
             mapping = _parse_mapping_from_first(lines, key_indent, match, row[1])
             items.append(mapping)
             continue
+        entry = rest.strip()
+        if entry[:1] not in ("'", '"', "[") and PLAIN_PAIR_RE.search(entry):
+            # YAML reads `- a b: c` as a mapping whose key this parser does not admit.
+            raise ParseError("line {}: a sequence entry holding a mapping needs a key this parser admits".format(row[1]))
         items.append(_scalar(rest))
 
 
@@ -747,12 +770,17 @@ def parse_workflow(text: str) -> Dict[str, Any]:
     lines = _Lines(text)
     if lines.peek() is None:
         raise ParseError("empty workflow")
-    document = _parse_block(lines, 0)
-    if lines.peek() is not None:
-        raise ParseError("line {}: trailing content".format(lines.peek()[1]))
-    if not isinstance(document, dict):
-        raise ParseError("workflow root must be a mapping")
-    decoded = _first_refused_in_scalars(document)
+    try:
+        document = _parse_block(lines, 0)
+        if lines.peek() is not None:
+            raise ParseError("line {}: trailing content".format(lines.peek()[1]))
+        if not isinstance(document, dict):
+            raise ParseError("workflow root must be a mapping")
+        decoded = _first_refused_in_scalars(document)
+    except RecursionError:
+        # A refusal, not a Python error, so every caller classifies it (site_assembly.py catches
+        # ParseError only).
+        raise ParseError("the document nests too deeply") from None
     if decoded is not None:
         raise ParseError("a scalar decodes to character U+{:04X}, which is refused".format(decoded))
     return document

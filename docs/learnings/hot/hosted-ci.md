@@ -2,10 +2,44 @@
 topic: hosted-ci
 importance: high
 last-used: 2026-10-07
-uses: 19
+uses: 20
 ---
 
 # Hosted CI (public, free GitHub-hosted runners)
+
+## 2026-10-07 — A colon and a space make a mapping: one-pair flow items and alias keys
+
+**Symptom.** The security review of the quoted-scalar fix (entry below) found that
+`scripts/ci/workflow_policy.py` read `extra_javascript: [path: //cdn.example.com/x.js]` in
+`mkdocs.yml` as a list holding the string `path: //cdn.example.com/x.js`. YAML reads it as a list
+holding the mapping `{path: //cdn.example.com/x.js}`, so the site-assembly policy's relative-path
+check never saw the path it would hand to MkDocs. In a workflow, an anchor defined in such an item
+(`[a: &r run]`) and a step written `- *r : …` read here as a literal key `*r`; to YAML it is an alias,
+the key the anchor names. The action-pin check, run in the same CI job, refuses a colon in a flow
+sequence and any anchor or alias it can see; its quote masking can hide an anchor's definition,
+but its refusal of the alias at the start of the step line closed the workflow route. Nothing
+closed the `mkdocs.yml` route.
+
+**Cause.** The flow-sequence reader split on commas and passed each item to the scalar reader, which
+returns plain text as a string; in a flow sequence YAML reads a plain `key: value` (or `key:`) as a
+one-pair mapping. A block sequence entry whose key fell outside the key pattern went the same way,
+and the key pattern admitted `*` as a key's first character.
+
+**Fix.** A plain flow item may hold no `:`, `[`, `]`, `{` or `}` (libyaml 0.2.1 and 0.2.5 even
+disagree on `[a:b]`); a plain sequence entry holding a colon followed by a space, a tab or the end
+is refused unless its key is one the parser reads as a mapping key, and so is a lone `- -`; any
+plain value holding such a colon, which YAML reads as a mapping or refuses, is refused; and a plain
+key may not start with `*`. A `\U` escape beyond U+10FFFF and a document nested past Python's
+recursion limit are now parse refusals rather than Python errors, which the site-assembly check
+reported only as unclassified failures. A test checks each refused shape against libyaml when
+Ruby is present, except the forms the loader versions disagree on; the nesting limit is the
+parser's own, not a YAML shape.
+
+**Lesson.** A subset parser has to refuse a construct everywhere YAML can form it, not only where the
+subset's grammar expects it: "flow sequences hold scalars only" was true of the grammar and false of
+the reader, which never looked for the colon that makes a mapping. When a review finds one
+differential, sweep the same reader for the class, not only the instance; this one sat beside the
+quoted-scalar gap in the same function.
 
 ## 2026-10-07 — A doubled quote is an escape: a quoted scalar that ends in a quote may still be open
 

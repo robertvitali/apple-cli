@@ -386,6 +386,8 @@ class SiteAssemblyTests(unittest.TestCase):
             ("site_name: t\ndocs_dir: docs/manual\ntheme: &a material\n", "outside the accepted YAML subset"),
             # YAML folds the next two lines into `site_name`, so mkdocs would see no `docs_dir`.
             ("site_name: 't ''\ndocs_dir: docs/manual\nsite_description: ''y'\n", "does not close at the end of its line"),
+            # YAML reads this item as a mapping whose `path` the relative-path check would never see.
+            ("site_name: t\ndocs_dir: docs/manual\nextra_javascript: [path: //cdn.example.com/x.js]\n", "flow sequences may hold scalars only"),
             ("site_name: t\u200b\ndocs_dir: docs/manual\n", "U+200B is refused (an invisible format"),
             ("site_name: t\ndocs_dir: docs/manual\nmarkdown_extensions:\n  - pymdownx.snippets\n", "markdown_extensions not admitted: pymdownx.snippets"),
             ("site_name: t\ndocs_dir: docs/manual\nmarkdown_extensions:\n  - admonition:\n      base_path: /\n", "option(s) not admitted for admonition"),

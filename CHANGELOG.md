@@ -53,8 +53,12 @@ JSON output are stable per the versioning policy — breaking changes bump
   folding), explicit indentation indicators and a tab in any line's leading whitespace are
   refused, a quoted scalar must close on its own line (a single-quoted one whose doubled quote
   YAML reads as an escape, leaving it open onto the lines below, and a double-quoted one holding
-  an unescaped quote are refused), and what this scan, the action-pin check and the
-  site-assembly rehearsal print escapes any character that is not printable. A write reachable
+  an unescaped quote are refused), a plain flow-sequence item holding `:`, `[`, `]`, `{` or `}`,
+  a plain value holding a colon followed by a space or a tab, a sequence entry YAML reads as a
+  mapping or a nested sequence that this scan would read as a string, a key starting with `*` (an
+  alias to YAML) and a document nested past the parser's recursion limit are refused, and what
+  this scan, the action-pin check and the site-assembly rehearsal print escapes any character
+  that is not printable. A write reachable
   only through a remote action's own code, or a command outside the recorded patterns, is not
   something a static list can detect, and every check reads the file through
   the scan's own parser, which the character refusals narrow but cannot prove reads it exactly

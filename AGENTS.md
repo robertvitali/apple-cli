@@ -700,8 +700,11 @@ CLI actually accepts.
   uses (no anchors, tags, flow mappings or multi-document files, no whitespace but space, tab
   and line feed (a carriage return is read as a line feed on this path), and no byte-order
   mark, bidirectional control, invisible character or character outside YAML's printable set,
-  no explicit block indentation indicator, no tab in a line's leading whitespace, and no quoted
-  scalar that does not close on its own line) and must fit a recorded
+  no explicit block indentation indicator, no tab in a line's leading whitespace, no quoted
+  scalar that does not close on its own line, no plain flow-sequence item holding `:`, `[`, `]`,
+  `{` or `}`, no plain value holding a colon followed by a space or a tab, and a sequence entry YAML
+  reads as a mapping must begin with a plain key the parser admits, so a `nav` title holding a
+  space cannot be written yet) and must fit a recorded
   allowlist — known top-level keys only, `docs_dir` present and exactly `docs/manual`, `use_directory_urls` absent or
   true, no `hooks`, no plugin but `search`, no `theme.custom_dir`, Markdown extensions and their
   options from the recorded set (`pymdownx.snippets` is refused), relative asset paths. A

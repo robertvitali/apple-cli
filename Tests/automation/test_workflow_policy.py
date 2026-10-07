@@ -140,7 +140,7 @@ class ParserTests(unittest.TestCase):
 
     def test_double_quoted_escapes_are_decoded_or_refused(self) -> None:
         self.assertEqual(policy._scalar('"a\\u0063b\\x41\\tc\\"d"'), 'acbA\tc"d')
-        for bad in ('"\\q"', '"\\u12"', '"trailing\\"', '"\\x4"'):
+        for bad in ('"\\q"', '"\\u12"', '"trailing\\"', '"\\x4"', '"\\U00110000"'):
             with self.subTest(bad=bad):
                 with self.assertRaises(policy.ParseError):
                     policy._scalar(bad)
@@ -199,6 +199,77 @@ class ParserTests(unittest.TestCase):
                     continue
                 with self.assertRaises(policy.ParseError):
                     policy._scalar(form)
+
+    FLOW_ITEMS_REFUSED = ("k: [path: x.js]\n", "k: [a, b: c]\n", "k: [a:]\n", "k: [x\t: y]\n", "k: [a: &r run]\n",
+                          "k: [a:[&r run]]\n", "k: [a:[b]]\n", "k: [a :[]]\n", "k: [a:\tb]\n", "k: [a[b]]\n",
+                          "k: [a}]\n")
+    # Refused as a precaution: libyaml 0.2.1 rejects these and 0.2.5 reads them as strings.
+    FLOW_ITEMS_LOADERS_DISAGREE = ("k: [a:b]\n", "k: [https://example.com/x]\n")
+    SEQUENCE_ENTRIES_REFUSED = ("k:\n  - a b: c\n", "k:\n  - b': b'\n", "k:\n  - *r : x\n", "k:\n  - a b:\n",
+                                "k:\n  - a b:\tc\n")
+    PLAIN_VALUES_REFUSED = ("k: echo: evil\n", "k:\n  - run: echo: evil\n", "k: done:\n", "k: echo:\tevil\n")
+
+    def test_a_plain_flow_item_holding_a_colon_or_a_bracket_is_refused(self) -> None:
+        # YAML reads a plain item holding `key: value` or `key:` as a one-pair mapping, and loaders
+        # disagree on other plain items with a colon (`[a:b]`, an unquoted URL); a quoted item stays
+        # a string.
+        for document in self.FLOW_ITEMS_REFUSED + self.FLOW_ITEMS_LOADERS_DISAGREE:
+            with self.subTest(document=document):
+                with self.assertRaisesRegex(policy.ParseError, "flow sequences may hold scalars only"):
+                    policy.parse_workflow(document)
+        self.assertEqual(policy.parse_workflow("k: ['a: b', 'https://example.com/x', b]\n"),
+                         {"k": ["a: b", "https://example.com/x", "b"]})
+
+    def test_a_sequence_entry_holding_a_key_the_parser_does_not_admit_is_refused(self) -> None:
+        # YAML reads each of these entries as a mapping; a key outside KEY_RE would otherwise make
+        # the entry a string here. An alias (`*r`) is never a key.
+        for document in self.SEQUENCE_ENTRIES_REFUSED:
+            with self.subTest(document=document):
+                with self.assertRaisesRegex(policy.ParseError, "needs a key this parser admits"):
+                    policy.parse_workflow(document)
+        # A lone `- -` is a nested sequence to YAML (`[[null]]`), not the string `-`.
+        for document in ("k:\n  - -\n", "k:\n  - - #c\n"):
+            with self.subTest(document=document):
+                with self.assertRaisesRegex(policy.ParseError, "nested sequences are refused"):
+                    policy.parse_workflow(document)
+        with self.assertRaises(policy.ParseError):
+            policy.parse_workflow("*r : x\n")
+        self.assertEqual(policy.parse_workflow("k:\n  - https://example.com/x\n  - echo a:b\n"),
+                         {"k": ["https://example.com/x", "echo a:b"]})
+
+    def test_a_plain_value_holding_a_colon_and_a_space_is_refused(self) -> None:
+        # In block context YAML refuses a plain value holding `: ` or ending in `:`.
+        for document in self.PLAIN_VALUES_REFUSED:
+            with self.subTest(document=document):
+                with self.assertRaisesRegex(policy.ParseError, "may not hold a colon followed by a space or a tab"):
+                    policy.parse_workflow(document)
+        self.assertEqual(policy.parse_workflow("k: echo a:b https://example.com/x\n"),
+                         {"k": "echo a:b https://example.com/x"})
+
+    def test_a_document_nested_past_the_recursion_limit_is_a_parse_refusal(self) -> None:
+        deep = "k:\n" + "".join(" " * level + "a:\n" for level in range(1, 2000)) + " " * 2000 + "a: x\n"
+        with self.assertRaisesRegex(policy.ParseError, "nests too deeply"):
+            policy.parse_workflow(deep)
+
+    @unittest.skipUnless(shutil.which("ruby"), "needs Ruby for its libyaml-backed loader (present on hosted Ubuntu and macOS)")
+    def test_each_refused_shape_is_a_mapping_a_nested_sequence_an_alias_or_an_error_to_libyaml(self) -> None:
+        documents = list(self.FLOW_ITEMS_REFUSED + self.SEQUENCE_ENTRIES_REFUSED + self.PLAIN_VALUES_REFUSED)
+        documents += ["*r : x\n", 'k: "\\U00110000"\n', "k:\n  - -\n"]
+        script = ('require "psych"; require "json"; '
+                  'deep = ->(v) { v.is_a?(Hash) || (v.is_a?(Array) && v.any? { |x| x.is_a?(Array) || deep.(x) }) }; '
+                  'puts JSON.generate(JSON.parse(STDIN.read).map { |t| '
+                  'begin; d = Psych.safe_load(t, aliases: true); deep.(d.is_a?(Hash) ? d["k"] : d); '
+                  'rescue Psych::Exception; nil; end })')
+        result = subprocess.run(["ruby", "-e", script], input=json.dumps(documents),
+                                capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        loaded = json.loads(result.stdout)
+        self.assertEqual(len(loaded), len(documents))
+        for document, mapped in zip(documents, loaded):
+            with self.subTest(document=document):
+                self.assertIn(mapped, (None, True))
+                with self.assertRaises(policy.ParseError):
+                    policy.parse_workflow(document)
 
     def test_quoted_mapping_keys_are_decoded(self) -> None:
         document = policy.parse_workflow('on: push\n"environm\\u0065nt": prod\n')
@@ -301,6 +372,26 @@ class ScanTests(unittest.TestCase):
         plain = mutate(QUALITY, "  quality-required:\n",
                        "      - run: true; git push origin HEAD:main\n  quality-required:\n")
         self.assert_ci_violation(plain, "git ref write")
+
+    def test_an_alias_used_as_a_step_key_is_refused(self) -> None:
+        # With anchors, YAML reads this step as `run: git push origin HEAD:main`; read here, the
+        # key would be the literal `*r` and the push would sit in a value the command scan skips.
+        step = mutate(QUALITY, "  quality-required:\n", "      - *r : git push origin HEAD:main\n  quality-required:\n")
+        self.assert_ci_violation(step, "needs a key this parser admits")
+        anchored = mutate(step, "\njobs:\n", "\nenv:\n  K: [a: &r run]\njobs:\n")
+        self.assert_ci_violation(anchored, "flow sequences may hold scalars only")
+
+    @unittest.skipUnless(shutil.which("ruby"), "needs Ruby for its libyaml-backed loader (present on hosted Ubuntu and macOS)")
+    def test_libyaml_reads_the_aliased_step_as_a_run(self) -> None:
+        # The reading the alias-key refusal guards against, checked against a real YAML loader.
+        anchored = mutate(mutate(QUALITY, "  quality-required:\n",
+                                 "      - *r : git push origin HEAD:main\n  quality-required:\n"),
+                          "\njobs:\n", "\nenv:\n  K: [a: &r run]\njobs:\n")
+        script = ('require "psych"; require "json"; '
+                  'puts JSON.generate(Psych.safe_load(STDIN.read, aliases: true)["jobs"]["build"]["steps"].last)')
+        result = subprocess.run(["ruby", "-e", script], input=anchored, capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {"run": "git push origin HEAD:main"})
 
     def test_missing_job_permissions_fails(self) -> None:
         body = mutate(QUALITY, JOB_HEADER, "    runs-on: ubuntu-latest\n    steps:")
