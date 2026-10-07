@@ -34,7 +34,8 @@ recorded, scoped evidence).
 ## LEDGER — every decision at a glance (updated 2026-10-07)
 
 **Still needs you: D2 (the Homebrew tap), D18 (the `v27.0.0` release, which waits on the phase-3
-publisher) and D22 (two parity narrowings).** D9 was reopened 2026-08-31 and finally closed the
+publisher), D22 (two parity narrowings) and D49 (how a Dependabot Actions pin update reaches
+`main`).** D9 was reopened 2026-08-31 and finally closed the
 same day (recorded CLOSED — see D9). D15 and D16 were ratified 2026-09-07. D3 and D14 were
 live-validated operator-present on 2026-08-27 (evidence on their Asana tasks; the Mail parent
 closed the same day under the closure-verification protocol). Publication remains blocked —
@@ -95,6 +96,7 @@ publication action.
 | D45 | Open Dependabot pull requests 7 and 8 while the Dependabot governance path is built | **ANSWERED 2026-10-02: supersede both on main (option A); APPLIED 2026-10-03** (resolved 2026-10-03: Dependabot closed both; its edits started two CI runs on pull request 7's pre-D41 head, one of which ran the Swift suite and added a log copy under D43) | Two reviewed commits on `main` take the same updates: urllib3 2.7.0 → 2.8.0 in `docs/requirements.txt`, which clears the three open alerts, and astral-sh/setup-uv 10.1.0 → 10.2.0, with its new SHA added to the reviewed Action allowlist. Dependabot then closes both pull requests itself. No agent action on either pull request, and no new CI run on pull request 7's pre-D41 head (D43) |
 | D46 | Interim protection for `main` before the design's ruleset | **APPLIED 2026-10-02T05:04Z on the operator's instruction; no-bypass shape RATIFIED 2026-10-02 (option A)** | One active ruleset on `main` only, with two rules, block force pushes and restrict deletion, and no bypass actor: while it is active nothing, the operator's credentials included, can force-update or delete `main`, and an authorized history rewrite needs the operator to disable it first. It guards against mistakes, not a misused admin credential, which can disable it. Neither rule applies to fast-forward pushes, pull requests, Dependabot's branches or the current read-only CI workflows; the first push under it (`9cd2260`) passed. At design §18 step 20 the operator decides whether it is deleted or kept; keeping it needs design amendments |
 | D47 | The public Activity view lists commits no advertised ref holds, whose parents reach the replaced history | **RATIFIED 2026-10-07 (UTC): leave them (option B of the later briefs), re-confirmed after the reach was measured** | The repository's public Activity view lists 128 commits that no advertised ref holds; with their parents they make 1,550 such commits, holding phone-number-like strings, email addresses and two commit messages with a denylist term no file or commit message on `main` carries. Accepted as a residual scoped to the 128 commits the view listed on 2026-10-06 and everything reachable from them that no advertised ref holds: 1,550 commits (the 128 among them) and their trees and file contents that no advertised ref holds, pinned by the SHA-256 of two private id lists. Anything the round's classes detect in a commit outside the two pinned lists, or in an object no listed commit reaches, is outside this residual and stays a finding unless another entry accepts it, whenever the view lists it or however it is found; the six branch names in the view that carry tracker identifiers are D50 |
+| D49 | How a Dependabot GitHub Actions pin update reaches `main` | **OPEN 2026-10-07 (UTC)** | Choose between (A) an identity-only allowlist with Dependabot pin pull requests merged through design §10.5's exception, checked by a workflow run from `main`'s own definition, (B) exact-SHA pins kept, with each Dependabot pin pull request treated as input to a reviewed commit on `main` and never merged, or (C) no exception wired, the current posture, each update taken by hand in a reviewed commit as under D45. Recommended: (B) for now, revisiting (A) before design §18 step 13 |
 | D50 | Deleted branch names in the public Activity view carry tracker identifiers | **RATIFIED 2026-10-07 (UTC): accept them as a recorded residual (option B)** | Six deleted branch names, in 24 creation, push and deletion events dated 2026-07-15 to 2026-08-23, carry tracker identifiers that also occur in commit messages D47 accepts. Accepted as a residual scoped to those six names in those 24 events; the same names in any other event or on any other surface, and any other tracker identifier the view shows, stay findings unless another entry accepts them |
 
 ---
@@ -2579,5 +2581,136 @@ end-of-roadmap privacy round records them as ACCEPTED. The same names in any oth
 other surface, and any other tracker identifier the view shows, stay findings unless another entry
 accepts them. No Support request was filed and nothing changed on GitHub; the operator may still
 file one, and this entry does not prevent it.
+
+---
+
+## D49 — How a Dependabot GitHub Actions pin update reaches `main`
+
+- **Status:** **OPEN 2026-10-07 (UTC)** — waiting on the operator; nothing applied. Filed by the
+  second agent session D44 authorizes; its decision brief goes to the operator through the
+  controller.
+- **Finding.** Design §10.5 allows exactly one automated control-plane exception: a Dependabot pull
+  request that changes only workflow files, whose parsed workflows a trusted-base comparison proves
+  identical apart from allowlisted `uses:` commit SHAs and their adjacent version comments, whose
+  every new SHA the trusted check verifies through the API as reachable from a tag or the default
+  branch of the same allowlisted Action's repository, and whose author is `dependabot[bot]` with
+  this repository as the head repository. The base policy stays blocking, the proposed pins run only
+  in the secret-free advisory lane, one qualified approval is required and auto-merge is forbidden.
+  Design §17 has `.github/actions-allowlist.json` record each permitted Action identity, and §18
+  step 4 has it replace the list embedded in `scripts/ci/action_pins.py`. That list had recorded
+  each Action's exact commit and version since the script's first commit (`5f4d226`, 2026-09-01);
+  `51c664a` moved it into the file unchanged in kind, and the policy checks
+  (`scripts/ci/action_pins.py`, `scripts/ci/workflow_policy.py`) require every workflow pin to match
+  it. Dependabot changes only the workflow files, so its Actions pull requests fail the
+  `Supply-chain policy` job, and merged as they stand they would turn `main` red. None has been
+  merged on GitHub: pull requests 1 and 2 (setup-uv and deploy-pages) closed unmerged; pull request
+  6's bump reached `main` in `098e784`, which a maintainer committed as a squash of it, with the pin
+  policy and its test edited, and which closed the pull request; and D45 replaced pull request 7
+  with `a26a19a`. The `Supply-chain policy` job runs from the pull request's merge commit beside the
+  other CI jobs, not before them, so every job that uses a bumped Action runs the proposed pin
+  whatever the policy's verdict, the policy job's own setup steps included when they use that
+  Action. The governance workflow is the only one GitHub runs from `main`'s own definition rather
+  than the proposal's on a pull request, and it judges only the pull request's title and body. Its
+  job token can only read the repository's contents and metadata and is used only by the checkout,
+  which does not keep it; the validator step is given no token or secret and has no path that reads
+  the GitHub API, and `workflow_policy.py` refuses any reference that would hand the token to a
+  step.
+- **What exists.** `c3adb30` adds `scripts/ci/dependabot_pin_exception.py`, an offline judge that
+  decides a proposal's structure, Dependabot identity and tag reachability from files it is given;
+  no workflow runs it on a proposal (CI runs only its tests). It accepts a narrower proof than the
+  design: the tag named by the new version comment must be exactly the new commit, because a commit
+  merely reachable from a tag or from the default branch leaves that version comment, which becomes
+  the allowlist's version label, unbound to the commit. A major-version bump qualifies like any
+  other. Its caller must judge only a proposal whose head contains the base tip; the module's
+  docstring records that limit and the others. Since `9aaf9ac` the test fixtures read the reviewed
+  pins from the allowlist, so a pin update no longer edits tests: it edits the allowlist, the
+  workflows and, for the two Actions it quotes, the urgent-release runbook.
+- **Under every option.** A qualifying report, or a hand check of the tag, proves that the version
+  label names the commit, not that the commit is trustworthy: an upstream tag moved to a compromised
+  commit qualifies, so reviewing the upstream change, and whether the release is immutable, remains
+  the control. Dependabot's own pull request still runs CI from its copy, so the proposed commit
+  executes in the secret-free, read-only lane before anyone reviews it. No CI check reads a pin's
+  upstream reachability on a push straight to `main` under any option: the allowlist edit an exact
+  pin requires is reviewed, not verified, so review is the control there unless such a check is
+  extended to every pin change. The draft launch specification (Section 13, L9's change) has
+  Dependabot ignore every Action its four publisher workflows use, updated by hand in every workflow
+  on the premise of one pin per name, so after L9 Dependabot's Actions version updates would cover
+  at most `astral-sh/setup-uv` (a security update can still name any Action, since `ignore` does not
+  govern one while `target-branch` is set, D45): (B)'s per-update cost and (A)'s merge path would
+  both apply to that one Action, and (A)'s identity-only list would leave that premise unenforced.
+- **Options** (as the decision brief states them):
+  - (A) Identity-only allowlist, with Dependabot pin pull requests merged through the §10.5
+    exception. Workflows stay pinned to full SHAs; the allowlist's format and loader, both pin
+    checks and the judge's old-pin check change to identity-only; the base-branch check adds the
+    exception's proofs, verifying the structure and the upstream reachability of every changed pin
+    through read-only API calls; and the runbook's quoted pins are decoupled or kept in step. Each
+    is a reviewed control-plane change rehearsed under design §18 step 13. The read-only token, the
+    API reads of changed paths and blobs as data, and the trusted-base conversion of the
+    `Supply-chain policy` job come with the control-plane half of `governance / required` (design
+    §18 step 5; §10.5 and its 2026-09-25 amendment), which the draft launch specification's P6 needs
+    before launch under every option; (A) adds the exception's proofs to that work. Under every
+    option the steps that run the proposal's tests or install its lock stay in the pull-request
+    lane. Gain: the designed merge path, with one approval per update, given after the merger
+    replaces the title and description as `AGENTS.md` (Branch model) requires of every Dependabot
+    pull request. Cost: the exception's proofs in the base-branch check, and Dependabot's pins
+    reviewed through those proofs and an approval rather than against a second recorded commit. An
+    identity-only list also governs every pin change that is not Dependabot's: a workflow edit
+    pushed straight to `main`, the usual path under the main-only workflow, runs no exception proof,
+    so its pins are held only to a full SHA of an allowlisted Action and to review: no allowlist
+    edit records the new commit and version beside it, and nothing holds the workflows to one commit
+    per Action.
+  - (B) Exact-SHA pins kept; a Dependabot pin pull request is input for a reviewed commit and is
+    never merged. A local checker, run by the operator or an agent, reads only the pull request's
+    structured fields (changed paths, file contents, refs, author and repository ids) and never acts
+    on its title or body text, uses an unauthenticated session or a read-only token, runs the
+    offline judge, verifies tag reachability and writes a value-free report recording what was read
+    and when. The update then lands on `main` as a dedicated reviewed commit under the usual gates,
+    carrying exactly the judged commit and version for each Action, with the tag evidence re-read
+    when it lands, and editing the workflows, the allowlist and, where it quotes the Action, the
+    runbook. Dependabot closes its own pull request then, as under D45, with a manual close as the
+    fallback; its edits while closing start CI and governance runs (D45's resolution). Gain:
+    `main`'s exact-pin gate stays, and the exception's proofs stay out of the base-branch check
+    until they are rehearsed. Trade: §10.5's blocking, API-verified merge path becomes advisory
+    evidence plus a separate reviewed change, and that evidence is only as trustworthy as the
+    session that gathers it. Dependabot's Actions pull requests stay red, as under (C). Cost: a
+    local checker to build and review (it gathers what the judge takes, the pull request's fields,
+    the base tip's workflows and the tag evidence, and checks that the head contains the base tip),
+    one reviewed commit per Actions update plus the evidence step, and amendments to design §10.5,
+    §17 and §18 step 13, to the draft launch specification's P6 and Section 13, which list the
+    exception as a launch precondition, and to `AGENTS.md`, the CHANGELOG entry and the readiness
+    evidence, which wait for the exception to be in force; if (A) follows, those texts change again.
+  - (C) No exception wired: the current posture under `AGENTS.md` (Branch model), which needs no
+    further ruling per pull request. Dependabot's Actions pull requests stay red and each update is
+    taken by hand in a reviewed commit on `main`, as under D45. Gain: no new tooling or design
+    change now. Cost: hand work with no required, structured evidence step each time, design §10.5's
+    path and §18 step 13 stay unbuilt, and the draft launch specification's P6 stays unmet, so (C)
+    cannot be the posture at launch. (B) differs from (C) by the checker and its recorded evidence,
+    and by the design amendments.
+- **Recommendation.** (B) for now, revisiting (A) before design §18 step 13. (B) keeps `main`'s
+  exact-pin gate: every pin change, Dependabot's or one pushed straight to `main`, carries a
+  reviewed allowlist edit recording its commit and version (reviewed; no CI check verifies it
+  upstream), and the workflows stay on one commit per Action. It also keeps the exception's proofs
+  out of the base-branch check until they are rehearsed, adding nothing to that check beyond the
+  token and API reads its control-plane half needs under every option. Its cost is the local checker
+  plus the design and launch-specification amendments; (A), if adopted at that revisit, would
+  reverse the amendments, and the comparison there is the evidence step's cost per update against
+  the exception's machinery. The offline judge (B) runs is the core (A) would run later, once its
+  old-pin check is adapted to an identity-only allowlist, as its docstring says. Under either (A) or
+  (B), whatever runs the judge must first bind the proposal to the base tip and read tag evidence
+  from the exact-match ref endpoint, peeling an annotated tag to its commit, and the refusal, by
+  literal path, of any pull request changing the four publisher workflows the draft launch
+  specification (Section 13) proposes is still to be added.
+- **Not decided here.** Whether major-version bumps need more review than the exception gives them;
+  the judge treats them like any other bump.
+- **Filed:** 2026-10-07 (UTC) · **Category:** dependency updates / Dependabot; control-plane
+  exception (design §10.5, §17)
+
+**Why it needed you.** The choice sets what binds a pin's commit on `main`, whether a Dependabot
+pull request may ever merge, and which design and launch-specification text changes: scope calls on
+the enforcement control plane, of which `.github/CODEOWNERS` names you sole code owner.
+
+**Blocking?** No. Until it is ruled, `AGENTS.md` (Branch model) governs a Dependabot Actions pull
+request: never merged, its update taken on `main` in a reviewed commit, which is option (C)'s
+posture. It needs a ruling before design §18 step 13.
 
 ---
