@@ -34,8 +34,7 @@ recorded, scoped evidence).
 ## LEDGER — every decision at a glance (updated 2026-10-07)
 
 **Still needs you: D2 (the Homebrew tap), D18 (the `v27.0.0` release, which waits on the phase-3
-publisher), D22 (two parity narrowings) and D50 (tracker identifiers in the Activity view's branch
-names).** D9 was reopened 2026-08-31 and finally closed the
+publisher) and D22 (two parity narrowings).** D9 was reopened 2026-08-31 and finally closed the
 same day (recorded CLOSED — see D9). D15 and D16 were ratified 2026-09-07. D3 and D14 were
 live-validated operator-present on 2026-08-27 (evidence on their Asana tasks; the Mail parent
 closed the same day under the closure-verification protocol). Publication remains blocked —
@@ -96,7 +95,7 @@ publication action.
 | D45 | Open Dependabot pull requests 7 and 8 while the Dependabot governance path is built | **ANSWERED 2026-10-02: supersede both on main (option A); APPLIED 2026-10-03** (resolved 2026-10-03: Dependabot closed both; its edits started two CI runs on pull request 7's pre-D41 head, one of which ran the Swift suite and added a log copy under D43) | Two reviewed commits on `main` take the same updates: urllib3 2.7.0 → 2.8.0 in `docs/requirements.txt`, which clears the three open alerts, and astral-sh/setup-uv 10.1.0 → 10.2.0, with its new SHA added to the reviewed Action allowlist. Dependabot then closes both pull requests itself. No agent action on either pull request, and no new CI run on pull request 7's pre-D41 head (D43) |
 | D46 | Interim protection for `main` before the design's ruleset | **APPLIED 2026-10-02T05:04Z on the operator's instruction; no-bypass shape RATIFIED 2026-10-02 (option A)** | One active ruleset on `main` only, with two rules, block force pushes and restrict deletion, and no bypass actor: while it is active nothing, the operator's credentials included, can force-update or delete `main`, and an authorized history rewrite needs the operator to disable it first. It guards against mistakes, not a misused admin credential, which can disable it. Neither rule applies to fast-forward pushes, pull requests, Dependabot's branches or the current read-only CI workflows; the first push under it (`9cd2260`) passed. At design §18 step 20 the operator decides whether it is deleted or kept; keeping it needs design amendments |
 | D47 | The public Activity view lists commits no advertised ref holds, whose parents reach the replaced history | **RATIFIED 2026-10-07 (UTC): leave them (option B of the later briefs), re-confirmed after the reach was measured** | The repository's public Activity view lists 128 commits that no advertised ref holds; with their parents they make 1,550 such commits, holding phone-number-like strings, email addresses and two commit messages with a denylist term no file or commit message on `main` carries. Accepted as a residual scoped to the 128 commits the view listed on 2026-10-06 and everything reachable from them that no advertised ref holds: 1,550 commits (the 128 among them) and their trees and file contents that no advertised ref holds, pinned by the SHA-256 of two private id lists. Anything the round's classes detect in a commit outside the two pinned lists, or in an object no listed commit reaches, is outside this residual and stays a finding unless another entry accepts it, whenever the view lists it or however it is found; the six branch names in the view that carry tracker identifiers are D50 |
-| D50 | Deleted branch names in the public Activity view carry tracker identifiers | **OPEN 2026-10-07** | Six deleted branch names, in 24 creation, push and deletion events dated 2026-07-15 to 2026-08-23, carry tracker identifiers. The same identifiers occur in commit messages D47 accepts, and each branch's last tip is among D47's commits. D47 does not cover the names; they stay a finding until the operator rules |
+| D50 | Deleted branch names in the public Activity view carry tracker identifiers | **RATIFIED 2026-10-07 (UTC): accept them as a recorded residual (option B)** | Six deleted branch names, in 24 creation, push and deletion events dated 2026-07-15 to 2026-08-23, carry tracker identifiers that also occur in commit messages D47 accepts. Accepted as a residual scoped to those six names in those 24 events; the same names in any other event or on any other surface, and any other tracker identifier the view shows, stay findings unless another entry accepts them |
 
 ---
 
@@ -2543,12 +2542,14 @@ repository is yours alone to decide (D9, D19, D38).
 **Blocking?** No; it settles the 128 commits the view listed on 2026-10-06 and their history before
 the fresh round runs. The branch names in it are D50, still open.
 
+**Amended 2026-10-07 (D50):** the branch names were ruled the same day: accepted as a recorded residual scoped to those six names in the 24 events D50 describes (option B).
+
 ---
 
 ## D50 — Deleted branch names in the public Activity view carry tracker identifiers
 
-- **Status:** **OPEN 2026-10-07 (UTC)** — filed by the controller with D47; nothing applied. D48
-  and D49 are reserved for entries another session files.
+- **Status:** **RATIFIED 2026-10-07 (UTC): accept them as a recorded residual (option B)** — filed
+  by the controller with D47. D48 and D49 are reserved for entries another session files.
 - **Finding.** The repository's public Activity view (D47) shows six deleted branch names that
   carry tracker identifiers, in 24 events (branch creations, pushes and deletions) dated 2026-07-15
   to 2026-08-23. The public Events feed does not list them. All six identifiers also occur in
@@ -2569,5 +2570,14 @@ the fresh round runs. The branch names in it are D50, still open.
 to decide (D37 precedent for tracker identifiers in branch names on GitHub-side surfaces).
 
 **Blocking?** It is a finding for the end-of-roadmap privacy round until ruled.
+**Resolution (2026-10-07):** the operator answered "B" to a plain-language brief that gave both
+options and the deciding fact, that the same identifiers already sit in commit messages D47
+accepts, so removing the Activity entries alone would leave them public; this followed the
+controller's recommendation. The six branch names, in the 24 branch-creation, push and deletion
+events dated 2026-07-15 to 2026-08-23 that this entry describes, are a recorded residual; the
+end-of-roadmap privacy round records them as ACCEPTED. The same names in any other event or on any
+other surface, and any other tracker identifier the view shows, stay findings unless another entry
+accepts them. No Support request was filed and nothing changed on GitHub; the operator may still
+file one, and this entry does not prevent it.
 
 ---

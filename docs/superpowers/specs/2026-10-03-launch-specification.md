@@ -1,7 +1,8 @@
 # Launch specification (design §15)
 
 **Status:** DRAFT — awaiting operator approval (design §15 precondition 3); not approved, not in force.
-**Date:** 2026-10-03. **Amended:** 2026-10-07 (D47: P2, 7.3, 11.2–11.4 and Section 15 item 3).
+**Date:** 2026-10-03. **Amended:** 2026-10-07 (D47: P2, 7.3, 11.2–11.4 and Section 15's
+introduction and items 3 and 14; D50: P2, 7.3, 11.3, 11.4).
 **Parent:** `docs/superpowers/specs/2026-09-01-publication-automation-design.md` ("the design").
 A bare section number below is this document's; "design §N" is the design's; "DN" is an entry
 in `HUMAN-DECISIONS.md`; "readiness row N" and "evidence §N" refer to
@@ -133,10 +134,9 @@ step that creates a public surface (validation and Dependabot pull requests and 
 step 20 policy pull request, rehearsal runs and check suites); a surface created after it starts is
 covered by a recorded delta round before L1. Section 15's privacy item (item 3, added 2026-10-04)
 was completed by D47 on 2026-10-07, before the round started. A Section 11 amendment that a later
-ruling makes after the round started (D50's, if it is ruled then) is covered by a recorded delta
-round, before L1, for what it adds or changes. Evidence: the readiness row "Fresh pre-publication
-privacy audit"; the ledger preamble. **State: NOT MET; the round has not run, and D50 is open (a
-finding until the operator rules; 11.3).**
+ruling makes after the round started is covered by a recorded delta round, before L1, for what it
+adds or changes. Evidence: the readiness row "Fresh pre-publication privacy audit"; the ledger
+preamble. **State: NOT MET; the round has not run.**
 
 **P3. This specification is approved** (design §15 precondition 3): it has passed the design's
 review gates (independent automated review with code, security and critic perspectives), and a
@@ -1268,10 +1268,11 @@ here and is read at the time.
 caches, third-party archives and check suites, and GitHub's by-ID serving of unreachable objects
 (D19, D38, D47), including the commits the repository's public Activity view lists and the history
 their parent links reach, so a history rewrite does not on its own remove what it replaced; the
-deleted branch names that view shows (D50); until GitHub Support removes them, a pull request's
-prior title in its `renamed` event and the pull request itself; and, until they age out, the
-account's public Events-feed entries for the venue's and any probe repository's pushes, pull
-requests and Releases, which deleting the repository is not shown to remove (D37).
+deleted branch names that view shows (D50; whether GitHub Support removes Activity entries is not
+established); a pull request's prior title in its `renamed` event and the pull request itself,
+until GitHub Support removes them; and, until they age out, the account's public Events-feed
+entries for the venue's and any probe repository's pushes, pull requests and Releases, which
+deleting the repository is not shown to remove (D37).
 
 ## 8. Homebrew distribution boundary
 
@@ -1607,21 +1608,19 @@ keeps the gate open until it is read or the operator rules on it.
 ### 11.3 Known items the round must read and disposition
 
 Each commit ID found on a public surface is read with every ancestor that no advertised ref holds:
-fetching one ID returns its history (D47). From evidence §2 and D35 to D38, D41 to D44, D47 and
-D50: copies of the eight D35 messages stored on run and check-suite objects, which D35 does not
-cover; the D36 contributor link in two commit messages on pull request 3's branch and in nine
-comment events in the public Events feed; the off-main commit IDs the Events feed still names (at
-least 29 at D37's read; 12 at a 2026-10-07 re-read, ten of them heads of runs D37 deleted and three
-of them outside both D47's lists and the pull-request refs, which with their parents make six
-commits no advertised ref holds), until they age out, about 2026-12-13 at the latest; check suites
-left by a third-party App on 129 of the 135 head commits of the runs D37 deleted; copies, stored
-outside git, of the pre-rewrite messages carrying two operator sessions (the messages themselves,
-among D47's 1,550 commits, are accepted under D47); the six deleted branch names in the Activity
-view that carry tracker identifiers (D50, until ruled); every page of the Activity view's listing
-and every commit ID it names that lies outside D47's two id lists; the test tree, re-read for other
-samples taken from a live store (D41); the residual D44's 2026-10-03 amendment records for the
-commit it names; the old Mail test-file versions in `main`'s history that evidence §2 names (D47's
-review).
+fetching one ID returns its history (D47). From evidence §2 and D35 to D38, D41 to D44 and D47:
+copies of the eight D35 messages stored on run and check-suite objects, which D35 does not cover;
+the D36 contributor link in two commit messages on pull request 3's branch and in nine comment
+events in the public Events feed; the off-main commit IDs the Events feed still names (at least 29
+at D37's read; 12 at a 2026-10-07 re-read, ten of them heads of runs D37 deleted and three of them
+outside both D47's lists and the pull-request refs, which with their parents make six commits no
+advertised ref holds), until they age out, about 2026-12-13 at the latest; check suites left by a
+third-party App on 129 of the 135 head commits of the runs D37 deleted; copies, stored outside git,
+of the pre-rewrite messages carrying two operator sessions (the messages themselves, among D47's
+1,550 commits, are accepted under D47); every page of the Activity view's listing and every commit
+ID it names that lies outside D47's two id lists; the test tree, re-read for other samples taken
+from a live store (D41); the residual D44's 2026-10-03 amendment records for the commit it names;
+the old Mail test-file versions in `main`'s history that evidence §2 names (D47's review).
 
 ### 11.4 Recorded as ACCEPTED, not as findings
 
@@ -1631,11 +1630,15 @@ its 2026-10-04 amendment records), D47 (the 1,550 commits that no advertised ref
 reachable from the 128 the Activity view listed on 2026-10-06, the 128 among them, and their trees
 and file contents that no advertised ref holds, pinned by the SHA-256 of two private id lists; if
 the lists cannot be produced with matching SHA-256, the round records the residual as unverifiable
-and puts it to the operator). D47's boundary, as its entry states it: "Anything the round's classes
-detect in a commit outside the two pinned lists, or in an object no listed commit reaches, is
-outside this residual and stays a finding unless another entry accepts it, whenever the view lists
-it or however it is found." D37 deleted 168 off-main runs; 205 runs were listed at its 2026-09-27
-read-back, and more since.
+and puts it to the operator), D50 (the six deleted branch names in the Activity view that carry
+tracker identifiers, in the 24 branch-creation, push and deletion events dated 2026-07-15 to
+2026-08-23 that D50 describes). D47's boundary, as its entry states it: "Anything the round's
+classes detect in a commit outside the two pinned lists, or in an object no listed commit reaches,
+is outside this residual and stays a finding unless another entry accepts it, whenever the view
+lists it or however it is found." D50's boundary, as its entry states it: "The same names in any
+other event or on any other surface, and any other tracker identifier the view shows, stay findings
+unless another entry accepts them." D37 deleted 168 off-main runs; 205 runs were listed at its
+2026-09-27 read-back, and more since.
 
 ### 11.5 The `v27.0.0` asset checks
 
