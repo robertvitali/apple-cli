@@ -475,7 +475,11 @@ Fast-forward pushes are unaffected.
   ruling 2026-08-30: this repo is publication-bound, so internal-tracker identifiers are banned
   going forward. The tracked tree was scrubbed at HEAD, and the operator authorized a targeted
   history rewrite that replaces them in prior blobs and commit messages with `GID-REDACTED`
-  (published history carries no GIDs once that rewrite is pushed). This is an explicit, standing
+  (as checked on 2026-10-07, the history every advertised ref holds carries none, but pre-rewrite
+  commits GitHub still serves by id keep them — D47 found tracker identifiers in 953 of the 1,550
+  commit messages it covers, not counting file contents, and the public Activity view lists 128 of
+  the 1,550 commits — as do six deleted branch names that view shows; D19, D38, D47 and D50 accept
+  these as residuals, each only within the scope it records). This is an explicit, standing
   repo-local override of the fleet's `asana:`-trailer convention. Task traceability lives in
   Asana itself, not in this repo's history.
 - **Enforcement control plane (design §10.5) is code-owner gated and manifest-defined.**
