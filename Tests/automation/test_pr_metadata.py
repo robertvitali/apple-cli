@@ -20,7 +20,8 @@ GOVERNANCE_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "governance.yml
 RETIRED_METADATA_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "pr-metadata.yml"
 VALIDATOR_PATH = REPO_ROOT / "scripts" / "ci" / "pr_metadata.py"
 WORKFLOW_POLICY_PATH = REPO_ROOT / "scripts" / "ci" / "workflow_policy.py"
-CHECKOUT_SHA = "3d3c42e5aac5ba805825da76410c181273ba90b1"
+ACTION_PINS_PATH = REPO_ROOT / "scripts" / "ci" / "action_pins.py"
+ALLOWLIST_PATH = REPO_ROOT / ".github" / "actions-allowlist.json"
 
 
 def load_validator_path(path: Path, module_name: str = "pr_metadata") -> ModuleType:
@@ -30,6 +31,20 @@ def load_validator_path(path: Path, module_name: str = "pr_metadata") -> ModuleT
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+def reviewed_checkout_pin() -> tuple[str, str]:
+    """The reviewed `actions/checkout` commit and version, read from the allowlist, so a pin bump
+    changes the allowlist and the workflows and no test."""
+    spec = importlib.util.spec_from_file_location("action_pins", ACTION_PINS_PATH)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("unable to load action pin checker")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.load_allowlist(ALLOWLIST_PATH)["actions/checkout"]
+
+
+CHECKOUT_SHA, CHECKOUT_VERSION = reviewed_checkout_pin()
 
 
 def parse_governance_workflow(text: str) -> dict:
@@ -173,7 +188,7 @@ class PullRequestWorkflowTests(unittest.TestCase):
         self.assertIn("name: governance / required", job)
         self.assertRegex(
             job,
-            rf"(?m)^\s+- uses: actions/checkout@{CHECKOUT_SHA} +# v7\.0\.1$",
+            rf"(?m)^\s+- uses: actions/checkout@{CHECKOUT_SHA} +# {re.escape(CHECKOUT_VERSION)}$",
         )
         self.assertIn("ref: ${{ github.event.pull_request.base.sha }}", job)
         self.assertIn("persist-credentials: false", job)

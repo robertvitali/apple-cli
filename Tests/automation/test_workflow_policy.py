@@ -14,7 +14,6 @@ REPO_ROOT = Path(__file__).resolve().parents[2]
 SCRIPT = REPO_ROOT / "scripts" / "ci" / "workflow_policy.py"
 PINS_SCRIPT = REPO_ROOT / "scripts" / "ci" / "action_pins.py"
 ALLOWLIST = REPO_ROOT / ".github" / "actions-allowlist.json"
-CHECKOUT = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1"
 
 
 def load_module(name: str = "workflow_policy", script: Path = SCRIPT):
@@ -27,6 +26,16 @@ def load_module(name: str = "workflow_policy", script: Path = SCRIPT):
 
 policy = load_module()
 pins = load_module("action_pins", PINS_SCRIPT)
+
+
+def reviewed_pin(name: str) -> str:
+    """The `uses:` text of an allowlisted Action, read from the reviewed allowlist, so a pin bump
+    changes the allowlist and the workflows and no test."""
+    sha, version = pins.load_allowlist(ALLOWLIST)[name]
+    return f"{name}@{sha} # {version}"
+
+
+CHECKOUT = reviewed_pin("actions/checkout")
 
 
 QUALITY = textwrap.dedent(
@@ -620,8 +629,8 @@ class ScanTests(unittest.TestCase):
 
     def test_a_pin_hidden_behind_a_no_break_space_is_refused(self) -> None:
         # With the no-break space read as a comment start and then stripped, both scanners saw the
-        # approved `@<sha> # v7.0.1`; GitHub reads `@<sha><NBSP>#<NBSP>v7.0.1`, a non-SHA ref.
-        hidden = CHECKOUT.replace(" # v7.0.1", "\u00a0#\u00a0v7.0.1")
+        # approved `@<sha> # <version>`; GitHub reads `@<sha><NBSP>#<NBSP><version>`, a non-SHA ref.
+        hidden = CHECKOUT.replace(" # ", "\u00a0#\u00a0")
         self.assertNotEqual(hidden, CHECKOUT)
         violations = self.scan_ci(QUALITY.replace(CHECKOUT, hidden))
         self.assertTrue(any("ci.yml: refused" in v and "U+00A0" in v for v in violations), violations)
@@ -629,7 +638,8 @@ class ScanTests(unittest.TestCase):
     def test_a_pin_with_a_decoded_trailing_line_feed_is_refused(self) -> None:
         # Python's `$` also matches before a final line feed, and a decoded line feed is admitted,
         # so `"<action>@<sha>\n"` matched the pin shape until the comparison became a full match.
-        quoted = QUALITY.replace("- uses: " + CHECKOUT, '- uses: "{}\\n" # v7.0.1'.format(CHECKOUT.split(" #")[0]))
+        pinned, version = CHECKOUT.split(" # ")
+        quoted = QUALITY.replace("- uses: " + CHECKOUT, '- uses: "{}\\n" # {}'.format(pinned, version))
         self.assertNotEqual(quoted, QUALITY)
         self.assert_ci_violation(quoted, "is not a remote action pinned to a full commit SHA")
 
@@ -734,8 +744,9 @@ class ScanTests(unittest.TestCase):
                         "      - name: |\n        uses: attacker/evil-action@{} # v1.0.0\n".format(sha) + CHECKOUT_STEP)
         self.assert_ci_violation(hidden, "not in the reviewed action-pin allowlist")
         # An approved name at a SHA outside the allowlist is refused too, visible or hidden.
-        for fragment in ("      - uses: actions/checkout@{} # v7.0.1\n".format(sha),
-                         "      - name: |\n        uses: actions/checkout@{} # v7.0.1\n".format(sha)):
+        version = CHECKOUT.split(" # ")[1]
+        for fragment in ("      - uses: actions/checkout@{} # {}\n".format(sha, version),
+                         "      - name: |\n        uses: actions/checkout@{} # {}\n".format(sha, version)):
             body = mutate(QUALITY, CHECKOUT_STEP, fragment + CHECKOUT_STEP)
             with self.subTest(fragment=fragment):
                 self.assert_ci_violation(body, "not in the reviewed action-pin allowlist")
@@ -779,8 +790,9 @@ class AllowlistTests(unittest.TestCase):
         self.assertEqual(policy.scan_repository(self.root), [])
         self.assertEqual(pins.validate_repository(self.root), [])
         sha = "0123456789abcdef0123456789abcdef01234567"
+        reviewed_version = pins.load_allowlist(ALLOWLIST)["actions/checkout"][1]
         for fragment in ("      - uses: example/unlisted@{} # v1.0.0\n".format(sha),
-                         "      - uses: actions/checkout@{} # v7.0.1\n".format(sha)):
+                         "      - uses: actions/checkout@{} # {}\n".format(sha, reviewed_version)):
             with self.subTest(fragment=fragment):
                 write_tree(self.root, {"ci.yml": mutate(QUALITY, CHECKOUT_STEP, fragment + CHECKOUT_STEP)})
                 self.assertTrue(any("ci.yml" in v and "reviewed action-pin allowlist" in v

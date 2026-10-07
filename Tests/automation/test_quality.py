@@ -23,9 +23,27 @@ import weakref
 REPO_ROOT = Path(__file__).resolve().parents[2]
 QUALITY_PATH = REPO_ROOT / "scripts" / "ci" / "quality.py"
 CI_WORKFLOW_PATH = REPO_ROOT / ".github" / "workflows" / "ci.yml"
+ACTION_PINS_PATH = REPO_ROOT / "scripts" / "ci" / "action_pins.py"
+ALLOWLIST_PATH = REPO_ROOT / ".github" / "actions-allowlist.json"
 FULL_SHA = "0123456789abcdef0123456789abcdef01234567"
 BASE_SHA = "89abcdef0123456789abcdef0123456789abcdef"
 OTHER_SHA = "fedcba9876543210fedcba9876543210fedcba98"
+
+
+def reviewed_pin(name: str) -> str:
+    """The `uses:` text of an allowlisted Action, read from the reviewed allowlist, so a pin bump
+    changes the allowlist and the workflows and no test."""
+    spec = importlib.util.spec_from_file_location("action_pins", ACTION_PINS_PATH)
+    if spec is None or spec.loader is None:
+        raise RuntimeError("unable to load action pin checker")
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    sha, version = module.load_allowlist(ALLOWLIST_PATH)[name]
+    return f"{name}@{sha} # {version}"
+
+
+UPLOAD_ARTIFACT = reviewed_pin("actions/upload-artifact")
+DOWNLOAD_ARTIFACT = reviewed_pin("actions/download-artifact")
 TRUSTED_HOSTED_ENVIRONMENT = {
     "GITHUB_ACTIONS": "true",
     "RUNNER_OS": "macOS",
@@ -348,7 +366,7 @@ class QualityDriverTests(unittest.TestCase):
         self.assertNotIn("--hosted-phase bats", bats_build_job)
         self.assertNotIn("--hosted-phase build", bats_job)
         self.assertIn(
-            "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1",
+            UPLOAD_ARTIFACT,
             bats_build_job,
         )
         self.assertIn(
@@ -373,7 +391,7 @@ class QualityDriverTests(unittest.TestCase):
         self.assertIn("path: ${{ runner.temp }}/hosted-bats-artifact/", bats_build_job)
         self.assertIn("if-no-files-found: error", bats_build_job)
         self.assertIn(
-            "actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1",
+            DOWNLOAD_ARTIFACT,
             bats_job,
         )
         self.assertIn(
@@ -394,10 +412,10 @@ class QualityDriverTests(unittest.TestCase):
             self.assertIn(required, install_artifact_step)
         self.assertLess(
             bats_job.index("- name: Install pinned Bats"),
-            bats_job.index("actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1"),
+            bats_job.index(DOWNLOAD_ARTIFACT),
         )
         self.assertLess(
-            bats_job.index("actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8.0.1"),
+            bats_job.index(DOWNLOAD_ARTIFACT),
             bats_job.index("- name: Validate hosted Bats binary artifact"),
         )
         self.assertLess(

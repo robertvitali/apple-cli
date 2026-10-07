@@ -17,10 +17,11 @@ WORKFLOWS_ROOT = REPO_ROOT / ".github" / "workflows"
 ALLOWLIST_PATH = REPO_ROOT / ".github" / "actions-allowlist.json"
 
 # How often each Action is used: an expectation of workflow usage kept independently of the
-# allowlist. The allowlist, .github/actions-allowlist.json, is the only list of pins; fixtures
-# across Tests/automation (this file, test_workflow_policy, test_pr_metadata, test_quality) and
-# the runbook's recorded workflow still quote individual live pins (checkout's above all) and
-# move with a bump of that Action.
+# allowlist. The allowlist, .github/actions-allowlist.json, is the only list of pins. Test
+# fixtures read the pins they need from it (`reviewed_pin`, REVIEWED_CHECKOUT_SHA), so a refusal
+# test starts from the reviewed pin whatever it is; only the urgent-release runbook's recorded
+# workflow, restored verbatim on the day, quotes pins (checkout and upload-artifact) and moves
+# with a bump of them.
 EXPECTED_ACTION_COUNTS = {
     "actions/checkout": 10,
     "actions/setup-python": 2,
@@ -52,6 +53,16 @@ def load_policy() -> ModuleType:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     return module
+
+
+REVIEWED_CHECKOUT_SHA, REVIEWED_CHECKOUT_VERSION = load_checker().load_allowlist(ALLOWLIST_PATH)["actions/checkout"]
+
+
+def reviewed_pin(name: str) -> str:
+    """The `uses:` text of an allowlisted Action, read from the reviewed allowlist, so a pin bump
+    changes the allowlist and the workflows and no test."""
+    sha, version = load_checker().load_allowlist(ALLOWLIST_PATH)[name]
+    return f"{name}@{sha} # {version}"
 
 
 def write_workflow(root: Path, relative: str, body: str) -> Path:
@@ -187,8 +198,7 @@ class ActionPinPolicyTests(unittest.TestCase):
 jobs:
   test:
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-""",
+      - uses: """ + reviewed_pin("actions/checkout") + "\n",
             )
 
             self.assertEqual(checker.validate_repository(root), [])
@@ -213,8 +223,7 @@ jobs:
             &anchor uses: anchored-shell-text
             *alias: aliased-shell-text
       # !!str uses: tagged-comment-text {? &anchor *alias}
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-""",
+      - uses: """ + reviewed_pin("actions/checkout") + "\n",
             )
 
             self.assertEqual(checker.validate_repository(root), [])
@@ -245,14 +254,14 @@ jobs:
     def test_rejects_quoted_uses_keys_and_flow_style_uses_nodes(self) -> None:
         checker = load_checker()
         documents = (
-            'jobs:\n  test:\n    "uses": actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n',
-            "jobs:\n  test:\n    'uses': actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n",
-            "jobs: {test: {uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1}}\n",
-            "jobs:\n  test:\n    steps: [{uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1}]\n",
-            'jobs:\n  test:\n    ? "uses"\n    : actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n',
-            "jobs:\n  test:\n    ? uses\n    : actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1\n",
+            ('jobs:\n  test:\n    "uses": actions/checkout@' + REVIEWED_CHECKOUT_SHA + ' # ' + REVIEWED_CHECKOUT_VERSION + '\n'),
+            ("jobs:\n  test:\n    'uses': actions/checkout@" + REVIEWED_CHECKOUT_SHA + " # " + REVIEWED_CHECKOUT_VERSION + "\n"),
+            ("jobs: {test: {uses: actions/checkout@" + REVIEWED_CHECKOUT_SHA + "}}\n"),
+            ("jobs:\n  test:\n    steps: [{uses: actions/checkout@" + REVIEWED_CHECKOUT_SHA + "}]\n"),
+            ('jobs:\n  test:\n    ? "uses"\n    : actions/checkout@' + REVIEWED_CHECKOUT_SHA + '\n'),
+            ("jobs:\n  test:\n    ? uses\n    : actions/checkout@" + REVIEWED_CHECKOUT_SHA + "\n"),
             "jobs:\n  test:\n    steps:\n      -   uses: vendor/example@aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa # v0.1.0\n",
-            'jobs: {"u\\u0073es": actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1}\n',
+            ('jobs: {"u\\u0073es": actions/checkout@' + REVIEWED_CHECKOUT_SHA + '}\n'),
         )
 
         for index, document in enumerate(documents):
@@ -268,12 +277,12 @@ jobs:
     def test_rejects_yaml_structure_that_can_hide_uses_keys(self) -> None:
         checker = load_checker()
         documents = (
-            "jobs:\n  test:\n    !!str uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n",
-            "jobs: {test: {? uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1}}\n",
-            "jobs:\n  test:\n    &action-key uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n",
-            "key: &action-key uses\njobs:\n  test:\n    *action-key: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n",
-            "jobs:\n  test:\n    !<tag:yaml.org,2002:str> uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n",
-            "jobs:\n  test:\n    &é uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n",
+            ("jobs:\n  test:\n    !!str uses: actions/checkout@" + REVIEWED_CHECKOUT_SHA + " # " + REVIEWED_CHECKOUT_VERSION + "\n"),
+            ("jobs: {test: {? uses: actions/checkout@" + REVIEWED_CHECKOUT_SHA + "}}\n"),
+            ("jobs:\n  test:\n    &action-key uses: actions/checkout@" + REVIEWED_CHECKOUT_SHA + " # " + REVIEWED_CHECKOUT_VERSION + "\n"),
+            ("key: &action-key uses\njobs:\n  test:\n    *action-key: actions/checkout@" + REVIEWED_CHECKOUT_SHA + " # " + REVIEWED_CHECKOUT_VERSION + "\n"),
+            ("jobs:\n  test:\n    !<tag:yaml.org,2002:str> uses: actions/checkout@" + REVIEWED_CHECKOUT_SHA + " # " + REVIEWED_CHECKOUT_VERSION + "\n"),
+            ("jobs:\n  test:\n    &é uses: actions/checkout@" + REVIEWED_CHECKOUT_SHA + " # " + REVIEWED_CHECKOUT_VERSION + "\n"),
         )
 
         for index, document in enumerate(documents):
@@ -289,9 +298,9 @@ jobs:
     def test_rejects_implicit_mappings_inside_flow_sequences(self) -> None:
         checker = load_checker()
         documents = (
-            "jobs:\n  test:\n    steps: [ uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 ]\n",
-            'jobs:\n  test:\n    steps: [ "uses": actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 ]\n',
-            'jobs:\n  test:\n    steps: [ "u\\u0073es": actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 ]\n',
+            ("jobs:\n  test:\n    steps: [ uses: actions/checkout@" + REVIEWED_CHECKOUT_SHA + " ]\n"),
+            ('jobs:\n  test:\n    steps: [ "uses": actions/checkout@' + REVIEWED_CHECKOUT_SHA + ' ]\n'),
+            ('jobs:\n  test:\n    steps: [ "u\\u0073es": actions/checkout@' + REVIEWED_CHECKOUT_SHA + ' ]\n'),
         )
 
         for index, document in enumerate(documents):
@@ -318,9 +327,13 @@ jobs:
 
     def test_rejects_reviewed_action_with_changed_sha_or_version_comment(self) -> None:
         checker = load_checker()
+        # Built from the reviewed pin, so the only mismatch is the one under test: one nibble of
+        # the commit, or the version label beside the reviewed commit.
+        other_sha = REVIEWED_CHECKOUT_SHA[:-1] + ("1" if REVIEWED_CHECKOUT_SHA[-1] == "0" else "0")
+        major, minor, patch = REVIEWED_CHECKOUT_VERSION[1:].split(".")
         values = (
-            "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b0 # v7.0.1",
-            "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.0",
+            f"actions/checkout@{other_sha} # {REVIEWED_CHECKOUT_VERSION}",
+            f"actions/checkout@{REVIEWED_CHECKOUT_SHA} # v{major}.{minor}.{int(patch) + 1}",
         )
 
         for index, value in enumerate(values):
@@ -328,7 +341,8 @@ jobs:
                 root = Path(directory)
                 write_workflow(root, "changed.yml", f"jobs:\n  test:\n    uses: {value}\n")
 
-                self.assertNotEqual(checker.validate_repository(root), [])
+                errors = checker.validate_repository(root)
+                self.assertTrue(any("does not match the reviewed allowlist" in error for error in errors), errors)
 
     def test_rejects_symlink_and_oversized_workflow_files(self) -> None:
         checker = load_checker()
@@ -338,7 +352,7 @@ jobs:
             workflow_root.mkdir(parents=True)
             target = root / "target.yml"
             target.write_text(
-                "jobs:\n  test:\n    uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1\n",
+                ("jobs:\n  test:\n    uses: actions/checkout@" + REVIEWED_CHECKOUT_SHA + " # " + REVIEWED_CHECKOUT_VERSION + "\n"),
                 encoding="utf-8",
             )
             (workflow_root / "linked.yml").symlink_to(target)
@@ -358,7 +372,7 @@ jobs:
         # return is a YAML line break this line scan does not split on), a byte-order mark, a
         # bidirectional control, and any character outside YAML's printable set.
         checker = load_checker()
-        pinned = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1"
+        pinned = ("actions/checkout@" + REVIEWED_CHECKOUT_SHA + " # " + REVIEWED_CHECKOUT_VERSION)
         for character in ("\u00a0", "\u2028", "\x85", "\x0b", "\r", "\x00", "\x7f", "\x86", "\ufffe", "\ufeff", "\u202e", "\u200f"):
             codepoint = "U+{:04X}".format(ord(character))
             with self.subTest(codepoint=codepoint), tempfile.TemporaryDirectory() as directory:
@@ -369,14 +383,14 @@ jobs:
                 self.assertTrue(any("odd.yml" in error and codepoint in error for error in errors), errors)
 
     def test_rejects_a_pin_hidden_behind_a_no_break_space(self) -> None:
-        # Before the refusal, `@<sha><NBSP>#<NBSP>v7.0.1` read here as the approved pin and its
+        # Before the refusal, `@<sha><NBSP>#<NBSP><version>` read here as the approved pin and its
         # annotation, while GitHub reads the whole scalar as the ref: not a SHA.
         checker = load_checker()
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             write_workflow(root, "hidden.yml",
                            "jobs:\n  test:\n    steps:\n      - uses: actions/checkout@"
-                           "3d3c42e5aac5ba805825da76410c181273ba90b1\u00a0#\u00a0v7.0.1\n")
+                           + REVIEWED_CHECKOUT_SHA + "\u00a0#\u00a0" + REVIEWED_CHECKOUT_VERSION + "\n")
             errors = checker.validate_repository(root)
             self.assertTrue(any("hidden.yml" in error and "U+00A0" in error for error in errors), errors)
 
@@ -443,7 +457,7 @@ jobs:
 
     def test_rejects_invisible_characters(self) -> None:
         checker = load_checker()
-        pinned = "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1"
+        pinned = ("actions/checkout@" + REVIEWED_CHECKOUT_SHA + " # " + REVIEWED_CHECKOUT_VERSION)
         for character in INVISIBLE_SAMPLES:
             codepoint = "U+{:04X}".format(ord(character))
             with self.subTest(codepoint=codepoint), tempfile.TemporaryDirectory() as directory:
@@ -482,9 +496,9 @@ jobs:
         checker = load_checker()
         invalid_values = (
             "actions/checkout@v7",
-            "actions/checkout@3D3C42E5AAC5BA805825DA76410C181273BA90B1 # v7.0.1",
-            "actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1",
-            "actions/checkout@${{ github.sha }} # v7.0.1",
+            "actions/checkout@" + REVIEWED_CHECKOUT_SHA.upper() + " # " + REVIEWED_CHECKOUT_VERSION,
+            ("actions/checkout@" + REVIEWED_CHECKOUT_SHA),
+            "actions/checkout@${{ github.sha }} # " + REVIEWED_CHECKOUT_VERSION,
             "docker://example.invalid/tool:latest",
             "docker://example.invalid/tool@sha256:AAAA",
             "./local/action",
@@ -546,16 +560,17 @@ jobs:
             write_workflow(
                 root,
                 "malformed.yml",
-                """jobs:
+                ("""jobs:
   test:
-    uses : actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-    uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-""",
+    uses : actions/checkout@""" + REVIEWED_CHECKOUT_SHA + """ # """ + REVIEWED_CHECKOUT_VERSION + """
+    uses: actions/checkout@""" + REVIEWED_CHECKOUT_SHA + """ # """ + REVIEWED_CHECKOUT_VERSION + """
+"""),
             )
 
             errors = checker.validate_repository(root)
 
-            self.assertTrue(any("malformed.yml:4:" in error for error in errors))
+            self.assertTrue(any("malformed.yml:4:" in error and "duplicate uses key in one mapping" in error
+                                for error in errors), errors)
 
 
 class RepositoryActionInventoryTests(unittest.TestCase):
