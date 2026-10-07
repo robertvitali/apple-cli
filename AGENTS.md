@@ -279,7 +279,9 @@ invokes the binary — the full recursive `bats -r bats/` tier is LOCAL ONLY: me
 environment-dependently and crawling at ~10s/test; a hosted-safe partition runs in CI's
 `hosted-bats` job on `macos-26`), **Python automation** (`python3 -m unittest discover -s
 Tests/automation`, the CI-policy tooling's own tests — run ONLY by the Ubuntu
-`Supply-chain policy` job, so a macOS-only skip there is a test no CI job runs), and
+`Supply-chain policy` job, so a macOS-only skip there is a test no CI job runs; its libyaml
+comparisons need Ruby, which that runner's image provides, and fail rather than skip in CI
+without it), and
 **live** (drives the real Apple frameworks against the sandbox — real Mac with granted
 TCC, not CI). Hosted CI is Ubuntu plus `macos-26` while local development tracks the
 current macOS, so a green local run is not evidence for the hosted lanes or vice versa;
@@ -722,10 +724,12 @@ CLI actually accepts.
   and line feed (a carriage return is read as a line feed on this path), and no byte-order
   mark, bidirectional control, invisible character or character outside YAML's printable set,
   no explicit block indentation indicator, no tab in a line's leading whitespace, no quoted
-  scalar that does not close on its own line, no plain flow-sequence item holding `:`, `[`, `]`,
-  `{` or `}`, no plain value holding a colon followed by a space or a tab, and a sequence entry YAML
-  reads as a mapping must begin with a plain key the parser admits, so a `nav` title holding a
-  space cannot be written yet) and must fit a recorded
+  scalar that does not close on its own line, no plain flow-sequence item holding `:`, `?`, `[`,
+  `]`, `{` or `}`, no plain value holding a colon followed by a space or a tab, no plain scalar
+  starting with `,`, `]`, `}` or `#`, or with `-` followed by a space, a tab or the end (a
+  flow-sequence item `-` directly before `,` or `]` stays the string `-`), no tab after a
+  sequence entry's `-`, and a sequence entry YAML reads as a mapping must begin with a
+  plain key the parser admits, so a `nav` title holding a space cannot be written yet) and must fit a recorded
   allowlist — known top-level keys only, `docs_dir` present and exactly `docs/manual`, `use_directory_urls` absent or
   true, no `hooks`, no plugin but `search`, no `theme.custom_dir`, Markdown extensions and their
   options from the recorded set (`pymdownx.snippets` is refused), relative asset paths. A

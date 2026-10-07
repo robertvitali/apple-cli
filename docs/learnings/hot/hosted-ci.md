@@ -1,11 +1,61 @@
 ---
 topic: hosted-ci
 importance: high
-last-used: 2026-10-07
-uses: 20
+last-used: 2026-10-10
+uses: 21
 ---
 
 # Hosted CI (public, free GitHub-hosted runners)
+
+## 2026-10-07 — A quote is a quote only where a node may start: a standing libyaml differential
+
+**Symptom.** The entry below left the parser's paths outside block scalars open. A seeded
+differential of `scripts/ci/workflow_policy.py` against libyaml 0.2.1 (Ruby Psych) and 0.2.5
+(PyYAML's C loader), over 272,000 generated documents, found 7 that both accept and read
+differently, and 10,328 (0.2.1) and 10,219 (0.2.5) that only the parser accepts. In `k: a-'x #y`
+the parser read the value `a-'x #y`; YAML reads `a-'x` and a comment. `k: ,`, `k: - b`, `- ]`,
+`[#, a]`, `[a?]` and `- \ta` were accepted here and are errors to libyaml (`[a?]` to 0.2.1 only).
+
+**Cause.** The comment stripper opened a quoted scalar at any quote that followed `:`, `-`, `[`
+or `,` once spaces were dropped, wherever that character sat, so after a quote in the middle of a
+plain value the ` #` that starts YAML's comment read as text. The scalar reader refused a plain
+scalar that starts with most indicators but not `,`, `]`, `}`, `#` or `- `, the nested-sequence
+check looked for `- ` with a space, not a tab, and nothing looked for a tab after a sequence
+entry's `-`.
+
+**Fix.** A quote opens only where YAML may start a node: at the start of the line's text, after a
+`-` or `?` indicator that itself starts one, after a `:` followed by a space, a tab or the end,
+after an anchor or a tag, and inside a flow collection after its `[` or `{`, a `,`, or,
+conservatively, any `?` or `:` (a JSON-like `{"a":"b #c"}` needs no space; a plain flow item
+holding either is refused in any case); where the stripper cannot tell, it still opens,
+which keeps text rather than drops it. A plain scalar may not start with `,`, `]`, `}` or `#`, or
+be `-` alone or `- x`, though a flow item `-` right before `,` or `]` stays the string `-`, as YAML
+reads it; a plain flow item may not hold `?`; a tab after a sequence entry's `-` is refused. After
+the fix the same 272,000 documents give 0 and 0 against both versions. Of the documents the fix
+newly refuses, libyaml 0.2.1 and MkDocs' loader read none as the parser did before; libyaml 0.2.5
+reads 109, each a `?` in a plain flow item such as `[x.css?v=1]`, which the other two reject. It
+newly accepts 4, each read as libyaml reads it. `LibyamlDifferentialTests` compares every scanned
+workflow, `mkdocs.yml`, the urgent-release runbook's recorded workflow, the same 272,000
+documents and a second set of 48,000 with the host's libyaml in CI and wherever Ruby is present,
+fails rather than skips in CI if Ruby is missing, and prints which libyaml it compared with. It
+compares node trees, a scalar's text and
+whether it was plain, so YAML 1.1's readings of `on` or `3.10` neither fake nor hide a difference.
+
+**Lesson.** Compare with the loader on structure, not on a type-resolved load: `safe_load` turns
+`on` into true and `3.10` into 3.1, which would report false differences and could mask real ones.
+Run more than one loader version, since 0.2.1 and 0.2.5 differ on `?` and `:` in flow items, and
+read the loader the consumer actually uses: MkDocs loads `mkdocs.yml` with PyYAML's pure-Python
+loader, which refuses tabs that both libyaml versions and this parser accept (10,395 of the
+documents). That one fails loudly, so it is recorded, not refused. And when a fix newly refuses
+documents a loader accepts, count them against each loader and say what they are. Size the standing
+set by the recorded one: at 600 documents per template (10,200 in all), seven of nine seeds (0 to
+8) found no document the old quote handling reads differently, so the test runs the record's own
+set (about 5 seconds). Then widen the shapes, not only the count: the record's set builds plain
+text, an indicator, a quote and ` #` only rarely, and with a `?` not at all, and in review a `?`
+in the middle of plain text was found opening a quote YAML never opens. A second set of 48,000
+that builds, in every document, a run of one to three pieces, a blank, an indicator or another
+piece, then a quote holding ` #` reports 2,873 such documents and 0 once fixed, and the test runs
+it beside the first (added 2026-10-10).
 
 ## 2026-10-07 — A colon and a space make a mapping: one-pair flow items and alias keys
 
