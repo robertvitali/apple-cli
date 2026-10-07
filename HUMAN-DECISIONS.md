@@ -31,10 +31,11 @@ recorded, scoped evidence).
 
 ---
 
-## LEDGER — every decision at a glance (updated 2026-10-04)
+## LEDGER — every decision at a glance (updated 2026-10-07)
 
 **Still needs you: D2 (the Homebrew tap), D18 (the `v27.0.0` release, which waits on the phase-3
-publisher) and D22 (two parity narrowings).** D9 was reopened 2026-08-31 and finally closed the
+publisher), D22 (two parity narrowings) and D50 (tracker identifiers in the Activity view's branch
+names).** D9 was reopened 2026-08-31 and finally closed the
 same day (recorded CLOSED — see D9). D15 and D16 were ratified 2026-09-07. D3 and D14 were
 live-validated operator-present on 2026-08-27 (evidence on their Asana tasks; the Mail parent
 closed the same day under the closure-verification protocol). Publication remains blocked —
@@ -94,6 +95,8 @@ publication action.
 | D44 | Narrow main-only reversal for a parallel session's worktree | **RATIFIED 2026-10-01** (amended 2026-10-03: the branch reached `origin` once and was deleted on the operator's word) | One local git worktree, `~/workspace/apple-cli-governance` on the local branch `26/governance`, for a second agent session working the supply-chain and governance queue in parallel. The branch is never pushed and never merged: each change is rebased onto the current `main`, passes the same review, scan and canonical gates, and lands by a fast-forward push to `main`, one landing at a time. Removed when that queue is done. Ordinary work otherwise stays main-only; D16 is unchanged |
 | D45 | Open Dependabot pull requests 7 and 8 while the Dependabot governance path is built | **ANSWERED 2026-10-02: supersede both on main (option A); APPLIED 2026-10-03** (resolved 2026-10-03: Dependabot closed both; its edits started two CI runs on pull request 7's pre-D41 head, one of which ran the Swift suite and added a log copy under D43) | Two reviewed commits on `main` take the same updates: urllib3 2.7.0 → 2.8.0 in `docs/requirements.txt`, which clears the three open alerts, and astral-sh/setup-uv 10.1.0 → 10.2.0, with its new SHA added to the reviewed Action allowlist. Dependabot then closes both pull requests itself. No agent action on either pull request, and no new CI run on pull request 7's pre-D41 head (D43) |
 | D46 | Interim protection for `main` before the design's ruleset | **APPLIED 2026-10-02T05:04Z on the operator's instruction; no-bypass shape RATIFIED 2026-10-02 (option A)** | One active ruleset on `main` only, with two rules, block force pushes and restrict deletion, and no bypass actor: while it is active nothing, the operator's credentials included, can force-update or delete `main`, and an authorized history rewrite needs the operator to disable it first. It guards against mistakes, not a misused admin credential, which can disable it. Neither rule applies to fast-forward pushes, pull requests, Dependabot's branches or the current read-only CI workflows; the first push under it (`9cd2260`) passed. At design §18 step 20 the operator decides whether it is deleted or kept; keeping it needs design amendments |
+| D47 | The public Activity view lists commits no advertised ref holds, whose parents reach the replaced history | **RATIFIED 2026-10-07 (UTC): leave them (option B of the later briefs), re-confirmed after the reach was measured** | The repository's public Activity view lists 128 commits that no advertised ref holds; with their parents they make 1,550 such commits, holding phone-number-like strings, email addresses and two commit messages with a denylist term no file or commit message on `main` carries. Accepted as a residual scoped to the 128 commits the view listed on 2026-10-06 and everything reachable from them that no advertised ref holds: 1,550 commits (the 128 among them) and their trees and file contents that no advertised ref holds, pinned by the SHA-256 of two private id lists. Anything the round's classes detect in a commit outside the two pinned lists, or in an object no listed commit reaches, is outside this residual and stays a finding unless another entry accepts it, whenever the view lists it or however it is found; the six branch names in the view that carry tracker identifiers are D50 |
+| D50 | Deleted branch names in the public Activity view carry tracker identifiers | **OPEN 2026-10-07** | Six deleted branch names, in 24 creation, push and deletion events dated 2026-07-15 to 2026-08-23, carry tracker identifiers. The same identifiers occur in commit messages D47 accepts, and each branch's last tip is among D47's commits. D47 does not cover the names; they stay a finding until the operator rules |
 
 ---
 
@@ -1254,6 +1257,8 @@ you can reverse that, and the flip's timing is yours.
 
 **Amended 2026-09-28 (D38):** this entry accepted by-id reachability of pre-rewrite objects, the D9 personal-data commits included, on the premises that their ids were retained nowhere this project controls and every published surface was clean or operator-dispositioned. Neither held for one of them: a 2026-07-23 pre-rewrite commit whose message carries personal data had its message and id served by the public workflow-run listing from 2026-09-21 to 2026-09-27 (D37), and a third-party check suite keeps a copy of the message by commit id. The operator accepted it as a recorded residual (D38) and filed no Support purge.
 
+**Amended 2026-10-07 (D47):** the repository's public Activity view, public since 2026-09-21, lists 128 commit ids that no advertised ref holds, and with their parents they make 1,550 such commits, so neither premise holds for those commits. This entry's finding that orphaned objects are reachable only by exact id and never listed does not hold either: the Activity view lists such ids, and fetching one returns every ancestor. The operator accepted those commits and their objects that no advertised ref holds as a recorded residual (D47) and filed no Support purge. For orphaned objects outside that set this entry's acceptance still rests on both premises. Anything the round's classes detect in a commit outside the two pinned lists, or in an object no listed commit reaches, is outside this residual and stays a finding unless another entry accepts it, whenever the view lists it or however it is found.
+
 ---
 
 ## D20 — Outside contributor's plaintext git identity on open pull requests 3–5
@@ -1955,6 +1960,8 @@ it, is yours alone to decide (D9, D19).
 
 **Blocking?** No; it settles one residual before the fresh round runs.
 
+**Amended 2026-10-07 (D47):** this commit is one of the 128 the public Activity view has listed since the 2026-09-21 visibility change, an exposure window not recorded above, and a second commit message carrying a denylist term is reachable through the listed commits' parents. Both, with every other object reachable from the 128 listed commits that no advertised ref holds (D47's 1,550 commits and their objects), now sit inside D47's accepted residual. Anything the round's classes detect in a commit outside the two pinned lists, or in an object no listed commit reaches, is outside this residual and stays a finding unless another entry accepts it, whenever the view lists it or however it is found.
+
 ---
 
 ## D39 — How APPLE_MAIL_MCP_HOME reads a tilde: as the retired Mail MCP read it
@@ -2430,5 +2437,137 @@ authorize changing, the design schedules `main` protection for §18 step 20, and
 shape constrains the operator's own emergency path.
 
 **Blocking?** No.
+
+---
+
+## D47 — The public Activity view lists commits no advertised ref holds, whose parents reach the replaced history: leave them
+
+- **Status:** **RATIFIED 2026-10-07 (UTC; 2026-10-06 local): leave them (option B of the second and
+  third briefs), re-confirmed after the reach was measured; a recount after the ruling lowered two
+  figures in the brief it answered.**
+- **Finding (controller, read-only, 2026-10-07T02:25Z to 04:31Z UTC; the view's newest event was
+  2026-10-06T08:44Z).** The repository's public Activity view listed 291 events (249 pushes, 15
+  force pushes, 14 branch creations, 13 branch deletions) naming 269 distinct commits, 133 of them
+  not on `main`. A fresh mirror of every ref GitHub advertises (`main`, the tag and the eight
+  pull-request refs) holds 5 of the 133, each the head of one of Dependabot's pull requests 1, 2,
+  6, 7 and 8, held by that pull request's ref and outside this entry. The other 128 are absent from
+  every advertised ref. 127 of them first appear in the view between 2026-07-15 and 2026-09-03; the
+  remaining one, first listed 2026-10-04, is the `26/governance` tip D44 records. GitHub still
+  served all 128 by full id on 2026-10-07. With their parents they make 1,550 commits in all, the
+  128 included, that no advertised ref holds (none is an ancestor of `main` or of a pull-request
+  ref), carrying 1,194 distinct file contents found in no commit of `main`'s history. A value-free
+  count over those objects, keeping only values that occur in no file or commit message in `main`'s
+  history and without reading them, found 14 distinct phone-number-like strings (4 of them bare
+  digit runs that may be constants) and 11 email addresses (AI co-author, GitHub and reserved
+  example addresses excluded, and reserved test numbers); no file content holds five or more such
+  addresses. Two commit messages carry a denylist term that no file or commit message on `main`
+  carries: one is D38's commit, itself one of the 128; the other is reachable only through parents
+  and was not recorded before. Three other denylist terms also occur in today's public files; their
+  matches were not classified. Counted per message and not filtered against `main`, 953 of the
+  1,550 messages carry tracker identifiers and 485 carry session links, the latter from the two
+  operator sessions D37 named. The view also shows six deleted branch names that carry tracker
+  identifiers; this ruling does not cover them (D50). The private lists of the 128 and of the 1,550
+  commit ids (full lowercase ids, sorted bytewise, one per line, each line ending in a line feed)
+  have SHA-256 `fec96da60ce0818cd031508a22fb5c6dfa47cddc7a03efd4fa6a53e3085a79b4` and
+  `0a66c433158bb5f92902df168fad7c3c7aa474bf51b1706ebcb86da75a0f0c3d`.
+- **What this changes in earlier entries.** D19 accepted by-id reachability on two premises, as D38
+  restates them: that the ids were retained nowhere this project controls, and that every published
+  surface was clean or operator-dispositioned. D37 (the run listing and the Events feed) and D44
+  (whose 2026-10-03 amendment noted that the view names its commit) had already broken them in
+  part. The Activity view, public since the 2026-09-21 visibility change, breaks them for the
+  replaced history reachable from these commits, and has listed D38's commit since then, an
+  exposure window D38 does not record. D19 also saw 35 of 38 orphaned ids referenced by
+  pull-request timelines stop answering; none of these 128 has. D38 made any other personal-data
+  object a finding; this ruling accepts the second message above with the rest of the 1,550. Of the
+  135 head commits of the runs D37 deleted, 126 are among the 1,550 and are accepted here as
+  commits, 6 are held by pull-request refs, and 3 lie outside both: the outside contributor's
+  earlier pull-request heads, which the Events feed still names through review events. With their
+  parents those 3 make 6 commits that no advertised ref holds and neither list contains; their two
+  session-link messages are copies of messages a pull-request ref holds (D36's known item); these
+  six commits are a separate surface and stay a known item for the round. Copies of commit messages
+  stored outside git by commit id, such as third-party check suites, are not covered and stay
+  findings or known items.
+- **Options put to the operator.** First brief, before the parent-link reach was measured: (A) the
+  operator files a GitHub Support request to purge the unreachable commits (recommended); (B) make
+  the repository private, then (A); (C) delete and recreate the repository; (D) accept it as a
+  recorded risk. Second and third briefs, after the reach was measured: (A) a Support purge,
+  recommended in both; (B) leave them, scoped to everything reachable from the 128 commits the view
+  listed on 2026-10-06; deleting and recreating the repository was named only as a step the
+  operator could take personally, which the controller would not prepare, and making the repository
+  private was not offered again. Support takes such requests only through its web form; no
+  pull-request ref holds any of the 1,550, so a purge would have left the pull requests in place.
+  The third-party fork D19 noted, made on 2026-09-10 while the repository was private, answers
+  not-found to the owner's token: deleted, or detached at the visibility change as a standalone
+  private repository, which the controller cannot tell. Its refs held none of the 1,550 when it was
+  made; whether a detached copy keeps the network's unreachable objects is not known, and no option
+  reaches it.
+- **Ruling and how it was reached.** To the first brief the operator answered, for this item, "2A
+  if you can submit it autmatically through the cli, if i have to do anything manual besides
+  reading and approving, 2C". The controller found no command-line route to Support and, treating
+  the conditional "2C" as enough, started on deleting and recreating the repository, an
+  irreversible step it should have confirmed with the operator first. It took a private read-only
+  snapshot of the settings and pull-request record; an automatic safety check stopped it before any
+  deletion step was written. The operator asked "wait why are we deleting the repo???", then asked
+  for the commit list, whether the commits expire and what a fresh visitor can reach, began the
+  Support form without submitting it, and decided "actually let's just let these commits be." That
+  decision rested on the controller's description of 128 commits, each reachable only by its id,
+  which was wrong: each commit's parent links make the history behind it retrievable too. The
+  second brief, on the measured reach, also wrongly said that 482 old file versions held the
+  operator's private terms, "the material D9's rewrite removed"; those matches were terms that also
+  occur in today's public files. A third brief corrected that, kept both options and their scope,
+  still recommended (A), called (B) a reasonable choice, and gave 51 email addresses and 9 file
+  versions holding five or more each, which it said looked like data dumps. The operator answered
+  "B". A recount after the ruling, against `main`'s whole history instead of its current files,
+  found 11 addresses and no such file, so that brief overstated what the operator accepted; the
+  operator was told at about 04:11Z. The 1,550 commits and their objects that no advertised ref
+  holds, which include D38's commit, are a recorded residual: the end-of-roadmap privacy round
+  records them as ACCEPTED with these measurements. Anything the round's classes detect in a commit
+  outside the two pinned lists, or in an object no listed commit reaches, is outside this residual
+  and stays a finding unless another entry accepts it, whenever the view lists it or however it is
+  found. No Support request was filed and nothing changed on GitHub; the operator may still file
+  one, and this entry does not prevent it.
+- **Private scratch.** For the measurement the controller fetched the 1,550 commits into a private
+  directory outside the repository. On 2026-10-07, after recording the counts and before committing
+  this entry, it deleted that copy, the snapshot of the settings and pull-request record, the fresh
+  mirror, the copies of commit messages and the unsent Support drafts, and read back their absence.
+  It keeps privately, for the privacy round, the four id lists (the 128, the 1,550, the 133 and the
+  three review-event commits), the raw Activity and Events listings, the counting scripts (the
+  per-object count and the distinct-value recount that produced the figures above), and its notes
+  and review records, some of which quote commit ids from those lists.
+- **Filed:** 2026-10-07 (UTC) · **Category:** privacy disposition / residual on a GitHub-side
+  surface
+
+**Why it needed you.** Leaving personal data retrievable, contacting GitHub Support or deleting the
+repository is yours alone to decide (D9, D19, D38).
+
+**Blocking?** No; it settles the 128 commits the view listed on 2026-10-06 and their history before
+the fresh round runs. The branch names in it are D50, still open.
+
+---
+
+## D50 — Deleted branch names in the public Activity view carry tracker identifiers
+
+- **Status:** **OPEN 2026-10-07 (UTC)** — filed by the controller with D47; nothing applied. D48
+  and D49 are reserved for entries another session files.
+- **Finding.** The repository's public Activity view (D47) shows six deleted branch names that
+  carry tracker identifiers, in 24 events (branch creations, pushes and deletions) dated 2026-07-15
+  to 2026-08-23. The public Events feed does not list them. All six identifiers also occur in
+  commit messages D47 accepts, and each branch's last tip is among D47's 1,550 commits. The
+  repository bans tracker identifiers in its files, commits and docs (`AGENTS.md`, Commits +
+  review); this is a GitHub-side surface the repository cannot edit, and D47 does not cover the
+  names.
+- **Options.** (A) the operator asks GitHub Support, through its web form, to remove those Activity
+  entries, alone or together with the purge D47 declined (which would reopen D47); whether Support
+  removes Activity entries is not established; (B) accept them as a recorded residual scoped to
+  those six names in those 24 events, as D47 accepted the same identifiers in the messages it
+  covers. Whether Activity entries ever age out is not known. Controller's recommendation: (B),
+  since (A) alone leaves the same identifiers retrievable through the commits D47 accepts.
+- **Filed:** 2026-10-07 (UTC) · **Category:** privacy / tracker identifiers on a GitHub-side
+  surface
+
+**Why it needed you.** Contacting GitHub Support, or leaving tracker identifiers public, is yours
+to decide (D37 precedent for tracker identifiers in branch names on GitHub-side surfaces).
+
+**Blocking?** It is a finding for the end-of-roadmap privacy round until ruled.
 
 ---

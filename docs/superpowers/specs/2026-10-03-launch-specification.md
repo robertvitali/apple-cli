@@ -1,7 +1,7 @@
 # Launch specification (design §15)
 
 **Status:** DRAFT — awaiting operator approval (design §15 precondition 3); not approved, not in force.
-**Date:** 2026-10-03.
+**Date:** 2026-10-03. **Amended:** 2026-10-07 (D47: P2, 7.3, 11.2–11.4 and Section 15 item 3).
 **Parent:** `docs/superpowers/specs/2026-09-01-publication-automation-design.md` ("the design").
 A bare section number below is this document's; "design §N" is the design's; "DN" is an entry
 in `HUMAN-DECISIONS.md`; "readiness row N" and "evidence §N" refer to
@@ -129,13 +129,14 @@ Evidence: readiness row "8–14, hosted halves of 15–17, 20"; D46; the step 20
 **P2. The privacy gate is closed** (design §15 precondition 2; D34): a fresh round (Section 11)
 recorded in evidence §2 with zero findings for its stated scope, and no surface inside the D34
 minimum left NOT READ without an operator ruling. The round starts only after the last P1 or P6
-step that creates a public surface (validation and Dependabot pull requests and their reviews,
-the step 20 policy pull request, rehearsal runs and check suites); a surface created after it
-starts is covered by a recorded delta round before L1. Section 15's privacy item (item 3, added
-2026-10-04) is completed before P2 is recorded met; a Section 11 amendment its ruling makes after
-the round started is covered by a recorded delta round, before L1, for what the amendment adds
-or changes. Evidence: the readiness row "Fresh pre-publication privacy audit"; the ledger
-preamble. **State: NOT MET; the round has not run, and Section 15's privacy item is open.**
+step that creates a public surface (validation and Dependabot pull requests and their reviews, the
+step 20 policy pull request, rehearsal runs and check suites); a surface created after it starts is
+covered by a recorded delta round before L1. Section 15's privacy item (item 3, added 2026-10-04)
+was completed by D47 on 2026-10-07, before the round started. A Section 11 amendment that a later
+ruling makes after the round started (D50's, if it is ruled then) is covered by a recorded delta
+round, before L1, for what it adds or changes. Evidence: the readiness row "Fresh pre-publication
+privacy audit"; the ledger preamble. **State: NOT MET; the round has not run, and D50 is open (a
+finding until the operator rules; 11.3).**
 
 **P3. This specification is approved** (design §15 precondition 3): it has passed the design's
 review gates (independent automated review with code, security and critic perspectives), and a
@@ -1263,12 +1264,14 @@ not inspected through the API here, so a suspected cache is deleted, not scanned
 effect on Pages, on public Release downloads and therefore on tap installs is not established
 here and is read at the time.
 
-**Known limits.** Beyond this repository's controls: forks, clones, mirrors, search-engine and
-CDN caches, third-party archives and check suites, and GitHub's by-ID serving of unreachable
-objects (D19, D38); until GitHub Support removes them, a pull request's prior title in its
-`renamed` event and the pull request itself; and, until they age out, the account's public
-Events-feed entries for the venue's and any probe repository's pushes, pull requests and
-Releases, which deleting the repository is not shown to remove (D37).
+**Known limits.** Beyond this repository's controls: forks, clones, mirrors, search-engine and CDN
+caches, third-party archives and check suites, and GitHub's by-ID serving of unreachable objects
+(D19, D38, D47), including the commits the repository's public Activity view lists and the history
+their parent links reach, so a history rewrite does not on its own remove what it replaced; the
+deleted branch names that view shows (D50); until GitHub Support removes them, a pull request's
+prior title in its `renamed` event and the pull request itself; and, until they age out, the
+account's public Events-feed entries for the venue's and any probe repository's pushes, pull
+requests and Releases, which deleting the repository is not shown to remove (D37).
 
 ## 8. Homebrew distribution boundary
 
@@ -1593,31 +1596,46 @@ Section 7.
 
 ### 11.2 Minimum surfaces (D34)
 
-Every surface Round 1 and its addendum scanned (among them pull-request text and timelines,
-issue events and comments, and commit comments), plus: the tree, history, commit messages,
-objects and refs; workflow logs and artifacts; workflow-run, check-suite and check-run objects
-(head branch, head-commit message and author, display title, annotations and job summaries, not
-only logs); Actions caches; repository metadata; Releases. A surface the round cannot read is
-recorded NOT READ, and a NOT READ surface inside this minimum keeps the gate open until it is
-read or the operator rules on it.
+Every surface Round 1 and its addendum scanned (among them pull-request text and timelines, issue
+events and comments, and commit comments), plus: the tree, history, commit messages, objects and
+refs; workflow logs and artifacts; workflow-run, check-suite and check-run objects (head branch,
+head-commit message and author, display title, annotations and job summaries, not only logs);
+Actions caches; repository metadata; Releases; the repository's public Activity view (D47). A
+surface the round cannot read is recorded NOT READ, and a NOT READ surface inside this minimum
+keeps the gate open until it is read or the operator rules on it.
 
 ### 11.3 Known items the round must read and disposition
 
-From evidence §2 and D35 to D38, D41 to D44: copies of the eight D35 messages stored on run and
-check-suite objects, which D35 does not cover; the D36 contributor link in two commit messages on
-pull request 3's branch and in nine comment events in the public Events feed; at least 29
-off-main commit IDs in the Events feed until they age out, about 2026-12-13 at the latest; check
-suites left by a third-party App on 129 of the 135 head commits of the runs D37 deleted; two
-operator sessions in pre-rewrite messages served by ID; the test tree, re-read for other samples
-taken from a live store (D41); the residual D44's 2026-10-03 amendment records for the commit it
-names.
+Each commit ID found on a public surface is read with every ancestor that no advertised ref holds:
+fetching one ID returns its history (D47). From evidence §2 and D35 to D38, D41 to D44, D47 and
+D50: copies of the eight D35 messages stored on run and check-suite objects, which D35 does not
+cover; the D36 contributor link in two commit messages on pull request 3's branch and in nine
+comment events in the public Events feed; the off-main commit IDs the Events feed still names (at
+least 29 at D37's read; 12 at a 2026-10-07 re-read, ten of them heads of runs D37 deleted and three
+of them outside both D47's lists and the pull-request refs, which with their parents make six
+commits no advertised ref holds), until they age out, about 2026-12-13 at the latest; check suites
+left by a third-party App on 129 of the 135 head commits of the runs D37 deleted; copies, stored
+outside git, of the pre-rewrite messages carrying two operator sessions (the messages themselves,
+among D47's 1,550 commits, are accepted under D47); the six deleted branch names in the Activity
+view that carry tracker identifiers (D50, until ruled); every page of the Activity view's listing
+and every commit ID it names that lies outside D47's two id lists; the test tree, re-read for other
+samples taken from a live store (D41); the residual D44's 2026-10-03 amendment records for the
+commit it names; the old Mail test-file versions in `main`'s history that evidence §2 names (D47's
+review).
 
 ### 11.4 Recorded as ACCEPTED, not as findings
 
 Each as scoped in its entry: D20 (the contributor's own git identity), D35, D36, D38 (one commit
-served by ID), D41 and D42 (live-store samples in history), D43 (CI logs until about 2027-01-01,
-as its 2026-10-04 amendment records). D37 deleted 168 off-main runs; 205 runs were listed at its
-2026-09-27 read-back, and more since.
+served by ID), D41 and D42 (live-store samples in history), D43 (CI logs until about 2027-01-01, as
+its 2026-10-04 amendment records), D47 (the 1,550 commits that no advertised ref holds and that are
+reachable from the 128 the Activity view listed on 2026-10-06, the 128 among them, and their trees
+and file contents that no advertised ref holds, pinned by the SHA-256 of two private id lists; if
+the lists cannot be produced with matching SHA-256, the round records the residual as unverifiable
+and puts it to the operator). D47's boundary, as its entry states it: "Anything the round's classes
+detect in a commit outside the two pinned lists, or in an object no listed commit reaches, is
+outside this residual and stays a finding unless another entry accepts it, whenever the view lists
+it or however it is found." D37 deleted 168 off-main runs; 205 runs were listed at its 2026-09-27
+read-back, and more since.
 
 ### 11.5 The `v27.0.0` asset checks
 
@@ -1917,8 +1935,10 @@ Each lands through its own reviewed change and is on `main` and read back before
 ## 15. Open review findings (for the operator)
 
 These were raised by independent reviewers of this draft, except item 3, which the author added
-after the rounds that raised the others, and which later rounds reviewed; none is resolved yet.
-They are recorded here, value-free, so the operator sees them before approving.
+after the rounds that raised the others, and which later rounds reviewed, and item 14, which the
+controller added on 2026-10-07 when a reviewer of D47's change raised it. Item 3 was resolved by
+D47 on 2026-10-07; none of the others is resolved yet. They are recorded here, value-free, so the
+operator sees them before approving.
 
 **MEDIUM**
 
@@ -1936,11 +1956,12 @@ They are recorded here, value-free, so the operator sees them before approving.
    production settings would refuse the same run, most plausibly after L9. *Suggested fix:* have
    §6.6 item 2 and the §6.7 probe apply and read back this repository's merge and Actions settings
    before rehearsing, and treat a later mismatch against L15 as a re-seed trigger.
-3. **Privacy — Sections 7 and 11 (added 2026-10-04 by the author, after the rounds that raised
-   the others).** An operator question bearing on these sections is filed outside this
-   repository and is not resolved here. This item is completed after the ruling, with a ledger
-   entry and any amendment to Sections 7 and 11 the ruling requires, made under the P3 review
-   gates; P2 is not recorded met before then.
+3. **Privacy — Sections 7 and 11 (added 2026-10-04 by the author, after the rounds that raised the
+   others).** An operator question bearing on these sections was filed outside this repository.
+   This item was to be completed after the ruling, with a ledger entry and any amendment to
+   Sections 7 and 11 the ruling requires, made under the P3 review gates, before P2 could be
+   recorded met. **Resolved 2026-10-07 by D47:** its ledger entry and its Section 7 and 11
+   amendments landed in one commit, under the P3 review gates.
 
 **LOW**
 
@@ -1990,3 +2011,8 @@ They are recorded here, value-free, so the operator sees them before approving.
     can take hours while the exposure stays public. *Suggested fix:* let the operator authorize
     immediate deletion for an exposure still live on a run surface, with the ledger entry drafted
     and landed right after.
+14. **Privacy — Section 11.6, L13 item 7 (added 2026-10-07 with D47).** The public Activity view
+    lists the commits of every branch the launch creates in this repository after its deletion,
+    force push or squash merge; Section 11.6 and L13 item 7 do not read that view yet. *Suggested
+    fix:* have both read every page of the view's listing and every commit ID it names, each with
+    every ancestor no advertised ref holds, and say what counts as a finding.

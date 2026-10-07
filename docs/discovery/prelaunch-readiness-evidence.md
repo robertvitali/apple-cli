@@ -440,6 +440,34 @@ if a CI run on a pre-D41 head is re-run or a pull request on such a head runs) r
 them, since history keeps the term anyway and several of those logs back the runner-image facts in
 Section 4. The fresh round records them as ACCEPTED under D43.
 
+**The public Activity view lists the replaced history (D47, 2026-10-07).** The repository's
+Activity view, a public surface no audit round read (the controller first noted it on 2026-10-04
+UTC, in D44's amendment dated 2026-10-03 local), lists 128 commit ids that no advertised ref holds;
+with their parents they make 1,550 such commits, whose objects hold phone-number-like strings,
+email addresses, tracker identifiers, session links and a second commit message with a denylist
+term (counts in D47). The operator accepted them as a recorded residual (D47), re-confirmed after
+the reach was measured. The fresh round records those 1,550 commits and their objects that no
+advertised ref holds as ACCEPTED under D47, against the private id lists whose hashes D47 gives; if
+the lists cannot be produced with matching SHA-256, it records D47's residual as unverifiable and
+puts it to the operator. It must still read the view itself, every page of the repository's
+activity listing and every commit id it names: any commit it lists outside those lists is read
+under the round's classes together with every ancestor that no advertised ref and neither list
+holds, since fetching one id returns its history, and a hit is a finding. The six deleted branch
+names in the view that carry tracker identifiers are D50, a finding until the operator rules. Of
+the 135 head commits of the runs D37 deleted, 126 are among the 1,550, 6 are held by pull-request
+refs and 3, the outside contributor's earlier pull-request heads, lie outside both; with their
+parents those 3 make 6 commits that no advertised ref holds. Re-read the same day, the Events feed
+lists 196 events (the 2026-09-10 fork event among them, flagged non-public, so a reader without a
+token sees 195). Its push events, which now begin on 2026-09-04, name 2 commit ids off `main`, one
+of the 128 and one pull-request head; its pull-request and review events name 10 more, 7
+pull-request heads and those 3 commits. Ten of the twelve are heads of runs D37 deleted, so the
+29-id known item above stands, narrowed to the ids the feed still names. The two operator sessions
+above appear in messages among the 1,550 and are accepted there under D47; their copies elsewhere
+stay a known item. D47's review also found 40 email addresses with non-reserved domains in old
+versions of Mail test files in `main`'s own history, absent from today's files; the round
+dispositions them, cleared if an earlier round's record covers them (Round 1's email row names
+single-letter test domains among the fixture domains), otherwise a finding.
+
 ## 3. Local verification for the visibility-step commit and its successors
 
 The five commits below each ran the full local canonical suite through the signal-reset launcher
