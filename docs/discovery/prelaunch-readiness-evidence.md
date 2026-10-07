@@ -1697,7 +1697,7 @@ repository identify Dependabot; the identity never changes the verdict, and a mu
 Dependabot path (ten identity-check mutants, including one dropping each repository-id type check,
 and three diagnostic-gating mutants) killed all thirteen against a clean baseline. Dependabot
 updates of GitHub Actions pins still fail the Supply-chain policy job by design until the design's
-Dependabot workflow-pin exception (§10.5) exists. Dependabot's current head branches target `main`;
+Dependabot workflow-pin exception (§10.5) is in force. Dependabot's current head branches target `main`;
 D16's third class covers only the Dependabot head refs created when design §18 step 13 points
 `target-branch` at the disposable ref, and its other two classes are rehearsal refs, so these
 branches are none of D16's classes; they exist under `.github/dependabot.yml` (version updates,

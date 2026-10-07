@@ -302,6 +302,15 @@ def _printable(text: str) -> str:
     return "".join(character if character.isprintable() else "\\u{:04x}".format(ord(character)) for character in text)
 
 
+# Public names for dependabot_pin_exception.py, which splits a pinned `uses:` line and escapes the
+# paths it prints exactly as this scan does; same contract. COUPLING: that exception also uses
+# USES_KEY_PATTERN, REMOTE_PATTERN, VERSION_PATTERN, MAX_WORKFLOW_BYTES, workflow_paths,
+# read_regular_utf8 and load_allowlist, so a change to any of them or to the splitter changes what
+# it accepts.
+printable = _printable
+split_scalar_and_comment = _split_scalar_and_comment
+
+
 def _refused_character(character: str) -> bool:
     """Whitespace other than space and tab, a character outside YAML's printable set, U+FEFF,
     or a bidirectional control (U+061C, U+200E, U+200F, U+202A-U+202E, U+2066-U+2069).

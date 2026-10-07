@@ -396,8 +396,10 @@ def is_dependabot_proposal(pull_request: object) -> bool:
     """Return whether the event names a Dependabot pull request from this repository.
 
     Every field must be present with the exact expected type and value, or the answer is
-    False. The answer only selects an explanatory diagnostic: it never changes the verdict,
-    which depends on the title and body alone.
+    False. Here the answer only selects an explanatory diagnostic: it never changes the
+    verdict, which depends on the title and body alone. COUPLING:
+    `dependabot_pin_exception.check_pull_request` does rest a verdict on it, so loosening it
+    widens the Dependabot workflow-pin exception.
     """
     if not isinstance(pull_request, dict):
         return False

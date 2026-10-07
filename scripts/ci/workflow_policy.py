@@ -756,6 +756,9 @@ def _assign(mapping: Dict[str, Any], lines: _Lines, indent: int, match: "re.Matc
     mapping[key] = _scalar(stripped)
 
 
+# COUPLING: dependabot_pin_exception.py judges Dependabot pin proposals with parse_workflow,
+# ParseError, first_refused_character and first_invisible_character, so a change to them changes
+# what that exception accepts.
 def parse_workflow(text: str) -> Dict[str, Any]:
     refused = first_refused_character(text)
     if refused is not None:

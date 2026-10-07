@@ -394,7 +394,9 @@ JSON output are stable per the versioning policy — breaking changes bump
   template, and the check now says so in an extra diagnostic when the event's author account and
   head repository identify Dependabot. That identity never changes the check's verdict, which rests
   on the title and body alone. Dependabot updates of GitHub Actions pins still fail the Supply-chain
-  policy job, by design, until the design's Dependabot workflow-pin exception (§10.5) exists.
+  policy job, by design, until the design's Dependabot workflow-pin exception (§10.5) is in force;
+  `scripts/ci/dependabot_pin_exception.py` is only its offline judge, and no workflow runs it to
+  judge a proposal.
   **For anyone running the binary, nothing changes:** no `apple` command, output field, error
   type, or exit code is affected, and `schema_version` stays `1`.
 - **The CI checks now read pull-request text, lock files, Bats files, Swift sources and commit
