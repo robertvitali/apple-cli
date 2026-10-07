@@ -51,10 +51,12 @@ JSON output are stable per the versioning policy — breaking changes bump
   or ends with whitespace or holds a tab or line feed is refused. Literal and folded block
   scalars are read with YAML's own indentation and value rules (leading empty lines, chomping,
   folding), explicit indentation indicators and a tab in any line's leading whitespace are
-  refused, and what this scan, the action-pin check and the site-assembly rehearsal print
-  escapes any character that is not printable. A write reachable only through a remote
-  action's own code, or a command outside the recorded patterns, is not something a static
-  list can detect, and every check reads the file through
+  refused, a quoted scalar must close on its own line (a single-quoted one whose doubled quote
+  YAML reads as an escape, leaving it open onto the lines below, and a double-quoted one holding
+  an unescaped quote are refused), and what this scan, the action-pin check and the
+  site-assembly rehearsal print escapes any character that is not printable. A write reachable
+  only through a remote action's own code, or a command outside the recorded patterns, is not
+  something a static list can detect, and every check reads the file through
   the scan's own parser, which the character refusals narrow but cannot prove reads it exactly
   as GitHub does; the read-only permissions and the absence of any secret are what bound such a
   path. **For anyone running the binary, nothing changes:** no `apple` command, output field,

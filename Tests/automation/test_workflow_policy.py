@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import importlib.util
 import json
+import shutil
 import subprocess
 import sys
 import tempfile
@@ -144,6 +145,61 @@ class ParserTests(unittest.TestCase):
                 with self.assertRaises(policy.ParseError):
                     policy._scalar(bad)
 
+    def test_a_single_quoted_scalar_must_close_at_the_end_of_its_line(self) -> None:
+        # `''` is an escaped quote, so each of these continues onto the next line in YAML or is a
+        # YAML error (`'a'#x'` is `a` and a comment to libyaml); none is the scalar it looks like.
+        for bad in ("'x ''", "'''", "'a'b'", "'a'''b'", "'a'#x'"):
+            with self.subTest(bad=bad):
+                with self.assertRaisesRegex(policy.ParseError, "does not close at the end of its line"):
+                    policy._scalar(bad)
+        # A flow-sequence item and a sequence entry reach the same reader: YAML reads each of these
+        # as one item (`a '] j: ['b`, `b', c`, `x ' - y`) where this parser read two keys or items.
+        for document in ("k: ['a '']\nj: [''b']\n", "k: [a, 'b'', c']\n", "k:\n  - 'x ''\n  - y'\n"):
+            with self.subTest(document=document):
+                with self.assertRaisesRegex(policy.ParseError, "does not close at the end of its line"):
+                    policy.parse_workflow(document)
+        for good, value in (("'it''s'", "it's"), ("''", ""), ("''''", "'"), ("'a '' b'", "a ' b")):
+            with self.subTest(good=good):
+                self.assertEqual(policy._scalar(good), value)
+
+    def test_a_double_quoted_scalar_may_not_hold_an_unescaped_quote(self) -> None:
+        for bad in ('"a" b"', '"a"b"', '""""', '"a"#"'):
+            with self.subTest(bad=bad):
+                with self.assertRaisesRegex(policy.ParseError, "unescaped quote inside a double-quoted scalar"):
+                    policy._scalar(bad)
+        for good, value in (('"a\\"b"', 'a"b'), ('"a\\\\"', "a\\"), ('""', "")):
+            with self.subTest(good=good):
+                self.assertEqual(policy._scalar(good), value)
+
+    @unittest.skipUnless(shutil.which("ruby"), "needs Ruby for its libyaml-backed loader (present on hosted Ubuntu and macOS)")
+    def test_quoted_scalar_refusals_and_values_agree_with_libyaml(self) -> None:
+        # Each form on a line of its own. libyaml rejects every malformed form, and gives the same
+        # value for every accepted one. It reads a comment-adjacent form as `a` and a comment;
+        # the subset refuses that too, so a quote mid-value never reads two ways.
+        malformed = ["'x ''", "'''", "'a'b'", "'a'''b'", '"a" b"', '"a"b"', '""""']
+        comment_adjacent = ["'a'#x'", '"a"#"']
+        accepted = ["'it''s'", "''", "''''", "'a '' b'", '"a\\"b"', '"a\\\\"', '""']
+        forms = malformed + comment_adjacent + accepted
+        script = ('require "psych"; require "json"; puts JSON.generate(JSON.parse(STDIN.read).map { |t| '
+                  'begin; [true, Psych.safe_load("k: " + t)["k"]]; rescue Psych::SyntaxError; [false, nil]; end })')
+        result = subprocess.run(["ruby", "-e", script], input=json.dumps(forms),
+                                capture_output=True, text=True, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        loaded = json.loads(result.stdout)
+        self.assertEqual(len(loaded), len(forms))
+        for form, (ok, value) in zip(forms, loaded):
+            with self.subTest(form=form):
+                if form in malformed:
+                    self.assertFalse(ok)
+                elif form in comment_adjacent:
+                    self.assertEqual((ok, value), (True, "a"))
+                else:
+                    self.assertTrue(ok)
+                    self.assertEqual(policy._scalar(form), value)
+                    continue
+                with self.assertRaises(policy.ParseError):
+                    policy._scalar(form)
+
     def test_quoted_mapping_keys_are_decoded(self) -> None:
         document = policy.parse_workflow('on: push\n"environm\\u0065nt": prod\n')
         self.assertEqual(document["environment"], "prod")
@@ -226,6 +282,25 @@ class ScanTests(unittest.TestCase):
 
     def test_conforming_tree_passes(self) -> None:
         self.assertEqual(self.scan({"ci.yml": QUALITY, "governance.yml": METADATA}), [])
+
+    def test_quoted_scalars_that_do_not_close_on_their_line_fail_the_scan(self) -> None:
+        # YAML reads this `run` as "true ' id: x name: '; git push origin HEAD:main", so the shell
+        # runs the push; read line by line, the push sits in a `name` the command scan never reads.
+        hidden = ("      - run: 'true ''\n"
+                  "        id: x\n"
+                  "        name: ''; git push origin HEAD:main'\n")
+        body = mutate(QUALITY, "  quality-required:\n", hidden + "  quality-required:\n")
+        self.assert_ci_violation(body, "single-quoted scalar does not close at the end of its line")
+        # The same fold could hide a key the scan requires: YAML reads `path` as
+        # "src ' persist-credentials: false clean: x", so the checkout keeps its credentials.
+        folded = mutate(QUALITY, "          persist-credentials: false\n",
+                        "          path: 'src ''\n          persist-credentials: false\n          clean: x'\n")
+        self.assert_ci_violation(folded, "single-quoted scalar does not close at the end of its line")
+        quoted = mutate(QUALITY, "      - name: Build\n", '      - name: "Build" now"\n')
+        self.assert_ci_violation(quoted, "unescaped quote inside a double-quoted scalar")
+        plain = mutate(QUALITY, "  quality-required:\n",
+                       "      - run: true; git push origin HEAD:main\n  quality-required:\n")
+        self.assert_ci_violation(plain, "git ref write")
 
     def test_missing_job_permissions_fails(self) -> None:
         body = mutate(QUALITY, JOB_HEADER, "    runs-on: ubuntu-latest\n    steps:")

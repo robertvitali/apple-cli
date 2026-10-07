@@ -1,12 +1,12 @@
 #!/usr/bin/env python3
 """Static read-only scan of every workflow under `.github/workflows/` (design section 18 step 17).
 
-Verified on PARSED YAML, never by text search. The parser accepts exactly the subset
+Verified on PARSED YAML, never by text search. The parser accepts a subset close to the one
 `scripts/ci/action_pins.py` already enforces (block mappings, block sequences, scalar-only
-flow sequences, quoted scalars, literal/folded block scalars, comments) and refuses
-everything else it recognises as outside that subset, so a workflow that hides structure
-the parser knows to look for fails the scan rather than passing it. A construct the parser
-accepts but reads differently from GitHub's loader is not caught that way; see below.
+flow sequences, quoted scalars that close on their own line, literal/folded block scalars,
+comments) and refuses everything else it recognises as outside that subset, so a workflow that
+hides structure the parser knows to look for fails the scan rather than passing it. A construct
+the parser accepts but reads differently from GitHub's loader is not caught that way; see below.
 
     python3 -I -S -B scripts/ci/workflow_policy.py [--root <repo>]
 
@@ -80,9 +80,12 @@ byte-order mark, bidirectional control or other character outside YAML's printab
 none of the recorded invisible characters of `invisible_character`, in the text or after
 decoding an escape) narrow the constructs it could read differently from GitHub's loader,
 but do not prove there are none. A no-break space before `#` was one until 2026-09-26: it
-ended a comment here, and a write command after it passed. The recorded sets below are
-control plane: changing a trigger, a required check name or an admitted runner label edits
-them in the same reviewed commit.
+ended a comment here, and a write command after it passed. A single-quoted scalar ending in
+`''` was another until 2026-10-07: YAML reads `''` as an escaped quote and folds the lines
+below into the scalar, so a write command, or a `permissions:` block GitHub never saw, could
+sit in what read here as separate keys. A quoted scalar must now close on its own line. The
+recorded sets below are control plane: changing a trigger, a required check name or an
+admitted runner label edits them in the same reviewed commit.
 """
 from __future__ import annotations
 
@@ -418,6 +421,9 @@ def _decode_double_quoted(body: str) -> str:
     index = 0
     while index < len(body):
         character = body[index]
+        if character == '"':
+            # YAML ends the scalar at an unescaped quote, so `"a" b"` is a YAML error, never `a" b`.
+            raise ParseError("unescaped quote inside a double-quoted scalar")
         if character != "\\":
             out.append(character)
             index += 1
@@ -466,6 +472,9 @@ def _expression_bodies(key: Optional[str], text: str) -> List[str]:
     return bodies
 
 
+SINGLE_QUOTED_BODY_RE = re.compile(r"(?:[^']|'')*+")
+
+
 def _scalar(raw: str) -> Any:
     text = raw.strip()
     if text == "":
@@ -475,8 +484,12 @@ def _scalar(raw: str) -> Any:
             raise ParseError("unterminated double-quoted scalar")
         return _decode_double_quoted(text[1:-1])
     if text[0] == "'":
+        # `''` inside a single-quoted scalar is an escaped quote, so `'x ''` does not close on its
+        # line: YAML reads the following lines into it, and a `run:` hands them to the shell.
         if len(text) < 2 or text[-1] != "'":
             raise ParseError("unterminated single-quoted scalar")
+        if SINGLE_QUOTED_BODY_RE.fullmatch(text[1:-1]) is None:
+            raise ParseError("single-quoted scalar does not close at the end of its line")
         return text[1:-1].replace("''", "'")
     if text == "{}":
         return {}

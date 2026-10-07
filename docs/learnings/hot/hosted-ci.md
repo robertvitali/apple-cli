@@ -1,11 +1,45 @@
 ---
 topic: hosted-ci
 importance: high
-last-used: 2026-10-06
-uses: 18
+last-used: 2026-10-07
+uses: 19
 ---
 
 # Hosted CI (public, free GitHub-hosted runners)
+
+## 2026-10-07 — A doubled quote is an escape: a quoted scalar that ends in a quote may still be open
+
+**Symptom.** A security review found that `scripts/ci/workflow_policy.py` passed
+
+    - run: 'true ''
+      id: x
+      name: ''; git push origin HEAD:main'
+
+with no violation. The parser read three keys; libyaml reads one `run` holding
+`true ' id: x name: '; git push origin HEAD:main`, so the shell would have run the push.
+The same fold could hide a key the scan requires (`persist-credentials: false`, a
+`permissions:` block) from GitHub while the parser still saw it. `mkdocs.yml`, read through the
+same parser for the site-assembly rehearsal, could lose its `docs_dir` the same way.
+
+**Cause.** `_scalar` took a single-quoted scalar as closed whenever its text began and ended
+with a quote. Inside single quotes YAML reads `''` as one escaped quote, so `'x ''` is still
+open and YAML folds the following lines into it. The double-quoted path had the matching gap:
+`"a" b"`, a YAML error, read as `a" b`.
+
+**Fix.** A single-quoted body must consist of characters other than a quote and doubled quotes,
+and an unescaped quote inside a double-quoted body is refused; either way a quoted scalar must
+close on its own line. A test checks the forms against libyaml when Ruby is present: it rejects the
+malformed ones, keeps the same value for the accepted ones, and reads a quote followed by `#` as a
+closed scalar and a comment, which the subset refuses as well.
+
+**Lesson.** "Starts and ends with the delimiter" is not "closed" when the delimiter has an
+escape form; check the body against the escape grammar. The fold also showed that a parser
+differential can fake a required key, not only hide a forbidden one, so the bound on a missed
+construct is what holds without any in-file key: here the repository's read-only default token
+and the absence of any secret. The 2026-09-26 entry's still-open item, the parser's paths
+outside block scalars, is narrower now but not closed: differential testing against libyaml the
+same day found further constructs outside block scalars that the parser accepts and reads
+differently from YAML. They are tracked for the next change, which records them.
 
 ## 2026-10-06 — commit-lint refuses a comma in the scope, and main keeps the red
 
