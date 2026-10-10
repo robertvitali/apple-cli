@@ -1202,7 +1202,7 @@ assert_numeric() {
 @test "mail mark accepts 100 ids and fails later at resolution (boundary is inclusive)" {
   require_index
   local ids=()
-  for i in $(seq 1 100); do ids+=("$i"); done
+  for i in $(seq 1 100); do ids+=("apple-cli-bats-reserved-$i@example.invalid"); done
   run "$BIN" mail mark --dry-run --read "${ids[@]}"
   ! echo "$output" | grep -q 'maximum is 100'
   echo "$output" | grep -q '"type" : "not_found"'
@@ -1213,7 +1213,7 @@ assert_numeric() {
 @test "mail move ACCEPTS 101 ids — the oracle does not cap it" {
   require_index
   local ids=()
-  for i in $(seq 1 101); do ids+=("$i"); done
+  for i in $(seq 1 101); do ids+=("apple-cli-bats-reserved-$i@example.invalid"); done
   run "$BIN" mail move --dry-run --to "Archive" "${ids[@]}"
   # POSITIVE CONTROL FIRST. Without it this test is vacuous: the first draft passed `--to-mailbox`,
   # which is not a real flag, so the binary exited at argument parsing and the two negative greps

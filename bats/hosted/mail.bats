@@ -923,7 +923,9 @@ assert 'would refuse' not in note, note
   # invocation would try to launch a live Mail.app compose window — --no-open keeps this test's
   # actual subject (headless write + the `opened` field + the written artifact) CI-safe.
   OUT="$BATS_TEST_TMPDIR/apple-cli-test-dr.eml"
-  run "$BIN" mail draft-rich --execute --to me@self.test --subject "apple-cli-test dr" --html "<b>x</b>" --out "$OUT" --no-open
+  run /bin/sh -c 'umask 022; exec "$@"' apple-cli-bats-child \
+    "$BIN" mail draft-rich --execute --to me@self.test --subject "apple-cli-test dr" \
+    --html "<b>x</b>" --out "$OUT" --no-open
   [ "$status" -eq 0 ]
   [ -f "$OUT" ]
   echo "$output" | grep -q '"opened" : false'

@@ -8,8 +8,7 @@ load "$HELPERS/app_lifecycle"
 # protected local paths and therefore cannot run in the hosted tier.
 
 setup() {
-  export PATH="$HOME/.swiftly/bin:$PATH"
-  BIN="$(swift build --show-bin-path)/apple"
+  BIN="${APPLE_CLI_TEST_BINARY:-$(swift build --show-bin-path)/apple}"
 }
 
 @test "reminders doctor reports authorization without prompting (exit 0)" {

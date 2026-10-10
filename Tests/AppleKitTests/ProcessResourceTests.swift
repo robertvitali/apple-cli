@@ -393,9 +393,10 @@ struct ProcessResourceTests {
     // starved runner can have it while every other caller keeps the six-second expiry: `expiry`
     // (seconds) arms the root and its descendant, and `descendant-expiry` overrides the
     // descendant's. `ready` names a file the root publishes, by write-then-rename, for the
-    // RecordedChildren readiness gate: in flood mode once output is pending, in the forking modes
-    // just before the fork. `heartbeat` names the detached descendant's heartbeat file; its first
-    // value is written before readiness, and the descendant stops when `<heartbeat>.stop` appears,
+    // RecordedChildren readiness gate: in flood mode immediately before its first output burst, in
+    // the forking modes just before the fork. `heartbeat` names the detached descendant's heartbeat
+    // file; its first value is written before readiness, and the descendant stops when
+    // `<heartbeat>.stop` appears,
     // acknowledging with `<heartbeat>.stopped`.
     private static let fixture = #"""
     import os, signal, sys, time
@@ -418,9 +419,9 @@ struct ProcessResourceTests {
     if mode == "signal":
         os.kill(os.getpid(), signal.SIGKILL)
     if mode == "flood":
+        ready()
         os.write(1, b"x" * 1024)
         os.write(2, b"progress\n")
-        ready()
         while True:
             os.write(1, b"x" * 1024)
             os.write(2, b"progress\n")
@@ -1652,14 +1653,17 @@ struct ProcessResourceTests {
     @Test("sustained output cannot postpone the deadline or retain descriptors")
     func outputDeadlineFairness() throws {
         // The one-second timeout is the subject, so output must contest it. The root publishes
-        // `ready` once its first output is pending, and the RecordedChildren gate holds the
-        // launcher's deadline until then, so Python start-up neither counts against the bounds
-        // below nor leaves the timeout uncontested. The first group signal, which the timeout
-        // sends, must come within four seconds of the gated spawn stamp (the deadline plus three of
-        // headroom; this is what output could postpone). Cleanup begins at that signal and must end
-        // within twenty seconds of it: its own budget is the one-second TERM pause (the flood root
-        // ignores SIGTERM) plus the one-second reap window, each timed from when the launcher
-        // reaches it, so stalls add up there.
+        // `ready` immediately before its first output burst, and the RecordedChildren gate holds the
+        // launcher's deadline until then, so Python start-up neither counts against the bounds below
+        // nor leaves the timeout uncontested. The gate must not depend on writes to the output pipe:
+        // while it holds, the launcher is still inside `spawn` and has not entered its read loop. The
+        // immediate post-ready writes wake that loop, and `RecordingProcessIO.syntheticReadSeconds`
+        // keeps output readable long enough to test deadline fairness. The first group signal, which
+        // the timeout sends, must come within four seconds of the gated spawn stamp (the deadline plus
+        // three of headroom; this is what output could postpone). Cleanup begins at that signal and
+        // must end within twenty seconds of it: its own budget is the one-second TERM pause (the
+        // flood root ignores SIGTERM) plus the one-second reap window, each timed from when the
+        // launcher reaches it, so stalls add up there.
         //
         // The reads are also checked from the launcher's own turns (`checkWindow`). Every read
         // follows a deadline check and the deadline is set before the first read, so the

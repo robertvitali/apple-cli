@@ -8,8 +8,7 @@ load "$HELPERS/app_lifecycle"
 # existing Full Disk Access but assert only schema, booleans, and counts; no live values are emitted.
 
 setup() {
-  export PATH="$HOME/.swiftly/bin:$PATH"
-  BIN="$(swift build --show-bin-path)/apple"
+  BIN="${APPLE_CLI_TEST_BINARY:-$(swift build --show-bin-path)/apple}"
 }
 
 # Live Messages reads need a readable chat.db. Probe it independently of the CLI under test:

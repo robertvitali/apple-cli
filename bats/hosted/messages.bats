@@ -7,7 +7,6 @@ HELPERS="$BATS_SUITE_ROOT/helpers"
 # or parser behavior that runs without Full Disk Access or live-store reads.
 
 setup() {
-  export PATH="$HOME/.swiftly/bin:$PATH"
   BIN="${APPLE_CLI_TEST_BINARY:-$(swift build --show-bin-path)/apple}"
 }
 
