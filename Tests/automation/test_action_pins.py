@@ -152,7 +152,8 @@ class ActionPinPolicyTests(unittest.TestCase):
             self.assertNotIn("${{", block)
         rehearsal = workflow_job(docs, "release-prep-rehearsal")
         # The rehearsal must stay read-only and must never publish its scratch copies,
-        # which carry the predicted version; only a CHECKED refusal (exit 1) is advisory.
+        # which carry the predicted version; only the nothing-to-release status (exit 3)
+        # is advisory, and exits 1 and 2 fail the job.
         self.assertIn("permissions:\n      contents: read", rehearsal)
         self.assertIn("fetch-depth: 0", rehearsal)
         self.assertIn("python3 -I -S -B scripts/ci/release_prep.py", rehearsal)
@@ -165,6 +166,40 @@ class ActionPinPolicyTests(unittest.TestCase):
         self.assertNotRegex(rehearsal, r"upload-artifact|actions/cache|GITHUB_OUTPUT|GITHUB_STEP_SUMMARY")
         self.assertIn('--scratch "$RUNNER_TEMP/', rehearsal)
         self.assertRegex(rehearsal, r"trap 'rm -rf \"\$RUNNER_TEMP/release-prep-scratch\"[^']*' EXIT")
+        # The job also builds and checks the release binary from the candidate plus release
+        # preparation's two rendered files, which needs the macOS image; nothing is built when
+        # there is nothing to release, and the work directory (binary, archive) goes on exit.
+        self.assertIn("runs-on: macos-26", rehearsal)
+        self.assertIn("timeout-minutes: 45", rehearsal)
+        self.assertTrue((REPO_ROOT / "scripts" / "ci" / "release_artifact.py").is_file())
+        self.assertRegex(
+            rehearsal,
+            r"trap 'rm -rf \"\$RUNNER_TEMP/release-prep-scratch\"[^']*\"\$RUNNER_TEMP/release-artifact-work\"[^']*' EXIT",
+        )
+        self.assertRegex(rehearsal, r'(?m)^\s+3\) echo "::notice::[^"]*"; exit 0 ;;$')
+        artifact_invocation = (
+            "          set +e\n"
+            "          python3 -I -S -B scripts/ci/release_artifact.py \\\n"
+            '            --candidate-root "$RUNNER_TEMP/candidate" \\\n'
+            '            --candidate-sha "$CANDIDATE_SHA" \\\n'
+            '            --overlay "$RUNNER_TEMP/release-prep-scratch" \\\n'
+            '            --work "$RUNNER_TEMP/release-artifact-work"\n'
+            "          status=$?\n"
+            "          set -e\n"
+            '          if [ "$status" != 0 ]; then\n'
+            '            echo "::error::release-artifact rehearsal failed (exit $status); see the log"; exit "$status"\n'
+            "          fi\n"
+        )
+        self.assertEqual(rehearsal.count(artifact_invocation), 1)
+        self.assertEqual(rehearsal.count("scripts/ci/release_artifact.py"), 1)
+        self.assertLess(rehearsal.index("          esac\n"), rehearsal.index(artifact_invocation))
+        self.assertIn(
+            "      - name: Record build toolchain\n", rehearsal,
+        )
+        self.assertLess(rehearsal.index("      - name: Record build toolchain\n"),
+                        rehearsal.index("      - name: Read-only release-preparation and release-artifact rehearsal"))
+        for command in ("sw_vers", "xcode-select -p", "/usr/bin/xcodebuild -version", "/usr/bin/swift --version"):
+            self.assertIn(command, workflow_named_step(rehearsal, "Record build toolchain"))
         # Inputs reach the shell through env:, never by expression: every run: must be a
         # literal block and no block may contain an expression marker.
         run_keys = re.findall(r"(?m)^\s+run:.*$", rehearsal)

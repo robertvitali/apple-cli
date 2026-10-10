@@ -98,6 +98,7 @@ publication action.
 | D47 | The public Activity view lists commits no advertised ref holds, whose parents reach the replaced history | **RATIFIED 2026-10-07 (UTC): leave them (option B of the later briefs), re-confirmed after the reach was measured** | The repository's public Activity view lists 128 commits that no advertised ref holds; with their parents they make 1,550 such commits, holding phone-number-like strings, email addresses and two commit messages with a denylist term no file or commit message on `main` carries. Accepted as a residual scoped to the 128 commits the view listed on 2026-10-06 and everything reachable from them that no advertised ref holds: 1,550 commits (the 128 among them) and their trees and file contents that no advertised ref holds, pinned by the SHA-256 of two private id lists. Anything the round's classes detect in a commit outside the two pinned lists, or in an object no listed commit reaches, is outside this residual and stays a finding unless another entry accepts it, whenever the view lists it or however it is found; the six branch names in the view that carry tracker identifiers are D50 |
 | D49 | How a Dependabot GitHub Actions pin update reaches `main` | **OPEN 2026-10-07 (UTC)** | Choose between (A) an identity-only allowlist with Dependabot pin pull requests merged through design §10.5's exception, checked by a workflow run from `main`'s own definition, (B) exact-SHA pins kept, with each Dependabot pin pull request treated as input to a reviewed commit on `main` and never merged, or (C) no exception wired, the current posture, each update taken by hand in a reviewed commit as under D45. Recommended: (B) for now, revisiting (A) before design §18 step 13 |
 | D50 | Deleted branch names in the public Activity view carry tracker identifiers | **RATIFIED 2026-10-07 (UTC): accept them as a recorded residual (option B)** | Six deleted branch names, in 24 creation, push and deletion events dated 2026-07-15 to 2026-08-23, carry tracker identifiers that also occur in commit messages D47 accepts. Accepted as a residual scoped to those six names in those 24 events; the same names in any other event or on any other surface, and any other tracker identifier the view shows, stay findings unless another entry accepts them |
+| D51 | Provisional definitions in the step-15 release-artifact rehearsal | **OPEN 2026-10-10 (UTC)** | Five points `scripts/ci/release_artifact.py` settles provisionally: the linkage definition, no artifact digest or size recorded, the runbook's `-gnone` recipe, a static bound (not a proof) for outward-write refusal, and `macos-26` with the default bump as the hosted evidence. The local run of the tooling needs a new grant, of the kind D23 records |
 
 ---
 
@@ -2712,5 +2713,98 @@ the enforcement control plane, of which `.github/CODEOWNERS` names you sole code
 **Blocking?** No. Until it is ruled, `AGENTS.md` (Branch model) governs a Dependabot Actions pull
 request: never merged, its update taken on `main` in a reviewed commit, which is option (C)'s
 posture. It needs a ruling before design §18 step 13.
+
+---
+
+## D51 — Provisional definitions in the step-15 release-artifact rehearsal
+
+- **Status:** **OPEN 2026-10-10 (UTC)** — filed by the controller with the commit that adds
+  `scripts/ci/release_artifact.py`. The tooling runs on the provisional answers below until each
+  is ruled; nothing but counting step 15 as passed waits on this entry.
+- **Context.** Design §18 step 15 asks the read-only release rehearsal to verify the predicted
+  release-file changes, archive contents, checksums, linkage, runtime version and refusal of any
+  outward-write step; §15.1 adds that checksum, architecture, linkage and runtime version agree;
+  §14.1 has tracked evidence record the pass result, the exact file allowlist and deterministic
+  artifact digests, and never the predicted version. `scripts/ci/release_artifact.py`, run by the
+  `release-prep-rehearsal` job in `docs.yml` on `macos-26`, builds the candidate plus the two files
+  release preparation renders and checks the outcome. Its change-set check does not run manual
+  generation to show that §14.2's third class of release-file change (version-dependent generated
+  documentation) is unnecessary; today's manual carries no version string. It settles five points
+  provisionally:
+  1. **Linkage**, which the design does not define. Provisional: every dylib load command names an
+     absolute path under `/usr/lib/` or `/System/Library/`, the dynamic linker is `/usr/lib/dyld`,
+     there is no LC_DYLD_ENVIRONMENT, and an LC_RPATH entry is allowed only as `@loader_path`,
+     `@executable_path`, or an absolute path under `/usr/lib/`, `/System/Library/`, the Command Line
+     Tools or an Xcode developer directory. SwiftPM adds such entries to every executable, and no
+     load command may name an `@rpath/` path, so dyld never consults them for the binary's own
+     libraries. Residual: dyld does consult the main executable's run-path entries for an
+     `@rpath/` dependency of any other image loaded into the process, and for a runtime `dlopen`
+     of an `@rpath/` path (the sources make no `dlopen` call today); and the Xcode root, unlike the
+     other permitted roots, is writable by the admin group. Alternative: a narrower, root-owned set
+     of run-path roots (for example without the Xcode root), or only the exact entries observed on
+     the hosted build.
+  2. **Digests.** §14.1 lists deterministic artifact digests among what tracked evidence records.
+     Provisional: no digest and no byte size is recorded, in the report, the run log or tracked
+     evidence, because the binary embeds the unassigned version and a digest over a handful of
+     candidate versions is reversed by enumeration, the reason §14.1 itself gives for never
+     recording the number. The runbook's tar recipe is not deterministic in any case (the gzip
+     header's timestamp, the member's modification time). This point concerns only the rehearsal's
+     artifact, whose version is unassigned: D34 already requires, for the exact artifact to be
+     published, D18 step (4)'s check and an operator-local denylist scan recorded against the
+     sha256 digest of the binary, the archive, the checksum file and the Release notes body. The
+     hosted rehearsal's path check is neither of those. Alternatives: a digest of a
+     version-neutralised copy; a deterministic recipe, shared with the runbook.
+  3. **Recipe.** Provisional: the urgent-release runbook's build (`swift build -c release -Xswiftc
+     -gnone`) and tar flags, plus disabled automatic dependency resolution, SwiftPM's netrc and
+     keychain lookups off, and SwiftPM's cache, configuration and fingerprint store kept in the
+     work directory; no strip, re-signing or prefix maps. D17 ruling 2 chose a rebuild with path
+     remapping, and D18 step (4) restated it as a verified outcome, not a flag list, naming
+     `-gnone` among the known means. Round 1 of the privacy audit traced every home-directory path
+     in the shipped binary (R1-F1, 270 strings) to its 135 N_OSO debug-map entries, which `-gnone`
+     suppresses, and the checks verify the outcome. The only path-free outcome verified so far
+     (D24) used a combined recipe, so the first hosted run is the first execution of this recipe,
+     and of the script's SwiftPM path flags, git isolation and pinned copy, on a SwiftPM release
+     binary. The path check scans for `/Users/`, `/private/tmp/`, `/var/folders/`, `/home/` and
+     `/var/tmp/`; `/Volumes/` and a bare `/tmp/` are left out because the product's own strings
+     contain them. Alternative: D24's combined recipe (prefix maps, `-oso_prefix`, `strip -S` and
+     ad-hoc re-signing).
+  4. **Outward-write refusal.** Provisional: a static bound, not a proof: the job's `contents:
+     read`, `persist-credentials: false` and absence of secrets, held by the step-17 workflow scan,
+     which is a recorded-list check. On top of it, the script checks that the job environment
+     carries none of the listed token variables and none of `GIT_CONFIG_COUNT`,
+     `GIT_CONFIG_KEY_<n>`, `GIT_CONFIG_VALUE_<n>` or `GIT_CONFIG_PARAMETERS`, and that the local
+     git configuration, plus any worktree configuration file that exists whatever
+     `extensions.worktreeConfig` says (includes followed per file), of the candidate root (in CI
+     the job's throwaway clone) and of every existing local repository its `remote.*.url` or
+     `remote.*.pushurl` names holds no key of the listed credential classes and no URL userinfo.
+     Remote values are read as written (`insteadOf` rewrites are not applied). HOME is passed
+     through, so git's own fetch could still read `~/.netrc` and `~/.ssh`; the build performs no
+     push. No write is attempted in order to watch it fail: such an attempt is itself an
+     outward-write call, which design §14.1 bars, and the workflow scan refuses the workflow-level
+     commands a probe would use. Alternative: a dynamic probe that attempts a write and records its
+     refusal, which would need a reviewed exception to §14.1 (and to the scan, if written in the
+     workflow).
+  5. **Platform and version shape of the hosted evidence.** `macos-26` is the only macOS runner
+     label the workflow scan admits, while the next planned release, `v27.0.0` (D18), names macOS 27
+     as the newest validated. The hosted job also runs release preparation without
+     `--macos-major`, so it predicts and builds a default-bump 26.x version and never the 27.0.0
+     shape; a local run of that shape through the artifact half is a native build that needs a
+     grant. Provisional: hosted step-15 evidence comes from `macos-26` with the default bump until a
+     reviewed change admits a macOS 27 label. A push run that a later push cancels (the workflow
+     cancels in-progress runs per ref) is not evidence. Alternatives: a hosted macOS 27 runner once
+     one is admitted, or a granted local run of the 27.0.0 shape (D24 was a granted local run, but
+     of the frozen 26.0.0 constant).
+- **Also needed, as a grant rather than a definition.** Step 15 also asks for a local rehearsal of
+  the tooling. Running the script on the operator's Mac is a native release build, a new grant of
+  the kind D23 records; it will be asked separately, with its exact invocation.
+- **Options.** Ratify or replace each provisional answer; the controller brings them one at a time.
+- **Filed:** 2026-10-10 (UTC) · **Category:** release rehearsal definitions (design §14.1, §15.1,
+  §18 step 15)
+
+**Why it needed you.** Each answer sets what a step-15 acceptance criterion means for the
+enforcement control plane.
+
+**Blocking?** Not for the tooling. Until ruled, the readiness record cites these answers as
+provisional and does not count step 15 as passed on them.
 
 ---

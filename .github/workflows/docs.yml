@@ -10,22 +10,43 @@ name: Docs
 #                   releases, so failing CI on it would be noise.
 #  - release-prep-rehearsal: the read-only exact-SHA release-preparation rehearsal
 #                   (design section 14.1; a smoke check toward section 18 step 15,
-#                   whose explicit-SHA evidence binding is separate) run against the
-#                   commit this workflow builds — the pushed commit on main, or the
-#                   pull request's merge commit — in a throwaway clone. Only the
+#                   whose explicit-SHA three-way evidence binding is still separate) run
+#                   against the commit this workflow builds (the pushed commit on main,
+#                   or the pull request's merge commit) in a throwaway clone. Only the
 #                   script's NOTHING-TO-RELEASE status (exit 3: no commits since the
 #                   last tag, an empty [Unreleased], or a release commit awaiting its
 #                   tag, all normal around a release) is advisory, for the same reason
-#                   release-notes is. A checked failure (exit 1: drift, a malformed
-#                   CHANGELOG, a stray manual link, git or I/O trouble) or a refused
-#                   invocation (exit 2) fails the job, so a real regression cannot hide
-#                   behind the advisory case. It covers the default-bump path only; the
-#                   macOS-adoption shape (--macos-major) is exercised locally before a
-#                   cut. It writes only into RUNNER_TEMP, has no secrets, uploads
-#                   nothing (the scratch copies carry the predicted version and are
-#                   never an artifact), and prints only the value-free report; the
+#                   release-notes is, and then nothing is built: the release commit
+#                   itself is never built by this job. A checked failure (exit 1: drift,
+#                   a malformed CHANGELOG, a stray manual link, git or I/O trouble) or a
+#                   refused invocation (exit 2) fails the job, so a real regression
+#                   cannot hide behind the advisory case. The job then also builds the
+#                   release binary from the candidate plus the two rendered files with
+#                   the urgent-release runbook's build and tar recipe, plus disabled
+#                   automatic dependency resolution, SwiftPM's netrc and keychain
+#                   lookups off, and SwiftPM's cache, configuration and fingerprint
+#                   store redirected into the work directory, and
+#                   verifies the change set, archive, checksum, architecture, deployment
+#                   target, linkage, debug map, home- and temporary-directory path
+#                   bytes, signature and runtime version (scripts/ci/release_artifact.py),
+#                   which is why it runs on macos-26. It covers the default-bump path
+#                   only; the macOS-adoption shape (--macos-major) is exercised locally
+#                   before a cut, and a local run of the artifact half is a native
+#                   release build that needs the operator's grant. It writes its outputs
+#                   only into RUNNER_TEMP (the toolchain may still write under HOME and
+#                   the system temporary directory on the discarded runner), has no
+#                   secrets and uploads nothing (the scratch copies, binary and archive
+#                   carry the predicted version and are never an artifact). The artifact
+#                   report is value-free (no digest, size, archive name or version); the
 #                   predicted version appears in the run log labelled UNASSIGNED, as
-#                   section 14.1 permits.
+#                   section 14.1 permits. On pull_request the proposal's own scripts run,
+#                   so it is a smoke check there; the push runs on main are the runs that
+#                   can later be bound as step-15 evidence, and a push run cancelled by a
+#                   later push is not evidence. Cost: while release preparation finds
+#                   something to release (every commit during the release freeze), every
+#                   push and pull request runs a macOS release build of up to 45 minutes;
+#                   hosted macOS minutes are free only while the repository is public,
+#                   metered whenever it is private.
 #  - site-assembly-rehearsal: the read-only complete-site assembly rehearsal (design
 #                   section 16 / section 18 step 16) run against the same commit in a
 #                   throwaway clone: the pinned MkDocs toolchain is installed from
@@ -100,8 +121,8 @@ jobs:
         run: python3 scripts/check-release-notes.py
 
   release-prep-rehearsal:
-    runs-on: ubuntu-latest
-    timeout-minutes: 10
+    runs-on: macos-26
+    timeout-minutes: 45
     permissions:
       contents: read
     steps:
@@ -110,7 +131,17 @@ jobs:
           fetch-depth: 0       # the rehearsal needs the reachable release tags
           persist-credentials: false
 
-      - name: Read-only release-preparation rehearsal (nothing-to-release advisory)
+      - name: Record build toolchain
+        # Log only. A runner label pins the macOS major, not the Xcode inside the image,
+        # which GitHub updates over time; this records the toolchain behind the build.
+        run: |
+          set -euo pipefail
+          sw_vers
+          xcode-select -p
+          /usr/bin/xcodebuild -version
+          /usr/bin/swift --version
+
+      - name: Read-only release-preparation and release-artifact rehearsal (nothing-to-release advisory)
         env:
           PUSHED_SHA: ${{ github.sha }}
           EVENT_NAME: ${{ github.event_name }}
@@ -120,7 +151,7 @@ jobs:
           # A throwaway clone keeps the rehearsal off the checkout (design 14.1: a fresh
           # tree or isolated scratch clone). Nothing under RUNNER_TEMP is uploaded, and
           # the scratch copies (which carry the predicted version) go on every exit.
-          trap 'rm -rf "$RUNNER_TEMP/release-prep-scratch" "$RUNNER_TEMP/candidate"' EXIT
+          trap 'rm -rf "$RUNNER_TEMP/release-prep-scratch" "$RUNNER_TEMP/release-artifact-work" "$RUNNER_TEMP/candidate"' EXIT
           git clone --quiet --no-hardlinks "$GITHUB_WORKSPACE" "$RUNNER_TEMP/candidate"
           CANDIDATE_SHA="$(git -C "$RUNNER_TEMP/candidate" rev-parse HEAD)"
           if [ "$EVENT_NAME" = push ] && [ "$CANDIDATE_SHA" != "$PUSHED_SHA" ]; then
@@ -138,9 +169,22 @@ jobs:
           set -e
           case "$status" in
             0) ;;
-            3) echo "::notice::release-prep: nothing to release at this commit (normal around a release)" ;;
+            3) echo "::notice::release-prep: nothing to release at this commit (normal around a release)"; exit 0 ;;
             *) echo "::error::release-prep rehearsal failed (exit $status); see the log"; exit "$status" ;;
           esac
+          # The release build runs only when release preparation rendered the two files; the
+          # binary and archive stay under RUNNER_TEMP, and only value-free results are printed.
+          set +e
+          python3 -I -S -B scripts/ci/release_artifact.py \
+            --candidate-root "$RUNNER_TEMP/candidate" \
+            --candidate-sha "$CANDIDATE_SHA" \
+            --overlay "$RUNNER_TEMP/release-prep-scratch" \
+            --work "$RUNNER_TEMP/release-artifact-work"
+          status=$?
+          set -e
+          if [ "$status" != 0 ]; then
+            echo "::error::release-artifact rehearsal failed (exit $status); see the log"; exit "$status"
+          fi
 
   site-assembly-rehearsal:
     runs-on: ubuntu-latest
