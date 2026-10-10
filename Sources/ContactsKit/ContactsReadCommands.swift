@@ -14,16 +14,27 @@ private let containersCap = 10
 struct AuthCommand: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "auth",
-        abstract: "Report Contacts TCC authorization status (never prompts).")
+        abstract: "Report Contacts TCC authorization status; prompts only with --request.")
     @OptionGroup var global: GlobalOptions
+    @Flag(name: .long, help: "Request Contacts permission if it has not been requested yet; never reads contact records.")
+    var request = false
+
     func run() throws {
         try run(storeFactory: { ContactsStore() })
     }
 
     /// Test seam (see AGENTS.md / the EventKit lane): the live `ContactsStore` is bound by the
     /// public `run()` above and nowhere else, so no flag or env var can substitute a backend.
-    func run(storeFactory: () -> ContactsStore) throws {
+    func run(storeFactory: () -> ContactsStore,
+             metadata: ContactsUsageMetadata = .currentExecutable()) throws {
         try runGuarded(tool: "contacts") {
+            if request {
+                try metadata.requireBeforePrompt()
+                let status = try storeFactory().requestAuthorization()
+                let rem = (status == "authorized" || status == "limited") ? nil : ContactsStore.remediation(for: status)
+                try emitContacts(global, AuthResult(status: status, remediation: rem))
+                return
+            }
             let store = storeFactory()
             let status = store.authorizationStatus()
             let rem = (status == "authorized" || status == "limited") ? nil : ContactsStore.remediation(for: status)

@@ -19,6 +19,8 @@ JSON output are stable per the versioning policy — breaking changes bump
 
 ### Added
 
+- **`apple contacts auth --request` now provides an explicit no-data Contacts permission request path, and the built executable embeds the Contacts usage metadata macOS requires for that prompt.** Plain `apple contacts auth` remains status-only and never prompts; `--request` only asks for authorization, never reads contact records or mutates the address book, and it refuses with `authorization_denied` if the executable is missing `NSContactsUsageDescription`. The existing data-command authorization behavior is otherwise unchanged, `schema_version` stays `1`, and live caller-specific TCC behavior still needs verification after reviewed installation. Manual: [`apple contacts auth`](https://github.com/robertvitali/apple-cli/blob/main/docs/manual/contacts/auth.md).
+
 - **A read-only release-preparation rehearsal now exists in the repository's CI tooling
   (`scripts/ci/release_prep.py`).** For one explicit commit it computes the next version from
   the commit history, renders the version-constant and CHANGELOG changes a release would make

@@ -14,7 +14,7 @@ apple contacts
 
 ## Subcommands
 
-- [`auth`](./auth.md) — Report Contacts TCC authorization status (never prompts).
+- [`auth`](./auth.md) — Report Contacts TCC authorization status; prompts only with --request.
 - [`containers`](./containers/index.md) — List contact containers (accounts).
 - [`create`](./create.md) — Create a contact (EXECUTES by default; --dry-run previews).
 - [`delete`](./delete.md) — Delete a contact (requires APPLE_TEST_MODE=1).

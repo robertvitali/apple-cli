@@ -1,12 +1,21 @@
 # apple contacts auth
 
-Report Contacts TCC authorization status (never prompts).
+Report Contacts TCC authorization status; prompts only with --request.
 
 ## Synopsis
 
 ```
-apple contacts auth
+apple contacts auth [flags]
 ```
+
+## Description
+
+Reports the current Contacts TCC state without prompting unless `--request` is passed. Add `--request` to ask macOS for Contacts permission explicitly without reading contact records or mutating the address book; if the executable lacks embedded Contacts usage metadata, the command refuses with an authorization error before making the request.
+
+## Options
+
+- `--request`
+  <br>Request Contacts permission if it has not been requested yet; never reads contact records.
 
 ## Inherited options
 

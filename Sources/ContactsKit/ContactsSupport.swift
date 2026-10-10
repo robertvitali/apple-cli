@@ -85,6 +85,40 @@ public func detectImageFormat(_ data: [UInt8]) -> String {
 
 public func detectImageFormat(_ data: Data) -> String { detectImageFormat([UInt8](data)) }
 
+// MARK: - Contacts permission-request metadata
+
+/// Requesting Contacts TCC from a command-line executable requires an embedded usage string.
+/// Plain `contacts auth` stays status-only; this guard is consulted only by `auth --request`.
+struct ContactsUsageMetadata {
+    let usageDescription: String?
+    let diagnostic: String?
+
+    static func currentExecutable(bundle: Bundle = .main) -> ContactsUsageMetadata {
+        let raw = bundle.object(forInfoDictionaryKey: "NSContactsUsageDescription") as? String
+        guard let trimmed = raw?.trimmingCharacters(in: .whitespacesAndNewlines), !trimmed.isEmpty else {
+            return .missing(description: "embedded Info.plist does not define a non-empty NSContactsUsageDescription")
+        }
+        return .present(description: trimmed)
+    }
+
+    static func present(description: String) -> ContactsUsageMetadata {
+        ContactsUsageMetadata(usageDescription: description, diagnostic: nil)
+    }
+
+    static func missing(description: String) -> ContactsUsageMetadata {
+        ContactsUsageMetadata(usageDescription: nil, diagnostic: description)
+    }
+
+    func requireBeforePrompt() throws {
+        if usageDescription != nil { return }
+        let detail = diagnostic ?? "missing NSContactsUsageDescription"
+        throw AppleError.permissionDenied(
+            "Contacts permission request cannot run because this executable does not embed NSContactsUsageDescription (\(detail)).",
+            status: "notDetermined",
+            remediation: "Install a build that embeds NSContactsUsageDescription, then run `apple contacts auth --request` again.")
+    }
+}
+
 // MARK: - Contact label selection (test-data sandbox prefix) — single source of truth
 
 /// The name a contact/group is labeled by for the test-data gate. The create-side label

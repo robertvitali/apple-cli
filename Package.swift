@@ -1,4 +1,5 @@
 // swift-tools-version: 6.0
+import Foundation
 import PackageDescription
 
 // apple — one CLI for Apple's native apps (Messages, Mail, Contacts, Notes,
@@ -6,6 +7,8 @@ import PackageDescription
 // per-domain parity contract.
 
 let argparse: Target.Dependency = .product(name: "ArgumentParser", package: "swift-argument-parser")
+let packageDirectory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
+let appleInfoPlist = packageDirectory.appendingPathComponent("Sources/apple/Info.plist").path
 
 let package = Package(
     name: "apple-cli",
@@ -40,6 +43,18 @@ let package = Package(
             dependencies: [
                 "MessagesKit", "MailKit", "ContactsKit",
                 "NotesKit", "CalendarKit", "RemindersKit", argparse,
+            ],
+            exclude: ["Info.plist"],
+            linkerSettings: [
+                .unsafeFlags(
+                    [
+                        "-Xlinker", "-sectcreate",
+                        "-Xlinker", "__TEXT",
+                        "-Xlinker", "__info_plist",
+                        "-Xlinker", appleInfoPlist,
+                    ],
+                    .when(platforms: [.macOS])
+                ),
             ]
         ),
 

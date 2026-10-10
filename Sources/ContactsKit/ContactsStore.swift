@@ -128,9 +128,9 @@ public final class ContactsStore {
     static func remediation(for status: String) -> String? {
         switch status {
         case "notDetermined":
-            return "Contacts access has not been requested yet. Run a data command "
-                + "(e.g. list) to trigger the system permission prompt, or grant access "
-                + "manually in System Settings → Privacy & Security → Contacts."
+            return "Contacts access has not been requested yet. Run `apple contacts auth --request` "
+                + "to trigger the system permission prompt, or grant access manually in "
+                + "System Settings → Privacy & Security → Contacts."
         case "denied":
             return "Contacts access was denied. Open System Settings → Privacy & Security "
                 + "→ Contacts and enable access for this tool (macOS will not re-prompt automatically)."
@@ -193,16 +193,27 @@ public final class ContactsStore {
         return outcome.granted
     }
 
-    /// Gate every data command (mirror `_require_contacts_authorization`): request on
-    /// `notDetermined`, then require authorized/limited. Throws `authorization_denied` carrying
-    /// `status` and `remediation` as STRUCTURED envelope fields, matching the oracle key-for-key.
-    /// They were previously folded into the message prose, which is what CONTACTS-M2 was.
-    public func requireAuthorization() throws {
+    /// Explicitly request Contacts access without reading or mutating the address book.
+    @discardableResult
+    public func requestAuthorization() throws -> String {
         var status = authorizationStatus()
         if status == "notDetermined" {
             _ = try requestAccess()
             status = authorizationStatus()
         }
+        try requireGrantedStatus(status)
+        return status
+    }
+
+    /// Gate every data command (mirror `_require_contacts_authorization`): request on
+    /// `notDetermined`, then require authorized/limited. Throws `authorization_denied` carrying
+    /// `status` and `remediation` as STRUCTURED envelope fields, matching the oracle key-for-key.
+    /// They were previously folded into the message prose, which is what CONTACTS-M2 was.
+    public func requireAuthorization() throws {
+        _ = try requestAuthorization()
+    }
+
+    private func requireGrantedStatus(_ status: String) throws {
         if status == "authorized" || status == "limited" { return }
         // `server.py:113-126`: message, status and remediation are three SEPARATE keys, and the
         // message does NOT have the remediation appended. We used to concatenate them, so the only

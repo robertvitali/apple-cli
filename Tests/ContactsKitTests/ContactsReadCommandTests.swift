@@ -159,6 +159,50 @@ struct ContactsAuthCommandTests {
         #expect(factory.backend.accessRequests == 0)
     }
 
+    @Test("--request prompts only at the explicit auth boundary")
+    func requestPromptsExplicitly() throws {
+        let factory = StoreFactory()
+        factory.backend.statuses = [0, 3]
+        let data = try runContacts {
+            try AuthCommand.parse(["--request"]).run(
+                storeFactory: factory.make,
+                metadata: .present(description: "synthetic usage"))
+        }
+        #expect(data["status"] as? String == "authorized")
+        #expect(data.keys.contains("remediation") == false)
+        #expect(factory.backend.accessRequests == 1)
+    }
+
+    @Test("--request denied status reports remediation without prompting again")
+    func requestDeniedReportsRemediation() throws {
+        let factory = StoreFactory()
+        factory.backend.statuses = [2]
+        let payload = try expectContactsFailure(exit: AppleExit.permissionDenied,
+                                                type: AppleErrorType.permissionDenied) {
+            try AuthCommand.parse(["--request"]).run(
+                storeFactory: factory.make,
+                metadata: .present(description: "synthetic usage"))
+        }
+        #expect(payload["status"] as? String == "denied")
+        #expect((payload["remediation"] as? String)?.contains("System Settings") == true)
+        #expect(factory.backend.accessRequests == 0)
+    }
+
+    @Test("--request refuses before touching Contacts when usage metadata is missing")
+    func requestRequiresUsageMetadata() throws {
+        let factory = StoreFactory()
+        factory.backend.statuses = [0]
+        let payload = try expectContactsFailure(exit: AppleExit.permissionDenied,
+                                                type: AppleErrorType.permissionDenied) {
+            try AuthCommand.parse(["--request"]).run(
+                storeFactory: factory.make,
+                metadata: .missing(description: "synthetic missing metadata"))
+        }
+        #expect(payload["status"] as? String == "notDetermined")
+        #expect((payload["message"] as? String)?.contains("NSContactsUsageDescription") == true)
+        #expect(factory.backend.accessRequests == 0)
+    }
+
     @Test("--text renders without emitting JSON on stdout")
     func textOutput() throws {
         let factory = StoreFactory()

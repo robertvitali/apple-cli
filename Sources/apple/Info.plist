@@ -1,0 +1,14 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+	<key>CFBundleExecutable</key>
+	<string>apple</string>
+	<key>CFBundleIdentifier</key>
+	<string>org.apple-cli.tool</string>
+	<key>CFBundleName</key>
+	<string>apple-cli</string>
+	<key>NSContactsUsageDescription</key>
+	<string>apple-cli needs Contacts access when you explicitly request permission or run Contacts commands that read or update your address book.</string>
+</dict>
+</plist>
