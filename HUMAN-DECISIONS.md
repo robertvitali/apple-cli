@@ -28,15 +28,15 @@ it instead of asking.
 `APPLIED` (decision is in the code/repo) · `RATIFIED` (decided, no code change needed) ·
 `WITHDRAWN` (should not have been asked) · `SUPERSEDED` · `CLOSED` (an incident gate closed on
 recorded, scoped evidence, or an arrangement ended and wound up as its entry prescribes).
+A date marked (UTC) is a UTC calendar date; unmarked dates follow D32.
 
 ---
 
-## LEDGER — every decision at a glance (updated 2026-10-10)
+## LEDGER — every decision at a glance (updated 2026-10-10 (UTC))
 
 **Still needs you: D2 (the Homebrew tap), D18 (the `v27.0.0` release, which waits on the phase-3
-publisher), D22 (two parity narrowings), D49 (how a Dependabot Actions pin update reaches
-`main`), D51 (the step-15 rehearsal's provisional definitions) and whether D44's recorded
-departure for `585c49b` stands.** D9 was reopened 2026-08-31 and finally closed the
+publisher), D22 (two parity narrowings) and, under D51, confirming the exact command of the granted
+local release build before it runs.** D9 was reopened 2026-08-31 and finally closed the
 same day (recorded CLOSED — see D9). D15 and D16 were ratified 2026-09-07. D3 and D14 were
 live-validated operator-present on 2026-08-27 (evidence on their Asana tasks; the Mail parent
 closed the same day under the closure-verification protocol). Publication remains blocked —
@@ -97,9 +97,10 @@ publication action.
 | D45 | Open Dependabot pull requests 7 and 8 while the Dependabot governance path is built | **ANSWERED 2026-10-02: supersede both on main (option A); APPLIED 2026-10-03** (resolved 2026-10-03: Dependabot closed both; its edits started two CI runs on pull request 7's pre-D41 head, one of which ran the Swift suite and added a log copy under D43) | Two reviewed commits on `main` take the same updates: urllib3 2.7.0 → 2.8.0 in `docs/requirements.txt`, which clears the three open alerts, and astral-sh/setup-uv 10.1.0 → 10.2.0, with its new SHA added to the reviewed Action allowlist. Dependabot then closes both pull requests itself. No agent action on either pull request, and no new CI run on pull request 7's pre-D41 head (D43) |
 | D46 | Interim protection for `main` before the design's ruleset | **APPLIED 2026-10-02T05:04Z on the operator's instruction; no-bypass shape RATIFIED 2026-10-02 (option A)** | One active ruleset on `main` only, with two rules, block force pushes and restrict deletion, and no bypass actor: while it is active nothing, the operator's credentials included, can force-update or delete `main`, and an authorized history rewrite needs the operator to disable it first. It guards against mistakes, not a misused admin credential, which can disable it. Neither rule applies to fast-forward pushes, pull requests, Dependabot's branches or the current read-only CI workflows; the first push under it (`9cd2260`) passed. At design §18 step 20 the operator decides whether it is deleted or kept; keeping it needs design amendments |
 | D47 | The public Activity view lists commits no advertised ref holds, whose parents reach the replaced history | **RATIFIED 2026-10-07 (UTC): leave them (option B of the later briefs), re-confirmed after the reach was measured** | The repository's public Activity view lists 128 commits that no advertised ref holds; with their parents they make 1,550 such commits, holding phone-number-like strings, email addresses and two commit messages with a denylist term no file or commit message on `main` carries. Accepted as a residual scoped to the 128 commits the view listed on 2026-10-06 and everything reachable from them that no advertised ref holds: 1,550 commits (the 128 among them) and their trees and file contents that no advertised ref holds, pinned by the SHA-256 of two private id lists. Anything the round's classes detect in a commit outside the two pinned lists, or in an object no listed commit reaches, is outside this residual and stays a finding unless another entry accepts it, whenever the view lists it or however it is found; the six branch names in the view that carry tracker identifiers are D50 |
-| D49 | How a Dependabot GitHub Actions pin update reaches `main` | **OPEN 2026-10-07 (UTC)** | Choose between (A) an identity-only allowlist with Dependabot pin pull requests merged through design §10.5's exception, checked by a workflow run from `main`'s own definition, (B) exact-SHA pins kept, with each Dependabot pin pull request treated as input to a reviewed commit on `main` and never merged, or (C) no exception wired, the current posture, each update taken by hand in a reviewed commit as under D45. Recommended: (B) for now, revisiting (A) before design §18 step 13 |
+| D48 | Launch specification approval | **ANSWERED 2026-10-10 (UTC): approve as written (option A)** | `docs/superpowers/specs/2026-10-03-launch-specification.md` as carried by 357bafa (blob d20411e, unchanged on `main` through 7221da7) meets design §15 precondition 3 (the spec's P3); it authorizes no step; Section 15's open findings stay open, each fixed by an amendment under the P3 review gates before L1 |
+| D49 | How a Dependabot GitHub Actions pin update reaches `main` | **ANSWERED 2026-10-10 (UTC): option (B)** | Exact-SHA pins stay; a Dependabot pin pull request is input to a dedicated reviewed commit on `main` and is never merged. Applying it needs a reviewed local checker first, then amendments to the design, the launch specification (with a new approval entry) and `AGENTS.md`; until then each update is taken by hand. (A), an identity-only allowlist merged through design §10.5's exception, is revisited before design §18 step 13 |
 | D50 | Deleted branch names in the public Activity view carry tracker identifiers | **RATIFIED 2026-10-07 (UTC): accept them as a recorded residual (option B)** | Six deleted branch names, in 24 creation, push and deletion events dated 2026-07-15 to 2026-08-23, carry tracker identifiers that also occur in commit messages D47 accepts. Accepted as a residual scoped to those six names in those 24 events; the same names in any other event or on any other surface, and any other tracker identifier the view shows, stay findings unless another entry accepts them |
-| D51 | Provisional definitions in the step-15 release-artifact rehearsal | **OPEN 2026-10-10 (UTC)** | Five points `scripts/ci/release_artifact.py` settles provisionally: the linkage definition, no artifact digest or size recorded, the runbook's `-gnone` recipe, a static bound (not a proof) for outward-write refusal, and `macos-26` with the default bump as the hosted evidence. The local run of the tooling needs a new grant, of the kind D23 records |
+| D51 | Provisional definitions in the step-15 release-artifact rehearsal | **ANSWERED 2026-10-10 (UTC): all five answers ratified; one local run granted in principle** | The linkage definition, no artifact digest or size recorded, the runbook's `-gnone` recipe, a static bound (not a proof) for outward-write refusal, and `macos-26` with the default bump as the hosted evidence are step 15's definitions. One local run of the tooling is granted in principle, as D23 granted its rehearsal; its exact command goes to the operator for confirmation before it runs, as in D24 |
 
 ---
 
@@ -2205,7 +2206,9 @@ open), or from a new or reopened pull request whose head predates it.
   Scope working rule above that no relaxation covers (readiness evidence, Section 3). It was
   reported to the operator on 2026-10-10, before the instruction above; this entry does not read
   that instruction as a ruling on it, and the question stays with the operator: whether the
-  departure stands as recorded, or the Scope rule should have been spelled out further.
+  departure stands as recorded, or the Scope rule should have been spelled out further. Ruled
+  2026-10-10 (UTC), in one acceptance of the controller's recommendations that covered six items:
+  the departure stands as recorded.
   `AGENTS.md`'s statements that all work happens in the primary checkout and that there is one
   branch again describe the local repository.
 - **Context.** The operator asked to run two agent sessions in parallel: one in the primary
@@ -2615,9 +2618,22 @@ file one, and this entry does not prevent it.
 
 ## D49 — How a Dependabot GitHub Actions pin update reaches `main`
 
-- **Status:** **OPEN 2026-10-07 (UTC)** — waiting on the operator; nothing applied. Filed by the
-  second agent session D44 authorizes; its decision brief goes to the operator through the
+- **Status:** **ANSWERED 2026-10-10 (UTC): option (B)**, not yet applied (Resolution below).
+  Historical status: **OPEN 2026-10-07 (UTC)** — waiting on the operator; nothing applied. Filed by
+  the second agent session D44 authorizes; its decision brief goes to the operator through the
   controller.
+- **Resolution:** 2026-10-10 (UTC): the operator chose (B), the recommended option, on the filing
+  session's decision brief (its fifth revision), relayed by the primary checkout's session.
+  Exact-SHA pins stay. A Dependabot pin pull request is input to a dedicated reviewed commit on
+  `main` carrying exactly the judged commit and version, and is never merged. Applying (B) needs the
+  local checker (B) describes, built and reviewed first; then amendments to design §10.5, §17 and
+  §18 step 13; amendments to the launch specification's P6 and Section 13, which D48 approved as
+  carried by 357bafa, so they also need a new approval entry naming the commit that carries them;
+  the matching `AGENTS.md`, CHANGELOG and readiness-evidence text; and, as the Recommendation notes,
+  the literal-path refusal of any pull request changing the four publisher workflows the launch
+  specification (Section 13) proposes. Until then `AGENTS.md`'s posture continues: no Dependabot
+  Actions pull request is merged, and each update is taken by hand in a reviewed commit. (A) is
+  revisited before design §18 step 13.
 - **Finding.** Design §10.5 allows exactly one automated control-plane exception: a Dependabot pull
   request that changes only workflow files, whose parsed workflows a trusted-base comparison proves
   identical apart from allowlisted `uses:` commit SHAs and their adjacent version comments, whose
@@ -2746,9 +2762,28 @@ posture. It needs a ruling before design §18 step 13.
 
 ## D51 — Provisional definitions in the step-15 release-artifact rehearsal
 
-- **Status:** **OPEN 2026-10-10 (UTC)** — filed by the controller with the commit that adds
-  `scripts/ci/release_artifact.py`. The tooling runs on the provisional answers below until each
-  is ruled; nothing but counting step 15 as passed waits on this entry.
+- **Status:** **ANSWERED 2026-10-10 (UTC): all five provisional answers ratified, and one local run
+  granted in principle** (Resolution below). Historical status: **OPEN 2026-10-10 (UTC)** — filed by
+  the controller with the commit that adds `scripts/ci/release_artifact.py`. The tooling runs on the
+  provisional answers below until each is ruled; nothing but counting step 15 as passed waits on
+  this entry.
+- **Resolution:** 2026-10-10 (UTC): the operator ratified point 1 on its own question ("Ratify
+  provisional"), then answered the controller's remaining recommendations with one acceptance ("I
+  will take all of your recommendations"), which covered six items, among them points 2 to 5 (ratify
+  each provisional answer) and "grant one local run of release_artifact.py (exact invocation
+  recorded before it runs)". Step 15 counts the five answers as its definitions. The local run is
+  granted in principle, as D23 granted its rehearsal, and the 'Also needed' item below stands: the
+  exact command is asked separately. The controller sets these conditions on it: `release_prep.py`
+  and then `release_artifact.py`, against a clean clone of one commit of `main`, in the 27.0.0 shape
+  (`--macos-major 27`) that the hosted job never builds, with every working file in a fresh
+  mode-0700 directory in the private evidence store outside the repository; nothing uploaded, tagged
+  or pushed; the rendered copies, the build and the clone, which carry the predicted version,
+  removed afterwards; only the two value-free reports kept. As in D24, the controller freezes that
+  command in a script, takes it through the review gates, records its digest and the commit, and
+  puts that exact command to the operator, whose confirmation is what runs; a failed or interrupted
+  run is not repeated without a new confirmation. Still to follow, each reviewed: the docstring,
+  comments, report note and messages in `scripts/ci/release_artifact.py` and the tests that pin
+  them, which still call these answers provisional.
 - **Context.** Design §18 step 15 asks the read-only release rehearsal to verify the predicted
   release-file changes, archive contents, checksums, linkage, runtime version and refusal of any
   outward-write step; §15.1 adds that checksum, architecture, linkage and runtime version agree;
@@ -2834,5 +2869,37 @@ enforcement control plane.
 
 **Blocking?** Not for the tooling. Until ruled, the readiness record cites these answers as
 provisional and does not count step 15 as passed on them.
+
+---
+
+## D48 — Launch specification approval
+
+- **Status:** **ANSWERED 2026-10-10 (UTC): approve as written (option A).** APPLIED when the
+  Status-line commit below is on `main`.
+- **Ruling.** The operator approves `docs/superpowers/specs/2026-10-03-launch-specification.md` with
+  the text carried by commit 357bafa (blob d20411e, unchanged on `main` through 7221da7), meeting
+  design §15 precondition 3 (the specification's P3). The approval also covers one later commit that
+  changes only the specification's Status line to "APPROVED 2026-10-10 (UTC) (D48)"; the Resolution
+  names that commit. The operator chose option (A), the recommended option, on its own question, in
+  preference to (B), approving only after the two MEDIUM findings (the probe never exercises the
+  recovery-environment deployment; the rehearsal does not apply this repository's real merge and
+  Actions settings) were fixed, and (C), naming sections to change.
+- **What it does not do.** It authorizes no step and no setting change. The launch waits on the
+  explicit version-publication instruction (P4), and each step on the operator's in-session
+  instruction (1.1).
+- **Open items.** Section 15's findings 1, 2 and 4 to 14 stay open; item 3 was resolved by D47. Each
+  open finding is fixed by an amendment under the P3 review gates before L1. Any other amendment to
+  the approved text is approved by a new entry naming the commit that carries it.
+- **Recorder's note.** Two amendments known now will need such an entry: D49's amendments to P6 and
+  Section 13, and the specification's wording that the operator's credential is held by "both agent
+  sessions" (among them its lines 70, 191 and 1811), of which one session remains since D44 closed.
+- **Filed:** 2026-10-10 (UTC), by the controller recording the ruling, under the number the second
+  agent session D44 authorized had claimed with its approval brief · **Category:** release / launch
+  governance
+
+**Why it needed you.** Design §15 reserves approval of the launch specification to the operator,
+and approving it accepts the Section 10 window without a release path.
+
+**Blocking?** It blocks L1 (P3). It does not block P1, P2, P6 or P10 work.
 
 ---

@@ -593,8 +593,8 @@ off, and SwiftPM's cache, configuration and fingerprint store kept in its work d
 that the rendered change set is exactly those two files (not that generated documentation needs
 no change), and checks the archive, the checksum file, a thin arm64 binary, the deployment target,
 linkage, the debug map, home- and temporary-directory path bytes, the code signature and the
-runtime version. Five of its answers are provisional until the operator rules
-on D51: the linkage definition, withholding every digest and size, the recipe, relying on the
+runtime version. Five of its answers, provisional when it landed, were ratified by the operator
+in D51: the linkage definition, withholding every digest and size, the recipe, relying on the
 workflow's static bound (not a proof) for outward-write refusal, and taking hosted evidence from
 `macos-26` with the default bump. Nothing is uploaded, and neither its report nor its own
 messages carry a digest, a size, the archive name or the version. The other half — the
