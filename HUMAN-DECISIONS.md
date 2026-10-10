@@ -27,15 +27,16 @@ it instead of asking.
 **Status values:** `OPEN` (waiting on the operator) · `ANSWERED` (decided, being applied) ·
 `APPLIED` (decision is in the code/repo) · `RATIFIED` (decided, no code change needed) ·
 `WITHDRAWN` (should not have been asked) · `SUPERSEDED` · `CLOSED` (an incident gate closed on
-recorded, scoped evidence).
+recorded, scoped evidence, or an arrangement ended and wound up as its entry prescribes).
 
 ---
 
-## LEDGER — every decision at a glance (updated 2026-10-07)
+## LEDGER — every decision at a glance (updated 2026-10-10)
 
 **Still needs you: D2 (the Homebrew tap), D18 (the `v27.0.0` release, which waits on the phase-3
-publisher), D22 (two parity narrowings) and D49 (how a Dependabot Actions pin update reaches
-`main`).** D9 was reopened 2026-08-31 and finally closed the
+publisher), D22 (two parity narrowings), D49 (how a Dependabot Actions pin update reaches
+`main`), D51 (the step-15 rehearsal's provisional definitions) and whether D44's recorded
+departure for `585c49b` stands.** D9 was reopened 2026-08-31 and finally closed the
 same day (recorded CLOSED — see D9). D15 and D16 were ratified 2026-09-07. D3 and D14 were
 live-validated operator-present on 2026-08-27 (evidence on their Asana tasks; the Mail parent
 closed the same day under the closure-verification protocol). Publication remains blocked —
@@ -92,7 +93,7 @@ publication action.
 | D41 | Two message texts and a search term from a live oracle run in a Messages test | **RATIFIED 2026-09-30: redact at HEAD, accept history (option A)** | `Tests/MessagesKitTests/MessagesKitTests.swift` carried two message texts and a search term sampled from the operator's Messages store during a live oracle run (committed 2026-07-15 in `23c9afc`, public in the periods D9 and D17 record). Replaced at HEAD with synthetic text; history keeps the originals as an accepted residual, as D38 did for its commit |
 | D42 | A note fragment from a live run in a Notes test | **RATIFIED 2026-09-30: redact at HEAD, accept history (option A)** | `Tests/NotesKitTests/NotesTextTests.swift` quoted a three-word fragment of one of the operator's notes, measured live on 2026-08-19 (NOTES-L1) and committed that day in `50c30f0`; public since the visibility change D17 records. Replaced at HEAD with synthetic text; history keeps the original as an accepted residual, as D41 did for the Messages test |
 | D43 | CI job logs print the removed Messages test's name, which carried D41's search term | **RATIFIED 2026-09-30: leave the logs to expire (option A), re-confirmed on corrected facts** (amended 2026-10-04: one later copy, the last now about 2027-01-01) | Hosted build-test job logs print every test name: 61 job logs in 57 CI runs (2026-09-01 to 2026-09-30) carry the removed test's name, two lines each; a scan of all 322 retrievable logs found neither the message texts nor D42's note fragment. Accepted as a residual until GitHub's 90-day log retention removes them (the last about 2026-12-29, later if a run from before the D41 commit is re-run or a pull request on an older head runs) |
-| D44 | Narrow main-only reversal for a parallel session's worktree | **RATIFIED 2026-10-01** (amended 2026-10-03: the branch reached `origin` once and was deleted on the operator's word) | One local git worktree, `~/workspace/apple-cli-governance` on the local branch `26/governance`, for a second agent session working the supply-chain and governance queue in parallel. The branch is never pushed and never merged: each change is rebased onto the current `main`, passes the same review, scan and canonical gates, and lands by a fast-forward push to `main`, one landing at a time. Removed when that queue is done. Ordinary work otherwise stays main-only; D16 is unchanged |
+| D44 | Narrow main-only reversal for a parallel session's worktree | **CLOSED 2026-10-10**: ended on the operator's word before the queue was done; worktree removed and branch deleted, nothing left to land (ratified 2026-10-01; amended 2026-10-03: the branch reached `origin` once and was deleted on the operator's word) | One local git worktree, `~/workspace/apple-cli-governance` on the local branch `26/governance`, for a second agent session working the supply-chain and governance queue in parallel. The branch is never pushed and never merged: each change is rebased onto the current `main`, passes the same review, scan and canonical gates, and lands by a fast-forward push to `main`, one landing at a time. Removed when that queue is done. Ordinary work otherwise stays main-only; D16 is unchanged |
 | D45 | Open Dependabot pull requests 7 and 8 while the Dependabot governance path is built | **ANSWERED 2026-10-02: supersede both on main (option A); APPLIED 2026-10-03** (resolved 2026-10-03: Dependabot closed both; its edits started two CI runs on pull request 7's pre-D41 head, one of which ran the Swift suite and added a log copy under D43) | Two reviewed commits on `main` take the same updates: urllib3 2.7.0 → 2.8.0 in `docs/requirements.txt`, which clears the three open alerts, and astral-sh/setup-uv 10.1.0 → 10.2.0, with its new SHA added to the reviewed Action allowlist. Dependabot then closes both pull requests itself. No agent action on either pull request, and no new CI run on pull request 7's pre-D41 head (D43) |
 | D46 | Interim protection for `main` before the design's ruleset | **APPLIED 2026-10-02T05:04Z on the operator's instruction; no-bypass shape RATIFIED 2026-10-02 (option A)** | One active ruleset on `main` only, with two rules, block force pushes and restrict deletion, and no bypass actor: while it is active nothing, the operator's credentials included, can force-update or delete `main`, and an authorized history rewrite needs the operator to disable it first. It guards against mistakes, not a misused admin credential, which can disable it. Neither rule applies to fast-forward pushes, pull requests, Dependabot's branches or the current read-only CI workflows; the first push under it (`9cd2260`) passed. At design §18 step 20 the operator decides whether it is deleted or kept; keeping it needs design amendments |
 | D47 | The public Activity view lists commits no advertised ref holds, whose parents reach the replaced history | **RATIFIED 2026-10-07 (UTC): leave them (option B of the later briefs), re-confirmed after the reach was measured** | The repository's public Activity view lists 128 commits that no advertised ref holds; with their parents they make 1,550 such commits, holding phone-number-like strings, email addresses and two commit messages with a denylist term no file or commit message on `main` carries. Accepted as a residual scoped to the 128 commits the view listed on 2026-10-06 and everything reachable from them that no advertised ref holds: 1,550 commits (the 128 among them) and their trees and file contents that no advertised ref holds, pinned by the SHA-256 of two private id lists. Anything the round's classes detect in a commit outside the two pinned lists, or in an object no listed commit reaches, is outside this residual and stays a finding unless another entry accepts it, whenever the view lists it or however it is found; the six branch names in the view that carry tracker identifiers are D50 |
@@ -2174,12 +2175,39 @@ open), or from a new or reopened pull request whose head predates it.
 
 ## D44 — Narrow main-only reversal for a parallel session's worktree
 
-- **Status:** **RATIFIED 2026-10-01: the narrow reversal (option A).** Ledger dates are the
+- **Status:** **CLOSED 2026-10-10** on the operator's word (Resolution below). Historical status:
+  **RATIFIED 2026-10-01: the narrow reversal (option A).** Ledger dates are the
   operator's local date (D32): the operator chose this option on 2026-10-01, shortly before the
   worktree and its local branch were created at 23:57 local (2026-10-02T03:57Z). The row as first
   drafted carried the UTC date 2026-10-02; its substance is unchanged. Unlike D16 and design §18
   step 8, the reversal was not recorded on `main` before the branch was cut: this entry's commit,
   made from the worktree, is the first landing under it.
+- **Resolution:** 2026-10-10: the operator ended the arrangement before the queue was done, stopped
+  the worktree's session, and asked the primary checkout's session to merge the worktree's branch
+  into `main` in its current state, remove the worktree and the branch, and take over the queue.
+  Nothing was left to merge: `26/governance` stood at `585c49b`, the last commit landed from the
+  worktree (in the push headed by `585c49b`, with `b45688b`), the worktree was clean and had no
+  stash entry, so no merge commit was made and no commit the branch then held was discarded;
+  `git worktree remove`, which refuses a worktree with uncommitted changes unless forced, and
+  `git branch -d`, which refuses a branch not merged into `main`, both succeeded without force. Read
+  back on 2026-10-10, `git worktree list` listed only the primary checkout,
+  `git branch --list 26/governance` was empty, and `git ls-remote --heads origin` held no
+  `26/governance` ref. Removing the worktree and deleting the branch removed their reflogs, the last
+  local references to `8e6af13` (amendment below), so that amendment's statement that the worktree's
+  reflog still names it no longer holds: the object stays in the local repository, unreferenced,
+  until a garbage collection prunes it; a copy of its patch is kept outside the repository; and on
+  GitHub it stays fetchable by its id and named in the public activity listing, as the amendment
+  recorded at the time. The queue's remaining work continues from the primary checkout under the
+  main-only workflow: two open agent tasks, refusing a quoted `<<` merge key in the workflow scan
+  and the `mkdocs.yml` navigation subset (quoted first keys, external links), and the Dependabot pin
+  path, which waits on D49. `585c49b`, a test-only change outside the queue, landed from the
+  worktree with `b45688b`, whose push could not pass the suite without it: a departure from the
+  Scope working rule above that no relaxation covers (readiness evidence, Section 3). It was
+  reported to the operator on 2026-10-10, before the instruction above; this entry does not read
+  that instruction as a ruling on it, and the question stays with the operator: whether the
+  departure stands as recorded, or the Scope rule should have been spelled out further.
+  `AGENTS.md`'s statements that all work happens in the primary checkout and that there is one
+  branch again describe the local repository.
 - **Context.** The operator asked to run two agent sessions in parallel: one in the primary
   checkout, and one in a second local worktree working the supply-chain and governance queue. That
   queue is the Dependabot governance path, the CI readers' handling of non-ASCII whitespace, the
