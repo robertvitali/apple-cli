@@ -112,12 +112,60 @@ A shared AX backend serializes the complete resolution/action/verification cycle
 across processes using a per-user advisory lock in a protected application-state
 directory. Validate directory/file ownership, permissions and symlink refusal;
 lock acquisition has a deadline and descriptors close on every path. Do not unlink
-a held lock. Use one end-to-end deadline, capped retries and explicit permission,
-unsupported-platform, target-mismatch and uncertain-outcome errors. Cancellation or
-timeout must quiesce all queued/in-flight AX work before releasing the lock; no
-background action may write after another caller acquires it. An advisory lock
-cannot exclude the user or unrelated automation. Bind process/window/conversation/
-message identity and revalidate immediately before every side effect; abort on drift.
+a held lock. Use one end-to-end deadline and cap retries to read-only phases or
+cases with proof no mutating request was delivered. Return explicit permission,
+unsupported-platform, target-mismatch and uncertain-outcome errors. Run mutating AX
+calls in a bounded, hidden worker mode of the same executable, with a private bounded
+request/response channel. Keep the lock and operation-state ownership in the parent;
+the worker must not independently start operations or clear their records. Worker
+mode accepts no targets or actions from arguments, environment variables or standard
+input. It requires a parent-created inherited anonymous channel, verified parent
+identity and a fresh one-operation nonce bound to the pending record. Reject
+standalone invocation and mismatched/replayed requests; exit after one bounded
+request. These checks prevent a separate command path from bypassing the parent
+policy, lock and pending-state gate; they do not claim isolation from a hostile
+process with the same user privileges. This avoids a separately installed messaging
+binary or companion executable.
+
+Before issuing any potentially mutating request, durably record the operation in
+the protected state directory using atomic replacement and file/directory sync.
+The record contains a versioned operation identity, exact targets, action and
+verification state, with strict size/shape validation and private permissions.
+Persist only opaque conversation/message/part identifiers, operation type and the
+minimum verification evidence. Use bounded hashes and lengths instead of message
+bodies or attachment paths where comparison is needed; omit contact names and
+recipient addresses. Any operation that requires additional sensitive persistent
+state needs an explicit reviewed justification. Never put target values or payloads
+in diagnostics. Successful resolution or explicit operator recovery must atomically
+remove the sensitive pending payload while recording only the operation identifier
+and disposition in a bounded local receipt. Recovery must name the unresolved
+operation, explain possible late effects and require explicit acknowledgement;
+ordinary reset or cleanup cannot silently remove the write gate. Define and test
+receipt retention and interrupted cleanup before adding that storage.
+Cancellation or timeout must stop and reap owned helper processes before releasing
+the lock, but helper termination does not cancel requests already delivered to
+Messages. Preserve an unresolved record on timeout, crash or uncertain delivery.
+Every later caller checks this record under the same lock and refuses new Messages
+UI writes while it remains unresolved. Read-only status and reconciliation may run.
+Malformed, inaccessible, foreign-owned or unsafe operation state also blocks writes.
+
+Resolve the record only with operation-specific evidence that proves completion
+and excludes a still-pending request, or proof that no mutating request was issued.
+A matching current snapshot alone does not establish causality: another actor may
+have produced it while this operation's toggle or keyboard action is still queued.
+Idempotence alone is insufficient too, because a late request could overturn a
+later conflicting operation. Where causal completion cannot be established, retain
+the unresolved record and require explicit operator recovery that explains possible
+late effects; never automatically clear it after a delay. The backend promises
+termination of owned helpers and durable gating of later writes, not cancellation
+or quiescence inside Messages. Normal success still requires an observed exact
+postcondition before durably resolving the record. Tests cover crashes before
+request delivery, after delivery, after verification but before record cleanup,
+and a competing process attempting a new write at each boundary.
+
+An advisory lock cannot exclude the user or unrelated automation. Bind
+process/window/conversation/message identity and revalidate immediately before
+every side effect; abort on drift.
 
 Select a conversation by its exact native identity and resolve message/part through
 GUID-bearing UI identifiers. Database membership alone does not prove the selected
@@ -142,7 +190,8 @@ self-addressed fixtures. Non-self/group operations require operator participatio
 1. Exact targeting and bounded reads establish the identity contract above.
 2. The shared automation backend establishes locking, deadlines and diagnostics.
 3. Reaction inspect/set/replace/remove supports standard and supported custom emoji.
-   Read the current outgoing reaction; already-desired/absent is idempotent. Preserve
+   Read the current outgoing reaction; already-desired/absent is idempotent before
+   delivery and never clears an unresolved operation record. Preserve
    exact grapheme identity, toggle once and verify the observed final reaction.
    Investigate picker identifiers and selected state for custom removal. Do not
    copy upstream skin-tone stripping or treat UI action completion as success.
