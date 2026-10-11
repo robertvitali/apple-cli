@@ -66,8 +66,8 @@ public enum AppleAutomationJournal {
 
     package struct WriteCheckpointHook {
         let target: WriteCheckpoint
-        let action: (WriteCheckpoint) -> Void
-        package init(target: WriteCheckpoint, action: @escaping (WriteCheckpoint) -> Void) {
+        let action: (WriteCheckpoint) throws -> Void
+        package init(target: WriteCheckpoint, action: @escaping (WriteCheckpoint) throws -> Void) {
             self.target = target
             self.action = action
         }
@@ -259,7 +259,7 @@ public enum AppleAutomationJournal {
 
         func recordObservedState(operationID: UUID) throws {
             try requireActive()
-            try resolve(operationID: operationID, disposition: .observedState)
+            try resolvePreservingPendingOnFailure(operationID: operationID, disposition: .observedState)
         }
 
         // Test seam for replay-guard regression only; production callers use begin(_:) so
@@ -289,6 +289,24 @@ public enum AppleAutomationJournal {
             snapshot.pending = nil
             appendReceipt(&snapshot, Receipt(operationID: operationID, disposition: disposition))
             try AppleAutomationJournal.writeSnapshot(snapshot, rootFD: rootFD, purpose: .resolve, checkpointHook: checkpointHook)
+        }
+
+        private func resolvePreservingPendingOnFailure(operationID: UUID, disposition: Receipt.Disposition) throws {
+            let original = try AppleAutomationJournal.readSnapshot(rootFD: rootFD)
+            guard let pending = original.pending, pending.operationID == operationID else { throw Error.operationNotFound(operationID.uuidString) }
+            guard pending.phase == .uncertainAfterHandoff else { throw Error.handoffNotRecorded }
+            var resolved = original
+            resolved.pending = nil
+            appendReceipt(&resolved, Receipt(operationID: operationID, disposition: disposition))
+            do {
+                try AppleAutomationJournal.writeSnapshot(resolved, rootFD: rootFD, purpose: .resolve, checkpointHook: checkpointHook)
+            } catch {
+                // A failure after rename may already expose the resolved snapshot.
+                // Restore pending while still locked when storage permits it. A
+                // further filesystem failure cannot guarantee durable restoration.
+                try? AppleAutomationJournal.writeSnapshot(original, rootFD: rootFD, purpose: .ordinary)
+                throw error
+            }
         }
 
         private func appendReceipt(_ snapshot: inout Snapshot, _ receipt: Receipt) {
@@ -473,24 +491,24 @@ public enum AppleAutomationJournal {
             }
         }
         guard fsync(fd) == 0 else { throw Error.syscall("fsync-state") }
-        fireCheckpoint(.beforeRename, hook: checkpointHook)
+        try fireCheckpoint(.beforeRename, hook: checkpointHook)
         guard renameat(rootFD, tempName, rootFD, stateFileName) == 0 else { throw Error.syscall("renameat") }
         shouldUnlink = false
-        fireCheckpoint(.afterRename, hook: checkpointHook)
+        try fireCheckpoint(.afterRename, hook: checkpointHook)
         guard fsync(rootFD) == 0 else { throw Error.syscall("fsync-dir") }
         switch purpose {
         case .begin:
-            fireCheckpoint(.afterDurableBegin, hook: checkpointHook)
+            try fireCheckpoint(.afterDurableBegin, hook: checkpointHook)
         case .markUncertain:
-            fireCheckpoint(.afterDurableMarkUncertain, hook: checkpointHook)
+            try fireCheckpoint(.afterDurableMarkUncertain, hook: checkpointHook)
         case .ordinary, .resolve:
             break
         }
     }
 
-    private static func fireCheckpoint(_ checkpoint: WriteCheckpoint, hook: WriteCheckpointHook?) {
+    private static func fireCheckpoint(_ checkpoint: WriteCheckpoint, hook: WriteCheckpointHook?) throws {
         guard hook?.target == checkpoint else { return }
-        hook?.action(checkpoint)
+        try hook?.action(checkpoint)
     }
 
     private static func encodeSnapshot(_ snapshot: Snapshot) throws -> Data {

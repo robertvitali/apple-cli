@@ -100,13 +100,14 @@ func competingProcessCannotAcquire(root: String) throws -> Bool {
 func observedResolution(root: String, commandName: String, seed: String) throws -> WorkerObservedAction {
     let deadline: WorkerDeadline
     if commandName == "probe.verify-sleep" {
-        deadline = .millisecondsFromNow(100)
+        deadline = .millisecondsFromNow(2_000)
     } else if commandName == "probe.cancel-hanging-worker" {
         deadline = .millisecondsFromNow(5_000)
     } else {
         deadline = .millisecondsFromNow(2_000)
     }
     let cancelMarker = URL(fileURLWithPath: root, isDirectory: true).appendingPathComponent("cancel-now").path
+    let verifyMarker = URL(fileURLWithPath: root, isDirectory: true).appendingPathComponent("verify-entered").path
     return WorkerObservedAction(
         stateRoot: root,
         deadline: deadline,
@@ -114,7 +115,8 @@ func observedResolution(root: String, commandName: String, seed: String) throws 
             commandName == "probe.cancel-immediate" || FileManager.default.fileExists(atPath: cancelMarker)
         },
         resolve: {
-            try WorkerResolvedAction(
+            if commandName == "probe.resolve-cancel" { throw WorkerProtocolError.cancelled }
+            return try WorkerResolvedAction(
                 target: binding(seed),
                 command: { _ in
                     if commandName == "probe.cancel-after-worker" {
@@ -130,6 +132,9 @@ func observedResolution(root: String, commandName: String, seed: String) throws 
         preflight: { _, context in
             if commandName == "probe.preflight-lock" {
                 guard try competingProcessCannotAcquire(root: root) else { throw WorkerProtocolError.invalidDescriptor }
+            }
+            if commandName == "probe.preflight-cancel" {
+                throw WorkerProtocolError.cancelled
             }
             if commandName == "probe.cancel-after-preflight" {
                 FileManager.default.createFile(atPath: cancelMarker, contents: Data())
@@ -164,9 +169,13 @@ func observedResolution(root: String, commandName: String, seed: String) throws 
             case "probe.verify-throw":
                 throw WorkerProtocolError.unsupportedCommand
             case "probe.verify-sleep":
-                Thread.sleep(forTimeInterval: 0.35)
-                if context.deadline.expired { throw WorkerProtocolError.deadlineExpired }
-                return "verified-after-sleep"
+                FileManager.default.createFile(atPath: verifyMarker, contents: Data())
+                while !context.deadline.expired { Thread.sleep(forTimeInterval: 0.01) }
+                throw WorkerProtocolError.deadlineExpired
+            case "probe.verify-cancel":
+                throw WorkerProtocolError.cancelled
+            case "probe.verify-parent-mismatch":
+                throw WorkerProtocolError.parentIdentityMismatch
             default:
                 if context.deadline.expired { throw WorkerProtocolError.deadlineExpired }
                 return "verified-\(seed)"
@@ -186,6 +195,12 @@ func journalSummary(root: String) -> String {
     } catch {
         return "journal-error=\(error)"
     }
+}
+
+func markerSummary(root: String, commandName: String) -> String {
+    guard commandName == "probe.verify-sleep" else { return "" }
+    let marker = URL(fileURLWithPath: root, isDirectory: true).appendingPathComponent("verify-entered").path
+    return FileManager.default.fileExists(atPath: marker) ? "|verify=entered" : "|verify=missing"
 }
 
 func writePID(_ pid: pid_t, to fd: Int32) {
@@ -589,7 +604,7 @@ if CommandLine.arguments.dropFirst().first == "--observed-run" {
     }
     let outcome = try launcher.launchObserved(observedResolution(root: root, commandName: commandName, seed: seed))
     let suffix = reportsDeferredReaping ? "|deferred=\(sink.accepted)" : ""
-    print("\(outcome.description)|\(journalSummary(root: root))\(suffix)")
+    print("\(outcome.description)|\(journalSummary(root: root))\(markerSummary(root: root, commandName: commandName))\(suffix)")
     exit(0)
 }
 

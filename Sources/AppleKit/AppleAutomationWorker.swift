@@ -670,10 +670,13 @@ package struct WorkerLauncher {
                 }
                 let resolved: WorkerResolvedAction
                 do { resolved = try action.resolve() }
+                catch WorkerProtocolError.cancelled { return .cancelled }
+                catch WorkerProtocolError.deadlineExpired { return .timedOut }
                 catch { return .requestNotSent(String(describing: error)) }
                 if let outcome = cancelledOrExpired() { return outcome }
                 let preflight: WorkerPreflightResult
                 do { preflight = try action.preflight(resolved, context()) }
+                catch WorkerProtocolError.cancelled { return .cancelled }
                 catch WorkerProtocolError.deadlineExpired { return .timedOut }
                 catch { return .requestNotSent(String(describing: error)) }
                 switch preflight {
@@ -708,7 +711,15 @@ package struct WorkerLauncher {
                                 preparedOperationID: op, isCancelled: action.isCancelled) {
                 case .response(let response):
                     if let outcome = cancelledOrExpired() { return outcome }
-                    guard let verification = try action.verify(resolved, response, context()) else {
+                    let verification: String?
+                    do { verification = try action.verify(resolved, response, context()) }
+                    catch WorkerProtocolError.cancelled { return .cancelled }
+                    catch WorkerProtocolError.deadlineExpired { return .timedOut }
+                    catch WorkerProtocolError.parentIdentityMismatch {
+                        return .childRefusedOrFailed(WorkerProtocolError.parentIdentityMismatch.description)
+                    }
+                    catch { return .childRefusedOrFailed(String(describing: error)) }
+                    guard let verification else {
                         return .verificationFailed
                     }
                     if let outcome = cancelledOrExpired() { return outcome }
@@ -737,7 +748,7 @@ package struct WorkerLauncher {
         } catch WorkerProtocolError.deadlineExpired {
             return .timedOut
         } catch WorkerProtocolError.parentIdentityMismatch {
-            return .requestNotSent(WorkerProtocolError.parentIdentityMismatch.description)
+            return .childRefusedOrFailed(WorkerProtocolError.parentIdentityMismatch.description)
         } catch {
             return .childRefusedOrFailed(String(describing: error))
         }
@@ -858,7 +869,7 @@ package struct WorkerLauncher {
             return .protocolViolation("malformed-frame")
         } catch WorkerProtocolError.truncatedFrame {
             cleanup(killChild: true)
-            return .childRefusedOrFailed("truncated-frame")
+            return request.deadline.expired ? .timedOut : .childRefusedOrFailed("truncated-frame")
         } catch {
             if pid == 0 { try? lease.recordNoDeliveryBeforeHandoff(operationID: preparedOperationID) }
             cleanup(killChild: true)

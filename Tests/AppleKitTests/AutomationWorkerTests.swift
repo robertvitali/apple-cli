@@ -470,12 +470,16 @@ struct AutomationWorkerTests {
             ("probe.refuse", "childRefusedOrFailed(refused)"),
             ("probe.verify-false", "verificationFailed"),
             ("probe.verify-throw", "childRefusedOrFailed(unsupported-command)"),
-            ("probe.verify-sleep", "timedOut")
+            ("probe.verify-sleep", "timedOut"),
+            ("probe.verify-parent-mismatch", "childRefusedOrFailed(parent-identity-mismatch)")
         ] {
             let root = try scratch.directory().appendingPathComponent("observed-\(command)-\(UUID().uuidString)", isDirectory: true)
             let outcome = try launchObservedThroughProbe(root: root, command: command, seed: command)
             #expect(outcome.hasPrefix(prefix))
             #expect(outcome.contains("|pending=uncertainAfterHandoff|receipts=none"))
+            if command == "probe.verify-sleep" {
+                #expect(outcome.contains("|verify=entered"))
+            }
         }
     }
 
@@ -493,8 +497,11 @@ struct AutomationWorkerTests {
     func observedActionHonorsCancellationBeforeClearingState() throws {
         for (command, expectedPending) in [
             ("probe.cancel-immediate", "none"),
+            ("probe.resolve-cancel", "none"),
+            ("probe.preflight-cancel", "none"),
             ("probe.cancel-after-preflight", "none"),
             ("probe.cancel-after-worker", "uncertainAfterHandoff"),
+            ("probe.verify-cancel", "uncertainAfterHandoff"),
             ("probe.cancel-after-verify", "uncertainAfterHandoff")
         ] {
             let root = try scratch.directory().appendingPathComponent("observed-cancel-\(command)-\(UUID().uuidString)", isDirectory: true)

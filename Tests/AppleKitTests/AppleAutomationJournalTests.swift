@@ -9,6 +9,8 @@ private struct TestFailure: Error, CustomStringConvertible {
     init(_ description: String) { self.description = description }
 }
 
+private struct CheckpointFailure: Error {}
+
 private final class BundleMarker: NSObject {}
 
 @Suite("Apple automation journal", .serialized)
@@ -233,6 +235,31 @@ struct AppleAutomationJournalTests {
                 try lease.recordObservedState(operationID: reused)
                 do { try lease.beginForTesting(reused, request: request("second")); throw TestFailure("observed-state receipt op should not replay") }
                 catch AppleAutomationJournal.Error.replayedOperationID(let op) { try assert(op == reused.uuidString, "replay guard names observed op") }
+            }
+        }
+    }
+
+    @Test("observed-state write failure restores uncertain pending")
+    func testObservedStateWriteFailureRestoresUncertainPending() throws {
+        try withScratch("observed-restore") { root in
+            let op = try AppleAutomationJournal.withLockedJournal(root: root.path, deadline: .millisecondsFromNow(1_000)) { lease in
+                let op = try lease.begin(request("restore"))
+                try lease.markUncertainAfterHandoff(operationID: op)
+                return op
+            }
+            try AppleAutomationJournal.withLockedJournalForCheckpointTesting(
+                root: root.path,
+                deadline: .millisecondsFromNow(1_000),
+                checkpointHook: AppleAutomationJournal.WriteCheckpointHook(target: .afterRename) { _ in throw CheckpointFailure() }
+            ) { lease in
+                do { try lease.recordObservedState(operationID: op); throw TestFailure("observed-state checkpoint failure should throw") }
+                catch is CheckpointFailure {}
+            }
+            try AppleAutomationJournal.withLockedJournal(root: root.path, deadline: .millisecondsFromNow(1_000)) { lease in
+                let snapshot = try lease.loadSnapshot()
+                try assert(snapshot.pending?.operationID == op, "observed-state failure restores pending op")
+                try assert(snapshot.pending?.phase == .uncertainAfterHandoff, "restored pending remains uncertain")
+                try assert(snapshot.receipts.isEmpty, "observed-state failure writes no receipt")
             }
         }
     }
