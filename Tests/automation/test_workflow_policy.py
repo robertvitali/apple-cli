@@ -229,6 +229,34 @@ class ParserTests(unittest.TestCase):
         self.assertEqual(policy.parse_workflow("k: ['a: b', 'https://example.com/x', b]\n"),
                          {"k": ["a: b", "https://example.com/x", "b"]})
 
+    def test_a_quoted_first_key_on_a_sequence_entry_reads_as_a_mapping(self) -> None:
+        # YAML reads each entry as a one-pair mapping (MkDocs' `nav` titles are written this way);
+        # the key is decoded as a mapping key is, and sibling keys follow at its column.
+        for text, expected in (
+                ('k:\n  - "Getting started": start.md\n', [{"Getting started": "start.md"}]),
+                ("k:\n  - 'Getting started': a.md\n    'Next page': b.md\n",
+                 [{"Getting started": "a.md", "Next page": "b.md"}]),
+                ('k:\n  - "a #b": c\n', [{"a #b": "c"}]),
+                ('k:\n  - "a" : c\n', [{"a": "c"}]),
+                ('k:\n  - "a\\tb": c\n', [{"a\tb": "c"}]),
+                ('k:\n  - "a":\n      - b\n', [{"a": ["b"]}]),
+                ('k:\n  - "a":\n      b: c\n', [{"a": {"b": "c"}}]),
+                ('k:\n  - "a": 1\n    b: 2\n', [{"a": "1", "b": "2"}]),
+                ('k:\n  - "a\\\\": b\n', [{"a\\": "b"}]),
+                # An escaped quote does not end the key: YAML reads these entries as strings.
+                ('k:\n  - "a\\": b"\n', ['a": b']),
+                ('k:\n  - "a: b"\n  - \'c\'\n', ["a: b", "c"])):
+            with self.subTest(text=text):
+                self.assertEqual(policy.parse_workflow(text), {"k": expected})
+        # Still refused: a key KEY_RE cannot spell (a doubled quote), a duplicate, a value holding a
+        # colon and a space, and a double-quoted key holding an escaped quote, which YAML reads as a
+        # key but the parser cannot (it fails closed instead of reading a string).
+        for text in ("k:\n  - 'a''b': c\n", 'k:\n  - "a": 1\n    a: 2\n', 'k:\n  - "a": b: c\n',
+                     'k:\n  - "a\\"b": c\n', 'k:\n  - "a\\": b" : c\n', 'k:\n  - "a\\": b" : "c"\n'):
+            with self.subTest(text=text):
+                with self.assertRaises(policy.ParseError):
+                    policy.parse_workflow(text)
+
     def test_a_sequence_entry_holding_a_key_the_parser_does_not_admit_is_refused(self) -> None:
         # YAML reads each of these entries as a mapping; a key outside KEY_RE would otherwise make
         # the entry a string here. An alias (`*r`) is never a key.
@@ -584,7 +612,7 @@ class LibyamlDifferentialTests(unittest.TestCase):
     def test_generated_documents_never_read_differently_or_only_here(self) -> None:
         documents = [document for seed in (1, 2, 3, 4) for document in differential_documents(seed, 4000)]
         agreed = self.assert_reads_as_libyaml(documents)
-        # Not vacuous: the parser accepts 35,026 of the 272,000, at least 208 from each template but
+        # Not vacuous: the parser accepts 38,830 of the 272,000, at least 425 from each template but
         # the properties one (anchors, tags, aliases, merge keys, explicit keys), which it refuses.
         self.assertGreaterEqual(sum(agreed.values()), 30000)
         self.assertEqual(agreed.get("properties", 0), 0)
@@ -598,12 +626,21 @@ class LibyamlDifferentialTests(unittest.TestCase):
         documents = [document for seed in (5, 6, 7, 8)
                      for document in differential_documents(seed, 4000, QUOTE_RUN_TEMPLATES)]
         agreed = self.assert_reads_as_libyaml(documents)
-        # Not vacuous: the parser accepts 17,438 of the 48,000, at least 3,678 from each template, and
+        # Not vacuous: the parser accepts 17,447 of the 48,000, at least 3,687 from each template, and
         # with a `?` in plain text read as an indicator 2,873 of them read differently.
         self.assertGreaterEqual(sum(agreed.values()), 15000)
         for name in QUOTE_RUN_TEMPLATES:
             with self.subTest(template=name):
                 self.assertGreaterEqual(agreed.get(name, 0), 3000)
+
+    @NEEDS_LIBYAML
+    def test_libyaml_reads_quoted_first_keys_on_sequence_entries_as_the_parser_does(self) -> None:
+        documents = [("quoted first key", text) for text in (
+            'k:\n  - "Getting started": start.md\n', "k:\n  - 'Getting started': a.md\n    'Next page': b.md\n",
+            'k:\n  - "a #b": c\n', 'k:\n  - "a" : c\n', 'k:\n  - "a\\tb": c\n', 'k:\n  - "a":\n      - b\n',
+            'k:\n  - "a":\n      b: c\n', 'k:\n  - "a": 1\n    b: 2\n', 'k:\n  - "a\\\\": b\n', 'k:\n  - "a\\": b"\n',
+            'nav:\n  - "Mail": mail/index.md\n  - "Getting started":\n    - "First steps": start.md\n')]
+        self.assertEqual(self.assert_reads_as_libyaml(documents), {"quoted first key": len(documents)})
 
 
 JOB_HEADER = "    runs-on: ubuntu-latest\n    permissions:\n      contents: read\n    steps:"
@@ -705,10 +742,14 @@ class ScanTests(unittest.TestCase):
                     with self.assertRaisesRegex(policy.ParseError, "a `<<` merge key is refused"):
                         policy.parse_workflow(text)
             with self.subTest(first_key=key):
-                # A quote-led first key on a sequence entry is refused before it is read as a key.
-                with self.assertRaises(policy.ParseError):
+                with self.assertRaisesRegex(policy.ParseError, "a `<<` merge key is refused"):
                     policy.parse_workflow("k:\n  - {}: x\n".format(key))
         self.assertEqual(policy.parse_workflow('"<<a": 1\n"a<<": 2\n'), {"<<a": "1", "a<<": "2"})
+
+    def test_a_step_with_a_quoted_run_key_is_scanned(self) -> None:
+        step = mutate(QUALITY, "  quality-required:\n",
+                      '      - "run": true; git push origin HEAD:main\n  quality-required:\n')
+        self.assert_ci_violation(step, "git ref write")
 
     def test_a_quoted_merge_key_fails_the_scan(self) -> None:
         body = mutate(QUALITY, "\njobs:\n", '\n"<<":\n  environment: prod\njobs:\n')

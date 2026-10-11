@@ -36,7 +36,8 @@ A date marked (UTC) is a UTC calendar date; unmarked dates follow D32.
 
 **Still needs you: D2 (the Homebrew tap), D18 (the `v27.0.0` release, which waits on the phase-3
 publisher), D22 (two parity narrowings) and, under D51, confirming the exact command of the granted
-local release build before it runs.** D9 was reopened 2026-08-31 and finally closed the
+local release build before it runs; at your convenience, confirming or reopening D52, recorded under
+a general acceptance that did not name it.** D9 was reopened 2026-08-31 and finally closed the
 same day (recorded CLOSED — see D9). D15 and D16 were ratified 2026-09-07. D3 and D14 were
 live-validated operator-present on 2026-08-27 (evidence on their Asana tasks; the Mail parent
 closed the same day under the closure-verification protocol). Publication remains blocked —
@@ -101,6 +102,7 @@ publication action.
 | D49 | How a Dependabot GitHub Actions pin update reaches `main` | **ANSWERED 2026-10-10 (UTC): option (B)** | Exact-SHA pins stay; a Dependabot pin pull request is input to a dedicated reviewed commit on `main` and is never merged. Applying it needs a reviewed local checker first, then amendments to the design, the launch specification (with a new approval entry) and `AGENTS.md`; until then each update is taken by hand. (A), an identity-only allowlist merged through design §10.5's exception, is revisited before design §18 step 13 |
 | D50 | Deleted branch names in the public Activity view carry tracker identifiers | **RATIFIED 2026-10-07 (UTC): accept them as a recorded residual (option B)** | Six deleted branch names, in 24 creation, push and deletion events dated 2026-07-15 to 2026-08-23, carry tracker identifiers that also occur in commit messages D47 accepts. Accepted as a residual scoped to those six names in those 24 events; the same names in any other event or on any other surface, and any other tracker identifier the view shows, stay findings unless another entry accepts them |
 | D51 | Provisional definitions in the step-15 release-artifact rehearsal | **ANSWERED 2026-10-10 (UTC): all five answers ratified; one local run granted in principle** | The linkage definition, no artifact digest or size recorded, the runbook's `-gnone` recipe, a static bound (not a proof) for outward-write refusal, and `macos-26` with the default bump as the hosted evidence are step 15's definitions. One local run of the tooling is granted in principle, as D23 granted its rehearsal; its exact command goes to the operator for confirmation before it runs, as in D24 |
+| D52 | `mkdocs.yml` nav links | **ANSWERED 2026-10-10 (UTC) under a general acceptance that did not name it: pages inside the manual only (option A); reopenable** | Ruling: nav links stay inside the manual; no URL approved. As applied (the controller's, see D52): page-shaped relative `.md` targets matched as written, with no fragment; the Material theme only; the strings it prints kept free of markup and their links https only; asset paths on a per-key allowlist; which host the printed links name, the generator link, Material's font load, repository-facts fetch and on-demand unpkg loads, nav titles YAML reads as non-strings, and page content are followed up separately |
 
 ---
 
@@ -2233,7 +2235,9 @@ open), or from a new or reopened pull request whose head predates it.
   that instruction as a ruling on it, and the question stays with the operator: whether the
   departure stands as recorded, or the Scope rule should have been spelled out further. Ruled
   2026-10-10 (UTC), in one acceptance of the controller's recommendations that covered six items:
-  the departure stands as recorded.
+  the departure stands as recorded. (2026-10-11 (UTC): six is the controller's count, listed in D52;
+  the acceptance named none of them, and one of the six the controller had not itself put to the
+  operator.)
   `AGENTS.md`'s statements that all work happens in the primary checkout and that there is one
   branch again describe the local repository.
 - **Context.** The operator asked to run two agent sessions in parallel: one in the primary
@@ -2808,7 +2812,9 @@ posture. It needs a ruling before design §18 step 13.
   puts that exact command to the operator, whose confirmation is what runs; a failed or interrupted
   run is not repeated without a new confirmation. Still to follow, each reviewed: the docstring,
   comments, report note and messages in `scripts/ci/release_artifact.py` and the tests that pin
-  them, which still call these answers provisional.
+  them, which still call these answers provisional. (2026-10-11 (UTC): six is the controller's count,
+  listed in D52, where points 2 to 5 count as one item; the acceptance named none of them, and one of
+  the six the controller had not itself put to the operator.)
 - **Context.** Design §18 step 15 asks the read-only release rehearsal to verify the predicted
   release-file changes, archive contents, checksums, linkage, runtime version and refusal of any
   outward-write step; §15.1 adds that checksum, architecture, linkage and runtime version agree;
@@ -2926,5 +2932,108 @@ provisional and does not count step 15 as passed on them.
 and approving it accepts the Section 10 window without a release path.
 
 **Blocking?** It blocks L1 (P3). It does not block P1, P2, P6 or P10 work.
+
+---
+
+## D52 — `mkdocs.yml` nav links: pages inside the manual only
+
+- **Status:** **ANSWERED 2026-10-10 (UTC) under a general acceptance that did not name it: refuse nav
+  links that leave the manual (option A); reopenable.** Applied by the commit that adds the `nav`
+  check to `scripts/ci/site_assembly.py`.
+- **Finding that framed the question.** The site-assembly config policy admitted the `nav` key but
+  never inspected it, so a nav entry linking out of the manual (`- Home: https://external.example/`)
+  passed, though the policy refuses what loads code and means to keep asset paths inside the manual.
+  A nav link is a link, not code loading, so the policy's stated purpose did not settle it. Found by
+  the critic review of the flow-pair and alias-key fix (2026-10-07).
+- **Options considered.** (A) refuse: every nav target is a page inside the manual; (B) admit
+  external links, as MkDocs does; (C) admit a recorded list of external URLs.
+- **Ruling.** (A). On 2026-10-10 (UTC) the nav-link question was among the controller's open items:
+  at 14:43 (UTC) the controller told the operator it would bring a recommendation on it. At 14:47
+  (UTC), in its handoff report to the operator, the session that had held the second-session role
+  recommended refusing external nav links unless the operator approves specific URLs. The controller
+  took the same recommendation but had not put it to the operator itself when, at 17:04 (UTC), the
+  operator answered the controller's open recommendations with one acceptance ("I will take all of
+  your recommendations"). The controller records this ruling under that acceptance. The operator was
+  not shown the recommendations it covered as a list. The controller counts six: ratify D51's points
+  2 to 5 (one recommendation, which is how D51's "six items, among them points 2 to 5" is to be
+  read); grant one local run of `release_artifact.py` (D51); let the `585c49b` departure stand (D44);
+  reword a Notes test comment (applied in `3fbee0f`); refuse external nav links (this entry); and
+  move the Mail parity task's optional criterion 3 to its own follow-up. No URL has been approved.
+  Because the acceptance did not name this item, the operator may reopen it by saying so.
+- **As applied** (the controller's engineering, beyond what was put to the operator). A nav target is
+  admitted only when it is page-shaped: a relative path whose segments hold only ASCII letters,
+  digits, `_`, `-` and `.`, none starting with `.`, the last ending in `.md`. Every page the
+  generated manual holds has that shape, and a test checks each tracked page. The target is matched
+  in full as written and nothing is decoded, so a `%` escape is refused rather than read. A `#`
+  fragment is refused as well: MkDocs 1.6.1 looks a nav target up as one whole path, so
+  `page.md#part` would be a dead link. Only the shape is checked, so a target naming no page renders
+  as a dead relative link. The reviews of the applying change found that a denylist of shapes let a
+  tab, a line break, a quote or an HTML entity through (browsers and Python's `urlsplit` strip tabs
+  and line breaks), so the check is an allowlist. They also found the older asset-path check was such
+  a denylist; asset paths now get the same kind of allowlist, with suffixes recorded per key (`.css`
+  for `extra_css`, `.js` and `.mjs` for `extra_javascript`, image types for `theme.logo` and
+  `theme.favicon`), and only scripts take the mapping form. Only the Material theme is admitted, and
+  `theme` must name it: MkDocs' default theme (`mkdocs`, used when `theme` is absent) and
+  `readthedocs` load highlight.js from cdnjs on every page and link to their projects in the footer,
+  and no admitted key turns either off; every tracked `mkdocs.yml` has named Material. MkDocs renders
+  its templates without escaping, so markup in any string a theme prints could still link out of the manual or load a
+  script. The list of those strings was built on 2026-10-11 (UTC) from every `config.` reference in
+  the HTML and XML templates of the pinned MkDocs 1.6.1 and Material 9.7.7 (`grep -rhoE
+  'config(\.[A-Za-z_]+)+' --include='*.html' --include='*.xml'` over both packages' templates),
+  set against the keys the policy admits, plus the two values MkDocs derives from admitted keys (nav
+  titles and the edit link built from `edit_uri`); it is rebuilt when the pins move. A first list,
+  written from memory, missed the `toc` title. The strings are: nav titles, `site_name`,
+  `site_description`, `site_author`, `repo_name`, `copyright`, the `theme.palette` strings and the
+  `toc` extension's `title` (Material's table-of-contents label), which reach text and
+  double-quoted attributes and must be non-blank plain text with no `<`, `>`, `&`, `"`, backtick, or
+  control, format or non-space blank character (`copyright` may hold line feeds; an apostrophe is
+  admitted, since no single-quoted attribute interpolates anything); `repo_url`, `edit_uri` and the
+  `extra.social` links, which reach href attributes and must be URL text with none of those and no
+  `'` or blank, and `https://` URLs naming a host with no user info, since URL text alone admits a
+  `javascript:` or `data:` URL that an href runs (`edit_uri` may instead be empty or a relative path
+  of plain segments, which MkDocs joins to `repo_url`); and the `theme.font` names, which reach a
+  style element and a font URL and must be letters, digits and spaces. Held to the same rules
+  although Material does not print them unescaped: the `extra.social` names (Material escapes them),
+  the `toc` extension's `permalink_title` and text `permalink` (Python-Markdown 3.10.3 escapes what
+  it renders), `theme.language`, which names the translation template Material loads, and
+  `theme.locale`, which only the themes no longer admitted put in the `lang` attribute. Icon names are shaped like bundled names and name
+  templates Material includes; a name it does not bundle fails the build. `theme.logo`,
+  `theme.favicon`, `extra_css` and `extra_javascript` are the asset paths above, and
+  `theme.features` reaches scripts through `tojson`. The other admitted keys print nothing:
+  `docs_dir`, `use_directory_urls`, `strict`, `not_in_nav`, `exclude_docs` and `plugins` configure
+  the build, and the other extension options are booleans, a depth, or strings the extensions
+  escape or use as mode names (`pymdownx.highlight`'s `line_spans` reaches Pygments 2.21.0, which
+  escapes it).
+- **Not covered, followed up separately.** Which host the printed links name: `repo_url`, the edit
+  links built from `edit_uri`, and the `extra.social` links are https URLs, but may name any host;
+  Material's generator link in the footer, which the admitted keys cannot turn off; and the Google
+  Fonts load Material makes unless `theme.font` is false. A plain nav title that YAML reads as a
+  number, a boolean or null (`- 1: index.md`) is shown differently from the string the policy
+  checked; only the displayed title differs. Page content is outside this configuration policy:
+  the manual's pages, generated from the binary and `docs/manual-prose.json`, may hold Markdown links
+  and raw HTML, and their file names follow `edit_uri` unescaped in any edit link. Material 9.7.7 also
+  loads scripts from unpkg on demand: mermaid when a page holds a `.mermaid` element (which raw HTML
+  or the admitted `attr_list` can make) and a ResizeObserver polyfill on browsers without one. With
+  `repo_url` set, Material fetches repository facts as JSON on page load. It picks the host with two
+  case-insensitive patterns matched against the header link's URL as the browser resolves it, path,
+  query and fragment included (checked in the pinned bundle): the host can be api.github.com or a host
+  derived from any part of that URL, not only its host, even when its host is github.com
+  (`https://github.com//beacon.example?gitlabq/p` fetches from `beacon.example`). The tracked
+  `repo_url` matches the GitHub pattern, so its fetch goes to api.github.com. It is tolerated, unlike
+  `extra.version`'s JSON fetch, because the tracked config keeps `repo_url` for the header's
+  repository link and no admitted key turns the fetch off while `repo_url` is set; a rule on which
+  host printed links name bounds it only if it also confines every part of the resolved URL the
+  patterns read. With `content.action.view` among the features, the view-source link Material derives
+  from the edit link by a text replacement may name a host rewritten from the checked one (still
+  https, still without markup).
+- **What would reopen it.** The operator's word; or a recorded need for an external nav link, a
+  fragment, or a target, path or string outside these shapes.
+- **Filed:** 2026-10-11 (UTC), by the controller recording the ruling · **Category:** site-assembly
+  policy (design §16)
+
+**Why it needed you.** It is a scope call on what the published site's navigation links to from
+every page.
+
+**Blocking?** No.
 
 ---

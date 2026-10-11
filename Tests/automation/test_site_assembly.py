@@ -88,7 +88,7 @@ class Fixture:
         self.root = root
         root.mkdir(parents=True)
         git(["init", "-q", "-b", "main"], root)
-        (root / "mkdocs.yml").write_text("site_name: test\ndocs_dir: docs/manual\n", encoding="utf-8")
+        (root / "mkdocs.yml").write_text("site_name: test\ndocs_dir: docs/manual\ntheme: material\n", encoding="utf-8")
 
     def commit_manual(self, marker: str, pages=("index.md", "mail/index.md"), constant=None) -> str:
         manual = self.root / "docs" / "manual"
@@ -407,6 +407,16 @@ class SiteAssemblyTests(unittest.TestCase):
             ("site_name: t\ndocs_dir: docs/manual\nextra_javascript:\n  - path: https://example.com/x.js\n    type: module\n", "extra_javascript entry must be a relative path"),
             ("site_name: t\ndocs_dir: docs/manual\ntheme:\n  name: material\nextra:\n  analytics:\n    provider: google\n    property: G-XXXX\n", "extra may carry only `social`"),
             ("site_name: t\ndocs_dir: docs/manual\nextra:\n  social:\n    - icon: fontawesome/brands/github\n      link: http://example.com/x\n", "extra.social entries must be"),
+            # MkDocs' default theme (used when `theme` is absent) and `readthedocs` load highlight.js from a
+            # CDN on every page, which no admitted key turns off.
+            ("site_name: t\ndocs_dir: docs/manual\n", "theme must be present and name one of ['material']"),
+            ("site_name: t\ndocs_dir: docs/manual\ntheme: mkdocs\n", "theme must be present and name one of ['material']"),
+            ("site_name: t\ndocs_dir: docs/manual\ntheme:\n  name: readthedocs\n", "theme must be present and name one of ['material']"),
+            ("site_name: t\ndocs_dir: docs/manual\ntheme:\n  locale: en\n", "theme must be present and name one of ['material']"),
+            ("site_name: t\ndocs_dir: docs/manual\ntheme:\n  name: [material]\n", "theme must be present and name one of ['material']"),
+            ("site_name: t\ndocs_dir: docs/manual\ntheme: material\nextra_css:\n  x.css: y\n", "extra_css must be a list"),
+            ("site_name: t\ndocs_dir: docs/manual\ntheme: material\nextra_javascript: x.js\n", "extra_javascript must be a list"),
+            ("site_name: t\ndocs_dir: docs/manual\ntheme: material\nextra:\n  social: true\n", "extra.social must be a list"),
         ):
             with self.subTest(config=config):
                 base.write_text(config, encoding="utf-8")
@@ -471,6 +481,252 @@ class SiteAssemblyTests(unittest.TestCase):
     def test_repository_mkdocs_config_passes_the_policy(self) -> None:
         """The tracked mkdocs.yml must stay inside the config allowlist, or the rehearsal turns red."""
         assembly.check_config_policy(REPO_ROOT / "mkdocs.yml", "repository")
+
+    def test_nav_targets_must_be_relative_pages_inside_the_manual(self) -> None:
+        # HUMAN-DECISIONS D52: a nav target is a relative `.md` page of plain segments and a title is
+        # plain text; nothing is decoded, so every other shape is refused as written.
+        config = self.tmp / "nav-mkdocs.yml"
+        head = "site_name: t\ndocs_dir: docs/manual\ntheme: material\n"
+        base = head + "nav:\n"
+
+        def nested(levels: int) -> str:
+            return "nav:\n" + "".join("  " * i + "  - S{}:\n".format(i) for i in range(levels)) + "  " * levels + "  - x.md\n"
+
+        for body in (base + "  - index.md\n  - Mail: mail/index.md\n  - Contacts:\n    - contacts/auth.md\n"
+                            "    - Groups: contacts/groups/index.md\n  - \"Getting started\": start.md\n"
+                            "  - 'Command reference':\n    - 'Mail send': mail/send.md\n"
+                            "  - \"What's new\": news.md\n  - Dash: -x.md\n",
+                     head + nested(8), head + "nav:\n", head + "nav: null\n"):
+            with self.subTest(accepted=body):
+                config.write_text(body, encoding="utf-8")
+                assembly.check_config_policy(config, "nav")  # pages, sections, quoted titles, 8 levels, no nav
+        refused = ("  - Home: https://external.example/\n", "  - https://external.example/x.md\n",
+                   "  - Mail: mailto:someone@example.com\n", "  - Js: javascript:void(0)\n",
+                   "  - Root: /index.md\n", "  - Up: ../outside.md\n", "  - Up: a/../../outside.md\n",
+                   "  - Here: ./index.md\n", "  - Here: a/./b.md\n", "  - Back: a\\\\b.md\n",
+                   "  - Contacts:\n    - Home: https://external.example/\n",
+                   "  - Deep:\n    - Deeper:\n      - Home: http://external.example/\n",
+                   "  - \"Home page\": https://external.example/\n",
+                   # whitespace and control characters, which URL readers strip (`java<TAB>script:`)
+                   "  - Home: \" https://external.example/\"\n", "  - Pad: \"index.md \"\n", "  - Blank: \" \"\n",
+                   "  - Js: \"java\\tscript:alert(1)\"\n", "  - Js: \"java\\nscript:alert(1)\"\n",
+                   "  - Js: java\tscript:alert(1)\n", "  - Js: |-\n      java\n      script:alert(1)\n",
+                   "  - Up: \".\\t./outside.md\"\n", "  - Web: \"ht\\ttps://external.example/\"\n",
+                   # percent escapes and HTML entities, which are not decoded but refused
+                   "  - Up: \"%2e%2e/outside.md\"\n", "  - Up: a/%2E%2E/outside.md\n",
+                   "  - Web: \"https%3a//external.example/\"\n", "  - Root: \"%2findex.md\"\n",
+                   "  - Encoded: \"mail%20send.md\"\n", "  - Js: \"javascript&colon;alert(1)\"\n",
+                   "  - Js: \"javascript&#58;alert(1)\"\n", "  - Slash: \"&#47;&#47;external.example/\"\n",
+                   # quotes and markup, which would leave the href attribute
+                   "  - Attr: 'x.md\" onclick=\"a'\n", "  - Tag: 'x\"><script>alert(1)</script>'\n",
+                   # not a page, or not a string
+                   "  - Html: index.html\n", "  - Bare: page\n", "  - Empty: \"\"\n", "  - Fragment: \"#x\"\n",
+                   "  - Home:\n", "  - Section: {}\n",
+                   # a fragment: MkDocs looks the whole string up as a file, so it would be a dead link
+                   "  - Anchor: mail/index.md#send\n")
+        for entry in refused:
+            with self.subTest(refused=entry):
+                config.write_text(base + entry, encoding="utf-8")
+                with self.assertRaisesRegex(assembly.AssertionFailure, "nav targets must be relative pages inside the manual"):
+                    assembly.check_config_policy(config, "nav")
+        # MkDocs renders a title as raw HTML, so markup in a title could link out of the manual.
+        titles = ("  - \"<a href=https://external.example/>Docs</a>\": index.md\n",
+                  "  - '<script src=//external.example/x.js></script>': index.md\n",
+                  "  - \"<a href=https://external.example/>x</a>\":\n      - index.md\n",
+                  "  - \"Tom &amp; Jerry\": index.md\n", "  - 'Say \"hi\"': index.md\n", "  - '`code`': index.md\n",
+                  "  - \"Tab\\there\": index.md\n", "  - \"Line\\nbreak\": index.md\n", "  - \"\": index.md\n",
+                  "  - \" \": index.md\n")
+        for entry in titles:
+            with self.subTest(title=entry):
+                config.write_text(base + entry, encoding="utf-8")
+                with self.assertRaisesRegex(assembly.AssertionFailure, "nav titles must be plain text"):
+                    assembly.check_config_policy(config, "nav")
+        for body, message in (("nav: index.md\n", "nav and its sections must be lists"),
+                              ("nav: []\n", "nav and its sections must not be empty"),
+                              ("nav:\n  - Section: []\n", "nav and its sections must not be empty"),
+                              ("nav:\n  - a: x.md\n    b: y.md\n", "one `title: target` pair"),
+                              (nested(9), "nested more than 8 levels"), (nested(10), "nested more than 8 levels")):
+            with self.subTest(body=body):
+                config.write_text(head + body, encoding="utf-8")
+                with self.assertRaisesRegex(assembly.AssertionFailure, message):
+                    assembly.check_config_policy(config, "nav")
+
+    def test_every_tracked_manual_page_is_an_admitted_nav_target(self) -> None:
+        # D52's allowlist must admit every page the generated manual holds, or a nav listing one
+        # would be refused.
+        manual = REPO_ROOT / "docs" / "manual"
+        pages = sorted(path.relative_to(manual).as_posix() for path in manual.rglob("*.md"))
+        self.assertGreater(len(pages), 100)
+        self.assertEqual([page for page in pages if assembly.NAV_TARGET_RE.fullmatch(page) is None], [])
+
+    def test_asset_paths_must_be_plain_relative_paths(self) -> None:
+        # Matched in full as written, like nav targets: URL readers strip a tab or line feed and a
+        # browser a leading blank, so each refused path below would load from another host.
+        config = self.tmp / "asset-mkdocs.yml"
+        head = "site_name: t\ndocs_dir: docs/manual\n"
+        for accepted in ("theme:\n  name: material\n  logo: assets/logo.svg\n  favicon: assets/logo.svg\n"
+                         "extra_css:\n  - css/site.css\nextra_javascript:\n  - js/a.js\n  - path: js/b.mjs\n"
+                         "    type: module\n    async: true\n    defer: false\n",
+                         "theme:\n  name: material\n  logo: assets/l.png\n  favicon: assets/f.ico\n",
+                         "theme:\n  name: material\n  logo: assets/l.webp\n  favicon: assets/f.webp\n"):
+            with self.subTest(accepted=accepted):
+                config.write_text(head + accepted, encoding="utf-8")
+                assembly.check_config_policy(config, "assets")
+        for body, message in (
+                ("extra_javascript:\n  - \"https:\\t//external.example/x.js\"\n", "must be a relative path"),
+                ("extra_javascript:\n  - \" //external.example/y.js\"\n", "must be a relative path"),
+                ("extra_javascript:\n  - \"\\t//external.example/x.js\"\n", "must be a relative path"),
+                ("extra_css:\n  - \"https:\\n//external.example/z.css\"\n", "must be a relative path"),
+                ("theme:\n  name: material\n  logo: \" //external.example/l.svg\"\n", "theme.logo must be a relative path"),
+                ("theme:\n  name: material\n  favicon: \"%2f%2fexternal.example/f.ico\"\n", "theme.favicon must be a relative path"),
+                ("extra_css:\n  - ../outside.css\n", "must be a relative path"),
+                ("extra_css:\n  - css/site.css#x\n", "must be a relative path"),
+                ("extra_javascript:\n  - js/x.py\n", "must be a relative path"),
+                ("extra_javascript:\n  - path: js/x.js\n    type: text/javascript\n", "type may only be `module`"),
+                ("extra_javascript:\n  - path: js/x.js\n    async: \"true\"\n", "async and defer must be true or false"),
+                ("extra_javascript:\n  - path: js/x.js\n    defer: \"false\"\n", "async and defer must be true or false"),
+                ("extra_javascript:\n  - path: js/x.js\n    defer: yes\n", "async and defer must be true or false"),
+                # each key takes its own suffixes, and only scripts take the mapping form
+                ("theme:\n  name: material\n  favicon: assets/x.js\n", "theme.favicon must be a relative path"),
+                ("theme:\n  name: material\n  logo: assets/l.ico\n", "theme.logo must be a relative path"),
+                ("extra_css:\n  - css/y.mjs\n", "extra_css entry must be a relative path"),
+                ("extra_javascript:\n  - js/site.css\n", "extra_javascript entry must be a relative path"),
+                ("theme:\n  name: material\n  logo:\n    path: assets/l.svg\n    type: module\n", "theme.logo must be a path, not a mapping"),
+                ("extra_css:\n  - path: css/site.css\n", "extra_css entry must be a path, not a mapping")):
+            with self.subTest(body=body):
+                config.write_text(head + body, encoding="utf-8")
+                with self.assertRaisesRegex(assembly.AssertionFailure, message):
+                    assembly.check_config_policy(config, "assets")
+
+    def test_strings_the_themes_print_must_be_plain_text(self) -> None:
+        # Material prints these as raw HTML (text nodes and double-quoted attributes), so markup in
+        # one could load a script or link out of the manual on every page (HUMAN-DECISIONS D52).
+        config = self.tmp / "strings-mkdocs.yml"
+        head = "site_name: t\ndocs_dir: docs/manual\n"
+        palette = "theme:\n  name: material\n  palette:\n"
+        config.write_text("site_name: \"Apple's tools\"\ndocs_dir: docs/manual\nsite_author: Jane Doe\nrepo_name: a/b\n"
+                          "copyright: >\n  Line one.\n  Line two.\n" + palette +
+                          "    - media: \"(prefers-color-scheme: light)\"\n      scheme: default\n      toggle:\n"
+                          "        icon: material/weather-night\n        name: Switch to dark mode\n", encoding="utf-8")
+        assembly.check_config_policy(config, "strings")
+        for body, message in (
+                ("copyright: '<script src=\"https://external.example/x.js\"></script>'\n", "copyright must be plain text"),
+                ("copyright: '<a href=\"https://external.example/\">x</a>'\n", "copyright must be plain text"),
+                ("copyright: \"a\\tb\"\n", "copyright must be plain text"),
+                ("site_description: 'x\" http-equiv=\"refresh\" content=\"0;url=https://external.example/'\n",
+                 "site_description must be plain text"),
+                ("site_author: \"<b>x</b>\"\n", "site_author must be plain text"),
+                ("repo_name: \"a&amp;b\"\n", "repo_name must be plain text"),
+                ("repo_name: \"\"\n", "repo_name must be plain text"),
+                (palette + "    - scheme: 'x\" onclick=\"a'\n", "theme.palette scheme must be plain text"),
+                (palette + "    - toggle:\n        name: \"<a href=https://external.example/>y</a>\"\n",
+                 "theme.palette toggle name must be plain text"),
+                (palette + "    - toggle:\n        icon: ../../x\n", "toggle icon must be shaped like a bundled icon name"),
+                (palette + "    - toggle:\n        icon: material/x\n        href: y\n", "toggle may hold only icon and name"),
+                (palette + "    - media: x\n      extra: y\n", "theme.palette entries may hold only")):
+            with self.subTest(body=body):
+                config.write_text(head + body, encoding="utf-8")
+                with self.assertRaisesRegex(assembly.AssertionFailure, message):
+                    assembly.check_config_policy(config, "strings")
+        # A one-mapping palette is read as a list of one.
+        config.write_text(head + "theme:\n  name: material\n  palette:\n    scheme: '<b>'\n", encoding="utf-8")
+        with self.assertRaisesRegex(assembly.AssertionFailure, "theme.palette scheme must be plain text"):
+            assembly.check_config_policy(config, "strings")
+        # Every key on its own, with a value that leaves a double-quoted attribute.
+        breakout = "'x\" onclick=\"a'"
+        for key in ("site_name", "site_description", "site_author", "repo_name"):
+            with self.subTest(key=key):
+                body = (head if key != "site_name" else "docs_dir: docs/manual\n") + "{}: {}\n".format(key, breakout)
+                config.write_text(body, encoding="utf-8")
+                with self.assertRaisesRegex(assembly.AssertionFailure, "{} must be plain text".format(key)):
+                    assembly.check_config_policy(config, "strings")
+        for key in ("media", "scheme", "primary", "accent"):
+            with self.subTest(palette=key):
+                config.write_text(head + palette + "    - {}: {}\n".format(key, breakout), encoding="utf-8")
+                with self.assertRaisesRegex(assembly.AssertionFailure, "theme.palette {} must be plain text".format(key)):
+                    assembly.check_config_policy(config, "strings")
+        for body, message in ((head + "theme:\n  name: material\n  palette: dark\n", "theme.palette entries may hold only"),
+                              (head + palette + "    - toggle: dark\n", "toggle may hold only icon and name")):
+            with self.subTest(body=body):
+                config.write_text(body, encoding="utf-8")
+                with self.assertRaisesRegex(assembly.AssertionFailure, message):
+                    assembly.check_config_policy(config, "strings")
+        # Material prints toc.title unescaped as the table-of-contents label; the permalink strings are
+        # held to the same rule.
+        toc = "markdown_extensions:\n  - toc:\n"
+        config.write_text(head + "theme: material\n" + toc + "      permalink: true\n      title: On this page\n"
+                          "      permalink_title: Link\n", encoding="utf-8")
+        assembly.check_config_policy(config, "strings")
+        config.write_text(head + "theme: material\n" + toc + "      permalink: \"#\"\n", encoding="utf-8")
+        assembly.check_config_policy(config, "strings")
+        for option in ("title", "permalink_title", "permalink"):
+            with self.subTest(toc=option):
+                config.write_text(head + toc + "      {}: '<script src=\"https://external.example/x.js\"></script>'\n".format(option),
+                                  encoding="utf-8")
+                with self.assertRaisesRegex(assembly.AssertionFailure, "toc.{} must be plain text".format(option)):
+                    assembly.check_config_policy(config, "strings")
+
+    def test_urls_fonts_languages_and_icons_the_themes_print_are_confined(self) -> None:
+        # Printed unescaped into href attributes and a style element; theme.language names a template
+        # Material loads, and theme.locale, which no admitted theme prints, is held to a language tag
+        # (HUMAN-DECISIONS D52). Which https host a URL names is not checked here.
+        config = self.tmp / "urls-mkdocs.yml"
+        head = "site_name: t\ndocs_dir: docs/manual\n"
+        config.write_text(head + "repo_url: https://github.example/a/b\nedit_uri: \"\"\ntheme:\n  name: material\n"
+                          "  language: en\n  locale: en_GB\n  font:\n    text: Roboto\n    code: Roboto Mono\n"
+                          "  icon:\n    repo: fontawesome/brands/github\nextra:\n  social:\n"
+                          "    - icon: fontawesome/brands/github\n      link: https://github.example/a/b\n      name: Source\n",
+                          encoding="utf-8")
+        assembly.check_config_policy(config, "urls")
+        config.write_text(head + "theme:\n  name: material\n  font: false\n", encoding="utf-8")
+        assembly.check_config_policy(config, "urls")
+        for edit_uri in ("edit/main/docs/manual/", "/blob/main/docs/", "https://github.example/a/b/edit/main/"):
+            with self.subTest(edit_uri=edit_uri):
+                config.write_text(head + "theme: material\nrepo_url: https://github.example/a/b\nedit_uri: {}\n".format(edit_uri),
+                                  encoding="utf-8")
+                assembly.check_config_policy(config, "urls")
+        theme = "theme:\n  name: material\n"
+        # An href runs a `javascript:` or `data:` URL, and URL text alone admits one.
+        for key in ("repo_url", "edit_uri"):
+            for value in ("javascript://example.com/%0Aalert(1)", "JaVaScRiPt://example.com/%0Aalert(1)", "javascript:alert(1)//",
+                          "data:text/html;base64,PHA+eDwvcD4=", "//external.example/x/", "http://external.example/x/",
+                          # an https URL must name a host, and user info would hide the real one
+                          "https://", "https://.example/x/", "https://trusted.example.com@example.org/",
+                          "https://user:pw@example.com/a/b"):
+                with self.subTest(key=key, value=value):
+                    config.write_text(head + "{}: {}\n".format(key, value), encoding="utf-8")
+                    with self.assertRaisesRegex(assembly.AssertionFailure, r"{} must be (empty, )?an https:// URL".format(key)):
+                        assembly.check_config_policy(config, "urls")
+        for body, message in (
+                ("repo_url: 'https://x.example/\"><script src=\"y.js\"></script>'\n", "repo_url must be URL text"),
+                ("repo_url: \"https://x.example/ a\"\n", "repo_url must be URL text"),
+                ("repo_url: \"\"\n", "repo_url must be URL text"),
+                ("repo_url: \"https://x.example/'a\"\n", "repo_url must be URL text"),
+                ("repo_url: \"https://x.example/a\\tb\"\n", "repo_url must be URL text"),
+                ("edit_uri: \"edit/a\\tb/\"\n", "edit_uri must be URL text"),
+                ("edit_uri: \"../x/\"\n", "edit_uri must be empty, an https:// URL with a host and no user info, or a relative path"),
+                ("edit_uri: 'x\"><svg onload=a>'\n", "edit_uri must be URL text"),
+                ("edit_uri: \"a&b\"\n", "edit_uri must be URL text"),
+                ("extra:\n  social:\n    - icon: fontawesome/brands/github\n      link: 'https://x.example/\" onmouseover=\"a'\n",
+                 "extra.social link must be URL text"),
+                ("extra:\n  social:\n    - icon: fontawesome/brands/github\n      link: https://x.example/\n      name: '<b>x</b>'\n",
+                 "extra.social name must be plain text"),
+                ("extra:\n  social:\n    - icon: 'a/b\"><x'\n      link: https://x.example/\n", "extra.social entries must be"),
+                ("extra:\n  social:\n    - icon: fontawesome/brands/github\n      link: https://trusted.example.com@example.org/\n",
+                 "extra.social entries must be"),
+                (theme + "  font:\n    text: 'R\"}</style><script src=\"y.js\"></script><style>'\n", "theme.font.text must be a font family name"),
+                (theme + "  font:\n    code: 'x\";}'\n", "theme.font.code must be a font family name"),
+                (theme + "  font:\n    text: Roboto\n    weight: bold\n", "theme.font may be false or hold only text and code"),
+                (theme + "  font: true\n", "theme.font may be false or hold only text and code"),
+                (theme + "  font: {}\n", "theme.font may be false or hold only text and code"),
+                (theme + "  locale: 'en\" onload=\"a'\n", "theme.locale must be a language tag"),
+                (theme + "  language: ../x\n", "theme.language must be a language tag"),
+                (theme + "  icon:\n    repo: 'a/b\"><x'\n", "theme.icon values must be shaped like bundled icon names"),
+                (theme + "  icon:\n    repo: fontawesome\n", "theme.icon values must be shaped like bundled icon names")):
+            with self.subTest(body=body):
+                config.write_text(head + body, encoding="utf-8")
+                with self.assertRaisesRegex(assembly.AssertionFailure, message):
+                    assembly.check_config_policy(config, "urls")
 
     def test_use_directory_urls_false_is_refused(self) -> None:
         self.repo.commit_manual("current")

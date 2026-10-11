@@ -96,7 +96,23 @@ JSON output are stable per the versioning policy — breaking changes bump
   disabled; nothing is deployed or uploaded. The Docs workflow now runs this rehearsal on
   every commit it builds, in a throwaway clone, with the published release set read from the
   public Releases listing without any token (when that listing is rate-limited from the
-  runner the job warns and the rehearsal does not run). **For anyone running the binary, nothing changes:** no `apple` command,
+  runner the job warns and the rehearsal does not run). A `nav` title holding a space may be
+  written quoted (`- "Getting started": start.md`). Every `nav` target must be a page-shaped
+  relative `.md` path inside the manual, and every asset path a plain relative path with the
+  suffixes recorded for its key (`.css` for `extra_css`, `.js` or `.mjs` for `extra_javascript`,
+  image suffixes for `theme.logo` and `theme.favicon`), each matched as written: an external link
+  (`https:`, `mailto:`, `javascript:`), a `%` escape or HTML entity, a `#` fragment, an absolute
+  path, a `.` or `..` segment, or a path holding a quote, whitespace or a control character anywhere
+  is refused. Only the Material theme is admitted, and `theme` must name it (MkDocs' default theme
+  and `readthedocs` load highlight.js from a CDN on every page). The configuration strings the
+  theme prints are confined too (the exact rules are in
+  `AGENTS.md` and HUMAN-DECISIONS D52): nav titles, the site, author, repository and copyright
+  strings, the palette strings and the table-of-contents title must be plain text with no markup,
+  for example no `<`, `&` or double quote; `repo_url` and the `extra.social` links must be `https://`
+  URLs naming a host, with no user info, quote, blank or markup, and `edit_uri` such a URL or a
+  relative path; font names and
+  language tags get narrow allowlists, and icon names must be shaped like bundled names.
+  **For anyone running the binary, nothing changes:** no `apple` command,
   output field, error type, or exit code is affected, and `schema_version` stays `1`.
 
 - **Runtime-metadata profiles carrying the two stock special module kinds are now

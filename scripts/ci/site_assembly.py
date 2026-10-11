@@ -38,12 +38,14 @@ with the renderer the caller supplies — the pinned MkDocs toolchain from
 `docs/requirements.txt` in every real run. A selected commit whose tree has no tracked
 manual, or any symlink under it, is a refusal; a selected commit's `mkdocs.yml` is checked
 against a recorded allowlist (no `hooks`, no plugin but `search`, no `theme.custom_dir`,
-`docs_dir` pinned to the tracked manual, pure Markdown extensions only) before the pinned
-toolchain reads it, so no historical code path is executed; every selected manual is
-rendered twice and the two renders must agree byte for byte; retention-limited Actions
-artifacts are never an input. What this cannot prove: the pinned toolchain itself is code
-that runs with the caller's privileges — its integrity rests on `docs/requirements.txt`
-being installed with hashes required, not on this script.
+`docs_dir` pinned to the tracked manual, pure Markdown extensions only, the Material theme
+only, `nav` targets and asset paths only plain relative paths inside the manual, and the
+strings the theme prints free of markup, D52) before the pinned toolchain reads it, so no
+historical code path is executed; every selected manual is rendered twice and the two
+renders must agree byte for byte; retention-limited Actions artifacts are never an input.
+What this cannot prove: the pinned toolchain itself is code that runs with the caller's
+privileges — its integrity rests on `docs/requirements.txt` being installed with hashes
+required, not on this script.
 
 The published set is a CALLER precondition: the design's "published, non-draft,
 non-prerelease Releases" is a Release property that git cannot see (a draft Release's tag
@@ -76,6 +78,7 @@ import re
 import subprocess
 import sys
 import tarfile
+import unicodedata
 from pathlib import Path
 from typing import Dict, List, Optional, Sequence, Tuple
 
@@ -118,12 +121,16 @@ YamlParseError = _WORKFLOW_POLICY.ParseError
 # refused before MkDocs sees the file: `hooks` (repository Python files), `plugins` other than
 # the built-in `search`, `theme.custom_dir` (repository templates), `docs_dir` other than the
 # tracked manual, `site_dir`, `watch`, `extra_templates`, `INHERIT`, and any unknown top-level
-# key. Markdown extensions are limited to a recorded pure set.
+# key. Markdown extensions are limited to a recorded pure set; `nav` targets and asset paths must be
+# plain relative paths inside the manual, and the strings MkDocs renders as HTML must be plain text
+# (NAV_TARGET_RE, ASSET_SUFFIXES and _check_plain_text below).
 ALLOWED_CONFIG_KEYS = {"site_name", "site_description", "site_author", "repo_url", "repo_name", "edit_uri",
                        "copyright", "docs_dir", "theme", "markdown_extensions", "plugins", "extra", "nav",
                        "use_directory_urls", "strict", "extra_css", "extra_javascript", "not_in_nav", "exclude_docs"}
 ALLOWED_THEME_KEYS = {"name", "logo", "favicon", "features", "palette", "font", "icon", "language", "locale"}
-ALLOWED_THEMES = {"material", "mkdocs", "readthedocs"}
+# Only Material: MkDocs' default theme (`mkdocs`, used when `theme` is absent) and `readthedocs` load
+# highlight.js from a CDN on every page and link out in their footers, and no admitted key turns that off.
+ALLOWED_THEMES = {"material"}
 ALLOWED_PLUGINS = {"search"}
 ALLOWED_MARKDOWN_EXTENSIONS = {"admonition", "toc", "tables", "attr_list", "md_in_html", "def_list", "footnotes", "abbr",
                                "pymdownx.highlight", "pymdownx.superfences", "pymdownx.inlinehilite", "pymdownx.details",
@@ -308,8 +315,89 @@ def _names(items: object) -> List[str]:
     return names
 
 
+# `nav` puts a link on every page (HUMAN-DECISIONS D52). A target is admitted only when it is
+# page-shaped: a relative path whose segments hold only ASCII letters, digits, `_`, `-` and `.`, none
+# starting with `.`, the last ending in `.md`. It is matched in full as written and nothing is
+# decoded, so a URL scheme, a `%` escape, an HTML entity, a `#` fragment, an absolute path, a `.` or
+# `..` segment, a quote, whitespace or a control character is refused; every page the generated
+# manual holds has that shape (a test checks each tracked page). Only the shape is checked: MkDocs
+# 1.6.1 looks a target up as one whole path, so a target naming no page, a fragment included,
+# renders as a dead relative link. Asset paths get the same kind of allowlist, with the suffixes
+# recorded for each key: the shape denylist they had let a tab, a line feed or a leading blank
+# through (`https:<TAB>//host/x.js`), which URL readers strip. Nav titles and the config strings
+# Material prints (site name, description and author, repository name, copyright, palette strings,
+# Material's table-of-contents label from `toc.title`) are rendered as raw HTML, so each must be plain
+# text: no `<`, `>`, `&`, `"` or backtick, and no tab, line feed or other control character (the
+# parser already refuses invisible and non-space blank characters; only `copyright` may hold line
+# feeds, from a block scalar or a `\n` escape). In the templates of the pinned MkDocs 1.6.1 and
+# Material 9.7.7 these strings reach only text and double-quoted attributes, and scripts get them
+# through `tojson`, so an apostrophe is safe; that was checked in the templates on 2026-10-11 (UTC)
+# and is rechecked when the pins move. Material also prints `repo_url`, an edit
+# link built from `edit_uri`, each `extra.social` link and the `theme.font` names unescaped (into
+# href attributes and a style element): those take URL text with no blank, quote, `<`, `>`, `&` or
+# backtick (an https URL, or for `edit_uri` also a relative path, so no `javascript:` or `data:`
+# link) and a font-family name. Material does not print `theme.locale` (the mkdocs and readthedocs
+# themes put it in the html lang attribute; they are not admitted); it is held to a language tag.
+# Which https host a link names is not checked here.
+NAV_TARGET_RE = re.compile(r"(?:[A-Za-z0-9_-][A-Za-z0-9._-]*/)*[A-Za-z0-9_-][A-Za-z0-9._-]*\.md")
+NAV_MAX_DEPTH = 8
+PLAIN_TEXT_REFUSED = frozenset('<>&"`')
+ASSET_SEGMENTS = r"(?:[A-Za-z0-9_-][A-Za-z0-9._-]*/)*[A-Za-z0-9_-][A-Za-z0-9._-]*"
+ASSET_SUFFIXES = {"extra_css": ("css",), "extra_javascript": ("js", "mjs"),
+                  "theme.logo": ("svg", "png", "webp"), "theme.favicon": ("svg", "png", "ico", "webp")}
+PALETTE_KEYS = {"media", "scheme", "primary", "accent", "toggle"}
+ICON_NAME_RE = re.compile(r"[a-z0-9-]+(?:/[a-z0-9-]+)+")
+FONT_NAME_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9 ]{0,63}")
+LANGUAGE_RE = re.compile(r"[A-Za-z]{2,3}(?:[-_][A-Za-z0-9]{2,8})*")
+URL_TEXT_REFUSED = frozenset("<>&\"'`")
+# An https URL with a host and no user info (`https://a@b/` names host `b`); the rest is URL text.
+HTTPS_URL_RE = re.compile(r"https://[A-Za-z0-9-]+(?:\.[A-Za-z0-9-]+)*(?::[0-9]{1,5})?(?:[/?#].*)?")
+# A relative `edit_uri` (joined to `repo_url` by MkDocs): plain segments, none starting with `.`, an
+# optional leading and trailing `/`, never `//`.
+EDIT_PATH_RE = re.compile(r"/?(?:[A-Za-z0-9_~-][A-Za-z0-9._~-]*/)*[A-Za-z0-9_~-][A-Za-z0-9._~-]*/?")
+
+
+def _check_plain_text(value: object, label: str, what: str, line_feeds: bool = False) -> None:
+    text = value.replace("\n", " ") if line_feeds and isinstance(value, str) else value
+    if not isinstance(text, str) or not text.strip() or any(
+            character in PLAIN_TEXT_REFUSED or (unicodedata.category(character)[0] in "CZ" and character != " ")
+            for character in text):
+        raise AssertionFailure("{}: mkdocs.yml {} must be plain text".format(label, what))
+
+
+def _check_url_text(value: object, label: str, what: str, empty: bool = False) -> None:
+    if not isinstance(value, str) or (value == "" and not empty) or any(
+            character in URL_TEXT_REFUSED or unicodedata.category(character)[0] in "CZ" for character in value):
+        raise AssertionFailure("{}: mkdocs.yml {} must be URL text with no blank, quote, markup or backtick".format(label, what))
+
+
+def _check_nav(entries: object, label: str, depth: int = 0) -> None:
+    if depth > NAV_MAX_DEPTH:
+        raise AssertionFailure("{}: mkdocs.yml nav is nested more than {} levels deep".format(label, NAV_MAX_DEPTH))
+    if not isinstance(entries, list):
+        raise AssertionFailure("{}: mkdocs.yml nav and its sections must be lists".format(label))
+    if not entries:
+        raise AssertionFailure("{}: mkdocs.yml nav and its sections must not be empty".format(label))
+    for entry in entries:
+        if isinstance(entry, dict) and len(entry) == 1:
+            title, target = next(iter(entry.items()))
+            _check_plain_text(title, label, "nav titles")
+            if isinstance(target, list):
+                _check_nav(target, label, depth + 1)
+                continue
+        elif isinstance(entry, str):
+            target = entry
+        else:
+            raise AssertionFailure("{}: mkdocs.yml nav entries must be a page or one `title: target` pair".format(label))
+        if not isinstance(target, str) or NAV_TARGET_RE.fullmatch(target) is None:
+            raise AssertionFailure("{}: mkdocs.yml nav targets must be relative pages inside the manual".format(label))
+
+
 def check_config_policy(config_path: Path, label: str) -> None:
-    """Refuse any MkDocs configuration that could load code or leave the manual tree."""
+    """Refuse any MkDocs configuration that could load code, link the nav outside the manual, load an
+    asset from outside the manual tree, choose a theme other than Material, or put markup into a string
+    the theme prints (HUMAN-DECISIONS D52 lists what this does not cover, among it Material's own
+    font, repository-facts and on-demand script loads)."""
     try:
         document = parse_yaml_subset(config_path.read_text(encoding="utf-8"))
     except (YamlParseError, OSError, UnicodeDecodeError) as error:
@@ -323,11 +411,14 @@ def check_config_policy(config_path: Path, label: str) -> None:
         raise AssertionFailure("{}: mkdocs.yml docs_dir must be exactly {}".format(label, REQUIRED_DOCS_DIR))
     if document.get("use_directory_urls", True) is not True:
         raise AssertionFailure("{}: mkdocs.yml use_directory_urls must be absent or true (the route shape of section 16)".format(label))
-    theme = document.get("theme", "mkdocs")  # MkDocs' own default when the key is absent
-    if isinstance(theme, str):
+    # The theme's name is checked last (below), so each other refusal reports its own cause.
+    theme = document.get("theme")
+    if theme is None:
+        theme = {}
+    elif isinstance(theme, str):
         theme = {"name": theme}
-    if not isinstance(theme, dict) or theme.get("name") not in ALLOWED_THEMES:
-        raise AssertionFailure("{}: mkdocs.yml theme must name one of {}".format(label, sorted(ALLOWED_THEMES)))
+    if not isinstance(theme, dict):
+        raise AssertionFailure("{}: mkdocs.yml theme must be present and name one of {}".format(label, sorted(ALLOWED_THEMES)))
     unknown_theme = sorted(set(theme) - ALLOWED_THEME_KEYS)
     if unknown_theme:
         raise AssertionFailure("{}: mkdocs.yml theme keys are not admitted: {}".format(label, ", ".join(unknown_theme)))
@@ -350,40 +441,114 @@ def check_config_policy(config_path: Path, label: str) -> None:
                             label, key, name, ", ".join(refused_options)))
                     if name == "toc" and "slugify" in options:
                         raise AssertionFailure("{}: mkdocs.yml toc.slugify names a Python callable and is refused".format(label))
+                    if name == "toc":
+                        # Material prints toc.title unescaped as the table-of-contents label; Python-Markdown
+                        # escapes the title, permalink text and permalink title it renders itself.
+                        for option in ("title", "permalink_title"):
+                            if options.get(option) is not None:
+                                _check_plain_text(options[option], label, "toc." + option)
+                        if isinstance(options.get("permalink"), str):
+                            _check_plain_text(options["permalink"], label, "toc.permalink")
                     if name == "pymdownx.tabbed" and "slugify" in options:
                         raise AssertionFailure("{}: mkdocs.yml pymdownx.tabbed.slugify names a Python callable and is refused".format(label))
-    def _relative_asset(text: object, what: str) -> None:
-        # MkDocs admits `- path.css` or `- {path: path.js, type: module, async: true, defer: true}`;
-        # the mapping form is validated on its `path` VALUE, and no other keys are admitted.
+    def _relative_asset(text: object, key: str, what: str) -> None:
+        # MkDocs admits `- path.css` or, for scripts only, `- {path: path.js, type: module, async: true,
+        # defer: true}`; the mapping form is validated on its `path` VALUE, and no other keys are admitted.
         if isinstance(text, dict):
+            if key != "extra_javascript":
+                raise AssertionFailure("{}: mkdocs.yml {} must be a path, not a mapping".format(label, what))
             if set(text) - {"path", "type", "async", "defer"}:
                 raise AssertionFailure("{}: mkdocs.yml {} carries keys outside path/type/async/defer".format(label, what))
+            if "type" in text and text["type"] != "module":
+                raise AssertionFailure("{}: mkdocs.yml {} type may only be `module`".format(label, what))
+            if any(flag in text and not isinstance(text[flag], bool) for flag in ("async", "defer")):
+                raise AssertionFailure("{}: mkdocs.yml {} async and defer must be true or false".format(label, what))
             value = text.get("path")
         else:
             value = text
-        if not isinstance(value, str) or not value or "://" in value or value.startswith("/") or ".." in Path(value).parts or "\\" in value:
-            raise AssertionFailure("{}: mkdocs.yml {} must be a relative path inside the manual".format(label, what))
+        suffixes = "|".join(ASSET_SUFFIXES[key])
+        if not isinstance(value, str) or re.fullmatch(r"{}\.(?:{})".format(ASSET_SEGMENTS, suffixes), value) is None:
+            raise AssertionFailure("{}: mkdocs.yml {} must be a relative path inside the manual ending in .{}".format(
+                label, what, ", .".join(ASSET_SUFFIXES[key])))
 
     for key in ("extra_css", "extra_javascript"):
+        if document.get(key) is not None and not isinstance(document[key], list):
+            raise AssertionFailure("{}: mkdocs.yml {} must be a list".format(label, key))
         for entry in document.get(key) or []:
-            _relative_asset(entry, key + " entry")
+            _relative_asset(entry, key, key + " entry")
+    for key in ("site_name", "site_description", "site_author", "repo_name"):
+        if document.get(key) is not None:
+            _check_plain_text(document[key], label, key)
+    if document.get("copyright") is not None:
+        _check_plain_text(document["copyright"], label, "copyright", line_feeds=True)
+    # URL text alone admits a `javascript:` or `data:` URL, which an href runs: `repo_url` must be an
+    # https URL, and `edit_uri` empty, an https URL or a relative path MkDocs joins to `repo_url`.
+    if document.get("repo_url") is not None:
+        _check_url_text(document["repo_url"], label, "repo_url")
+        if HTTPS_URL_RE.fullmatch(document["repo_url"]) is None:
+            raise AssertionFailure("{}: mkdocs.yml repo_url must be an https:// URL with a host and no user info".format(label))
+    if document.get("edit_uri") is not None:
+        _check_url_text(document["edit_uri"], label, "edit_uri", empty=True)
+        edit_uri = document["edit_uri"]
+        if edit_uri and HTTPS_URL_RE.fullmatch(edit_uri) is None and EDIT_PATH_RE.fullmatch(edit_uri) is None:
+            raise AssertionFailure("{}: mkdocs.yml edit_uri must be empty, an https:// URL with a host and no user info, "
+                                   "or a relative path of plain segments".format(label))
+
+    if document.get("nav") is not None:
+        _check_nav(document["nav"], label)
     # `extra` is theme-interpreted: Material reads `extra.analytics` (third-party script), `extra.consent`,
     # `extra.version` (a JSON fetch) and more. Only the recorded `social` shape is admitted.
     extra = document.get("extra")
     if extra is not None:
         if not isinstance(extra, dict) or set(extra) - {"social"}:
             raise AssertionFailure("{}: mkdocs.yml extra may carry only `social`".format(label))
+        if extra.get("social") is not None and not isinstance(extra["social"], list):
+            raise AssertionFailure("{}: mkdocs.yml extra.social must be a list".format(label))
         for entry in extra.get("social") or []:
             if not isinstance(entry, dict) or set(entry) - {"icon", "link", "name"} or not isinstance(entry.get("link"), str) \
-                    or not entry["link"].startswith("https://") or not isinstance(entry.get("icon"), str) or "/" not in entry["icon"]:
-                raise AssertionFailure("{}: mkdocs.yml extra.social entries must be {{icon: bundled/name, link: https://…}}".format(label))
+                    or HTTPS_URL_RE.fullmatch(entry["link"]) is None or not isinstance(entry.get("icon"), str) \
+                    or ICON_NAME_RE.fullmatch(entry["icon"]) is None:
+                raise AssertionFailure("{}: mkdocs.yml extra.social entries must be {{icon: set/name, link: https://…}}".format(label))
+            _check_url_text(entry["link"], label, "extra.social link")
+            if entry.get("name") is not None:
+                _check_plain_text(entry["name"], label, "extra.social name")
     for asset_key in ("logo", "favicon"):
         if asset_key in theme:
-            _relative_asset(theme[asset_key], "theme." + asset_key)
+            _relative_asset(theme[asset_key], "theme." + asset_key, "theme." + asset_key)
+    if theme.get("palette") is not None:
+        options = theme["palette"] if isinstance(theme["palette"], list) else [theme["palette"]]
+        for option in options:
+            if not isinstance(option, dict) or set(option) - PALETTE_KEYS:
+                raise AssertionFailure("{}: mkdocs.yml theme.palette entries may hold only {}".format(
+                    label, ", ".join(sorted(PALETTE_KEYS))))
+            for key in ("media", "scheme", "primary", "accent"):
+                if option.get(key) is not None:
+                    _check_plain_text(option[key], label, "theme.palette " + key)
+            toggle = option.get("toggle")
+            if toggle is not None:
+                if not isinstance(toggle, dict) or set(toggle) - {"icon", "name"}:
+                    raise AssertionFailure("{}: mkdocs.yml theme.palette toggle may hold only icon and name".format(label))
+                if toggle.get("name") is not None:
+                    _check_plain_text(toggle["name"], label, "theme.palette toggle name")
+                icon = toggle.get("icon")
+                if icon is not None and (not isinstance(icon, str) or ICON_NAME_RE.fullmatch(icon) is None):
+                    raise AssertionFailure("{}: mkdocs.yml theme.palette toggle icon must be shaped like a bundled icon name (set/name)".format(label))
     if "icon" in theme:
         icons = theme["icon"]
-        if not isinstance(icons, dict) or any(not isinstance(v, str) or "/" not in v or "://" in v or ".." in v for v in icons.values()):
-            raise AssertionFailure("{}: mkdocs.yml theme.icon values must be bundled icon names".format(label))
+        if not isinstance(icons, dict) or any(not isinstance(v, str) or ICON_NAME_RE.fullmatch(v) is None for v in icons.values()):
+            raise AssertionFailure("{}: mkdocs.yml theme.icon values must be shaped like bundled icon names (set/name)".format(label))
+    font = theme.get("font")
+    if font is not None and font is not False:
+        if not isinstance(font, dict) or not font or set(font) - {"text", "code"}:
+            raise AssertionFailure("{}: mkdocs.yml theme.font may be false or hold only text and code".format(label))
+        for key in ("text", "code"):
+            if font.get(key) is not None and (not isinstance(font[key], str) or FONT_NAME_RE.fullmatch(font[key]) is None):
+                raise AssertionFailure("{}: mkdocs.yml theme.font.{} must be a font family name".format(label, key))
+    for key in ("language", "locale"):
+        if theme.get(key) is not None and (not isinstance(theme[key], str) or LANGUAGE_RE.fullmatch(theme[key]) is None):
+            raise AssertionFailure("{}: mkdocs.yml theme.{} must be a language tag".format(label, key))
+    if not isinstance(theme.get("name"), str) or theme["name"] not in ALLOWED_THEMES:
+        raise AssertionFailure("{}: mkdocs.yml theme must be present and name one of {}".format(label, sorted(ALLOWED_THEMES)))
 
 
 def render(renderer: Path, source: Path, output: Path) -> None:

@@ -461,6 +461,20 @@ _SIMPLE_ESCAPES = {
 _HEX_ESCAPES = {"x": 2, "u": 4, "U": 8}
 
 
+def _double_quoted_length(text: str) -> int:
+    """The length of the double-quoted scalar `text` starts with, reading `\\` escapes; 0 if it does
+    not close."""
+    index = 1
+    while index < len(text):
+        if text[index] == "\\":
+            index += 2
+        elif text[index] == '"':
+            return index + 1
+        else:
+            index += 1
+    return 0
+
+
 def _decode_double_quoted(body: str) -> str:
     """Decode a YAML double-quoted scalar with the full escape set; refuse anything else.
 
@@ -742,20 +756,27 @@ def _parse_sequence(lines: _Lines, indent: int, under_key: bool = False) -> List
             raise ParseError("line {}: unexpected indentation".format(row[1]))
         lines.take()
         rest = row[2].lstrip()[2:]
+        entry = rest.strip()
         item_indent = indent + 2
-        if rest.strip() == "":
+        if entry == "":
             items.append(_parse_block(lines, item_indent) if _next_deeper(lines, indent) else None)
             continue
-        if NESTED_SEQUENCE_RE.match(rest.strip()):
+        if NESTED_SEQUENCE_RE.match(entry):
             raise ParseError("line {}: nested sequences are refused".format(row[1]))
-        match = KEY_RE.match(rest.strip())
-        if match and not rest.strip().startswith(("'", '"', "[")):
-            # Inline mapping start: "- key: value" followed by sibling keys at the key's column.
+        match = KEY_RE.match(entry)
+        if match and entry.startswith('"') and len(match.group("key")) != _double_quoted_length(entry):
+            # KEY_RE does not read escapes: `- "a\": b"` is the string `a": b` to YAML, not a key `a\`.
+            # Such an entry falls through to the scalar reader, which refuses a key holding an escaped
+            # quote (`- "a\"b": c`) rather than read it. A single-quoted key needs no check: `''` is
+            # its only escape, so KEY_RE's closing `'` before the colon is YAML's closing quote too.
+            match = None
+        if match:
+            # Inline mapping start: "- key: value" followed by sibling keys at the key's column. The
+            # key may be quoted (`- "Getting started": page.md`), decoded as a mapping key is.
             key_indent = indent + 2 + (len(rest) - len(rest.lstrip()))
             mapping = _parse_mapping_from_first(lines, key_indent, match, row[1])
             items.append(mapping)
             continue
-        entry = rest.strip()
         if entry[:1] not in ("'", '"', "[") and PLAIN_PAIR_RE.search(entry):
             # YAML reads `- a b: c` as a mapping whose key this parser does not admit.
             raise ParseError("line {}: a sequence entry holding a mapping needs a key this parser admits".format(row[1]))

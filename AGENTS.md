@@ -764,11 +764,33 @@ CLI actually accepts.
   starting with `,`, `]`, `}` or `#`, or with `-` followed by a space, a tab or the end (a
   flow-sequence item `-` directly before `,` or `]` stays the string `-`), no tab after a
   sequence entry's `-`, no `<<` key, quoted or not, and a sequence entry YAML reads as a mapping
-  must begin with a plain key the parser admits, so a `nav` title holding a space cannot be
-  written yet) and must fit a recorded
+  must begin with a key the parser admits, plain or quoted, so a `nav` title holding a space is
+  written quoted (double quotes for a title holding an apostrophe: a doubled `''` inside a key is
+  refused, as is an escaped `\"` inside a double-quoted key)) and must fit a recorded
   allowlist — known top-level keys only, `docs_dir` present and exactly `docs/manual`, `use_directory_urls` absent or
-  true, no `hooks`, no plugin but `search`, no `theme.custom_dir`, Markdown extensions and their
-  options from the recorded set (`pymdownx.snippets` is refused), relative asset paths. A
+  true, `theme` present and naming `material` (MkDocs' default theme and `readthedocs` load
+  highlight.js from a CDN on every page), no `hooks`, no plugin but `search`, no `theme.custom_dir`,
+  Markdown extensions and their
+  options from the recorded set (`pymdownx.snippets` is refused), asset paths with the suffixes
+  recorded for each key (`.css` for `extra_css`; `.js` or `.mjs` for `extra_javascript`, the one key
+  that takes the `path`/`type: module`/`async`/`defer` mapping form; image suffixes for
+  `theme.logo` and `theme.favicon`), a `nav` that is absent or a non-empty list of pages and
+  one-pair `title: target` entries (a section non-empty too, nested at most eight levels below the
+  top-level list), and the strings listed here free of markup (HUMAN-DECISIONS D52, which also lists
+  what is not covered). A nav target or asset path is matched in full as written: its segments hold
+  only ASCII letters, digits, `_`, `-` and `.`, none starting with `.`, and a nav target ends in
+  `.md`, so a URL scheme, a `%` escape, an HTML entity, a `#` fragment, an absolute path, a `..`
+  segment, a quote or whitespace, for example, is refused. Nav titles, `site_name`,
+  `site_description`, `site_author`, `repo_name`, `copyright`, the `theme.palette` strings, the
+  `extra.social` names and the `toc` extension's `title`, `permalink_title` and text `permalink`
+  must be plain text: a non-blank string with no `<`, `>`, `&`, `"`, backtick, or control, format or
+  non-space blank character (`copyright` may hold line feeds). `repo_url`, `edit_uri` (which may be
+  empty) and the `extra.social` links take URL text with none of those and no `'` or blank, and
+  must be `https://` URLs naming a host with no user info, except that `edit_uri` may instead be a
+  relative path of plain segments (`edit/main/docs/`); `theme.font` is false or names its text and
+  code fonts with letters, digits and spaces; `theme.language` and `theme.locale` are language
+  tags; icon names are shaped like bundled names (`fontawesome/brands/github`; a name the theme
+  does not bundle fails the build). A
   config edit outside that set turns the rehearsal red; `Tests/automation/test_site_assembly.py`
   pins the tracked file against the policy so the break shows in CI, not at the next rehearsal.
   A published tag whose commit carries no tracked manual is a refusal by design (`v26.0.0`

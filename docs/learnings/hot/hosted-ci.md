@@ -2,10 +2,43 @@
 topic: hosted-ci
 importance: high
 last-used: 2026-10-11
-uses: 22
+uses: 23
 ---
 
 # Hosted CI (public, free GitHub-hosted runners)
+
+## 2026-10-11 — Match a link against an allowlist as written; end a quoted key where its escapes say
+
+**Symptom.** The first `nav` check for `mkdocs.yml` (D52) refused shapes: a URL scheme, a leading
+`/`, a `..` segment, a backslash. Reviewers got past each of three versions. A tab or a line feed
+inside the target (`java<TAB>script:`) slipped past the scheme check; percent-decoding before the
+check added its own bypasses; an HTML entity (`javascript&colon;`) or a quote that closes the `href`
+attribute got through too. The asset-path check (`extra_css`, `extra_javascript`, `theme.logo`,
+`theme.favicon`) had the same denylist, and ` //host/x.js` with a leading blank passed it.
+Separately, once a sequence entry could start with a quoted key, `- "a\": b"`, which YAML reads as
+the string `a": b`, was read as a key `a\` in one round.
+
+**Cause.** URL readers and browsers strip a tab, a line feed and leading blanks before they parse,
+and a browser decodes entities in an attribute, so a check of the text as written is not a check of
+what the reader sees. Every decoding step the check adds is another reader to match. The key
+pattern's double-quoted branch (`"[^"]*"`) ends at the first quote and does not read escapes.
+
+**Fix.** A nav target and an asset path are now matched in full, as written, against an allowlist:
+segments of ASCII letters, digits, `_`, `-` and `.`, none starting with `.`, and a recorded suffix.
+Nothing is decoded, so a `%` escape is refused rather than read. A double-quoted key is taken only
+when the pattern's key is exactly as long as the quoted scalar read with its escapes; otherwise the
+entry goes to the scalar reader, which refuses a key holding a `\"` escape.
+
+**Lesson.** For a string that ends up in a URL or an HTML attribute, list what is allowed and match
+it whole; do not decode it to look for what is forbidden. A regex that finds the end of a quoted
+string must agree with the escape-aware reader on where it ends, and a test should pin a case where
+they could differ. A title or label rendered as raw HTML is a link surface too, and MkDocs renders
+without escaping: list the strings a theme prints from the pinned templates themselves (grep every
+`config.` reference in the unpacked wheels and set it against the admitted keys), not from memory;
+the list written from memory missed Material's table-of-contents title. And a character rule is
+not a scheme rule: URL text with no quote, blank or markup still admits
+`javascript://host/%0Aalert(1)`, so a link a page renders as an href also needs its scheme fixed
+(`https://`) or its shape confined to a relative path.
 
 ## 2026-10-11 — A quoted `<<` is still a merge key: Ruby merges where a parse tree cannot see
 
