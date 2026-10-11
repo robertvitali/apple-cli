@@ -5,7 +5,8 @@ Reminders** — on macOS. A single Swift binary (`apple`) with JSON-first output
 built so AI CLIs (and humans) can drive Apple apps from the command line instead
 of a stack of always-on background servers.
 
-> Status: **released — `v26.0.0`** (2026-08-30). See
+> Source version: **`27.0.0` — unpublished**, targeting macOS 27. The historical
+> `v26.0.0` tag is retained; no downloadable release is currently published. See
 > [Versioning](#versioning) below and the
 > [releases page](https://github.com/robertvitali/apple-cli/releases).
 
@@ -38,14 +39,14 @@ bats -r bats/          # CLI smoke tests
 
 ## Versioning
 
-Versions are **platform-keyed**, not classic SemVer (tags carry a `v` prefix:
-`v26.0.0`):
+Versions are **platform-keyed**, not classic SemVer. Release tags carry a `v`
+prefix; the current `27.0.0` source version remains unpublished and untagged:
 
 | Digit | Meaning | Example |
 |---|---|---|
-| **MAJOR** | The macOS major this release is built and validated against | `26.x.y` = macOS 26; `27.0.0` lands when macOS 27 support is adopted |
-| **MINOR** | Feature additions (and any breaking-flagged change) | `26.1.0` |
-| **PATCH** | Bug fixes, docs, small non-feature updates | `26.0.1` |
+| **MAJOR** | The macOS major this release is built and validated against | `27.x.y` = macOS 27 |
+| **MINOR** | Feature additions (and any breaking-flagged change) | `27.1.0` |
+| **PATCH** | Bug fixes, docs, small non-feature updates | `27.0.1` |
 
 MAJOR is a validation target, not a deployment minimum. `Package.swift` declares
 macOS 14 as the technical minimum, so the binary installs on macOS 14 and later,
@@ -54,7 +55,8 @@ untested and unsupported. Breaking changes to the agent-facing JSON contract
 never bump MAJOR — they bump the envelope's `schema_version` and ship in at
 least a MINOR flagged `BREAKING:` in the [CHANGELOG](./CHANGELOG.md). At
 runtime, `apple version` emits both `version` and `schema_version` as JSON
-(`apple --version` prints the bare string). Release binaries are attached to
+(`apple --version` prints the bare string). The unpublished source version has
+no release binary; future published binaries will appear on
 [GitHub Releases](https://github.com/robertvitali/apple-cli/releases). Full
 policy: [`docs/versioning-policy.md`](./docs/versioning-policy.md).
 

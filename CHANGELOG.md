@@ -16,6 +16,7 @@ JSON output are stable per the versioning policy — breaking changes bump
 `schema_version`, carry a `BREAKING:` flag here, and ship in at least a MINOR.
 
 ## [Unreleased]
+<!-- apple-cli-unpublished-version: 27.0.0 -->
 
 ### Added
 

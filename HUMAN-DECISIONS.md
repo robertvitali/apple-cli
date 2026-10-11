@@ -1178,6 +1178,11 @@ repository setting or native release-build rehearsal is authorized by this amend
 The macOS 14 technical minimum and JSON schema remain unchanged. All publication conditions
 below still apply; this entry stays open until the separately authorized release completes.
 
+**Source adoption applied, 2026-10-11:** the reviewed preparation tool generated the
+`27.0.0` source constant and matching unpublished changelog marker. Notes remain under
+`[Unreleased]`, and documentation distinguishes this source version from a release.
+No tag or distribution artifact is created; D18's publication steps remain open.
+
 - **Status:** **OPEN** — instruction received 2026-09-20; execution gated as below.
   **Update 2026-09-22:** steps (1) and (3) are satisfied — (1) flip and green hosted runs
   2026-09-21; (3) the §4.1 amendment and the `[Unreleased]` baseline note land in the commit

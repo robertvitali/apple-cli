@@ -80,6 +80,9 @@ platform-keyed amendment) and AGENTS.md "Versioning + releases". Summary:
 - One version for the whole binary, **platform-keyed**: MAJOR = the supported macOS
   major (first release `26.0.0` for macOS 26; MAJOR moves only on macOS adoption),
   MINOR = feature additions, PATCH = fixes/docs/small updates.
+- Source version `27.0.0` adopts macOS 27 and remains unpublished. The validated
+  marker under `[Unreleased]` preserves that version across release rehearsals;
+  the macOS 14 deployment minimum and JSON schema version 1 are unchanged.
 - Contract = CLI surface + JSON output schema + behavior/exit codes. A breaking
   change to any of them bumps the envelope `schema_version`, is flagged `BREAKING:`
   in the changelog, and ships in (at least) a MINOR — never MAJOR.

@@ -29,12 +29,11 @@ heading. Its value is strict `MAJOR.MINOR.PATCH`. It is valid only when
 `AppleVersion.current`, no tag anywhere in the repository and no released
 changelog heading already names that version, and the version's major is greater
 than the highest reachable released major with `.0.0` for minor and patch. With
-today's released baseline, the only approved source adoption is `27.0.0`; the
-inspected source still declares `26.0.0`, and `26.0.0` remains the old released
-tag. `27.0.0` is source-only and unassigned until the adoption implementation
-lands; no local or remote tag or Release should exist for it during this step.
+the retained release baseline, source adoption now declares `27.0.0`, and
+`v26.0.0` remains the historical tag. `27.0.0` is an unpublished source version;
+no local or remote tag or Release should exist for it during this step.
 
-`scripts/ci/release_prep.py` should gain an explicit `--source-adoption` mode
+`scripts/ci/release_prep.py` provides an explicit `--source-adoption` mode
 that renders the version constant and the marker into scratch only, preserving
 the existing `[Unreleased]` body and main-branch manual links. The normal
 release-preparation path should parse the same shared version state, treat
