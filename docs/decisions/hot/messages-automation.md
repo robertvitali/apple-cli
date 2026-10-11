@@ -2,7 +2,7 @@
 topic: messages-automation
 last-used: 2026-10-11
 importance: high
-uses: 2
+uses: 3
 ---
 
 # Messages automation decisions
@@ -35,3 +35,19 @@ explicit operator recovery that acknowledges possible late effects. Successful
 post-delivery completion remains deferred until the concrete worker and exact
 state verifier can provide operation-bound evidence. Neither an arbitrary proof
 string nor a matching snapshot can clear pending state through this foundation.
+
+## 2026-10-11 — Keep worker transport separate from real action construction
+
+The executable now has a hidden worker dispatch with an empty production
+registry. Its package-scoped transport uses inherited anonymous pipes, canonical
+parent and child executable identity, a fresh operation nonce, bounded frames
+and one monotonic deadline. The parent holds the journal lock through the
+exchange and records uncertainty before sending any action-capable bytes.
+Worker acknowledgment is lifecycle evidence; it never clears the pending action.
+
+Only a named test factory can currently construct a launch request. Before a
+real Messages operation is registered, a typed descriptor must derive both the
+worker command and journal identity from the same validated target and action.
+The test factory must not become a production shortcut. Exact AX identity,
+permission diagnostics, live cancellation effects and postcondition verification
+remain separate work; this transport adds no public mutation command.

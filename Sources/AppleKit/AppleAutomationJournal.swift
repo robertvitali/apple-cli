@@ -51,6 +51,9 @@ public enum AppleAutomationJournal {
             let add = milliseconds > UInt64.max / 1_000_000 ? UInt64.max : milliseconds * 1_000_000
             return MonotonicDeadline(uptimeNanoseconds: now > UInt64.max - add ? UInt64.max : now + add)
         }
+        package static func uptimeNanoseconds(_ uptimeNanoseconds: UInt64) -> MonotonicDeadline {
+            MonotonicDeadline(uptimeNanoseconds: uptimeNanoseconds)
+        }
         fileprivate var expired: Bool { DispatchTime.now().uptimeNanoseconds >= uptimeNanoseconds }
     }
 

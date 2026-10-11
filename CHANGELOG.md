@@ -20,10 +20,12 @@ JSON output are stable per the versioning policy — breaking changes bump
 
 ### Added
 
-- **Automation journal foundation:** shared private state serializes cooperating
+- **Automation journal and worker foundation:** shared private state serializes cooperating
   processes and retains one unresolved operation across failures. It records
   target digests instead of raw identifiers and requires explicit recovery after
-  possible delivery. This internal foundation does not enable new Messages
+  possible delivery. A bounded same-executable worker channel validates process
+  identity and request acknowledgments while retaining unresolved action state.
+  This internal foundation does not enable new Messages
   mutations or claim that terminating a worker cancels an action in Messages.
 
 - **Exact Messages reads:** `messages conversations` discovers direct chats and

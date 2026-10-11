@@ -89,6 +89,10 @@ struct Apple: ParsableCommand {
     // `apple … | head` — yields a clean exit, not an uncatchable crash) before dispatch.
     static func main() {
         signal(SIGPIPE, SIG_IGN)
+        if InternalWorkerMain.isWorkerInvocation(CommandLine.arguments) {
+            Foundation.exit(InternalWorkerMain.run(arguments: CommandLine.arguments,
+                                                  registry: EmptyWorkerOperationRegistry()))
+        }
         Foundation.exit(execute(arguments: CommandLine.arguments, streams: .standard))
     }
 

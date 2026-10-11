@@ -1,0 +1,659 @@
+import Darwin
+import Foundation
+
+package struct WorkerDeadline: Codable, Equatable, Sendable {
+    let uptimeNanoseconds: UInt64
+    package static func millisecondsFromNow(_ milliseconds: UInt64) -> WorkerDeadline {
+        let now = DispatchTime.now().uptimeNanoseconds
+        let add = milliseconds > UInt64.max / 1_000_000 ? UInt64.max : milliseconds * 1_000_000
+        return WorkerDeadline(uptimeNanoseconds: now > UInt64.max - add ? UInt64.max : now + add)
+    }
+    var expired: Bool { remainingNanoseconds == 0 }
+    var remainingNanoseconds: UInt64 {
+        let now = DispatchTime.now().uptimeNanoseconds
+        return now >= uptimeNanoseconds ? 0 : uptimeNanoseconds - now
+    }
+    var pollMilliseconds: Int32 {
+        let remaining = remainingNanoseconds
+        guard remaining > 0 else { return 0 }
+        return Int32(min(10, max(1, (remaining + 999_999) / 1_000_000)))
+    }
+
+    var journalDeadline: AppleAutomationJournal.MonotonicDeadline {
+        AppleAutomationJournal.MonotonicDeadline.uptimeNanoseconds(uptimeNanoseconds)
+    }
+
+    func boundedNanoseconds(_ configured: UInt64) -> UInt64 {
+        min(configured, remainingNanoseconds)
+    }
+}
+
+
+package struct WorkerCommand: Codable, Equatable, Sendable, CustomStringConvertible {
+    package let name: String
+    package let payload: Data?
+
+    enum CodingKeys: String, CodingKey {
+        case name
+        case payload
+    }
+
+    package init(name: String, payload: Data? = nil) throws {
+        guard !name.isEmpty, name.utf8.count <= 128, name.allSatisfy({ $0.isLetter || $0.isNumber || $0 == "." || $0 == "-" || $0 == "_" }) else {
+            throw WorkerProtocolError.malformedFrame
+        }
+        if let payload, payload.count > 4096 { throw WorkerProtocolError.frameTooLarge }
+        self.name = name
+        self.payload = payload
+    }
+
+    package init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        let name = try container.decode(String.self, forKey: .name)
+        let payload = try container.decodeIfPresent(Data.self, forKey: .payload)
+        try self.init(name: name, payload: payload)
+    }
+
+    package var description: String { name }
+}
+
+package struct WorkerProcessIdentity: Codable, Equatable, Sendable {
+    package let pid: Int32
+    package let parentPID: Int32
+    package let uid: UInt32
+    package let gid: UInt32
+    package let startTimeMicroseconds: UInt64
+    package let executableDevice: UInt64
+    package let executableInode: UInt64
+    package let executablePath: String
+}
+
+package struct WorkerExecutableIdentity: Codable, Equatable, Sendable {
+    package let uid: UInt32
+    package let gid: UInt32
+    package let device: UInt64
+    package let inode: UInt64
+    package let path: String
+
+    package init(uid: UInt32, gid: UInt32, device: UInt64, inode: UInt64, path: String) {
+        self.uid = uid
+        self.gid = gid
+        self.device = device
+        self.inode = inode
+        self.path = path
+    }
+}
+
+package struct WorkerRequest: Codable, Equatable, Sendable {
+    package let schemaVersion: Int
+    package let operationID: UUID
+    package let nonce: UUID
+    package let deadline: WorkerDeadline
+    package let parent: WorkerProcessIdentity
+    package let workerExecutable: WorkerExecutableIdentity
+    package let command: WorkerCommand
+
+    package init(schemaVersion: Int, operationID: UUID, nonce: UUID, deadline: WorkerDeadline, parent: WorkerProcessIdentity, workerExecutable: WorkerExecutableIdentity, command: WorkerCommand) {
+        self.schemaVersion = schemaVersion
+        self.operationID = operationID
+        self.nonce = nonce
+        self.deadline = deadline
+        self.parent = parent
+        self.workerExecutable = workerExecutable
+        self.command = command
+    }
+}
+
+package enum WorkerResponseCategory: String, Codable, Equatable, Sendable { case ack, refused, failed }
+
+package struct WorkerResponse: Codable, Equatable, Sendable {
+    package let schemaVersion: Int
+    package let operationID: UUID
+    package let nonce: UUID
+    package let category: WorkerResponseCategory
+}
+
+package enum WorkerProtocolError: Error, Equatable, CustomStringConvertible {
+    case invalidArguments
+    case invalidDescriptor
+    case frameTooLarge
+    case truncatedFrame
+    case malformedFrame
+    case deadlineExpired
+    case parentIdentityMismatch
+    case unsupportedCommand
+    case childExited
+
+    package var description: String {
+        switch self {
+        case .invalidArguments: return "invalid-arguments"
+        case .invalidDescriptor: return "invalid-descriptor"
+        case .frameTooLarge: return "frame-too-large"
+        case .truncatedFrame: return "truncated-frame"
+        case .malformedFrame: return "malformed-frame"
+        case .deadlineExpired: return "deadline-expired"
+        case .parentIdentityMismatch: return "parent-identity-mismatch"
+        case .unsupportedCommand: return "unsupported-command"
+        case .childExited: return "child-exited"
+        }
+    }
+}
+
+enum WorkerFrameIO {
+    static let requestCap = 64 * 1024
+    static let responseCap = 16 * 1024
+
+    static func setNonblocking(_ fd: Int32, noSigpipe: Bool = false) throws {
+        let flags = fcntl(fd, F_GETFL)
+        guard flags >= 0, fcntl(fd, F_SETFL, flags | O_NONBLOCK) == 0 else { throw DarwinScriptProcessIO.posixError(errno) }
+        if noSigpipe, fcntl(fd, F_SETNOSIGPIPE, 1) != 0 { throw DarwinScriptProcessIO.posixError(errno) }
+    }
+
+    static func validateAnonymousPipe(_ fd: Int32) throws {
+        guard fd > 2 else { throw WorkerProtocolError.invalidDescriptor }
+        var st = stat()
+        guard fstat(fd, &st) == 0 else { throw DarwinScriptProcessIO.posixError(errno) }
+        guard (st.st_mode & S_IFMT) == S_IFIFO, st.st_nlink == 0 else { throw WorkerProtocolError.invalidDescriptor }
+    }
+
+    static func writeFrame(_ data: Data, to fd: Int32, cap: Int, io: any ScriptProcessIO,
+                           deadline: WorkerDeadline) throws {
+        guard data.count <= cap else { throw WorkerProtocolError.frameTooLarge }
+        var header = UInt32(data.count).bigEndian
+        var bytes = Data(bytes: &header, count: 4)
+        bytes.append(data)
+        var offset = 0
+        while offset < bytes.count {
+            try throwIfParentDeadOrChildExited(deadline: deadline)
+            var p = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
+            let ready = poll(&p, 1, deadline.pollMilliseconds)
+            if ready < 0 {
+                if errno == EINTR { continue }
+                throw DarwinScriptProcessIO.posixError(errno)
+            }
+            guard ready > 0 else { continue }
+            if p.revents & Int16(POLLERR | POLLHUP | POLLNVAL) != 0 { throw WorkerProtocolError.truncatedFrame }
+            guard p.revents & Int16(POLLOUT) != 0 else { continue }
+            do {
+                let wrote = try bytes.withUnsafeBytes { raw in
+                    try io.write(fd, from: UnsafeRawBufferPointer(rebasing: raw[offset..<min(bytes.count, offset + 4096)]))
+                }
+                guard wrote > 0 else { throw WorkerProtocolError.truncatedFrame }
+                offset += wrote
+            } catch {
+                if isRetryable(error) { continue }
+                throw error
+            }
+        }
+    }
+
+    static func readOneFrameThenEOF(from fd: Int32, cap: Int, io: any ScriptProcessIO,
+                                    deadline: WorkerDeadline) throws -> Data {
+        var storage = Data()
+        var expected: Int?
+        var returnedFrame: Data?
+        var buffer = [UInt8](repeating: 0, count: 4096)
+        while true {
+            try throwIfParentDeadOrChildExited(deadline: deadline)
+            if let frame = returnedFrame {
+                var p = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+                let ready = poll(&p, 1, deadline.pollMilliseconds)
+                if ready < 0 {
+                    if errno == EINTR { continue }
+                    throw DarwinScriptProcessIO.posixError(errno)
+                }
+                guard ready > 0 else { continue }
+                if p.revents & Int16(POLLIN) != 0 {
+                    let count = try buffer.withUnsafeMutableBytes { try io.read(fd, into: $0) }
+                    if count > 0 { throw WorkerProtocolError.malformedFrame }
+                    return frame
+                }
+                if p.revents & Int16(POLLHUP) != 0 {
+                    let count = try buffer.withUnsafeMutableBytes { try io.read(fd, into: $0) }
+                    if count > 0 { throw WorkerProtocolError.malformedFrame }
+                    return frame
+                }
+                if p.revents & Int16(POLLERR | POLLNVAL) != 0 { throw WorkerProtocolError.truncatedFrame }
+                continue
+            }
+            var p = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
+            let ready = poll(&p, 1, deadline.pollMilliseconds)
+            if ready < 0 {
+                if errno == EINTR { continue }
+                throw DarwinScriptProcessIO.posixError(errno)
+            }
+            guard ready > 0 else { continue }
+            if p.revents & Int16(POLLERR | POLLNVAL) != 0 { throw WorkerProtocolError.truncatedFrame }
+            if p.revents & (Int16(POLLIN) | Int16(POLLHUP)) == 0 { continue }
+            let read: Int
+            do { read = try buffer.withUnsafeMutableBytes { try io.read(fd, into: $0) } }
+            catch {
+                if isRetryable(error) { continue }
+                throw error
+            }
+            guard read > 0 else { throw WorkerProtocolError.truncatedFrame }
+            storage.append(contentsOf: buffer.prefix(read))
+            if expected == nil, storage.count >= 4 {
+                let length = storage.prefix(4).reduce(UInt32(0)) { ($0 << 8) | UInt32($1) }
+                guard length <= UInt32(cap) else { throw WorkerProtocolError.frameTooLarge }
+                expected = Int(length)
+            }
+            if let expected, storage.count >= 4 + expected {
+                guard storage.count == 4 + expected else { throw WorkerProtocolError.malformedFrame }
+                returnedFrame = storage.subdata(in: 4..<(4 + expected))
+            }
+            if storage.count > cap + 4 { throw WorkerProtocolError.frameTooLarge }
+        }
+    }
+
+    static func throwIfParentDeadOrChildExited(deadline: WorkerDeadline) throws {
+        if deadline.expired { throw WorkerProtocolError.deadlineExpired }
+        if getppid() == 1 { throw WorkerProtocolError.parentIdentityMismatch }
+    }
+
+    static func isRetryable(_ error: any Error) -> Bool {
+        let value = error as NSError
+        return value.domain == NSPOSIXErrorDomain && (value.code == Int(EAGAIN) || value.code == Int(EINTR))
+    }
+}
+
+package protocol WorkerOperation: Sendable {
+    func run(_ request: WorkerRequest, deadline: WorkerDeadline) throws -> WorkerResponseCategory
+}
+
+package protocol WorkerOperationRegistry: Sendable {
+    func operation(for command: WorkerCommand) -> (any WorkerOperation)?
+}
+
+package struct EmptyWorkerOperationRegistry: WorkerOperationRegistry {
+    package init() {}
+    package func operation(for command: WorkerCommand) -> (any WorkerOperation)? { nil }
+}
+
+package enum InternalWorkerMain {
+    static let sentinel = "__apple_cli_internal_worker_v1"
+
+    package static func isWorkerInvocation(_ arguments: [String]) -> Bool {
+        arguments.count == 6 && arguments[1] == sentinel && arguments[2] == "--request-fd" && arguments[4] == "--response-fd"
+    }
+
+    package static func run(arguments: [String], registry: any WorkerOperationRegistry) -> Int32 {
+        do {
+            guard isWorkerInvocation(arguments), let requestFD = Int32(arguments[3]),
+                  let responseFD = Int32(arguments[5]), requestFD > 2, responseFD > 2,
+                  requestFD != responseFD else { throw WorkerProtocolError.invalidArguments }
+            try WorkerFrameIO.validateAnonymousPipe(requestFD)
+            try WorkerFrameIO.validateAnonymousPipe(responseFD)
+            try WorkerFrameIO.setNonblocking(requestFD)
+            try WorkerFrameIO.setNonblocking(responseFD, noSigpipe: true)
+            let io = DarwinScriptProcessIO()
+            defer { try? io.close(requestFD); try? io.close(responseFD) }
+            let requestData = try WorkerFrameIO.readOneFrameThenEOF(from: requestFD, cap: WorkerFrameIO.requestCap,
+                                                                    io: io, deadline: .millisecondsFromNow(1_000))
+            let request = try JSONDecoder().decode(WorkerRequest.self, from: requestData)
+            guard request.schemaVersion == 1 else { throw WorkerProtocolError.malformedFrame }
+            guard validateParent(request.parent), validateWorkerExecutable(request.workerExecutable, sameExecutableAs: request.parent) else { throw WorkerProtocolError.parentIdentityMismatch }
+            guard !request.deadline.expired else { throw WorkerProtocolError.deadlineExpired }
+            guard let operation = registry.operation(for: request.command) else { throw WorkerProtocolError.unsupportedCommand }
+            let watchdog = WorkerOperationWatchdog(parent: request.parent, deadline: request.deadline)
+            watchdog.start()
+            defer { watchdog.cancel() }
+            let category = try operation.run(request, deadline: request.deadline)
+            guard validateParent(request.parent), validateWorkerExecutable(request.workerExecutable, sameExecutableAs: request.parent) else { throw WorkerProtocolError.parentIdentityMismatch }
+            let response = WorkerResponse(schemaVersion: 1, operationID: request.operationID, nonce: request.nonce, category: category)
+            let responseData = try JSONEncoder().encode(response)
+            try WorkerFrameIO.writeFrame(responseData, to: responseFD, cap: WorkerFrameIO.responseCap,
+                                         io: io, deadline: request.deadline)
+            return 0
+        } catch {
+            return 70
+        }
+    }
+
+    fileprivate static func validateParentForWatchdog(_ identity: WorkerProcessIdentity) -> Bool {
+        guard getppid() == identity.pid, let current = WorkerProcessIdentity.current(pid: identity.pid) else { return false }
+        return current == identity
+    }
+
+    private static func validateWorkerExecutable(_ identity: WorkerExecutableIdentity, sameExecutableAs parent: WorkerProcessIdentity) -> Bool {
+        guard let current = WorkerExecutableIdentity.current() else { return false }
+        let parentExecutable = WorkerExecutableIdentity(uid: parent.uid, gid: parent.gid, device: parent.executableDevice, inode: parent.executableInode, path: parent.executablePath)
+        return current == identity && current == parentExecutable
+    }
+
+    private static func validateParent(_ identity: WorkerProcessIdentity) -> Bool {
+        validateParentForWatchdog(identity)
+    }
+}
+
+extension WorkerProcessIdentity {
+    static func current(pid: pid_t = getpid()) -> WorkerProcessIdentity? {
+        var info = proc_bsdinfo()
+        let size = MemoryLayout<proc_bsdinfo>.stride
+        let result = withUnsafeMutablePointer(to: &info) { pointer in
+            pointer.withMemoryRebound(to: UInt8.self, capacity: size) { raw in
+                proc_pidinfo(pid, PROC_PIDTBSDINFO, 0, raw, Int32(size))
+            }
+        }
+        guard result == Int32(size) else { return nil }
+        var pathBuffer = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+        let pathSize = UInt32(pathBuffer.count)
+        let pathLength = proc_pidpath(pid, &pathBuffer, pathSize)
+        guard pathLength > 0 else { return nil }
+        let observedPath = String(decoding: pathBuffer.prefix(Int(pathLength)).map { UInt8(bitPattern: $0) }, as: UTF8.self)
+        guard let executable = WorkerExecutableIdentity.canonicalExecutable(path: observedPath, uid: UInt32(info.pbi_uid), gid: UInt32(info.pbi_gid)) else { return nil }
+        let micros = UInt64(info.pbi_start_tvsec) * 1_000_000 + UInt64(info.pbi_start_tvusec)
+        return WorkerProcessIdentity(pid: pid,
+                                     parentPID: Int32(info.pbi_ppid),
+                                     uid: UInt32(info.pbi_uid),
+                                     gid: UInt32(info.pbi_gid),
+                                     startTimeMicroseconds: micros,
+                                     executableDevice: executable.device,
+                                     executableInode: executable.inode,
+                                     executablePath: executable.path)
+    }
+}
+
+extension WorkerExecutableIdentity {
+    static func current() -> WorkerExecutableIdentity? {
+        guard let process = WorkerProcessIdentity.current() else { return nil }
+        return WorkerExecutableIdentity(uid: process.uid, gid: process.gid, device: process.executableDevice, inode: process.executableInode, path: process.executablePath)
+    }
+
+    fileprivate static func canonicalExecutable(path: String, uid: UInt32, gid: UInt32) -> WorkerExecutableIdentity? {
+        guard let resolved = realpath(path, nil) else { return nil }
+        defer { free(resolved) }
+        let canonicalPath = String(cString: resolved)
+        var st = stat()
+        guard stat(canonicalPath, &st) == 0, (st.st_mode & S_IFMT) == S_IFREG else { return nil }
+        return WorkerExecutableIdentity(uid: uid, gid: gid, device: UInt64(st.st_dev), inode: UInt64(st.st_ino), path: canonicalPath)
+    }
+}
+
+package struct WorkerJournalBinding {
+    package let root: String
+    package let request: AppleAutomationJournal.OperationRequest
+    package init(root: String, request: AppleAutomationJournal.OperationRequest) {
+        self.root = root
+        self.request = request
+    }
+}
+
+package struct WorkerLaunchRequest {
+    package let command: WorkerCommand
+    package let deadline: WorkerDeadline
+    package let journal: WorkerJournalBinding
+
+    private init(command: WorkerCommand, deadline: WorkerDeadline, journal: WorkerJournalBinding) {
+        self.command = command
+        self.deadline = deadline
+        self.journal = journal
+    }
+
+    package static func makeForTesting(command: WorkerCommand, journalRequest: AppleAutomationJournal.OperationRequest, deadline: WorkerDeadline, stateRoot: String) -> WorkerLaunchRequest {
+        WorkerLaunchRequest(command: command, deadline: deadline, journal: WorkerJournalBinding(root: stateRoot, request: journalRequest))
+    }
+}
+
+package enum WorkerLaunchOutcome: CustomStringConvertible {
+    case spawnOrSetupFailedBeforeRequest(String)
+    case requestNotSent(String)
+    case childRefusedOrFailed(String)
+    case childReturned(WorkerResponse)
+    case timedOut
+    case protocolViolation(String)
+
+    package var description: String {
+        switch self {
+        case .spawnOrSetupFailedBeforeRequest(let value): return "spawnOrSetupFailedBeforeRequest(\(value))"
+        case .requestNotSent(let value): return "requestNotSent(\(value))"
+        case .childRefusedOrFailed(let value): return "childRefusedOrFailed(\(value))"
+        case .childReturned(let response): return "childReturned(\(response.category.rawValue))"
+        case .timedOut: return "timedOut"
+        case .protocolViolation(let value): return "protocolViolation(\(value))"
+        }
+    }
+}
+
+final class WorkerOperationWatchdog: @unchecked Sendable {
+    private let parent: WorkerProcessIdentity
+    private let deadline: WorkerDeadline
+    private let lock = NSLock()
+    private var cancelled = false
+
+    init(parent: WorkerProcessIdentity, deadline: WorkerDeadline) {
+        self.parent = parent
+        self.deadline = deadline
+    }
+
+    func start() {
+        Thread.detachNewThread { [self] in
+            while true {
+                lock.lock()
+                let done = cancelled
+                lock.unlock()
+                if done { return }
+                if deadline.expired || !InternalWorkerMain.validateParentForWatchdog(parent) {
+                    Darwin._exit(70)
+                }
+                _ = poll(nil, 0, 10)
+            }
+        }
+    }
+
+    func cancel() { lock.withLock { cancelled = true } }
+}
+
+package struct WorkerLauncher {
+    package typealias JournalMutationHook = @Sendable (String) -> Void
+    package typealias SpawnedPIDHook = @Sendable (pid_t) -> Void
+    private let io: any ScriptProcessIO
+    private let mutateJournalBeforeAckValidation: JournalMutationHook?
+    private let deferredReaping: any ScriptDeferredReaping
+    private let spawnedPIDHook: SpawnedPIDHook?
+    private let signalGraceNanoseconds: UInt64
+    private let reapGraceNanoseconds: UInt64
+    package init() {
+        self.io = DarwinScriptProcessIO()
+        self.mutateJournalBeforeAckValidation = nil
+        self.deferredReaping = ScriptEventualReaper.shared
+        self.spawnedPIDHook = nil
+        self.signalGraceNanoseconds = 200_000_000
+        self.reapGraceNanoseconds = 200_000_000
+    }
+
+    package init(testSpawnedPIDHook: @escaping SpawnedPIDHook,
+                 signalGraceMilliseconds: UInt64 = 200,
+                 reapGraceMilliseconds: UInt64 = 200) {
+        self.io = DarwinScriptProcessIO()
+        self.mutateJournalBeforeAckValidation = nil
+        self.deferredReaping = ScriptEventualReaper.shared
+        self.spawnedPIDHook = testSpawnedPIDHook
+        self.signalGraceNanoseconds = signalGraceMilliseconds * 1_000_000
+        self.reapGraceNanoseconds = reapGraceMilliseconds * 1_000_000
+    }
+
+    init(testIO: any ScriptProcessIO) {
+        self.io = testIO
+        self.mutateJournalBeforeAckValidation = nil
+        self.deferredReaping = ScriptEventualReaper.shared
+        self.spawnedPIDHook = nil
+        self.signalGraceNanoseconds = 200_000_000
+        self.reapGraceNanoseconds = 200_000_000
+    }
+
+    package init(testMutationHook: JournalMutationHook? = nil,
+         testDeferredReaping deferredReaping: (any ScriptDeferredReaping)? = nil,
+         signalGraceMilliseconds: UInt64 = 200,
+         reapGraceMilliseconds: UInt64 = 200) {
+        self.io = DarwinScriptProcessIO()
+        self.mutateJournalBeforeAckValidation = testMutationHook
+        self.deferredReaping = deferredReaping ?? ScriptEventualReaper.shared
+        self.spawnedPIDHook = nil
+        self.signalGraceNanoseconds = signalGraceMilliseconds * 1_000_000
+        self.reapGraceNanoseconds = reapGraceMilliseconds * 1_000_000
+    }
+
+    package func launch(_ request: WorkerLaunchRequest) throws -> WorkerLaunchOutcome {
+        guard !request.deadline.expired else { return .timedOut }
+        do {
+            return try AppleAutomationJournal.withLockedJournal(root: request.journal.root, deadline: request.deadline.journalDeadline) { lease in
+                guard !request.deadline.expired else { return .timedOut }
+            let op: UUID
+            do { op = try lease.begin(request.journal.request) }
+            catch { return .requestNotSent(String(describing: error)) }
+            guard let parent = WorkerProcessIdentity.current() else {
+                try? lease.recordNoDeliveryBeforeHandoff(operationID: op)
+                return .requestNotSent("identity-unavailable")
+            }
+            let executable = WorkerExecutableIdentity(uid: parent.uid, gid: parent.gid, device: parent.executableDevice, inode: parent.executableInode, path: parent.executablePath)
+            let nonce = UUID()
+            let frame = WorkerRequest(schemaVersion: 1, operationID: op, nonce: nonce,
+                                      deadline: request.deadline, parent: parent, workerExecutable: executable, command: request.command)
+            let encoded: Data
+            do { encoded = try JSONEncoder().encode(frame) }
+            catch {
+                try? lease.recordNoDeliveryBeforeHandoff(operationID: op)
+                return .requestNotSent(String(describing: error))
+            }
+            return exchange(request: request, frame: frame, encoded: encoded, lease: lease, preparedOperationID: op)
+            }
+        } catch AppleAutomationJournal.Error.lockTimedOut {
+            return .timedOut
+        }
+    }
+
+    private func exchange(request: WorkerLaunchRequest, frame: WorkerRequest, encoded: Data,
+                          lease: AppleAutomationJournal.JournalLease, preparedOperationID: UUID) -> WorkerLaunchOutcome {
+        var owned = Set<Int32>()
+        func keep(_ fd: Int32) -> Int32 { owned.insert(fd); return fd }
+        func closeOwned(_ fd: Int32) { if owned.remove(fd) != nil { try? io.close(fd) } }
+        func closeAll() { for fd in Array(owned) { closeOwned(fd) } }
+        var pid: pid_t = 0
+        var ownsChild = false
+        var maySignal = true
+        func observe() {
+            guard ownsChild, pid > 1 else { return }
+            var info = siginfo_t()
+            let rc = waitid(P_PID, id_t(pid), &info, WEXITED | WNOHANG | WNOWAIT)
+            if rc == 0, info.si_pid == pid { maySignal = false }
+            else if rc != 0, errno == ECHILD { ownsChild = false; maySignal = false }
+        }
+        func reapOnce() -> Bool {
+            guard ownsChild, pid > 1 else { return true }
+            var info = siginfo_t()
+            let rc = waitid(P_PID, id_t(pid), &info, WEXITED | WNOHANG)
+            if rc == 0, info.si_pid == pid { ownsChild = false; maySignal = false; return true }
+            if rc != 0, errno == ECHILD { ownsChild = false; maySignal = false; return true }
+            return false
+        }
+        func transferReap() {
+            guard ownsChild, pid > 1 else { return }
+            ownsChild = false
+            maySignal = false
+            deferredReaping.accept(ScriptPendingReap(pid: pid, reaper: DarwinScriptProcessReaper()))
+        }
+        func cleanup(killChild: Bool) {
+            closeAll()
+            observe()
+            if killChild, ownsChild, maySignal, pid > 1, pid != getpgrp() { _ = Darwin.kill(-pid, SIGTERM) }
+            let termBudget = request.deadline.boundedNanoseconds(signalGraceNanoseconds)
+            let termDeadline = DispatchTime(uptimeNanoseconds: DispatchTime.now().uptimeNanoseconds &+ termBudget)
+            while termBudget > 0, DispatchTime.now() < termDeadline, ownsChild { if reapOnce() { return }; _ = poll(nil, 0, request.deadline.pollMilliseconds) }
+            observe()
+            if killChild, ownsChild, maySignal, pid > 1, pid != getpgrp() { _ = Darwin.kill(-pid, SIGKILL) }
+            let reapBudget = request.deadline.boundedNanoseconds(reapGraceNanoseconds)
+            let reapDeadline = DispatchTime(uptimeNanoseconds: DispatchTime.now().uptimeNanoseconds &+ reapBudget)
+            while reapBudget > 0, DispatchTime.now() < reapDeadline, ownsChild { if reapOnce() { return }; _ = poll(nil, 0, request.deadline.pollMilliseconds) }
+            transferReap()
+        }
+
+        do {
+            let req = try io.pipe(); _ = keep(req.read); _ = keep(req.write)
+            let resp = try io.pipe(); _ = keep(resp.read); _ = keep(resp.write)
+            let null = try io.nullInput(); _ = keep(null)
+            try WorkerFrameIO.validateAnonymousPipe(req.read)
+            try WorkerFrameIO.validateAnonymousPipe(req.write)
+            try WorkerFrameIO.validateAnonymousPipe(resp.read)
+            try WorkerFrameIO.validateAnonymousPipe(resp.write)
+            try WorkerFrameIO.setNonblocking(req.write, noSigpipe: true)
+            try WorkerFrameIO.setNonblocking(resp.read)
+            pid = try spawn(executable: frame.parent.executablePath, requestFD: req.read, responseFD: resp.write, null: null)
+            ownsChild = true
+            spawnedPIDHook?(pid)
+            closeOwned(req.read); closeOwned(resp.write); closeOwned(null)
+            try lease.markUncertainAfterHandoff(operationID: preparedOperationID)
+            try WorkerFrameIO.writeFrame(encoded, to: req.write, cap: WorkerFrameIO.requestCap, io: io, deadline: request.deadline)
+            closeOwned(req.write)
+            let data = try WorkerFrameIO.readOneFrameThenEOF(from: resp.read, cap: WorkerFrameIO.responseCap, io: io, deadline: request.deadline)
+            closeOwned(resp.read)
+            let response = try JSONDecoder().decode(WorkerResponse.self, from: data)
+            cleanup(killChild: false)
+            guard response.schemaVersion == 1, response.operationID == frame.operationID, response.nonce == frame.nonce else {
+                return .protocolViolation("response-binding")
+            }
+            mutateJournalBeforeAckValidation?(request.journal.root)
+            let snapshot = try lease.loadSnapshot()
+            guard let pending = snapshot.pending,
+                  pending.operationID == frame.operationID,
+                  pending.phase == .uncertainAfterHandoff,
+                  pending.matches(request.journal.request) else {
+                return .protocolViolation("journal-binding")
+            }
+            guard response.category == .ack else { return .childRefusedOrFailed(response.category.rawValue) }
+            return .childReturned(response)
+        } catch WorkerProtocolError.deadlineExpired {
+            cleanup(killChild: true)
+            return .timedOut
+        } catch WorkerProtocolError.frameTooLarge {
+            cleanup(killChild: true)
+            return .protocolViolation("frame-too-large")
+        } catch WorkerProtocolError.malformedFrame {
+            cleanup(killChild: true)
+            return .protocolViolation("malformed-frame")
+        } catch WorkerProtocolError.truncatedFrame {
+            cleanup(killChild: true)
+            return .childRefusedOrFailed("truncated-frame")
+        } catch {
+            if pid == 0 { try? lease.recordNoDeliveryBeforeHandoff(operationID: preparedOperationID) }
+            cleanup(killChild: true)
+            return pid == 0 ? .spawnOrSetupFailedBeforeRequest(String(describing: error)) : .childRefusedOrFailed(String(describing: error))
+        }
+    }
+
+    private func spawn(executable: String, requestFD: Int32, responseFD: Int32, null: Int32) throws -> pid_t {
+        var attributes: posix_spawnattr_t?
+        var actions: posix_spawn_file_actions_t?
+        func check(_ code: Int32) throws { guard code == 0 else { throw DarwinScriptProcessIO.posixError(code) } }
+        try check(posix_spawnattr_init(&attributes)); defer { posix_spawnattr_destroy(&attributes) }
+        try check(posix_spawn_file_actions_init(&actions)); defer { posix_spawn_file_actions_destroy(&actions) }
+        var mask = sigset_t(); var defaults = sigset_t()
+        sigemptyset(&mask); sigfillset(&defaults)
+        try check(posix_spawnattr_setsigmask(&attributes, &mask))
+        try check(posix_spawnattr_setsigdefault(&attributes, &defaults))
+        try check(posix_spawnattr_setpgroup(&attributes, 0))
+        try check(posix_spawnattr_setflags(&attributes, Int16(POSIX_SPAWN_SETPGROUP | POSIX_SPAWN_SETSIGMASK | POSIX_SPAWN_SETSIGDEF | POSIX_SPAWN_CLOEXEC_DEFAULT)))
+        for fd in [STDIN_FILENO, STDOUT_FILENO, STDERR_FILENO] { try check(posix_spawn_file_actions_adddup2(&actions, null, fd)) }
+        try check(posix_spawn_file_actions_addinherit_np(&actions, requestFD))
+        try check(posix_spawn_file_actions_addinherit_np(&actions, responseFD))
+        let strings = [executable, InternalWorkerMain.sentinel, "--request-fd", String(requestFD), "--response-fd", String(responseFD)]
+        var argv = strings.map { strdup($0) }
+        defer { for pointer in argv { free(pointer) } }
+        guard argv.allSatisfy({ $0 != nil }) else { throw DarwinScriptProcessIO.posixError(ENOMEM) }
+        argv.append(nil)
+        var child: pid_t = 0
+        let code = argv.withUnsafeMutableBufferPointer { posix_spawn(&child, executable, &actions, &attributes, $0.baseAddress!, environ) }
+        try check(code)
+        return child
+    }
+}
+
+extension AppleAutomationJournal.PendingOperation {
+    fileprivate func matches(_ request: AppleAutomationJournal.OperationRequest) -> Bool {
+        operationType == request.operationType &&
+        conversationDigest == request.conversationDigest &&
+        messageDigest == request.messageDigest &&
+        partDigest == request.partDigest &&
+        minimumEvidence == request.minimumEvidence
+    }
+}

@@ -65,7 +65,8 @@ let package = Package(
         // Test-only pre-runtime descriptor observer; no public product or library linkage.
         .executableTarget(name: "LauncherFDProbe", path: "Tests/LauncherFDProbe"),
         .executableTarget(name: "AutomationJournalProbe", dependencies: ["AppleKit"], path: "Tests/AutomationJournalProbe"),
-        .testTarget(name: "AppleKitTests", dependencies: ["AppleKit", "TestSupport", "LauncherFDProbe", "AutomationJournalProbe"]),
+        .executableTarget(name: "AutomationWorkerProbe", dependencies: ["AppleKit"], path: "Tests/AutomationWorkerProbe"),
+        .testTarget(name: "AppleKitTests", dependencies: ["AppleKit", "TestSupport", "LauncherFDProbe", "AutomationJournalProbe", "AutomationWorkerProbe"]),
         .testTarget(name: "EventKitCoreTests", dependencies: ["EventKitCore", "AppleKit"]),
         .testTarget(name: "MessagesKitTests", dependencies: ["MessagesKit", "AppleKit", "TestSupport"]),
         .testTarget(name: "MailKitTests", dependencies: ["MailKit", "AppleKit", "TestSupport"]),

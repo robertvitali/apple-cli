@@ -226,7 +226,7 @@ struct DarwinScriptProcessChildren: ScriptProcessChildren {
     }
 }
 
-final class ScriptPendingReap: @unchecked Sendable {
+package final class ScriptPendingReap: @unchecked Sendable {
     private let lock = NSLock()
     private let pid: pid_t
     private let reaper: any ScriptProcessReaping
@@ -248,7 +248,7 @@ final class ScriptPendingReap: @unchecked Sendable {
     }
 }
 
-protocol ScriptDeferredReaping: Sendable {
+package protocol ScriptDeferredReaping: Sendable {
     func accept(_ pending: ScriptPendingReap)
 }
 
