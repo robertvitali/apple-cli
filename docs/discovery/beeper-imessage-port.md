@@ -1,4 +1,4 @@
-# Beeper-backed Messages capability port
+# Experimental Beeper-backed Messages capability port
 
 ## Contract and integration
 
@@ -9,6 +9,12 @@ or shell out to a second messaging binary. Keep the existing runtime, AppleKit
 permission/output/error/path controls, command defaults and schema version.
 Existing commands remain compatible; new fields and commands are additive.
 No Messages database writes, injection or system protection changes are permitted.
+This is an experimental UI-backed backend contract, not a release or readiness
+claim. The current design does not establish strict GUID-bearing independent AX
+identity or causal completion; it uses bounded UI identity checks and observed
+database postconditions. UI drift can affect the wrong message, and observed
+postconditions cannot prove that no queued late action remains. Mutation result
+envelopes must report the experimental status and verification string.
 The approved unpublished source state adopts `27.0.0` for the macOS 27 source
 baseline only. It does not cut a release, tag, GitHub Release, Homebrew update,
 repository-setting change, publication infrastructure deployment, deployment-minimum
@@ -81,19 +87,26 @@ compatibility caveats for supported macOS versions.
 
 ## Exact reads and identity
 
-Add bounded all-conversation discovery, per-conversation history and single-message
-lookup. Existing named-group chats behavior remains the default. Message mutations and replies require explicit conversation/message identities and
-applicable native parts; validate membership in a read-only database snapshot.
-Conversation operations require exact conversation identity. Creation requires
-resolved recipients and service. Preserve existing recipient/contact send semantics. Never select by body text, latest message, contact
-name or apparent UI activity. A message belonging to several conversations must
-retain the caller-selected membership.
+Add bounded all-conversation discovery, per-conversation history and
+single-message lookup. Existing named-group chats behavior remains the default.
+Message mutations and replies require explicit conversation/message identities
+and applicable native parts; validate exact database chat/message/native-part
+membership in a read-only snapshot. Conversation operations require exact
+conversation identity. Creation requires resolved recipients and service.
+Preserve existing recipient/contact send semantics. Never select by body text,
+latest message, contact name, apparent UI activity or geometry offsets. A message
+belonging to several conversations must retain the caller-selected membership.
 
-Use persistent GUIDs where available, retaining local ROWIDs as local selectors.
-Expose native part identifiers only when decoded from attributed-body metadata;
-never pretend an attachment position or text offset is a native part. Preserve
-bodyless records and distinguish missing messages from undecodable bodies. Missing
-required schema and failed queries are errors, not empty pages. Treat every archived
+Use persistent database GUIDs where available, retaining local ROWIDs as local
+selectors. Expose native part identifiers only when decoded from attributed-body
+metadata; never pretend an attachment position or text offset is a native part.
+Default reaction targeting may select the sole proven native part; it must never
+fabricate part `0` or any other implicit part, and must require explicit part
+selection when several native parts are possible.
+The experimental UI route may use GUID/native-part deep links, but only with the
+strict UI identity checks below. Preserve bodyless records and distinguish
+missing messages from undecodable bodies. Missing required schema and failed
+queries are errors, not empty pages. Treat every archived
 body as untrusted: prohibit unrestricted NSUnarchiver/NSKeyedUnarchiver object
 instantiation; use a constrained parser or explicit secure class allowlist. Bound
 blob size, depth, object count and reference traversal; detect cycles. Unsupported
@@ -112,20 +125,25 @@ A shared AX backend serializes the complete resolution/action/verification cycle
 across processes using a per-user advisory lock in a protected application-state
 directory. Validate directory/file ownership, permissions and symlink refusal;
 lock acquisition has a deadline and descriptors close on every path. Do not unlink
-a held lock. Use one end-to-end deadline and cap retries to read-only phases or
-cases with proof no mutating request was delivered. Return explicit permission,
-unsupported-platform, target-mismatch and uncertain-outcome errors. Run mutating AX
-calls in a bounded, hidden worker mode of the same executable, with a private bounded
-request/response channel. Keep the lock and operation-state ownership in the parent;
-the worker must not independently start operations or clear their records. Worker
-mode accepts no targets or actions from arguments, environment variables or standard
-input. It requires a parent-created inherited anonymous channel, verified parent
-identity and a fresh one-operation nonce bound to the pending record. Reject
+a held lock. The same lock spans pre-read/no-op checks, worker handoff, post-read
+verification and receipt update. Use one end-to-end deadline and cap retries to
+read-only phases or cases with proof no mutating request was delivered. Return
+explicit permission, unsupported-platform, target-mismatch and uncertain-outcome
+errors. Run mutating AX calls in a bounded, hidden worker mode of the same
+executable, with a private bounded request/response channel. Keep the lock and
+operation-state ownership in the parent; the worker must not independently start
+operations or clear their records. Worker mode accepts no targets or actions from
+arguments, environment variables or standard input. It requires a parent-created
+inherited anonymous channel, verified parent identity and a fresh one-operation
+nonce bound to the pending record. Reject
 standalone invocation and mismatched/replayed requests; exit after one bounded
-request. These checks prevent a separate command path from bypassing the parent
-policy, lock and pending-state gate; they do not claim isolation from a hostile
-process with the same user privileges. This avoids a separately installed messaging
-binary or companion executable.
+request. The worker acknowledgement must carry the nonce-bound operation outcome;
+the existing normal/refused/failed outcome enum is sufficient when bound to the
+nonce. The parent independently verifies state under the lock before resolving
+anything, and an ACK alone is insufficient. These checks prevent a separate
+command path from bypassing the parent policy, lock and pending-state gate; they
+do not claim isolation from a hostile process with the same user privileges. This
+avoids a separately installed messaging binary or companion executable.
 
 Before issuing any potentially mutating request, durably record the operation in
 the protected state directory using atomic replacement and file/directory sync.
@@ -136,47 +154,63 @@ minimum verification evidence. Use bounded hashes and lengths instead of message
 bodies or attachment paths where comparison is needed; omit contact names and
 recipient addresses. Any operation that requires additional sensitive persistent
 state needs an explicit reviewed justification. Never put target values or payloads
-in diagnostics. Successful resolution or explicit operator recovery must atomically
-remove the sensitive pending payload while recording only the operation identifier
-and disposition in a bounded local receipt. Recovery must name the unresolved
-operation, explain possible late effects and require explicit acknowledgement;
-ordinary reset or cleanup cannot silently remove the write gate. Define and test
-receipt retention and interrupted cleanup before adding that storage.
+in diagnostics. Observed-state resolution or explicit operator recovery must
+atomically remove the sensitive pending payload while recording only the
+operation identifier and disposition in a bounded local receipt. Recovery must
+name the unresolved operation, explain possible late effects and require
+explicit acknowledgement; ordinary reset, cleanup or no-op handling cannot
+silently remove the write gate. Define and test receipt retention and
+interrupted cleanup before adding that storage.
 Cancellation or timeout must stop and reap owned helper processes before releasing
 the lock, but helper termination does not cancel requests already delivered to
-Messages. Preserve an unresolved record on timeout, crash or uncertain delivery.
-Every later caller checks this record under the same lock and refuses new Messages
-UI writes while it remains unresolved. Read-only status and reconciliation may run.
+Messages. Preserve an unresolved record on timeout, crash, cancellation, failure,
+identity mismatch or uncertain delivery after any possible handoff to Messages.
+Every later caller checks this record under the same lock and refuses new
+Messages UI writes while it remains unresolved. Read-only status and
+reconciliation may run.
 Malformed, inaccessible, foreign-owned or unsafe operation state also blocks writes.
 
-Resolve the record only with operation-specific evidence that proves completion
-and excludes a still-pending request, or proof that no mutating request was issued.
-A matching current snapshot alone does not establish causality: another actor may
-have produced it while this operation's toggle or keyboard action is still queued.
-Idempotence alone is insufficient too, because a late request could overturn a
-later conflicting operation. Where causal completion cannot be established, retain
-the unresolved record and require explicit operator recovery that explains possible
-late effects; never automatically clear it after a delay. The backend promises
-termination of owned helpers and durable gating of later writes, not cancellation
-or quiescence inside Messages. Normal success still requires an observed exact
-postcondition before durably resolving the record. Tests cover crashes before
-request delivery, after delivery, after verification but before record cleanup,
-and a competing process attempting a new write at each boundary.
+Resolve the record automatically only when no mutating request was issued, or
+after a normal nonce-bound worker outcome plus the operation-specific observed
+postcondition while the operation still holds the lock. Persisted message and
+reaction mutations require exact database verification. Non-persisted operations
+such as typing require bounded UI/AX observation and evidence of their owned
+lifetime and cleanup; their verification string must name that evidence rather
+than imply a database check. That resolution has
+`observedState` disposition and an explicit result verification string; it is
+not causal completion and does not prove that no late queued action remains
+inside Messages. A matching current snapshot alone never clears a failed or
+uncertain operation: another actor may have produced it while this operation's
+toggle or keyboard action is still queued. Idempotence alone is insufficient too,
+because a late request could overturn a later conflicting operation. Prior
+failed or uncertain operations require explicit operator recovery that explains
+possible late effects; never automatically clear them after a delay. The backend
+promises termination of owned helpers and durable gating of later writes, not
+cancellation or quiescence inside Messages. Tests cover crashes before request
+delivery, after delivery, after verification but before record cleanup,
+cancellation, worker failure, identity mismatch and a competing process
+attempting a new write at each boundary.
 
-An advisory lock cannot exclude the user or unrelated automation. Bind
-process/window/conversation/message identity and revalidate immediately before
-every side effect; abort on drift.
+An advisory lock cannot exclude the user or unrelated automation. Bind exact
+database conversation/message/part identifiers plus process/window/route objects
+and revalidate immediately before every side effect; abort on drift.
 
-Select a conversation by its exact native identity and resolve message/part through
-GUID-bearing UI identifiers. Database membership alone does not prove the selected
-UI conversation. Require independent exact UI identity evidence; when unavailable,
-fail closed. Evaluate a secondary Messages instance in isolated manual validation;
-never assume it preserves correctness or desktop state. Do not adopt upstream
-same-contact, focus-change or sleep-based targeting fallbacks.
+Select a conversation by its exact native identity and resolve message/part
+through experimental GUID/native-part UI deep links. Database membership alone
+does not prove the selected UI conversation. Require strict stable
+process/window/transcript identity and a unique selected route before every side
+effect; when unavailable, fail closed. Forbid body/latest-message, same-contact,
+geometry-offset, focus-change and sleep-based targeting fallbacks. Evaluate a
+secondary Messages instance in isolated manual validation; never assume it
+preserves correctness or desktop state.
 
 Every write uses AppleKit execution and sandbox policy once at command entry.
-Dry-run returns a resolved preview without driving AX or changing state. Execute
-returns dry_run false and only claims success after observing the postcondition.
+Dry-run returns a resolved preview without driving AX, launching UI workers or
+changing state. Execute returns dry_run false. A no-op found by the locked
+pre-read returns distinct `already_in_desired_state`, creates no observed-state
+receipt when no operation record was written, and cannot bypass a pending record.
+A mutating handoff reports experimental `observedState` only after observing its
+documented operation-specific postcondition.
 Uncertain writes are reconciled before any retry; sends are never blindly retried.
 Absence in a delayed database snapshot is not proof that a send failed. Refuse
 pre-existing composer content unless an operation explicitly supports preserving it;
@@ -191,12 +225,14 @@ self-addressed fixtures. Non-self/group operations require operator participatio
 2. The shared automation backend establishes locking, deadlines and diagnostics.
 3. Reaction inspect/set/replace/remove supports standard and supported custom emoji.
    Read the current outgoing reaction; already-desired/absent is idempotent before
-   delivery and never clears an unresolved operation record. Preserve
-   exact grapheme identity, toggle once and verify the observed final reaction.
+   delivery only when no operation record is pending, and never clears an
+   unresolved operation record. Preserve exact grapheme identity, toggle once and
+   verify the observed final reaction.
    Investigate picker identifiers and selected state for custom removal. Do not
    copy upstream skin-tone stripping or treat UI action completion as success.
 4. Text and attachment replies require exact quoted message/part identity and verify
-   the persisted reply relationship. Preserve existing attachment path controls.
+   the persisted reply relationship through the same observed-state contract.
+   Preserve existing attachment path controls.
 5. Rich reads expose supported reply relationships, authors, edits, delivery/error/
    read metadata, unsend markers, mentions and stickers. Missing/unsupported fields
    remain distinguishable; sticker reaction writes are unsupported.
@@ -222,9 +258,9 @@ self-addressed fixtures. Non-self/group operations require operator participatio
 Expose newline-delimited versioned JSON envelopes and explicit bounded filters.
 Use a durable, private per-consumer journal with monotonically increasing sequence
 numbers and an opaque checkpoint bound to journal generation and filter signature.
-Use one bounded-lock writer per consumer journal. Persist appended events, prior
-normalized observation state/fingerprints and scan progress in one transaction before
-emitting them. Filters are immutable within a generation; reject incompatible reuse
+Use one cross-process bounded-lock writer per consumer journal. Persist appended
+events, prior normalized observation state/fingerprints and scan progress in one
+transaction before emitting them. Filters are immutable within a generation; reject incompatible reuse
 and require explicit new-generation initialization. Resume replays journal records after the supplied checkpoint;
 consumers persist the checkpoint after handling an event and tolerate duplicates.
 A crash before consumer checkpoint persistence can replay an event. Initial start
