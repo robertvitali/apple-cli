@@ -16,6 +16,8 @@ import os
 from pathlib import Path
 import sys
 import tempfile
+import threading
+import time
 from types import MappingProxyType, SimpleNamespace
 import unittest
 from unittest import mock
@@ -125,10 +127,88 @@ class LifecycleFixture(unittest.TestCase):
         values.update(changes)
         return protocol.CommandRequest(**values)
 
+    def pipe_capacity(self):
+        reader, writer = os.pipe()
+        try:
+            os.set_blocking(writer, False)
+            capacity = 0
+            chunk = b"x" * 65536
+            while True:
+                try:
+                    capacity += os.write(writer, chunk)
+                except BlockingIOError:
+                    return capacity
+        finally:
+            os.close(reader)
+            os.close(writer)
+
+    def assert_worker_receipt_larger_than_pipe_capacity(self, raw):
+        self.assertGreater(len(raw), self.pipe_capacity())
+
     def worker(self, *, outcome="success", status=0, stdout=b"fixed\n", stderr=b"",
-               transform=None, after_wait=None, delayed_tail=None):
+               transform=None, after_wait=None, delayed_tail=None,
+               wait_until_receipt_blocks=False):
         observed = []
-        held_writers = []
+        producers = []
+
+        def close_writer(producer):
+            with producer["lock"]:
+                descriptor = producer["writer"]
+                if descriptor is None:
+                    return
+                producer["writer"] = None
+            try:
+                os.close(descriptor)
+            except OSError:
+                pass
+
+        def finish_producer(producer, *, stop):
+            if stop:
+                producer["stop"].set()
+            thread = producer.get("thread")
+            if producer.get("started") and thread is not None:
+                thread.join(timeout=2.0)
+                if thread.is_alive():
+                    close_writer(producer)
+                    thread.join(timeout=2.0)
+            close_writer(producer)
+            alive = bool(producer.get("started") and thread is not None
+                         and thread.is_alive())
+            return alive, list(producer["errors"])
+
+        def assert_producer_clean(producer, *, stop):
+            alive, errors = finish_producer(producer, stop=stop)
+            self.assertFalse(alive)
+            self.assertEqual(errors, [])
+
+        def write_all(producer, data, *, deadline=None, blocked=None):
+            offset = 0
+            while offset < len(data):
+                if producer["stop"].is_set():
+                    return
+                if deadline is not None and time.monotonic() >= deadline:
+                    raise AssertionError("synthetic receipt write timed out")
+                with producer["lock"]:
+                    descriptor = producer["writer"]
+                    if descriptor is None:
+                        return
+                    try:
+                        written = os.write(descriptor, data[offset:])
+                    except BlockingIOError:
+                        if blocked is not None:
+                            blocked.set()
+                        written = None
+                    except InterruptedError:
+                        written = None
+                    except OSError as error:
+                        if error.errno in (errno.EBADF, errno.EPIPE):
+                            return
+                        raise
+                if written is None:
+                    producer["stop"].wait(0.001)
+                    continue
+                self.assertGreater(written, 0)
+                offset += written
 
         def spawn(session, request, context, directory):
             self.events.append("spawn")
@@ -152,18 +232,50 @@ class LifecycleFixture(unittest.TestCase):
             if transform:
                 raw = transform(raw)
             reader, writer = os.pipe()
+            producer = None
             try:
-                self.assertEqual(os.write(writer, raw), len(raw))
+                os.set_blocking(writer, False)
+                producer = {
+                    "writer": writer,
+                    "stop": threading.Event(),
+                    "blocked": threading.Event(),
+                    "errors": [],
+                    "lock": threading.Lock(),
+                    "thread": None,
+                    "started": False,
+                }
+                producers.append(producer)
+                close_after_initial = not raw.endswith(b"\n")
+                initial_deadline = time.monotonic() + 2.0
+
+                def send_receipt():
+                    try:
+                        write_all(producer, raw, deadline=initial_deadline,
+                                  blocked=producer["blocked"])
+                    except BaseException as error:
+                        producer["errors"].append(error)
+                    finally:
+                        if close_after_initial:
+                            close_writer(producer)
+
+                thread = threading.Thread(target=send_receipt,
+                                          name="synthetic-receipt-writer")
+                producer["thread"] = thread
+                thread.start()
+                producer["started"] = True
+                if wait_until_receipt_blocks:
+                    self.assertTrue(producer["blocked"].wait(timeout=2.0))
+                    self.assertEqual(producer["errors"], [])
             except BaseException:
+                if producer is not None:
+                    finish_producer(producer, stop=True)
+                else:
+                    try:
+                        os.close(writer)
+                    except OSError:
+                        pass
                 os.close(reader)
-                os.close(writer)
                 raise
-            if delayed_tail is None:
-                os.close(writer)
-            else:
-                writer_info = os.fstat(writer)
-                held_writers.append((writer, (writer_info.st_dev, writer_info.st_ino,
-                                              writer_info.st_mode)))
             # Retain only this synthetic FD for fixture fallback cleanup. The
             # success assertion checks parent closure before any new FD opens.
             pipe_info = os.fstat(reader)
@@ -175,8 +287,19 @@ class LifecycleFixture(unittest.TestCase):
                 self.events.append("wait")
                 anchor.returncode = -9
                 if delayed_tail is not None:
-                    self.assertEqual(os.write(writer, delayed_tail), len(delayed_tail))
-                    os.close(writer)
+                    producer["thread"].join(timeout=2.0)
+                    if producer["thread"].is_alive() or producer["errors"]:
+                        alive, errors = finish_producer(producer, stop=True)
+                        self.assertFalse(alive)
+                        self.assertEqual(errors, [])
+                    self.assertEqual(producer["errors"], [])
+                    try:
+                        write_all(producer, delayed_tail,
+                                  deadline=time.monotonic() + 2.0)
+                    finally:
+                        close_writer(producer)
+                else:
+                    assert_producer_clean(producer, stop=True)
                 if after_wait:
                     after_wait(directory)
                 return -9
@@ -188,7 +311,13 @@ class LifecycleFixture(unittest.TestCase):
                                                    side_effect=spawn))
 
         def cleanup():
-            descriptors = [(entry[2], entry[3]) for entry in observed] + held_writers
+            failures = []
+            for producer in producers:
+                alive, errors = finish_producer(producer, stop=True)
+                if alive:
+                    failures.append("synthetic receipt writer did not stop")
+                failures.extend(str(error) for error in errors)
+            descriptors = [(entry[2], entry[3]) for entry in observed]
             for descriptor, expected in descriptors:
                 try:
                     actual = os.fstat(descriptor)
@@ -196,6 +325,7 @@ class LifecycleFixture(unittest.TestCase):
                         os.close(descriptor)
                 except OSError:
                     pass
+            self.assertEqual(failures, [])
 
         self.addCleanup(cleanup)
         return observed
@@ -564,7 +694,16 @@ class CommandLifecycleTests(LifecycleFixture):
     def test_cancellation_after_worker_assignment_still_cleans_owned_anchor(self):
         value = self.ready_session()
         self.current_request = self.request()
-        observed = self.worker(transform=lambda raw: (value._latch_cancellation(2, None), raw)[1])
+
+        def cancel_with_oversized_receipt(raw):
+            value._latch_cancellation(2, None)
+            padding = max(0, self.pipe_capacity() + 1 - len(raw))
+            oversized = raw[:-1] + (b" " * padding) + raw[-1:]
+            self.assert_worker_receipt_larger_than_pipe_capacity(oversized)
+            return oversized
+
+        observed = self.worker(transform=cancel_with_oversized_receipt,
+                               wait_until_receipt_blocks=True)
         with self.assertRaises(core.ProcessFailure) as raised:
             value.run(self.current_request)
         self.assertEqual(raised.exception.reason, "cancelled")
