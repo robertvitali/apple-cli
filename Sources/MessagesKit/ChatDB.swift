@@ -1288,6 +1288,503 @@ public struct ChatDB {
         return (chat, message)
     }
 
+    public mutating func exactReactionInspect(chat selector: ExactChatSelector,
+                                              message messageSelector: ExactMessageSelector,
+                                              partIndex: Int? = nil,
+                                              rowLimit: Int = 512) throws -> ExactReactionInspect {
+        guard (1...10_000).contains(rowLimit) else {
+            throw AppleError.validation("rowLimit must be between 1 and 10000")
+        }
+        // The shared legacy binder uses C-string lengths. Refuse unsafe selectors
+        // before exactGet so an embedded NUL cannot resolve a different GUID.
+        if case .guid(let guid) = selector, !safeReactionTargetGUID(guid) {
+            throw AppleError.validation("reaction chat GUID is empty or contains unsafe controls")
+        }
+        if case .guid(let guid) = messageSelector, !safeReactionTargetGUID(guid) {
+            throw AppleError.validation("reaction message GUID is empty or contains unsafe controls")
+        }
+        let (chat, message) = try exactGet(chat: selector, message: messageSelector)
+        let chatTarget = ExactReactionChatTarget(rowid: chat.rowid, guid: chat.guid)
+        let messageTarget = ExactReactionMessageTarget(rowid: message.rowid, guid: message.message_guid)
+        var unknownReasons: [String] = []
+        // ROWID selection bypasses selector validation; the stored identity still
+        // has to be safe before either an outgoing state or mutation is authoritative.
+        let chatGUIDSafe = chat.guid.map(safeReactionTargetGUID) ?? false
+        if !chatGUIDSafe {
+            unknownReasons.append(chat.guid == nil ? "missing-target-chat-guid" : "unsafe-target-chat-guid")
+        }
+        let chatGUIDUnique: Bool
+        if chatGUIDSafe, let guid = chat.guid {
+            chatGUIDUnique = try reactionChatGUIDIdentifiesSelectedChat(guid, chatRowid: chat.rowid)
+            if !chatGUIDUnique { unknownReasons.append("target-chat-guid-not-globally-unique") }
+        } else {
+            chatGUIDUnique = false
+        }
+
+        let reactionSchema = try reactionColumns()
+        guard reactionSchema.available else {
+            unknownReasons.append(contentsOf: reactionSchema.missing.map { "missing-reaction-column:\($0)" })
+            return ExactReactionInspect(
+                status: "unavailable",
+                chat: chatTarget,
+                message: messageTarget,
+                target: ExactReactionTarget(chat_rowid: chat.rowid, chat_guid: chat.guid,
+                                            message_rowid: message.rowid, message_guid: message.message_guid,
+                                            part_index: nil, mutation_eligible: false),
+                current_outgoing: ExactCurrentOutgoingReaction(status: "unknown", key: nil, reaction: nil),
+                reactions_by_author: [],
+                evidence: ExactReactionEvidence(row_limit: rowLimit, rows_examined: 0,
+                                                rows_capped: false, unknown_reasons: unknownReasons)
+            )
+        }
+
+        let provenPart = try resolveExactReactionPart(message, requested: partIndex, unknownReasons: &unknownReasons)
+        guard let messageGUID = message.message_guid, safeReactionTargetGUID(messageGUID) else {
+            unknownReasons.append(message.message_guid == nil ? "missing-target-guid" : "unsafe-target-guid")
+            return ExactReactionInspect(
+                status: message.message_guid == nil ? "unavailable" : "ambiguous",
+                chat: chatTarget,
+                message: messageTarget,
+                target: ExactReactionTarget(chat_rowid: chat.rowid, chat_guid: chat.guid,
+                                            message_rowid: message.rowid, message_guid: message.message_guid,
+                                            part_index: provenPart, mutation_eligible: false),
+                current_outgoing: ExactCurrentOutgoingReaction(status: "unknown", key: nil, reaction: nil),
+                reactions_by_author: [],
+                evidence: ExactReactionEvidence(row_limit: rowLimit, rows_examined: 0,
+                                                rows_capped: false, unknown_reasons: unknownReasons)
+            )
+        }
+
+        let aliases = reactionAliases(messageGUID: messageGUID, parts: reactionAliasParts(message, selected: provenPart))
+        let rows = try reactionRows(chatRowid: chat.rowid, aliases: aliases.all, rowLimit: rowLimit,
+                                    hasCustomEmoji: reactionSchema.hasCustomEmoji)
+        var capped = false
+        let visibleRows: [SQLiteReader.Row]
+        if rows.count > rowLimit {
+            capped = true
+            unknownReasons.append("reaction-row-limit-exceeded")
+            visibleRows = Array(rows.prefix(rowLimit))
+        } else {
+            visibleRows = rows
+        }
+
+        let guidUnique = try messageGUIDIsGloballyUnique(messageGUID)
+        if !guidUnique { unknownReasons.append("target-guid-not-globally-unique") }
+        let aliasOwnershipUnique = try reactionAliasesHaveSingleOwner(aliases.all, messageRowid: message.rowid)
+        if !aliasOwnershipUnique { unknownReasons.append("ambiguous-reaction-alias-ownership") }
+        let membership = try exactSingleChatMembership(messageRowid: message.rowid, chatRowid: chat.rowid)
+        if membership.capped {
+            unknownReasons.append("target-chat-membership-limit-exceeded")
+        } else if !membership.single {
+            unknownReasons.append("target-message-not-distinct-single-chat-member")
+        }
+        let targetUncertain = !chatGUIDSafe || !chatGUIDUnique || !guidUnique || !aliasOwnershipUnique || !membership.single || membership.capped
+            || provenPart == nil || capped
+        let authorStates = foldReactions(rows: visibleRows, selectedAliases: aliases.selected,
+                                         bareAliases: aliases.bare, targetUncertain: targetUncertain,
+                                         hasCustomEmoji: reactionSchema.hasCustomEmoji,
+                                         unknownReasons: &unknownReasons)
+        if provenPart == nil {
+            unknownReasons.append("unknown-part")
+        }
+        let currentOutgoing: ExactCurrentOutgoingReaction
+        if targetUncertain || authorStates.contains(where: { $0.author.kind == "unknown" || ($0.author.kind == "self" && $0.status == "unknown") }) {
+            currentOutgoing = ExactCurrentOutgoingReaction(status: "unknown", key: nil, reaction: nil)
+        } else if let mine = authorStates.first(where: { $0.author.kind == "self" })?.current {
+            currentOutgoing = ExactCurrentOutgoingReaction(status: "present", key: mine.key, reaction: mine)
+        } else {
+            currentOutgoing = ExactCurrentOutgoingReaction(status: "absent", key: nil, reaction: nil)
+        }
+
+        let mutationEligible = chatGUIDSafe
+            && chatGUIDUnique
+            && guidUnique
+            && aliasOwnershipUnique
+            && membership.single
+            && !membership.capped
+            && provenPart != nil
+            && !capped
+            && currentOutgoing.status != "unknown"
+            && unknownReasons.isEmpty
+        let status = unknownReasons.isEmpty ? "ok" : "ambiguous"
+
+        return ExactReactionInspect(
+            status: status,
+            chat: chatTarget,
+            message: messageTarget,
+            target: ExactReactionTarget(chat_rowid: chat.rowid, chat_guid: chat.guid,
+                                        message_rowid: message.rowid, message_guid: message.message_guid,
+                                        part_index: provenPart, mutation_eligible: mutationEligible),
+            current_outgoing: currentOutgoing,
+            reactions_by_author: authorStates,
+            evidence: ExactReactionEvidence(row_limit: rowLimit, rows_examined: visibleRows.count,
+                                            rows_capped: capped,
+                                            unknown_reasons: Array(Set(unknownReasons)).sorted())
+        )
+    }
+
+    public func exactParticipantHandles(chatRowid: Int64) throws -> [String] {
+        _ = try requiredColumns("chat_handle_join", ["chat_id", "handle_id"])
+        _ = try requiredColumns("handle", ["ROWID", "id"])
+        let rows = try reader.rows("""
+            SELECT chj.chat_id AS join_chat_rowid, chj.handle_id AS handle_rowid, h.id AS handle
+            FROM chat_handle_join chj
+            LEFT JOIN handle h ON h.ROWID = chj.handle_id
+            WHERE chj.chat_id = CAST(?1 AS INTEGER)
+            ORDER BY chj.handle_id
+            LIMIT 10001
+            """, [String(chatRowid)])
+        guard !rows.isEmpty, rows.count <= 10_000 else {
+            throw AppleError.upstream("Messages database chat participants are missing or exceed the inspection limit")
+        }
+        var handles: [String] = []
+        for row in rows {
+            guard case .integer(let joinedChatRowid)? = row.values["join_chat_rowid"],
+                  joinedChatRowid == chatRowid else {
+                throw AppleError.upstream("Messages database chat participant references an invalid chat id")
+            }
+            guard case .integer(let handleRowid)? = row.values["handle_rowid"], handleRowid > 0 else {
+                throw AppleError.upstream("Messages database returned a chat participant without a handle id")
+            }
+            guard case .text(let handle)? = row.values["handle"], !handle.isEmpty else {
+                throw AppleError.upstream("Messages database chat participant references a missing or unknown handle")
+            }
+            handles.append(handle)
+        }
+        return handles
+    }
+
+    private func reactionColumns() throws -> (available: Bool, missing: [String], hasCustomEmoji: Bool) {
+        let columns = try requiredColumns("message", ["ROWID"])
+        let required: Set<String> = ["associated_message_guid", "associated_message_type", "is_from_me", "handle_id", "date"]
+        let missing = required.subtracting(columns).sorted()
+        return (missing.isEmpty, missing, columns.contains("associated_message_emoji"))
+    }
+
+    private func resolveExactReactionPart(_ message: ExactMessage, requested: Int?,
+                                          unknownReasons: inout [String]) throws -> Int? {
+        if let requested {
+            guard requested >= 0 else { throw AppleError.validation("partIndex must be >= 0") }
+            if message.native_parts_available,
+               let parts = message.native_parts,
+               parts.contains(where: { $0.index == requested }) {
+                return requested
+            }
+            unknownReasons.append("part-not-proven")
+            return nil
+        }
+        guard message.native_parts_available, let parts = message.native_parts else {
+            unknownReasons.append("native-parts-unavailable:\(message.native_parts_reason)")
+            return nil
+        }
+        let indexes = Set(parts.map(\.index))
+        if indexes.count == 1 { return indexes.first }
+        if indexes.count > 1 {
+            unknownReasons.append("multiple-native-parts-require-explicit-part")
+            return nil
+        }
+        unknownReasons.append("empty-native-parts")
+        return nil
+    }
+
+    private func reactionAliasParts(_ message: ExactMessage, selected: Int?) -> [Int] {
+        if let selected { return [selected] }
+        guard message.native_parts_available, let parts = message.native_parts else { return [] }
+        return Array(Set(parts.map(\.index))).sorted()
+    }
+
+    private func reactionAliases(messageGUID: String, parts: [Int]) -> (selected: Set<String>, bare: Set<String>, all: [String]) {
+        let bare = Set([messageGUID, "bp:\(messageGUID)"])
+        var selected = bare
+        for part in parts {
+            selected.insert("p:\(part)/\(messageGUID)")
+            selected.insert("p:\(part)/bp:\(messageGUID)")
+        }
+        return (selected, bare, Array(selected).sorted())
+    }
+
+    private func reactionAliasesHaveSingleOwner(_ aliases: [String], messageRowid: Int64) throws -> Bool {
+        // Invert EVERY accepted alias form: H, bp:H, p:N/H, p:N/bp:H.
+        // A literal-GUID uniqueness check misses G versus bp:G, and checking only
+        // those two misses a message whose literal GUID is p:N/G. Check globally,
+        // including possible parts of other messages without assuming their bodies
+        // prove absence. One additional possible owner is sufficient to refuse.
+        var owners = Set(aliases)
+        for alias in aliases {
+            if alias.hasPrefix("bp:") { owners.insert(String(alias.dropFirst(3))) }
+            if alias.hasPrefix("p:"), let slash = alias.firstIndex(of: "/") {
+                let part = String(alias[alias.index(alias.startIndex, offsetBy: 2)..<slash])
+                if let index = Int(part), index >= 0, String(index) == part {
+                    let suffix = String(alias[alias.index(after: slash)...])
+                    owners.insert(suffix)
+                    if suffix.hasPrefix("bp:") { owners.insert(String(suffix.dropFirst(3))) }
+                }
+            }
+        }
+        let candidates = owners.sorted()
+        let placeholders = candidates.indices.map { "?\($0 + 1)" }.joined(separator: ", ")
+        let rows = try reader.rows("""
+            SELECT ROWID AS rowid FROM message
+            WHERE guid COLLATE BINARY IN (\(placeholders))
+            LIMIT 2
+            """, candidates)
+        return rows.count == 1 && rows[0].int("rowid") == messageRowid
+    }
+
+    private func reactionRows(chatRowid: Int64, aliases: [String], rowLimit: Int,
+                              hasCustomEmoji: Bool) throws -> [SQLiteReader.Row] {
+        guard !aliases.isEmpty else { return [] }
+        let placeholders = aliases.indices.map { "?\($0 + 2)" }.joined(separator: ", ")
+        let customEmojiSQL = hasCustomEmoji ? "m.associated_message_emoji" : "NULL"
+        let sql = """
+            SELECT m.ROWID AS rowid, m.guid AS message_guid,
+                   m.associated_message_guid AS associated_message_guid,
+                   m.associated_message_type AS associated_message_type,
+                   \(customEmojiSQL) AS associated_message_emoji,
+                   m.is_from_me AS is_from_me, m.handle_id AS handle_id, m.date AS raw_date,
+                   \(ChatDB.normalizedSecondsSQL) AS normalized_seconds,
+                   \(ChatDB.normalizedNanosecondsSQL) AS normalized_nanoseconds
+            FROM chat_message_join cmj
+            JOIN message m ON m.ROWID = cmj.message_id
+            WHERE cmj.chat_id = CAST(?1 AS INTEGER)
+              AND m.associated_message_guid IN (\(placeholders))
+            ORDER BY normalized_seconds, normalized_nanoseconds, m.ROWID
+            LIMIT \(rowLimit + 1)
+            """
+        return try reader.rows(sql, [String(chatRowid)] + aliases)
+    }
+
+    private func foldReactions(rows: [SQLiteReader.Row], selectedAliases: Set<String>, bareAliases: Set<String>,
+                               targetUncertain: Bool, hasCustomEmoji: Bool,
+                               unknownReasons: inout [String]) -> [ExactReactionAuthorState] {
+        struct Accumulator {
+            var author: ExactReactionAuthor
+            var current: ExactReactionValue?
+            var events: [ExactReactionEvent] = []
+            var unknown = false
+        }
+        var states: [String: Accumulator] = [:]
+        var order: [String] = []
+
+        for row in rows {
+            guard let associatedGUID = row.text("associated_message_guid"),
+                  selectedAliases.contains(associatedGUID) else { continue }
+            // No recorded contract proves any exact-associated type is irrelevant.
+            // Retain future/NULL types as evidence; never guess their add/remove action.
+            let rawType: Int64?
+            if case .integer(let value)? = row.values["associated_message_type"] {
+                rawType = value
+            } else {
+                rawType = nil
+            }
+            let customEmoji: String?
+            if case .text(let value)? = row.values["associated_message_emoji"] {
+                customEmoji = value
+            } else {
+                customEmoji = nil
+            }
+            let mapped = rawType.flatMap {
+                reactionValue(type: $0, emoji: customEmoji, hasCustomEmoji: hasCustomEmoji)
+            } ?? (action: "unknown", value: ExactReactionValue(
+                key: "unsupported:type:\(rawType.map(String.init) ?? "unknown")",
+                name: "unknown", emoji: customEmoji, supported: false))
+            var uncertain = targetUncertain || !mapped.value.supported
+            if !mapped.value.supported { unknownReasons.append("unknown-reaction-type") }
+            if rawType == 2006 || rawType == 3006, mapped.value.emoji == nil {
+                unknownReasons.append("missing-custom-emoji")
+            }
+            // Even a sole decoded native part does not prove that a bare GUID or
+            // bp:GUID event refers to it. The contract permits default part selection,
+            // not alias remapping. Keep the evidence but refuse an authoritative fold.
+            if bareAliases.contains(associatedGUID) {
+                uncertain = true
+                unknownReasons.append("bare-associated-message-guid-for-part-target")
+            }
+
+            let author = reactionAuthor(row)
+            let authorKey = reactionAuthorKey(author)
+            if author.kind == "unknown" {
+                uncertain = true
+                unknownReasons.append("unknown-author")
+            }
+            // SQL arithmetic can coerce malformed TEXT/REAL into plausible dates.
+            // Only integer storage and integer normalization may establish ordering.
+            let seconds: Int64?
+            let nanos: Int64?
+            if case .integer? = row.values["raw_date"],
+               case .integer(let s)? = row.values["normalized_seconds"],
+               case .integer(let n)? = row.values["normalized_nanoseconds"],
+               (0..<1_000_000_000).contains(n) {
+                seconds = s
+                nanos = n
+            } else {
+                seconds = nil
+                nanos = nil
+                uncertain = true
+                if case .null? = row.values["raw_date"] {
+                    unknownReasons.append("null-reaction-timestamp")
+                } else {
+                    unknownReasons.append("invalid-reaction-timestamp")
+                }
+            }
+            if states[authorKey] == nil {
+                states[authorKey] = Accumulator(author: author)
+                order.append(authorKey)
+            }
+            let event = ExactReactionEvent(
+                rowid: row.int("rowid") ?? 0,
+                message_guid: row.text("message_guid"),
+                action: mapped.action,
+                associated_message_guid: associatedGUID,
+                reaction: mapped.value,
+                normalized_seconds: seconds,
+                normalized_nanoseconds: nanos
+            )
+            states[authorKey]?.events.append(event)
+            // Uncertainty is sticky across this author's entire fold: a later known
+            // event cannot establish ordering against an undated or unsupported event.
+            if uncertain { states[authorKey]?.unknown = true }
+            if mapped.action == "add" {
+                states[authorKey]?.current = mapped.value
+            } else if let current = states[authorKey]?.current,
+                      current.key.utf8.elementsEqual(mapped.value.key.utf8) {
+                // Swift String equality normalizes Unicode; reaction identity must
+                // retain byte-distinct custom graphemes, including variation selectors.
+                states[authorKey]?.current = nil
+            }
+        }
+        return order.compactMap { key in
+            guard let state = states[key] else { return nil }
+            return ExactReactionAuthorState(author: state.author,
+                                           current: state.unknown ? nil : state.current, events: state.events,
+                                           status: state.unknown ? "unknown" : (state.current == nil ? "absent" : "present"))
+        }
+    }
+
+    private func reactionAuthor(_ row: SQLiteReader.Row) -> ExactReactionAuthor {
+        // Row.int intentionally coerces REAL/TEXT elsewhere. Author identity cannot
+        // use that coercion: 0.5, NULL, or a future flag value is not a known sender.
+        switch row.values["is_from_me"] {
+        case .integer(1)?:
+            return ExactReactionAuthor(kind: "self", handle_id: nil, is_from_me: true)
+        case .integer(0)?:
+            guard case .integer(let handleID)? = row.values["handle_id"], handleID > 0 else {
+                return ExactReactionAuthor(kind: "unknown", handle_id: nil, is_from_me: false)
+            }
+            return ExactReactionAuthor(kind: "other", handle_id: handleID, is_from_me: false)
+        default:
+            return ExactReactionAuthor(kind: "unknown", handle_id: nil, is_from_me: nil)
+        }
+    }
+
+    private func reactionAuthorKey(_ author: ExactReactionAuthor) -> String {
+        switch author.kind {
+        case "self": return "self"
+        case "other": return "handle:\(author.handle_id ?? -1)"
+        default: return "unknown"
+        }
+    }
+
+    private func reactionValue(type: Int64, emoji: String?, hasCustomEmoji: Bool) -> (action: String, value: ExactReactionValue)? {
+        guard (2000...2007).contains(type) || (3000...3007).contains(type) else { return nil }
+        let add = (2000...2007).contains(type)
+        let normalized = add ? type : type - 1000
+        let action = add ? "add" : "remove"
+        switch normalized {
+        case 2000: return (action, ExactReactionValue(key: "heart", name: "heart", emoji: nil, supported: true))
+        case 2001: return (action, ExactReactionValue(key: "like", name: "like", emoji: nil, supported: true))
+        case 2002: return (action, ExactReactionValue(key: "dislike", name: "dislike", emoji: nil, supported: true))
+        case 2003: return (action, ExactReactionValue(key: "laugh", name: "laugh", emoji: nil, supported: true))
+        case 2004: return (action, ExactReactionValue(key: "emphasize", name: "emphasize", emoji: nil, supported: true))
+        case 2005: return (action, ExactReactionValue(key: "question", name: "question", emoji: nil, supported: true))
+        case 2006:
+            let value = hasCustomEmoji ? emoji.flatMap { validCustomReactionEmoji($0) ? $0 : nil } : nil
+            return (action, ExactReactionValue(key: value.map { "custom:\($0)" } ?? "custom:unknown",
+                                               name: value == nil ? "unknown" : "custom",
+                                               emoji: value, supported: value != nil))
+        case 2007:
+            return (action, ExactReactionValue(key: "unsupported:sticker", name: "unknown", emoji: nil, supported: false))
+        default:
+            return nil
+        }
+    }
+
+    private func safeReactionTargetGUID(_ guid: String) -> Bool {
+        !guid.isEmpty && !guid.unicodeScalars.contains {
+            switch $0.properties.generalCategory {
+            case .control, .format, .lineSeparator, .paragraphSeparator: return true
+            default: return false
+            }
+        }
+    }
+
+    private func validCustomReactionEmoji(_ value: String) -> Bool {
+        // Deliberately bounded grammar, not a claim to support every Unicode emoji:
+        // * keycap: [0-9#*] FE0F? 20E3;
+        // * standalone non-component emoji scalar, optionally FE0F for a text-
+        //   presentation base OR one modifier for an Emoji_Modifier_Base;
+        // * technologist ZWJ: [woman|man|person] modifier? 200D laptop.
+        // Flags, tags, other ZWJ sequences and all unconsumed suffixes are unknown.
+        // Validate scalars only; never normalize, strip or re-encode the value.
+        let scalars = Array(value.unicodeScalars)
+        guard let first = scalars.first else { return false }
+        let codes = scalars.map(\.value)
+        if (0x30...0x39).contains(first.value) || first.value == 0x23 || first.value == 0x2A {
+            return codes == [first.value, 0x20E3] || codes == [first.value, 0xFE0F, 0x20E3]
+        }
+        if codes.contains(0x200D) {
+            guard [UInt32(0x1F469), 0x1F468, 0x1F9D1].contains(first.value) else { return false }
+            if codes.count == 3 { return codes[1...] == [0x200D, 0x1F4BB] }
+            return codes.count == 4 && scalars[1].properties.isEmojiModifier
+                && codes[2...] == [0x200D, 0x1F4BB]
+        }
+        guard first.value > 0x7F, first.properties.isEmoji,
+              !first.properties.isEmojiModifier,
+              !(0x1F1E6...0x1F1FF).contains(first.value), // regional-indicator components
+              !(0x1F9B0...0x1F9B3).contains(first.value) // hair components
+        else { return false }
+        if codes.count == 1 { return true }
+        guard codes.count == 2 else { return false }
+        return (codes[1] == 0xFE0F && !first.properties.isEmojiPresentation)
+            || (first.properties.isEmojiModifierBase && scalars[1].properties.isEmojiModifier)
+    }
+
+    private func messageGUIDIsGloballyUnique(_ guid: String) throws -> Bool {
+        let rows = try reader.rows("SELECT COUNT(*) AS count FROM message WHERE guid = ?1", [guid])
+        return rows.first?.int("count") == 1
+    }
+
+    private func reactionChatGUIDIdentifiesSelectedChat(_ guid: String, chatRowid: Int64) throws -> Bool {
+        let rows = try reader.rows("""
+            SELECT ROWID AS rowid FROM chat
+            WHERE guid COLLATE BINARY = ?1
+            LIMIT 2
+            """, [guid])
+        return rows.count == 1 && rows[0].int("rowid") == chatRowid
+    }
+
+    private func exactSingleChatMembership(messageRowid: Int64, chatRowid: Int64) throws -> (single: Bool, capped: Bool) {
+        // Numeric parameter casts preserve matches even without column affinity;
+        // leave stored membership values untouched for the validation below.
+        let rows = try reader.rows("""
+            SELECT chat_id, message_id
+            FROM chat_message_join
+            WHERE message_id = CAST(?1 AS INTEGER)
+            LIMIT 10001
+            """, [String(messageRowid)])
+        if rows.count > 10_000 { return (false, true) }
+        // Validate storage before deduplication; neither Row.int nor SQLite DISTINCT
+        // may collapse malformed REAL membership evidence into an integer identity.
+        var chatIDs: Set<Int64> = []
+        for row in rows {
+            guard case .integer(let id)? = row.values["chat_id"],
+                  case .integer(let storedMessageID)? = row.values["message_id"],
+                  storedMessageID == messageRowid else { return (false, false) }
+            chatIDs.insert(id)
+        }
+        return (chatIDs.count == 1 && chatIDs.contains(chatRowid), false)
+    }
+
     private func exactCompare(_ lhsSeconds: Int64?, _ lhsNanos: Int64?, _ lhsTie: Int64,
                               _ rhsSeconds: Int64?, _ rhsNanos: Int64?, _ rhsTie: Int64,
                               order: ExactOrder) -> Bool {
