@@ -31,8 +31,8 @@ tests keep that text restorable as it stands:
   * step 5.1's notes block, run verbatim, extracts the release section whole when more than a
     pipe buffer of changelog follows it, and cuts an oversized section as the legacy publisher
     did;
-  * a real YAML loader (libyaml, through Ruby, where Ruby is installed) accepts the recorded
-    text, since the scan's own parser is more lenient than GitHub's;
+  * a real YAML loader (libyaml, through Ruby, where Ruby is installed and always in CI) accepts
+    the recorded text, since the scan's own parser is more lenient than GitHub's;
   * its packaging step, run from the recorded text on macOS (its tools are the macOS ones:
     `nm` for Mach-O, bsdtar's flags, `cc` to build the fixtures), packages a clean binary to
     the D18 step (4) standard and refuses one with a debug-map entry, one carrying a
@@ -541,7 +541,9 @@ class RecordedNotesExtractionTests(unittest.TestCase):
         self.assertTrue(kept.endswith("\n") and ("\n" + section).startswith(kept), "the cut must fall on a line boundary")
 
 
-@unittest.skipUnless(shutil.which("ruby"), "needs Ruby for its libyaml-backed loader (present on hosted Ubuntu and macOS)")
+# In CI a missing Ruby fails this rather than skipping it, as test_workflow_policy.py does.
+@unittest.skipUnless(shutil.which("ruby") or "CI" in os.environ or "GITHUB_ACTIONS" in os.environ,
+                     "needs Ruby for its libyaml-backed loader (present on hosted Ubuntu and macOS)")
 class RecordedWorkflowLoadsInARealYamlLoader(unittest.TestCase):
     """The static scan's own parser is lenient where YAML is strict (an unquoted `: ` inside a
     value, for one); GitHub's loader is not, so a real loader must accept the recorded text."""
@@ -549,7 +551,8 @@ class RecordedWorkflowLoadsInARealYamlLoader(unittest.TestCase):
     def test_libyaml_reads_it_as_the_scan_does(self) -> None:
         _, text = recorded_workflow()
         script = 'require "psych"; require "json"; puts JSON.generate(Psych.safe_load(STDIN.read))'
-        result = subprocess.run(["ruby", "-e", script], input=text, capture_output=True, text=True, check=False)
+        result = subprocess.run(["ruby", "-e", script], input=text, capture_output=True, text=True, check=False,
+                                timeout=600)  # test_workflow_policy.LIBYAML_TIMEOUT_SECONDS
         self.assertEqual(result.returncode, 0, result.stderr)
         loaded = json.loads(result.stdout)
         # YAML 1.1 reads the bare `on` key as true; GitHub, and the scan, read it as the key "on".

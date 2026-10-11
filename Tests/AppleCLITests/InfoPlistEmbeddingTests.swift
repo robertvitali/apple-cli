@@ -12,45 +12,14 @@ struct AppleInfoPlistEmbeddingTests {
     }
 
     private func locateBuiltAppleExecutable() throws -> URL {
-        let root = try repositoryRoot()
-        let configuredScratch = ProcessInfo.processInfo.environment["SWIFT_BUILD_SCRATCH_PATH"]
-        let scratchRoots = [configuredScratch, ".build-swiftly", ".build"].compactMap { $0 }
-
-        for scratch in scratchRoots {
-            let base = URL(fileURLWithPath: scratch, relativeTo: root).standardizedFileURL
-            let direct = [
-                base.appendingPathComponent("arm64-apple-macosx/debug/apple"),
-                base.appendingPathComponent("debug/apple"),
-            ]
-            for candidate in direct where FileManager.default.isExecutableFile(atPath: candidate.path) {
-                return candidate
-            }
-            if let discovered = findExecutableApple(under: base) { return discovered }
+        let candidate = Bundle(for: TestBundleMarker.self)
+            .bundleURL
+            .deletingLastPathComponent()
+            .appendingPathComponent("apple")
+        guard FileManager.default.isExecutableFile(atPath: candidate.path) else {
+            throw MetadataTestError("could not locate apple executable beside the current test bundle")
         }
-        throw MetadataTestError("could not locate built apple executable under SwiftPM scratch paths")
-    }
-
-    private func repositoryRoot() throws -> URL {
-        var directory = URL(fileURLWithPath: #filePath).deletingLastPathComponent()
-        for _ in 0..<8 {
-            if FileManager.default.fileExists(atPath: directory.appendingPathComponent("Package.swift").path) {
-                return directory
-            }
-            directory.deleteLastPathComponent()
-        }
-        throw MetadataTestError("could not locate repository root")
-    }
-
-    private func findExecutableApple(under root: URL) -> URL? {
-        guard let enumerator = FileManager.default.enumerator(
-            at: root,
-            includingPropertiesForKeys: [.isExecutableKey, .isRegularFileKey],
-            options: [.skipsHiddenFiles, .skipsPackageDescendants]
-        ) else { return nil }
-        for case let candidate as URL in enumerator where candidate.lastPathComponent == "apple" {
-            if FileManager.default.isExecutableFile(atPath: candidate.path) { return candidate }
-        }
-        return nil
+        return candidate
     }
 
     private func embeddedInfoPlist(from binary: URL) throws -> [String: Any] {
@@ -115,11 +84,11 @@ struct AppleInfoPlistEmbeddingTests {
         let bytes = data[offset..<(offset + length)].prefix { $0 != 0 }
         return String(decoding: bytes, as: UTF8.self)
     }
-
-
 }
 
 private struct MetadataTestError: Error, CustomStringConvertible {
     let description: String
     init(_ description: String) { self.description = description }
 }
+
+private final class TestBundleMarker {}

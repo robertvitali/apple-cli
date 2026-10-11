@@ -1,8 +1,11 @@
 """Tests for scripts/ci/workflow_policy.py — the parsed-YAML read-only workflow scan."""
 from __future__ import annotations
 
+import collections
 import importlib.util
 import json
+import os
+import random
 import shutil
 import subprocess
 import sys
@@ -37,6 +40,12 @@ def reviewed_pin(name: str) -> str:
 
 
 CHECKOUT = reviewed_pin("actions/checkout")
+
+# The libyaml comparisons below run wherever Ruby is present. In CI a missing Ruby fails them instead
+# of skipping them, so the hosted run cannot pass without comparing anything. The libyaml behind
+# Ruby differs by host (0.2.1 on the macOS where the record was made).
+NEEDS_LIBYAML = unittest.skipUnless(shutil.which("ruby") or "CI" in os.environ or "GITHUB_ACTIONS" in os.environ,
+                                    "needs Ruby for its libyaml-backed loader (present on hosted Ubuntu and macOS)")
 
 
 QUALITY = textwrap.dedent(
@@ -171,7 +180,7 @@ class ParserTests(unittest.TestCase):
             with self.subTest(good=good):
                 self.assertEqual(policy._scalar(good), value)
 
-    @unittest.skipUnless(shutil.which("ruby"), "needs Ruby for its libyaml-backed loader (present on hosted Ubuntu and macOS)")
+    @NEEDS_LIBYAML
     def test_quoted_scalar_refusals_and_values_agree_with_libyaml(self) -> None:
         # Each form on a line of its own. libyaml rejects every malformed form, and gives the same
         # value for every accepted one. It reads a comment-adjacent form as `a` and a comment;
@@ -183,7 +192,7 @@ class ParserTests(unittest.TestCase):
         script = ('require "psych"; require "json"; puts JSON.generate(JSON.parse(STDIN.read).map { |t| '
                   'begin; [true, Psych.safe_load("k: " + t)["k"]]; rescue Psych::SyntaxError; [false, nil]; end })')
         result = subprocess.run(["ruby", "-e", script], input=json.dumps(forms),
-                                capture_output=True, text=True, check=False)
+                                capture_output=True, text=True, check=False, timeout=LIBYAML_TIMEOUT_SECONDS)
         self.assertEqual(result.returncode, 0, result.stderr)
         loaded = json.loads(result.stdout)
         self.assertEqual(len(loaded), len(forms))
@@ -251,7 +260,7 @@ class ParserTests(unittest.TestCase):
         with self.assertRaisesRegex(policy.ParseError, "nests too deeply"):
             policy.parse_workflow(deep)
 
-    @unittest.skipUnless(shutil.which("ruby"), "needs Ruby for its libyaml-backed loader (present on hosted Ubuntu and macOS)")
+    @NEEDS_LIBYAML
     def test_each_refused_shape_is_a_mapping_a_nested_sequence_an_alias_or_an_error_to_libyaml(self) -> None:
         documents = list(self.FLOW_ITEMS_REFUSED + self.SEQUENCE_ENTRIES_REFUSED + self.PLAIN_VALUES_REFUSED)
         documents += ["*r : x\n", 'k: "\\U00110000"\n', "k:\n  - -\n"]
@@ -261,7 +270,7 @@ class ParserTests(unittest.TestCase):
                   'begin; d = Psych.safe_load(t, aliases: true); deep.(d.is_a?(Hash) ? d["k"] : d); '
                   'rescue Psych::Exception; nil; end })')
         result = subprocess.run(["ruby", "-e", script], input=json.dumps(documents),
-                                capture_output=True, text=True, check=False)
+                                capture_output=True, text=True, check=False, timeout=LIBYAML_TIMEOUT_SECONDS)
         self.assertEqual(result.returncode, 0, result.stderr)
         loaded = json.loads(result.stdout)
         self.assertEqual(len(loaded), len(documents))
@@ -304,6 +313,297 @@ class ParserTests(unittest.TestCase):
         )
         self.assertEqual(document["jobs"]["a"]["steps"][0]["run"], "first\n\n  indented\n")  # libyaml's value (clip)
         self.assertEqual(document["jobs"]["a"]["steps"][1]["run"], "second")
+
+    # A quote opens a quoted scalar only where YAML may start a node; elsewhere it is plain text, and a
+    # ` #` after it starts a comment. Each value is libyaml's reading.
+    QUOTE_IS_PLAIN_TEXT = (("k: a-'x #y'\n", "a-'x"), ('k: :"b #c"\n', ':"b'), ('k:\t:"b #\n', ':"b'),
+                           ("k: a, 'x #y'\n", "a, 'x"), ("k: a [b, 'x #y']\n", "a [b, 'x"),
+                           ("k: -'x #'\n", "-'x"), ("k:\n  - a-'x #y'\n", ["a-'x"]),
+                           ('k: a ? "x #y"\n', 'a ? "x'), ("k: a ?\t'x #y'\n", "a ?\t'x"),
+                           ("k:\n  - a ? 'x #y'\n", ["a ? 'x"]), ("k: a - 'x #y'\n", "a - 'x"))
+    # A plain scalar that starts with a flow indicator or `#`, `-` alone or `- x` after a key, a tab
+    # after a sequence entry's `-`: each is a YAML error to libyaml 0.2.1 and 0.2.5.
+    INDICATOR_STARTS_REFUSED = ("k: ,\n", "k: ]x\n", "k: }\n", "k: -\n", "k: - b\n", "k:\t-\n", "'': -\n",
+                                "k:\n  - ,\n", "k:\n  - ]\n", "k:\n  a: }-\n", "k: [#, a]\n", "k: [a, - ]\n",
+                                "k:\n  - [b, ,]\n", "k:\n  - \ta\n", "k:\n  -\tb\n", "k:\n-\t:\n- b\n",
+                                "k:\n  - -\t: x\n", "k: -\tb\n")
+    # Refused as a precaution: libyaml 0.2.1 rejects a `?` in a plain flow item and 0.2.5 mostly reads
+    # it as text.
+    FLOW_QUESTION_MARK_REFUSED = ("k: [a?]\n", "k: [b, /?]\n", "k:\n  - [x\"?, a]\n")
+    BLOCK_WITH_DASH_TAB = "k: |\n  -\tx\n  - \ty\nl: x\n"
+    # A `-` right before `,` or `]` is the string `-` to YAML (`[a, - ]` is an error, above).
+    LONE_DASH_ITEMS = (("k: [a,-]\n", ["a", "-"]), ("k: [-, x]\n", ["-", "x"]), ("k: [ -]\n", ["-"]))
+
+    def test_a_quote_away_from_a_node_start_is_plain_text(self) -> None:
+        for document, value in self.QUOTE_IS_PLAIN_TEXT:
+            with self.subTest(document=document):
+                self.assertEqual(policy.parse_workflow(document), {"k": value})
+        # Inside a flow collection a `:` is taken, conservatively, to start a node with no space
+        # after it, so a JSON-like value keeps its ` #` (the parser then refuses the flow mapping as
+        # a whole).
+        self.assertEqual(policy._strip_comment('k: {"a":"b #c"}'), 'k: {"a":"b #c"}')
+        # An anchor inside a flow collection ends at the `,` (libyaml reads `[null, "x #y"]`).
+        self.assertEqual(policy._strip_comment("k: [&a,'x #y']"), "k: [&a,'x #y']")
+        # Where a node starts the quote still opens, so a ` #` inside it is text.
+        self.assertEqual(policy.parse_workflow("k: 'a #b'\nl:\n  - \"c #d\"\n  - x: 'e #f'\nm: ['g #h', \"i #j\"]\n"),
+                         {"k": "a #b", "l": ["c #d", {"x": "e #f"}], "m": ["g #h", "i #j"]})
+
+    def test_a_plain_scalar_starting_with_an_indicator_is_refused(self) -> None:
+        for document in self.INDICATOR_STARTS_REFUSED + self.FLOW_QUESTION_MARK_REFUSED:
+            with self.subTest(document=document):
+                with self.assertRaises(policy.ParseError):
+                    policy.parse_workflow(document)
+        self.assertEqual(policy.parse_workflow("k: -x\nl: a,b]\nm:\n  - -1\n"), {"k": "-x", "l": "a,b]", "m": ["-1"]})
+        for document, value in self.LONE_DASH_ITEMS:
+            with self.subTest(document=document):
+                self.assertEqual(policy.parse_workflow(document), {"k": value})
+        # A block scalar's lines are text: a tab after a `-` there is kept, as YAML keeps it.
+        self.assertEqual(policy.parse_workflow(self.BLOCK_WITH_DASH_TAB), {"k": "-\tx\n- \ty\n", "l": "x"})
+
+    @NEEDS_LIBYAML
+    def test_quote_and_indicator_shapes_agree_with_libyaml(self) -> None:
+        documents = [document for document, _ in self.QUOTE_IS_PLAIN_TEXT] + list(self.INDICATOR_STARTS_REFUSED)
+        trees = libyaml_trees(documents)
+        for (document, value), tree in zip(self.QUOTE_IS_PLAIN_TEXT, trees):
+            with self.subTest(document=document):
+                self.assertEqual(tree, tree_of({"k": value}))
+        for document, tree in zip(self.INDICATOR_STARTS_REFUSED, trees[len(self.QUOTE_IS_PLAIN_TEXT):]):
+            with self.subTest(document=document):
+                self.assertIsNone(tree)
+        accepted = [self.BLOCK_WITH_DASH_TAB] + [document for document, _ in self.LONE_DASH_ITEMS]
+        self.assertEqual(libyaml_trees(accepted), [parser_tree(document) for document in accepted])
+        self.assertEqual(libyaml_trees(['k: {"a":"b #c"}\n']), [tree_of({"k": {"a": "b #c"}})])
+
+
+# --------------------------------------------------------------------------- libyaml differential
+
+# libyaml's reading as a node tree, through Ruby's Psych: a scalar keeps its text and whether it was
+# plain, so YAML 1.1 type resolution (`on` as true, `3.10` as 3.1) can neither fake nor hide a
+# difference. Any tag, anchor, alias or non-scalar key reports the document as outside the subset,
+# since this parser refuses all of them; so does a stream holding other than one document.
+LIBYAML_TREE_SCRIPT = r"""
+require "psych"; require "json"
+def walk(n)
+  raise "anchor" if n.respond_to?(:anchor) && n.anchor
+  raise "tag" if n.respond_to?(:tag) && n.tag
+  case n
+  when Psych::Nodes::Scalar then [n.plain ? "plain" : "quoted", n.value]
+  when Psych::Nodes::Sequence then ["seq", n.children.map { |c| walk(c) }]
+  when Psych::Nodes::Mapping
+    ["map", n.children.each_slice(2).map { |k, v|
+      key = walk(k)
+      raise "key" unless key[0] == "plain" || key[0] == "quoted"
+      [key[1], walk(v)]
+    }]
+  else raise "alias"
+  end
+end
+STDERR.puts "libyaml-version " + Psych::LIBYAML_VERSION
+puts JSON.generate(JSON.parse(STDIN.read).map { |t|
+  begin
+    s = Psych.parse_stream(t)
+    s.children.length == 1 ? walk(s.children[0].root) : nil
+  rescue Psych::SyntaxError, RuntimeError
+    nil
+  end
+})
+"""
+
+
+def _resolved(node):
+    """A libyaml node tree in `tree_of`'s form, with plain scalars resolved as this parser resolves
+    them (YAML 1.2's spellings of true, false and null) and every other scalar a string."""
+    kind, body = node
+    if kind == "plain" and body in ("true", "True", "TRUE"):
+        return True
+    if kind == "plain" and body in ("false", "False", "FALSE"):
+        return False
+    if kind == "plain" and body in ("null", "Null", "NULL", "~", ""):
+        return None
+    if kind in ("plain", "quoted"):
+        return ["str", body]
+    if kind == "seq":
+        return ["seq", [_resolved(item) for item in body]]
+    return ["map", [[key, _resolved(value)] for key, value in body]]
+
+
+def tree_of(value):
+    """This parser's reading in a form comparable with libyaml's: key order kept, strings tagged."""
+    if isinstance(value, dict):
+        return ["map", [[key, tree_of(item)] for key, item in value.items()]]
+    if isinstance(value, list):
+        return ["seq", [tree_of(item) for item in value]]
+    if isinstance(value, str):
+        return ["str", value]
+    return value
+
+
+LIBYAML_TIMEOUT_SECONDS = 600
+LIBYAML_VERSIONS_SEEN = []  # printed once per run, so each hosted log names the libyaml it compared with
+
+
+def libyaml_trees(texts):
+    """libyaml's reading of each text in `tree_of`'s form, or None where it is outside the subset."""
+    try:
+        result = subprocess.run(["ruby", "-e", LIBYAML_TREE_SCRIPT], input=json.dumps(texts),
+                                capture_output=True, text=True, check=False, timeout=LIBYAML_TIMEOUT_SECONDS)
+    except subprocess.TimeoutExpired:
+        raise AssertionError("the libyaml oracle did not answer within {} s".format(LIBYAML_TIMEOUT_SECONDS)) from None
+    if result.returncode != 0:
+        raise AssertionError("the libyaml oracle failed: " + result.stderr[-2000:])
+    version = [line[len("libyaml-version "):] for line in result.stderr.splitlines()
+               if line.startswith("libyaml-version ")][:1]
+    if version not in LIBYAML_VERSIONS_SEEN:
+        LIBYAML_VERSIONS_SEEN.append(version)
+        print("libyaml oracle: libyaml " + (version[0] if version else "version not reported"), file=sys.stderr)
+    trees = json.loads(result.stdout)
+    if len(trees) != len(texts):
+        raise AssertionError("the libyaml oracle answered {} of {} texts".format(len(trees), len(texts)))
+    return [None if tree is None else _resolved(tree) for tree in trees]
+
+
+def parser_tree(text):
+    try:
+        return tree_of(policy.parse_workflow(text))
+    except policy.ParseError:
+        return None
+
+
+# The seeded generator behind the recorded differential (readiness row 17): documents built from
+# short runs of the characters and pairs that decide how YAML reads a line, in the shapes outside
+# block scalars (values, keys, sequence entries, flow sequences, continuation lines). The test runs
+# the record's own set, seeds 1 to 4 with 4,000 documents per template each; the record also read
+# them with libyaml 0.2.5 and PyYAML's pure-Python loader. Widen it before trusting a zero: at 600
+# documents per template, seven of nine seeds found no document the old quote handling reads
+# differently, where the 272,000 found 8.
+DIFFERENTIAL_PIECES = ("a", "b", "x", " ", "  ", "\t", ":", ": ", "#", " #", "'", '"', "''", "\\\"", "-", "- ",
+                       "- -", "[", "]", "{", "}", ",", "&", "*", "!", "|", ">", "?", "%", "@", "`", "\\", "=",
+                       "$", "/", ".", "~", "<<", "a:b", "true", "null", "3.10", "on", "${{ x }}", "\u00e9")
+
+
+def _piece(rng, low=1, high=5):
+    return "".join(rng.choice(DIFFERENTIAL_PIECES) for _ in range(rng.randint(low, high)))
+
+
+def _gap(rng):
+    return rng.choice((" ", " ", "  ", "\t", " \t"))
+
+
+def _quote(rng):
+    return rng.choice(("'", '"'))
+
+
+def _key(rng):
+    # Keys that may collide, by spelling or once decoded.
+    return rng.choice(("a", "b", "'a'", '"a"', '"\\u0061"', "a ", "on", "'on'", "a b", "-a", "a#b"))
+
+
+DIFFERENTIAL_TEMPLATES = {
+    "plain value": lambda r: "k:" + _gap(r) + _piece(r) + "\n",
+    "quoted value": lambda r: "k:" + _gap(r) + _quote(r) + _piece(r, 0, 4) + _quote(r) + _piece(r, 0, 3) + "\n",
+    "comment after": lambda r: ("k: " + _quote(r) + _piece(r, 0, 3) + _quote(r) + r.choice(("", " ", "\t", "x"))
+                                + "#" + _piece(r) + "\n"),
+    "key": lambda r: _piece(r) + ":" + _gap(r) + _piece(r) + "\n",
+    "quoted key": lambda r: _quote(r) + _piece(r, 0, 4) + _quote(r) + ":" + _gap(r) + _piece(r) + "\n",
+    "nested key": lambda r: "k:\n  " + _piece(r) + ": " + _piece(r) + "\n",
+    "two keys": lambda r: _key(r) + ":" + _gap(r) + _piece(r, 1, 3) + "\n" + _key(r) + ":" + _gap(r) + _piece(r, 1, 3) + "\n",
+    "sequence entry": lambda r: "k:\n  -" + _gap(r) + _piece(r) + "\n",
+    "sequence at key column": lambda r: "k:\n-" + _gap(r) + _piece(r) + "\n- b\n",
+    "sequence pair": lambda r: "k:\n  -" + _gap(r) + _piece(r) + ":" + _gap(r) + _piece(r) + "\n",
+    "sequence quoted key": lambda r: "k:\n  - " + _quote(r) + _piece(r, 0, 4) + _quote(r) + ": " + _piece(r, 1, 3) + "\n",
+    "sequence mapping": lambda r: "k:\n  - a: " + _piece(r) + "\n    " + _piece(r) + ": x\n",
+    "flow": lambda r: "k: [" + _piece(r) + r.choice((", ", ",", " , ")) + _piece(r, 0, 3) + "]\n",
+    "flow entry": lambda r: "k:\n  - [" + _piece(r) + ", " + _piece(r, 0, 3) + "]\n",
+    "continuation": lambda r: "k: " + _piece(r) + "\n  " + _piece(r) + "\n",
+    "entry continuation": lambda r: "k:\n  - " + _piece(r) + "\n    " + _piece(r) + "\n",
+    "properties": lambda r: "k: " + r.choice(("&a ", "!t ", "!!str ", "*a", "<<: ", "? ")) + _piece(r) + "\n",
+}
+
+
+# A second seeded set aims every document at a shape the record's set produces only rarely: a run
+# of one to three pieces, a blank, an indicator or another piece that may or may not start a node,
+# then a quote holding a ` #`. The record's seeds produced none with a `?` in plain text there, so a
+# `?` in plain text read as an indicator passed them; this set reports such documents.
+QUOTE_RUN_LEADS = ("? ", "?\t", "- ", "-\t", ": ", "&a ", "!t ", "a ", ", ", "[", "-", "?", "", " ")
+
+
+def _quote_run(rng):
+    lead = "".join(rng.choice(QUOTE_RUN_LEADS) for _ in range(rng.randint(1, 2)))
+    return (_piece(rng, 1, 3) + _gap(rng) + lead + _quote(rng) + _piece(rng, 0, 3) + " #" + _piece(rng, 0, 3)
+            + rng.choice(("", "'", '"')))
+
+
+QUOTE_RUN_TEMPLATES = {
+    "quote run value": lambda r: "k:" + _gap(r) + _quote_run(r) + "\n",
+    "quote run entry": lambda r: "k:\n  -" + _gap(r) + _quote_run(r) + "\n",
+    "quote run nested value": lambda r: "k:\n  b:" + _gap(r) + _quote_run(r) + "\n",
+}
+
+
+def differential_documents(seed, per_template, templates=None):
+    """`per_template` documents from each template, reproducible from `seed`."""
+    rng = random.Random(seed)
+    templates = DIFFERENTIAL_TEMPLATES if templates is None else templates
+    return [(name, make(rng)) for name, make in templates.items() for _ in range(per_template)]
+
+
+class LibyamlDifferentialTests(unittest.TestCase):
+    """Wherever this parser accepts a document, libyaml accepts it too and reads the same tree."""
+
+    def assert_reads_as_libyaml(self, documents):
+        trees = libyaml_trees([text for _, text in documents])
+        offenders = []
+        agreed = {}
+        for (name, text), expected in zip(documents, trees):
+            mine = parser_tree(text)
+            if mine is not None:
+                if mine != expected:
+                    offenders.append((name, text, mine, expected))
+                else:
+                    agreed[name] = agreed.get(name, 0) + 1
+        self.assertEqual(offenders[:5], [], "{} documents read differently, or only here".format(len(offenders)))
+        return agreed
+
+    @NEEDS_LIBYAML
+    def test_each_scanned_workflow_and_the_mkdocs_configuration_reads_as_libyaml_reads_it(self) -> None:
+        documents = [(path.relative_to(REPO_ROOT).as_posix(),
+                      pins.read_regular_utf8(path, policy.MAX_WORKFLOW_BYTES))
+                     for path in pins.workflow_paths(REPO_ROOT)]
+        documents.append(("mkdocs.yml", (REPO_ROOT / "mkdocs.yml").read_text(encoding="utf-8")))
+        # The urgent-release runbook's recorded workflow, which this scan reads and GitHub runs once
+        # it is restored.
+        runbook = load_module("urgent_release_runbook_tests", Path(__file__).with_name("test_urgent_release_runbook.py"))
+        documents.append(runbook.recorded_workflow())
+        self.assertGreaterEqual(len(documents), 5)
+        agreed = self.assert_reads_as_libyaml(documents)
+        # Each one parsed here, counted per name: once the urgent-release workflow is restored it is
+        # both scanned and recorded, so its name appears twice on each side.
+        self.assertEqual(agreed, dict(collections.Counter(name for name, _ in documents)))
+
+    @NEEDS_LIBYAML
+    def test_generated_documents_never_read_differently_or_only_here(self) -> None:
+        documents = [document for seed in (1, 2, 3, 4) for document in differential_documents(seed, 4000)]
+        agreed = self.assert_reads_as_libyaml(documents)
+        # Not vacuous: the parser accepts 35,047 of the 272,000, at least 208 from each template but
+        # the properties one (anchors, tags, aliases, merge keys, explicit keys), which it refuses.
+        self.assertGreaterEqual(sum(agreed.values()), 30000)
+        self.assertEqual(agreed.get("properties", 0), 0)
+        for name in DIFFERENTIAL_TEMPLATES:
+            if name != "properties":
+                with self.subTest(template=name):
+                    self.assertGreaterEqual(agreed.get(name, 0), 100)
+
+    @NEEDS_LIBYAML
+    def test_quote_runs_never_read_differently_or_only_here(self) -> None:
+        documents = [document for seed in (5, 6, 7, 8)
+                     for document in differential_documents(seed, 4000, QUOTE_RUN_TEMPLATES)]
+        agreed = self.assert_reads_as_libyaml(documents)
+        # Not vacuous: the parser accepts 17,438 of the 48,000, at least 3,678 from each template, and
+        # with a `?` in plain text read as an indicator 2,873 of them read differently.
+        self.assertGreaterEqual(sum(agreed.values()), 15000)
+        for name in QUOTE_RUN_TEMPLATES:
+            with self.subTest(template=name):
+                self.assertGreaterEqual(agreed.get(name, 0), 3000)
 
 
 JOB_HEADER = "    runs-on: ubuntu-latest\n    permissions:\n      contents: read\n    steps:"
@@ -381,7 +681,7 @@ class ScanTests(unittest.TestCase):
         anchored = mutate(step, "\njobs:\n", "\nenv:\n  K: [a: &r run]\njobs:\n")
         self.assert_ci_violation(anchored, "flow sequences may hold scalars only")
 
-    @unittest.skipUnless(shutil.which("ruby"), "needs Ruby for its libyaml-backed loader (present on hosted Ubuntu and macOS)")
+    @NEEDS_LIBYAML
     def test_libyaml_reads_the_aliased_step_as_a_run(self) -> None:
         # The reading the alias-key refusal guards against, checked against a real YAML loader.
         anchored = mutate(mutate(QUALITY, "  quality-required:\n",
@@ -389,7 +689,8 @@ class ScanTests(unittest.TestCase):
                           "\njobs:\n", "\nenv:\n  K: [a: &r run]\njobs:\n")
         script = ('require "psych"; require "json"; '
                   'puts JSON.generate(Psych.safe_load(STDIN.read, aliases: true)["jobs"]["build"]["steps"].last)')
-        result = subprocess.run(["ruby", "-e", script], input=anchored, capture_output=True, text=True, check=False)
+        result = subprocess.run(["ruby", "-e", script], input=anchored, capture_output=True, text=True, check=False,
+                                timeout=LIBYAML_TIMEOUT_SECONDS)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout), {"run": "git push origin HEAD:main"})
 
@@ -615,6 +916,15 @@ class ScanTests(unittest.TestCase):
     def test_duplicate_check_names_within_one_workflow_fail(self) -> None:
         body = mutate(QUALITY, "  build:\n    runs-on", "  build:\n    name: quality / required\n    runs-on")
         self.assert_ci_violation(body, "check `quality / required` is also produced by job")
+
+    def test_a_comment_after_a_mid_value_question_mark_cannot_hide_a_duplicate_check_name(self) -> None:
+        # YAML reads both names as `lint ? 'fast` (the rest of the second is a comment), so the two
+        # jobs produce one check name; read with the quote opened, the second would differ.
+        body = mutate(QUALITY, "  build:\n    runs-on", "  build:\n    name: lint ? 'fast\n    runs-on")
+        body = mutate(body, "  quality-required:\n",
+                      "  lint:\n    name: lint ? 'fast #shadow'\n    runs-on: ubuntu-latest\n    permissions:\n"
+                      "      contents: read\n    steps:\n      - run: echo lint\n  quality-required:\n")
+        self.assert_ci_violation(body, "check `lint ? 'fast` is also produced by job")
 
     def test_recorded_trigger_set_drift_fails(self) -> None:
         body = mutate(QUALITY, "types: [opened, edited, synchronize, reopened]", "types: [opened, synchronize, reopened]")

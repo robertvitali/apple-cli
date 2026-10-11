@@ -27,15 +27,16 @@ it instead of asking.
 **Status values:** `OPEN` (waiting on the operator) · `ANSWERED` (decided, being applied) ·
 `APPLIED` (decision is in the code/repo) · `RATIFIED` (decided, no code change needed) ·
 `WITHDRAWN` (should not have been asked) · `SUPERSEDED` · `CLOSED` (an incident gate closed on
-recorded, scoped evidence).
+recorded, scoped evidence, or an arrangement ended and wound up as its entry prescribes).
+A date marked (UTC) is a UTC calendar date; unmarked dates follow D32.
 
 ---
 
-## LEDGER — every decision at a glance (updated 2026-10-07)
+## LEDGER — every decision at a glance (updated 2026-10-10 (UTC))
 
 **Still needs you: D2 (the Homebrew tap), D18 (the `v27.0.0` release, which waits on the phase-3
-publisher), D22 (two parity narrowings) and D49 (how a Dependabot Actions pin update reaches
-`main`).** D9 was reopened 2026-08-31 and finally closed the
+publisher), D22 (two parity narrowings) and, under D51, confirming the exact command of the granted
+local release build before it runs.** D9 was reopened 2026-08-31 and finally closed the
 same day (recorded CLOSED — see D9). D15 and D16 were ratified 2026-09-07. D3 and D14 were
 live-validated operator-present on 2026-08-27 (evidence on their Asana tasks; the Mail parent
 closed the same day under the closure-verification protocol). Publication remains blocked —
@@ -92,12 +93,14 @@ publication action.
 | D41 | Two message texts and a search term from a live oracle run in a Messages test | **RATIFIED 2026-09-30: redact at HEAD, accept history (option A)** | `Tests/MessagesKitTests/MessagesKitTests.swift` carried two message texts and a search term sampled from the operator's Messages store during a live oracle run (committed 2026-07-15 in `23c9afc`, public in the periods D9 and D17 record). Replaced at HEAD with synthetic text; history keeps the originals as an accepted residual, as D38 did for its commit |
 | D42 | A note fragment from a live run in a Notes test | **RATIFIED 2026-09-30: redact at HEAD, accept history (option A)** | `Tests/NotesKitTests/NotesTextTests.swift` quoted a three-word fragment of one of the operator's notes, measured live on 2026-08-19 (NOTES-L1) and committed that day in `50c30f0`; public since the visibility change D17 records. Replaced at HEAD with synthetic text; history keeps the original as an accepted residual, as D41 did for the Messages test |
 | D43 | CI job logs print the removed Messages test's name, which carried D41's search term | **RATIFIED 2026-09-30: leave the logs to expire (option A), re-confirmed on corrected facts** (amended 2026-10-04: one later copy, the last now about 2027-01-01) | Hosted build-test job logs print every test name: 61 job logs in 57 CI runs (2026-09-01 to 2026-09-30) carry the removed test's name, two lines each; a scan of all 322 retrievable logs found neither the message texts nor D42's note fragment. Accepted as a residual until GitHub's 90-day log retention removes them (the last about 2026-12-29, later if a run from before the D41 commit is re-run or a pull request on an older head runs) |
-| D44 | Narrow main-only reversal for a parallel session's worktree | **RATIFIED 2026-10-01** (amended 2026-10-03: the branch reached `origin` once and was deleted on the operator's word) | One local git worktree, `~/workspace/apple-cli-governance` on the local branch `26/governance`, for a second agent session working the supply-chain and governance queue in parallel. The branch is never pushed and never merged: each change is rebased onto the current `main`, passes the same review, scan and canonical gates, and lands by a fast-forward push to `main`, one landing at a time. Removed when that queue is done. Ordinary work otherwise stays main-only; D16 is unchanged |
+| D44 | Narrow main-only reversal for a parallel session's worktree | **CLOSED 2026-10-10**: ended on the operator's word before the queue was done; worktree removed and branch deleted, nothing left to land (ratified 2026-10-01; amended 2026-10-03: the branch reached `origin` once and was deleted on the operator's word) | One local git worktree, `~/workspace/apple-cli-governance` on the local branch `26/governance`, for a second agent session working the supply-chain and governance queue in parallel. The branch is never pushed and never merged: each change is rebased onto the current `main`, passes the same review, scan and canonical gates, and lands by a fast-forward push to `main`, one landing at a time. Removed when that queue is done. Ordinary work otherwise stays main-only; D16 is unchanged |
 | D45 | Open Dependabot pull requests 7 and 8 while the Dependabot governance path is built | **ANSWERED 2026-10-02: supersede both on main (option A); APPLIED 2026-10-03** (resolved 2026-10-03: Dependabot closed both; its edits started two CI runs on pull request 7's pre-D41 head, one of which ran the Swift suite and added a log copy under D43) | Two reviewed commits on `main` take the same updates: urllib3 2.7.0 → 2.8.0 in `docs/requirements.txt`, which clears the three open alerts, and astral-sh/setup-uv 10.1.0 → 10.2.0, with its new SHA added to the reviewed Action allowlist. Dependabot then closes both pull requests itself. No agent action on either pull request, and no new CI run on pull request 7's pre-D41 head (D43) |
 | D46 | Interim protection for `main` before the design's ruleset | **APPLIED 2026-10-02T05:04Z on the operator's instruction; no-bypass shape RATIFIED 2026-10-02 (option A)** | One active ruleset on `main` only, with two rules, block force pushes and restrict deletion, and no bypass actor: while it is active nothing, the operator's credentials included, can force-update or delete `main`, and an authorized history rewrite needs the operator to disable it first. It guards against mistakes, not a misused admin credential, which can disable it. Neither rule applies to fast-forward pushes, pull requests, Dependabot's branches or the current read-only CI workflows; the first push under it (`9cd2260`) passed. At design §18 step 20 the operator decides whether it is deleted or kept; keeping it needs design amendments |
 | D47 | The public Activity view lists commits no advertised ref holds, whose parents reach the replaced history | **RATIFIED 2026-10-07 (UTC): leave them (option B of the later briefs), re-confirmed after the reach was measured** | The repository's public Activity view lists 128 commits that no advertised ref holds; with their parents they make 1,550 such commits, holding phone-number-like strings, email addresses and two commit messages with a denylist term no file or commit message on `main` carries. Accepted as a residual scoped to the 128 commits the view listed on 2026-10-06 and everything reachable from them that no advertised ref holds: 1,550 commits (the 128 among them) and their trees and file contents that no advertised ref holds, pinned by the SHA-256 of two private id lists. Anything the round's classes detect in a commit outside the two pinned lists, or in an object no listed commit reaches, is outside this residual and stays a finding unless another entry accepts it, whenever the view lists it or however it is found; the six branch names in the view that carry tracker identifiers are D50 |
-| D49 | How a Dependabot GitHub Actions pin update reaches `main` | **OPEN 2026-10-07 (UTC)** | Choose between (A) an identity-only allowlist with Dependabot pin pull requests merged through design §10.5's exception, checked by a workflow run from `main`'s own definition, (B) exact-SHA pins kept, with each Dependabot pin pull request treated as input to a reviewed commit on `main` and never merged, or (C) no exception wired, the current posture, each update taken by hand in a reviewed commit as under D45. Recommended: (B) for now, revisiting (A) before design §18 step 13 |
+| D48 | Launch specification approval | **ANSWERED 2026-10-10 (UTC): approve as written (option A)** | `docs/superpowers/specs/2026-10-03-launch-specification.md` as carried by 357bafa (blob d20411e, unchanged on `main` through 7221da7) meets design §15 precondition 3 (the spec's P3); it authorizes no step; Section 15's open findings stay open, each fixed by an amendment under the P3 review gates before L1 |
+| D49 | How a Dependabot GitHub Actions pin update reaches `main` | **ANSWERED 2026-10-10 (UTC): option (B)** | Exact-SHA pins stay; a Dependabot pin pull request is input to a dedicated reviewed commit on `main` and is never merged. Applying it needs a reviewed local checker first, then amendments to the design, the launch specification (with a new approval entry) and `AGENTS.md`; until then each update is taken by hand. (A), an identity-only allowlist merged through design §10.5's exception, is revisited before design §18 step 13 |
 | D50 | Deleted branch names in the public Activity view carry tracker identifiers | **RATIFIED 2026-10-07 (UTC): accept them as a recorded residual (option B)** | Six deleted branch names, in 24 creation, push and deletion events dated 2026-07-15 to 2026-08-23, carry tracker identifiers that also occur in commit messages D47 accepts. Accepted as a residual scoped to those six names in those 24 events; the same names in any other event or on any other surface, and any other tracker identifier the view shows, stay findings unless another entry accepts them |
+| D51 | Provisional definitions in the step-15 release-artifact rehearsal | **ANSWERED 2026-10-10 (UTC): all five answers ratified; one local run granted in principle** | The linkage definition, no artifact digest or size recorded, the runbook's `-gnone` recipe, a static bound (not a proof) for outward-write refusal, and `macos-26` with the default bump as the hosted evidence are step 15's definitions. One local run of the tooling is granted in principle, as D23 granted its rehearsal; its exact command goes to the operator for confirmation before it runs, as in D24 |
 
 ---
 
@@ -2173,12 +2176,41 @@ open), or from a new or reopened pull request whose head predates it.
 
 ## D44 — Narrow main-only reversal for a parallel session's worktree
 
-- **Status:** **RATIFIED 2026-10-01: the narrow reversal (option A).** Ledger dates are the
+- **Status:** **CLOSED 2026-10-10** on the operator's word (Resolution below). Historical status:
+  **RATIFIED 2026-10-01: the narrow reversal (option A).** Ledger dates are the
   operator's local date (D32): the operator chose this option on 2026-10-01, shortly before the
   worktree and its local branch were created at 23:57 local (2026-10-02T03:57Z). The row as first
   drafted carried the UTC date 2026-10-02; its substance is unchanged. Unlike D16 and design §18
   step 8, the reversal was not recorded on `main` before the branch was cut: this entry's commit,
   made from the worktree, is the first landing under it.
+- **Resolution:** 2026-10-10: the operator ended the arrangement before the queue was done, stopped
+  the worktree's session, and asked the primary checkout's session to merge the worktree's branch
+  into `main` in its current state, remove the worktree and the branch, and take over the queue.
+  Nothing was left to merge: `26/governance` stood at `585c49b`, the last commit landed from the
+  worktree (in the push headed by `585c49b`, with `b45688b`), the worktree was clean and had no
+  stash entry, so no merge commit was made and no commit the branch then held was discarded;
+  `git worktree remove`, which refuses a worktree with uncommitted changes unless forced, and
+  `git branch -d`, which refuses a branch not merged into `main`, both succeeded without force. Read
+  back on 2026-10-10, `git worktree list` listed only the primary checkout,
+  `git branch --list 26/governance` was empty, and `git ls-remote --heads origin` held no
+  `26/governance` ref. Removing the worktree and deleting the branch removed their reflogs, the last
+  local references to `8e6af13` (amendment below), so that amendment's statement that the worktree's
+  reflog still names it no longer holds: the object stays in the local repository, unreferenced,
+  until a garbage collection prunes it; a copy of its patch is kept outside the repository; and on
+  GitHub it stays fetchable by its id and named in the public activity listing, as the amendment
+  recorded at the time. The queue's remaining work continues from the primary checkout under the
+  main-only workflow: two open agent tasks, refusing a quoted `<<` merge key in the workflow scan
+  and the `mkdocs.yml` navigation subset (quoted first keys, external links), and the Dependabot pin
+  path, which waits on D49. `585c49b`, a test-only change outside the queue, landed from the
+  worktree with `b45688b`, whose push could not pass the suite without it: a departure from the
+  Scope working rule above that no relaxation covers (readiness evidence, Section 3). It was
+  reported to the operator on 2026-10-10, before the instruction above; this entry does not read
+  that instruction as a ruling on it, and the question stays with the operator: whether the
+  departure stands as recorded, or the Scope rule should have been spelled out further. Ruled
+  2026-10-10 (UTC), in one acceptance of the controller's recommendations that covered six items:
+  the departure stands as recorded.
+  `AGENTS.md`'s statements that all work happens in the primary checkout and that there is one
+  branch again describe the local repository.
 - **Context.** The operator asked to run two agent sessions in parallel: one in the primary
   checkout, and one in a second local worktree working the supply-chain and governance queue. That
   queue is the Dependabot governance path, the CI readers' handling of non-ASCII whitespace, the
@@ -2586,9 +2618,22 @@ file one, and this entry does not prevent it.
 
 ## D49 — How a Dependabot GitHub Actions pin update reaches `main`
 
-- **Status:** **OPEN 2026-10-07 (UTC)** — waiting on the operator; nothing applied. Filed by the
-  second agent session D44 authorizes; its decision brief goes to the operator through the
+- **Status:** **ANSWERED 2026-10-10 (UTC): option (B)**, not yet applied (Resolution below).
+  Historical status: **OPEN 2026-10-07 (UTC)** — waiting on the operator; nothing applied. Filed by
+  the second agent session D44 authorizes; its decision brief goes to the operator through the
   controller.
+- **Resolution:** 2026-10-10 (UTC): the operator chose (B), the recommended option, on the filing
+  session's decision brief (its fifth revision), relayed by the primary checkout's session.
+  Exact-SHA pins stay. A Dependabot pin pull request is input to a dedicated reviewed commit on
+  `main` carrying exactly the judged commit and version, and is never merged. Applying (B) needs the
+  local checker (B) describes, built and reviewed first; then amendments to design §10.5, §17 and
+  §18 step 13; amendments to the launch specification's P6 and Section 13, which D48 approved as
+  carried by 357bafa, so they also need a new approval entry naming the commit that carries them;
+  the matching `AGENTS.md`, CHANGELOG and readiness-evidence text; and, as the Recommendation notes,
+  the literal-path refusal of any pull request changing the four publisher workflows the launch
+  specification (Section 13) proposes. Until then `AGENTS.md`'s posture continues: no Dependabot
+  Actions pull request is merged, and each update is taken by hand in a reviewed commit. (A) is
+  revisited before design §18 step 13.
 - **Finding.** Design §10.5 allows exactly one automated control-plane exception: a Dependabot pull
   request that changes only workflow files, whose parsed workflows a trusted-base comparison proves
   identical apart from allowlisted `uses:` commit SHAs and their adjacent version comments, whose
@@ -2712,5 +2757,149 @@ the enforcement control plane, of which `.github/CODEOWNERS` names you sole code
 **Blocking?** No. Until it is ruled, `AGENTS.md` (Branch model) governs a Dependabot Actions pull
 request: never merged, its update taken on `main` in a reviewed commit, which is option (C)'s
 posture. It needs a ruling before design §18 step 13.
+
+---
+
+## D51 — Provisional definitions in the step-15 release-artifact rehearsal
+
+- **Status:** **ANSWERED 2026-10-10 (UTC): all five provisional answers ratified, and one local run
+  granted in principle** (Resolution below). Historical status: **OPEN 2026-10-10 (UTC)** — filed by
+  the controller with the commit that adds `scripts/ci/release_artifact.py`. The tooling runs on the
+  provisional answers below until each is ruled; nothing but counting step 15 as passed waits on
+  this entry.
+- **Resolution:** 2026-10-10 (UTC): the operator ratified point 1 on its own question ("Ratify
+  provisional"), then answered the controller's remaining recommendations with one acceptance ("I
+  will take all of your recommendations"), which covered six items, among them points 2 to 5 (ratify
+  each provisional answer) and "grant one local run of release_artifact.py (exact invocation
+  recorded before it runs)". Step 15 counts the five answers as its definitions. The local run is
+  granted in principle, as D23 granted its rehearsal, and the 'Also needed' item below stands: the
+  exact command is asked separately. The controller sets these conditions on it: `release_prep.py`
+  and then `release_artifact.py`, against a clean clone of one commit of `main`, in the 27.0.0 shape
+  (`--macos-major 27`) that the hosted job never builds, with every working file in a fresh
+  mode-0700 directory in the private evidence store outside the repository; nothing uploaded, tagged
+  or pushed; the rendered copies, the build and the clone, which carry the predicted version,
+  removed afterwards; only the two value-free reports kept. As in D24, the controller freezes that
+  command in a script, takes it through the review gates, records its digest and the commit, and
+  puts that exact command to the operator, whose confirmation is what runs; a failed or interrupted
+  run is not repeated without a new confirmation. Still to follow, each reviewed: the docstring,
+  comments, report note and messages in `scripts/ci/release_artifact.py` and the tests that pin
+  them, which still call these answers provisional.
+- **Context.** Design §18 step 15 asks the read-only release rehearsal to verify the predicted
+  release-file changes, archive contents, checksums, linkage, runtime version and refusal of any
+  outward-write step; §15.1 adds that checksum, architecture, linkage and runtime version agree;
+  §14.1 has tracked evidence record the pass result, the exact file allowlist and deterministic
+  artifact digests, and never the predicted version. `scripts/ci/release_artifact.py`, run by the
+  `release-prep-rehearsal` job in `docs.yml` on `macos-26`, builds the candidate plus the two files
+  release preparation renders and checks the outcome. Its change-set check does not run manual
+  generation to show that §14.2's third class of release-file change (version-dependent generated
+  documentation) is unnecessary; today's manual carries no version string. It settles five points
+  provisionally:
+  1. **Linkage**, which the design does not define. Provisional: every dylib load command names an
+     absolute path under `/usr/lib/` or `/System/Library/`, the dynamic linker is `/usr/lib/dyld`,
+     there is no LC_DYLD_ENVIRONMENT, and an LC_RPATH entry is allowed only as `@loader_path`,
+     `@executable_path`, or an absolute path under `/usr/lib/`, `/System/Library/`, the Command Line
+     Tools or an Xcode developer directory. SwiftPM adds such entries to every executable, and no
+     load command may name an `@rpath/` path, so dyld never consults them for the binary's own
+     libraries. Residual: dyld does consult the main executable's run-path entries for an
+     `@rpath/` dependency of any other image loaded into the process, and for a runtime `dlopen`
+     of an `@rpath/` path (the sources make no `dlopen` call today); and the Xcode root, unlike the
+     other permitted roots, is writable by the admin group. Alternative: a narrower, root-owned set
+     of run-path roots (for example without the Xcode root), or only the exact entries observed on
+     the hosted build.
+  2. **Digests.** §14.1 lists deterministic artifact digests among what tracked evidence records.
+     Provisional: no digest and no byte size is recorded, in the report, the run log or tracked
+     evidence, because the binary embeds the unassigned version and a digest over a handful of
+     candidate versions is reversed by enumeration, the reason §14.1 itself gives for never
+     recording the number. The runbook's tar recipe is not deterministic in any case (the gzip
+     header's timestamp, the member's modification time). This point concerns only the rehearsal's
+     artifact, whose version is unassigned: D34 already requires, for the exact artifact to be
+     published, D18 step (4)'s check and an operator-local denylist scan recorded against the
+     sha256 digest of the binary, the archive, the checksum file and the Release notes body. The
+     hosted rehearsal's path check is neither of those. Alternatives: a digest of a
+     version-neutralised copy; a deterministic recipe, shared with the runbook.
+  3. **Recipe.** Provisional: the urgent-release runbook's build (`swift build -c release -Xswiftc
+     -gnone`) and tar flags, plus disabled automatic dependency resolution, SwiftPM's netrc and
+     keychain lookups off, and SwiftPM's cache, configuration and fingerprint store kept in the
+     work directory; no strip, re-signing or prefix maps. D17 ruling 2 chose a rebuild with path
+     remapping, and D18 step (4) restated it as a verified outcome, not a flag list, naming
+     `-gnone` among the known means. Round 1 of the privacy audit traced every home-directory path
+     in the shipped binary (R1-F1, 270 strings) to its 135 N_OSO debug-map entries, which `-gnone`
+     suppresses, and the checks verify the outcome. The only path-free outcome verified so far
+     (D24) used a combined recipe, so the first hosted run is the first execution of this recipe,
+     and of the script's SwiftPM path flags, git isolation and pinned copy, on a SwiftPM release
+     binary. The path check scans for `/Users/`, `/private/tmp/`, `/var/folders/`, `/home/` and
+     `/var/tmp/`; `/Volumes/` and a bare `/tmp/` are left out because the product's own strings
+     contain them. Alternative: D24's combined recipe (prefix maps, `-oso_prefix`, `strip -S` and
+     ad-hoc re-signing).
+  4. **Outward-write refusal.** Provisional: a static bound, not a proof: the job's `contents:
+     read`, `persist-credentials: false` and absence of secrets, held by the step-17 workflow scan,
+     which is a recorded-list check. On top of it, the script checks that the job environment
+     carries none of the listed token variables and none of `GIT_CONFIG_COUNT`,
+     `GIT_CONFIG_KEY_<n>`, `GIT_CONFIG_VALUE_<n>` or `GIT_CONFIG_PARAMETERS`, and that the local
+     git configuration, plus any worktree configuration file that exists whatever
+     `extensions.worktreeConfig` says (includes followed per file), of the candidate root (in CI
+     the job's throwaway clone) and of every existing local repository its `remote.*.url` or
+     `remote.*.pushurl` names holds no key of the listed credential classes and no URL userinfo.
+     Remote values are read as written (`insteadOf` rewrites are not applied). HOME is passed
+     through, so git's own fetch could still read `~/.netrc` and `~/.ssh`; the build performs no
+     push. No write is attempted in order to watch it fail: such an attempt is itself an
+     outward-write call, which design §14.1 bars, and the workflow scan refuses the workflow-level
+     commands a probe would use. Alternative: a dynamic probe that attempts a write and records its
+     refusal, which would need a reviewed exception to §14.1 (and to the scan, if written in the
+     workflow).
+  5. **Platform and version shape of the hosted evidence.** `macos-26` is the only macOS runner
+     label the workflow scan admits, while the next planned release, `v27.0.0` (D18), names macOS 27
+     as the newest validated. The hosted job also runs release preparation without
+     `--macos-major`, so it predicts and builds a default-bump 26.x version and never the 27.0.0
+     shape; a local run of that shape through the artifact half is a native build that needs a
+     grant. Provisional: hosted step-15 evidence comes from `macos-26` with the default bump until a
+     reviewed change admits a macOS 27 label. A push run that a later push cancels (the workflow
+     cancels in-progress runs per ref) is not evidence. Alternatives: a hosted macOS 27 runner once
+     one is admitted, or a granted local run of the 27.0.0 shape (D24 was a granted local run, but
+     of the frozen 26.0.0 constant).
+- **Also needed, as a grant rather than a definition.** Step 15 also asks for a local rehearsal of
+  the tooling. Running the script on the operator's Mac is a native release build, a new grant of
+  the kind D23 records; it will be asked separately, with its exact invocation.
+- **Options.** Ratify or replace each provisional answer; the controller brings them one at a time.
+- **Filed:** 2026-10-10 (UTC) · **Category:** release rehearsal definitions (design §14.1, §15.1,
+  §18 step 15)
+
+**Why it needed you.** Each answer sets what a step-15 acceptance criterion means for the
+enforcement control plane.
+
+**Blocking?** Not for the tooling. Until ruled, the readiness record cites these answers as
+provisional and does not count step 15 as passed on them.
+
+---
+
+## D48 — Launch specification approval
+
+- **Status:** **ANSWERED 2026-10-10 (UTC): approve as written (option A).** APPLIED when the
+  Status-line commit below is on `main`.
+- **Ruling.** The operator approves `docs/superpowers/specs/2026-10-03-launch-specification.md` with
+  the text carried by commit 357bafa (blob d20411e, unchanged on `main` through 7221da7), meeting
+  design §15 precondition 3 (the specification's P3). The approval also covers one later commit that
+  changes only the specification's Status line to "APPROVED 2026-10-10 (UTC) (D48)"; the Resolution
+  names that commit. The operator chose option (A), the recommended option, on its own question, in
+  preference to (B), approving only after the two MEDIUM findings (the probe never exercises the
+  recovery-environment deployment; the rehearsal does not apply this repository's real merge and
+  Actions settings) were fixed, and (C), naming sections to change.
+- **What it does not do.** It authorizes no step and no setting change. The launch waits on the
+  explicit version-publication instruction (P4), and each step on the operator's in-session
+  instruction (1.1).
+- **Open items.** Section 15's findings 1, 2 and 4 to 14 stay open; item 3 was resolved by D47. Each
+  open finding is fixed by an amendment under the P3 review gates before L1. Any other amendment to
+  the approved text is approved by a new entry naming the commit that carries it.
+- **Recorder's note.** Two amendments known now will need such an entry: D49's amendments to P6 and
+  Section 13, and the specification's wording that the operator's credential is held by "both agent
+  sessions" (among them its lines 70, 191 and 1811), of which one session remains since D44 closed.
+- **Filed:** 2026-10-10 (UTC), by the controller recording the ruling, under the number the second
+  agent session D44 authorized had claimed with its approval brief · **Category:** release / launch
+  governance
+
+**Why it needed you.** Design §15 reserves approval of the launch specification to the operator,
+and approving it accepts the Section 10 window without a release path.
+
+**Blocking?** It blocks L1 (P3). It does not block P1, P2, P6 or P10 work.
 
 ---

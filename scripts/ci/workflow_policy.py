@@ -89,7 +89,13 @@ does not admit, a lone `- -` entry and a plain key starting with `*` were others
 day: each was a string or a literal key here and a mapping, a nested sequence or an alias to
 YAML. They are refused now, as are a plain flow item holding any `:`, `[`, `]`, `{` or `}` and a
 plain value holding a colon followed by a space or a tab, or ending in one, which YAML loaders
-read as a mapping, refuse, or disagree on.
+read as a mapping, refuse, or disagree on. A quote in the middle of a plain value was one more
+until a seeded differential against libyaml later that day: it opened a quoted scalar here, so a
+` #` after it read as text rather than a comment (text kept, never dropped). The same comparison
+found a plain scalar starting with `,`, `]`, `}`, `#` or `- `, a tab after a sequence entry's `-`
+and a `?` in a plain flow item accepted here and refused by YAML (the `?` by libyaml 0.2.1 and
+MkDocs' loader); they are refused now, and `Tests/automation/test_workflow_policy.py` repeats the
+comparison with the host's libyaml whenever Ruby is present.
 The recorded sets below are control plane: changing a trigger, a required check name or an
 admitted runner label edits them in the same reviewed commit.
 """
@@ -379,13 +385,22 @@ def _first_refused_in_scalars(node: Any) -> Optional[int]:
 def _strip_comment(line: str) -> str:
     """Remove a trailing ` #` comment that sits outside a quoted scalar.
 
-    A quote opens a quoted scalar only at the start of a value (line start, or after
-    `:`, `-`, `[` or `,` plus spaces); an apostrophe inside a plain scalar is text.
+    A quote opens a quoted scalar only where YAML may start a node: at the start of the line's text,
+    after a `-` or `?` indicator that itself sits where a node may start, after a `:` followed by a
+    space, a tab or the end, after an anchor or a tag, and inside a flow collection after its `[` or
+    `{`, a `,`, or, conservatively, any `?` or `:` (a JSON-like `{"a":"b #c"}` needs no space; a
+    plain flow item holding either is refused in any case). Anywhere else a quote is plain text, as
+    in `k: a-'x #y`, `k: a ? 'x #y` and `k: :"x #y`, which YAML reads as `a-'x`, `a ? 'x` and `:"x`
+    followed by a comment. Where this cannot tell, it opens the quote: that keeps text a loader
+    drops (the value then differs, or is refused), never drops text a loader keeps.
     """
     quote: Optional[str] = None
+    node_start = True  # a node may start here: leading spaces keep it so
+    flow_depth = 0
     index = 0
     while index < len(line):
         character = line[index]
+        following = line[index + 1] if index + 1 < len(line) else ""
         if quote == '"':
             if character == "\\":
                 index += 2
@@ -394,16 +409,41 @@ def _strip_comment(line: str) -> str:
                 quote = None
         elif quote == "'":
             if character == "'":
-                if index + 1 < len(line) and line[index + 1] == "'":
+                if following == "'":
                     index += 2
                     continue
                 quote = None
-        elif character in {'"', "'"}:
-            before = line[:index].rstrip()
-            if before == "" or before[-1] in ":-[,":
-                quote = character
         elif character == "#" and (index == 0 or line[index - 1] in " \t"):
             return line[:index].rstrip()
+        elif character in " \t":
+            pass
+        elif character in {'"', "'"}:
+            if node_start:
+                quote = character
+            node_start = False
+        elif character in "-?:" and (following in ("", " ", "\t") or (flow_depth and character != "-")):
+            # An indicator: a sequence entry, an explicit key or a mapping value starts a node.
+            # A `-` or a `?` is an indicator only where a node may already start (`k: a ? 'x #y'` is
+            # the plain text `a ? 'x` and a comment to YAML), while a `:` takes precedence in plain
+            # text too, and opening there keeps text, so it always counts; inside a flow collection
+            # a `?` or `:` counts with no space after it, for the same reason.
+            node_start = node_start or character == ":" or (character == "?" and flow_depth > 0)
+        elif character in "[{" and (node_start or flow_depth):
+            flow_depth += 1
+            node_start = True
+        elif character == "," and flow_depth:
+            node_start = True
+        elif character in "]}" and flow_depth:
+            flow_depth -= 1
+            node_start = False
+        elif character in "&!" and node_start:
+            # An anchor or a tag: the node it labels starts after the following space, or, inside a
+            # flow collection, where a `,` or bracket ends it (`[&a,'x #y']`).
+            stops = " \t,[]{}" if flow_depth else " \t"
+            while index + 1 < len(line) and line[index + 1] not in stops:
+                index += 1
+        else:
+            node_start = False
         index += 1
     return line.rstrip()
 
@@ -507,21 +547,30 @@ def _scalar(raw: str) -> Any:
     if text[0] == "[":
         if text[-1] != "]":
             raise ParseError("flow sequence must close on the same line")
-        inner = text[1:-1].strip()
-        if inner == "":
+        inner = text[1:-1]
+        if inner.strip() == "":
             return []
         items = []
-        for item in inner.split(","):
-            item = item.strip()
+        for raw_item in inner.split(","):
+            item = raw_item.strip()
+            if item == "-" and raw_item.rstrip(" \t") == raw_item:
+                # A `-` right before `,` or `]` is the string `-` to YAML; `[a, - ]` is an error.
+                items.append("-")
+                continue
             # YAML reads a plain item holding `key: value` or `key:` as a one-pair mapping, and loaders
-            # disagree on other plain items with a colon (libyaml 0.2.1 refuses `[a:b]`, 0.2.5 reads a
-            # string), so a plain item holds none of `:`, `[`, `]`, `{` or `}`.
-            if item == "" or item[0] in "[{" or "{" in item or (item[0] not in "'\"" and any(c in item for c in ":[]}")):
-                raise ParseError("flow sequences may hold scalars only (a plain item holds no `:`, `[`, `]`, `{` or `}`)")
+            # disagree on other plain items with a colon or a `?` (libyaml 0.2.1 and PyYAML's
+            # pure-Python loader, which MkDocs uses, refuse `[a:b]` and `[a?b]`; libyaml 0.2.5 reads
+            # strings), so a plain item holds none of `:`, `?`, `[`, `]`, `{` or `}`.
+            if item == "" or item[0] in "[{" or "{" in item or (item[0] not in "'\"" and any(c in item for c in ":?[]}")):
+                raise ParseError("flow sequences may hold scalars only (a plain item holds no `:`, `?`, `[`, `]`, `{` or `}`)")
             items.append(_scalar(item))
         return items
     if text[0] in "{&*!?%@`|>":
         raise ParseError("flow mappings, anchors, aliases, tags and bare block indicators are refused")
+    if text[0] in ",]}#" or text == "-" or text[:2] in ("- ", "-\t"):
+        # YAML refuses a plain scalar that starts with a flow indicator or `#`, and reads `- x`
+        # after a key as a block sequence, which it refuses there.
+        raise ParseError("a plain scalar may not start with `,`, `]`, `}`, `#`, or `-` followed by a space, a tab or the end")
     if PLAIN_PAIR_RE.search(text):
         # A plain value holding a colon and a space or a tab (or ending in `:`) is a mapping or a YAML
         # error, never this string.
@@ -537,6 +586,10 @@ def _scalar(raw: str) -> Any:
 
 # A plain key may not start with `*`: YAML reads `*name :` as an alias, the key an anchor names.
 KEY_RE = re.compile(r"^(?P<key>[A-Za-z0-9_.\-/][A-Za-z0-9_.\-/*]*|\"[^\"]*\"|'[^']*')\s*:(?:\s+(?P<value>.*))?$")
+
+
+SEQUENCE_TAB_RE = re.compile(r"-[ \t]*\t")
+NESTED_SEQUENCE_RE = re.compile(r"-(?:[ \t]|$)")
 
 
 class _Lines:
@@ -564,6 +617,11 @@ class _Lines:
 
     def take(self) -> Tuple[int, int, str]:
         row = self.rows[self.position]
+        if SEQUENCE_TAB_RE.match(row[2], row[0]):
+            # libyaml refuses a tab after a sequence entry's `-` (`-\ta`, `- \ta`, `-\t: x`). Checked
+            # here, where a row is read as structure, so a block scalar's lines (skipped, not taken)
+            # may still hold one.
+            raise ParseError("line {}: a tab after a sequence entry's `-` is refused".format(row[1]))
         self.position += 1
         return row
 
@@ -683,7 +741,7 @@ def _parse_sequence(lines: _Lines, indent: int, under_key: bool = False) -> List
         if rest.strip() == "":
             items.append(_parse_block(lines, item_indent) if _next_deeper(lines, indent) else None)
             continue
-        if rest.strip().startswith("- ") or rest.strip() == "-":
+        if NESTED_SEQUENCE_RE.match(rest.strip()):
             raise ParseError("line {}: nested sequences are refused".format(row[1]))
         match = KEY_RE.match(rest.strip())
         if match and not rest.strip().startswith(("'", '"', "[")):

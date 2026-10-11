@@ -64,8 +64,11 @@ working material for a reviewer, never an artifact, never evidence, never upload
 
 Out of scope here, gated elsewhere: the release-notes contract
 (`scripts/check-release-notes.py`), manual freshness (`scripts/gen-manual.py
---check`), the artifact build and its outcome gate (the report reserves an
-`artifact_sha256` slot for a later, separately computed record), and every
+--check`), the artifact build and its outcome gate (`scripts/ci/release_artifact.py`,
+which builds and packages the candidate plus these rendered files and verifies the
+outcome without printing or recording any digest in its report, its messages or tracked
+evidence; this report's `artifact_sha256` slot stays empty pending the operator's ruling
+on design section 14.1's deterministic-digest clause, HUMAN-DECISIONS D51), and every
 outward write.
 """
 from __future__ import annotations

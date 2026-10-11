@@ -279,7 +279,9 @@ invokes the binary — the full recursive `bats -r bats/` tier is LOCAL ONLY: me
 environment-dependently and crawling at ~10s/test; a hosted-safe partition runs in CI's
 `hosted-bats` job on `macos-26`), **Python automation** (`python3 -m unittest discover -s
 Tests/automation`, the CI-policy tooling's own tests — run ONLY by the Ubuntu
-`Supply-chain policy` job, so a macOS-only skip there is a test no CI job runs), and
+`Supply-chain policy` job, so a macOS-only skip there is a test no CI job runs; its libyaml
+comparisons need Ruby, which that runner's image provides, and fail rather than skip in CI
+without it), and
 **live** (drives the real Apple frameworks against the sandbox — real Mac with granted
 TCC, not CI). Hosted CI is Ubuntu plus `macos-26` while local development tracks the
 current macOS, so a green local run is not evidence for the hosted lanes or vice versa;
@@ -557,7 +559,7 @@ in the changelog. This supersedes the strict-SemVer MAJOR semantics in
 (`--version` and `apple version` read it). Never hand-bump it, and never hand-edit released
 CHANGELOG headings — release preparation owns both.
 
-**Release automation — current state (2026-09-22):** the legacy `release.yml` publisher was
+**Release automation — current state (2026-10-10):** the legacy `release.yml` publisher was
 REMOVED on 2026-09-07 as a publication-design prerequisite; no workflow in this repository can
 tag, publish, or write a branch, and the repository's own tests refuse any that could; since
 2026-09-23 the parsed-YAML scan `scripts/ci/workflow_policy.py` (design §18 step 17: explicit
@@ -583,8 +585,21 @@ throwaway clone; only the script's nothing-to-release status (no commits since t
 empty `[Unreleased]`, or a release commit awaiting its tag) is advisory, every other failure fails
 the job — a smoke check of the default-bump path toward design §18 step 15, whose explicit-SHA
 evidence binding is still pending; the macOS-adoption shape is exercised locally before a cut,
-and the scratch copies are never uploaded. The other half — the release-preparation PR, the
-trusted listener, the bot publisher with its operator-approved environment and tag rulesets —
+and the scratch copies are never uploaded. When that rehearsal finds something to release, the
+same job, on `macos-26`, runs `scripts/ci/release_artifact.py`: it builds the release binary from
+a fresh clone of the candidate plus the two rendered files with the urgent-release runbook's
+build and tar recipe (plus disabled automatic resolution, SwiftPM's netrc and keychain lookups
+off, and SwiftPM's cache, configuration and fingerprint store kept in its work directory), checks
+that the rendered change set is exactly those two files (not that generated documentation needs
+no change), and checks the archive, the checksum file, a thin arm64 binary, the deployment target,
+linkage, the debug map, home- and temporary-directory path bytes, the code signature and the
+runtime version. Five of its answers, provisional when it landed, were ratified by the operator
+in D51: the linkage definition, withholding every digest and size, the recipe, relying on the
+workflow's static bound (not a proof) for outward-write refusal, and taking hosted evidence from
+`macos-26` with the default bump. Nothing is uploaded, and neither its report nor its own
+messages carry a digest, a size, the archive name or the version. The other half — the
+release-preparation PR, the trusted listener, the bot publisher with its operator-approved
+environment and tag rulesets —
 does not exist yet and may not be added until the design's
 §15 preconditions hold (the reviewed §18 step 20 `main` ruleset active and read back, which
 D46's interim ruleset is not; closed privacy gate; reviewed launch specification).
@@ -619,8 +634,12 @@ Release by hand, with the operator's own credentials, from that artifact; and th
 removed the same day the release is published or abandoned. No identity joins a bypass list,
 neither readiness level may be claimed while the workflow exists, and the runbook retires at
 launch. An agent may carry a runbook release through step 4 and stops there. Outside a runbook
-release, the rehearsal above is the only release-shaped execution an agent may perform, and it
-may run freely against any clean commit because it writes nothing outside its scratch directory.
+release, the rehearsal above is the only release-shaped execution an agent may perform:
+`release_prep.py` may run freely against any clean commit because it writes nothing outside its
+scratch directory, while running `release_artifact.py` against a real candidate on the operator's
+Mac is a native release build that needs the operator's grant (D23, D51), so its routine run is
+the hosted job (its own tests never run `swift` or build the product: they use a fake build, and
+one macOS-only class compiles tiny C programs).
 Prerequisites that carry over to every real path: clean `main`; the FULL local canonical suite
 (both Swift toolchains AND `bats -r bats/`, per Toolchain + testing) green on the EXACT
 candidate commit — the hosted gates run build, swift test and only a hosted-safe Bats partition,
@@ -722,10 +741,12 @@ CLI actually accepts.
   and line feed (a carriage return is read as a line feed on this path), and no byte-order
   mark, bidirectional control, invisible character or character outside YAML's printable set,
   no explicit block indentation indicator, no tab in a line's leading whitespace, no quoted
-  scalar that does not close on its own line, no plain flow-sequence item holding `:`, `[`, `]`,
-  `{` or `}`, no plain value holding a colon followed by a space or a tab, and a sequence entry YAML
-  reads as a mapping must begin with a plain key the parser admits, so a `nav` title holding a
-  space cannot be written yet) and must fit a recorded
+  scalar that does not close on its own line, no plain flow-sequence item holding `:`, `?`, `[`,
+  `]`, `{` or `}`, no plain value holding a colon followed by a space or a tab, no plain scalar
+  starting with `,`, `]`, `}` or `#`, or with `-` followed by a space, a tab or the end (a
+  flow-sequence item `-` directly before `,` or `]` stays the string `-`), no tab after a
+  sequence entry's `-`, and a sequence entry YAML reads as a mapping must begin with a
+  plain key the parser admits, so a `nav` title holding a space cannot be written yet) and must fit a recorded
   allowlist — known top-level keys only, `docs_dir` present and exactly `docs/manual`, `use_directory_urls` absent or
   true, no `hooks`, no plugin but `search`, no `theme.custom_dir`, Markdown extensions and their
   options from the recorded set (`pymdownx.snippets` is refused), relative asset paths. A

@@ -292,8 +292,15 @@ struct RecentCommandTests {
         let hit = try #require((try drive(try RecentCmd.parse([]), runner)["notes"]
             as? [[String: Any]])?.first)
 
+        // Pinned in local time, as the --text stamp test below is: the wire date 2026-3-2-8-0-0 is
+        // local, so its UTC form starts with 2026-03-01 on a host east of UTC+8.
         let modified = try #require(hit["modified"] as? String)
-        #expect(modified.hasPrefix("2026-03-02"), "the pass-1 value, not pass 2's 2020 re-read")
+        let parsed = try #require(ISO8601DateFormatter().date(from: modified))
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone.current
+        let c = cal.dateComponents([.year, .month, .day, .hour, .minute, .second], from: parsed)
+        #expect((c.year, c.month, c.day, c.hour, c.minute, c.second) == (2026, 3, 2, 8, 0, 0),
+                "the pass-1 value, not pass 2's 2020 re-read")
     }
 
     /// The one case the payload cannot make honest: a note pass 1 could not date is ranked last
@@ -316,8 +323,13 @@ struct RecentCommandTests {
         #expect(stamp.timeIntervalSince(before) >= -1 && stamp.timeIntervalSince(before) < 300,
                 "a read-time placeholder, which is exactly why the docs say not to trust it")
         // The note that DID have a date is unaffected — the placeholder is not a blanket rewrite.
+        // Its wire date 2026-1-15-9-30-0 is local, so it is compared in local time, as above.
         let dated = try #require(hits.first?["modified"] as? String)
-        #expect(dated.hasPrefix("2026-01-15"))
+        let datedInstant = try #require(ISO8601DateFormatter().date(from: dated))
+        var cal = Calendar(identifier: .gregorian)
+        cal.timeZone = TimeZone.current
+        let c = cal.dateComponents([.year, .month, .day, .hour, .minute, .second], from: datedInstant)
+        #expect((c.year, c.month, c.day, c.hour, c.minute, c.second) == (2026, 1, 15, 9, 30, 0))
     }
 
     // MARK: failure paths
