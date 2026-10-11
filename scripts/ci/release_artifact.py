@@ -60,9 +60,12 @@ Steps, in order. Each fails closed, and a failed step leaves every later check `
 6.  `change-set`: the candidate is cloned into `<work>/src` and checked out detached at the
     SHA, the two overlay files replace their tracked counterparts, and `git status` must then
     list exactly those two paths as modified, once each, and nothing else: the rendered
-    change set is exactly the two allowlisted files and both differ from HEAD. Residual: this
-    does not show that generated documentation needs no change (design section 14.2's third
-    file class).
+    change set is exactly the two allowlisted files and both differ from HEAD. The one
+    exception is the pending unpublished state (release preparation's pending path), where the
+    version constant already holds the pending version and may stay unchanged, in which case
+    `git status` lists the CHANGELOG alone (the CHANGELOG must still differ from HEAD); no other
+    path may appear in either state. Residual: this does not show that generated documentation
+    needs no change (design section 14.2's third file class).
 7.  `deployment-minimum`: exactly one `.macOS(.vNN)` / `.macOS(.vNN_M)` inside the
     `platforms:` argument of `Package.swift` names the expected deployment minimum.
 8.  `build`: `/usr/bin/swift build -c release --disable-automatic-resolution -Xswiftc -gnone`

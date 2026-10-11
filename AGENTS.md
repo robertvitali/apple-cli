@@ -583,15 +583,19 @@ version. It touches nothing in the tree and creates no ref; `docs.yml` runs it a
 that workflow builds (the pushed commit on `main`, or a pull request's merge commit) in a
 throwaway clone; only the script's nothing-to-release status (no commits since the last tag, an
 empty `[Unreleased]`, or a release commit awaiting its tag) is advisory, every other failure fails
-the job — a smoke check of the default-bump path toward design §18 step 15, whose explicit-SHA
-evidence binding is still pending; the macOS-adoption shape is exercised locally before a cut,
+the job — a smoke check of the default-bump path (since the 2026-10-11 source adoption, of the
+pending unpublished-source path instead, which D51 does not count as step-15 evidence until the
+operator rules) toward design §18 step 15, whose explicit-SHA evidence binding is still
+pending; the macOS-adoption shape is exercised locally before a cut,
 and the scratch copies are never uploaded. When that rehearsal finds something to release, the
 same job, on `macos-26`, runs `scripts/ci/release_artifact.py`: it builds the release binary from
 a fresh clone of the candidate plus the two rendered files with the urgent-release runbook's
 build and tar recipe (plus disabled automatic resolution, SwiftPM's netrc and keychain lookups
 off, and SwiftPM's cache, configuration and fingerprint store kept in its work directory), checks
-that the rendered change set is exactly those two files (not that generated documentation needs
-no change), and checks the archive, the checksum file, a thin arm64 binary, the deployment target,
+that the rendered change set is exactly those two files (or the CHANGELOG alone when the
+candidate's version state, computed with release preparation's own logic, is a pending
+unpublished one), not that generated documentation needs no change, and checks the archive,
+the checksum file, a thin arm64 binary, the deployment target,
 linkage, the debug map, home- and temporary-directory path bytes, the code signature and the
 runtime version. Five of its answers, provisional when it landed, were ratified by the operator
 in D51: the linkage definition, withholding every digest and size, the recipe, relying on the
