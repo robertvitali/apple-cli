@@ -745,8 +745,9 @@ CLI actually accepts.
   `]`, `{` or `}`, no plain value holding a colon followed by a space or a tab, no plain scalar
   starting with `,`, `]`, `}` or `#`, or with `-` followed by a space, a tab or the end (a
   flow-sequence item `-` directly before `,` or `]` stays the string `-`), no tab after a
-  sequence entry's `-`, and a sequence entry YAML reads as a mapping must begin with a
-  plain key the parser admits, so a `nav` title holding a space cannot be written yet) and must fit a recorded
+  sequence entry's `-`, no `<<` key, quoted or not, and a sequence entry YAML reads as a mapping
+  must begin with a plain key the parser admits, so a `nav` title holding a space cannot be
+  written yet) and must fit a recorded
   allowlist — known top-level keys only, `docs_dir` present and exactly `docs/manual`, `use_directory_urls` absent or
   true, no `hooks`, no plugin but `search`, no `theme.custom_dir`, Markdown extensions and their
   options from the recorded set (`pymdownx.snippets` is refused), relative asset paths. A

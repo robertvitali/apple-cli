@@ -584,7 +584,7 @@ class LibyamlDifferentialTests(unittest.TestCase):
     def test_generated_documents_never_read_differently_or_only_here(self) -> None:
         documents = [document for seed in (1, 2, 3, 4) for document in differential_documents(seed, 4000)]
         agreed = self.assert_reads_as_libyaml(documents)
-        # Not vacuous: the parser accepts 35,047 of the 272,000, at least 208 from each template but
+        # Not vacuous: the parser accepts 35,026 of the 272,000, at least 208 from each template but
         # the properties one (anchors, tags, aliases, merge keys, explicit keys), which it refuses.
         self.assertGreaterEqual(sum(agreed.values()), 30000)
         self.assertEqual(agreed.get("properties", 0), 0)
@@ -693,6 +693,37 @@ class ScanTests(unittest.TestCase):
                                 timeout=LIBYAML_TIMEOUT_SECONDS)
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(json.loads(result.stdout), {"run": "git push origin HEAD:main"})
+
+    def test_a_quoted_merge_key_is_refused_in_every_position(self) -> None:
+        # KEY_RE's plain branch cannot spell `<<`; its quoted branch can, and the key is compared after
+        # decoding, so an escaped spelling is refused too.
+        for key in ('"<<"', "'<<'", '"\\x3c<"', '"\\u003c\\u003c"', '"\\U0000003c\\U0000003c"'):
+            for text in ("on: push\n{}:\n  environment: prod\n".format(key),
+                         "jobs:\n  a:\n    {}:\n      environment: prod\n".format(key),
+                         "k:\n  - a: 1\n    {}:\n      secrets: x\n".format(key)):
+                with self.subTest(text=text):
+                    with self.assertRaisesRegex(policy.ParseError, "a `<<` merge key is refused"):
+                        policy.parse_workflow(text)
+            with self.subTest(first_key=key):
+                # A quote-led first key on a sequence entry is refused before it is read as a key.
+                with self.assertRaises(policy.ParseError):
+                    policy.parse_workflow("k:\n  - {}: x\n".format(key))
+        self.assertEqual(policy.parse_workflow('"<<a": 1\n"a<<": 2\n'), {"<<a": "1", "a<<": "2"})
+
+    def test_a_quoted_merge_key_fails_the_scan(self) -> None:
+        body = mutate(QUALITY, "\njobs:\n", '\n"<<":\n  environment: prod\njobs:\n')
+        self.assert_ci_violation(body, "a `<<` merge key is refused")
+
+    @NEEDS_LIBYAML
+    def test_psych_merges_a_quoted_merge_key(self) -> None:
+        # The reading the merge-key refusal guards against: Psych merges a `<<` key's mapping into its
+        # parent at construction, single- or double-quoted alike, which a parse-tree comparison never sees.
+        text = 'j:\n  a: 1\n  "<<":\n    environment: prod\nk:\n  \'<<\':\n    secrets: x\n'
+        script = 'require "psych"; require "json"; puts JSON.generate(Psych.safe_load(STDIN.read, aliases: true))'
+        result = subprocess.run(["ruby", "-e", script], input=text, capture_output=True, text=True, check=False,
+                                timeout=LIBYAML_TIMEOUT_SECONDS)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(json.loads(result.stdout), {"j": {"a": 1, "environment": "prod"}, "k": {"secrets": "x"}})
 
     def test_missing_job_permissions_fails(self) -> None:
         body = mutate(QUALITY, JOB_HEADER, "    runs-on: ubuntu-latest\n    steps:")

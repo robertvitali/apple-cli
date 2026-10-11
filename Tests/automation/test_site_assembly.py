@@ -471,6 +471,17 @@ class SiteAssemblyTests(unittest.TestCase):
         self.assertEqual(completed.returncode, 1, completed.stderr)
         self.assertIn("use_directory_urls", completed.stderr)
 
+    def test_a_quoted_merge_key_in_the_config_is_refused(self) -> None:
+        # The shared parser refuses a quoted `<<` key before the key allowlist would: a loader that
+        # merges it would read `use_directory_urls: false` from a key the allowlist sees only as `<<`.
+        self.repo.commit_manual("current")
+        (self.repo.root / "mkdocs.yml").write_text('site_name: t\ndocs_dir: docs/manual\n"<<":\n  use_directory_urls: false\n',
+                                                   encoding="utf-8")
+        git(["add", "-A"], self.repo.root); git(["commit", "-q", "-m", "docs: merge key"], self.repo.root)
+        completed, _s, _r = self.run_assembly()
+        self.assertEqual(completed.returncode, 1, completed.stderr)
+        self.assertIn("a `<<` merge key is refused", completed.stderr)
+
     def test_printed_errors_escape_characters_that_could_start_a_line(self) -> None:
         # A refused tag or config key may hold a line feed; printed verbatim, a following
         # `::error::` would reach the runner as a workflow command. (A refused tag is quoted with

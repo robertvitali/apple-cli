@@ -1,11 +1,44 @@
 ---
 topic: hosted-ci
 importance: high
-last-used: 2026-10-10
-uses: 21
+last-used: 2026-10-11
+uses: 22
 ---
 
 # Hosted CI (public, free GitHub-hosted runners)
+
+## 2026-10-11 — A quoted `<<` is still a merge key: Ruby merges where a parse tree cannot see
+
+**Symptom.** A security review of the standing differential (`b45688b`) found that the workflow
+scan accepted `"<<":` as an ordinary key. In
+
+```yaml
+j:
+  a: 1
+  "<<":
+    environment: prod
+```
+
+the parser read `j` as `a` and a key `<<` holding a mapping; Ruby's Psych (libyaml 0.2.1) reads
+`j` as `a` and `environment`. A merged `environment` or `container` key would have been invisible to
+the scan (a `secrets` key is refused at any depth, and a merge never replaces a key the job states
+itself, such as `runs-on` or `permissions`, whose absence the scan reports).
+
+**Cause.** The key pattern's plain branch cannot spell `<<`, but its quoted branch can, and Psych
+merges every `<<` key whose tag is not `!!str`, quoted or not; PyYAML, which MkDocs uses, merges
+only a plain one. The differential compares node trees, and the merge happens later, in the
+constructor, so both sides read the same key and the comparison passed.
+
+**Fix.** A `<<` key, however it is quoted or escaped, is a parse refusal wherever it sits, in a
+workflow and in `mkdocs.yml` alike. A Ruby-backed test shows Psych merging the quoted key, so the
+refusal's reason stays checked. Over the record's 272,000 documents the parser now accepts 35,026:
+the 21 it no longer accepts each hold a quoted `<<` key, none is newly accepted, and the second set
+of 48,000 is unchanged.
+
+**Lesson.** A parse-tree differential checks agreement on the tree only, not on what a loader
+builds from it. A key the constructor treats specially needs its own check against each consumer's
+loader. GitHub's loader reportedly does not support merge keys; that is not verified, so the scan
+refuses the key rather than rely on it.
 
 ## 2026-10-07 — A quote is a quote only where a node may start: a standing libyaml differential
 

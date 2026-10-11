@@ -95,7 +95,12 @@ until a seeded differential against libyaml later that day: it opened a quoted s
 found a plain scalar starting with `,`, `]`, `}`, `#` or `- `, a tab after a sequence entry's `-`
 and a `?` in a plain flow item accepted here and refused by YAML (the `?` by libyaml 0.2.1 and
 MkDocs' loader); they are refused now, and `Tests/automation/test_workflow_policy.py` repeats the
-comparison with the host's libyaml whenever Ruby is present.
+comparison with the host's libyaml whenever Ruby is present. That comparison checks node trees
+only, not what a loader builds from them: a quoted `<<` key was one more gap until 2026-10-11,
+since Ruby's Psych merges its mapping into the parent at construction (a `<<` key is refused
+now, quoted or not), and plain keys that differ as text but resolve to the same YAML 1.1 value
+(`on` and `true`, `null` and `Null`) are another: this parser keeps them apart, a loader keeps the
+last.
 The recorded sets below are control plane: changing a trigger, a required check name or an
 admitted runner label edits them in the same reviewed commit.
 """
@@ -793,6 +798,11 @@ def _assign(mapping: Dict[str, Any], lines: _Lines, indent: int, match: "re.Matc
     key = _scalar(raw_key) if raw_key[0] in "\"'" else raw_key
     if not isinstance(key, str):
         raise ParseError("line {}: mapping key must be a scalar".format(lineno))
+    if key == "<<":
+        # KEY_RE's plain branch cannot spell `<<`, but its quoted branch can, and Ruby's Psych merges a
+        # quoted `<<` key's mapping into its parent at construction, where a parse-tree comparison never
+        # sees it: a merged key such as `environment` would then be invisible to this scan.
+        raise ParseError("line {}: a `<<` merge key is refused".format(lineno))
     if key in mapping:
         raise ParseError("line {}: duplicate key `{}`".format(lineno, key))
     value = match.group("value")
