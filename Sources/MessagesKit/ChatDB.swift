@@ -1073,8 +1073,6 @@ public struct ChatDB {
 
     private static let exactCursorVersion = 1
     private static let exactCursorMaxBytes = 4096
-    private static let exactNativePartsReason = "unavailable until a safe data-only attributedBody typedstream parser is implemented"
-
     private static let normalizedSecondsSQL = """
         CASE
           WHEN m.date IS NULL THEN NULL
@@ -1321,6 +1319,7 @@ public struct ChatDB {
             let selectedChat = try requiredInt(row, "selected_chat_rowid")
             let joined = attachments[rowid] ?? []
             let bodyInfo = exactBody(row, attachments: joined)
+            let nativePartsInfo = exactNativeParts(row)
             let rawDate = row.int("date")
             let date = rawDate.map(MessageTime.date(fromRaw:))
             let isFromMe = (row.int("is_from_me") ?? 0) != 0
@@ -1352,12 +1351,28 @@ public struct ChatDB {
                 is_group: row.int("selected_style") == ChatDB.groupChatStyle,
                 has_attachments: (row.int("cache_has_attachments") ?? 0) != 0 || !joined.isEmpty,
                 attachments: joined,
-                native_parts_available: false,
-                native_parts_reason: ChatDB.exactNativePartsReason,
-                native_parts: nil
+                native_parts_available: nativePartsInfo.available,
+                native_parts_reason: nativePartsInfo.reason,
+                native_parts: nativePartsInfo.parts
             ))
         }
         return out
+    }
+
+    private func exactNativeParts(_ row: SQLiteReader.Row) -> (available: Bool, reason: String, parts: [ExactNativePart]?) {
+        let decoded = NativeMessageParts.decode(row.data("attributedBody"))
+        let parts = decoded.nativeParts.map { nativeParts in
+            nativeParts.map { nativePart in
+                ExactNativePart(
+                    index: nativePart.index,
+                    utf16_ranges: nativePart.utf16Ranges.map {
+                        ExactNativePart.UTF16Range(location: $0.location, length: $0.length)
+                    },
+                    attachment_guid: nativePart.attachmentGUID
+                )
+            }
+        }
+        return (decoded.nativePartsAvailable, decoded.nativePartsReason, parts)
     }
 
     private func exactBody(_ row: SQLiteReader.Row, attachments: [Attachment]) -> (body: String?, availability: ExactBodyAvailability) {

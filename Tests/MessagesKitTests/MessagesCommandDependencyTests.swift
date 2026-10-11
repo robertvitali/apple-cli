@@ -96,6 +96,16 @@ extension Send.Outcome {
 private let syntheticChatDBPath = "synthetic/chat.db"
 private let syntheticAddressBookDir = "synthetic/AddressBook"
 
+private let commandNativePartKey = NSAttributedString.Key("__kIMMessagePartAttributeName")
+
+private func commandNativeArchive(_ text: String, _ attributes: [(NSAttributedString.Key, Any, NSRange)] = []) -> Data {
+    let value = NSMutableAttributedString(string: text)
+    for (key, object, range) in attributes {
+        value.addAttribute(key, value: object, range: range)
+    }
+    return NSArchiver.archivedData(withRootObject: value)
+}
+
 /// Rebuilds `chat` WITHOUT `style`, keeping `chat_message_join` intact. That is the one schema
 /// shape where a store can join messages to chats but cannot classify them, so it is what makes
 /// `--direct-only` unable to run — the fail-open case the `direct_only_applied` field exists for.
@@ -1443,7 +1453,7 @@ struct MessagesCommandDependencyTests {
         #expect(message["selected_chat_rowid"] as? Int == 3)
         #expect(message["native_parts"] is NSNull)
         #expect(message["native_parts_available"] as? Bool == false)
-        #expect((message["native_parts_reason"] as? String)?.contains("typedstream parser") == true)
+        #expect(message["native_parts_reason"] as? String == "absent-blob")
         let availability = try #require(message["body_availability"] as? [String: Any])
         #expect(availability["status"] as? String == "available")
 
@@ -1451,6 +1461,57 @@ struct MessagesCommandDependencyTests {
             try Get.parse(["--chat-rowid", "1", "--message-rowid", "1"]).run(dependencies: deps)
         }
         #expect(wrongChat.exitCode == AppleExit.notFound)
+    }
+
+
+    @Test func exactCommandOutputCarriesNativePartsNullAndArrayShapes() throws {
+        let fx = try ChatFixture()
+        let blob = commandNativeArchive("Alice", [
+            (commandNativePartKey, NSNumber(value: 2), NSRange(location: 0, length: 5))
+        ])
+        try fx.insertMessage(rowid: 60, guid: "native-command-array", attributedBody: blob,
+                             chatRowid: 3, date: fx.base - 60)
+        try fx.insertMessage(rowid: 61, guid: "native-command-empty",
+                             attributedBody: commandNativeArchive("plain"),
+                             chatRowid: 3, date: fx.base - 61)
+        let deps = fixtureDependencies(fx)
+
+        let getOutput = try payload(from: captureStdout {
+            try Get.parse(["--chat-rowid", "3", "--message-rowid", "60"]).run(dependencies: deps)
+        })
+        let getMessage = try #require(getOutput["message"] as? [String: Any])
+        #expect(getMessage["native_parts_available"] as? Bool == true)
+        #expect(getMessage["native_parts_reason"] as? String == "available")
+        let getParts = try #require(getMessage["native_parts"] as? [[String: Any]])
+        #expect(getParts.count == 1)
+        #expect(getParts[0]["index"] as? Int == 2)
+        let ranges = try #require(getParts[0]["utf16_ranges"] as? [[String: Any]])
+        #expect(ranges.count == 1)
+        #expect(ranges[0]["location"] as? Int == 0)
+        #expect(ranges[0]["length"] as? Int == 5)
+        #expect(getParts[0]["attachment_guid"] is NSNull)
+
+        let historyOutput = try payload(from: captureStdout {
+            try History.parse(["--chat-rowid", "3", "--limit", "100"]).run(dependencies: deps)
+        })
+        let messages = try #require(historyOutput["messages"] as? [[String: Any]])
+        let historyMessage = try #require(messages.first { $0["rowid"] as? Int == 60 })
+        #expect(historyMessage["native_parts_available"] as? Bool == true)
+        #expect(historyMessage["native_parts_reason"] as? String == "available")
+        #expect((historyMessage["native_parts"] as? [[String: Any]])?.count == 1)
+
+        let empty = try #require(messages.first { $0["rowid"] as? Int == 61 })
+        #expect(empty["native_parts_available"] as? Bool == true)
+        #expect(empty["native_parts_reason"] as? String == "empty-known")
+        #expect((empty["native_parts"] as? [[String: Any]])?.isEmpty == true)
+
+        let absentOutput = try payload(from: captureStdout {
+            try Get.parse(["--chat-rowid", "3", "--message-rowid", "6"]).run(dependencies: deps)
+        })
+        let absent = try #require(absentOutput["message"] as? [String: Any])
+        #expect(absent["native_parts"] is NSNull)
+        #expect(absent["native_parts_available"] as? Bool == false)
+        #expect(absent["native_parts_reason"] as? String == "absent-blob")
     }
 
     @Test func exactReadCursorsRejectWrongScopeAndMalformedInput() throws {

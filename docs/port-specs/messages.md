@@ -517,10 +517,22 @@ or discovery scan cost.
 Exact reads retain the caller-selected chat for messages linked to several chats,
 and expose the message GUID without selecting by body text or latest activity.
 Required-schema/query failures are errors instead of successful empty results.
-Body availability distinguishes missing and undecodable text. Native parts remain
-explicitly unavailable in this first increment; no attachment position or text
-offset is promoted to native identity. Safe native-part decoding and automation
-verification are separate increments of the expanded capability design in
+Body availability distinguishes missing and undecodable text. Exact reads decode
+a constrained, data-only subset of `attributedBody` native-part metadata without
+Foundation unarchiving: `native_parts_available` is true for supported archives,
+`native_parts` is an array of `{index, utf16_ranges, attachment_guid}` records.
+Each index is scoped to its message GUID; attachment order and text offsets are
+never promoted to native identity. A supported archive with no native keys returns an empty array with
+`native_parts_reason: "empty-known"`. The `utf16_ranges` are offsets into the
+archived attributed-string text, not necessarily the emitted `body`, because the
+`text` column still has body precedence. Missing archives report
+`native_parts_available: false`, `native_parts: null`,
+`native_parts_reason: "absent-blob"`; malformed, keyed, or richer unsupported
+archives report false/null with a bounded reason rather than partial metadata.
+This first decoder intentionally supports only the constrained NSArchiver classes
+exercised by synthetic fixtures and leaves richer typedstream shapes such as
+stickers/data detectors unavailable. Automation verification is a separate
+increment of the expanded capability design in
 [`beeper-imessage-port.md`](../discovery/beeper-imessage-port.md).
 
 These commands use read-only database snapshots and never drive Messages UI or

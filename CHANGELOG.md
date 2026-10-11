@@ -25,8 +25,9 @@ JSON output are stable per the versioning policy — breaking changes bump
   bounded cursor pagination; `messages get` fetches one exact message after
   checking its membership in the selected conversation. GUID and local ROWID
   selectors never fall back to body text or the latest message. Reads preserve
-  bodyless records and expose unavailable body/native-part metadata explicitly.
-  Existing commands retain their behavior and the JSON envelope remains schema 1.
+  bodyless records, expose body availability explicitly, and decode a constrained
+  safe subset of native `attributedBody` part metadata. Existing commands retain
+  their behavior and the JSON envelope remains schema 1.
   Manuals: [`conversations`](https://github.com/robertvitali/apple-cli/blob/main/docs/manual/messages/conversations.md),
   [`history`](https://github.com/robertvitali/apple-cli/blob/main/docs/manual/messages/history.md),
   [`get`](https://github.com/robertvitali/apple-cli/blob/main/docs/manual/messages/get.md).

@@ -189,6 +189,69 @@ final class ChatFixture {
             throw Err.exec(err.map { String(cString: $0) } ?? "unknown sqlite error")
         }
     }
+
+    func insertMessage(rowid: Int64, guid: String, text: String? = nil, attributedBody: Data? = nil,
+                       chatRowid: Int64, date: Int64? = nil, handleID: Int64 = 1,
+                       service: String = "iMessage", cacheHasAttachments: Bool = false) throws {
+        var db: OpaquePointer?
+        guard sqlite3_open(path, &db) == SQLITE_OK else { throw Err.open }
+        defer { sqlite3_close(db) }
+
+        var stmt: OpaquePointer?
+        let sql = """
+            INSERT INTO message (ROWID,guid,text,attributedBody,is_from_me,handle_id,service,date,error,cache_has_attachments)
+            VALUES (?1,?2,?3,?4,0,?5,?6,?7,0,?8)
+            """
+        guard sqlite3_prepare_v2(db, sql, -1, &stmt, nil) == SQLITE_OK else {
+            throw Err.exec(String(cString: sqlite3_errmsg(db)))
+        }
+        defer { sqlite3_finalize(stmt) }
+        sqlite3_bind_int64(stmt, 1, rowid)
+        sqlite3_bind_text(stmt, 2, guid, -1, SQLITE_TRANSIENT)
+        if let text { sqlite3_bind_text(stmt, 3, text, -1, SQLITE_TRANSIENT) } else { sqlite3_bind_null(stmt, 3) }
+        if let attributedBody {
+            attributedBody.withUnsafeBytes { raw in
+                _ = sqlite3_bind_blob(stmt, 4, raw.baseAddress, Int32(attributedBody.count), SQLITE_TRANSIENT)
+            }
+        } else {
+            sqlite3_bind_null(stmt, 4)
+        }
+        sqlite3_bind_int64(stmt, 5, handleID)
+        sqlite3_bind_text(stmt, 6, service, -1, SQLITE_TRANSIENT)
+        if let date { sqlite3_bind_int64(stmt, 7, date) } else { sqlite3_bind_null(stmt, 7) }
+        sqlite3_bind_int(stmt, 8, cacheHasAttachments ? 1 : 0)
+        guard sqlite3_step(stmt) == SQLITE_DONE else {
+            throw Err.exec(String(cString: sqlite3_errmsg(db)))
+        }
+        try exec("INSERT INTO chat_message_join VALUES (\(chatRowid),\(rowid));")
+    }
+
+    func insertAttachment(rowid: Int64, guid: String, messageRowid: Int64) throws {
+        try exec("""
+            INSERT INTO attachment (ROWID,guid,filename,mime_type,uti,transfer_name,total_bytes,is_sticker,hide_attachment)
+            VALUES (\(rowid),'\(guid)','~/Library/Messages/Attachments/zz/native-\(rowid).png','image/png','public.png','native-\(rowid).png',\(rowid),0,0);
+            INSERT INTO message_attachment_join VALUES (\(messageRowid),\(rowid));
+            UPDATE message SET cache_has_attachments=1 WHERE ROWID=\(messageRowid);
+            """)
+    }
+}
+
+private let nativePartKey = NSAttributedString.Key("__kIMMessagePartAttributeName")
+private let nativeFileKey = NSAttributedString.Key("__kIMFileTransferGUIDAttributeName")
+
+private func nativeArchive(_ text: String, _ attributes: [(NSAttributedString.Key, Any, NSRange)] = []) -> Data {
+    let value = NSMutableAttributedString(string: text)
+    for (key, object, range) in attributes {
+        value.addAttribute(key, value: object, range: range)
+    }
+    return NSArchiver.archivedData(withRootObject: value)
+}
+
+private func nativeRange(_ text: String, _ needle: String, from start: Int = 0) -> NSRange {
+    let ns = text as NSString
+    let range = ns.range(of: needle, options: [], range: NSRange(location: start, length: ns.length - start))
+    precondition(range.location != NSNotFound)
+    return range
 }
 
 @Suite("ChatDB against a seeded fixture")
@@ -854,7 +917,90 @@ struct ChatDBFixtureTests {
         #expect(attached.body_availability.reason == "bodyless attachment row")
         #expect(attached.native_parts == nil)
         #expect(attached.native_parts_available == false)
-        #expect(attached.native_parts_reason.contains("typedstream parser"))
+        #expect(attached.native_parts_reason == "absent-blob")
+    }
+
+    @Test func exactNativePartsDistinguishAbsentCorruptAndKnownEmptyBlobs() throws {
+        let fx = try ChatFixture()
+        try fx.insertMessage(rowid: 23, guid: "known-empty-native", attributedBody: nativeArchive("plain"),
+                             chatRowid: 3, date: fx.base - 23)
+        try fx.insertMessage(rowid: 24, guid: "corrupt-native", attributedBody: Data([0x00, 0x01, 0x02]),
+                             chatRowid: 3, date: fx.base - 24)
+        var db = try makeDB(fx, book: friendBook)
+        let messages = try db.exactHistory(chat: .rowid(3), limit: 100, order: .desc, cursor: nil).items
+
+        let absent = try #require(messages.first { $0.rowid == 6 })
+        #expect(absent.native_parts_available == false)
+        #expect(absent.native_parts_reason == "absent-blob")
+        #expect(absent.native_parts == nil)
+
+        let knownEmpty = try #require(messages.first { $0.rowid == 23 })
+        #expect(knownEmpty.native_parts_available == true)
+        #expect(knownEmpty.native_parts_reason == "empty-known")
+        #expect(knownEmpty.native_parts == [])
+
+        let corrupt = try #require(messages.first { $0.rowid == 24 })
+        #expect(corrupt.native_parts_available == false)
+        #expect(corrupt.native_parts_reason != "absent-blob")
+        #expect(corrupt.native_parts == nil)
+    }
+
+    @Test func exactNativePartsPreserveBodyColumnAndExposeArchivedUTF16Ranges() throws {
+        let fx = try ChatFixture()
+        let archivedText = "Archived Alice text"
+        let blob = nativeArchive(archivedText, [
+            (nativePartKey, NSNumber(value: 3), nativeRange(archivedText, "Alice"))
+        ])
+        try fx.insertMessage(rowid: 60, guid: "native-body-precedence", text: "body column wins",
+                             attributedBody: blob, chatRowid: 3, date: fx.base - 60)
+        var db = try makeDB(fx, book: friendBook)
+
+        let (_, got) = try db.exactGet(chat: .rowid(3), message: .rowid(60))
+        #expect(got.body == "body column wins")
+        #expect(got.body_availability.status == "available")
+        #expect(got.native_parts_available == true)
+        #expect(got.native_parts_reason == "available")
+        #expect(got.native_parts == [
+            ChatDB.ExactNativePart(index: 3,
+                                   utf16_ranges: [.init(location: 9, length: 5)],
+                                   attachment_guid: nil)
+        ])
+
+        let history = try db.exactHistory(chat: .rowid(3), limit: 100, order: .desc, cursor: nil).items
+        let fromHistory = try #require(history.first { $0.rowid == 60 })
+        #expect(fromHistory.native_parts == got.native_parts)
+        #expect(fromHistory.native_parts_available == got.native_parts_available)
+        #expect(fromHistory.native_parts_reason == got.native_parts_reason)
+    }
+
+    @Test func exactNativePartsPreserveDiscontiguousRangesAndAttachmentGUIDs() throws {
+        let fx = try ChatFixture()
+        let text = "Alice \u{fffc} Alice"
+        let firstAlice = nativeRange(text, "Alice")
+        let secondAlice = nativeRange(text, "Alice", from: firstAlice.location + firstAlice.length)
+        let objectReplacement = nativeRange(text, "\u{fffc}")
+        let blob = nativeArchive(text, [
+            (nativePartKey, NSNumber(value: 4), firstAlice),
+            (nativePartKey, NSNumber(value: 4), secondAlice),
+            (nativePartKey, NSNumber(value: 5), objectReplacement),
+            (nativeFileKey, "native-guid-second", objectReplacement)
+        ])
+        try fx.insertMessage(rowid: 62, guid: "native-discontiguous", attributedBody: blob,
+                             chatRowid: 3, date: fx.base - 62)
+        try fx.insertAttachment(rowid: 82, guid: "native-guid-second", messageRowid: 62)
+        try fx.insertAttachment(rowid: 81, guid: "native-guid-first", messageRowid: 62)
+        var db = try makeDB(fx, book: friendBook)
+
+        let (_, message) = try db.exactGet(chat: .rowid(3), message: .rowid(62))
+        #expect(message.attachments.map { $0.guid ?? "" } == ["native-guid-first", "native-guid-second"])
+        #expect(message.native_parts == [
+            ChatDB.ExactNativePart(index: 4,
+                                   utf16_ranges: [.init(location: 0, length: 5), .init(location: 8, length: 5)],
+                                   attachment_guid: nil),
+            ChatDB.ExactNativePart(index: 5,
+                                   utf16_ranges: [.init(location: 6, length: 1)],
+                                   attachment_guid: "native-guid-second")
+        ])
     }
 
     @Test func exactHistorySortsMixedDateUnitsAndExtremeTimestamps() throws {
