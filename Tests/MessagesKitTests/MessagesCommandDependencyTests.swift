@@ -33,6 +33,9 @@ extension MessagesCommandDependencies {
             AddressBook.Diagnostic(sources_dir: syntheticAddressBookDir, sources_dir_exists: false,
                                    database_count: 0, databases: [], contacts_with_handles: 0)
         },
+        accessibilityDiagnostic: @escaping @Sendable () -> Permissions.AccessibilityPreflight = {
+            Permissions.accessibilityPreflight(trusted: false)
+        },
         hasFullDiskAccess: @escaping @Sendable () -> Bool = { false },
         allowedRecipients: [String] = []
     ) -> MessagesCommandDependencies {
@@ -42,6 +45,7 @@ extension MessagesCommandDependencies {
             performSend: performSend,
             dbDiagnostic: dbDiagnostic,
             addressBookDiagnostic: addressBookDiagnostic,
+            accessibilityDiagnostic: accessibilityDiagnostic,
             hasFullDiskAccess: hasFullDiskAccess,
             resolveGate: hermeticGate(allowedRecipients: allowedRecipients)
         )
@@ -1714,6 +1718,7 @@ struct MessagesCommandDependencyTests {
                                            sources_dir_exists: true, database_count: 0,
                                            databases: [], contacts_with_handles: 2)
                 },
+                accessibilityDiagnostic: { Permissions.accessibilityPreflight(trusted: true) },
                 hasFullDiskAccess: { true }
             ))
         }
@@ -1721,7 +1726,46 @@ struct MessagesCommandDependencyTests {
         let data = try payload(from: output)
         #expect(data["full_disk_access"] as? Bool == true)
         #expect(data["contacts_with_handles"] as? Int == 2)
+        let accessibility = try #require(data["accessibility"] as? [String: Any])
+        #expect(accessibility["trusted"] as? Bool == true)
+        #expect(accessibility["identity"] as? String == "current_process")
+        #expect((accessibility["notes"] as? [String]) == ["This status applies only to the current process; other launches may have different permissions."])
         #expect((data["notes"] as? [String])?.isEmpty == true)
+    }
+
+    @Test func doctorDeniedAccessibilitySucceedsAndPreservesExistingNotes() throws {
+        let command = try Doctor.parse([])
+        let output = try captureStdout {
+            try command.run(dependencies: .fixture(
+                dbDiagnostic: {
+                    ChatDB.DBCheck(path: syntheticChatDBPath, exists: true, readable: true,
+                                   connected: false, table_count: nil, has_message_table: false,
+                                   has_handle_table: false, has_chat_table: false, message_count: nil)
+                },
+                addressBookDiagnostic: {
+                    AddressBook.Diagnostic(sources_dir: syntheticAddressBookDir,
+                                           sources_dir_exists: true, database_count: 0,
+                                           databases: [], contacts_with_handles: 0)
+                },
+                accessibilityDiagnostic: { Permissions.accessibilityPreflight(trusted: false) },
+                hasFullDiskAccess: { true }
+            ))
+        }
+
+        let envelope = try successEnvelope(from: output)
+        #expect(envelope["schema_version"] as? Int == 1)
+        #expect(envelope["ok"] as? Bool == true)
+        let data = try #require(envelope["data"] as? [String: Any])
+        let accessibility = try #require(data["accessibility"] as? [String: Any])
+        #expect(accessibility["trusted"] as? Bool == false)
+        #expect(accessibility["identity"] as? String == "current_process")
+        let accessibilityNotes = try #require(accessibility["notes"] as? [String])
+        #expect(accessibilityNotes.contains("This status applies only to the current process; other launches may have different permissions."))
+        #expect(accessibilityNotes.contains("Accessibility not trusted — enable Accessibility for apple or the host app shown by macOS in System Settings › Privacy & Security › Accessibility, then rerun this check."))
+        let notes = try #require(data["notes"] as? [String])
+        #expect(notes.contains("Messages chat.db not accessible."))
+        #expect(notes.contains("Accessibility not trusted — enable Accessibility for apple or the host app shown by macOS in System Settings › Privacy & Security › Accessibility, then rerun this check."))
+        #expect(notes.contains("No AddressBook contacts with phone/email found."))
     }
 
     @Test func textRenderersUseInjectedDependencies() throws {
@@ -1815,6 +1859,7 @@ struct MessagesCommandDependencyTests {
                     contacts_with_handles: 2
                 )
             },
+            accessibilityDiagnostic: { Permissions.accessibilityPreflight(trusted: false) },
             hasFullDiskAccess: { false }
         )
 
@@ -1830,12 +1875,37 @@ struct MessagesCommandDependencyTests {
         }
         #expect(checkAddressBook.contains("contacts with handles: 2"))
 
+        let trustedDoctor = try captureStdout {
+            let command = try Doctor.parse(["--text"])
+            try command.run(dependencies: .fixture(
+                dbDiagnostic: {
+                    ChatDB.DBCheck(path: syntheticChatDBPath, exists: true, readable: true,
+                                   connected: true, table_count: 3, has_message_table: true,
+                                   has_handle_table: true, has_chat_table: true, message_count: 12)
+                },
+                addressBookDiagnostic: {
+                    AddressBook.Diagnostic(sources_dir: syntheticAddressBookDir,
+                                           sources_dir_exists: true, database_count: 1,
+                                           databases: [], contacts_with_handles: 2)
+                },
+                accessibilityDiagnostic: { Permissions.accessibilityPreflight(trusted: true) },
+                hasFullDiskAccess: { true }
+            ))
+        }
+        #expect(trustedDoctor.contains("Accessibility: trusted=true identity=current_process"))
+        #expect(trustedDoctor.contains("This status applies only to the current process; other launches may have different permissions."))
+
         let doctor = try captureStdout {
             let command = try Doctor.parse(["--text"])
             try command.run(dependencies: deps)
         }
         #expect(doctor.contains("Full Disk Access: false"))
+        #expect(doctor.contains("Accessibility: trusted=false identity=current_process"))
+        #expect(doctor.contains("This status applies only to the current process; other launches may have different permissions."))
         #expect(doctor.contains("Full Disk Access not detected"))
+        #expect(doctor.contains("Accessibility not trusted"))
+        #expect(doctor.components(separatedBy: "This status applies only to the current process; other launches may have different permissions.").count == 2)
+        #expect(doctor.components(separatedBy: "Accessibility not trusted").count == 2)
     }
 
     @Test func emptyTextRenderersUseInjectedDependencies() throws {

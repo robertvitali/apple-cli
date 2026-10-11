@@ -1,6 +1,6 @@
 # apple messages doctor
 
-One-shot health check: FDA + chat.db + AddressBook diagnostics.
+One-shot health check: FDA + Accessibility + chat.db + AddressBook diagnostics.
 
 ## Synopsis
 

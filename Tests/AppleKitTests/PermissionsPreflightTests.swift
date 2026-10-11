@@ -115,4 +115,32 @@ struct PermissionsPreflightTests {
         #expect(text.contains("\"full_disk_access\" : false"))
         #expect(text.contains("\"notes\""))
     }
+    @Test("accessibility preflight records granted current-process status without remediation")
+    func accessibilityPreflightGranted() {
+        let result = Permissions.accessibilityPreflight(trusted: true)
+        #expect(result.trusted)
+        #expect(result.identity == "current_process")
+        #expect(result.notes == ["This status applies only to the current process; other launches may have different permissions."])
+    }
+
+    @Test("accessibility preflight records denied current-process status with manual remediation")
+    func accessibilityPreflightDenied() {
+        let result = Permissions.accessibilityPreflight(trusted: false)
+        #expect(!result.trusted)
+        #expect(result.identity == "current_process")
+        #expect(result.notes == [
+            "This status applies only to the current process; other launches may have different permissions.",
+            "Accessibility not trusted — enable Accessibility for apple or the host app shown by macOS in System Settings › Privacy & Security › Accessibility, then rerun this check.",
+        ])
+    }
+
+    @Test("accessibility preflight encodes the fixed identity and trust state")
+    func accessibilityPreflightWireShape() throws {
+        let data = try Output.encode(Permissions.accessibilityPreflight(trusted: false))
+        let text = String(decoding: data, as: UTF8.self)
+        #expect(text.contains("\"trusted\" : false"))
+        #expect(text.contains("\"identity\" : \"current_process\""))
+        #expect(text.contains("\"notes\""))
+    }
+
 }

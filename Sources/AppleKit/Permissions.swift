@@ -1,9 +1,11 @@
+import ApplicationServices
 import Foundation
 
 /// Shared TCC / permission preflight + a common health/`doctor` shape, so every domain
 /// reports permission state consistently (each port spec has a `doctor`/`health` in its
 /// parity floor). Framework-specific authorization (EventKit, Contacts) is checked in the
-/// owning domain/`EventKitCore`; this covers Full Disk Access detection + the shared result.
+/// owning domain/`EventKitCore`; this covers Full Disk Access detection and shared
+/// Accessibility status.
 public enum Permissions {
 
     /// A yes/no question about one path.
@@ -57,6 +59,34 @@ public enum Permissions {
             if canRead(path) { return true }
         }
         return false
+    }
+
+    /// Status-only Accessibility trust diagnostic for current process. This deliberately never
+    /// prompts: production calls only `AXIsProcessTrusted()`, while tests inject the Bool into
+    /// `accessibilityPreflight(trusted:)` and never touch live TCC.
+    public struct AccessibilityPreflight: Encodable, Sendable, Equatable {
+        public let trusted: Bool
+        public let identity: String
+        public let notes: [String]
+
+        public init(trusted: Bool, notes: [String]) {
+            self.trusted = trusted
+            self.identity = "current_process"
+            self.notes = notes
+        }
+    }
+
+    public static func accessibilityPreflight() -> AccessibilityPreflight {
+        // Future action-capable worker launches must recheck Accessibility before acting.
+        accessibilityPreflight(trusted: AXIsProcessTrusted())
+    }
+
+    static func accessibilityPreflight(trusted: Bool) -> AccessibilityPreflight {
+        var notes = ["This status applies only to the current process; other launches may have different permissions."]
+        if !trusted {
+            notes.append("Accessibility not trusted — enable Accessibility for apple or the host app shown by macOS in System Settings › Privacy & Security › Accessibility, then rerun this check.")
+        }
+        return AccessibilityPreflight(trusted: trusted, notes: notes)
     }
 
     /// Shared preflight result — domains embed this in their `doctor` output.

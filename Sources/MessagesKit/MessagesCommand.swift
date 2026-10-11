@@ -50,6 +50,7 @@ struct MessagesCommandDependencies: Sendable {
     var performSend: @Sendable (Send.Request) throws -> Send.Outcome
     var dbDiagnostic: @Sendable () -> ChatDB.DBCheck
     var addressBookDiagnostic: @Sendable () -> AddressBook.Diagnostic
+    var accessibilityDiagnostic: @Sendable () -> Permissions.AccessibilityPreflight
     var hasFullDiskAccess: @Sendable () -> Bool
     /// Resolves the write posture (execute-vs-preview, sandbox, sandbox recipient allowlist) for
     /// `send`. Injected for the same reason `TestMode.sandboxActive(flag:envVar:)` and
@@ -66,6 +67,7 @@ struct MessagesCommandDependencies: Sendable {
         performSend: Send.perform,
         dbDiagnostic: { ChatDB.diagnose() },
         addressBookDiagnostic: AddressBook.diagnose,
+        accessibilityDiagnostic: Permissions.accessibilityPreflight,
         hasFullDiskAccess: Permissions.hasFullDiskAccess,
         // Wrapped rather than referenced directly: `resolve` carries a default argument (the
         // allowlist-reader seam), and a Swift function reference cannot elide one.
@@ -984,7 +986,7 @@ struct CheckAddressBook: ParsableCommand {
 struct Doctor: ParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "doctor",
-        abstract: "One-shot health check: FDA + chat.db + AddressBook diagnostics.")
+        abstract: "One-shot health check: FDA + Accessibility + chat.db + AddressBook diagnostics.")
     @OptionGroup var global: GlobalOptions
 
     func run() throws {
@@ -996,18 +998,23 @@ struct Doctor: ParsableCommand {
             let fda = dependencies.hasFullDiskAccess()
             let dbCheck = dependencies.dbDiagnostic()
             let abCheck = dependencies.addressBookDiagnostic()
+            let accessibility = dependencies.accessibilityDiagnostic()
             var notes: [String] = []
             if !fda { notes.append("Full Disk Access not detected — grant it to your terminal in System Settings › Privacy & Security › Full Disk Access.") }
             if !dbCheck.connected { notes.append("Messages chat.db not accessible.") }
+            if !accessibility.trusted { notes.append(contentsOf: accessibility.notes) }
             if abCheck.contacts_with_handles == 0 { notes.append("No AddressBook contacts with phone/email found.") }
-            let data = DoctorData(full_disk_access: fda, messages_db: dbCheck, addressbook: abCheck,
+            let data = DoctorData(full_disk_access: fda, accessibility: accessibility, messages_db: dbCheck, addressbook: abCheck,
                 contacts_with_handles: abCheck.contacts_with_handles, notes: notes)
+            let accessibilityNoteSet = Set(accessibility.notes)
+            let textNotes = accessibility.notes + notes.filter { !accessibilityNoteSet.contains($0) }
             try emit(global, data) {
                 """
                 Full Disk Access: \(fda)
+                Accessibility: trusted=\(accessibility.trusted) identity=\(accessibility.identity)
                 chat.db: connected=\(dbCheck.connected) messages=\(dbCheck.message_count.map(String.init) ?? "?")
                 AddressBook: databases=\(abCheck.database_count) contacts=\(abCheck.contacts_with_handles)
-                \(notes.isEmpty ? "All checks passed." : notes.joined(separator: "\n"))
+                \(textNotes.isEmpty ? "All checks passed." : textNotes.joined(separator: "\n"))
                 """
             }
         }

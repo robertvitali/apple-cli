@@ -20,6 +20,8 @@ JSON output are stable per the versioning policy — breaking changes bump
 
 ### Added
 
+- **`apple messages doctor` now reports status-only Accessibility trust diagnostics alongside its existing Full Disk Access, Messages database and AddressBook checks.** The JSON result includes the current process trust status, fixed `current_process` identity and remediation notes without prompting or changing settings; the text result names the same status, and the command still succeeds when Accessibility is denied. Other launches may have different Accessibility permissions and must check their own status before acting. Manual: [`apple messages doctor`](https://github.com/robertvitali/apple-cli/blob/main/docs/manual/messages/doctor.md).
+
 - **Automation journal and worker foundation:** shared private state serializes cooperating
   processes and retains one unresolved operation across failures. It records
   target digests instead of raw identifiers and requires explicit recovery after

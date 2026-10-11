@@ -1,3 +1,4 @@
+import AppleKit
 import Foundation
 
 /// Encodable payloads for the `data` field of the JSON envelope. Property names are
@@ -157,6 +158,7 @@ struct ContactsCheckData: Encodable {
 
 struct DoctorData: Encodable {
     let full_disk_access: Bool
+    let accessibility: Permissions.AccessibilityPreflight?
     let messages_db: ChatDB.DBCheck
     let addressbook: AddressBook.Diagnostic
     let contacts_with_handles: Int
