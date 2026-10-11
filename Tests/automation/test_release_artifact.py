@@ -1743,7 +1743,8 @@ class EndToEndTests(TempCase):
         self.assertEqual(report["outward_writes"], [])
         self.assertEqual(report["schema_version"], 1)
         self.assertIn("withheld", report["note"])
-        self.assertIn("provisional, HUMAN-DECISIONS D51", report["note"])
+        self.assertIn("ratified in HUMAN-DECISIONS D51", report["note"])
+        self.assertNotIn("provisional", report["note"].lower())
         self.assertIn("the bound on outward writes is the workflow", report["note"])
         self.assertEqual(sorted(report), ["candidate_sha", "change_set", "checks", "note", "outward_writes", "pass",
                                           "schema_version"])
@@ -2123,7 +2124,7 @@ class EndToEndTests(TempCase):
         self.assertEqual(len(set(artifact.CHECK_NAMES)), len(artifact.CHECK_NAMES))
         self.assertEqual(set(artifact.FAILURE_CLASSES), {"io", "git", "platform", "assertion", "timeout", "tool"})
         for phrase in ("DEFINITION", "HUMAN-DECISIONS D51", "HUMAN-DECISIONS D23", "does not by itself satisfy",
-                       "provisional,\nHUMAN-DECISIONS D51", "of ANY image loaded into the process",
+                       "reversed by enumeration; ratified in\nHUMAN-DECISIONS D51", "of ANY image loaded into the process",
                        "writable by the admin group",
                        "neither D18 step (4)'s check on the published artifact nor D34's operator-local denylist scan",
                        "the toolchain's transient files under TMPDIR", "`--disable-keychain`; HOME is passed through",
@@ -2133,6 +2134,9 @@ class EndToEndTests(TempCase):
             # Compared with whitespace collapsed, so reflowing the prose cannot break a phrase.
             self.assertIn(" ".join(phrase.split()), " ".join(artifact.__doc__.split()))
         self.assertNotIn("<work>/tmp", artifact.__doc__)
+        # D51 ratified the five answers on 2026-10-10 (UTC); none is described as provisional any more.
+        self.assertNotIn("provisional", artifact.__doc__.lower())
+        self.assertNotIn("provisional", artifact.REPORT_NOTE.lower())
 
 
 class LedgerTests(unittest.TestCase):

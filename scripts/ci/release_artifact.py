@@ -24,7 +24,7 @@ release commit itself (nothing to release) is never built there. Running it on t
 Mac is a native release build and needs an operator grant (HUMAN-DECISIONS D23); it is not a
 "runs freely" rehearsal. The recipe (the runbook's `-Xswiftc -gnone`; no strip, no re-sign,
 no prefix maps), the linkage rule and the path-prefix classes below are the project's
-PROVISIONAL definitions pending HUMAN-DECISIONS D51.
+definitions, ratified in HUMAN-DECISIONS D51 on 2026-10-10 (UTC).
 
 WHAT IT WRITES. Its outputs (the source clone, the build tree, SwiftPM's cache, configuration
 and fingerprint store, the pinned binary, the archive and the checksum file) all go under
@@ -125,8 +125,8 @@ scripts/ci/workflow_policy.py). This tool does not by itself satisfy design step
 of any outward-write step" (HUMAN-DECISIONS D51).
 
 LINKAGE. Design section 15.1 asks that "checksum, architecture, linkage, and runtime version
-agree" without defining linkage. This script is the project's provisional DEFINITION of it
-(HUMAN-DECISIONS D51): every dylib load command (LC_LOAD_DYLIB, LC_LOAD_WEAK_DYLIB,
+agree" without defining linkage. This script is the project's DEFINITION of it
+(ratified in HUMAN-DECISIONS D51): every dylib load command (LC_LOAD_DYLIB, LC_LOAD_WEAK_DYLIB,
 LC_REEXPORT_DYLIB, LC_LAZY_LOAD_DYLIB, LC_LOAD_UPWARD_DYLIB) names an absolute path that
 starts with `/usr/lib/` or `/System/Library/`, none starts with `@` and none contains `/../`;
 at least one dylib is linked; the dynamic linker is exactly `/usr/lib/dyld`; there is no
@@ -145,7 +145,7 @@ of ANY image loaded into the process (a library's own `@rpath/` dependency, or a
 roots. An rpath under a home or temporary prefix fails this rule (it is outside the
 permitted set); one under a prefix `paths` scans for also fails that check, independently.
 
-PATHS. The provisional path-prefix classes (HUMAN-DECISIONS D51) are `/Users/`,
+PATHS. The path-prefix classes (ratified in HUMAN-DECISIONS D51) are `/Users/`,
 `/private/tmp/`, `/var/folders/`, `/home/` and `/var/tmp/`, scanned in the binary, the
 compressed archive and the decompressed tar stream. `/Volumes/` and a bare `/tmp/` are
 deliberately absent: the product's own help text contains `/Volumes/`, and its Messages
@@ -154,7 +154,7 @@ neither D18 step (4)'s check on the published artifact nor D34's operator-local 
 
 NEVER PRINTED OR RECORDED: the predicted version, the archive name (it embeds the version), any
 digest of the binary, the archive or the checksum file, and any byte size (design section 14.1:
-a digest over a handful of candidate versions is reversed by enumeration; provisional,
+a digest over a handful of candidate versions is reversed by enumeration; ratified in
 HUMAN-DECISIONS D51). Failure messages name the check and a value-free reason; the path scan
 names the prefix class, a count and the Mach-O section holding each hit, never the bytes that
 matched; a linkage failure names a dylib or rpath only when it fully matches a safe shape
@@ -284,7 +284,7 @@ FAILURE_CLASSES: Tuple[str, ...] = (IO, GIT, PLATFORM, ASSERTION, TIMEOUT, TOOL)
 REPORT_NOTE = (
     "digests, sizes and the archive name are withheld because the binary embeds the unassigned "
     "version (design section 14.1: a digest over a handful of candidate versions is reversed by "
-    "enumeration; provisional, HUMAN-DECISIONS D51); the binary, archive and checksum file exist "
+    "enumeration; ratified in HUMAN-DECISIONS D51); the binary, archive and checksum file exist "
     "only under the work directory, "
     "and nothing was uploaded; outward_writes records that this script performs no outward "
     "write, while the bound on outward writes is the workflow (contents: read, "
@@ -399,7 +399,7 @@ N_OSO = 0x66
 SYSTEM_DYLIB_PREFIXES = ("/usr/lib/", "/System/Library/")
 DYLINKER = "/usr/lib/dyld"
 # Run-path entries an executable may carry: exactly one of these tokens, or an absolute path
-# with no `..` segment under one of these roots (provisional, HUMAN-DECISIONS D51).
+# with no `..` segment under one of these roots (ratified in HUMAN-DECISIONS D51).
 PERMITTED_RPATH_TOKENS = ("@loader_path", "@executable_path")
 PERMITTED_RPATH_ROOTS = ("/usr/lib/", "/System/Library/", "/Library/Developer/CommandLineTools/")
 XCODE_RPATH_RE = re.compile(r"/Applications/Xcode[^/]*\.app/Contents/Developer/")
