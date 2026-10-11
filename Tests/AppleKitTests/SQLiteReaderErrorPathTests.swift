@@ -42,6 +42,53 @@ struct SQLiteReaderErrorPathTests {
         #expect(try #require(error).description.hasPrefix("sqlite open failed:"))
     }
 
+    @Test("typed text preserves embedded NUL bytes and rejects invalid UTF-8")
+    func typedTextUsesItsFullByteLength() throws {
+        let reader = try SQLiteReader(path: database().path)
+        let row = try #require(try reader.rows("SELECT CAST(x'610062' AS TEXT) AS value").first)
+        #expect(row.text("value")?.utf8.elementsEqual([0x61, 0, 0x62]) == true)
+        #expect(throws: SQLiteReader.DBError.self) {
+            try reader.rows("SELECT CAST(x'FF' AS TEXT) AS value")
+        }
+    }
+
+    @Test("unrepresentable real integers are unavailable rather than trapping")
+    func unrepresentableRealIntegersAreUnavailable() {
+        for number in [Double.infinity, -Double.infinity, Double.nan,
+                       Double(Int64.max), -Double.greatestFiniteMagnitude] {
+            #expect(SQLiteReader.Row(values: ["value": .real(number)]).int("value") == nil)
+        }
+        #expect(SQLiteReader.Row(values: ["value": .real(Double(Int64.min))]).int("value") == Int64.min)
+        #expect(SQLiteReader.Row(values: ["value": .real(3.5)]).int("value") == 3)
+    }
+
+    @Test("a failed WAL transfer refuses and removes the incomplete snapshot")
+    func failedWALTransferDoesNotExposeStaleMainFile() throws {
+        enum TransferFailure: Error { case interrupted }
+        let source = try database()
+        let sourceWAL = source.path + "-wal"
+        // No live writer or Apple store: synthetic bytes make the copy branch observable.
+        try Data(repeating: 0x41, count: 32).write(to: URL(fileURLWithPath: sourceWAL))
+        let destination = try scratch.directory().appendingPathComponent("copy.sqlite")
+        var attemptedWAL = false
+        #expect(throws: TransferFailure.self) {
+            try SQLiteReader.copyCoherentSnapshot(from: source.path, to: destination) { from, to in
+                if from == sourceWAL {
+                    attemptedWAL = true
+                    // A transfer may create part of its destination before throwing.
+                    try Data([0x41]).write(to: URL(fileURLWithPath: to))
+                    throw TransferFailure.interrupted
+                }
+                try FileManager.default.copyItem(atPath: from, toPath: to)
+            }
+        }
+        #expect(attemptedWAL)
+        #expect(!FileManager.default.fileExists(atPath: destination.path))
+        #expect(!FileManager.default.fileExists(atPath: destination.path + "-wal"))
+        #expect(FileManager.default.fileExists(atPath: source.path))
+        #expect(try Data(contentsOf: URL(fileURLWithPath: sourceWAL)).count == 32)
+    }
+
     @Test("a file that is not a database never yields rows")
     func malformedStoreNeverYieldsRows() throws {
         let junk = try scratch.directory().appendingPathComponent("junk.sqlite")

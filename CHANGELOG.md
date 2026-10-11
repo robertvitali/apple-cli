@@ -556,6 +556,12 @@ JSON output are stable per the versioning policy — breaking changes bump
   an existing error class.
 
 ### Fixed
+
+- **Database snapshots now fail when copying an existing write-ahead log fails.**
+  This prevents incomplete snapshots from reporting stale message, mail or note
+  state as current. Incomplete copies are rejected and their cleanup is attempted.
+  Typed database reads also preserve embedded NUL bytes in valid text, reject
+  invalid UTF-8, and treat out-of-range numeric values as unavailable.
 - **`apple notes append` points to a command that exists.** Its help and its `--dry-run`
   preview told callers to run `notes attachments list` before appending, and no such command
   exists; they now say to run `apple notes attachments` with the same `--id`, or the same

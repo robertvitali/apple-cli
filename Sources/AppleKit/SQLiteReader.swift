@@ -131,12 +131,19 @@ public final class SQLiteReader {
     /// silently wrong answer. For a tool whose premise is strict-superset parity, silent-wrong is
     /// the worst failure class available, and it is not something to trade for latency.
     @discardableResult
-    static func copyCoherentSnapshot(from src: String, to dest: URL) throws -> SnapshotDiagnostics {
+    static func copyCoherentSnapshot(
+        from src: String, to dest: URL,
+        copyItem: (String, String) throws -> Void = {
+            try FileManager.default.copyItem(atPath: $0, toPath: $1)
+        }
+    ) throws -> SnapshotDiagnostics {
         var diag = SnapshotDiagnostics()
+        var completed = false
+        defer { if !completed { SQLiteReader.removeTempDB(dest) } }
         for attempt in 0...1 {
             let before = SQLiteReader.walSalt(src)
             diag.pinned = try SQLiteReader.withReadSnapshotPinned(src) {
-                try FileManager.default.copyItem(atPath: src, toPath: dest.path)
+                try copyItem(src, dest.path)
                 SQLiteReader.restrictToOwner(dest)
                 // `-wal` only. Copying `-shm` was measured INERT — a current one, a deliberately
                 // stale one, and none at all yield identical correct reads, because SQLite rebuilds
@@ -145,12 +152,18 @@ public final class SQLiteReader {
                 // SQLite creates one in the snapshot directory on first read anyway.)
                 let wal = src + "-wal"
                 if FileManager.default.fileExists(atPath: wal) {
-                    try? FileManager.default.copyItem(atPath: wal, toPath: dest.path + "-wal")
+                    // Missing committed WAL frames can look like an authoritative absence.
+                    // Never return the main-file copy after a failed sidecar transfer.
+                    try copyItem(wal, dest.path + "-wal")
                     SQLiteReader.restrictToOwner(URL(fileURLWithPath: dest.path + "-wal"))
                 }
             }
             let after = SQLiteReader.walSalt(src)
-            if before == after { diag.verified = true; return diag }
+            if before == after {
+                diag.verified = true
+                completed = true
+                return diag
+            }
 
             // The WAL was reset inside the window. Throw this snapshot away and take another.
             diag.retries = attempt + 1
@@ -585,7 +598,9 @@ public final class SQLiteReader {
         public func int(_ column: String) -> Int64? {
             switch values[column] {
             case .integer(let i)?: return i
-            case .real(let d)?: return Int64(d)
+            case .real(let d)?:
+                guard d.isFinite, d >= Double(Int64.min), d < Double(Int64.max) else { return nil }
+                return Int64(d)
             case .text(let s)?: return Int64(s)
             default: return nil
             }
@@ -620,8 +635,13 @@ public final class SQLiteReader {
                 case SQLITE_INTEGER: values[name] = .integer(sqlite3_column_int64(stmt, col))
                 case SQLITE_FLOAT:   values[name] = .real(sqlite3_column_double(stmt, col))
                 case SQLITE_TEXT:
-                    if let t = sqlite3_column_text(stmt, col) { values[name] = .text(String(cString: t)) }
-                    else { values[name] = .null }
+                    if let t = sqlite3_column_text(stmt, col) {
+                        let bytes = Data(bytes: t, count: Int(sqlite3_column_bytes(stmt, col)))
+                        guard let text = String(data: bytes, encoding: .utf8) else {
+                            throw DBError.step("text column contains invalid UTF-8")
+                        }
+                        values[name] = .text(text)
+                    } else { values[name] = .null }
                 case SQLITE_BLOB:
                     if let b = sqlite3_column_blob(stmt, col) {
                         values[name] = .blob(Data(bytes: b, count: Int(sqlite3_column_bytes(stmt, col))))
