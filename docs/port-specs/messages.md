@@ -3,7 +3,7 @@
 **Domain:** iMessage / SMS
 **MCP under test:** `mac_messages_mcp` — github.com/carterlasalle/mac_messages_mcp @ `99388d252459745fb6779557149ad43be89dfc6e` (v0.7.x line; merge of PR #45, dated 2026-05-04)
 **Mechanism:** reads `~/Library/Messages/chat.db` (SQLite) for reads + `~/Library/Application Support/AddressBook/**/AddressBook-v22.abcddb` (SQLite) for contacts; drives Messages.app via `osascript` (AppleScript) for sends.
-**Primary candidate CLI:** `imsg` (Peter Steinberger / steipete) — **canonical repo `github.com/openclaw/imsg` @ v0.13.0**.
+**Primary candidate CLI:** `imsg` — **canonical repo `github.com/openclaw/imsg` @ v0.13.0**.
 **Verdict (TL;DR):** **BUILD-OUR-OWN, forking `imsg` as the base.** No single CLI is a strict superset — `imsg` misses/parts several MCP cells (standalone fuzzy contact search + scores, contact enumeration, fuzzy message search w/ threshold+time-window, cross-chat "recent", DB/AddressBook diagnostics). But `imsg` is an outstanding fork base and feature-donor (same author, MIT, Swift, chat.db+AppleScript already built, JSON/JSON-RPC first-class, actively maintained).
 
 ---
