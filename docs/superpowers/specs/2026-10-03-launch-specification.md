@@ -1,6 +1,6 @@
 # Launch specification (design §15)
 
-**Status:** DRAFT — awaiting operator approval (design §15 precondition 3); not approved, not in force.
+**Status:** APPROVED 2026-10-10 (UTC) (D48)
 **Date:** 2026-10-03. **Amended:** 2026-10-07 (D47: P2, 7.3, 11.2–11.4 and Section 15's
 introduction and items 3 and 14; D50: P2, 7.3, 11.3, 11.4).
 **Parent:** `docs/superpowers/specs/2026-09-01-publication-automation-design.md` ("the design").
