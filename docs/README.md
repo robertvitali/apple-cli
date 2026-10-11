@@ -22,6 +22,7 @@
 - [coverage](learnings/hot/coverage.md)
 - [hosted-ci](learnings/hot/hosted-ci.md)
 - [mail-automation](learnings/hot/mail-automation.md)
+- [messages-reads](learnings/hot/messages-reads.md)
 - [privacy-audits](learnings/hot/privacy-audits.md)
 
 ### medium
@@ -37,6 +38,7 @@
 ## discovery
 
 - [apple-script-output-limit](discovery/apple-script-output-limit.md)
+- [beeper-imessage-port](discovery/beeper-imessage-port.md)
 - [capability-evidence-claims-and-parser](discovery/capability-evidence-claims-and-parser.md)
 - [capability-local-owner-protocol](discovery/capability-local-owner-protocol.md)
 - [capability-retained-process-sessions](discovery/capability-retained-process-sessions.md)

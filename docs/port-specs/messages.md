@@ -491,3 +491,37 @@ per candidate over up to 10k rows. The prefix and suffix loops are bounded by th
 *query* length and are uncapped, so a long message still has its tail examined.
 On the measured corpus (768 bodies, longest 1416 characters) two messages exceed
 the cap.
+
+## 9. Exact conversation and message reads
+
+The additive `messages conversations`, `messages history` and `messages get`
+commands establish explicit identity for the expanded Messages capabilities.
+They do not change the named-only `chats` listing or the legacy `recent` and
+`search` selection rules described above.
+
+| Command | Selection and result |
+|---|---|
+| `conversations` | Direct chats, named groups and unnamed groups, ordered by normalized last activity and chat ROWID. Returns chat GUIDs and local ROWIDs. |
+| `history` | Exactly one chat GUID or positive local ROWID. Returns messages only from that selected membership, including bodyless records. |
+| `get` | Exactly one chat selector and one message GUID or positive local ROWID. Refuses duplicate GUIDs, missing identities and membership mismatches. |
+
+Paged reads default to 100 results and accept 1–1000. Cursors bind the operation,
+resolved conversation where applicable, ordering and insertion upper bounds.
+Message ROWID bounds exclude subsequent inserts even when backdated; discovery
+also bounds chat ROWIDs and calculates activity within the message bound.
+Every invocation reads a fresh database snapshot, so edits, deletions and changed
+memberships can affect later pages. This is neither a frozen multi-invocation
+snapshot nor an event replay contract. The output limit does not bound snapshot
+or discovery scan cost.
+
+Exact reads retain the caller-selected chat for messages linked to several chats,
+and expose the message GUID without selecting by body text or latest activity.
+Required-schema/query failures are errors instead of successful empty results.
+Body availability distinguishes missing and undecodable text. Native parts remain
+explicitly unavailable in this first increment; no attachment position or text
+offset is promoted to native identity. Safe native-part decoding and automation
+verification are separate increments of the expanded capability design in
+[`beeper-imessage-port.md`](../discovery/beeper-imessage-port.md).
+
+These commands use read-only database snapshots and never drive Messages UI or
+mark conversations read. They retain JSON envelope schema version 1.

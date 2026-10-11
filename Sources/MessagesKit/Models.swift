@@ -84,6 +84,71 @@ struct SearchData: Encodable {
     let messages: [ChatDB.ScoredMessage]
 }
 
+struct ConversationsData: Encodable {
+    let limit: Int
+    let order: String
+    let cursor: String?
+    let next_cursor: String?
+    let count: Int
+    let conversations: [ChatDB.ExactConversation]
+
+    enum CodingKeys: String, CodingKey {
+        case limit, order, cursor, next_cursor, count, conversations
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(limit, forKey: .limit)
+        try c.encode(order, forKey: .order)
+        try encodeOrNull(&c, cursor, .cursor)
+        try encodeOrNull(&c, next_cursor, .next_cursor)
+        try c.encode(count, forKey: .count)
+        try c.encode(conversations, forKey: .conversations)
+    }
+}
+
+struct HistoryData: Encodable {
+    let chat_rowid: Int64
+    let chat_guid: String?
+    let limit: Int
+    let order: String
+    let cursor: String?
+    let next_cursor: String?
+    let count: Int
+    let messages: [ChatDB.ExactMessage]
+
+    enum CodingKeys: String, CodingKey {
+        case chat_rowid, chat_guid, limit, order, cursor, next_cursor, count, messages
+    }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(chat_rowid, forKey: .chat_rowid)
+        try encodeOrNull(&c, chat_guid, .chat_guid)
+        try c.encode(limit, forKey: .limit)
+        try c.encode(order, forKey: .order)
+        try encodeOrNull(&c, cursor, .cursor)
+        try encodeOrNull(&c, next_cursor, .next_cursor)
+        try c.encode(count, forKey: .count)
+        try c.encode(messages, forKey: .messages)
+    }
+}
+
+struct GetMessageData: Encodable {
+    let chat_rowid: Int64
+    let chat_guid: String?
+    let message: ChatDB.ExactMessage
+
+    enum CodingKeys: String, CodingKey { case chat_rowid, chat_guid, message }
+
+    func encode(to encoder: Encoder) throws {
+        var c = encoder.container(keyedBy: CodingKeys.self)
+        try c.encode(chat_rowid, forKey: .chat_rowid)
+        try encodeOrNull(&c, chat_guid, .chat_guid)
+        try c.encode(message, forKey: .message)
+    }
+}
+
 struct ContactsCheckData: Encodable {
     struct Sample: Encodable { let number: String; let name: String }
     let count: Int

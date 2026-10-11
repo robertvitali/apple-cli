@@ -886,6 +886,839 @@ public struct ChatDB {
         return out
     }
 
+    // MARK: - Exact read APIs
+
+    public enum ExactOrder: String, Sendable { case asc, desc }
+
+    public enum ExactChatSelector: Sendable, Equatable {
+        case rowid(Int64)
+        case guid(String)
+    }
+
+    public enum ExactMessageSelector: Sendable, Equatable {
+        case rowid(Int64)
+        case guid(String)
+    }
+
+    public struct ExactBodyAvailability: Encodable, Equatable, Sendable {
+        public let status: String
+        public let reason: String?
+
+        enum CodingKeys: String, CodingKey { case status, reason }
+
+        public func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encode(status, forKey: .status)
+            try encodeOrNull(&c, reason, .reason)
+        }
+    }
+
+    public struct ExactNativePart: Encodable, Equatable, Sendable {
+        public let index: Int
+        public let utf16_ranges: [UTF16Range]
+        public let attachment_guid: String?
+
+        public struct UTF16Range: Encodable, Equatable, Sendable {
+            public let location: Int
+            public let length: Int
+        }
+
+        enum CodingKeys: String, CodingKey { case index, utf16_ranges, attachment_guid }
+
+        public func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encode(index, forKey: .index)
+            try c.encode(utf16_ranges, forKey: .utf16_ranges)
+            try encodeOrNull(&c, attachment_guid, .attachment_guid)
+        }
+    }
+
+    public struct ExactMessage: Encodable {
+        public let rowid: Int64
+        public let message_guid: String?
+        public let selected_chat_rowid: Int64
+        public let chat_guid: String?
+        public let chat_identifier: String?
+        public let date: Date?
+        public let date_local: String?
+        public let timestamp: Int64?
+        public let normalized_seconds: Int64?
+        public let normalized_nanoseconds: Int64?
+        public let is_from_me: Bool
+        public let sender: String
+        public let handle: String?
+        public let service: String?
+        public let body: String?
+        public let body_availability: ExactBodyAvailability
+        public let group_name: String?
+        public let is_group: Bool
+        public let has_attachments: Bool
+        public let attachments: [Attachment]
+        public let native_parts_available: Bool
+        public let native_parts_reason: String
+        public let native_parts: [ExactNativePart]?
+
+        enum CodingKeys: String, CodingKey {
+            case rowid, message_guid, selected_chat_rowid, chat_guid, chat_identifier
+            case date, date_local, timestamp, normalized_seconds, normalized_nanoseconds, is_from_me, sender, handle
+            case service, body, body_availability, group_name, is_group, has_attachments
+            case attachments, native_parts_available, native_parts_reason, native_parts
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encode(rowid, forKey: .rowid)
+            try encodeOrNull(&c, message_guid, .message_guid)
+            try c.encode(selected_chat_rowid, forKey: .selected_chat_rowid)
+            try encodeOrNull(&c, chat_guid, .chat_guid)
+            try encodeOrNull(&c, chat_identifier, .chat_identifier)
+            try encodeOrNull(&c, date, .date)
+            try encodeOrNull(&c, date_local, .date_local)
+            try encodeOrNull(&c, timestamp, .timestamp)
+            try encodeOrNull(&c, normalized_seconds, .normalized_seconds)
+            try encodeOrNull(&c, normalized_nanoseconds, .normalized_nanoseconds)
+            try c.encode(is_from_me, forKey: .is_from_me)
+            try c.encode(sender, forKey: .sender)
+            try c.encodeIfPresent(handle, forKey: .handle)
+            try c.encodeIfPresent(service, forKey: .service)
+            try encodeOrNull(&c, body, .body)
+            try c.encode(body_availability, forKey: .body_availability)
+            try c.encodeIfPresent(group_name, forKey: .group_name)
+            try c.encode(is_group, forKey: .is_group)
+            try c.encode(has_attachments, forKey: .has_attachments)
+            try c.encode(attachments, forKey: .attachments)
+            try c.encode(native_parts_available, forKey: .native_parts_available)
+            try c.encode(native_parts_reason, forKey: .native_parts_reason)
+            try encodeOrNull(&c, native_parts, .native_parts)
+        }
+    }
+
+    public struct ExactConversation: Encodable {
+        public let chat_rowid: Int64
+        public let chat_guid: String?
+        public let chat_identifier: String?
+        public let display_name: String?
+        public let room_name: String?
+        public let service_name: String?
+        public let group_id: String?
+        public let style: Int64?
+        public let is_group: Bool
+        public let last_activity: Date?
+        public let last_activity_timestamp: Int64?
+        public let last_activity_normalized_seconds: Int64?
+        public let last_activity_normalized_nanoseconds: Int64?
+        public let participants: [String]
+
+        enum CodingKeys: String, CodingKey {
+            case chat_rowid, chat_guid, chat_identifier, display_name, room_name, service_name
+            case group_id, style, is_group, last_activity, last_activity_timestamp
+            case last_activity_normalized_seconds, last_activity_normalized_nanoseconds, participants
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encode(chat_rowid, forKey: .chat_rowid)
+            try encodeOrNull(&c, chat_guid, .chat_guid)
+            try encodeOrNull(&c, chat_identifier, .chat_identifier)
+            try encodeOrNull(&c, display_name, .display_name)
+            try encodeOrNull(&c, room_name, .room_name)
+            try encodeOrNull(&c, service_name, .service_name)
+            try encodeOrNull(&c, group_id, .group_id)
+            try encodeOrNull(&c, style, .style)
+            try c.encode(is_group, forKey: .is_group)
+            try encodeOrNull(&c, last_activity, .last_activity)
+            try encodeOrNull(&c, last_activity_timestamp, .last_activity_timestamp)
+            try encodeOrNull(&c, last_activity_normalized_seconds, .last_activity_normalized_seconds)
+            try encodeOrNull(&c, last_activity_normalized_nanoseconds, .last_activity_normalized_nanoseconds)
+            try c.encode(participants, forKey: .participants)
+        }
+    }
+
+    public struct ExactPage<T: Encodable>: Encodable {
+        public let items: [T]
+        public let nextCursor: String?
+        public let chat: ResolvedExactChat?
+    }
+
+    public struct ResolvedExactChat: Encodable, Sendable, Equatable {
+        public let rowid: Int64
+        public let guid: String?
+        public let identifier: String?
+        public let displayName: String?
+        public let style: Int64?
+
+        enum CodingKeys: String, CodingKey {
+            case rowid, guid, identifier, displayName, style
+        }
+    }
+
+    private struct ExactCursor: Codable {
+        let v: Int
+        let op: String
+        let chatRowid: Int64?
+        let chatGuid: String?
+        let order: String
+        let maxMessageRowid: Int64
+        let maxChatRowid: Int64?
+        let lastSeconds: Int64?
+        let lastNanoseconds: Int64?
+        let lastMessageRowid: Int64?
+        let lastChatRowid: Int64?
+
+        enum CodingKeys: String, CodingKey, CaseIterable {
+            case v, op, chatRowid, chatGuid, order, maxMessageRowid, maxChatRowid
+            case lastSeconds, lastNanoseconds, lastMessageRowid, lastChatRowid
+        }
+    }
+
+    private static let exactCursorVersion = 1
+    private static let exactCursorMaxBytes = 4096
+    private static let exactNativePartsReason = "unavailable until a safe data-only attributedBody typedstream parser is implemented"
+
+    private static let normalizedSecondsSQL = """
+        CASE
+          WHEN m.date IS NULL THEN NULL
+          WHEN m.date BETWEEN -9999999999 AND 9999999999 THEN m.date
+          WHEN m.date < 0 AND (m.date % 1000000000) != 0 THEN (m.date / 1000000000) - 1
+          ELSE m.date / 1000000000
+        END
+        """
+
+    private static let normalizedNanosecondsSQL = """
+        CASE
+          WHEN m.date IS NULL THEN NULL
+          WHEN m.date BETWEEN -9999999999 AND 9999999999 THEN 0
+          ELSE ((m.date % 1000000000) + 1000000000) % 1000000000
+        END
+        """
+
+    private static func exactMessageSelect(seconds: String = ChatDB.normalizedSecondsSQL,
+                                           nanos: String = ChatDB.normalizedNanosecondsSQL) -> String {
+        """
+        SELECT m.ROWID AS rowid, m.guid AS message_guid, m.date AS date,
+               \(seconds) AS normalized_seconds,
+               \(nanos) AS normalized_nanoseconds,
+               m.text AS text, m.attributedBody AS attributedBody,
+               m.is_from_me AS is_from_me, m.handle_id AS handle_rowid,
+               m.cache_roomnames AS cache_roomnames, m.service AS service,
+               m.cache_has_attachments AS cache_has_attachments,
+               h.id AS address,
+               c.ROWID AS selected_chat_rowid, c.chat_identifier AS chat_identifier,
+               c.guid AS chat_guid, c.display_name AS selected_display_name,
+               c.style AS selected_style
+        FROM chat_message_join cmj
+        JOIN chat c ON c.ROWID = cmj.chat_id
+        JOIN message m ON m.ROWID = cmj.message_id
+        LEFT JOIN handle h ON m.handle_id = h.ROWID
+        """
+    }
+
+    public mutating func exactConversations(limit: Int, order: ExactOrder, cursor: String?) throws -> ExactPage<ExactConversation> {
+        try requireExactReadSchema()
+        let firstMaxMessage = try maxRowid(table: "message")
+        let firstMaxChat = try maxRowid(table: "chat")
+        let decoded = try decodeCursor(cursor, op: "conversations", chat: nil, order: order)
+        let maxMessage = decoded?.maxMessageRowid ?? firstMaxMessage
+        let maxChat = decoded?.maxChatRowid ?? firstMaxChat
+        let activitySQL = """
+            SELECT cmj.chat_id AS chat_id, m.ROWID AS message_rowid, m.date AS date,
+                   \(ChatDB.normalizedSecondsSQL) AS normalized_seconds,
+                   \(ChatDB.normalizedNanosecondsSQL) AS normalized_nanoseconds
+            FROM chat_message_join cmj
+            JOIN message m ON m.ROWID = cmj.message_id
+            WHERE m.ROWID <= ?1
+            """
+        var activity: [Int64: (raw: Int64?, seconds: Int64?, nanos: Int64?, messageRowid: Int64)] = [:]
+        for row in try reader.rows(activitySQL, [String(maxMessage)]) {
+            guard let chatID = row.int("chat_id"), let mid = row.int("message_rowid") else { continue }
+            let candidate = (raw: row.int("date"), seconds: row.int("normalized_seconds"),
+                             nanos: row.int("normalized_nanoseconds"), messageRowid: mid)
+            if let current = activity[chatID] {
+                if exactCompare(candidate.seconds, candidate.nanos, candidate.messageRowid,
+                                current.seconds, current.nanos, current.messageRowid, order: .desc) {
+                    activity[chatID] = candidate
+                }
+            } else {
+                activity[chatID] = candidate
+            }
+        }
+
+        let sql = """
+            SELECT ROWID AS chat_rowid, chat_identifier, display_name, room_name, guid,
+                   service_name, group_id, style
+            FROM chat
+            WHERE ROWID <= ?1
+            """
+        let binds = [String(maxChat)]
+        let rows = try reader.rows(sql, binds)
+        let participantMap = try exactChatParticipants(chatIds: rows.compactMap { $0.int("chat_rowid") })
+        var conversations: [ExactConversation] = rows.compactMap { row in
+            guard let chatID = row.int("chat_rowid") else { return nil }
+            let last = activity[chatID]
+            return ExactConversation(
+                chat_rowid: chatID,
+                chat_guid: row.text("guid"),
+                chat_identifier: row.text("chat_identifier"),
+                display_name: row.text("display_name"),
+                room_name: row.text("room_name"),
+                service_name: row.text("service_name"),
+                group_id: row.text("group_id"),
+                style: row.int("style"),
+                is_group: row.int("style") == ChatDB.groupChatStyle,
+                last_activity: last?.raw.map(MessageTime.date(fromRaw:)),
+                last_activity_timestamp: last?.raw,
+                last_activity_normalized_seconds: last?.seconds,
+                last_activity_normalized_nanoseconds: last?.nanos,
+                participants: participantMap[chatID] ?? []
+            )
+        }
+        conversations.sort { lhs, rhs in
+            exactCompare(lhs.last_activity_normalized_seconds, lhs.last_activity_normalized_nanoseconds,
+                         lhs.chat_rowid, rhs.last_activity_normalized_seconds,
+                         rhs.last_activity_normalized_nanoseconds, rhs.chat_rowid, order: order)
+        }
+        if let decoded, let lastChat = decoded.lastChatRowid {
+            conversations = conversations.filter {
+                exactCompare(decoded.lastSeconds, decoded.lastNanoseconds, lastChat,
+                             $0.last_activity_normalized_seconds, $0.last_activity_normalized_nanoseconds,
+                             $0.chat_rowid, order: order)
+            }
+        }
+        let page = Array(conversations.prefix(limit + 1))
+        let visible = Array(page.prefix(limit))
+        let next = try page.count > limit ? visible.last.map {
+            try encodeCursor(ExactCursor(v: ChatDB.exactCursorVersion, op: "conversations",
+                                         chatRowid: nil, chatGuid: nil, order: order.rawValue,
+                                         maxMessageRowid: maxMessage, maxChatRowid: maxChat,
+                                         lastSeconds: $0.last_activity_normalized_seconds,
+                                         lastNanoseconds: $0.last_activity_normalized_nanoseconds,
+                                         lastMessageRowid: nil, lastChatRowid: $0.chat_rowid))
+        } : nil
+        return ExactPage(items: visible, nextCursor: next, chat: nil)
+    }
+
+    public mutating func exactHistory(chat selector: ExactChatSelector, limit: Int,
+                                      order: ExactOrder, cursor: String?) throws -> ExactPage<ExactMessage> {
+        try requireExactReadSchema()
+        let chat = try resolveExactChat(selector)
+        let decoded = try decodeCursor(cursor, op: "history", chat: chat, order: order)
+        let maxMessage: Int64
+        if let decoded {
+            maxMessage = decoded.maxMessageRowid
+        } else {
+            maxMessage = try maxRowid(table: "message")
+        }
+        let orderSQL = order == .desc ? "DESC" : "ASC"
+        var sql = ChatDB.exactMessageSelect() + """
+
+        WHERE c.ROWID = ?1 AND m.ROWID <= ?2
+        """
+        var binds = [String(chat.rowid), String(maxMessage)]
+        if let decoded, let lastMessage = decoded.lastMessageRowid {
+            let lastSeconds = decoded.lastSeconds
+            let lastNanos = decoded.lastNanoseconds
+            if order == .desc {
+                if let lastSeconds, let lastNanos {
+                    sql += " AND (((\(ChatDB.normalizedSecondsSQL)) < CAST(?3 AS INTEGER)) OR ((\(ChatDB.normalizedSecondsSQL)) = CAST(?3 AS INTEGER) AND (\(ChatDB.normalizedNanosecondsSQL)) < CAST(?4 AS INTEGER)) OR ((\(ChatDB.normalizedSecondsSQL)) = CAST(?3 AS INTEGER) AND (\(ChatDB.normalizedNanosecondsSQL)) = CAST(?4 AS INTEGER) AND m.ROWID < ?5) OR ((\(ChatDB.normalizedSecondsSQL)) IS NULL))"
+                    binds.append(String(lastSeconds))
+                    binds.append(String(lastNanos))
+                    binds.append(String(lastMessage))
+                } else {
+                    sql += " AND (\(ChatDB.normalizedSecondsSQL)) IS NULL AND m.ROWID < ?3"
+                    binds.append(String(lastMessage))
+                }
+            } else {
+                if let lastSeconds, let lastNanos {
+                    sql += " AND (((\(ChatDB.normalizedSecondsSQL)) > CAST(?3 AS INTEGER)) OR ((\(ChatDB.normalizedSecondsSQL)) = CAST(?3 AS INTEGER) AND (\(ChatDB.normalizedNanosecondsSQL)) > CAST(?4 AS INTEGER)) OR ((\(ChatDB.normalizedSecondsSQL)) = CAST(?3 AS INTEGER) AND (\(ChatDB.normalizedNanosecondsSQL)) = CAST(?4 AS INTEGER) AND m.ROWID > ?5))"
+                    binds.append(String(lastSeconds))
+                    binds.append(String(lastNanos))
+                    binds.append(String(lastMessage))
+                } else {
+                    sql += " AND (((\(ChatDB.normalizedSecondsSQL)) IS NOT NULL) OR ((\(ChatDB.normalizedSecondsSQL)) IS NULL AND m.ROWID > ?3))"
+                    binds.append(String(lastMessage))
+                }
+            }
+        }
+        let nullOrder = order == .desc ? "normalized_seconds IS NULL ASC" : "normalized_seconds IS NOT NULL ASC"
+        sql += """
+
+        ORDER BY \(nullOrder), normalized_seconds \(orderSQL), normalized_nanoseconds \(orderSQL), m.ROWID \(orderSQL)
+        LIMIT \(limit + 1)
+        """
+        let messages = try shapeExactMessages(rows: reader.rows(sql, binds))
+        let visible = Array(messages.prefix(limit))
+        let next = try messages.count > limit ? visible.last.map {
+            try encodeCursor(ExactCursor(v: ChatDB.exactCursorVersion, op: "history",
+                                         chatRowid: chat.rowid, chatGuid: chat.guid,
+                                         order: order.rawValue, maxMessageRowid: maxMessage,
+                                         maxChatRowid: nil,
+                                         lastSeconds: $0.normalized_seconds,
+                                         lastNanoseconds: $0.normalized_nanoseconds,
+                                         lastMessageRowid: $0.rowid, lastChatRowid: nil))
+        } : nil
+        return ExactPage(items: visible, nextCursor: next, chat: chat)
+    }
+
+    public mutating func exactGet(chat selector: ExactChatSelector,
+                                  message messageSelector: ExactMessageSelector) throws -> (ResolvedExactChat, ExactMessage) {
+        try requireExactReadSchema()
+        let chat = try resolveExactChat(selector)
+        let messagePredicate: String
+        let bind: String
+        switch messageSelector {
+        case .rowid(let rowid):
+            messagePredicate = "m.ROWID = ?2"
+            bind = String(rowid)
+        case .guid(let guid):
+            let rows = try reader.rows("SELECT ROWID FROM message WHERE guid = ?1", [guid])
+            guard !rows.isEmpty else { throw AppleError.notFound("message not found") }
+            guard rows.count == 1 else {
+                throw AppleError.validation("message guid matches multiple rows; use --message-rowid")
+            }
+            messagePredicate = "m.ROWID = ?2"
+            bind = String(try requiredInt(rows[0], "ROWID"))
+        }
+        let sql = ChatDB.exactMessageSelect() + """
+
+        WHERE c.ROWID = ?1 AND \(messagePredicate)
+        LIMIT 1
+        """
+        let messages = try shapeExactMessages(rows: reader.rows(sql, [String(chat.rowid), bind]))
+        guard let message = messages.first else {
+            throw AppleError.notFound("message is not a member of the selected conversation")
+        }
+        return (chat, message)
+    }
+
+    private func exactCompare(_ lhsSeconds: Int64?, _ lhsNanos: Int64?, _ lhsTie: Int64,
+                              _ rhsSeconds: Int64?, _ rhsNanos: Int64?, _ rhsTie: Int64,
+                              order: ExactOrder) -> Bool {
+        switch (lhsSeconds, rhsSeconds) {
+        case let (l?, r?) where l != r:
+            return order == .desc ? l > r : l < r
+        case (nil, _?) where order == .asc:
+            return true
+        case (_?, nil) where order == .asc:
+            return false
+        case (nil, _?) where order == .desc:
+            return false
+        case (_?, nil) where order == .desc:
+            return true
+        default:
+            if let lhsNanos, let rhsNanos, lhsNanos != rhsNanos {
+                return order == .desc ? lhsNanos > rhsNanos : lhsNanos < rhsNanos
+            }
+            return order == .desc ? lhsTie > rhsTie : lhsTie < rhsTie
+        }
+    }
+
+    private mutating func shapeExactMessages(rows: [SQLiteReader.Row]) throws -> [ExactMessage] {
+        let ids = rows.compactMap { $0.int("rowid") }
+        let attachments = try strictAttachmentsByMessage(ids: ids)
+        var out: [ExactMessage] = []
+        for row in rows {
+            let rowid = try requiredInt(row, "rowid")
+            let selectedChat = try requiredInt(row, "selected_chat_rowid")
+            let joined = attachments[rowid] ?? []
+            let bodyInfo = exactBody(row, attachments: joined)
+            let rawDate = row.int("date")
+            let date = rawDate.map(MessageTime.date(fromRaw:))
+            let isFromMe = (row.int("is_from_me") ?? 0) != 0
+            let address = row.text("address")
+            let sender = senderName(isFromMe: isFromMe, address: address)
+            var group: String?
+            if let room = row.text("cache_roomnames"),
+               let name = try exactDisplayNameForRoom(room), !name.isEmpty {
+                group = name
+            }
+            out.append(ExactMessage(
+                rowid: rowid,
+                message_guid: row.text("message_guid"),
+                selected_chat_rowid: selectedChat,
+                chat_guid: row.text("chat_guid"),
+                chat_identifier: row.text("chat_identifier"),
+                date: date,
+                date_local: date.map(MessageTime.localString(from:)),
+                timestamp: rawDate,
+                normalized_seconds: row.int("normalized_seconds"),
+                normalized_nanoseconds: row.int("normalized_nanoseconds"),
+                is_from_me: isFromMe,
+                sender: sender,
+                handle: address,
+                service: row.text("service"),
+                body: bodyInfo.body,
+                body_availability: bodyInfo.availability,
+                group_name: group,
+                is_group: row.int("selected_style") == ChatDB.groupChatStyle,
+                has_attachments: (row.int("cache_has_attachments") ?? 0) != 0 || !joined.isEmpty,
+                attachments: joined,
+                native_parts_available: false,
+                native_parts_reason: ChatDB.exactNativePartsReason,
+                native_parts: nil
+            ))
+        }
+        return out
+    }
+
+    private func exactBody(_ row: SQLiteReader.Row, attachments: [Attachment]) -> (body: String?, availability: ExactBodyAvailability) {
+        if let text = row.text("text") {
+            return (text, ExactBodyAvailability(status: "available", reason: nil))
+        }
+        if let blob = row.data("attributedBody") {
+            if let decoded = AttributedBody.decode(blob) {
+                return (decoded, ExactBodyAvailability(status: "available", reason: nil))
+            }
+            return (nil, ExactBodyAvailability(status: "unavailable", reason: "attributedBody undecodable"))
+        }
+        if !attachments.isEmpty {
+            return ("", ExactBodyAvailability(status: "empty", reason: "bodyless attachment row"))
+        }
+        return (nil, ExactBodyAvailability(status: "empty", reason: "no text, attributedBody, or attachments"))
+    }
+
+    private func exactDisplayNameForRoom(_ room: String) throws -> String? {
+        try reader.rows("SELECT display_name FROM chat WHERE room_name = ?1 LIMIT 1", [room])
+            .first?.text("display_name")
+    }
+
+    private func strictAttachmentsByMessage(ids: [Int64]) throws -> [Int64: [Attachment]] {
+        guard !ids.isEmpty else { return [:] }
+        let columns = try requiredColumns("attachment", ["ROWID"])
+        _ = try requiredColumns("message_attachment_join", ["message_id", "attachment_id"])
+        let selectedColumns = [
+            "guid", "filename", "mime_type", "uti", "transfer_name", "total_bytes",
+            "is_sticker", "hide_attachment"
+        ].map { attachmentSelect(column: $0, available: columns) }.joined(separator: ",\n                       ")
+        var out: [Int64: [Attachment]] = [:]
+        for chunk in ChatDB.idChunks(ids) {
+            let placeholders = chunk.indices.map { "?\($0 + 1)" }.joined(separator: ", ")
+            let sql = """
+                SELECT maj.message_id AS message_id, a.ROWID AS rowid,
+                       \(selectedColumns)
+                FROM message_attachment_join maj
+                JOIN attachment a ON a.ROWID = maj.attachment_id
+                WHERE maj.message_id IN (\(placeholders))
+                ORDER BY maj.message_id, a.ROWID
+                """
+            for row in try reader.rows(sql, chunk.map(String.init)) {
+                let raw = row.text("filename")
+                let resolved = attachmentPath(from: raw)
+                out[try requiredInt(row, "message_id"), default: []].append(Attachment(
+                    rowid: try requiredInt(row, "rowid"),
+                    guid: row.text("guid"),
+                    filename: raw,
+                    path: resolved.path,
+                    exists: resolved.exists,
+                    mime_type: row.text("mime_type"),
+                    uti: row.text("uti"),
+                    transfer_name: row.text("transfer_name"),
+                    total_bytes: row.int("total_bytes"),
+                    is_sticker: row.int("is_sticker").map { $0 != 0 },
+                    hide_attachment: row.int("hide_attachment").map { $0 != 0 }
+                ))
+            }
+        }
+        return out
+    }
+
+    private func exactChatParticipants(chatIds: [Int64]) throws -> [Int64: [String]] {
+        guard !chatIds.isEmpty else { return [:] }
+        var out: [Int64: [String]] = [:]
+        for chunk in ChatDB.idChunks(chatIds) {
+            let placeholders = chunk.indices.map { "?\($0 + 1)" }.joined(separator: ", ")
+            let sql = """
+                SELECT chj.chat_id AS chat_id, h.id AS handle
+                FROM chat_handle_join chj
+                JOIN handle h ON h.ROWID = chj.handle_id
+                WHERE chj.chat_id IN (\(placeholders))
+                ORDER BY chj.chat_id, h.ROWID
+                """
+            for row in try reader.rows(sql, chunk.map(String.init)) {
+                guard let handle = row.text("handle") else { continue }
+                out[try requiredInt(row, "chat_id"), default: []].append(handle)
+            }
+        }
+        return out
+    }
+
+    private func resolveExactChat(_ selector: ExactChatSelector) throws -> ResolvedExactChat {
+        let rows: [SQLiteReader.Row]
+        switch selector {
+        case .rowid(let rowid):
+            rows = try reader.rows("""
+                SELECT ROWID AS rowid, guid, chat_identifier, display_name, style
+                FROM chat WHERE ROWID = ?1
+                """, [String(rowid)])
+        case .guid(let guid):
+            rows = try reader.rows("""
+                SELECT ROWID AS rowid, guid, chat_identifier, display_name, style
+                FROM chat WHERE guid = ?1
+                """, [guid])
+        }
+        guard !rows.isEmpty else { throw AppleError.notFound("conversation not found") }
+        guard rows.count == 1 else {
+            throw AppleError.validation("chat guid matches multiple rows; use --chat-rowid")
+        }
+        let row = rows[0]
+        return ResolvedExactChat(rowid: try requiredInt(row, "rowid"),
+                                 guid: row.text("guid"),
+                                 identifier: row.text("chat_identifier"),
+                                 displayName: row.text("display_name"),
+                                 style: row.int("style"))
+    }
+
+    private func requireExactReadSchema() throws {
+        _ = try requiredColumns("message", [
+            "ROWID", "guid", "text", "attributedBody", "is_from_me", "handle_id",
+            "cache_roomnames", "service", "cache_has_attachments", "date",
+        ])
+        _ = try requiredColumns("chat", [
+            "ROWID", "chat_identifier", "display_name", "room_name", "guid",
+            "service_name", "group_id", "style",
+        ])
+        _ = try requiredColumns("chat_message_join", ["chat_id", "message_id"])
+        _ = try requiredColumns("chat_handle_join", ["chat_id", "handle_id"])
+        _ = try requiredColumns("handle", ["ROWID", "id"])
+        _ = try requiredColumns("message_attachment_join", ["message_id", "attachment_id"])
+        _ = try requiredColumns("attachment", ["ROWID"])
+    }
+
+    private func requiredColumns(_ table: String, _ required: Set<String>) throws -> Set<String> {
+        let rows = try reader.rows("PRAGMA table_info(\(table))")
+        let columns = Set(rows.compactMap { $0.text("name") })
+        guard !columns.isEmpty else { throw AppleError.upstream("Messages database is missing required table '\(table)'") }
+        let missing = required.subtracting(columns)
+        guard missing.isEmpty else {
+            throw AppleError.upstream("Messages database table '\(table)' is missing required column(s): \(missing.sorted().joined(separator: ", "))")
+        }
+        return columns
+    }
+
+    private func maxRowid(table: String) throws -> Int64 {
+        try reader.rows("SELECT COALESCE(MAX(ROWID), 0) AS max_rowid FROM \(table)")
+            .first?.int("max_rowid") ?? 0
+    }
+
+    private func requiredInt(_ row: SQLiteReader.Row, _ column: String) throws -> Int64 {
+        guard let value = row.int(column) else {
+            throw AppleError.upstream("Messages database query did not return required column '\(column)'")
+        }
+        return value
+    }
+
+    private func decodeCursor(_ cursor: String?, op: String, chat: ResolvedExactChat?,
+                              order: ExactOrder) throws -> ExactCursor? {
+        guard let cursor else { return nil }
+        guard cursor.utf8.count <= ChatDB.exactCursorMaxBytes else {
+            throw AppleError.validation("cursor too large (max \(ChatDB.exactCursorMaxBytes) bytes)")
+        }
+        guard let data = Data(base64Encoded: cursor) else {
+            throw AppleError.validation("cursor must be base64-encoded JSON")
+        }
+        try validateExactCursorJSONShape(data)
+        let decoded: ExactCursor
+        do {
+            decoded = try JSONDecoder().decode(ExactCursor.self, from: data)
+        } catch {
+            throw AppleError.validation("cursor is malformed")
+        }
+        guard decoded.v == ChatDB.exactCursorVersion else {
+            throw AppleError.validation("cursor version is unsupported")
+        }
+        guard decoded.op == op else { throw AppleError.validation("cursor is for a different operation") }
+        guard decoded.order == order.rawValue else { throw AppleError.validation("cursor is for a different order") }
+        guard decoded.maxMessageRowid >= 0, (decoded.maxChatRowid ?? 0) >= 0 else {
+            throw AppleError.validation("cursor has an invalid range")
+        }
+        switch op {
+        case "history":
+            guard decoded.maxChatRowid == nil, decoded.lastChatRowid == nil else {
+                throw AppleError.validation("cursor carries fields for a different operation")
+            }
+            guard let lastMessage = decoded.lastMessageRowid, lastMessage > 0,
+                  lastMessage <= decoded.maxMessageRowid else {
+                throw AppleError.validation("cursor has an invalid range")
+            }
+            guard let chat else { throw AppleError.validation("cursor is missing conversation scope") }
+            guard decoded.chatRowid == chat.rowid, decoded.chatGuid == chat.guid else {
+                throw AppleError.validation("cursor is for a different conversation")
+            }
+        case "conversations":
+            guard decoded.chatRowid == nil, decoded.chatGuid == nil,
+                  decoded.lastMessageRowid == nil else {
+                throw AppleError.validation("cursor carries fields for a different operation")
+            }
+            guard let maxChat = decoded.maxChatRowid, maxChat >= 0,
+                  let lastChat = decoded.lastChatRowid, lastChat > 0, lastChat <= maxChat else {
+                throw AppleError.validation("cursor has an invalid range")
+            }
+        default:
+            throw AppleError.validation("cursor is for an unsupported operation")
+        }
+        switch (decoded.lastSeconds, decoded.lastNanoseconds) {
+        case (.some, .none), (.none, .some):
+            throw AppleError.validation("cursor has an invalid sort key")
+        case (_, let nanos?):
+            guard nanos >= 0 && nanos < 1_000_000_000 else {
+                throw AppleError.validation("cursor has an invalid sort key")
+            }
+        default:
+            break
+        }
+        return decoded
+    }
+
+    private func encodeCursor(_ cursor: ExactCursor) throws -> String {
+        let data = try JSONEncoder().encode(cursor)
+        let encoded = data.base64EncodedString()
+        guard encoded.utf8.count <= ChatDB.exactCursorMaxBytes else {
+            throw AppleError.upstream("Messages database identity values produce an oversized pagination cursor")
+        }
+        return encoded
+    }
+
+    private func validateExactCursorJSONShape(_ data: Data) throws {
+        guard let text = String(data: data, encoding: .utf8) else {
+            throw AppleError.validation("cursor is malformed")
+        }
+        let keys = try topLevelJSONKeys(text)
+        let allowed = Set(ExactCursor.CodingKeys.allCases.map(\.stringValue))
+        var seen: Set<String> = []
+        for key in keys {
+            guard allowed.contains(key) else {
+                throw AppleError.validation("cursor contains an unknown field")
+            }
+            guard seen.insert(key).inserted else {
+                throw AppleError.validation("cursor contains a duplicate field")
+            }
+        }
+    }
+
+    private func topLevelJSONKeys(_ text: String) throws -> [String] {
+        let bytes = Array(text.utf8)
+        var index = 0
+        func skipWhitespace() {
+            while index < bytes.count, [UInt8(ascii: " "), UInt8(ascii: "\n"), UInt8(ascii: "\r"), UInt8(ascii: "\t")].contains(bytes[index]) {
+                index += 1
+            }
+        }
+        func parseString() throws -> String {
+            guard index < bytes.count, bytes[index] == UInt8(ascii: "\"") else {
+                throw AppleError.validation("cursor is malformed")
+            }
+            index += 1
+            var out = Data()
+            while index < bytes.count {
+                let b = bytes[index]
+                index += 1
+                if b == UInt8(ascii: "\"") {
+                    return String(data: out, encoding: .utf8) ?? ""
+                }
+                if b == UInt8(ascii: "\\") {
+                    guard index < bytes.count else { throw AppleError.validation("cursor is malformed") }
+                    let escaped = bytes[index]
+                    index += 1
+                    switch escaped {
+                    case UInt8(ascii: "\""), UInt8(ascii: "\\"), UInt8(ascii: "/"):
+                        out.append(escaped)
+                    case UInt8(ascii: "b"):
+                        out.append(8)
+                    case UInt8(ascii: "f"):
+                        out.append(12)
+                    case UInt8(ascii: "n"):
+                        out.append(10)
+                    case UInt8(ascii: "r"):
+                        out.append(13)
+                    case UInt8(ascii: "t"):
+                        out.append(9)
+                    case UInt8(ascii: "u"):
+                        guard index + 4 <= bytes.count else { throw AppleError.validation("cursor is malformed") }
+                        let hex = bytes[index ..< index + 4]
+                        index += 4
+                        guard let scalar = UInt32(String(decoding: hex, as: UTF8.self), radix: 16),
+                              let unicode = UnicodeScalar(scalar) else {
+                            throw AppleError.validation("cursor is malformed")
+                        }
+                        out.append(contentsOf: String(unicode).utf8)
+                    default:
+                        throw AppleError.validation("cursor is malformed")
+                    }
+                } else {
+                    out.append(b)
+                }
+            }
+            throw AppleError.validation("cursor is malformed")
+        }
+        func skipValue() throws {
+            skipWhitespace()
+            guard index < bytes.count else { throw AppleError.validation("cursor is malformed") }
+            if bytes[index] == UInt8(ascii: "\"") {
+                _ = try parseString()
+                return
+            }
+            var depth = 0
+            var inString = false
+            var escaped = false
+            while index < bytes.count {
+                let b = bytes[index]
+                if inString {
+                    if escaped { escaped = false }
+                    else if b == UInt8(ascii: "\\") { escaped = true }
+                    else if b == UInt8(ascii: "\"") { inString = false }
+                    index += 1
+                    continue
+                }
+                if b == UInt8(ascii: "\"") { inString = true; index += 1; continue }
+                if b == UInt8(ascii: "{") || b == UInt8(ascii: "[") { depth += 1; index += 1; continue }
+                if b == UInt8(ascii: "}") || b == UInt8(ascii: "]") {
+                    if depth == 0 { return }
+                    depth -= 1
+                    index += 1
+                    continue
+                }
+                if depth == 0 && b == UInt8(ascii: ",") { return }
+                index += 1
+            }
+        }
+        skipWhitespace()
+        guard index < bytes.count, bytes[index] == UInt8(ascii: "{") else {
+            throw AppleError.validation("cursor is malformed")
+        }
+        index += 1
+        var keys: [String] = []
+        skipWhitespace()
+        if index < bytes.count, bytes[index] == UInt8(ascii: "}") {
+            index += 1
+            skipWhitespace()
+            guard index == bytes.count else { throw AppleError.validation("cursor is malformed") }
+            return keys
+        }
+        while true {
+            skipWhitespace()
+            keys.append(try parseString())
+            skipWhitespace()
+            guard index < bytes.count, bytes[index] == UInt8(ascii: ":") else {
+                throw AppleError.validation("cursor is malformed")
+            }
+            index += 1
+            try skipValue()
+            skipWhitespace()
+            guard index < bytes.count else { throw AppleError.validation("cursor is malformed") }
+            if bytes[index] == UInt8(ascii: ",") {
+                index += 1
+                continue
+            }
+            if bytes[index] == UInt8(ascii: "}") {
+                index += 1
+                break
+            }
+            throw AppleError.validation("cursor is malformed")
+        }
+        skipWhitespace()
+        guard index == bytes.count else { throw AppleError.validation("cursor is malformed") }
+        return keys
+    }
+
     // MARK: - iMessage availability (oracle `_check_imessage_availability`)
 
     public struct Availability: Encodable {

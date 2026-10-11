@@ -1389,6 +1389,169 @@ struct MessagesCommandDependencyTests {
         #expect(empty.contains("No named group chats matching 'no-such-chat'."))
     }
 
+    @Test func conversationsCommandListsAllChatShapesAndPaginates() throws {
+        let deps = fixtureDependencies(chat)
+        let first = try payload(from: captureStdout {
+            try Conversations.parse(["--limit", "1"]).run(dependencies: deps)
+        })
+        #expect(first["count"] as? Int == 1)
+        #expect(first["cursor"] is NSNull)
+        let cursor = try #require(first["next_cursor"] as? String)
+        let rows = try #require(first["conversations"] as? [[String: Any]])
+        #expect(rows.first?["chat_rowid"] != nil)
+        #expect(rows.first?["last_activity_normalized_seconds"] != nil)
+        #expect(rows.first?["last_activity_normalized_nanoseconds"] != nil)
+
+        let second = try payload(from: captureStdout {
+            try Conversations.parse(["--limit", "100", "--cursor", cursor]).run(dependencies: deps)
+        })
+        #expect(second["next_cursor"] is NSNull)
+        let secondRows = try #require(second["conversations"] as? [[String: Any]])
+        let ids = Set((rows + secondRows).compactMap { $0["chat_rowid"] as? Int })
+        #expect(ids.isSuperset(of: [1, 2, 3]))
+    }
+
+    @Test func historyCommandSelectsByRowidAndGuid() throws {
+        let deps = fixtureDependencies(chat)
+        let byRowid = try payload(from: captureStdout {
+            try History.parse(["--chat-rowid", "3", "--limit", "100"]).run(dependencies: deps)
+        })
+        #expect(byRowid["chat_rowid"] as? Int == 3)
+        #expect(byRowid["chat_guid"] as? String == "iMessage;-;+12125550100")
+        let rowMessages = try #require(byRowid["messages"] as? [[String: Any]])
+        let multichat = try #require(rowMessages.first { $0["rowid"] as? Int == 4 })
+        #expect(multichat["selected_chat_rowid"] as? Int == 3)
+        #expect(multichat["chat_guid"] as? String == "iMessage;-;+12125550100")
+
+        let byGuid = try payload(from: captureStdout {
+            try History.parse(["--chat-guid", "iMessage;+;chat999", "--limit", "100"])
+                .run(dependencies: deps)
+        })
+        #expect(byGuid["chat_rowid"] as? Int == 1)
+        let guidMessages = try #require(byGuid["messages"] as? [[String: Any]])
+        #expect(guidMessages.first { $0["rowid"] as? Int == 4 }?["selected_chat_rowid"] as? Int == 1)
+    }
+
+    @Test func getCommandRequiresSelectedConversationMembership() throws {
+        let deps = fixtureDependencies(chat)
+        let output = try payload(from: captureStdout {
+            try Get.parse(["--chat-rowid", "3", "--message-rowid", "4"]).run(dependencies: deps)
+        })
+        #expect(output["chat_rowid"] as? Int == 3)
+        let message = try #require(output["message"] as? [String: Any])
+        #expect(message["rowid"] as? Int == 4)
+        #expect(message["selected_chat_rowid"] as? Int == 3)
+        #expect(message["native_parts"] is NSNull)
+        #expect(message["native_parts_available"] as? Bool == false)
+        #expect((message["native_parts_reason"] as? String)?.contains("typedstream parser") == true)
+        let availability = try #require(message["body_availability"] as? [String: Any])
+        #expect(availability["status"] as? String == "available")
+
+        let wrongChat = try captureCommand {
+            try Get.parse(["--chat-rowid", "1", "--message-rowid", "1"]).run(dependencies: deps)
+        }
+        #expect(wrongChat.exitCode == AppleExit.notFound)
+    }
+
+    @Test func exactReadCursorsRejectWrongScopeAndMalformedInput() throws {
+        let deps = fixtureDependencies(chat)
+        let page = try payload(from: captureStdout {
+            try History.parse(["--chat-rowid", "3", "--limit", "1"]).run(dependencies: deps)
+        })
+        let cursor = try #require(page["next_cursor"] as? String)
+
+        let wrongOperation = try captureCommand {
+            try Conversations.parse(["--cursor", cursor]).run(dependencies: deps)
+        }
+        #expect(wrongOperation.exitCode == AppleExit.usage)
+        #expect((try errorPayload(from: wrongOperation.stdout)["message"] as? String)?
+            .contains("different operation") == true)
+
+        let wrongOrder = try captureCommand {
+            try History.parse(["--chat-rowid", "3", "--order", "asc", "--cursor", cursor])
+                .run(dependencies: deps)
+        }
+        #expect(wrongOrder.exitCode == AppleExit.usage)
+        #expect((try errorPayload(from: wrongOrder.stdout)["message"] as? String)?
+            .contains("different order") == true)
+
+        let wrongChat = try captureCommand {
+            try History.parse(["--chat-rowid", "1", "--cursor", cursor]).run(dependencies: deps)
+        }
+        #expect(wrongChat.exitCode == AppleExit.usage)
+        #expect((try errorPayload(from: wrongChat.stdout)["message"] as? String)?
+            .contains("different conversation") == true)
+
+        let malformed = try captureCommand {
+            try History.parse(["--chat-rowid", "3", "--cursor", "not-base64"]).run(dependencies: deps)
+        }
+        #expect(malformed.exitCode == AppleExit.usage)
+
+        let oversize = try captureCommand {
+            try History.parse(["--chat-rowid", "3", "--cursor", String(repeating: "a", count: 4097)])
+                .run(dependencies: deps)
+        }
+        #expect(oversize.exitCode == AppleExit.usage)
+        #expect((try errorPayload(from: oversize.stdout)["message"] as? String)?
+            .contains("cursor too large") == true)
+
+
+        let missingLastMessage = cursorJSON(#"{"v":1,"op":"history","chatRowid":3,"chatGuid":"iMessage;-;+12125550100","order":"desc","maxMessageRowid":10,"lastSeconds":100,"lastNanoseconds":0}"#)
+        let missingLast = try captureCommand {
+            try History.parse(["--chat-rowid", "3", "--cursor", missingLastMessage]).run(dependencies: deps)
+        }
+        #expect(missingLast.exitCode == AppleExit.usage)
+
+        let badNanos = cursorJSON(#"{"v":1,"op":"history","chatRowid":3,"chatGuid":"iMessage;-;+12125550100","order":"desc","maxMessageRowid":10,"lastSeconds":100,"lastNanoseconds":1000000000,"lastMessageRowid":1}"#)
+        let badSortKey = try captureCommand {
+            try History.parse(["--chat-rowid", "3", "--cursor", badNanos]).run(dependencies: deps)
+        }
+        #expect(badSortKey.exitCode == AppleExit.usage)
+
+        let outOfRange = cursorJSON(#"{"v":1,"op":"history","chatRowid":3,"chatGuid":"iMessage;-;+12125550100","order":"desc","maxMessageRowid":10,"lastSeconds":100,"lastNanoseconds":0,"lastMessageRowid":11}"#)
+        let badRange = try captureCommand {
+            try History.parse(["--chat-rowid", "3", "--cursor", outOfRange]).run(dependencies: deps)
+        }
+        #expect(badRange.exitCode == AppleExit.usage)
+
+        let unknownField = cursorJSON(#"{"v":1,"op":"history","chatRowid":3,"chatGuid":"iMessage;-;+12125550100","order":"desc","maxMessageRowid":10,"lastSeconds":100,"lastNanoseconds":0,"lastMessageRowid":1,"extra":true}"#)
+        let unknown = try captureCommand {
+            try History.parse(["--chat-rowid", "3", "--cursor", unknownField]).run(dependencies: deps)
+        }
+        #expect(unknown.exitCode == AppleExit.usage)
+
+        let duplicateField = cursorJSON(#"{"v":1,"op":"history","op":"history","chatRowid":3,"chatGuid":"iMessage;-;+12125550100","order":"desc","maxMessageRowid":10,"lastSeconds":100,"lastNanoseconds":0,"lastMessageRowid":1}"#)
+        let duplicate = try captureCommand {
+            try History.parse(["--chat-rowid", "3", "--cursor", duplicateField]).run(dependencies: deps)
+        }
+        #expect(duplicate.exitCode == AppleExit.usage)
+
+        let conversationWithChatSelector = cursorJSON(#"{"v":1,"op":"conversations","chatRowid":3,"order":"desc","maxMessageRowid":10,"maxChatRowid":3,"lastSeconds":100,"lastNanoseconds":0,"lastChatRowid":1}"#)
+        let wrongConversationShape = try captureCommand {
+            try Conversations.parse(["--cursor", conversationWithChatSelector]).run(dependencies: deps)
+        }
+        #expect(wrongConversationShape.exitCode == AppleExit.usage)
+    }
+
+    @Test func exactReadValidationErrorsEmitJSONWithoutLiveDependencies() throws {
+        try expectValidationError(try History.parse(["--chat-rowid", "0"]),
+                                  run: { try $0.run(dependencies: .fixture()) })
+        try expectValidationError(try History.parse(["--chat-rowid", "1", "--chat-guid", "g"]),
+                                  run: { try $0.run(dependencies: .fixture()) })
+        try expectValidationError(try History.parse(["--chat-guid", ""]),
+                                  run: { try $0.run(dependencies: .fixture()) })
+        try expectValidationError(try History.parse(["--chat-rowid", "1", "--limit", "1001"]),
+                                  run: { try $0.run(dependencies: .fixture()) })
+        try expectValidationError(try History.parse(["--chat-rowid", "1", "--order", "sideways"]),
+                                  run: { try $0.run(dependencies: .fixture()) })
+        try expectValidationError(try Get.parse(["--chat-rowid", "1", "--message-rowid", "0"]),
+                                  run: { try $0.run(dependencies: .fixture()) })
+        try expectValidationError(try Get.parse(["--chat-rowid", "1"]),
+                                  run: { try $0.run(dependencies: .fixture()) })
+        try expectValidationError(try Conversations.parse(["--limit", "0"]),
+                                  run: { try $0.run(dependencies: .fixture()) })
+    }
+
     @Test func searchUsesInjectedChatDB() throws {
         let command = try Search.parse(["decoded", "--hours", "24", "--match", "contains"])
         let output = try captureStdout {
@@ -2058,6 +2221,10 @@ private func successEnvelope(from output: String) throws -> [String: Any] {
 
 private func payload(from output: String) throws -> [String: Any] {
     try #require(try successEnvelope(from: output)["data"] as? [String: Any])
+}
+
+private func cursorJSON(_ json: String) -> String {
+    Data(json.utf8).base64EncodedString()
 }
 
 private func errorPayload(from output: String) throws -> [String: Any] {

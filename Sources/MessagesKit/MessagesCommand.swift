@@ -16,6 +16,7 @@ public struct MessagesCommand: ParsableCommand {
         abstract: "iMessage / SMS — send, read, search.",
         subcommands: [
             Recent.self, Send_.self, FindContact.self, Chats.self, Search.self,
+            Conversations.self, History.self, Get.self,
             CheckAvailability.self, CheckDB.self, CheckContacts.self, CheckAddressBook.self,
             Doctor.self,
         ]
@@ -27,7 +28,7 @@ public struct MessagesCommand: ParsableCommand {
     /// smoke test's ok=false contract, and gives agents a machine-readable nudge).
     public func run() throws {
         try runGuarded(tool: "messages") {
-            throw AppleError.validation("specify a subcommand: recent, send, find-contact, chats, search, check-availability, check-db, check-contacts, check-addressbook, doctor")
+            throw AppleError.validation("specify a subcommand: recent, send, find-contact, chats, search, conversations, history, get, check-availability, check-db, check-contacts, check-addressbook, doctor")
         }
     }
 }
@@ -621,6 +622,173 @@ private func renderChat(_ index: Int, _ chat: ChatDB.Chat) -> String {
     }
     if !extras.isEmpty { line += " — " + extras.joined(separator: "; ") }
     return line
+}
+
+// MARK: - conversations / history / get (exact read APIs)
+
+private let exactReadDefaultLimit = 100
+private let exactReadMaxLimit = 1000
+private let exactGUIDMaxScalars = 2048
+
+private func validateExactLimit(_ limit: Int) throws {
+    guard (1...exactReadMaxLimit).contains(limit) else {
+        throw AppleError.validation("limit must be between 1 and \(exactReadMaxLimit)")
+    }
+}
+
+private func parseExactOrder(_ value: String) throws -> ChatDB.ExactOrder {
+    guard let order = ChatDB.ExactOrder(rawValue: value) else {
+        throw AppleError.validation("order must be asc or desc")
+    }
+    return order
+}
+
+private func validateOpaqueGUID(_ value: String, name: String) throws -> String {
+    guard !value.isEmpty else { throw AppleError.validation("\(name) cannot be empty") }
+    guard value.unicodeScalars.count <= exactGUIDMaxScalars else {
+        throw AppleError.validation("\(name) too long (max \(exactGUIDMaxScalars) code points)")
+    }
+    guard value.unicodeScalars.allSatisfy({ !CharacterSet.controlCharacters.contains($0) }) else {
+        throw AppleError.validation("\(name) cannot contain control characters")
+    }
+    return value
+}
+
+private func parseChatSelector(rowid: Int64?, guid: String?) throws -> ChatDB.ExactChatSelector {
+    switch (rowid, guid) {
+    case let (id?, nil):
+        guard id > 0 else { throw AppleError.validation("chat-rowid must be positive") }
+        return .rowid(id)
+    case let (nil, guid?):
+        return .guid(try validateOpaqueGUID(guid, name: "chat-guid"))
+    case (nil, nil):
+        throw AppleError.validation("pass exactly one of --chat-rowid or --chat-guid")
+    case (_?, _?):
+        throw AppleError.validation("pass exactly one of --chat-rowid or --chat-guid")
+    }
+}
+
+private func parseMessageSelector(rowid: Int64?, guid: String?) throws -> ChatDB.ExactMessageSelector {
+    switch (rowid, guid) {
+    case let (id?, nil):
+        guard id > 0 else { throw AppleError.validation("message-rowid must be positive") }
+        return .rowid(id)
+    case let (nil, guid?):
+        return .guid(try validateOpaqueGUID(guid, name: "message-guid"))
+    case (nil, nil):
+        throw AppleError.validation("pass exactly one of --message-rowid or --message-guid")
+    case (_?, _?):
+        throw AppleError.validation("pass exactly one of --message-rowid or --message-guid")
+    }
+}
+
+struct Conversations: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "conversations",
+        abstract: "List all conversations: 1:1 chats, named groups, and unnamed groups.")
+    @OptionGroup var global: GlobalOptions
+    @Option(name: .long, help: "Max conversations to return (default 100, max 1000).")
+    var limit: Int = exactReadDefaultLimit
+    @Option(name: .long, help: "Sort order by last activity, then chat ROWID: desc (default) or asc.")
+    var order: String = ChatDB.ExactOrder.desc.rawValue
+    @Option(name: .long, help: "Opaque cursor returned by a previous conversations page.")
+    var cursor: String?
+
+    func run() throws { try run(dependencies: .live) }
+
+    func run(dependencies: MessagesCommandDependencies) throws {
+        try runGuarded(tool: tool) {
+            try validateExactLimit(limit)
+            let parsedOrder = try parseExactOrder(order)
+            let book = dependencies.loadAddressBook()
+            var db = try dependencies.makeChatDB(book)
+            let page = try db.exactConversations(limit: limit, order: parsedOrder, cursor: cursor)
+            let data = ConversationsData(limit: limit, order: parsedOrder.rawValue, cursor: cursor,
+                                         next_cursor: page.nextCursor, count: page.items.count,
+                                         conversations: page.items)
+            try emit(global, data) {
+                if page.items.isEmpty { return "No conversations found." }
+                return page.items.map { chat in
+                    let label = chat.display_name ?? chat.chat_identifier ?? chat.chat_guid ?? "conversation"
+                    return "\(chat.chat_rowid): \(label)"
+                }.joined(separator: "\n")
+            }
+        }
+    }
+}
+
+struct History: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "history",
+        abstract: "Read one conversation by exact chat GUID or local chat ROWID.")
+    @OptionGroup var global: GlobalOptions
+    @Option(name: .long, help: "Conversation GUID from chat.guid.") var chatGuid: String?
+    @Option(name: .long, help: "Local conversation ROWID from chat.ROWID.") var chatRowid: Int64?
+    @Option(name: .long, help: "Max messages to return (default 100, max 1000).")
+    var limit: Int = exactReadDefaultLimit
+    @Option(name: .long, help: "Sort order by normalized message date and ROWID: desc (default) or asc.")
+    var order: String = ChatDB.ExactOrder.desc.rawValue
+    @Option(name: .long, help: "Opaque cursor returned by a previous history page.")
+    var cursor: String?
+
+    func run() throws { try run(dependencies: .live) }
+
+    func run(dependencies: MessagesCommandDependencies) throws {
+        try runGuarded(tool: tool) {
+            try validateExactLimit(limit)
+            let selector = try parseChatSelector(rowid: chatRowid, guid: chatGuid)
+            let parsedOrder = try parseExactOrder(order)
+            let book = dependencies.loadAddressBook()
+            var db = try dependencies.makeChatDB(book)
+            let page = try db.exactHistory(chat: selector, limit: limit, order: parsedOrder, cursor: cursor)
+            let chat = try requireExactChat(page.chat)
+            let data = HistoryData(chat_rowid: chat.rowid, chat_guid: chat.guid, limit: limit,
+                                   order: parsedOrder.rawValue, cursor: cursor,
+                                   next_cursor: page.nextCursor, count: page.items.count,
+                                   messages: page.items)
+            try emit(global, data) {
+                if page.items.isEmpty { return "No messages found in selected conversation." }
+                return page.items.map(renderExactMessage).joined(separator: "\n")
+            }
+        }
+    }
+}
+
+struct Get: ParsableCommand {
+    static let configuration = CommandConfiguration(
+        commandName: "get",
+        abstract: "Read one message by exact conversation identity and exact message identity.")
+    @OptionGroup var global: GlobalOptions
+    @Option(name: .long, help: "Conversation GUID from chat.guid.") var chatGuid: String?
+    @Option(name: .long, help: "Local conversation ROWID from chat.ROWID.") var chatRowid: Int64?
+    @Option(name: .long, help: "Message GUID from message.guid.") var messageGuid: String?
+    @Option(name: .long, help: "Local message ROWID from message.ROWID.") var messageRowid: Int64?
+
+    func run() throws { try run(dependencies: .live) }
+
+    func run(dependencies: MessagesCommandDependencies) throws {
+        try runGuarded(tool: tool) {
+            let chatSelector = try parseChatSelector(rowid: chatRowid, guid: chatGuid)
+            let messageSelector = try parseMessageSelector(rowid: messageRowid, guid: messageGuid)
+            let book = dependencies.loadAddressBook()
+            var db = try dependencies.makeChatDB(book)
+            let (chat, message) = try db.exactGet(chat: chatSelector, message: messageSelector)
+            let data = GetMessageData(chat_rowid: chat.rowid, chat_guid: chat.guid, message: message)
+            try emit(global, data) { renderExactMessage(message) }
+        }
+    }
+}
+
+private func renderExactMessage(_ message: ChatDB.ExactMessage) -> String {
+    let when = message.date_local ?? "undated"
+    let body = message.body ?? "[body unavailable: \(message.body_availability.reason ?? message.body_availability.status)]"
+    return "[\(when)] \(message.sender): \(body)"
+        + attachmentSuffix(message.attachments, hasAttachments: message.has_attachments, body: body)
+}
+
+private func requireExactChat(_ chat: ChatDB.ResolvedExactChat?) throws -> ChatDB.ResolvedExactChat {
+    guard let chat else { throw AppleError.unknown("internal error: exact history resolved no chat") }
+    return chat
 }
 
 // MARK: - search (tool_fuzzy_search_messages)

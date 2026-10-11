@@ -739,6 +739,240 @@ struct ChatDBFixtureTests {
         #expect(db.namedChats(nameFilter: "group", limit: 1).map(\.display_name) == ["Test Group"])
     }
 
+    // MARK: - Exact reads
+
+    @Test func exactConversationsListDirectNamedAndUnnamedGroups() throws {
+        let fx = try ChatFixture()
+        var db = try makeDB(fx, book: friendBook)
+        let page = try db.exactConversations(limit: 100, order: .desc, cursor: nil)
+
+        #expect(page.items.map(\.chat_rowid).contains(3)) // direct chat
+        #expect(page.items.map(\.chat_rowid).contains(1)) // named group
+        #expect(page.items.map(\.chat_rowid).contains(2)) // unnamed/empty-display group
+        let direct = try #require(page.items.first { $0.chat_rowid == 3 })
+        #expect(direct.chat_identifier == "+12125550100")
+        #expect(direct.is_group == false)
+        let unnamed = try #require(page.items.first { $0.chat_rowid == 2 })
+        #expect(unnamed.display_name == "")
+        #expect(unnamed.is_group == true)
+    }
+
+    @Test func exactHistoryUsesSelectedMultichatMembership() throws {
+        let fx = try ChatFixture()
+        var db = try makeDB(fx, book: friendBook)
+
+        let direct = try db.exactHistory(chat: .rowid(3), limit: 100, order: .desc, cursor: nil)
+        let multichat = try #require(direct.items.first { $0.rowid == 4 })
+        #expect(multichat.selected_chat_rowid == 3)
+        #expect(multichat.chat_guid == "iMessage;-;+12125550100")
+        #expect(multichat.is_group == false)
+
+        let group = try db.exactHistory(chat: .rowid(1), limit: 100, order: .desc, cursor: nil)
+        let sameMessage = try #require(group.items.first { $0.rowid == 4 })
+        #expect(sameMessage.selected_chat_rowid == 1)
+        #expect(sameMessage.chat_guid == "iMessage;+;chat999")
+        #expect(sameMessage.is_group == true)
+    }
+
+    @Test func exactGetRequiresMessageMembershipInSelectedChat() throws {
+        let fx = try ChatFixture()
+        var db = try makeDB(fx, book: friendBook)
+
+        let (_, message) = try db.exactGet(chat: .rowid(3), message: .rowid(4))
+        #expect(message.selected_chat_rowid == 3)
+
+        do {
+            _ = try db.exactGet(chat: .rowid(1), message: .rowid(1))
+            Issue.record("message 1 is not in chat 1")
+        } catch let error as AppleError {
+            #expect(error.type == AppleErrorType.notFound)
+        }
+    }
+
+    @Test func exactReadsRejectDuplicateGUIDsInsteadOfPickingFirstRow() throws {
+        let fx = try ChatFixture()
+        try fx.exec("""
+            INSERT INTO chat VALUES
+            (90,'duplicate','Duplicate','duplicate','iMessage;+;chat999','iMessage','GD',43);
+            INSERT INTO message (ROWID,guid,text,is_from_me,handle_id,service,date,error)
+            VALUES (90,'g1','duplicate guid',0,1,'iMessage',\(fx.base - 2000),0);
+            INSERT INTO chat_message_join VALUES (3,90);
+            """)
+        var db = try makeDB(fx, book: friendBook)
+
+        do {
+            _ = try db.exactHistory(chat: .guid("iMessage;+;chat999"), limit: 10, order: .desc, cursor: nil)
+            Issue.record("duplicate chat GUID must fail")
+        } catch let error as AppleError {
+            #expect(error.type == AppleErrorType.validation)
+        }
+
+        do {
+            _ = try db.exactGet(chat: .rowid(3), message: .guid("g1"))
+            Issue.record("duplicate message GUID must fail")
+        } catch let error as AppleError {
+            #expect(error.type == AppleErrorType.validation)
+        }
+    }
+
+    @Test func exactHistoryIsolatesIdenticalBodiesAcrossChats() throws {
+        let fx = try ChatFixture()
+        try fx.exec("""
+            INSERT INTO message (ROWID,guid,text,is_from_me,handle_id,service,date,error) VALUES
+            (20,'same-20','identical synthetic body',0,1,'iMessage',\(fx.base - 20),0),
+            (21,'same-21','identical synthetic body',0,2,'iMessage',\(fx.base - 21),0);
+            INSERT INTO chat_message_join VALUES (3,20),(1,21);
+            """)
+        var db = try makeDB(fx, book: friendBook)
+
+        #expect(try db.exactHistory(chat: .rowid(3), limit: 100, order: .desc, cursor: nil)
+            .items.filter { $0.body == "identical synthetic body" }.map(\.rowid) == [20])
+        #expect(try db.exactHistory(chat: .rowid(1), limit: 100, order: .desc, cursor: nil)
+            .items.filter { $0.body == "identical synthetic body" }.map(\.rowid) == [21])
+    }
+
+    @Test func exactHistoryKeepsBodylessAndUndecodableRowsHonest() throws {
+        let fx = try ChatFixture()
+        try fx.exec("""
+            INSERT INTO message (ROWID,guid,attributedBody,is_from_me,handle_id,service,date,error)
+            VALUES (22,'bad-body',x'00010203',0,1,'iMessage',\(fx.base - 22),0);
+            INSERT INTO chat_message_join VALUES (3,22);
+            """)
+        var db = try makeDB(fx, book: friendBook)
+        let messages = try db.exactHistory(chat: .rowid(3), limit: 100, order: .desc, cursor: nil).items
+
+        let bodyless = try #require(messages.first { $0.rowid == 7 })
+        #expect(bodyless.body == nil)
+        #expect(bodyless.body_availability.status == "empty")
+
+        let undecodable = try #require(messages.first { $0.rowid == 22 })
+        #expect(undecodable.body == nil)
+        #expect(undecodable.body_availability.status == "unavailable")
+
+        let attached = try #require(messages.first { $0.rowid == 6 })
+        #expect(attached.body == "")
+        #expect(attached.body_availability.reason == "bodyless attachment row")
+        #expect(attached.native_parts == nil)
+        #expect(attached.native_parts_available == false)
+        #expect(attached.native_parts_reason.contains("typedstream parser"))
+    }
+
+    @Test func exactHistorySortsMixedDateUnitsAndExtremeTimestamps() throws {
+        let fx = try ChatFixture()
+        try fx.exec("""
+            INSERT INTO message (ROWID,guid,text,is_from_me,handle_id,service,date,error) VALUES
+            (30,'seconds-date','seconds date',0,1,'iMessage',100,0),
+            (31,'nanos-date','nanos date',0,1,'iMessage',100000000000,0),
+            (32,'min-date','min date',0,1,'iMessage',-9223372036854775808,0),
+            (33,'overflow-seconds','overflow seconds',0,1,'iMessage',9999999999,0),
+            (34,'null-date','null date',0,1,'iMessage',NULL,0),
+            (35,'large-seconds','large seconds',0,1,'iMessage',9223372037,0);
+            INSERT INTO chat_message_join VALUES (3,30),(3,31),(3,32),(3,33),(3,34),(3,35);
+            """)
+        var db = try makeDB(fx, book: friendBook)
+
+        let asc = try db.exactHistory(chat: .rowid(3), limit: 100, order: .asc, cursor: nil).items
+        #expect(asc.first?.rowid == 34) // NULL dates are explicit and deterministic.
+        #expect(asc.contains { $0.rowid == 32 && $0.date != nil })
+        #expect(asc.first { $0.rowid == 33 }?.normalized_seconds == 9_999_999_999)
+        #expect(asc.first { $0.rowid == 33 }?.normalized_nanoseconds == 0)
+        #expect(asc.first { $0.rowid == 30 }?.normalized_seconds == 100)
+        #expect(asc.first { $0.rowid == 31 }?.normalized_seconds == 100)
+        #expect(asc.first { $0.rowid == 31 }?.normalized_nanoseconds == 0)
+        #expect(asc.firstIndex(where: { $0.rowid == 35 })! < asc.firstIndex(where: { $0.rowid == 33 })!)
+    }
+
+    @Test func exactHistoryCursorReachesNullDateTail() throws {
+        let fx = try ChatFixture()
+        try fx.exec("""
+            INSERT INTO message (ROWID,guid,text,is_from_me,handle_id,service,date,error) VALUES
+            (40,'null-a','null a',0,1,'iMessage',NULL,0),
+            (41,'null-b','null b',0,1,'iMessage',NULL,0);
+            INSERT INTO chat_message_join VALUES (3,40),(3,41);
+            """)
+        var db = try makeDB(fx, book: friendBook)
+        var cursor: String?
+        var seen: [Int64] = []
+        var priorCursors: Set<String> = []
+        for _ in 0 ..< 20 {
+            let page = try db.exactHistory(chat: .rowid(3), limit: 2, order: .desc, cursor: cursor)
+            seen.append(contentsOf: page.items.map(\.rowid))
+            cursor = page.nextCursor
+            if let cursor {
+                #expect(priorCursors.insert(cursor).inserted, "cursor pagination must make progress")
+            } else {
+                break
+            }
+        }
+        #expect(cursor == nil, "cursor pagination must terminate")
+        #expect(seen.contains(40))
+        #expect(seen.contains(41))
+    }
+
+    @Test func exactHistoryCursorExcludesLaterBackdatedInserts() throws {
+        let fx = try ChatFixture()
+        var db = try makeDB(fx, book: friendBook)
+        let first = try db.exactHistory(chat: .rowid(3), limit: 1, order: .desc, cursor: nil)
+        let cursor = try #require(first.nextCursor)
+        try fx.exec("""
+            INSERT INTO message (ROWID,guid,text,is_from_me,handle_id,service,date,error)
+            VALUES (99,'later-backdated','later backdated',0,1,'iMessage',\(fx.base - 50_000),0);
+            INSERT INTO chat_message_join VALUES (3,99);
+            """)
+        var afterInsert = try makeDB(fx, book: friendBook)
+        let next = try afterInsert.exactHistory(chat: .rowid(3), limit: 100, order: .desc, cursor: cursor)
+        #expect(!next.items.contains { $0.rowid == 99 })
+    }
+
+    @Test func exactConversationsCursorExcludesLaterNewChats() throws {
+        let fx = try ChatFixture()
+        var db = try makeDB(fx, book: friendBook)
+        let first = try db.exactConversations(limit: 1, order: .desc, cursor: nil)
+        let cursor = try #require(first.nextCursor)
+        try fx.exec("""
+            INSERT INTO chat VALUES
+            (99,'later-chat','Later Group','later-chat','iMessage;+;later-chat','iMessage','G99',43);
+            """)
+        var afterInsert = try makeDB(fx, book: friendBook)
+        let next = try afterInsert.exactConversations(limit: 100, order: .desc, cursor: cursor)
+        #expect(!next.items.contains { $0.chat_rowid == 99 })
+    }
+
+    @Test func exactHistoryRefusesOversizedCursorFromStoredChatGUID() throws {
+        let fx = try ChatFixture()
+        let hugeGUID = "iMessage;-;+" + String(repeating: "x", count: 5000)
+        try fx.exec("""
+            INSERT INTO chat VALUES
+            (77,'oversized-chat','Oversized Synthetic','oversized-chat','\(hugeGUID)','iMessage','G77',45);
+            INSERT INTO message (ROWID,guid,text,is_from_me,handle_id,service,date,error) VALUES
+            (77,'oversized-cursor-a','oversized cursor a',0,1,'iMessage',\(fx.base - 77),0),
+            (78,'oversized-cursor-b','oversized cursor b',0,1,'iMessage',\(fx.base - 78),0);
+            INSERT INTO chat_message_join VALUES (77,77),(77,78);
+            """)
+        var db = try makeDB(fx, book: friendBook)
+
+        do {
+            _ = try db.exactHistory(chat: .rowid(77), limit: 1, order: .desc, cursor: nil)
+            Issue.record("oversized stored chat GUID must not emit an unusable cursor")
+        } catch let error as AppleError {
+            #expect(error.type == AppleErrorType.upstream)
+            #expect(error.message.contains("oversized pagination cursor"))
+        }
+    }
+
+    @Test func exactReadsFailOnMissingRequiredSchema() throws {
+        let fx = try ChatFixture()
+        try fx.exec("DROP TABLE chat_message_join;")
+        var db = try makeDB(fx, book: friendBook)
+
+        do {
+            _ = try db.exactConversations(limit: 10, order: .desc, cursor: nil)
+            Issue.record("missing join table must fail exact reads")
+        } catch let error as AppleError {
+            #expect(error.type == AppleErrorType.upstream)
+        }
+    }
+
     @Test func handleRowIdLookupTriesPhoneVariants() throws {
         let fx = try ChatFixture()
         let db = try makeDB(fx, book: friendBook)

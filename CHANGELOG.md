@@ -20,6 +20,17 @@ JSON output are stable per the versioning policy — breaking changes bump
 
 ### Added
 
+- **Exact Messages reads:** `messages conversations` discovers direct chats and
+  named or unnamed groups; `messages history` reads one exact conversation with
+  bounded cursor pagination; `messages get` fetches one exact message after
+  checking its membership in the selected conversation. GUID and local ROWID
+  selectors never fall back to body text or the latest message. Reads preserve
+  bodyless records and expose unavailable body/native-part metadata explicitly.
+  Existing commands retain their behavior and the JSON envelope remains schema 1.
+  Manuals: [`conversations`](https://github.com/robertvitali/apple-cli/blob/main/docs/manual/messages/conversations.md),
+  [`history`](https://github.com/robertvitali/apple-cli/blob/main/docs/manual/messages/history.md),
+  [`get`](https://github.com/robertvitali/apple-cli/blob/main/docs/manual/messages/get.md).
+
 - **`apple contacts auth --request` now provides an explicit no-data Contacts permission request path, and the built executable embeds the Contacts usage metadata macOS requires for that prompt.** Plain `apple contacts auth` remains status-only and never prompts; `--request` only asks for authorization, never reads contact records or mutates the address book, and it refuses with `authorization_denied` if the executable is missing `NSContactsUsageDescription`. The existing data-command authorization behavior is otherwise unchanged, `schema_version` stays `1`, and live caller-specific TCC behavior still needs verification after reviewed installation. Manual: [`apple contacts auth`](https://github.com/robertvitali/apple-cli/blob/main/docs/manual/contacts/auth.md).
 
 - **A read-only release-preparation rehearsal now exists in the repository's CI tooling

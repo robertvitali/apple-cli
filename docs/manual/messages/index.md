@@ -19,8 +19,11 @@ apple messages
 - [`check-availability`](./check-availability.md) — Check (history-based) whether a recipient has iMessage, else SMS fallback.
 - [`check-contacts`](./check-contacts.md) — Enumerate AddressBook contacts (count + sample number→name entries).
 - [`check-db`](./check-db.md) — Diagnose Messages chat.db access + required tables.
+- [`conversations`](./conversations.md) — List all conversations: 1:1 chats, named groups, and unnamed groups.
 - [`doctor`](./doctor.md) — One-shot health check: FDA + chat.db + AddressBook diagnostics.
 - [`find-contact`](./find-contact.md) — Fuzzy-search contacts by name/nickname; ranked candidates with confidence scores.
+- [`get`](./get.md) — Read one message by exact conversation identity and exact message identity.
+- [`history`](./history.md) — Read one conversation by exact chat GUID or local chat ROWID.
 - [`recent`](./recent.md) — Recent messages across ALL chats in the last N hours (optionally by contact).
 - [`search`](./search.md) — Search messages: fuzzy (WRatio) + threshold + time window (or contains/exact).
 - [`send`](./send.md) — Send an iMessage/SMS (sends on call; --dry-run previews).

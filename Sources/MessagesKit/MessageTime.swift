@@ -22,7 +22,8 @@ public enum MessageTime {
     /// Convert a raw `message.date` value (ns since 2001, or seconds on legacy rows)
     /// to a `Date`. Mirrors the oracle's `len(str(ts)) > 10 → nanoseconds` heuristic.
     public static func date(fromRaw raw: Int64) -> Date {
-        let digits = String(abs(raw)).count
+        let magnitude = raw == Int64.min ? String(Int64.max) : String(raw.magnitude)
+        let digits = magnitude.count
         let appleSeconds = digits > 10 ? Double(raw) / 1_000_000_000.0 : Double(raw)
         return Date(timeIntervalSince1970: appleSeconds + appleUnixOffset)
     }

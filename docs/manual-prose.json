@@ -59,6 +59,44 @@
     ],
     "notes": "Only NAMED chats are listed — a chat whose `display_name` is empty or absent (every 1:1 conversation, and any group nobody has named) does not appear, which is the behavior this command has always had. Ordering follows the chat table's own row order and `--name` and `--limit` do not change it: the filter is applied first, then the limit, so `--name X --limit 1` is the first chat matching X and not the first chat overall. A store that cannot be joined to its messages reports null activity rather than failing."
   },
+  "apple messages conversations": {
+    "description": "Discovers direct conversations, named groups and unnamed groups. Each row includes `chat_rowid`, `chat_guid`, `chat_identifier`, available display/service metadata, participants and last activity. `last_activity_normalized_seconds` and `last_activity_normalized_nanoseconds` provide the normalized Apple-epoch time as an exact pair, while `last_activity_timestamp` retains the raw database value. Use `chat_guid` or the local `chat_rowid` with `messages history` and `messages get`; display names and message text are not exact selectors. The existing `messages chats` command continues to list named chats only.",
+    "examples": [
+      {
+        "title": "Discover conversations of every kind",
+        "command": "apple messages conversations --limit 25"
+      },
+      {
+        "title": "Continue the same discovery traversal",
+        "command": "apple messages conversations --cursor '<next_cursor>' --limit 25"
+      }
+    ],
+    "notes": "Pages default to 100 rows and accept limits from 1 to 1000. Ordering is by normalized last activity, then chat ROWID; `--order desc` is the default and `--order asc` reverses it. Pass the returned `next_cursor` unchanged with the same order; null means there is no next page in this traversal. Cursors are limited to 4 KiB and are bound to the operation and ordering. Initial message and chat ROWID upper bounds exclude later inserts, including backdated messages, and conversation activity is computed only from messages within that bound. Each invocation reads a fresh snapshot, so edits, deletions and changed memberships can still affect later pages; this is not an immutable snapshot or event replay. The result limit does not bound database snapshot or discovery scan cost. Missing required schema or failed queries are errors rather than empty results. Reads do not drive Messages UI or mark conversations read."
+  },
+  "apple messages history": {
+    "description": "Reads one exact conversation with bounded results. Supply exactly one of `--chat-guid` or `--chat-rowid`. GUIDs are opaque database identifiers; ROWIDs are positive identifiers local to this Messages database. Ambiguous GUIDs are refused. A message linked to several chats retains the selected conversation's identity, rather than silently switching to its first chat.",
+    "examples": [
+      {
+        "title": "Read an explicitly selected local conversation",
+        "command": "apple messages history --chat-rowid 42 --limit 25"
+      },
+      {
+        "title": "Continue that conversation's history",
+        "command": "apple messages history --chat-rowid 42 --cursor '<next_cursor>' --limit 25"
+      }
+    ],
+    "notes": "Pages default to 100 rows, with a maximum of 1000. Messages sort by normalized Apple timestamp and message ROWID, newest first unless `--order asc` is supplied. Undated rows remain discoverable. `timestamp` retains the raw Apple value; `normalized_seconds` and `normalized_nanoseconds` form an exact pair since the Apple epoch (2001-01-01 UTC), with a nonnegative nanosecond remainder. Both normalized fields are null for undated rows. Reuse `next_cursor` unchanged with the same resolved conversation and order; null marks the end. Cursors are limited to 4 KiB. A first-page message ROWID upper bound excludes later inserts even when their dates are older. Each page reads a fresh snapshot: edits, deletions and membership changes remain visible, so this is not snapshot isolation across invocations or a resume/replay event stream. Output limits do not bound snapshot cost.\n\nEach message exposes `message_guid` and the selected chat identity alongside its local ROWID and message/attachment fields. Bodyless and undecodable records are retained; `body_availability` distinguishes them from available text. Native parts are explicitly unavailable until safe metadata decoding is supported; an attachment position or text offset is not a native part identifier. Missing required schema, failed queries and missing conversation identities fail clearly. Reading history does not mark the conversation read."
+  },
+  "apple messages get": {
+    "description": "Fetches one message using exactly one conversation selector (`--chat-guid` or `--chat-rowid`) and exactly one message selector (`--message-guid` or `--message-rowid`). Both identities and their membership are checked in the read-only database snapshot. Duplicate GUIDs, missing rows and a message outside the selected conversation are refused. Identical text in another conversation does not affect selection.",
+    "examples": [
+      {
+        "title": "Fetch one message in its selected conversation",
+        "command": "apple messages get --chat-rowid 42 --message-rowid 123"
+      }
+    ],
+    "notes": "GUIDs are opaque, persistent identifiers when available; positive ROWIDs are local to this database. The result retains caller-selected chat membership even when the message also belongs to another conversation. Message and attachment fields use the same shape as `messages history`, including explicit body and native-part availability. This command reads database state only; it does not select a Messages window, mark a chat read or mutate a message."
+  },
   "apple messages send": {
     "description": "Sends when invoked; `--dry-run` previews. `--service` picks the route for a one-to-one send: `auto` (the default) tries iMessage and falls back to SMS for a phone-shaped recipient, `imessage` uses iMessage only and fails rather than falling back, and `sms` uses the enabled SMS account only. `--file` attaches a file and may be repeated; the message body goes out first, then each file in the order given, all in one Messages automation run. Either a message or a file is required — a send with neither is a `validation_error`, reported after the recipient has been resolved, so an unknown recipient or a sandbox refusal comes first.",
     "examples": [
