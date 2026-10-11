@@ -62,6 +62,7 @@ FAKE_RENDERER = textwrap.dedent(
                 shutil.copyfile(src, target)
     """
 )
+PENDING_MARKER = "<!-- apple-cli-unpublished-version: 27.0.0 -->"
 
 
 def load_module():
@@ -98,6 +99,14 @@ class Fixture:
         swift = self.root / "Sources" / "AppleKit" / "CommandSupport.swift"
         swift.parent.mkdir(parents=True, exist_ok=True)
         swift.write_text('public enum AppleVersion {{\n    public static let current = "{}"\n}}\n'.format(constant), encoding="utf-8")
+        changelog_version = marker if re.fullmatch(r"\d+\.\d+\.\d+", marker) else constant
+        (self.root / "CHANGELOG.md").write_text(
+            "# Changelog\n\n"
+            "## [Unreleased]\n\n"
+            "## [{}] - 2026-01-01\n\n"
+            "- Fixture release.\n".format(changelog_version),
+            encoding="utf-8",
+        )
         for page in pages:
             target = manual / page
             target.parent.mkdir(parents=True, exist_ok=True)
@@ -512,6 +521,48 @@ class SiteAssemblyTests(unittest.TestCase):
         self.assertEqual(report["routes"], ["/", "/versions/", "/versions/26.0/", "/version-manifest.json"])
         self.assertNotIn("26.1", completed.stderr + json.dumps(report), "the derived minor bump must not be logged or reported")
 
+    def test_derived_candidate_version_uses_pending_unpublished_marker(self) -> None:
+        self.repo.commit_manual("26.0.0"); self.repo.tag("v26.0.0")
+        (self.repo.root / "feature.txt").write_text("x\n", encoding="utf-8")
+        git(["add", "-A"], self.repo.root); git(["commit", "-q", "-m", "feat(x): would normally be 26.1"], self.repo.root)
+        self.repo.commit_manual("pending-27", constant="27.0.0")
+        changelog = self.repo.root / "CHANGELOG.md"
+        changelog.write_text(
+            "# Changelog\n\n"
+            "## [Unreleased]\n{}\n\n"
+            "### Added\n\n- Pending source.\n\n"
+            "## [26.0.0] - 2026-08-30\n\n- First.\n".format(PENDING_MARKER),
+            encoding="utf-8",
+        )
+        git(["add", "CHANGELOG.md"], self.repo.root); git(["commit", "-q", "-m", "chore: pending version marker"], self.repo.root)
+        completed, scratch, report_path = self.run_assembly("--derive-candidate-version", "--published-tag", "v26.0.0", version=None)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertTrue(report["candidate_serves_root"])
+        self.assertEqual(report["routes"], ["/", "/versions/", "/versions/26.0/", "/version-manifest.json"])
+        self.assertNotIn("27.0", completed.stderr + json.dumps(report))
+
+
+    def test_derived_candidate_version_uses_untagged_awaiting_tag_state(self) -> None:
+        self.repo.commit_manual("26.0.0"); self.repo.tag("v26.0.0")
+        self.repo.commit_manual("prepared-27", constant="27.0.0")
+        changelog = self.repo.root / "CHANGELOG.md"
+        changelog.write_text(
+            "# Changelog\n\n"
+            "## [Unreleased]\n\n"
+            "## [27.0.0] - 2026-10-07\n\n"
+            "### Added\n\n- Prepared source.\n\n"
+            "## [26.0.0] - 2026-08-30\n\n- First.\n",
+            encoding="utf-8",
+        )
+        git(["add", "CHANGELOG.md"], self.repo.root); git(["commit", "-q", "-m", "chore: prepared release heading"], self.repo.root)
+        completed, scratch, report_path = self.run_assembly("--derive-candidate-version", "--published-tag", "v26.0.0", version=None)
+        self.assertEqual(completed.returncode, 0, completed.stderr)
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        self.assertTrue(report["candidate_serves_root"])
+        self.assertEqual(report["routes"], ["/", "/versions/", "/versions/26.0/", "/version-manifest.json"])
+        self.assertNotIn("27.0", completed.stderr + json.dumps(report))
+
     def test_derived_candidate_at_a_tagged_release_folds_the_tag(self) -> None:
         self.repo.commit_manual("25.0.0"); self.repo.tag("v25.0.0")
         self.repo.commit_manual("26.0.0"); self.repo.tag("v26.0.0")
@@ -545,6 +596,21 @@ class SiteAssemblyTests(unittest.TestCase):
                 self.assertEqual(completed.returncode, 2, completed.stderr)
                 self.assertFalse(scratch.exists())
 
+
+    def test_derived_candidate_version_rejects_unreachable_matching_tag(self) -> None:
+        self.repo.commit_manual("26.0.0"); self.repo.tag("v26.0.0")
+        git(["checkout", "-q", "-b", "side"], self.repo.root)
+        (self.repo.root / "side.txt").write_text("x\n", encoding="utf-8")
+        git(["add", "side.txt"], self.repo.root); git(["commit", "-q", "-m", "fix: side"], self.repo.root)
+        self.repo.tag("v26.0.1")
+        git(["checkout", "-q", "main"], self.repo.root)
+        (self.repo.root / "fix.txt").write_text("x\n", encoding="utf-8")
+        git(["add", "fix.txt"], self.repo.root); git(["commit", "-q", "-m", "fix: main"], self.repo.root)
+        completed, _scratch, _report_path = self.run_assembly("--derive-candidate-version", "--published-tag", "v26.0.0", version=None)
+        self.assertEqual(completed.returncode, 1, completed.stderr)
+        self.assertIn("computed version already has a release tag", completed.stderr)
+        self.assertNotIn("26.0.1", completed.stderr)
+
     def test_derived_version_may_not_displace_a_published_tag(self) -> None:
         self.repo.commit_manual("26.0.0"); self.repo.tag("v26.0.0")
         self.repo.commit_manual("26.0.1"); self.repo.tag("v26.0.1")
@@ -554,7 +620,7 @@ class SiteAssemblyTests(unittest.TestCase):
         git(["add", "-A"], self.repo.root); git(["commit", "-q", "-m", "fix: something"], self.repo.root)
         completed, _s, _r = self.run_assembly("--derive-candidate-version", "--published-tag", "v26.0.1", version=None)
         self.assertEqual(completed.returncode, 1, completed.stderr)
-        self.assertIn("already carries the derived candidate version", completed.stderr)
+        self.assertIn("computed version already has a release tag", completed.stderr)
         self.assertNotIn("26.0.1", completed.stderr)
 
     def test_folded_tag_is_constant_checked_and_full_listing_page_is_refused(self) -> None:

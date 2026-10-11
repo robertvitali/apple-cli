@@ -78,6 +78,26 @@ CHANGELOG_SOURCE = (
     "- First release. Manual: https://github.com/{repo}/blob/v26.0.0/docs/manual/README.md\n"
 ).format(repo=REPOSITORY)
 
+PENDING_MARKER = "<!-- apple-cli-unpublished-version: 27.0.0 -->"
+
+
+def pending_changelog(marker: str = PENDING_MARKER, body: str = "### Added\n\n- **Something callers can see.** Manual: "
+                     "https://github.com/{repo}/blob/main/docs/manual/README.md\n\n") -> str:
+    return (
+        "# Changelog\n\n"
+        "Intro text.\n\n"
+        "## [Unreleased]\n"
+        "{marker}\n\n"
+        "{body}"
+        "## [26.0.0] - 2026-08-30\n\n"
+        "### Added\n\n"
+        "- First release. Manual: https://github.com/{repo}/blob/v26.0.0/docs/manual/README.md\n"
+    ).format(repo=REPOSITORY, marker=marker, body=body.format(repo=REPOSITORY))
+
+
+def pending_constant(version: str = "27.0.0") -> str:
+    return CONSTANT_SOURCE.replace('"26.0.0"', '"{}"'.format(version))
+
 
 def seed_repo(path: Path, changelog: str = CHANGELOG_SOURCE, constant: str = CONSTANT_SOURCE) -> str:
     git(["init", "-q"], path)
@@ -365,8 +385,174 @@ class ReleasePrepTests(unittest.TestCase):
         sha = commit(self.root, "fix(mail): mainline fix")
         result = self.rehearse(sha)
         self.assertEqual(result.returncode, 1)
-        self.assertIn("already exists", result.stderr)
+        self.assertIn("already has a release tag", result.stderr)
         self.assertFalse(self.scratch.exists() and any(self.scratch.iterdir()))
+
+    # --- unpublished source adoption -----------------------------------------
+
+    def set_pending_source_state(self, changelog: str = None, constant: str = None) -> str:
+        (self.root / CHANGELOG_REL).write_text(changelog or pending_changelog(), encoding="utf-8")
+        (self.root / CONSTANT_REL).write_text(constant or pending_constant(), encoding="utf-8")
+        git(["commit", "-q", "-am", "chore: adopt unpublished source version"], self.root)
+        return git(["rev-parse", "HEAD"], self.root).strip()
+
+    def test_source_adoption_renders_marker_and_constant_to_scratch_only(self) -> None:
+        sha = commit(self.root, "feat(messages): stage macos 27 sources")
+        result = self.rehearse(sha, "--source-adoption", "--macos-major", "27", "--declared-version", "27.0.0")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("source adoption", result.stderr)
+        rendered_changelog = (self.scratch / CHANGELOG_REL).read_text(encoding="utf-8")
+        rendered_constant = (self.scratch / CONSTANT_REL).read_text(encoding="utf-8")
+        self.assertIn("## [Unreleased]\n{}\n\n### Added".format(PENDING_MARKER), rendered_changelog)
+        self.assertIn("blob/main/docs/manual/README.md", rendered_changelog)
+        self.assertNotIn("## [27.0.0]", rendered_changelog)
+        self.assertIn('public static let current = "27.0.0"', rendered_constant)
+        self.assertIn('public static let current = "26.0.0"', (self.root / CONSTANT_REL).read_text(encoding="utf-8"))
+
+    def test_repeated_source_adoption_is_noop_for_matching_pending_state(self) -> None:
+        sha = self.set_pending_source_state()
+        result = self.rehearse(sha, "--source-adoption", "--macos-major", "27", "--declared-version", "27.0.0")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("already adopted", result.stderr)
+        self.assertEqual(sorted(p.relative_to(self.scratch).as_posix() for p in self.scratch.rglob("*") if p.is_file()),
+                         [])
+
+    def test_repeated_source_adoption_noop_still_rejects_released_heading(self) -> None:
+        sha = self.set_pending_source_state(pending_changelog() + "\n## [27.0.0] - 2026-10-01\n", pending_constant())
+        result = self.rehearse(sha, "--source-adoption", "--macos-major", "27", "--declared-version", "27.0.0")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("released heading", result.stderr)
+
+
+    def test_source_adoption_refuses_ahead_constant_without_marker(self) -> None:
+        commit(self.root, "feat(messages): stage macos 27 sources")
+        (self.root / CONSTANT_REL).write_text(pending_constant(), encoding="utf-8")
+        git(["add", CONSTANT_REL.as_posix()], self.root)
+        git(["commit", "-q", "-m", "chore: ahead constant without marker"], self.root)
+        sha = git(["rev-parse", "HEAD"], self.root).strip()
+        result = self.rehearse(sha, "--source-adoption", "--macos-major", "27", "--declared-version", "27.0.0")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("without the unpublished marker", result.stderr)
+        self.assertFalse(self.scratch.exists() and any(self.scratch.iterdir()))
+
+    def test_pending_marker_requires_a_reachable_release_baseline(self) -> None:
+        git(["tag", "-d", "v26.0.0"], self.root)
+        sha = self.set_pending_source_state()
+        result = self.rehearse(sha)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("requires an existing release tag", result.stderr)
+
+
+    def set_awaiting_tag_source_state(self, version: str = "27.0.0", body: str = "") -> str:
+        changelog = (
+            "# Changelog\n\n"
+            "Intro text.\n\n"
+            "## [Unreleased]\n\n"
+            "{body}"
+            "## [{version}] - 2026-09-23\n\n"
+            "### Added\n\n"
+            "- **Prepared release.** Manual: https://github.com/{repo}/blob/v{version}/docs/manual/README.md\n\n"
+            "## [26.0.0] - 2026-08-30\n\n"
+            "### Added\n\n"
+            "- First release. Manual: https://github.com/{repo}/blob/v26.0.0/docs/manual/README.md\n"
+        ).format(repo=REPOSITORY, version=version, body=body)
+        (self.root / CHANGELOG_REL).write_text(changelog, encoding="utf-8")
+        (self.root / CONSTANT_REL).write_text(pending_constant(version), encoding="utf-8")
+        git(["commit", "-q", "-am", "chore: prepare untagged release"], self.root)
+        return git(["rev-parse", "HEAD"], self.root).strip()
+
+    def test_untagged_prepared_major_release_is_awaiting_tag(self) -> None:
+        sha = self.set_awaiting_tag_source_state()
+        result = self.rehearse(sha)
+        self.assertEqual(result.returncode, 3, result.stderr)
+        self.assertIn("awaiting its tag", result.stderr)
+
+    def test_untagged_prepared_major_rejects_nonempty_unreleased(self) -> None:
+        sha = self.set_awaiting_tag_source_state(body="### Fixed\n\n- Pending note.\n\n")
+        result = self.rehearse(sha)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("without the unpublished marker", result.stderr)
+
+    def test_untagged_prepared_major_rejects_incompatible_explicit_request(self) -> None:
+        sha = self.set_awaiting_tag_source_state()
+        result = self.rehearse(sha, "--macos-major", "28")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("incompatible with the awaiting-tag source version", result.stderr)
+        if self.report.exists():
+            self.report.unlink()
+        result = self.rehearse(sha, "--bump", "minor")
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("incompatible with an awaiting-tag source version", result.stderr)
+
+    def test_pending_marker_owns_normal_release_version_and_removes_marker_in_scratch(self) -> None:
+        commit(self.root, "feat(messages): later feature")
+        sha = self.set_pending_source_state()
+        result = self.rehearse(sha)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("27.0.0 (UNASSIGNED", result.stderr)
+        changelog = (self.scratch / CHANGELOG_REL).read_text(encoding="utf-8")
+        self.assertIn("## [Unreleased]\n\n## [27.0.0] - 2026-09-23", changelog)
+        self.assertNotIn("apple-cli-unpublished-version", changelog)
+
+    def test_pending_marker_accepts_matching_macos_major_and_rejects_other_overrides(self) -> None:
+        sha = self.set_pending_source_state()
+        ok = self.rehearse(sha, "--macos-major", "27")
+        self.assertEqual(ok.returncode, 0, ok.stderr)
+        shutil.rmtree(self.scratch)
+        self.report.unlink()
+        for extra in (("--bump", "minor"), ("--bump", "patch"), ("--macos-major", "28")):
+            with self.subTest(extra=extra):
+                result = self.rehearse(sha, *extra)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn("pending unpublished version", result.stderr)
+                if self.report.exists():
+                    self.report.unlink()
+
+    def test_pending_marker_failure_modes(self) -> None:
+        cases = (
+            ("marker after body",
+             "# Changelog\n\nIntro text.\n\n## [Unreleased]\n\n### Added\n\n- text\n\n{}\n\n"
+             "## [26.0.0] - 2026-08-30\n\n- First.\n".format(PENDING_MARKER),
+             pending_constant(),
+             "immediately after"),
+            ("duplicate marker", pending_changelog(marker=PENDING_MARKER + "\n" + PENDING_MARKER), pending_constant(),
+             "exactly once"),
+            ("malformed marker", pending_changelog(marker="<!-- apple-cli-unpublished-version 27.0.0 -->"), pending_constant(),
+             "one strict marker line"),
+            ("constant mismatch", pending_changelog(), pending_constant("27.0.1"), "does not match"),
+            ("released heading exists", pending_changelog() + "\n## [27.0.0] - 2026-10-01\n", pending_constant(),
+             "released heading"),
+        )
+        for label, changelog, constant, needle in cases:
+            with self.subTest(label=label):
+                if self.report.exists():
+                    self.report.unlink()
+                if self.scratch.exists():
+                    shutil.rmtree(self.scratch)
+                git(["reset", "-q", "--hard", self.base], self.root)
+                sha = self.set_pending_source_state(changelog, constant)
+                result = self.rehearse(sha)
+                self.assertEqual(result.returncode, 1, result.stderr)
+                self.assertIn(needle, result.stderr)
+                if self.report.exists():
+                    self.report.unlink()
+                if self.scratch.exists():
+                    shutil.rmtree(self.scratch)
+
+    def test_constant_ahead_without_marker_is_refused(self) -> None:
+        sha = self.set_pending_source_state(CHANGELOG_SOURCE, pending_constant())
+        result = self.rehearse(sha)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("without the unpublished marker", result.stderr)
+
+    def test_constant_ahead_equal_to_computed_version_still_needs_awaiting_tag_shape(self) -> None:
+        (self.root / CONSTANT_REL).write_text(pending_constant("26.0.1"), encoding="utf-8")
+        git(["add", CONSTANT_REL.as_posix()], self.root)
+        git(["commit", "-q", "-m", "fix: staged release without heading"], self.root)
+        sha = git(["rev-parse", "HEAD"], self.root).strip()
+        result = self.rehearse(sha)
+        self.assertEqual(result.returncode, 1, result.stderr)
+        self.assertIn("without the unpublished marker", result.stderr)
 
     # --- checkout and identity -----------------------------------------------
 
@@ -576,7 +762,7 @@ class ReleasePrepTests(unittest.TestCase):
         git(["commit", "-q", "-am", "docs: note after the release commit"], self.root)
         result = self.rehearse(git(["rev-parse", "HEAD"], self.root).strip())
         self.assertEqual(result.returncode, 1, result.stderr)
-        self.assertIn("already carries a heading for the computed version", result.stderr)
+        self.assertIn("without the unpublished marker", result.stderr)
 
     def test_release_heading_without_the_matching_constant_is_refused(self) -> None:
         self.release_commit()
@@ -595,7 +781,7 @@ class ReleasePrepTests(unittest.TestCase):
         git(["commit", "-q", "-am", "docs: an out-of-place heading"], self.root)
         result = self.rehearse(git(["rev-parse", "HEAD"], self.root).strip())
         self.assertEqual(result.returncode, 1, result.stderr)
-        self.assertIn("already carries a heading for the computed version", result.stderr)
+        self.assertIn("without the unpublished marker", result.stderr)
 
     def test_release_commit_with_a_stray_main_link_is_drift(self) -> None:
         self.release_commit()
@@ -677,6 +863,19 @@ class ReleasePrepTests(unittest.TestCase):
             release_prep.drift_gate('public static let current = "1.2.4"', "## [1.2.3] - 2026-01-01\n", "1.2.3")
         release_prep.drift_gate('public static let current = "1.2.3"', "## [1.2.3] - 2026-01-01\n", "1.2.3")
 
+
+    def test_compute_version_requires_candidate_source_files(self) -> None:
+        root = Path(self._tmp.name) / "missing-version-files"
+        root.mkdir()
+
+        def fake_git(args, cwd):
+            if args[:2] == ["tag", "--list"]:
+                return "v26.0.0\n"
+            raise AssertionError(args)
+
+        with self.assertRaisesRegex(release_prep.AssertionFailure, "candidate Sources/AppleKit/CommandSupport.swift is required"):
+            release_prep.compute_version(root, fake_git, None, None)
+
     def test_compute_version_with_fake_git(self) -> None:
         calls = []
 
@@ -684,17 +883,19 @@ class ReleasePrepTests(unittest.TestCase):
             calls.append(list(args))
             if args[:2] == ["tag", "--list"] and "--merged" in args:
                 return "v26.0.0\nv26.0.0-rc1\nv26.2\nv25.9.9\n"
+            if args[:2] == ["tag", "--list"]:
+                return ""
             if args[:2] == ["log", "--format=%s"]:
                 return "fix: a\nrefactor!: b\n"
             if args[:2] == ["log", "--format=%B%x00"]:
                 return "fix: a\x00refactor!: b\x00"
             raise AssertionError(args)
 
-        version, label, last = release_prep.compute_version(Path("/nonexistent"), fake_git, None, None)
+        version, label, last = release_prep.compute_version(self.root, fake_git, None, None)
         self.assertEqual((version, label, last), ((26, 1, 0), "minor", "v26.0.0"))
-        version, label, last = release_prep.compute_version(Path("/nonexistent"), fake_git, "patch", None)
+        version, label, last = release_prep.compute_version(self.root, fake_git, "patch", None)
         self.assertEqual((version, label, last), ((26, 0, 1), "patch", "v26.0.0"))
-        version, label, last = release_prep.compute_version(Path("/nonexistent"), fake_git, None, 27)
+        version, label, last = release_prep.compute_version(self.root, fake_git, None, 27)
         self.assertEqual((version, label, last), ((27, 0, 0), "major (macos-major input)", "v26.0.0"))
         self.assertTrue(all(call[0] in ("tag", "log") for call in calls))
 
@@ -736,10 +937,10 @@ class ReleasePrepTests(unittest.TestCase):
 
         for log_output in ("\t\n", "\u00a0\n", "\n", " \n\n"):
             with self.subTest(log_output=ascii(log_output)):
-                version, label, last = release_prep.compute_version(Path("/nonexistent"), fake_git(log_output), None, None)
+                version, label, last = release_prep.compute_version(self.root, fake_git(log_output), None, None)
                 self.assertEqual((version, label, last), ((26, 0, 1), "patch", "v26.0.0"))
         with self.assertRaises(release_prep.NothingToRelease):
-            release_prep.compute_version(Path("/nonexistent"), fake_git(""), None, None)
+            release_prep.compute_version(self.root, fake_git(""), None, None)
 
     def test_release_tags_are_matched_exactly(self) -> None:
         def fake_git(listing):
@@ -780,7 +981,7 @@ class ReleasePrepTests(unittest.TestCase):
                 for bump, major, expected in ((None, None, (26, 0, 1)), ("minor", None, (26, 1, 0)),
                                               (None, 27, (27, 0, 0))):
                     version, _label, _last = release_prep.compute_version(
-                        Path("/nonexistent"), fake_git(subjects), bump, major)
+                        self.root, fake_git(subjects), bump, major)
                     self.assertEqual(version, expected)
 
 

@@ -87,6 +87,7 @@ CHANGELOG_SOURCE = (
     "## [26.0.0] - 2026-08-30\n\n"
     "- First release.\n"
 )
+PENDING_MARKER = "<!-- apple-cli-unpublished-version: 27.0.0 -->"
 PACKAGE_SWIFT = (
     "// swift-tools-version: 6.0\n"
     "import PackageDescription\n\n"
@@ -121,6 +122,14 @@ def make_overlay(root: Path, version: str = NEW_VERSION, heading_version: Option
             heading_version or version), 1),
         encoding="utf-8")
     return root
+
+
+def make_marker_overlay(root: Path) -> Path:
+    overlay = make_overlay(root, version="27.0.0")
+    text = (overlay / CHANGELOG_REL).read_text(encoding="utf-8")
+    (overlay / CHANGELOG_REL).write_text(text.replace("## [Unreleased]\n\n", "## [Unreleased]\n{}\n\n".format(PENDING_MARKER), 1),
+                                         encoding="utf-8")
+    return overlay
 
 
 # --- synthetic Mach-O images -------------------------------------------------------------------
@@ -1352,6 +1361,16 @@ class OverlayTests(TempCase):
         (overlay / CHANGELOG_REL).write_text(CHANGELOG_SOURCE, encoding="utf-8")
         self.refuse(overlay, "drift gate")
 
+    def test_overlay_must_not_carry_unpublished_marker(self) -> None:
+        self.refuse(make_marker_overlay(self.tmp / "marker-overlay"), "unpublished marker")
+
+    def test_overlay_must_not_carry_malformed_unpublished_marker(self) -> None:
+        overlay = make_marker_overlay(self.tmp / "malformed-marker-overlay")
+        changelog = overlay / CHANGELOG_REL
+        changelog.write_text(changelog.read_text(encoding="utf-8").replace(
+            "apple-cli-unpublished-version:", "apple-cli-unpublished-version"), encoding="utf-8")
+        self.refuse(overlay, "unpublished marker")
+
 
 # --- change set, deployment minimum, no-write-path ---------------------------------------------
 
@@ -1669,6 +1688,12 @@ class EndToEndTests(TempCase):
         super().setUp()
         self.candidate = self.tmp / "candidate"
         self.sha = seed_repo(self.candidate)
+        git(["tag", "-a", "v26.7.12", "-m", "v26.7.12"], self.candidate)
+        marker = self.candidate / "candidate.txt"
+        marker.write_text("candidate release material\n", encoding="utf-8")
+        git(["add", "candidate.txt"], self.candidate)
+        git(["commit", "-q", "-m", "fix: candidate release material"], self.candidate)
+        self.sha = git(["rev-parse", "HEAD"], self.candidate).strip()
         self.overlay = make_overlay(self.tmp / "overlay")
         self.runs = 0
         self.work_parent = self.tmp / "WORKMARKERQZ"
@@ -1685,6 +1710,17 @@ class EndToEndTests(TempCase):
         request = artifact.resolve_request(candidate or self.candidate, sha or self.sha, self.overlay, self.work(), report_path)
         stdout, stderr = io.StringIO(), io.StringIO()
         status = artifact.execute(request, tools, git_runner, stdout, stderr)
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        return status, report, stdout.getvalue(), stderr.getvalue(), report_path.read_text(encoding="utf-8")
+
+    def run_rehearsal_with_overlay(self, overlay: Path, tools: FakeTools, candidate: Optional[Path] = None,
+                                   sha: Optional[str] = None, *extra):
+        self.runs += 1
+        report_path = self.tmp / "reports" / "report-{}.json".format(self.runs)
+        report_path.parent.mkdir(exist_ok=True)
+        request = artifact.resolve_request(candidate or self.candidate, sha or self.sha, overlay, self.work(), report_path, *extra)
+        stdout, stderr = io.StringIO(), io.StringIO()
+        status = artifact.execute(request, tools, artifact.run_git, stdout, stderr)
         report = json.loads(report_path.read_text(encoding="utf-8"))
         return status, report, stdout.getvalue(), stderr.getvalue(), report_path.read_text(encoding="utf-8")
 
@@ -1720,6 +1756,59 @@ class EndToEndTests(TempCase):
         self.assertTrue((work / "out" / ARCHIVE_NAME).is_file())
         self.assertTrue((work / "out" / (ARCHIVE_NAME + ".sha256")).is_file())
         self.assertEqual(tools.calls.count("swift_build"), 1)
+
+    def test_overlay_version_must_match_default_or_compatible_request(self) -> None:
+        git(["tag", "-a", "v26.0.0", "-m", "v26.0.0"], self.candidate)
+        self.sha = git(["rev-parse", "HEAD"], self.candidate).strip()
+        fix = self.candidate / "fix.txt"
+        fix.write_text("x\n", encoding="utf-8")
+        git(["add", "fix.txt"], self.candidate)
+        git(["commit", "-q", "-m", "fix: artifact candidate"], self.candidate)
+        self.sha = git(["rev-parse", "HEAD"], self.candidate).strip()
+        stale = make_overlay(self.tmp / "stale-overlay", version="26.7.14")
+        status, report, _stdout, stderr, raw = self.run_rehearsal_with_overlay(stale, FakeTools(version="26.7.14"))
+        self.assertEqual(status, 1)
+        self.assertEqual(report["checks"]["overlay"], "fail")
+        self.assertIn("does not match the requested candidate version", stderr)
+        self.assert_value_free(stderr, raw)
+
+        compatible = make_overlay(self.tmp / "compatible-overlay", version=NEW_VERSION)
+        status, report, _stdout, stderr, _raw = self.run_rehearsal_with_overlay(compatible, FakeTools(version=NEW_VERSION))
+        self.assertEqual(status, 0, stderr)
+
+    def test_artifact_accepts_matching_macos_major_request_for_pending_source(self) -> None:
+        git(["tag", "-a", "v26.0.0", "-m", "v26.0.0"], self.candidate)
+        (self.candidate / CONSTANT_REL).write_text(CONSTANT_SOURCE.replace('"26.0.0"', '"27.0.0"'), encoding="utf-8")
+        pending = CHANGELOG_SOURCE.replace("## [Unreleased]\n", "## [Unreleased]\n{}\n".format(PENDING_MARKER), 1)
+        (self.candidate / CHANGELOG_REL).write_text(pending, encoding="utf-8")
+        git(["commit", "-q", "-am", "chore: adopt unpublished source version"], self.candidate)
+        self.sha = git(["rev-parse", "HEAD"], self.candidate).strip()
+        overlay = make_overlay(self.tmp / "pending-release-overlay", version="27.0.0")
+        status, report, _stdout, stderr, _raw = self.run_rehearsal_with_overlay(
+            overlay, FakeTools(version="27.0.0"), None, None, None, 27)
+        self.assertEqual(status, 0, stderr)
+
+        rejected, report, _stdout, stderr, _raw = self.run_rehearsal_with_overlay(
+            overlay, FakeTools(version="27.0.0"), None, None, "minor", None)
+        self.assertEqual(rejected, 1)
+        self.assertEqual(report["checks"]["overlay"], "fail")
+        self.assertIn("pending unpublished version", stderr)
+
+
+    def test_unreachable_matching_tag_refuses_overlay_before_build(self) -> None:
+        branch = git(["branch", "--show-current"], self.candidate).strip()
+        git(["checkout", "-q", "-b", "side"], self.candidate)
+        side = self.candidate / "side.txt"
+        side.write_text("side release material\n", encoding="utf-8")
+        git(["add", "side.txt"], self.candidate)
+        git(["commit", "-q", "-m", "fix: side release material"], self.candidate)
+        git(["tag", "-a", "v26.7.13", "-m", "v26.7.13"], self.candidate)
+        git(["checkout", "-q", branch], self.candidate)
+        status, report, _stdout, stderr, raw = self.run_rehearsal(FakeTools())
+        self.assertEqual(status, 1)
+        self.assertEqual(report["checks"]["overlay"], "fail")
+        self.assertIn("computed version already has a release tag", stderr)
+        self.assert_value_free(stderr, raw)
 
     def test_every_check_runs_on_the_pinned_copy(self) -> None:
         tools = FakeTools()
@@ -1988,7 +2077,13 @@ class EndToEndTests(TempCase):
 
     def test_missing_package_swift_fails_closed_before_the_build(self) -> None:
         candidate = self.tmp / "no-package"
-        sha = seed_repo(candidate, package=False)
+        seed_repo(candidate, package=False)
+        git(["tag", "-a", "v26.7.12", "-m", "v26.7.12"], candidate)
+        marker = candidate / "candidate.txt"
+        marker.write_text("candidate release material\n", encoding="utf-8")
+        git(["add", "candidate.txt"], candidate)
+        git(["commit", "-q", "-m", "fix: candidate release material"], candidate)
+        sha = git(["rev-parse", "HEAD"], candidate).strip()
         tools = FakeTools()
         status, report, _, _, _ = self.run_rehearsal(tools, candidate, sha)
         self.assertEqual((report["checks"]["deployment-minimum"], report["failure_class"]), ("fail", "io"))
@@ -2122,6 +2217,12 @@ class CliTests(TempCase):
         # No Package.swift: even a CLI run that got past every earlier check on a Darwin arm64 host
         # would stop at deployment-minimum, so no test here can ever start a real build.
         self.sha = seed_repo(self.candidate, package=False)
+        git(["tag", "-a", "v26.7.12", "-m", "v26.7.12"], self.candidate)
+        marker = self.candidate / "candidate.txt"
+        marker.write_text("candidate release material\n", encoding="utf-8")
+        git(["add", "candidate.txt"], self.candidate)
+        git(["commit", "-q", "-m", "fix: candidate release material"], self.candidate)
+        self.sha = git(["rev-parse", "HEAD"], self.candidate).strip()
         self.overlay = make_overlay(self.tmp / "overlay")
         self.work = self.tmp / "work"
 

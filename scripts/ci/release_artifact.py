@@ -220,6 +220,7 @@ PolicyError = _RELEASE_PREP.PolicyError
 AssertionFailure = _RELEASE_PREP.AssertionFailure
 GitError = _RELEASE_PREP.GitError
 run_git = _RELEASE_PREP.run_git
+compute_version_state = _RELEASE_PREP.compute_version_state
 full_sha = _RELEASE_PREP.full_sha
 validate_checkout = _RELEASE_PREP.validate_checkout
 drift_gate = _RELEASE_PREP.drift_gate
@@ -421,12 +422,15 @@ class Request:
     """A request that passed every step-1 check; every path is resolved."""
 
     def __init__(self, candidate_root: Path, candidate_sha: str, overlay: Path, work: Path,
-                 report_path: Optional[Path] = None) -> None:
+                 report_path: Optional[Path] = None, bump: Optional[str] = None,
+                 macos_major: Optional[int] = None) -> None:
         self.candidate_root = candidate_root
         self.candidate_sha = candidate_sha
         self.overlay = overlay
         self.work = work
         self.report_path = report_path
+        self.bump = bump
+        self.macos_major = macos_major
 
 
 class Ledger:
@@ -764,7 +768,8 @@ def prepare_work(work: Path) -> bool:
 # --- step 1: request -------------------------------------------------------------------------
 
 def resolve_request(candidate_root_arg: Path, candidate_sha_arg: Optional[str], overlay_arg: Path,
-                    work_arg: Path, report_arg: Optional[Path]) -> Request:
+                    work_arg: Path, report_arg: Optional[Path], bump: Optional[str] = None,
+                    macos_major: Optional[int] = None) -> Request:
     candidate_sha = full_sha(candidate_sha_arg, "--candidate-sha")
     candidate_root = candidate_root_arg.expanduser().resolve()
     if not candidate_root.is_dir():
@@ -804,7 +809,7 @@ def resolve_request(candidate_root_arg: Path, candidate_sha_arg: Optional[str], 
             except OSError:
                 pass
         raise PolicyError("--report must lie outside --work and the overlay")
-    return Request(candidate_root, candidate_sha, overlay, work, report_path)
+    return Request(candidate_root, candidate_sha, overlay, work, report_path, bump, macos_major)
 
 
 # --- steps 2 to 7 ----------------------------------------------------------------------------
@@ -888,11 +893,26 @@ def read_overlay(overlay: Path) -> Tuple[str, Dict[Path, bytes]]:
     if VERSION_RE.fullmatch(version) is None:
         raise StepFailure("overlay", "the overlay version constant is not strict MAJOR.MINOR.PATCH")
     changelog = _decode(changelog_bytes, "overlay", "overlay CHANGELOG")
+    if "apple-cli-unpublished-version" in changelog:
+        raise StepFailure("overlay", "the overlay must not carry the unpublished marker")
     try:
         drift_gate(source, changelog, version)
     except AssertionFailure as error:
         raise StepFailure("overlay", str(error)) from error
     return version, {CONSTANT_PATH: constant_bytes, CHANGELOG_PATH: changelog_bytes}
+
+
+def check_overlay_matches_request(request: Request, overlay_version: str, git: GitRunner) -> Optional[object]:
+    try:
+        state = compute_version_state(request.candidate_root, git, request.bump, request.macos_major)
+    except _RELEASE_PREP.NothingToRelease:
+        raise StepFailure("overlay", "there is nothing to release for this overlay")
+    except (AssertionFailure, PolicyError, GitError) as error:
+        raise StepFailure("overlay", str(error)) from error
+    expected = _RELEASE_PREP.format_version(state.version)
+    if overlay_version != expected:
+        raise StepFailure("overlay", "the overlay version does not match the requested candidate version")
+    return state
 
 
 def check_platform(tools: Tools) -> None:
@@ -1030,7 +1050,7 @@ def copy_overlay_file(data: bytes, source: Path, relative: Path) -> None:
 
 
 def assemble_source(candidate_root: Path, candidate_sha: str, overlay_files: Mapping[Path, bytes], work: Path,
-                    git: GitRunner) -> Path:
+                    git: GitRunner, allow_unchanged: Sequence[Path] = ()) -> Path:
     source = work / "src"
     git(["clone", "--quiet", "--no-hardlinks", "--no-checkout", "--", str(candidate_root), str(source)], work)
     git(["checkout", "--quiet", "--detach", candidate_sha], source)
@@ -1041,7 +1061,8 @@ def assemble_source(candidate_root: Path, candidate_sha: str, overlay_files: Map
     status = git(["status", "--porcelain=v1", "-z", "--untracked-files=all"], source)
     entries = [entry for entry in status.split("\0") if entry]
     expected = [" M " + path.as_posix() for path in ALLOWLIST]
-    unchanged = [entry for entry in expected if entry not in entries]
+    allowed = {" M " + path.as_posix() for path in allow_unchanged}
+    unchanged = [entry for entry in expected if entry not in entries and entry not in allowed]
     unexpected = [entry for entry in entries if entry not in expected]
     reasons = []
     if unchanged:
@@ -1862,6 +1883,7 @@ def rehearse_artifact(request: Request, tools: Tools, git: GitRunner = run_git,
         stage = "overlay"
         version, overlay_files = read_overlay(request.overlay)
         redactor.version = version
+        state = check_overlay_matches_request(request, version, git)
         ledger.passed("overlay")
         stage = "platform"
         check_platform(tools)
@@ -1870,7 +1892,8 @@ def rehearse_artifact(request: Request, tools: Tools, git: GitRunner = run_git,
         check_no_write_path(tools.environment(), request.candidate_root, git)
         ledger.passed("no-write-path")
         stage = "change-set"
-        source = assemble_source(request.candidate_root, request.candidate_sha, overlay_files, request.work, git)
+        allow_unchanged = (CONSTANT_PATH,) if getattr(state, "pending_unpublished", False) else ()
+        source = assemble_source(request.candidate_root, request.candidate_sha, overlay_files, request.work, git, allow_unchanged)
         ledger.passed("change-set")
         stage = "deployment-minimum"
         expected = expected_minimum(_read_text(source / "Package.swift", "deployment-minimum", "Package.swift"))
@@ -1995,6 +2018,8 @@ def parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
     parser.add_argument("--candidate-sha", required=True)
     parser.add_argument("--overlay", type=Path, required=True, help="release_prep.py's scratch directory")
     parser.add_argument("--work", type=Path, required=True, help="absent or empty private directory")
+    parser.add_argument("--bump", choices=("minor", "patch"), default=None)
+    parser.add_argument("--macos-major", default=None)
     parser.add_argument("--report", type=Path, default=None)
     return parser.parse_args(argv)
 
@@ -2002,7 +2027,19 @@ def parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
 def main(argv: Optional[Sequence[str]] = None) -> int:
     args = parse_args(argv)
     try:
-        request = resolve_request(args.candidate_root, args.candidate_sha, args.overlay, args.work, args.report)
+        if args.macos_major is not None and _RELEASE_PREP.MACOS_MAJOR_RE.fullmatch(args.macos_major) is None:
+            raise PolicyError("--macos-major must be a positive integer without leading zeros")
+        if args.macos_major is not None and args.bump is not None:
+            raise PolicyError("--macos-major and --bump are exclusive")
+        request = resolve_request(
+            args.candidate_root,
+            args.candidate_sha,
+            args.overlay,
+            args.work,
+            args.report,
+            args.bump,
+            int(args.macos_major) if args.macos_major is not None else None,
+        )
     except PolicyError as error:
         print("release-artifact: policy: {}".format(escape_controls(str(error))), file=sys.stderr)
         return POLICY_FAILURE_STATUS

@@ -31,6 +31,12 @@ JSON output are stable per the versioning policy — breaking changes bump
   script, and the Docs workflow now runs it against every commit it builds (pushed commits
   and pull-request merge commits) in a throwaway clone, treating only "nothing to release
   yet" as advisory; the publisher that would use it is not part of this change.
+  Its explicit `--source-adoption` mode now prepares an unpublished platform-major
+  version in scratch while retaining `[Unreleased]` notes and main manual links.
+  A validated pending-version marker keeps normal preparation, site assembly and
+  artifact validation on the same next version across subsequent commits; conflicting
+  requests and stale release overlays are refused. This tooling does not publish a
+  release or change the deployment minimum or JSON schema.
 
 - **Every CI workflow is now checked, on parsed YAML rather than by text search, to be
   read-only before each `main` push and pull request (`scripts/ci/workflow_policy.py`).** The

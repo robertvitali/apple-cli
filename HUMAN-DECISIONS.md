@@ -32,7 +32,7 @@ A date marked (UTC) is a UTC calendar date; unmarked dates follow D32.
 
 ---
 
-## LEDGER — every decision at a glance (updated 2026-10-10 (UTC))
+## LEDGER — every decision at a glance (updated 2026-10-11 (UTC))
 
 **Still needs you: D2 (the Homebrew tap), D18 (the `v27.0.0` release, which waits on the phase-3
 publisher), D22 (two parity narrowings) and, under D51, confirming the exact command of the granted
@@ -51,7 +51,7 @@ publication action.
 | # | Topic | Status | Ruling |
 |---|---|---|---|
 | D1 | `notes delete-folder` previews by default | **RATIFIED** | Keep the preview default — `--execute` stays required on the only irreversible-and-unrecoverable write |
-| D2 | Cut the first release + retire the six MCP servers | **2 of 3 parts APPLIED 2026-08-30** | **Terminal gate. Yours alone.** Release DONE: `v26.0.0` cut, tagged, GitHub Release published (notes-length recovery was manual; workflow fixed after); the Release was converted to a draft on 2026-09-20 under D17 ruling 3 and deleted on 2026-09-27 under D34, the `v26.0.0` tag kept; `v27.0.0` is planned to replace it (D17 ruling 2, D18). Retirement DONE: all six MCPs moved to `retiredServers` in the private fleet-config repo; hosts converge on their next whole-tree apply. REMAINING: fleet deployment of the binary — and the operator ruled 2026-08-30 that this is Homebrew-ONLY (a tap; the previously-scoped install script and self-update subcommand are CANCELLED), and that a RELEASE FREEZE holds until that tap actually serves `brew install apple-cli`: version stays pinned at `v26.0.0`, work lands UNRELEASED under `[Unreleased]`, do not dispatch release.yml or edit the version constant. Completing this part lifts the freeze; an explicit operator release instruction also lifts it for that release, and until the design's publisher exists such a release takes `docs/runbooks/urgent-release.md` (amended 2026-09-26; `release.yml` no longer exists). D2 closes then |
+| D2 | Cut the first release + retire the six MCP servers | **2 of 3 parts APPLIED 2026-08-30** | **Terminal gate. Yours alone.** Release DONE: `v26.0.0` cut, tagged, GitHub Release published (notes-length recovery was manual; workflow fixed after); the Release was converted to a draft on 2026-09-20 under D17 ruling 3 and deleted on 2026-09-27 under D34, the `v26.0.0` tag kept; `v27.0.0` is planned to replace it (D17 ruling 2, D18). Retirement DONE: all six MCPs moved to `retiredServers` in the private fleet-config repo; hosts converge on their next whole-tree apply. REMAINING: fleet deployment of the binary — and the operator ruled 2026-08-30 that this is Homebrew-ONLY (a tap; the previously-scoped install script and self-update subcommand are CANCELLED), and that a RELEASE FREEZE holds until that tap actually serves `brew install apple-cli`: outside D18’s 2026-10-11 unpublished source-adoption exception, the version stays pinned at `v26.0.0`; work lands UNRELEASED under `[Unreleased]`. Do not dispatch release.yml or hand-edit the version constant. The D18 exception permits only reviewed tooling-generated source adoption, not publication. Completing this part lifts the freeze; an explicit operator release instruction also lifts it for that release, and until the design's publisher exists such a release takes `docs/runbooks/urgent-release.md` (amended 2026-09-26; `release.yml` no longer exists). D2 closes then |
 | D3 | Live-validate `mail send --gui-send` | **APPLIED 2026-08-27** | Live-validated operator-present: one self-addressed send executed and delivered (oracle-verified both sides), test items cleaned by exact id |
 | D4 | Live-validate iMessage group-chat send | **APPLIED 2026-08-23** | Option (b): record "wired + code-inspected, never live-validated" as a port-spec asterisk |
 | D5 | Chasing the Messages fuzzy-search recall gap | WITHDRAWN | Should not have been asked; became ordinary queue work |
@@ -67,7 +67,7 @@ publication action.
 | D15 | Extend the public-attribution exception to `.github/CODEOWNERS` | **RATIFIED 2026-09-07** | The operator's exact GitHub user may appear in `.github/CODEOWNERS` for every enforcement-control-plane path, as deliberate public attribution alongside LICENSE, README, and git author metadata. Sequence is fixed: the `AGENTS.md` exception extension lands first as its own reviewed commit, the CODEOWNERS commit lands second with its own fresh privacy scan, then GitHub's code-owners errors API confirms it parses. Trade-off recorded per the design: from that step until public launch no release can be cut; the release freeze's urgent-fix clause is satisfiable only by a reviewed, operator-authorized, temporary restoration of a write-capable release workflow, recorded as an explicit exception and removed again afterwards |
 | D16 | Narrow main-only reversal for disposable rehearsal refs | **RATIFIED 2026-09-07** | Three disposable ref classes, and only these, may be created for the publication-automation rehearsals (design §18 steps 8–14, removal at step 18): the uniquely named disposable target ref, the proposal head refs of the validation PRs (which target that ref, never `main`), and the Dependabot-created head refs of step 13; never for feature work; never merged into `main`; deleted after the rehearsal, including on abort; does not reverse the ruling for ordinary work. The `AGENTS.md` reversal commit lands under the private main-only gate when the rehearsal step begins, after an in-session re-confirmation and before the first branch is cut. The later full reversal that activates the `main` ruleset is a SEPARATE future operator instruction and is not granted here |
 | D17 | Early visibility flip to restore hosted Actions; pre-flip privacy audit round 1; disposition of its findings | **ANSWERED 2026-09-20; APPLIED 2026-09-21** (flip 14:31Z; hosted CI and Docs green the same day; end-of-roadmap audit round 2 run 2026-09-22: zero new findings, gate not yet closed — R1-F1 recurred in the unchanged draft asset; the draft was deleted 2026-09-27 under D34, and the gate will close on a fresh round with zero findings, not yet run) | Operator ordered: fresh audit first, flip on zero findings, end-of-roadmap audit still required. Round 1's zero-findings condition was NOT met: seven findings — five operator-dispositioned (D17–D20), the fixture fix pending, and the hosted-log deletion OPEN in D21 — both closed 2026-09-21 (fixture fix landed, D21 applied); D19 later superseded; for the binary the operator chose rebuild + re-cut (as `v27.0.0`) rather than accept, and, because the design forbids a private publisher and hosted runs are billing-blocked, ordered the `v26.0.0` Release converted to a draft first, the flip second, the re-cut after hosted validation |
-| D18 | macOS 27 adoption release `v27.0.0` | **OPEN — steps (1) and (3) satisfied 2026-09-22; (2) and (4) demonstrated on `3e46e82` in rehearsal; (4a)/(5) gated on the phase-3 publisher** | Operator instruction 2026-09-20: bump to `27.0.0` once all tests pass on macOS 27. Satisfied: the D17 flip and green hosted runs (1); the §4.1 adoption-matrix amendment and `[Unreleased]` baseline note, this commit (3). Demonstrated on `3e46e82`, to be re-established on the exact release commit and its shipped artifact when the publisher runs: the local canonical suite green on macOS 27 plus the hosted logic gate (2); the path-free rebuild rehearsal PASS on every gate — zero debug-map entries, zero home paths in binary or archive, clean tar headers, zero network fetches (4, D23/D24), with the local run accepted as the §12 hardened alternative (D25). Still waiting: a publisher path (4a, design §18 phase 3, unbuilt) and the release through it (5). The `v26.0.0` draft was deleted under D34, settling this entry's draft-or-delete question |
+| D18 | macOS 27 adoption release `v27.0.0` | **OPEN — steps (1) and (3) satisfied 2026-09-22; (2) and (4) demonstrated on `3e46e82` in rehearsal; (4a)/(5) gated on the phase-3 publisher** | Operator instruction 2026-09-20: bump to `27.0.0` once all tests pass on macOS 27. Satisfied: the D17 flip and green hosted runs (1); the §4.1 adoption-matrix amendment and `[Unreleased]` baseline note, this commit (3). Demonstrated on `3e46e82`, to be re-established on the exact release commit and its shipped artifact when the publisher runs: the local canonical suite green on macOS 27 plus the hosted logic gate (2); the path-free rebuild rehearsal PASS on every gate — zero debug-map entries, zero home paths in binary or archive, clean tar headers, zero network fetches (4, D23/D24), with the local run accepted as the §12 hardened alternative (D25). Still waiting: a publisher path (4a, design §18 phase 3, unbuilt) and the release through it (5). The `v26.0.0` draft was deleted under D34, settling this entry's draft-or-delete question. Amendment 2026-10-11 authorizes reviewed tooling and unpublished source `27.0.0` adoption; all publication conditions remain open |
 | D19 | GitHub still serves pre-rewrite commits by id | **SUPERSEDED 2026-09-21** (ANSWERED 2026-09-20) | Verified: seven pre-rewrite commit ids formerly cited in this file return HTTP 200 from the API and still carry pre-redaction tracker identifiers. Operator reversed the 2026-08-23 no-Support posture: request a purge of unreachable objects and cached views from GitHub Support while the repo is still private; the D17 flip waits on that confirmation. Stale id citations in this file were re-pointed to their rewritten counterparts the same day. Superseded 2026-09-21: request withdrawn by the operator, no purge filed; residual by-id reachability accepted; D9's no-Support posture stands |
 | D20 | Outside contributor's plaintext git identity on open PRs 3–5 | **RATIFIED 2026-09-20; APPLIED 2026-09-22** (PRs 3–5 squash-merged locally as `7fc4a49`, `6f8b852`, `57984cf`; follow-ups `9a86125`, `8e9be32`, `4f8776a`; two further proposals filed as D22) | Accepted as that contributor's own public attribution for now; the PRs were squash-merged with the squash author identity read back first; the reachable `refs/pull/*` copies are outside the D19 purge and remain resolvable after the PRs closed — their retention is GitHub's, not this repository's |
 | D21 | Delete 18 hosted workflow runs' logs that echo pre-redaction tracker identifiers | **APPLIED 2026-09-21** | Post-round scan of all 305 run logs: no personal data; 18 runs' logs contain 16-digit tracker identifiers inside historical branch names. Deleting run logs is destructive and outward-facing, so it waited for the operator's instruction; authorized and executed 2026-09-21 (18 log archives deleted, 18 × 204, read back 18 × 404); removed from D17's blocker list |
@@ -158,6 +158,10 @@ make without argument if you prefer strict parity.
 ---
 
 ## D2 — Tag 1.0.0 and retire the six MCP servers
+
+**Source-only exception, 2026-10-11:** D18 now permits the reviewed unpublished macOS 27
+source version before Homebrew distribution. The source exception does not lift this entry's
+publication or Homebrew gates and does not complete its remaining third part.
 
 - **Status:** 2 of 3 parts APPLIED 2026-08-30 — **the hard stop held: both parts ran on
   explicit, live operator instruction in the 2026-08-30 session.**
@@ -1160,6 +1164,20 @@ unlocked by this: D18 (`v27.0.0`) and the end-of-roadmap audit remain open.
 
 ## D18 — macOS 27 adoption release: bump to `v27.0.0` once all tests pass
 
+**Source-only amendment, 2026-10-11:** the operator explicitly authorized the macOS 27
+source version and then approved the tooling change: "Yes do the tooling change and let’s
+version bump to 27". This supersedes the version-26 source freeze for this adoption only.
+Use reviewed `release_prep.py --source-adoption --macos-major 27 --declared-version 27.0.0`
+to render scratch copies, then apply them through reviewed, tested commits to `main`.
+Retain `[Unreleased]` notes and main manual links, recording the pending version in the
+single validated `apple-cli-unpublished-version` marker. The source constant and marker
+must agree; no existing tag or released heading may claim that version. Shared preparation,
+site and artifact validation must preserve that pending version across later commits and
+reject incompatible requests or stale overlays. No tag, GitHub Release, Homebrew update,
+repository setting or native release-build rehearsal is authorized by this amendment.
+The macOS 14 technical minimum and JSON schema remain unchanged. All publication conditions
+below still apply; this entry stays open until the separately authorized release completes.
+
 - **Status:** **OPEN** — instruction received 2026-09-20; execution gated as below.
   **Update 2026-09-22:** steps (1) and (3) are satisfied — (1) flip and green hosted runs
   2026-09-21; (3) the §4.1 amendment and the `[Unreleased]` baseline note land in the commit
@@ -1203,7 +1221,9 @@ unlocked by this: D18 (`v27.0.0`) and the end-of-roadmap audit remain open.
   reached.
 - **Filed:** 2026-09-20 · **Category:** release / platform adoption
 
-**Why it needed you.** A version bump is a release, and releases are yours to call.
+**Why it needed you.** Publishing a version is a release, and releases are yours to call.
+The source-only amendment above separately authorizes an unpublished version without
+authorizing publication.
 
 **Blocking?** D2's remaining Homebrew part waits on it (no downloadable release exists until it ships); nothing else in the current roadmap does.
 

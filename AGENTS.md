@@ -606,14 +606,32 @@ D46's interim ruleset is not; closed privacy gate; reviewed launch specification
 Commit-header discipline stays CI-enforced (`commit-lint` job) because the bump math depends
 on it.
 
-**RELEASE FREEZE (operator ruling, 2026-08-30) — no version bump until Homebrew is serving.**
-The version stays pinned at the released `v26.0.0` until the tap from the distribution task is
+**Unpublished source adoption (operator ruling, 2026-10-11).** The operator authorized the
+macOS 27 source version and the tooling needed to represent it without publishing a release.
+Use `release_prep.py --source-adoption --macos-major 27 --declared-version 27.0.0` against a
+clean candidate and apply its reviewed scratch copies of the version constant and changelog.
+The changelog retains `[Unreleased]`, its notes and main-branch manual links, with exactly one
+`<!-- apple-cli-unpublished-version: 27.0.0 -->` marker immediately after that heading.
+The marker and source constant must agree; the version must have no existing tag anywhere or
+released changelog heading. A pending adoption owns the next release version even after later
+feature or fix commits; normal preparation removes the marker only in its scratch release
+output. Site and artifact rehearsals use the same validated candidate state, and incompatible
+overrides or stale overlays fail closed. Repeating the same source adoption is a no-op.
+This exception permits reviewed and tested source commits only. It does not authorize a tag,
+GitHub Release, Homebrew distribution, repository-setting change or native release-build
+rehearsal. The deployment minimum and JSON schema remain independent. D18 records this
+source exception; its publication conditions and D23/D51 build grants remain in force.
+
+**RELEASE FREEZE (operator ruling, 2026-08-30; source exception above).**
+Outside the explicit unpublished source-adoption exception, the version stays pinned at the
+released `v26.0.0` until the tap from the distribution task is
 actually serving `brew install apple-cli`; only then does incrementing resume. Work landing on
 `main` in the meantime — the pre-publication redaction passes, the Messages attachment feature,
 anything else — accumulates under CHANGELOG `[Unreleased]` and ships UNRELEASED. There is no release
 workflow to dispatch; do not hand-edit `AppleVersion.current`, and do not describe pending work
-by a version number it has not been assigned. This freeze overrides the "run it when a batch has
-accumulated" guidance below until the operator lifts it — and an explicit operator instruction to
+by a version number it has not been assigned. An adopted source version must be described as
+unpublished until the separate publication path completes. This freeze overrides the "run it
+when a batch has accumulated" guidance below until the operator lifts it — and an explicit operator instruction to
 cut a release lifts it for that release. Until the design's publisher exists, such a release has
 exactly one path, the urgent-release runbook
 ([`docs/runbooks/urgent-release.md`](./docs/runbooks/urgent-release.md)); a release that moves

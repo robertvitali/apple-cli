@@ -10,7 +10,7 @@ calls the network, and never records the predicted version in its report.
     python3 -I -S -B scripts/ci/release_prep.py --candidate-root <clone> \
         --candidate-sha <40-hex> --repository owner/name --scratch <empty-dir> \
         [--bump minor|patch] [--macos-major NN] [--declared-version X.Y.Z] \
-        [--report <path.json>]
+        [--source-adoption] [--report <path.json>]
 
 Run it against a fresh scratch clone of the candidate, not the working checkout
 (design section 14.1: "a fresh temporary tree or isolated scratch clone"); the
@@ -34,24 +34,30 @@ What it checks and produces, in order:
     tag reachable from the candidate (branch-reachable, per design section 14.2);
     at least one commit exists since it (subjects are read as git writes them, one
     per line feed).
-3.  The next version: `--macos-major NN` forces `NN.0.0` and must exceed the current
-    major (the only way MAJOR moves; required for a first release, and exclusive
-    with `--bump`); otherwise MINOR when any subject since the last tag is `feat` or
-    carries the breaking `!` marker, or any body line starts with `BREAKING CHANGE:`
-    / `BREAKING-CHANGE:`, else PATCH; `--bump` forces MINOR or PATCH. When
-    `--declared-version` is given (the analogue of the freeze-lift variable of design
-    section 15.1) a computed version that differs FAILS CLOSED rather than
-    auto-correcting.
-4.  The tag for that version must not already exist anywhere in the repository.
+3.  The next version: a valid pending unpublished marker, placed immediately under
+    the sole `[Unreleased]` heading and matching `AppleVersion.current`, owns the
+    next source-only `MAJOR.0.0` candidate. Otherwise `--macos-major NN` forces
+    `NN.0.0` and must exceed the current major (the only way MAJOR moves; required
+    for a first release, and exclusive with `--bump`); otherwise MINOR when any
+    subject since the last tag is `feat` or carries the breaking `!` marker, or any
+    body line starts with `BREAKING CHANGE:` / `BREAKING-CHANGE:`, else PATCH;
+    `--bump` forces MINOR or PATCH. When `--declared-version` is given (the
+    analogue of the freeze-lift variable of design section 15.1) a computed version
+    that differs FAILS CLOSED rather than auto-correcting.
+4.  The tag for that version must not already exist anywhere in the repository. An
+    already-prepared release section with an empty `[Unreleased]` is treated as
+    awaiting its tag, not as a new release.
 5.  The transformation, rendered into `--scratch` and nowhere else:
     `Sources/AppleKit/CommandSupport.swift` with `AppleVersion.current` rewritten
     (exactly one match), and `CHANGELOG.md` with `[Unreleased]` moved under a new
     `## [X.Y.Z] - YYYY-MM-DD` heading (leaving an empty `[Unreleased]`), every
     `blob/main/docs/manual/` link inside the new section retargeted to the tag (at
     least one must exist there, and none may exist outside it — released sections
-    link the manual at their own tag).
-6.  The drift gate on the rendered copies: constant == changelog heading ==
-    tag-to-be, and nothing else in the allowlist changed.
+    link the manual at their own tag). With `--source-adoption`, the scratch output
+    instead contains only the source-only constant and unpublished marker, or no
+    files when that state is already present.
+6.  The drift gate on normal release rendered copies: constant == changelog heading
+    == tag-to-be, and nothing else in the allowlist changed.
 
 The report (`--report`) is value-free by design: the pass result, the exact file
 allowlist, the candidate SHA and the digests of the UNTRANSFORMED inputs. It carries
@@ -92,6 +98,7 @@ TAG_RE = re.compile(r"^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$")
 REPOSITORY_RE = re.compile(r"^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?/[A-Za-z0-9_-][A-Za-z0-9._-]*$")
 MACOS_MAJOR_RE = re.compile(r"^[1-9][0-9]*$")
 CONSTANT_RE = re.compile(r'(public static let current = ")([^"]+)(")')
+UNPUBLISHED_MARKER_LINE_RE = re.compile(r"^<!-- apple-cli-unpublished-version: ([^ ]+) -->$")
 FEATURE_SUBJECT_RE = re.compile(r"^feat(\(|!|:)|^[a-z]+(\([^)]*\))?!:")
 BREAKING_BODY_RE = re.compile(r"^BREAKING[ -]CHANGE:", re.M)
 UNRELEASED_HEADING = "## [Unreleased]"
@@ -146,6 +153,16 @@ class GitError(Exception):
     """git itself failed, timed out, or could not be spawned."""
 
 
+class VersionState:
+    def __init__(self, version: Tuple[int, int, int], label: str, last_tag: Optional[str],
+                 pending_unpublished: bool = False, computed: bool = True) -> None:
+        self.version = version
+        self.label = label
+        self.last_tag = last_tag
+        self.pending_unpublished = pending_unpublished
+        self.computed = computed
+
+
 def run_git(args: Sequence[str], cwd: Path) -> str:
     command = ["/usr/bin/git", *GIT_CONFIG_OVERRIDES, *args]
     try:
@@ -189,6 +206,17 @@ def parse_date(raw: str) -> str:
 
 def format_version(version: Tuple[int, int, int]) -> str:
     return "{}.{}.{}".format(*version)
+
+
+def parse_constant_version(source: str) -> str:
+    matches = list(CONSTANT_RE.finditer(source))
+    if len(matches) != 1:
+        raise AssertionFailure(
+            "expected exactly one `public static let current = \"...\"` in the version constant file"
+        )
+    if VERSION_RE.fullmatch(matches[0].group(2)) is None:
+        raise AssertionFailure("the current version constant is not strict MAJOR.MINOR.PATCH")
+    return matches[0].group(2)
 
 
 def validate_checkout(root: Path, candidate_sha: str, git: GitRunner) -> None:
@@ -244,6 +272,133 @@ def tag_exists(root: Path, tag: str, git: GitRunner) -> bool:
     return any(line == tag for line in listing.split("\n"))
 
 
+def read_candidate_text(root: Path, relative_path: Path) -> str:
+    try:
+        return (root / relative_path).read_text(encoding="utf-8")
+    except FileNotFoundError as error:
+        raise AssertionFailure("candidate {} is required for version validation".format(relative_path.as_posix())) from error
+    except UnicodeDecodeError as error:
+        raise AssertionFailure("candidate {} must be UTF-8 text".format(relative_path.as_posix())) from error
+
+
+def assert_no_unmarked_ahead_constant(constant_source: str, changelog: str, last_version: Tuple[int, int, int],
+                                      expected_version: Tuple[int, int, int]) -> None:
+    constant_version = parse_version(parse_constant_version(constant_source), "version constant")
+    expected_text = format_version(expected_version)
+    if constant_version > last_version and not (
+        constant_version == expected_version and awaiting_tag_shape(changelog, expected_text)
+    ):
+        raise AssertionFailure("the version constant is ahead of the latest release without the unpublished marker")
+
+
+def released_heading_exists(changelog: str, version: str) -> bool:
+    return re.search(r"^## \[{}\] - \d{{4}}-\d{{2}}-\d{{2}}$".format(re.escape(version)),
+                     changelog, re.M) is not None
+
+
+def find_unpublished_marker(changelog: str) -> Optional[str]:
+    marker_lines: List[Tuple[int, str]] = []
+    for index, line in enumerate(changelog.split("\n")):
+        if "apple-cli-unpublished-version" in line:
+            marker_lines.append((index, line))
+    if not marker_lines:
+        return None
+    if len(marker_lines) != 1:
+        raise AssertionFailure("the unpublished version marker must appear exactly once")
+    index, line = marker_lines[0]
+    match = UNPUBLISHED_MARKER_LINE_RE.fullmatch(line)
+    if match is None:
+        raise AssertionFailure("the unpublished version marker must be one strict marker line")
+    lines = changelog.split("\n")
+    unreleased_indexes = [i for i, item in enumerate(lines) if item == UNRELEASED_HEADING]
+    if len(unreleased_indexes) != 1:
+        raise AssertionFailure("CHANGELOG must contain exactly one `## [Unreleased]` heading")
+    if index != unreleased_indexes[0] + 1:
+        raise AssertionFailure("the unpublished version marker must appear immediately after `## [Unreleased]`")
+    parse_version(match.group(1), "unpublished version marker")
+    return match.group(1)
+
+
+def remove_unpublished_marker(changelog: str) -> str:
+    lines = changelog.split("\n")
+    return "\n".join(line for line in lines if "apple-cli-unpublished-version:" not in line)
+
+
+def awaiting_tag_shape(changelog: str, version: str) -> bool:
+    existing = re.search(r"^## \[{}\] - \d{{4}}-\d{{2}}-\d{{2}}$".format(re.escape(version)), changelog, re.M)
+    unreleased = re.search(r"^## \[Unreleased\][^\n]*\n(.*?)(?=^## )", changelog, re.S | re.M)
+    return (
+        existing is not None
+        and unreleased is not None
+        and not unreleased.group(1).strip()
+        and unreleased.end() == existing.start()
+    )
+
+
+def awaiting_tag_state(root: Path, git: GitRunner, constant_source: str, changelog: str,
+                       last_release: Optional[Tuple[Tuple[int, int, int], str]], bump: Optional[str],
+                       macos_major: Optional[int]) -> Optional[VersionState]:
+    if last_release is None:
+        return None
+    constant = parse_constant_version(constant_source)
+    version = parse_version(constant, "version constant")
+    if version <= last_release[0]:
+        return None
+    if tag_exists(root, "v" + constant, git):
+        return None
+    if not awaiting_tag_shape(changelog, constant):
+        return None
+    if bump is not None:
+        raise AssertionFailure("--bump is incompatible with an awaiting-tag source version")
+    if macos_major is not None and version != (macos_major, 0, 0):
+        raise AssertionFailure("--macos-major is incompatible with the awaiting-tag source version")
+    return VersionState(version, "awaiting tag", last_release[1], False, False)
+
+
+def insert_unpublished_marker(changelog: str, version: str) -> str:
+    if find_unpublished_marker(changelog) is not None:
+        return changelog
+    lines = changelog.split("\n")
+    indexes = [i for i, line in enumerate(lines) if line == UNRELEASED_HEADING]
+    if len(indexes) != 1:
+        raise AssertionFailure("CHANGELOG must contain exactly one `## [Unreleased]` heading")
+    lines.insert(indexes[0] + 1, "<!-- apple-cli-unpublished-version: {} -->".format(version))
+    return "\n".join(lines)
+
+
+def valid_pending_version(
+    root: Path,
+    git: GitRunner,
+    constant_source: str,
+    changelog: str,
+    last_release: Optional[Tuple[Tuple[int, int, int], str]],
+    bump: Optional[str],
+    macos_major: Optional[int],
+) -> Optional[VersionState]:
+    marker = find_unpublished_marker(changelog)
+    constant = parse_constant_version(constant_source)
+    if marker is None:
+        return None
+    if constant != marker:
+        raise AssertionFailure("the version constant does not match the unpublished version marker")
+    version = parse_version(marker, "unpublished version marker")
+    if version[1] != 0 or version[2] != 0:
+        raise AssertionFailure("the unpublished version marker must name MAJOR.0.0")
+    if last_release is None:
+        raise AssertionFailure("the unpublished version marker requires an existing release tag")
+    if version[0] <= last_release[0][0]:
+        raise AssertionFailure("the unpublished version marker must exceed the released macOS major")
+    if tag_exists(root, "v" + marker, git):
+        raise AssertionFailure("the unpublished version marker names a tag that already exists")
+    if released_heading_exists(changelog, marker):
+        raise AssertionFailure("the unpublished version marker already has a released heading")
+    if bump is not None:
+        raise AssertionFailure("--bump is incompatible with a pending unpublished version")
+    if macos_major is not None and version != (macos_major, 0, 0):
+        raise AssertionFailure("--macos-major is incompatible with the pending unpublished version")
+    return VersionState(version, "pending unpublished source", last_release[1] if last_release else None, True)
+
+
 def compute_bump(subjects: Sequence[str], bodies: Sequence[str]) -> str:
     if any(FEATURE_SUBJECT_RE.search(subject) for subject in subjects):
         return "minor"
@@ -259,8 +414,31 @@ def compute_version(
     macos_major: Optional[int],
 ) -> Tuple[Tuple[int, int, int], str, Optional[str]]:
     """Return (version, bump label, last reachable release tag or None)."""
+    state = compute_version_state(root, git, bump, macos_major)
+    return state.version, state.label, state.last_tag
+
+
+def compute_version_state(
+    root: Path,
+    git: GitRunner,
+    bump: Optional[str],
+    macos_major: Optional[int],
+    constant_source: Optional[str] = None,
+    changelog_text: Optional[str] = None,
+) -> VersionState:
+    """Return the shared candidate version state for release prep, artifact and site."""
     tags = reachable_release_tags(root, git)
     last = tags[0] if tags else None
+    if constant_source is None:
+        constant_source = read_candidate_text(root, CONSTANT_PATH)
+    if changelog_text is None:
+        changelog_text = read_candidate_text(root, CHANGELOG_PATH)
+    pending = valid_pending_version(root, git, constant_source, changelog_text, last, bump, macos_major)
+    if pending is not None:
+        return pending
+    awaiting = awaiting_tag_state(root, git, constant_source, changelog_text, last, bump, macos_major)
+    if awaiting is not None:
+        return awaiting
     subjects: List[str] = []
     last_tag: Optional[str] = None
     if last is not None:
@@ -273,7 +451,12 @@ def compute_version(
             raise AssertionFailure(
                 "--macos-major must exceed the current major of the last reachable release tag"
             )
-        return (macos_major, 0, 0), "major (macos-major input)", last_tag
+        computed_version = (macos_major, 0, 0)
+        if tag_exists(root, "v" + format_version(computed_version), git):
+            raise AssertionFailure("the requested macOS major already has a release tag")
+        if last is not None:
+            assert_no_unmarked_ahead_constant(constant_source, changelog_text, last[0], computed_version)
+        return VersionState(computed_version, "major (macos-major input)", last_tag)
     if last is None:
         raise AssertionFailure(
             "no reachable release tag: a first release must set --macos-major"
@@ -284,20 +467,17 @@ def compute_version(
         label = compute_bump(subjects, bodies)
     else:
         label = bump
-    if label == "minor":
-        return (major, minor + 1, 0), label, last_tag
-    return (major, minor, patch + 1), label, last_tag
+    computed_version = (major, minor + 1, 0) if label == "minor" else (major, minor, patch + 1)
+    if tag_exists(root, "v" + format_version(computed_version), git):
+        raise AssertionFailure("the computed version already has a release tag")
+    assert_no_unmarked_ahead_constant(constant_source, changelog_text, last[0], computed_version)
+    return VersionState(computed_version, label, last_tag)
 
 
 def render_constant(source: str, version: str) -> str:
     matches = list(CONSTANT_RE.finditer(source))
-    if len(matches) != 1:
-        raise AssertionFailure(
-            "expected exactly one `public static let current = \"...\"` in the version constant file"
-        )
+    parse_constant_version(source)
     match = matches[0]
-    if VERSION_RE.fullmatch(match.group(2)) is None:
-        raise AssertionFailure("the current version constant is not strict MAJOR.MINOR.PATCH")
     return source[: match.start(2)] + version + source[match.end(2):]
 
 
@@ -424,6 +604,7 @@ def rehearse(
     macos_major: Optional[int],
     declared_version: Optional[str],
     date: str,
+    source_adoption: bool = False,
     git: GitRunner = run_git,
     log: Optional[Callable[[str], None]] = None,
 ) -> Dict[str, object]:
@@ -435,7 +616,84 @@ def rehearse(
     constant_source = constant_bytes.decode("utf-8")
     changelog_text = changelog_bytes.decode("utf-8")
 
-    version_tuple, bump_label, last_tag = compute_version(candidate_root, git, bump, macos_major)
+    if source_adoption:
+        if declared_version is None or macos_major is None:
+            raise PolicyError("--source-adoption requires --macos-major and --declared-version")
+        version_tuple = parse_version(declared_version, "--declared-version")
+        if version_tuple != (macos_major, 0, 0):
+            raise PolicyError("--source-adoption requires --declared-version to match --macos-major")
+        version = format_version(version_tuple)
+        if bump is not None:
+            raise PolicyError("--source-adoption is incompatible with --bump")
+        tags = reachable_release_tags(candidate_root, git)
+        last = tags[0] if tags else None
+        if last is None:
+            raise AssertionFailure("source adoption requires an existing release tag")
+        if version_tuple[1:] != (0, 0) or version_tuple[0] <= last[0][0]:
+            raise AssertionFailure("--source-adoption must name the next macOS MAJOR.0.0")
+        if tag_exists(candidate_root, "v" + version, git):
+            raise AssertionFailure("the source-adoption version already has a tag")
+        current_version = parse_constant_version(constant_source)
+        pending_state = valid_pending_version(candidate_root, git, constant_source, changelog_text, last, None, macos_major)
+        marker = format_version(pending_state.version) if pending_state is not None else None
+        if marker is None:
+            assert_no_unmarked_ahead_constant(constant_source, changelog_text, last[0], version_tuple)
+        if marker is not None and marker != version:
+            raise AssertionFailure("the unpublished version marker does not match --source-adoption")
+        if marker == version and current_version == version:
+            prepare_scratch(scratch)
+            emit("release-prep: source adoption already adopted; scratch left empty")
+            return {
+                "schema_version": REPORT_SCHEMA_VERSION,
+                "pass": True,
+                "candidate_sha": candidate_sha,
+                "declared_version_checked": True,
+                "source_adoption": True,
+                "source_adoption_noop": True,
+                "allowlist": [str(path) for path in ALLOWLIST],
+                "input_sha256": {
+                    str(CONSTANT_PATH): sha256_bytes(constant_bytes),
+                    str(CHANGELOG_PATH): sha256_bytes(changelog_bytes),
+                },
+                "artifact_sha256": {},
+                "outward_writes": [],
+                "note": "source adoption already present; no transformed files were written",
+            }
+        if marker is not None and current_version != version:
+            raise AssertionFailure("the version constant does not match the unpublished version marker")
+        if released_heading_exists(changelog_text, version):
+            raise AssertionFailure("the source-adoption version already has a released heading")
+        rendered_constant = render_constant(constant_source, version)
+        rendered_changelog = insert_unpublished_marker(changelog_text, version)
+        prepare_scratch(scratch)
+        write_private(scratch / CONSTANT_PATH, rendered_constant)
+        write_private(scratch / CHANGELOG_PATH, rendered_changelog)
+        if (candidate_root / CONSTANT_PATH).read_bytes() != constant_bytes:
+            raise AssertionFailure("the candidate version constant file changed during the rehearsal")
+        if (candidate_root / CHANGELOG_PATH).read_bytes() != changelog_bytes:
+            raise AssertionFailure("the candidate CHANGELOG changed during the rehearsal")
+        if git(["status", "--porcelain", "--untracked-files=all"], candidate_root).strip():
+            raise AssertionFailure("candidate worktree is not clean after the rehearsal")
+        emit("release-prep: source adoption rendered 2 files into the scratch directory; candidate tree untouched")
+        return {
+            "schema_version": REPORT_SCHEMA_VERSION,
+            "pass": True,
+            "candidate_sha": candidate_sha,
+            "declared_version_checked": True,
+            "source_adoption": True,
+            "source_adoption_noop": False,
+            "allowlist": [str(path) for path in ALLOWLIST],
+            "input_sha256": {
+                str(CONSTANT_PATH): sha256_bytes(constant_bytes),
+                str(CHANGELOG_PATH): sha256_bytes(changelog_bytes),
+            },
+            "artifact_sha256": {},
+            "outward_writes": [],
+            "note": "source-adoption transformed files exist only in the scratch directory; no version is recorded",
+        }
+
+    state = compute_version_state(candidate_root, git, bump, macos_major, constant_source, changelog_text)
+    version_tuple, bump_label, last_tag = state.version, state.label, state.last_tag
     version = format_version(version_tuple)
     if declared_version is not None and declared_version != version:
         raise AssertionFailure(
@@ -447,7 +705,8 @@ def rehearse(
 
     rendered_constant = render_constant(constant_source, version)
     current_version = CONSTANT_RE.search(constant_source).group(2)  # exactly one, checked above
-    rendered_changelog = render_changelog(changelog_text, version, date, repository, current_version)
+    release_changelog = remove_unpublished_marker(changelog_text) if state.pending_unpublished else changelog_text
+    rendered_changelog = render_changelog(release_changelog, version, date, repository, current_version)
     drift_gate(rendered_constant, rendered_changelog, version)
 
     prepare_scratch(scratch)
@@ -506,6 +765,8 @@ def parse_args(argv: Optional[Sequence[str]]) -> argparse.Namespace:
     parser.add_argument("--macos-major", default=None,
                         help="adopt a new macOS major: the ONLY way MAJOR moves; exclusive with --bump")
     parser.add_argument("--declared-version", default=None)
+    parser.add_argument("--source-adoption", action="store_true",
+                        help="render an unpublished source version marker and constant into scratch only")
     parser.add_argument("--report", type=Path, default=None)
     parser.add_argument("--date", default=None, help=argparse.SUPPRESS)
     return parser.parse_args(argv)
@@ -558,6 +819,7 @@ def main(argv: Optional[Sequence[str]] = None) -> int:
             macos_major=int(args.macos_major) if args.macos_major is not None else None,
             declared_version=args.declared_version,
             date=date,
+            source_adoption=args.source_adoption,
         )
     except PolicyError as error:
         print("release-prep: policy: {}".format(error), file=sys.stderr)

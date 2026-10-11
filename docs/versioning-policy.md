@@ -3,7 +3,7 @@
 > **AMENDMENT (2026-08-29, operator ruling) — platform-keyed MAJOR.** This supersedes §3's
 > strict-SemVer MAJOR semantics. The version is `MAJOR.MINOR.PATCH` where **MAJOR = the
 > supported macOS major** (first release `26.0.0` for macOS 26; MAJOR changes only when a new
-> macOS major is adopted, via the release workflow's `macos_major` input). **MINOR** = feature
+> macOS major is adopted, via release preparation's explicit `--macos-major` input). **MINOR** = feature
 > additions (any `feat:` commit since the last tag). **PATCH** = bug fixes, docs, and small
 > non-feature updates. **Breaking agent-contract changes** (removing/renaming/retyping a JSON
 > field, enum/exit-code changes — §5's list still defines "breaking") no longer bump MAJOR:
@@ -23,6 +23,22 @@
 > retired the same day on explicit operator instruction — §4's pre-1.0/until-1.0 clauses
 > (incl. §4.2's don't-retire-before-1.0 corollary and step 10's wait-for-D2) are now
 > historical: their conditions were met and discharged at `v26.0.0`.
+
+> **AMENDMENT (2026-10-11, operator ruling) — unpublished source adoption.** The
+> macOS 27 source version may become `27.0.0` before publication. Use the reviewed
+> `scripts/ci/release_prep.py --source-adoption` path with `--macos-major 27` and
+> `--declared-version 27.0.0`; apply its scratch-rendered constant and changelog
+> after review and tests. Keep the notes under `[Unreleased]` and retain links to
+> the main-branch manual. Exactly one `apple-cli-unpublished-version` HTML comment
+> immediately after that heading records the version; it must match the source
+> constant and must not collide with any existing tag or released heading.
+> Shared preparation, site and artifact validation uses that pending version even
+> after later feature commits. Normal release preparation removes the marker and
+> promotes the notes only in scratch; incompatible overrides and stale overlays
+> fail closed. This source state is explicitly unpublished and is not a completed
+> release. The macOS 14 deployment minimum and JSON schema remain unchanged.
+> D18's publication conditions, D23/D51's native-build permission requirements,
+> and the separate tag, GitHub Release and Homebrew gates remain in force.
 
 Scope: a suite of published, macOS-native command-line tools that port existing
 MCP-server capabilities to the command line, consumed primarily by three AI CLIs
