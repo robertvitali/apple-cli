@@ -238,6 +238,13 @@ struct AutomationWorkerTests {
         return result.stdout
     }
 
+    private func launchObservedThroughProbe(root: URL, command name: String, seed: String = "observed") throws -> String {
+        let result = try runProbe(["--observed-run", root.path, name, seed])
+        #expect(!result.timedOut)
+        #expect(result.exitCode == 0)
+        return result.stdout
+    }
+
     private func directProtocolOutcome(_ mode: String, scratchRoot: URL? = nil) throws -> String {
         var arguments = ["--direct-protocol", mode]
         if let scratchRoot { arguments.append(scratchRoot.path) }
@@ -432,6 +439,87 @@ struct AutomationWorkerTests {
             #expect(snapshot.receipts.count == 1)
             #expect(snapshot.receipts.first?.disposition == .noDelivery)
         }
+    }
+
+    @Test("observed action clears pending only after ACK and verifier success")
+    func observedActionClearsPendingAfterAckAndVerifierSuccess() throws {
+        let root = try scratch.directory().appendingPathComponent("observed-ok-\(UUID().uuidString)", isDirectory: true)
+        let outcome = try launchObservedThroughProbe(root: root, command: "probe.empty", seed: "ok")
+        #expect(outcome.hasPrefix("observedState("))
+        #expect(outcome.contains(",verified-ok)|pending=none|receipts=observedState"))
+    }
+
+    @Test("observed no-op is blocked by pending and writes no receipt")
+    func observedNoOpIsBlockedByPendingAndWritesNoReceipt() throws {
+        let pendingRoot = try scratch.directory().appendingPathComponent("observed-noop-pending-\(UUID().uuidString)", isDirectory: true)
+        try AppleAutomationJournal.withLockedJournal(root: pendingRoot.path, deadline: .millisecondsFromNow(1_000)) { lease in
+            _ = try lease.begin(operationRequest("existing"))
+        }
+        let blocked = try launchObservedThroughProbe(root: pendingRoot, command: "probe.noop", seed: "blocked")
+        #expect(blocked.contains("requestNotSent(pending-operation-exists:"))
+        #expect(blocked.contains("|pending=preparedBeforeHandoff|receipts=none"))
+
+        let root = try scratch.directory().appendingPathComponent("observed-noop-\(UUID().uuidString)", isDirectory: true)
+        let noop = try launchObservedThroughProbe(root: root, command: "probe.noop", seed: "noop")
+        #expect(noop == "alreadyInDesiredState(already-desired)|pending=none|receipts=none")
+    }
+
+    @Test("observed action retains uncertainty when worker or verifier cannot prove success")
+    func observedActionRetainsUncertaintyWithoutVerifiedSuccess() throws {
+        for (command, prefix) in [
+            ("probe.refuse", "childRefusedOrFailed(refused)"),
+            ("probe.verify-false", "verificationFailed"),
+            ("probe.verify-throw", "childRefusedOrFailed(unsupported-command)"),
+            ("probe.verify-sleep", "timedOut")
+        ] {
+            let root = try scratch.directory().appendingPathComponent("observed-\(command)-\(UUID().uuidString)", isDirectory: true)
+            let outcome = try launchObservedThroughProbe(root: root, command: command, seed: command)
+            #expect(outcome.hasPrefix(prefix))
+            #expect(outcome.contains("|pending=uncertainAfterHandoff|receipts=none"))
+        }
+    }
+
+    @Test("observed action holds the journal lock through preflight and verification")
+    func observedActionHoldsLockThroughPreflightAndVerification() throws {
+        for command in ["probe.preflight-lock", "probe.verify-lock"] {
+            let root = try scratch.directory().appendingPathComponent("observed-lock-\(command)-\(UUID().uuidString)", isDirectory: true)
+            let outcome = try launchObservedThroughProbe(root: root, command: command, seed: command)
+            #expect(outcome.contains("observedState("))
+            #expect(outcome.contains("|pending=none|receipts=observedState"))
+        }
+    }
+
+    @Test("observed action honors cancellation before clearing state")
+    func observedActionHonorsCancellationBeforeClearingState() throws {
+        for (command, expectedPending) in [
+            ("probe.cancel-immediate", "none"),
+            ("probe.cancel-after-preflight", "none"),
+            ("probe.cancel-after-worker", "uncertainAfterHandoff"),
+            ("probe.cancel-after-verify", "uncertainAfterHandoff")
+        ] {
+            let root = try scratch.directory().appendingPathComponent("observed-cancel-\(command)-\(UUID().uuidString)", isDirectory: true)
+            let outcome = try launchObservedThroughProbe(root: root, command: command, seed: command)
+            #expect(outcome.hasPrefix("cancelled"))
+            #expect(outcome.contains("|pending=\(expectedPending)|receipts=none"))
+        }
+    }
+
+    @Test("observed action cancels a hanging worker before deadline and releases lock")
+    func observedActionCancelsHangingWorkerBeforeDeadlineAndReleasesLock() throws {
+        let root = try scratch.directory().appendingPathComponent("observed-cancel-hanging-\(UUID().uuidString)", isDirectory: true)
+        let start = Date()
+        let outcome = try launchObservedThroughProbe(root: root, command: "probe.cancel-hanging-worker", seed: "hang")
+        let elapsed = Date().timeIntervalSince(start)
+        #expect(elapsed < 2.0)
+        #expect(outcome == "cancelled|pending=uncertainAfterHandoff|receipts=none|deferred=0")
+    }
+
+    @Test("observed action revalidates pending binding after verifier")
+    func observedActionRevalidatesPendingBindingAfterVerifier() throws {
+        let root = try scratch.directory().appendingPathComponent("observed-postverify-mismatch-\(UUID().uuidString)", isDirectory: true)
+        let outcome = try launchObservedThroughProbe(root: root, command: "probe.verify-mutate-journal", seed: "mismatch")
+        #expect(outcome.hasPrefix("protocolViolation(journal-binding)"))
+        #expect(outcome.contains("|pending=uncertainAfterHandoff|receipts=none"))
     }
 
     private func openDescriptorCount() -> Int {

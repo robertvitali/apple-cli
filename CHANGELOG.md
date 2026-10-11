@@ -27,6 +27,11 @@ JSON output are stable per the versioning policy — breaking changes bump
   target digests instead of raw identifiers and requires explicit recovery after
   possible delivery. A bounded same-executable worker channel validates process
   identity and request acknowledgments while retaining unresolved action state.
+  Its observed-state orchestration holds that same lock through pre-read,
+  no-op detection, worker execution and operation-specific verification. Only
+  a normally acknowledged and verified result records `observedState`; failures
+  and uncertain outcomes continue to block later writes. Observed state is not
+  proof that Messages has no queued late action.
   This internal foundation does not enable new Messages
   mutations or claim that terminating a worker cancels an action in Messages.
 

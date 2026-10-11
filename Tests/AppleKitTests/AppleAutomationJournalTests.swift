@@ -192,7 +192,7 @@ struct AppleAutomationJournalTests {
     }
 
     @Test("explicit recovery requires uncertain phase")
-        func testExplicitRecoveryRequiresUncertainPhase() throws {
+    func testExplicitRecoveryRequiresUncertainPhase() throws {
         try withScratch("recover-prepared") { root in
             try AppleAutomationJournal.withLockedJournal(root: root.path, deadline: .millisecondsFromNow(1_000)) { lease in
                 let op = try lease.begin(request())
@@ -202,6 +202,37 @@ struct AppleAutomationJournalTests {
                 try assert(snapshot.pending?.operationID == op, "prepared pending remains after rejected recovery")
                 try assert(snapshot.pending?.phase == .preparedBeforeHandoff, "prepared phase remains after rejected recovery")
                 try assert(snapshot.receipts.isEmpty, "rejected recovery writes no receipt")
+            }
+        }
+    }
+
+    @Test("observed-state resolution requires uncertain phase")
+    func testObservedStateResolutionRequiresUncertainPhase() throws {
+        try withScratch("observed-state") { root in
+            try AppleAutomationJournal.withLockedJournal(root: root.path, deadline: .millisecondsFromNow(1_000)) { lease in
+                let op = try lease.begin(request("observed"))
+                do { try lease.recordObservedState(operationID: op); throw TestFailure("prepared observed-state resolution should fail") }
+                catch AppleAutomationJournal.Error.handoffNotRecorded {}
+                try lease.markUncertainAfterHandoff(operationID: op)
+                try lease.recordObservedState(operationID: op)
+                let snapshot = try lease.loadSnapshot()
+                try assert(snapshot.pending == nil, "observed-state resolution clears uncertain pending")
+                try assert(snapshot.receipts.first?.operationID == op, "observed-state receipt records op id")
+                try assert(snapshot.receipts.first?.disposition == .observedState, "observed-state receipt disposition")
+            }
+        }
+    }
+
+    @Test("observed-state receipts reject replayed operation IDs")
+    func testObservedStateReceiptsRejectReplayedOperationIDs() throws {
+        try withScratch("observed-replay") { root in
+            let reused = UUID()
+            try AppleAutomationJournal.withLockedJournal(root: root.path, deadline: .millisecondsFromNow(1_000)) { lease in
+                try lease.beginForTesting(reused, request: request("first"))
+                try lease.markUncertainAfterHandoff(operationID: reused)
+                try lease.recordObservedState(operationID: reused)
+                do { try lease.beginForTesting(reused, request: request("second")); throw TestFailure("observed-state receipt op should not replay") }
+                catch AppleAutomationJournal.Error.replayedOperationID(let op) { try assert(op == reused.uuidString, "replay guard names observed op") }
             }
         }
     }
@@ -225,12 +256,18 @@ struct AppleAutomationJournalTests {
             try AppleAutomationJournal.withLockedJournal(root: root.path, deadline: .millisecondsFromNow(1_000)) { lease in
                 for index in 0..<40 {
                     let op = try lease.begin(request("r\(index)"))
-                    try lease.recordNoDeliveryBeforeHandoff(operationID: op)
+                    if index.isMultiple(of: 2) {
+                        try lease.markUncertainAfterHandoff(operationID: op)
+                        try lease.recordObservedState(operationID: op)
+                    } else {
+                        try lease.recordNoDeliveryBeforeHandoff(operationID: op)
+                    }
                 }
                 _ = try lease.begin(request("still-pending"))
                 let snapshot = try lease.loadSnapshot()
                 try assert(snapshot.receipts.count == 32, "receipts retained to 32")
                 try assert(snapshot.pending != nil, "pending retained despite receipt pruning")
+                try assert(snapshot.receipts.contains(where: { $0.disposition == .observedState }), "observed-state receipts participate in retention")
             }
         }
     }

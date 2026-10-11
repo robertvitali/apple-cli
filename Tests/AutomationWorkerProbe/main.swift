@@ -20,6 +20,21 @@ struct ProbeOperation: WorkerOperation {
             return .ack
         case "probe.crash":
             Darwin.abort()
+        case "probe.refuse":
+            return .refused
+        case "probe.cancel-marker":
+            if let payload = request.command.payload,
+               let path = String(data: payload, encoding: .utf8) {
+                FileManager.default.createFile(atPath: path, contents: Data())
+            }
+            return .ack
+        case "probe.cancel-marker-hang":
+            if let payload = request.command.payload,
+               let path = String(data: payload, encoding: .utf8) {
+                FileManager.default.createFile(atPath: path, contents: Data())
+            }
+            Thread.sleep(forTimeInterval: 10.0)
+            return .ack
         default:
             return .ack
         }
@@ -55,6 +70,122 @@ func request(_ seed: String = "probe") throws -> AppleAutomationJournal.Operatio
         partDigest: digest("part-\(seed)"),
         minimumEvidence: .init(targetHash: digest("minimum-evidence-\(seed)"), targetLength: 12)
     )
+}
+
+func binding(_ seed: String = "probe") throws -> WorkerObservedTargetBinding {
+    let journalRequest = try request(seed)
+    return WorkerObservedTargetBinding(operationType: journalRequest.operationType,
+                                       conversationDigest: journalRequest.conversationDigest,
+                                       messageDigest: journalRequest.messageDigest,
+                                       partDigest: journalRequest.partDigest,
+                                       minimumEvidence: journalRequest.minimumEvidence)
+}
+
+func competingProcessCannotAcquire(root: String) throws -> Bool {
+    let process = Process()
+    process.executableURL = URL(fileURLWithPath: CommandLine.arguments[0])
+    process.arguments = ["--journal-lock-probe", root]
+    try process.run()
+    let deadline = Date().addingTimeInterval(1.0)
+    while process.isRunning && Date() < deadline {
+        Thread.sleep(forTimeInterval: 0.01)
+    }
+    if process.isRunning {
+        process.terminate()
+        return false
+    }
+    return process.terminationReason == .exit && process.terminationStatus == 0
+}
+
+func observedResolution(root: String, commandName: String, seed: String) throws -> WorkerObservedAction {
+    let deadline: WorkerDeadline
+    if commandName == "probe.verify-sleep" {
+        deadline = .millisecondsFromNow(100)
+    } else if commandName == "probe.cancel-hanging-worker" {
+        deadline = .millisecondsFromNow(5_000)
+    } else {
+        deadline = .millisecondsFromNow(2_000)
+    }
+    let cancelMarker = URL(fileURLWithPath: root, isDirectory: true).appendingPathComponent("cancel-now").path
+    return WorkerObservedAction(
+        stateRoot: root,
+        deadline: deadline,
+        isCancelled: {
+            commandName == "probe.cancel-immediate" || FileManager.default.fileExists(atPath: cancelMarker)
+        },
+        resolve: {
+            try WorkerResolvedAction(
+                target: binding(seed),
+                command: { _ in
+                    if commandName == "probe.cancel-after-worker" {
+                        return try WorkerCommand(name: "probe.cancel-marker", payload: cancelMarker.data(using: .utf8))
+                    }
+                    if commandName == "probe.cancel-hanging-worker" {
+                        return try WorkerCommand(name: "probe.cancel-marker-hang", payload: cancelMarker.data(using: .utf8))
+                    }
+                    return try WorkerCommand(name: commandName)
+                }
+            )
+        },
+        preflight: { _, context in
+            if commandName == "probe.preflight-lock" {
+                guard try competingProcessCannotAcquire(root: root) else { throw WorkerProtocolError.invalidDescriptor }
+            }
+            if commandName == "probe.cancel-after-preflight" {
+                FileManager.default.createFile(atPath: cancelMarker, contents: Data())
+            }
+            if commandName == "probe.preflight-sleep" {
+                Thread.sleep(forTimeInterval: 0.35)
+            }
+            if commandName == "probe.noop" {
+                return .alreadyInDesiredState("already-desired")
+            }
+            if context.deadline.expired {
+                throw WorkerProtocolError.deadlineExpired
+            }
+            return .requiresMutation
+        },
+        verify: { _, _, context in
+            switch commandName {
+            case "probe.verify-lock":
+                guard try competingProcessCannotAcquire(root: root) else { throw WorkerProtocolError.invalidDescriptor }
+                return "verified-lock"
+            case "probe.cancel-after-verify":
+                FileManager.default.createFile(atPath: cancelMarker, contents: Data())
+                return "cancelled-after-verify"
+            case "probe.verify-mutate-journal":
+                let state = URL(fileURLWithPath: root).appendingPathComponent("automation-state.json")
+                var text = try String(contentsOf: state, encoding: .utf8)
+                text = text.replacingOccurrences(of: "reactionSet", with: "replySend")
+                try text.write(to: state, atomically: false, encoding: .utf8)
+                return "mutated-journal"
+            case "probe.verify-false":
+                return nil
+            case "probe.verify-throw":
+                throw WorkerProtocolError.unsupportedCommand
+            case "probe.verify-sleep":
+                Thread.sleep(forTimeInterval: 0.35)
+                if context.deadline.expired { throw WorkerProtocolError.deadlineExpired }
+                return "verified-after-sleep"
+            default:
+                if context.deadline.expired { throw WorkerProtocolError.deadlineExpired }
+                return "verified-\(seed)"
+            }
+        }
+    )
+}
+
+func journalSummary(root: String) -> String {
+    do {
+        return try AppleAutomationJournal.withLockedJournal(root: root, deadline: .millisecondsFromNow(1_000)) { lease in
+            let snapshot = try lease.loadSnapshot()
+            let pending = snapshot.pending?.phase.rawValue ?? "none"
+            let receipts = snapshot.receipts.map { $0.disposition.rawValue }.joined(separator: ",")
+            return "pending=\(pending)|receipts=\(receipts.isEmpty ? "none" : receipts)"
+        }
+    } catch {
+        return "journal-error=\(error)"
+    }
 }
 
 func writePID(_ pid: pid_t, to fd: Int32) {
@@ -425,6 +556,40 @@ if CommandLine.arguments.dropFirst().first == "--parent-run" {
 if CommandLine.arguments.dropFirst().first == "--direct-protocol" {
     guard CommandLine.arguments.count == 3 || CommandLine.arguments.count == 4 else { exit(41) }
     print(try runDirectProtocolProbe(CommandLine.arguments[2], scratchParent: CommandLine.arguments.count == 4 ? CommandLine.arguments[3] : nil))
+    exit(0)
+}
+
+if CommandLine.arguments.dropFirst().first == "--journal-lock-probe" {
+    guard CommandLine.arguments.count == 3 else { exit(44) }
+    do {
+        try AppleAutomationJournal.withLockedJournal(root: CommandLine.arguments[2], deadline: .millisecondsFromNow(50)) { _ in }
+        exit(2)
+    } catch AppleAutomationJournal.Error.lockTimedOut {
+        exit(0)
+    } catch {
+        exit(3)
+    }
+}
+
+if CommandLine.arguments.dropFirst().first == "--observed-run" {
+    guard CommandLine.arguments.count == 5 else { exit(43) }
+    let root = CommandLine.arguments[2]
+    let commandName = CommandLine.arguments[3]
+    let seed = CommandLine.arguments[4]
+    let sink = DeferredSink()
+    let launcher: WorkerLauncher
+    let reportsDeferredReaping: Bool
+    if commandName == "probe.cancel-hanging-worker" {
+        launcher = WorkerLauncher(testMutationHook: nil, testDeferredReaping: sink,
+                                  signalGraceMilliseconds: 200, reapGraceMilliseconds: 200)
+        reportsDeferredReaping = true
+    } else {
+        launcher = WorkerLauncher()
+        reportsDeferredReaping = false
+    }
+    let outcome = try launcher.launchObserved(observedResolution(root: root, commandName: commandName, seed: seed))
+    let suffix = reportsDeferredReaping ? "|deferred=\(sink.accepted)" : ""
+    print("\(outcome.description)|\(journalSummary(root: root))\(suffix)")
     exit(0)
 }
 

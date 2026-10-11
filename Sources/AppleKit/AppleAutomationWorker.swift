@@ -8,8 +8,8 @@ package struct WorkerDeadline: Codable, Equatable, Sendable {
         let add = milliseconds > UInt64.max / 1_000_000 ? UInt64.max : milliseconds * 1_000_000
         return WorkerDeadline(uptimeNanoseconds: now > UInt64.max - add ? UInt64.max : now + add)
     }
-    var expired: Bool { remainingNanoseconds == 0 }
-    var remainingNanoseconds: UInt64 {
+    package var expired: Bool { remainingNanoseconds == 0 }
+    package var remainingNanoseconds: UInt64 {
         let now = DispatchTime.now().uptimeNanoseconds
         return now >= uptimeNanoseconds ? 0 : uptimeNanoseconds - now
     }
@@ -120,6 +120,7 @@ package enum WorkerProtocolError: Error, Equatable, CustomStringConvertible {
     case truncatedFrame
     case malformedFrame
     case deadlineExpired
+    case cancelled
     case parentIdentityMismatch
     case unsupportedCommand
     case childExited
@@ -132,6 +133,7 @@ package enum WorkerProtocolError: Error, Equatable, CustomStringConvertible {
         case .truncatedFrame: return "truncated-frame"
         case .malformedFrame: return "malformed-frame"
         case .deadlineExpired: return "deadline-expired"
+        case .cancelled: return "cancelled"
         case .parentIdentityMismatch: return "parent-identity-mismatch"
         case .unsupportedCommand: return "unsupported-command"
         case .childExited: return "child-exited"
@@ -157,14 +159,14 @@ enum WorkerFrameIO {
     }
 
     static func writeFrame(_ data: Data, to fd: Int32, cap: Int, io: any ScriptProcessIO,
-                           deadline: WorkerDeadline) throws {
+                           deadline: WorkerDeadline, isCancelled: () -> Bool = { false }) throws {
         guard data.count <= cap else { throw WorkerProtocolError.frameTooLarge }
         var header = UInt32(data.count).bigEndian
         var bytes = Data(bytes: &header, count: 4)
         bytes.append(data)
         var offset = 0
         while offset < bytes.count {
-            try throwIfParentDeadOrChildExited(deadline: deadline)
+            try throwIfParentDeadOrChildExited(deadline: deadline, isCancelled: isCancelled)
             var p = pollfd(fd: fd, events: Int16(POLLOUT), revents: 0)
             let ready = poll(&p, 1, deadline.pollMilliseconds)
             if ready < 0 {
@@ -188,13 +190,13 @@ enum WorkerFrameIO {
     }
 
     static func readOneFrameThenEOF(from fd: Int32, cap: Int, io: any ScriptProcessIO,
-                                    deadline: WorkerDeadline) throws -> Data {
+                                    deadline: WorkerDeadline, isCancelled: () -> Bool = { false }) throws -> Data {
         var storage = Data()
         var expected: Int?
         var returnedFrame: Data?
         var buffer = [UInt8](repeating: 0, count: 4096)
         while true {
-            try throwIfParentDeadOrChildExited(deadline: deadline)
+            try throwIfParentDeadOrChildExited(deadline: deadline, isCancelled: isCancelled)
             if let frame = returnedFrame {
                 var p = pollfd(fd: fd, events: Int16(POLLIN), revents: 0)
                 let ready = poll(&p, 1, deadline.pollMilliseconds)
@@ -246,7 +248,8 @@ enum WorkerFrameIO {
         }
     }
 
-    static func throwIfParentDeadOrChildExited(deadline: WorkerDeadline) throws {
+    static func throwIfParentDeadOrChildExited(deadline: WorkerDeadline, isCancelled: () -> Bool = { false }) throws {
+        if isCancelled() { throw WorkerProtocolError.cancelled }
         if deadline.expired { throw WorkerProtocolError.deadlineExpired }
         if getppid() == 1 { throw WorkerProtocolError.parentIdentityMismatch }
     }
@@ -384,7 +387,7 @@ package struct WorkerLaunchRequest {
     package let deadline: WorkerDeadline
     package let journal: WorkerJournalBinding
 
-    private init(command: WorkerCommand, deadline: WorkerDeadline, journal: WorkerJournalBinding) {
+    fileprivate init(command: WorkerCommand, deadline: WorkerDeadline, journal: WorkerJournalBinding) {
         self.command = command
         self.deadline = deadline
         self.journal = journal
@@ -392,6 +395,96 @@ package struct WorkerLaunchRequest {
 
     package static func makeForTesting(command: WorkerCommand, journalRequest: AppleAutomationJournal.OperationRequest, deadline: WorkerDeadline, stateRoot: String) -> WorkerLaunchRequest {
         WorkerLaunchRequest(command: command, deadline: deadline, journal: WorkerJournalBinding(root: stateRoot, request: journalRequest))
+    }
+}
+
+/// Digest-only target binding used to derive the journal request and raw worker command
+/// from the same resolved target. This binds orchestration intent; it does not prove
+/// that an arbitrary command payload semantically matches those digests.
+package struct WorkerObservedTargetBinding {
+    package let operationType: AppleAutomationJournal.PendingOperation.OperationType
+    package let conversationDigest: AppleAutomationJournal.TargetDigest
+    package let messageDigest: AppleAutomationJournal.TargetDigest?
+    package let partDigest: AppleAutomationJournal.TargetDigest?
+    package let minimumEvidence: AppleAutomationJournal.PendingOperation.MinimumEvidence
+
+    package init(operationType: AppleAutomationJournal.PendingOperation.OperationType,
+                 conversationDigest: AppleAutomationJournal.TargetDigest,
+                 messageDigest: AppleAutomationJournal.TargetDigest?,
+                 partDigest: AppleAutomationJournal.TargetDigest?,
+                 minimumEvidence: AppleAutomationJournal.PendingOperation.MinimumEvidence) {
+        self.operationType = operationType
+        self.conversationDigest = conversationDigest
+        self.messageDigest = messageDigest
+        self.partDigest = partDigest
+        self.minimumEvidence = minimumEvidence
+    }
+
+    fileprivate var journalRequest: AppleAutomationJournal.OperationRequest {
+        AppleAutomationJournal.OperationRequest(operationType: operationType,
+                                                conversationDigest: conversationDigest,
+                                                messageDigest: messageDigest,
+                                                partDigest: partDigest,
+                                                minimumEvidence: minimumEvidence)
+    }
+}
+
+/// A resolved observed action. Build `command` from the supplied target binding so
+/// production callers keep the worker payload and journal request coupled to one
+/// resolution pass.
+package struct WorkerResolvedAction {
+    package let command: WorkerCommand
+    package let journalRequest: AppleAutomationJournal.OperationRequest
+    package init(target binding: WorkerObservedTargetBinding, command: (WorkerObservedTargetBinding) throws -> WorkerCommand) throws {
+        self.command = try command(binding)
+        self.journalRequest = binding.journalRequest
+    }
+}
+
+package enum WorkerPreflightResult: Equatable {
+    case requiresMutation
+    case alreadyInDesiredState(String)
+}
+
+/// Deadline and cooperative cancellation state passed to observed-action callbacks.
+/// Callbacks must stay bounded and check this context before continuing slow work.
+package struct WorkerObservedContext {
+    package let deadline: WorkerDeadline
+    private let isCancelledCallback: () -> Bool
+    package init(deadline: WorkerDeadline, isCancelled: @escaping () -> Bool) {
+        self.deadline = deadline
+        self.isCancelledCallback = isCancelled
+    }
+    package var isCancelled: Bool { isCancelledCallback() }
+}
+
+/// Experimental observed worker orchestration. `resolve`, `preflight`, and `verify`
+/// run while the journal lock is held, so callbacks must be quick or cooperatively
+/// bounded by `WorkerObservedContext.deadline` and `isCancelled`.
+package struct WorkerObservedAction {
+    package typealias Resolve = () throws -> WorkerResolvedAction
+    package typealias Preflight = (WorkerResolvedAction, WorkerObservedContext) throws -> WorkerPreflightResult
+    package typealias Verify = (WorkerResolvedAction, WorkerResponse, WorkerObservedContext) throws -> String?
+
+    package let stateRoot: String
+    package let deadline: WorkerDeadline
+    let isCancelled: () -> Bool
+    let resolve: Resolve
+    let preflight: Preflight
+    let verify: Verify
+
+    package init(stateRoot: String,
+                 deadline: WorkerDeadline,
+                 isCancelled: @escaping () -> Bool = { false },
+                 resolve: @escaping Resolve,
+                 preflight: @escaping Preflight,
+                 verify: @escaping Verify) {
+        self.stateRoot = stateRoot
+        self.deadline = deadline
+        self.isCancelled = isCancelled
+        self.resolve = resolve
+        self.preflight = preflight
+        self.verify = verify
     }
 }
 
@@ -413,6 +506,45 @@ package enum WorkerLaunchOutcome: CustomStringConvertible {
         case .protocolViolation(let value): return "protocolViolation(\(value))"
         }
     }
+}
+
+/// Experimental UI-automation result for a bounded worker handoff plus caller-supplied
+/// postcondition. `.observedState` records only observed postcondition evidence; it is
+/// not causal completion proof and does not prove Messages has no queued late action.
+package enum WorkerObservedOutcome: CustomStringConvertible {
+    case alreadyInDesiredState(String)
+    case observedState(operationID: UUID, verification: String)
+    case spawnOrSetupFailedBeforeRequest(String)
+    case requestNotSent(String)
+    case childRefusedOrFailed(String)
+    case cancelled
+    case verificationFailed
+    case timedOut
+    case protocolViolation(String)
+
+    package var description: String {
+        switch self {
+        case .alreadyInDesiredState(let value): return "alreadyInDesiredState(\(value))"
+        case .observedState(let operationID, let verification): return "observedState(\(operationID.uuidString),\(verification))"
+        case .spawnOrSetupFailedBeforeRequest(let value): return "spawnOrSetupFailedBeforeRequest(\(value))"
+        case .requestNotSent(let value): return "requestNotSent(\(value))"
+        case .childRefusedOrFailed(let value): return "childRefusedOrFailed(\(value))"
+        case .cancelled: return "cancelled"
+        case .verificationFailed: return "verificationFailed"
+        case .timedOut: return "timedOut"
+        case .protocolViolation(let value): return "protocolViolation(\(value))"
+        }
+    }
+}
+
+private enum WorkerExchangeResult {
+    case response(WorkerResponse)
+    case spawnOrSetupFailedBeforeRequest(String)
+    case requestNotSent(String)
+    case childRefusedOrFailed(String)
+    case cancelled
+    case timedOut
+    case protocolViolation(String)
 }
 
 final class WorkerOperationWatchdog: @unchecked Sendable {
@@ -499,32 +631,140 @@ package struct WorkerLauncher {
         do {
             return try AppleAutomationJournal.withLockedJournal(root: request.journal.root, deadline: request.deadline.journalDeadline) { lease in
                 guard !request.deadline.expired else { return .timedOut }
-            let op: UUID
-            do { op = try lease.begin(request.journal.request) }
-            catch { return .requestNotSent(String(describing: error)) }
-            guard let parent = WorkerProcessIdentity.current() else {
-                try? lease.recordNoDeliveryBeforeHandoff(operationID: op)
-                return .requestNotSent("identity-unavailable")
-            }
-            let executable = WorkerExecutableIdentity(uid: parent.uid, gid: parent.gid, device: parent.executableDevice, inode: parent.executableInode, path: parent.executablePath)
-            let nonce = UUID()
-            let frame = WorkerRequest(schemaVersion: 1, operationID: op, nonce: nonce,
-                                      deadline: request.deadline, parent: parent, workerExecutable: executable, command: request.command)
-            let encoded: Data
-            do { encoded = try JSONEncoder().encode(frame) }
-            catch {
-                try? lease.recordNoDeliveryBeforeHandoff(operationID: op)
-                return .requestNotSent(String(describing: error))
-            }
-            return exchange(request: request, frame: frame, encoded: encoded, lease: lease, preparedOperationID: op)
+                let op: UUID
+                do { op = try lease.begin(request.journal.request) }
+                catch { return .requestNotSent(String(describing: error)) }
+                guard let frame = makeWorkerFrame(operationID: op, command: request.command, deadline: request.deadline) else {
+                    try? lease.recordNoDeliveryBeforeHandoff(operationID: op)
+                    return .requestNotSent("identity-unavailable")
+                }
+                let encoded: Data
+                do { encoded = try JSONEncoder().encode(frame) }
+                catch {
+                    try? lease.recordNoDeliveryBeforeHandoff(operationID: op)
+                    return .requestNotSent(String(describing: error))
+                }
+                return launchOutcome(from: exchange(request: request, frame: frame, encoded: encoded, lease: lease, preparedOperationID: op))
             }
         } catch AppleAutomationJournal.Error.lockTimedOut {
             return .timedOut
         }
     }
 
+    package func launchObserved(_ action: WorkerObservedAction) throws -> WorkerObservedOutcome {
+        guard !action.deadline.expired else { return .timedOut }
+        guard !action.isCancelled() else { return .cancelled }
+        func context() -> WorkerObservedContext {
+            WorkerObservedContext(deadline: action.deadline, isCancelled: action.isCancelled)
+        }
+        func cancelledOrExpired() -> WorkerObservedOutcome? {
+            if action.isCancelled() { return .cancelled }
+            if action.deadline.expired { return .timedOut }
+            return nil
+        }
+        do {
+            return try AppleAutomationJournal.withLockedJournal(root: action.stateRoot, deadline: action.deadline.journalDeadline, isCancelled: action.isCancelled) { lease in
+                if let outcome = cancelledOrExpired() { return outcome }
+                if let pending = try lease.loadSnapshot().pending {
+                    return .requestNotSent(AppleAutomationJournal.Error.pendingOperationExists(pending.operationID.uuidString).description)
+                }
+                let resolved: WorkerResolvedAction
+                do { resolved = try action.resolve() }
+                catch { return .requestNotSent(String(describing: error)) }
+                if let outcome = cancelledOrExpired() { return outcome }
+                let preflight: WorkerPreflightResult
+                do { preflight = try action.preflight(resolved, context()) }
+                catch WorkerProtocolError.deadlineExpired { return .timedOut }
+                catch { return .requestNotSent(String(describing: error)) }
+                switch preflight {
+                case .alreadyInDesiredState(let verification):
+                    if let outcome = cancelledOrExpired() { return outcome }
+                    return .alreadyInDesiredState(verification)
+                case .requiresMutation:
+                    break
+                }
+                if let outcome = cancelledOrExpired() { return outcome }
+                let op: UUID
+                do { op = try lease.begin(resolved.journalRequest) }
+                catch { return .requestNotSent(String(describing: error)) }
+                guard let frame = makeWorkerFrame(operationID: op, command: resolved.command, deadline: action.deadline) else {
+                    try? lease.recordNoDeliveryBeforeHandoff(operationID: op)
+                    return .requestNotSent("identity-unavailable")
+                }
+                let encoded: Data
+                do { encoded = try JSONEncoder().encode(frame) }
+                catch {
+                    try? lease.recordNoDeliveryBeforeHandoff(operationID: op)
+                    return .requestNotSent(String(describing: error))
+                }
+                if let outcome = cancelledOrExpired() {
+                    try? lease.recordNoDeliveryBeforeHandoff(operationID: op)
+                    return outcome
+                }
+                let request = WorkerLaunchRequest(command: resolved.command,
+                                                  deadline: action.deadline,
+                                                  journal: WorkerJournalBinding(root: action.stateRoot, request: resolved.journalRequest))
+                switch exchange(request: request, frame: frame, encoded: encoded, lease: lease,
+                                preparedOperationID: op, isCancelled: action.isCancelled) {
+                case .response(let response):
+                    if let outcome = cancelledOrExpired() { return outcome }
+                    guard let verification = try action.verify(resolved, response, context()) else {
+                        return .verificationFailed
+                    }
+                    if let outcome = cancelledOrExpired() { return outcome }
+                    let snapshot = try lease.loadSnapshot()
+                    guard let pending = snapshot.pending,
+                          pending.operationID == op,
+                          pending.phase == .uncertainAfterHandoff,
+                          pending.matches(resolved.journalRequest) else {
+                        return .protocolViolation("journal-binding")
+                    }
+                    do { try lease.recordObservedState(operationID: op) }
+                    catch { return .protocolViolation(String(describing: error)) }
+                    return .observedState(operationID: op, verification: verification)
+                case .spawnOrSetupFailedBeforeRequest(let value): return .spawnOrSetupFailedBeforeRequest(value)
+                case .requestNotSent(let value): return .requestNotSent(value)
+                case .childRefusedOrFailed(let value): return .childRefusedOrFailed(value)
+                case .cancelled: return .cancelled
+                case .timedOut: return .timedOut
+                case .protocolViolation(let value): return .protocolViolation(value)
+                }
+            }
+        } catch AppleAutomationJournal.Error.lockTimedOut {
+            return .timedOut
+        } catch AppleAutomationJournal.Error.cancelled {
+            return .cancelled
+        } catch WorkerProtocolError.deadlineExpired {
+            return .timedOut
+        } catch WorkerProtocolError.parentIdentityMismatch {
+            return .requestNotSent(WorkerProtocolError.parentIdentityMismatch.description)
+        } catch {
+            return .childRefusedOrFailed(String(describing: error))
+        }
+    }
+
+    private func makeWorkerFrame(operationID: UUID, command: WorkerCommand, deadline: WorkerDeadline) -> WorkerRequest? {
+        guard let parent = WorkerProcessIdentity.current() else { return nil }
+        let executable = WorkerExecutableIdentity(uid: parent.uid, gid: parent.gid, device: parent.executableDevice, inode: parent.executableInode, path: parent.executablePath)
+        return WorkerRequest(schemaVersion: 1, operationID: operationID, nonce: UUID(),
+                             deadline: deadline, parent: parent, workerExecutable: executable, command: command)
+    }
+
+    private func launchOutcome(from result: WorkerExchangeResult) -> WorkerLaunchOutcome {
+        switch result {
+        case .response(let response): return .childReturned(response)
+        case .spawnOrSetupFailedBeforeRequest(let value): return .spawnOrSetupFailedBeforeRequest(value)
+        case .requestNotSent(let value): return .requestNotSent(value)
+        case .childRefusedOrFailed(let value): return .childRefusedOrFailed(value)
+        case .cancelled: return .timedOut
+        case .timedOut: return .timedOut
+        case .protocolViolation(let value): return .protocolViolation(value)
+        }
+    }
+
     private func exchange(request: WorkerLaunchRequest, frame: WorkerRequest, encoded: Data,
-                          lease: AppleAutomationJournal.JournalLease, preparedOperationID: UUID) -> WorkerLaunchOutcome {
+                          lease: AppleAutomationJournal.JournalLease, preparedOperationID: UUID,
+                          isCancelled: () -> Bool = { false }) -> WorkerExchangeResult {
         var owned = Set<Int32>()
         func keep(_ fd: Int32) -> Int32 { owned.insert(fd); return fd }
         func closeOwned(_ fd: Int32) { if owned.remove(fd) != nil { try? io.close(fd) } }
@@ -583,9 +823,11 @@ package struct WorkerLauncher {
             spawnedPIDHook?(pid)
             closeOwned(req.read); closeOwned(resp.write); closeOwned(null)
             try lease.markUncertainAfterHandoff(operationID: preparedOperationID)
-            try WorkerFrameIO.writeFrame(encoded, to: req.write, cap: WorkerFrameIO.requestCap, io: io, deadline: request.deadline)
+            try WorkerFrameIO.writeFrame(encoded, to: req.write, cap: WorkerFrameIO.requestCap, io: io,
+                                         deadline: request.deadline, isCancelled: isCancelled)
             closeOwned(req.write)
-            let data = try WorkerFrameIO.readOneFrameThenEOF(from: resp.read, cap: WorkerFrameIO.responseCap, io: io, deadline: request.deadline)
+            let data = try WorkerFrameIO.readOneFrameThenEOF(from: resp.read, cap: WorkerFrameIO.responseCap, io: io,
+                                                             deadline: request.deadline, isCancelled: isCancelled)
             closeOwned(resp.read)
             let response = try JSONDecoder().decode(WorkerResponse.self, from: data)
             cleanup(killChild: false)
@@ -601,7 +843,10 @@ package struct WorkerLauncher {
                 return .protocolViolation("journal-binding")
             }
             guard response.category == .ack else { return .childRefusedOrFailed(response.category.rawValue) }
-            return .childReturned(response)
+            return .response(response)
+        } catch WorkerProtocolError.cancelled {
+            cleanup(killChild: true)
+            return .cancelled
         } catch WorkerProtocolError.deadlineExpired {
             cleanup(killChild: true)
             return .timedOut

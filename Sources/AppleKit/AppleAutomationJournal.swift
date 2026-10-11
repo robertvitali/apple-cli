@@ -169,7 +169,7 @@ public enum AppleAutomationJournal {
     }
 
     public struct Receipt: Equatable {
-        public enum Disposition: String, Equatable, CaseIterable { case recovered, noDelivery }
+        public enum Disposition: String, Equatable, CaseIterable { case recovered, noDelivery, observedState }
         public let operationID: UUID
         public let disposition: Disposition
         public let recordedMonotonicNanos: UInt64
@@ -255,6 +255,11 @@ public enum AppleAutomationJournal {
             snapshot.pending = nil
             appendReceipt(&snapshot, Receipt(operationID: operationID, disposition: .noDelivery))
             try AppleAutomationJournal.writeSnapshot(snapshot, rootFD: rootFD, purpose: .resolve, checkpointHook: checkpointHook)
+        }
+
+        func recordObservedState(operationID: UUID) throws {
+            try requireActive()
+            try resolve(operationID: operationID, disposition: .observedState)
         }
 
         // Test seam for replay-guard regression only; production callers use begin(_:) so
