@@ -285,6 +285,41 @@ struct AutomationWorkerTests {
         try? io.close(trailing.read)
     }
 
+    @Test("worker response decoding sanitizes optional detail and accepts legacy frames")
+    func workerResponseDecodingSanitizesOptionalDetail() throws {
+        let operationID = UUID()
+        let nonce = UUID()
+        func json(_ detail: String?) -> Data {
+            var object: [String: Any] = [
+                "schemaVersion": 1,
+                "operationID": operationID.uuidString,
+                "nonce": nonce.uuidString,
+                "category": "refused"
+            ]
+            if let detail { object["detail"] = detail }
+            return try! JSONSerialization.data(withJSONObject: object, options: [.sortedKeys])
+        }
+
+        let legacy = try JSONDecoder().decode(WorkerResponse.self, from: json(nil))
+        #expect(legacy.detail == nil)
+        #expect(legacy.failureReason == "refused")
+
+        let valid = try JSONDecoder().decode(WorkerResponse.self, from: json("target-drift"))
+        #expect(valid.detail == "target-drift")
+        #expect(valid.failureReason == "target-drift")
+
+        for privateLookingDetail in ["unsafe detail", "555-0100", "Alice", "token_ABC123"] {
+            let unsafe = try JSONDecoder().decode(WorkerResponse.self, from: json(privateLookingDetail))
+            #expect(unsafe.detail == nil)
+            #expect(unsafe.failureReason == "refused")
+        }
+
+        let encodedUnsafe = WorkerResponse(schemaVersion: 1, operationID: operationID, nonce: nonce,
+                                           category: .refused, detail: "unsafe detail")
+        #expect(encodedUnsafe.detail == nil)
+        #expect(!String(decoding: try JSONEncoder().encode(encodedUnsafe), as: UTF8.self).contains("unsafe detail"))
+    }
+
     @Test("response reader waits for EOF so ACK then hang times out")
     func ackThenHangTimesOutBeforeAcceptingFrame() throws {
         let io = DarwinScriptProcessIO()
@@ -467,7 +502,8 @@ struct AutomationWorkerTests {
     @Test("observed action retains uncertainty when worker or verifier cannot prove success")
     func observedActionRetainsUncertaintyWithoutVerifiedSuccess() throws {
         for (command, prefix) in [
-            ("probe.refuse", "childRefusedOrFailed(refused)"),
+            ("probe.refuse", "childRefusedOrFailed(probe-refused)"),
+            ("probe.refuse-unsafe-detail", "childRefusedOrFailed(refused)"),
             ("probe.verify-false", "verificationFailed"),
             ("probe.verify-throw", "childRefusedOrFailed(unsupported-command)"),
             ("probe.verify-sleep", "timedOut"),

@@ -106,11 +106,89 @@ package struct WorkerRequest: Codable, Equatable, Sendable {
 
 package enum WorkerResponseCategory: String, Codable, Equatable, Sendable { case ack, refused, failed }
 
+package struct WorkerOperationResult: Equatable, Sendable {
+    package let category: WorkerResponseCategory
+    package let detail: String?
+
+    package init(_ category: WorkerResponseCategory, detail: String? = nil) {
+        self.category = category
+        self.detail = Self.safeDetail(detail)
+    }
+
+    package static let ack = WorkerOperationResult(.ack)
+    package static let refused = WorkerOperationResult(.refused)
+    package static let failed = WorkerOperationResult(.failed)
+
+    package static func refused(_ detail: String) -> WorkerOperationResult {
+        WorkerOperationResult(.refused, detail: detail)
+    }
+
+    package static func failed(_ detail: String) -> WorkerOperationResult {
+        WorkerOperationResult(.failed, detail: detail)
+    }
+
+    private static let publicDetails: Set<String> = [
+        "accessibility-denied",
+        "ambiguous-selected-message",
+        "ax-failure",
+        "deadline-expired",
+        "invalid-payload",
+        "picker-unavailable",
+        "probe-refused",
+        "reaction-unavailable",
+        "target-drift",
+        "traversal-limit",
+        "unknown-ax-value"
+    ]
+
+    private static func safeDetail(_ value: String?) -> String? {
+        guard let value, value.utf8.count <= 128, publicDetails.contains(value) else { return nil }
+        return value
+    }
+}
+
 package struct WorkerResponse: Codable, Equatable, Sendable {
     package let schemaVersion: Int
     package let operationID: UUID
     package let nonce: UUID
     package let category: WorkerResponseCategory
+    package let detail: String?
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion
+        case operationID
+        case nonce
+        case category
+        case detail
+    }
+
+    package init(schemaVersion: Int, operationID: UUID, nonce: UUID, category: WorkerResponseCategory, detail: String? = nil) {
+        self.schemaVersion = schemaVersion
+        self.operationID = operationID
+        self.nonce = nonce
+        self.category = category
+        self.detail = WorkerOperationResult(category, detail: detail).detail
+    }
+
+    package init(from decoder: any Decoder) throws {
+        let container = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(schemaVersion: container.decode(Int.self, forKey: .schemaVersion),
+                      operationID: container.decode(UUID.self, forKey: .operationID),
+                      nonce: container.decode(UUID.self, forKey: .nonce),
+                      category: container.decode(WorkerResponseCategory.self, forKey: .category),
+                      detail: container.decodeIfPresent(String.self, forKey: .detail))
+    }
+
+    package func encode(to encoder: any Encoder) throws {
+        var container = encoder.container(keyedBy: CodingKeys.self)
+        try container.encode(schemaVersion, forKey: .schemaVersion)
+        try container.encode(operationID, forKey: .operationID)
+        try container.encode(nonce, forKey: .nonce)
+        try container.encode(category, forKey: .category)
+        try container.encodeIfPresent(detail, forKey: .detail)
+    }
+
+    package var failureReason: String { detail ?? category.rawValue }
 }
 
 package enum WorkerProtocolError: Error, Equatable, CustomStringConvertible {
@@ -261,7 +339,7 @@ enum WorkerFrameIO {
 }
 
 package protocol WorkerOperation: Sendable {
-    func run(_ request: WorkerRequest, deadline: WorkerDeadline) throws -> WorkerResponseCategory
+    func run(_ request: WorkerRequest, deadline: WorkerDeadline) throws -> WorkerOperationResult
 }
 
 package protocol WorkerOperationRegistry: Sendable {
@@ -301,9 +379,9 @@ package enum InternalWorkerMain {
             let watchdog = WorkerOperationWatchdog(parent: request.parent, deadline: request.deadline)
             watchdog.start()
             defer { watchdog.cancel() }
-            let category = try operation.run(request, deadline: request.deadline)
+            let result = try operation.run(request, deadline: request.deadline)
             guard validateParent(request.parent), validateWorkerExecutable(request.workerExecutable, sameExecutableAs: request.parent) else { throw WorkerProtocolError.parentIdentityMismatch }
-            let response = WorkerResponse(schemaVersion: 1, operationID: request.operationID, nonce: request.nonce, category: category)
+            let response = WorkerResponse(schemaVersion: 1, operationID: request.operationID, nonce: request.nonce, category: result.category, detail: result.detail)
             let responseData = try JSONEncoder().encode(response)
             try WorkerFrameIO.writeFrame(responseData, to: responseFD, cap: WorkerFrameIO.responseCap,
                                          io: io, deadline: request.deadline)
@@ -501,7 +579,8 @@ package enum WorkerLaunchOutcome: CustomStringConvertible {
         case .spawnOrSetupFailedBeforeRequest(let value): return "spawnOrSetupFailedBeforeRequest(\(value))"
         case .requestNotSent(let value): return "requestNotSent(\(value))"
         case .childRefusedOrFailed(let value): return "childRefusedOrFailed(\(value))"
-        case .childReturned(let response): return "childReturned(\(response.category.rawValue))"
+        case .childReturned(let response):
+            return response.detail.map { "childReturned(\(response.category.rawValue):\($0))" } ?? "childReturned(\(response.category.rawValue))"
         case .timedOut: return "timedOut"
         case .protocolViolation(let value): return "protocolViolation(\(value))"
         }
@@ -853,7 +932,7 @@ package struct WorkerLauncher {
                   pending.matches(request.journal.request) else {
                 return .protocolViolation("journal-binding")
             }
-            guard response.category == .ack else { return .childRefusedOrFailed(response.category.rawValue) }
+            guard response.category == .ack else { return .childRefusedOrFailed(response.failureReason) }
             return .response(response)
         } catch WorkerProtocolError.cancelled {
             cleanup(killChild: true)

@@ -6,7 +6,7 @@ import AppleKit
 func c_fork() -> pid_t
 
 struct ProbeOperation: WorkerOperation {
-    func run(_ request: WorkerRequest, deadline: WorkerDeadline) throws -> WorkerResponseCategory {
+    func run(_ request: WorkerRequest, deadline: WorkerDeadline) throws -> WorkerOperationResult {
         switch request.command.name {
         case "probe.empty":
             let extraDescriptors = (3..<64).filter { fcntl(Int32($0), F_GETFD) >= 0 }
@@ -21,7 +21,9 @@ struct ProbeOperation: WorkerOperation {
         case "probe.crash":
             Darwin.abort()
         case "probe.refuse":
-            return .refused
+            return .refused("probe-refused")
+        case "probe.refuse-unsafe-detail":
+            return .refused("unsafe detail")
         case "probe.cancel-marker":
             if let payload = request.command.payload,
                let path = String(data: payload, encoding: .utf8) {
