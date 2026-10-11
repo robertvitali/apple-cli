@@ -293,7 +293,7 @@ struct RecentCommandTests {
             as? [[String: Any]])?.first)
 
         // Pinned in local time, as the --text stamp test below is: the wire date 2026-3-2-8-0-0 is
-        // local, so its UTC form starts with 2026-03-01 on a host east of UTC+8.
+        // local, so whether its UTC form starts with 2026-03-02 depends on the host's time zone.
         let modified = try #require(hit["modified"] as? String)
         let parsed = try #require(ISO8601DateFormatter().date(from: modified))
         var cal = Calendar(identifier: .gregorian)
