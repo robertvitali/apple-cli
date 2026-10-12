@@ -91,7 +91,7 @@ struct Apple: ParsableCommand {
         signal(SIGPIPE, SIG_IGN)
         if InternalWorkerMain.isWorkerInvocation(CommandLine.arguments) {
             Foundation.exit(InternalWorkerMain.run(arguments: CommandLine.arguments,
-                                                  registry: EmptyWorkerOperationRegistry()))
+                                                  registry: MessagesCommand.workerOperationRegistry()))
         }
         Foundation.exit(execute(arguments: CommandLine.arguments, streams: .standard))
     }

@@ -14,6 +14,7 @@ apple messages
 
 ## Subcommands
 
+- [`automation`](./automation/index.md) — Read or recover shared Messages automation state.
 - [`chats`](./chats.md) — List named group chats (chat_identifier, display_name, last activity, participants).
 - [`check-addressbook`](./check-addressbook.md) — Diagnose AddressBook *.abcddb access + required tables + contact counts.
 - [`check-availability`](./check-availability.md) — Check (history-based) whether a recipient has iMessage, else SMS fallback.
@@ -24,7 +25,7 @@ apple messages
 - [`find-contact`](./find-contact.md) — Fuzzy-search contacts by name/nickname; ranked candidates with confidence scores.
 - [`get`](./get.md) — Read one message by exact conversation identity and exact message identity.
 - [`history`](./history.md) — Read one conversation by exact chat GUID or local chat ROWID.
-- [`reaction`](./reaction/index.md) — Inspect reactions on exact Messages targets.
+- [`reaction`](./reaction/index.md) — Inspect or mutate an exact message reaction.
 - [`recent`](./recent.md) — Recent messages across ALL chats in the last N hours (optionally by contact).
 - [`search`](./search.md) — Search messages: fuzzy (WRatio) + threshold + time window (or contains/exact).
 - [`send`](./send.md) — Send an iMessage/SMS (sends on call; --dry-run previews).

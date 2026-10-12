@@ -47,6 +47,19 @@ JSON output are stable per the versioning policy — breaking changes bump
   [`history`](https://github.com/robertvitali/apple-cli/blob/main/docs/manual/messages/history.md),
   [`get`](https://github.com/robertvitali/apple-cli/blob/main/docs/manual/messages/get.md).
 
+- **Experimental standard Messages reaction writes now run through `apple messages
+  reaction set` and `apple messages reaction remove`.** The commands target exact
+  conversation/message/native-part identifiers, preview with `--dry-run`, and use
+  the shared Messages automation journal for pending-operation gating. Standard
+  reaction execution verifies native picker selected state, binds the worker ACK
+  to the pending operation, and then verifies fresh database target identity and
+  eligibility before reporting `verification_source:
+  ui_selected_state_and_database_identity`. Strict targeting remains the default;
+  `--experimental-ui-handoff` explicitly opts into the weaker modal route when the
+  Tapback picker hides the transcript and reports that limitation. Custom emoji
+  remains preview-only, and `messages automation status` / `recover` expose
+  unresolved operations.
+
 - **`apple messages reaction inspect` now exposes read-only exact reaction
   inspection.** It uses the same exact chat/message selectors as `messages get`,
   can target a native message part with `--part-index`, and returns the current

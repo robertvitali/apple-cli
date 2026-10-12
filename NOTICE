@@ -16,6 +16,8 @@ MIT terms, and the specific copyright line added below before the port lands.
 - sweetrb/apple-notes-mcp (MIT) — Notes: AppleScript templates, NoteStore.sqlite
   checklist protobuf decoder, markdown conversion, attachment handling.
 - gumadeiras/fruitmail-cli (MIT) — Mail: Envelope Index SQLite fast-read approach.
+- Beeper platform-imessage (MIT) — Messages: reaction mappings, native deep-link
+  and Tapback Accessibility interaction design, from commit fdc5640bfcf936c3d8208bc15411944b7ed9819c.
 
 License verification REQUIRED before lifting any code from these references
 (their licenses were flagged "verify" during scoping):
@@ -26,3 +28,30 @@ License verification REQUIRED before lifting any code from these references
 
 Per-domain rule: confirm the upstream license permits reuse and add its exact
 copyright line here BEFORE porting any of its code.
+
+Beeper platform-imessage
+------------------------
+Source: https://github.com/beeper/platform-imessage/tree/fdc5640bfcf936c3d8208bc15411944b7ed9819c
+License: MIT
+
+MIT License
+
+Copyright (c) 2020-2023 Texts.com, 2023- Automattic Inc
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.

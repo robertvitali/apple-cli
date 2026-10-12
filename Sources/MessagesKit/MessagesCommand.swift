@@ -16,7 +16,8 @@ public struct MessagesCommand: ParsableCommand {
         abstract: "iMessage / SMS — send, read, search.",
         subcommands: [
             Recent.self, Send_.self, FindContact.self, Chats.self, Search.self,
-            Conversations.self, History.self, Get.self, Reaction.self,
+            Conversations.self, History.self, Get.self,
+            Reaction.self, MessagesAutomation.self,
             CheckAvailability.self, CheckDB.self, CheckContacts.self, CheckAddressBook.self,
             Doctor.self,
         ]
@@ -28,14 +29,14 @@ public struct MessagesCommand: ParsableCommand {
     /// smoke test's ok=false contract, and gives agents a machine-readable nudge).
     public func run() throws {
         try runGuarded(tool: "messages") {
-            throw AppleError.validation("specify a subcommand: recent, send, find-contact, chats, search, conversations, history, get, reaction, check-availability, check-db, check-contacts, check-addressbook, doctor")
+            throw AppleError.validation("specify a subcommand: recent, send, find-contact, chats, search, conversations, history, get, reaction, automation, check-availability, check-db, check-contacts, check-addressbook, doctor")
         }
     }
 }
 
 // MARK: - Shared output helper
 
-let tool = "messages"
+package let tool = "messages"
 
 /// The I/O edges of `apple messages`, bound once per invocation. Production has exactly ONE
 /// value — `.live` — and no flag or environment variable can select another; the seam exists so
@@ -52,6 +53,8 @@ struct MessagesCommandDependencies: Sendable {
     var addressBookDiagnostic: @Sendable () -> AddressBook.Diagnostic
     var accessibilityDiagnostic: @Sendable () -> Permissions.AccessibilityPreflight
     var hasFullDiskAccess: @Sendable () -> Bool
+    var messagesAutomationStateRoot: @Sendable () -> String
+    var launchObservedWorker: @Sendable (WorkerObservedAction) throws -> WorkerObservedOutcome
     /// Resolves the write posture (execute-vs-preview, sandbox, sandbox recipient allowlist) for
     /// `send`. Injected for the same reason `TestMode.sandboxActive(flag:envVar:)` and
     /// `GlobalOptions.willExecute(defaultDryRun:envVar:)` carry `envVar:` seams: the resolution
@@ -69,6 +72,8 @@ struct MessagesCommandDependencies: Sendable {
         addressBookDiagnostic: AddressBook.diagnose,
         accessibilityDiagnostic: Permissions.accessibilityPreflight,
         hasFullDiskAccess: Permissions.hasFullDiskAccess,
+        messagesAutomationStateRoot: MessagesAutomationState.productionRoot,
+        launchObservedWorker: { try WorkerLauncher().launchObserved($0) },
         // Wrapped rather than referenced directly: `resolve` carries a default argument (the
         // allowlist-reader seam), and a Swift function reference cannot elide one.
         resolveGate: { try MessagesWriteGuard.resolve($0) }
@@ -76,7 +81,7 @@ struct MessagesCommandDependencies: Sendable {
 }
 
 /// Emit JSON (default) or a human text rendering (`--text`) on stdout.
-func emit<T: Encodable>(_ global: GlobalOptions, _ data: T, text: () -> String) throws {
+package func emit<T: Encodable>(_ global: GlobalOptions, _ data: T, text: () -> String) throws {
     if global.json {
         try Output.emit(tool: tool, data: data)
     } else {
@@ -86,7 +91,7 @@ func emit<T: Encodable>(_ global: GlobalOptions, _ data: T, text: () -> String) 
 
 /// Emit a messages WRITE result, tagging the envelope when the sandbox is engaged so a caller can
 /// tell a restricted send from a normal one without re-reading the environment.
-private func emitWrite<T: Encodable>(_ global: GlobalOptions, _ data: T, sandboxActive: Bool,
+package func emitWrite<T: Encodable>(_ global: GlobalOptions, _ data: T, sandboxActive: Bool,
                                      text: () -> String) throws {
     if global.json {
         try Output.emit(tool: tool, data: data, sandboxActive: sandboxActive)
@@ -108,10 +113,21 @@ enum MessagesWriteGuard {
     struct Gate: Sendable, Equatable {
         let willExecute: Bool
         let sandboxActive: Bool
+        /// The sandbox item-label prefix (`APPLE_TEST_SANDBOX`), captured with the rest of the
+        /// write posture so sandbox checks do not re-read process-global environment mid-command.
+        let sandboxPrefix: String
         /// The sandbox recipient allowlist (`APPLE_TEST_RECIPIENTS`), captured HERE rather than
         /// re-read at the guard, so the whole write posture is bound once — and so the logic tier
         /// can exercise the sandbox refusal branch without mutating a process-wide variable.
         let allowedRecipients: [String]
+
+        init(willExecute: Bool, sandboxActive: Bool, sandboxPrefix: String = TestMode.canonicalSandboxPrefix,
+             allowedRecipients: [String]) {
+            self.willExecute = willExecute
+            self.sandboxActive = sandboxActive
+            self.sandboxPrefix = sandboxPrefix
+            self.allowedRecipients = allowedRecipients
+        }
     }
 
     /// Resolve a messages write under write-model v2: **it sends when invoked**, exactly as
@@ -152,6 +168,7 @@ enum MessagesWriteGuard {
         let sandboxActive = try TestMode.sandboxActive(flag: global.testMode)
         let willExecute = try global.willExecute(defaultDryRun: false)
         return Gate(willExecute: willExecute, sandboxActive: sandboxActive,
+                    sandboxPrefix: TestMode.sandboxPrefix,
                     allowedRecipients: allowedRecipients())
     }
 }
@@ -656,7 +673,7 @@ private func validateOpaqueGUID(_ value: String, name: String) throws -> String 
     return value
 }
 
-func parseChatSelector(rowid: Int64?, guid: String?) throws -> ChatDB.ExactChatSelector {
+package func parseChatSelector(rowid: Int64?, guid: String?) throws -> ChatDB.ExactChatSelector {
     switch (rowid, guid) {
     case let (id?, nil):
         guard id > 0 else { throw AppleError.validation("chat-rowid must be positive") }
@@ -670,7 +687,7 @@ func parseChatSelector(rowid: Int64?, guid: String?) throws -> ChatDB.ExactChatS
     }
 }
 
-func parseMessageSelector(rowid: Int64?, guid: String?) throws -> ChatDB.ExactMessageSelector {
+package func parseMessageSelector(rowid: Int64?, guid: String?) throws -> ChatDB.ExactMessageSelector {
     switch (rowid, guid) {
     case let (id?, nil):
         guard id > 0 else { throw AppleError.validation("message-rowid must be positive") }

@@ -38,6 +38,10 @@ extension MessagesCommandDependencies {
             Permissions.accessibilityPreflight(trusted: false)
         },
         hasFullDiskAccess: @escaping @Sendable () -> Bool = { false },
+        messagesAutomationStateRoot: @escaping @Sendable () -> String = { "synthetic/messages-automation" },
+        launchObservedWorker: @escaping @Sendable (WorkerObservedAction) throws -> WorkerObservedOutcome = { _ in
+            throw AppleError.upstream("test worker dependency not configured")
+        },
         allowedRecipients: [String] = []
     ) -> MessagesCommandDependencies {
         MessagesCommandDependencies(
@@ -48,6 +52,8 @@ extension MessagesCommandDependencies {
             addressBookDiagnostic: addressBookDiagnostic,
             accessibilityDiagnostic: accessibilityDiagnostic,
             hasFullDiskAccess: hasFullDiskAccess,
+            messagesAutomationStateRoot: messagesAutomationStateRoot,
+            launchObservedWorker: launchObservedWorker,
             resolveGate: hermeticGate(allowedRecipients: allowedRecipients)
         )
     }
@@ -111,6 +117,45 @@ private func commandNativeArchive(_ text: String, _ attributes: [(NSAttributedSt
     return NSArchiver.archivedData(withRootObject: value)
 }
 
+private func commandReactionRange(_ text: String, _ needle: String) -> NSRange {
+    let range = (text as NSString).range(of: needle)
+    precondition(range.location != NSNotFound)
+    return range
+}
+
+private extension ChatFixture {
+    func addReactionColumns(includeCustomEmoji: Bool = true) throws {
+        try exec("ALTER TABLE message ADD COLUMN associated_message_guid TEXT;")
+        try exec("ALTER TABLE message ADD COLUMN associated_message_type INTEGER;")
+        if includeCustomEmoji {
+            try exec("ALTER TABLE message ADD COLUMN associated_message_emoji TEXT;")
+        }
+    }
+
+    func insertReactionTarget(rowid: Int64, guid: String, text: String = "apple-cli-test target",
+                              part: Int = 2, chatRowid: Int64 = 3) throws {
+        let body = commandNativeArchive(text, [
+            (commandNativePartKey, NSNumber(value: part), commandReactionRange(text, "target")),
+        ])
+        try insertMessage(rowid: rowid, guid: guid, text: text, attributedBody: body,
+                          chatRowid: chatRowid, date: base + 10)
+    }
+
+    func insertReaction(rowid: Int64, guid: String, associatedGUID: String, type: Int,
+                        isFromMe: Int = 1, handleID: Int64? = 1, date: Int64,
+                        chatRowid: Int64 = 3, emoji: String? = nil) throws {
+        let handleSQL = handleID.map(String.init) ?? "NULL"
+        let emojiSQL = emoji.map { "'\($0)'" } ?? "NULL"
+        try exec("""
+            INSERT INTO message (ROWID,guid,text,is_from_me,handle_id,service,date,error,
+                associated_message_guid,associated_message_type,associated_message_emoji)
+            VALUES (\(rowid),'\(guid)',NULL,\(isFromMe),\(handleSQL),'iMessage',\(date),0,
+                '\(associatedGUID)',\(type),\(emojiSQL));
+            INSERT INTO chat_message_join VALUES (\(chatRowid),\(rowid));
+            """)
+    }
+}
+
 /// Rebuilds `chat` WITHOUT `style`, keeping `chat_message_join` intact. That is the one schema
 /// shape where a store can join messages to chats but cannot classify them, so it is what makes
 /// `--direct-only` unable to run — the fail-open case the `direct_only_applied` field exists for.
@@ -120,7 +165,7 @@ private let styleLessChatSchema = """
         room_name TEXT, guid TEXT, service_name TEXT, group_id TEXT);
     """
 
-@Suite("Messages command dependency injection")
+@Suite("Messages command dependency injection", .serialized)
 struct MessagesCommandDependencyTests {
     private let scratch = ScratchDirs("messages-command-dependencies")
     /// Held for the LIFETIME OF THE TEST, not just the statement that builds the dependencies.
@@ -1468,27 +1513,12 @@ struct MessagesCommandDependencyTests {
         #expect(wrongChat.exitCode == AppleExit.notFound)
     }
 
-
-    @Test func reactionsInspectCommandReportsExactCurrentState() throws {
+    @Test func reactionInspectUsesExactTargetAndReportsCurrentOutgoing() throws {
         let fx = try ChatFixture()
-        try fx.exec("""
-            ALTER TABLE message ADD COLUMN associated_message_guid TEXT;
-            ALTER TABLE message ADD COLUMN associated_message_type INTEGER;
-            ALTER TABLE message ADD COLUMN associated_message_emoji TEXT;
-            """)
-        let text = "left right"
-        let blob = commandNativeArchive(text, [
-            (commandNativePartKey, NSNumber(value: 2), (text as NSString).range(of: "right"))
-        ])
-        try fx.insertMessage(rowid: 70, guid: "target-guid", text: text,
-                             attributedBody: blob, chatRowid: 3, date: fx.base)
-        try fx.exec("""
-            INSERT INTO message (ROWID,guid,text,is_from_me,handle_id,service,date,error,
-                associated_message_guid,associated_message_type,associated_message_emoji)
-            VALUES (100,'reaction-like',NULL,1,1,'iMessage',\(fx.base + 10),0,
-                'p:2/target-guid',2001,NULL);
-            INSERT INTO chat_message_join VALUES (3,100);
-            """)
+        try fx.addReactionColumns()
+        try fx.insertReactionTarget(rowid: 70, guid: "reaction-target")
+        try fx.insertReaction(rowid: 100, guid: "reaction-heart", associatedGUID: "p:2/reaction-target",
+                              type: 2000, date: fx.base + 11)
         let addressBookLoads = LockedBox(0)
         let path = fx.path
         let homePath = fx.homePath
@@ -1516,40 +1546,37 @@ struct MessagesCommandDependencyTests {
         #expect(target["mutation_eligible"] as? Bool == true)
         let current = try #require(output["current_outgoing"] as? [String: Any])
         #expect(current["status"] as? String == "present")
-        #expect(current["key"] as? String == "like")
-        let reaction = try #require(current["reaction"] as? [String: Any])
-        #expect(reaction["key"] as? String == "like")
-        #expect(reaction["name"] as? String == "like")
+        #expect(current["key"] as? String == "heart")
         let evidence = try #require(output["evidence"] as? [String: Any])
         #expect(evidence["row_limit"] as? Int == 10)
         #expect(evidence["rows_examined"] as? Int == 1)
     }
 
+    @Test func reactionInspectTextOutputPreservesDetailedCompatibilityFormat() throws {
+        let fx = try ChatFixture()
+        try fx.addReactionColumns()
+        try fx.insertReactionTarget(rowid: 70, guid: "reaction-target")
+        try fx.insertReaction(rowid: 100, guid: "reaction-heart", associatedGUID: "p:2/reaction-target",
+                              type: 2000, date: fx.base + 11)
+        let deps = fixtureDependencies(fx)
+
+        let text = try captureStdout {
+            try ReactionInspect.parse(["--text", "--chat-rowid", "3", "--message-rowid", "70",
+                                       "--part-index", "2", "--row-limit", "10"])
+                .run(dependencies: deps)
+        }
+
+        #expect(text == "reaction status=ok current=heart part=2 eligible=true\n")
+    }
+
     @Test func reactionsInspectCommandReportsBoundedRows() throws {
         let fx = try ChatFixture()
-        try fx.exec("""
-            ALTER TABLE message ADD COLUMN associated_message_guid TEXT;
-            ALTER TABLE message ADD COLUMN associated_message_type INTEGER;
-            ALTER TABLE message ADD COLUMN associated_message_emoji TEXT;
-            """)
-        let text = "left right"
-        let blob = commandNativeArchive(text, [
-            (commandNativePartKey, NSNumber(value: 2), (text as NSString).range(of: "right"))
-        ])
-        try fx.insertMessage(rowid: 70, guid: "target-guid", text: text, attributedBody: blob,
-                             chatRowid: 3, date: fx.base)
-        try fx.exec("""
-            INSERT INTO message (ROWID,guid,text,is_from_me,handle_id,service,date,error,
-                associated_message_guid,associated_message_type,associated_message_emoji)
-            VALUES (100,'reaction-like',NULL,1,1,'iMessage',\(fx.base + 10),0,
-                'p:2/target-guid',2001,NULL);
-            INSERT INTO chat_message_join VALUES (3,100);
-            INSERT INTO message (ROWID,guid,text,is_from_me,handle_id,service,date,error,
-                associated_message_guid,associated_message_type,associated_message_emoji)
-            VALUES (101,'reaction-heart',NULL,0,1,'iMessage',\(fx.base + 11),0,
-                'p:2/target-guid',2000,NULL);
-            INSERT INTO chat_message_join VALUES (3,101);
-            """)
+        try fx.addReactionColumns()
+        try fx.insertReactionTarget(rowid: 70, guid: "reaction-target")
+        try fx.insertReaction(rowid: 100, guid: "reaction-like", associatedGUID: "p:2/reaction-target",
+                              type: 2001, date: fx.base + 10)
+        try fx.insertReaction(rowid: 101, guid: "reaction-heart", associatedGUID: "p:2/reaction-target",
+                              type: 2000, isFromMe: 0, date: fx.base + 11)
         let deps = fixtureDependencies(fx)
 
         let output = try payload(from: captureStdout {
@@ -1602,6 +1629,709 @@ struct MessagesCommandDependencyTests {
         #expect(partError["type"] as? String == AppleErrorType.validation)
         #expect((partError["message"] as? String)?.contains("partIndex must be >= 0") == true)
         #expect(dbLoads.value == 0)
+    }
+
+    @Test func reactionSetDryRunDoesNotLaunchObservedWorkerOrCreateJournal() throws {
+        let fx = try ChatFixture()
+        try fx.addReactionColumns()
+        try fx.insertReactionTarget(rowid: 70, guid: "reaction-target")
+        let launched = LockedBox(false)
+        let deps = reactionDependencies(fx, allowedRecipients: ["+12125550100"]) { _ in
+            launched.withLock { $0 = true }
+            return .timedOut
+        }
+
+        let output = try payload(from: captureStdout {
+            try ReactionSet.parse(["--chat-rowid", "3", "--message-rowid", "70", "--part-index", "2",
+                                   "--reaction", "like", "--dry-run", "--test-mode"])
+                .run(dependencies: deps)
+        })
+
+        #expect(output["dry_run"] as? Bool == true)
+        #expect(output["executed"] as? Bool == false)
+        #expect(output["desired_reaction_key"] as? String == "like")
+        #expect(launched.value == false)
+    }
+
+    @Test func reactionSandboxRequiresLabeledSingleAllowedParticipant() throws {
+        let fx = try ChatFixture()
+        try fx.addReactionColumns()
+        try fx.insertReactionTarget(rowid: 70, guid: "reaction-target", text: "plain target")
+        let deps = reactionDependencies(fx, allowedRecipients: ["+12125550100"])
+
+        let result = try captureCommand {
+            try ReactionSet.parse(["--chat-rowid", "3", "--message-rowid", "70", "--part-index", "2",
+                                   "--reaction", "like", "--dry-run", "--test-mode"])
+                .run(dependencies: deps)
+        }
+
+        #expect(result.exitCode == AppleExit.permissionDenied)
+        let error = try errorPayload(from: result.stdout)
+        #expect(error["type"] as? String == AppleErrorType.safetyViolation)
+        #expect(error["sandbox"] as? Bool == true)
+    }
+
+    @Test func reactionProductionDryRunAllowsExactGroupTargets() throws {
+        let fx = try ChatFixture()
+        try fx.addReactionColumns()
+        try fx.insertReactionTarget(rowid: 70, guid: "reaction-target", chatRowid: 1)
+        let deps = reactionDependencies(fx)
+
+        let output = try payload(from: captureStdout {
+            try ReactionSet.parse(["--chat-rowid", "1", "--message-rowid", "70", "--part-index", "2",
+                                   "--reaction", "like", "--dry-run"])
+                .run(dependencies: deps)
+        })
+
+        #expect(output["dry_run"] as? Bool == true)
+        #expect(output["executed"] as? Bool == false)
+        #expect(output["desired_reaction_key"] as? String == "like")
+    }
+
+    @Test func reactionNoOpRunsThroughObservedLauncherPendingGate() throws {
+        let fx = try ChatFixture()
+        try fx.addReactionColumns()
+        try fx.insertReactionTarget(rowid: 70, guid: "reaction-target")
+        try fx.insertReaction(rowid: 100, guid: "reaction-like", associatedGUID: "p:2/reaction-target",
+                              type: 2001, date: fx.base + 11)
+        let sawAction = LockedBox(false)
+        let deps = reactionDependencies(fx, allowedRecipients: ["+12125550100"]) { action in
+            sawAction.withLock { $0 = true }
+            let resolved = try action.resolve()
+            let context = WorkerObservedContext(deadline: action.deadline, isCancelled: { false })
+            switch try action.preflight(resolved, context) {
+            case .alreadyInDesiredState(let verification):
+                throw ReactionTestFailure("unexpected DB no-op: \(verification)")
+            case .requiresMutation:
+                let response = WorkerResponse(schemaVersion: 1, operationID: UUID(), nonce: UUID(),
+                                              category: .ack, detail: "reaction-set-unchanged-verified")
+                let verification = try #require(try action.verify(resolved, response, context))
+                return .observedState(operationID: UUID(uuidString: "10101010-1010-4010-8010-101010101010")!,
+                                      verification: verification)
+            }
+        }
+
+        let result = try captureCommand {
+            try ReactionSet.parse(["--chat-rowid", "3", "--message-rowid", "70", "--part-index", "2",
+                                   "--reaction", "like", "--test-mode"])
+                .run(dependencies: deps)
+        }
+        #expect(result.exitCode == nil, Comment(rawValue: result.stdout))
+        let output = try payload(from: result.stdout)
+
+        #expect(sawAction.value == true)
+        #expect(output["dry_run"] as? Bool == false)
+        #expect(output["executed"] as? Bool == true)
+        #expect(output["observed_state"] as? String == "observedState")
+        #expect(output["verification_source"] as? String == "ui_selected_state_and_database_identity")
+        #expect(output["reaction_changed"] as? Bool == false)
+    }
+
+    @Test func reactionExecuteRequiresAccessibilityAfterNoOpPreflight() throws {
+        let fx = try ChatFixture()
+        try fx.addReactionColumns()
+        try fx.insertReactionTarget(rowid: 70, guid: "reaction-target")
+        let attemptedHandoff = LockedBox(false)
+        let deps = reactionDependencies(fx, allowedRecipients: ["+12125550100"],
+                                        accessibilityTrusted: false) { action in
+            let resolved = try action.resolve()
+            let context = WorkerObservedContext(deadline: action.deadline, isCancelled: { false })
+            do {
+                switch try action.preflight(resolved, context) {
+                case .alreadyInDesiredState:
+                    throw ReactionTestFailure("accessibility is not required for a no-op")
+                case .requiresMutation:
+                    attemptedHandoff.withLock { $0 = true }
+                    return .timedOut
+                }
+            } catch {
+                return .requestNotSent(String(describing: error))
+            }
+        }
+
+        let result = try captureCommand {
+            try ReactionSet.parse(["--chat-rowid", "3", "--message-rowid", "70", "--part-index", "2",
+                                   "--reaction", "like", "--test-mode"])
+                .run(dependencies: deps)
+        }
+
+        #expect(result.exitCode == AppleExit.permissionDenied)
+        let error = try errorPayload(from: result.stdout)
+        #expect(error["type"] as? String == AppleErrorType.permissionDenied)
+        #expect(error["status"] as? String == "accessibility_not_trusted")
+        #expect(attemptedHandoff.value == false)
+    }
+
+    @Test func reactionExecuteBindsWorkerPayloadAndVerifiesFreshDatabaseState() throws {
+        let fx = try ChatFixture()
+        try fx.addReactionColumns()
+        try fx.insertReactionTarget(rowid: 70, guid: "reaction-target")
+        let observedCommand = LockedBox<WorkerCommand?>(nil)
+        let operationID = UUID(uuidString: "11111111-1111-4111-8111-111111111111")!
+        let deps = reactionDependencies(fx, allowedRecipients: ["+12125550100"]) { action in
+            let resolved = try action.resolve()
+            observedCommand.withLock { $0 = resolved.command }
+            let context = WorkerObservedContext(deadline: action.deadline, isCancelled: { false })
+            switch try action.preflight(resolved, context) {
+            case .alreadyInDesiredState(let verification):
+                throw ReactionTestFailure("unexpected reaction no-op: \(verification)")
+            case .requiresMutation:
+                break
+            }
+            let response = WorkerResponse(schemaVersion: 1, operationID: operationID,
+                                          nonce: operationID, category: .ack,
+                                          detail: "reaction-set-changed-verified")
+            let verification = try #require(try action.verify(resolved, response, context))
+            return .observedState(operationID: operationID, verification: verification)
+        }
+
+        let result = try captureCommand {
+            try ReactionSet.parse(["--chat-rowid", "3", "--message-rowid", "70", "--part-index", "2",
+                                   "--reaction", "like", "--test-mode"])
+                .run(dependencies: deps)
+        }
+        #expect(result.exitCode == nil)
+        let output = try payload(from: result.stdout)
+
+        let command = try #require(observedCommand.value)
+        #expect(command.name == "messages.reaction.set")
+        let payloadData = try #require(command.payload)
+        let workerPayload = try JSONDecoder().decode(MessagesReactionWorkerPayload.self, from: payloadData)
+        #expect(workerPayload.operation == .set)
+        #expect(workerPayload.chatGUID == "iMessage;-;+12125550100")
+        #expect(workerPayload.messageGUID == "reaction-target")
+        #expect(workerPayload.nativePartIndex == 2)
+        #expect(workerPayload.nativePartGUID == "p:2/reaction-target")
+        #expect(output["dry_run"] as? Bool == false)
+        #expect(output["executed"] as? Bool == true)
+        #expect(output["operation_id"] as? String == operationID.uuidString)
+        #expect(output["observed_state"] as? String == "observedState")
+        #expect(output["verification_source"] as? String == "ui_selected_state_and_database_identity")
+        #expect(output["reaction_changed"] as? Bool == true)
+        let inspect = try #require(output["inspect"] as? [String: Any])
+        let current = try #require(inspect["current_outgoing"] as? [String: Any])
+        #expect(current["status"] as? String == "absent")
+    }
+
+    @Test func reactionExperimentalHandoffFlagBindsPayloadAndOutputMode() throws {
+        let fx = try ChatFixture()
+        try fx.addReactionColumns()
+        try fx.insertReactionTarget(rowid: 70, guid: "reaction-target")
+        let observedCommand = LockedBox<WorkerCommand?>(nil)
+        let operationID = UUID(uuidString: "12121212-1212-4121-8121-121212121212")!
+        let reactionDBPath = fx.path
+        let reactionDate = fx.base + 12
+        let deps = reactionDependencies(fx, allowedRecipients: ["+12125550100"]) { action in
+            let resolved = try action.resolve()
+            observedCommand.withLock { $0 = resolved.command }
+            let context = WorkerObservedContext(deadline: action.deadline, isCancelled: { false })
+            guard case .requiresMutation = try action.preflight(resolved, context) else {
+                throw ReactionTestFailure("unexpected no-op")
+            }
+            try insertReactionRow(path: reactionDBPath, rowid: 101, guid: "reaction-like",
+                                  associatedGUID: "p:2/reaction-target", type: 2001,
+                                  date: reactionDate)
+            let response = WorkerResponse(schemaVersion: 1, operationID: operationID,
+                                          nonce: operationID, category: .ack,
+                                          detail: "reaction-set-changed-verified")
+            let verification = try #require(try action.verify(resolved, response, context))
+            return .observedState(operationID: operationID, verification: verification)
+        }
+
+        let result = try captureCommand {
+            try ReactionSet.parse(["--chat-rowid", "3", "--message-rowid", "70", "--part-index", "2",
+                                   "--reaction", "like", "--experimental-ui-handoff", "--test-mode"])
+                .run(dependencies: deps)
+        }
+        #expect(result.exitCode == nil, Comment(rawValue: result.stdout))
+        let output = try payload(from: result.stdout)
+        let command = try #require(observedCommand.value)
+        let payloadData = try #require(command.payload)
+        let workerPayload = try JSONDecoder().decode(MessagesReactionWorkerPayload.self, from: payloadData)
+
+        #expect(workerPayload.experimentalUIHandoff == true)
+        #expect(output["targeting_mode"] as? String == "experimental_ui_handoff")
+        #expect((output["limitation"] as? String)?.contains("cannot prove original message continuity after modal") == true)
+    }
+
+    @Test func reactionVerificationRejectsBareUnknownOrWrongOperationAckDetails() throws {
+        for detail in [nil, "reaction-remove-changed-verified", "reaction-set-unknown-verified"] as [String?] {
+            let fx = try ChatFixture()
+            try fx.addReactionColumns()
+            try fx.insertReactionTarget(rowid: 70, guid: "reaction-target")
+            let deps = reactionDependencies(fx, allowedRecipients: ["+12125550100"]) { action in
+                let resolved = try action.resolve()
+                let context = WorkerObservedContext(deadline: action.deadline, isCancelled: { false })
+                guard case .requiresMutation = try action.preflight(resolved, context) else {
+                    throw ReactionTestFailure("unexpected no-op")
+                }
+                let response = WorkerResponse(schemaVersion: 1, operationID: UUID(), nonce: UUID(),
+                                              category: .ack, detail: detail)
+                if try action.verify(resolved, response, context) != nil {
+                    throw ReactionTestFailure("unexpectedly accepted ACK detail")
+                }
+                return .verificationFailed
+            }
+
+            let result = try captureCommand {
+                try ReactionSet.parse(["--chat-rowid", "3", "--message-rowid", "70", "--part-index", "2",
+                                       "--reaction", "like", "--test-mode"])
+                    .run(dependencies: deps)
+            }
+            #expect(result.exitCode == AppleExit.upstream)
+        }
+    }
+
+    @Test func reactionImplicitRemoveRequiresSelectorWhenDatabaseHasNoOutgoingReaction() throws {
+        let fx = try ChatFixture()
+        try fx.addReactionColumns()
+        try fx.insertReactionTarget(rowid: 70, guid: "reaction-target")
+        let deps = reactionDependencies(fx, allowedRecipients: ["+12125550100"])
+
+        let result = try captureCommand {
+            try ReactionRemove.parse(["--chat-rowid", "3", "--message-rowid", "70",
+                                      "--part-index", "2", "--test-mode"])
+                .run(dependencies: deps)
+        }
+
+        #expect(result.exitCode == AppleExit.usage)
+    }
+
+    @Test func reactionImplicitRemoveKeepsResolvedDesiredKeyAfterStateTurnsAbsent() throws {
+        let fx = try ChatFixture()
+        try fx.addReactionColumns()
+        try fx.insertReactionTarget(rowid: 70, guid: "reaction-target")
+        try fx.insertReaction(rowid: 100, guid: "reaction-heart", associatedGUID: "p:2/reaction-target",
+                              type: 2000, date: fx.base + 11)
+        let operationID = UUID(uuidString: "22222222-2222-4222-8222-222222222222")!
+        let reactionDBPath = fx.path
+        let reactionDate = fx.base + 12
+        let deps = reactionDependencies(fx, allowedRecipients: ["+12125550100"]) { action in
+            let resolved = try action.resolve()
+            let context = WorkerObservedContext(deadline: action.deadline, isCancelled: { false })
+            switch try action.preflight(resolved, context) {
+            case .alreadyInDesiredState(let verification):
+                throw ReactionTestFailure("unexpected reaction no-op: \(verification)")
+            case .requiresMutation:
+                break
+            }
+            try insertReactionRow(path: reactionDBPath, rowid: 101, guid: "remove-heart",
+                                  associatedGUID: "p:2/reaction-target", type: 3000,
+                                  date: reactionDate)
+            let response = WorkerResponse(schemaVersion: 1, operationID: operationID,
+                                          nonce: operationID, category: .ack,
+                                          detail: "reaction-remove-changed-verified")
+            let verification = try #require(try action.verify(resolved, response, context))
+            return .observedState(operationID: operationID, verification: verification)
+        }
+
+        let result = try captureCommand {
+            try ReactionRemove.parse(["--chat-rowid", "3", "--message-rowid", "70",
+                                      "--part-index", "2", "--test-mode"])
+                .run(dependencies: deps)
+        }
+        #expect(result.exitCode == nil, Comment(rawValue: result.stdout))
+        let output = try payload(from: result.stdout)
+
+        #expect(output["desired_reaction_key"] as? String == "heart")
+        #expect(output["observed_state"] as? String == "observedState")
+        let inspect = try #require(output["inspect"] as? [String: Any])
+        let current = try #require(inspect["current_outgoing"] as? [String: Any])
+        #expect(current["status"] as? String == "absent")
+    }
+
+    @Test func reactionVerificationRejectsRowidRetargetedToDifferentGuid() throws {
+        let fx = try ChatFixture()
+        try fx.addReactionColumns()
+        try fx.insertReactionTarget(rowid: 70, guid: "reaction-target")
+        let reactionDBPath = fx.path
+        let deps = reactionDependencies(fx, allowedRecipients: ["+12125550100"]) { action in
+            let resolved = try action.resolve()
+            let context = WorkerObservedContext(deadline: action.deadline, isCancelled: { false })
+            switch try action.preflight(resolved, context) {
+            case .alreadyInDesiredState(let verification):
+                throw ReactionTestFailure("unexpected reaction no-op: \(verification)")
+            case .requiresMutation:
+                break
+            }
+            try updateMessageGUID(path: reactionDBPath, rowid: 70, guid: "retargeted-message")
+            let response = WorkerResponse(schemaVersion: 1, operationID: UUID(), nonce: UUID(), category: .ack, detail: "reaction-set-changed-verified")
+            if let verification = try action.verify(resolved, response, context) {
+                throw ReactionTestFailure("verification unexpectedly accepted retargeted identity: \(verification)")
+            }
+            return .verificationFailed
+        }
+
+        let result = try captureCommand {
+            try ReactionSet.parse(["--chat-rowid", "3", "--message-rowid", "70", "--part-index", "2",
+                                   "--reaction", "like", "--test-mode"])
+                .run(dependencies: deps)
+        }
+
+        #expect(result.exitCode == AppleExit.upstream)
+        let error = try errorPayload(from: result.stdout)
+        #expect(error["type"] as? String == AppleErrorType.upstream)
+    }
+
+    @Test func reactionVerificationRejectsFreshAmbiguityForResolvedTarget() throws {
+        let fx = try ChatFixture()
+        try fx.addReactionColumns()
+        try fx.insertReactionTarget(rowid: 70, guid: "reaction-target")
+        let reactionDBPath = fx.path
+        let duplicateDate = fx.base + 14
+        let deps = reactionDependencies(fx, allowedRecipients: ["+12125550100"]) { action in
+            let resolved = try action.resolve()
+            let context = WorkerObservedContext(deadline: action.deadline, isCancelled: { false })
+            switch try action.preflight(resolved, context) {
+            case .alreadyInDesiredState(let verification):
+                throw ReactionTestFailure("unexpected reaction no-op: \(verification)")
+            case .requiresMutation:
+                break
+            }
+            try insertBareMessage(path: reactionDBPath, rowid: 71, guid: "reaction-target", date: duplicateDate)
+            let response = WorkerResponse(schemaVersion: 1, operationID: UUID(), nonce: UUID(), category: .ack, detail: "reaction-set-changed-verified")
+            if let verification = try action.verify(resolved, response, context) {
+                throw ReactionTestFailure("verification unexpectedly accepted ambiguous identity: \(verification)")
+            }
+            return .verificationFailed
+        }
+
+        let result = try captureCommand {
+            try ReactionSet.parse(["--chat-rowid", "3", "--message-rowid", "70", "--part-index", "2",
+                                   "--reaction", "like", "--test-mode"])
+                .run(dependencies: deps)
+        }
+
+        #expect(result.exitCode == AppleExit.upstream)
+        let error = try errorPayload(from: result.stdout)
+        #expect(error["type"] as? String == AppleErrorType.upstream)
+    }
+
+    @Test func reactionObservedOutputUsesInspectCapturedBeforePostLockDrift() throws {
+        let fx = try ChatFixture()
+        try fx.addReactionColumns()
+        try fx.insertReactionTarget(rowid: 70, guid: "reaction-target")
+        let operationID = UUID(uuidString: "33333333-3333-4333-8333-333333333333")!
+        let reactionDBPath = fx.path
+        let firstReactionDate = fx.base + 12
+        let secondReactionDate = fx.base + 13
+        let deps = reactionDependencies(fx, allowedRecipients: ["+12125550100"]) { action in
+            let resolved = try action.resolve()
+            let context = WorkerObservedContext(deadline: action.deadline, isCancelled: { false })
+            switch try action.preflight(resolved, context) {
+            case .alreadyInDesiredState(let verification):
+                throw ReactionTestFailure("unexpected reaction no-op: \(verification)")
+            case .requiresMutation:
+                break
+            }
+            try insertReactionRow(path: reactionDBPath, rowid: 101, guid: "reaction-like",
+                                  associatedGUID: "p:2/reaction-target", type: 2001,
+                                  date: firstReactionDate)
+            let response = WorkerResponse(schemaVersion: 1, operationID: operationID,
+                                          nonce: operationID, category: .ack,
+                                          detail: "reaction-set-changed-verified")
+            let verification = try #require(try action.verify(resolved, response, context))
+            try insertReactionRow(path: reactionDBPath, rowid: 102, guid: "reaction-heart",
+                                  associatedGUID: "p:2/reaction-target", type: 2000,
+                                  date: secondReactionDate)
+            return .observedState(operationID: operationID, verification: verification)
+        }
+
+        let result = try captureCommand {
+            try ReactionSet.parse(["--chat-rowid", "3", "--message-rowid", "70", "--part-index", "2",
+                                   "--reaction", "like", "--test-mode"])
+                .run(dependencies: deps)
+        }
+        #expect(result.exitCode == nil, Comment(rawValue: result.stdout))
+        let output = try payload(from: result.stdout)
+        let inspect = try #require(output["inspect"] as? [String: Any])
+        let current = try #require(inspect["current_outgoing"] as? [String: Any])
+        #expect(current["key"] as? String == "like")
+    }
+
+    @Test func reactionNoOpOutputUsesPreflightInspectBeforePostLockDrift() throws {
+        let fx = try ChatFixture()
+        try fx.addReactionColumns()
+        try fx.insertReactionTarget(rowid: 70, guid: "reaction-target")
+        try fx.insertReaction(rowid: 100, guid: "reaction-like", associatedGUID: "p:2/reaction-target",
+                              type: 2001, date: fx.base + 11)
+        let reactionDBPath = fx.path
+        let removalDate = fx.base + 12
+        let deps = reactionDependencies(fx, allowedRecipients: ["+12125550100"]) { action in
+            let resolved = try action.resolve()
+            let context = WorkerObservedContext(deadline: action.deadline, isCancelled: { false })
+            switch try action.preflight(resolved, context) {
+            case .alreadyInDesiredState(let verification):
+                throw ReactionTestFailure("unexpected DB no-op: \(verification)")
+            case .requiresMutation:
+                let operationID = UUID(uuidString: "20202020-2020-4020-8020-202020202020")!
+                let response = WorkerResponse(schemaVersion: 1, operationID: operationID, nonce: operationID,
+                                              category: .ack, detail: "reaction-set-unchanged-verified")
+                let verification = try #require(try action.verify(resolved, response, context))
+                try insertReactionRow(path: reactionDBPath, rowid: 101, guid: "remove-like",
+                                      associatedGUID: "p:2/reaction-target", type: 3001,
+                                      date: removalDate)
+                return .observedState(operationID: operationID, verification: verification)
+            }
+        }
+
+        let result = try captureCommand {
+            try ReactionSet.parse(["--chat-rowid", "3", "--message-rowid", "70", "--part-index", "2",
+                                   "--reaction", "like", "--test-mode"])
+                .run(dependencies: deps)
+        }
+        #expect(result.exitCode == nil, Comment(rawValue: result.stdout))
+        let output = try payload(from: result.stdout)
+        let inspect = try #require(output["inspect"] as? [String: Any])
+        let current = try #require(inspect["current_outgoing"] as? [String: Any])
+        #expect(current["key"] as? String == "like")
+        #expect(output["verification_source"] as? String == "ui_selected_state_and_database_identity")
+        #expect(output["reaction_changed"] as? Bool == false)
+    }
+
+    @Test func reactionCustomExecuteIsSafetyRefusedInsideObservedGate() throws {
+        let fx = try ChatFixture()
+        try fx.addReactionColumns()
+        try fx.insertReactionTarget(rowid: 70, guid: "reaction-target")
+        let preflightReached = LockedBox(false)
+        let deps = reactionDependencies(fx, allowedRecipients: ["+12125550100"]) { action in
+            do {
+                _ = try action.resolve()
+                preflightReached.withLock { $0 = true }
+                return .timedOut
+            } catch {
+                return .requestNotSent(String(describing: error))
+            }
+        }
+
+        let result = try captureCommand {
+            try ReactionSet.parse(["--chat-rowid", "3", "--message-rowid", "70", "--part-index", "2",
+                                   "--emoji", "👍", "--test-mode"])
+                .run(dependencies: deps)
+        }
+
+        #expect(result.exitCode == AppleExit.permissionDenied)
+        let error = try errorPayload(from: result.stdout)
+        #expect(error["type"] as? String == AppleErrorType.safetyViolation)
+        #expect(preflightReached.value == false)
+    }
+
+    @Test func reactionLockedResolveRefusesStandardToCustomImplicitRemoveDrift() throws {
+        let fx = try ChatFixture()
+        try fx.addReactionColumns()
+        try fx.insertReactionTarget(rowid: 70, guid: "reaction-target")
+        try fx.insertReaction(rowid: 100, guid: "reaction-heart", associatedGUID: "p:2/reaction-target",
+                              type: 2000, date: fx.base + 11)
+        let reactionDBPath = fx.path
+        let base = fx.base
+        let preflightReached = LockedBox(false)
+        let deps = reactionDependencies(fx, allowedRecipients: ["+12125550100"]) { action in
+            try insertReactionRow(path: reactionDBPath, rowid: 101, guid: "reaction-custom",
+                                  associatedGUID: "p:2/reaction-target", type: 2006,
+                                  date: base + 12, emoji: "👍")
+            do {
+                _ = try action.resolve()
+                preflightReached.withLock { $0 = true }
+                return .timedOut
+            } catch {
+                return .requestNotSent(String(describing: error))
+            }
+        }
+
+        let result = try captureCommand {
+            try ReactionRemove.parse(["--chat-rowid", "3", "--message-rowid", "70",
+                                      "--part-index", "2", "--test-mode"])
+                .run(dependencies: deps)
+        }
+
+        #expect(result.exitCode == AppleExit.permissionDenied)
+        let error = try errorPayload(from: result.stdout)
+        #expect(error["type"] as? String == AppleErrorType.safetyViolation)
+        #expect(preflightReached.value == false)
+    }
+
+    @Test func reactionImplicitRemoveOutputUsesLockedStandardAfterDrift() throws {
+        let fx = try ChatFixture()
+        try fx.addReactionColumns()
+        try fx.insertReactionTarget(rowid: 70, guid: "reaction-target")
+        try fx.insertReaction(rowid: 100, guid: "reaction-heart", associatedGUID: "p:2/reaction-target",
+                              type: 2000, date: fx.base + 11)
+        let operationID = UUID(uuidString: "44444444-4444-4444-8444-444444444444")!
+        let reactionDBPath = fx.path
+        let base = fx.base
+        let deps = reactionDependencies(fx, allowedRecipients: ["+12125550100"]) { action in
+            try insertReactionRow(path: reactionDBPath, rowid: 101, guid: "reaction-like",
+                                  associatedGUID: "p:2/reaction-target", type: 2001,
+                                  date: base + 12)
+            let resolved = try action.resolve()
+            let context = WorkerObservedContext(deadline: action.deadline, isCancelled: { false })
+            switch try action.preflight(resolved, context) {
+            case .alreadyInDesiredState(let verification):
+                throw ReactionTestFailure("unexpected reaction no-op: \(verification)")
+            case .requiresMutation:
+                break
+            }
+            try insertReactionRow(path: reactionDBPath, rowid: 102, guid: "remove-like",
+                                  associatedGUID: "p:2/reaction-target", type: 3001,
+                                  date: base + 13)
+            let response = WorkerResponse(schemaVersion: 1, operationID: operationID,
+                                          nonce: operationID, category: .ack,
+                                          detail: "reaction-remove-changed-verified")
+            let verification = try #require(try action.verify(resolved, response, context))
+            return .observedState(operationID: operationID, verification: verification)
+        }
+
+        let result = try captureCommand {
+            try ReactionRemove.parse(["--chat-rowid", "3", "--message-rowid", "70",
+                                      "--part-index", "2", "--test-mode"])
+                .run(dependencies: deps)
+        }
+        #expect(result.exitCode == nil, Comment(rawValue: result.stdout))
+        let output = try payload(from: result.stdout)
+        #expect(output["desired_reaction_key"] as? String == "like")
+        let inspect = try #require(output["inspect"] as? [String: Any])
+        let current = try #require(inspect["current_outgoing"] as? [String: Any])
+        #expect(current["status"] as? String == "absent")
+    }
+
+
+    @Test func reactionExplicitRemoveAlreadyAbsentIsBlockedByPendingJournal() throws {
+        let fx = try ChatFixture()
+        try fx.addReactionColumns()
+        try fx.insertReactionTarget(rowid: 70, guid: "reaction-target")
+        let stateRoot = fx.homePath + "/messages-automation"
+        let pendingID = UUID(uuidString: "55555555-5555-4555-8555-555555555555")!
+        try seedUncertainPendingReaction(root: stateRoot, operationID: pendingID)
+        let deps = reactionDependencies(fx, allowedRecipients: ["+12125550100"],
+                                        launchObservedWorker: { try WorkerLauncher().launchObserved($0) })
+
+        let result = try captureCommand {
+            try ReactionRemove.parse(["--chat-rowid", "3", "--message-rowid", "70",
+                                      "--part-index", "2", "--reaction", "like", "--test-mode"])
+                .run(dependencies: deps)
+        }
+
+        #expect(result.exitCode == AppleExit.upstream)
+        let error = try errorPayload(from: result.stdout)
+        #expect((error["message"] as? String)?.contains("pending-operation-exists") == true)
+    }
+
+    @Test func automationRecoverDryRunFlagPreservesPendingJournal() throws {
+        let fx = try ChatFixture()
+        let stateRoot = fx.homePath + "/messages-automation"
+        let pendingID = UUID(uuidString: "66666666-6666-4666-8666-666666666666")!
+        try seedUncertainPendingReaction(root: stateRoot, operationID: pendingID)
+        let deps = reactionDependencies(fx)
+
+        let result = try TestEnvironment.withoutWriteModeOverrides {
+            try captureCommand {
+                try MessagesAutomationRecover.parse(["--op-id", pendingID.uuidString,
+                                                     "--acknowledge-possible-late-effects", "--dry-run"])
+                    .run(dependencies: deps)
+            }
+        }
+        #expect(result.exitCode == nil, Comment(rawValue: result.stdout))
+        let output = try payload(from: result.stdout)
+        #expect(output["dry_run"] as? Bool == true)
+        #expect(output["recovered"] as? Bool == false)
+        let status = try readReactionJournalSnapshot(root: stateRoot)
+        #expect(status.pending?.operationID == pendingID)
+        #expect(status.receipts.isEmpty)
+    }
+
+    @Test func automationRecoverDryRunRejectsMismatchedOperationAndPreservesPendingJournal() throws {
+        let fx = try ChatFixture()
+        let stateRoot = fx.homePath + "/messages-automation"
+        let pendingID = UUID(uuidString: "88888888-8888-4888-8888-888888888888")!
+        let otherID = UUID(uuidString: "99999999-9999-4999-8999-999999999999")!
+        try seedUncertainPendingReaction(root: stateRoot, operationID: pendingID)
+        let deps = reactionDependencies(fx)
+
+        let result = try TestEnvironment.withoutWriteModeOverrides {
+            try captureCommand {
+                try MessagesAutomationRecover.parse(["--op-id", otherID.uuidString,
+                                                     "--acknowledge-possible-late-effects", "--dry-run"])
+                    .run(dependencies: deps)
+            }
+        }
+
+        #expect(result.exitCode == AppleExit.upstream)
+        let error = try errorPayload(from: result.stdout)
+        #expect((error["message"] as? String)?.contains("operation-not-found") == true)
+        let status = try readReactionJournalSnapshot(root: stateRoot)
+        #expect(status.pending?.operationID == pendingID)
+        #expect(status.receipts.isEmpty)
+    }
+
+    @Test func automationRecoverDryRunRejectsAbsentPendingJournal() throws {
+        let fx = try ChatFixture()
+        let stateRoot = fx.homePath + "/messages-automation"
+        let pendingID = UUID(uuidString: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa")!
+        let deps = reactionDependencies(fx)
+
+        let result = try TestEnvironment.withoutWriteModeOverrides {
+            try captureCommand {
+                try MessagesAutomationRecover.parse(["--op-id", pendingID.uuidString,
+                                                     "--acknowledge-possible-late-effects", "--dry-run"])
+                    .run(dependencies: deps)
+            }
+        }
+
+        #expect(result.exitCode == AppleExit.upstream)
+        let error = try errorPayload(from: result.stdout)
+        #expect((error["message"] as? String)?.contains("operation-not-found") == true)
+        let status = try readReactionJournalSnapshot(root: stateRoot)
+        #expect(status.pending == nil)
+        #expect(status.receipts.isEmpty)
+    }
+
+    @Test func automationRecoverDryRunRejectsPreparedBeforeHandoffAndPreservesPendingJournal() throws {
+        let fx = try ChatFixture()
+        let stateRoot = fx.homePath + "/messages-automation"
+        let pendingID = UUID(uuidString: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbbb")!
+        try seedPreparedPendingReaction(root: stateRoot, operationID: pendingID)
+        let deps = reactionDependencies(fx)
+
+        let result = try TestEnvironment.withoutWriteModeOverrides {
+            try captureCommand {
+                try MessagesAutomationRecover.parse(["--op-id", pendingID.uuidString,
+                                                     "--acknowledge-possible-late-effects", "--dry-run"])
+                    .run(dependencies: deps)
+            }
+        }
+
+        #expect(result.exitCode == AppleExit.upstream)
+        let error = try errorPayload(from: result.stdout)
+        #expect((error["message"] as? String)?.contains("handoff-not-recorded") == true)
+        let status = try readReactionJournalSnapshot(root: stateRoot)
+        #expect(status.pending?.operationID == pendingID)
+        #expect(status.pending?.phase == .preparedBeforeHandoff)
+        #expect(status.receipts.isEmpty)
+    }
+
+    @Test func automationRecoverDryRunEnvironmentPreservesPendingJournal() throws {
+        let fx = try ChatFixture()
+        let stateRoot = fx.homePath + "/messages-automation"
+        let pendingID = UUID(uuidString: "77777777-7777-4777-8777-777777777777")!
+        try seedUncertainPendingReaction(root: stateRoot, operationID: pendingID)
+        let deps = reactionDependencies(fx)
+
+        let result = try TestEnvironment.withoutWriteModeOverrides {
+            try TestEnvironment.with(["APPLE_DRY_RUN": "1"]) {
+                try captureCommand {
+                    try MessagesAutomationRecover.parse(["--op-id", pendingID.uuidString,
+                                                         "--acknowledge-possible-late-effects"])
+                        .run(dependencies: deps)
+                }
+            }
+        }
+        #expect(result.exitCode == nil, Comment(rawValue: result.stdout))
+        let output = try payload(from: result.stdout)
+        #expect(output["dry_run"] as? Bool == true)
+        #expect(output["recovered"] as? Bool == false)
+        let status = try readReactionJournalSnapshot(root: stateRoot)
+        #expect(status.pending?.operationID == pendingID)
+        #expect(status.receipts.isEmpty)
     }
 
     @Test func exactCommandOutputCarriesNativePartsNullAndArrayShapes() throws {
@@ -2517,6 +3247,97 @@ private func fixtureDependencies(_ fx: ChatFixture) -> MessagesCommandDependenci
     })
 }
 
+private func reactionDependencies(
+    _ fx: ChatFixture,
+    allowedRecipients: [String] = ["+12125550100"],
+    accessibilityTrusted: Bool = true,
+    launchObservedWorker: @escaping @Sendable (WorkerObservedAction) throws -> WorkerObservedOutcome = { _ in
+        throw AppleError.upstream("test worker dependency not configured")
+    }
+) -> MessagesCommandDependencies {
+    let path = fx.path
+    let homePath = fx.homePath
+    let book = AddressBook(contacts: ["12125550100": "Friend Name"])
+    return .fixture(book: book, makeChatDB: { _ in
+        try ChatDB(path: path, book: book, copyToTemp: false, homeDirectoryForTilde: homePath)
+    }, accessibilityDiagnostic: { Permissions.accessibilityPreflight(trusted: accessibilityTrusted) },
+       messagesAutomationStateRoot: { homePath + "/messages-automation" },
+       launchObservedWorker: launchObservedWorker,
+       allowedRecipients: allowedRecipients)
+}
+
+private func insertReactionRow(path: String, rowid: Int64, guid: String, associatedGUID: String,
+                               type: Int, date: Int64, chatRowid: Int64 = 3, emoji: String? = nil) throws {
+    var db: OpaquePointer?
+    guard sqlite3_open(path, &db) == SQLITE_OK, let db else { throw SQLiteFixtureError.open }
+    defer { sqlite3_close(db) }
+    let emojiSQL = emoji.map { "'\($0)'" } ?? "NULL"
+    let sql = """
+        INSERT INTO message (ROWID,guid,text,is_from_me,handle_id,service,date,error,
+            associated_message_guid,associated_message_type,associated_message_emoji)
+        VALUES (\(rowid),'\(guid)',NULL,1,1,'iMessage',\(date),0,
+            '\(associatedGUID)',\(type),\(emojiSQL));
+        INSERT INTO chat_message_join VALUES (\(chatRowid),\(rowid));
+        """
+    guard sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK else { throw SQLiteFixtureError.exec }
+}
+
+private func updateMessageGUID(path: String, rowid: Int64, guid: String) throws {
+    var db: OpaquePointer?
+    guard sqlite3_open(path, &db) == SQLITE_OK, let db else { throw SQLiteFixtureError.open }
+    defer { sqlite3_close(db) }
+    let sql = "UPDATE message SET guid='\(guid)' WHERE ROWID=\(rowid);"
+    guard sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK else { throw SQLiteFixtureError.exec }
+}
+
+private func readReactionJournalSnapshot(root: String) throws -> AppleAutomationJournal.Snapshot {
+    try AppleAutomationJournal.withLockedJournal(root: root, deadline: .millisecondsFromNow(1_000)) { lease in
+        try lease.loadSnapshot()
+    }
+}
+
+private func pendingReactionRequest() throws -> AppleAutomationJournal.OperationRequest {
+    try AppleAutomationJournal.OperationRequest(
+        operationType: .reactionSet,
+        conversationDigest: AppleAutomationJournal.targetDigest(forOpaqueIdentifier: "chat:test"),
+        messageDigest: AppleAutomationJournal.targetDigest(forOpaqueIdentifier: "message:test"),
+        partDigest: AppleAutomationJournal.targetDigest(forOpaqueIdentifier: "part:2"),
+        minimumEvidence: .init(targetHash: AppleAutomationJournal.targetDigest(forOpaqueIdentifier: "target:test"),
+                               targetLength: "target:test".utf8.count)
+    )
+}
+
+private func seedPreparedPendingReaction(root: String, operationID: UUID) throws {
+    let request = try pendingReactionRequest()
+    try AppleAutomationJournal.withLockedJournal(root: root, deadline: .millisecondsFromNow(1_000)) { lease in
+        try lease.beginForTesting(operationID, request: request)
+    }
+}
+
+private func seedUncertainPendingReaction(root: String, operationID: UUID) throws {
+    try seedPreparedPendingReaction(root: root, operationID: operationID)
+    try AppleAutomationJournal.withLockedJournal(root: root, deadline: .millisecondsFromNow(1_000)) { lease in
+        try lease.markUncertainAfterHandoff(operationID: operationID)
+    }
+}
+
+private func insertBareMessage(path: String, rowid: Int64, guid: String, date: Int64,
+                               chatRowid: Int64 = 3) throws {
+    var db: OpaquePointer?
+    guard sqlite3_open(path, &db) == SQLITE_OK, let db else { throw SQLiteFixtureError.open }
+    defer { sqlite3_close(db) }
+    let sql = """
+        INSERT INTO message (ROWID,guid,text,is_from_me,handle_id,service,date,error)
+        VALUES (\(rowid),'\(guid)','apple-cli-test duplicate',0,1,'iMessage',\(date),0);
+        INSERT INTO chat_message_join VALUES (\(chatRowid),\(rowid));
+        """
+    guard sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK else { throw SQLiteFixtureError.exec }
+}
+
+private struct ReactionTestFailure: Error, CustomStringConvertible {
+    let description: String
+    init(_ description: String) { self.description = description }
+}
 private final class LockedBox<T>: @unchecked Sendable {
     private let lock = NSLock()
     private var storage: T
@@ -2536,4 +3357,5 @@ private final class LockedBox<T>: @unchecked Sendable {
 
 private enum SQLiteFixtureError: Error {
     case open
+    case exec
 }

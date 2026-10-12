@@ -308,7 +308,55 @@ struct AutomationWorkerTests {
         #expect(valid.detail == "target-drift")
         #expect(valid.failureReason == "target-drift")
 
-        for privateLookingDetail in ["unsafe detail", "555-0100", "Alice", "token_ABC123"] {
+        for diagnosticDetail in [
+            "ax-failure-preflight",
+            "ax-failure-open",
+            "ax-failure-initial-route",
+            "ax-failure-menu-open",
+            "ax-failure-picker-readiness",
+            "ax-failure-pre-press",
+            "ax-failure-press",
+            "ax-failure-post-press",
+            "ax-failure-cleanup",
+            "ax-failure-verification",
+            "post-press-window-drift",
+            "post-press-picker-identity-drift",
+            "post-press-button-identity-drift",
+            "post-press-selected-unknown",
+            "post-press-selection-timeout",
+            "picker-cancel-picker-unavailable",
+            "picker-cancel-identity-drift",
+            "picker-cancel-unavailable",
+            "picker-dismissal-window-drift",
+            "picker-dismissal-picker-identity-drift",
+            "picker-dismissal-timeout",
+            "post-press-verify-open-drift",
+            "post-press-verify-route-drift",
+            "post-press-verify-action-missing",
+            "post-press-verify-picker-state-drift"
+        ] {
+            let response = WorkerResponse(schemaVersion: 1, operationID: operationID, nonce: nonce,
+                                          category: .refused, detail: diagnosticDetail)
+            #expect(response.detail == diagnosticDetail)
+            #expect(response.failureReason == diagnosticDetail)
+        }
+
+        for ackDetail in ["reaction-set-changed-verified", "reaction-set-unchanged-verified",
+                          "reaction-remove-changed-verified", "reaction-remove-unchanged-verified"] {
+            let response = WorkerResponse(schemaVersion: 1, operationID: operationID, nonce: nonce,
+                                          category: .ack, detail: ackDetail)
+            #expect(response.detail == ackDetail)
+            #expect(response.failureReason == ackDetail)
+        }
+
+        for privateLookingDetail in ["unsafe detail", "555-0100", "Alice", "token_ABC123",
+                                     "reaction-set-unknown-verified", "reaction-remove-changed",
+                                     "target-drift-verify_route", "deadline-expired-private_stage",
+                                     "ax-failure-verify_route-extra", "post-press",
+                                     "post-press-window-drift-extra", "post-press-verify-action", "picker-cancel",
+                                     "picker-cancel-identity-drift-extra", "pre-press-window-drift",
+                                     "ax-failure-private", "ax-failure-press-private",
+                                     "ax-failure-press:", "ax-failure-press-555-0100"] {
             let unsafe = try JSONDecoder().decode(WorkerResponse.self, from: json(privateLookingDetail))
             #expect(unsafe.detail == nil)
             #expect(unsafe.failureReason == "refused")

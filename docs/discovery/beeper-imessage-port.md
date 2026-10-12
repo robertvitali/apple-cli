@@ -193,7 +193,10 @@ attempting a new write at each boundary.
 
 An advisory lock cannot exclude the user or unrelated automation. Bind exact
 database conversation/message/part identifiers plus process/window/route objects
-and revalidate immediately before every side effect; abort on drift.
+and revalidate immediately before every side effect; abort on drift. Reaction
+writes additionally bind the parent ACK to the pending operation and require a
+fresh database read proving target identity and mutation eligibility before the
+parent records observed state.
 
 Select a conversation by its exact native identity and resolve message/part
 through experimental GUID/native-part UI deep links. Database membership alone
@@ -204,13 +207,48 @@ geometry-offset, focus-change and sleep-based targeting fallbacks. Evaluate a
 secondary Messages instance in isolated manual validation; never assume it
 preserves correctness or desktop state.
 
+Reaction set/remove use the native Tapback picker as the local reaction-state
+oracle. Strict mode is the default. `--experimental-ui-handoff` only opts into
+the native picker transition that can temporarily hide the transcript; it does
+not choose the post-press verification branch. In either strict or experimental
+mode, the preferred `.present` branch presses at most one reaction button,
+observes the requested selected state on the same retained picker/button, then
+cancels only that owned picker and verifies dismissal before ACK. The parent
+still requires fresh database target identity and eligibility before recording
+observed state.
+
+If the picker disappears before selected-state proof, the same `.absent` fallback
+can be used after either mode only by restoring the exact original
+process/root/window/transcript/message identity route. When the disappearance
+comes from a hidden-transcript picker transition, `--experimental-ui-handoff`
+must have been supplied on that invocation. The fallback does not deep-link,
+navigate to another message or require a selected-message flag. It waits for the
+original AX objects to be uniquely reachable under the same process/root and
+ownership, confirms the picker is absent immediately before opening the
+canonical menu from that retained message, then verifies the requested selected
+state and owned cleanup. Continuity depends on exact retained object identity
+and membership. Replacement objects, foreign ownership, duplicate candidates,
+missing canonical actions, failed readiness checks, unknown selected state or
+cleanup failure leave the operation uncertain. No mode or branch ever presses a
+second reaction button.
+
+The experimental handoff cannot prove original-message continuity during the
+modal transcript replacement, cancellation quiescence inside Messages, or durable
+sync completion. The user must leave Messages untouched during execution, and
+post-verification cannot undo a reaction redirected by desktop interference.
+Custom emoji reactions are accepted for preview in the current candidate, but
+execution remains refused until exact native UI selection is proven.
+
 Every write uses AppleKit execution and sandbox policy once at command entry.
 Dry-run returns a resolved preview without driving AX, launching UI workers or
-changing state. Execute returns dry_run false. A no-op found by the locked
-pre-read returns distinct `already_in_desired_state`, creates no observed-state
-receipt when no operation record was written, and cannot bypass a pending record.
-A mutating handoff reports experimental `observedState` only after observing its
-documented operation-specific postcondition.
+changing state. Execute returns dry_run false. For database-only operations with authoritative
+pre-read evidence, a no-op found under the lock may return distinct
+`already_in_desired_state`, creates no observed-state receipt when no operation
+record was written, and cannot bypass a pending record. Reaction writes use the
+UI picker state as the local oracle instead: already-desired or already-absent
+performs no reaction press but still passes the pending-operation gate and worker
+verification. A mutating handoff reports experimental `observedState` only after
+observing its documented operation-specific postcondition.
 Uncertain writes are reconciled before any retry; sends are never blindly retried.
 Absence in a delayed database snapshot is not proof that a send failed. Refuse
 pre-existing composer content unless an operation explicitly supports preserving it;
@@ -219,17 +257,32 @@ that is still provably owned and unchanged by the user.
 Agent live validation uses only newly created, labeled, privately tracked disposable
 self-addressed fixtures. Non-self/group operations require operator participation.
 
-## Feature behavior
+## Approved feature behavior
+
+The following list defines the full approved delivery scope. It is not a claim
+that every capability is implemented or verified in the current candidate. The
+approved product scope includes standard and custom reaction set, replace and
+remove. The current reaction candidate executes standard reactions only; custom
+emoji can be previewed and accepted as a target shape, but execution remains
+refused pending implementation and native UI validation.
 
 1. Exact targeting and bounded reads establish the identity contract above.
 2. The shared automation backend establishes locking, deadlines and diagnostics.
-3. Reaction inspect/set/replace/remove supports standard and supported custom emoji.
-   Read the current outgoing reaction; already-desired/absent is idempotent before
-   delivery only when no operation record is pending, and never clears an
-   unresolved operation record. Preserve exact grapheme identity, toggle once and
-   verify the observed final reaction.
-   Investigate picker identifiers and selected state for custom removal. Do not
-   copy upstream skin-tone stripping or treat UI action completion as success.
+3. Reaction inspect plus set/replace/remove supports the approved standard and
+   custom reaction scope. Read database reaction evidence without reclassifying
+   raw authorship; database outgoing absence alone never proves local UI absence,
+   especially in self-chat echo cases. For set/remove, read native picker
+   selected state, press at most once, verify the requested selected state
+   through the `.present` or `.absent` route above, then verify fresh database
+   target identity and eligibility before reporting
+   `verification_source: ui_selected_state_and_database_identity`.
+   Already-selected set and unselected explicit remove are verified no-change
+   results with `reaction_changed: false`; unresolved pending operations still
+   block new writes. Implicit remove refuses when the database cannot resolve one
+   reaction and requires explicit `--reaction`. Current-candidate custom emoji
+   preview is accepted, but execution is refused until exact UI support is
+   proven. Do not copy upstream skin-tone stripping or treat UI action completion
+   as success.
 4. Text and attachment replies require exact quoted message/part identity and verify
    the persisted reply relationship through the same observed-state contract.
    Preserve existing attachment path controls.

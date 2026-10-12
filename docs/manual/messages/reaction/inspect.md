@@ -1,6 +1,6 @@
 # apple messages reaction inspect
 
-Inspect outgoing and incoming reactions for one exact message.
+Inspect outgoing and incoming reactions for an exact message.
 
 ## Synopsis
 
@@ -58,7 +58,7 @@ apple messages reaction inspect --chat-rowid 42 --message-rowid 123 --part-index
 
 ## Notes
 
-`--part-index` selects one native Messages part index decoded from `attributedBody`. Without it, a message with exactly one decoded native part uses that part; a message with several decoded parts reports `multiple-native-parts-require-explicit-part`, and a message whose native parts are unavailable reports why the part could not be proven. `--row-limit` defaults to 512 and accepts 1 through 10000. If more matching reaction rows exist than the cap, the JSON reports `rows_capped: true`, includes `reaction-row-limit-exceeded` in `unknown_reasons`, and treats the fold as unknown rather than pretending the partial scan is authoritative.
+`--part-index` selects one native Messages part index decoded from `attributedBody`. Without it, a message with exactly one decoded native part uses that part; a message with several decoded parts reports `multiple-native-parts-require-explicit-part`, and a message whose native parts are unavailable reports why the part could not be proven. `--row-limit` defaults to 512 and accepts 1 through 10000. If more matching reaction rows exist than the cap, the JSON reports `rows_capped: true`, includes `reaction-row-limit-exceeded` in `unknown_reasons`, and treats the fold as unknown rather than pretending the partial scan is authoritative. Author fields and `current_outgoing` describe raw database attribution. In a self-chat, Messages may replace an outgoing reaction event with an incoming echo even while the local picker still shows the reaction selected. Inspection does not open the picker or infer local ownership from an incoming handle; reaction writes report their separate native UI verification source.
 
 ## Output
 
