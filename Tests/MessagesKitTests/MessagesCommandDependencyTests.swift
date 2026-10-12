@@ -18,6 +18,7 @@ import TestSupport
 extension MessagesCommandDependencies {
     static func fixture(
         book: AddressBook = AddressBook(),
+        loadAddressBook: (@Sendable () -> AddressBook)? = nil,
         makeChatDB: @escaping @Sendable (AddressBook) throws -> ChatDB = { _ in
             throw AppleError.upstream("test ChatDB dependency not configured")
         },
@@ -40,7 +41,7 @@ extension MessagesCommandDependencies {
         allowedRecipients: [String] = []
     ) -> MessagesCommandDependencies {
         MessagesCommandDependencies(
-            loadAddressBook: { book },
+            loadAddressBook: loadAddressBook ?? { book },
             makeChatDB: makeChatDB,
             performSend: performSend,
             dbDiagnostic: dbDiagnostic,
@@ -1467,6 +1468,141 @@ struct MessagesCommandDependencyTests {
         #expect(wrongChat.exitCode == AppleExit.notFound)
     }
 
+
+    @Test func reactionsInspectCommandReportsExactCurrentState() throws {
+        let fx = try ChatFixture()
+        try fx.exec("""
+            ALTER TABLE message ADD COLUMN associated_message_guid TEXT;
+            ALTER TABLE message ADD COLUMN associated_message_type INTEGER;
+            ALTER TABLE message ADD COLUMN associated_message_emoji TEXT;
+            """)
+        let text = "left right"
+        let blob = commandNativeArchive(text, [
+            (commandNativePartKey, NSNumber(value: 2), (text as NSString).range(of: "right"))
+        ])
+        try fx.insertMessage(rowid: 70, guid: "target-guid", text: text,
+                             attributedBody: blob, chatRowid: 3, date: fx.base)
+        try fx.exec("""
+            INSERT INTO message (ROWID,guid,text,is_from_me,handle_id,service,date,error,
+                associated_message_guid,associated_message_type,associated_message_emoji)
+            VALUES (100,'reaction-like',NULL,1,1,'iMessage',\(fx.base + 10),0,
+                'p:2/target-guid',2001,NULL);
+            INSERT INTO chat_message_join VALUES (3,100);
+            """)
+        let addressBookLoads = LockedBox(0)
+        let path = fx.path
+        let homePath = fx.homePath
+        let deps = MessagesCommandDependencies.fixture(
+            loadAddressBook: {
+                addressBookLoads.withLock { $0 += 1 }
+                return AddressBook(contacts: ["12125550199": "Should Not Load"])
+            },
+            makeChatDB: { _ in
+                try ChatDB(path: path, book: AddressBook(), copyToTemp: false,
+                           homeDirectoryForTilde: homePath)
+            })
+
+        let output = try payload(from: captureStdout {
+            try ReactionInspect.parse(["--chat-rowid", "3", "--message-rowid", "70",
+                                       "--part-index", "2", "--row-limit", "10"])
+                .run(dependencies: deps)
+        })
+
+        #expect(addressBookLoads.value == 0)
+        #expect(output["status"] as? String == "ok")
+        let target = try #require(output["target"] as? [String: Any])
+        #expect(target["message_rowid"] as? Int == 70)
+        #expect(target["part_index"] as? Int == 2)
+        #expect(target["mutation_eligible"] as? Bool == true)
+        let current = try #require(output["current_outgoing"] as? [String: Any])
+        #expect(current["status"] as? String == "present")
+        #expect(current["key"] as? String == "like")
+        let reaction = try #require(current["reaction"] as? [String: Any])
+        #expect(reaction["key"] as? String == "like")
+        #expect(reaction["name"] as? String == "like")
+        let evidence = try #require(output["evidence"] as? [String: Any])
+        #expect(evidence["row_limit"] as? Int == 10)
+        #expect(evidence["rows_examined"] as? Int == 1)
+    }
+
+    @Test func reactionsInspectCommandReportsBoundedRows() throws {
+        let fx = try ChatFixture()
+        try fx.exec("""
+            ALTER TABLE message ADD COLUMN associated_message_guid TEXT;
+            ALTER TABLE message ADD COLUMN associated_message_type INTEGER;
+            ALTER TABLE message ADD COLUMN associated_message_emoji TEXT;
+            """)
+        let text = "left right"
+        let blob = commandNativeArchive(text, [
+            (commandNativePartKey, NSNumber(value: 2), (text as NSString).range(of: "right"))
+        ])
+        try fx.insertMessage(rowid: 70, guid: "target-guid", text: text, attributedBody: blob,
+                             chatRowid: 3, date: fx.base)
+        try fx.exec("""
+            INSERT INTO message (ROWID,guid,text,is_from_me,handle_id,service,date,error,
+                associated_message_guid,associated_message_type,associated_message_emoji)
+            VALUES (100,'reaction-like',NULL,1,1,'iMessage',\(fx.base + 10),0,
+                'p:2/target-guid',2001,NULL);
+            INSERT INTO chat_message_join VALUES (3,100);
+            INSERT INTO message (ROWID,guid,text,is_from_me,handle_id,service,date,error,
+                associated_message_guid,associated_message_type,associated_message_emoji)
+            VALUES (101,'reaction-heart',NULL,0,1,'iMessage',\(fx.base + 11),0,
+                'p:2/target-guid',2000,NULL);
+            INSERT INTO chat_message_join VALUES (3,101);
+            """)
+        let deps = fixtureDependencies(fx)
+
+        let output = try payload(from: captureStdout {
+            try ReactionInspect.parse(["--chat-rowid", "3", "--message-rowid", "70",
+                                       "--row-limit", "1"])
+                .run(dependencies: deps)
+        })
+
+        let evidence = try #require(output["evidence"] as? [String: Any])
+        #expect(evidence["row_limit"] as? Int == 1)
+        #expect(evidence["rows_examined"] as? Int == 1)
+        #expect(evidence["rows_capped"] as? Bool == true)
+        let reasons = try #require(evidence["unknown_reasons"] as? [String])
+        #expect(reasons.contains("reaction-row-limit-exceeded"))
+        let current = try #require(output["current_outgoing"] as? [String: Any])
+        #expect(current["status"] as? String == "unknown")
+    }
+
+    @Test func reactionsInspectValidationErrorsEmitJSONWithoutLiveDependencies() throws {
+        try expectValidationError(
+            try ReactionInspect.parse(["--chat-rowid", "3", "--chat-guid", "chat",
+                                       "--message-rowid", "70"]),
+            run: { try $0.run(dependencies: .fixture()) })
+        try expectValidationError(
+            try ReactionInspect.parse(["--chat-rowid", "3"]),
+            run: { try $0.run(dependencies: .fixture()) })
+
+        let dbLoads = LockedBox(0)
+        let deps = MessagesCommandDependencies.fixture(makeChatDB: { _ in
+            dbLoads.withLock { $0 += 1 }
+            throw AppleError.upstream("reaction inspect should validate before database construction")
+        })
+        let badLimit = try captureCommand {
+            try ReactionInspect.parse(["--chat-rowid", "3", "--message-rowid", "70",
+                                       "--row-limit", "0"])
+                .run(dependencies: deps)
+        }
+        #expect(badLimit.exitCode == AppleExit.usage)
+        let error = try errorPayload(from: badLimit.stdout)
+        #expect(error["type"] as? String == AppleErrorType.validation)
+        #expect((error["message"] as? String)?.contains("rowLimit must be between 1 and 10000") == true)
+
+        let badPart = try captureCommand {
+            try ReactionInspect.parse(["--chat-rowid", "3", "--message-rowid", "70",
+                                       "--part-index=-1"])
+                .run(dependencies: deps)
+        }
+        #expect(badPart.exitCode == AppleExit.usage)
+        let partError = try errorPayload(from: badPart.stdout)
+        #expect(partError["type"] as? String == AppleErrorType.validation)
+        #expect((partError["message"] as? String)?.contains("partIndex must be >= 0") == true)
+        #expect(dbLoads.value == 0)
+    }
 
     @Test func exactCommandOutputCarriesNativePartsNullAndArrayShapes() throws {
         let fx = try ChatFixture()

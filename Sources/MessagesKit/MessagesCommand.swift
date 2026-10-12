@@ -16,7 +16,7 @@ public struct MessagesCommand: ParsableCommand {
         abstract: "iMessage / SMS — send, read, search.",
         subcommands: [
             Recent.self, Send_.self, FindContact.self, Chats.self, Search.self,
-            Conversations.self, History.self, Get.self,
+            Conversations.self, History.self, Get.self, Reaction.self,
             CheckAvailability.self, CheckDB.self, CheckContacts.self, CheckAddressBook.self,
             Doctor.self,
         ]
@@ -28,14 +28,14 @@ public struct MessagesCommand: ParsableCommand {
     /// smoke test's ok=false contract, and gives agents a machine-readable nudge).
     public func run() throws {
         try runGuarded(tool: "messages") {
-            throw AppleError.validation("specify a subcommand: recent, send, find-contact, chats, search, conversations, history, get, check-availability, check-db, check-contacts, check-addressbook, doctor")
+            throw AppleError.validation("specify a subcommand: recent, send, find-contact, chats, search, conversations, history, get, reaction, check-availability, check-db, check-contacts, check-addressbook, doctor")
         }
     }
 }
 
 // MARK: - Shared output helper
 
-private let tool = "messages"
+let tool = "messages"
 
 /// The I/O edges of `apple messages`, bound once per invocation. Production has exactly ONE
 /// value — `.live` — and no flag or environment variable can select another; the seam exists so
@@ -76,7 +76,7 @@ struct MessagesCommandDependencies: Sendable {
 }
 
 /// Emit JSON (default) or a human text rendering (`--text`) on stdout.
-private func emit<T: Encodable>(_ global: GlobalOptions, _ data: T, text: () -> String) throws {
+func emit<T: Encodable>(_ global: GlobalOptions, _ data: T, text: () -> String) throws {
     if global.json {
         try Output.emit(tool: tool, data: data)
     } else {
@@ -656,7 +656,7 @@ private func validateOpaqueGUID(_ value: String, name: String) throws -> String 
     return value
 }
 
-private func parseChatSelector(rowid: Int64?, guid: String?) throws -> ChatDB.ExactChatSelector {
+func parseChatSelector(rowid: Int64?, guid: String?) throws -> ChatDB.ExactChatSelector {
     switch (rowid, guid) {
     case let (id?, nil):
         guard id > 0 else { throw AppleError.validation("chat-rowid must be positive") }
@@ -670,7 +670,7 @@ private func parseChatSelector(rowid: Int64?, guid: String?) throws -> ChatDB.Ex
     }
 }
 
-private func parseMessageSelector(rowid: Int64?, guid: String?) throws -> ChatDB.ExactMessageSelector {
+func parseMessageSelector(rowid: Int64?, guid: String?) throws -> ChatDB.ExactMessageSelector {
     switch (rowid, guid) {
     case let (id?, nil):
         guard id > 0 else { throw AppleError.validation("message-rowid must be positive") }

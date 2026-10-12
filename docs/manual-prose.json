@@ -97,6 +97,20 @@
     ],
     "notes": "GUIDs are opaque, persistent identifiers when available; positive ROWIDs are local to this database. The result retains caller-selected chat membership even when the message also belongs to another conversation. Message, attachment and native-part fields use the same shape as `messages history`, including explicit body availability and explicit native-part null-versus-array states. This command reads database state only; it does not select a Messages window, mark a chat read or mutate a message."
   },
+  "apple messages reaction inspect": {
+    "description": "Inspects the current reaction state for one exact Messages target. Supply exactly one conversation selector (`--chat-guid` or `--chat-rowid`) and exactly one message selector (`--message-guid` or `--message-rowid`). The command reads chat.db only; it does not open Messages, mark a conversation read or mutate a reaction.",
+    "examples": [
+      {
+        "title": "Inspect reactions on one local message",
+        "command": "apple messages reaction inspect --chat-rowid 42 --message-rowid 123"
+      },
+      {
+        "title": "Inspect one native message part with a smaller row cap",
+        "command": "apple messages reaction inspect --chat-rowid 42 --message-rowid 123 --part-index 2 --row-limit 50"
+      }
+    ],
+    "notes": "`--part-index` selects one native Messages part index decoded from `attributedBody`. Without it, a message with exactly one decoded native part uses that part; a message with several decoded parts reports `multiple-native-parts-require-explicit-part`, and a message whose native parts are unavailable reports why the part could not be proven. `--row-limit` defaults to 512 and accepts 1 through 10000. If more matching reaction rows exist than the cap, the JSON reports `rows_capped: true`, includes `reaction-row-limit-exceeded` in `unknown_reasons`, and treats the fold as unknown rather than pretending the partial scan is authoritative."
+  },
   "apple messages send": {
     "description": "Sends when invoked; `--dry-run` previews. `--service` picks the route for a one-to-one send: `auto` (the default) tries iMessage and falls back to SMS for a phone-shaped recipient, `imessage` uses iMessage only and fails rather than falling back, and `sms` uses the enabled SMS account only. `--file` attaches a file and may be repeated; the message body goes out first, then each file in the order given, all in one Messages automation run. Either a message or a file is required — a send with neither is a `validation_error`, reported after the recipient has been resolved, so an unknown recipient or a sandbox refusal comes first.",
     "examples": [

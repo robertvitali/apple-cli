@@ -47,6 +47,14 @@ JSON output are stable per the versioning policy — breaking changes bump
   [`history`](https://github.com/robertvitali/apple-cli/blob/main/docs/manual/messages/history.md),
   [`get`](https://github.com/robertvitali/apple-cli/blob/main/docs/manual/messages/get.md).
 
+- **`apple messages reaction inspect` now exposes read-only exact reaction
+  inspection.** It uses the same exact chat/message selectors as `messages get`,
+  can target a native message part with `--part-index`, and returns the current
+  outgoing reaction plus incoming reaction evidence without opening Messages or
+  mutating anything. `--row-limit` bounds the reaction rows inspected and reports
+  capped evidence rather than treating a partial scan as authoritative. Manual:
+  [`apple messages reaction inspect`](https://github.com/robertvitali/apple-cli/blob/main/docs/manual/messages/reaction/inspect.md).
+
 - **`apple contacts auth --request` now provides an explicit no-data Contacts permission request path, and the built executable embeds the Contacts usage metadata macOS requires for that prompt.** Plain `apple contacts auth` remains status-only and never prompts; `--request` only asks for authorization, never reads contact records or mutates the address book, and it refuses with `authorization_denied` if the executable is missing `NSContactsUsageDescription`. The existing data-command authorization behavior is otherwise unchanged, `schema_version` stays `1`, and live caller-specific TCC behavior still needs verification after reviewed installation. Manual: [`apple contacts auth`](https://github.com/robertvitali/apple-cli/blob/main/docs/manual/contacts/auth.md).
 
 - **A read-only release-preparation rehearsal now exists in the repository's CI tooling
