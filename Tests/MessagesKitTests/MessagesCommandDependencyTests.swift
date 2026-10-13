@@ -2089,7 +2089,7 @@ struct MessagesCommandDependencyTests {
         #expect(output["reaction_changed"] as? Bool == false)
     }
 
-    @Test func reactionCustomExecuteIsSafetyRefusedInsideObservedGate() throws {
+    @Test func reactionCustomSetExecuteIsSafetyRefusedInsideObservedGate() throws {
         let fx = try ChatFixture()
         try fx.addReactionColumns()
         try fx.insertReactionTarget(rowid: 70, guid: "reaction-target")
@@ -2107,6 +2107,113 @@ struct MessagesCommandDependencyTests {
         let result = try captureCommand {
             try ReactionSet.parse(["--chat-rowid", "3", "--message-rowid", "70", "--part-index", "2",
                                    "--emoji", "👍", "--test-mode"])
+                .run(dependencies: deps)
+        }
+
+        #expect(result.exitCode == AppleExit.permissionDenied)
+        let error = try errorPayload(from: result.stdout)
+        #expect(error["type"] as? String == AppleErrorType.safetyViolation)
+        #expect(preflightReached.value == false)
+    }
+
+    @Test func reactionExplicitCustomRemoveLaunchesWorkerWithExactPayload() throws {
+        let fx = try ChatFixture()
+        try fx.addReactionColumns()
+        try fx.insertReactionTarget(rowid: 70, guid: "reaction-target")
+        try fx.insertReaction(rowid: 100, guid: "reaction-custom", associatedGUID: "p:2/reaction-target",
+                              type: 2006, date: fx.base + 11, emoji: "👍🏽")
+        let observedCommand = LockedBox<WorkerCommand?>(nil)
+        let operationID = UUID(uuidString: "24242424-2424-4242-8424-242424242424")!
+        let reactionDBPath = fx.path
+        let reactionDate = fx.base + 12
+        let deps = reactionDependencies(fx, allowedRecipients: ["+12125550100"]) { action in
+            let resolved = try action.resolve()
+            observedCommand.withLock { $0 = resolved.command }
+            let context = WorkerObservedContext(deadline: action.deadline, isCancelled: { false })
+            guard case .requiresMutation = try action.preflight(resolved, context) else {
+                throw ReactionTestFailure("unexpected custom remove no-op")
+            }
+            try insertReactionRow(path: reactionDBPath, rowid: 101, guid: "remove-custom",
+                                  associatedGUID: "p:2/reaction-target", type: 3006,
+                                  date: reactionDate, emoji: "👍🏽")
+            let response = WorkerResponse(schemaVersion: 1, operationID: operationID,
+                                          nonce: operationID, category: .ack,
+                                          detail: "reaction-remove-changed-verified")
+            let verification = try #require(try action.verify(resolved, response, context))
+            return .observedState(operationID: operationID, verification: verification)
+        }
+
+        let result = try captureCommand {
+            try ReactionRemove.parse(["--chat-rowid", "3", "--message-rowid", "70", "--part-index", "2",
+                                      "--emoji", "👍🏽", "--test-mode"])
+                .run(dependencies: deps)
+        }
+
+        #expect(result.exitCode == nil, Comment(rawValue: result.stdout))
+        let output = try payload(from: result.stdout)
+        let command = try #require(observedCommand.value)
+        #expect(command.name == "messages.reaction.remove")
+        let payloadData = try #require(command.payload)
+        let workerPayload = try JSONDecoder().decode(MessagesReactionWorkerPayload.self, from: payloadData)
+        #expect(workerPayload.operation == .remove)
+        #expect(workerPayload.reaction == .custom("👍🏽"))
+        #expect(output["desired_reaction_key"] as? String == "custom:👍🏽")
+        #expect(output["reaction_changed"] as? Bool == true)
+        let inspect = try #require(output["inspect"] as? [String: Any])
+        let current = try #require(inspect["current_outgoing"] as? [String: Any])
+        #expect(current["status"] as? String == "absent")
+    }
+
+    @Test func reactionExplicitCustomRemoveWorkerFailureLeavesCommandUnverified() throws {
+        let fx = try ChatFixture()
+        try fx.addReactionColumns()
+        try fx.insertReactionTarget(rowid: 70, guid: "reaction-target")
+        try fx.insertReaction(rowid: 100, guid: "reaction-custom", associatedGUID: "p:2/reaction-target",
+                              type: 2006, date: fx.base + 11, emoji: "👍🏽")
+        let resolvedBeforeFailure = LockedBox(false)
+        let deps = reactionDependencies(fx, allowedRecipients: ["+12125550100"]) { action in
+            let resolved = try action.resolve()
+            let context = WorkerObservedContext(deadline: action.deadline, isCancelled: { false })
+            guard case .requiresMutation = try action.preflight(resolved, context) else {
+                throw ReactionTestFailure("unexpected custom remove no-op")
+            }
+            resolvedBeforeFailure.withLock { $0 = true }
+            return .childRefusedOrFailed("reaction-unavailable")
+        }
+
+        let result = try captureCommand {
+            try ReactionRemove.parse(["--chat-rowid", "3", "--message-rowid", "70", "--part-index", "2",
+                                      "--emoji", "👍🏽", "--test-mode"])
+                .run(dependencies: deps)
+        }
+
+        #expect(result.exitCode == AppleExit.upstream)
+        let error = try errorPayload(from: result.stdout)
+        #expect(error["type"] as? String == AppleErrorType.upstream)
+        #expect((error["message"] as? String)?.contains("reaction-unavailable") == true)
+        #expect(resolvedBeforeFailure.value == true)
+    }
+
+    @Test func reactionImplicitCustomRemoveRemainsSafetyRefused() throws {
+        let fx = try ChatFixture()
+        try fx.addReactionColumns()
+        try fx.insertReactionTarget(rowid: 70, guid: "reaction-target")
+        try fx.insertReaction(rowid: 100, guid: "reaction-custom", associatedGUID: "p:2/reaction-target",
+                              type: 2006, date: fx.base + 11, emoji: "👍")
+        let preflightReached = LockedBox(false)
+        let deps = reactionDependencies(fx, allowedRecipients: ["+12125550100"]) { action in
+            do {
+                _ = try action.resolve()
+                preflightReached.withLock { $0 = true }
+                return .timedOut
+            } catch {
+                return .requestNotSent(String(describing: error))
+            }
+        }
+
+        let result = try captureCommand {
+            try ReactionRemove.parse(["--chat-rowid", "3", "--message-rowid", "70",
+                                      "--part-index", "2", "--test-mode"])
                 .run(dependencies: deps)
         }
 

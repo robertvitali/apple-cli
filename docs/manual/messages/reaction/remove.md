@@ -10,7 +10,7 @@ apple messages reaction remove [flags]
 
 ## Description
 
-Removes an outgoing reaction from one exact Messages target. Select the target with the same exact chat/message/native-part selectors as `reaction set`. Pass `--reaction` to remove a specific standard reaction or `--emoji` to preview a custom reaction removal; omit both only when database evidence resolves exactly one outgoing standard reaction. The approved scope covers standard and custom remove, but the current candidate executes standard reaction removal only; custom emoji execution is refused outside dry run.
+Removes an outgoing reaction from one exact Messages target. Select the target with the same exact chat/message/native-part selectors as `reaction set`. Pass `--reaction` for a standard reaction or `--emoji` for explicit custom-emoji removal. Omit both only when database evidence resolves exactly one outgoing standard reaction. Explicit custom removal is experimental and requires an exact native picker button; live validation remains pending. Custom set/replace and implicit custom removal remain refused outside dry run.
 
 ## Options
 
@@ -19,7 +19,7 @@ Removes an outgoing reaction from one exact Messages target. Select the target w
 - `--chat-rowid` `<chat-rowid>`
   <br>Local conversation ROWID from chat.ROWID.
 - `--emoji` `<emoji>`
-  <br>Custom emoji reaction to remove. Accepted for preview; execution is refused until AX support is proven.
+  <br>Custom emoji reaction to remove. Explicit custom emoji removal is experimental; custom set/replace and implicit custom removal are refused.
 - `--experimental-ui-handoff`
   <br>Allow a modal handoff route when the Tapback picker hides the transcript; cannot prove original message continuity after modal, so keep Messages untouched during automation.
 - `--message-guid` `<message-guid>`
@@ -62,7 +62,7 @@ APPLE_TEST_MODE=1 apple messages reaction remove --chat-rowid 42 --message-rowid
 
 ## Notes
 
-The same exact-target, dry-run, sandbox, pending-operation and UI verification rules as `reaction set` apply. An explicit requested reaction is removed only if its native button is selected; an unselected button is a verified no-change result with `reaction_changed: false`. Database outgoing absence alone never proves local UI absence. When the database cannot resolve one reaction for implicit removal, specify `--reaction` explicitly; the command refuses instead of guessing or reporting a false no-op. The `--experimental-ui-handoff` flag only opts into transcript-hidden picker transitions; retained-picker `.present` proof and restored-route `.absent` proof are post-press verification branches available under the same identity rules described for `reaction set`. Results report `reaction_changed` and `verification_source: ui_selected_state_and_database_identity` while retaining raw database authorship. The experimental handoff opt-in cannot prove original-message continuity during the modal transition, cancellation quiescence inside Messages or durable sync completion. Leave Messages untouched during execution. Post-verification cannot undo a reaction redirected by desktop interference. Custom emoji preview is accepted, but current-candidate execution is refused until exact native UI support is proven.
+The same exact-target, dry-run, sandbox, pending-operation and UI verification rules as `reaction set` apply. An explicit requested reaction is removed only if its native button is selected; an unselected button is a verified no-change result with `reaction_changed: false`. Database outgoing absence alone never proves local UI absence. When the database cannot resolve one reaction for implicit removal, specify `--reaction` or `--emoji` explicitly; the command refuses instead of guessing or reporting a false no-op. The `--experimental-ui-handoff` flag only opts into transcript-hidden picker transitions; retained-picker `.present` proof and restored-route `.absent` proof are post-press verification branches available under the same identity rules described for `reaction set`. Results report `reaction_changed` and `verification_source: ui_selected_state_and_database_identity` while retaining raw database authorship. The experimental handoff opt-in cannot prove original-message continuity during the modal transition, cancellation quiescence inside Messages or durable sync completion. Leave Messages untouched during execution. Post-verification cannot undo a reaction redirected by desktop interference. Custom emoji identifiers are matched byte-for-byte, including variation selectors, skin tones and ZWJ sequences; the command never substitutes a base emoji. A repeated custom removal is a verified no-op only when the exact button is still exposed and unselected. A missing button is not evidence of absence. If the button disappears after a press, verification fails and the operation remains pending instead of claiming success. General custom-removal idempotency and live reliability are not established.
 
 ## Output
 

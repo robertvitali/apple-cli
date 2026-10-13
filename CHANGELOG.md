@@ -56,9 +56,18 @@ JSON output are stable per the versioning policy — breaking changes bump
   eligibility before reporting `verification_source:
   ui_selected_state_and_database_identity`. Strict targeting remains the default;
   `--experimental-ui-handoff` explicitly opts into the weaker modal route when the
-  Tapback picker hides the transcript and reports that limitation. Custom emoji
-  remains preview-only, and `messages automation status` / `recover` expose
-  unresolved operations.
+  Tapback picker hides the transcript and reports that limitation.
+  `messages automation status` / `recover` expose unresolved operations.
+
+- **Explicit custom-emoji removal is available experimentally** through
+  `apple messages reaction remove --emoji`. The exact emoji must be exposed as a
+  native picker button, including its variation selectors and skin tone. Missing
+  buttons never prove absence; a button that disappears after removal leaves
+  verification uncertain and the operation pending. Repeating removal is a
+  verified no-op only if the exact button remains exposed and unselected. Live
+  validation remains pending. Custom set/replace and implicit custom removal
+  remain preview-only. See the
+  [reaction removal manual](https://github.com/robertvitali/apple-cli/blob/main/docs/manual/messages/reaction/remove.md).
 
 - **`apple messages reaction inspect` now exposes read-only exact reaction
   inspection.** It uses the same exact chat/message selectors as `messages get`,

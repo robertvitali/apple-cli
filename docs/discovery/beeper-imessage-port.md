@@ -236,8 +236,12 @@ The experimental handoff cannot prove original-message continuity during the
 modal transcript replacement, cancellation quiescence inside Messages, or durable
 sync completion. The user must leave Messages untouched during execution, and
 post-verification cannot undo a reaction redirected by desktop interference.
-Custom emoji reactions are accepted for preview in the current candidate, but
-execution remains refused until exact native UI selection is proven.
+Custom emoji set/replace remains preview-only. Explicit custom removal uses the
+existing exact picker-button route with byte-for-byte emoji matching. Its live
+validation remains pending. Implicit custom removal is refused on execution. A
+missing button never proves absence; if the exact button disappears after a
+press, verification fails and the operation remains pending. Repeat removal is
+a verified no-op only when the exact button remains exposed and unselected.
 
 Every write uses AppleKit execution and sandbox policy once at command entry.
 Dry-run returns a resolved preview without driving AX, launching UI workers or
@@ -262,9 +266,9 @@ self-addressed fixtures. Non-self/group operations require operator participatio
 The following list defines the full approved delivery scope. It is not a claim
 that every capability is implemented or verified in the current candidate. The
 approved product scope includes standard and custom reaction set, replace and
-remove. The current reaction candidate executes standard reactions only; custom
-emoji can be previewed and accepted as a target shape, but execution remains
-refused pending implementation and native UI validation.
+remove. The current reaction candidate executes standard reactions and explicit
+custom removal. Custom removal still needs live validation; custom set/replace
+is preview-only pending implementation and native UI validation.
 
 1. Exact targeting and bounded reads establish the identity contract above.
 2. The shared automation backend establishes locking, deadlines and diagnostics.
@@ -279,10 +283,10 @@ refused pending implementation and native UI validation.
    Already-selected set and unselected explicit remove are verified no-change
    results with `reaction_changed: false`; unresolved pending operations still
    block new writes. Implicit remove refuses when the database cannot resolve one
-   reaction and requires explicit `--reaction`. Current-candidate custom emoji
-   preview is accepted, but execution is refused until exact UI support is
-   proven. Do not copy upstream skin-tone stripping or treat UI action completion
-   as success.
+   reaction and requires explicit `--reaction` or `--emoji`. Custom removal
+   requires explicit `--emoji` even if database evidence identifies one outgoing
+   custom reaction. Custom set/replace remains preview-only. Do not copy upstream
+   skin-tone stripping or treat UI action completion as success.
 4. Text and attachment replies require exact quoted message/part identity and verify
    the persisted reply relationship through the same observed-state contract.
    Preserve existing attachment path controls.

@@ -10,7 +10,7 @@ apple messages reaction
 
 ## Description
 
-Groups exact Messages reaction inspection and experimental standard reaction writes. Reads are database-only; writes execute by default unless `--dry-run` or `APPLE_DRY_RUN=1` is active and always report `experimental: true`.
+Groups exact Messages reaction inspection, experimental standard reaction writes and explicit custom-emoji removal. Reads are database-only; writes execute by default unless `--dry-run` or `APPLE_DRY_RUN=1` is active and always report `experimental: true`.
 
 ## Subcommands
 
@@ -49,7 +49,7 @@ apple messages reaction set --chat-rowid 42 --message-rowid 123 --reaction heart
 
 ## Notes
 
-Reaction writes use exact conversation, message and native-part identity. Agent-run live writes must use the sandbox. The sandbox requires the target message text to start with `apple-cli-test`, requires exactly one selected participant, and confines that participant to the allowed test recipients; sandbox reaction writes refuse group conversations. Production writes may target exact group chat GUIDs or ROWIDs. Standard reactions are `heart`, `like`, `dislike`, `laugh`, `emphasize` and `question`. Custom emoji reactions are accepted for preview with `--emoji`, but execution is refused until the native UI path is proven. Successful writes require native picker selected-state verification plus fresh database target identity and eligibility; raw database authorship is returned as recorded and is not used alone to prove the current user’s reaction.
+Reaction writes use exact conversation, message and native-part identity. Agent-run live writes must use the sandbox. The sandbox requires the target message text to start with `apple-cli-test`, requires exactly one selected participant, and confines that participant to the allowed test recipients; sandbox reaction writes refuse group conversations. Production writes may target exact group chat GUIDs or ROWIDs. Standard reactions are `heart`, `like`, `dislike`, `laugh`, `emphasize` and `question`. Custom emoji set/replace is preview-only. Explicit custom removal with `--emoji` uses an exact, byte-matched native picker button; live validation of this experimental route remains pending. Missing buttons never prove that a reaction is absent. Successful writes require native picker selected-state verification plus fresh database target identity and eligibility; raw database authorship is returned as recorded and is not used alone to prove the current user’s reaction.
 
 ## Output
 

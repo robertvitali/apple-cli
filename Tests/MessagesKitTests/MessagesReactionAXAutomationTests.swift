@@ -225,6 +225,94 @@ struct MessagesReactionAXAutomationTests {
         #expect(throws: (any Error).self) { try request(.set, .custom(value)) }
     }
 
+    @Test func customRemovePressesExactVisibleEmojiButtonAndCleansUp() throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "👍🏽"
+        driver.button.isSelected = true
+
+        #expect(try apply(driver, .remove, .custom("👍🏽")) == .ack("reaction-remove-changed-verified"))
+        #expect(driver.button.performed == ["AXPress"])
+        #expect(driver.picker.performed == ["AXCancel"])
+    }
+
+    @Test func customRemoveDismissedPickerVerifiesExactEmojiOnRetainedRoute() throws {
+        let driver = FakeReactionDriver()
+        let clock = FakeReadinessClock()
+        driver.button.id = "👍🏽"
+        driver.button.isSelected = true
+        driver.button.onAction = { _ in
+            driver.button.isSelected = false
+            driver.window.nodes.removeAll { $0.sameIdentity(as: driver.picker) }
+        }
+
+        let automation = MessagesReactionAXAutomation(driver: driver, readinessNow: { clock.now },
+                                                      readinessPause: { clock.pause($0) })
+        #expect(try automation.apply(request(.remove, .custom("👍🏽"), experimentalUIHandoff: true),
+                                     deadline: .millisecondsFromNow(2_000)) ==
+                .ack("reaction-remove-changed-verified"))
+        #expect(driver.button.performed == ["AXPress"])
+        #expect(driver.picker.performed == ["AXCancel"])
+        #expect(driver.message.performed.count == 2)
+    }
+
+    @Test func customRemoveExactVisibleEmojiAlreadyUnselectedIsNoOp() throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "👍🏽"
+        driver.button.isSelected = false
+
+        #expect(try apply(driver, .remove, .custom("👍🏽")) == .ack("reaction-remove-unchanged-verified"))
+        #expect(driver.button.performed.isEmpty)
+        #expect(driver.picker.performed == ["AXCancel"])
+    }
+
+    @Test func customRemoveMissingExactButtonAfterDismissalDoesNotAck() throws {
+        let driver = FakeReactionDriver()
+        let clock = FakeReadinessClock()
+        driver.button.id = "👍🏽"
+        driver.button.isSelected = true
+        driver.button.onAction = { _ in
+            driver.button.isSelected = false
+            driver.picker.nodes = []
+            driver.window.nodes.removeAll { $0.sameIdentity(as: driver.picker) }
+        }
+
+        let automation = MessagesReactionAXAutomation(driver: driver, readinessNow: { clock.now },
+                                                      readinessPause: { clock.pause($0) })
+        #expect(try automation.apply(request(.remove, .custom("👍🏽"), experimentalUIHandoff: true),
+                                     deadline: .millisecondsFromNow(2_000)) == .refused("reaction-unavailable"))
+        #expect(driver.button.performed == ["AXPress"])
+        #expect(driver.picker.performed.isEmpty)
+    }
+
+    @Test func customRemoveRetainedPickerLosesExactButtonDoesNotAck() throws {
+        let driver = FakeReactionDriver()
+        let clock = FakeReadinessClock()
+        driver.button.id = "👍🏽"
+        driver.button.isSelected = true
+        driver.button.onAction = { _ in
+            driver.button.isSelected = false
+            driver.picker.nodes = []
+        }
+
+        let automation = MessagesReactionAXAutomation(driver: driver, readinessNow: { clock.now },
+                                                      readinessPause: { clock.pause($0) })
+        #expect(try automation.apply(request(.remove, .custom("👍🏽"), experimentalUIHandoff: true),
+                                     deadline: .millisecondsFromNow(2_000)) == .refused("reaction-unavailable"))
+        #expect(driver.button.performed == ["AXPress"])
+        #expect(driver.picker.performed.isEmpty)
+    }
+
+    @Test(arguments: [("❤️", "❤"), ("👍🏽", "👍"), ("👩🏽‍💻", "👩‍💻")])
+    func customRemoveRequiresExactUTF8EmojiIdentifier(_ requested: String, _ exposed: String) throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = exposed
+        driver.button.isSelected = true
+
+        #expect(try apply(driver, .remove, .custom(requested)) == .refused("reaction-unavailable"))
+        #expect(driver.button.performed.isEmpty)
+        #expect(driver.picker.performed.isEmpty)
+    }
+
     @Test func deniedAccessibilityDoesNotOpenOrPrompt() throws {
         let driver = FakeReactionDriver()
         driver.trusted = false
