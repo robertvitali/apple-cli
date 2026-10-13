@@ -218,6 +218,43 @@ against a historical value (Q12 [1]).
 | `get_recent_messages` | hours=6 cross-chat: every MCP output line reproduced **byte-verbatim** (attributedBody-decoded bodies, group names, sender resolution, timestamps). **This claim is bounded to the pre-attachment build and is deliberately no longer true of `--text`** — see "Attachment metadata" below for the two intentional deviations (an appended `[N attachments: …]` suffix, and a row set that now includes attachment-only messages the oracle drops). The JSON body/group/sender/timestamp shaping the claim was really about is unchanged. |
 | `fuzzy_search_messages` | See the WRatio boundary note below. |
 
+### Exact root text replies
+
+`apple messages reply send` is a CLI-only experimental write built on exact read
+evidence plus the shared Messages UI automation journal. It targets a root message
+inside one direct conversation by exact chat selector, exact message selector and
+native part index. It does not use body text, latest-message order, a parent lookup
+or raw `thread_originator` metadata alone to authorize the write.
+
+Dry run resolves the same exact target and sandbox policy but performs no UI work
+and creates no journal state. Execution requires `--experimental-ui-handoff`. The
+reply text is supplied as `--body` (the global `--text` flag is already the output
+format selector), must be nonempty, and is capped at 2048 UTF-8 bytes; the private
+worker payload is capped at 4096 encoded bytes. Sandbox mode requires the target
+root body and outgoing reply body to carry the canonical `apple-cli-test` prefix
+and requires exactly one participant in `APPLE_TEST_RECIPIENTS`. Group replies and
+attachment replies are not implemented in this unit.
+
+The UI phase opens the exact native Messages URL, retains the canonical process,
+window, root transcript and normal composer, then opens exactly one owned Reply
+composer. It writes the body once, verifies the retained composer identity and
+control state, rejects local attachment or modal evidence, and snapshots exact
+UTF-8 text with `AXNumberOfCharacters` matching the string's UTF-16 count. It posts
+one Return down/up pair to the Messages process, with the macOS 15+ extra key-up
+release used by existing automation. After the first send dispatch it does not
+retry Return and does not clear a nonempty composer.
+
+The child ACK has two accepted cleanup shapes: Messages may already have restored
+the original clean main composer, or the retained owned reply composer may be empty
+and closed with exactly one `AXCancel`. The parent records observed state only after
+that ACK and a fresh database proof: a new outgoing row in the same chat, after the
+pre-dispatch high-water mark, whose exact UTF-8 body and native
+`thread_originator` parent GUID/part match the target. Unknown ownership, malformed
+GUIDs, malformed join evidence, duplicates, overflow or wrong-chat rows leave the
+operation unverified rather than authorizing success. The result reports
+`verification_source: ui_clean_state_and_database_correspondence`, the sent row and
+GUID, the parent GUID/part, and the exact target.
+
 ### Send service control and attachments
 
 Two CLI-only extras on the send path, both listed as WORTH-INCLUDING in §5. Neither

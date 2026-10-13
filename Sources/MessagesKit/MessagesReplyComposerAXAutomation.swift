@@ -42,6 +42,8 @@ enum MessagesReplyComposerAXError: String, Error, CustomStringConvertible, CaseI
     case replyComposerCleanupUnavailable = "reply-composer-cleanup-unavailable"
     case replyComposerCleanupFailed = "reply-composer-cleanup-failed"
     case replyComposerOriginalDraftDrift = "reply-composer-original-draft-drift"
+    case replyComposerTextMismatch = "reply-composer-text-mismatch"
+    case replyComposerPossibleDraftRemains = "reply-composer-possible-draft-remains"
     case targetDrift = "target-drift"
     case traversalLimit = "traversal-limit"
     case unknownAXValue = "unknown-ax-value"
@@ -53,6 +55,7 @@ protocol MessagesReplyComposerAXDriving: MessagesAXProcessDriving {
     func replyActionTitles(deadline: WorkerDeadline) throws -> [String]
     func normalComposePlaceholders(deadline: WorkerDeadline) throws -> [String]
     func replyTranscriptDescription(deadline: WorkerDeadline) throws -> String?
+    func focusedElement(in process: MessagesAXProcess, deadline: WorkerDeadline) throws -> (any MessagesAXElement)?
 }
 
 struct MessagesAXActionMatcher {
@@ -168,6 +171,10 @@ final class LiveMessagesReplyComposerAXDriver: MessagesReplyComposerAXDriving {
     func canonicalMessagesProcess(deadline: WorkerDeadline) throws -> MessagesAXProcess { try base.canonicalMessagesProcess(deadline: deadline) }
     func messagesProcessIsFrontmost(_ process: MessagesAXProcess, deadline: WorkerDeadline) throws -> Bool { try base.messagesProcessIsFrontmost(process, deadline: deadline) }
     func focusedElement(deadline: WorkerDeadline) throws -> (any MessagesAXElement)? { try base.focusedElement(deadline: deadline) }
+    func focusedElement(in process: MessagesAXProcess, deadline: WorkerDeadline) throws -> (any MessagesAXElement)? {
+        guard let root = process.root as? LiveAXElement else { throw MessagesAXNavigationError.axFailure }
+        return try root.focusedElement(deadline: deadline)
+    }
 }
 
 private enum MessagesReplyComposerAXStage: String {
@@ -202,23 +209,48 @@ struct MessagesReplyComposerAXAutomation {
     let maxChildren: Int
     private let readinessNow: () -> UInt64
     private let readinessPause: (UInt64) -> Void
+    private let sendReturnKey: (pid_t, WorkerDeadline) throws -> Void
 
     init(driver: any MessagesReplyComposerAXDriving = LiveMessagesReplyComposerAXDriver(),
                  maxTraversalNodes: Int = 2_048, maxTraversalDepth: Int = 32, maxChildren: Int = 256,
                  readinessNow: @escaping () -> UInt64 = { DispatchTime.now().uptimeNanoseconds },
-                 readinessPause: @escaping (UInt64) -> Void = { Thread.sleep(forTimeInterval: Double($0) / 1_000_000_000) }) {
+                 readinessPause: @escaping (UInt64) -> Void = { Thread.sleep(forTimeInterval: Double($0) / 1_000_000_000) },
+                 sendReturnKey: @escaping (pid_t, WorkerDeadline) throws -> Void = { pid, deadline in
+                     let presser = LiveMessagesPairedKeyPresser(pid: pid)
+                     do { try presser.pressReturn(flags: .cleared, deadline: deadline) }
+                     catch MessagesPairedKeyPressError.deadlineExpired { throw MessagesReplyComposerAXError.deadlineExpired }
+                     catch { throw MessagesReplyComposerAXError.axFailure }
+                 }) {
         self.driver = driver
         self.maxTraversalNodes = maxTraversalNodes
         self.maxTraversalDepth = maxTraversalDepth
         self.maxChildren = maxChildren
         self.readinessNow = readinessNow
         self.readinessPause = readinessPause
+        self.sendReturnKey = sendReturnKey
     }
 
     private var navigator: MessagesAXNavigator {
         MessagesAXNavigator(driver: driver, maxTraversalNodes: maxTraversalNodes,
                             maxTraversalDepth: maxTraversalDepth, maxChildren: maxChildren,
                             readinessNow: readinessNow, readinessPause: readinessPause)
+    }
+
+    private static func throwReplyCommonReactionError(_ error: MessagesReactionAXError, stage: MessagesReplyComposerAXStage) throws -> Never {
+        switch error {
+        case .deadlineExpired:
+            throw MessagesReplyComposerAXError.deadlineExpired
+        case .axFailure:
+            throw MessagesReplyComposerStagedAXFailure(stage: stage)
+        case .targetDrift, .ambiguousSelectedMessage:
+            throw MessagesReplyComposerStagedTargetDrift(stage: stage)
+        case .unknownAXValue:
+            throw MessagesReplyComposerAXError.unknownAXValue
+        case .traversalLimit:
+            throw MessagesReplyComposerAXError.traversalLimit
+        default:
+            throw error
+        }
     }
 
     func inspect(_ request: MessagesReplyComposerProbeRequest, deadline: WorkerDeadline) throws -> MessagesReplyComposerAXOutcome {
@@ -239,6 +271,28 @@ struct MessagesReplyComposerAXAutomation {
         } catch let error as MessagesAXRouteDrift {
             let mapped = Self.replyError(from: error)
             return .refused(mapped.description)
+        } catch {
+            return .failed(MessagesReplyComposerAXError.axFailure.description)
+        }
+    }
+
+    func send(_ request: MessagesReplySendRequest, deadline: WorkerDeadline) throws -> MessagesReplyComposerAXOutcome {
+        do { return try executeSend(request, deadline: deadline) }
+        catch let error as MessagesReplyComposerStagedAXFailure { return .failed(error.detail) }
+        catch let error as MessagesReplyComposerStagedTargetDrift { return .refused(error.detail) }
+        catch let error as MessagesReplyComposerAXError {
+            switch error {
+            case .axFailure, .deadlineExpired: return .failed(error.description)
+            default: return .refused(error.description)
+            }
+        } catch let error as MessagesAXNavigationError {
+            let mapped = Self.replyError(from: error)
+            switch mapped {
+            case .axFailure, .deadlineExpired: return .failed(mapped.description)
+            default: return .refused(mapped.description)
+            }
+        } catch _ as MessagesAXRouteDrift {
+            return .refused(MessagesReplyComposerAXError.targetDrift.description)
         } catch {
             return .failed(MessagesReplyComposerAXError.axFailure.description)
         }
@@ -406,6 +460,112 @@ struct MessagesReplyComposerAXAutomation {
             case .unknownAXValue, .traversalLimit:
                 throw Self.replyError(from: error)
             }
+        } catch let error as MessagesReactionAXError {
+            try Self.throwReplyCommonReactionError(error, stage: stage)
+        } catch MessagesReplyComposerAXError.axFailure {
+            throw MessagesReplyComposerStagedAXFailure(stage: stage)
+        } catch MessagesReplyComposerAXError.targetDrift {
+            throw MessagesReplyComposerStagedTargetDrift(stage: stage)
+        } catch _ as MessagesAXRouteDrift {
+            throw MessagesReplyComposerStagedTargetDrift(stage: stage)
+        }
+    }
+
+    private func executeSend(_ request: MessagesReplySendRequest, deadline: WorkerDeadline) throws -> MessagesReplyComposerAXOutcome {
+        var stage = MessagesReplyComposerAXStage.preflight
+        do {
+            try checkMessagesAXDeadline(deadline)
+            guard driver.checkAccessibilityTrusted(prompt: false) else { return .refused(MessagesReplyComposerAXError.accessibilityDenied.description) }
+            let titles = try driver.replyActionTitles(deadline: deadline)
+            guard !titles.isEmpty else { throw MessagesReplyComposerAXError.unknownAXValue }
+            let normalPlaceholders = try driver.normalComposePlaceholders(deadline: deadline)
+            let replyDescription = try driver.replyTranscriptDescription(deadline: deadline)
+            try refuseUnsafeExistingStateBeforeOpen(normalPlaceholders: normalPlaceholders, replyDescription: replyDescription, deadline: deadline)
+            let targetURL = try NativeMessagesURL.message(messageGUID: request.messageGUID,
+                                                          nativePartIndex: request.nativePartIndex,
+                                                          nativePartGUID: request.nativePartGUID)
+            stage = .open
+            let process = try driver.openMessages(url: targetURL, deadline: deadline)
+            stage = .postOpenSafety
+            try refuseUnsafeExistingState(process: process, normalPlaceholders: normalPlaceholders,
+                                          replyDescription: replyDescription, deadline: deadline)
+            stage = .initialRoute
+            let route = try navigator.captureInitialRoute(process: process, isTargetEligible: { element, deadline in
+                try replyAction(on: element, titles: titles, deadline: deadline) != nil
+            }, deadline: deadline)
+            stage = .routeRevalidation
+            try navigator.revalidate(route, isTargetEligible: { element, deadline in
+                try replyAction(on: element, titles: titles, deadline: deadline) != nil
+            }, deadline: deadline)
+            guard try replyComposer(in: route.window, replyDescription: replyDescription, deadline: deadline) == nil else {
+                throw MessagesReplyComposerAXError.replyComposerExisting
+            }
+            let originalDraft = try cleanNormalComposerProof(in: route.window, normalPlaceholders: normalPlaceholders, deadline: deadline)
+            stage = .replyOpen
+            guard let action = try replyAction(on: route.selected, titles: titles, deadline: deadline) else {
+                throw MessagesReplyComposerAXError.replyActionUnavailable
+            }
+            try route.selected.performAction(named: action, deadline: deadline)
+            stage = .composerReadiness
+            let composer = try waitForOwnedComposer(route: route, titles: titles, replyDescription: replyDescription, deadline: deadline)
+            try validateOwnedComposer(composer, deadline: deadline)
+            guard try bodyHasNoLocalAttachmentEvidence(in: composer.body, window: route.window, deadline: deadline),
+                  try hasNoLocalModalEvidence(in: route.window, window: route.window, deadline: deadline) else {
+                throw MessagesReplyComposerAXError.replyComposerAttachmentEvidence
+            }
+            stage = .cleanup
+            var sendStarted = false
+            do {
+                try composer.body.setValue(request.text, deadline: deadline)
+                let inserted = try revalidateComposerWithExpectedText(route: route, original: composer, expectedText: request.text,
+                                                                      titles: titles, replyDescription: replyDescription, deadline: deadline)
+                guard try inserted.transcript.actions(deadline: deadline).contains("AXCancel") else {
+                    throw MessagesReplyComposerAXError.replyComposerCleanupUnavailable
+                }
+                let finalComposer = try revalidateComposerWithExpectedText(route: route, original: composer, expectedText: request.text,
+                                                                           titles: titles, replyDescription: replyDescription, deadline: deadline)
+                guard try bodyHasNoLocalAttachmentEvidence(in: finalComposer.body, window: route.window, deadline: deadline) else {
+                    throw MessagesReplyComposerAXError.replyComposerAttachmentEvidence
+                }
+                guard try hasNoLocalModalEvidence(in: route.window, window: route.window, deadline: deadline) else {
+                    throw MessagesReplyComposerAXError.replyComposerOwnershipDrift
+                }
+                try validateAppRootFocus(route: route, composer: finalComposer, deadline: deadline)
+                let finalSnapshot = try finalComposer.body.bodyTextSnapshot(deadline: deadline)
+                guard finalSnapshot.text.utf8.elementsEqual(request.text.utf8) else {
+                    throw MessagesReplyComposerAXError.replyComposerTextMismatch
+                }
+                stage = .verification
+                sendStarted = true
+                try sendReturnKey(pid_t(route.process.identity.pid), deadline)
+                return try verifyAfterSend(route: route, originalComposer: composer, titles: titles,
+                                           replyDescription: replyDescription, originalDraft: originalDraft,
+                                           normalPlaceholders: normalPlaceholders, deadline: deadline)
+            } catch {
+                if !sendStarted {
+                    var cleanupCancelStarted = false
+                    try? clearAndCancelOwnedTextComposer(route: route, original: composer, expectedText: request.text,
+                                                         titles: titles, replyDescription: replyDescription,
+                                                         originalDraft: originalDraft, normalPlaceholders: normalPlaceholders,
+                                                         deadline: deadline, cancelStarted: &cleanupCancelStarted)
+                    if !cleanupCancelStarted {
+                        try? cancelOwnedEmptyComposer(route: route, original: composer, titles: titles,
+                                                      replyDescription: replyDescription, originalDraft: originalDraft,
+                                                      normalPlaceholders: normalPlaceholders, deadline: deadline,
+                                                      cancelStarted: &cleanupCancelStarted)
+                    }
+                }
+                throw error
+            }
+        } catch let error as MessagesAXNavigationError {
+            switch error {
+            case .deadlineExpired: throw MessagesReplyComposerAXError.deadlineExpired
+            case .axFailure: throw MessagesReplyComposerStagedAXFailure(stage: stage)
+            case .targetDrift, .ambiguousSelectedMessage: throw MessagesReplyComposerStagedTargetDrift(stage: stage)
+            case .unknownAXValue, .traversalLimit: throw Self.replyError(from: error)
+            }
+        } catch let error as MessagesReactionAXError {
+            try Self.throwReplyCommonReactionError(error, stage: stage)
         } catch MessagesReplyComposerAXError.axFailure {
             throw MessagesReplyComposerStagedAXFailure(stage: stage)
         } catch MessagesReplyComposerAXError.targetDrift {
@@ -572,6 +732,200 @@ struct MessagesReplyComposerAXAutomation {
         guard fields.count == 1, let body = fields.first else { throw MessagesReplyComposerAXError.replyComposerAmbiguous }
         let evidence = try body.bodyValueEvidence(deadline: deadline)
         return ComposerSurface(transcript: transcript, body: body, evidence: evidence)
+    }
+
+    private func validateOwnedComposerControls(_ composer: ComposerSurface, deadline: WorkerDeadline) throws {
+        guard try composer.body.enabled(deadline: deadline) == true,
+              try composer.body.valueSettable(deadline: deadline) == true,
+              try composer.body.focused(deadline: deadline) == true else {
+            throw MessagesReplyComposerAXError.replyComposerOwnershipDrift
+        }
+    }
+
+    private func revalidateComposerWithExpectedText(route: MessagesAXRoute, original: ComposerSurface, expectedText: String,
+                                                    titles: [String], replyDescription: String?, deadline: WorkerDeadline) throws -> ComposerSurface {
+        let current = try currentOwnedComposerAllowingText(route: route, titles: titles, replyDescription: replyDescription, deadline: deadline)
+        guard let current, current.transcript.sameIdentity(as: original.transcript), current.body.sameIdentity(as: original.body) else {
+            throw MessagesReplyComposerAXError.replyComposerOwnershipDrift
+        }
+        try validateOwnedComposerControls(current, deadline: deadline)
+        guard try bodyHasNoLocalAttachmentEvidence(in: current.body, window: route.window, deadline: deadline) else {
+            throw MessagesReplyComposerAXError.replyComposerAttachmentEvidence
+        }
+        guard try hasNoLocalModalEvidence(in: route.window, window: route.window, deadline: deadline) else {
+            throw MessagesReplyComposerAXError.replyComposerOwnershipDrift
+        }
+        let snapshot = try current.body.bodyTextSnapshot(deadline: deadline)
+        guard snapshot.text.utf8.elementsEqual(expectedText.utf8) else {
+            throw MessagesReplyComposerAXError.replyComposerTextMismatch
+        }
+        return current
+    }
+
+    private func currentOwnedComposerAllowingText(route: MessagesAXRoute, titles: [String], replyDescription: String?,
+                                                  deadline: WorkerDeadline) throws -> ComposerSurface? {
+        let window = try retainedWindow(route: route, deadline: deadline)
+        guard let composer = try replyComposer(in: window, replyDescription: replyDescription, deadline: deadline) else { return nil }
+        guard !composer.transcript.sameIdentity(as: route.transcript),
+              try restoredMainTranscriptIsPresent(in: window, route: route, deadline: deadline) == false else {
+            throw MessagesReplyComposerAXError.replyComposerOwnershipDrift
+        }
+        return composer
+    }
+
+    private func retainedOwnedComposer(route: MessagesAXRoute, original: ComposerSurface, titles: [String],
+                                       replyDescription: String?, deadline: WorkerDeadline) throws -> ComposerSurface {
+        guard try driver.messagesProcessIsFrontmost(route.process, deadline: deadline) else {
+            throw MessagesReplyComposerAXError.replyComposerOwnershipDrift
+        }
+        guard let current = try currentOwnedComposerAllowingText(route: route, titles: titles,
+                                                                replyDescription: replyDescription, deadline: deadline),
+              current.transcript.sameIdentity(as: original.transcript),
+              current.body.sameIdentity(as: original.body) else {
+            throw MessagesReplyComposerAXError.replyComposerOwnershipDrift
+        }
+        return current
+    }
+
+    private func validateAppRootFocus(route: MessagesAXRoute, composer: ComposerSurface, deadline: WorkerDeadline) throws {
+        let window = try retainedWindow(route: route, deadline: deadline)
+        guard window.sameIdentity(as: route.window) else {
+            throw MessagesReplyComposerAXError.replyComposerOwnershipDrift
+        }
+        guard let bodyWindow = try composer.body.window(deadline: deadline), bodyWindow.sameIdentity(as: route.window) else {
+            throw MessagesReplyComposerAXError.replyComposerOwnershipDrift
+        }
+        guard try driver.messagesProcessIsFrontmost(route.process, deadline: deadline) else {
+            throw MessagesReplyComposerAXError.replyComposerOwnershipDrift
+        }
+        guard let focused = try driver.focusedElement(in: route.process, deadline: deadline) else {
+            throw MessagesReplyComposerAXError.replyComposerOwnershipDrift
+        }
+        guard try focused.processIdentifier(deadline: deadline) == route.process.identity.pid else {
+            throw MessagesReplyComposerAXError.replyComposerOwnershipDrift
+        }
+        guard let focusedWindow = try focused.window(deadline: deadline), focusedWindow.sameIdentity(as: route.window) else {
+            throw MessagesReplyComposerAXError.replyComposerOwnershipDrift
+        }
+        guard focused.sameIdentity(as: composer.body) else {
+            throw MessagesReplyComposerAXError.replyComposerOwnershipDrift
+        }
+        _ = try retainedWindow(route: route, deadline: deadline)
+        guard try driver.messagesProcessIsFrontmost(route.process, deadline: deadline) else {
+            throw MessagesReplyComposerAXError.replyComposerOwnershipDrift
+        }
+        try validateOwnedComposerControls(composer, deadline: deadline)
+    }
+
+    private func finalOwnedEmptyComposerForCancel(route: MessagesAXRoute, original: ComposerSurface, titles: [String],
+                                                  replyDescription: String?, deadline: WorkerDeadline) throws -> ComposerSurface {
+        let current = try retainedOwnedComposer(route: route, original: original, titles: titles,
+                                                replyDescription: replyDescription, deadline: deadline)
+        try validateOwnedComposerControls(current, deadline: deadline)
+        guard try bodyHasNoLocalAttachmentEvidence(in: current.body, window: route.window, deadline: deadline) else {
+            throw MessagesReplyComposerAXError.replyComposerAttachmentEvidence
+        }
+        guard try hasNoLocalModalEvidence(in: route.window, window: route.window, deadline: deadline) else {
+            throw MessagesReplyComposerAXError.replyComposerOwnershipDrift
+        }
+        let snapshot = try current.body.bodyTextSnapshot(deadline: deadline)
+        guard snapshot.provenEmpty else {
+            throw MessagesReplyComposerAXError.replyComposerPossibleDraftRemains
+        }
+        return current
+    }
+
+    private func clearAndCancelOwnedTextComposer(route: MessagesAXRoute, original: ComposerSurface, expectedText: String,
+                                                 titles: [String], replyDescription: String?, originalDraft: NormalComposerProof,
+                                                 normalPlaceholders: [String], deadline: WorkerDeadline,
+                                                 cancelStarted: inout Bool) throws {
+        let transcript = try retainedOwnedComposer(route: route, original: original, titles: titles,
+                                                   replyDescription: replyDescription, deadline: deadline).transcript
+        guard try transcript.actions(deadline: deadline).contains("AXCancel") else {
+            throw MessagesReplyComposerAXError.replyComposerCleanupUnavailable
+        }
+        let composer = try revalidateComposerWithExpectedText(route: route, original: original, expectedText: expectedText,
+                                                              titles: titles, replyDescription: replyDescription, deadline: deadline)
+        try composer.body.setValue("", deadline: deadline)
+        let emptyTranscript = try retainedOwnedComposer(route: route, original: original, titles: titles,
+                                                        replyDescription: replyDescription, deadline: deadline).transcript
+        guard try emptyTranscript.actions(deadline: deadline).contains("AXCancel") else {
+            throw MessagesReplyComposerAXError.replyComposerCleanupUnavailable
+        }
+        let empty = try finalOwnedEmptyComposerForCancel(route: route, original: original, titles: titles,
+                                                         replyDescription: replyDescription, deadline: deadline)
+        cancelStarted = true
+        try empty.transcript.performAction(named: "AXCancel", deadline: deadline)
+        try verifyCleanup(route: route, titles: titles, replyDescription: replyDescription, originalDraft: originalDraft,
+                          normalPlaceholders: normalPlaceholders, deadline: deadline)
+    }
+
+    private func cancelOwnedEmptyComposer(route: MessagesAXRoute, original: ComposerSurface, titles: [String], replyDescription: String?,
+                                          originalDraft: NormalComposerProof, normalPlaceholders: [String], deadline: WorkerDeadline,
+                                          cancelStarted: inout Bool) throws {
+        let transcript = try retainedOwnedComposer(route: route, original: original, titles: titles,
+                                                   replyDescription: replyDescription, deadline: deadline).transcript
+        guard try transcript.actions(deadline: deadline).contains("AXCancel") else {
+            throw MessagesReplyComposerAXError.replyComposerCleanupUnavailable
+        }
+        let empty = try finalOwnedEmptyComposerForCancel(route: route, original: original, titles: titles,
+                                                         replyDescription: replyDescription, deadline: deadline)
+        cancelStarted = true
+        try empty.transcript.performAction(named: "AXCancel", deadline: deadline)
+        try verifyCleanup(route: route, titles: titles, replyDescription: replyDescription, originalDraft: originalDraft,
+                          normalPlaceholders: normalPlaceholders, deadline: deadline)
+    }
+
+    private func verifyAfterSend(route: MessagesAXRoute, originalComposer: ComposerSurface, titles: [String], replyDescription: String?,
+                                 originalDraft: NormalComposerProof, normalPlaceholders: [String], deadline: WorkerDeadline) throws -> MessagesReplyComposerAXOutcome {
+        let started = readinessNow()
+        let cap: UInt64 = 1_500_000_000
+        var retainedNonemptyObserved = false
+        for attempt in 0...30 {
+            try checkMessagesAXDeadline(deadline)
+            do {
+                try verifyCleanup(route: route, titles: titles, replyDescription: replyDescription,
+                                  originalDraft: originalDraft, normalPlaceholders: normalPlaceholders, deadline: deadline)
+                return .ack(MessagesReplySendACKDetail.alreadyRestoredVerified)
+            } catch MessagesReplyComposerAXError.replyComposerCleanupFailed {
+            }
+            let window = try retainedWindow(route: route, deadline: deadline)
+            if let composer = try replyComposer(in: window, replyDescription: replyDescription, deadline: deadline),
+               composer.transcript.sameIdentity(as: originalComposer.transcript),
+               composer.body.sameIdentity(as: originalComposer.body) {
+                try validateOwnedComposerControls(composer, deadline: deadline)
+                guard try bodyHasNoLocalAttachmentEvidence(in: composer.body, window: route.window, deadline: deadline) else {
+                    throw MessagesReplyComposerAXError.replyComposerAttachmentEvidence
+                }
+                guard try hasNoLocalModalEvidence(in: route.window, window: route.window, deadline: deadline) else {
+                    throw MessagesReplyComposerAXError.replyComposerOwnershipDrift
+                }
+                let snapshot = try composer.body.bodyTextSnapshot(deadline: deadline)
+                if snapshot.provenEmpty {
+                    let transcript = try retainedOwnedComposer(route: route, original: originalComposer, titles: titles,
+                                                               replyDescription: replyDescription, deadline: deadline).transcript
+                    guard try transcript.actions(deadline: deadline).contains("AXCancel") else {
+                        throw MessagesReplyComposerAXError.replyComposerCleanupUnavailable
+                    }
+                    let empty = try finalOwnedEmptyComposerForCancel(route: route, original: originalComposer, titles: titles,
+                                                                     replyDescription: replyDescription, deadline: deadline)
+                    try empty.transcript.performAction(named: "AXCancel", deadline: deadline)
+                    try verifyCleanup(route: route, titles: titles, replyDescription: replyDescription,
+                                      originalDraft: originalDraft, normalPlaceholders: normalPlaceholders, deadline: deadline)
+                    return .ack(MessagesReplySendACKDetail.retainedEmptyCancelledVerified)
+                }
+                retainedNonemptyObserved = true
+            }
+            guard attempt < 30 else {
+                throw retainedNonemptyObserved ? MessagesReplyComposerAXError.replyComposerPossibleDraftRemains : MessagesReplyComposerAXError.replyComposerCleanupFailed
+            }
+            let now = readinessNow()
+            guard now >= started, now - started < cap else {
+                throw retainedNonemptyObserved ? MessagesReplyComposerAXError.replyComposerPossibleDraftRemains : MessagesReplyComposerAXError.replyComposerCleanupFailed
+            }
+            readinessPause(min(50_000_000, cap - (now - started), deadline.remainingNanoseconds))
+        }
+        throw retainedNonemptyObserved ? MessagesReplyComposerAXError.replyComposerPossibleDraftRemains : MessagesReplyComposerAXError.replyComposerCleanupFailed
     }
 
     private func bodyFields(in root: any MessagesAXElement, window: any MessagesAXElement, deadline: WorkerDeadline) throws -> [any MessagesAXElement] {

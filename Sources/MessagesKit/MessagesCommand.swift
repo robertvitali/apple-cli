@@ -17,7 +17,7 @@ public struct MessagesCommand: ParsableCommand {
         subcommands: [
             Recent.self, Send_.self, FindContact.self, Chats.self, Search.self,
             Conversations.self, History.self, Get.self,
-            Reaction.self, MessagesAutomation.self,
+            Reaction.self, Reply.self, MessagesAutomation.self,
             CheckAvailability.self, CheckDB.self, CheckContacts.self, CheckAddressBook.self,
             Doctor.self,
         ]
@@ -29,7 +29,7 @@ public struct MessagesCommand: ParsableCommand {
     /// smoke test's ok=false contract, and gives agents a machine-readable nudge).
     public func run() throws {
         try runGuarded(tool: "messages") {
-            throw AppleError.validation("specify a subcommand: recent, send, find-contact, chats, search, conversations, history, get, reaction, automation, check-availability, check-db, check-contacts, check-addressbook, doctor")
+            throw AppleError.validation("specify a subcommand: recent, send, find-contact, chats, search, conversations, history, get, reaction, reply, automation, check-availability, check-db, check-contacts, check-addressbook, doctor")
         }
     }
 }
@@ -42,6 +42,12 @@ package let tool = "messages"
 /// value — `.live` — and no flag or environment variable can select another; the seam exists so
 /// the logic tier can drive every command against synthetic SQLite fixtures and fake senders
 /// instead of the real chat.db, AddressBook and `osascript`.
+
+struct MessagesReplyCleanStateToken: @unchecked Sendable {
+    let value: Any
+    init(_ value: Any) { self.value = value }
+}
+
 struct MessagesCommandDependencies: Sendable {
     var loadAddressBook: @Sendable () -> AddressBook
     var makeChatDB: @Sendable (AddressBook) throws -> ChatDB
@@ -55,6 +61,8 @@ struct MessagesCommandDependencies: Sendable {
     var hasFullDiskAccess: @Sendable () -> Bool
     var messagesAutomationStateRoot: @Sendable () -> String
     var launchObservedWorker: @Sendable (WorkerObservedAction) throws -> WorkerObservedOutcome
+    var captureReplyCleanState: @Sendable (MessagesReplyComposerProbeRequest, WorkerDeadline) throws -> MessagesReplyCleanStateToken
+    var verifyReplyCleanState: @Sendable (MessagesReplyComposerProbeRequest, MessagesReplyCleanStateToken, WorkerDeadline) throws -> String
     /// Resolves the write posture (execute-vs-preview, sandbox, sandbox recipient allowlist) for
     /// `send`. Injected for the same reason `TestMode.sandboxActive(flag:envVar:)` and
     /// `GlobalOptions.willExecute(defaultDryRun:envVar:)` carry `envVar:` seams: the resolution
@@ -74,6 +82,16 @@ struct MessagesCommandDependencies: Sendable {
         hasFullDiskAccess: Permissions.hasFullDiskAccess,
         messagesAutomationStateRoot: MessagesAutomationState.productionRoot,
         launchObservedWorker: { try WorkerLauncher().launchObserved($0) },
+        captureReplyCleanState: { request, deadline in
+            let state = try MessagesReplyComposerAXAutomation().captureStartingDraftSafetyState(request, deadline: deadline)
+            return MessagesReplyCleanStateToken(state)
+        },
+        verifyReplyCleanState: { request, token, deadline in
+            guard let state = token.value as? MessagesReplyComposerStartingState else {
+                throw WorkerProtocolError.malformedFrame
+            }
+            return try MessagesReplyComposerAXAutomation().verifyCleanReplyState(request, original: state, deadline: deadline)
+        },
         // Wrapped rather than referenced directly: `resolve` carries a default argument (the
         // allowlist-reader seam), and a Swift function reference cannot elide one.
         resolveGate: { try MessagesWriteGuard.resolve($0) }

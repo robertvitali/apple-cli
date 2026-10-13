@@ -181,6 +181,10 @@ package struct WorkerOperationResult: Equatable, Sendable {
         "reply-composer-cleanup-unavailable",
         "reply-composer-cleanup-failed",
         "reply-composer-original-draft-drift",
+        "reply-composer-text-mismatch",
+        "reply-composer-possible-draft-remains",
+        "reply-send-already-restored-clean-verified",
+        "reply-send-empty-owned-composer-closed-verified",
         "target-drift",
         "traversal-limit",
         "unknown-ax-value"

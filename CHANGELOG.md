@@ -20,6 +20,8 @@ JSON output are stable per the versioning policy — breaking changes bump
 
 ### Added
 
+- **Experimental exact Messages text replies now run through `apple messages reply send`.** The command resolves a root message in a direct conversation, previews with `--dry-run`, requires `--experimental-ui-handoff` to execute, and verifies both clean UI restoration and fresh same-chat database correspondence before reporting success. Reply bodies are passed with `--body`, bounded to 2048 UTF-8 bytes, and sandboxed agent runs must target labeled test content and allowed test recipients. Groups and attachment replies remain out of scope.
+
 - **`apple messages doctor` now reports status-only Accessibility trust diagnostics alongside its existing Full Disk Access, Messages database and AddressBook checks.** The JSON result includes the current process trust status, fixed `current_process` identity and remediation notes without prompting or changing settings; the text result names the same status, and the command still succeeds when Accessibility is denied. Other launches may have different Accessibility permissions and must check their own status before acting. Manual: [`apple messages doctor`](https://github.com/robertvitali/apple-cli/blob/main/docs/manual/messages/doctor.md).
 
 - **Automation journal and worker foundation:** shared private state serializes cooperating

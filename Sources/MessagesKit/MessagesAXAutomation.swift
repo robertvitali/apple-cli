@@ -2150,13 +2150,25 @@ private final class PickerSearchInvocation: @unchecked Sendable {
     }
 }
 
-struct PairedCustomEmojiKeyPress {
+enum MessagesPairedKeyFlags: Equatable {
+    case preserved
+    case cleared
+}
+
+enum MessagesPairedKeyPressError: Error {
+    case deadlineExpired
+    case axFailure
+}
+
+struct PairedMessagesKeyPress {
     let postDown: () -> Void
     let postUp: () -> Void
     let postRequiredExtraKeyUp: () -> Void
 }
 
-private final class MainThreadCustomEmojiKeyPressAction: @unchecked Sendable {
+typealias PairedCustomEmojiKeyPress = PairedMessagesKeyPress
+
+private final class MainThreadMessagesKeyPressAction: @unchecked Sendable {
     private let action: () throws -> Void
 
     init(_ action: @escaping () throws -> Void) {
@@ -2168,12 +2180,77 @@ private final class MainThreadCustomEmojiKeyPressAction: @unchecked Sendable {
     }
 }
 
+struct LiveMessagesPairedKeyPresser {
+    let pid: pid_t
+    var operatingSystemMajorVersion: () -> Int = {
+        ProcessInfo.processInfo.operatingSystemVersion.majorVersion
+    }
+    var makePairedKeyPress: (CGKeyCode, pid_t, MessagesPairedKeyFlags) throws -> PairedMessagesKeyPress = Self.makeLivePairedKeyPress
+
+    func pressReturn(flags: MessagesPairedKeyFlags, deadline: WorkerDeadline) throws {
+        try press(CGKeyCode(kVK_Return), flags: flags, deadline: deadline)
+    }
+
+    func press(_ code: CGKeyCode, flags: MessagesPairedKeyFlags, deadline: WorkerDeadline) throws {
+        try checkPairedKeyDeadline(deadline)
+        let pairedKeyPress = try makePairedKeyPress(code, pid, flags)
+        let action = {
+            try checkPairedKeyDeadline(deadline)
+            pairedKeyPress.postDown()
+            pairedKeyPress.postUp()
+            if self.operatingSystemMajorVersion() >= 15 {
+                pairedKeyPress.postRequiredExtraKeyUp()
+            }
+            try checkPairedKeyDeadline(deadline)
+        }
+        if Thread.isMainThread {
+            try action()
+        } else {
+            let mainAction = MainThreadMessagesKeyPressAction(action)
+            var result: Result<Void, MessagesPairedKeyPressError> = .success(())
+            DispatchQueue.main.sync {
+                result = Result { try mainAction.run() }.mapError { error in
+                    error as? MessagesPairedKeyPressError ?? .axFailure
+                }
+            }
+            try result.get()
+        }
+        try checkPairedKeyDeadline(deadline)
+    }
+
+    private static func makeLivePairedKeyPress(code: CGKeyCode, pid: pid_t, flags: MessagesPairedKeyFlags) throws -> PairedMessagesKeyPress {
+        guard let source = CGEventSource(stateID: .hidSystemState),
+              let downEvent = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: true),
+              let upEvent = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: false) else {
+            throw MessagesPairedKeyPressError.axFailure
+        }
+        if flags == .cleared {
+            downEvent.flags = []
+            upEvent.flags = []
+        }
+        return PairedMessagesKeyPress(
+            postDown: { downEvent.postToPid(pid) },
+            postUp: { upEvent.postToPid(pid) },
+            postRequiredExtraKeyUp: {
+                upEvent.flags = []
+                upEvent.postToPid(pid)
+            }
+        )
+    }
+}
+
+private func checkPairedKeyDeadline(_ deadline: WorkerDeadline) throws {
+    guard !deadline.expired else { throw MessagesPairedKeyPressError.deadlineExpired }
+}
+
 struct LiveCustomEmojiKeyPresser {
     let pid: pid_t
     var operatingSystemMajorVersion: () -> Int = {
         ProcessInfo.processInfo.operatingSystemVersion.majorVersion
     }
-    var makePairedKeyPress: (CGKeyCode, pid_t) throws -> PairedCustomEmojiKeyPress = Self.makeLivePairedKeyPress
+    var makePairedKeyPress: (CGKeyCode, pid_t) throws -> PairedCustomEmojiKeyPress = { code, pid in
+        try LiveMessagesPairedKeyPresser.makeLivePairedKeyPressForCompatibility(code: code, pid: pid)
+    }
 
     func press(_ key: MessagesCustomEmojiChooserKey, deadline: WorkerDeadline) throws {
         try checkDeadline(deadline)
@@ -2183,44 +2260,16 @@ struct LiveCustomEmojiKeyPresser {
         case .rightArrow: code = CGKeyCode(kVK_RightArrow)
         case .returnKey: code = CGKeyCode(kVK_Return)
         }
-        let pairedKeyPress = try makePairedKeyPress(code, pid)
-        let action = {
-            try checkDeadline(deadline)
-            pairedKeyPress.postDown()
-            pairedKeyPress.postUp()
-            if self.operatingSystemMajorVersion() >= 15 {
-                pairedKeyPress.postRequiredExtraKeyUp()
-            }
-            try checkDeadline(deadline)
-        }
-        if Thread.isMainThread {
-            try action()
-        } else {
-            let mainAction = MainThreadCustomEmojiKeyPressAction(action)
-            var result: Result<Void, MessagesReactionAXError> = .success(())
-            DispatchQueue.main.sync {
-                result = Result { try mainAction.run() }.mapError { error in
-                    error as? MessagesReactionAXError ?? .axFailure
-                }
-            }
-            try result.get()
-        }
-        try checkDeadline(deadline)
+        let presser = LiveMessagesPairedKeyPresser(pid: pid, operatingSystemMajorVersion: operatingSystemMajorVersion,
+                                                   makePairedKeyPress: { code, pid, _ in try makePairedKeyPress(code, pid) })
+        do { try presser.press(code, flags: .preserved, deadline: deadline) }
+        catch MessagesPairedKeyPressError.deadlineExpired { throw MessagesReactionAXError.deadlineExpired }
+        catch { throw MessagesReactionAXError.axFailure }
     }
+}
 
-    private static func makeLivePairedKeyPress(code: CGKeyCode, pid: pid_t) throws -> PairedCustomEmojiKeyPress {
-        guard let source = CGEventSource(stateID: .hidSystemState),
-              let downEvent = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: true),
-              let upEvent = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: false) else {
-            throw MessagesReactionAXError.axFailure
-        }
-        return PairedCustomEmojiKeyPress(
-            postDown: { downEvent.postToPid(pid) },
-            postUp: { upEvent.postToPid(pid) },
-            postRequiredExtraKeyUp: {
-                upEvent.flags = []
-                upEvent.postToPid(pid)
-            }
-        )
+extension LiveMessagesPairedKeyPresser {
+    static func makeLivePairedKeyPressForCompatibility(code: CGKeyCode, pid: pid_t) throws -> PairedMessagesKeyPress {
+        try makeLivePairedKeyPress(code: code, pid: pid, flags: .preserved)
     }
 }

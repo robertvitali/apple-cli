@@ -28,6 +28,22 @@ struct MessagesReplyComposerAXAutomationTests {
                                              requiredBodyPrefix: requiredBodyPrefix)
     }
 
+
+    private func sendRequest(text: String = "apple-cli-test reply") throws -> MessagesReplySendRequest {
+        try MessagesReplySendRequest(chatGUID: "iMessage;-;+12125550100",
+                                     messageGUID: "message-guid",
+                                     nativePartIndex: 2,
+                                     nativePartGUID: "p:2/message-guid",
+                                     expectedChatRowID: 3,
+                                     expectedMessageRowID: 70,
+                                     expectedParticipantHandles: ["+12125550100"],
+                                     expectedIsFromMe: false,
+                                     expectedBodySHA256: AppleAutomationJournal.targetDigest(forOpaqueIdentifier: "apple-cli-test target").value,
+                                     expectedBodyUTF8Length: "apple-cli-test target".utf8.count,
+                                     requiredBodyPrefix: "apple-cli-test",
+                                     text: text)
+    }
+
     private func dbFixture() throws -> ChatFixture {
         let fx = try ChatFixture()
         let text = "apple-cli-test target"
@@ -45,6 +61,628 @@ struct MessagesReplyComposerAXAutomationTests {
         #expect(driver.message.performed == ["Name:Reply\nTarget:0x0\nSelector:(null)"])
         #expect(driver.replyTranscript.performed == ["AXCancel"])
         #expect(driver.replyVisible == false)
+    }
+
+
+    @Test func sendInsertsExactTextAndAcknowledgesAlreadyRestoredWithoutCancel() throws {
+        let driver = FakeReplyDriver()
+        var returnPresses = 0
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in }, sendReturnKey: { _, _ in
+            returnPresses += 1
+            driver.replyVisible = false
+        }).send(sendRequest(text: "apple-cli-test cafe\u{0301}"), deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .ack(MessagesReplySendACKDetail.alreadyRestoredVerified))
+        #expect(returnPresses == 1)
+        #expect(driver.replyBody.bodyText == "apple-cli-test cafe\u{0301}")
+        #expect(driver.replyTranscript.performed.isEmpty)
+    }
+
+    @Test func sendCancelsRetainedEmptyOwnedComposerOnceAfterSend() throws {
+        let driver = FakeReplyDriver()
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in }, sendReturnKey: { _, deadline in
+            try driver.replyBody.setValue("", deadline: deadline)
+        }).send(sendRequest(), deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .ack(MessagesReplySendACKDetail.retainedEmptyCancelledVerified))
+        #expect(driver.replyTranscript.performed == ["AXCancel"])
+        #expect(driver.replyVisible == false)
+    }
+
+    @Test func sendPostDispatchEmptyCancelRefusesIfBodyChangesDuringActionRead() throws {
+        let driver = FakeReplyDriver()
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in }, sendReturnKey: { [driver] _, deadline in
+            try driver.replyBody.setValue("", deadline: deadline)
+            driver.replyTranscript.onActionsRead = { [driver] in
+                driver.replyBody.applyBodyText("apple-cli-test changed")
+            }
+        }).send(sendRequest(), deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .refused("reply-composer-possible-draft-remains"))
+        #expect(driver.replyTranscript.performed.isEmpty)
+        #expect(driver.replyVisible == true)
+        #expect(driver.replyBody.bodyText == "apple-cli-test changed")
+    }
+
+
+
+    @Test func sendPostDispatchEmptyCancelRefusesIfAttachmentAppearsDuringActionRead() throws {
+        let driver = FakeReplyDriver()
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in }, sendReturnKey: { [driver] _, deadline in
+            try driver.replyBody.setValue("", deadline: deadline)
+            driver.replyTranscript.onActionsRead = { [driver] in
+                driver.replyBody.staticChildren.append(FakeReplyNode(roleValue: "AXImage"))
+            }
+        }).send(sendRequest(), deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .refused("reply-composer-attachment-evidence"))
+        #expect(driver.replyTranscript.performed.isEmpty)
+        #expect(driver.replyVisible == true)
+    }
+
+    @Test func sendPostDispatchEmptyCancelRefusesIfModalAppearsDuringActionRead() throws {
+        let driver = FakeReplyDriver()
+        let modal = FakeReplyNode(roleValue: "AXSheet")
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in }, sendReturnKey: { [driver] _, deadline in
+            try driver.replyBody.setValue("", deadline: deadline)
+            driver.replyTranscript.onActionsRead = { [driver] in
+                driver.extraWindowChildren = [modal]
+            }
+        }).send(sendRequest(), deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .refused("reply-composer-ownership-drift"))
+        #expect(driver.replyTranscript.performed.isEmpty)
+        #expect(driver.replyVisible == true)
+    }
+
+    @Test func sendPostDispatchEmptyCancelRefusesIfBodyChangesDuringFinalControlRead() throws {
+        let driver = FakeReplyDriver()
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in }, sendReturnKey: { [driver] _, deadline in
+            try driver.replyBody.setValue("", deadline: deadline)
+            driver.replyTranscript.onActionsRead = { [driver] in
+                driver.replyBody.onControlRead = { [driver] in
+                    driver.replyBody.applyBodyText("apple-cli-test changed")
+                }
+            }
+        }).send(sendRequest(), deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .refused("reply-composer-possible-draft-remains"))
+        #expect(driver.replyTranscript.performed.isEmpty)
+        #expect(driver.replyVisible == true)
+        #expect(driver.replyBody.bodyText == "apple-cli-test changed")
+    }
+
+    @Test func sendWaitsForTransientRetainedComposerTextToClearAfterReturn() throws {
+        let driver = FakeReplyDriver()
+        var returnPresses = 0
+        var pauses = 0
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { [driver] _ in
+            pauses += 1
+            if pauses == 1 { driver.replyBody.applyBodyText("") }
+        }, sendReturnKey: { [driver] _, _ in
+            returnPresses += 1
+            driver.replyBody.applyBodyText("apple-cli-test transient")
+        }).send(sendRequest(), deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .ack(MessagesReplySendACKDetail.retainedEmptyCancelledVerified))
+        #expect(returnPresses == 1)
+        #expect(driver.replyTranscript.performed == ["AXCancel"])
+        #expect(driver.replyVisible == false)
+    }
+
+    @Test func sendBoundsPersistentRetainedComposerTextAfterOneReturnWithoutClearing() throws {
+        let driver = FakeReplyDriver()
+        var returnPresses = 0
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in }, sendReturnKey: { [driver] _, _ in
+            returnPresses += 1
+            driver.replyBody.applyBodyText("apple-cli-test persistent")
+        }).send(sendRequest(), deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .refused("reply-composer-possible-draft-remains"))
+        #expect(returnPresses == 1)
+        #expect(driver.replyTranscript.performed.isEmpty)
+        #expect(driver.replyVisible == true)
+        #expect(driver.replyBody.bodyText == "apple-cli-test persistent")
+    }
+
+    @Test func sendRefusesWrongAppRootFocusBeforeReturnAndClearsExactOwnedDraft() throws {
+        let driver = FakeReplyDriver()
+        var returnPresses = 0
+        driver.appFocusedOverride = driver.message
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in }, sendReturnKey: { _, _ in
+            returnPresses += 1
+        }).send(sendRequest(), deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .refused("reply-composer-ownership-drift"))
+        #expect(returnPresses == 0)
+        #expect(driver.replyBody.bodyText.isEmpty)
+        #expect(driver.replyTranscript.performed == ["AXCancel"])
+        #expect(driver.replyVisible == false)
+    }
+
+    @Test func sendAllowsSystemFocusMismatchWhenAppRootFocusIsExactBody() throws {
+        let driver = FakeReplyDriver()
+        var returnPresses = 0
+        driver.focusedOverride = driver.message
+        driver.appFocusedOverride = driver.replyBody
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in }, sendReturnKey: { [driver] _, _ in
+            returnPresses += 1
+            driver.replyVisible = false
+        }).send(sendRequest(), deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .ack(MessagesReplySendACKDetail.alreadyRestoredVerified))
+        #expect(returnPresses == 1)
+        #expect(driver.replyTranscript.performed.isEmpty)
+    }
+
+    @Test func sendRefusesMissingAppRootFocusBeforeReturnAndClearsExactOwnedDraft() throws {
+        let driver = FakeReplyDriver()
+        var returnPresses = 0
+        driver.appFocusAvailable = false
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in }, sendReturnKey: { _, _ in
+            returnPresses += 1
+        }).send(sendRequest(), deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .refused("reply-composer-ownership-drift"))
+        #expect(returnPresses == 0)
+        #expect(driver.replyBody.bodyText.isEmpty)
+        #expect(driver.replyTranscript.performed == ["AXCancel"])
+    }
+
+    @Test func sendMapsAppRootFocusAXFailureToCleanupStage() throws {
+        let driver = FakeReplyDriver()
+        var returnPresses = 0
+        driver.appFocusError = MessagesReactionAXError.axFailure
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in }, sendReturnKey: { _, _ in
+            returnPresses += 1
+        }).send(sendRequest(), deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .failed("ax-failure-cleanup"))
+        #expect(returnPresses == 0)
+        #expect(driver.replyTranscript.performed == ["AXCancel"])
+    }
+
+    @Test func sendRefusesWrongAppRootFocusedBodyBeforeReturnAndClearsExactOwnedDraft() throws {
+        let driver = FakeReplyDriver()
+        var returnPresses = 0
+        driver.appFocusedOverride = driver.message
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in }, sendReturnKey: { _, _ in
+            returnPresses += 1
+        }).send(sendRequest(), deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .refused("reply-composer-ownership-drift"))
+        #expect(returnPresses == 0)
+        #expect(driver.replyBody.bodyText.isEmpty)
+        #expect(driver.replyTranscript.performed == ["AXCancel"])
+    }
+
+    @Test func sendRefusesAppRootFocusedElementWithWrongPIDBeforeReturn() throws {
+        let driver = FakeReplyDriver()
+        var returnPresses = 0
+        let foreign = FakeReplyNode(roleValue: "AXTextField", identifierValue: "messageBodyField", enabledValue: true, focusedValue: true, settableValue: true)
+        foreign.processIdentifierValue = 999
+        foreign.parentNode = driver.window
+        driver.appFocusedOverride = foreign
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in }, sendReturnKey: { _, _ in
+            returnPresses += 1
+        }).send(sendRequest(), deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .refused("reply-composer-ownership-drift"))
+        #expect(returnPresses == 0)
+        #expect(driver.replyTranscript.performed == ["AXCancel"])
+    }
+
+    @Test func sendRefusesAppRootFocusedElementWithWrongWindowBeforeReturn() throws {
+        let driver = FakeReplyDriver()
+        var returnPresses = 0
+        let otherWindow = FakeReplyNode(roleValue: "AXWindow")
+        let foreign = FakeReplyNode(roleValue: "AXTextField", identifierValue: "messageBodyField", enabledValue: true, focusedValue: true, settableValue: true)
+        foreign.parentNode = otherWindow
+        driver.appFocusedOverride = foreign
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in }, sendReturnKey: { _, _ in
+            returnPresses += 1
+        }).send(sendRequest(), deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .refused("reply-composer-ownership-drift"))
+        #expect(returnPresses == 0)
+        #expect(driver.replyTranscript.performed == ["AXCancel"])
+    }
+
+    @Test func sendRefusesPreFocusFrontmostDriftBeforeReturn() throws {
+        let driver = FakeReplyDriver()
+        var returnPresses = 0
+        driver.frontmostResults = [false]
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in }, sendReturnKey: { _, _ in
+            returnPresses += 1
+        }).send(sendRequest(), deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .refused("reply-composer-ownership-drift"))
+        #expect(returnPresses == 0)
+        #expect(driver.replyTranscript.performed == ["AXCancel"])
+    }
+
+    @Test func sendRefusesPostFocusFrontmostDriftBeforeReturn() throws {
+        let driver = FakeReplyDriver()
+        var returnPresses = 0
+        driver.frontmostResults = [true, false]
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in }, sendReturnKey: { _, _ in
+            returnPresses += 1
+        }).send(sendRequest(), deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .refused("reply-composer-ownership-drift"))
+        #expect(returnPresses == 0)
+        #expect(driver.replyTranscript.performed == ["AXCancel"])
+    }
+
+    @Test func sendRefusesFocusDriftDuringFinalAttachmentScanBeforeReturn() throws {
+        let driver = FakeReplyDriver()
+        var returnPresses = 0
+        var afterPreSendActionRead = false
+        var attachmentReadsAfterAction = 0
+        driver.replyTranscript.onActionsRead = { afterPreSendActionRead = true }
+        driver.replyBody.onLinkedElementsRead = { [driver] in
+            guard afterPreSendActionRead, driver.replyBody.bodyText == sendRequestText else { return }
+            attachmentReadsAfterAction += 1
+            if attachmentReadsAfterAction == 6 { driver.appFocusedOverride = driver.message }
+        }
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in }, sendReturnKey: { _, _ in
+            returnPresses += 1
+        }).send(sendRequest(), deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .refused("reply-composer-ownership-drift"))
+        #expect(returnPresses == 0)
+        #expect(driver.replyTranscript.performed == ["AXCancel"])
+    }
+
+    @Test func sendRefusesFocusDriftDuringFinalModalScanBeforeReturn() throws {
+        let driver = FakeReplyDriver()
+        var returnPresses = 0
+        var afterPreSendActionRead = false
+        var windowReadsAfterAction = 0
+        driver.replyTranscript.onActionsRead = { afterPreSendActionRead = true }
+        driver.window.onChildrenRead = { [driver] in
+            guard afterPreSendActionRead, driver.replyVisible, driver.replyBody.bodyText == sendRequestText else { return }
+            windowReadsAfterAction += 1
+            if windowReadsAfterAction == 5 { driver.appFocusedOverride = driver.message }
+        }
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in }, sendReturnKey: { _, _ in
+            returnPresses += 1
+        }).send(sendRequest(), deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .refused("reply-composer-ownership-drift"))
+        #expect(returnPresses == 0)
+        #expect(driver.replyTranscript.performed == ["AXCancel"])
+    }
+
+    @Test func sendRefusesProcessDriftAfterAppRootFocusBeforeReturn() throws {
+        let driver = FakeReplyDriver()
+        var returnPresses = 0
+        driver.onAppFocusRead = { [weak driver] in driver?.processAvailable = false }
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in }, sendReturnKey: { _, _ in
+            returnPresses += 1
+        }).send(sendRequest(), deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .failed("ax-failure-cleanup"))
+        #expect(returnPresses == 0)
+        #expect(driver.replyTranscript.performed.isEmpty)
+    }
+
+    @Test func sendRefusesLaunchIdentityDriftAfterAppRootFocusBeforeReturn() throws {
+        let driver = FakeReplyDriver()
+        var returnPresses = 0
+        driver.onAppFocusRead = { [weak driver] in
+            guard let driver else { return }
+            driver.identity = MessagesAXProcessIdentity(pid: 123, bundleURL: URL(fileURLWithPath: "/System/Applications/Messages.app"), launchDate: Date(timeIntervalSince1970: 2))
+        }
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in }, sendReturnKey: { _, _ in
+            returnPresses += 1
+        }).send(sendRequest(), deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .refused("target-drift-cleanup"))
+        #expect(returnPresses == 0)
+        #expect(driver.replyTranscript.performed.isEmpty)
+    }
+
+    @Test func sendRefusesRootDriftAfterAppRootFocusBeforeReturn() throws {
+        let driver = FakeReplyDriver()
+        var returnPresses = 0
+        driver.onAppFocusRead = { [weak driver] in
+            driver?.canonicalRootOverride = FakeReplyNode(roleValue: "AXApplication")
+        }
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in }, sendReturnKey: { _, _ in
+            returnPresses += 1
+        }).send(sendRequest(), deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .refused("target-drift-cleanup"))
+        #expect(returnPresses == 0)
+        #expect(driver.replyTranscript.performed.isEmpty)
+    }
+
+    @Test func sendMapsAppRootCommonFocusedDeadlineToDeadlineFailure() throws {
+        let driver = FakeReplyDriver()
+        var returnPresses = 0
+        driver.appFocusError = MessagesReactionAXError.deadlineExpired
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in }, sendReturnKey: { _, _ in
+            returnPresses += 1
+        }).send(sendRequest(), deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .failed("deadline-expired"))
+        #expect(returnPresses == 0)
+    }
+
+    @Test func sendMapsForeignFrontmostTargetDriftToVerificationStageRefusal() throws {
+        let driver = FakeReplyDriver()
+        var returnPresses = 0
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in }, sendReturnKey: { [driver] _, deadline in
+            returnPresses += 1
+            try driver.replyBody.setValue("", deadline: deadline)
+            driver.frontmostError = MessagesReactionAXError.targetDrift
+        }).send(sendRequest(), deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .refused("target-drift-verification"))
+        #expect(returnPresses == 1)
+        #expect(driver.replyTranscript.performed.isEmpty)
+    }
+
+    @Test func sendCleanupRefusesIfExactTextChangesDuringCancelActionRead() throws {
+        let driver = FakeReplyDriver()
+        var returnPresses = 0
+        var actionReads = 0
+        driver.appFocusedOverride = driver.message
+        driver.replyTranscript.onActionsRead = { [weak driver] in
+            actionReads += 1
+            if actionReads == 2 { driver?.replyBody.applyBodyText("apple-cli-test changed") }
+        }
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in }, sendReturnKey: { _, _ in
+            returnPresses += 1
+        }).send(sendRequest(), deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .refused("reply-composer-ownership-drift"))
+        #expect(returnPresses == 0)
+        #expect(driver.replyBody.bodyText == "apple-cli-test changed")
+        #expect(driver.replyTranscript.performed.isEmpty)
+        #expect(driver.replyVisible == true)
+    }
+
+    @Test func sendCancelsOwnedEmptyComposerWhenInsertionThrowsBeforeTextLands() throws {
+        let driver = FakeReplyDriver()
+        var returnPresses = 0
+        driver.replyBody.onSetValue = { value in
+            if !value.isEmpty { throw MessagesReplyComposerAXError.axFailure }
+        }
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in }, sendReturnKey: { _, _ in
+            returnPresses += 1
+        }).send(sendRequest(), deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .failed("ax-failure-cleanup"))
+        #expect(returnPresses == 0)
+        #expect(driver.replyBody.bodyText.isEmpty)
+        #expect(driver.replyTranscript.performed == ["AXCancel"])
+        #expect(driver.replyVisible == false)
+    }
+
+    @Test func sendEmptyCleanupRefusesIfBodyChangesDuringCancelActionRead() throws {
+        let driver = FakeReplyDriver()
+        var returnPresses = 0
+        driver.replyBody.onSetValue = { value in
+            if !value.isEmpty { throw MessagesReplyComposerAXError.axFailure }
+        }
+        driver.replyTranscript.onActionsRead = { [weak driver] in
+            driver?.replyBody.applyBodyText("apple-cli-test changed")
+        }
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in }, sendReturnKey: { _, _ in
+            returnPresses += 1
+        }).send(sendRequest(), deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .failed("ax-failure-cleanup"))
+        #expect(returnPresses == 0)
+        #expect(driver.replyBody.bodyText == "apple-cli-test changed")
+        #expect(driver.replyTranscript.performed.isEmpty)
+        #expect(driver.replyVisible == true)
+    }
+
+    @Test func sendPostClearCleanupRefusesIfBodyChangesDuringFinalControlRead() throws {
+        let driver = FakeReplyDriver()
+        var returnPresses = 0
+        driver.appFocusedOverride = driver.message
+        driver.replyBody.onSetValue = { [driver] value in
+            if value.isEmpty {
+                driver.replyBody.onControlRead = { [driver] in
+                    driver.replyBody.applyBodyText("apple-cli-test changed")
+                }
+            }
+        }
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in }, sendReturnKey: { _, _ in
+            returnPresses += 1
+        }).send(sendRequest(), deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .refused("reply-composer-ownership-drift"))
+        #expect(returnPresses == 0)
+        #expect(driver.replyBody.bodyText == "apple-cli-test changed")
+        #expect(driver.replyTranscript.performed.isEmpty)
+        #expect(driver.replyVisible == true)
+    }
+
+    @Test func sendPostClearCleanupRefusesIfBodyChangesDuringFinalModalRead() throws {
+        let driver = FakeReplyDriver()
+        var returnPresses = 0
+        driver.appFocusedOverride = driver.message
+        driver.replyBody.onSetValue = { [driver] value in
+            if value.isEmpty {
+                driver.window.onChildrenRead = { [driver] in
+                    driver.replyBody.applyBodyText("apple-cli-test changed")
+                }
+            }
+        }
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in }, sendReturnKey: { _, _ in
+            returnPresses += 1
+        }).send(sendRequest(), deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .refused("reply-composer-ownership-drift"))
+        #expect(returnPresses == 0)
+        #expect(driver.replyBody.bodyText == "apple-cli-test changed")
+        #expect(driver.replyTranscript.performed.isEmpty)
+        #expect(driver.replyVisible == true)
+    }
+
+    @Test func sendEmptyCleanupRefusesIfBodyChangesDuringFinalControlRead() throws {
+        let driver = FakeReplyDriver()
+        var returnPresses = 0
+        driver.replyBody.onSetValue = { value in
+            if !value.isEmpty { throw MessagesReplyComposerAXError.axFailure }
+        }
+        driver.replyTranscript.onActionsRead = { [driver] in
+            driver.replyBody.onControlRead = { [driver] in
+                driver.replyBody.applyBodyText("apple-cli-test changed")
+            }
+        }
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in }, sendReturnKey: { _, _ in
+            returnPresses += 1
+        }).send(sendRequest(), deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .failed("ax-failure-cleanup"))
+        #expect(returnPresses == 0)
+        #expect(driver.replyBody.bodyText == "apple-cli-test changed")
+        #expect(driver.replyTranscript.performed.isEmpty)
+        #expect(driver.replyVisible == true)
+    }
+
+    @Test func sendEmptyCleanupRefusesIfBodyChangesDuringFinalModalRead() throws {
+        let driver = FakeReplyDriver()
+        var returnPresses = 0
+        driver.replyBody.onSetValue = { value in
+            if !value.isEmpty { throw MessagesReplyComposerAXError.axFailure }
+        }
+        driver.replyTranscript.onActionsRead = { [driver] in
+            driver.window.onChildrenRead = { [driver] in
+                driver.replyBody.applyBodyText("apple-cli-test changed")
+            }
+        }
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in }, sendReturnKey: { _, _ in
+            returnPresses += 1
+        }).send(sendRequest(), deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .failed("ax-failure-cleanup"))
+        #expect(returnPresses == 0)
+        #expect(driver.replyBody.bodyText == "apple-cli-test changed")
+        #expect(driver.replyTranscript.performed.isEmpty)
+        #expect(driver.replyVisible == true)
+    }
+
+    @Test func sendPostClearCleanupRefusesIfAttachmentAppearsDuringFinalProof() throws {
+        let driver = FakeReplyDriver()
+        var returnPresses = 0
+        driver.appFocusedOverride = driver.message
+        driver.replyBody.onSetValue = { [driver] value in
+            if value.isEmpty {
+                driver.replyBody.staticChildren.append(FakeReplyNode(roleValue: "AXImage"))
+            }
+        }
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in }, sendReturnKey: { _, _ in
+            returnPresses += 1
+        }).send(sendRequest(), deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .refused("reply-composer-ownership-drift"))
+        #expect(returnPresses == 0)
+        #expect(driver.replyTranscript.performed.isEmpty)
+        #expect(driver.replyVisible == true)
+    }
+
+    @Test func sendPostClearCleanupRefusesIfModalAppearsDuringFinalProof() throws {
+        let driver = FakeReplyDriver()
+        let modal = FakeReplyNode(roleValue: "AXSheet")
+        var returnPresses = 0
+        driver.appFocusedOverride = driver.message
+        driver.replyBody.onSetValue = { [driver] value in
+            if value.isEmpty { driver.extraWindowChildren = [modal] }
+        }
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in }, sendReturnKey: { _, _ in
+            returnPresses += 1
+        }).send(sendRequest(), deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .refused("reply-composer-ownership-drift"))
+        #expect(returnPresses == 0)
+        #expect(driver.replyTranscript.performed.isEmpty)
+        #expect(driver.replyVisible == true)
+    }
+
+    @Test func sendEmptyCleanupRefusesIfAttachmentAppearsDuringFinalProof() throws {
+        let driver = FakeReplyDriver()
+        var returnPresses = 0
+        driver.replyBody.onSetValue = { [driver] value in
+            if !value.isEmpty {
+                driver.replyBody.staticChildren.append(FakeReplyNode(roleValue: "AXImage"))
+                throw MessagesReplyComposerAXError.axFailure
+            }
+        }
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in }, sendReturnKey: { _, _ in
+            returnPresses += 1
+        }).send(sendRequest(), deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .failed("ax-failure-cleanup"))
+        #expect(returnPresses == 0)
+        #expect(driver.replyTranscript.performed.isEmpty)
+        #expect(driver.replyVisible == true)
+    }
+
+    @Test func sendEmptyCleanupRefusesIfModalAppearsDuringFinalProof() throws {
+        let driver = FakeReplyDriver()
+        let modal = FakeReplyNode(roleValue: "AXSheet")
+        var returnPresses = 0
+        driver.replyBody.onSetValue = { [driver] value in
+            if !value.isEmpty {
+                driver.extraWindowChildren = [modal]
+                throw MessagesReplyComposerAXError.axFailure
+            }
+        }
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in }, sendReturnKey: { _, _ in
+            returnPresses += 1
+        }).send(sendRequest(), deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .failed("ax-failure-cleanup"))
+        #expect(returnPresses == 0)
+        #expect(driver.replyTranscript.performed.isEmpty)
+        #expect(driver.replyVisible == true)
+    }
+
+    @Test func sendCleanupDoesNotAttemptSecondCancelAfterFirstCancelThrows() throws {
+        let driver = FakeReplyDriver()
+        var returnPresses = 0
+        driver.appFocusedOverride = driver.message
+        driver.replyTranscript.onAction = { name in
+            guard name == "AXCancel" else { throw MessagesReplyComposerAXError.replyComposerCleanupUnavailable }
+            throw MessagesReplyComposerAXError.axFailure
+        }
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in }, sendReturnKey: { _, _ in
+            returnPresses += 1
+        }).send(sendRequest(), deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .refused("reply-composer-ownership-drift"))
+        #expect(returnPresses == 0)
+        #expect(driver.replyTranscript.performed == ["AXCancel"])
+        #expect(driver.replyVisible == true)
+    }
+
+    @Test func sendLeavesPartialInsertedTextUntouchedWhenInsertionThrows() throws {
+        let driver = FakeReplyDriver()
+        var returnPresses = 0
+        driver.replyBody.onSetValue = { value in
+            if !value.isEmpty {
+                driver.replyBody.applyBodyText("apple-cli-test partial")
+                throw MessagesReplyComposerAXError.axFailure
+            }
+        }
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in }, sendReturnKey: { _, _ in
+            returnPresses += 1
+        }).send(sendRequest(), deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .failed("ax-failure-cleanup"))
+        #expect(returnPresses == 0)
+        #expect(driver.replyBody.bodyText == "apple-cli-test partial")
+        #expect(driver.replyTranscript.performed.isEmpty)
+        #expect(driver.replyVisible == true)
+    }
+
+    @Test func combinedWorkerRegistryAcceptsReplySendButNotInspectCommand() throws {
+        let registry = MessagesWorkerRegistry(replyDriver: FakeReplyDriver())
+        let payload = try sendRequest().workerPayloadData()
+        #expect(registry.operation(for: try WorkerCommand(name: "messages.reply.send", payload: payload)) != nil)
+        #expect(registry.operation(for: try WorkerCommand(name: "messages.reply.inspect", payload: try request().workerPayloadData())) == nil)
+    }
+
+
+    @Test func sendDoesNotRetryOrClearTextWhenReturnDispatchThrows() throws {
+        let driver = FakeReplyDriver()
+        var returnPresses = 0
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in }, sendReturnKey: { _, _ in
+            returnPresses += 1
+            throw MessagesReplyComposerAXError.axFailure
+        }).send(sendRequest(), deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .failed("ax-failure-verification"))
+        #expect(returnPresses == 1)
+        #expect(driver.replyBody.bodyText == "apple-cli-test reply")
+        #expect(driver.replyTranscript.performed.isEmpty)
+        #expect(driver.replyVisible == true)
+    }
+
+    @Test func sendLeavesNonemptyComposerUnchangedAfterReturnDispatch() throws {
+        let driver = FakeReplyDriver()
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in }, sendReturnKey: { _, _ in })
+            .send(sendRequest(), deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .refused("reply-composer-possible-draft-remains"))
+        #expect(driver.replyBody.bodyText == "apple-cli-test reply")
+        #expect(driver.replyTranscript.performed.isEmpty)
+    }
+
+    @Test func bodyTextSnapshotRequiresUTF16CountConsistency() throws {
+        #expect(throws: Error.self) {
+            _ = try MessagesAXBodyTextSnapshot(text: "apple-cli-test 😊", characterCount: "apple-cli-test 😊".count)
+        }
+        let snapshot = try MessagesAXBodyTextSnapshot(text: "apple-cli-test 😊", characterCount: "apple-cli-test 😊".utf16.count)
+        #expect(snapshot.utf16Count == "apple-cli-test 😊".utf16.count)
     }
 
     @Test func unavailableBodyEvidenceIsNotEmptyComposerProof() throws {
@@ -770,6 +1408,8 @@ private struct MessagesReplyComposerProbeRequestFixtureWithoutPhase: Encodable {
     enum CodingKeys: String, CodingKey { case chatGUID = "chat_guid", messageGUID = "message_guid", nativePartIndex = "native_part_index", nativePartGUID = "native_part_guid", expectedChatRowID = "expected_chat_rowid", expectedMessageRowID = "expected_message_rowid", expectedParticipantHandles = "expected_participant_handles", expectedIsFromMe = "expected_is_from_me", expectedBodySHA256 = "expected_body_sha256", expectedBodyUTF8Length = "expected_body_utf8_length", requiredBodyPrefix = "required_body_prefix" }
 }
 
+private let sendRequestText = "apple-cli-test reply"
+
 private let replyNativePartKey = NSAttributedString.Key("__kIMMessagePartAttributeName")
 
 private func replyNativeArchive(_ text: String, _ attributes: [(NSAttributedString.Key, Any, NSRange)] = []) -> Data {
@@ -805,7 +1445,16 @@ private final class FakeReplyDriver: MessagesReplyComposerAXDriving {
     var processAvailable = true
     var openCount = 0
     var onOpen: (() -> Void)?
-    let identity = MessagesAXProcessIdentity(pid: 123, bundleURL: URL(fileURLWithPath: "/System/Applications/Messages.app"), launchDate: Date(timeIntervalSince1970: 1))
+    var focusedOverride: FakeReplyNode?
+    var appFocusedOverride: FakeReplyNode?
+    var appFocusAvailable = true
+    var appFocusError: Error?
+    var onAppFocusRead: (() -> Void)?
+    var frontmostResults: [Bool] = []
+    var frontmostError: Error?
+    var focusedElementError: Error?
+    var identity = MessagesAXProcessIdentity(pid: 123, bundleURL: URL(fileURLWithPath: "/System/Applications/Messages.app"), launchDate: Date(timeIntervalSince1970: 1))
+    var canonicalRootOverride: FakeReplyNode?
 
     init() {
         root.dynamicChildren = { [weak self] in self.map { [$0.window] } ?? [] }
@@ -842,12 +1491,25 @@ private final class FakeReplyDriver: MessagesReplyComposerAXDriving {
         guard processAvailable else { throw MessagesReplyComposerAXError.axFailure }
         return process
     }
-    func messagesProcessIsFrontmost(_ process: MessagesAXProcess, deadline: WorkerDeadline) throws -> Bool { process.identity == identity }
-    func focusedElement(deadline: WorkerDeadline) throws -> (any MessagesAXElement)? { replyVisible ? replyBody : normalBody }
+    func messagesProcessIsFrontmost(_ process: MessagesAXProcess, deadline: WorkerDeadline) throws -> Bool {
+        if let frontmostError { throw frontmostError }
+        if !frontmostResults.isEmpty { return frontmostResults.removeFirst() }
+        return process.identity == identity
+    }
+    func focusedElement(deadline: WorkerDeadline) throws -> (any MessagesAXElement)? {
+        if let focusedElementError { throw focusedElementError }
+        return focusedOverride ?? (replyVisible ? replyBody : normalBody)
+    }
+    func focusedElement(in process: MessagesAXProcess, deadline: WorkerDeadline) throws -> (any MessagesAXElement)? {
+        if let appFocusError { throw appFocusError }
+        onAppFocusRead?()
+        guard appFocusAvailable else { return nil }
+        return appFocusedOverride ?? (replyVisible ? replyBody : normalBody)
+    }
     func replyActionTitles(deadline: WorkerDeadline) throws -> [String] { ["Reply"] }
     func normalComposePlaceholders(deadline: WorkerDeadline) throws -> [String] { ["iMessage", "Text Message"] }
     func replyTranscriptDescription(deadline: WorkerDeadline) throws -> String? { "Reply transcript" }
-    private var process: MessagesAXProcess { MessagesAXProcess(identity: identity, root: root) }
+    private var process: MessagesAXProcess { MessagesAXProcess(identity: identity, root: canonicalRootOverride ?? root) }
 }
 
 private final class FakeReplyNode: MessagesAXElement {
@@ -865,13 +1527,16 @@ private final class FakeReplyNode: MessagesAXElement {
     var dynamicChildren: (() -> [FakeReplyNode])?
     var bodyEvidence: MessagesAXBodyValueEvidence = .init(valueKind: .noValue, characterCount: 0, placeholder: nil)
     var bodyEvidenceSequence: [MessagesAXBodyValueEvidence] = []
+    var bodyText: String = ""
     var onChildrenRead: (() throws -> Void)?
     var onLinkedElementsRead: (() -> Void)?
     var onActionsRead: (() -> Void)?
     var onBodyEvidenceRead: (() -> Void)?
     var onControlRead: (() -> Void)?
     var onAction: ((String) throws -> Void)?
+    var onSetValue: ((String) throws -> Void)?
     weak var parentNode: FakeReplyNode?
+    var processIdentifierValue: Int32? = 123
 
     init(roleValue: String, identifierValue: String? = nil, descriptionValue: String? = nil,
          selectedValue: Bool? = nil, enabledValue: Bool? = nil, focusedValue: Bool? = nil,
@@ -906,7 +1571,7 @@ private final class FakeReplyNode: MessagesAXElement {
     func window(deadline: WorkerDeadline) throws -> (any MessagesAXElement)? { rootWindow() }
     func directWindows(limit: Int, deadline: WorkerDeadline) throws -> [any MessagesAXElement] { try children(limit: limit, deadline: deadline) }
     func parent(deadline: WorkerDeadline) throws -> (any MessagesAXElement)? { parentNode }
-    func processIdentifier(deadline: WorkerDeadline) throws -> Int32? { 123 }
+    func processIdentifier(deadline: WorkerDeadline) throws -> Int32? { processIdentifierValue }
     func valueSettable(deadline: WorkerDeadline) throws -> Bool? {
         onControlRead?()
         return settableValue
@@ -927,7 +1592,15 @@ private final class FakeReplyNode: MessagesAXElement {
         onLinkedElementsRead?()
         return []
     }
-    func setValue(_ value: String, deadline: WorkerDeadline) throws {}
+    func setValue(_ value: String, deadline: WorkerDeadline) throws {
+        try onSetValue?(value)
+        applyBodyText(value)
+    }
+    func applyBodyText(_ value: String) {
+        bodyText = value
+        bodyEvidence = .init(valueKind: value.isEmpty ? .noValue : .string(value.utf16.count),
+                             characterCount: value.utf16.count, placeholder: bodyEvidence.placeholder)
+    }
     func focused(deadline: WorkerDeadline) throws -> Bool? {
         onControlRead?()
         return focusedValue
@@ -936,6 +1609,9 @@ private final class FakeReplyNode: MessagesAXElement {
         let evidence = bodyEvidenceSequence.isEmpty ? bodyEvidence : bodyEvidenceSequence.removeFirst()
         onBodyEvidenceRead?()
         return evidence
+    }
+    func bodyTextSnapshot(deadline: WorkerDeadline) throws -> MessagesAXBodyTextSnapshot {
+        try MessagesAXBodyTextSnapshot(text: bodyText, characterCount: bodyText.utf16.count)
     }
     func performAction(named name: String, deadline: WorkerDeadline) throws {
         performed.append(name)

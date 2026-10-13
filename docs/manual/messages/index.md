@@ -27,6 +27,7 @@ apple messages
 - [`history`](./history.md) — Read one conversation by exact chat GUID or local chat ROWID.
 - [`reaction`](./reaction/index.md) — Inspect or mutate an exact message reaction.
 - [`recent`](./recent.md) — Recent messages across ALL chats in the last N hours (optionally by contact).
+- [`reply`](./reply/index.md) — Send an exact threaded reply in Messages.
 - [`search`](./search.md) — Search messages: fuzzy (WRatio) + threshold + time window (or contains/exact).
 - [`send`](./send.md) — Send an iMessage/SMS (sends on call; --dry-run previews).
 

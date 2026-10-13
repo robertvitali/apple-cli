@@ -1,4 +1,5 @@
 import Foundation
+import Carbon.HIToolbox.Events
 import ApplicationServices
 import Testing
 @testable import AppleKit
@@ -1144,6 +1145,31 @@ struct MessagesReactionAXAutomationTests {
         #expect(driver.customCandidate.performed.isEmpty)
         #expect(driver.customVisibleButton.performed.isEmpty)
         #expect(driver.picker.performed == ["AXCancel", "AXCancel"])
+    }
+
+
+    @Test func pairedKeyPresserSupportsReplyClearedFlagsAndCustomEmojiPreservedFlags() throws {
+        var calls: [(CGKeyCode, pid_t, MessagesPairedKeyFlags)] = []
+        var events: [String] = []
+        let presser = LiveMessagesPairedKeyPresser(
+            pid: 123,
+            operatingSystemMajorVersion: { 15 },
+            makePairedKeyPress: { code, pid, flags in
+                calls.append((code, pid, flags))
+                return PairedMessagesKeyPress(
+                    postDown: { events.append("down") },
+                    postUp: { events.append("up") },
+                    postRequiredExtraKeyUp: { events.append("extra-up") }
+                )
+            }
+        )
+
+        try presser.press(CGKeyCode(kVK_Return), flags: .cleared, deadline: .millisecondsFromNow(5_000))
+        try presser.press(CGKeyCode(kVK_DownArrow), flags: .preserved, deadline: .millisecondsFromNow(5_000))
+
+        #expect(events == ["down", "up", "extra-up", "down", "up", "extra-up"])
+        #expect(calls.map(\.2) == [.cleared, .preserved])
+        #expect(calls.map(\.1) == [123, 123])
     }
 
     @Test func customChooserKeyPressReleasesKeyWhenDeadlineExpiresAfterKeyDown() throws {

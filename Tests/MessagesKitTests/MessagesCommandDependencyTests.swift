@@ -6,6 +6,8 @@ import Testing
 @testable import MessagesKit
 import TestSupport
 
+private let SQLITE_TRANSIENT = unsafeBitCast(-1, to: sqlite3_destructor_type.self)
+
 // MARK: - Test-only dependency fixtures
 
 /// The fake edge set every test in this file drives the commands through. It lives in the TEST
@@ -42,6 +44,12 @@ extension MessagesCommandDependencies {
         launchObservedWorker: @escaping @Sendable (WorkerObservedAction) throws -> WorkerObservedOutcome = { _ in
             throw AppleError.upstream("test worker dependency not configured")
         },
+        captureReplyCleanState: @escaping @Sendable (MessagesReplyComposerProbeRequest, WorkerDeadline) throws -> MessagesReplyCleanStateToken = { _, _ in
+            MessagesReplyCleanStateToken("synthetic-clean-state")
+        },
+        verifyReplyCleanState: @escaping @Sendable (MessagesReplyComposerProbeRequest, MessagesReplyCleanStateToken, WorkerDeadline) throws -> String = { _, _, _ in
+            MessagesReplyComposerProbeDetail.verified
+        },
         allowedRecipients: [String] = []
     ) -> MessagesCommandDependencies {
         MessagesCommandDependencies(
@@ -54,6 +62,8 @@ extension MessagesCommandDependencies {
             hasFullDiskAccess: hasFullDiskAccess,
             messagesAutomationStateRoot: messagesAutomationStateRoot,
             launchObservedWorker: launchObservedWorker,
+            captureReplyCleanState: captureReplyCleanState,
+            verifyReplyCleanState: verifyReplyCleanState,
             resolveGate: hermeticGate(allowedRecipients: allowedRecipients)
         )
     }
@@ -108,6 +118,7 @@ private let syntheticChatDBPath = "synthetic/chat.db"
 private let syntheticAddressBookDir = "synthetic/AddressBook"
 
 private let commandNativePartKey = NSAttributedString.Key("__kIMMessagePartAttributeName")
+private let commandNativeFileKey = NSAttributedString.Key("__kIMFileTransferGUIDAttributeName")
 
 private func commandNativeArchive(_ text: String, _ attributes: [(NSAttributedString.Key, Any, NSRange)] = []) -> Data {
     let value = NSMutableAttributedString(string: text)
@@ -139,6 +150,27 @@ private extension ChatFixture {
         ])
         try insertMessage(rowid: rowid, guid: guid, text: text, attributedBody: body,
                           chatRowid: chatRowid, date: base + 10)
+    }
+
+    func insertReplyTarget(rowid: Int64, guid: String, text: String = "apple-cli-test target",
+                           part: Int = 2, chatRowid: Int64 = 3) throws {
+        try addThreadOriginatorColumns()
+        let body = commandNativeArchive(text, [
+            (commandNativePartKey, NSNumber(value: part), commandReactionRange(text, "target")),
+        ])
+        try insertMessage(rowid: rowid, guid: guid, text: text, attributedBody: body,
+                          chatRowid: chatRowid, date: base + 10)
+        try setThreadOriginator(rowid: rowid, guidSQL: "NULL", partSQL: "NULL")
+    }
+
+    func insertReplyResult(rowid: Int64, guid: String, text: String, chatRowid: Int64 = 3,
+                           parentGUID: String = "reply-target", parentPart: String = "2",
+                           isFromMe: Int = 1) throws {
+        try exec("""
+            INSERT INTO message (ROWID,guid,text,is_from_me,handle_id,service,date,error,thread_originator_guid,thread_originator_part)
+            VALUES (\(rowid),'\(guid)','\(text)',\(isFromMe),1,'iMessage',\(base + rowid),0,'\(parentGUID)','\(parentPart)');
+            INSERT INTO chat_message_join VALUES (\(chatRowid),\(rowid));
+            """)
     }
 
     func insertReaction(rowid: Int64, guid: String, associatedGUID: String, type: Int,
@@ -1897,6 +1929,384 @@ struct MessagesCommandDependencyTests {
         #expect(result.exitCode == AppleExit.usage)
     }
 
+    @Test func replySendDryRunResolvesExactTargetWithoutWorkerOrJournal() throws {
+        let fx = try ChatFixture()
+        try fx.insertReplyTarget(rowid: 70, guid: "reply-target")
+        let launched = LockedBox(false)
+        let deps = replyDependencies(fx, allowedRecipients: ["+12125550100"]) { _ in
+            launched.withLock { $0 = true }
+            return .timedOut
+        }
+
+        let output = try payload(from: captureStdout {
+            try ReplySend.parse(["--chat-rowid", "3", "--message-rowid", "70", "--part-index", "2",
+                                 "--body", "apple-cli-test reply", "--dry-run", "--test-mode"])
+                .run(dependencies: deps)
+        })
+
+        #expect(output["dry_run"] as? Bool == true)
+        #expect(output["executed"] as? Bool == false)
+        #expect(output["action"] as? String == "messages-reply-send")
+        #expect(output["text"] as? String == "apple-cli-test reply")
+        #expect(output["text_utf8_bytes"] as? Int == "apple-cli-test reply".utf8.count)
+        let target = try #require(output["target"] as? [String: Any])
+        #expect(target["participant_handle"] as? String == "+12125550100")
+        #expect(launched.value == false)
+    }
+
+    @Test func replySendAcceptsMaximumRawTextButRejectsOverflow() throws {
+        let fx = try ChatFixture()
+        try fx.insertReplyTarget(rowid: 70, guid: "reply-target")
+        let deps = replyDependencies(fx)
+        let maxText = "apple-cli-test " + String(repeating: "x", count: 2048 - "apple-cli-test ".utf8.count)
+        let maxOutput = try payload(from: captureStdout {
+            try ReplySend.parse(["--chat-rowid", "3", "--message-rowid", "70", "--part-index", "2",
+                                 "--body", maxText, "--dry-run"])
+                .run(dependencies: deps)
+        })
+        #expect(maxOutput["text_utf8_bytes"] as? Int == 2048)
+
+        let overflow = maxText + "x"
+        let result = try captureCommand {
+            try ReplySend.parse(["--chat-rowid", "3", "--message-rowid", "70", "--part-index", "2",
+                                 "--body", overflow, "--dry-run"])
+                .run(dependencies: deps)
+        }
+        #expect(result.exitCode == AppleExit.usage)
+    }
+
+    @Test func replySendRejectsEncodedWorkerPayloadOverflowBeforeWorkerOrJournal() throws {
+        let fx = try ChatFixture()
+        let longGUID = "reply-target-" + String(repeating: "g", count: 500)
+        let longChatGUID = "iMessage;-;+" + String(repeating: "1", count: 500)
+        let longHandle = "+" + String(repeating: "1", count: 511)
+        try fx.insertReplyTarget(rowid: 70, guid: longGUID)
+        try fx.exec("UPDATE chat SET guid='\(longChatGUID)' WHERE ROWID=3;")
+        try fx.exec("UPDATE handle SET id='\(longHandle)' WHERE ROWID=1;")
+        let launched = LockedBox(false)
+        let deps = replyDependencies(fx, allowedRecipients: [longHandle]) { _ in
+            launched.withLock { $0 = true }
+            return .timedOut
+        }
+        let maxText = "apple-cli-test " + String(repeating: "x", count: 2048 - "apple-cli-test ".utf8.count)
+
+        let result = try captureCommand {
+            try ReplySend.parse(["--chat-rowid", "3", "--message-rowid", "70", "--part-index", "2",
+                                 "--body", maxText, "--experimental-ui-handoff", "--test-mode"])
+                .run(dependencies: deps)
+        }
+
+        #expect(result.exitCode == AppleExit.usage)
+        #expect(launched.value == false)
+    }
+
+    @Test func replySendPreflightRefusesTargetDriftBeforeWorkerMutation() throws {
+        let fx = try ChatFixture()
+        try fx.insertReplyTarget(rowid: 70, guid: "reply-target")
+        let driftDBPath = fx.path
+        let deps = replyDependencies(fx) { action in
+            let resolved = try action.resolve()
+            try execReplySQL(path: driftDBPath, "UPDATE message SET guid='reply-target-drifted' WHERE ROWID=70;")
+            let context = WorkerObservedContext(deadline: action.deadline, isCancelled: { false })
+            #expect(throws: Error.self) {
+                _ = try action.preflight(resolved, context)
+            }
+            return .verificationFailed
+        }
+
+        let result = try captureCommand {
+            try ReplySend.parse(["--chat-rowid", "3", "--message-rowid", "70", "--part-index", "2",
+                                 "--body", "apple-cli-test reply", "--experimental-ui-handoff", "--test-mode"])
+                .run(dependencies: deps)
+        }
+        #expect(result.exitCode == AppleExit.upstream)
+    }
+
+    @Test func replySendPreflightRefusesBodyOwnershipAndPartGUIDDriftBeforeHandoff() throws {
+        for drift in ["body", "ownership", "part-guid"] {
+            let fx = try ChatFixture()
+            try fx.insertReplyTarget(rowid: 70, guid: "reply-target")
+            if drift == "part-guid" {
+                let body = commandNativeArchive("apple-cli-test target", [
+                    (commandNativePartKey, NSNumber(value: 2), commandReactionRange("apple-cli-test target", "target")),
+                    (commandNativeFileKey, "attachment-guid-1", commandReactionRange("apple-cli-test target", "target")),
+                ])
+                try replaceReplyAttributedBody(path: fx.path, rowid: 70, body: body)
+            }
+            let driftDBPath = fx.path
+            let deps = replyDependencies(fx) { action in
+                let resolved = try action.resolve()
+                switch drift {
+                case "body":
+                    try execReplySQL(path: driftDBPath, "UPDATE message SET text='apple-cli-test changed target' WHERE ROWID=70;")
+                case "ownership":
+                    try execReplySQL(path: driftDBPath, "UPDATE message SET is_from_me=1 WHERE ROWID=70;")
+                case "part-guid":
+                    let changed = commandNativeArchive("apple-cli-test target", [
+                        (commandNativePartKey, NSNumber(value: 2), commandReactionRange("apple-cli-test target", "target")),
+                    ])
+                    try replaceReplyAttributedBody(path: driftDBPath, rowid: 70, body: changed)
+                default:
+                    break
+                }
+                let context = WorkerObservedContext(deadline: action.deadline, isCancelled: { false })
+                #expect(throws: Error.self, "drift: \(drift)") {
+                    _ = try action.preflight(resolved, context)
+                }
+                return .verificationFailed
+            }
+
+            let result = try captureCommand {
+                try ReplySend.parse(["--chat-rowid", "3", "--message-rowid", "70", "--part-index", "2",
+                                     "--body", "apple-cli-test reply", "--experimental-ui-handoff", "--test-mode"])
+                    .run(dependencies: deps)
+            }
+            #expect(result.exitCode == AppleExit.upstream, Comment(rawValue: drift + result.stdout))
+        }
+    }
+
+    @Test func replySendVerifyHonorsCancellationBeforeDBPolling() throws {
+        let fx = try ChatFixture()
+        try fx.insertReplyTarget(rowid: 70, guid: "reply-target")
+        let operationID = UUID(uuidString: "44444444-4444-4444-8444-444444444444")!
+        let deps = replyDependencies(fx) { action in
+            let resolved = try action.resolve()
+            let context = WorkerObservedContext(deadline: action.deadline, isCancelled: { true })
+            let response = WorkerResponse(schemaVersion: 1, operationID: operationID, nonce: operationID,
+                                          category: .ack, detail: MessagesReplySendACKDetail.alreadyRestoredVerified)
+            #expect(throws: WorkerProtocolError.cancelled) {
+                _ = try action.verify(resolved, response, context)
+            }
+            return .cancelled
+        }
+
+        let result = try captureCommand {
+            try ReplySend.parse(["--chat-rowid", "3", "--message-rowid", "70", "--part-index", "2",
+                                 "--body", "apple-cli-test reply", "--experimental-ui-handoff", "--test-mode"])
+                .run(dependencies: deps)
+        }
+        #expect(result.exitCode == AppleExit.upstream)
+    }
+
+    @Test func replySendVerifyRejectsWrongACKDetailBeforeCleanProof() throws {
+        let fx = try ChatFixture()
+        try fx.insertReplyTarget(rowid: 70, guid: "reply-target")
+        let operationID = UUID()
+        let verified = LockedBox(false)
+        let deps = replyDependencies(fx, launchObservedWorker: { action in
+            let resolved = try action.resolve()
+            let context = WorkerObservedContext(deadline: action.deadline, isCancelled: { false })
+            #expect(try action.preflight(resolved, context) == .requiresMutation)
+            let response = WorkerResponse(schemaVersion: 1, operationID: operationID, nonce: operationID,
+                                          category: .ack, detail: "reply-send-unverified")
+            #expect(try action.verify(resolved, response, context) == nil)
+            #expect(verified.value == false)
+            return .verificationFailed
+        }, verifyReplyCleanState: { _, _, _ in
+            verified.withLock { $0 = true }
+            return MessagesReplyComposerProbeDetail.verified
+        })
+
+        let result = try captureCommand {
+            try ReplySend.parse(["--chat-rowid", "3", "--message-rowid", "70", "--part-index", "2",
+                                 "--body", "apple-cli-test reply", "--experimental-ui-handoff", "--test-mode"])
+                .run(dependencies: deps)
+        }
+        #expect(result.exitCode == AppleExit.upstream)
+    }
+
+    @Test func replySendVerifyPollsUntilDelayedReplyRowAppears() throws {
+        let fx = try ChatFixture()
+        try fx.insertReplyTarget(rowid: 70, guid: "reply-target")
+        let operationID = UUID()
+        let replyDBPath = fx.path
+        let replyBase = fx.base
+        let deps = replyDependencies(fx, allowedRecipients: ["+12125550100"]) { action in
+            let resolved = try action.resolve()
+            let context = WorkerObservedContext(deadline: action.deadline, isCancelled: { false })
+            #expect(try action.preflight(resolved, context) == .requiresMutation)
+            DispatchQueue.global().asyncAfter(deadline: .now() + 0.05) {
+                try? insertReplyResultRow(path: replyDBPath, rowid: 1_000_000, guid: "sent-reply", text: "apple-cli-test reply", base: replyBase)
+            }
+            let response = WorkerResponse(schemaVersion: 1, operationID: operationID, nonce: operationID,
+                                          category: .ack, detail: MessagesReplySendACKDetail.alreadyRestoredVerified)
+            let verification = try #require(try action.verify(resolved, response, context))
+            return .observedState(operationID: operationID, verification: verification)
+        }
+
+        let result = try captureCommand {
+            try ReplySend.parse(["--chat-rowid", "3", "--message-rowid", "70", "--part-index", "2",
+                                 "--body", "apple-cli-test reply", "--experimental-ui-handoff", "--test-mode"])
+                .run(dependencies: deps)
+        }
+        #expect(result.exitCode == nil, Comment(rawValue: result.stdout))
+    }
+
+    @Test func replySendVerifyStopsPollingAtDeadlineWithoutCleanProof() throws {
+        let fx = try ChatFixture()
+        try fx.insertReplyTarget(rowid: 70, guid: "reply-target")
+        let operationID = UUID()
+        let verified = LockedBox(false)
+        let deps = replyDependencies(fx, launchObservedWorker: { action in
+            let resolved = try action.resolve()
+            let context = WorkerObservedContext(deadline: .millisecondsFromNow(1), isCancelled: { false })
+            #expect(try action.preflight(resolved, context) == .requiresMutation)
+            let response = WorkerResponse(schemaVersion: 1, operationID: operationID, nonce: operationID,
+                                          category: .ack, detail: MessagesReplySendACKDetail.alreadyRestoredVerified)
+            #expect(throws: WorkerProtocolError.deadlineExpired) {
+                _ = try action.verify(resolved, response, context)
+            }
+            #expect(verified.value == false)
+            return .timedOut
+        }, verifyReplyCleanState: { _, _, _ in
+            verified.withLock { $0 = true }
+            return MessagesReplyComposerProbeDetail.verified
+        })
+
+        let result = try captureCommand {
+            try ReplySend.parse(["--chat-rowid", "3", "--message-rowid", "70", "--part-index", "2",
+                                 "--body", "apple-cli-test reply", "--experimental-ui-handoff", "--test-mode"])
+                .run(dependencies: deps)
+        }
+        #expect(result.exitCode == AppleExit.upstream)
+    }
+
+    @Test func replySendVerifyRequiresIndependentParentCleanUIAfterDBProof() throws {
+        let fx = try ChatFixture()
+        try fx.insertReplyTarget(rowid: 70, guid: "reply-target")
+        let operationID = UUID(uuidString: "44444444-4444-4444-8444-444444444444")!
+        let replyDBPath = fx.path
+        let replyBase = fx.base
+        let captured = LockedBox(false)
+        let verified = LockedBox(false)
+        let deps = replyDependencies(fx, allowedRecipients: ["+12125550100"], launchObservedWorker: { action in
+            let resolved = try action.resolve()
+            let context = WorkerObservedContext(deadline: action.deadline, isCancelled: { false })
+            #expect(try action.preflight(resolved, context) == .requiresMutation)
+            #expect(captured.value == true)
+            try insertReplyResultRow(path: replyDBPath, rowid: 1_000_000, guid: "sent-reply", text: "apple-cli-test reply", base: replyBase)
+            let response = WorkerResponse(schemaVersion: 1, operationID: operationID, nonce: operationID,
+                                          category: .ack, detail: MessagesReplySendACKDetail.alreadyRestoredVerified)
+            #expect(throws: MessagesReplyComposerAXError.self) {
+                _ = try action.verify(resolved, response, context)
+            }
+            #expect(verified.value == true)
+            return .verificationFailed
+        }, captureReplyCleanState: { _, _ in
+            captured.withLock { $0 = true }
+            return MessagesReplyCleanStateToken("synthetic-clean-state")
+        }, verifyReplyCleanState: { _, _, _ in
+            verified.withLock { $0 = true }
+            throw MessagesReplyComposerAXError.replyComposerOwnershipDrift
+        })
+
+        let result = try captureCommand {
+            try ReplySend.parse(["--chat-rowid", "3", "--message-rowid", "70", "--part-index", "2",
+                                 "--body", "apple-cli-test reply", "--experimental-ui-handoff", "--test-mode"])
+                .run(dependencies: deps)
+        }
+        #expect(result.exitCode == AppleExit.upstream)
+    }
+
+    @Test func replySendVerifyAcceptsBothCleanACKDetailsWithIndependentParentProof() throws {
+        for detail in [MessagesReplySendACKDetail.alreadyRestoredVerified, MessagesReplySendACKDetail.retainedEmptyCancelledVerified] {
+            let fx = try ChatFixture()
+            try fx.insertReplyTarget(rowid: 70, guid: "reply-target")
+            let operationID = UUID()
+            let replyDBPath = fx.path
+            let replyBase = fx.base
+            let verified = LockedBox(false)
+            let deps = replyDependencies(fx, allowedRecipients: ["+12125550100"], launchObservedWorker: { action in
+                let resolved = try action.resolve()
+                let context = WorkerObservedContext(deadline: action.deadline, isCancelled: { false })
+                #expect(try action.preflight(resolved, context) == .requiresMutation)
+                try insertReplyResultRow(path: replyDBPath, rowid: 1_000_000, guid: "sent-reply", text: "apple-cli-test reply", base: replyBase)
+                let response = WorkerResponse(schemaVersion: 1, operationID: operationID, nonce: operationID,
+                                              category: .ack, detail: detail)
+                let verification = try #require(try action.verify(resolved, response, context))
+                #expect(verification.contains("database reply correspondence"))
+                return .observedState(operationID: operationID, verification: verification)
+            }, verifyReplyCleanState: { _, token, _ in
+                #expect((token.value as? String) == "synthetic-clean-state")
+                verified.withLock { $0 = true }
+                return MessagesReplyComposerProbeDetail.verified
+            })
+
+            let result = try captureCommand {
+                try ReplySend.parse(["--chat-rowid", "3", "--message-rowid", "70", "--part-index", "2",
+                                     "--body", "apple-cli-test reply", "--experimental-ui-handoff", "--test-mode"])
+                    .run(dependencies: deps)
+            }
+            #expect(result.exitCode == nil, Comment(rawValue: detail + result.stdout))
+            #expect(verified.value == true)
+        }
+    }
+
+    @Test func replySendExecuteVerifiesFreshDBCorrespondenceBeforeSuccess() throws {
+        let fx = try ChatFixture()
+        try fx.insertReplyTarget(rowid: 70, guid: "reply-target")
+        let operationID = UUID(uuidString: "44444444-4444-4444-8444-444444444444")!
+        let replyDBPath = fx.path
+        let replyBase = fx.base
+        let deps = replyDependencies(fx, allowedRecipients: ["+12125550100"]) { action in
+            let resolved = try action.resolve()
+            #expect(resolved.command.name == "messages.reply.send")
+            let context = WorkerObservedContext(deadline: action.deadline, isCancelled: { false })
+            #expect(try action.preflight(resolved, context) == .requiresMutation)
+            try insertReplyResultRow(path: replyDBPath, rowid: 1_000_000, guid: "sent-reply", text: "apple-cli-test reply", base: replyBase)
+            let response = WorkerResponse(schemaVersion: 1, operationID: operationID, nonce: operationID,
+                                          category: .ack, detail: MessagesReplySendACKDetail.alreadyRestoredVerified)
+            let verification = try #require(try action.verify(resolved, response, context))
+            return .observedState(operationID: operationID, verification: verification)
+        }
+
+        let result = try captureCommand {
+            try ReplySend.parse(["--chat-rowid", "3", "--message-rowid", "70", "--part-index", "2",
+                                 "--body", "apple-cli-test reply", "--experimental-ui-handoff", "--test-mode"])
+                .run(dependencies: deps)
+        }
+        #expect(result.exitCode == nil, Comment(rawValue: result.stdout))
+        let output = try payload(from: result.stdout)
+        #expect(output["dry_run"] as? Bool == false)
+        #expect(output["executed"] as? Bool == true)
+        #expect(output["sent_message_guid"] as? String == "sent-reply")
+        #expect(output["sent_message_rowid"] as? Int == 1_000_000)
+        #expect(output["parent_message_guid"] as? String == "reply-target")
+        #expect(output["parent_native_part"] as? Int == 2)
+    }
+
+    @Test func replySendExecuteRequiresExplicitExperimentalUIHandoff() throws {
+        let fx = try ChatFixture()
+        try fx.insertReplyTarget(rowid: 70, guid: "reply-target")
+        let deps = replyDependencies(fx, allowedRecipients: ["+12125550100"])
+
+        let result = try captureCommand {
+            try ReplySend.parse(["--chat-rowid", "3", "--message-rowid", "70", "--part-index", "2",
+                                 "--body", "apple-cli-test reply", "--test-mode"])
+                .run(dependencies: deps)
+        }
+
+        #expect(result.exitCode == AppleExit.usage)
+        let error = try errorPayload(from: result.stdout)
+        #expect(error["type"] as? String == AppleErrorType.validation)
+    }
+
+    @Test func replySendSandboxRequiresLabeledTextAndAllowedRecipient() throws {
+        let fx = try ChatFixture()
+        try fx.insertReplyTarget(rowid: 70, guid: "reply-target")
+        let deps = replyDependencies(fx, allowedRecipients: ["+12125550199"])
+
+        let result = try captureCommand {
+            try ReplySend.parse(["--chat-rowid", "3", "--message-rowid", "70", "--part-index", "2",
+                                 "--body", "plain reply", "--dry-run", "--test-mode"])
+                .run(dependencies: deps)
+        }
+
+        #expect(result.exitCode == AppleExit.permissionDenied)
+        let error = try errorPayload(from: result.stdout)
+        #expect(error["type"] as? String == AppleErrorType.safetyViolation)
+    }
+
     @Test func reactionImplicitRemoveKeepsResolvedDesiredKeyAfterStateTurnsAbsent() throws {
         let fx = try ChatFixture()
         try fx.addReactionColumns()
@@ -3393,12 +3803,37 @@ private func fixtureDependencies(_ fx: ChatFixture) -> MessagesCommandDependenci
     })
 }
 
+private func replyDependencies(
+    _ fx: ChatFixture,
+    allowedRecipients: [String] = ["+12125550100"],
+    accessibilityTrusted: Bool = true,
+    launchObservedWorker: @escaping @Sendable (WorkerObservedAction) throws -> WorkerObservedOutcome = { _ in
+        throw AppleError.upstream("test worker dependency not configured")
+    },
+    captureReplyCleanState: @escaping @Sendable (MessagesReplyComposerProbeRequest, WorkerDeadline) throws -> MessagesReplyCleanStateToken = { _, _ in
+        MessagesReplyCleanStateToken("synthetic-clean-state")
+    },
+    verifyReplyCleanState: @escaping @Sendable (MessagesReplyComposerProbeRequest, MessagesReplyCleanStateToken, WorkerDeadline) throws -> String = { _, _, _ in
+        MessagesReplyComposerProbeDetail.verified
+    }
+) -> MessagesCommandDependencies {
+    reactionDependencies(fx, allowedRecipients: allowedRecipients, accessibilityTrusted: accessibilityTrusted,
+                         launchObservedWorker: launchObservedWorker, captureReplyCleanState: captureReplyCleanState,
+                         verifyReplyCleanState: verifyReplyCleanState)
+}
+
 private func reactionDependencies(
     _ fx: ChatFixture,
     allowedRecipients: [String] = ["+12125550100"],
     accessibilityTrusted: Bool = true,
     launchObservedWorker: @escaping @Sendable (WorkerObservedAction) throws -> WorkerObservedOutcome = { _ in
         throw AppleError.upstream("test worker dependency not configured")
+    },
+    captureReplyCleanState: @escaping @Sendable (MessagesReplyComposerProbeRequest, WorkerDeadline) throws -> MessagesReplyCleanStateToken = { _, _ in
+        MessagesReplyCleanStateToken("synthetic-clean-state")
+    },
+    verifyReplyCleanState: @escaping @Sendable (MessagesReplyComposerProbeRequest, MessagesReplyCleanStateToken, WorkerDeadline) throws -> String = { _, _, _ in
+        MessagesReplyComposerProbeDetail.verified
     }
 ) -> MessagesCommandDependencies {
     let path = fx.path
@@ -3409,7 +3844,42 @@ private func reactionDependencies(
     }, accessibilityDiagnostic: { Permissions.accessibilityPreflight(trusted: accessibilityTrusted) },
        messagesAutomationStateRoot: { homePath + "/messages-automation" },
        launchObservedWorker: launchObservedWorker,
+       captureReplyCleanState: captureReplyCleanState,
+       verifyReplyCleanState: verifyReplyCleanState,
        allowedRecipients: allowedRecipients)
+}
+
+private func insertReplyResultRow(path: String, rowid: Int64, guid: String, text: String, base: Int64,
+                                  chatRowid: Int64 = 3, parentGUID: String = "reply-target",
+                                  parentPart: String = "2", isFromMe: Int = 1) throws {
+    try execReplySQL(path: path, """
+        INSERT INTO message (ROWID,guid,text,is_from_me,handle_id,service,date,error,thread_originator_guid,thread_originator_part)
+        VALUES (\(rowid),'\(guid)','\(text)',\(isFromMe),1,'iMessage',\(base + rowid),0,'\(parentGUID)','\(parentPart)');
+        INSERT INTO chat_message_join VALUES (\(chatRowid),\(rowid));
+        """)
+}
+
+private func execReplySQL(path: String, _ sql: String) throws {
+    var db: OpaquePointer?
+    guard sqlite3_open(path, &db) == SQLITE_OK, let db else { throw SQLiteFixtureError.open }
+    defer { sqlite3_close(db) }
+    guard sqlite3_exec(db, sql, nil, nil, nil) == SQLITE_OK else { throw SQLiteFixtureError.exec }
+}
+
+private func replaceReplyAttributedBody(path: String, rowid: Int64, body: Data) throws {
+    var db: OpaquePointer?
+    guard sqlite3_open(path, &db) == SQLITE_OK, let db else { throw SQLiteFixtureError.open }
+    defer { sqlite3_close(db) }
+    var stmt: OpaquePointer?
+    guard sqlite3_prepare_v2(db, "UPDATE message SET attributedBody=?1 WHERE ROWID=?2", -1, &stmt, nil) == SQLITE_OK else {
+        throw SQLiteFixtureError.exec
+    }
+    defer { sqlite3_finalize(stmt) }
+    body.withUnsafeBytes { raw in
+        _ = sqlite3_bind_blob(stmt, 1, raw.baseAddress, Int32(body.count), SQLITE_TRANSIENT)
+    }
+    sqlite3_bind_int64(stmt, 2, rowid)
+    guard sqlite3_step(stmt) == SQLITE_DONE else { throw SQLiteFixtureError.exec }
 }
 
 private func insertReactionRow(path: String, rowid: Int64, guid: String, associatedGUID: String,

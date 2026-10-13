@@ -149,6 +149,30 @@
     ],
     "notes": "Reaction writes use exact conversation, message and native-part identity. Agent-run live writes must use the sandbox. The sandbox requires the target message text to start with `apple-cli-test`, requires exactly one selected participant, and confines that participant to the allowed test recipients; sandbox reaction writes refuse group conversations. Production writes may target exact group chat GUIDs or ROWIDs. Standard reactions are `heart`, `like`, `dislike`, `laugh`, `emphasize` and `question`. Custom emoji set/replace is experimental: it verifies an already-selected exact Tapback button as unchanged, and uses the uniquely owned native chooser when that button is unselected or absent. Unknown selected state is refused. Live reliability remains unverified. Explicit custom removal with `--emoji` uses an exact, byte-matched native picker button; a bounded settling interval precedes its single press and exact-state revalidation. Missing buttons never prove that a reaction is absent. Successful writes require native picker selected-state verification plus fresh database target identity and eligibility; raw database authorship is returned as recorded and is not used alone to prove the current user’s reaction."
   },
+  "apple messages reply": {
+    "description": "Groups experimental exact threaded reply sends for Messages. The current subcommand sends a text reply to a proven root message in a direct conversation.",
+    "examples": [
+      {
+        "title": "Preview an exact text reply",
+        "command": "apple messages reply send --chat-rowid 42 --message-rowid 123 --part-index 2 --body 'apple-cli-test reply' --dry-run"
+      }
+    ],
+    "notes": "Reply sends are experimental UI handoffs. Dry run resolves the exact root target and sandbox policy without driving Messages UI or creating journal state. Execution requires `--experimental-ui-handoff`, the shared Messages automation journal, Accessibility trust and a direct one-recipient conversation. Group replies and attachment replies are not enabled in this unit. Agent-run live writes must use the sandbox and target only operator-approved test recipients."
+  },
+  "apple messages reply send": {
+    "description": "Sends a bounded text reply to one exact root message in a direct Messages conversation. Select the conversation with exactly one of `--chat-rowid` or `--chat-guid`; select the root message with exactly one of `--message-rowid` or `--message-guid`; pass `--part-index` for the decoded native part and `--body` for the reply text.",
+    "examples": [
+      {
+        "title": "Preview a sandboxed exact reply",
+        "command": "apple messages reply send --chat-rowid 42 --message-rowid 123 --part-index 2 --body 'apple-cli-test reply' --dry-run --test-mode"
+      },
+      {
+        "title": "Execute with explicit UI handoff opt-in",
+        "command": "APPLE_TEST_MODE=1 apple messages reply send --chat-rowid 42 --message-rowid 123 --part-index 2 --body 'apple-cli-test reply' --experimental-ui-handoff"
+      }
+    ],
+    "notes": "The reply body must be nonempty and at most 2048 UTF-8 bytes; the encoded worker payload is capped at 4096 bytes. `--body` is used instead of `--text` because `--text` is the global output-format flag. Execution opens the exact native Messages URL, retains the original process/window/transcript and normal composer identities, opens one owned Reply composer, writes the body once, snapshots exact UTF-8 text with UTF-16 character-count consistency, posts one Return key pair to Messages and then verifies both UI cleanup and fresh database correspondence before clearing the pending operation. A successful result reports `verification_source: ui_clean_state_and_database_correspondence`, `sent_message_rowid`, `sent_message_guid`, `parent_message_guid`, `parent_native_part`, and the exact target. If Messages already restored the clean main composer after send, no cancel is sent; if an owned reply composer remains empty, exactly one `AXCancel` closes it. After the first send dispatch, the command never retries Return and never clears a nonempty composer. Database thread-originator metadata alone never authorizes a write; the parent accepts the worker ACK only after strict same-chat new-row proof. Dry run performs no UI work and creates no journal entry."
+  },
   "apple messages reaction inspect": {
     "description": "Inspects the current reaction state for one exact Messages target. Supply exactly one conversation selector (`--chat-guid` or `--chat-rowid`) and exactly one message selector (`--message-guid` or `--message-rowid`). The command reads chat.db only; it does not open Messages, mark a conversation read or mutate a reaction.",
     "examples": [
@@ -216,16 +240,28 @@
   "apple notes search": {
     "description": "Searches note titles, or note bodies instead of titles with `--content`, across the account or within one folder with `--folder`. `--folder` must name at least one path component: `\"\"` and separators-only values such as `\"///\"` are refused as a `validation_error` (exit 64) rather than silently widening the search to the whole account. Omit `--folder` to search every folder.",
     "examples": [
-      { "title": "Search titles across every folder", "command": "apple notes search \"budget\"" },
-      { "title": "Search bodies instead of titles, inside one folder", "command": "apple notes search \"budget\" --content --folder 'Projects/Drafts'" }
+      {
+        "title": "Search titles across every folder",
+        "command": "apple notes search \"budget\""
+      },
+      {
+        "title": "Search bodies instead of titles, inside one folder",
+        "command": "apple notes search \"budget\" --content --folder 'Projects/Drafts'"
+      }
     ],
     "notes": "Nested folders are addressed with `/` between components."
   },
   "apple notes list": {
     "description": "Lists note titles across the account, or within one folder with `--folder`. `--folder` must name at least one path component: `\"\"` and separators-only values such as `\"///\"` are refused as a `validation_error` (exit 64) rather than silently widening the listing to the whole account. Omit `--folder` to list every folder.",
     "examples": [
-      { "title": "List every note title", "command": "apple notes list" },
-      { "title": "List one folder, at most 20 titles", "command": "apple notes list --folder 'Projects' --limit 20" }
+      {
+        "title": "List every note title",
+        "command": "apple notes list"
+      },
+      {
+        "title": "List one folder, at most 20 titles",
+        "command": "apple notes list --folder 'Projects' --limit 20"
+      }
     ],
     "notes": "Nested folders are addressed with `/` between components. Titles come back in the order Notes.app returns them, not sorted by date; use `apple notes recent` for newest-first."
   },

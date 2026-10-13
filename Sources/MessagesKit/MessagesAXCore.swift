@@ -26,6 +26,24 @@ struct MessagesAXBodyValueEvidence: Equatable, Sendable {
     }
 }
 
+
+struct MessagesAXBodyTextSnapshot: Equatable, Sendable {
+    let text: String
+    let utf16Count: Int
+    let characterCount: Int
+
+    init(text: String, characterCount: Int) throws {
+        guard text.utf8.count <= 4096 else { throw MessagesAXNavigationError.unknownAXValue }
+        let utf16Count = text.utf16.count
+        guard utf16Count == characterCount else { throw MessagesAXNavigationError.unknownAXValue }
+        self.text = text
+        self.utf16Count = utf16Count
+        self.characterCount = characterCount
+    }
+
+    var provenEmpty: Bool { text.isEmpty && characterCount == 0 }
+}
+
 protocol MessagesAXElement: AnyObject {
     func sameIdentity(as other: any MessagesAXElement) -> Bool
     func role(deadline: WorkerDeadline) throws -> String
@@ -49,6 +67,7 @@ protocol MessagesAXElement: AnyObject {
     func setValue(_ value: String, deadline: WorkerDeadline) throws
     func focused(deadline: WorkerDeadline) throws -> Bool?
     func bodyValueEvidence(deadline: WorkerDeadline) throws -> MessagesAXBodyValueEvidence
+    func bodyTextSnapshot(deadline: WorkerDeadline) throws -> MessagesAXBodyTextSnapshot
     func performAction(named name: String, deadline: WorkerDeadline) throws
 }
 
@@ -57,6 +76,10 @@ extension MessagesAXElement {
 
     func bodyValueEvidence(deadline: WorkerDeadline) throws -> MessagesAXBodyValueEvidence {
         MessagesAXBodyValueEvidence(valueKind: .unknown, characterCount: nil, placeholder: nil)
+    }
+
+    func bodyTextSnapshot(deadline: WorkerDeadline) throws -> MessagesAXBodyTextSnapshot {
+        throw MessagesAXNavigationError.unknownAXValue
     }
 }
 
@@ -227,6 +250,15 @@ final class LiveAXElement: MessagesAXElement {
         try elementAttribute(kAXWindowAttribute, deadline: deadline)
     }
 
+    func focusedElement(deadline: WorkerDeadline) throws -> (any MessagesAXElement)? {
+        let (status, value) = try rawAttribute(kAXFocusedUIElementAttribute, deadline: deadline)
+        if status == .attributeUnsupported || status == .noValue { return nil }
+        guard status == .success, let value, CFGetTypeID(value) == AXUIElementGetTypeID() else {
+            throw MessagesAXNavigationError.axFailure
+        }
+        return LiveAXElement(element: value as! AXUIElement)
+    }
+
     func directWindows(limit: Int, deadline: WorkerDeadline) throws -> [any MessagesAXElement] {
         try relationship(kAXWindowsAttribute, limit: limit, requireAvailable: true, deadline: deadline)
     }
@@ -269,9 +301,9 @@ final class LiveAXElement: MessagesAXElement {
         case .success:
             guard let rawValue else { throw MessagesAXNavigationError.unknownAXValue }
             if CFGetTypeID(rawValue) == CFStringGetTypeID(), let string = rawValue as? String, string.utf8.count <= 4096 {
-                valueKind = .string(string.count)
+                valueKind = .string(string.utf16.count)
             } else if let attributed = rawValue as? NSAttributedString, attributed.string.utf8.count <= 4096 {
-                valueKind = .attributedString(attributed.string.count)
+                valueKind = .attributedString(attributed.string.utf16.count)
             } else {
                 valueKind = .unknown
             }
@@ -286,6 +318,32 @@ final class LiveAXElement: MessagesAXElement {
             placeholder = nil
         }
         return MessagesAXBodyValueEvidence(valueKind: valueKind, characterCount: characterCount, placeholder: placeholder)
+    }
+
+    func bodyTextSnapshot(deadline: WorkerDeadline) throws -> MessagesAXBodyTextSnapshot {
+        let (valueStatus, rawValue) = try rawAttribute(kAXValueAttribute, deadline: deadline)
+        let text: String
+        switch valueStatus {
+        case .noValue:
+            text = ""
+        case .success:
+            guard let rawValue else { throw MessagesAXNavigationError.unknownAXValue }
+            if CFGetTypeID(rawValue) == CFStringGetTypeID(), let string = rawValue as? String {
+                text = string
+            } else if let attributed = rawValue as? NSAttributedString {
+                text = attributed.string
+            } else {
+                throw MessagesAXNavigationError.unknownAXValue
+            }
+        case .attributeUnsupported, .notImplemented:
+            throw MessagesAXNavigationError.unknownAXValue
+        default:
+            throw MessagesAXNavigationError.axFailure
+        }
+        guard let characterCount = try optionalIntegerAttribute("AXNumberOfCharacters", limit: 4096, deadline: deadline) else {
+            throw MessagesAXNavigationError.unknownAXValue
+        }
+        return try MessagesAXBodyTextSnapshot(text: text, characterCount: characterCount)
     }
 
     private func optionalIntegerAttribute(_ name: String, limit: Int, deadline: WorkerDeadline) throws -> Int? {

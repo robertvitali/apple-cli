@@ -14,7 +14,7 @@ enum MessagesAutomationState {
 
 extension MessagesCommand {
     package static func workerOperationRegistry() -> any WorkerOperationRegistry {
-        MessagesReactionWorkerRegistry()
+        MessagesWorkerRegistry()
     }
 }
 
