@@ -160,27 +160,27 @@ struct MessagesReactionAXAutomationTests {
         let driver = FakeReactionDriver()
         switch injectedStage {
         case "preflight":
-            driver.actionTitlesError = .axFailure
+            driver.actionTitlesError = MessagesReactionAXError.axFailure
         case "open":
-            driver.openError = .axFailure
+            driver.openError = MessagesReactionAXError.axFailure
         case "initial-route":
-            driver.transcript.readError = .axFailure
+            driver.transcript.readError = MessagesReactionAXError.axFailure
         case "menu-open":
             driver.message.onAction = { _ in throw MessagesReactionAXError.axFailure }
         case "picker-readiness":
-            driver.picker.linkError = .axFailure
+            driver.picker.linkError = MessagesReactionAXError.axFailure
         case "pre-press":
             var selectedReads = 0
             driver.button.onSelectedRead = {
                 selectedReads += 1
-                if selectedReads == 1 { driver.button.selectedError = .axFailure }
+                if selectedReads == 1 { driver.button.selectedError = MessagesReactionAXError.axFailure }
             }
         case "press":
             driver.button.onAction = { _ in throw MessagesReactionAXError.axFailure }
         case "post-press":
             driver.button.onAction = { _ in
                 driver.button.isSelected = true
-                driver.root.readError = .axFailure
+                driver.root.readError = MessagesReactionAXError.axFailure
             }
         case "cleanup":
             driver.button.isSelected = true
@@ -194,7 +194,51 @@ struct MessagesReactionAXAutomationTests {
             driver.onProcessRead = { _ in
                 guard driver.button.performed == ["AXPress"] else { return }
                 postPressProcessReads += 1
-                if postPressProcessReads >= 3 { driver.transcript.readError = .axFailure }
+                if postPressProcessReads >= 3 { driver.transcript.readError = MessagesReactionAXError.axFailure }
+            }
+        default:
+            Issue.record("unhandled injected stage")
+        }
+
+        let outcome = try apply(driver, experimentalUIHandoff: true)
+        #expect(outcome == .failed(expectedDetail))
+    }
+
+    @Test(arguments: [
+        ("initial-route", "ax-failure-initial-route"),
+        ("picker-readiness", "ax-failure-picker-readiness"),
+        ("pre-press", "ax-failure-pre-press"),
+        ("post-press", "ax-failure-post-press"),
+        ("verification", "ax-failure-verification"),
+    ])
+    func neutralAXFailuresReportTheCurrentStage(_ injectedStage: String, _ expectedDetail: String) throws {
+        let driver = FakeReactionDriver()
+        switch injectedStage {
+        case "initial-route":
+            driver.transcript.readError = MessagesAXNavigationError.axFailure
+        case "picker-readiness":
+            driver.picker.linkError = MessagesAXNavigationError.axFailure
+        case "pre-press":
+            var selectedReads = 0
+            driver.button.onSelectedRead = {
+                selectedReads += 1
+                if selectedReads == 1 { driver.button.selectedError = MessagesAXNavigationError.axFailure }
+            }
+        case "post-press":
+            driver.button.onAction = { _ in
+                driver.button.isSelected = true
+                driver.root.readError = MessagesAXNavigationError.axFailure
+            }
+        case "verification":
+            driver.button.onAction = { _ in
+                driver.button.isSelected = true
+                driver.window.nodes.removeAll { $0.sameIdentity(as: driver.picker) }
+            }
+            var postPressProcessReads = 0
+            driver.onProcessRead = { _ in
+                guard driver.button.performed == ["AXPress"] else { return }
+                postPressProcessReads += 1
+                if postPressProcessReads >= 3 { driver.transcript.readError = MessagesAXNavigationError.axFailure }
             }
         default:
             Issue.record("unhandled injected stage")
@@ -628,26 +672,26 @@ struct MessagesReactionAXAutomationTests {
             do {
                 try LiveAXElement.validateChildCount(status: status, count: 0, limit: 256, requireAvailable: true)
                 Issue.record("required unavailable relationship unexpectedly succeeded")
-            } catch MessagesReactionAXError.axFailure {
+            } catch MessagesAXNavigationError.axFailure {
                 Issue.record("required unavailable relationship was misclassified as transport failure")
             } catch {}
         }
         for status in [AXError.cannotComplete, .invalidUIElement] {
-            #expect(throws: MessagesReactionAXError.axFailure) {
+            #expect(throws: MessagesAXNavigationError.axFailure) {
                 try LiveAXElement.validateChildCount(status: status, count: 0, limit: 256, requireAvailable: true)
             }
         }
-        #expect(throws: MessagesReactionAXError.traversalLimit) {
+        #expect(throws: MessagesAXNavigationError.traversalLimit) {
             try LiveAXElement.validateChildCount(status: .success, count: 257, limit: 256, requireAvailable: true)
         }
-        #expect(throws: MessagesReactionAXError.axFailure) {
+        #expect(throws: MessagesAXNavigationError.axFailure) {
             try LiveAXElement.validateChildCount(status: .success, count: -1, limit: 256, requireAvailable: true)
         }
     }
 
     @Test func attributeErrorsFailClosed() throws {
         let driver = FakeReactionDriver()
-        driver.transcript.readError = .axFailure
+        driver.transcript.readError = MessagesReactionAXError.axFailure
         #expect(try apply(driver) == .failed("ax-failure-initial-route"))
         #expect(driver.message.performed.isEmpty)
     }
@@ -1758,7 +1802,7 @@ struct MessagesReactionAXAutomationTests {
         let driver = FakeReactionDriver()
         driver.button.id = "heart"
         driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
-        driver.customPopover.navigationReadError = .axFailure
+        driver.customPopover.navigationReadError = MessagesReactionAXError.axFailure
 
         #expect(try apply(driver, .set, .custom("👍🏽"), experimentalUIHandoff: true) ==
                 .failed("ax-failure-custom-chooser-search-discovery"))
@@ -1877,26 +1921,26 @@ struct MessagesReactionAXAutomationTests {
                 if !driver.window.nodes.contains(where: { $0.sameIdentity(as: driver.picker) }) {
                     driver.window.nodes.append(driver.picker)
                 }
-                driver.window.linkError = .axFailure
+                driver.window.linkError = MessagesReactionAXError.axFailure
             }
         case "existing-button":
             driver.button.id = "👍🏽"
-            driver.button.selectedError = .axFailure
+            driver.button.selectedError = MessagesReactionAXError.axFailure
         case "route-validation":
             driver.onProcessRead = { _ in
                 guard !driver.message.performed.isEmpty, driver.button.performed.isEmpty,
                       driver.customLauncher.performed.isEmpty else { return }
-                driver.canonicalProcessError = .axFailure
+                driver.canonicalProcessError = MessagesReactionAXError.axFailure
             }
         case "query":
-            driver.customEmojiSearchPlanError = .axFailure
+            driver.customEmojiSearchPlanError = MessagesReactionAXError.axFailure
         case "preexisting-check":
             driver.detachedPopoverProvider = { throw MessagesReactionAXError.axFailure }
         case "launch-discovery":
-            driver.picker.onProcessIdentifierRead = { _ in driver.customLauncher.readError = .axFailure }
+            driver.picker.onProcessIdentifierRead = { _ in driver.customLauncher.readError = MessagesReactionAXError.axFailure }
         case "launch-revalidation":
             driver.detachedPopoverProvider = {
-                driver.customLauncher.readError = .axFailure
+                driver.customLauncher.readError = MessagesReactionAXError.axFailure
                 return nil
             }
         case "launch-press":
@@ -1922,14 +1966,14 @@ struct MessagesReactionAXAutomationTests {
                 driver.canonicalProcessError = nil
                 guard armPopoverProcessFailure else { return }
                 armedProcessReads += 1
-                if armedProcessReads == 2 { driver.canonicalProcessError = .axFailure }
+                if armedProcessReads == 2 { driver.canonicalProcessError = MessagesReactionAXError.axFailure }
             }
         case "popover":
             var reads = 0
             driver.detachedPopoverProvider = {
                 reads += 1
                 if reads == 1 { return nil }
-                driver.customPopover.readError = .axFailure
+                driver.customPopover.readError = MessagesReactionAXError.axFailure
                 return driver.customPopover
             }
         case "search-discovery":
@@ -1937,7 +1981,7 @@ struct MessagesReactionAXAutomationTests {
             driver.detachedPopoverProvider = {
                 reads += 1
                 if reads == 1 { return nil }
-                driver.customSearchField.readError = .axFailure
+                driver.customSearchField.readError = MessagesReactionAXError.axFailure
                 return driver.customPopover
             }
         case "search-precondition":
@@ -1946,7 +1990,7 @@ struct MessagesReactionAXAutomationTests {
                 return nil
             }
         case "search-write":
-            driver.customSearchField.setValueError = .axFailure
+            driver.customSearchField.setValueError = MessagesReactionAXError.axFailure
         case "search-readback":
             var failed = false
             driver.customSearchField.onValueRead = {
@@ -1972,7 +2016,7 @@ struct MessagesReactionAXAutomationTests {
             driver.customSearchField.onValueRead = {
                 if driver.customSearchField.setValues.contains(query) {
                     queryReads += 1
-                    if queryReads == 2 { driver.customCandidate.candidateValueOverride = .error(.axFailure) }
+                    if queryReads == 2 { driver.customCandidate.candidateValueOverride = .error(MessagesReactionAXError.axFailure) }
                 }
                 return nil
             }
@@ -1981,14 +2025,14 @@ struct MessagesReactionAXAutomationTests {
             driver.customSearchField.onValueRead = {
                 if driver.customSearchField.setValues.contains(query) {
                     queryReads += 1
-                    if queryReads == 3 { driver.canonicalProcessError = .axFailure }
+                    if queryReads == 3 { driver.canonicalProcessError = MessagesReactionAXError.axFailure }
                 }
                 return nil
             }
         case "candidate-press":
             driver.customCandidate.onAction = { _ in throw MessagesReactionAXError.axFailure }
         case "post-selection":
-            driver.customCandidate.onAction = { _ in driver.picker.linkError = .axFailure }
+            driver.customCandidate.onAction = { _ in driver.picker.linkError = MessagesReactionAXError.axFailure }
         default:
             Issue.record("unhandled custom chooser phase")
         }
@@ -2117,7 +2161,7 @@ struct MessagesReactionAXAutomationTests {
         let driver = FakeReactionDriver()
         driver.button.id = "heart"
         driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
-        driver.customSearchField.setValueError = .axFailure
+        driver.customSearchField.setValueError = MessagesReactionAXError.axFailure
 
         #expect(try apply(driver, .set, .custom("👍🏽"), experimentalUIHandoff: true) == .failed("ax-failure-custom-chooser-search-write"))
         #expect(driver.customSearchField.setValues.isEmpty)
@@ -2175,7 +2219,7 @@ struct MessagesReactionAXAutomationTests {
         case "number":
             driver.customCandidate.candidateValueOverride = .known(nil)
         default:
-            driver.customCandidate.candidateValueOverride = .error(.unknownAXValue)
+            driver.customCandidate.candidateValueOverride = .error(MessagesReactionAXError.unknownAXValue)
         }
 
         let expected: MessagesReactionAXOutcome = shape == "malformed" ? .refused("unknown-ax-value") : .refused("reaction-unavailable-custom-chooser-candidate-read")
@@ -2335,7 +2379,7 @@ struct MessagesReactionAXAutomationTests {
         driver.customCandidate.onActionsRead = {
             actionReads += 1
             if actionReads == 3, let glyph = driver.customCandidate.nodes.first as? FakeAXNode {
-                glyph.readError = .axFailure
+                glyph.readError = MessagesReactionAXError.axFailure
             }
         }
 
@@ -2349,7 +2393,7 @@ struct MessagesReactionAXAutomationTests {
         driver.button.id = "heart"
         driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
         configureAXUnknownCustomCandidateProof(driver, emoji: "👍🏽")
-        (driver.customCandidate.nodes[0] as? FakeAXNode)?.readError = .axFailure
+        (driver.customCandidate.nodes[0] as? FakeAXNode)?.readError = MessagesReactionAXError.axFailure
 
         #expect(try apply(driver, .set, .custom("👍🏽"), experimentalUIHandoff: true) ==
                 .failed("ax-failure-custom-chooser-candidate-read"))
@@ -2421,7 +2465,7 @@ struct MessagesReactionAXAutomationTests {
         if evidence == "equal" { windowEvidence.identity = driver.window.identity }
         switch evidence {
         case "absent": node.owningWindow = nil
-        case "error": node.windowError = .axFailure
+        case "error": node.windowError = MessagesReactionAXError.axFailure
         default: node.owningWindow = windowEvidence
         }
         let expected: MessagesReactionAXOutcome = switch evidence {
@@ -2563,7 +2607,7 @@ struct MessagesReactionAXAutomationTests {
 
     @Test func linkedTransportErrorNeverBecomesEmptyGraph() throws {
         let driver = FakeReactionDriver()
-        driver.transcript.linkError = .axFailure
+        driver.transcript.linkError = MessagesReactionAXError.axFailure
         #expect(try apply(driver) == .failed("ax-failure-initial-route"))
         #expect(driver.message.performed.isEmpty)
     }
@@ -2600,11 +2644,11 @@ struct MessagesReactionAXAutomationTests {
         for status in [AXError.actionUnsupported, .attributeUnsupported, .noValue] {
             #expect(try LiveAXElement.checkedActions(status: status, names: nil).isEmpty)
         }
-        #expect(throws: MessagesReactionAXError.unknownAXValue) {
+        #expect(throws: MessagesAXNavigationError.unknownAXValue) {
             try LiveAXElement.checkedActions(status: .notImplemented, names: nil)
         }
         for status in [AXError.cannotComplete, .invalidUIElement, .failure, .illegalArgument] {
-            #expect(throws: MessagesReactionAXError.axFailure) {
+            #expect(throws: MessagesAXNavigationError.axFailure) {
                 try LiveAXElement.checkedActions(status: status, names: nil)
             }
         }
@@ -2613,7 +2657,7 @@ struct MessagesReactionAXAutomationTests {
         for names in [nil, [NSNumber(value: 1)] as CFArray,
                       Array(repeating: "AXPress", count: 129) as CFArray,
                       [String(repeating: "a", count: 2049)] as CFArray] as [CFArray?] {
-            #expect(throws: MessagesReactionAXError.unknownAXValue) {
+            #expect(throws: MessagesAXNavigationError.unknownAXValue) {
                 try LiveAXElement.checkedActions(status: .success, names: names)
             }
         }
@@ -2623,16 +2667,16 @@ struct MessagesReactionAXAutomationTests {
         for status in [AXError.attributeUnsupported, .noValue] {
             #expect(try LiveAXElement.checkedWindow(status: status, value: nil) == nil)
         }
-        #expect(throws: MessagesReactionAXError.unknownAXValue) {
+        #expect(throws: MessagesAXNavigationError.unknownAXValue) {
             try LiveAXElement.checkedWindow(status: .notImplemented, value: nil)
         }
         for status in [AXError.cannotComplete, .invalidUIElement, .failure, .illegalArgument] {
-            #expect(throws: MessagesReactionAXError.axFailure) {
+            #expect(throws: MessagesAXNavigationError.axFailure) {
                 try LiveAXElement.checkedWindow(status: status, value: nil)
             }
         }
         for value in [nil, "AXWindow" as CFString, kCFBooleanTrue, ["AXWindow"] as CFArray] as [CFTypeRef?] {
-            #expect(throws: MessagesReactionAXError.unknownAXValue) {
+            #expect(throws: MessagesAXNavigationError.unknownAXValue) {
                 try LiveAXElement.checkedWindow(status: .success, value: value)
             }
         }
@@ -2670,7 +2714,7 @@ struct MessagesReactionAXAutomationTests {
 
     @Test func axChildrenFullRelationshipRequiresFullArrayCountToMatchPreCount() throws {
         let child = AXUIElementCreateApplication(101)
-        #expect(throws: MessagesTargetDrift.self) {
+        #expect(throws: MessagesAXRouteDrift.self) {
             try LiveAXElement.checkedFullRelationship(initialStatus: .success, initialCount: 2,
                                                       copiedValue: [child] as CFArray, copyStatus: .success,
                                                       finalStatus: .success, finalCount: 2,
@@ -2680,7 +2724,7 @@ struct MessagesReactionAXAutomationTests {
 
     @Test func axChildrenFullRelationshipRequiresStableRecount() throws {
         let child = AXUIElementCreateApplication(101)
-        #expect(throws: MessagesTargetDrift.self) {
+        #expect(throws: MessagesAXRouteDrift.self) {
             try LiveAXElement.checkedFullRelationship(initialStatus: .success, initialCount: 1,
                                                       copiedValue: [child] as CFArray, copyStatus: .success,
                                                       finalStatus: .success, finalCount: 2,
@@ -2689,13 +2733,13 @@ struct MessagesReactionAXAutomationTests {
     }
 
     @Test func axChildrenFullRelationshipRejectsMalformedFullAttributeValue() throws {
-        #expect(throws: MessagesReactionAXError.unknownAXValue) {
+        #expect(throws: MessagesAXNavigationError.unknownAXValue) {
             try LiveAXElement.checkedFullRelationship(initialStatus: .success, initialCount: 1,
                                                       copiedValue: "not-array" as CFString, copyStatus: .success,
                                                       finalStatus: .success, finalCount: 1,
                                                       limit: 256)
         }
-        #expect(throws: MessagesReactionAXError.unknownAXValue) {
+        #expect(throws: MessagesAXNavigationError.unknownAXValue) {
             try LiveAXElement.checkedFullRelationship(initialStatus: .success, initialCount: 1,
                                                       copiedValue: ["not-ax"] as CFArray, copyStatus: .success,
                                                       finalStatus: .success, finalCount: 1,
@@ -2704,7 +2748,7 @@ struct MessagesReactionAXAutomationTests {
     }
 
     @Test func axChildrenFullRelationshipCapsPreCountBeforeCopy() throws {
-        #expect(throws: MessagesReactionAXError.traversalLimit) {
+        #expect(throws: MessagesAXNavigationError.traversalLimit) {
             try LiveAXElement.checkedFullRelationship(initialStatus: .success, initialCount: 257,
                                                       copiedValue: nil, copyStatus: .success,
                                                       finalStatus: .success, finalCount: 257,
@@ -2718,7 +2762,7 @@ struct MessagesReactionAXAutomationTests {
         let initialStatus: AXError = phase == "initial" ? .cannotComplete : .success
         let copyStatus: AXError = phase == "copy" ? .cannotComplete : .success
         let finalStatus: AXError = phase == "final" ? .cannotComplete : .success
-        #expect(throws: MessagesReactionAXError.axFailure) {
+        #expect(throws: MessagesAXNavigationError.axFailure) {
             try LiveAXElement.checkedFullRelationship(initialStatus: initialStatus, initialCount: 1,
                                                       copiedValue: [child] as CFArray, copyStatus: copyStatus,
                                                       finalStatus: finalStatus, finalCount: 1,
@@ -2730,7 +2774,7 @@ struct MessagesReactionAXAutomationTests {
         #expect(try LiveAXElement.checkedString("AXGroup" as CFString, limit: 128) == "AXGroup")
         for value in [NSNumber(value: 1), String(repeating: "a", count: 129) as NSString,
                       String(repeating: "🙂", count: 40) as NSString] {
-            #expect(throws: MessagesReactionAXError.unknownAXValue) {
+            #expect(throws: MessagesAXNavigationError.unknownAXValue) {
                 try LiveAXElement.checkedString(value, limit: 128)
             }
         }
@@ -2741,10 +2785,10 @@ struct MessagesReactionAXAutomationTests {
         #expect(try LiveAXElement.checkedCandidateValue(kCFBooleanTrue) == nil)
         #expect(try LiveAXElement.checkedCandidateValue(NSNumber(value: 7)) == nil)
         #expect(try LiveAXElement.checkedCandidateValue("👍🏽" as CFString) == "👍🏽")
-        #expect(throws: MessagesReactionAXError.unknownAXValue) {
+        #expect(throws: MessagesAXNavigationError.unknownAXValue) {
             try LiveAXElement.checkedCandidateValue(["👍🏽"] as CFArray)
         }
-        #expect(throws: MessagesReactionAXError.unknownAXValue) {
+        #expect(throws: MessagesAXNavigationError.unknownAXValue) {
             try LiveAXElement.checkedCandidateValue(String(repeating: "a", count: 2049) as CFString)
         }
     }
@@ -2893,6 +2937,52 @@ struct MessagesReactionAXAutomationTests {
         #expect(driver.customCandidate.performed.isEmpty)
     }
 
+    @Test func waitForPickerRetriesNeutralRelationshipCountChangeWithoutRepeatingMenuOpenOrChooserWrite() throws {
+        let driver = FakeReactionDriver()
+        let clock = FakeReadinessClock()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+        var countReads = 0
+        driver.message.onAction = { _ in
+            driver.window.nodes = [driver.transcript, driver.picker, driver.customLauncher]
+            driver.window.onChildren = {
+                countReads += 1
+                driver.window.nodes = [driver.transcript, driver.picker, driver.customLauncher]
+                if countReads == 1 {
+                    driver.window.childrenReadError = MessagesAXRouteDrift(.relationshipCountChanged)
+                } else {
+                    driver.window.childrenReadError = nil
+                }
+            }
+            driver.window.onChildrenRead = { _ in
+                driver.window.childrenReadError = nil
+            }
+        }
+        driver.customSearchField.onSetValue = { value in
+            if value == "thumbs up: medium skin tone" { #expect(driver.message.performed.count == 1) }
+        }
+        driver.customCandidate.onAction = { _ in
+            driver.window.onChildren = nil
+            driver.window.onChildrenRead = nil
+            driver.message.onAction = { _ in
+                if !driver.window.nodes.contains(where: { $0.sameIdentity(as: driver.picker) }) {
+                    driver.window.nodes.append(driver.picker)
+                }
+            }
+            driver.picker.nodes = [driver.customVisibleButton]
+            driver.customVisibleButton.isSelected = true
+            driver.detachedPopover = nil
+        }
+
+        #expect(try apply(driver, .set, .custom("👍🏽"), clock: clock, experimentalUIHandoff: true) ==
+                .ack("reaction-set-changed-verified"))
+        #expect(clock.pauses.first == 50_000_000)
+        #expect(clock.pauses.contains(750_000_000))
+        #expect(driver.message.performed.count == 2)
+        #expect(driver.customSearchField.setValues == ["thumbs up: medium skin tone"])
+        #expect(driver.customCandidate.performed.isEmpty)
+    }
+
     @Test func waitForPickerPreservesPersistentRelationshipCountChangeAfterBoundedRetry() throws {
         let driver = FakeReactionDriver()
         let clock = FakeReadinessClock()
@@ -3001,7 +3091,7 @@ struct MessagesReactionAXAutomationTests {
             driver.window.nodes.append(driver.picker)
             switch failure {
             case "transport":
-                driver.window.childrenReadError = .axFailure
+                driver.window.childrenReadError = MessagesReactionAXError.axFailure
             case "type":
                 driver.window.nodes = [driver.transcript, FakeBadAXElement()]
             default:
@@ -3138,8 +3228,8 @@ struct MessagesReactionAXAutomationTests {
             case "foreign-picker": driver.picker.owningWindow = foreign
             case "foreign-button": driver.button.owningWindow = foreign
             case "unknown": driver.button.isSelected = nil
-            case "invalid-selected": driver.button.selectedError = .unknownAXValue
-            default: driver.picker.linkError = .axFailure
+            case "invalid-selected": driver.button.selectedError = MessagesReactionAXError.unknownAXValue
+            default: driver.picker.linkError = MessagesReactionAXError.axFailure
             }
         }
         let expected: MessagesReactionAXOutcome = switch failure {
@@ -3487,6 +3577,30 @@ struct MessagesReactionAXAutomationTests {
         #expect(driver.openedURLs.count == 1)
     }
 
+    @Test func staleRetainedWindowPickerDoesNotMaskCurrentWindowDrift() throws {
+        let driver = FakeReactionDriver()
+        let clock = FakeReadinessClock()
+        var postPressDirectWindowCounts = 0
+        driver.button.onAction = { _ in
+            driver.button.isSelected = true
+            driver.window.nodes.removeAll { $0.sameIdentity(as: driver.picker) }
+        }
+        driver.root.onDirectWindowsCountRead = {
+            guard driver.button.performed == ["AXPress"] else { return }
+            postPressDirectWindowCounts += 1
+            if postPressDirectWindowCounts == 4 {
+                driver.window.nodes.append(driver.picker)
+                driver.replace("window")
+            }
+        }
+
+        #expect(try apply(driver, clock: clock, experimentalUIHandoff: true) ==
+                .refused("exact-existing-verify-discovery-drift-window-mismatch"))
+        #expect(driver.button.performed == ["AXPress"])
+        #expect(driver.message.performed.count == 1)
+        #expect(driver.openedURLs.count == 1)
+    }
+
     @Test(arguments: ["tapback", "press"])
     func mutatingErrorsNeverRetryDuringReadiness(_ phase: String) throws {
         let driver = FakeReactionDriver()
@@ -3740,7 +3854,7 @@ private func glyphProofNode(emoji: String, parent: FakeAXNode, processID: Int32)
 
 private enum FakeCandidateTextOverride {
     case known(String?)
-    case error(MessagesReactionAXError)
+    case error(any Error)
 }
 
 private final class FakeAXNode: MessagesAXElement {
@@ -3759,26 +3873,26 @@ private final class FakeAXNode: MessagesAXElement {
     var actionNames: [String]
     var nodes: [any MessagesAXElement]
     var navigationNodes: [any MessagesAXElement]?
-    var navigationReadError: MessagesReactionAXError?
+    var navigationReadError: (any Error)?
     var navigationRelationshipChanged = false
     var childrenRelationshipChanged = false
     var links: [any MessagesAXElement] = []
     weak var owningWindow: (any MessagesAXElement)?
     weak var parentNode: (any MessagesAXElement)?
     var directWindowNodes: [any MessagesAXElement]?
-    var directWindowsError: MessagesReactionAXError?
+    var directWindowsError: (any Error)?
     var directWindowsRelationshipChanged = false
     var directWindowsMalformed = false
     var onDirectWindowsRead: ((WorkerDeadline) -> Void)?
     var onDirectWindowsCountRead: (() -> Void)?
-    var windowError: MessagesReactionAXError?
-    var linkError: MessagesReactionAXError?
+    var windowError: (any Error)?
+    var linkError: (any Error)?
     var onLinkedElements: (() -> Void)?
     var onProcessIdentifierRead: ((Int32?) -> Void)?
     var performed: [String] = []
-    var readError: MessagesReactionAXError?
-    var childrenReadError: MessagesReactionAXError?
-    var selectedError: MessagesReactionAXError?
+    var readError: (any Error)?
+    var childrenReadError: (any Error)?
+    var selectedError: (any Error)?
     var onSelectedRead: (() -> Void)?
     var onActionsRead: (() -> Void)?
     var onChildren: (() -> Void)?
@@ -3786,7 +3900,7 @@ private final class FakeAXNode: MessagesAXElement {
     var onAction: ((String) throws -> Void)?
     var onSetValue: ((String) -> Void)?
     var onValueRead: (() throws -> String?)?
-    var setValueError: MessagesReactionAXError?
+    var setValueError: (any Error)?
     var setValues: [String] = []
     var currentValue: String?
 

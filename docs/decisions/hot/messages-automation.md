@@ -1,11 +1,26 @@
 ---
 topic: messages-automation
-last-used: 2026-10-11
+last-used: 2026-10-13
 importance: high
-uses: 3
+uses: 4
 ---
 
 # Messages automation decisions
+
+## 2026-10-13 — Separate shared navigation from reaction controls
+
+Keep the typed Accessibility adapter and process, window, transcript and retained
+target checks in a shared Messages core. Operation-specific controls, polling and
+verification remain with the operation: the navigator does not discover Tapback
+pickers or interpret reaction state. Shared errors are neutral; the reaction
+boundary maps them to the existing public details, including staged failures.
+
+Initial route capture requires native selected state plus a caller-supplied
+eligibility predicate. Rediscovery after an operation instead requires the same
+retained target identity and eligibility; the target need not remain selected.
+Neither path falls back to message text, position or the latest message. These
+checks preserve the experimental selected-target handoff and do not establish an
+independent GUID-bearing Accessibility identity.
 
 ## 2026-10-11 — Preserve uncertainty after a timed-out UI request
 

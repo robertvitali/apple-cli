@@ -228,42 +228,6 @@ private func checkDeadline(_ deadline: WorkerDeadline) throws {
     guard !deadline.expired else { throw MessagesReactionAXError.deadlineExpired }
 }
 
-// Every remote property access is explicit, throwing and deadline-bound. Nil
-protocol MessagesAXElement: AnyObject {
-    func sameIdentity(as other: any MessagesAXElement) -> Bool
-    func role(deadline: WorkerDeadline) throws -> String
-    func identifier(deadline: WorkerDeadline) throws -> String?
-    func axDescription(deadline: WorkerDeadline) throws -> String?
-    func axValue(deadline: WorkerDeadline) throws -> String?
-    func candidateValueText(deadline: WorkerDeadline) throws -> String?
-    func axTitle(deadline: WorkerDeadline) throws -> String?
-    func subrole(deadline: WorkerDeadline) throws -> String?
-    func enabled(deadline: WorkerDeadline) throws -> Bool?
-    func selected(deadline: WorkerDeadline) throws -> Bool?
-    func window(deadline: WorkerDeadline) throws -> (any MessagesAXElement)?
-    func directWindows(limit: Int, deadline: WorkerDeadline) throws -> [any MessagesAXElement]
-    func parent(deadline: WorkerDeadline) throws -> (any MessagesAXElement)?
-    func processIdentifier(deadline: WorkerDeadline) throws -> Int32?
-    func valueSettable(deadline: WorkerDeadline) throws -> Bool?
-    func actions(deadline: WorkerDeadline) throws -> [String]
-    func children(limit: Int, deadline: WorkerDeadline) throws -> [any MessagesAXElement]
-    func childrenInNavigationOrder(limit: Int, deadline: WorkerDeadline) throws -> [any MessagesAXElement]?
-    func linkedElements(limit: Int, deadline: WorkerDeadline) throws -> [any MessagesAXElement]
-    func setValue(_ value: String, deadline: WorkerDeadline) throws
-    func performAction(named name: String, deadline: WorkerDeadline) throws
-}
-
-struct MessagesAXProcessIdentity: Equatable {
-    let pid: Int32
-    let bundleURL: URL
-    let launchDate: Date
-}
-
-struct MessagesAXProcess {
-    let identity: MessagesAXProcessIdentity
-    let root: any MessagesAXElement
-}
-
 struct MessagesCustomEmojiSearchPlan: Equatable {
     let query: String
     let position: Int
@@ -276,16 +240,11 @@ enum MessagesCustomEmojiChooserKey: Equatable {
     case returnKey
 }
 
-protocol MessagesReactionAXDriving: AnyObject {
-    func checkAccessibilityTrusted(prompt: Bool) -> Bool
+protocol MessagesReactionAXDriving: MessagesAXProcessDriving {
     func reactActionTitles(deadline: WorkerDeadline) throws -> [String]
     func customEmojiSearchPlan(for emoji: String, deadline: WorkerDeadline) throws -> MessagesCustomEmojiSearchPlan
     func pressCustomEmojiChooserKey(_ key: MessagesCustomEmojiChooserKey, process: MessagesAXProcess, deadline: WorkerDeadline) throws
-    func messagesProcessIsFrontmost(_ process: MessagesAXProcess, deadline: WorkerDeadline) throws -> Bool
-    func focusedElement(deadline: WorkerDeadline) throws -> (any MessagesAXElement)?
     func detachedCustomEmojiPopover(process: MessagesAXProcess, deadline: WorkerDeadline) throws -> (any MessagesAXElement)?
-    func openMessages(url: URL, deadline: WorkerDeadline) throws -> MessagesAXProcess
-    func canonicalMessagesProcess(deadline: WorkerDeadline) throws -> MessagesAXProcess
 }
 struct MessagesReactionActionTitleResolver {
     var baseTitle: (WorkerDeadline) throws -> String?
@@ -362,23 +321,18 @@ struct MessagesReactionAXAutomation {
         self.readinessPause = readinessPause
     }
 
-    private struct Route {
-        let process: MessagesAXProcess
-        let window: any MessagesAXElement
-        let transcript: any MessagesAXElement
-        let selected: any MessagesAXElement
-    }
+    private typealias Route = MessagesAXRoute
     private enum PostPressPickerState {
         case present
         case absent
     }
-    private enum RetainedRouteDiscovery {
-        case available(Route)
-        case unavailable(MessagesTargetDriftReason)
-    }
     private enum PickerResolution {
         case exact(any MessagesAXElement, any MessagesAXElement, Bool)
         case customChooserChanged((any MessagesAXElement)?)
+    }
+    private enum RetainedRouteDiscovery {
+        case available(Route)
+        case unavailable(MessagesTargetDriftReason)
     }
     private struct CustomEmojiCandidate {
         let element: any MessagesAXElement
@@ -443,6 +397,12 @@ struct MessagesReactionAXAutomation {
         var detail: String { "reaction-unavailable-custom-chooser-\(phase.rawValue)" }
     }
 
+    private var navigator: MessagesAXNavigator {
+        MessagesAXNavigator(driver: driver, maxTraversalNodes: maxTraversalNodes,
+                            maxTraversalDepth: maxTraversalDepth, maxChildren: maxChildren,
+                            readinessNow: readinessNow, readinessPause: readinessPause)
+    }
+
     func apply(_ request: MessagesReactionRequest, deadline: WorkerDeadline) throws -> MessagesReactionAXOutcome {
         do { return try execute(request, deadline: deadline) }
         catch let error as StagedAXFailure { return .failed(error.stage.rawValue) }
@@ -450,6 +410,11 @@ struct MessagesReactionAXAutomation {
         catch let error as CustomChooserAXFailure { return .failed(error.detail) }
         catch let error as CustomChooserReactionUnavailable { return .refused(error.detail) }
         catch let error as MessagesVerificationFailure { return .refused(error.detail) }
+        catch let error as MessagesAXNavigationError {
+            let reactionError = Self.reactionError(from: error)
+            if reactionError == .deadlineExpired || reactionError == .axFailure { return .failed(reactionError.description) }
+            return .refused(reactionError.description)
+        }
         catch let error as MessagesReactionAXError {
             if error == .deadlineExpired || error == .axFailure { return .failed(error.description) }
             return .refused(error.description)
@@ -554,12 +519,23 @@ struct MessagesReactionAXAutomation {
             throw error
         } catch let error as CustomChooserReactionUnavailable {
             throw error
+        } catch let error as MessagesAXNavigationError {
+            switch error {
+            case .axFailure:
+                throw StagedAXFailure(stage: stage)
+            case .targetDrift:
+                throw StagedTargetDrift(stage: stage, reason: nil)
+            default:
+                throw Self.reactionError(from: error)
+            }
         } catch MessagesReactionAXError.axFailure {
             throw StagedAXFailure(stage: stage)
         } catch MessagesReactionAXError.targetDrift {
             throw StagedTargetDrift(stage: stage, reason: nil)
         } catch let error as MessagesTargetDrift {
             throw StagedTargetDrift(stage: stage, reason: error.reason)
+        } catch let error as MessagesAXRouteDrift {
+            throw StagedTargetDrift(stage: stage, reason: Self.targetDriftReason(from: error.reason))
         } catch let error as MessagesVerificationFailure {
             throw error
         } catch let error as MessagesReactionAXError {
@@ -568,6 +544,33 @@ struct MessagesReactionAXAutomation {
             // Never expose native AX transport errors or values.
             throw StagedAXFailure(stage: stage)
         }
+    }
+
+    private static func reactionError(from error: MessagesAXNavigationError) -> MessagesReactionAXError {
+        switch error {
+        case .deadlineExpired: return .deadlineExpired
+        case .targetDrift: return .targetDrift
+        case .ambiguousSelectedMessage: return .ambiguousSelectedMessage
+        case .unknownAXValue: return .unknownAXValue
+        case .traversalLimit: return .traversalLimit
+        case .axFailure: return .axFailure
+        }
+    }
+
+    private static func targetDriftReason(from reason: MessagesAXRouteDriftReason?) -> MessagesTargetDriftReason? {
+        guard let reason else { return nil }
+        switch reason {
+        case .relationshipCountChanged: return .relationshipCountChanged
+        case .windowMismatch: return .windowMismatch
+        case .missingTranscript: return .missingTranscript
+        case .missingRetainedTarget: return .missingRetainedMessage
+        case .replacedTranscript: return .replacedTranscript
+        case .retainedTargetActionMissing: return .retainedMessageActionMissing
+        }
+    }
+
+    private static func targetDrift(from error: MessagesAXRouteDrift) -> MessagesTargetDrift {
+        MessagesTargetDrift(targetDriftReason(from: error.reason))
     }
 
     static func matchesAction(_ action: String, title: String) -> Bool {
@@ -587,44 +590,19 @@ struct MessagesReactionAXAutomation {
     }
 
     private func captureRoute(process: MessagesAXProcess, titles: [String], deadline: WorkerDeadline) throws -> Route {
-        let rootWindow = try uniqueRootWindow(process: process, deadline: deadline)
-        var candidates: [(any MessagesAXElement, any MessagesAXElement)] = []
-        let transcripts = try collect(from: rootWindow, window: rootWindow, deadline: deadline) { _, role, identifier in
-            // macOS 27 exposes AXGroup. Retain the previous AXCollection
-            // shape only with the same exact native transcript identifier.
-            (role == "AXGroup" || role == "AXCollection") && identifier == "TranscriptCollectionView"
-        }
-        candidates.append(contentsOf: transcripts.map { (rootWindow, $0) })
-        guard candidates.count == 1 else { throw MessagesReactionAXError.targetDrift }
-        let (window, transcript) = candidates[0]
-        let messages = try collect(from: transcript, window: window, deadline: deadline) { element, _, _ in
-            guard try reactAction(on: element, titles: titles, deadline: deadline) != nil else { return false }
-            guard let selected = try element.selected(deadline: deadline) else {
-                throw MessagesReactionAXError.unknownAXValue
-            }
-            return selected
-        }
-        guard messages.count == 1 else {
-            throw messages.isEmpty ? MessagesReactionAXError.targetDrift : .ambiguousSelectedMessage
-        }
-        return Route(process: process, window: window, transcript: transcript, selected: messages[0])
+        try navigator.captureRoute(process: process, isTargetEligible: { element, deadline in
+            try reactAction(on: element, titles: titles, deadline: deadline) != nil
+        }, deadline: deadline)
     }
 
     private func checkProcess(_ expected: MessagesAXProcess, deadline: WorkerDeadline) throws {
-        try checkDeadline(deadline)
-        let current = try driver.canonicalMessagesProcess(deadline: deadline)
-        guard current.identity == expected.identity, expected.root.sameIdentity(as: current.root) else {
-            throw MessagesReactionAXError.targetDrift
-        }
-        try checkDeadline(deadline)
+        try navigator.checkProcess(expected, deadline: deadline)
     }
 
     private func revalidate(_ route: Route, titles: [String], deadline: WorkerDeadline) throws {
-        let current = try captureRoute(process: route.process, titles: titles, deadline: deadline)
-        guard route.window.sameIdentity(as: current.window),
-              route.transcript.sameIdentity(as: current.transcript),
-              route.selected.sameIdentity(as: current.selected) else { throw MessagesReactionAXError.targetDrift }
-        try checkDeadline(deadline)
+        try navigator.revalidate(route, isTargetEligible: { element, deadline in
+            try reactAction(on: element, titles: titles, deadline: deadline) != nil
+        }, deadline: deadline)
     }
     private func verificationFailure(_ path: MessagesVerificationPath, _ kind: MessagesVerificationFailureKind, _ reason: MessagesTargetDriftReason? = nil) -> MessagesVerificationFailure {
         MessagesVerificationFailure(path: path, kind: kind, reason: reason)
@@ -684,44 +662,27 @@ struct MessagesReactionAXAutomation {
     private func availableRetainedRouteAfterPickerDismissal(process: MessagesAXProcess, titles: [String],
                                                             originalRoute: Route, requirePickerAbsent: Bool,
                                                             deadline: WorkerDeadline) throws -> RetainedRouteDiscovery {
+        let currentWindow = try uniqueCurrentWindow(originalRoute, deadline: deadline)
+        let picker = try availablePicker(in: currentWindow, deadline: deadline)
+        if requirePickerAbsent, picker != nil { throw MessagesTargetDrift(.pickerStillPresent) }
         do {
-            try checkProcess(process, deadline: deadline)
-            let window = try uniqueRootWindow(process: process, deadline: deadline)
-            guard window.sameIdentity(as: originalRoute.window) else { throw MessagesTargetDrift(.windowMismatch) }
-            let picker = try availablePicker(in: window, deadline: deadline)
-            if requirePickerAbsent, picker != nil {
-                throw MessagesTargetDrift(.pickerStillPresent)
+            let discovery = try navigator.retainedRouteDiscovery(process: process, originalRoute: originalRoute,
+                                                                 isTargetEligible: { element, deadline in
+                try reactAction(on: element, titles: titles, deadline: deadline) != nil
+            }, deadline: deadline)
+            switch discovery {
+            case .available(let route):
+                return .available(route)
+            case .unavailable(let reason):
+                let reactionReason = Self.targetDriftReason(from: reason) ?? .relationshipCountChanged
+                if picker != nil, reason == .missingTranscript { return .unavailable(.pickerStillPresent) }
+                return .unavailable(reactionReason)
             }
-            let transcripts = try collect(from: window, window: window, deadline: deadline) { _, role, identifier in
-                (role == "AXGroup" || role == "AXCollection") && identifier == "TranscriptCollectionView"
-            }
-            guard !transcripts.isEmpty else {
-                return .unavailable(picker == nil ? .missingTranscript : .pickerStillPresent)
-            }
-            guard transcripts.count == 1, let transcript = transcripts.first else {
-                throw MessagesTargetDrift(.relationshipCountChanged)
-            }
-            guard transcript.sameIdentity(as: originalRoute.transcript) else {
-                throw MessagesTargetDrift(.replacedTranscript)
-            }
-            let messages = try collect(from: transcript, window: window, deadline: deadline) { element, _, _ in
-                element.sameIdentity(as: originalRoute.selected)
-            }
-            guard !messages.isEmpty else { return .unavailable(.missingRetainedMessage) }
-            guard messages.count == 1 else { throw MessagesTargetDrift(.relationshipCountChanged) }
-            guard try reactAction(on: messages[0], titles: titles, deadline: deadline) != nil else {
-                throw MessagesTargetDrift(.retainedMessageActionMissing)
-            }
-            return .available(Route(process: process, window: window, transcript: transcript, selected: messages[0]))
-        } catch let error as MessagesTargetDrift {
-            throw error
-        } catch MessagesReactionAXError.postPressVerifyRouteDrift {
+        } catch let error as MessagesAXRouteDrift {
+            throw Self.targetDrift(from: error)
+        } catch MessagesAXNavigationError.targetDrift {
             throw MessagesReactionAXError.postPressVerifyRouteDrift
-        } catch MessagesReactionAXError.targetDrift {
-            throw MessagesReactionAXError.postPressVerifyRouteDrift
-        } catch MessagesReactionAXError.pickerUnavailable {
-            throw MessagesReactionAXError.postPressVerifyRouteDrift
-        } catch MessagesReactionAXError.ambiguousSelectedMessage {
+        } catch MessagesAXNavigationError.ambiguousSelectedMessage {
             throw MessagesReactionAXError.postPressVerifyRouteDrift
         }
     }
@@ -788,6 +749,12 @@ struct MessagesReactionAXAutomation {
                                                                  originalRoute: originalRoute, deadline: deadline)
         } catch let error as MessagesTargetDrift {
             throw verificationFailure(path, .discoveryDrift, error.reason)
+        } catch let error as MessagesAXRouteDrift {
+            throw verificationFailure(path, .discoveryDrift, Self.targetDriftReason(from: error.reason))
+        } catch MessagesAXNavigationError.targetDrift {
+            throw verificationFailure(path, .discoveryDrift)
+        } catch MessagesAXNavigationError.ambiguousSelectedMessage {
+            throw verificationFailure(path, .discoveryDrift)
         } catch MessagesReactionAXError.postPressVerifyRouteDrift {
             throw verificationFailure(path, .discoveryDrift)
         } catch MessagesReactionAXError.targetDrift {
@@ -902,25 +869,23 @@ struct MessagesReactionAXAutomation {
 
 
     private func uniqueCurrentWindow(_ route: Route, deadline: WorkerDeadline) throws -> any MessagesAXElement {
-        let window = try uniqueRootWindow(process: route.process, deadline: deadline)
-        guard window.sameIdentity(as: route.window) else {
-            throw MessagesTargetDrift(.windowMismatch)
+        do {
+            return try navigator.uniqueCurrentWindow(route, deadline: deadline)
+        } catch let error as MessagesAXRouteDrift {
+            throw Self.targetDrift(from: error)
+        } catch let error as MessagesAXNavigationError {
+            throw Self.reactionError(from: error)
         }
-        return window
     }
 
     private func uniqueRootWindow(process: MessagesAXProcess, deadline: WorkerDeadline) throws -> any MessagesAXElement {
-        try checkProcess(process, deadline: deadline)
-        let windows = try process.root.directWindows(limit: maxChildren, deadline: deadline)
-        guard windows.count == 1, let window = windows.first else {
-            throw MessagesTargetDrift(.windowMismatch)
+        do {
+            return try navigator.uniqueRootWindow(process: process, deadline: deadline)
+        } catch let error as MessagesAXRouteDrift {
+            throw Self.targetDrift(from: error)
+        } catch let error as MessagesAXNavigationError {
+            throw Self.reactionError(from: error)
         }
-        guard try window.role(deadline: deadline) == "AXWindow",
-              try window.processIdentifier(deadline: deadline) == process.identity.pid else {
-            throw MessagesTargetDrift(.windowMismatch)
-        }
-        try checkProcess(process, deadline: deadline)
-        return window
     }
 
     private func validatePostMenuPicker(route: Route, titles: [String], picker: any MessagesAXElement,
@@ -1029,6 +994,11 @@ struct MessagesReactionAXAutomation {
             // Preserve global timeout failures and local readiness refusals.
             try checkDeadline(deadline)
             throw unavailable
+        } catch MessagesAXNavigationError.deadlineExpired {
+            // Live AX adapters throw the neutral deadline error; preserve the
+            // reaction readiness contract at this boundary.
+            try checkDeadline(deadline)
+            throw unavailable
         }
         throw unavailable
     }
@@ -1125,6 +1095,7 @@ struct MessagesReactionAXAutomation {
                                                _ body: () throws -> T) throws -> T {
         do { return try body() }
         catch MessagesReactionAXError.axFailure { throw CustomChooserAXFailure(phase: phase) }
+        catch MessagesAXNavigationError.axFailure { throw CustomChooserAXFailure(phase: phase) }
     }
 
     private func withCustomChooserReactionUnavailable<T>(_ phase: CustomChooserAXFailurePhase,
@@ -1183,6 +1154,23 @@ struct MessagesReactionAXAutomation {
                 guard attempt < 30, now >= start, now - start < 1_500_000_000 else { throw error }
                 try checkDeadline(global)
                 guard !bound.expired else { throw error }
+                readinessPause(min(50_000_000, bound.remainingNanoseconds))
+            } catch let error as MessagesAXNavigationError {
+                let reactionError = Self.reactionError(from: error)
+                if reactionError == .deadlineExpired {
+                    try checkDeadline(global)
+                    if let lastAXFailurePhase { throw CustomChooserAXFailure(phase: lastAXFailurePhase) }
+                    if let lastUnavailablePhase { throw CustomChooserReactionUnavailable(phase: lastUnavailablePhase) }
+                    throw lastError
+                }
+                guard reactionError == .axFailure else { throw reactionError }
+                lastError = reactionError
+                lastAXFailurePhase = nil
+                lastUnavailablePhase = nil
+                let now = readinessNow()
+                guard attempt < 30, now >= start, now - start < 1_500_000_000 else { throw reactionError }
+                try checkDeadline(global)
+                guard !bound.expired else { throw reactionError }
                 readinessPause(min(50_000_000, bound.remainingNanoseconds))
             }
         }
@@ -1658,11 +1646,17 @@ struct MessagesReactionAXAutomation {
     }
 
     private func availablePicker(in root: any MessagesAXElement, deadline: WorkerDeadline) throws -> (any MessagesAXElement)? {
-        let matches = try collect(from: root, window: root, deadline: deadline) { _, _, identifier in
-            identifier == "TapbackPickerCollectionView"
+        do {
+            let matches = try navigator.collect(from: root, window: root, deadline: deadline) { _, _, identifier in
+                identifier == "TapbackPickerCollectionView"
+            }
+            guard matches.count <= 1 else { throw MessagesReactionAXError.pickerUnavailable }
+            return matches.first
+        } catch let error as MessagesAXRouteDrift {
+            throw Self.targetDrift(from: error)
+        } catch let error as MessagesAXNavigationError {
+            throw Self.reactionError(from: error)
         }
-        guard matches.count <= 1 else { throw MessagesReactionAXError.pickerUnavailable }
-        return matches.first
     }
 
     private func uniquePicker(in root: any MessagesAXElement, deadline: WorkerDeadline) throws -> any MessagesAXElement {
@@ -1693,61 +1687,13 @@ struct MessagesReactionAXAutomation {
     private func collect(from root: any MessagesAXElement, window: (any MessagesAXElement)? = nil,
                          deadline: WorkerDeadline,
                          matching predicate: (any MessagesAXElement, String, String?) throws -> Bool) throws -> [any MessagesAXElement] {
-        guard maxTraversalNodes > 0, maxTraversalDepth >= 0, maxChildren >= 0 else {
-            throw MessagesReactionAXError.traversalLimit
+        do {
+            return try navigator.collect(from: root, window: window, deadline: deadline, matching: predicate)
+        } catch let error as MessagesAXRouteDrift {
+            throw Self.targetDrift(from: error)
+        } catch let error as MessagesAXNavigationError {
+            throw Self.reactionError(from: error)
         }
-        // Breadth-first discovery bounds shortest-path depth, not an accidental
-        // longer route through a cycle. Retain actual AX identities (CFEqual in
-        // LiveAXElement), including queued nodes, rather than wrapper identities.
-        var discovered: [(element: any MessagesAXElement, depth: Int)] = [(root, 0)]
-        var cursor = 0
-        var matches: [any MessagesAXElement] = []
-        while cursor < discovered.count {
-            try checkDeadline(deadline)
-            let (next, depth) = discovered[cursor]
-            cursor += 1
-            let role = try next.role(deadline: deadline)
-            let identifier = try next.identifier(deadline: deadline)
-            guard role.utf8.count <= 128, identifier.map({ $0.utf8.count <= 2048 }) ?? true else {
-                throw MessagesReactionAXError.unknownAXValue
-            }
-            if try predicate(next, role, identifier) {
-                // Linked UI elements establish reachability, not containment.
-                // Require the actual match's AXWindow, including for direct
-                // links that never pass through a foreign AXWindow node.
-                if let window {
-                    guard let owner = try next.window(deadline: deadline) else {
-                        throw MessagesReactionAXError.unknownAXValue
-                    }
-                    try checkDeadline(deadline)
-                    guard owner.sameIdentity(as: window) else { throw MessagesTargetDrift(.windowMismatch) }
-                }
-                matches.append(next)
-            }
-            try checkDeadline(deadline)
-            let children = try next.children(limit: maxChildren, deadline: deadline)
-            try checkDeadline(deadline)
-            guard children.count <= maxChildren else { throw MessagesReactionAXError.traversalLimit }
-            let remaining = maxChildren - children.count
-            let linked = try next.linkedElements(limit: remaining, deadline: deadline)
-            try checkDeadline(deadline)
-            guard linked.count <= remaining else { throw MessagesReactionAXError.traversalLimit }
-            // The edge cap counts both relationships, even duplicate edges;
-            // node/depth limits count only distinct discovered identities.
-            for candidate in children + linked {
-                let known = try discovered.contains { entry in
-                    try checkDeadline(deadline)
-                    return entry.element.sameIdentity(as: candidate)
-                }
-                if known { continue }
-                guard discovered.count < maxTraversalNodes, depth < maxTraversalDepth else {
-                    throw MessagesReactionAXError.traversalLimit
-                }
-                discovered.append((candidate, depth + 1))
-            }
-        }
-        try checkDeadline(deadline)
-        return matches
     }
 
 }
@@ -1989,332 +1935,6 @@ final class LiveMessagesReactionAXDriver: MessagesReactionAXDriving {
         let identity = try Self.uniqueIdentity(identities)
         try checkDeadline(deadline)
         return MessagesAXProcess(identity: identity, root: LiveAXElement(element: AXUIElementCreateApplication(identity.pid)))
-    }
-}
-
-final class LiveAXElement: MessagesAXElement {
-    private let element: AXUIElement
-    init(element: AXUIElement) { self.element = element }
-
-    func sameIdentity(as other: any MessagesAXElement) -> Bool {
-        guard let other = other as? LiveAXElement else { return false }
-        return CFEqual(element, other.element)
-    }
-
-    private func prepare(_ deadline: WorkerDeadline) throws {
-        try checkDeadline(deadline)
-        // 0.30 leaves room below the required 0.35 maximum, including Float rounding.
-        let timeout = Float(min(0.30, Double(deadline.remainingNanoseconds) / 1_000_000_000 / 2))
-        guard timeout > 0, AXUIElementSetMessagingTimeout(element, timeout) == .success else {
-            throw MessagesReactionAXError.axFailure
-        }
-        try checkDeadline(deadline)
-    }
-
-    private func attribute(_ name: String, deadline: WorkerDeadline) throws -> CFTypeRef? {
-        try prepare(deadline)
-        var value: CFTypeRef?
-        let status = AXUIElementCopyAttributeValue(element, name as CFString, &value)
-        try checkDeadline(deadline)
-        if status == .attributeUnsupported || status == .noValue { return nil }
-        guard status == .success, let value else { throw MessagesReactionAXError.axFailure }
-        return value
-    }
-
-    func role(deadline: WorkerDeadline) throws -> String {
-        guard let value = try attribute(kAXRoleAttribute, deadline: deadline) else {
-            throw MessagesReactionAXError.unknownAXValue
-        }
-        return try Self.checkedString(value, limit: 128)
-    }
-
-    func identifier(deadline: WorkerDeadline) throws -> String? {
-        guard let value = try attribute(kAXIdentifierAttribute, deadline: deadline) else { return nil }
-        return try Self.checkedString(value, limit: 2048)
-    }
-
-    func axDescription(deadline: WorkerDeadline) throws -> String? {
-        guard let value = try attribute(kAXDescriptionAttribute, deadline: deadline) else { return nil }
-        return try Self.checkedString(value, limit: 2048)
-    }
-
-    func axValue(deadline: WorkerDeadline) throws -> String? {
-        guard let value = try attribute(kAXValueAttribute, deadline: deadline) else { return nil }
-        return try Self.checkedString(value, limit: 2048)
-    }
-
-    func axTitle(deadline: WorkerDeadline) throws -> String? {
-        guard let value = try attribute(kAXTitleAttribute, deadline: deadline) else { return nil }
-        return try Self.checkedString(value, limit: 2048)
-    }
-
-    func candidateValueText(deadline: WorkerDeadline) throws -> String? {
-        try Self.checkedCandidateValue(attribute(kAXValueAttribute, deadline: deadline))
-    }
-
-    static func checkedCandidateValue(_ value: CFTypeRef?) throws -> String? {
-        guard let value else { return nil }
-        let type = CFGetTypeID(value)
-        if type == CFBooleanGetTypeID() || type == CFNumberGetTypeID() { return nil }
-        return try checkedString(value, limit: 2048)
-    }
-
-    func subrole(deadline: WorkerDeadline) throws -> String? {
-        guard let value = try attribute(kAXSubroleAttribute, deadline: deadline) else { return nil }
-        return try Self.checkedString(value, limit: 128)
-    }
-
-    func enabled(deadline: WorkerDeadline) throws -> Bool? {
-        try Self.checkedBoolean(attribute(kAXEnabledAttribute, deadline: deadline))
-    }
-
-    func selected(deadline: WorkerDeadline) throws -> Bool? {
-        try Self.checkedBoolean(attribute(kAXSelectedAttribute, deadline: deadline))
-    }
-
-    func window(deadline: WorkerDeadline) throws -> (any MessagesAXElement)? {
-        try elementAttribute(kAXWindowAttribute, deadline: deadline)
-    }
-
-    func directWindows(limit: Int, deadline: WorkerDeadline) throws -> [any MessagesAXElement] {
-        try relationship(kAXWindowsAttribute, limit: limit, requireAvailable: true, deadline: deadline)
-    }
-
-    func parent(deadline: WorkerDeadline) throws -> (any MessagesAXElement)? {
-        try elementAttribute(kAXParentAttribute, deadline: deadline)
-    }
-
-    func processIdentifier(deadline: WorkerDeadline) throws -> Int32? {
-        try prepare(deadline)
-        var pid: pid_t = 0
-        let status = AXUIElementGetPid(element, &pid)
-        try checkDeadline(deadline)
-        guard status == .success, pid > 0 else { throw MessagesReactionAXError.axFailure }
-        return pid
-    }
-
-    func valueSettable(deadline: WorkerDeadline) throws -> Bool? {
-        try prepare(deadline)
-        var settable = DarwinBoolean(false)
-        let status = AXUIElementIsAttributeSettable(element, kAXValueAttribute as CFString, &settable)
-        try checkDeadline(deadline)
-        if status == .attributeUnsupported || status == .noValue { return nil }
-        guard status == .success else { throw MessagesReactionAXError.axFailure }
-        return settable.boolValue
-    }
-
-    private func elementAttribute(_ name: String, deadline: WorkerDeadline) throws -> LiveAXElement? {
-        try prepare(deadline)
-        var value: CFTypeRef?
-        let status = AXUIElementCopyAttributeValue(element, name as CFString, &value)
-        try checkDeadline(deadline)
-        return try Self.checkedWindow(status: status, value: value)
-    }
-
-    static func checkedWindow(status: AXError, value: CFTypeRef?) throws -> LiveAXElement? {
-        if status == .attributeUnsupported || status == .noValue { return nil }
-        if status == .notImplemented { throw MessagesReactionAXError.unknownAXValue }
-        guard status == .success else { throw MessagesReactionAXError.axFailure }
-        guard let value, CFGetTypeID(value) == AXUIElementGetTypeID() else {
-            throw MessagesReactionAXError.unknownAXValue
-        }
-        return LiveAXElement(element: value as! AXUIElement)
-    }
-
-    static func checkedBoolean(_ value: CFTypeRef?) throws -> Bool? {
-        guard let value else { return nil }
-        // NSNumber's bridging can turn arbitrary numbers into Bool. AXSelected
-        // must actually be a CFBoolean; neither a string nor 0/1 is evidence.
-        guard CFGetTypeID(value) == CFBooleanGetTypeID() else { throw MessagesReactionAXError.unknownAXValue }
-        return CFBooleanGetValue((value as! CFBoolean))
-    }
-
-    static func checkedString(_ value: CFTypeRef, limit: Int) throws -> String {
-        guard CFGetTypeID(value) == CFStringGetTypeID(),
-              CFStringGetLength((value as! CFString)) <= limit,
-              let string = value as? String, string.utf8.count <= limit else {
-            throw MessagesReactionAXError.unknownAXValue
-        }
-        return string
-    }
-
-    func actions(deadline: WorkerDeadline) throws -> [String] {
-        try prepare(deadline)
-        var names: CFArray?
-        let status = AXUIElementCopyActionNames(element, &names)
-        try checkDeadline(deadline)
-        return try Self.checkedActions(status: status, names: names)
-    }
-
-    static func checkedActions(status: AXError, names: CFArray?) throws -> [String] {
-        // Explicit absence on a noninteractive node is not a transport failure.
-        // NotImplemented is broader (incomplete process AX support per the SDK):
-        // refuse unknown evidence instead of treating it as an empty action list.
-        if status == .actionUnsupported || status == .attributeUnsupported || status == .noValue { return [] }
-        if status == .notImplemented { throw MessagesReactionAXError.unknownAXValue }
-        guard status == .success else { throw MessagesReactionAXError.axFailure }
-        guard let names, CFArrayGetCount(names) <= 128 else { throw MessagesReactionAXError.unknownAXValue }
-        return try (names as [AnyObject]).map { try checkedString($0, limit: 2048) }
-    }
-
-    static func validateChildCount(status: AXError, count: CFIndex, limit: Int,
-                                   requireAvailable: Bool = false) throws {
-        _ = try relationshipCount(status: status, count: count, limit: limit, requireAvailable: requireAvailable)
-    }
-
-    private static func relationshipCount(status: AXError, count: CFIndex, limit: Int,
-                                           requireAvailable: Bool = false) throws -> Int {
-        guard limit >= 0 else { throw MessagesReactionAXError.traversalLimit }
-        if status == .attributeUnsupported || status == .noValue {
-            if requireAvailable { throw MessagesTargetDrift(.relationshipCountChanged) }
-            return 0
-        }
-        guard status == .success, count >= 0 else { throw MessagesReactionAXError.axFailure }
-        guard count <= limit else { throw MessagesReactionAXError.traversalLimit }
-        return count
-    }
-
-    func children(limit: Int, deadline: WorkerDeadline) throws -> [any MessagesAXElement] {
-        try fullRelationship(kAXChildrenAttribute, limit: limit, deadline: deadline)
-    }
-
-    func childrenInNavigationOrder(limit: Int, deadline: WorkerDeadline) throws -> [any MessagesAXElement]? {
-        try optionalRelationship("AXChildrenInNavigationOrder", limit: limit, deadline: deadline)
-    }
-
-    func linkedElements(limit: Int, deadline: WorkerDeadline) throws -> [any MessagesAXElement] {
-        try relationship(kAXLinkedUIElementsAttribute, limit: limit, deadline: deadline)
-    }
-
-    static func checkedFullRelationship(initialStatus: AXError, initialCount: CFIndex, copiedValue: CFTypeRef?,
-                                        copyStatus: AXError, finalStatus: AXError, finalCount: CFIndex,
-                                        limit: Int, requireAvailable: Bool = false) throws -> [LiveAXElement] {
-        let expectedCount = try relationshipCount(status: initialStatus, count: initialCount, limit: limit,
-                                                  requireAvailable: requireAvailable)
-        var values: [AnyObject] = []
-        if expectedCount > 0 {
-            if copyStatus == .attributeUnsupported || copyStatus == .noValue {
-                throw MessagesTargetDrift(.relationshipCountChanged)
-            }
-            guard copyStatus == .success else { throw MessagesReactionAXError.axFailure }
-            guard let copiedValue, CFGetTypeID(copiedValue) == CFArrayGetTypeID() else {
-                throw MessagesReactionAXError.unknownAXValue
-            }
-            let array = copiedValue as! CFArray
-            guard CFArrayGetCount(array) == expectedCount else {
-                throw MessagesTargetDrift(.relationshipCountChanged)
-            }
-            values = array as [AnyObject]
-        }
-        let observedCount = try relationshipCount(status: finalStatus, count: finalCount, limit: limit,
-                                                  requireAvailable: requireAvailable)
-        guard observedCount == expectedCount else { throw MessagesTargetDrift(.relationshipCountChanged) }
-        return try values.map { value in
-            guard CFGetTypeID(value) == AXUIElementGetTypeID() else { throw MessagesReactionAXError.unknownAXValue }
-            return LiveAXElement(element: value as! AXUIElement)
-        }
-    }
-
-    private func fullRelationship(_ name: String, limit: Int, requireAvailable: Bool = false,
-                                  deadline: WorkerDeadline) throws -> [any MessagesAXElement] {
-        try prepare(deadline)
-        var initialCount: CFIndex = 0
-        let initialStatus = AXUIElementGetAttributeValueCount(element, name as CFString, &initialCount)
-        try checkDeadline(deadline)
-        var copiedValue: CFTypeRef?
-        var copyStatus: AXError = .success
-        if try Self.relationshipCount(status: initialStatus, count: initialCount, limit: limit,
-                                      requireAvailable: requireAvailable) > 0 {
-            try prepare(deadline)
-            copyStatus = AXUIElementCopyAttributeValue(element, name as CFString, &copiedValue)
-            try checkDeadline(deadline)
-        }
-        try prepare(deadline)
-        var finalCount: CFIndex = 0
-        let finalStatus = AXUIElementGetAttributeValueCount(element, name as CFString, &finalCount)
-        try checkDeadline(deadline)
-        return try Self.checkedFullRelationship(initialStatus: initialStatus, initialCount: initialCount,
-                                                copiedValue: copiedValue, copyStatus: copyStatus,
-                                                finalStatus: finalStatus, finalCount: finalCount,
-                                                limit: limit, requireAvailable: requireAvailable)
-    }
-
-    private func optionalRelationship(_ name: String, limit: Int, deadline: WorkerDeadline) throws -> [any MessagesAXElement]? {
-        func count() throws -> Int? {
-            try prepare(deadline)
-            var value: CFIndex = 0
-            let status = AXUIElementGetAttributeValueCount(element, name as CFString, &value)
-            try checkDeadline(deadline)
-            if status == .attributeUnsupported || status == .noValue { return nil }
-            guard status == .success, value >= 0 else { throw MessagesReactionAXError.axFailure }
-            guard value <= limit else { throw MessagesReactionAXError.traversalLimit }
-            return value
-        }
-        guard let initialCount = try count() else { return nil }
-        var values: [AnyObject] = []
-        if initialCount > 0 {
-            try prepare(deadline)
-            var array: CFArray?
-            let status = AXUIElementCopyAttributeValues(element, name as CFString, 0, initialCount, &array)
-            try checkDeadline(deadline)
-            if status == .attributeUnsupported || status == .noValue { throw MessagesTargetDrift(.relationshipCountChanged) }
-            guard status == .success else { throw MessagesReactionAXError.axFailure }
-            guard let array, CFArrayGetCount(array) == initialCount else { throw MessagesTargetDrift(.relationshipCountChanged) }
-            values = array as [AnyObject]
-        }
-        guard let finalCount = try count(), finalCount == initialCount else {
-            throw MessagesTargetDrift(.relationshipCountChanged)
-        }
-        return try values.map { value in
-            try checkDeadline(deadline)
-            guard CFGetTypeID(value) == AXUIElementGetTypeID() else { throw MessagesReactionAXError.unknownAXValue }
-            return LiveAXElement(element: value as! AXUIElement)
-        }
-    }
-
-    private func relationship(_ name: String, limit: Int, requireAvailable: Bool = false, deadline: WorkerDeadline) throws -> [any MessagesAXElement] {
-        func count() throws -> Int {
-            try prepare(deadline)
-            var value: CFIndex = 0
-            let status = AXUIElementGetAttributeValueCount(element, name as CFString, &value)
-            try checkDeadline(deadline)
-            return try Self.relationshipCount(status: status, count: value, limit: limit, requireAvailable: requireAvailable)
-        }
-        let initialCount = try count()
-        var values: [AnyObject] = []
-        if initialCount > 0 {
-            try prepare(deadline)
-            var array: CFArray?
-            let status = AXUIElementCopyAttributeValues(element, name as CFString, 0, initialCount, &array)
-            try checkDeadline(deadline)
-            // A relation that vanished after a positive count changed under us.
-            if status == .attributeUnsupported || status == .noValue { throw MessagesTargetDrift(.relationshipCountChanged) }
-            guard status == .success else { throw MessagesReactionAXError.axFailure }
-            guard let array, CFArrayGetCount(array) == initialCount else { throw MessagesTargetDrift(.relationshipCountChanged) }
-            values = array as [AnyObject]
-        }
-        // Recheck even empty/unsupported relations so a newly appearing edge
-        // cannot turn an incomplete scan into uniqueness evidence.
-        guard try count() == initialCount else { throw MessagesTargetDrift(.relationshipCountChanged) }
-        return try values.map { value in
-            try checkDeadline(deadline)
-            guard CFGetTypeID(value) == AXUIElementGetTypeID() else { throw MessagesReactionAXError.unknownAXValue }
-            return LiveAXElement(element: value as! AXUIElement)
-        }
-    }
-
-    func performAction(named name: String, deadline: WorkerDeadline) throws {
-        try prepare(deadline)
-        let status = AXUIElementPerformAction(element, name as CFString)
-        try checkDeadline(deadline)
-        guard status == .success else { throw MessagesReactionAXError.axFailure }
-    }
-
-    func setValue(_ value: String, deadline: WorkerDeadline) throws {
-        try prepare(deadline)
-        let status = AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, value as CFString)
-        try checkDeadline(deadline)
-        guard status == .success else { throw MessagesReactionAXError.axFailure }
     }
 }
 
