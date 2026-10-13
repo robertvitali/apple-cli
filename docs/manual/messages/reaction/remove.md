@@ -10,7 +10,7 @@ apple messages reaction remove [flags]
 
 ## Description
 
-Removes an outgoing reaction from one exact Messages target. Select the target with the same exact chat/message/native-part selectors as `reaction set`. Pass `--reaction` for a standard reaction or `--emoji` for explicit custom-emoji removal. Omit both only when database evidence resolves exactly one outgoing standard reaction. Explicit custom removal is experimental and requires an exact native picker button; live validation remains pending. Implicit custom removal remains refused outside dry run.
+Removes an outgoing reaction from one exact Messages target. Select the target with the same exact chat/message/native-part selectors as `reaction set`. Pass `--reaction` for a standard reaction or `--emoji` for explicit custom-emoji removal. Omit both only when database evidence resolves exactly one outgoing standard reaction. Explicit custom removal is experimental and requires an exact native picker button. A bounded settling interval precedes the single press, with exact-state revalidation after the wait. Implicit custom removal remains refused outside dry run.
 
 ## Options
 

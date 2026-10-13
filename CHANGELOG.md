@@ -77,8 +77,8 @@ JSON output are stable per the versioning policy — breaking changes bump
   native picker button, including its variation selectors and skin tone. Missing
   buttons never prove absence; a button that disappears after removal leaves
   verification uncertain and the operation pending. Repeating removal is a
-  verified no-op only if the exact button remains exposed and unselected. Live
-  validation remains pending. Implicit custom removal remains preview-only. See the
+  verified no-op only if the exact button remains exposed and unselected. General
+  live reliability is not established. Implicit custom removal remains preview-only. See the
   [reaction removal manual](https://github.com/robertvitali/apple-cli/blob/main/docs/manual/messages/reaction/remove.md).
 
 - **`apple messages reaction inspect` now exposes read-only exact reaction
@@ -598,6 +598,11 @@ JSON output are stable per the versioning policy — breaking changes bump
   an existing error class.
 
 ### Fixed
+
+- **Custom reaction removal waits for picker animation before pressing.** A bounded
+  750 ms settling interval precedes the single exact-button press, with retained
+  route, picker, button and selected-state revalidation after the wait. Insufficient
+  time or changed controls fail without pressing. Result verification is unchanged.
 
 - **Database snapshots now fail when copying an existing write-ahead log fails.**
   This prevents incomplete snapshots from reporting stale message, mail or note

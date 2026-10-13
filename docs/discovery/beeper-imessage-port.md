@@ -245,8 +245,9 @@ post-verification cannot undo a reaction redirected by desktop interference.
 Custom emoji set/replace verifies an already-selected exact picker button as an
 unchanged result. An unselected or absent button uses the owned detached chooser
 route below; unknown selected state is refused. Explicit custom
-removal uses the existing exact picker-button route with byte-for-byte matching. Its live
-validation remains pending. Implicit custom removal is refused on execution. A
+removal uses the existing exact picker-button route with byte-for-byte matching.
+Before pressing a selected custom button, it waits a bounded 750 ms for picker
+animation, then revalidates the retained route, picker, button and selected state. Implicit custom removal is refused on execution. A
 missing button never proves absence; if the exact button disappears after a
 press, verification fails and the operation remains pending. Repeat removal is
 a verified no-op only when the exact button remains exposed and unselected.
@@ -374,8 +375,8 @@ The following list defines the full approved delivery scope. It is not a claim
 that every capability is implemented or verified in the current candidate. The
 approved product scope includes standard and custom reaction set, replace and
 remove. The reaction candidate includes standard reactions, explicit custom removal and
-custom set/replace. Custom removal still needs native UI validation; the scope
-below does not establish general emoji-variant support or live reliability.
+custom set/replace. The scope below does not establish general emoji-variant
+support or live reliability.
 
 1. Exact targeting and bounded reads establish the identity contract above.
 2. The shared automation backend establishes locking, deadlines and diagnostics.

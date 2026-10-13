@@ -283,6 +283,61 @@ struct MessagesReactionAXAutomationTests {
         #expect(driver.picker.performed == ["AXCancel"])
     }
 
+    @Test func customRemoveWaitsForExactCustomButtonToSettleBeforePress() throws {
+        let driver = FakeReactionDriver()
+        let clock = FakeReadinessClock()
+        driver.button.id = "👍🏽"
+        driver.button.isSelected = true
+        driver.button.onAction = { _ in
+            if clock.now >= 750_000_000 {
+                driver.button.isSelected = false
+            }
+        }
+
+        let automation = MessagesReactionAXAutomation(driver: driver, readinessNow: { clock.now },
+                                                      readinessPause: { clock.pause($0) })
+        #expect(try automation.apply(request(.remove, .custom("👍🏽")), deadline: .millisecondsFromNow(2_000)) ==
+                .ack("reaction-remove-changed-verified"))
+        #expect(clock.pauses.first == 750_000_000)
+        #expect(driver.button.performed == ["AXPress"])
+        #expect(driver.picker.performed == ["AXCancel"])
+    }
+
+    @Test func customRemoveDriftDuringExactCustomSettlePreventsPress() throws {
+        let driver = FakeReactionDriver()
+        let clock = FakeReadinessClock()
+        driver.button.id = "👍🏽"
+        driver.button.isSelected = true
+        clock.onPause = {
+            if clock.pauses == [750_000_000] {
+                driver.replace("button")
+            }
+        }
+
+        let automation = MessagesReactionAXAutomation(driver: driver, readinessNow: { clock.now },
+                                                      readinessPause: { clock.pause($0) })
+        #expect(try automation.apply(request(.remove, .custom("👍🏽")), deadline: .millisecondsFromNow(2_000)) ==
+                .refused("target-drift-pre-press-button-mismatch"))
+        #expect(clock.pauses == [750_000_000])
+        #expect(driver.button.performed.isEmpty)
+        #expect(driver.picker.performed.isEmpty)
+    }
+
+    @Test func customRemoveExactCustomSettleDeadlineExpiresBeforePress() throws {
+        let driver = FakeReactionDriver()
+        let clock = FakeReadinessClock()
+        driver.button.id = "👍🏽"
+        driver.button.isSelected = true
+
+        let automation = MessagesReactionAXAutomation(driver: driver, readinessNow: { clock.now },
+                                                      readinessPause: { clock.pause($0) })
+        #expect(try automation.apply(request(.remove, .custom("👍🏽")), deadline: .millisecondsFromNow(500)) ==
+                .failed("deadline-expired"))
+        #expect(clock.pauses.isEmpty)
+        #expect(driver.button.performed.isEmpty)
+        #expect(driver.picker.performed.isEmpty)
+    }
+
     @Test func customRemoveMissingExactButtonAfterDismissalDoesNotAck() throws {
         let driver = FakeReactionDriver()
         let clock = FakeReadinessClock()
