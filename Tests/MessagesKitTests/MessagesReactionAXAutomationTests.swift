@@ -15,13 +15,13 @@ struct MessagesReactionAXAutomationTests {
     }
 
     private func apply(_ driver: FakeReactionDriver, _ operation: MessagesReactionWorkerPayload.Operation = .set,
-                       _ reaction: MessagesReaction = .standard(.heart),
-                       experimentalUIHandoff: Bool = false) throws -> MessagesReactionAXOutcome {
+                       _ reaction: MessagesReaction = .standard(.heart), experimentalUIHandoff: Bool = false,
+                       deadline: WorkerDeadline = .millisecondsFromNow(10_000)) throws -> MessagesReactionAXOutcome {
         let request = try MessagesReactionRequest(operation: operation, chatGUID: "chat-guid", messageGUID: "message-guid",
                                                   nativePartIndex: 2, nativePartGUID: "p:2/message-guid",
                                                   reaction: reaction,
                                                   experimentalUIHandoff: experimentalUIHandoff)
-        return try MessagesReactionAXAutomation(driver: driver).apply(request, deadline: .millisecondsFromNow(2_000))
+        return try MessagesReactionAXAutomation(driver: driver).apply(request, deadline: deadline)
     }
 
     private func workerRequest(command: WorkerCommand) -> WorkerRequest {
@@ -33,6 +33,22 @@ struct MessagesReactionAXAutomationTests {
         return WorkerRequest(schemaVersion: 1, operationID: UUID(), nonce: UUID(),
                              deadline: .millisecondsFromNow(2_000), parent: identity,
                              workerExecutable: executable, command: command)
+    }
+
+    private func customChooserCGWindowBounds(x: Double = 10, y: Double = 20,
+                                             width: Double = 360, height: Double = 420) -> [String: Any] {
+        ["X": NSNumber(value: x), "Y": NSNumber(value: y),
+         "Width": NSNumber(value: width), "Height": NSNumber(value: height)]
+    }
+
+    private func customChooserCGWindowInfo(ownerPID: Any = NSNumber(value: Int32(123)),
+                                           onscreen: Any = true,
+                                           alpha: Any = NSNumber(value: 1.0),
+                                           bounds: Any? = nil) -> [String: Any] {
+        [kCGWindowOwnerPID as String: ownerPID,
+         kCGWindowIsOnscreen as String: onscreen,
+         kCGWindowAlpha as String: alpha,
+         kCGWindowBounds as String: bounds ?? customChooserCGWindowBounds()]
     }
 
     @Test func actualNativePartURL() throws {
@@ -99,7 +115,7 @@ struct MessagesReactionAXAutomationTests {
         failedDriver.button.onAction = { _ in throw MessagesReactionAXError.axFailure }
 
         for (driver, expected) in [
-            (refusedDriver, WorkerOperationResult.refused("target-drift")),
+            (refusedDriver, WorkerOperationResult.refused("target-drift-initial-route")),
             (failedDriver, WorkerOperationResult.failed("ax-failure-press")),
         ] {
             let payload = try MessagesReactionWorkerPayload(operation: .set, chatGUID: "chat-guid",
@@ -154,8 +170,10 @@ struct MessagesReactionAXAutomationTests {
         case "picker-readiness":
             driver.picker.linkError = .axFailure
         case "pre-press":
-            driver.onProcessRead = { count in
-                if count == 3 { driver.root.readError = .axFailure }
+            var selectedReads = 0
+            driver.button.onSelectedRead = {
+                selectedReads += 1
+                if selectedReads == 1 { driver.button.selectedError = .axFailure }
             }
         case "press":
             driver.button.onAction = { _ in throw MessagesReactionAXError.axFailure }
@@ -345,14 +363,14 @@ struct MessagesReactionAXAutomationTests {
         let driver = FakeReactionDriver()
         driver.actionTitles = ["Tapback"]
         driver.message.actionNames = ["Name:Tapback Details\u{2026}\nTarget:0x0\nSelector:(null)"]
-        #expect(try apply(driver) == .refused("target-drift"))
+        #expect(try apply(driver) == .refused("target-drift-initial-route"))
         #expect(driver.message.performed.isEmpty)
     }
 
     @Test func malformedFullTitleSuffixIsRejected() throws {
         let driver = FakeReactionDriver()
         driver.message.actionNames = ["Name:Tapback Details\u{2026} extra\nTarget:0x0\nSelector:(null)"]
-        #expect(try apply(driver) == .refused("target-drift"))
+        #expect(try apply(driver) == .refused("target-drift-initial-route"))
         #expect(driver.message.performed.isEmpty)
     }
 
@@ -399,7 +417,7 @@ struct MessagesReactionAXAutomationTests {
     @Test func arbitraryReactPrefixIsNotAccepted() throws {
         let driver = FakeReactionDriver()
         driver.message.actionNames = ["Name:TapbackExtra", "Name:React"]
-        #expect(try apply(driver) == .refused("target-drift"))
+        #expect(try apply(driver) == .refused("target-drift-initial-route"))
         #expect(driver.message.performed.isEmpty)
     }
 
@@ -412,14 +430,56 @@ struct MessagesReactionAXAutomationTests {
         #expect(throws: (any Error).self) { try LiveMessagesReactionAXDriver.uniqueIdentity([wrongBundle]) }
     }
 
+    @Test func customChooserWindowPointsUseOnlyStrictOwnedVisibleWindowMetadata() throws {
+        let points = try LiveMessagesReactionAXDriver.customChooserWindowPoints(
+            [customChooserCGWindowInfo()] as CFArray, pid: 123)
+        #expect(points == [CGPoint(x: 190, y: 58)])
+
+        #expect(try LiveMessagesReactionAXDriver.customChooserWindowPoints(
+            [customChooserCGWindowInfo(ownerPID: NSNumber(value: Int32(456)))] as CFArray, pid: 123).isEmpty)
+        #expect(try LiveMessagesReactionAXDriver.customChooserWindowPoints(
+            [customChooserCGWindowInfo(onscreen: false)] as CFArray, pid: 123).isEmpty)
+        #expect(try LiveMessagesReactionAXDriver.customChooserWindowPoints(
+            [customChooserCGWindowInfo(alpha: NSNumber(value: 0.0))] as CFArray, pid: 123).isEmpty)
+        #expect(try LiveMessagesReactionAXDriver.customChooserWindowPoints(
+            [customChooserCGWindowInfo(bounds: customChooserCGWindowBounds(width: 299))] as CFArray, pid: 123).isEmpty)
+        #expect(try LiveMessagesReactionAXDriver.customChooserWindowPoints(
+            [customChooserCGWindowInfo(bounds: customChooserCGWindowBounds(height: 561))] as CFArray, pid: 123).isEmpty)
+    }
+
+    @Test func customChooserWindowPointsFailClosedOnMalformedWindowMetadata() throws {
+        #expect(throws: MessagesReactionAXError.unknownAXValue) {
+            try LiveMessagesReactionAXDriver.customChooserWindowPoints(nil, pid: 123)
+        }
+        #expect(throws: MessagesReactionAXError.unknownAXValue) {
+            try LiveMessagesReactionAXDriver.customChooserWindowPoints(
+                [customChooserCGWindowInfo(ownerPID: kCFBooleanTrue as Any)] as CFArray, pid: 123)
+        }
+        #expect(throws: MessagesReactionAXError.unknownAXValue) {
+            try LiveMessagesReactionAXDriver.customChooserWindowPoints(
+                [customChooserCGWindowInfo(ownerPID: "123" as NSString)] as CFArray, pid: 123)
+        }
+        #expect(throws: MessagesReactionAXError.unknownAXValue) {
+            try LiveMessagesReactionAXDriver.customChooserWindowPoints(
+                [customChooserCGWindowInfo(bounds: ["X": "10", "Y": NSNumber(value: 20),
+                                                    "Width": NSNumber(value: 360),
+                                                    "Height": NSNumber(value: 420)])] as CFArray,
+                pid: 123)
+        }
+        #expect(throws: MessagesReactionAXError.traversalLimit) {
+            try LiveMessagesReactionAXDriver.customChooserWindowPoints(
+                Array(repeating: customChooserCGWindowInfo(), count: 9) as CFArray, pid: 123)
+        }
+    }
+
     @Test(arguments: ["process", "pid", "bundle", "launch", "window", "transcript", "message"])
     func identicalPropertiesDoNotAllowIdentityReplacementBeforeAction(_ level: String) throws {
         let driver = FakeReactionDriver()
-        driver.onProcessRead = { count in
-            guard count == 2 else { return }
+        driver.message.onSelectedRead = {
             driver.replace(level)
         }
-        #expect(try apply(driver) == .refused("target-drift"))
+        let expected = level == "window" ? "target-drift-initial-route-window-mismatch" : "target-drift-initial-route"
+        #expect(try apply(driver) == .refused(expected))
         #expect(driver.message.performed.isEmpty)
         #expect(driver.button.performed.isEmpty)
     }
@@ -427,11 +487,33 @@ struct MessagesReactionAXAutomationTests {
     @Test(arguments: ["process", "pid", "bundle", "launch", "window", "transcript", "message", "picker", "button"])
     func identityReplacementBeforePressRefuses(_ level: String) throws {
         let driver = FakeReactionDriver()
-        driver.onProcessRead = { count in
-            guard count == 4 else { return }
-            driver.replace(level)
+        var selectedReads = 0
+        driver.button.onSelectedRead = {
+            selectedReads += 1
+            if selectedReads == 1 { driver.replace(level) }
         }
-        #expect(try apply(driver) == .refused("target-drift"))
+        let expected: String
+        switch level {
+        case "window": expected = "target-drift-pre-press-window-mismatch"
+        case "picker": expected = "target-drift-pre-press-picker-mismatch"
+        case "button": expected = "target-drift-pre-press-button-mismatch"
+        default: expected = "target-drift-pre-press"
+        }
+        #expect(try apply(driver) == .refused(expected))
+        #expect(driver.button.performed.isEmpty)
+    }
+
+    @Test(arguments: [("picker", "target-drift-pre-press-picker-mismatch"),
+                      ("button", "target-drift-pre-press-button-mismatch")])
+    func retainedPickerAndButtonMismatchUseTypedDiagnostics(_ drift: String, _ expected: String) throws {
+        let driver = FakeReactionDriver()
+        var selectedReads = 0
+        driver.button.onSelectedRead = {
+            selectedReads += 1
+            if selectedReads == 1 { driver.replace(drift) }
+        }
+        #expect(try apply(driver) == .refused(expected))
+        #expect(driver.message.performed.count == 1)
         #expect(driver.button.performed.isEmpty)
     }
 
@@ -445,7 +527,7 @@ struct MessagesReactionAXAutomationTests {
     @Test func duplicateTranscriptRefused() throws {
         let driver = FakeReactionDriver()
         driver.window.nodes.append(driver.transcript.clone())
-        #expect(try apply(driver) == .refused("target-drift"))
+        #expect(try apply(driver) == .refused("target-drift-initial-route"))
     }
 
     @Test(arguments: ["message", "button", "unselected-message"])
@@ -481,6 +563,31 @@ struct MessagesReactionAXAutomationTests {
         }
         #expect(throws: (any Error).self) { try LiveAXElement.validateChildCount(status: .success, count: 257, limit: 256) }
         #expect(throws: (any Error).self) { try LiveAXElement.validateChildCount(status: .success, count: -1, limit: 256) }
+    }
+
+    @Test func requiredRelationshipsDistinguishDriftFromTransportFailure() throws {
+        try LiveAXElement.validateChildCount(status: .success, count: 0, limit: 256, requireAvailable: true)
+        try LiveAXElement.validateChildCount(status: .success, count: 256, limit: 256, requireAvailable: true)
+
+        for status in [AXError.attributeUnsupported, .noValue] {
+            do {
+                try LiveAXElement.validateChildCount(status: status, count: 0, limit: 256, requireAvailable: true)
+                Issue.record("required unavailable relationship unexpectedly succeeded")
+            } catch MessagesReactionAXError.axFailure {
+                Issue.record("required unavailable relationship was misclassified as transport failure")
+            } catch {}
+        }
+        for status in [AXError.cannotComplete, .invalidUIElement] {
+            #expect(throws: MessagesReactionAXError.axFailure) {
+                try LiveAXElement.validateChildCount(status: status, count: 0, limit: 256, requireAvailable: true)
+            }
+        }
+        #expect(throws: MessagesReactionAXError.traversalLimit) {
+            try LiveAXElement.validateChildCount(status: .success, count: 257, limit: 256, requireAvailable: true)
+        }
+        #expect(throws: MessagesReactionAXError.axFailure) {
+            try LiveAXElement.validateChildCount(status: .success, count: -1, limit: 256, requireAvailable: true)
+        }
     }
 
     @Test func attributeErrorsFailClosed() throws {
@@ -539,7 +646,7 @@ struct MessagesReactionAXAutomationTests {
             driver.window.nodes = [driver.picker]
         }
 
-        #expect(try apply(driver) == .refused("target-drift"))
+        #expect(try apply(driver) == .refused("target-drift-pre-press"))
         #expect(driver.message.performed.count == 1)
         #expect(driver.button.performed.isEmpty)
     }
@@ -554,7 +661,7 @@ struct MessagesReactionAXAutomationTests {
             driver.window.nodes = [transcript, driver.picker]
         }
 
-        #expect(try apply(driver) == .refused("target-drift"))
+        #expect(try apply(driver) == .refused("target-drift-pre-press"))
         #expect(driver.message.performed.count == 1)
         #expect(driver.button.performed.isEmpty)
     }
@@ -585,9 +692,103 @@ struct MessagesReactionAXAutomationTests {
             }
         }
 
-        #expect(try apply(driver, experimentalUIHandoff: true) == .refused("target-drift"))
+        let expected = drift == "process" ? "target-drift-pre-press" : "target-drift-pre-press-window-mismatch"
+        #expect(try apply(driver, experimentalUIHandoff: true) == .refused(expected))
         #expect(driver.message.performed.count == 1)
         #expect(driver.button.performed.isEmpty)
+    }
+
+    @Test func experimentalHandoffReadsCurrentWindowFromRootWindowsWithoutTraversingDetachedChooser() throws {
+        let driver = FakeReactionDriver()
+        let detachedChooser = FakeAXNode(role: "AXPopover",
+                                         children: (0..<257).map { _ in FakeAXNode(role: "AXGroup") })
+        var detachedChooserChildReads = 0
+        detachedChooser.onChildrenRead = { _ in detachedChooserChildReads += 1 }
+        driver.message.onAction = { _ in
+            driver.window.nodes = [driver.picker]
+            driver.root.nodes = [driver.window, detachedChooser]
+        }
+
+        #expect(try apply(driver, experimentalUIHandoff: true) == .ack("reaction-set-changed-verified"))
+        #expect(detachedChooserChildReads == 0)
+        #expect(driver.button.performed == ["AXPress"])
+        withExtendedLifetime(detachedChooser) {}
+    }
+
+    @Test func experimentalHandoffRefusesDuplicateRootWindowEntriesEvenWhenTheyShareIdentity() throws {
+        let driver = FakeReactionDriver()
+        let duplicate = driver.window.clone()
+        duplicate.identity = driver.window.identity
+        driver.message.onAction = { _ in
+            driver.window.nodes = [driver.picker]
+            driver.root.nodes = [driver.window, duplicate]
+        }
+
+        #expect(try apply(driver, experimentalUIHandoff: true) == .refused("target-drift-pre-press-window-mismatch"))
+        #expect(driver.message.performed.count == 1)
+        #expect(driver.button.performed.isEmpty)
+        withExtendedLifetime(duplicate) {}
+    }
+
+    @Test(arguments: ["empty", "multiple", "duplicate", "unsupported", "malformed", "foreign-pid",
+                      "wrong-role", "replaced-window", "relaunched-process", "relationship-count-change"])
+    func experimentalHandoffRefusesInvalidDirectRootWindowsBeforePress(_ shape: String) throws {
+        let driver = FakeReactionDriver()
+        let otherWindow = FakeAXNode(role: "AXWindow")
+        otherWindow.processID = driver.processIdentity.pid
+        let duplicate = driver.window.clone()
+        duplicate.identity = driver.window.identity
+        let wrongRole = FakeAXNode(role: "AXGroup")
+        wrongRole.identity = driver.window.identity
+        wrongRole.processID = driver.processIdentity.pid
+        driver.message.onAction = { _ in
+            driver.window.nodes = [driver.picker]
+            switch shape {
+            case "empty":
+                driver.root.directWindowNodes = []
+            case "multiple":
+                driver.root.directWindowNodes = [driver.window, otherWindow]
+            case "duplicate":
+                driver.root.directWindowNodes = [driver.window, duplicate]
+            case "unsupported":
+                driver.root.directWindowsRelationshipChanged = true
+            case "malformed":
+                driver.root.directWindowsMalformed = true
+            case "foreign-pid":
+                driver.window.processID = 124
+            case "wrong-role":
+                driver.root.directWindowNodes = [wrongRole]
+            case "replaced-window":
+                driver.root.directWindowNodes = [driver.window.clone()]
+            case "relaunched-process":
+                driver.processIdentity = MessagesAXProcessIdentity(pid: driver.processIdentity.pid,
+                                                                   bundleURL: driver.processIdentity.bundleURL,
+                                                                   launchDate: Date(timeIntervalSince1970: 2_000))
+            case "relationship-count-change":
+                driver.root.directWindowNodes = [driver.window]
+                var reads = 0
+                driver.root.onDirectWindowsCountRead = {
+                    reads += 1
+                    if reads == 1 { driver.root.directWindowNodes = [] }
+                }
+            default:
+                Issue.record("unhandled direct root window shape")
+            }
+        }
+
+        let expected: MessagesReactionAXOutcome
+        switch shape {
+        case "malformed":
+            expected = .refused("unknown-ax-value")
+        case "unsupported", "relaunched-process", "relationship-count-change":
+            expected = .refused("target-drift-pre-press")
+        default:
+            expected = .refused("target-drift-pre-press-window-mismatch")
+        }
+        #expect(try apply(driver, experimentalUIHandoff: true) == expected)
+        #expect(driver.message.performed.count == 1)
+        #expect(driver.button.performed.isEmpty)
+        withExtendedLifetime([otherWindow, duplicate, wrongRole]) {}
     }
 
     @Test func experimentalHandoffRefusesSelectedStateDriftBeforePress() throws {
@@ -595,11 +796,13 @@ struct MessagesReactionAXAutomationTests {
         driver.message.onAction = { _ in
             driver.window.nodes = [driver.picker]
         }
-        driver.onProcessRead = { count in
-            if count == 4 { driver.button.isSelected = true }
+        var selectedReads = 0
+        driver.button.onSelectedRead = {
+            selectedReads += 1
+            if selectedReads == 1 { driver.button.isSelected = true }
         }
 
-        #expect(try apply(driver, experimentalUIHandoff: true) == .refused("target-drift"))
+        #expect(try apply(driver, experimentalUIHandoff: true) == .refused("target-drift-pre-press-selected-state-changed"))
         #expect(driver.message.performed.count == 1)
         #expect(driver.button.performed.isEmpty)
     }
@@ -690,7 +893,7 @@ struct MessagesReactionAXAutomationTests {
             driver.window.nodes.removeAll { $0.sameIdentity(as: driver.transcript) }
             driver.window.nodes.removeAll { $0.sameIdentity(as: driver.picker) }
         }
-        driver.root.onChildrenRead = { effective in
+        driver.root.onDirectWindowsRead = { effective in
             guard driver.button.performed == ["AXPress"], observedVerifyReadDeadline == nil,
                   effective.remainingNanoseconds > 1_500_000_000 else { return }
             observedVerifyReadDeadline = effective
@@ -720,7 +923,8 @@ struct MessagesReactionAXAutomationTests {
             driver.window.nodes.removeAll { $0.sameIdentity(as: driver.picker) }
         }
 
-        #expect(try apply(driver, clock: clock, experimentalUIHandoff: true, deadline: .millisecondsFromNow(10_000)) == .refused("post-press-verify-route-drift"))
+        #expect(try apply(driver, clock: clock, experimentalUIHandoff: true, deadline: .millisecondsFromNow(10_000)) ==
+                .refused("exact-existing-verify-discovery-drift-missing-transcript"))
         #expect(clock.pauses.count == 160)
         #expect(clock.now == 8_000_000_000)
         #expect(driver.button.performed == ["AXPress"])
@@ -738,12 +942,13 @@ struct MessagesReactionAXAutomationTests {
             driver.window.nodes.removeAll { $0.sameIdentity(as: driver.transcript) }
             driver.window.nodes.removeAll { $0.sameIdentity(as: driver.picker) }
         }
-        driver.root.onChildrenRead = { effective in
+        driver.root.onDirectWindowsRead = { effective in
             guard driver.button.performed == ["AXPress"], observedEffectiveDeadline == nil else { return }
             observedEffectiveDeadline = effective
         }
 
-        #expect(try apply(driver, clock: clock, experimentalUIHandoff: true, deadline: global) == .refused("post-press-verify-route-drift"))
+        #expect(try apply(driver, clock: clock, experimentalUIHandoff: true, deadline: global) ==
+                .refused("exact-existing-verify-discovery-drift-missing-transcript"))
         #expect(observedEffectiveDeadline == global)
         #expect(driver.button.performed == ["AXPress"])
         #expect(driver.message.performed.count == 1)
@@ -786,29 +991,1325 @@ struct MessagesReactionAXAutomationTests {
 
         let driftDriver = FakeReactionDriver()
         driftDriver.button.isSelected = true
-        driftDriver.onProcessRead = { count in if count == 4 { driftDriver.replace("window") } }
-        #expect(try apply(driftDriver) == .refused("target-drift"))
+        var selectedReads = 0
+        driftDriver.button.onSelectedRead = {
+            selectedReads += 1
+            if selectedReads == 2 { driftDriver.replace("window") }
+        }
+        #expect(try apply(driftDriver) == .refused("target-drift-cleanup-window-mismatch"))
         #expect(driftDriver.button.performed.isEmpty)
     }
 
     @Test(arguments: ["👍🏽", "👩🏽‍💻", "❤️", "❤︎", "🇬🇧", "1️⃣"])
-    func exactCustomSelectionAndRemoval(_ emoji: String) throws {
-        for operation in [MessagesReactionWorkerPayload.Operation.set, .remove] {
-            let driver = FakeReactionDriver()
-            driver.button.id = emoji
-            driver.button.isSelected = operation == .remove
-            #expect(try apply(driver, operation, .custom(emoji)) == .ack(operation == .set ? "reaction-set-changed-verified" : "reaction-remove-changed-verified"))
-            #expect(driver.button.performed == ["AXPress"])
-            #expect(driver.button.id?.utf8.elementsEqual(emoji.utf8) == true)
-        }
+    func exactCustomRemovalPressesSelectedButton(_ emoji: String) throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = emoji
+        driver.button.isSelected = true
+
+        #expect(try apply(driver, .remove, .custom(emoji)) == .ack("reaction-remove-changed-verified"))
+        #expect(driver.button.performed == ["AXPress"])
+        #expect(driver.button.id?.utf8.elementsEqual(emoji.utf8) == true)
     }
 
     @Test(arguments: [("👍🏽", "👍"), ("❤️", "❤"), ("❤︎", "❤️"), ("👩🏽‍💻", "👩‍💻")])
     func customVariantMismatchRefuses(_ requested: String, _ displayed: String) throws {
         let driver = FakeReactionDriver()
         driver.button.id = displayed
-        #expect(try apply(driver, .set, .custom(requested)) == .refused("reaction-unavailable"))
+        #expect(try apply(driver, .set, .custom(requested)) == .refused("reaction-unavailable-custom-chooser-launch-discovery"))
         #expect(driver.button.performed.isEmpty)
+    }
+
+    @Test func customSetMissingExactButtonUsesChooserOnceAndVerifiesPostState() throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+        driver.customCandidate.onAction = { _ in
+            driver.window.onChildren = nil
+            driver.window.onChildrenRead = nil
+            driver.message.onAction = { _ in
+                if !driver.window.nodes.contains(where: { $0.sameIdentity(as: driver.picker) }) {
+                    driver.window.nodes.append(driver.picker)
+                }
+            }
+            driver.picker.nodes = [driver.customVisibleButton]
+            driver.customVisibleButton.isSelected = true
+            driver.detachedPopover = nil
+        }
+
+        #expect(try apply(driver, .set, .custom("👍🏽"), experimentalUIHandoff: true) == .ack("reaction-set-changed-verified"))
+        #expect(driver.button.performed.isEmpty)
+        #expect(driver.customLauncher.performed == ["AXPress"])
+        #expect(driver.customSearchField.setValues == ["thumbs up: medium skin tone"])
+        #expect(driver.customCandidate.performed.isEmpty)
+        #expect(driver.customVisibleButton.performed.isEmpty)
+        #expect(driver.picker.performed == ["AXCancel", "AXCancel"])
+    }
+
+    @Test func customChooserKeyPressReleasesKeyWhenDeadlineExpiresAfterKeyDown() throws {
+        var events: [String] = []
+        let deadline = WorkerDeadline.millisecondsFromNow(50)
+        let presser = LiveCustomEmojiKeyPresser(
+            pid: 123,
+            operatingSystemMajorVersion: { 15 },
+            makePairedKeyPress: { _, _ in
+                PairedCustomEmojiKeyPress(
+                    postDown: {
+                        events.append("down")
+                        Thread.sleep(forTimeInterval: Double(deadline.remainingNanoseconds) / 1_000_000_000 + 0.005)
+                    },
+                    postUp: { events.append("up") },
+                    postRequiredExtraKeyUp: { events.append("extra-up") }
+                )
+            }
+        )
+
+        #expect(throws: MessagesReactionAXError.deadlineExpired) {
+            try presser.press(.returnKey, deadline: deadline)
+        }
+        #expect(events == ["down", "up", "extra-up"])
+    }
+
+    @Test func customChooserUsesBoundedBeeperKeySequenceForIndexedResult() throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "✅", query: "check mark", position: 8)
+        let clock = FakeReadinessClock()
+        driver.customCandidate.onAction = { _ in
+            if !driver.window.nodes.contains(where: { $0.sameIdentity(as: driver.picker) }) {
+                driver.window.nodes.append(driver.picker)
+            }
+            driver.picker.nodes = [driver.customVisibleButton]
+            driver.customVisibleButton.id = "✅"
+            driver.customVisibleButton.isSelected = true
+            driver.detachedPopover = nil
+        }
+
+        #expect(try apply(driver, .set, .custom("✅"), clock: clock, experimentalUIHandoff: true,
+                          deadline: .millisecondsFromNow(10_000)) == .ack("reaction-set-changed-verified"))
+        #expect(driver.customChooserKeyPresses == [.downArrow, .downArrow, .rightArrow, .rightArrow, .returnKey])
+        #expect(driver.customChooserKeyPresses.filter { $0 == .returnKey }.count == 1)
+        #expect(driver.customCandidate.performed.isEmpty)
+        #expect(clock.pauses.prefix(6) == [750_000_000, 50_000_000, 50_000_000, 50_000_000, 50_000_000, 100_000_000])
+    }
+
+    @Test(arguments: [
+        (MessagesCustomEmojiSearchPlan(query: "check mark", position: 256, supportsSkinToneVariants: false), "cap"),
+        (MessagesCustomEmojiSearchPlan(query: "thumbs up", position: 0, supportsSkinToneVariants: true), "tone")
+    ])
+    func customChooserRejectsUnsafeSearchPlans(_ plan: MessagesCustomEmojiSearchPlan, _ shape: String) throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "✅", query: plan.query, position: plan.position,
+                                    supportsSkinToneVariants: plan.supportsSkinToneVariants)
+
+        #expect(try apply(driver, .set, .custom("✅"), experimentalUIHandoff: true) ==
+                .refused("reaction-unavailable-custom-chooser-query"))
+        #expect(driver.customLauncher.performed.isEmpty)
+        #expect(driver.customChooserKeyPresses.isEmpty)
+        withExtendedLifetime(shape) {}
+    }
+
+    @Test func customChooserRefusesWhenProcessNotFrontmostBeforeKey() throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "✅", query: "check mark")
+        driver.processFrontmost = false
+
+        #expect(try apply(driver, .set, .custom("✅"), experimentalUIHandoff: true) ==
+                .refused("target-drift-picker-readiness"))
+        #expect(driver.customChooserKeyPresses.isEmpty)
+    }
+
+    @Test func customChooserRefusesContradictoryFocusedElementBeforeKey() throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "✅", query: "check mark")
+        let foreign = FakeAXNode(role: "AXTextField")
+        foreign.processID = driver.processIdentity.pid
+        foreign.owningWindow = driver.window
+        foreign.parentNode = driver.window
+        driver.focusedAXElement = foreign
+
+        #expect(try apply(driver, .set, .custom("✅"), experimentalUIHandoff: true) ==
+                .refused("target-drift-picker-readiness"))
+        #expect(driver.customChooserKeyPresses.isEmpty)
+    }
+
+    @Test func customChooserRefusesFocusedElementFromOtherProcessBeforeKey() throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "✅", query: "check mark")
+        let foreign = FakeAXNode(role: "AXTextField")
+        foreign.processID = 999
+        foreign.owningWindow = driver.window
+        foreign.parentNode = driver.customPopover
+        driver.focusedAXElement = foreign
+
+        #expect(try apply(driver, .set, .custom("✅"), experimentalUIHandoff: true) ==
+                .refused("target-drift-picker-readiness"))
+        #expect(driver.customChooserKeyPresses.isEmpty)
+    }
+
+    @Test func customChooserAllowsMissingFocusAndHiddenNativePickerWithOwnedPopover() throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "✅", query: "check mark")
+        driver.customLauncher.onAction = { _ in
+            driver.detachedPopover = driver.customPopover
+            driver.window.nodes.removeAll { $0.sameIdentity(as: driver.picker) }
+        }
+        driver.customCandidate.onAction = { _ in
+            driver.picker.nodes = [driver.customVisibleButton]
+            driver.customVisibleButton.id = "✅"
+            driver.customVisibleButton.isSelected = true
+            driver.detachedPopover = nil
+        }
+
+        #expect(try apply(driver, .set, .custom("✅"), experimentalUIHandoff: true) == .ack("reaction-set-changed-verified"))
+        #expect(driver.customChooserKeyPresses == [.downArrow, .returnKey])
+    }
+
+    @Test func customChooserRevalidatesOwnedQueryBeforeEveryKey() throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "✅", query: "check mark", position: 1)
+        let clock = FakeReadinessClock()
+        driver.onCustomChooserKey = { key in
+            if key == .downArrow { driver.customSearchField.currentValue = "user edit" }
+        }
+
+        #expect(try apply(driver, .set, .custom("✅"), clock: clock, experimentalUIHandoff: true,
+                          deadline: .millisecondsFromNow(10_000)) ==
+                .refused("target-drift-picker-readiness"))
+        #expect(driver.customChooserKeyPresses == [.downArrow])
+        #expect(driver.customSearchField.setValues == ["check mark"])
+    }
+
+    @Test func customChooserRevalidatesOwnedQueryBeforeReturnAfterNavigation() throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "✅", query: "check mark", position: 1)
+        driver.onCustomChooserKey = { key in
+            if key == .rightArrow { driver.customSearchField.currentValue = "user edit" }
+        }
+
+        #expect(try apply(driver, .set, .custom("✅"), experimentalUIHandoff: true) ==
+                .refused("target-drift-picker-readiness"))
+        #expect(driver.customChooserKeyPresses == [.downArrow, .rightArrow])
+        #expect(driver.customChooserKeyPresses.filter { $0 == .returnKey }.isEmpty)
+    }
+
+    @Test func customChooserKeepsPostProofMandatoryAfterReturn() throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "✅", query: "check mark")
+        driver.customCandidate.onAction = { _ in driver.detachedPopover = nil }
+
+        #expect(try apply(driver, .set, .custom("✅"), experimentalUIHandoff: true) ==
+                .refused("reaction-unavailable-custom-chooser-post-selection"))
+        #expect(driver.customChooserKeyPresses == [.downArrow, .returnKey])
+        #expect(driver.customCandidate.performed.isEmpty)
+    }
+
+    @Test func customEmojiSearchResolverRequiresExactUTF8UniqueResultUnderCap() throws {
+        #expect(try CustomEmojiSearchResolver.exactPosition(in: ["✅", "👀"], emoji: "👀") == 1)
+        #expect(try CustomEmojiSearchResolver.exactPosition(in: ["✅"], emoji: "👀") == nil)
+        #expect(try CustomEmojiSearchResolver.exactPosition(in: ["❤️"], emoji: "❤") == nil)
+        #expect(throws: MessagesReactionAXError.reactionUnavailable) {
+            try CustomEmojiSearchResolver.exactPosition(in: ["👀", "👀"], emoji: "👀")
+        }
+        #expect(throws: MessagesReactionAXError.reactionUnavailable) {
+            try CustomEmojiSearchResolver.exactPosition(in: Array(repeating: "✅", count: 257), emoji: "👀")
+        }
+    }
+
+    @Test func customEmojiSearchResolverRejectsMalformedPickerRecords() throws {
+        #expect(try CustomEmojiSearchResolver.checkedPickerTokenStrings([FakeEmojiToken("👀")] as NSArray) == ["👀"])
+        #expect(throws: MessagesReactionAXError.unknownAXValue) {
+            try CustomEmojiSearchResolver.checkedPickerTokenStrings(NSObject())
+        }
+        #expect(throws: MessagesReactionAXError.unknownAXValue) {
+            try CustomEmojiSearchResolver.checkedPickerTokenStrings([NSObject()] as NSArray)
+        }
+        #expect(throws: MessagesReactionAXError.unknownAXValue) {
+            try CustomEmojiSearchResolver.checkedPickerTokenStrings([FakeEmojiToken("")] as NSArray)
+        }
+        #expect(throws: MessagesReactionAXError.unknownAXValue) {
+            try CustomEmojiSearchResolver.checkedPickerTokenStrings(Array(repeating: FakeEmojiToken("✅"), count: 257) as NSArray)
+        }
+    }
+
+    @Test func customSetUnselectedExactButtonUsesChooserWithoutPressingExactButton() throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "👍🏽"
+        driver.button.isSelected = false
+        driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+        driver.customCandidate.onAction = { _ in
+            driver.button.isSelected = true
+            driver.detachedPopover = nil
+        }
+
+        #expect(try apply(driver, .set, .custom("👍🏽"), experimentalUIHandoff: true) == .ack("reaction-set-changed-verified"))
+        #expect(driver.button.performed.isEmpty)
+        #expect(driver.customLauncher.performed == ["AXPress"])
+        #expect(driver.customCandidate.performed.isEmpty)
+        #expect(driver.picker.performed == ["AXCancel", "AXCancel"])
+    }
+
+    @Test func customSetUnknownExactButtonSelectionRefusesWithoutChooser() throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "👍🏽"
+        driver.button.isSelected = nil
+        driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+
+        #expect(try apply(driver, .set, .custom("👍🏽"), experimentalUIHandoff: true) == .refused("unknown-ax-value"))
+        #expect(driver.button.performed.isEmpty)
+        #expect(driver.customLauncher.performed.isEmpty)
+        #expect(driver.customCandidate.performed.isEmpty)
+    }
+
+    @Test func customSetChooserFailureDoesNotFallbackToExactButtonPress() throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "👍🏽"
+        driver.button.isSelected = false
+        driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+        driver.customCandidate.isEnabled = false
+
+        #expect(try apply(driver, .set, .custom("👍🏽"), experimentalUIHandoff: true) == .refused("reaction-unavailable-custom-chooser-candidate-read"))
+        #expect(driver.button.performed.isEmpty)
+        #expect(driver.customLauncher.performed == ["AXPress"])
+        #expect(driver.customCandidate.performed.isEmpty)
+    }
+
+
+    @Test func customChooserDoesNotAckUnlessPostChooserExactButtonSelected() throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+        driver.customCandidate.onAction = { _ in
+            driver.picker.nodes = [driver.customVisibleButton]
+            driver.customVisibleButton.isSelected = false
+            driver.detachedPopover = nil
+        }
+
+        #expect(try apply(driver, .set, .custom("👍🏽"), experimentalUIHandoff: true) == .refused("custom-chooser-post-selection-unselected"))
+        #expect(driver.customCandidate.performed.isEmpty)
+    }
+
+    @Test func customChooserPostSelectionMissingButtonKeepsPhaseWhileUnselectedKeepsSpecificDetail() throws {
+        let missing = FakeReactionDriver()
+        missing.button.id = "heart"
+        missing.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+        missing.customCandidate.onAction = { _ in missing.detachedPopover = nil }
+
+        #expect(try apply(missing, .set, .custom("👍🏽"), experimentalUIHandoff: true) ==
+                .refused("reaction-unavailable-custom-chooser-post-selection"))
+        #expect(missing.customCandidate.performed.isEmpty)
+
+        let unselected = FakeReactionDriver()
+        unselected.button.id = "heart"
+        unselected.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+        unselected.customCandidate.onAction = { _ in
+            unselected.picker.nodes = [unselected.customVisibleButton]
+            unselected.customVisibleButton.isSelected = false
+            unselected.detachedPopover = nil
+        }
+
+        #expect(try apply(unselected, .set, .custom("👍🏽"), experimentalUIHandoff: true) ==
+                .refused("custom-chooser-post-selection-unselected"))
+        #expect(unselected.customCandidate.performed.isEmpty)
+    }
+
+    @Test func customChooserReportsValidationDriftAfterSelectionBeforeAck() throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+        let clock = FakeReadinessClock()
+        driver.customCandidate.onAction = { _ in
+            driver.picker.nodes = [driver.customVisibleButton]
+            driver.customVisibleButton.isSelected = true
+            driver.detachedPopover = nil
+        }
+        driver.customVisibleButton.onSelectedRead = {
+            guard driver.message.performed.count >= 2 else { return }
+            driver.picker.nodes = [driver.customVisibleButton.clone()]
+        }
+
+        #expect(try apply(driver, .set, .custom("👍🏽"), clock: clock, experimentalUIHandoff: true,
+                          deadline: .millisecondsFromNow(10_000)) ==
+                .refused("custom-chooser-verify-validation-drift-button-mismatch"))
+        #expect(driver.customCandidate.performed.isEmpty)
+        #expect(driver.message.performed.count == 2)
+        #expect(driver.picker.performed == ["AXCancel"])
+    }
+
+    @Test func customChooserVerifiesOriginalRouteAfterSelectionBeforeAck() throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+        let clock = FakeReadinessClock()
+        driver.customCandidate.onAction = { _ in
+            driver.picker.nodes = [driver.customVisibleButton]
+            driver.customVisibleButton.isSelected = true
+            driver.detachedPopover = nil
+        }
+        driver.picker.onAction = { _ in
+            driver.window.nodes.removeAll { $0.sameIdentity(as: driver.picker) }
+            driver.replace("message")
+        }
+
+        #expect(try apply(driver, .set, .custom("👍🏽"), clock: clock, experimentalUIHandoff: true,
+                          deadline: .millisecondsFromNow(10_000)) == .refused("custom-chooser-verify-discovery-drift-missing-retained-message"))
+        #expect(driver.customCandidate.performed.isEmpty)
+        #expect(clock.now == 8_900_000_000)
+    }
+
+    @Test func customChooserVerificationDistinguishesPickerStillPresentFromMissingTranscript() throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+        let clock = FakeReadinessClock()
+        driver.customCandidate.onAction = { _ in
+            driver.picker.nodes = [driver.customVisibleButton]
+            driver.customVisibleButton.isSelected = true
+            driver.detachedPopover = nil
+        }
+        var windowReadsAfterCancel = 0
+        driver.picker.onAction = { _ in
+            driver.window.nodes.removeAll { $0.sameIdentity(as: driver.picker) }
+            driver.window.nodes.removeAll { $0.sameIdentity(as: driver.transcript) }
+        }
+        driver.window.onChildren = {
+            guard driver.picker.performed == ["AXCancel"] else { return }
+            windowReadsAfterCancel += 1
+            guard windowReadsAfterCancel >= 2 else { return }
+            if !driver.window.nodes.contains(where: { $0.sameIdentity(as: driver.picker) }) {
+                driver.window.nodes.append(driver.picker)
+            }
+        }
+
+        #expect(try apply(driver, .set, .custom("👍🏽"), clock: clock, experimentalUIHandoff: true,
+                          deadline: .millisecondsFromNow(10_000)) ==
+                .refused("custom-chooser-verify-discovery-drift-picker-still-present"))
+        #expect(driver.customCandidate.performed.isEmpty)
+        #expect(clock.now == 8_900_000_000)
+    }
+
+    @Test func customChooserVerificationDistinguishesMissingTranscriptAfterDismissal() throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+        let clock = FakeReadinessClock()
+        driver.customCandidate.onAction = { _ in
+            driver.picker.nodes = [driver.customVisibleButton]
+            driver.customVisibleButton.isSelected = true
+            driver.detachedPopover = nil
+        }
+        driver.picker.onAction = { _ in
+            driver.window.nodes.removeAll { $0.sameIdentity(as: driver.picker) }
+            driver.window.nodes.removeAll { $0.sameIdentity(as: driver.transcript) }
+        }
+
+        #expect(try apply(driver, .set, .custom("👍🏽"), clock: clock, experimentalUIHandoff: true,
+                          deadline: .millisecondsFromNow(10_000)) ==
+                .refused("custom-chooser-verify-discovery-drift-missing-transcript"))
+        #expect(driver.customCandidate.performed.isEmpty)
+        #expect(clock.now == 8_900_000_000)
+    }
+
+    @Test func customChooserVerificationReportsReplacedTranscript() throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+        driver.customCandidate.onAction = { _ in
+            driver.picker.nodes = [driver.customVisibleButton]
+            driver.customVisibleButton.isSelected = true
+            driver.detachedPopover = nil
+        }
+        driver.picker.onAction = { _ in
+            driver.window.nodes.removeAll { $0.sameIdentity(as: driver.picker) }
+            driver.replace("transcript")
+            driver.window.nodes.removeAll { $0.sameIdentity(as: driver.picker) }
+        }
+
+        #expect(try apply(driver, .set, .custom("👍🏽"), experimentalUIHandoff: true,
+                          deadline: .millisecondsFromNow(10_000)) ==
+                .refused("custom-chooser-verify-discovery-drift-replaced-transcript"))
+        #expect(driver.customCandidate.performed.isEmpty)
+    }
+
+    @Test func customChooserVerificationReportsRetainedMessageActionGone() throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+        driver.customCandidate.onAction = { _ in
+            driver.picker.nodes = [driver.customVisibleButton]
+            driver.customVisibleButton.isSelected = true
+            driver.detachedPopover = nil
+        }
+        driver.picker.onAction = { _ in
+            driver.window.nodes.removeAll { $0.sameIdentity(as: driver.picker) }
+            driver.message.actionNames = []
+        }
+
+        #expect(try apply(driver, .set, .custom("👍🏽"), experimentalUIHandoff: true,
+                          deadline: .millisecondsFromNow(10_000)) ==
+                .refused("custom-chooser-verify-discovery-drift-retained-message-action-missing"))
+        #expect(driver.customCandidate.performed.isEmpty)
+    }
+
+    @Test func customChooserLauncherMustBeExactPickerSibling() throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "heart"
+        driver.emojiSearchPlans["👍🏽"] = MessagesCustomEmojiSearchPlan(query: "thumbs up: medium skin tone", position: 0, supportsSkinToneVariants: false)
+        let broadLauncher = FakeAXNode(role: "AXButton", actions: ["AXPress"])
+        broadLauncher.axDescription = "More"
+        broadLauncher.owningWindow = driver.window
+        broadLauncher.parentNode = driver.window
+        broadLauncher.processID = driver.processIdentity.pid
+        broadLauncher.onAction = { _ in driver.detachedPopover = driver.customPopover }
+        driver.customCandidate.axDescription = "👍🏽"
+        driver.customCandidate.axValue = "👍🏽"
+        driver.customVisibleButton.id = "👍🏽"
+        driver.window.nodes.append(broadLauncher)
+
+        #expect(try apply(driver, .set, .custom("👍🏽"), experimentalUIHandoff: true) == .refused("reaction-unavailable-custom-chooser-launch-discovery"))
+        #expect(broadLauncher.performed.isEmpty)
+    }
+
+
+    @Test func customChooserUsesDetachedPopoverDiscoveryNotRootTree() throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+        driver.customLauncher.onAction = { _ in driver.window.nodes.append(driver.customPopover) }
+
+        #expect(try apply(driver, .set, .custom("👍🏽"), experimentalUIHandoff: true) == .refused("reaction-unavailable-custom-chooser-detached-discovery"))
+        #expect(driver.customCandidate.performed.isEmpty)
+    }
+
+    @Test func customChooserRefusesPreexistingPopoverBeforeLauncher() throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+        driver.detachedPopover = driver.customPopover
+
+        #expect(try apply(driver, .set, .custom("👍🏽"), experimentalUIHandoff: true) == .refused("reaction-unavailable-custom-chooser-preexisting-check"))
+        #expect(driver.customLauncher.performed.isEmpty)
+        #expect(driver.customSearchField.setValues.isEmpty)
+        #expect(driver.customCandidate.performed.isEmpty)
+    }
+
+    @Test func customChooserPrelaunchPopoverReadFailureRefusesBeforeWrites() throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+        driver.detachedPopoverProvider = { throw MessagesReactionAXError.targetDrift }
+
+        #expect(try apply(driver, .set, .custom("👍🏽"), experimentalUIHandoff: true) == .refused("target-drift-picker-readiness"))
+        #expect(driver.customLauncher.performed.isEmpty)
+        #expect(driver.customSearchField.setValues.isEmpty)
+        #expect(driver.customCandidate.performed.isEmpty)
+    }
+
+    @Test func customChooserCandidateLocalWorkBudgetExhaustionKeepsRefusalAndCleanup() throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+        driver.customCandidate.axDescription = nil
+        driver.customCandidate.axValue = nil
+        driver.customCandidate.axTitle = nil
+        var consumedCandidateBudget = false
+        driver.customSearchField.onSetValue = { value in
+            guard value == "thumbs up: medium skin tone" else { return }
+            driver.customPopover.navigationNodes = nil
+            driver.customPopover.onChildrenRead = { effective in
+                guard !consumedCandidateBudget else { return }
+                consumedCandidateBudget = true
+                Thread.sleep(forTimeInterval: Double(effective.remainingNanoseconds) / 1_000_000_000 + 0.005)
+            }
+        }
+        let global = WorkerDeadline.millisecondsFromNow(1_200)
+
+        #expect(try apply(driver, .set, .custom("👍🏽"), experimentalUIHandoff: true,
+                          deadline: global) == .refused("reaction-unavailable"))
+        #expect(!global.expired)
+        #expect(driver.customSearchField.setValues == ["thumbs up: medium skin tone", ""])
+        #expect(driver.customSearchField.currentValue == "")
+        #expect(driver.customCandidate.performed.isEmpty)
+    }
+
+    @Test func customChooserCandidateGlobalDeadlineExpiryStillFails() throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+        let global = WorkerDeadline.millisecondsFromNow(1_200)
+        driver.customSearchField.onSetValue = { value in
+            guard value == "thumbs up: medium skin tone" else { return }
+            Thread.sleep(forTimeInterval: Double(global.remainingNanoseconds) / 1_000_000_000 + 0.005)
+        }
+
+        #expect(try apply(driver, .set, .custom("👍🏽"), experimentalUIHandoff: true,
+                          deadline: global) == .failed("deadline-expired"))
+        #expect(driver.customSearchField.setValues == ["thumbs up: medium skin tone"])
+        #expect(driver.customCandidate.performed.isEmpty)
+    }
+
+    @Test(arguments: ["nonempty", "disabled", "not-settable"])
+    func customChooserRequiresReadyEmptySettableSearch(_ shape: String) throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+        switch shape {
+        case "nonempty": driver.customSearchField.currentValue = "existing"
+        case "disabled": driver.customSearchField.isEnabled = false
+        default: driver.customSearchField.isValueSettable = false
+        }
+
+        #expect(try apply(driver, .set, .custom("👍🏽"), experimentalUIHandoff: true) == .refused("reaction-unavailable-custom-chooser-search-precondition"))
+        #expect(driver.customSearchField.setValues.isEmpty)
+        #expect(driver.customCandidate.performed.isEmpty)
+    }
+
+    @Test func customChooserTraversesNavigationOrderBeforeFallbackChildren() throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+        let duplicateOnlyInChildren = driver.customCandidate.clone()
+        duplicateOnlyInChildren.parentNode = driver.customPopover
+        duplicateOnlyInChildren.processID = driver.processIdentity.pid
+        driver.customPopover.nodes.append(duplicateOnlyInChildren)
+        driver.customCandidate.onAction = { _ in
+            driver.picker.nodes = [driver.customVisibleButton]
+            driver.customVisibleButton.isSelected = true
+            driver.detachedPopover = nil
+        }
+
+        #expect(try apply(driver, .set, .custom("👍🏽"), experimentalUIHandoff: true) == .ack("reaction-set-changed-verified"))
+        #expect(driver.customCandidate.performed.isEmpty)
+    }
+
+    @Test func customChooserFallsBackToChildrenOnlyWhenNavigationOrderAbsent() throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+        driver.customPopover.navigationNodes = nil
+        driver.customCandidate.onAction = { _ in
+            driver.picker.nodes = [driver.customVisibleButton]
+            driver.customVisibleButton.isSelected = true
+            driver.detachedPopover = nil
+        }
+
+        #expect(try apply(driver, .set, .custom("👍🏽"), experimentalUIHandoff: true) == .ack("reaction-set-changed-verified"))
+    }
+
+    @Test func customChooserSearchDiscoveryDoesNotTraverseResultsBeforeQuery() throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+        driver.customCandidate.nodes = (0..<257).map { _ in FakeAXNode(role: "AXGroup") }
+        var resultChildrenReadsBeforeQuery = 0
+        driver.customCandidate.onChildrenRead = { _ in
+            if driver.customSearchField.setValues.isEmpty { resultChildrenReadsBeforeQuery += 1 }
+        }
+        driver.customSearchField.onSetValue = { value in
+            guard value == "thumbs up: medium skin tone" else { return }
+            driver.customCandidate.nodes = []
+        }
+        driver.customCandidate.onAction = { _ in
+            driver.picker.nodes = [driver.customVisibleButton]
+            driver.customVisibleButton.isSelected = true
+            driver.detachedPopover = nil
+        }
+
+        #expect(try apply(driver, .set, .custom("👍🏽"), experimentalUIHandoff: true) == .ack("reaction-set-changed-verified"))
+        #expect(resultChildrenReadsBeforeQuery == 0)
+        #expect(driver.customSearchField.setValues == ["thumbs up: medium skin tone"])
+        #expect(driver.customCandidate.performed.isEmpty)
+    }
+
+    @Test func customChooserSearchDiscoveryRefusesDuplicateDirectSearchFieldsWithoutWritingQuery() throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+        let duplicate = driver.customSearchField.clone()
+        duplicate.parentNode = driver.customPopover
+        duplicate.processID = driver.processIdentity.pid
+        driver.customPopover.navigationNodes = [driver.customSearchField, duplicate, driver.customCandidate]
+
+        let outcome = try apply(driver, .set, .custom("👍🏽"), experimentalUIHandoff: true)
+
+        if case .refused = outcome {} else { Issue.record("expected refusal before query write, got \(outcome)") }
+        #expect(driver.customSearchField.setValues.isEmpty)
+        #expect(driver.customCandidate.performed.isEmpty)
+    }
+
+    @Test func customChooserSearchDiscoveryRefusesWrongParentDirectSearchWithoutWritingQuery() throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+        let foreignParent = FakeAXNode(role: "AXPopover")
+        foreignParent.processID = driver.processIdentity.pid
+        driver.customSearchField.parentNode = foreignParent
+
+        let outcome = try apply(driver, .set, .custom("👍🏽"), experimentalUIHandoff: true)
+
+        if case .refused = outcome {} else { Issue.record("expected refusal before query write, got \(outcome)") }
+        #expect(driver.customSearchField.setValues.isEmpty)
+        #expect(driver.customCandidate.performed.isEmpty)
+        withExtendedLifetime(foreignParent) {}
+    }
+
+    @Test func customChooserSearchDiscoveryRefusesForeignPIDDirectSearchWithoutWritingQuery() throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+        driver.customSearchField.processID = 124
+
+        let outcome = try apply(driver, .set, .custom("👍🏽"), experimentalUIHandoff: true)
+
+        if case .refused = outcome {} else { Issue.record("expected refusal before query write, got \(outcome)") }
+        #expect(driver.customSearchField.setValues.isEmpty)
+        #expect(driver.customCandidate.performed.isEmpty)
+    }
+
+    @Test func customChooserSearchDiscoveryRefusesMissingDirectSearchWithoutWritingQuery() throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+        driver.customPopover.navigationNodes = [driver.customCandidate]
+
+        let outcome = try apply(driver, .set, .custom("👍🏽"), experimentalUIHandoff: true)
+
+        if case .refused = outcome {} else { Issue.record("expected refusal before query write, got \(outcome)") }
+        #expect(driver.customSearchField.setValues.isEmpty)
+        #expect(driver.customCandidate.performed.isEmpty)
+    }
+
+    @Test func customChooserSearchDiscoveryRefusesMalformedDirectSearchWithoutWritingQuery() throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+        driver.customSearchField.roleName = String(repeating: "a", count: 129)
+
+        let outcome = try apply(driver, .set, .custom("👍🏽"), experimentalUIHandoff: true)
+
+        if case .refused = outcome {} else { Issue.record("expected refusal before query write, got \(outcome)") }
+        #expect(driver.customSearchField.setValues.isEmpty)
+        #expect(driver.customCandidate.performed.isEmpty)
+    }
+
+    @Test func customChooserSearchDiscoveryRefusesNavigationReadErrorWithoutWritingQuery() throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+        driver.customPopover.navigationReadError = .axFailure
+
+        #expect(try apply(driver, .set, .custom("👍🏽"), experimentalUIHandoff: true) ==
+                .failed("ax-failure-custom-chooser-search-discovery"))
+        #expect(driver.customSearchField.setValues.isEmpty)
+        #expect(driver.customCandidate.performed.isEmpty)
+    }
+
+    @Test func customChooserSearchDiscoveryRefusesNavigationCountDriftWithoutWritingQuery() throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+        driver.customPopover.navigationRelationshipChanged = true
+
+        let outcome = try apply(driver, .set, .custom("👍🏽"), experimentalUIHandoff: true)
+
+        if case .refused = outcome {} else { Issue.record("expected refusal before query write, got \(outcome)") }
+        #expect(driver.customSearchField.setValues.isEmpty)
+        #expect(driver.customCandidate.performed.isEmpty)
+    }
+
+    @Test func customChooserSearchDiscoveryDoesNotUseNestedOnlySearchFallback() throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+        let container = FakeAXNode(role: "AXGroup", children: [driver.customSearchField])
+        container.parentNode = driver.customPopover
+        container.owningWindow = driver.window
+        container.processID = driver.processIdentity.pid
+        driver.customSearchField.parentNode = container
+        driver.customPopover.navigationNodes = nil
+        driver.customPopover.nodes = [container, driver.customCandidate]
+
+        let outcome = try apply(driver, .set, .custom("👍🏽"), experimentalUIHandoff: true)
+
+        if case .refused = outcome {} else { Issue.record("expected refusal before query write, got \(outcome)") }
+        #expect(driver.customSearchField.setValues.isEmpty)
+        #expect(driver.customCandidate.performed.isEmpty)
+        withExtendedLifetime(container) {}
+    }
+
+
+    @Test func customChooserRestoresOwnQueryAfterPreselectionFailure() throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+        let duplicate = driver.customCandidate.clone()
+        duplicate.parentNode = driver.customPopover
+        duplicate.processID = driver.processIdentity.pid
+        driver.customPopover.navigationNodes?.append(duplicate)
+
+        #expect(try apply(driver, .set, .custom("👍🏽"), experimentalUIHandoff: true) == .refused("reaction-unavailable-custom-chooser-candidate-read"))
+        #expect(driver.customSearchField.setValues == ["thumbs up: medium skin tone", ""])
+        #expect(driver.customSearchField.currentValue == "")
+        #expect(driver.customCandidate.performed.isEmpty)
+    }
+
+    @Test(arguments: ["missing", "duplicate"])
+    func customChooserCandidateAbsenceAndDuplicatesExposeCandidateReadPhase(_ shape: String) throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+        switch shape {
+        case "missing":
+            driver.customCandidate.axDescription = nil
+            driver.customCandidate.axValue = nil
+            driver.customCandidate.axTitle = nil
+        default:
+            let duplicate = driver.customCandidate.clone()
+            duplicate.parentNode = driver.customPopover
+            duplicate.processID = driver.processIdentity.pid
+            driver.customPopover.navigationNodes?.append(duplicate)
+        }
+
+        #expect(try apply(driver, .set, .custom("👍🏽"), experimentalUIHandoff: true) ==
+                .refused("reaction-unavailable-custom-chooser-candidate-read"))
+        #expect(driver.customSearchField.setValues == ["thumbs up: medium skin tone", ""])
+        #expect(driver.customSearchField.currentValue == "")
+        #expect(driver.customCandidate.performed.isEmpty)
+    }
+
+    @Test func customChooserPreselectionCleanupPreservesInterveningUserEdit() throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+        let duplicate = driver.customCandidate.clone()
+        duplicate.parentNode = driver.customPopover
+        duplicate.processID = driver.processIdentity.pid
+        driver.customPopover.navigationNodes?.append(duplicate)
+        driver.customSearchField.onSetValue = { value in
+            if value == "thumbs up: medium skin tone" { driver.customSearchField.currentValue = "user edit" }
+        }
+
+        #expect(try apply(driver, .set, .custom("👍🏽"), experimentalUIHandoff: true) == .refused("target-drift-picker-readiness"))
+        #expect(driver.customSearchField.setValues == ["thumbs up: medium skin tone"])
+        #expect(driver.customSearchField.currentValue == "user edit")
+        #expect(driver.customCandidate.performed.isEmpty)
+    }
+
+
+
+    @Test(arguments: [
+        "picker-read", "existing-button", "route-validation", "query",
+        "preexisting-check", "launch-discovery", "launch-revalidation", "launch-press",
+        "detached-discovery", "detached-discovery-process", "popover", "search-discovery",
+        "search-precondition", "search-write", "search-readback", "candidate-wait",
+        "candidate-read", "candidate-revalidation", "candidate-press", "post-selection"
+    ])
+    func customChooserAXFailuresExposeFinitePhase(_ phase: String) throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+        let query = "thumbs up: medium skin tone"
+        switch phase {
+        case "picker-read":
+            driver.message.onAction = { _ in
+                if !driver.window.nodes.contains(where: { $0.sameIdentity(as: driver.picker) }) {
+                    driver.window.nodes.append(driver.picker)
+                }
+                driver.window.linkError = .axFailure
+            }
+        case "existing-button":
+            driver.button.id = "👍🏽"
+            driver.button.selectedError = .axFailure
+        case "route-validation":
+            driver.onProcessRead = { _ in
+                guard !driver.message.performed.isEmpty, driver.button.performed.isEmpty,
+                      driver.customLauncher.performed.isEmpty else { return }
+                driver.canonicalProcessError = .axFailure
+            }
+        case "query":
+            driver.customEmojiSearchPlanError = .axFailure
+        case "preexisting-check":
+            driver.detachedPopoverProvider = { throw MessagesReactionAXError.axFailure }
+        case "launch-discovery":
+            driver.picker.onProcessIdentifierRead = { _ in driver.customLauncher.readError = .axFailure }
+        case "launch-revalidation":
+            driver.detachedPopoverProvider = {
+                driver.customLauncher.readError = .axFailure
+                return nil
+            }
+        case "launch-press":
+            driver.customLauncher.onAction = { _ in throw MessagesReactionAXError.axFailure }
+        case "detached-discovery":
+            var reads = 0
+            driver.detachedPopoverProvider = {
+                reads += 1
+                if reads == 1 { return nil }
+                throw MessagesReactionAXError.axFailure
+            }
+        case "detached-discovery-process":
+            var armPopoverProcessFailure = false
+            var armedProcessReads = 0
+            driver.root.onDirectWindowsCountRead = {
+                guard driver.customLauncher.performed == ["AXPress"] else { return }
+                armPopoverProcessFailure = true
+                armedProcessReads = 0
+            }
+            driver.onProcessRead = { _ in
+                // Inject only after the route's post-enumeration process check.
+                // Clear the fault before each retry's earlier route validation.
+                driver.canonicalProcessError = nil
+                guard armPopoverProcessFailure else { return }
+                armedProcessReads += 1
+                if armedProcessReads == 2 { driver.canonicalProcessError = .axFailure }
+            }
+        case "popover":
+            var reads = 0
+            driver.detachedPopoverProvider = {
+                reads += 1
+                if reads == 1 { return nil }
+                driver.customPopover.readError = .axFailure
+                return driver.customPopover
+            }
+        case "search-discovery":
+            var reads = 0
+            driver.detachedPopoverProvider = {
+                reads += 1
+                if reads == 1 { return nil }
+                driver.customSearchField.readError = .axFailure
+                return driver.customPopover
+            }
+        case "search-precondition":
+            driver.customSearchField.onValueRead = {
+                if driver.customSearchField.setValues.isEmpty { throw MessagesReactionAXError.axFailure }
+                return nil
+            }
+        case "search-write":
+            driver.customSearchField.setValueError = .axFailure
+        case "search-readback":
+            var failed = false
+            driver.customSearchField.onValueRead = {
+                if driver.customSearchField.setValues.contains(query), !failed {
+                    failed = true
+                    throw MessagesReactionAXError.axFailure
+                }
+                return nil
+            }
+        case "candidate-wait":
+            var queryReads = 0
+            driver.customSearchField.onValueRead = {
+                if driver.customSearchField.setValues.contains(query) {
+                    queryReads += 1
+                    if queryReads >= 2 { throw MessagesReactionAXError.axFailure }
+                }
+                return nil
+            }
+        case "candidate-read":
+            driver.customCandidate.axDescription = nil
+            driver.customCandidate.axTitle = nil
+            var queryReads = 0
+            driver.customSearchField.onValueRead = {
+                if driver.customSearchField.setValues.contains(query) {
+                    queryReads += 1
+                    if queryReads == 2 { driver.customCandidate.candidateValueOverride = .error(.axFailure) }
+                }
+                return nil
+            }
+        case "candidate-revalidation":
+            var queryReads = 0
+            driver.customSearchField.onValueRead = {
+                if driver.customSearchField.setValues.contains(query) {
+                    queryReads += 1
+                    if queryReads == 3 { driver.canonicalProcessError = .axFailure }
+                }
+                return nil
+            }
+        case "candidate-press":
+            driver.customCandidate.onAction = { _ in throw MessagesReactionAXError.axFailure }
+        case "post-selection":
+            driver.customCandidate.onAction = { _ in driver.picker.linkError = .axFailure }
+        default:
+            Issue.record("unhandled custom chooser phase")
+        }
+
+        let expectedPhase = phase == "detached-discovery-process" ? "detached-discovery" : phase
+        let expected = "ax-failure-custom-chooser-\(expectedPhase)"
+        let result = try apply(driver, .set, .custom("👍🏽"), experimentalUIHandoff: true)
+        #expect(result == .failed(expected))
+        let launcherPressExpected = [
+            "launch-press", "detached-discovery", "detached-discovery-process", "popover",
+            "search-discovery", "search-precondition", "search-write", "search-readback",
+            "candidate-wait", "candidate-read", "candidate-revalidation", "candidate-press", "post-selection"
+        ].contains(phase)
+        #expect(driver.button.performed.isEmpty)
+        #expect(driver.customLauncher.performed == (launcherPressExpected ? ["AXPress"] : []))
+        #expect(driver.customCandidate.performed.isEmpty)
+    }
+
+
+    @Test func customChooserReadinessAXFailureThenAbsencePreservesFinalRefusal() throws {
+        let driver = FakeReactionDriver()
+        let clock = FakeReadinessClock()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+        var reads = 0
+        driver.detachedPopoverProvider = {
+            reads += 1
+            if reads == 1 { return nil }
+            if reads == 2 { throw MessagesReactionAXError.axFailure }
+            return nil
+        }
+
+        #expect(try apply(driver, .set, .custom("👍🏽"), clock: clock, experimentalUIHandoff: true) ==
+                .refused("reaction-unavailable-custom-chooser-detached-discovery"))
+        #expect(clock.pauses.count == 30)
+        #expect(driver.customLauncher.performed == ["AXPress"])
+        #expect(driver.customCandidate.performed.isEmpty)
+    }
+
+    @Test func customChooserReadinessAbsenceThenAXFailurePreservesFinalAXPhase() throws {
+        let driver = FakeReactionDriver()
+        let clock = FakeReadinessClock()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+        var reads = 0
+        driver.detachedPopoverProvider = {
+            reads += 1
+            if reads == 1 { return nil }
+            throw MessagesReactionAXError.axFailure
+        }
+
+        #expect(try apply(driver, .set, .custom("👍🏽"), clock: clock, experimentalUIHandoff: true) ==
+                .failed("ax-failure-custom-chooser-detached-discovery"))
+        #expect(clock.pauses.count == 30)
+        #expect(driver.customLauncher.performed == ["AXPress"])
+        #expect(driver.customCandidate.performed.isEmpty)
+    }
+
+    @Test func customChooserStrictModeHiddenRouteRefusesBeforeLauncher() throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+        driver.message.onAction = { _ in
+            driver.window.nodes.removeAll { $0.sameIdentity(as: driver.transcript) }
+            if !driver.window.nodes.contains(where: { $0.sameIdentity(as: driver.picker) }) {
+                driver.window.nodes.append(driver.picker)
+            }
+        }
+
+        #expect(try apply(driver, .set, .custom("👍🏽"), experimentalUIHandoff: false) == .refused("target-drift-picker-readiness"))
+        #expect(driver.customLauncher.performed.isEmpty)
+        #expect(driver.customSearchField.setValues.isEmpty)
+        #expect(driver.customCandidate.performed.isEmpty)
+    }
+
+    @Test func customChooserReadinessWaitsWithoutRepeatingLauncherSearchOrPress() throws {
+        let driver = FakeReactionDriver()
+        let clock = FakeReadinessClock()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+        var pauses = 0
+        driver.customLauncher.onAction = { _ in }
+        var popoverReads = 0
+        driver.detachedPopoverProvider = {
+            popoverReads += 1
+            if popoverReads == 1 { return nil }
+            if pauses >= 1 { return driver.customPopover }
+            throw MessagesReactionAXError.reactionUnavailable
+        }
+        driver.customCandidate.onAction = { _ in }
+        clock.onPause = {
+            pauses += 1
+            if pauses == 2 {
+                driver.picker.nodes = [driver.customVisibleButton]
+                driver.customVisibleButton.isSelected = true
+                driver.detachedPopover = nil
+            }
+        }
+
+        #expect(try apply(driver, .set, .custom("👍🏽"), clock: clock, experimentalUIHandoff: true,
+                          deadline: .millisecondsFromNow(10_000)) == .ack("reaction-set-changed-verified"))
+        #expect(driver.customLauncher.performed == ["AXPress"])
+        #expect(driver.customSearchField.setValues == ["thumbs up: medium skin tone"])
+        #expect(driver.customCandidate.performed.isEmpty)
+    }
+
+    @Test func customChooserCleansOwnQueryAfterReadbackFailureBeforeSelection() throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+        var failedAfterOwnQuery = false
+        driver.customSearchField.onValueRead = {
+            if driver.customSearchField.setValues.contains("thumbs up: medium skin tone"), !failedAfterOwnQuery {
+                failedAfterOwnQuery = true
+                throw MessagesReactionAXError.targetDrift
+            }
+            return nil
+        }
+
+        #expect(try apply(driver, .set, .custom("👍🏽"), experimentalUIHandoff: true) == .refused("target-drift-picker-readiness"))
+        #expect(driver.customSearchField.setValues == ["thumbs up: medium skin tone", ""])
+        #expect(driver.customCandidate.performed.isEmpty)
+    }
+
+    @Test func customChooserSetValueFailureDoesNotAttemptCleanupOrSelection() throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+        driver.customSearchField.setValueError = .axFailure
+
+        #expect(try apply(driver, .set, .custom("👍🏽"), experimentalUIHandoff: true) == .failed("ax-failure-custom-chooser-search-write"))
+        #expect(driver.customSearchField.setValues.isEmpty)
+        #expect(driver.customCandidate.performed.isEmpty)
+    }
+
+    @Test func customChooserPreselectionCleanupDoesNotClearForeignSearchField() throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+        let foreignSearch = FakeAXNode(role: "AXTextField")
+        foreignSearch.axSubrole = "AXSearchField"
+        foreignSearch.currentValue = "thumbs up: medium skin tone"
+        foreignSearch.parentNode = driver.customPopover
+        foreignSearch.owningWindow = driver.window
+        foreignSearch.processID = driver.processIdentity.pid
+        let duplicate = driver.customCandidate.clone()
+        duplicate.parentNode = driver.customPopover
+        duplicate.processID = driver.processIdentity.pid
+        driver.customSearchField.onSetValue = { value in
+            if value == "thumbs up: medium skin tone" {
+                driver.customPopover.navigationNodes = [foreignSearch, driver.customCandidate, duplicate]
+            }
+        }
+
+        #expect(try apply(driver, .set, .custom("👍🏽"), experimentalUIHandoff: true) == .refused("target-drift-picker-readiness"))
+        #expect(driver.customSearchField.setValues == ["thumbs up: medium skin tone"])
+        #expect(foreignSearch.setValues.isEmpty)
+        #expect(driver.customCandidate.performed.isEmpty)
+    }
+
+    @Test func customChooserRefusesSamePIDCandidateOutsidePopoverParentChain() throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+        let foreignParent = FakeAXNode(role: "AXGroup")
+        foreignParent.owningWindow = driver.window
+        foreignParent.processID = driver.processIdentity.pid
+        driver.customCandidate.parentNode = foreignParent
+
+        #expect(try apply(driver, .set, .custom("👍🏽"), experimentalUIHandoff: true) == .refused("target-drift-picker-readiness"))
+        #expect(driver.customCandidate.performed.isEmpty)
+    }
+
+    @Test(arguments: ["bool", "number", "malformed"])
+    func customChooserCandidateValueTextTypesAreStrict(_ shape: String) throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+        driver.customCandidate.axDescription = nil
+        driver.customCandidate.axTitle = nil
+        switch shape {
+        case "bool":
+            driver.customCandidate.candidateValueOverride = .known(nil)
+        case "number":
+            driver.customCandidate.candidateValueOverride = .known(nil)
+        default:
+            driver.customCandidate.candidateValueOverride = .error(.unknownAXValue)
+        }
+
+        let expected: MessagesReactionAXOutcome = shape == "malformed" ? .refused("unknown-ax-value") : .refused("reaction-unavailable-custom-chooser-candidate-read")
+        #expect(try apply(driver, .set, .custom("👍🏽"), experimentalUIHandoff: true) == expected)
+        #expect(driver.customCandidate.performed.isEmpty)
+    }
+
+    @Test func customSetAlreadySelectedExactButtonSkipsChooser() throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "👍🏽"
+        driver.button.isSelected = true
+        driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+
+        #expect(try apply(driver, .set, .custom("👍🏽"), experimentalUIHandoff: true) == .ack("reaction-set-unchanged-verified"))
+        #expect(driver.button.performed.isEmpty)
+        #expect(driver.customLauncher.performed.isEmpty)
+        #expect(driver.customSearchField.setValues.isEmpty)
+        #expect(driver.customCandidate.performed.isEmpty)
+    }
+
+    @Test(arguments: ["duplicate", "foreign", "disabled", "unknown-enabled", "nonpressable-only", "variant"])
+    func customChooserRefusesUnsafeCandidateShapes(_ shape: String) throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+        switch shape {
+        case "duplicate":
+            let duplicate = driver.customCandidate.clone()
+            duplicate.parentNode = driver.customPopover
+            duplicate.processID = driver.processIdentity.pid
+            driver.customPopover.navigationNodes?.append(duplicate)
+        case "foreign":
+            driver.customCandidate.processID = 999
+        case "disabled":
+            driver.customCandidate.isEnabled = false
+        case "unknown-enabled":
+            driver.customCandidate.isEnabled = nil
+        case "nonpressable-only":
+            driver.customCandidate.actionNames = []
+        default:
+            driver.customCandidate.axDescription = "👍"
+            driver.customCandidate.axValue = nil
+            driver.customCandidate.axTitle = nil
+        }
+
+        let expected: MessagesReactionAXOutcome = shape == "foreign" ? .refused("target-drift-picker-readiness") : .refused("reaction-unavailable-custom-chooser-candidate-read")
+        let outcome = try apply(driver, .set, .custom("👍🏽"), experimentalUIHandoff: true)
+        #expect(outcome == expected)
+        #expect(driver.customLauncher.performed == ["AXPress"])
+        #expect(driver.customCandidate.performed.isEmpty)
+    }
+
+
+    @Test func customChooserAcceptsAXUnknownCandidateWithOwnedEnabledGlyphProof() throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+        configureAXUnknownCustomCandidateProof(driver, emoji: "👍🏽")
+        driver.customCandidate.onAction = { _ in
+            driver.picker.nodes = [driver.customVisibleButton]
+            driver.customVisibleButton.isSelected = true
+            driver.detachedPopover = nil
+        }
+
+        #expect(try apply(driver, .set, .custom("👍🏽"), experimentalUIHandoff: true) == .ack("reaction-set-changed-verified"))
+        #expect(driver.customCandidate.performed.isEmpty)
+    }
+
+    @Test(arguments: [
+        "explicit-false", "wrong-role", "wrong-subrole", "missing-glyph", "duplicate-glyph",
+        "disabled-glyph", "foreign-glyph", "wrong-parent-glyph", "wrong-glyph-value",
+        "wrong-description", "title-only", "extra-action", "missing-action",
+        "duplicate-disabled-glyph", "duplicate-press-candidate"
+    ])
+    func customChooserRefusesAXUnknownCandidatesWithoutExactOwnedGlyphProof(_ shape: String) throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+        configureAXUnknownCustomCandidateProof(driver, emoji: "👍🏽")
+        switch shape {
+        case "explicit-false":
+            driver.customCandidate.isEnabled = false
+        case "wrong-role":
+            driver.customCandidate.roleName = "AXButton"
+        case "wrong-subrole":
+            driver.customCandidate.axSubrole = "AXCell"
+        case "missing-glyph":
+            driver.customCandidate.nodes = []
+        case "duplicate-glyph":
+            let duplicate = glyphProofNode(emoji: "👍🏽", parent: driver.customCandidate, processID: driver.processIdentity.pid)
+            driver.customCandidate.nodes.append(duplicate)
+        case "disabled-glyph":
+            (driver.customCandidate.nodes[0] as? FakeAXNode)?.isEnabled = false
+        case "foreign-glyph":
+            (driver.customCandidate.nodes[0] as? FakeAXNode)?.processID = 999
+        case "wrong-parent-glyph":
+            let foreignParent = FakeAXNode(role: "AXUnknown")
+            foreignParent.processID = driver.processIdentity.pid
+            (driver.customCandidate.nodes[0] as? FakeAXNode)?.parentNode = foreignParent
+        case "wrong-glyph-value":
+            (driver.customCandidate.nodes[0] as? FakeAXNode)?.axValue = "👍"
+        case "wrong-description":
+            driver.customCandidate.axDescription = "👍"
+        case "title-only":
+            driver.customCandidate.axDescription = nil
+            driver.customCandidate.axTitle = "👍🏽"
+        case "extra-action":
+            driver.customCandidate.actionNames = ["AXPress", "AXShowMenu"]
+        case "missing-action":
+            driver.customCandidate.actionNames = []
+        case "duplicate-disabled-glyph":
+            let duplicate = glyphProofNode(emoji: "👍🏽", parent: driver.customCandidate, processID: driver.processIdentity.pid)
+            duplicate.isEnabled = false
+            driver.customCandidate.nodes.append(duplicate)
+        case "duplicate-press-candidate":
+            let duplicate = driver.customCandidate.clone()
+            duplicate.parentNode = driver.customPopover
+            duplicate.processID = driver.processIdentity.pid
+            let duplicateGlyph = glyphProofNode(emoji: "👍🏽", parent: duplicate, processID: driver.processIdentity.pid)
+            duplicate.nodes = [duplicateGlyph]
+            driver.customPopover.navigationNodes?.append(duplicate)
+        default:
+            Issue.record("unhandled AXUnknown candidate proof shape")
+        }
+
+        let expected: MessagesReactionAXOutcome = ["foreign-glyph", "wrong-parent-glyph"].contains(shape)
+            ? .refused("target-drift-picker-readiness")
+            : .refused("reaction-unavailable-custom-chooser-candidate-read")
+        #expect(try apply(driver, .set, .custom("👍🏽"), experimentalUIHandoff: true) == expected)
+        #expect(driver.customCandidate.performed.isEmpty)
+    }
+
+    @Test func customChooserRefusesAXUnknownCandidateWhenGlyphProofChangesBeforePress() throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+        configureAXUnknownCustomCandidateProof(driver, emoji: "👍🏽")
+        var actionReads = 0
+        driver.customCandidate.onActionsRead = {
+            actionReads += 1
+            if actionReads == 2, let glyph = driver.customCandidate.nodes.first as? FakeAXNode {
+                glyph.parentNode = driver.customPopover
+            }
+        }
+
+        #expect(try apply(driver, .set, .custom("👍🏽"), experimentalUIHandoff: true) ==
+                .refused("target-drift-picker-readiness"))
+        #expect(driver.customCandidate.performed.isEmpty)
+    }
+
+    @Test func customChooserReportsAXUnknownCandidateTransportFailureWithRevalidationPhase() throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+        configureAXUnknownCustomCandidateProof(driver, emoji: "👍🏽")
+        var actionReads = 0
+        driver.customCandidate.onActionsRead = {
+            actionReads += 1
+            if actionReads == 3, let glyph = driver.customCandidate.nodes.first as? FakeAXNode {
+                glyph.readError = .axFailure
+            }
+        }
+
+        #expect(try apply(driver, .set, .custom("👍🏽"), experimentalUIHandoff: true) ==
+                .failed("ax-failure-custom-chooser-candidate-revalidation"))
+        #expect(driver.customCandidate.performed.isEmpty)
+    }
+
+    @Test func customChooserRefusesAXUnknownCandidateGlyphTransportFailureAtReadPhase() throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+        configureAXUnknownCustomCandidateProof(driver, emoji: "👍🏽")
+        (driver.customCandidate.nodes[0] as? FakeAXNode)?.readError = .axFailure
+
+        #expect(try apply(driver, .set, .custom("👍🏽"), experimentalUIHandoff: true) ==
+                .failed("ax-failure-custom-chooser-candidate-read"))
+        #expect(driver.customCandidate.performed.isEmpty)
+    }
+
+    @Test func customChooserCleanupDoesNotOverwriteUserEditedSearch() throws {
+        let driver = FakeReactionDriver()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+        driver.customCandidate.onAction = { _ in driver.customSearchField.currentValue = "user edit" }
+
+        #expect(try apply(driver, .set, .custom("👍🏽"), experimentalUIHandoff: true) == .refused("reaction-unavailable-custom-chooser-post-selection"))
+        #expect(driver.customSearchField.setValues == ["thumbs up: medium skin tone"])
+        #expect(driver.customSearchField.currentValue == "user edit")
     }
 
     @Test func duplicateExactButtonsRefuse() throws {
@@ -820,11 +2321,14 @@ struct MessagesReactionAXAutomationTests {
 
     @Test func pickerOutsideRetainedWindowRefuses() throws {
         let driver = FakeReactionDriver()
+        let otherWindow = FakeAXNode(role: "AXWindow", children: [driver.picker])
+        driver.root.directWindowNodes = [driver.window]
         driver.message.onAction = { _ in
-            driver.root.nodes.append(FakeAXNode(role: "AXWindow", children: [driver.picker]))
+            driver.root.nodes.append(otherWindow)
         }
         #expect(try apply(driver) == .refused("picker-unavailable"))
         #expect(driver.button.performed.isEmpty)
+        withExtendedLifetime(otherWindow) {}
     }
 
     @Test(arguments: ["window", "picker", "button"])
@@ -844,7 +2348,7 @@ struct MessagesReactionAXAutomationTests {
                 driver.transcript.links = [entry == "window" ? otherWindow : driver.picker]
             }
         }
-        #expect(try apply(driver) == .refused("target-drift"))
+        #expect(try apply(driver) == .refused("target-drift-picker-readiness-window-mismatch"))
         #expect(driver.message.performed.count == 1)
         #expect(driver.button.performed.isEmpty)
     }
@@ -868,7 +2372,7 @@ struct MessagesReactionAXAutomationTests {
         let expected: MessagesReactionAXOutcome = switch evidence {
         case "absent": .refused("unknown-ax-value")
         case "error": .failed(element == "transcript" || element == "message" ? "ax-failure-initial-route" : "ax-failure-picker-readiness")
-        case "different": .refused("target-drift")
+        case "different": .refused(element == "transcript" || element == "message" ? "target-drift-initial-route-window-mismatch" : "target-drift-picker-readiness-window-mismatch")
         default: .ack("reaction-set-changed-verified")
         }
         #expect(try apply(driver) == expected)
@@ -884,8 +2388,7 @@ struct MessagesReactionAXAutomationTests {
         let driver = FakeReactionDriver()
         let otherWindow = FakeAXNode(role: "AXWindow")
         let beforeReact = element == "transcript" || element == "message"
-        driver.onProcessRead = { count in
-            guard count == (beforeReact ? 2 : 4) else { return }
+        let drift = {
             switch element {
             case "transcript": driver.transcript.owningWindow = otherWindow
             case "message": driver.message.owningWindow = otherWindow
@@ -893,7 +2396,16 @@ struct MessagesReactionAXAutomationTests {
             default: driver.button.owningWindow = otherWindow
             }
         }
-        #expect(try apply(driver) == .refused("target-drift"))
+        if beforeReact {
+            driver.message.onSelectedRead = drift
+        } else {
+            var selectedReads = 0
+            driver.button.onSelectedRead = {
+                selectedReads += 1
+                if selectedReads == 1 { drift() }
+            }
+        }
+        #expect(try apply(driver) == .refused(beforeReact ? "target-drift-initial-route-window-mismatch" : "target-drift-pre-press-window-mismatch"))
         #expect(driver.message.performed.count == (beforeReact ? 0 : 1))
         #expect(driver.button.performed.isEmpty)
     }
@@ -952,10 +2464,16 @@ struct MessagesReactionAXAutomationTests {
         list.links = [driver.transcript]
         driver.window.nodes = [list]
         driver.transcript.roleName = "AXGroup"
-        driver.onProcessRead = { count in
-            if count == processRead { list.links = [driver.transcript.clone()] }
+        if processRead == 2 {
+            driver.message.onSelectedRead = { list.links = [driver.transcript.clone()] }
+        } else {
+            var selectedReads = 0
+            driver.button.onSelectedRead = {
+                selectedReads += 1
+                if selectedReads == 1 { list.links = [driver.transcript.clone()] }
+            }
         }
-        #expect(try apply(driver) == .refused("target-drift"))
+        #expect(try apply(driver) == .refused(processRead == 2 ? "target-drift-initial-route" : "target-drift-pre-press"))
         #expect(driver.message.performed.count == (processRead == 2 ? 0 : 1))
         #expect(driver.button.performed.isEmpty)
     }
@@ -999,7 +2517,7 @@ struct MessagesReactionAXAutomationTests {
         let driver = FakeReactionDriver()
         driver.transcript.roleName = "AXGroup"
         driver.transcript.id = "OtherCollectionView"
-        #expect(try apply(driver) == .refused("target-drift"))
+        #expect(try apply(driver) == .refused("target-drift-initial-route"))
         #expect(driver.message.performed.isEmpty)
     }
 
@@ -1072,6 +2590,87 @@ struct MessagesReactionAXAutomationTests {
         #expect(!owner.sameIdentity(as: LiveAXElement(element: AXUIElementCreateApplication(124))))
     }
 
+    @Test func axChildrenFullRelationshipUsesFullAttributeArrayWhenIndexedCopyIsTruncated() throws {
+        let first = AXUIElementCreateApplication(101)
+        let second = AXUIElementCreateApplication(102)
+        let values = [first, second] as CFArray
+
+        let children = try LiveAXElement.checkedFullRelationship(initialStatus: .success, initialCount: 2,
+                                                                 copiedValue: values, copyStatus: .success,
+                                                                 finalStatus: .success, finalCount: 2,
+                                                                 limit: 256)
+
+        #expect(children.count == 2)
+        #expect(children[0].sameIdentity(as: LiveAXElement(element: first)))
+        #expect(children[1].sameIdentity(as: LiveAXElement(element: second)))
+    }
+
+    @Test(arguments: [AXError.attributeUnsupported, .noValue])
+    func axChildrenFullRelationshipPreservesAbsentRelationshipSemantics(_ status: AXError) throws {
+        #expect(try LiveAXElement.checkedFullRelationship(initialStatus: status, initialCount: 0,
+                                                         copiedValue: nil, copyStatus: .success,
+                                                         finalStatus: status, finalCount: 0,
+                                                         limit: 256).isEmpty)
+    }
+
+    @Test func axChildrenFullRelationshipRequiresFullArrayCountToMatchPreCount() throws {
+        let child = AXUIElementCreateApplication(101)
+        #expect(throws: MessagesTargetDrift.self) {
+            try LiveAXElement.checkedFullRelationship(initialStatus: .success, initialCount: 2,
+                                                      copiedValue: [child] as CFArray, copyStatus: .success,
+                                                      finalStatus: .success, finalCount: 2,
+                                                      limit: 256)
+        }
+    }
+
+    @Test func axChildrenFullRelationshipRequiresStableRecount() throws {
+        let child = AXUIElementCreateApplication(101)
+        #expect(throws: MessagesTargetDrift.self) {
+            try LiveAXElement.checkedFullRelationship(initialStatus: .success, initialCount: 1,
+                                                      copiedValue: [child] as CFArray, copyStatus: .success,
+                                                      finalStatus: .success, finalCount: 2,
+                                                      limit: 256)
+        }
+    }
+
+    @Test func axChildrenFullRelationshipRejectsMalformedFullAttributeValue() throws {
+        #expect(throws: MessagesReactionAXError.unknownAXValue) {
+            try LiveAXElement.checkedFullRelationship(initialStatus: .success, initialCount: 1,
+                                                      copiedValue: "not-array" as CFString, copyStatus: .success,
+                                                      finalStatus: .success, finalCount: 1,
+                                                      limit: 256)
+        }
+        #expect(throws: MessagesReactionAXError.unknownAXValue) {
+            try LiveAXElement.checkedFullRelationship(initialStatus: .success, initialCount: 1,
+                                                      copiedValue: ["not-ax"] as CFArray, copyStatus: .success,
+                                                      finalStatus: .success, finalCount: 1,
+                                                      limit: 256)
+        }
+    }
+
+    @Test func axChildrenFullRelationshipCapsPreCountBeforeCopy() throws {
+        #expect(throws: MessagesReactionAXError.traversalLimit) {
+            try LiveAXElement.checkedFullRelationship(initialStatus: .success, initialCount: 257,
+                                                      copiedValue: nil, copyStatus: .success,
+                                                      finalStatus: .success, finalCount: 257,
+                                                      limit: 256)
+        }
+    }
+
+    @Test(arguments: ["initial", "copy", "final"])
+    func axChildrenFullRelationshipPropagatesTransportFailure(_ phase: String) throws {
+        let child = AXUIElementCreateApplication(101)
+        let initialStatus: AXError = phase == "initial" ? .cannotComplete : .success
+        let copyStatus: AXError = phase == "copy" ? .cannotComplete : .success
+        let finalStatus: AXError = phase == "final" ? .cannotComplete : .success
+        #expect(throws: MessagesReactionAXError.axFailure) {
+            try LiveAXElement.checkedFullRelationship(initialStatus: initialStatus, initialCount: 1,
+                                                      copiedValue: [child] as CFArray, copyStatus: copyStatus,
+                                                      finalStatus: finalStatus, finalCount: 1,
+                                                      limit: 256)
+        }
+    }
+
     @Test func adapterStringsHaveTypeAndUTF8Bounds() throws {
         #expect(try LiveAXElement.checkedString("AXGroup" as CFString, limit: 128) == "AXGroup")
         for value in [NSNumber(value: 1), String(repeating: "a", count: 129) as NSString,
@@ -1079,6 +2678,19 @@ struct MessagesReactionAXAutomationTests {
             #expect(throws: MessagesReactionAXError.unknownAXValue) {
                 try LiveAXElement.checkedString(value, limit: 128)
             }
+        }
+    }
+
+    @Test func candidateValueTextTreatsKnownNonTextAsNoMatchAndMalformedAsDrift() throws {
+        #expect(try LiveAXElement.checkedCandidateValue(nil) == nil)
+        #expect(try LiveAXElement.checkedCandidateValue(kCFBooleanTrue) == nil)
+        #expect(try LiveAXElement.checkedCandidateValue(NSNumber(value: 7)) == nil)
+        #expect(try LiveAXElement.checkedCandidateValue("👍🏽" as CFString) == "👍🏽")
+        #expect(throws: MessagesReactionAXError.unknownAXValue) {
+            try LiveAXElement.checkedCandidateValue(["👍🏽"] as CFArray)
+        }
+        #expect(throws: MessagesReactionAXError.unknownAXValue) {
+            try LiveAXElement.checkedCandidateValue(String(repeating: "a", count: 2049) as CFString)
         }
     }
 
@@ -1155,9 +2767,16 @@ struct MessagesReactionAXAutomationTests {
 
     private func apply(_ driver: FakeReactionDriver, _ operation: MessagesReactionWorkerPayload.Operation = .set,
                        clock: FakeReadinessClock, experimentalUIHandoff: Bool = false,
-                       deadline: WorkerDeadline = .millisecondsFromNow(2_000)) throws -> MessagesReactionAXOutcome {
+                       deadline: WorkerDeadline = .millisecondsFromNow(10_000)) throws -> MessagesReactionAXOutcome {
         try MessagesReactionAXAutomation(driver: driver, readinessNow: { clock.now }, readinessPause: { clock.pause($0) })
             .apply(request(operation, experimentalUIHandoff: experimentalUIHandoff), deadline: deadline)
+    }
+
+    private func apply(_ driver: FakeReactionDriver, _ operation: MessagesReactionWorkerPayload.Operation,
+                       _ reaction: MessagesReaction, clock: FakeReadinessClock, experimentalUIHandoff: Bool = false,
+                       deadline: WorkerDeadline = .millisecondsFromNow(10_000)) throws -> MessagesReactionAXOutcome {
+        try MessagesReactionAXAutomation(driver: driver, readinessNow: { clock.now }, readinessPause: { clock.pause($0) })
+            .apply(request(operation, reaction, experimentalUIHandoff: experimentalUIHandoff), deadline: deadline)
     }
 
     @Test(arguments: ["picker", "button"], [false, true])
@@ -1176,6 +2795,178 @@ struct MessagesReactionAXAutomationTests {
         #expect(driver.button.performed.isEmpty)
     }
 
+
+    @Test func waitForPickerRetriesTransientRelationshipCountChangeWithoutRepeatingMenuOpenOrChooserWrite() throws {
+        let driver = FakeReactionDriver()
+        let clock = FakeReadinessClock()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+        var countReads = 0
+        driver.message.onAction = { _ in
+            driver.window.nodes = [driver.transcript, driver.picker, driver.customLauncher]
+            driver.window.onChildren = {
+                countReads += 1
+                driver.window.nodes = [driver.transcript, driver.picker, driver.customLauncher]
+                if countReads == 1 { driver.window.childrenRelationshipChanged = true }
+            }
+            driver.window.onChildrenRead = { _ in
+                driver.window.childrenRelationshipChanged = false
+            }
+        }
+        driver.customSearchField.onSetValue = { value in
+            if value == "thumbs up: medium skin tone" { #expect(driver.message.performed.count == 1) }
+        }
+        driver.customCandidate.onAction = { _ in
+            driver.window.onChildren = nil
+            driver.window.onChildrenRead = nil
+            driver.message.onAction = { _ in
+                if !driver.window.nodes.contains(where: { $0.sameIdentity(as: driver.picker) }) {
+                    driver.window.nodes.append(driver.picker)
+                }
+            }
+            driver.picker.nodes = [driver.customVisibleButton]
+            driver.customVisibleButton.isSelected = true
+            driver.detachedPopover = nil
+        }
+
+        #expect(try apply(driver, .set, .custom("👍🏽"), clock: clock, experimentalUIHandoff: true) ==
+                .ack("reaction-set-changed-verified"))
+        #expect(clock.pauses.first == 50_000_000)
+        #expect(clock.pauses.contains(750_000_000))
+        #expect(driver.message.performed.count == 2)
+        #expect(driver.customSearchField.setValues == ["thumbs up: medium skin tone"])
+        #expect(driver.customCandidate.performed.isEmpty)
+    }
+
+    @Test func waitForPickerPreservesPersistentRelationshipCountChangeAfterBoundedRetry() throws {
+        let driver = FakeReactionDriver()
+        let clock = FakeReadinessClock()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+        driver.message.onAction = { _ in
+            driver.window.nodes = [driver.transcript, driver.picker, driver.customLauncher]
+            driver.window.onChildren = {
+                driver.window.nodes = [driver.transcript, driver.picker, driver.customLauncher]
+                driver.window.childrenRelationshipChanged = true
+            }
+            driver.window.onChildrenRead = { _ in driver.window.childrenRelationshipChanged = false }
+        }
+
+        #expect(try apply(driver, .set, .custom("👍🏽"), clock: clock, experimentalUIHandoff: true) ==
+                .refused("target-drift-picker-readiness-relationship-count-changed"))
+        #expect(clock.pauses.count == 30)
+        #expect(driver.message.performed.count == 1)
+        #expect(driver.customSearchField.setValues.isEmpty)
+        #expect(driver.customCandidate.performed.isEmpty)
+    }
+
+    @Test func waitForPickerPreservesRelationshipCountChangeWhenLocalCapExpiresBeforeAttemptBound() throws {
+        let driver = FakeReactionDriver()
+        let clock = FakeReadinessClock()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+        driver.message.onAction = { _ in
+            driver.window.nodes = [driver.transcript, driver.picker, driver.customLauncher]
+            driver.window.onChildren = {
+                driver.window.nodes = [driver.transcript, driver.picker, driver.customLauncher]
+                driver.window.childrenRelationshipChanged = true
+            }
+            driver.window.onChildrenRead = { _ in driver.window.childrenRelationshipChanged = false }
+        }
+        clock.onPause = { clock.now = 1_500_000_000 }
+
+        #expect(try apply(driver, .set, .custom("👍🏽"), clock: clock, experimentalUIHandoff: true) ==
+                .refused("target-drift-picker-readiness-relationship-count-changed"))
+        #expect(clock.pauses.count == 1)
+        #expect(driver.message.performed.count == 1)
+        #expect(driver.customSearchField.setValues.isEmpty)
+        #expect(driver.customCandidate.performed.isEmpty)
+    }
+
+    @Test func waitForPickerCleanAbsenceAfterRelationshipCountChangeEndsPickerUnavailable() throws {
+        let driver = FakeReactionDriver()
+        let clock = FakeReadinessClock()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+        var firstRead = true
+        driver.message.onAction = { _ in
+            driver.window.nodes = [driver.transcript, driver.picker, driver.customLauncher]
+            driver.window.onChildren = {
+                if firstRead {
+                    firstRead = false
+                    driver.window.nodes = [driver.transcript, driver.picker, driver.customLauncher]
+                    driver.window.childrenRelationshipChanged = true
+                } else {
+                    driver.window.nodes = [driver.transcript, driver.customLauncher]
+                }
+            }
+            driver.window.onChildrenRead = { _ in driver.window.childrenRelationshipChanged = false }
+        }
+
+        #expect(try apply(driver, .set, .custom("👍🏽"), clock: clock, experimentalUIHandoff: true) ==
+                .refused("picker-unavailable"))
+        #expect(clock.pauses.count == 30)
+        #expect(driver.message.performed.count == 1)
+        #expect(driver.customSearchField.setValues.isEmpty)
+        #expect(driver.customCandidate.performed.isEmpty)
+    }
+
+    @Test func waitForPickerDoesNotRetryRouteDriftAfterRelationshipRetry() throws {
+        let driver = FakeReactionDriver()
+        let clock = FakeReadinessClock()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+        var countReads = 0
+        driver.message.onAction = { _ in
+            driver.window.nodes = [driver.transcript, driver.picker, driver.customLauncher]
+            driver.window.onChildren = {
+                countReads += 1
+                driver.window.nodes = [driver.transcript, driver.picker, driver.customLauncher]
+                if countReads == 1 { driver.window.childrenRelationshipChanged = true }
+            }
+            driver.window.onChildrenRead = { _ in driver.window.childrenRelationshipChanged = false }
+        }
+        clock.onPause = { driver.replace("window") }
+
+        #expect(try apply(driver, .set, .custom("👍🏽"), clock: clock, experimentalUIHandoff: false) ==
+                .refused("target-drift-picker-readiness-window-mismatch"))
+        #expect(clock.pauses.count == 1)
+        #expect(driver.message.performed.count == 1)
+        #expect(driver.customSearchField.setValues.isEmpty)
+        #expect(driver.customCandidate.performed.isEmpty)
+    }
+
+    @Test(arguments: ["transport", "type", "limit"])
+    func waitForPickerDoesNotRetryNonRelationshipReadinessFailures(_ failure: String) throws {
+        let driver = FakeReactionDriver()
+        let clock = FakeReadinessClock()
+        driver.button.id = "heart"
+        driver.installCustomChooser(emoji: "👍🏽", query: "thumbs up: medium skin tone")
+        driver.message.onAction = { _ in
+            driver.window.nodes.append(driver.picker)
+            switch failure {
+            case "transport":
+                driver.window.childrenReadError = .axFailure
+            case "type":
+                driver.window.nodes = [driver.transcript, FakeBadAXElement()]
+            default:
+                driver.window.nodes.append(contentsOf: (0..<600).map { _ in FakeAXNode(role: "AXGroup") })
+            }
+        }
+
+        let expected: MessagesReactionAXOutcome
+        switch failure {
+        case "transport": expected = .failed("ax-failure-custom-chooser-picker-read")
+        case "limit": expected = .refused("traversal-limit")
+        default: expected = .refused("unknown-ax-value")
+        }
+        #expect(try apply(driver, .set, .custom("👍🏽"), clock: clock, experimentalUIHandoff: true) == expected)
+        #expect(clock.pauses.isEmpty)
+        #expect(driver.message.performed.count == 1)
+        #expect(driver.customSearchField.setValues.isEmpty)
+        #expect(driver.customCandidate.performed.isEmpty)
+    }
+
     @Test func localCapIsCheckedAfterReadBeforeAcceptingReadyButton() throws {
         let driver = FakeReactionDriver()
         let clock = FakeReadinessClock()
@@ -1192,16 +2983,11 @@ struct MessagesReactionAXAutomationTests {
         let clock = FakeReadinessClock()
         clock.advanceOnPause = false
         let global = WorkerDeadline.millisecondsFromNow(earlierGlobal ? 500 : 10_000)
-        let target = phase == "revalidation" ? driver.root : driver.picker
         var childReads = 0
         var expiredDuringRead = false
         var readsAfterExpiry = 0
         let installExpiry = {
-            target.onChildrenRead = { effective in
-                childReads += 1
-                // Picker discovery reads its children once; button discovery
-                // reads them a second time, under the same readiness budget.
-                guard childReads == (phase == "button" ? 2 : 1) else { return }
+            let expire: (WorkerDeadline) -> Void = { effective in
                 if earlierGlobal {
                     #expect(effective == global)
                 } else {
@@ -1211,7 +2997,18 @@ struct MessagesReactionAXAutomationTests {
                 Thread.sleep(forTimeInterval: Double(min(effective.remainingNanoseconds, 1_500_000_000)) / 1_000_000_000 + 0.005)
                 expiredDuringRead = true
             }
-            target.onLinkedElements = {
+            if phase == "revalidation" {
+                driver.root.onDirectWindowsRead = expire
+            } else {
+                driver.picker.onChildrenRead = { effective in
+                    childReads += 1
+                    // Picker discovery reads its children once; button discovery
+                    // reads them a second time, under the same readiness budget.
+                    guard childReads == (phase == "button" ? 2 : 1) else { return }
+                    expire(effective)
+                }
+            }
+            driver.picker.onLinkedElements = {
                 if expiredDuringRead { readsAfterExpiry += 1 }
             }
             driver.button.onChildren = {
@@ -1293,7 +3090,7 @@ struct MessagesReactionAXAutomationTests {
         let expected: MessagesReactionAXOutcome = switch failure {
         case "duplicate-picker": .refused("picker-unavailable")
         case "duplicate-button": .refused("reaction-unavailable")
-        case "foreign-picker", "foreign-button": .refused("target-drift")
+        case "foreign-picker", "foreign-button": .refused("target-drift-picker-readiness-window-mismatch")
         case "unknown", "invalid-selected": .refused("unknown-ax-value")
         default: .failed("ax-failure-picker-readiness")
         }
@@ -1314,19 +3111,22 @@ struct MessagesReactionAXAutomationTests {
             if level == "missing-picker" { driver.window.nodes = [driver.transcript] }
             else { driver.replace(level) }
         }
-        #expect(try apply(driver, clock: clock) == .refused("target-drift"))
+        let expected = level == "window" ? "target-drift-picker-readiness-window-mismatch" : "target-drift-picker-readiness"
+        #expect(try apply(driver, clock: clock) == .refused(expected))
         #expect(clock.pauses.count == 1)
         #expect(driver.openedURLs.count == 1)
         #expect(driver.message.performed.count == 1)
         #expect(driver.button.performed.isEmpty)
     }
 
-    @Test(arguments: ["picker", "button"], [3, 4])
-    func finalRevalidationAbsenceNeverStartsReadinessAgain(_ missing: String, _ processRead: Int) throws {
+    @Test(arguments: ["picker", "button"])
+    func finalRevalidationAbsenceNeverStartsReadinessAgain(_ missing: String) throws {
         let driver = FakeReactionDriver()
         let clock = FakeReadinessClock()
-        driver.onProcessRead = { count in
-            guard count == processRead else { return }
+        var actionReads = 0
+        driver.button.onActionsRead = {
+            actionReads += 1
+            guard actionReads == 1 else { return }
             if missing == "picker" { driver.window.nodes = [driver.transcript] }
             else { driver.picker.nodes = [] }
         }
@@ -1468,24 +3268,21 @@ struct MessagesReactionAXAutomationTests {
             driver.button.isSelected = true
             driver.window.nodes.removeAll { $0.sameIdentity(as: driver.picker) }
         }
-        var postPressProcessReads = 0
-        driver.onProcessRead = { _ in
+        var postPressDirectWindowReads = 0
+        driver.root.onDirectWindowsCountRead = {
             guard driver.button.performed == ["AXPress"] else { return }
-            postPressProcessReads += 1
-            if ["process", "pid", "bundle", "launch", "window"].contains(drift), postPressProcessReads == 3 {
-                driver.replace(drift)
-            }
-        }
-        driver.window.onChildren = {
-            guard drift == "transcript", driver.button.performed == ["AXPress"], postPressProcessReads >= 3 else { return }
-            driver.replace("transcript")
-        }
-        driver.transcript.onChildren = {
-            guard drift == "message", driver.button.performed == ["AXPress"], postPressProcessReads >= 3 else { return }
-            driver.replace("message")
+            postPressDirectWindowReads += 1
+            if postPressDirectWindowReads == 5 { driver.replace(drift) }
         }
 
-        #expect(try apply(driver, clock: clock, experimentalUIHandoff: true) == .refused("post-press-verify-route-drift"))
+        let expected: String
+        switch drift {
+        case "window": expected = "exact-existing-verify-discovery-drift-window-mismatch"
+        case "transcript": expected = "exact-existing-verify-discovery-drift-replaced-transcript"
+        case "message": expected = "exact-existing-verify-discovery-drift-missing-retained-message"
+        default: expected = "exact-existing-verify-discovery-drift"
+        }
+        #expect(try apply(driver, clock: clock, experimentalUIHandoff: true) == .refused(expected))
         #expect(driver.button.performed == ["AXPress"])
         #expect(driver.message.performed.count == 1)
         #expect(driver.openedURLs.count == 1)
@@ -1501,11 +3298,31 @@ struct MessagesReactionAXAutomationTests {
             driver.message.owningWindow = foreignWindow
         }
 
-        #expect(try apply(driver, clock: clock, experimentalUIHandoff: true) == .refused("post-press-verify-route-drift"))
+        #expect(try apply(driver, clock: clock, experimentalUIHandoff: true) ==
+                .refused("exact-existing-verify-discovery-drift-window-mismatch"))
         #expect(driver.button.performed == ["AXPress"])
         #expect(driver.message.performed.count == 1)
         #expect(driver.openedURLs.count == 1)
         withExtendedLifetime(foreignWindow) {}
+    }
+
+    @Test func postPressExactExistingValidationDriftIsLocalized() throws {
+        let driver = FakeReactionDriver()
+        let clock = FakeReadinessClock()
+        driver.button.onAction = { _ in
+            driver.button.isSelected = true
+            driver.window.nodes.removeAll { $0.sameIdentity(as: driver.picker) }
+        }
+        driver.button.onSelectedRead = {
+            guard driver.message.performed.count >= 2 else { return }
+            driver.replace("button")
+        }
+
+        #expect(try apply(driver, clock: clock, experimentalUIHandoff: true) ==
+                .refused("exact-existing-verify-validation-drift-button-mismatch"))
+        #expect(driver.button.performed == ["AXPress"])
+        #expect(driver.message.performed.count == 2)
+        #expect(driver.openedURLs.count == 1)
     }
 
     @Test func postPressRetainedRouteAbsentMessageTimesOut() throws {
@@ -1517,7 +3334,8 @@ struct MessagesReactionAXAutomationTests {
             driver.transcript.nodes = []
         }
 
-        #expect(try apply(driver, clock: clock, experimentalUIHandoff: true, deadline: .millisecondsFromNow(10_000)) == .refused("post-press-verify-route-drift"))
+        #expect(try apply(driver, clock: clock, experimentalUIHandoff: true, deadline: .millisecondsFromNow(10_000)) ==
+                .refused("exact-existing-verify-discovery-drift-missing-retained-message"))
         #expect(clock.now == 8_000_000_000)
         #expect(driver.message.performed.count == 1)
         #expect(driver.openedURLs.count == 1)
@@ -1532,7 +3350,8 @@ struct MessagesReactionAXAutomationTests {
             driver.message.actionNames = []
         }
 
-        #expect(try apply(driver, clock: clock, experimentalUIHandoff: true) == .refused("post-press-verify-action-missing"))
+        #expect(try apply(driver, clock: clock, experimentalUIHandoff: true) ==
+                .refused("exact-existing-verify-discovery-drift-retained-message-action-missing"))
         #expect(driver.button.performed == ["AXPress"])
         #expect(driver.message.performed.count == 1)
         #expect(driver.openedURLs.count == 1)
@@ -1545,7 +3364,7 @@ struct MessagesReactionAXAutomationTests {
             driver.window.nodes.removeAll { $0.sameIdentity(as: driver.picker) }
         }
 
-        #expect(try apply(driver, clock: clock, experimentalUIHandoff: true) == .refused("post-press-verify-picker-state-drift"))
+        #expect(try apply(driver, clock: clock, experimentalUIHandoff: true) == .refused("exact-existing-verify-desired-state-mismatch"))
         #expect(driver.button.performed == ["AXPress"])
         #expect(driver.picker.performed.isEmpty)
         #expect(driver.message.performed.count == 2)
@@ -1582,7 +3401,8 @@ struct MessagesReactionAXAutomationTests {
             if childReadsAfterPress == 2 { driver.transcript.nodes = [driver.message.clone()] }
         }
 
-        #expect(try apply(driver, clock: clock, experimentalUIHandoff: true) == .refused("post-press-verify-route-drift"))
+        #expect(try apply(driver, clock: clock, experimentalUIHandoff: true) ==
+                .refused("exact-existing-verify-discovery-drift-missing-retained-message"))
         #expect(driver.button.performed == ["AXPress"])
         #expect(driver.message.performed.count == 1)
         #expect(driver.openedURLs.count == 1)
@@ -1605,7 +3425,8 @@ struct MessagesReactionAXAutomationTests {
             }
         }
 
-        #expect(try apply(driver, clock: clock, experimentalUIHandoff: true) == .refused("post-press-verify-route-drift"))
+        #expect(try apply(driver, clock: clock, experimentalUIHandoff: true) ==
+                .refused("exact-existing-verify-discovery-drift-picker-still-present"))
         #expect(driver.button.performed == ["AXPress"])
         #expect(driver.message.performed.count == 1)
         #expect(driver.openedURLs.count == 1)
@@ -1636,6 +3457,16 @@ private final class FakeReadinessClock {
     }
 }
 
+private final class FakeEmojiToken: NSObject {
+    private let tokenString: NSString
+
+    init(_ value: String) {
+        self.tokenString = value as NSString
+    }
+
+    @objc func string() -> NSString { tokenString }
+}
+
 private final class FakeReactionDriver: MessagesReactionAXDriving {
     static let identity = MessagesAXProcessIdentity(pid: 123, bundleURL: LiveMessagesReactionAXDriver.applicationURL,
                                                     launchDate: Date(timeIntervalSince1970: 1_000))
@@ -1643,12 +3474,20 @@ private final class FakeReactionDriver: MessagesReactionAXDriving {
     var trusted = true
     var prompted = false
     var actionTitles = ["Tapback Details\u{2026}", "Tapback"]
+    var emojiSearchPlans: [String: MessagesCustomEmojiSearchPlan] = [:]
     var openedURLs: [URL] = []
     var processReads = 0
+    var canonicalProcessError: MessagesReactionAXError?
     var onProcessRead: ((Int) -> Void)?
     var ignoreOpenWhilePickerPresent = false
     var shouldRestoreTranscriptOnOpen: (() -> Bool)?
     var actionTitlesError: MessagesReactionAXError?
+    var customEmojiSearchPlanError: MessagesReactionAXError?
+    var onCustomEmojiSearchPlan: ((String) -> Void)?
+    var processFrontmost = true
+    var processFrontmostError: MessagesReactionAXError?
+    var focusedAXElement: FakeAXNode?
+    var focusedAXError: MessagesReactionAXError?
     var openError: MessagesReactionAXError?
     var root: FakeAXNode
     var window: FakeAXNode
@@ -1656,15 +3495,43 @@ private final class FakeReactionDriver: MessagesReactionAXDriving {
     var message: FakeAXNode
     var picker: FakeAXNode
     var button: FakeAXNode
+    var customLauncher: FakeAXNode
+    var customPopover: FakeAXNode
+    var customSearchField: FakeAXNode
+    var customCandidate: FakeAXNode
+    var customVisibleButton: FakeAXNode
+    var detachedPopover: FakeAXNode?
+    var detachedPopoverProvider: (() throws -> FakeAXNode?)?
 
     init() {
         message = FakeAXNode(role: "AXGroup", selected: true, actions: ["Name:Tapback\nTarget:0x0\nSelector:(null)"])
         transcript = FakeAXNode(role: "AXCollection", id: "TranscriptCollectionView", children: [message])
         button = FakeAXNode(role: "AXButton", id: "heart", selected: false, actions: ["AXPress"])
         picker = FakeAXNode(role: "AXCollection", id: "TapbackPickerCollectionView", actions: ["AXCancel"], children: [button])
+        customLauncher = FakeAXNode(role: "AXButton", actions: ["AXPress"])
+        customLauncher.axDescription = "Add custom emoji reaction"
+        customSearchField = FakeAXNode(role: "AXTextField")
+        customSearchField.axSubrole = "AXSearchField"
+        customSearchField.currentValue = ""
+        customCandidate = FakeAXNode(role: "AXButton", actions: ["AXPress"])
+        customVisibleButton = FakeAXNode(role: "AXButton", actions: ["AXPress"])
+        customPopover = FakeAXNode(role: "AXPopover", children: [customSearchField, customCandidate])
+        customPopover.navigationNodes = [customSearchField, customCandidate]
         window = FakeAXNode(role: "AXWindow", children: [transcript])
         root = FakeAXNode(role: "AXApplication", children: [window])
-        for node in [transcript, message, picker, button] { node.owningWindow = window }
+        for node in [transcript, message, picker, button, customLauncher, customPopover, customSearchField,
+                     customCandidate, customVisibleButton] {
+            node.owningWindow = window
+            node.processID = processIdentity.pid
+        }
+        transcript.parentNode = window
+        message.parentNode = transcript
+        picker.parentNode = window
+        button.parentNode = picker
+        customLauncher.parentNode = window
+        customSearchField.parentNode = customPopover
+        customCandidate.parentNode = customPopover
+        customVisibleButton.parentNode = picker
         message.onAction = { [weak self] _ in
             guard let self else { return }
             if !self.window.nodes.contains(where: { $0.sameIdentity(as: self.picker) }) {
@@ -1675,12 +3542,47 @@ private final class FakeReactionDriver: MessagesReactionAXDriving {
             guard name == "AXCancel", let self else { return }
             self.window.nodes.removeAll { $0.sameIdentity(as: self.picker) }
         }
+        customLauncher.onAction = { [weak self] name in
+            guard name == "AXPress", let self else { return }
+            self.detachedPopover = self.customPopover
+        }
     }
 
     func checkAccessibilityTrusted(prompt: Bool) -> Bool { prompted = prompt; return trusted }
     func reactActionTitles(deadline: WorkerDeadline) throws -> [String] {
         if let actionTitlesError { throw actionTitlesError }
         return actionTitles
+    }
+    func customEmojiSearchPlan(for emoji: String, deadline: WorkerDeadline) throws -> MessagesCustomEmojiSearchPlan {
+        if let customEmojiSearchPlanError { throw customEmojiSearchPlanError }
+        onCustomEmojiSearchPlan?(emoji)
+        guard let plan = emojiSearchPlans[emoji] else { throw MessagesReactionAXError.unknownAXValue }
+        return plan
+    }
+    var customChooserKeyPresses: [MessagesCustomEmojiChooserKey] = []
+    var customChooserKeyError: MessagesReactionAXError?
+    var onCustomChooserKey: ((MessagesCustomEmojiChooserKey) throws -> Void)?
+    func pressCustomEmojiChooserKey(_ key: MessagesCustomEmojiChooserKey, process: MessagesAXProcess, deadline: WorkerDeadline) throws {
+        guard process.identity == processIdentity else { throw MessagesReactionAXError.targetDrift }
+        if let customChooserKeyError { throw customChooserKeyError }
+        customChooserKeyPresses.append(key)
+        if key == .returnKey { try customCandidate.onAction?("AXPress") }
+        try onCustomChooserKey?(key)
+    }
+    func messagesProcessIsFrontmost(_ process: MessagesAXProcess, deadline: WorkerDeadline) throws -> Bool {
+        guard process.identity == processIdentity else { throw MessagesReactionAXError.targetDrift }
+        if let processFrontmostError { throw processFrontmostError }
+        return processFrontmost
+    }
+    func focusedElement(deadline: WorkerDeadline) throws -> (any MessagesAXElement)? {
+        if let focusedAXError { throw focusedAXError }
+        return focusedAXElement
+    }
+    func detachedCustomEmojiPopover(process: MessagesAXProcess,
+                                    deadline: WorkerDeadline) throws -> (any MessagesAXElement)? {
+        guard process.identity == processIdentity else { throw MessagesReactionAXError.reactionUnavailable }
+        if let detachedPopoverProvider { return try detachedPopoverProvider() }
+        return detachedPopover
     }
     func openMessages(url: URL, deadline: WorkerDeadline) throws -> MessagesAXProcess {
         if let openError { throw openError }
@@ -1696,6 +3598,7 @@ private final class FakeReactionDriver: MessagesReactionAXDriving {
     func canonicalMessagesProcess(deadline: WorkerDeadline) throws -> MessagesAXProcess {
         processReads += 1
         onProcessRead?(processReads)
+        if let canonicalProcessError { throw canonicalProcessError }
         return MessagesAXProcess(identity: processIdentity, root: root)
     }
     func replace(_ level: String) {
@@ -1712,27 +3615,125 @@ private final class FakeReactionDriver: MessagesReactionAXDriving {
         default: break
         }
     }
+    func installCustomChooser(emoji: String, query: String, position: Int = 0, supportsSkinToneVariants: Bool = false) {
+        emojiSearchPlans[emoji] = MessagesCustomEmojiSearchPlan(query: query, position: position,
+                                                               supportsSkinToneVariants: supportsSkinToneVariants)
+        customCandidate.axDescription = emoji
+        customCandidate.axValue = emoji
+        customCandidate.axTitle = emoji
+        customVisibleButton.id = emoji
+        customVisibleButton.isSelected = false
+        customLauncher.parentNode = window
+        customSearchField.parentNode = customPopover
+        customCandidate.parentNode = customPopover
+        customVisibleButton.parentNode = picker
+        if !window.nodes.contains(where: { $0.sameIdentity(as: customLauncher) }) {
+            window.nodes.append(customLauncher)
+        }
+    }
+}
+
+
+
+private final class FakeBadAXElement: MessagesAXElement {
+    func sameIdentity(as other: any MessagesAXElement) -> Bool { false }
+    func role(deadline: WorkerDeadline) throws -> String { throw MessagesReactionAXError.unknownAXValue }
+    func identifier(deadline: WorkerDeadline) throws -> String? { throw MessagesReactionAXError.unknownAXValue }
+    func axDescription(deadline: WorkerDeadline) throws -> String? { throw MessagesReactionAXError.unknownAXValue }
+    func axValue(deadline: WorkerDeadline) throws -> String? { throw MessagesReactionAXError.unknownAXValue }
+    func candidateValueText(deadline: WorkerDeadline) throws -> String? { throw MessagesReactionAXError.unknownAXValue }
+    func axTitle(deadline: WorkerDeadline) throws -> String? { throw MessagesReactionAXError.unknownAXValue }
+    func subrole(deadline: WorkerDeadline) throws -> String? { throw MessagesReactionAXError.unknownAXValue }
+    func enabled(deadline: WorkerDeadline) throws -> Bool? { throw MessagesReactionAXError.unknownAXValue }
+    func selected(deadline: WorkerDeadline) throws -> Bool? { throw MessagesReactionAXError.unknownAXValue }
+    func window(deadline: WorkerDeadline) throws -> (any MessagesAXElement)? { throw MessagesReactionAXError.unknownAXValue }
+    func directWindows(limit: Int, deadline: WorkerDeadline) throws -> [any MessagesAXElement] { throw MessagesReactionAXError.unknownAXValue }
+    func parent(deadline: WorkerDeadline) throws -> (any MessagesAXElement)? { throw MessagesReactionAXError.unknownAXValue }
+    func processIdentifier(deadline: WorkerDeadline) throws -> Int32? { throw MessagesReactionAXError.unknownAXValue }
+    func valueSettable(deadline: WorkerDeadline) throws -> Bool? { throw MessagesReactionAXError.unknownAXValue }
+    func actions(deadline: WorkerDeadline) throws -> [String] { throw MessagesReactionAXError.unknownAXValue }
+    func children(limit: Int, deadline: WorkerDeadline) throws -> [any MessagesAXElement] { throw MessagesReactionAXError.unknownAXValue }
+    func childrenInNavigationOrder(limit: Int, deadline: WorkerDeadline) throws -> [any MessagesAXElement]? { throw MessagesReactionAXError.unknownAXValue }
+    func linkedElements(limit: Int, deadline: WorkerDeadline) throws -> [any MessagesAXElement] { throw MessagesReactionAXError.unknownAXValue }
+    func setValue(_ value: String, deadline: WorkerDeadline) throws { throw MessagesReactionAXError.unknownAXValue }
+    func performAction(named name: String, deadline: WorkerDeadline) throws { throw MessagesReactionAXError.unknownAXValue }
+}
+
+private func configureAXUnknownCustomCandidateProof(_ driver: FakeReactionDriver, emoji: String) {
+    driver.customCandidate.roleName = "AXUnknown"
+    driver.customCandidate.axSubrole = nil
+    driver.customCandidate.isEnabled = nil
+    driver.customCandidate.actionNames = ["AXPress"]
+    driver.customCandidate.axDescription = emoji
+    driver.customCandidate.axValue = nil
+    driver.customCandidate.axTitle = nil
+    let glyph = glyphProofNode(emoji: emoji, parent: driver.customCandidate, processID: driver.processIdentity.pid)
+    driver.customCandidate.nodes = [glyph]
+}
+
+private func glyphProofNode(emoji: String, parent: FakeAXNode, processID: Int32) -> FakeAXNode {
+    let glyph = FakeAXNode(role: "AXStaticText")
+    glyph.axValue = emoji
+    glyph.axDescription = nil
+    glyph.axTitle = nil
+    glyph.isEnabled = true
+    glyph.actionNames = []
+    glyph.parentNode = parent
+    glyph.processID = processID
+    return glyph
+}
+
+private enum FakeCandidateTextOverride {
+    case known(String?)
+    case error(MessagesReactionAXError)
 }
 
 private final class FakeAXNode: MessagesAXElement {
     var identity = UUID()
     var roleName: String
     var id: String?
+    var axDescription: String?
+    var axValue: String?
+    var axTitle: String?
+    var axSubrole: String?
+    var candidateValueOverride: FakeCandidateTextOverride?
+    var isEnabled: Bool? = true
+    var isValueSettable: Bool? = true
+    var processID: Int32? = FakeReactionDriver.identity.pid
     var isSelected: Bool?
     var actionNames: [String]
     var nodes: [any MessagesAXElement]
+    var navigationNodes: [any MessagesAXElement]?
+    var navigationReadError: MessagesReactionAXError?
+    var navigationRelationshipChanged = false
+    var childrenRelationshipChanged = false
     var links: [any MessagesAXElement] = []
     weak var owningWindow: (any MessagesAXElement)?
+    weak var parentNode: (any MessagesAXElement)?
+    var directWindowNodes: [any MessagesAXElement]?
+    var directWindowsError: MessagesReactionAXError?
+    var directWindowsRelationshipChanged = false
+    var directWindowsMalformed = false
+    var onDirectWindowsRead: ((WorkerDeadline) -> Void)?
+    var onDirectWindowsCountRead: (() -> Void)?
     var windowError: MessagesReactionAXError?
     var linkError: MessagesReactionAXError?
     var onLinkedElements: (() -> Void)?
+    var onProcessIdentifierRead: ((Int32?) -> Void)?
     var performed: [String] = []
     var readError: MessagesReactionAXError?
+    var childrenReadError: MessagesReactionAXError?
     var selectedError: MessagesReactionAXError?
     var onSelectedRead: (() -> Void)?
+    var onActionsRead: (() -> Void)?
     var onChildren: (() -> Void)?
     var onChildrenRead: ((WorkerDeadline) -> Void)?
     var onAction: ((String) throws -> Void)?
+    var onSetValue: ((String) -> Void)?
+    var onValueRead: (() throws -> String?)?
+    var setValueError: MessagesReactionAXError?
+    var setValues: [String] = []
+    var currentValue: String?
 
     init(role: String, id: String? = nil, selected: Bool? = nil,
          actions: [String] = [], children: [any MessagesAXElement] = []) {
@@ -1741,6 +3742,27 @@ private final class FakeAXNode: MessagesAXElement {
     func clone() -> FakeAXNode {
         let copy = FakeAXNode(role: roleName, id: id, selected: isSelected, actions: actionNames, children: nodes)
         copy.owningWindow = owningWindow
+        copy.axDescription = axDescription
+        copy.axValue = axValue
+        copy.axTitle = axTitle
+        copy.axSubrole = axSubrole
+        copy.candidateValueOverride = candidateValueOverride
+        copy.isEnabled = isEnabled
+        copy.isValueSettable = isValueSettable
+        copy.processID = processID
+        copy.navigationNodes = navigationNodes
+        copy.navigationReadError = navigationReadError
+        copy.navigationRelationshipChanged = navigationRelationshipChanged
+        copy.childrenRelationshipChanged = childrenRelationshipChanged
+        copy.directWindowNodes = directWindowNodes
+        copy.directWindowsError = directWindowsError
+        copy.directWindowsRelationshipChanged = directWindowsRelationshipChanged
+        copy.directWindowsMalformed = directWindowsMalformed
+        copy.onDirectWindowsRead = onDirectWindowsRead
+        copy.onDirectWindowsCountRead = onDirectWindowsCountRead
+        copy.onProcessIdentifierRead = onProcessIdentifierRead
+        copy.childrenReadError = childrenReadError
+        copy.parentNode = parentNode
         return copy
     }
     func sameIdentity(as other: any MessagesAXElement) -> Bool {
@@ -1753,6 +3775,31 @@ private final class FakeAXNode: MessagesAXElement {
     }
     func role(deadline: WorkerDeadline) throws -> String { try check(deadline); return roleName }
     func identifier(deadline: WorkerDeadline) throws -> String? { try check(deadline); return id }
+    func axDescription(deadline: WorkerDeadline) throws -> String? { try check(deadline); return axDescription }
+    func axValue(deadline: WorkerDeadline) throws -> String? {
+        try check(deadline)
+        if let override = try onValueRead?() { return override }
+        return currentValue ?? axValue
+    }
+    func candidateValueText(deadline: WorkerDeadline) throws -> String? {
+        try check(deadline)
+        switch candidateValueOverride {
+        case .known(let value): return value
+        case .error(let error): throw error
+        case nil: return try axValue(deadline: deadline)
+        }
+    }
+    func axTitle(deadline: WorkerDeadline) throws -> String? { try check(deadline); return axTitle }
+    func subrole(deadline: WorkerDeadline) throws -> String? { try check(deadline); return axSubrole }
+    func enabled(deadline: WorkerDeadline) throws -> Bool? { try check(deadline); return isEnabled }
+    func parent(deadline: WorkerDeadline) throws -> (any MessagesAXElement)? { try check(deadline); return parentNode }
+    func processIdentifier(deadline: WorkerDeadline) throws -> Int32? {
+        try check(deadline)
+        let value = processID
+        onProcessIdentifierRead?(value)
+        return value
+    }
+    func valueSettable(deadline: WorkerDeadline) throws -> Bool? { try check(deadline); return isValueSettable }
     func selected(deadline: WorkerDeadline) throws -> Bool? {
         try check(deadline)
         if let selectedError { throw selectedError }
@@ -1760,18 +3807,56 @@ private final class FakeAXNode: MessagesAXElement {
         onSelectedRead?()
         return value
     }
-    func actions(deadline: WorkerDeadline) throws -> [String] { try check(deadline); return actionNames }
+    func actions(deadline: WorkerDeadline) throws -> [String] {
+        try check(deadline)
+        onActionsRead?()
+        return actionNames
+    }
     func window(deadline: WorkerDeadline) throws -> (any MessagesAXElement)? {
         try check(deadline)
         if let windowError { throw windowError }
         return owningWindow
     }
+    func directWindows(limit: Int, deadline: WorkerDeadline) throws -> [any MessagesAXElement] {
+        try check(deadline)
+        onDirectWindowsRead?(deadline)
+        if let directWindowsError { throw directWindowsError }
+        if directWindowsRelationshipChanged { throw MessagesReactionAXError.targetDrift }
+        let initial = try currentDirectWindows(limit: limit, deadline: deadline)
+        onDirectWindowsCountRead?()
+        if directWindowsMalformed { throw MessagesReactionAXError.unknownAXValue }
+        guard initial.count <= limit else { throw MessagesReactionAXError.traversalLimit }
+        let copied = initial
+        let final = try currentDirectWindows(limit: limit, deadline: deadline)
+        onDirectWindowsCountRead?()
+        guard final.count == initial.count else { throw MessagesReactionAXError.targetDrift }
+        return copied
+    }
+    private func currentDirectWindows(limit: Int, deadline: WorkerDeadline) throws -> [any MessagesAXElement] {
+        try check(deadline)
+        let values = directWindowNodes ?? nodes.filter { element in
+            (element as? FakeAXNode)?.roleName == "AXWindow"
+        }
+        guard values.count <= limit else { throw MessagesReactionAXError.traversalLimit }
+        return values
+    }
     func children(limit: Int, deadline: WorkerDeadline) throws -> [any MessagesAXElement] {
         try check(deadline)
         onChildren?()
+        if let childrenReadError { throw childrenReadError }
+        let relationshipChanged = childrenRelationshipChanged
         onChildrenRead?(deadline)
+        if relationshipChanged { throw MessagesTargetDrift(.relationshipCountChanged) }
         guard nodes.count <= limit else { throw MessagesReactionAXError.traversalLimit }
         return nodes
+    }
+    func childrenInNavigationOrder(limit: Int, deadline: WorkerDeadline) throws -> [any MessagesAXElement]? {
+        try check(deadline)
+        if let navigationReadError { throw navigationReadError }
+        if navigationRelationshipChanged { throw MessagesReactionAXError.targetDrift }
+        guard let navigationNodes else { return nil }
+        guard navigationNodes.count <= limit else { throw MessagesReactionAXError.traversalLimit }
+        return navigationNodes
     }
     func linkedElements(limit: Int, deadline: WorkerDeadline) throws -> [any MessagesAXElement] {
         try check(deadline)
@@ -1779,6 +3864,13 @@ private final class FakeAXNode: MessagesAXElement {
         if let linkError { throw linkError }
         guard links.count <= limit else { throw MessagesReactionAXError.traversalLimit }
         return links
+    }
+    func setValue(_ value: String, deadline: WorkerDeadline) throws {
+        try check(deadline)
+        if let setValueError { throw setValueError }
+        setValues.append(value)
+        currentValue = value
+        onSetValue?(value)
     }
     func performAction(named name: String, deadline: WorkerDeadline) throws {
         try check(deadline)

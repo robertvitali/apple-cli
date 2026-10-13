@@ -1,5 +1,6 @@
 import ApplicationServices
 import AppKit
+import Carbon.HIToolbox.Events
 import Foundation
 import AppleKit
 
@@ -150,6 +151,50 @@ enum MessagesReactionACKDetail {
     }
 }
 
+enum MessagesTargetDriftReason: String {
+    case relationshipCountChanged = "relationship-count-changed"
+    case windowMismatch = "window-mismatch"
+    case pickerMismatch = "picker-mismatch"
+    case buttonMismatch = "button-mismatch"
+    case selectedStateChanged = "selected-state-changed"
+    case pickerStillPresent = "picker-still-present"
+    case missingTranscript = "missing-transcript"
+    case missingRetainedMessage = "missing-retained-message"
+    case replacedTranscript = "replaced-transcript"
+    case retainedMessageActionMissing = "retained-message-action-missing"
+}
+
+struct MessagesTargetDrift: Error {
+    let reason: MessagesTargetDriftReason?
+
+    init(_ reason: MessagesTargetDriftReason? = nil) {
+        self.reason = reason
+    }
+}
+
+private enum MessagesVerificationPath: String {
+    case exactExisting = "exact-existing"
+    case customChooser = "custom-chooser"
+}
+
+private enum MessagesVerificationFailureKind: String {
+    case discoveryDrift = "discovery-drift"
+    case validationDrift = "validation-drift"
+    case desiredStateMismatch = "desired-state-mismatch"
+}
+
+private struct MessagesVerificationFailure: Error {
+    let path: MessagesVerificationPath
+    let kind: MessagesVerificationFailureKind
+    let reason: MessagesTargetDriftReason?
+
+    var detail: String {
+        let base = "\(path.rawValue)-verify-\(kind.rawValue)"
+        guard let reason else { return base }
+        return "\(base)-\(reason.rawValue)"
+    }
+}
+
 enum MessagesReactionAXError: String, Error, CustomStringConvertible, CaseIterable {
     case invalidPayload = "invalid-payload"
     case deadlineExpired = "deadline-expired"
@@ -175,6 +220,7 @@ enum MessagesReactionAXError: String, Error, CustomStringConvertible, CaseIterab
     case postPressVerifyRouteDrift = "post-press-verify-route-drift"
     case postPressVerifyActionMissing = "post-press-verify-action-missing"
     case postPressVerifyPickerStateDrift = "post-press-verify-picker-state-drift"
+    case customChooserPostSelectionUnselected = "custom-chooser-post-selection-unselected"
     var description: String { rawValue }
 }
 
@@ -187,11 +233,23 @@ protocol MessagesAXElement: AnyObject {
     func sameIdentity(as other: any MessagesAXElement) -> Bool
     func role(deadline: WorkerDeadline) throws -> String
     func identifier(deadline: WorkerDeadline) throws -> String?
+    func axDescription(deadline: WorkerDeadline) throws -> String?
+    func axValue(deadline: WorkerDeadline) throws -> String?
+    func candidateValueText(deadline: WorkerDeadline) throws -> String?
+    func axTitle(deadline: WorkerDeadline) throws -> String?
+    func subrole(deadline: WorkerDeadline) throws -> String?
+    func enabled(deadline: WorkerDeadline) throws -> Bool?
     func selected(deadline: WorkerDeadline) throws -> Bool?
     func window(deadline: WorkerDeadline) throws -> (any MessagesAXElement)?
+    func directWindows(limit: Int, deadline: WorkerDeadline) throws -> [any MessagesAXElement]
+    func parent(deadline: WorkerDeadline) throws -> (any MessagesAXElement)?
+    func processIdentifier(deadline: WorkerDeadline) throws -> Int32?
+    func valueSettable(deadline: WorkerDeadline) throws -> Bool?
     func actions(deadline: WorkerDeadline) throws -> [String]
     func children(limit: Int, deadline: WorkerDeadline) throws -> [any MessagesAXElement]
+    func childrenInNavigationOrder(limit: Int, deadline: WorkerDeadline) throws -> [any MessagesAXElement]?
     func linkedElements(limit: Int, deadline: WorkerDeadline) throws -> [any MessagesAXElement]
+    func setValue(_ value: String, deadline: WorkerDeadline) throws
     func performAction(named name: String, deadline: WorkerDeadline) throws
 }
 
@@ -206,9 +264,26 @@ struct MessagesAXProcess {
     let root: any MessagesAXElement
 }
 
+struct MessagesCustomEmojiSearchPlan: Equatable {
+    let query: String
+    let position: Int
+    let supportsSkinToneVariants: Bool
+}
+
+enum MessagesCustomEmojiChooserKey: Equatable {
+    case downArrow
+    case rightArrow
+    case returnKey
+}
+
 protocol MessagesReactionAXDriving: AnyObject {
     func checkAccessibilityTrusted(prompt: Bool) -> Bool
     func reactActionTitles(deadline: WorkerDeadline) throws -> [String]
+    func customEmojiSearchPlan(for emoji: String, deadline: WorkerDeadline) throws -> MessagesCustomEmojiSearchPlan
+    func pressCustomEmojiChooserKey(_ key: MessagesCustomEmojiChooserKey, process: MessagesAXProcess, deadline: WorkerDeadline) throws
+    func messagesProcessIsFrontmost(_ process: MessagesAXProcess, deadline: WorkerDeadline) throws -> Bool
+    func focusedElement(deadline: WorkerDeadline) throws -> (any MessagesAXElement)?
+    func detachedCustomEmojiPopover(process: MessagesAXProcess, deadline: WorkerDeadline) throws -> (any MessagesAXElement)?
     func openMessages(url: URL, deadline: WorkerDeadline) throws -> MessagesAXProcess
     func canonicalMessagesProcess(deadline: WorkerDeadline) throws -> MessagesAXProcess
 }
@@ -297,6 +372,18 @@ struct MessagesReactionAXAutomation {
         case present
         case absent
     }
+    private enum RetainedRouteDiscovery {
+        case available(Route)
+        case unavailable(MessagesTargetDriftReason)
+    }
+    private enum PickerResolution {
+        case exact(any MessagesAXElement, any MessagesAXElement, Bool)
+        case customChooserChanged((any MessagesAXElement)?)
+    }
+    private struct CustomEmojiCandidate {
+        let element: any MessagesAXElement
+        let actions: [String]
+    }
     private enum AXFailureStage: String {
         case preflight = "ax-failure-preflight"
         case open = "ax-failure-open"
@@ -308,14 +395,61 @@ struct MessagesReactionAXAutomation {
         case postPress = "ax-failure-post-press"
         case cleanup = "ax-failure-cleanup"
         case verification = "ax-failure-verification"
+
+        var targetDriftComponent: String {
+            String(rawValue.dropFirst("ax-failure-".count))
+        }
     }
     private struct StagedAXFailure: Error {
         let stage: AXFailureStage
+    }
+    private struct StagedTargetDrift: Error {
+        let stage: AXFailureStage
+        let reason: MessagesTargetDriftReason?
+
+        var detail: String {
+            let base = "target-drift-\(stage.targetDriftComponent)"
+            guard let reason else { return base }
+            return "\(base)-\(reason.rawValue)"
+        }
+    }
+    private enum CustomChooserAXFailurePhase: String {
+        case pickerRead = "picker-read"
+        case existingButton = "existing-button"
+        case routeValidation = "route-validation"
+        case launchDiscovery = "launch-discovery"
+        case query
+        case preexistingCheck = "preexisting-check"
+        case launchRevalidation = "launch-revalidation"
+        case launchPress = "launch-press"
+        case detachedDiscovery = "detached-discovery"
+        case popover
+        case searchDiscovery = "search-discovery"
+        case searchPrecondition = "search-precondition"
+        case searchWrite = "search-write"
+        case searchReadback = "search-readback"
+        case candidateWait = "candidate-wait"
+        case candidateRead = "candidate-read"
+        case candidateRevalidation = "candidate-revalidation"
+        case candidatePress = "candidate-press"
+        case postSelection = "post-selection"
+    }
+    private struct CustomChooserAXFailure: Error {
+        let phase: CustomChooserAXFailurePhase
+        var detail: String { "ax-failure-custom-chooser-\(phase.rawValue)" }
+    }
+    private struct CustomChooserReactionUnavailable: Error {
+        let phase: CustomChooserAXFailurePhase
+        var detail: String { "reaction-unavailable-custom-chooser-\(phase.rawValue)" }
     }
 
     func apply(_ request: MessagesReactionRequest, deadline: WorkerDeadline) throws -> MessagesReactionAXOutcome {
         do { return try execute(request, deadline: deadline) }
         catch let error as StagedAXFailure { return .failed(error.stage.rawValue) }
+        catch let error as StagedTargetDrift { return .refused(error.detail) }
+        catch let error as CustomChooserAXFailure { return .failed(error.detail) }
+        catch let error as CustomChooserReactionUnavailable { return .refused(error.detail) }
+        catch let error as MessagesVerificationFailure { return .refused(error.detail) }
         catch let error as MessagesReactionAXError {
             if error == .deadlineExpired || error == .axFailure { return .failed(error.description) }
             return .refused(error.description)
@@ -349,13 +483,24 @@ struct MessagesReactionAXAutomation {
             try route.selected.performAction(named: action, deadline: deadline)
             try checkDeadline(deadline)
 
-            // Exact picker identity is the sole custom route. No chooser, search,
-            // skin-tone folding, character picker, or positional fallback exists.
             stage = .pickerReadiness
-            let (picker, button, initialSelected) = try waitForPickerButton(route: route, titles: titles,
-                                                                            identifier: request.reaction.pickerIdentifier,
-                                                                            experimentalUIHandoff: request.experimentalUIHandoff,
-                                                                            deadline: deadline)
+            let resolution = try waitForPickerButtonOrCustomChooser(route: route, titles: titles,
+                                                                    request: request, deadline: deadline)
+            if case .customChooserChanged(let picker) = resolution {
+                if let picker {
+                    stage = .cleanup
+                    try cancelOwnedPicker(route: route, titles: titles, picker: picker,
+                                          experimentalUIHandoff: request.experimentalUIHandoff, deadline: deadline)
+                }
+                stage = .verification
+                try verifyRetainedStateAfterPickerDismissal(request: request, titles: titles,
+                                                            originalRoute: route, desiredSelected: true,
+                                                            path: .customChooser, deadline: deadline)
+                return .ack(MessagesReactionACKDetail.verified(operation: request.operation, changed: true))
+            }
+            guard case .exact(let picker, let button, let initialSelected) = resolution else {
+                throw MessagesReactionAXError.reactionUnavailable
+            }
             stage = .prePress
             let selected = try validatePostMenuPicker(route: route, titles: titles, picker: picker, button: button,
                                                       initialSelected: initialSelected,
@@ -398,10 +543,21 @@ struct MessagesReactionAXAutomation {
             }
             stage = .verification
             try verifyRetainedStateAfterPickerDismissal(request: request, titles: titles,
-                                                        originalRoute: route, desiredSelected: desiredSelected, deadline: deadline)
+                                                        originalRoute: route, desiredSelected: desiredSelected,
+                                                        path: .exactExisting, deadline: deadline)
             return .ack(MessagesReactionACKDetail.verified(operation: request.operation, changed: true))
+        } catch let error as CustomChooserAXFailure {
+            throw error
+        } catch let error as CustomChooserReactionUnavailable {
+            throw error
         } catch MessagesReactionAXError.axFailure {
             throw StagedAXFailure(stage: stage)
+        } catch MessagesReactionAXError.targetDrift {
+            throw StagedTargetDrift(stage: stage, reason: nil)
+        } catch let error as MessagesTargetDrift {
+            throw StagedTargetDrift(stage: stage, reason: error.reason)
+        } catch let error as MessagesVerificationFailure {
+            throw error
         } catch let error as MessagesReactionAXError {
             throw error
         } catch {
@@ -427,19 +583,14 @@ struct MessagesReactionAXAutomation {
     }
 
     private func captureRoute(process: MessagesAXProcess, titles: [String], deadline: WorkerDeadline) throws -> Route {
-        try checkProcess(process, deadline: deadline)
-        let windows = try collect(from: process.root, deadline: deadline) { _, role, _ in
-            role == "AXWindow"
-        }
+        let rootWindow = try uniqueRootWindow(process: process, deadline: deadline)
         var candidates: [(any MessagesAXElement, any MessagesAXElement)] = []
-        for window in windows {
-            let transcripts = try collect(from: window, window: window, deadline: deadline) { _, role, identifier in
-                // macOS 27 exposes AXGroup. Retain the previous AXCollection
-                // shape only with the same exact native transcript identifier.
-                (role == "AXGroup" || role == "AXCollection") && identifier == "TranscriptCollectionView"
-            }
-            candidates.append(contentsOf: transcripts.map { (window, $0) })
+        let transcripts = try collect(from: rootWindow, window: rootWindow, deadline: deadline) { _, role, identifier in
+            // macOS 27 exposes AXGroup. Retain the previous AXCollection
+            // shape only with the same exact native transcript identifier.
+            (role == "AXGroup" || role == "AXCollection") && identifier == "TranscriptCollectionView"
         }
+        candidates.append(contentsOf: transcripts.map { (rootWindow, $0) })
         guard candidates.count == 1 else { throw MessagesReactionAXError.targetDrift }
         let (window, transcript) = candidates[0]
         let messages = try collect(from: transcript, window: window, deadline: deadline) { element, _, _ in
@@ -471,75 +622,95 @@ struct MessagesReactionAXAutomation {
               route.selected.sameIdentity(as: current.selected) else { throw MessagesReactionAXError.targetDrift }
         try checkDeadline(deadline)
     }
+    private func verificationFailure(_ path: MessagesVerificationPath, _ kind: MessagesVerificationFailureKind, _ reason: MessagesTargetDriftReason? = nil) -> MessagesVerificationFailure {
+        MessagesVerificationFailure(path: path, kind: kind, reason: reason)
+    }
+
     private func waitForRetainedRouteAfterPickerDismissal(process: MessagesAXProcess, titles: [String],
                                                           originalRoute: Route, deadline: WorkerDeadline) throws -> Route {
         let started = readinessNow()
         let cap: UInt64 = 8_000_000_000
         let localDeadline = WorkerDeadline.millisecondsFromNow(8_000)
         let readDeadline = deadline.remainingNanoseconds <= localDeadline.remainingNanoseconds ? deadline : localDeadline
+        var lastUnavailableReason: MessagesTargetDriftReason?
         for attempt in 0...160 {
             try checkDeadline(deadline)
-            if readDeadline.expired { throw MessagesReactionAXError.postPressVerifyRouteDrift }
-            if let route = try availableRetainedRouteAfterPickerDismissal(process: process, titles: titles,
-                                                                          originalRoute: originalRoute,
-                                                                          requirePickerAbsent: false,
-                                                                          deadline: readDeadline) {
-                return route
+            if readDeadline.expired {
+                if let lastUnavailableReason { throw MessagesTargetDrift(lastUnavailableReason) }
+                throw MessagesReactionAXError.postPressVerifyRouteDrift
             }
-            guard attempt < 160 else { throw MessagesReactionAXError.postPressVerifyRouteDrift }
+            switch try availableRetainedRouteAfterPickerDismissal(process: process, titles: titles,
+                                                                  originalRoute: originalRoute,
+                                                                  requirePickerAbsent: false,
+                                                                  deadline: readDeadline) {
+            case .available(let route):
+                return route
+            case .unavailable(let reason):
+                lastUnavailableReason = reason
+            }
+            guard attempt < 160 else {
+                if let lastUnavailableReason { throw MessagesTargetDrift(lastUnavailableReason) }
+                throw MessagesReactionAXError.postPressVerifyRouteDrift
+            }
             let now = readinessNow()
-            guard now >= started, now - started < cap else { throw MessagesReactionAXError.postPressVerifyRouteDrift }
+            guard now >= started, now - started < cap else {
+                if let lastUnavailableReason { throw MessagesTargetDrift(lastUnavailableReason) }
+                throw MessagesReactionAXError.postPressVerifyRouteDrift
+            }
             let pause = min(50_000_000, cap - (now - started), readDeadline.remainingNanoseconds)
             readinessPause(pause)
         }
+        if let lastUnavailableReason { throw MessagesTargetDrift(lastUnavailableReason) }
         throw MessagesReactionAXError.postPressVerifyRouteDrift
     }
 
     private func requireRetainedRouteAfterPickerDismissal(process: MessagesAXProcess, titles: [String],
                                                           originalRoute: Route, deadline: WorkerDeadline) throws -> Route {
-        guard let route = try availableRetainedRouteAfterPickerDismissal(process: process, titles: titles,
-                                                                         originalRoute: originalRoute,
-                                                                         requirePickerAbsent: true,
-                                                                         deadline: deadline) else {
-            throw MessagesReactionAXError.postPressVerifyRouteDrift
+        switch try availableRetainedRouteAfterPickerDismissal(process: process, titles: titles,
+                                                              originalRoute: originalRoute,
+                                                              requirePickerAbsent: true,
+                                                              deadline: deadline) {
+        case .available(let route):
+            return route
+        case .unavailable(let reason):
+            throw MessagesTargetDrift(reason)
         }
-        return route
     }
 
     private func availableRetainedRouteAfterPickerDismissal(process: MessagesAXProcess, titles: [String],
                                                             originalRoute: Route, requirePickerAbsent: Bool,
-                                                            deadline: WorkerDeadline) throws -> Route? {
+                                                            deadline: WorkerDeadline) throws -> RetainedRouteDiscovery {
         do {
             try checkProcess(process, deadline: deadline)
-            let windows = try collect(from: process.root, deadline: deadline) { _, role, _ in
-                role == "AXWindow"
-            }
-            guard windows.count == 1, let window = windows.first, window.sameIdentity(as: originalRoute.window) else {
-                throw MessagesReactionAXError.postPressVerifyRouteDrift
-            }
-            if requirePickerAbsent, try availablePicker(in: window, deadline: deadline) != nil {
-                throw MessagesReactionAXError.postPressVerifyRouteDrift
+            let window = try uniqueRootWindow(process: process, deadline: deadline)
+            guard window.sameIdentity(as: originalRoute.window) else { throw MessagesTargetDrift(.windowMismatch) }
+            let picker = try availablePicker(in: window, deadline: deadline)
+            if requirePickerAbsent, picker != nil {
+                throw MessagesTargetDrift(.pickerStillPresent)
             }
             let transcripts = try collect(from: window, window: window, deadline: deadline) { _, role, identifier in
                 (role == "AXGroup" || role == "AXCollection") && identifier == "TranscriptCollectionView"
             }
-            guard !transcripts.isEmpty else { return nil }
-            guard transcripts.count == 1, let transcript = transcripts.first,
-                  transcript.sameIdentity(as: originalRoute.transcript) else {
-                throw MessagesReactionAXError.postPressVerifyRouteDrift
+            guard !transcripts.isEmpty else {
+                return .unavailable(picker == nil ? .missingTranscript : .pickerStillPresent)
+            }
+            guard transcripts.count == 1, let transcript = transcripts.first else {
+                throw MessagesTargetDrift(.relationshipCountChanged)
+            }
+            guard transcript.sameIdentity(as: originalRoute.transcript) else {
+                throw MessagesTargetDrift(.replacedTranscript)
             }
             let messages = try collect(from: transcript, window: window, deadline: deadline) { element, _, _ in
-                guard element.sameIdentity(as: originalRoute.selected) else { return false }
-                guard try reactAction(on: element, titles: titles, deadline: deadline) != nil else {
-                    throw MessagesReactionAXError.postPressVerifyActionMissing
-                }
-                return true
+                element.sameIdentity(as: originalRoute.selected)
             }
-            guard !messages.isEmpty else { return nil }
-            guard messages.count == 1 else { throw MessagesReactionAXError.postPressVerifyRouteDrift }
-            return Route(process: process, window: window, transcript: transcript, selected: messages[0])
-        } catch MessagesReactionAXError.postPressVerifyActionMissing {
-            throw MessagesReactionAXError.postPressVerifyActionMissing
+            guard !messages.isEmpty else { return .unavailable(.missingRetainedMessage) }
+            guard messages.count == 1 else { throw MessagesTargetDrift(.relationshipCountChanged) }
+            guard try reactAction(on: messages[0], titles: titles, deadline: deadline) != nil else {
+                throw MessagesTargetDrift(.retainedMessageActionMissing)
+            }
+            return .available(Route(process: process, window: window, transcript: transcript, selected: messages[0]))
+        } catch let error as MessagesTargetDrift {
+            throw error
         } catch MessagesReactionAXError.postPressVerifyRouteDrift {
             throw MessagesReactionAXError.postPressVerifyRouteDrift
         } catch MessagesReactionAXError.targetDrift {
@@ -566,6 +737,8 @@ struct MessagesReactionAXAutomation {
                 window = try uniqueCurrentWindow(route, deadline: readDeadline)
             } catch MessagesReactionAXError.targetDrift {
                 throw MessagesReactionAXError.postPressWindowDrift
+            } catch _ as MessagesTargetDrift {
+                throw MessagesReactionAXError.postPressWindowDrift
             }
             if let currentPicker = try availablePicker(in: window, deadline: readDeadline) {
                 guard picker.sameIdentity(as: currentPicker) else {
@@ -585,6 +758,8 @@ struct MessagesReactionAXAutomation {
                     _ = try uniqueCurrentWindow(route, deadline: readDeadline)
                 } catch MessagesReactionAXError.targetDrift {
                     throw MessagesReactionAXError.postPressWindowDrift
+                } catch _ as MessagesTargetDrift {
+                    throw MessagesReactionAXError.postPressWindowDrift
                 }
                 return .absent
             }
@@ -599,11 +774,25 @@ struct MessagesReactionAXAutomation {
 
     private func verifyRetainedStateAfterPickerDismissal(request: MessagesReactionRequest, titles: [String],
                                                          originalRoute: Route, desiredSelected: Bool,
+                                                         path: MessagesVerificationPath,
                                                          deadline: WorkerDeadline) throws {
-        _ = try waitForRetainedRouteAfterPickerDismissal(process: originalRoute.process, titles: titles,
-                                                         originalRoute: originalRoute, deadline: deadline)
-        let route = try requireRetainedRouteAfterPickerDismissal(process: originalRoute.process, titles: titles,
+        let route: Route
+        do {
+            _ = try waitForRetainedRouteAfterPickerDismissal(process: originalRoute.process, titles: titles,
+                                                             originalRoute: originalRoute, deadline: deadline)
+            route = try requireRetainedRouteAfterPickerDismissal(process: originalRoute.process, titles: titles,
                                                                  originalRoute: originalRoute, deadline: deadline)
+        } catch let error as MessagesTargetDrift {
+            throw verificationFailure(path, .discoveryDrift, error.reason)
+        } catch MessagesReactionAXError.postPressVerifyRouteDrift {
+            throw verificationFailure(path, .discoveryDrift)
+        } catch MessagesReactionAXError.targetDrift {
+            throw verificationFailure(path, .discoveryDrift)
+        } catch MessagesReactionAXError.pickerUnavailable {
+            throw verificationFailure(path, .discoveryDrift)
+        } catch MessagesReactionAXError.ambiguousSelectedMessage {
+            throw verificationFailure(path, .discoveryDrift)
+        }
         guard let action = try reactAction(on: route.selected, titles: titles, deadline: deadline) else {
             throw MessagesReactionAXError.postPressVerifyActionMissing
         }
@@ -614,8 +803,10 @@ struct MessagesReactionAXAutomation {
                                                                        identifier: request.reaction.pickerIdentifier,
                                                                        experimentalUIHandoff: request.experimentalUIHandoff,
                                                                        deadline: deadline)
+        } catch let error as MessagesTargetDrift {
+            throw verificationFailure(path, .validationDrift, error.reason)
         } catch MessagesReactionAXError.targetDrift {
-            throw MessagesReactionAXError.postPressVerifyPickerStateDrift
+            throw verificationFailure(path, .validationDrift)
         }
         let selected: Bool
         do {
@@ -624,10 +815,12 @@ struct MessagesReactionAXAutomation {
                                                   identifier: request.reaction.pickerIdentifier,
                                                   experimentalUIHandoff: request.experimentalUIHandoff,
                                                   deadline: deadline)
+        } catch let error as MessagesTargetDrift {
+            throw verificationFailure(path, .validationDrift, error.reason)
         } catch MessagesReactionAXError.targetDrift {
-            throw MessagesReactionAXError.postPressVerifyPickerStateDrift
+            throw verificationFailure(path, .validationDrift)
         }
-        guard selected == desiredSelected else { throw MessagesReactionAXError.postPressVerifyPickerStateDrift }
+        guard selected == desiredSelected else { throw verificationFailure(path, .desiredStateMismatch) }
         try cancelOwnedPicker(route: route, titles: titles, picker: picker,
                               experimentalUIHandoff: request.experimentalUIHandoff, deadline: deadline)
     }
@@ -639,6 +832,8 @@ struct MessagesReactionAXAutomation {
             do {
                 window = try uniqueCurrentWindow(route, deadline: deadline)
             } catch MessagesReactionAXError.targetDrift {
+                throw MessagesReactionAXError.pickerCancelIdentityDrift
+            } catch _ as MessagesTargetDrift {
                 throw MessagesReactionAXError.pickerCancelIdentityDrift
             }
         } else {
@@ -675,6 +870,8 @@ struct MessagesReactionAXAutomation {
                 window = try uniqueCurrentWindow(route, deadline: readDeadline)
             } catch MessagesReactionAXError.targetDrift {
                 throw MessagesReactionAXError.pickerDismissalWindowDrift
+            } catch _ as MessagesTargetDrift {
+                throw MessagesReactionAXError.pickerDismissalWindowDrift
             }
             if let picker = try availablePicker(in: window, deadline: readDeadline) {
                 guard picker.sameIdentity(as: retainedPicker) else {
@@ -684,6 +881,8 @@ struct MessagesReactionAXAutomation {
                 do {
                     _ = try uniqueCurrentWindow(route, deadline: readDeadline)
                 } catch MessagesReactionAXError.targetDrift {
+                    throw MessagesReactionAXError.pickerDismissalWindowDrift
+                } catch _ as MessagesTargetDrift {
                     throw MessagesReactionAXError.pickerDismissalWindowDrift
                 }
                 return
@@ -699,13 +898,24 @@ struct MessagesReactionAXAutomation {
 
 
     private func uniqueCurrentWindow(_ route: Route, deadline: WorkerDeadline) throws -> any MessagesAXElement {
-        try checkProcess(route.process, deadline: deadline)
-        let windows = try collect(from: route.process.root, deadline: deadline) { _, role, _ in
-            role == "AXWindow"
+        let window = try uniqueRootWindow(process: route.process, deadline: deadline)
+        guard window.sameIdentity(as: route.window) else {
+            throw MessagesTargetDrift(.windowMismatch)
         }
-        guard windows.count == 1, let window = windows.first, window.sameIdentity(as: route.window) else {
-            throw MessagesReactionAXError.targetDrift
+        return window
+    }
+
+    private func uniqueRootWindow(process: MessagesAXProcess, deadline: WorkerDeadline) throws -> any MessagesAXElement {
+        try checkProcess(process, deadline: deadline)
+        let windows = try process.root.directWindows(limit: maxChildren, deadline: deadline)
+        guard windows.count == 1, let window = windows.first else {
+            throw MessagesTargetDrift(.windowMismatch)
         }
+        guard try window.role(deadline: deadline) == "AXWindow",
+              try window.processIdentifier(deadline: deadline) == process.identity.pid else {
+            throw MessagesTargetDrift(.windowMismatch)
+        }
+        try checkProcess(process, deadline: deadline)
         return window
     }
 
@@ -721,11 +931,11 @@ struct MessagesReactionAXAutomation {
             window = route.window
         }
         let currentPicker = try uniquePicker(in: window, deadline: deadline)
-        guard picker.sameIdentity(as: currentPicker) else { throw MessagesReactionAXError.targetDrift }
+        guard picker.sameIdentity(as: currentPicker) else { throw MessagesTargetDrift(.pickerMismatch) }
         let currentButton = try uniqueButton(in: currentPicker, window: window, identifier: identifier, deadline: deadline)
-        guard button.sameIdentity(as: currentButton),
-              let selected = try button.selected(deadline: deadline), selected == initialSelected else {
-            throw MessagesReactionAXError.targetDrift
+        guard button.sameIdentity(as: currentButton) else { throw MessagesTargetDrift(.buttonMismatch) }
+        guard let selected = try button.selected(deadline: deadline), selected == initialSelected else {
+            throw MessagesTargetDrift(.selectedStateChanged)
         }
         return selected
     }
@@ -803,6 +1013,630 @@ struct MessagesReactionAXAutomation {
         throw unavailable
     }
 
+    private func waitForPickerButtonOrCustomChooser(route: Route, titles: [String], request: MessagesReactionRequest,
+                                                    deadline: WorkerDeadline) throws -> PickerResolution {
+        if request.operation == .set, case .custom(let emoji) = request.reaction {
+            let picker = try withCustomChooserAXFailure(.pickerRead) {
+                try waitForPicker(route: route, titles: titles,
+                                  experimentalUIHandoff: request.experimentalUIHandoff,
+                                  deadline: deadline)
+            }
+            if let button = try withCustomChooserAXFailure(.existingButton, {
+                try availableButton(in: picker, window: route.window, identifier: emoji, deadline: deadline)
+            }) {
+                let selected = try withCustomChooserAXFailure(.existingButton) {
+                    try button.selected(deadline: deadline)
+                }
+                guard let selected else { throw MessagesReactionAXError.unknownAXValue }
+                if selected { return .exact(picker, button, selected) }
+            }
+            let remainingPicker = try setCustomReactionWithChooser(route: route, titles: titles, emoji: emoji,
+                picker: picker, experimentalUIHandoff: request.experimentalUIHandoff, deadline: deadline)
+            return .customChooserChanged(remainingPicker)
+        }
+        let exact = try waitForPickerButton(route: route, titles: titles,
+                                           identifier: request.reaction.pickerIdentifier,
+                                           experimentalUIHandoff: request.experimentalUIHandoff,
+                                           deadline: deadline)
+        return .exact(exact.0, exact.1, exact.2)
+    }
+
+    private func waitForPicker(route: Route, titles: [String], experimentalUIHandoff: Bool,
+                               deadline: WorkerDeadline) throws -> any MessagesAXElement {
+        let started = readinessNow()
+        let cap: UInt64 = 1_500_000_000
+        let localDeadline = WorkerDeadline.millisecondsFromNow(1_500)
+        let readDeadline = deadline.remainingNanoseconds <= localDeadline.remainingNanoseconds ? deadline : localDeadline
+        var lastAvailabilityRelationshipDrift: MessagesTargetDrift?
+        for attempt in 0..<31 {
+            try checkDeadline(deadline)
+            guard !readDeadline.expired else {
+                if let lastAvailabilityRelationshipDrift { throw lastAvailabilityRelationshipDrift }
+                throw MessagesReactionAXError.pickerUnavailable
+            }
+            let window: any MessagesAXElement
+            if attempt > 0 {
+                if experimentalUIHandoff {
+                    window = try uniqueCurrentWindow(route, deadline: readDeadline)
+                } else {
+                    try revalidate(route, titles: titles, deadline: readDeadline)
+                    window = route.window
+                }
+            } else {
+                window = route.window
+            }
+            do {
+                if let picker = try availablePicker(in: window, deadline: readDeadline) {
+                    return picker
+                }
+                lastAvailabilityRelationshipDrift = nil
+            } catch let drift as MessagesTargetDrift where drift.reason == .relationshipCountChanged {
+                lastAvailabilityRelationshipDrift = drift
+                guard attempt < 30 else { throw drift }
+            }
+            guard attempt < 30 else {
+                if let lastAvailabilityRelationshipDrift { throw lastAvailabilityRelationshipDrift }
+                throw MessagesReactionAXError.pickerUnavailable
+            }
+            let now = readinessNow()
+            guard now >= started, now - started < cap else {
+                if let lastAvailabilityRelationshipDrift { throw lastAvailabilityRelationshipDrift }
+                throw MessagesReactionAXError.pickerUnavailable
+            }
+            let pause = min(50_000_000, cap - (now - started), readDeadline.remainingNanoseconds)
+            try checkDeadline(readDeadline)
+            readinessPause(pause)
+        }
+        throw MessagesReactionAXError.pickerUnavailable
+    }
+
+    private func validateChooserRoute(_ route: Route, titles: [String], experimentalUIHandoff: Bool,
+                                      deadline: WorkerDeadline) throws {
+        if experimentalUIHandoff {
+            _ = try uniqueCurrentWindow(route, deadline: deadline)
+        } else {
+            try revalidate(route, titles: titles, deadline: deadline)
+        }
+    }
+
+    // Only read-only readiness is retried. Unknown types, ownership drift and
+    // incomplete traversals are never converted to absence or retried as writes.
+    private func withCustomChooserAXFailure<T>(_ phase: CustomChooserAXFailurePhase,
+                                               _ body: () throws -> T) throws -> T {
+        do { return try body() }
+        catch MessagesReactionAXError.axFailure { throw CustomChooserAXFailure(phase: phase) }
+    }
+
+    private func withCustomChooserReactionUnavailable<T>(_ phase: CustomChooserAXFailurePhase,
+                                                         _ body: () throws -> T) throws -> T {
+        do { return try body() }
+        catch MessagesReactionAXError.reactionUnavailable { throw CustomChooserReactionUnavailable(phase: phase) }
+    }
+
+    private func waitForChooserRead<T>(deadline: WorkerDeadline, globalDeadline: WorkerDeadline? = nil,
+                                       read: (WorkerDeadline) throws -> T) throws -> T {
+        let global = globalDeadline ?? deadline
+        let local = WorkerDeadline.millisecondsFromNow(1_500)
+        let bound = deadline.remainingNanoseconds <= local.remainingNanoseconds ? deadline : local
+        let start = readinessNow()
+        var lastError = MessagesReactionAXError.reactionUnavailable
+        var lastAXFailurePhase: CustomChooserAXFailurePhase?
+        var lastUnavailablePhase: CustomChooserAXFailurePhase?
+        for attempt in 0..<31 {
+            try checkDeadline(global)
+            guard !bound.expired else {
+                if let lastAXFailurePhase { throw CustomChooserAXFailure(phase: lastAXFailurePhase) }
+                if let lastUnavailablePhase { throw CustomChooserReactionUnavailable(phase: lastUnavailablePhase) }
+                throw lastError
+            }
+            do { return try read(bound) }
+            catch let error as CustomChooserAXFailure {
+                lastError = .axFailure
+                lastAXFailurePhase = error.phase
+                lastUnavailablePhase = nil
+                let now = readinessNow()
+                guard attempt < 30, now >= start, now - start < 1_500_000_000 else { throw error }
+                try checkDeadline(global)
+                guard !bound.expired else { throw error }
+                readinessPause(min(50_000_000, bound.remainingNanoseconds))
+            } catch let error as CustomChooserReactionUnavailable {
+                lastError = .reactionUnavailable
+                lastAXFailurePhase = nil
+                lastUnavailablePhase = error.phase
+                let now = readinessNow()
+                guard attempt < 30, now >= start, now - start < 1_500_000_000 else { throw error }
+                try checkDeadline(global)
+                guard !bound.expired else { throw error }
+                readinessPause(min(50_000_000, bound.remainingNanoseconds))
+            } catch let error as MessagesReactionAXError {
+                if error == .deadlineExpired {
+                    try checkDeadline(global)
+                    if let lastAXFailurePhase { throw CustomChooserAXFailure(phase: lastAXFailurePhase) }
+                    if let lastUnavailablePhase { throw CustomChooserReactionUnavailable(phase: lastUnavailablePhase) }
+                    throw lastError
+                }
+                guard error == .reactionUnavailable || error == .pickerUnavailable || error == .axFailure else { throw error }
+                lastError = error
+                lastAXFailurePhase = nil
+                lastUnavailablePhase = nil
+                let now = readinessNow()
+                guard attempt < 30, now >= start, now - start < 1_500_000_000 else { throw error }
+                try checkDeadline(global)
+                guard !bound.expired else { throw error }
+                readinessPause(min(50_000_000, bound.remainingNanoseconds))
+            }
+        }
+        if let lastUnavailablePhase { throw CustomChooserReactionUnavailable(phase: lastUnavailablePhase) }
+        throw MessagesReactionAXError.reactionUnavailable
+    }
+
+    private func setCustomReactionWithChooser(route: Route, titles: [String], emoji: String,
+                                              picker: any MessagesAXElement, experimentalUIHandoff: Bool,
+                                              deadline: WorkerDeadline) throws -> (any MessagesAXElement)? {
+        try withCustomChooserAXFailure(.routeValidation) {
+            try validateChooserRoute(route, titles: titles, experimentalUIHandoff: experimentalUIHandoff, deadline: deadline)
+        }
+        guard try withCustomChooserAXFailure(.launchDiscovery, {
+            try uniquePicker(in: route.window, deadline: deadline).sameIdentity(as: picker)
+        }) else {
+            throw MessagesReactionAXError.targetDrift
+        }
+        try withCustomChooserAXFailure(.launchDiscovery) {
+            try requireProcessOwned(picker, process: route.process, deadline: deadline)
+        }
+        let launcher = try withCustomChooserReactionUnavailable(.launchDiscovery) {
+            try withCustomChooserAXFailure(.launchDiscovery) {
+                try uniqueCustomEmojiLauncher(picker: picker, process: route.process,
+                                              phase: .launchDiscovery, deadline: deadline)
+            }
+        }
+        let searchPlan = try withCustomChooserReactionUnavailable(.query) {
+            try withCustomChooserAXFailure(.query) {
+                try driver.customEmojiSearchPlan(for: emoji, deadline: deadline)
+            }
+        }
+        guard MessagesReactionActionTitleResolver.valid(searchPlan.query),
+              searchPlan.position >= 0, searchPlan.position < 256 else {
+            throw CustomChooserReactionUnavailable(phase: .query)
+        }
+        guard !searchPlan.supportsSkinToneVariants else {
+            throw CustomChooserReactionUnavailable(phase: .query)
+        }
+        let query = searchPlan.query
+        // A pre-existing chooser cannot be attributed to this launcher action.
+        // Only verified absence permits launch; ambiguity and read errors throw.
+        guard try withCustomChooserReactionUnavailable(.preexistingCheck, {
+            try withCustomChooserAXFailure(.preexistingCheck) {
+                try driver.detachedCustomEmojiPopover(process: route.process, deadline: deadline) == nil
+            }
+        }) else {
+            throw CustomChooserReactionUnavailable(phase: .preexistingCheck)
+        }
+        try withCustomChooserAXFailure(.launchRevalidation) {
+            try validateChooserRoute(route, titles: titles, experimentalUIHandoff: experimentalUIHandoff, deadline: deadline)
+            guard try uniquePicker(in: route.window, deadline: deadline).sameIdentity(as: picker),
+                  try withCustomChooserReactionUnavailable(.launchRevalidation, {
+                      try uniqueCustomEmojiLauncher(picker: picker, process: route.process,
+                                                    phase: .launchRevalidation, deadline: deadline).sameIdentity(as: launcher)
+                  }),
+                  try launcher.actions(deadline: deadline).contains("AXPress") else {
+                throw MessagesReactionAXError.targetDrift
+            }
+        }
+        try withCustomChooserAXFailure(.launchPress) {
+            try launcher.performAction(named: "AXPress", deadline: deadline)
+        }
+        let (popover, search) = try waitForChooserRead(deadline: deadline) { bound in
+            try withCustomChooserAXFailure(.routeValidation) {
+                try validateChooserRoute(route, titles: titles, experimentalUIHandoff: experimentalUIHandoff, deadline: bound)
+            }
+            let popover = try uniqueCustomEmojiPopover(route: route, picker: picker,
+                                                       detachedPhase: .detachedDiscovery,
+                                                       popoverPhase: .popover, deadline: bound)
+            let search = try uniqueCustomEmojiSearchField(in: popover, process: route.process,
+                                                          phase: .searchDiscovery, deadline: bound)
+            guard try withCustomChooserAXFailure(.searchPrecondition, {
+                try search.enabled(deadline: bound) == true && search.valueSettable(deadline: bound) == true &&
+                    search.axValue(deadline: bound) == ""
+            }) else { throw CustomChooserReactionUnavailable(phase: .searchPrecondition) }
+            return (popover, search)
+        }
+        // Leave time to restore only our own search on preselection failure.
+        let reserve: UInt64 = 1_000_000_000
+        guard deadline.remainingNanoseconds > reserve + 100_000_000 else { throw MessagesReactionAXError.deadlineExpired }
+        let workDeadline = WorkerDeadline.millisecondsFromNow((deadline.remainingNanoseconds - reserve) / 1_000_000)
+        var selectionStarted = false
+        do {
+            try withCustomChooserAXFailure(.candidateWait) {
+                try validateChooserRoute(route, titles: titles, experimentalUIHandoff: experimentalUIHandoff, deadline: workDeadline)
+                try validateChooserOwnership(route: route, picker: picker, popover: popover, search: search,
+                                             expectedQuery: "", phase: .candidateWait, deadline: workDeadline)
+            }
+            // AXSet may take effect even when it reports failure. Cleanup covers
+            // both the write and its readback, but never clears a user's value.
+            try withCustomChooserAXFailure(.searchWrite) {
+                try search.setValue(query, deadline: workDeadline)
+            }
+            let didReadBack = try withCustomChooserAXFailure(.searchReadback) {
+                try search.axValue(deadline: workDeadline)?.utf8.elementsEqual(query.utf8) == true
+            }
+            guard didReadBack else { throw MessagesReactionAXError.targetDrift }
+            let candidate = try waitForChooserRead(deadline: workDeadline, globalDeadline: deadline) { bound in
+                try validateChooserOwnership(route: route, picker: picker, popover: popover, search: search,
+                                             expectedQuery: query, phase: .candidateWait, deadline: bound)
+                return try uniqueCustomEmojiCandidate(in: popover, process: route.process, emoji: emoji,
+                                                      phase: .candidateRead, deadline: bound)
+            }
+            try withCustomChooserAXFailure(.candidateRevalidation) {
+                try validateChooserRoute(route, titles: titles, experimentalUIHandoff: experimentalUIHandoff, deadline: workDeadline)
+                try validateChooserOwnership(route: route, picker: picker, popover: popover, search: search,
+                                             expectedQuery: query, phase: .candidateRevalidation, deadline: workDeadline)
+            }
+            let final = try uniqueCustomEmojiCandidate(in: popover, process: route.process, emoji: emoji,
+                                                       phase: .candidateRevalidation, deadline: workDeadline)
+            guard final.element.sameIdentity(as: candidate.element), final.actions.contains("AXPress") else {
+                throw MessagesReactionAXError.targetDrift
+            }
+            try withCustomChooserAXFailure(.candidateRevalidation) {
+                try checkProcess(route.process, deadline: workDeadline)
+            }
+            let stillOwnsQuery = try withCustomChooserAXFailure(.candidateRevalidation) {
+                try search.axValue(deadline: workDeadline)?.utf8.elementsEqual(query.utf8) == true
+            }
+            guard stillOwnsQuery else { throw MessagesReactionAXError.targetDrift }
+            try requirePopoverMembership(candidate.element, popover: popover, process: route.process,
+                                         phase: .candidateRevalidation, deadline: workDeadline)
+            let candidateStillMatches = try withCustomChooserAXFailure(.candidateRevalidation) {
+                try customEmojiCandidateMatches(candidate.element, process: route.process, emoji: emoji,
+                                                phase: .candidateRevalidation, deadline: workDeadline)
+            }
+            guard candidateStillMatches else { throw MessagesReactionAXError.targetDrift }
+            try checkDeadline(workDeadline)
+            try pressCustomEmojiCandidateUsingKeyboard(searchPlan, route: route, titles: titles, picker: picker,
+                                                       popover: popover, search: search, candidate: candidate,
+                                                       emoji: emoji, experimentalUIHandoff: experimentalUIHandoff,
+                                                       deadline: workDeadline) { selectionStarted = true }
+        } catch {
+            if !selectionStarted {
+                // Cleanup is best effort; any failure preserves the original
+                // refusal and the parent operation's uncertain state.
+                do {
+                    try validateChooserOwnership(route: route, picker: picker, popover: popover, search: search,
+                                                 expectedQuery: query, phase: .candidateWait, deadline: deadline)
+                    try search.setValue("", deadline: deadline)
+                    guard try search.axValue(deadline: deadline) == "" else { throw MessagesReactionAXError.targetDrift }
+                } catch { /* Leave uncertain state for reconciliation. */ }
+            }
+            throw error
+        }
+        var observedUnselected = false
+        do {
+            return try waitForChooserRead(deadline: deadline) { bound in
+                try withCustomChooserAXFailure(.postSelection) {
+                    try validateChooserRoute(route, titles: titles, experimentalUIHandoff: experimentalUIHandoff, deadline: bound)
+                }
+                guard let currentPicker = try withCustomChooserAXFailure(.postSelection, {
+                    try availablePicker(in: route.window, deadline: bound)
+                }) else { return nil }
+                guard let button = try withCustomChooserReactionUnavailable(.postSelection, {
+                    try withCustomChooserAXFailure(.postSelection) {
+                        try availableButton(in: currentPicker, window: route.window, identifier: emoji, deadline: bound)
+                    }
+                }) else {
+                    throw CustomChooserReactionUnavailable(phase: .postSelection)
+                }
+                let selected = try withCustomChooserAXFailure(.postSelection) {
+                    try button.selected(deadline: bound)
+                }
+                guard let selected else { throw MessagesReactionAXError.unknownAXValue }
+                guard selected else {
+                    observedUnselected = true
+                    throw CustomChooserReactionUnavailable(phase: .postSelection)
+                }
+                return currentPicker
+            }
+        } catch is CustomChooserReactionUnavailable where observedUnselected {
+            throw MessagesReactionAXError.customChooserPostSelectionUnselected
+        }
+    }
+
+    private func pressCustomEmojiCandidateUsingKeyboard(_ plan: MessagesCustomEmojiSearchPlan, route: Route,
+                                                        titles: [String], picker: any MessagesAXElement,
+                                                        popover: any MessagesAXElement, search: any MessagesAXElement,
+                                                        candidate: CustomEmojiCandidate, emoji: String,
+                                                        experimentalUIHandoff: Bool, deadline: WorkerDeadline,
+                                                        markSelectionStarted: () -> Void) throws {
+        try customChooserPause(750_000_000, deadline: deadline)
+        let keys = try customChooserSelectionKeys(position: plan.position)
+        for index in keys.indices {
+            let key = keys[index]
+            if key == .returnKey { try customChooserPause(100_000_000, deadline: deadline) }
+            try validateCustomEmojiSelectionKeyPreconditions(route: route, titles: titles, picker: picker,
+                                                             popover: popover, search: search, candidate: candidate,
+                                                             emoji: emoji, expectedQuery: plan.query,
+                                                             experimentalUIHandoff: experimentalUIHandoff,
+                                                             deadline: deadline)
+            try withCustomChooserAXFailure(.candidatePress) {
+                markSelectionStarted()
+                try driver.pressCustomEmojiChooserKey(key, process: route.process, deadline: deadline)
+            }
+            if key != .returnKey, index + 1 < keys.count { try customChooserPause(50_000_000, deadline: deadline) }
+        }
+    }
+
+    private func customChooserSelectionKeys(position: Int) throws -> [MessagesCustomEmojiChooserKey] {
+        guard position >= 0, position < 256 else { throw CustomChooserReactionUnavailable(phase: .query) }
+        let (downArrows, rightArrows) = position.quotientAndRemainder(dividingBy: 6)
+        return [.downArrow] + Array(repeating: .downArrow, count: downArrows)
+            + Array(repeating: .rightArrow, count: rightArrows) + [.returnKey]
+    }
+
+    private func customChooserPause(_ nanoseconds: UInt64, deadline: WorkerDeadline) throws {
+        try checkDeadline(deadline)
+        guard deadline.remainingNanoseconds > nanoseconds else { throw MessagesReactionAXError.deadlineExpired }
+        readinessPause(nanoseconds)
+        try checkDeadline(deadline)
+    }
+
+    private func validateCustomEmojiSelectionKeyPreconditions(route: Route, titles: [String],
+                                                             picker: any MessagesAXElement,
+                                                             popover: any MessagesAXElement,
+                                                             search: any MessagesAXElement,
+                                                             candidate: CustomEmojiCandidate, emoji: String,
+                                                             expectedQuery: String, experimentalUIHandoff: Bool,
+                                                             deadline: WorkerDeadline) throws {
+        try withCustomChooserAXFailure(.candidateRevalidation) {
+            try validateChooserRoute(route, titles: titles, experimentalUIHandoff: experimentalUIHandoff, deadline: deadline)
+            try validateCustomChooserKeyboardFocus(route: route, popover: popover, deadline: deadline)
+            try validateChooserOwnership(route: route, picker: picker, popover: popover, search: search,
+                                         expectedQuery: expectedQuery, phase: .candidateRevalidation, deadline: deadline)
+        }
+        let current = try uniqueCustomEmojiCandidate(in: popover, process: route.process, emoji: emoji,
+                                                     phase: .candidateRevalidation, deadline: deadline)
+        guard current.element.sameIdentity(as: candidate.element), current.actions.contains("AXPress") else {
+            throw MessagesReactionAXError.targetDrift
+        }
+    }
+
+    private func validateCustomChooserKeyboardFocus(route: Route, popover: any MessagesAXElement,
+                                                    deadline: WorkerDeadline) throws {
+        guard try driver.messagesProcessIsFrontmost(route.process, deadline: deadline) else {
+            throw MessagesReactionAXError.targetDrift
+        }
+        guard let focused = try driver.focusedElement(deadline: deadline) else { return }
+        try requireProcessOwned(focused, process: route.process, deadline: deadline)
+        try requirePopoverMembership(focused, popover: popover, process: route.process,
+                                     phase: .candidateRevalidation, deadline: deadline)
+    }
+
+    private func validateChooserOwnership(route: Route, picker: any MessagesAXElement,
+                                         popover: any MessagesAXElement, search: any MessagesAXElement,
+                                         expectedQuery: String, phase: CustomChooserAXFailurePhase,
+                                         deadline: WorkerDeadline) throws {
+        let current = try uniqueCustomEmojiPopover(route: route, picker: picker,
+                                                   detachedPhase: phase, popoverPhase: phase, deadline: deadline)
+        guard current.sameIdentity(as: popover) else { throw MessagesReactionAXError.targetDrift }
+        let currentSearch = try uniqueCustomEmojiSearchField(in: current, process: route.process, phase: phase, deadline: deadline)
+        guard currentSearch.sameIdentity(as: search),
+              try withCustomChooserAXFailure(phase, { try search.enabled(deadline: deadline) == true }),
+              try withCustomChooserAXFailure(phase, { try search.valueSettable(deadline: deadline) == true }),
+              try withCustomChooserAXFailure(phase, {
+                  try search.axValue(deadline: deadline)?.utf8.elementsEqual(expectedQuery.utf8) == true
+              }) else {
+            throw MessagesReactionAXError.targetDrift
+        }
+        try withCustomChooserAXFailure(phase) { try checkProcess(route.process, deadline: deadline) }
+    }
+
+    private func requirePopoverMembership(_ element: any MessagesAXElement, popover: any MessagesAXElement,
+                                          process: MessagesAXProcess, phase: CustomChooserAXFailurePhase? = nil,
+                                          deadline: WorkerDeadline) throws {
+        var current = element
+        var seen: [any MessagesAXElement] = []
+        for _ in 0..<17 {
+            if let phase {
+                try withCustomChooserAXFailure(phase) { try requireProcessOwned(current, process: process, deadline: deadline) }
+            } else {
+                try requireProcessOwned(current, process: process, deadline: deadline)
+            }
+            if current.sameIdentity(as: popover) { return }
+            guard !seen.contains(where: { $0.sameIdentity(as: current) }),
+                  let parent = try (phase.map { phase in try withCustomChooserAXFailure(phase) { try current.parent(deadline: deadline) } } ?? current.parent(deadline: deadline)) else { throw MessagesReactionAXError.targetDrift }
+            seen.append(current)
+            current = parent
+        }
+        throw MessagesReactionAXError.traversalLimit
+    }
+
+    private func uniqueCustomEmojiLauncher(picker: any MessagesAXElement, process: MessagesAXProcess,
+                                           phase: CustomChooserAXFailurePhase,
+                                           deadline: WorkerDeadline) throws -> any MessagesAXElement {
+        guard let parent = try picker.parent(deadline: deadline) else {
+            throw CustomChooserReactionUnavailable(phase: phase)
+        }
+        let siblings = try parent.children(limit: maxChildren, deadline: deadline)
+        let matches = try siblings.filter { element in
+            try checkDeadline(deadline)
+            guard !element.sameIdentity(as: picker), try element.role(deadline: deadline) == "AXButton",
+                  try element.identifier(deadline: deadline) == nil,
+                  try element.axDescription(deadline: deadline) == "Add custom emoji reaction",
+                  try element.enabled(deadline: deadline) == true else { return false }
+            try requireProcessOwned(element, process: process, deadline: deadline)
+            guard let elementParent = try element.parent(deadline: deadline), elementParent.sameIdentity(as: parent) else {
+                throw MessagesReactionAXError.targetDrift
+            }
+            return true
+        }
+        guard matches.count == 1, let match = matches.first else {
+            throw CustomChooserReactionUnavailable(phase: phase)
+        }
+        return match
+    }
+
+    private func uniqueCustomEmojiPopover(route: Route, picker: any MessagesAXElement,
+                                          detachedPhase: CustomChooserAXFailurePhase,
+                                          popoverPhase: CustomChooserAXFailurePhase,
+                                          deadline: WorkerDeadline) throws -> any MessagesAXElement {
+        try withCustomChooserAXFailure(detachedPhase) {
+            try checkProcess(route.process, deadline: deadline)
+        }
+        let popover = try withCustomChooserReactionUnavailable(detachedPhase) {
+            try withCustomChooserAXFailure(detachedPhase) {
+                try driver.detachedCustomEmojiPopover(process: route.process, deadline: deadline)
+            }
+        }
+        guard let popover else { throw CustomChooserReactionUnavailable(phase: detachedPhase) }
+        try withCustomChooserReactionUnavailable(popoverPhase) {
+            try withCustomChooserAXFailure(popoverPhase) {
+                guard try popover.role(deadline: deadline) == "AXPopover" else {
+                    throw MessagesReactionAXError.reactionUnavailable
+                }
+            }
+        }
+        try withCustomChooserAXFailure(popoverPhase) {
+            try requireProcessOwned(popover, process: route.process, deadline: deadline)
+        }
+        return popover
+    }
+
+    private func uniqueCustomEmojiSearchField(in popover: any MessagesAXElement, process: MessagesAXProcess,
+                                              phase: CustomChooserAXFailurePhase,
+                                              deadline: WorkerDeadline) throws -> any MessagesAXElement {
+        let matches = try withCustomChooserAXFailure(phase) {
+            // The search field is a direct chooser control. Walking result
+            // descendants here can exhaust the budget before a query is set.
+            let children: [any MessagesAXElement]
+            if let navigation = try popover.childrenInNavigationOrder(limit: maxChildren, deadline: deadline) {
+                children = navigation
+            } else {
+                children = try popover.children(limit: maxChildren, deadline: deadline)
+            }
+            guard children.count <= maxChildren else { throw MessagesReactionAXError.traversalLimit }
+            return try children.filter { element in
+                try checkDeadline(deadline)
+                try requireProcessOwned(element, process: process, deadline: deadline)
+                let role = try element.role(deadline: deadline)
+                guard role.utf8.count <= 128 else { throw MessagesReactionAXError.unknownAXValue }
+                guard role == "AXTextField" else { return false }
+                return try element.subrole(deadline: deadline) == "AXSearchField"
+            }
+        }
+        guard matches.count == 1, let match = matches.first else {
+            throw CustomChooserReactionUnavailable(phase: phase)
+        }
+        try withCustomChooserAXFailure(phase) {
+            guard let parent = try match.parent(deadline: deadline), parent.sameIdentity(as: popover) else {
+                throw MessagesReactionAXError.targetDrift
+            }
+        }
+        return match
+    }
+
+    private func uniqueCustomEmojiCandidate(in popover: any MessagesAXElement, process: MessagesAXProcess,
+                                            emoji: String, phase: CustomChooserAXFailurePhase,
+                                            deadline: WorkerDeadline) throws -> CustomEmojiCandidate {
+        let matches = try withCustomChooserAXFailure(phase) {
+            try collectPopoverNavigation(from: popover, process: process, deadline: deadline) { element, _ in
+                try customEmojiCandidateMatches(element, process: process, emoji: emoji, phase: phase, deadline: deadline)
+            }
+        }
+        guard matches.count == 1, let match = matches.first else {
+            throw CustomChooserReactionUnavailable(phase: phase)
+        }
+        try requirePopoverMembership(match, popover: popover, process: process, phase: phase, deadline: deadline)
+        let actions = try withCustomChooserAXFailure(phase) { try match.actions(deadline: deadline) }
+        return CustomEmojiCandidate(element: match, actions: actions)
+    }
+
+    private func customEmojiCandidateMatches(_ element: any MessagesAXElement, process: MessagesAXProcess,
+                                             emoji: String, phase: CustomChooserAXFailurePhase,
+                                             deadline: WorkerDeadline) throws -> Bool {
+        let fields = try [element.axDescription(deadline: deadline), element.candidateValueText(deadline: deadline),
+                          element.axTitle(deadline: deadline)].compactMap { $0 }
+        guard fields.contains(where: { $0.utf8.elementsEqual(emoji.utf8) }) else { return false }
+        let actions = try element.actions(deadline: deadline)
+        guard actions.contains("AXPress") else { return false }
+        let enabled = try element.enabled(deadline: deadline)
+        if enabled == true {
+            try requireProcessOwned(element, process: process, deadline: deadline)
+            return true
+        }
+        guard enabled == nil else { throw CustomChooserReactionUnavailable(phase: phase) }
+        guard actions == ["AXPress"],
+              try element.role(deadline: deadline) == "AXUnknown",
+              try element.subrole(deadline: deadline) == nil,
+              try element.axDescription(deadline: deadline)?.utf8.elementsEqual(emoji.utf8) == true else {
+            return false
+        }
+        try requireProcessOwned(element, process: process, deadline: deadline)
+        return try hasExactOwnedGlyphProof(in: element, process: process, emoji: emoji, deadline: deadline)
+    }
+
+    private func hasExactOwnedGlyphProof(in candidate: any MessagesAXElement, process: MessagesAXProcess,
+                                         emoji: String, deadline: WorkerDeadline) throws -> Bool {
+        let children: [any MessagesAXElement]
+        if let navigationChildren = try candidate.childrenInNavigationOrder(limit: maxChildren, deadline: deadline) {
+            children = navigationChildren
+        } else {
+            children = try candidate.children(limit: maxChildren, deadline: deadline)
+        }
+        guard children.count <= maxChildren else { throw MessagesReactionAXError.traversalLimit }
+        var matches: [any MessagesAXElement] = []
+        for child in children {
+            try checkDeadline(deadline)
+            try requireProcessOwned(child, process: process, deadline: deadline)
+            guard let parent = try child.parent(deadline: deadline), parent.sameIdentity(as: candidate) else {
+                throw MessagesReactionAXError.targetDrift
+            }
+            guard try child.role(deadline: deadline) == "AXStaticText",
+                  try child.subrole(deadline: deadline) == nil,
+                  try child.axValue(deadline: deadline)?.utf8.elementsEqual(emoji.utf8) == true else { continue }
+            matches.append(child)
+        }
+        guard matches.count == 1, let match = matches.first else { return false }
+        return try match.enabled(deadline: deadline) == true && match.actions(deadline: deadline).isEmpty
+    }
+
+    private func collectPopoverNavigation(from root: any MessagesAXElement, process: MessagesAXProcess, deadline: WorkerDeadline,
+                                          matching predicate: (any MessagesAXElement, String) throws -> Bool) throws -> [any MessagesAXElement] {
+        var discovered: [(element: any MessagesAXElement, depth: Int)] = [(root, 0)]
+        var cursor = 0
+        var matches: [any MessagesAXElement] = []
+        while cursor < discovered.count {
+            try checkDeadline(deadline)
+            let (next, depth) = discovered[cursor]
+            cursor += 1
+            try requireProcessOwned(next, process: process, deadline: deadline)
+            let role = try next.role(deadline: deadline)
+            guard role.utf8.count <= 128 else { throw MessagesReactionAXError.unknownAXValue }
+            if try predicate(next, role) { matches.append(next) }
+            let related: [any MessagesAXElement]
+            if let navigationChildren = try next.childrenInNavigationOrder(limit: maxChildren, deadline: deadline) {
+                related = navigationChildren
+            } else {
+                related = try next.children(limit: maxChildren, deadline: deadline)
+            }
+            guard related.count <= maxChildren else { throw MessagesReactionAXError.traversalLimit }
+            for candidate in related {
+                let known = try discovered.contains { entry in
+                    try checkDeadline(deadline)
+                    return entry.element.sameIdentity(as: candidate)
+                }
+                if known { continue }
+                guard discovered.count < 512, depth < 16 else { throw MessagesReactionAXError.traversalLimit }
+                discovered.append((candidate, depth + 1))
+            }
+        }
+        return matches
+    }
+
+    private func requireProcessOwned(_ element: any MessagesAXElement, process: MessagesAXProcess,
+                                     deadline: WorkerDeadline) throws {
+        guard let pid = try element.processIdentifier(deadline: deadline), pid == process.identity.pid else {
+            throw MessagesReactionAXError.targetDrift
+        }
+    }
+
     private func availablePicker(in root: any MessagesAXElement, deadline: WorkerDeadline) throws -> (any MessagesAXElement)? {
         let matches = try collect(from: root, window: root, deadline: deadline) { _, _, identifier in
             identifier == "TapbackPickerCollectionView"
@@ -866,7 +1700,7 @@ struct MessagesReactionAXAutomation {
                         throw MessagesReactionAXError.unknownAXValue
                     }
                     try checkDeadline(deadline)
-                    guard owner.sameIdentity(as: window) else { throw MessagesReactionAXError.targetDrift }
+                    guard owner.sameIdentity(as: window) else { throw MessagesTargetDrift(.windowMismatch) }
                 }
                 matches.append(next)
             }
@@ -939,6 +1773,134 @@ final class LiveMessagesReactionAXDriver: MessagesReactionAXDriving {
         let titles = try titleResolver.resolve(deadline: deadline)
         try checkDeadline(deadline)
         return titles
+    }
+
+    func customEmojiSearchPlan(for emoji: String, deadline: WorkerDeadline) throws -> MessagesCustomEmojiSearchPlan {
+        try CustomEmojiSearchResolver.searchPlan(for: emoji, deadline: deadline)
+    }
+
+    func pressCustomEmojiChooserKey(_ key: MessagesCustomEmojiChooserKey, process: MessagesAXProcess,
+                                    deadline: WorkerDeadline) throws {
+        try checkDeadline(deadline)
+        let current = try canonicalMessagesProcess(deadline: deadline)
+        guard current.identity == process.identity, current.root.sameIdentity(as: process.root) else {
+            throw MessagesReactionAXError.targetDrift
+        }
+        try LiveCustomEmojiKeyPresser(pid: process.identity.pid).press(key, deadline: deadline)
+        let after = try canonicalMessagesProcess(deadline: deadline)
+        guard after.identity == process.identity, after.root.sameIdentity(as: process.root) else {
+            throw MessagesReactionAXError.targetDrift
+        }
+    }
+
+    func messagesProcessIsFrontmost(_ process: MessagesAXProcess, deadline: WorkerDeadline) throws -> Bool {
+        try checkDeadline(deadline)
+        let identities = try NSRunningApplication.runningApplications(withBundleIdentifier: Self.bundleIdentifier).map(identity)
+        let identity = try Self.uniqueIdentity(identities)
+        guard identity == process.identity else { throw MessagesReactionAXError.targetDrift }
+        let frontmost = NSWorkspace.shared.frontmostApplication
+        try checkDeadline(deadline)
+        return frontmost?.processIdentifier == process.identity.pid && frontmost?.isActive == true
+    }
+
+    func focusedElement(deadline: WorkerDeadline) throws -> (any MessagesAXElement)? {
+        try checkDeadline(deadline)
+        let system = AXUIElementCreateSystemWide()
+        var raw: CFTypeRef?
+        let status = AXUIElementCopyAttributeValue(system, kAXFocusedUIElementAttribute as CFString, &raw)
+        try checkDeadline(deadline)
+        if status == .noValue || status == .attributeUnsupported { return nil }
+        guard status == .success, let element = raw, CFGetTypeID(element) == AXUIElementGetTypeID() else {
+            throw MessagesReactionAXError.axFailure
+        }
+        return LiveAXElement(element: element as! AXUIElement)
+    }
+
+    // Geometry is only a way to discover the detached search field. Every
+    // candidate must prove actual AX ownership and its native parent shape.
+    static func customChooserWindowPoints(_ raw: CFArray?, pid: Int32) throws -> [CGPoint] {
+        guard let raw, CFArrayGetCount(raw) <= 4096 else { throw MessagesReactionAXError.unknownAXValue }
+        func number(_ value: Any?) throws -> Double {
+            guard let value, CFGetTypeID(value as CFTypeRef) == CFNumberGetTypeID(),
+                  let n = value as? NSNumber, n.doubleValue.isFinite else { throw MessagesReactionAXError.unknownAXValue }
+            return n.doubleValue
+        }
+        var points: [CGPoint] = []
+        for item in raw as [AnyObject] {
+            guard CFGetTypeID(item) == CFDictionaryGetTypeID(), let info = item as? [String: Any] else {
+                throw MessagesReactionAXError.unknownAXValue
+            }
+            let owner = try number(info[kCGWindowOwnerPID as String])
+            guard owner.rounded() == owner, owner >= 0, owner <= Double(Int32.max) else {
+                throw MessagesReactionAXError.unknownAXValue
+            }
+            guard owner == Double(pid) else { continue }
+            guard let onscreen = info[kCGWindowIsOnscreen as String],
+                  CFGetTypeID(onscreen as CFTypeRef) == CFBooleanGetTypeID() else {
+                throw MessagesReactionAXError.unknownAXValue
+            }
+            guard (onscreen as? Bool) == true else { continue }
+            let alpha = try number(info[kCGWindowAlpha as String])
+            guard alpha >= 0, alpha <= 1 else { throw MessagesReactionAXError.unknownAXValue }
+            guard alpha > 0 else { continue }
+            guard let bounds = info[kCGWindowBounds as String],
+                  CFGetTypeID(bounds as CFTypeRef) == CFDictionaryGetTypeID(),
+                  let dict = bounds as? [String: Any] else { throw MessagesReactionAXError.unknownAXValue }
+            let x = try number(dict["X"]), y = try number(dict["Y"])
+            let width = try number(dict["Width"]), height = try number(dict["Height"])
+            guard width >= 0, height >= 0 else { throw MessagesReactionAXError.unknownAXValue }
+            guard (300...420).contains(width), (350...560).contains(height) else { continue }
+            let point = CGPoint(x: x + width / 2, y: y + 38)
+            guard Float(point.x).isFinite, Float(point.y).isFinite, points.count < 8 else {
+                throw MessagesReactionAXError.traversalLimit
+            }
+            points.append(point)
+        }
+        return points
+    }
+
+    func detachedCustomEmojiPopover(process: MessagesAXProcess,
+                                    deadline: WorkerDeadline) throws -> (any MessagesAXElement)? {
+        try checkDeadline(deadline)
+        let current = try canonicalMessagesProcess(deadline: deadline)
+        guard current.identity == process.identity, current.root.sameIdentity(as: process.root) else {
+            throw MessagesReactionAXError.targetDrift
+        }
+        let raw = CGWindowListCopyWindowInfo([.optionOnScreenOnly, .excludeDesktopElements], kCGNullWindowID)
+        try checkDeadline(deadline)
+        let points = try Self.customChooserWindowPoints(raw, pid: process.identity.pid)
+        let app = AXUIElementCreateApplication(process.identity.pid)
+        var matches: [(search: LiveAXElement, popover: any MessagesAXElement)] = []
+        for point in points {
+            try checkDeadline(deadline)
+            let timeout = Float(min(0.25, Double(deadline.remainingNanoseconds) / 2_000_000_000))
+            guard AXUIElementSetMessagingTimeout(app, timeout) == .success else { throw MessagesReactionAXError.axFailure }
+            var hit: AXUIElement?
+            let status = AXUIElementCopyElementAtPosition(app, Float(point.x), Float(point.y), &hit)
+            try checkDeadline(deadline)
+            if status == .noValue || status == .attributeUnsupported { continue }
+            guard status == .success, let hit else { throw MessagesReactionAXError.axFailure }
+            let search = LiveAXElement(element: hit)
+            guard try search.processIdentifier(deadline: deadline) == process.identity.pid else {
+                throw MessagesReactionAXError.targetDrift
+            }
+            guard try search.role(deadline: deadline) == "AXTextField",
+                  try search.subrole(deadline: deadline) == "AXSearchField" else { continue }
+            guard let parent = try search.parent(deadline: deadline),
+                  try parent.processIdentifier(deadline: deadline) == process.identity.pid,
+                  try parent.role(deadline: deadline) == "AXPopover" else {
+                throw MessagesReactionAXError.targetDrift
+            }
+            if !matches.contains(where: { $0.search.sameIdentity(as: search) && $0.popover.sameIdentity(as: parent) }) {
+                matches.append((search, parent))
+            }
+        }
+        guard matches.count <= 1 else { throw MessagesReactionAXError.reactionUnavailable }
+        let after = try canonicalMessagesProcess(deadline: deadline)
+        guard after.identity == process.identity, after.root.sameIdentity(as: process.root) else {
+            throw MessagesReactionAXError.targetDrift
+        }
+        return matches.first?.popover
     }
 
     private func identity(_ app: NSRunningApplication) throws -> MessagesAXProcessIdentity {
@@ -1051,14 +2013,80 @@ final class LiveAXElement: MessagesAXElement {
         return try Self.checkedString(value, limit: 2048)
     }
 
+    func axDescription(deadline: WorkerDeadline) throws -> String? {
+        guard let value = try attribute(kAXDescriptionAttribute, deadline: deadline) else { return nil }
+        return try Self.checkedString(value, limit: 2048)
+    }
+
+    func axValue(deadline: WorkerDeadline) throws -> String? {
+        guard let value = try attribute(kAXValueAttribute, deadline: deadline) else { return nil }
+        return try Self.checkedString(value, limit: 2048)
+    }
+
+    func axTitle(deadline: WorkerDeadline) throws -> String? {
+        guard let value = try attribute(kAXTitleAttribute, deadline: deadline) else { return nil }
+        return try Self.checkedString(value, limit: 2048)
+    }
+
+    func candidateValueText(deadline: WorkerDeadline) throws -> String? {
+        try Self.checkedCandidateValue(attribute(kAXValueAttribute, deadline: deadline))
+    }
+
+    static func checkedCandidateValue(_ value: CFTypeRef?) throws -> String? {
+        guard let value else { return nil }
+        let type = CFGetTypeID(value)
+        if type == CFBooleanGetTypeID() || type == CFNumberGetTypeID() { return nil }
+        return try checkedString(value, limit: 2048)
+    }
+
+    func subrole(deadline: WorkerDeadline) throws -> String? {
+        guard let value = try attribute(kAXSubroleAttribute, deadline: deadline) else { return nil }
+        return try Self.checkedString(value, limit: 128)
+    }
+
+    func enabled(deadline: WorkerDeadline) throws -> Bool? {
+        try Self.checkedBoolean(attribute(kAXEnabledAttribute, deadline: deadline))
+    }
+
     func selected(deadline: WorkerDeadline) throws -> Bool? {
         try Self.checkedBoolean(attribute(kAXSelectedAttribute, deadline: deadline))
     }
 
     func window(deadline: WorkerDeadline) throws -> (any MessagesAXElement)? {
+        try elementAttribute(kAXWindowAttribute, deadline: deadline)
+    }
+
+    func directWindows(limit: Int, deadline: WorkerDeadline) throws -> [any MessagesAXElement] {
+        try relationship(kAXWindowsAttribute, limit: limit, requireAvailable: true, deadline: deadline)
+    }
+
+    func parent(deadline: WorkerDeadline) throws -> (any MessagesAXElement)? {
+        try elementAttribute(kAXParentAttribute, deadline: deadline)
+    }
+
+    func processIdentifier(deadline: WorkerDeadline) throws -> Int32? {
+        try prepare(deadline)
+        var pid: pid_t = 0
+        let status = AXUIElementGetPid(element, &pid)
+        try checkDeadline(deadline)
+        guard status == .success, pid > 0 else { throw MessagesReactionAXError.axFailure }
+        return pid
+    }
+
+    func valueSettable(deadline: WorkerDeadline) throws -> Bool? {
+        try prepare(deadline)
+        var settable = DarwinBoolean(false)
+        let status = AXUIElementIsAttributeSettable(element, kAXValueAttribute as CFString, &settable)
+        try checkDeadline(deadline)
+        if status == .attributeUnsupported || status == .noValue { return nil }
+        guard status == .success else { throw MessagesReactionAXError.axFailure }
+        return settable.boolValue
+    }
+
+    private func elementAttribute(_ name: String, deadline: WorkerDeadline) throws -> LiveAXElement? {
         try prepare(deadline)
         var value: CFTypeRef?
-        let status = AXUIElementCopyAttributeValue(element, kAXWindowAttribute as CFString, &value)
+        let status = AXUIElementCopyAttributeValue(element, name as CFString, &value)
         try checkDeadline(deadline)
         return try Self.checkedWindow(status: status, value: value)
     }
@@ -1083,7 +2111,7 @@ final class LiveAXElement: MessagesAXElement {
 
     static func checkedString(_ value: CFTypeRef, limit: Int) throws -> String {
         guard CFGetTypeID(value) == CFStringGetTypeID(),
-              CFStringGetLength(value as! CFString) <= limit,
+              CFStringGetLength((value as! CFString)) <= limit,
               let string = value as? String, string.utf8.count <= limit else {
             throw MessagesReactionAXError.unknownAXValue
         }
@@ -1109,33 +2137,128 @@ final class LiveAXElement: MessagesAXElement {
         return try (names as [AnyObject]).map { try checkedString($0, limit: 2048) }
     }
 
-    static func validateChildCount(status: AXError, count: CFIndex, limit: Int) throws {
-        _ = try relationshipCount(status: status, count: count, limit: limit)
+    static func validateChildCount(status: AXError, count: CFIndex, limit: Int,
+                                   requireAvailable: Bool = false) throws {
+        _ = try relationshipCount(status: status, count: count, limit: limit, requireAvailable: requireAvailable)
     }
 
-    private static func relationshipCount(status: AXError, count: CFIndex, limit: Int) throws -> Int {
+    private static func relationshipCount(status: AXError, count: CFIndex, limit: Int,
+                                           requireAvailable: Bool = false) throws -> Int {
         guard limit >= 0 else { throw MessagesReactionAXError.traversalLimit }
-        if status == .attributeUnsupported || status == .noValue { return 0 }
+        if status == .attributeUnsupported || status == .noValue {
+            if requireAvailable { throw MessagesTargetDrift(.relationshipCountChanged) }
+            return 0
+        }
         guard status == .success, count >= 0 else { throw MessagesReactionAXError.axFailure }
         guard count <= limit else { throw MessagesReactionAXError.traversalLimit }
         return count
     }
 
     func children(limit: Int, deadline: WorkerDeadline) throws -> [any MessagesAXElement] {
-        try relationship(kAXChildrenAttribute, limit: limit, deadline: deadline)
+        try fullRelationship(kAXChildrenAttribute, limit: limit, deadline: deadline)
+    }
+
+    func childrenInNavigationOrder(limit: Int, deadline: WorkerDeadline) throws -> [any MessagesAXElement]? {
+        try optionalRelationship("AXChildrenInNavigationOrder", limit: limit, deadline: deadline)
     }
 
     func linkedElements(limit: Int, deadline: WorkerDeadline) throws -> [any MessagesAXElement] {
         try relationship(kAXLinkedUIElementsAttribute, limit: limit, deadline: deadline)
     }
 
-    private func relationship(_ name: String, limit: Int, deadline: WorkerDeadline) throws -> [any MessagesAXElement] {
+    static func checkedFullRelationship(initialStatus: AXError, initialCount: CFIndex, copiedValue: CFTypeRef?,
+                                        copyStatus: AXError, finalStatus: AXError, finalCount: CFIndex,
+                                        limit: Int, requireAvailable: Bool = false) throws -> [LiveAXElement] {
+        let expectedCount = try relationshipCount(status: initialStatus, count: initialCount, limit: limit,
+                                                  requireAvailable: requireAvailable)
+        var values: [AnyObject] = []
+        if expectedCount > 0 {
+            if copyStatus == .attributeUnsupported || copyStatus == .noValue {
+                throw MessagesTargetDrift(.relationshipCountChanged)
+            }
+            guard copyStatus == .success else { throw MessagesReactionAXError.axFailure }
+            guard let copiedValue, CFGetTypeID(copiedValue) == CFArrayGetTypeID() else {
+                throw MessagesReactionAXError.unknownAXValue
+            }
+            let array = copiedValue as! CFArray
+            guard CFArrayGetCount(array) == expectedCount else {
+                throw MessagesTargetDrift(.relationshipCountChanged)
+            }
+            values = array as [AnyObject]
+        }
+        let observedCount = try relationshipCount(status: finalStatus, count: finalCount, limit: limit,
+                                                  requireAvailable: requireAvailable)
+        guard observedCount == expectedCount else { throw MessagesTargetDrift(.relationshipCountChanged) }
+        return try values.map { value in
+            guard CFGetTypeID(value) == AXUIElementGetTypeID() else { throw MessagesReactionAXError.unknownAXValue }
+            return LiveAXElement(element: value as! AXUIElement)
+        }
+    }
+
+    private func fullRelationship(_ name: String, limit: Int, requireAvailable: Bool = false,
+                                  deadline: WorkerDeadline) throws -> [any MessagesAXElement] {
+        try prepare(deadline)
+        var initialCount: CFIndex = 0
+        let initialStatus = AXUIElementGetAttributeValueCount(element, name as CFString, &initialCount)
+        try checkDeadline(deadline)
+        var copiedValue: CFTypeRef?
+        var copyStatus: AXError = .success
+        if try Self.relationshipCount(status: initialStatus, count: initialCount, limit: limit,
+                                      requireAvailable: requireAvailable) > 0 {
+            try prepare(deadline)
+            copyStatus = AXUIElementCopyAttributeValue(element, name as CFString, &copiedValue)
+            try checkDeadline(deadline)
+        }
+        try prepare(deadline)
+        var finalCount: CFIndex = 0
+        let finalStatus = AXUIElementGetAttributeValueCount(element, name as CFString, &finalCount)
+        try checkDeadline(deadline)
+        return try Self.checkedFullRelationship(initialStatus: initialStatus, initialCount: initialCount,
+                                                copiedValue: copiedValue, copyStatus: copyStatus,
+                                                finalStatus: finalStatus, finalCount: finalCount,
+                                                limit: limit, requireAvailable: requireAvailable)
+    }
+
+    private func optionalRelationship(_ name: String, limit: Int, deadline: WorkerDeadline) throws -> [any MessagesAXElement]? {
+        func count() throws -> Int? {
+            try prepare(deadline)
+            var value: CFIndex = 0
+            let status = AXUIElementGetAttributeValueCount(element, name as CFString, &value)
+            try checkDeadline(deadline)
+            if status == .attributeUnsupported || status == .noValue { return nil }
+            guard status == .success, value >= 0 else { throw MessagesReactionAXError.axFailure }
+            guard value <= limit else { throw MessagesReactionAXError.traversalLimit }
+            return value
+        }
+        guard let initialCount = try count() else { return nil }
+        var values: [AnyObject] = []
+        if initialCount > 0 {
+            try prepare(deadline)
+            var array: CFArray?
+            let status = AXUIElementCopyAttributeValues(element, name as CFString, 0, initialCount, &array)
+            try checkDeadline(deadline)
+            if status == .attributeUnsupported || status == .noValue { throw MessagesTargetDrift(.relationshipCountChanged) }
+            guard status == .success else { throw MessagesReactionAXError.axFailure }
+            guard let array, CFArrayGetCount(array) == initialCount else { throw MessagesTargetDrift(.relationshipCountChanged) }
+            values = array as [AnyObject]
+        }
+        guard let finalCount = try count(), finalCount == initialCount else {
+            throw MessagesTargetDrift(.relationshipCountChanged)
+        }
+        return try values.map { value in
+            try checkDeadline(deadline)
+            guard CFGetTypeID(value) == AXUIElementGetTypeID() else { throw MessagesReactionAXError.unknownAXValue }
+            return LiveAXElement(element: value as! AXUIElement)
+        }
+    }
+
+    private func relationship(_ name: String, limit: Int, requireAvailable: Bool = false, deadline: WorkerDeadline) throws -> [any MessagesAXElement] {
         func count() throws -> Int {
             try prepare(deadline)
             var value: CFIndex = 0
             let status = AXUIElementGetAttributeValueCount(element, name as CFString, &value)
             try checkDeadline(deadline)
-            return try Self.relationshipCount(status: status, count: value, limit: limit)
+            return try Self.relationshipCount(status: status, count: value, limit: limit, requireAvailable: requireAvailable)
         }
         let initialCount = try count()
         var values: [AnyObject] = []
@@ -1145,14 +2268,14 @@ final class LiveAXElement: MessagesAXElement {
             let status = AXUIElementCopyAttributeValues(element, name as CFString, 0, initialCount, &array)
             try checkDeadline(deadline)
             // A relation that vanished after a positive count changed under us.
-            if status == .attributeUnsupported || status == .noValue { throw MessagesReactionAXError.targetDrift }
+            if status == .attributeUnsupported || status == .noValue { throw MessagesTargetDrift(.relationshipCountChanged) }
             guard status == .success else { throw MessagesReactionAXError.axFailure }
-            guard let array, CFArrayGetCount(array) == initialCount else { throw MessagesReactionAXError.targetDrift }
+            guard let array, CFArrayGetCount(array) == initialCount else { throw MessagesTargetDrift(.relationshipCountChanged) }
             values = array as [AnyObject]
         }
         // Recheck even empty/unsupported relations so a newly appearing edge
         // cannot turn an incomplete scan into uniqueness evidence.
-        guard try count() == initialCount else { throw MessagesReactionAXError.targetDrift }
+        guard try count() == initialCount else { throw MessagesTargetDrift(.relationshipCountChanged) }
         return try values.map { value in
             try checkDeadline(deadline)
             guard CFGetTypeID(value) == AXUIElementGetTypeID() else { throw MessagesReactionAXError.unknownAXValue }
@@ -1165,5 +2288,285 @@ final class LiveAXElement: MessagesAXElement {
         let status = AXUIElementPerformAction(element, name as CFString)
         try checkDeadline(deadline)
         guard status == .success else { throw MessagesReactionAXError.axFailure }
+    }
+
+    func setValue(_ value: String, deadline: WorkerDeadline) throws {
+        try prepare(deadline)
+        let status = AXUIElementSetAttributeValue(element, kAXValueAttribute as CFString, value as CFString)
+        try checkDeadline(deadline)
+        guard status == .success else { throw MessagesReactionAXError.axFailure }
+    }
+}
+
+// CharacterPicker SPI selector shape follows the Beeper attribution recorded in NOTICE.
+enum CustomEmojiSearchResolver {
+    static func searchPlan(for emoji: String, deadline: WorkerDeadline) throws -> MessagesCustomEmojiSearchPlan {
+        try checkDeadline(deadline)
+        guard let bundle = Bundle(path: "/System/Library/PrivateFrameworks/CharacterPicker.framework"),
+              bundle.load(),
+              let cls = NSClassFromString("CPKDefaultDataSource") as? NSObject.Type else {
+            throw MessagesReactionAXError.unknownAXValue
+        }
+        try checkDeadline(deadline)
+        let selector = NSSelectorFromString("localizedCharacterName:")
+        guard let method = class_getClassMethod(cls, selector),
+              method_getNumberOfArguments(method) == 3,
+              Self.copyType({ method_copyReturnType(method) }) == "@",
+              Self.copyType({ method_copyArgumentType(method, 0) }) == "@",
+              Self.copyType({ method_copyArgumentType(method, 1) }) == ":",
+              Self.copyType({ method_copyArgumentType(method, 2) }) == "@" else {
+            throw MessagesReactionAXError.unknownAXValue
+        }
+        try checkDeadline(deadline)
+        guard cls.responds(to: selector),
+              let localizedName = cls.perform(selector, with: emoji)?.takeUnretainedValue() as? String,
+              !localizedName.isEmpty, localizedName.utf8.count <= 256 else {
+            throw MessagesReactionAXError.unknownAXValue
+        }
+        let queries = [localizedName, localizedName.replacingOccurrences(of: "flag of ", with: ""),
+                       localizedName.split(separator: " ").first.map(String.init), "flag"].compactMap { $0 }
+        let skinTone = try supportsSkinToneVariants(emoji: emoji, deadline: deadline)
+        for query in queries where MessagesReactionActionTitleResolver.valid(query) {
+            let results = try pickerResults(query: query, objectClass: cls, deadline: deadline)
+            if let position = try exactPosition(in: results, emoji: emoji) {
+                return MessagesCustomEmojiSearchPlan(query: query, position: position, supportsSkinToneVariants: skinTone)
+            }
+        }
+        throw MessagesReactionAXError.reactionUnavailable
+    }
+
+    static func exactPosition(in results: [String], emoji: String) throws -> Int? {
+        guard results.count <= 256 else { throw MessagesReactionAXError.reactionUnavailable }
+        let positions = results.indices.filter { results[$0].utf8.elementsEqual(emoji.utf8) }
+        guard positions.count <= 1 else { throw MessagesReactionAXError.reactionUnavailable }
+        return positions.first
+    }
+
+    private static func pickerResults(query: String, objectClass: NSObject.Type, deadline: WorkerDeadline) throws -> [String] {
+        try checkDeadline(deadline)
+        let languageSelector = NSSelectorFromString("preferredLanguagesForSearch")
+        let searchSelector = NSSelectorFromString("emojiTokensForSearchString:inLanguages:maxResults:usingBlock:")
+        guard let languageMethod = class_getClassMethod(objectClass, languageSelector),
+              method_getNumberOfArguments(languageMethod) == 2,
+              Self.copyType({ method_copyReturnType(languageMethod) }) == "@",
+              Self.copyType({ method_copyArgumentType(languageMethod, 0) }) == "@",
+              Self.copyType({ method_copyArgumentType(languageMethod, 1) }) == ":",
+              let searchMethod = class_getClassMethod(objectClass, searchSelector),
+              method_getNumberOfArguments(searchMethod) == 6,
+              Self.copyType({ method_copyReturnType(searchMethod) }) == "v",
+              Self.copyType({ method_copyArgumentType(searchMethod, 0) }) == "@",
+              Self.copyType({ method_copyArgumentType(searchMethod, 1) }) == ":",
+              Self.copyType({ method_copyArgumentType(searchMethod, 2) }) == "@",
+              Self.copyType({ method_copyArgumentType(searchMethod, 3) }) == "@",
+              Self.copyType({ method_copyArgumentType(searchMethod, 4) }) == "Q",
+              Self.copyType({ method_copyArgumentType(searchMethod, 5) }) == "@?" else {
+            throw MessagesReactionAXError.unknownAXValue
+        }
+        typealias LanguagesIMP = @convention(c) (AnyClass, Selector) -> Unmanaged<AnyObject>?
+        let languageIMP = unsafeBitCast(method_getImplementation(languageMethod), to: LanguagesIMP.self)
+        guard let languagesObject = languageIMP(objectClass, languageSelector)?.takeUnretainedValue(),
+              CFGetTypeID(languagesObject) == CFArrayGetTypeID() else {
+            throw MessagesReactionAXError.unknownAXValue
+        }
+        let lock = NSLock()
+        var output: [String]?
+        var completed = false
+        let semaphore = DispatchSemaphore(value: 0)
+        let block: @convention(block) (AnyObject?, Bool) -> Void = { results, _ in
+            lock.lock()
+            guard !completed else { lock.unlock(); return }
+            defer { completed = true; lock.unlock(); semaphore.signal() }
+            guard let values = try? checkedPickerTokenStrings(results) else { return }
+            output = values
+        }
+        typealias SearchIMP = @convention(c) (AnyClass, Selector, NSString, AnyObject, UInt, AnyObject) -> Void
+        let searchIMP = unsafeBitCast(method_getImplementation(searchMethod), to: SearchIMP.self)
+        let invocation = PickerSearchInvocation(objectClass: objectClass, selector: searchSelector, query: query,
+                                                languages: languagesObject, block: block as AnyObject, imp: searchIMP)
+        let waitNanoseconds = min(deadline.remainingNanoseconds, 2_000_000_000)
+        guard waitNanoseconds > 0 else { throw MessagesReactionAXError.unknownAXValue }
+        if Thread.isMainThread {
+            DispatchQueue.global(qos: .userInitiated).async { invocation.run() }
+            let start = DispatchTime.now().uptimeNanoseconds
+            while true {
+                try checkDeadline(deadline)
+                if semaphore.wait(timeout: .now()) == .success { break }
+                let now = DispatchTime.now().uptimeNanoseconds
+                guard now >= start, now - start < waitNanoseconds else {
+                    lock.lock(); completed = true; lock.unlock()
+                    throw MessagesReactionAXError.unknownAXValue
+                }
+                _ = RunLoop.current.run(mode: .default, before: Date(timeIntervalSinceNow: 0.01))
+            }
+        } else {
+            invocation.run()
+            guard semaphore.wait(timeout: DispatchTime.now() + .nanoseconds(Int(waitNanoseconds))) == .success else {
+                lock.lock(); completed = true; lock.unlock()
+                throw MessagesReactionAXError.unknownAXValue
+            }
+        }
+        lock.lock(); let result = output; lock.unlock()
+        guard let result else { throw MessagesReactionAXError.unknownAXValue }
+        try checkDeadline(deadline)
+        return result
+    }
+
+    static func checkedPickerTokenStrings(_ results: AnyObject?) throws -> [String] {
+        let stringSelector = NSSelectorFromString("string")
+        guard let results, CFGetTypeID(results) == CFArrayGetTypeID() else { throw MessagesReactionAXError.unknownAXValue }
+        let raw = results as! CFArray
+        guard CFArrayGetCount(raw) <= 256 else { throw MessagesReactionAXError.unknownAXValue }
+        var values: [String] = []
+        for item in (results as! [AnyObject]) {
+            guard let method = class_getInstanceMethod(type(of: item), stringSelector),
+                  method_getNumberOfArguments(method) == 2,
+                  Self.copyType({ method_copyReturnType(method) }) == "@",
+                  Self.copyType({ method_copyArgumentType(method, 0) }) == "@",
+                  Self.copyType({ method_copyArgumentType(method, 1) }) == ":",
+                  item.responds(to: stringSelector),
+                  let value = item.perform(stringSelector)?.takeUnretainedValue() as? String,
+                  !value.isEmpty, value.utf8.count <= 128 else { throw MessagesReactionAXError.unknownAXValue }
+            values.append(value)
+        }
+        return values
+    }
+
+    private static func supportsSkinToneVariants(emoji: String, deadline: WorkerDeadline) throws -> Bool {
+        try checkDeadline(deadline)
+        guard let bundle = Bundle(path: "/System/Library/PrivateFrameworks/EmojiFoundation.framework"),
+              bundle.load(),
+              let cls = NSClassFromString("EMFEmojiToken") as? NSObject.Type else { throw MessagesReactionAXError.unknownAXValue }
+        let initSelector = NSSelectorFromString("initWithString:localeIdentifier:")
+        guard let initMethod = class_getInstanceMethod(cls, initSelector),
+              method_getNumberOfArguments(initMethod) == 4,
+              Self.copyType({ method_copyReturnType(initMethod) }) == "@",
+              Self.copyType({ method_copyArgumentType(initMethod, 0) }) == "@",
+              Self.copyType({ method_copyArgumentType(initMethod, 1) }) == ":",
+              Self.copyType({ method_copyArgumentType(initMethod, 2) }) == "@",
+              Self.copyType({ method_copyArgumentType(initMethod, 3) }) == "@" else { throw MessagesReactionAXError.unknownAXValue }
+        guard let allocated = class_createInstance(cls, 0) as AnyObject? else { throw MessagesReactionAXError.unknownAXValue }
+        let initializerOwned = Unmanaged.passRetained(allocated)
+        typealias InitIMP = @convention(c) (AnyObject, Selector, NSString, NSString) -> Unmanaged<AnyObject>?
+        let initIMP = unsafeBitCast(method_getImplementation(initMethod), to: InitIMP.self)
+        guard let token = initIMP(initializerOwned.takeUnretainedValue(), initSelector, emoji as NSString,
+                                  Locale.current.identifier as NSString)?.takeRetainedValue() else {
+            throw MessagesReactionAXError.unknownAXValue
+        }
+        let supportSelector = NSSelectorFromString("supportsSkinToneVariants")
+        guard let supportMethod = class_getInstanceMethod(type(of: token), supportSelector),
+              method_getNumberOfArguments(supportMethod) == 2,
+              Self.copyType({ method_copyReturnType(supportMethod) }) == "B",
+              Self.copyType({ method_copyArgumentType(supportMethod, 0) }) == "@",
+              Self.copyType({ method_copyArgumentType(supportMethod, 1) }) == ":" else {
+            throw MessagesReactionAXError.unknownAXValue
+        }
+        typealias SupportsIMP = @convention(c) (AnyObject, Selector) -> Bool
+        let supportIMP = unsafeBitCast(method_getImplementation(supportMethod), to: SupportsIMP.self)
+        try checkDeadline(deadline)
+        return supportIMP(token, supportSelector)
+    }
+
+    private static func copyType(_ producer: () -> UnsafeMutablePointer<CChar>?) -> String? {
+        guard let pointer = producer() else { return nil }
+        defer { free(pointer) }
+        return String(cString: pointer)
+    }
+}
+
+private final class PickerSearchInvocation: @unchecked Sendable {
+    typealias SearchIMP = @convention(c) (AnyClass, Selector, NSString, AnyObject, UInt, AnyObject) -> Void
+    let objectClass: AnyClass
+    let selector: Selector
+    let query: NSString
+    let languages: AnyObject
+    let block: AnyObject
+    let imp: SearchIMP
+
+    init(objectClass: AnyClass, selector: Selector, query: String, languages: AnyObject, block: AnyObject, imp: @escaping SearchIMP) {
+        self.objectClass = objectClass
+        self.selector = selector
+        self.query = query as NSString
+        self.languages = languages
+        self.block = block
+        self.imp = imp
+    }
+
+    func run() {
+        imp(objectClass, selector, query, languages, 256, block)
+    }
+}
+
+struct PairedCustomEmojiKeyPress {
+    let postDown: () -> Void
+    let postUp: () -> Void
+    let postRequiredExtraKeyUp: () -> Void
+}
+
+private final class MainThreadCustomEmojiKeyPressAction: @unchecked Sendable {
+    private let action: () throws -> Void
+
+    init(_ action: @escaping () throws -> Void) {
+        self.action = action
+    }
+
+    func run() throws {
+        try action()
+    }
+}
+
+struct LiveCustomEmojiKeyPresser {
+    let pid: pid_t
+    var operatingSystemMajorVersion: () -> Int = {
+        ProcessInfo.processInfo.operatingSystemVersion.majorVersion
+    }
+    var makePairedKeyPress: (CGKeyCode, pid_t) throws -> PairedCustomEmojiKeyPress = Self.makeLivePairedKeyPress
+
+    func press(_ key: MessagesCustomEmojiChooserKey, deadline: WorkerDeadline) throws {
+        try checkDeadline(deadline)
+        let code: CGKeyCode
+        switch key {
+        case .downArrow: code = CGKeyCode(kVK_DownArrow)
+        case .rightArrow: code = CGKeyCode(kVK_RightArrow)
+        case .returnKey: code = CGKeyCode(kVK_Return)
+        }
+        let pairedKeyPress = try makePairedKeyPress(code, pid)
+        let action = {
+            try checkDeadline(deadline)
+            pairedKeyPress.postDown()
+            pairedKeyPress.postUp()
+            if self.operatingSystemMajorVersion() >= 15 {
+                pairedKeyPress.postRequiredExtraKeyUp()
+            }
+            try checkDeadline(deadline)
+        }
+        if Thread.isMainThread {
+            try action()
+        } else {
+            let mainAction = MainThreadCustomEmojiKeyPressAction(action)
+            var result: Result<Void, MessagesReactionAXError> = .success(())
+            DispatchQueue.main.sync {
+                result = Result { try mainAction.run() }.mapError { error in
+                    error as? MessagesReactionAXError ?? .axFailure
+                }
+            }
+            try result.get()
+        }
+        try checkDeadline(deadline)
+    }
+
+    private static func makeLivePairedKeyPress(code: CGKeyCode, pid: pid_t) throws -> PairedCustomEmojiKeyPress {
+        guard let source = CGEventSource(stateID: .hidSystemState),
+              let downEvent = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: true),
+              let upEvent = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: false) else {
+            throw MessagesReactionAXError.axFailure
+        }
+        return PairedCustomEmojiKeyPress(
+            postDown: { downEvent.postToPid(pid) },
+            postUp: { upEvent.postToPid(pid) },
+            postRequiredExtraKeyUp: {
+                upEvent.flags = []
+                upEvent.postToPid(pid)
+            }
+        )
     }
 }

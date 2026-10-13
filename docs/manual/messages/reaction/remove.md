@@ -10,7 +10,7 @@ apple messages reaction remove [flags]
 
 ## Description
 
-Removes an outgoing reaction from one exact Messages target. Select the target with the same exact chat/message/native-part selectors as `reaction set`. Pass `--reaction` for a standard reaction or `--emoji` for explicit custom-emoji removal. Omit both only when database evidence resolves exactly one outgoing standard reaction. Explicit custom removal is experimental and requires an exact native picker button; live validation remains pending. Custom set/replace and implicit custom removal remain refused outside dry run.
+Removes an outgoing reaction from one exact Messages target. Select the target with the same exact chat/message/native-part selectors as `reaction set`. Pass `--reaction` for a standard reaction or `--emoji` for explicit custom-emoji removal. Omit both only when database evidence resolves exactly one outgoing standard reaction. Explicit custom removal is experimental and requires an exact native picker button; live validation remains pending. Implicit custom removal remains refused outside dry run.
 
 ## Options
 
@@ -19,7 +19,7 @@ Removes an outgoing reaction from one exact Messages target. Select the target w
 - `--chat-rowid` `<chat-rowid>`
   <br>Local conversation ROWID from chat.ROWID.
 - `--emoji` `<emoji>`
-  <br>Custom emoji reaction to remove. Explicit custom emoji removal is experimental; custom set/replace and implicit custom removal are refused.
+  <br>Custom emoji reaction to remove. Explicit custom emoji removal is experimental; implicit custom removal remains refused.
 - `--experimental-ui-handoff`
   <br>Allow a modal handoff route when the Tapback picker hides the transcript; cannot prove original message continuity after modal, so keep Messages untouched during automation.
 - `--message-guid` `<message-guid>`

@@ -59,14 +59,26 @@ JSON output are stable per the versioning policy — breaking changes bump
   Tapback picker hides the transcript and reports that limitation.
   `messages automation status` / `recover` expose unresolved operations.
 
+- **Experimental custom reaction set/replace can use the native emoji chooser**
+  when the exact requested Tapback button is unselected or absent. An already-
+  selected exact button is verified as unchanged; unknown selected state is
+  refused. The chooser
+  uses optional macOS emoji search, complete bounded result traversal and exact
+  UTF-8 emoji matching. It selects the mapped native result using bounded
+  Down/Right/Return events addressed to Messages, with ownership checks between
+  keys. Missing, ambiguous or stale controls refuse the operation. Emoji variants
+  requiring a separate skin-tone picker are refused; no emoji normalization or
+  default-tone substitution is used. Success still requires selected-state
+  verification on the original message. General emoji-variant support and live
+  reliability are not established.
+
 - **Explicit custom-emoji removal is available experimentally** through
   `apple messages reaction remove --emoji`. The exact emoji must be exposed as a
   native picker button, including its variation selectors and skin tone. Missing
   buttons never prove absence; a button that disappears after removal leaves
   verification uncertain and the operation pending. Repeating removal is a
   verified no-op only if the exact button remains exposed and unselected. Live
-  validation remains pending. Custom set/replace and implicit custom removal
-  remain preview-only. See the
+  validation remains pending. Implicit custom removal remains preview-only. See the
   [reaction removal manual](https://github.com/robertvitali/apple-cli/blob/main/docs/manual/messages/reaction/remove.md).
 
 - **`apple messages reaction inspect` now exposes read-only exact reaction

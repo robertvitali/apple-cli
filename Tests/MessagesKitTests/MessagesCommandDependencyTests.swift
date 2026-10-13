@@ -2089,31 +2089,50 @@ struct MessagesCommandDependencyTests {
         #expect(output["reaction_changed"] as? Bool == false)
     }
 
-    @Test func reactionCustomSetExecuteIsSafetyRefusedInsideObservedGate() throws {
+    @Test func reactionExplicitCustomSetLaunchesWorkerWithExactPayload() throws {
         let fx = try ChatFixture()
         try fx.addReactionColumns()
         try fx.insertReactionTarget(rowid: 70, guid: "reaction-target")
-        let preflightReached = LockedBox(false)
+        let observedCommand = LockedBox<WorkerCommand?>(nil)
+        let operationID = UUID(uuidString: "23232323-2323-4323-8323-232323232323")!
+        let reactionDBPath = fx.path
+        let reactionDate = fx.base + 12
         let deps = reactionDependencies(fx, allowedRecipients: ["+12125550100"]) { action in
-            do {
-                _ = try action.resolve()
-                preflightReached.withLock { $0 = true }
-                return .timedOut
-            } catch {
-                return .requestNotSent(String(describing: error))
+            let resolved = try action.resolve()
+            observedCommand.withLock { $0 = resolved.command }
+            let context = WorkerObservedContext(deadline: action.deadline, isCancelled: { false })
+            guard case .requiresMutation = try action.preflight(resolved, context) else {
+                throw ReactionTestFailure("unexpected custom set no-op")
             }
+            try insertReactionRow(path: reactionDBPath, rowid: 101, guid: "reaction-custom",
+                                  associatedGUID: "p:2/reaction-target", type: 2006,
+                                  date: reactionDate, emoji: "👍🏽")
+            let response = WorkerResponse(schemaVersion: 1, operationID: operationID,
+                                          nonce: operationID, category: .ack,
+                                          detail: "reaction-set-changed-verified")
+            let verification = try #require(try action.verify(resolved, response, context))
+            return .observedState(operationID: operationID, verification: verification)
         }
 
         let result = try captureCommand {
             try ReactionSet.parse(["--chat-rowid", "3", "--message-rowid", "70", "--part-index", "2",
-                                   "--emoji", "👍", "--test-mode"])
+                                   "--emoji", "👍🏽", "--test-mode"])
                 .run(dependencies: deps)
         }
 
-        #expect(result.exitCode == AppleExit.permissionDenied)
-        let error = try errorPayload(from: result.stdout)
-        #expect(error["type"] as? String == AppleErrorType.safetyViolation)
-        #expect(preflightReached.value == false)
+        #expect(result.exitCode == nil, Comment(rawValue: result.stdout))
+        let output = try payload(from: result.stdout)
+        let command = try #require(observedCommand.value)
+        #expect(command.name == "messages.reaction.set")
+        let payloadData = try #require(command.payload)
+        let workerPayload = try JSONDecoder().decode(MessagesReactionWorkerPayload.self, from: payloadData)
+        #expect(workerPayload.operation == .set)
+        #expect(workerPayload.reaction == .custom("👍🏽"))
+        #expect(output["desired_reaction_key"] as? String == "custom:👍🏽")
+        #expect(output["reaction_changed"] as? Bool == true)
+        let inspect = try #require(output["inspect"] as? [String: Any])
+        let current = try #require(inspect["current_outgoing"] as? [String: Any])
+        #expect(current["key"] as? String == "custom:👍🏽")
     }
 
     @Test func reactionExplicitCustomRemoveLaunchesWorkerWithExactPayload() throws {

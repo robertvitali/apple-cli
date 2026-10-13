@@ -160,6 +160,7 @@ package struct WorkerOperationResult: Equatable, Sendable {
         "post-press-verify-route-drift",
         "post-press-verify-action-missing",
         "post-press-verify-picker-state-drift",
+        "custom-chooser-post-selection-unselected",
         "reaction-remove-changed-verified",
         "reaction-remove-unchanged-verified",
         "reaction-set-changed-verified",
@@ -170,9 +171,106 @@ package struct WorkerOperationResult: Equatable, Sendable {
         "unknown-ax-value"
     ]
 
+    private static let targetDriftPhases: Set<String> = [
+        "preflight",
+        "open",
+        "initial-route",
+        "menu-open",
+        "picker-readiness",
+        "pre-press",
+        "press",
+        "post-press",
+        "cleanup",
+        "verification"
+    ]
+
+    private static let targetDriftReasons: Set<String> = [
+        "relationship-count-changed",
+        "window-mismatch",
+        "picker-mismatch",
+        "button-mismatch",
+        "selected-state-changed"
+    ]
+
+    private static let verificationPaths: Set<String> = ["exact-existing", "custom-chooser"]
+    private static let verificationDriftKinds: Set<String> = ["discovery-drift", "validation-drift"]
+    private static let verificationDriftReasons: Set<String> = targetDriftReasons.union([
+        "picker-still-present",
+        "missing-transcript",
+        "missing-retained-message",
+        "replaced-transcript",
+        "retained-message-action-missing"
+    ])
+    private static let customChooserAXFailurePhases: Set<String> = [
+        "picker-read",
+        "existing-button",
+        "route-validation",
+        "launch-discovery",
+        "query",
+        "preexisting-check",
+        "launch-revalidation",
+        "launch-press",
+        "detached-discovery",
+        "popover",
+        "search-discovery",
+        "search-precondition",
+        "search-write",
+        "search-readback",
+        "candidate-wait",
+        "candidate-read",
+        "candidate-revalidation",
+        "candidate-press",
+        "post-selection"
+    ]
+
     private static func safeDetail(_ value: String?) -> String? {
-        guard let value, value.utf8.count <= 128, publicDetails.contains(value) else { return nil }
+        guard let value, value.utf8.count <= 128 else { return nil }
+        guard publicDetails.contains(value) || isSafeTargetDriftDetail(value) || isSafeVerificationDetail(value) ||
+            isSafeCustomChooserAXFailureDetail(value) || isSafeCustomChooserReactionUnavailableDetail(value) else { return nil }
         return value
+    }
+
+    private static func isSafeTargetDriftDetail(_ value: String) -> Bool {
+        let prefix = "target-drift-"
+        guard value.hasPrefix(prefix) else { return false }
+        let suffix = String(value.dropFirst(prefix.count))
+        for phase in targetDriftPhases {
+            if suffix == phase { return true }
+            let phasePrefix = "\(phase)-"
+            if suffix.hasPrefix(phasePrefix) {
+                return targetDriftReasons.contains(String(suffix.dropFirst(phasePrefix.count)))
+            }
+        }
+        return false
+    }
+
+    private static func isSafeCustomChooserAXFailureDetail(_ value: String) -> Bool {
+        let prefix = "ax-failure-custom-chooser-"
+        guard value.hasPrefix(prefix) else { return false }
+        return customChooserAXFailurePhases.contains(String(value.dropFirst(prefix.count)))
+    }
+
+    private static func isSafeCustomChooserReactionUnavailableDetail(_ value: String) -> Bool {
+        let prefix = "reaction-unavailable-custom-chooser-"
+        guard value.hasPrefix(prefix) else { return false }
+        return customChooserAXFailurePhases.contains(String(value.dropFirst(prefix.count)))
+    }
+
+    private static func isSafeVerificationDetail(_ value: String) -> Bool {
+        for path in verificationPaths {
+            let prefix = "\(path)-verify-"
+            guard value.hasPrefix(prefix) else { continue }
+            let suffix = String(value.dropFirst(prefix.count))
+            if suffix == "desired-state-mismatch" { return true }
+            for kind in verificationDriftKinds {
+                if suffix == kind { return true }
+                let kindPrefix = "\(kind)-"
+                if suffix.hasPrefix(kindPrefix) {
+                    return verificationDriftReasons.contains(String(suffix.dropFirst(kindPrefix.count)))
+                }
+            }
+        }
+        return false
     }
 }
 

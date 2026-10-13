@@ -17,7 +17,9 @@ MIT terms, and the specific copyright line added below before the port lands.
   checklist protobuf decoder, markdown conversion, attachment handling.
 - gumadeiras/fruitmail-cli (MIT) — Mail: Envelope Index SQLite fast-read approach.
 - Beeper platform-imessage (MIT) — Messages: reaction mappings, native deep-link
-  and Tapback Accessibility interaction design, from commit fdc5640bfcf936c3d8208bc15411944b7ed9819c.
+  and Tapback Accessibility interaction design, detached emoji chooser discovery
+  and localized emoji search/result indexing and PID-targeted keyboard selection,
+  from commit fdc5640bfcf936c3d8208bc15411944b7ed9819c.
 
 License verification REQUIRED before lifting any code from these references
 (their licenses were flagged "verify" during scoping):

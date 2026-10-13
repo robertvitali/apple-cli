@@ -207,6 +207,12 @@ geometry-offset, focus-change and sleep-based targeting fallbacks. Evaluate a
 secondary Messages instance in isolated manual validation; never assume it
 preserves correctness or desktop state.
 
+Application-window membership uses the canonical process root's bounded, typed
+`AXWindows` list. Require one window, stable enumeration, the expected process
+owner and exact retained identity where one has already been captured. Unknown or
+unsupported membership is a refusal. Window validation does not traverse child
+controls; transcript/message and detached chooser ownership are checked separately.
+
 Reaction set/remove use the native Tapback picker as the local reaction-state
 oracle. Strict mode is the default. `--experimental-ui-handoff` only opts into
 the native picker transition that can temporarily hide the transcript; it does
@@ -236,8 +242,10 @@ The experimental handoff cannot prove original-message continuity during the
 modal transcript replacement, cancellation quiescence inside Messages, or durable
 sync completion. The user must leave Messages untouched during execution, and
 post-verification cannot undo a reaction redirected by desktop interference.
-Custom emoji set/replace remains preview-only. Explicit custom removal uses the
-existing exact picker-button route with byte-for-byte emoji matching. Its live
+Custom emoji set/replace verifies an already-selected exact picker button as an
+unchanged result. An unselected or absent button uses the owned detached chooser
+route below; unknown selected state is refused. Explicit custom
+removal uses the existing exact picker-button route with byte-for-byte matching. Its live
 validation remains pending. Implicit custom removal is refused on execution. A
 missing button never proves absence; if the exact button disappears after a
 press, verification fails and the operation remains pending. Repeat removal is
@@ -261,14 +269,113 @@ that is still provably owned and unchanged by the user.
 Agent live validation uses only newly created, labeled, privately tracked disposable
 self-addressed fixtures. Non-self/group operations require operator participation.
 
+## Custom emoji chooser ownership and verification
+
+The custom chooser is a separate native surface. Retain the exact message route
+and Tapback picker before opening it. Discover its launcher only as the uniquely
+owned sibling of that picker, with the native custom-reaction description and
+an enabled press action. Launcher recognition currently requires the observed
+English Accessibility description; other UI languages are unvalidated and may
+refuse. Generic emoji controls elsewhere in the window do not qualify. Strict mode retains its original route requirements; experimental modal
+handoff does not authorize arbitrary window or message replacement.
+
+The detached chooser may be absent from the application root's ordinary AX tree.
+Bounded on-screen window metadata and an AX hit test locate a candidate search
+field; geometry is discovery only, never message identity or selection evidence.
+Verify actual AX process ownership, search-field role/subrole and parent popover,
+then require one unique retained search/popover pair under the same process launch.
+Before pressing the launcher, require verified chooser absence; ambiguity or a
+read failure is not absence. Never adopt an already-open chooser. The search
+must initially be empty, enabled and writable. Search-field discovery inspects only
+that popover's direct navigation children, or direct ordinary children when the
+navigation relation is explicitly unavailable. Require one matching search field
+with the retained popover as its actual parent; do not walk emoji-result subtrees
+or recursively adopt a nested field to locate the search control.
+
+An optional guarded CharacterPicker framework lookup derives a bounded localized
+search term and its native result index, following the upstream CharacterPickerSearch
+sequence. Refuse unavailable classes/selectors, incompatible method signatures,
+malformed results, duplicate exact matches and indexes outside the 256-result cap.
+Require the requested emoji's exact UTF-8 bytes; a normalized base emoji is not a
+match. Refuse requests that require a separate skin-tone picker rather than accepting
+its default variant. Write the chosen query once, read back, and allow bounded
+read-only readiness under the shared deadline. Cleanup before keyboard navigation
+clears only the retained field while its current value still equals this operation's
+query. Preserve user edits; never restore the query after starting navigation.
+
+After writing the query, traverse the entire uniquely owned popover for candidates,
+preferring navigation children and
+falling back to ordinary children only when the navigation attribute is known
+absent or unsupported. Enforce complete bounded traversal, actual process ownership
+and strict AX types. Read ordinary `AXChildren` as a full array after checking its
+count against the cap: the indexed API can return fewer children despite an
+unchanged reported count. Require the full array and recount to match the initial
+count, with every entry an AX element. Other relationships retain their existing
+readers. Compare description, text value and title with the original
+emoji's exact UTF-8 bytes. Known non-text scalar values are not emoji candidates;
+unknown types, read errors, incomplete traversal and duplicate pressable matches
+refuse selection. A matching static-text child is not a second pressable match.
+The candidate's action and glyph attributes establish result identity, not proof
+that invoking `AXPress` commits a reaction. The observed native result item
+has role `AXUnknown`, no subrole or enabled value, and only `AXPress`.
+Accept that specific shape only when its description matches the exact emoji
+and it has one directly owned, enabled `AXStaticText` child with the same exact
+text value. Revalidate that proof before keyboard selection. Explicitly disabled candidates,
+missing or ambiguous glyph children, foreign ownership and malformed attributes
+remain refusals; passive container states never supply enabled proof.
+No variation-selector removal, skin-tone substitution, clipboard or default emoji
+fallback is permitted.
+
+Custom selection follows Beeper's complete native sequence: settle the query for
+0.75 seconds, send Down to enter the result matrix, then navigate the mapped index
+in the six-column grid with Down/Right and short bounded pauses, followed by one
+Return. This explicitly replaces the earlier direct candidate-AXPress design.
+Use a non-null HID event source and post only to the retained Messages PID, with
+the upstream main-thread and macOS key-up handling. Revalidate process/frontmost
+identity, retained popover/search ownership and unchanged query before every key.
+When focused-element evidence is available, contradictory ownership refuses the
+operation; an unavailable focused/selected result-cell attribute is not a new
+requirement. Revalidate complete exact candidate identity immediately before Return.
+All pauses and keys share the existing deadline. Never repeat Return, fall back to
+AXPress or post global keys. A failed sequence stays uncertain.
+
+Native result order and the six-column layout are private macOS behavior. Validate
+their correspondence on the supported host before claiming live support; do not
+infer every locale, result index or emoji variant from a small fixture exercise.
+After selection, restore and verify
+the original retained message route without another deep link. Reopen its canonical
+picker and require the exact reaction to be selected before owned cleanup and ACK.
+A zero-exit UI action or an unselected returned button never proves success.
+Any uncertain post-selection result remains pending for reconciliation.
+
+Before opening the custom chooser, native-picker readiness may discard and retry
+an inconsistent child-count snapshot within its existing bounded read window.
+Each retry revalidates the retained route. Identity, type, transport and traversal
+failures still stop the operation; opening the picker is never repeated.
+
+Automation failure details use a fixed, privacy-safe vocabulary. Target drift
+reports the execution phase and, where known, whether the UI relationships,
+retained window, picker, button or selected state changed. Verification failures
+also distinguish the existing-button and custom-chooser paths and identify route
+discovery, picker validation or a mismatched final selected state. Retained-route
+discovery distinguishes a missing transcript, missing retained message, replaced
+transcript, missing reaction action and a still-present native Tapback picker.
+Absence reasons retain the existing bounded read-only wait; they do not prove
+that a custom chooser dismissed or that a reaction was applied. These diagnostics
+do not expose native UI values, relax identity checks or authorize an automatic retry.
+Custom-chooser transport failures and unavailable-control refusals identify the
+same finite execution phases, while preserving their distinct failed and refused
+outcomes. Readiness polling retains the last phase without extending its deadline
+or repeating a write.
+
 ## Approved feature behavior
 
 The following list defines the full approved delivery scope. It is not a claim
 that every capability is implemented or verified in the current candidate. The
 approved product scope includes standard and custom reaction set, replace and
-remove. The current reaction candidate executes standard reactions and explicit
-custom removal. Custom removal still needs live validation; custom set/replace
-is preview-only pending implementation and native UI validation.
+remove. The reaction candidate includes standard reactions, explicit custom removal and
+custom set/replace. Custom removal still needs native UI validation; the scope
+below does not establish general emoji-variant support or live reliability.
 
 1. Exact targeting and bounded reads establish the identity contract above.
 2. The shared automation backend establishes locking, deadlines and diagnostics.
@@ -285,8 +392,10 @@ is preview-only pending implementation and native UI validation.
    block new writes. Implicit remove refuses when the database cannot resolve one
    reaction and requires explicit `--reaction` or `--emoji`. Custom removal
    requires explicit `--emoji` even if database evidence identifies one outgoing
-   custom reaction. Custom set/replace remains preview-only. Do not copy upstream
-   skin-tone stripping or treat UI action completion as success.
+   custom reaction. Custom set/replace follows the owned chooser contract above
+   when its exact picker button is unselected or absent. An already-selected
+   exact button is a verified no-op; unknown selected state is refused. Do not copy upstream skin-tone
+   stripping or treat UI action completion as success.
 4. Text and attachment replies require exact quoted message/part identity and verify
    the persisted reply relationship through the same observed-state contract.
    Preserve existing attachment path controls.

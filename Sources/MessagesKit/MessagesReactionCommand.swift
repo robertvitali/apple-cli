@@ -540,7 +540,7 @@ private func runReactionMutation(global: GlobalOptions, dependencies: MessagesCo
                 let resolved = try resolveReactionTarget(db: &db, options: options, operation: operation)
                 try validateReactionSandbox(target: resolved, db: db, gate: gate)
                 if case .custom = resolved.reaction,
-                   !(operation == .remove && options.emoji != nil) {
+                   operation == .remove && options.emoji == nil {
                     throw ReactionCustomExecutionUnsupported()
                 }
                 observation.recordResolved(resolved)
@@ -609,7 +609,7 @@ private func runReactionMutation(global: GlobalOptions, dependencies: MessagesCo
 
 private func reactionStateError(_ value: String) -> AppleError {
     if value == "custom-reaction-execution-unsupported" {
-        return AppleError.safetyViolation("custom set/replace and implicit custom removal are not supported by this experimental version")
+        return AppleError.safetyViolation("implicit custom removal is not supported by this experimental version")
     }
     if value.hasPrefix("accessibility-not-trusted:") {
         return AppleError.permissionDenied(
@@ -671,7 +671,7 @@ struct ReactionSet: ParsableCommand, ReactionWriteOptions {
     @Option(name: .long, help: "Native Messages part index to mutate.") var partIndex: Int?
     @Option(name: .customLong("reaction"), help: "Standard reaction: heart, like, dislike, laugh, emphasize, question.")
     var standardReaction: String?
-    @Option(name: .long, help: "Custom emoji reaction. Accepted for preview; execution is refused until AX support is proven.")
+    @Option(name: .long, help: "Custom emoji reaction to set or replace via the exact picker button or owned native chooser route.")
     var emoji: String?
     @Flag(name: .customLong("experimental-ui-handoff"), help: "Allow a modal handoff route when the Tapback picker hides the transcript; cannot prove original message continuity after modal, so keep Messages untouched during automation.")
     var experimentalUIHandoff = false
@@ -693,7 +693,7 @@ struct ReactionRemove: ParsableCommand, ReactionWriteOptions {
     @Option(name: .long, help: "Native Messages part index to mutate.") var partIndex: Int?
     @Option(name: .customLong("reaction"), help: "Standard reaction to remove: heart, like, dislike, laugh, emphasize, question.")
     var standardReaction: String?
-    @Option(name: .long, help: "Custom emoji reaction to remove. Explicit custom emoji removal is experimental; custom set/replace and implicit custom removal are refused.")
+    @Option(name: .long, help: "Custom emoji reaction to remove. Explicit custom emoji removal is experimental; implicit custom removal remains refused.")
     var emoji: String?
     @Flag(name: .customLong("experimental-ui-handoff"), help: "Allow a modal handoff route when the Tapback picker hides the transcript; cannot prove original message continuity after modal, so keep Messages untouched during automation.")
     var experimentalUIHandoff = false
