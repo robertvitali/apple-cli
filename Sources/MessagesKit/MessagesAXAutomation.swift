@@ -2153,6 +2153,7 @@ private final class PickerSearchInvocation: @unchecked Sendable {
 enum MessagesPairedKeyFlags: Equatable {
     case preserved
     case cleared
+    case explicit(UInt64)
 }
 
 enum MessagesPairedKeyPressError: Error {
@@ -2224,9 +2225,16 @@ struct LiveMessagesPairedKeyPresser {
               let upEvent = CGEvent(keyboardEventSource: source, virtualKey: code, keyDown: false) else {
             throw MessagesPairedKeyPressError.axFailure
         }
-        if flags == .cleared {
+        switch flags {
+        case .preserved:
+            break
+        case .cleared:
             downEvent.flags = []
             upEvent.flags = []
+        case .explicit(let rawFlags):
+            let explicit = CGEventFlags(rawValue: rawFlags)
+            downEvent.flags = explicit
+            upEvent.flags = explicit
         }
         return PairedMessagesKeyPress(
             postDown: { downEvent.postToPid(pid) },

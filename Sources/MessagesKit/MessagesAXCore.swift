@@ -52,6 +52,8 @@ protocol MessagesAXElement: AnyObject {
     func axValue(deadline: WorkerDeadline) throws -> String?
     func candidateValueText(deadline: WorkerDeadline) throws -> String?
     func axTitle(deadline: WorkerDeadline) throws -> String?
+    func stringAttribute(named name: String, deadline: WorkerDeadline) throws -> String?
+    func fileURLAttribute(named name: String, deadline: WorkerDeadline) throws -> URL?
     func subrole(deadline: WorkerDeadline) throws -> String?
     func enabled(deadline: WorkerDeadline) throws -> Bool?
     func selected(deadline: WorkerDeadline) throws -> Bool?
@@ -73,6 +75,13 @@ protocol MessagesAXElement: AnyObject {
 
 extension MessagesAXElement {
     func focused(deadline: WorkerDeadline) throws -> Bool? { nil }
+    func stringAttribute(named name: String, deadline: WorkerDeadline) throws -> String? { nil }
+    func fileURLAttribute(named name: String, deadline: WorkerDeadline) throws -> URL? {
+        guard let value = try stringAttribute(named: name, deadline: deadline), !value.isEmpty else { return nil }
+        if value.hasPrefix("/") { return URL(fileURLWithPath: value).standardizedFileURL }
+        guard let url = URL(string: value), url.isFileURL else { throw MessagesAXNavigationError.unknownAXValue }
+        return url.standardizedFileURL
+    }
 
     func bodyValueEvidence(deadline: WorkerDeadline) throws -> MessagesAXBodyValueEvidence {
         MessagesAXBodyValueEvidence(valueKind: .unknown, characterCount: nil, placeholder: nil)
@@ -288,6 +297,40 @@ final class LiveAXElement: MessagesAXElement {
 
     func focused(deadline: WorkerDeadline) throws -> Bool? {
         try Self.checkedBoolean(attribute(kAXFocusedAttribute, deadline: deadline))
+    }
+
+
+    func stringAttribute(named name: String, deadline: WorkerDeadline) throws -> String? {
+        guard let raw = try attribute(name, deadline: deadline) else { return nil }
+        if CFGetTypeID(raw) == CFStringGetTypeID() {
+            return try Self.checkedString(raw, limit: 2048)
+        }
+        if CFGetTypeID(raw) == CFURLGetTypeID(), let url = raw as? URL {
+            let value = url.absoluteString
+            guard value.utf8.count <= 2048 else { throw MessagesAXNavigationError.unknownAXValue }
+            return value
+        }
+        throw MessagesAXNavigationError.unknownAXValue
+    }
+
+    func fileURLAttribute(named name: String, deadline: WorkerDeadline) throws -> URL? {
+        guard let raw = try attribute(name, deadline: deadline) else { return nil }
+        return try Self.checkedFileURL(raw)
+    }
+
+    // Used by the live adapter and synthetic CFURL/CFString tests.
+    static func checkedFileURL(_ raw: CFTypeRef) throws -> URL? {
+        if CFGetTypeID(raw) == CFURLGetTypeID(), let url = raw as? URL {
+            guard url.isFileURL, url.absoluteString.utf8.count <= 2048 else { throw MessagesAXNavigationError.unknownAXValue }
+            return url.standardizedFileURL
+        }
+        if CFGetTypeID(raw) == CFStringGetTypeID() {
+            let value = try Self.checkedString(raw, limit: 2048)
+            if value.isEmpty { return nil }
+            guard let url = URL(string: value), url.isFileURL else { throw MessagesAXNavigationError.unknownAXValue }
+            return url.standardizedFileURL
+        }
+        throw MessagesAXNavigationError.unknownAXValue
     }
 
     func bodyValueEvidence(deadline: WorkerDeadline) throws -> MessagesAXBodyValueEvidence {

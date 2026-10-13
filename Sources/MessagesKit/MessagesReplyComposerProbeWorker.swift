@@ -1,6 +1,222 @@
+import CryptoKit
 import Darwin
 import Foundation
 import AppleKit
+
+
+package struct MessagesReplyAttachmentFileStat: Codable, Equatable, Sendable {
+    package let device: UInt64
+    package let inode: UInt64
+    package let size: Int64
+    package let mode: UInt16
+    package let uid: UInt32
+    package let modifiedSeconds: Int64
+    package let modifiedNanoseconds: Int64
+    package let changedSeconds: Int64
+    package let changedNanoseconds: Int64
+
+    enum CodingKeys: String, CodingKey {
+        case device, inode, size, mode, uid
+        case modifiedSeconds = "mtime_sec"
+        case modifiedNanoseconds = "mtime_nsec"
+        case changedSeconds = "ctime_sec"
+        case changedNanoseconds = "ctime_nsec"
+    }
+
+    package init(device: UInt64, inode: UInt64, size: Int64, mode: UInt16, uid: UInt32,
+                 modifiedSeconds: Int64, modifiedNanoseconds: Int64,
+                 changedSeconds: Int64, changedNanoseconds: Int64) throws {
+        guard device > 0, inode > 0,
+              size >= 0, size <= 65_536,
+              mode == 0o600 || mode == 0o700,
+              uid == UInt32(getuid()),
+              modifiedNanoseconds >= 0, modifiedNanoseconds < 1_000_000_000,
+              changedNanoseconds >= 0, changedNanoseconds < 1_000_000_000 else {
+            throw MessagesReplyComposerAXError.invalidPayload
+        }
+        self.device = device
+        self.inode = inode
+        self.size = size
+        self.mode = mode
+        self.uid = uid
+        self.modifiedSeconds = modifiedSeconds
+        self.modifiedNanoseconds = modifiedNanoseconds
+        self.changedSeconds = changedSeconds
+        self.changedNanoseconds = changedNanoseconds
+    }
+
+    package init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(device: c.decode(UInt64.self, forKey: .device),
+                      inode: c.decode(UInt64.self, forKey: .inode),
+                      size: c.decode(Int64.self, forKey: .size),
+                      mode: c.decode(UInt16.self, forKey: .mode),
+                      uid: c.decode(UInt32.self, forKey: .uid),
+                      modifiedSeconds: c.decode(Int64.self, forKey: .modifiedSeconds),
+                      modifiedNanoseconds: c.decode(Int64.self, forKey: .modifiedNanoseconds),
+                      changedSeconds: c.decode(Int64.self, forKey: .changedSeconds),
+                      changedNanoseconds: c.decode(Int64.self, forKey: .changedNanoseconds))
+    }
+}
+
+package struct MessagesReplyAttachmentDraftEvidence: Codable, Equatable, Sendable {
+    package let copyPath: String
+    package let copySHA256: String
+    package let copySize: Int
+    package let copyStat: MessagesReplyAttachmentFileStat
+    package let directoryPath: String
+    package let directoryStat: MessagesReplyAttachmentFileStat
+
+    enum CodingKeys: String, CodingKey {
+        case copyPath = "copy_path"
+        case copySHA256 = "copy_sha256"
+        case copySize = "copy_size"
+        case copyStat = "copy_stat"
+        case directoryPath = "directory_path"
+        case directoryStat = "directory_stat"
+    }
+
+    package init(copyPath: String, copySHA256: String, copySize: Int, copyStat: MessagesReplyAttachmentFileStat,
+                 directoryPath: String, directoryStat: MessagesReplyAttachmentFileStat) throws {
+        guard !copyPath.isEmpty, copyPath.utf8.count <= 1024,
+              !directoryPath.isEmpty, directoryPath.utf8.count <= 1024,
+              copySHA256.hasPrefix("sha256:"), copySHA256.utf8.count == 71,
+              copySHA256.dropFirst(7).allSatisfy({ $0 >= "0" && $0 <= "9" || $0 >= "a" && $0 <= "f" }),
+              (copyPath as NSString).isAbsolutePath,
+              (directoryPath as NSString).isAbsolutePath,
+              URL(fileURLWithPath: copyPath).standardizedFileURL.path == copyPath,
+              URL(fileURLWithPath: directoryPath, isDirectory: true).standardizedFileURL.path == directoryPath,
+              copySize >= 1, copySize <= 65_536,
+              copyStat.mode == 0o600, directoryStat.mode == 0o700,
+              copyStat.uid == UInt32(getuid()), directoryStat.uid == UInt32(getuid()),
+              copyStat.size == Int64(copySize), directoryStat.size >= 0,
+              URL(fileURLWithPath: copyPath).standardizedFileURL.deletingLastPathComponent().path == URL(fileURLWithPath: directoryPath, isDirectory: true).standardizedFileURL.path,
+              URL(fileURLWithPath: copyPath).lastPathComponent == replyAttachmentDraftCopyBasename() else { throw MessagesReplyComposerAXError.invalidPayload }
+        self.copyPath = copyPath
+        self.copySHA256 = copySHA256
+        self.copySize = copySize
+        self.copyStat = copyStat
+        self.directoryPath = directoryPath
+        self.directoryStat = directoryStat
+    }
+
+    package init(from decoder: any Decoder) throws {
+        let c = try decoder.container(keyedBy: CodingKeys.self)
+        try self.init(copyPath: c.decode(String.self, forKey: .copyPath),
+                      copySHA256: c.decode(String.self, forKey: .copySHA256),
+                      copySize: c.decode(Int.self, forKey: .copySize),
+                      copyStat: c.decode(MessagesReplyAttachmentFileStat.self, forKey: .copyStat),
+                      directoryPath: c.decode(String.self, forKey: .directoryPath),
+                      directoryStat: c.decode(MessagesReplyAttachmentFileStat.self, forKey: .directoryStat))
+    }
+}
+
+
+package struct MessagesReplyAttachmentProbeCleanupEvidence: Codable, Equatable, Sendable {
+    package let disposition: String
+    package let copyAbsent: Bool?
+    package let directoryAbsent: Bool?
+
+    enum CodingKeys: String, CodingKey {
+        case disposition
+        case copyAbsent = "copy_absent"
+        case directoryAbsent = "directory_absent"
+    }
+}
+
+package struct MessagesReplyAttachmentProbePrivateResult: Codable, Equatable, Sendable {
+    package let schemaVersion: Int
+    package let outcome: String
+    package let category: String?
+    package let detail: String?
+    package let phase: String?
+    package let workerCommand: String?
+    package let observedState: String?
+    package let operationID: UUID?
+    package let observedResult: String?
+    package let payloadSHA256: String?
+    package let payloadSize: Int?
+    package let attachmentDraft: MessagesReplyAttachmentDraftEvidence?
+    package let cleanup: MessagesReplyAttachmentProbeCleanupEvidence?
+
+    enum CodingKeys: String, CodingKey {
+        case schemaVersion = "schema_version"
+        case outcome, category, detail, phase
+        case workerCommand = "worker_command"
+        case observedState = "observed_state"
+        case operationID = "operation_id"
+        case observedResult = "observed_result"
+        case payloadSHA256 = "payload_sha256"
+        case payloadSize = "payload_size"
+        case attachmentDraft = "attachment_draft"
+        case cleanup
+    }
+}
+
+package enum MessagesReplyAttachmentProbePrivateEntrypoint {
+    // The timeout/cancellation cases deliberately do not authorize cleanup: they
+    // can occur after handoff, while Messages may still refer to the copy.
+    package static func cleanupBeforeHandoffIfProven(_ evidence: MessagesReplyAttachmentDraftEvidence?,
+                                                    launchStarted: Bool,
+                                                    outcome: WorkerObservedOutcome?,
+                                                    deadline: WorkerDeadline) throws {
+        guard let evidence else { return }
+        let noHandoff: Bool
+        switch outcome {
+        case .requestNotSent, .spawnOrSetupFailedBeforeRequest: noHandoff = true
+        default: noHandoff = !launchStarted
+        }
+        if noHandoff { _ = try removeReplyAttachmentDraftCopyIfOwned(evidence, deadline: deadline) }
+    }
+
+    package static func cleanupEvidence(for evidence: MessagesReplyAttachmentDraftEvidence?) -> MessagesReplyAttachmentProbeCleanupEvidence? {
+        guard let evidence else { return nil }
+        let copyAbsent = lstatAbsent(evidence.copyPath)
+        let directoryAbsent = lstatAbsent(evidence.directoryPath)
+        let disposition: String
+        if copyAbsent == true, directoryAbsent == true { disposition = "removed" }
+        else if copyAbsent == false || directoryAbsent == false { disposition = "preserved" }
+        else { disposition = "unknown" }
+        return MessagesReplyAttachmentProbeCleanupEvidence(disposition: disposition,
+                                                          copyAbsent: copyAbsent,
+                                                          directoryAbsent: directoryAbsent)
+    }
+
+    package static func classify(observed outcome: WorkerObservedOutcome?,
+                                 prepared request: MessagesReplyComposerProbeRequest?,
+                                 payloadData: Data?,
+                                 cleanup: MessagesReplyAttachmentProbeCleanupEvidence?) -> (exitCode: Int32, result: MessagesReplyAttachmentProbePrivateResult) {
+        let payloadSHA = payloadData.map { "sha256:" + SHA256.hash(data: $0).map { String(format: "%02x", $0) }.joined() }
+        let phase = request?.phase
+        let attachment = request?.attachmentDraft
+        let payloadSize = payloadData?.count
+        guard case .observedState(let operationID, let verification) = outcome,
+              verification == MessagesReplyComposerProbeDetail.attachmentDraftVerified,
+              request?.phase == "replyAttachmentDraftInspect",
+              request?.attachmentDraft != nil,
+              payloadData != nil,
+              cleanup?.disposition == "removed",
+              cleanup?.copyAbsent == true, cleanup?.directoryAbsent == true else {
+            return (65, MessagesReplyAttachmentProbePrivateResult(schemaVersion: 1, outcome: "refused", category: nil,
+                                                                  detail: nil, phase: phase, workerCommand: request == nil ? nil : "messages.reply.inspect",
+                                                                  observedState: nil, operationID: nil, observedResult: outcome?.description,
+                                                                  payloadSHA256: payloadSHA, payloadSize: payloadSize,
+                                                                  attachmentDraft: attachment, cleanup: cleanup))
+        }
+        return (0, MessagesReplyAttachmentProbePrivateResult(schemaVersion: 1, outcome: "completed", category: "ack",
+                                                             detail: verification, phase: phase, workerCommand: "messages.reply.inspect",
+                                                             observedState: "observedState", operationID: operationID,
+                                                             observedResult: outcome?.description, payloadSHA256: payloadSHA,
+                                                             payloadSize: payloadSize, attachmentDraft: attachment, cleanup: cleanup))
+    }
+
+    private static func lstatAbsent(_ path: String) -> Bool? {
+        var st = stat()
+        if lstat(path, &st) == 0 { return false }
+        if errno == ENOENT { return true }
+        return nil
+    }
+}
 
 package struct MessagesReplyComposerProbeRequest: Codable, Equatable, Sendable {
     package let chatGUID: String
@@ -15,6 +231,7 @@ package struct MessagesReplyComposerProbeRequest: Codable, Equatable, Sendable {
     package let expectedBodySHA256: String
     package let expectedBodyUTF8Length: Int
     package let requiredBodyPrefix: String
+    package let attachmentDraft: MessagesReplyAttachmentDraftEvidence?
 
     enum CodingKeys: String, CodingKey {
         case chatGUID = "chat_guid"
@@ -29,6 +246,7 @@ package struct MessagesReplyComposerProbeRequest: Codable, Equatable, Sendable {
         case expectedBodySHA256 = "expected_body_sha256"
         case expectedBodyUTF8Length = "expected_body_utf8_length"
         case requiredBodyPrefix = "required_body_prefix"
+        case attachmentDraft = "attachment_draft"
     }
 
     package init(chatGUID: String,
@@ -42,8 +260,10 @@ package struct MessagesReplyComposerProbeRequest: Codable, Equatable, Sendable {
                  expectedIsFromMe: Bool,
                  expectedBodySHA256: String,
                  expectedBodyUTF8Length: Int,
-                 requiredBodyPrefix: String) throws {
-        guard phase == "replyInspect",
+                 requiredBodyPrefix: String,
+                 attachmentDraft: MessagesReplyAttachmentDraftEvidence? = nil) throws {
+        let validPhase = (phase == "replyInspect" && attachmentDraft == nil) || (phase == "replyAttachmentDraftInspect" && attachmentDraft != nil)
+        guard validPhase,
               !chatGUID.isEmpty, chatGUID.utf8.count <= 512,
               expectedChatRowID > 0, expectedMessageRowID > 0,
               !expectedParticipantHandles.isEmpty, expectedParticipantHandles.count <= 32,
@@ -65,6 +285,7 @@ package struct MessagesReplyComposerProbeRequest: Codable, Equatable, Sendable {
         self.expectedBodySHA256 = expectedBodySHA256
         self.expectedBodyUTF8Length = expectedBodyUTF8Length
         self.requiredBodyPrefix = requiredBodyPrefix
+        self.attachmentDraft = attachmentDraft
         guard try workerPayloadData().count <= 4096 else { throw MessagesReplyComposerAXError.invalidPayload }
     }
 
@@ -81,7 +302,8 @@ package struct MessagesReplyComposerProbeRequest: Codable, Equatable, Sendable {
                       expectedIsFromMe: c.decode(Bool.self, forKey: .expectedIsFromMe),
                       expectedBodySHA256: c.decode(String.self, forKey: .expectedBodySHA256),
                       expectedBodyUTF8Length: c.decode(Int.self, forKey: .expectedBodyUTF8Length),
-                      requiredBodyPrefix: c.decode(String.self, forKey: .requiredBodyPrefix))
+                      requiredBodyPrefix: c.decode(String.self, forKey: .requiredBodyPrefix),
+                      attachmentDraft: c.decodeIfPresent(MessagesReplyAttachmentDraftEvidence.self, forKey: .attachmentDraft))
     }
 
     package func encode(to encoder: any Encoder) throws {
@@ -98,6 +320,7 @@ package struct MessagesReplyComposerProbeRequest: Codable, Equatable, Sendable {
         try c.encode(expectedBodySHA256, forKey: .expectedBodySHA256)
         try c.encode(expectedBodyUTF8Length, forKey: .expectedBodyUTF8Length)
         try c.encode(requiredBodyPrefix, forKey: .requiredBodyPrefix)
+        try c.encodeIfPresent(attachmentDraft, forKey: .attachmentDraft)
     }
 
     package func workerPayloadData() throws -> Data {
@@ -167,6 +390,7 @@ private struct MessagesReplyComposerProbeEvidence: Codable {
     let bodySHA256: String
     let bodyUTF8Length: Int
     let requiredBodyPrefix: String
+    let attachmentDraft: MessagesReplyAttachmentDraftEvidence?
 
     enum CodingKeys: String, CodingKey {
         case phase
@@ -181,6 +405,7 @@ private struct MessagesReplyComposerProbeEvidence: Codable {
         case bodySHA256 = "body_sha256"
         case bodyUTF8Length = "body_utf8_length"
         case requiredBodyPrefix = "required_body_prefix"
+        case attachmentDraft = "attachment_draft"
     }
 }
 
@@ -191,6 +416,178 @@ private struct MessagesReplyComposerResolvedParentTarget {
 
 package enum MessagesReplyComposerProbeParent {
     package static func productionStateRoot() -> String { MessagesAutomationState.productionRoot() }
+
+    package static func payloadDataForAttachmentDraft(base request: MessagesReplyComposerProbeRequest,
+                                                      rawFilePath: String,
+                                                      scratchRoot: String,
+                                                      repoRoot: String,
+                                                      home: String = NSHomeDirectory(),
+                                                      deadline: WorkerDeadline) throws -> Data {
+        guard request.phase == "replyInspect", request.attachmentDraft == nil else { throw MessagesReplyComposerParentError.unsafeInputFile }
+        let evidence = try prepareAttachmentDraft(rawFilePath: rawFilePath, scratchRoot: scratchRoot,
+                                                  repoRoot: repoRoot, home: home, deadline: deadline)
+        do {
+            let prepared = try MessagesReplyComposerProbeRequest(chatGUID: request.chatGUID,
+                                                                 messageGUID: request.messageGUID,
+                                                                 nativePartIndex: request.nativePartIndex,
+                                                                 nativePartGUID: request.nativePartGUID,
+                                                                 phase: "replyAttachmentDraftInspect",
+                                                                 expectedChatRowID: request.expectedChatRowID,
+                                                                 expectedMessageRowID: request.expectedMessageRowID,
+                                                                 expectedParticipantHandles: request.expectedParticipantHandles,
+                                                                 expectedIsFromMe: request.expectedIsFromMe,
+                                                                 expectedBodySHA256: request.expectedBodySHA256,
+                                                                 expectedBodyUTF8Length: request.expectedBodyUTF8Length,
+                                                                 requiredBodyPrefix: request.requiredBodyPrefix,
+                                                                 attachmentDraft: evidence)
+            return try prepared.workerPayloadData()
+        } catch {
+            _ = try? removeReplyAttachmentDraftCopyIfOwned(evidence, deadline: deadline)
+            throw error
+        }
+    }
+
+    private static func prepareAttachmentDraft(rawFilePath: String, scratchRoot: String, repoRoot: String, home: String,
+                                               deadline: WorkerDeadline) throws -> MessagesReplyAttachmentDraftEvidence {
+        try checkMessagesAXDeadline(deadline)
+        let sourcePath = try AttachmentSource.resolve(rawFilePath, home: home)
+        let canonicalSource = URL(fileURLWithPath: sourcePath).resolvingSymlinksInPath().standardizedFileURL.path
+        let canonicalRepo = URL(fileURLWithPath: repoRoot, isDirectory: true).resolvingSymlinksInPath().standardizedFileURL.path
+        let canonicalScratch = URL(fileURLWithPath: scratchRoot, isDirectory: true).resolvingSymlinksInPath().standardizedFileURL.path
+        guard canonicalSource != canonicalRepo,
+              !canonicalSource.hasPrefix(canonicalRepo.hasSuffix("/") ? canonicalRepo : canonicalRepo + "/"),
+              canonicalScratch != canonicalRepo,
+              !canonicalScratch.hasPrefix(canonicalRepo.hasSuffix("/") ? canonicalRepo : canonicalRepo + "/") else {
+            throw MessagesReplyComposerParentError.unsafeInputFile
+        }
+        let sourceFD = open(canonicalSource, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+        guard sourceFD >= 0 else { throw MessagesReplyComposerParentError.unsafeInputFile }
+        defer { close(sourceFD) }
+        var sourceBefore = stat()
+        guard fstat(sourceFD, &sourceBefore) == 0,
+              (sourceBefore.st_mode & S_IFMT) == S_IFREG,
+              sourceBefore.st_uid == getuid(),
+              sourceBefore.st_size >= 1,
+              sourceBefore.st_size <= 65_536 else { throw MessagesReplyComposerParentError.unsafeInputFile }
+        let handle = FileHandle(fileDescriptor: sourceFD, closeOnDealloc: false)
+        let bytes = try handle.read(upToCount: 65_537) ?? Data()
+        try checkMessagesAXDeadline(deadline)
+        var sourceAfter = stat()
+        var sourcePathState = stat()
+        guard fstat(sourceFD, &sourceAfter) == 0, stat(canonicalSource, &sourcePathState) == 0,
+              fileIdentity(sourceBefore, equals: sourceAfter), fileIdentity(sourceBefore, equals: sourcePathState),
+              bytes.count == sourceBefore.st_size, !bytes.isEmpty, bytes.count <= 65_536 else {
+            throw MessagesReplyComposerParentError.unsafeInputFile
+        }
+        let directory = URL(fileURLWithPath: canonicalScratch, isDirectory: true).appendingPathComponent(UUID().uuidString, isDirectory: true).path
+        guard directory.utf8.count <= 1024 else { throw MessagesReplyComposerParentError.unsafeInputFile }
+        var dirFD: Int32 = -1
+        var copyFD: Int32 = -1
+        var ownedDirectory: stat?
+        var ownedCopy: stat?
+        defer {
+            if copyFD >= 0 { close(copyFD) }
+            if dirFD >= 0 { close(dirFD) }
+        }
+        do {
+            guard mkdir(directory, 0o700) == 0 else { throw MessagesReplyComposerParentError.unsafeInputFile }
+            dirFD = open(directory, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            guard dirFD >= 0 else { throw MessagesReplyComposerParentError.unsafeInputFile }
+            var dirStat = stat()
+            guard fstat(dirFD, &dirStat) == 0,
+                  (dirStat.st_mode & S_IFMT) == S_IFDIR,
+                  (dirStat.st_mode & 0o777) == 0o700,
+                  dirStat.st_uid == getuid() else { throw MessagesReplyComposerParentError.unsafeInputFile }
+            ownedDirectory = dirStat
+            let copyName = replyAttachmentDraftCopyBasename()
+            let copyPath = URL(fileURLWithPath: directory, isDirectory: true).appendingPathComponent(copyName).path
+            guard copyPath.utf8.count <= 1024 else { throw MessagesReplyComposerParentError.unsafeInputFile }
+            copyFD = openat(dirFD, copyName, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
+            guard copyFD >= 0 else { throw MessagesReplyComposerParentError.unsafeInputFile }
+            var createdStat = stat()
+            guard fstat(copyFD, &createdStat) == 0 else { throw MessagesReplyComposerParentError.unsafeInputFile }
+            ownedCopy = createdStat
+            var writeOffset = 0
+            while writeOffset < bytes.count {
+                try checkMessagesAXDeadline(deadline)
+                let wrote = bytes.withUnsafeBytes { raw in
+                    write(copyFD, raw.baseAddress!.advanced(by: writeOffset), bytes.count - writeOffset)
+                }
+                guard wrote > 0 else { throw MessagesReplyComposerParentError.unsafeInputFile }
+                writeOffset += wrote
+            }
+            guard fchmod(copyFD, 0o600) == 0 else { throw MessagesReplyComposerParentError.unsafeInputFile }
+            let closeResult = close(copyFD)
+            copyFD = -1
+            guard closeResult == 0 else { throw MessagesReplyComposerParentError.unsafeInputFile }
+            try checkMessagesAXDeadline(deadline)
+            let reopened = openat(dirFD, copyName, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
+            guard reopened >= 0 else { throw MessagesReplyComposerParentError.unsafeInputFile }
+            defer { close(reopened) }
+            var copyStat = stat()
+            guard fstat(reopened, &copyStat) == 0,
+                  (copyStat.st_mode & S_IFMT) == S_IFREG,
+                  (copyStat.st_mode & 0o777) == 0o600,
+                  copyStat.st_uid == getuid(), copyStat.st_size == bytes.count else {
+                throw MessagesReplyComposerParentError.unsafeInputFile
+            }
+            let copyBytes = try FileHandle(fileDescriptor: reopened, closeOnDealloc: false).read(upToCount: 65_537) ?? Data()
+            guard copyBytes == bytes else { throw MessagesReplyComposerParentError.unsafeInputFile }
+            guard fstat(dirFD, &dirStat) == 0,
+                  (dirStat.st_mode & S_IFMT) == S_IFDIR,
+                  (dirStat.st_mode & 0o777) == 0o700,
+                  dirStat.st_uid == getuid() else { throw MessagesReplyComposerParentError.unsafeInputFile }
+            let digest = "sha256:" + SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
+            let evidence = try MessagesReplyAttachmentDraftEvidence(copyPath: copyPath,
+                                                                     copySHA256: digest,
+                                                                     copySize: bytes.count,
+                                                                     copyStat: try statEvidence(copyStat),
+                                                                     directoryPath: directory,
+                                                                     directoryStat: try statEvidence(dirStat))
+            _ = try validateReplyAttachmentDraftCopy(evidence, deadline: deadline)
+            return evidence
+        } catch {
+            // Keep the directory descriptor open through cleanup. Only remove a
+            // name still bound to the exact inode created here, including a
+            // partially written file. Never follow a replaced path.
+            if dirFD >= 0, let ownedDirectory {
+                if let ownedCopy {
+                    var current = stat()
+                    if fstatat(dirFD, replyAttachmentDraftCopyBasename(), &current, AT_SYMLINK_NOFOLLOW) == 0,
+                       current.st_dev == ownedCopy.st_dev, current.st_ino == ownedCopy.st_ino,
+                       current.st_uid == ownedCopy.st_uid, (current.st_mode & S_IFMT) == S_IFREG {
+                        _ = unlinkat(dirFD, replyAttachmentDraftCopyBasename(), 0)
+                    }
+                }
+                var currentDirectory = stat()
+                if lstat(directory, &currentDirectory) == 0,
+                   currentDirectory.st_dev == ownedDirectory.st_dev,
+                   currentDirectory.st_ino == ownedDirectory.st_ino,
+                   currentDirectory.st_uid == ownedDirectory.st_uid,
+                   (currentDirectory.st_mode & S_IFMT) == S_IFDIR {
+                    _ = rmdir(directory) // Empty only; unexpected content is preserved.
+                }
+            }
+            throw error
+        }
+    }
+
+    private static func fileIdentity(_ lhs: stat, equals rhs: stat) -> Bool {
+        lhs.st_dev == rhs.st_dev && lhs.st_ino == rhs.st_ino && lhs.st_size == rhs.st_size &&
+        lhs.st_mode == rhs.st_mode && lhs.st_uid == rhs.st_uid &&
+        lhs.st_mtimespec.tv_sec == rhs.st_mtimespec.tv_sec && lhs.st_mtimespec.tv_nsec == rhs.st_mtimespec.tv_nsec &&
+        lhs.st_ctimespec.tv_sec == rhs.st_ctimespec.tv_sec && lhs.st_ctimespec.tv_nsec == rhs.st_ctimespec.tv_nsec
+    }
+
+    private static func statEvidence(_ value: stat) throws -> MessagesReplyAttachmentFileStat {
+        try MessagesReplyAttachmentFileStat(device: UInt64(value.st_dev), inode: UInt64(value.st_ino), size: Int64(value.st_size),
+                                            mode: UInt16(value.st_mode & 0o777), uid: UInt32(value.st_uid),
+                                            modifiedSeconds: Int64(value.st_mtimespec.tv_sec),
+                                            modifiedNanoseconds: Int64(value.st_mtimespec.tv_nsec),
+                                            changedSeconds: Int64(value.st_ctimespec.tv_sec),
+                                            changedNanoseconds: Int64(value.st_ctimespec.tv_nsec))
+    }
+
 
     package static func payloadData(fromFile path: String, repoRoot: String) throws -> Data {
         guard !path.isEmpty else { throw MessagesReplyComposerParentError.unsafeInputFile }
@@ -240,7 +637,8 @@ package enum MessagesReplyComposerProbeParent {
                                                           isFromMe: request.expectedIsFromMe,
                                                           bodySHA256: request.expectedBodySHA256,
                                                           bodyUTF8Length: request.expectedBodyUTF8Length,
-                                                          requiredBodyPrefix: request.requiredBodyPrefix)
+                                                          requiredBodyPrefix: request.requiredBodyPrefix,
+                                                          attachmentDraft: request.attachmentDraft)
         return try journalRequest(for: evidence, payloadData: payloadData)
     }
 
@@ -303,7 +701,8 @@ package enum MessagesReplyComposerProbeParent {
                                                           isFromMe: message.is_from_me,
                                                           bodySHA256: request.expectedBodySHA256,
                                                           bodyUTF8Length: request.expectedBodyUTF8Length,
-                                                          requiredBodyPrefix: request.requiredBodyPrefix)
+                                                          requiredBodyPrefix: request.requiredBodyPrefix,
+                                                          attachmentDraft: request.attachmentDraft)
         return MessagesReplyComposerResolvedParentTarget(evidence: evidence, payload: request)
     }
 
@@ -336,6 +735,7 @@ package enum MessagesReplyComposerProbeParent {
             resolve: {
                 var db = try makeChatDB()
                 let resolved = try resolveTarget(request: request, db: &db)
+                if let attachment = request.attachmentDraft { _ = try validateReplyAttachmentDraftCopy(attachment, deadline: deadline) }
                 let journal = try journalRequest(for: resolved.evidence, payloadData: payloadData)
                 return try WorkerResolvedAction(target: WorkerObservedTargetBinding(
                     operationType: journal.operationType,
@@ -350,17 +750,22 @@ package enum MessagesReplyComposerProbeParent {
             preflight: { _, context in
                 var db = try makeChatDB()
                 _ = try resolveTarget(request: request, db: &db)
+                if let attachment = request.attachmentDraft { _ = try validateReplyAttachmentDraftCopy(attachment, deadline: context.deadline) }
                 let clean = try automation.captureStartingDraftSafetyState(request, deadline: context.deadline)
                 originalCleanState = clean
                 return .requiresMutation
             },
             verify: { _, response, context in
-                guard response.category == .ack,
-                      response.detail == MessagesReplyComposerProbeDetail.verified else { return nil }
+                let expectedDetail = request.phase == "replyAttachmentDraftInspect" ? MessagesReplyComposerProbeDetail.attachmentDraftVerified : MessagesReplyComposerProbeDetail.verified
+                guard response.category == .ack, response.detail == expectedDetail else { return nil }
                 var db = try makeChatDB()
                 _ = try resolveTarget(request: request, db: &db)
+                if request.attachmentDraft != nil, response.detail != MessagesReplyComposerProbeDetail.attachmentDraftVerified { return nil }
+                if let attachment = request.attachmentDraft { _ = try validateReplyAttachmentDraftCopy(attachment, deadline: context.deadline) }
                 guard let originalCleanState else { throw MessagesReplyComposerParentError.targetDrift }
-                return try automation.verifyCleanReplyState(request, original: originalCleanState, deadline: context.deadline)
+                guard try automation.verifyCleanReplyState(request, original: originalCleanState, deadline: context.deadline) == MessagesReplyComposerProbeDetail.verified else { return nil }
+                if let attachment = request.attachmentDraft { _ = try removeReplyAttachmentDraftCopyIfOwned(attachment, deadline: context.deadline) }
+                return expectedDetail
             })
     }
 }

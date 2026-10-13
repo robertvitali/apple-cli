@@ -1,8 +1,10 @@
+import ApplicationServices
 import Foundation
 import AppleKit
 
 package enum MessagesReplyComposerProbeDetail {
     package static let verified = "no-send-empty-owned-composer-closed-verified"
+    package static let attachmentDraftVerified = "no-send-exact-attachment-draft-closed-verified"
 }
 
 enum MessagesReplyComposerAXOutcome: Equatable, Sendable {
@@ -44,6 +46,9 @@ enum MessagesReplyComposerAXError: String, Error, CustomStringConvertible, CaseI
     case replyComposerOriginalDraftDrift = "reply-composer-original-draft-drift"
     case replyComposerTextMismatch = "reply-composer-text-mismatch"
     case replyComposerPossibleDraftRemains = "reply-composer-possible-draft-remains"
+    case replyAttachmentClipboardDrift = "reply-attachment-clipboard-drift"
+    case replyAttachmentLayoutDrift = "reply-attachment-layout-drift"
+    case replyAttachmentDraftUnverified = "reply-attachment-draft-unverified"
     case targetDrift = "target-drift"
     case traversalLimit = "traversal-limit"
     case unknownAXValue = "unknown-ax-value"
@@ -210,6 +215,9 @@ struct MessagesReplyComposerAXAutomation {
     private let readinessNow: () -> UInt64
     private let readinessPause: (UInt64) -> Void
     private let sendReturnKey: (pid_t, WorkerDeadline) throws -> Void
+    private let clipboardFactory: () -> any MessagesClipboarding
+    private let pasteKeyResolver: any MessagesPasteKeyResolving
+    private let sendPasteKey: (pid_t, UInt16, WorkerDeadline) throws -> Void
 
     init(driver: any MessagesReplyComposerAXDriving = LiveMessagesReplyComposerAXDriver(),
                  maxTraversalNodes: Int = 2_048, maxTraversalDepth: Int = 32, maxChildren: Int = 256,
@@ -220,6 +228,14 @@ struct MessagesReplyComposerAXAutomation {
                      do { try presser.pressReturn(flags: .cleared, deadline: deadline) }
                      catch MessagesPairedKeyPressError.deadlineExpired { throw MessagesReplyComposerAXError.deadlineExpired }
                      catch { throw MessagesReplyComposerAXError.axFailure }
+                 },
+                 clipboardFactory: @escaping () -> any MessagesClipboarding = { LiveMessagesClipboard() },
+                 pasteKeyResolver: any MessagesPasteKeyResolving = LiveMessagesPasteKeyResolver(),
+                 sendPasteKey: @escaping (pid_t, UInt16, WorkerDeadline) throws -> Void = { pid, keyCode, deadline in
+                     let presser = LiveMessagesPairedKeyPresser(pid: pid)
+                     do { try presser.press(CGKeyCode(keyCode), flags: .explicit(CGEventFlags.maskCommand.rawValue), deadline: deadline) }
+                     catch MessagesPairedKeyPressError.deadlineExpired { throw MessagesReplyComposerAXError.deadlineExpired }
+                     catch { throw MessagesReplyComposerAXError.axFailure }
                  }) {
         self.driver = driver
         self.maxTraversalNodes = maxTraversalNodes
@@ -228,6 +244,9 @@ struct MessagesReplyComposerAXAutomation {
         self.readinessNow = readinessNow
         self.readinessPause = readinessPause
         self.sendReturnKey = sendReturnKey
+        self.clipboardFactory = clipboardFactory
+        self.pasteKeyResolver = pasteKeyResolver
+        self.sendPasteKey = sendPasteKey
     }
 
     private var navigator: MessagesAXNavigator {
@@ -373,6 +392,7 @@ struct MessagesReplyComposerAXAutomation {
     }
 
     private func execute(_ request: MessagesReplyComposerProbeRequest, deadline: WorkerDeadline) throws -> MessagesReplyComposerAXOutcome {
+        if request.phase == "replyAttachmentDraftInspect" { return try executeAttachmentDraftInspect(request, deadline: deadline) }
         var stage = MessagesReplyComposerAXStage.preflight
         do {
             try checkMessagesAXDeadline(deadline)
@@ -469,6 +489,183 @@ struct MessagesReplyComposerAXAutomation {
         } catch _ as MessagesAXRouteDrift {
             throw MessagesReplyComposerStagedTargetDrift(stage: stage)
         }
+    }
+
+
+
+    private func executeAttachmentDraftInspect(_ request: MessagesReplyComposerProbeRequest, deadline: WorkerDeadline) throws -> MessagesReplyComposerAXOutcome {
+        guard let attachment = request.attachmentDraft else { throw MessagesReplyComposerAXError.invalidPayload }
+        var stage = MessagesReplyComposerAXStage.preflight
+        var clipboardOwnerCount: Int?
+        var originalClipboard: MessagesClipboardSnapshot?
+        var publishedURL: URL?
+        var activeClipboard: (any MessagesClipboarding)?
+        do {
+            let copyURL = try validateReplyAttachmentDraftCopy(attachment, deadline: deadline)
+            try checkMessagesAXDeadline(deadline)
+            guard driver.checkAccessibilityTrusted(prompt: false) else { return .refused(MessagesReplyComposerAXError.accessibilityDenied.description) }
+            let titles = try driver.replyActionTitles(deadline: deadline)
+            guard !titles.isEmpty else { throw MessagesReplyComposerAXError.unknownAXValue }
+            let normalPlaceholders = try driver.normalComposePlaceholders(deadline: deadline)
+            let replyDescription = try driver.replyTranscriptDescription(deadline: deadline)
+            try refuseUnsafeExistingStateBeforeOpen(normalPlaceholders: normalPlaceholders, replyDescription: replyDescription, deadline: deadline)
+            let targetURL = try NativeMessagesURL.message(messageGUID: request.messageGUID,
+                                                          nativePartIndex: request.nativePartIndex,
+                                                          nativePartGUID: request.nativePartGUID)
+            stage = .open
+            let process = try driver.openMessages(url: targetURL, deadline: deadline)
+            stage = .postOpenSafety
+            try refuseUnsafeExistingState(process: process, normalPlaceholders: normalPlaceholders,
+                                          replyDescription: replyDescription, deadline: deadline)
+            stage = .initialRoute
+            let route = try navigator.captureInitialRoute(process: process, isTargetEligible: { element, deadline in
+                try replyAction(on: element, titles: titles, deadline: deadline) != nil
+            }, deadline: deadline)
+            stage = .routeRevalidation
+            try navigator.revalidate(route, isTargetEligible: { element, deadline in
+                try replyAction(on: element, titles: titles, deadline: deadline) != nil
+            }, deadline: deadline)
+            guard try replyComposer(in: route.window, replyDescription: replyDescription, deadline: deadline) == nil else {
+                throw MessagesReplyComposerAXError.replyComposerExisting
+            }
+            let originalDraft = try cleanNormalComposerProof(in: route.window, normalPlaceholders: normalPlaceholders, deadline: deadline)
+            stage = .replyOpen
+            guard let action = try replyAction(on: route.selected, titles: titles, deadline: deadline) else {
+                throw MessagesReplyComposerAXError.replyActionUnavailable
+            }
+            try route.selected.performAction(named: action, deadline: deadline)
+            stage = .composerReadiness
+            let composer = try waitForOwnedComposer(route: route, titles: titles,
+                                                    replyDescription: replyDescription, deadline: deadline)
+            try validateOwnedComposer(composer, deadline: deadline)
+            guard try bodyHasNoLocalAttachmentEvidence(in: composer.body, window: route.window, deadline: deadline) else {
+                throw MessagesReplyComposerAXError.replyComposerAttachmentEvidence
+            }
+            guard try hasNoLocalModalEvidence(in: route.window, window: route.window, deadline: deadline) else {
+                throw MessagesReplyComposerAXError.replyComposerOwnershipDrift
+            }
+            let clipboard = clipboardFactory()
+            activeClipboard = clipboard
+            let layoutBefore = try pasteKeyResolver.resolvePasteKey(deadline: deadline)
+            let originalSnapshot = try clipboard.snapshot(deadline: deadline)
+            originalClipboard = originalSnapshot
+            let cleared = try clipboard.clearContentsReturningCount(deadline: deadline)
+            clipboardOwnerCount = cleared
+            try clipboard.verifyEmpty(ownerCount: cleared, deadline: deadline)
+            publishedURL = copyURL
+            try clipboard.publishAndVerifyFileURL(copyURL, ownerCount: cleared, deadline: deadline)
+            let layoutAfter = try pasteKeyResolver.resolvePasteKey(deadline: deadline)
+            guard layoutAfter == layoutBefore else { throw MessagesReplyComposerAXError.replyAttachmentLayoutDrift }
+            _ = try validateReplyAttachmentDraftCopy(attachment, deadline: deadline)
+            let finalComposer = try revalidateOwnedComposer(route: route, original: composer, titles: titles,
+                                                            replyDescription: replyDescription, deadline: deadline)
+            guard try bodyHasNoLocalAttachmentEvidence(in: finalComposer.body, window: route.window, deadline: deadline) else {
+                throw MessagesReplyComposerAXError.replyComposerAttachmentEvidence
+            }
+            guard try hasNoLocalModalEvidence(in: route.window, window: route.window, deadline: deadline) else {
+                throw MessagesReplyComposerAXError.replyComposerOwnershipDrift
+            }
+            try validateAppRootFocus(route: route, composer: finalComposer, deadline: deadline)
+            let finalEvidence = try finalComposer.body.bodyValueEvidence(deadline: deadline)
+            guard finalEvidence.provenEmpty, finalEvidence == composer.evidence else {
+                throw MessagesReplyComposerAXError.replyComposerOwnershipDrift
+            }
+            try clipboard.verifyOwnedPayload(ownerCount: cleared, url: copyURL, deadline: deadline)
+            try sendPasteKey(route.process.identity.pid, layoutBefore.keyCode, deadline)
+            let afterPaste = try retainedOwnedComposer(route: route, original: composer, titles: titles,
+                                                       replyDescription: replyDescription, deadline: deadline)
+            guard try hasNoLocalModalEvidence(in: route.window, window: route.window, deadline: deadline) else {
+                throw MessagesReplyComposerAXError.replyComposerOwnershipDrift
+            }
+            _ = try validateReplyAttachmentDraftCopy(attachment, deadline: deadline)
+            guard try afterPaste.transcript.actions(deadline: deadline).contains("AXCancel") else {
+                throw MessagesReplyComposerAXError.replyComposerCleanupUnavailable
+            }
+            try validateExactAttachmentDraft(in: afterPaste.body, route: route, expectedCopyPath: copyURL.path, deadline: deadline)
+            guard try hasNoLocalModalEvidence(in: route.window, window: route.window, deadline: deadline) else {
+                throw MessagesReplyComposerAXError.replyComposerOwnershipDrift
+            }
+            try afterPaste.transcript.performAction(named: "AXCancel", deadline: deadline)
+            stage = .verification
+            try verifyCleanup(route: route, titles: titles, replyDescription: replyDescription,
+                              originalDraft: originalDraft, normalPlaceholders: normalPlaceholders, deadline: deadline)
+            try restoreClipboardIfOwned(clipboard: clipboard, original: originalClipboard, ownerCount: clipboardOwnerCount, url: publishedURL, deadline: deadline)
+            return .ack(MessagesReplyComposerProbeDetail.attachmentDraftVerified)
+        } catch let error as MessagesAXNavigationError {
+            if let activeClipboard { try? restoreClipboardIfOwned(clipboard: activeClipboard, original: originalClipboard, ownerCount: clipboardOwnerCount, url: publishedURL, deadline: deadline) }
+            switch error {
+            case .deadlineExpired: throw MessagesReplyComposerAXError.deadlineExpired
+            case .axFailure: throw MessagesReplyComposerStagedAXFailure(stage: stage)
+            case .targetDrift, .ambiguousSelectedMessage: throw MessagesReplyComposerStagedTargetDrift(stage: stage)
+            case .unknownAXValue, .traversalLimit: throw Self.replyError(from: error)
+            }
+        } catch let error as MessagesReactionAXError {
+            if let activeClipboard { try? restoreClipboardIfOwned(clipboard: activeClipboard, original: originalClipboard, ownerCount: clipboardOwnerCount, url: publishedURL, deadline: deadline) }
+            try Self.throwReplyCommonReactionError(error, stage: stage)
+        } catch MessagesReplyComposerAXError.axFailure {
+            if let activeClipboard { try? restoreClipboardIfOwned(clipboard: activeClipboard, original: originalClipboard, ownerCount: clipboardOwnerCount, url: publishedURL, deadline: deadline) }
+            throw MessagesReplyComposerStagedAXFailure(stage: stage)
+        } catch MessagesReplyComposerAXError.targetDrift {
+            if let activeClipboard { try? restoreClipboardIfOwned(clipboard: activeClipboard, original: originalClipboard, ownerCount: clipboardOwnerCount, url: publishedURL, deadline: deadline) }
+            throw MessagesReplyComposerStagedTargetDrift(stage: stage)
+        } catch _ as MessagesAXRouteDrift {
+            if let activeClipboard { try? restoreClipboardIfOwned(clipboard: activeClipboard, original: originalClipboard, ownerCount: clipboardOwnerCount, url: publishedURL, deadline: deadline) }
+            throw MessagesReplyComposerStagedTargetDrift(stage: stage)
+        } catch {
+            if let activeClipboard { try? restoreClipboardIfOwned(clipboard: activeClipboard, original: originalClipboard, ownerCount: clipboardOwnerCount, url: publishedURL, deadline: deadline) }
+            throw error
+        }
+    }
+
+    private func restoreClipboardIfOwned(clipboard: any MessagesClipboarding, original: MessagesClipboardSnapshot?, ownerCount: Int?, url: URL?, deadline: WorkerDeadline) throws {
+        guard let original, let ownerCount else { return }
+        let current = try clipboard.snapshot(deadline: deadline)
+        let ownedState = current.changeCount == ownerCount && (current.isEmptyAtCount || url.map { current.isExactFileURLPayload($0) } == true)
+        guard ownedState else { throw MessagesReplyComposerAXError.replyAttachmentClipboardDrift }
+        try clipboard.restore(original, deadline: deadline)
+    }
+
+    private func validateExactAttachmentDraft(in body: any MessagesAXElement, route: MessagesAXRoute,
+                                              expectedCopyPath: String, deadline: WorkerDeadline) throws {
+        let children = try body.children(limit: 16, deadline: deadline)
+        let linked = try body.linkedElements(limit: max(0, 16 - children.count), deadline: deadline)
+        let candidates = try (children + linked).filter { element in
+            guard let owner = try element.window(deadline: deadline), owner.sameIdentity(as: route.window) else {
+                throw MessagesAXRouteDrift(.windowMismatch)
+            }
+            guard try element.processIdentifier(deadline: deadline) == route.process.identity.pid else {
+                throw MessagesReplyComposerAXError.replyAttachmentDraftUnverified
+            }
+            let role = try element.role(deadline: deadline)
+            let identifier = try element.identifier(deadline: deadline)?.lowercased()
+            return role == "AXImage" || identifier?.contains("attachment") == true || identifier?.contains("filetransfer") == true
+        }
+        guard candidates.count == 1, let candidate = candidates.first else {
+            throw MessagesReplyComposerAXError.replyAttachmentDraftUnverified
+        }
+        let snapshot = try body.bodyTextSnapshot(deadline: deadline)
+        if !snapshot.text.isEmpty {
+            guard snapshot.text.unicodeScalars.allSatisfy({ $0.value == 0xfffc }) else {
+                throw MessagesReplyComposerAXError.replyAttachmentDraftUnverified
+            }
+        }
+        var exact = false
+        for name in ["AXURL", "AXDocument"] {
+            do {
+                if let url = try candidate.fileURLAttribute(named: name, deadline: deadline) {
+                    if url.standardizedFileURL.path == expectedCopyPath { exact = true }
+                }
+            } catch {
+                throw MessagesReplyComposerAXError.replyAttachmentDraftUnverified
+            }
+        }
+        for name in ["AXPath", "AXFilePath"] {
+            if let value = try candidate.stringAttribute(named: name, deadline: deadline), !value.isEmpty {
+                guard value.hasPrefix("/") else { throw MessagesReplyComposerAXError.replyAttachmentDraftUnverified }
+                if URL(fileURLWithPath: value).standardizedFileURL.path == expectedCopyPath { exact = true }
+            }
+        }
+        guard exact else { throw MessagesReplyComposerAXError.replyAttachmentDraftUnverified }
     }
 
     private func executeSend(_ request: MessagesReplySendRequest, deadline: WorkerDeadline) throws -> MessagesReplyComposerAXOutcome {

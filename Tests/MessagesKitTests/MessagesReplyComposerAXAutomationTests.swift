@@ -1,5 +1,6 @@
 import Foundation
 import CoreFoundation
+import AppKit
 import Testing
 import TestSupport
 @testable import AppleKit
@@ -1357,6 +1358,553 @@ struct MessagesReplyComposerAXAutomationTests {
         }
     }
 
+
+
+    @Test func attachmentDraftPreparationCreatesBoundedOwnedCopyPayload() throws {
+        let sourceDir = try scratch.directory()
+        let source = sourceDir.appendingPathComponent("apple-cli-test-source.txt")
+        let bytes = Data("apple-cli-test attachment".utf8)
+        FileManager.default.createFile(atPath: source.path, contents: bytes)
+        chmod(source.path, 0o600)
+        let copyRoot = try scratch.directory()
+        let payload = try MessagesReplyComposerProbeParent.payloadDataForAttachmentDraft(base: request(), rawFilePath: source.path,
+                                                                                        scratchRoot: copyRoot.path,
+                                                                                        repoRoot: FileManager.default.currentDirectoryPath,
+                                                                                        deadline: .millisecondsFromNow(5_000))
+        let decoded = try JSONDecoder().decode(MessagesReplyComposerProbeRequest.self, from: payload)
+        #expect(decoded.phase == "replyAttachmentDraftInspect")
+        let attachment = try #require(decoded.attachmentDraft)
+        #expect(attachment.copyPath.hasPrefix(copyRoot.path))
+        #expect(!attachment.copyPath.contains(source.lastPathComponent))
+        #expect(attachment.copySize == bytes.count)
+        #expect(try Data(contentsOf: URL(fileURLWithPath: attachment.copyPath)) == bytes)
+        var st = stat()
+        #expect(stat(attachment.copyPath, &st) == 0)
+        #expect((st.st_mode & 0o777) == 0o600)
+        #expect(payload.count <= 4096)
+        #expect(MessagesReplyComposerProbeWorkerRegistry(driver: FakeReplyDriver()).operation(for: try WorkerCommand(name: "messages.reply.inspect", payload: payload)) != nil)
+        #expect(MessagesWorkerRegistry().operation(for: try WorkerCommand(name: "messages.reply.inspect", payload: payload)) == nil)
+        #expect(WorkerOperationResult(.ack, detail: MessagesReplyComposerProbeDetail.attachmentDraftVerified).detail == MessagesReplyComposerProbeDetail.attachmentDraftVerified)
+    }
+
+    @Test func attachmentDraftInspectPastesOneCommandVAndCancelsExactOwnedDraft() throws {
+        let driver = FakeReplyDriver()
+        let (payload, attachment) = try attachmentDraftPayload()
+        let request = try JSONDecoder().decode(MessagesReplyComposerProbeRequest.self, from: payload)
+        let clipboard = FakeMessagesClipboard()
+        let resolver = FakePasteKeyResolver([MessagesPasteKeyEvidence(inputSourceID: "source", layoutSHA256: "sha256:" + String(repeating: "a", count: 64), keyboardType: 40, keyCode: 9),
+                                             MessagesPasteKeyEvidence(inputSourceID: "source", layoutSHA256: "sha256:" + String(repeating: "a", count: 64), keyboardType: 40, keyCode: 9)])
+        var pastePresses: [(pid_t, UInt16)] = []
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in },
+                                                            clipboardFactory: { clipboard }, pasteKeyResolver: resolver,
+                                                            sendPasteKey: { pid, key, _ in
+                                                                pastePresses.append((pid, key))
+                                                                let node = FakeReplyNode(roleValue: "AXImage", identifierValue: "attachment")
+                                                                node.stringAttributes["AXURL"] = URL(fileURLWithPath: attachment.copyPath).absoluteString
+                                                                driver.replyBody.staticChildren = [node]
+                                                                driver.replyBody.applyBodyText("\u{fffc}")
+                                                            }).inspect(request, deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .ack(MessagesReplyComposerProbeDetail.attachmentDraftVerified))
+        #expect(pastePresses.count == 1)
+        #expect(pastePresses.first?.0 == driver.identity.pid)
+        #expect(pastePresses.first?.1 == 9)
+        #expect(driver.replyTranscript.performed == ["AXCancel"])
+        #expect(clipboard.restoredSnapshots.map(\.items) == [clipboard.original.items])
+    }
+
+    @Test func attachmentDraftInspectRefusesWeakAttachmentIdentityWithoutCancel() throws {
+        let driver = FakeReplyDriver()
+        let (payload, _) = try attachmentDraftPayload()
+        let request = try JSONDecoder().decode(MessagesReplyComposerProbeRequest.self, from: payload)
+        let clipboard = FakeMessagesClipboard()
+        let evidence = MessagesPasteKeyEvidence(inputSourceID: "source", layoutSHA256: "sha256:" + String(repeating: "a", count: 64), keyboardType: 40, keyCode: 9)
+        let resolver = FakePasteKeyResolver([evidence, evidence])
+        var pastePresses = 0
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in },
+                                                            clipboardFactory: { clipboard }, pasteKeyResolver: resolver,
+                                                            sendPasteKey: { _, _, _ in
+                                                                pastePresses += 1
+                                                                let node = FakeReplyNode(roleValue: "AXImage", identifierValue: "attachment")
+                                                                node.stringAttributes["AXTitle"] = "apple-cli-test-source.txt"
+                                                                driver.replyBody.staticChildren = [node]
+                                                                driver.replyBody.applyBodyText("\u{fffc}")
+                                                            }).inspect(request, deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .refused("reply-attachment-draft-unverified"))
+        #expect(pastePresses == 1)
+        #expect(driver.replyTranscript.performed.isEmpty)
+        #expect(clipboard.restoredSnapshots.map(\.items) == [clipboard.original.items])
+    }
+
+    @Test func attachmentDraftInspectRefusesLayoutDriftBeforePaste() throws {
+        let driver = FakeReplyDriver()
+        let (payload, _) = try attachmentDraftPayload()
+        let request = try JSONDecoder().decode(MessagesReplyComposerProbeRequest.self, from: payload)
+        let clipboard = FakeMessagesClipboard()
+        let first = MessagesPasteKeyEvidence(inputSourceID: "source", layoutSHA256: "sha256:" + String(repeating: "a", count: 64), keyboardType: 40, keyCode: 9)
+        let second = MessagesPasteKeyEvidence(inputSourceID: "source", layoutSHA256: "sha256:" + String(repeating: "b", count: 64), keyboardType: 40, keyCode: 9)
+        var pastePresses = 0
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in },
+                                                            clipboardFactory: { clipboard }, pasteKeyResolver: FakePasteKeyResolver([first, second]),
+                                                            sendPasteKey: { _, _, _ in pastePresses += 1 })
+            .inspect(request, deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .refused("reply-attachment-layout-drift"))
+        #expect(pastePresses == 0)
+        #expect(driver.replyTranscript.performed.isEmpty)
+    }
+
+    @Test func attachmentDraftInspectRefusesClipboardDriftBeforePaste() throws {
+        let driver = FakeReplyDriver()
+        let (payload, _) = try attachmentDraftPayload()
+        let request = try JSONDecoder().decode(MessagesReplyComposerProbeRequest.self, from: payload)
+        let clipboard = FakeMessagesClipboard()
+        clipboard.mutateAfterPublish = true
+        let evidence = MessagesPasteKeyEvidence(inputSourceID: "source", layoutSHA256: "sha256:" + String(repeating: "a", count: 64), keyboardType: 40, keyCode: 9)
+        var pastePresses = 0
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in },
+                                                            clipboardFactory: { clipboard }, pasteKeyResolver: FakePasteKeyResolver([evidence, evidence]),
+                                                            sendPasteKey: { _, _, _ in pastePresses += 1 })
+            .inspect(request, deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .refused("reply-attachment-clipboard-drift"))
+        #expect(pastePresses == 0)
+        #expect(driver.replyTranscript.performed.isEmpty)
+    }
+
+
+    @Test func attachmentDraftInspectRestoresOwnedEmptyClipboardWhenPublishFails() throws {
+        let driver = FakeReplyDriver()
+        let (payload, _) = try attachmentDraftPayload()
+        let request = try JSONDecoder().decode(MessagesReplyComposerProbeRequest.self, from: payload)
+        let clipboard = FakeMessagesClipboard()
+        clipboard.publishSucceeds = false
+        let evidence = MessagesPasteKeyEvidence(inputSourceID: "source", layoutSHA256: "sha256:" + String(repeating: "a", count: 64), keyboardType: 40, keyCode: 9)
+        var pastePresses = 0
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in },
+                                                            clipboardFactory: { clipboard }, pasteKeyResolver: FakePasteKeyResolver([evidence]),
+                                                            sendPasteKey: { _, _, _ in pastePresses += 1 })
+            .inspect(request, deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .refused("reply-attachment-clipboard-drift"))
+        #expect(pastePresses == 0)
+        #expect(clipboard.restoredSnapshots.map(\.items) == [clipboard.original.items])
+    }
+
+
+    @Test func attachmentDraftInspectRefusesLateClipboardDriftAfterUIProofWithZeroPaste() throws {
+        let driver = FakeReplyDriver()
+        let (payload, attachment) = try attachmentDraftPayload()
+        let request = try JSONDecoder().decode(MessagesReplyComposerProbeRequest.self, from: payload)
+        let clipboard = FakeMessagesClipboard()
+        let evidence = MessagesPasteKeyEvidence(inputSourceID: "source", layoutSHA256: "sha256:" + String(repeating: "a", count: 64), keyboardType: 40, keyCode: 9)
+        var armed = false
+        driver.replyBody.onBodyEvidenceRead = {
+            guard !armed, clipboard.current.isExactFileURLPayload(URL(fileURLWithPath: attachment.copyPath)) else { return }
+            armed = true
+            clipboard.mutateOnNextRead = true
+        }
+        var pastePresses = 0
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in },
+                                                            clipboardFactory: { clipboard }, pasteKeyResolver: FakePasteKeyResolver([evidence, evidence]),
+                                                            sendPasteKey: { _, _, _ in pastePresses += 1 })
+            .inspect(request, deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .refused("reply-attachment-clipboard-drift"))
+        #expect(pastePresses == 0)
+        #expect(driver.replyTranscript.performed.isEmpty)
+    }
+
+    @Test func attachmentDraftInspectRefusesNonfileURLEvenWhenPathMatches() throws {
+        let driver = FakeReplyDriver()
+        let (payload, attachment) = try attachmentDraftPayload()
+        let request = try JSONDecoder().decode(MessagesReplyComposerProbeRequest.self, from: payload)
+        let clipboard = FakeMessagesClipboard()
+        let evidence = MessagesPasteKeyEvidence(inputSourceID: "source", layoutSHA256: "sha256:" + String(repeating: "a", count: 64), keyboardType: 40, keyCode: 9)
+        var pastePresses = 0
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in },
+                                                            clipboardFactory: { clipboard }, pasteKeyResolver: FakePasteKeyResolver([evidence, evidence]),
+                                                            sendPasteKey: { _, _, _ in
+                                                                pastePresses += 1
+                                                                let node = FakeReplyNode(roleValue: "AXImage", identifierValue: "attachment")
+                                                                node.stringAttributes["AXURL"] = "https://example.com\(attachment.copyPath)"
+                                                                driver.replyBody.staticChildren = [node]
+                                                                driver.replyBody.applyBodyText("\u{fffc}")
+                                                            }).inspect(request, deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .refused("reply-attachment-draft-unverified"))
+        #expect(pastePresses == 1)
+        #expect(driver.replyTranscript.performed.isEmpty)
+    }
+
+    @Test func attachmentDraftCopyValidationRejectsStatDriftAndCleanupPreservesUnexpectedDirectoryContent() throws {
+        let (_, drifted) = try attachmentDraftPayload()
+        chmod(drifted.copyPath, 0o644)
+        #expect(throws: Error.self) {
+            _ = try validateReplyAttachmentDraftCopy(drifted, deadline: .millisecondsFromNow(5_000))
+        }
+        let (_, attachment) = try attachmentDraftPayload()
+        let extra = URL(fileURLWithPath: attachment.directoryPath, isDirectory: true).appendingPathComponent("unexpected.txt")
+        FileManager.default.createFile(atPath: extra.path, contents: Data("unexpected".utf8))
+        #expect(throws: Error.self) {
+            _ = try removeReplyAttachmentDraftCopyIfOwned(attachment, deadline: .millisecondsFromNow(5_000))
+        }
+        #expect(FileManager.default.fileExists(atPath: extra.path))
+    }
+
+    @Test func attachmentDraftClipboardSnapshotRefusesUnstableOrMissingRepresentations() throws {
+        let clipboard = FakeMessagesClipboard()
+        clipboard.mutateOnNextRead = true
+        #expect(throws: Error.self) {
+            _ = try clipboard.snapshot(deadline: .millisecondsFromNow(5_000))
+        }
+        let failing = FakeMessagesClipboard()
+        failing.throwOnRead = true
+        #expect(throws: Error.self) {
+            _ = try failing.snapshot(deadline: .millisecondsFromNow(5_000))
+        }
+    }
+
+    @Test func parentObservedActionRequiresFinalCopyProofAndCleansOnlyAfterVerifiedAck() throws {
+        let fx = try dbFixture()
+        let dbPath = fx.path
+        let homePath = fx.homePath
+        let driver = FakeReplyDriver()
+        let (payload, attachment) = try attachmentDraftPayload()
+        let action = try MessagesReplyComposerProbeParent.observedAction(
+            stateRoot: try scratch.directory().path,
+            payloadData: payload,
+            deadline: .millisecondsFromNow(5_000),
+            makeChatDB: { try ChatDB(path: dbPath, book: AddressBook(), copyToTemp: false, homeDirectoryForTilde: homePath) },
+            automation: MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in })
+        )
+        let resolved = try action.resolve()
+        let context = WorkerObservedContext(deadline: action.deadline, isCancelled: { false })
+        #expect(try action.preflight(resolved, context) == .requiresMutation)
+        try Data("tampered".utf8).write(to: URL(fileURLWithPath: attachment.copyPath))
+        let response = WorkerResponse(schemaVersion: 1, operationID: UUID(), nonce: UUID(), category: .ack, detail: MessagesReplyComposerProbeDetail.attachmentDraftVerified)
+        #expect(throws: Error.self) {
+            _ = try action.verify(resolved, response, context)
+        }
+        #expect(FileManager.default.fileExists(atPath: attachment.copyPath))
+    }
+
+
+    @Test func attachmentProbePrivateClassifierOnlyCompletesExactObservedAttachmentState() throws {
+        let (payload, _) = try attachmentDraftPayload()
+        let prepared = try JSONDecoder().decode(MessagesReplyComposerProbeRequest.self, from: payload)
+        let id = UUID()
+        let removed = MessagesReplyAttachmentProbeCleanupEvidence(disposition: "removed", copyAbsent: true, directoryAbsent: true)
+        let success = MessagesReplyAttachmentProbePrivateEntrypoint.classify(
+            observed: .observedState(operationID: id, verification: MessagesReplyComposerProbeDetail.attachmentDraftVerified),
+            prepared: prepared, payloadData: payload, cleanup: removed)
+        #expect(success.exitCode == 0)
+        #expect(success.result.outcome == "completed")
+        #expect(success.result.category == "ack")
+        #expect(success.result.detail == MessagesReplyComposerProbeDetail.attachmentDraftVerified)
+        #expect(success.result.phase == "replyAttachmentDraftInspect")
+        #expect(success.result.workerCommand == "messages.reply.inspect")
+        #expect(success.result.observedState == "observedState")
+        #expect(success.result.operationID == id)
+        let failures: [WorkerObservedOutcome?] = [
+            nil,
+            .alreadyInDesiredState("verified"),
+            .observedState(operationID: UUID(), verification: MessagesReplyComposerProbeDetail.verified),
+            .spawnOrSetupFailedBeforeRequest("setup"),
+            .requestNotSent("not-sent"),
+            .childRefusedOrFailed("refused"),
+            .cancelled,
+            .verificationFailed,
+            .timedOut,
+            .protocolViolation("bad")
+        ]
+        for failure in failures {
+            let classified = MessagesReplyAttachmentProbePrivateEntrypoint.classify(observed: failure, prepared: prepared,
+                                                                                    payloadData: payload, cleanup: removed)
+            #expect(classified.exitCode != 0)
+            #expect(classified.result.outcome == "refused")
+        }
+    }
+
+    @Test func attachmentDraftInspectRestoresOwnedEmptyClipboardWhenClearVerificationThrows() throws {
+        let driver = FakeReplyDriver()
+        let (payload, _) = try attachmentDraftPayload()
+        let request = try JSONDecoder().decode(MessagesReplyComposerProbeRequest.self, from: payload)
+        let clipboard = FakeMessagesClipboard()
+        clipboard.throwOnReadAfterNextClear = true
+        let evidence = MessagesPasteKeyEvidence(inputSourceID: "source", layoutSHA256: "sha256:" + String(repeating: "a", count: 64), keyboardType: 40, keyCode: 9)
+        var pastePresses = 0
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in },
+                                                            clipboardFactory: { clipboard }, pasteKeyResolver: FakePasteKeyResolver([evidence]),
+                                                            sendPasteKey: { _, _, _ in pastePresses += 1 })
+            .inspect(request, deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .refused("reply-attachment-clipboard-drift"))
+        #expect(pastePresses == 0)
+        #expect(clipboard.restoredSnapshots.map(\.items) == [clipboard.original.items])
+    }
+
+    @Test func attachmentDraftClipboardNilItemsRequireIndependentEmptyProof() throws {
+        let clipboard = FakeMessagesClipboard()
+        clipboard.returnNilItems = true
+        #expect(throws: Error.self) {
+            _ = try clipboard.snapshot(deadline: .millisecondsFromNow(5_000))
+        }
+        clipboard.emptyTypesWhenNilItems = true
+        #expect(try clipboard.snapshot(deadline: .millisecondsFromNow(5_000)).items.isEmpty)
+        let count = try clipboard.clearContentsReturningCount(deadline: .millisecondsFromNow(5_000))
+        try clipboard.verifyEmpty(ownerCount: count, deadline: .millisecondsFromNow(5_000))
+    }
+
+    @Test func attachmentDraftInspectRestoresOwnedPayloadClipboardWhenPublishThrows() throws {
+        let driver = FakeReplyDriver()
+        let (payload, _) = try attachmentDraftPayload()
+        let request = try JSONDecoder().decode(MessagesReplyComposerProbeRequest.self, from: payload)
+        let clipboard = FakeMessagesClipboard()
+        clipboard.publishThrows = true
+        let evidence = MessagesPasteKeyEvidence(inputSourceID: "source", layoutSHA256: "sha256:" + String(repeating: "a", count: 64), keyboardType: 40, keyCode: 9)
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in },
+                                                            clipboardFactory: { clipboard }, pasteKeyResolver: FakePasteKeyResolver([evidence]),
+                                                            sendPasteKey: { _, _, _ in })
+            .inspect(request, deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .refused("reply-attachment-clipboard-drift"))
+        #expect(clipboard.restoredSnapshots.map(\.items) == [clipboard.original.items])
+    }
+
+    @Test func attachmentDraftInspectAcceptsTypedFileURLAttribute() throws {
+        let driver = FakeReplyDriver()
+        let (payload, attachment) = try attachmentDraftPayload()
+        let request = try JSONDecoder().decode(MessagesReplyComposerProbeRequest.self, from: payload)
+        let clipboard = FakeMessagesClipboard()
+        let evidence = MessagesPasteKeyEvidence(inputSourceID: "source", layoutSHA256: "sha256:" + String(repeating: "a", count: 64), keyboardType: 40, keyCode: 9)
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in },
+                                                            clipboardFactory: { clipboard }, pasteKeyResolver: FakePasteKeyResolver([evidence, evidence]),
+                                                            sendPasteKey: { _, _, _ in
+                                                                let node = FakeReplyNode(roleValue: "AXImage", identifierValue: "attachment")
+                                                                node.fileURLAttributes["AXURL"] = URL(fileURLWithPath: attachment.copyPath)
+                                                                driver.replyBody.staticChildren = [node]
+                                                                driver.replyBody.applyBodyText("\u{fffc}")
+                                                            }).inspect(request, deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .ack(MessagesReplyComposerProbeDetail.attachmentDraftVerified))
+        #expect(driver.replyTranscript.performed == ["AXCancel"])
+    }
+
+    @Test func attachmentDraftInspectRefusesModalDriftDuringAttachmentCancelProof() throws {
+        let driver = FakeReplyDriver()
+        let (payload, attachment) = try attachmentDraftPayload()
+        let request = try JSONDecoder().decode(MessagesReplyComposerProbeRequest.self, from: payload)
+        let clipboard = FakeMessagesClipboard()
+        let evidence = MessagesPasteKeyEvidence(inputSourceID: "source", layoutSHA256: "sha256:" + String(repeating: "a", count: 64), keyboardType: 40, keyCode: 9)
+        var afterPaste = false
+        driver.replyBody.onChildrenRead = {
+            guard afterPaste else { return }
+            driver.extraWindowChildren.append(FakeReplyNode(roleValue: "AXSheet", identifierValue: nil))
+        }
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in },
+                                                            clipboardFactory: { clipboard }, pasteKeyResolver: FakePasteKeyResolver([evidence, evidence]),
+                                                            sendPasteKey: { _, _, _ in
+                                                                afterPaste = true
+                                                                let node = FakeReplyNode(roleValue: "AXImage", identifierValue: "attachment")
+                                                                node.stringAttributes["AXURL"] = URL(fileURLWithPath: attachment.copyPath).absoluteString
+                                                                driver.replyBody.staticChildren = [node]
+                                                                driver.replyBody.applyBodyText("\u{fffc}")
+                                                            }).inspect(request, deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .refused("reply-composer-ownership-drift"))
+        #expect(driver.replyTranscript.performed.isEmpty)
+    }
+
+    @Test func attachmentDraftEvidenceDecodeValidatesNestedStatAndPathBounds() throws {
+        let (_, attachment) = try attachmentDraftPayload()
+        let encoded = try JSONEncoder().encode(attachment)
+        var object = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        object["copy_size"] = 70_000
+        let oversized = try JSONSerialization.data(withJSONObject: object)
+        #expect(throws: Error.self) {
+            _ = try JSONDecoder().decode(MessagesReplyAttachmentDraftEvidence.self, from: oversized)
+        }
+        var nested = try #require(JSONSerialization.jsonObject(with: encoded) as? [String: Any])
+        var copyStat = try #require(nested["copy_stat"] as? [String: Any])
+        copyStat["mode"] = 0o644
+        nested["copy_stat"] = copyStat
+        let badStat = try JSONSerialization.data(withJSONObject: nested)
+        #expect(throws: Error.self) {
+            _ = try JSONDecoder().decode(MessagesReplyAttachmentDraftEvidence.self, from: badStat)
+        }
+    }
+
+
+    @Test func attachmentDraftPayloadCleansOwnedCopyWhenPreparedPayloadExceedsBound() throws {
+        let sourceDir = try scratch.directory()
+        let source = sourceDir.appendingPathComponent("apple-cli-test-source.txt")
+        FileManager.default.createFile(atPath: source.path, contents: Data("apple-cli-test attachment".utf8))
+        chmod(source.path, 0o600)
+        var failingRoot: URL?
+        for width in 1...120 {
+            let handles = (0..<32).map { "fixture\($0)" + String(repeating: "x", count: width) + "@example.com" }
+            guard let candidate = try? request(participantHandles: handles),
+                  (try? candidate.workerPayloadData()) != nil else { continue }
+            let attemptRoot = try scratch.directory()
+            do {
+                let payload = try MessagesReplyComposerProbeParent.payloadDataForAttachmentDraft(base: candidate, rawFilePath: source.path,
+                                                                                                 scratchRoot: attemptRoot.path,
+                                                                                                 repoRoot: FileManager.default.currentDirectoryPath,
+                                                                                                 deadline: .millisecondsFromNow(5_000))
+                let decoded = try JSONDecoder().decode(MessagesReplyComposerProbeRequest.self, from: payload)
+                if let attachment = decoded.attachmentDraft {
+                    _ = try removeReplyAttachmentDraftCopyIfOwned(attachment, deadline: .millisecondsFromNow(5_000))
+                }
+            } catch {
+                failingRoot = attemptRoot
+                break
+            }
+        }
+        let root = try #require(failingRoot)
+        #expect(try FileManager.default.contentsOfDirectory(atPath: root.path).isEmpty)
+    }
+
+    @Test func attachmentDraftPreparationHonorsExpiredDeadlineBeforeCopy() throws {
+        let sourceDir = try scratch.directory()
+        let source = sourceDir.appendingPathComponent("apple-cli-test-source.txt")
+        FileManager.default.createFile(atPath: source.path, contents: Data("apple-cli-test attachment".utf8))
+        chmod(source.path, 0o600)
+        let copyRoot = try scratch.directory()
+        #expect(throws: Error.self) {
+            _ = try MessagesReplyComposerProbeParent.payloadDataForAttachmentDraft(base: request(), rawFilePath: source.path,
+                                                                                  scratchRoot: copyRoot.path,
+                                                                                  repoRoot: FileManager.default.currentDirectoryPath,
+                                                                                  deadline: .millisecondsFromNow(0))
+        }
+        #expect(try FileManager.default.contentsOfDirectory(atPath: copyRoot.path).isEmpty)
+    }
+
+    @Test func attachmentDraftLiveCFURLConversionPreservesFileIdentity() throws {
+        let url = URL(fileURLWithPath: "/tmp/apple-cli-test file.bin")
+        #expect(try LiveAXElement.checkedFileURL(url as CFURL) == url)
+        #expect(try LiveAXElement.checkedFileURL(url.absoluteString as CFString) == url)
+        for raw in [URL(string: "https://example.com/file")! as CFURL,
+                               "/tmp/apple-cli-test file.bin" as CFString,
+                               NSNumber(value: 7),
+                               ("file:///" + String(repeating: "a", count: 2048)) as CFString] as [CFTypeRef] {
+            #expect(throws: Error.self) { _ = try LiveAXElement.checkedFileURL(raw) }
+        }
+    }
+
+    @Test func attachmentDraftClipboardProviderBoundsAndMissingDataRefuse() throws {
+        let type = NSPasteboard.PasteboardType.string
+        func read(_ types: [[NSPasteboard.PasteboardType]]?, declared: [NSPasteboard.PasteboardType]? = nil,
+                  bytes: Data? = Data([1])) throws -> [[MessagesClipboardRepresentation]] {
+            try LiveMessagesClipboardBackend.readRepresentations(itemTypes: types, declaredTypes: declared,
+                                                                   deadline: .millisecondsFromNow(5_000)) { _, _ in bytes }
+        }
+        #expect(try read(nil, declared: []).isEmpty)
+        for declared in [nil, [type]] as [[NSPasteboard.PasteboardType]?] {
+            #expect(throws: Error.self) { _ = try read(nil, declared: declared) }
+        }
+        #expect(throws: Error.self) { _ = try read([[type]], bytes: nil) }
+        #expect(throws: Error.self) { _ = try read(Array(repeating: [type], count: 9)) }
+        #expect(throws: Error.self) { _ = try read([Array(repeating: type, count: 33)]) }
+        #expect(throws: Error.self) { _ = try read([[type]], bytes: Data(repeating: 0, count: 65_537)) }
+        #expect(throws: Error.self) { _ = try read(Array(repeating: [type], count: 5), bytes: Data(repeating: 0, count: 65_536)) }
+        #expect(try read(Array(repeating: [type], count: 4), bytes: Data(repeating: 0, count: 65_536)).count == 4)
+        #expect(throws: Error.self) {
+            _ = try LiveMessagesClipboardBackend.readRepresentations(itemTypes: [[type]], declaredTypes: nil,
+                                                                      deadline: .millisecondsFromNow(5_000)) { _, _ in
+                throw MessagesReplyComposerAXError.invalidPayload
+            }
+        }
+    }
+
+    @Test func attachmentDraftRestorationRefusesPartialWriteCountAndContentFailures() throws {
+        for failure in 0..<3 {
+            let clipboard = FakeMessagesClipboard()
+            if failure == 0 { clipboard.writeSucceeds = false }
+            if failure == 1 { clipboard.mutateAfterWrite = true }
+            if failure == 2 { clipboard.changeCountAfterWrite = true }
+            #expect(throws: Error.self) { try clipboard.restore(clipboard.original, deadline: .millisecondsFromNow(5_000)) }
+            #expect(clipboard.restoredSnapshots.count == 1)
+            #expect(clipboard.current.changeCount > clipboard.original.changeCount)
+        }
+    }
+
+    @Test func attachmentDraftExpiryBeforeClipboardOperationsDoesNotWrite() throws {
+        let clipboard = FakeMessagesClipboard()
+        let expired = WorkerDeadline.millisecondsFromNow(0)
+        #expect(throws: Error.self) { _ = try clipboard.snapshot(deadline: expired) }
+        #expect(throws: Error.self) { _ = try clipboard.clearContentsReturningCount(deadline: expired) }
+        #expect(throws: Error.self) { try clipboard.publishAndVerifyFileURL(URL(fileURLWithPath: "/tmp/apple-cli-test.bin"), ownerCount: 1, deadline: expired) }
+        #expect(throws: Error.self) { try clipboard.restore(clipboard.original, deadline: expired) }
+        #expect(clipboard.current == clipboard.original)
+        #expect(clipboard.restoredSnapshots.isEmpty)
+    }
+
+    @Test func attachmentDraftCleanupDistinguishesNoHandoffFromUncertainOutcomes() throws {
+        let cases: [(Bool, WorkerObservedOutcome?, Bool)] = [
+            (false, nil, true), (true, .requestNotSent("refused"), true),
+            (true, .spawnOrSetupFailedBeforeRequest("spawn"), true),
+            (true, nil, false), (true, .cancelled, false), (true, .timedOut, false),
+            (true, .verificationFailed, false), (true, .childRefusedOrFailed("child"), false),
+            (true, .protocolViolation("binding"), false)
+        ]
+        for (started, outcome, shouldRemove) in cases {
+            let (_, attachment) = try attachmentDraftPayload()
+            try MessagesReplyAttachmentProbePrivateEntrypoint.cleanupBeforeHandoffIfProven(attachment, launchStarted: started,
+                                                                                           outcome: outcome, deadline: .millisecondsFromNow(5_000))
+            #expect(FileManager.default.fileExists(atPath: attachment.copyPath) == !shouldRemove)
+            #expect(FileManager.default.fileExists(atPath: attachment.directoryPath) == !shouldRemove)
+        }
+    }
+
+    @Test func attachmentDraftDecodeRefusesWrongTypesPathsHashesAndTimestamps() throws {
+        let (_, attachment) = try attachmentDraftPayload()
+        let original = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(attachment)) as? [String: Any])
+        for (key, value) in [("copy_size", "1"), ("copy_size", true),
+                                           ("copy_path", String(repeating: "x", count: 1025)),
+                                           ("copy_path", "relative.bin"),
+                                           ("copy_sha256", "sha256:" + String(repeating: "z", count: 64)),
+                                           ("directory_stat", NSNull())] as [(String, Any)] {
+            var malformed = original
+            malformed[key] = value
+            let data = try JSONSerialization.data(withJSONObject: malformed)
+            #expect(throws: Error.self) { _ = try JSONDecoder().decode(MessagesReplyAttachmentDraftEvidence.self, from: data) }
+        }
+        var malformed = original
+        var copyStat = try #require(malformed["copy_stat"] as? [String: Any])
+        copyStat["mtime_nsec"] = 1_000_000_000
+        malformed["copy_stat"] = copyStat
+        let data = try JSONSerialization.data(withJSONObject: malformed)
+        #expect(throws: Error.self) { _ = try JSONDecoder().decode(MessagesReplyAttachmentDraftEvidence.self, from: data) }
+    }
+
+    private func attachmentDraftPayload() throws -> (Data, MessagesReplyAttachmentDraftEvidence) {
+        let sourceDir = try scratch.directory()
+        let source = sourceDir.appendingPathComponent("apple-cli-test-source.txt")
+        FileManager.default.createFile(atPath: source.path, contents: Data("apple-cli-test attachment".utf8))
+        chmod(source.path, 0o600)
+        let payload = try MessagesReplyComposerProbeParent.payloadDataForAttachmentDraft(base: request(), rawFilePath: source.path,
+                                                                                        scratchRoot: try scratch.directory().path,
+                                                                                        repoRoot: FileManager.default.currentDirectoryPath,
+                                                                                        deadline: .millisecondsFromNow(5_000))
+        let decoded = try JSONDecoder().decode(MessagesReplyComposerProbeRequest.self, from: payload)
+        return (payload, try #require(decoded.attachmentDraft))
+    }
+
+
+
+    @Test func parentObservedActionVerifiesAttachmentDraftDetailAndFreshUI() throws {
+        let fx = try dbFixture()
+        let dbPath = fx.path
+        let homePath = fx.homePath
+        let driver = FakeReplyDriver()
+        let (payload, _) = try attachmentDraftPayload()
+        let action = try MessagesReplyComposerProbeParent.observedAction(
+            stateRoot: try scratch.directory().path,
+            payloadData: payload,
+            deadline: .millisecondsFromNow(5_000),
+            makeChatDB: { try ChatDB(path: dbPath, book: AddressBook(), copyToTemp: false, homeDirectoryForTilde: homePath) },
+            automation: MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in })
+        )
+        let resolved = try action.resolve()
+        let context = WorkerObservedContext(deadline: action.deadline, isCancelled: { false })
+        #expect(try action.preflight(resolved, context) == .requiresMutation)
+        let wrong = WorkerResponse(schemaVersion: 1, operationID: UUID(), nonce: UUID(), category: .ack, detail: MessagesReplyComposerProbeDetail.verified)
+        #expect(try action.verify(resolved, wrong, context) == nil)
+        let response = WorkerResponse(schemaVersion: 1, operationID: UUID(), nonce: UUID(), category: .ack, detail: MessagesReplyComposerProbeDetail.attachmentDraftVerified)
+        #expect(try action.verify(resolved, response, context) == MessagesReplyComposerProbeDetail.attachmentDraftVerified)
+    }
+
     @Test func requestRequiresFixedAppleCliTestPrefix() throws {
         #expect(throws: Error.self) {
             _ = try request(requiredBodyPrefix: "synthetic-test")
@@ -1559,6 +2107,16 @@ private final class FakeReplyNode: MessagesAXElement {
     func axValue(deadline: WorkerDeadline) throws -> String? { nil }
     func candidateValueText(deadline: WorkerDeadline) throws -> String? { nil }
     func axTitle(deadline: WorkerDeadline) throws -> String? { nil }
+    var stringAttributes: [String: String] = [:]
+    var fileURLAttributes: [String: URL] = [:]
+    func stringAttribute(named name: String, deadline: WorkerDeadline) throws -> String? { stringAttributes[name] }
+    func fileURLAttribute(named name: String, deadline: WorkerDeadline) throws -> URL? {
+        if let url = fileURLAttributes[name] { return url.standardizedFileURL }
+        guard let value = stringAttributes[name], !value.isEmpty else { return nil }
+        if value.hasPrefix("/") { return URL(fileURLWithPath: value).standardizedFileURL }
+        guard let url = URL(string: value), url.isFileURL else { throw MessagesAXNavigationError.unknownAXValue }
+        return url.standardizedFileURL
+    }
     func subrole(deadline: WorkerDeadline) throws -> String? { nil }
     func enabled(deadline: WorkerDeadline) throws -> Bool? {
         onControlRead?()
@@ -1625,5 +2183,83 @@ private final class FakeReplyNode: MessagesAXElement {
             node = current.parentNode
         }
         return nil
+    }
+}
+
+private final class FakeMessagesClipboard: MessagesClipboarding, MessagesClipboardBackend {
+    let original = MessagesClipboardSnapshot(changeCount: 1, items: [[MessagesClipboardRepresentation(type: "public.utf8-plain-text", data: Data("original".utf8))]])
+    var current: MessagesClipboardSnapshot
+    var restoredSnapshots: [MessagesClipboardSnapshot] = []
+    var mutateAfterPublish = false
+    var publishSucceeds = true
+    var publishThrows = false
+    var mutateOnNextRead = false
+    var throwOnRead = false
+    var throwOnReadAfterNextClear = false
+    private var throwOnReadAfterClearIsArmed = false
+    var returnNilItems = false
+    var emptyTypesWhenNilItems = false
+    var writeSucceeds = true
+    var mutateAfterWrite = false
+    var changeCountAfterWrite = false
+    var readCount = 0
+
+    init() { current = original }
+
+    var backend: any MessagesClipboardBackend { self }
+    var changeCount: Int { current.changeCount }
+
+    func readItems(deadline: WorkerDeadline) throws -> [[MessagesClipboardRepresentation]] {
+        if throwOnRead { throw MessagesReplyComposerAXError.invalidPayload }
+        if returnNilItems {
+            guard emptyTypesWhenNilItems else { throw MessagesReplyComposerAXError.replyAttachmentClipboardDrift }
+            readCount += 1
+            return []
+        }
+        readCount += 1
+        if throwOnReadAfterClearIsArmed {
+            throwOnReadAfterClearIsArmed = false
+            throw MessagesReplyComposerAXError.replyAttachmentClipboardDrift
+        }
+        if mutateOnNextRead {
+            mutateOnNextRead = false
+            current = MessagesClipboardSnapshot(changeCount: current.changeCount + 1, items: current.items)
+        }
+        return current.items
+    }
+
+    func clearContents(deadline: WorkerDeadline) throws -> Int {
+        current = MessagesClipboardSnapshot(changeCount: current.changeCount + 1, items: [])
+        if throwOnReadAfterNextClear {
+            throwOnReadAfterNextClear = false
+            throwOnReadAfterClearIsArmed = true
+        }
+        return current.changeCount
+    }
+
+    func publishFileURLData(_ data: Data, deadline: WorkerDeadline) throws -> Bool {
+        let count = mutateAfterPublish ? current.changeCount + 1 : current.changeCount
+        current = MessagesClipboardSnapshot(changeCount: count, items: [[MessagesClipboardRepresentation(type: NSPasteboard.PasteboardType.fileURL.rawValue, data: data)]])
+        if publishThrows { throw MessagesReplyComposerAXError.replyAttachmentClipboardDrift }
+        return publishSucceeds
+    }
+
+    func writeItems(_ items: [[MessagesClipboardRepresentation]], deadline: WorkerDeadline) throws -> Bool {
+        restoredSnapshots.append(MessagesClipboardSnapshot(changeCount: current.changeCount, items: items))
+        let restored = mutateAfterWrite ? [[MessagesClipboardRepresentation(type: "public.utf8-plain-text", data: Data("drift".utf8))]] : items
+        current = MessagesClipboardSnapshot(changeCount: current.changeCount + (changeCountAfterWrite ? 1 : 0), items: restored)
+        return writeSucceeds
+    }
+}
+
+
+private final class FakePasteKeyResolver: MessagesPasteKeyResolving, @unchecked Sendable {
+    private var values: [MessagesPasteKeyEvidence]
+
+    init(_ values: [MessagesPasteKeyEvidence]) { self.values = values }
+
+    func resolvePasteKey(deadline: WorkerDeadline) throws -> MessagesPasteKeyEvidence {
+        guard !values.isEmpty else { throw MessagesReplyComposerAXError.replyComposerEvidenceUnavailable }
+        return values.removeFirst()
     }
 }

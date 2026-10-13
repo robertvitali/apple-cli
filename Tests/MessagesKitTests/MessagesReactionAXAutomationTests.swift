@@ -1166,10 +1166,11 @@ struct MessagesReactionAXAutomationTests {
 
         try presser.press(CGKeyCode(kVK_Return), flags: .cleared, deadline: .millisecondsFromNow(5_000))
         try presser.press(CGKeyCode(kVK_DownArrow), flags: .preserved, deadline: .millisecondsFromNow(5_000))
+        try presser.press(CGKeyCode(kVK_ANSI_V), flags: .explicit(CGEventFlags.maskCommand.rawValue), deadline: .millisecondsFromNow(5_000))
 
-        #expect(events == ["down", "up", "extra-up", "down", "up", "extra-up"])
-        #expect(calls.map(\.2) == [.cleared, .preserved])
-        #expect(calls.map(\.1) == [123, 123])
+        #expect(events == ["down", "up", "extra-up", "down", "up", "extra-up", "down", "up", "extra-up"])
+        #expect(calls.map(\.2) == [.cleared, .preserved, .explicit(CGEventFlags.maskCommand.rawValue)])
+        #expect(calls.map(\.1) == [123, 123, 123])
     }
 
     @Test func customChooserKeyPressReleasesKeyWhenDeadlineExpiresAfterKeyDown() throws {
