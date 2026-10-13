@@ -72,9 +72,19 @@ struct AutomationWorkerTests {
         }
     }
 
-    private struct NullInputFailingIO: ScriptProcessIO {
+    private final class NullInputFailingIO: ScriptProcessIO, @unchecked Sendable {
         private let base = DarwinScriptProcessIO()
-        func pipe() throws -> (read: Int32, write: Int32) { try base.pipe() }
+        private let lock = NSLock()
+        private var liveDescriptors = Set<Int32>()
+        private var created = 0
+
+        var allocationCount: Int { lock.withLock { created } }
+        var outstanding: Set<Int32> { lock.withLock { liveDescriptors } }
+
+        func pipe() throws -> (read: Int32, write: Int32) {
+            let pair = try base.pipe()
+            return (record(pair.read), record(pair.write))
+        }
         func nullInput() throws -> Int32 { throw DarwinScriptProcessIO.posixError(EIO) }
         func capture(in directory: URL) throws -> Int32 { try base.capture(in: directory) }
         func read(_ fd: Int32, into buffer: UnsafeMutableRawBufferPointer) throws -> Int { try base.read(fd, into: buffer) }
@@ -83,7 +93,22 @@ struct AutomationWorkerTests {
         func captureSnapshot(_ fd: Int32, maximumBytes: Int?, configuredLimit: Int?) throws -> Data {
             try base.captureSnapshot(fd, maximumBytes: maximumBytes, configuredLimit: configuredLimit)
         }
-        func close(_ fd: Int32) throws { try base.close(fd) }
+        func close(_ fd: Int32) throws {
+            try base.close(fd)
+            #expect(lock.withLock { liveDescriptors.remove(fd) } != nil)
+        }
+
+        func closeOutstandingForTestCleanup() {
+            for fd in outstanding { try? close(fd) }
+        }
+
+        private func record(_ fd: Int32) -> Int32 {
+            lock.withLock {
+                #expect(liveDescriptors.insert(fd).inserted)
+                created += 1
+            }
+            return fd
+        }
     }
 
     private func setNonblocking(_ fd: Int32) {
@@ -594,9 +619,10 @@ struct AutomationWorkerTests {
 
     @Test("setup failure before child spawn closes descriptors and records no-delivery")
     func setupFailureBeforeSpawnClosesDescriptorsAndClearsPreparedOperation() throws {
-        let before = openDescriptorCount()
+        let io = NullInputFailingIO()
+        defer { io.closeOutstandingForTestCleanup() }
         let root = try scratch.directory().appendingPathComponent("setup-fd-\(UUID().uuidString)", isDirectory: true)
-        let outcome = try WorkerLauncher(testIO: NullInputFailingIO()).launch(WorkerLaunchRequest.makeForTesting(
+        let outcome = try WorkerLauncher(testIO: io).launch(WorkerLaunchRequest.makeForTesting(
             command: command("probe.empty"),
             journalRequest: operationRequest("setup-fd"),
             deadline: .millisecondsFromNow(500),
@@ -606,7 +632,8 @@ struct AutomationWorkerTests {
             Issue.record("expected spawnOrSetupFailedBeforeRequest, got \(outcome)")
             return
         }
-        #expect(openDescriptorCount() == before)
+        #expect(io.allocationCount == 4)
+        #expect(io.outstanding.isEmpty)
         try AppleAutomationJournal.withLockedJournal(root: root.path, deadline: .millisecondsFromNow(1_000)) { lease in
             let snapshot = try lease.loadSnapshot()
             #expect(snapshot.pending == nil)
@@ -712,7 +739,4 @@ struct AutomationWorkerTests {
         #expect(outcome.contains("|pending=uncertainAfterHandoff|receipts=none"))
     }
 
-    private func openDescriptorCount() -> Int {
-        (0..<256).filter { fcntl(Int32($0), F_GETFD) >= 0 }.count
-    }
 }
