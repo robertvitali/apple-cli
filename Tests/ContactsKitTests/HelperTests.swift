@@ -176,6 +176,66 @@ struct ReadBoundedFileInputRuleTests {
         return ends[0]
     }
 
+    private final class PipeProducer: @unchecked Sendable {
+        private let lock = NSLock()
+        private let done = DispatchSemaphore(value: 0)
+        private var writer: Int32
+        private var started = false
+        private var finished = false
+
+        init(writer: Int32) {
+            self.writer = writer
+        }
+
+        deinit {
+            closeIfUnstarted()
+        }
+
+        func start(name: String, _ produce: @escaping @Sendable (Int32) -> Void) {
+            let fd = lock.withLock { () -> Int32 in
+                precondition(!started)
+                started = true
+                return writer
+            }
+            let thread = Thread { [self] in
+                defer {
+                    close(fd)
+                    markFinished()
+                }
+                produce(fd)
+            }
+            thread.name = name
+            thread.qualityOfService = .userInitiated
+            thread.start()
+        }
+
+        func closeIfUnstarted() {
+            let fd = lock.withLock { () -> Int32 in
+                guard !started, writer >= 0 else { return -1 }
+                defer { writer = -1 }
+                return writer
+            }
+            if fd >= 0 {
+                close(fd)
+                markFinished()
+            }
+        }
+
+        func wait(timeout: DispatchTime) -> DispatchTimeoutResult {
+            if lock.withLock({ finished }) { return .success }
+            let result = done.wait(timeout: timeout)
+            if result == .success {
+                lock.withLock { finished = true }
+            }
+            return result
+        }
+
+        private func markFinished() {
+            lock.withLock { finished = true }
+            done.signal()
+        }
+    }
+
     @Test("a symbolic link is measured and read as its target")
     func symbolicLinkIsMeasuredAsItsTarget() throws {
         let dir = try scratch.directory()
@@ -272,9 +332,15 @@ struct ReadBoundedFileInputRuleTests {
         var ends: [Int32] = [0, 0]
         try #require(pipe(&ends) == 0)
         let (reader, writer) = (ends[0], ends[1])
+        var readerOpen = true
+        let producer = PipeProducer(writer: writer)
+        defer {
+            if readerOpen { close(reader) }
+            producer.closeIfUnstarted()
+            _ = producer.wait(timeout: .now() + 30)
+        }
         try #require(fcntl(writer, F_SETNOSIGPIPE, 1) == 0)
-        let done = DispatchSemaphore(value: 0)
-        DispatchQueue.global().async {
+        producer.start(name: "apple-cli.contacts.pipe-over-limit-writer") { writer in
             let chunk = [UInt8](repeating: 0x62, count: 64 * 1024)
             var sent = 0
             while sent <= maxContactsInputBytes + chunk.count {
@@ -282,13 +348,12 @@ struct ReadBoundedFileInputRuleTests {
                 if count <= 0 { break }
                 sent += count
             }
-            close(writer)
-            done.signal()
         }
         expectRefusal("/dev/fd/\(reader)", type: AppleErrorType.validation,
                       prefix: "note file exceeds the 25 MB limit (more than \(maxContactsInputBytes) bytes were read)")
         close(reader)
-        #expect(done.wait(timeout: .now() + 30) == .success)
+        readerOpen = false
+        #expect(producer.wait(timeout: .now() + 30) == .success)
     }
 
     @Test("a relative spelling is made absolute for the text match, keeping its .. components")
@@ -440,14 +505,24 @@ struct ReadBoundedFileInputRuleTests {
         var ends: [Int32] = [0, 0]
         try #require(pipe(&ends) == 0)
         let (reader, writer) = (ends[0], ends[1])
-        defer { close(reader) }
+        var readerOpen = true
+        let producer = PipeProducer(writer: writer)
+        defer {
+            if readerOpen { close(reader) }
+            producer.closeIfUnstarted()
+            _ = producer.wait(timeout: .now() + 30)
+        }
         try #require(fcntl(reader, F_SETFL, fcntl(reader, F_GETFL) | O_NONBLOCK) == 0)
-        DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) {
+        try #require(fcntl(writer, F_SETNOSIGPIPE, 1) == 0)
+        producer.start(name: "apple-cli.contacts.nonblocking-pipe-writer") { writer in
+            usleep(200_000)
             let bytes = Array("late".utf8)
             _ = bytes.withUnsafeBytes { write(writer, $0.baseAddress, bytes.count) }
-            close(writer)
         }
         #expect(try readAtMost(reader, limit: 10) == Data("late".utf8))
+        close(reader)
+        readerOpen = false
+        #expect(producer.wait(timeout: .now() + 30) == .success)
     }
 }
 
