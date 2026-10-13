@@ -354,6 +354,14 @@ struct AutomationWorkerTests {
             "ax-failure-custom-chooser-candidate-revalidation",
             "ax-failure-custom-chooser-candidate-press",
             "ax-failure-custom-chooser-post-selection",
+            "target-drift-post-open-safety",
+            "target-drift-route-revalidation",
+            "target-drift-reply-open",
+            "target-drift-composer-readiness",
+            "ax-failure-post-open-safety",
+            "ax-failure-route-revalidation",
+            "ax-failure-reply-open",
+            "ax-failure-composer-readiness",
             "reaction-unavailable-custom-chooser-picker-read",
             "reaction-unavailable-custom-chooser-existing-button",
             "reaction-unavailable-custom-chooser-route-validation",
@@ -406,7 +414,8 @@ struct AutomationWorkerTests {
         }
 
         for ackDetail in ["reaction-set-changed-verified", "reaction-set-unchanged-verified",
-                          "reaction-remove-changed-verified", "reaction-remove-unchanged-verified"] {
+                          "reaction-remove-changed-verified", "reaction-remove-unchanged-verified",
+                          "no-send-empty-owned-composer-closed-verified"] {
             let response = WorkerResponse(schemaVersion: 1, operationID: operationID, nonce: nonce,
                                           category: .ack, detail: ackDetail)
             #expect(response.detail == ackDetail)
@@ -416,6 +425,7 @@ struct AutomationWorkerTests {
         for privateLookingDetail in ["unsafe detail", "555-0100", "Alice", "token_ABC123",
                                      "reaction-set-unknown-verified", "reaction-remove-changed",
                                      "target-drift-verify_route", "target-drift-private-stage",
+                                     "target-drift-post-open-safety-private",
                                      "target-drift-pre-press-private", "target-drift-pre-press-window_mismatch",
                                      "target-drift-pre-press-window-mismatch-extra",
                                      "target-drift-pre-press-missing-transcript",
@@ -430,6 +440,7 @@ struct AutomationWorkerTests {
                                      "post-press-window-drift-extra", "post-press-verify-action", "picker-cancel",
                                      "picker-cancel-identity-drift-extra", "pre-press-window-drift",
                                      "ax-failure-private", "ax-failure-press-private",
+                                     "ax-failure-post-open-safety-private",
                                      "ax-failure-custom-chooser-private",
                                      "ax-failure-custom-chooser-query-private",
                                      "ax-failure-custom-chooser-query-555-0100",
@@ -689,6 +700,14 @@ struct AutomationWorkerTests {
     func observedActionRevalidatesPendingBindingAfterVerifier() throws {
         let root = try scratch.directory().appendingPathComponent("observed-postverify-mismatch-\(UUID().uuidString)", isDirectory: true)
         let outcome = try launchObservedThroughProbe(root: root, command: "probe.verify-mutate-journal", seed: "mismatch")
+        #expect(outcome.hasPrefix("protocolViolation(journal-binding)"))
+        #expect(outcome.contains("|pending=uncertainAfterHandoff|receipts=none"))
+    }
+
+    @Test("reply inspect shares replySend journal binding but hashes its phase evidence")
+    func replyInspectBindingKeepsPendingWhenPhaseEvidenceChanges() throws {
+        let root = try scratch.directory().appendingPathComponent("observed-replyinspect-evidence-\(UUID().uuidString)", isDirectory: true)
+        let outcome = try launchObservedThroughProbe(root: root, command: "probe.reply-inspect-mutate-evidence", seed: "replyinspect")
         #expect(outcome.hasPrefix("protocolViolation(journal-binding)"))
         #expect(outcome.contains("|pending=uncertainAfterHandoff|receipts=none"))
     }

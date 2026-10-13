@@ -4,6 +4,28 @@ import AppleKit
 
 // Every remote property access is explicit, throwing and deadline-bound. Nil
 // relationship values are handled by the concrete adapter, not by callers.
+enum MessagesAXBodyValueKind: Equatable, Sendable {
+    case noValue
+    case string(Int)
+    case attributedString(Int)
+    case unsupported
+    case unknown
+}
+
+struct MessagesAXBodyValueEvidence: Equatable, Sendable {
+    let valueKind: MessagesAXBodyValueKind
+    let characterCount: Int?
+    let placeholder: String?
+
+    var provenEmpty: Bool {
+        guard characterCount == 0 else { return false }
+        switch valueKind {
+        case .noValue, .string(0), .attributedString(0): return true
+        case .string, .attributedString, .unsupported, .unknown: return false
+        }
+    }
+}
+
 protocol MessagesAXElement: AnyObject {
     func sameIdentity(as other: any MessagesAXElement) -> Bool
     func role(deadline: WorkerDeadline) throws -> String
@@ -25,18 +47,37 @@ protocol MessagesAXElement: AnyObject {
     func childrenInNavigationOrder(limit: Int, deadline: WorkerDeadline) throws -> [any MessagesAXElement]?
     func linkedElements(limit: Int, deadline: WorkerDeadline) throws -> [any MessagesAXElement]
     func setValue(_ value: String, deadline: WorkerDeadline) throws
+    func focused(deadline: WorkerDeadline) throws -> Bool?
+    func bodyValueEvidence(deadline: WorkerDeadline) throws -> MessagesAXBodyValueEvidence
     func performAction(named name: String, deadline: WorkerDeadline) throws
+}
+
+extension MessagesAXElement {
+    func focused(deadline: WorkerDeadline) throws -> Bool? { nil }
+
+    func bodyValueEvidence(deadline: WorkerDeadline) throws -> MessagesAXBodyValueEvidence {
+        MessagesAXBodyValueEvidence(valueKind: .unknown, characterCount: nil, placeholder: nil)
+    }
 }
 
 struct MessagesAXProcessIdentity: Equatable {
     let pid: Int32
     let bundleURL: URL
     let launchDate: Date
+    init(pid: Int32, bundleURL: URL, launchDate: Date) {
+        self.pid = pid
+        self.bundleURL = bundleURL
+        self.launchDate = launchDate
+    }
 }
 
 struct MessagesAXProcess {
     let identity: MessagesAXProcessIdentity
     let root: any MessagesAXElement
+    init(identity: MessagesAXProcessIdentity, root: any MessagesAXElement) {
+        self.identity = identity
+        self.root = root
+    }
 }
 
 protocol MessagesAXProcessDriving: AnyObject {
@@ -80,6 +121,12 @@ struct MessagesAXRoute {
     let window: any MessagesAXElement
     let transcript: any MessagesAXElement
     let selected: any MessagesAXElement
+    init(process: MessagesAXProcess, window: any MessagesAXElement, transcript: any MessagesAXElement, selected: any MessagesAXElement) {
+        self.process = process
+        self.window = window
+        self.transcript = transcript
+        self.selected = selected
+    }
 }
 
 enum MessagesAXRetainedRouteDiscovery {
@@ -110,11 +157,16 @@ final class LiveAXElement: MessagesAXElement {
         try checkMessagesAXDeadline(deadline)
     }
 
-    private func attribute(_ name: String, deadline: WorkerDeadline) throws -> CFTypeRef? {
+    private func rawAttribute(_ name: String, deadline: WorkerDeadline) throws -> (AXError, CFTypeRef?) {
         try prepare(deadline)
         var value: CFTypeRef?
         let status = AXUIElementCopyAttributeValue(element, name as CFString, &value)
         try checkMessagesAXDeadline(deadline)
+        return (status, value)
+    }
+
+    private func attribute(_ name: String, deadline: WorkerDeadline) throws -> CFTypeRef? {
+        let (status, value) = try rawAttribute(name, deadline: deadline)
         if status == .attributeUnsupported || status == .noValue { return nil }
         guard status == .success, let value else { throw MessagesAXNavigationError.axFailure }
         return value
@@ -200,6 +252,58 @@ final class LiveAXElement: MessagesAXElement {
         if status == .attributeUnsupported || status == .noValue { return nil }
         guard status == .success else { throw MessagesAXNavigationError.axFailure }
         return settable.boolValue
+    }
+
+    func focused(deadline: WorkerDeadline) throws -> Bool? {
+        try Self.checkedBoolean(attribute(kAXFocusedAttribute, deadline: deadline))
+    }
+
+    func bodyValueEvidence(deadline: WorkerDeadline) throws -> MessagesAXBodyValueEvidence {
+        let valueKind: MessagesAXBodyValueKind
+        let (valueStatus, rawValue) = try rawAttribute(kAXValueAttribute, deadline: deadline)
+        switch valueStatus {
+        case .noValue:
+            valueKind = .noValue
+        case .attributeUnsupported:
+            valueKind = .unsupported
+        case .success:
+            guard let rawValue else { throw MessagesAXNavigationError.unknownAXValue }
+            if CFGetTypeID(rawValue) == CFStringGetTypeID(), let string = rawValue as? String, string.utf8.count <= 4096 {
+                valueKind = .string(string.count)
+            } else if let attributed = rawValue as? NSAttributedString, attributed.string.utf8.count <= 4096 {
+                valueKind = .attributedString(attributed.string.count)
+            } else {
+                valueKind = .unknown
+            }
+        default:
+            throw MessagesAXNavigationError.axFailure
+        }
+        let characterCount = try optionalIntegerAttribute("AXNumberOfCharacters", limit: 4096, deadline: deadline)
+        let placeholder: String?
+        if let rawPlaceholder = try attribute("AXPlaceholderValue", deadline: deadline) {
+            placeholder = try Self.checkedString(rawPlaceholder, limit: 512)
+        } else {
+            placeholder = nil
+        }
+        return MessagesAXBodyValueEvidence(valueKind: valueKind, characterCount: characterCount, placeholder: placeholder)
+    }
+
+    private func optionalIntegerAttribute(_ name: String, limit: Int, deadline: WorkerDeadline) throws -> Int? {
+        let (status, raw) = try rawAttribute(name, deadline: deadline)
+        if status == .attributeUnsupported || status == .noValue { return nil }
+        guard status == .success, let raw else { throw MessagesAXNavigationError.axFailure }
+        return try Self.checkedInteger(raw, limit: limit)
+    }
+
+    static func checkedInteger(_ raw: CFTypeRef, limit: Int) throws -> Int {
+        guard CFGetTypeID(raw) == CFNumberGetTypeID(), CFNumberIsFloatType((raw as! CFNumber)) == false else {
+            throw MessagesAXNavigationError.unknownAXValue
+        }
+        var int64: Int64 = 0
+        guard CFNumberGetValue((raw as! CFNumber), .sInt64Type, &int64), int64 >= 0, int64 <= Int64(limit) else {
+            throw MessagesAXNavigationError.unknownAXValue
+        }
+        return Int(int64)
     }
 
     private func elementAttribute(_ name: String, deadline: WorkerDeadline) throws -> LiveAXElement? {

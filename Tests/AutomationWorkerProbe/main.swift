@@ -24,6 +24,8 @@ struct ProbeOperation: WorkerOperation {
             return .refused("probe-refused")
         case "probe.refuse-unsafe-detail":
             return .refused("unsafe detail")
+        case "probe.reply-inspect-detail":
+            return WorkerOperationResult(.ack, detail: "no-send-empty-owned-composer-closed-verified")
         case "probe.cancel-marker":
             if let payload = request.command.payload,
                let path = String(data: payload, encoding: .utf8) {
@@ -64,9 +66,9 @@ func digest(_ value: String) throws -> AppleAutomationJournal.TargetDigest {
     try AppleAutomationJournal.targetDigest(forOpaqueIdentifier: value)
 }
 
-func request(_ seed: String = "probe") throws -> AppleAutomationJournal.OperationRequest {
+func request(_ seed: String = "probe", operationType: AppleAutomationJournal.PendingOperation.OperationType = .reactionSet) throws -> AppleAutomationJournal.OperationRequest {
     try AppleAutomationJournal.OperationRequest(
-        operationType: .reactionSet,
+        operationType: operationType,
         conversationDigest: digest("conversation-\(seed)"),
         messageDigest: digest("message-\(seed)"),
         partDigest: digest("part-\(seed)"),
@@ -74,8 +76,8 @@ func request(_ seed: String = "probe") throws -> AppleAutomationJournal.Operatio
     )
 }
 
-func binding(_ seed: String = "probe") throws -> WorkerObservedTargetBinding {
-    let journalRequest = try request(seed)
+func binding(_ seed: String = "probe", operationType: AppleAutomationJournal.PendingOperation.OperationType = .reactionSet) throws -> WorkerObservedTargetBinding {
+    let journalRequest = try request(seed, operationType: operationType)
     return WorkerObservedTargetBinding(operationType: journalRequest.operationType,
                                        conversationDigest: journalRequest.conversationDigest,
                                        messageDigest: journalRequest.messageDigest,
@@ -99,6 +101,10 @@ func competingProcessCannotAcquire(root: String) throws -> Bool {
     return process.terminationReason == .exit && process.terminationStatus == 0
 }
 
+func observedOperationType(commandName: String) -> AppleAutomationJournal.PendingOperation.OperationType {
+    commandName.hasPrefix("probe.reply-inspect") ? .replySend : .reactionSet
+}
+
 func observedResolution(root: String, commandName: String, seed: String) throws -> WorkerObservedAction {
     let deadline: WorkerDeadline
     if commandName == "probe.verify-sleep" {
@@ -119,7 +125,7 @@ func observedResolution(root: String, commandName: String, seed: String) throws 
         resolve: {
             if commandName == "probe.resolve-cancel" { throw WorkerProtocolError.cancelled }
             return try WorkerResolvedAction(
-                target: binding(seed),
+                target: binding(seed, operationType: observedOperationType(commandName: commandName)),
                 command: { _ in
                     if commandName == "probe.cancel-after-worker" {
                         return try WorkerCommand(name: "probe.cancel-marker", payload: cancelMarker.data(using: .utf8))
@@ -166,6 +172,13 @@ func observedResolution(root: String, commandName: String, seed: String) throws 
                 text = text.replacingOccurrences(of: "reactionSet", with: "replySend")
                 try text.write(to: state, atomically: false, encoding: .utf8)
                 return "mutated-journal"
+            case "probe.reply-inspect-mutate-evidence":
+                let state = URL(fileURLWithPath: root).appendingPathComponent("automation-state.json")
+                var text = try String(contentsOf: state, encoding: .utf8)
+                text = text.replacingOccurrences(of: try digest("minimum-evidence-\(seed)").value,
+                                                  with: try digest("minimum-evidence-tampered-\(seed)").value)
+                try text.write(to: state, atomically: false, encoding: .utf8)
+                return "mutated-reply-inspect-evidence"
             case "probe.verify-false":
                 return nil
             case "probe.verify-throw":

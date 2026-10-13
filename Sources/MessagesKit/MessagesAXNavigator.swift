@@ -28,6 +28,18 @@ struct MessagesAXNavigator {
                                  expectedWindow: nil, expectedTranscript: nil, deadline: deadline).route()
     }
 
+    func captureWindowTranscript(process: MessagesAXProcess,
+                                 deadline: WorkerDeadline) throws -> (window: any MessagesAXElement, transcript: any MessagesAXElement) {
+        let window = try uniqueRootWindow(process: process, deadline: deadline)
+        let transcripts = try collect(from: window, window: window, deadline: deadline) { _, role, identifier in
+            (role == "AXGroup" || role == "AXCollection") && identifier == "TranscriptCollectionView"
+        }
+        guard transcripts.count == 1, let transcript = transcripts.first else {
+            throw MessagesAXNavigationError.targetDrift
+        }
+        return (window, transcript)
+    }
+
     func captureInitialRoute(process: MessagesAXProcess, isTargetEligible: TargetEligibility,
                              deadline: WorkerDeadline) throws -> MessagesAXRoute {
         let started = readinessNow()
@@ -88,15 +100,9 @@ struct MessagesAXNavigator {
                                       expectedWindow: (any MessagesAXElement)?,
                                       expectedTranscript: (any MessagesAXElement)?,
                                       deadline: WorkerDeadline) throws -> CaptureRouteSnapshot {
-        let rootWindow = try uniqueRootWindow(process: process, deadline: deadline)
+        let (rootWindow, transcript) = try captureWindowTranscript(process: process, deadline: deadline)
         if let expectedWindow, !rootWindow.sameIdentity(as: expectedWindow) {
             throw MessagesAXRouteDrift(.windowMismatch)
-        }
-        let transcripts = try collect(from: rootWindow, window: rootWindow, deadline: deadline) { _, role, identifier in
-            (role == "AXGroup" || role == "AXCollection") && identifier == "TranscriptCollectionView"
-        }
-        guard transcripts.count == 1, let transcript = transcripts.first else {
-            throw MessagesAXNavigationError.targetDrift
         }
         if let expectedTranscript, !transcript.sameIdentity(as: expectedTranscript) {
             throw MessagesAXNavigationError.targetDrift
