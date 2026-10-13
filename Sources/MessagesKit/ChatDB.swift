@@ -247,6 +247,7 @@ public struct ChatDB {
     /// `false` on every store, so a plain read cannot tell the no-chat and cannot-classify
     /// cases apart).
     public static let groupChatStyle: Int64 = 43
+    private static let directChatStyle: Int64 = 45
 
     /// Which chat a message belongs to. `identifier`/`guid` are nil when the chat row
     /// carries none; the whole record is absent when the message maps to no chat at all.
@@ -1014,6 +1015,63 @@ public struct ChatDB {
         }
     }
 
+    struct ExactReplyTarget {
+        let chat_rowid: Int64
+        let chat_guid: String?
+        let message_rowid: Int64
+        let message_guid: String
+        let native_part: Int
+        let part_guid: String?
+        let participant_handle: String
+        let root_is_from_me: Bool
+    }
+
+    struct ExactReplyRow {
+        let rowid: Int64
+        let message_guid: String?
+        let messageGUIDMalformed: Bool
+        let selected_chat_rowid: Int64
+        let ownershipKnown: Bool
+        let is_from_me: Bool
+        let bodyKnown: Bool
+        let body: String?
+        let thread_originator: ExactThreadOriginator
+    }
+
+    struct ExactReplyRowScan {
+        static let rowLimit = 129
+
+        let chat_rowid: Int64
+        let after_highwater: Int64
+        let row_limit: Int
+        let rows_examined: Int
+        let overflow: Bool
+        let rows: [ExactReplyRow]
+    }
+
+    struct ExactReplyCorrespondence: Encodable, Equatable, Sendable {
+        let status: String
+        let reason: String?
+        let message_rowid: Int64?
+        let message_guid: String?
+        let parent_message_guid: String?
+        let parent_native_part: Int?
+
+        enum CodingKeys: String, CodingKey {
+            case status, reason, message_rowid, message_guid, parent_message_guid, parent_native_part
+        }
+
+        public func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encode(status, forKey: .status)
+            try encodeOrNull(&c, reason, .reason)
+            try encodeOrNull(&c, message_rowid, .message_rowid)
+            try encodeOrNull(&c, message_guid, .message_guid)
+            try encodeOrNull(&c, parent_message_guid, .parent_message_guid)
+            try encodeOrNull(&c, parent_native_part, .parent_native_part)
+        }
+    }
+
     public struct ExactConversation: Encodable {
         public let chat_rowid: Int64
         public let chat_guid: String?
@@ -1318,6 +1376,132 @@ public struct ChatDB {
         return (chat, message)
     }
 
+    mutating func exactReplyTarget(chat selector: ExactChatSelector,
+                                           message messageSelector: ExactMessageSelector,
+                                           partIndex: Int? = nil) throws -> ExactReplyTarget {
+        let (chat, message) = try exactGet(chat: selector, message: messageSelector)
+        guard message.selected_chat_rowid == chat.rowid else {
+            throw AppleError.validation("reply target message is not in the selected conversation")
+        }
+        let strictTarget = try exactReplyTargetEvidence(chatRowid: chat.rowid, messageRowid: message.rowid)
+        let participants = try exactParticipantHandles(chatRowid: chat.rowid)
+        guard participants.count == 1 else {
+            throw AppleError.validation("reply target direct conversation must have exactly one participant")
+        }
+        guard message.thread_originator.available, message.thread_originator.reason == "no-linkage" else {
+            throw AppleError.validation("reply target must be a root message")
+        }
+        let nativePart = try resolveExactReplyPart(message, requested: partIndex)
+        let partGUID = message.native_parts?.first(where: { $0.index == nativePart })?.attachment_guid
+        return ExactReplyTarget(chat_rowid: chat.rowid,
+                                chat_guid: strictTarget.chatGUID,
+                                message_rowid: message.rowid,
+                                message_guid: strictTarget.messageGUID,
+                                native_part: nativePart,
+                                part_guid: partGUID,
+                                participant_handle: participants[0],
+                                root_is_from_me: strictTarget.isFromMe)
+    }
+
+    func exactReplyHighwater(chatRowid: Int64) throws -> Int64 {
+        guard chatRowid > 0 else { throw AppleError.validation("chatRowid must be > 0") }
+        try validateExactReplyMembershipEvidence(chatRowid: chatRowid)
+        let rows = try reader.rows("""
+            SELECT COALESCE(MAX(m.ROWID), 0) AS max_rowid
+            FROM chat_message_join cmj
+            JOIN message m ON m.ROWID = cmj.message_id
+            WHERE cmj.chat_id = CAST(?1 AS INTEGER)
+            """, [String(chatRowid)])
+        guard let row = rows.first, case .integer(let highwater)? = row.values["max_rowid"] else {
+            throw AppleError.upstream("Messages database reply highwater query returned an invalid rowid")
+        }
+        return highwater
+    }
+
+    mutating func exactReplyRows(chatRowid: Int64, afterHighwater: Int64) throws -> ExactReplyRowScan {
+        guard chatRowid > 0 else { throw AppleError.validation("chatRowid must be > 0") }
+        guard afterHighwater >= 0 else { throw AppleError.validation("afterHighwater must be >= 0") }
+        try validateExactReplyMembershipEvidence(chatRowid: chatRowid)
+        let schema = try requireExactReadSchema()
+        let originatorSelect = schema.threadOriginatorColumnsAvailable
+            ? "m.thread_originator_guid AS thread_originator_guid, m.thread_originator_part AS thread_originator_part"
+            : "NULL AS thread_originator_guid, NULL AS thread_originator_part"
+        let rows = try reader.rows("""
+            SELECT m.ROWID AS rowid, m.guid AS message_guid, m.text AS text,
+                   m.attributedBody AS attributedBody, m.is_from_me AS is_from_me,
+                   \(originatorSelect), cmj.chat_id AS join_chat_id,
+                   cmj.message_id AS join_message_id, c.ROWID AS selected_chat_rowid
+            FROM chat_message_join cmj
+            JOIN chat c ON c.ROWID = cmj.chat_id
+            JOIN message m ON m.ROWID = cmj.message_id
+            WHERE c.ROWID = ?1 AND m.ROWID > CAST(?2 AS INTEGER)
+            ORDER BY m.ROWID ASC
+            LIMIT \(ExactReplyRowScan.rowLimit)
+            """, [String(chatRowid), String(afterHighwater)])
+        let shaped = try shapeExactReplyRows(rows, chatRowid: chatRowid, schema: schema)
+        return ExactReplyRowScan(chat_rowid: chatRowid,
+                                 after_highwater: afterHighwater,
+                                 row_limit: ExactReplyRowScan.rowLimit,
+                                 rows_examined: shaped.count,
+                                 overflow: shaped.count >= ExactReplyRowScan.rowLimit,
+                                 rows: shaped)
+    }
+
+    static func judgeExactReplyCorrespondence(scan: ExactReplyRowScan,
+                                                     target: ExactReplyTarget,
+                                                     expectedText: String) throws -> ExactReplyCorrespondence {
+        if scan.overflow {
+            return replyUncertain("row-limit-exceeded")
+        }
+        var matches: [ExactReplyRow] = []
+        for row in scan.rows {
+            guard row.ownershipKnown else { return replyUncertain("unknown-ownership") }
+            guard row.is_from_me else { continue }
+            guard row.bodyKnown else { return replyUncertain("unknown-outgoing-body") }
+            guard let body = row.body, body.utf8.elementsEqual(expectedText.utf8) else { continue }
+            guard row.rowid > scan.after_highwater, row.rowid > 0 else {
+                return replyUncertain("matching-row-malformed")
+            }
+            guard row.selected_chat_rowid == target.chat_rowid else {
+                return replyUncertain("matching-row-wrong-chat")
+            }
+            guard !row.messageGUIDMalformed, let guid = row.message_guid, !guid.isEmpty else {
+                return replyUncertain("matching-row-missing-guid")
+            }
+            let originator = row.thread_originator
+            guard originator.available else {
+                switch originator.reason {
+                case "partial" where originator.message_guid == nil:
+                    return replyUncertain("matching-row-missing-parent-guid")
+                case "partial" where originator.raw_part == nil:
+                    return replyUncertain("matching-row-missing-parent-part")
+                case "malformed", "unsupported-part-marker":
+                    return replyUncertain("matching-row-malformed-parent")
+                default:
+                    return replyUncertain("matching-row-malformed-parent")
+                }
+            }
+            guard originator.reason == "available",
+                  let parentGUID = originator.message_guid,
+                  parentGUID.utf8.elementsEqual(target.message_guid.utf8),
+                  originator.native_part == target.native_part else {
+                return replyUncertain("matching-row-wrong-parent")
+            }
+            matches.append(row)
+        }
+        guard let match = matches.first else {
+            return ExactReplyCorrespondence(status: "waiting", reason: nil, message_rowid: nil,
+                                            message_guid: nil, parent_message_guid: nil, parent_native_part: nil)
+        }
+        guard matches.count == 1 else {
+            return replyUncertain("duplicate-matching-replies")
+        }
+        return ExactReplyCorrespondence(status: "verified", reason: nil, message_rowid: match.rowid,
+                                        message_guid: match.message_guid,
+                                        parent_message_guid: match.thread_originator.message_guid,
+                                        parent_native_part: match.thread_originator.native_part)
+    }
+
     public mutating func exactReactionInspect(chat selector: ExactChatSelector,
                                               message messageSelector: ExactMessageSelector,
                                               partIndex: Int? = nil,
@@ -1482,6 +1666,145 @@ public struct ChatDB {
             handles.append(handle)
         }
         return handles
+    }
+
+    private func exactReplyTargetEvidence(chatRowid: Int64, messageRowid: Int64) throws -> (chatGUID: String, messageGUID: String, isFromMe: Bool) {
+        let rows = try reader.rows("""
+            SELECT c.guid AS chat_guid, c.style AS chat_style,
+                   m.guid AS message_guid, m.is_from_me AS is_from_me,
+                   cmj.chat_id AS join_chat_id, cmj.message_id AS join_message_id
+            FROM chat_message_join cmj
+            JOIN chat c ON c.ROWID = cmj.chat_id
+            JOIN message m ON m.ROWID = cmj.message_id
+            WHERE c.ROWID = ?1 AND m.ROWID = ?2
+            LIMIT 2
+            """, [String(chatRowid), String(messageRowid)])
+        guard rows.count == 1 else {
+            throw AppleError.validation("reply target message is not a distinct member of the selected conversation")
+        }
+        let row = rows[0]
+        guard case .integer(let joinedChat)? = row.values["join_chat_id"], joinedChat == chatRowid,
+              case .integer(let joinedMessage)? = row.values["join_message_id"], joinedMessage == messageRowid else {
+            throw AppleError.validation("reply target chat membership is malformed")
+        }
+        guard case .text(let chatGUID)? = row.values["chat_guid"], !chatGUID.isEmpty else {
+            throw AppleError.validation("reply target chat is missing a strict GUID")
+        }
+        guard case .integer(let style)? = row.values["chat_style"], style == ChatDB.directChatStyle else {
+            throw AppleError.validation("reply target must be in a supported direct conversation")
+        }
+        guard case .text(let messageGUID)? = row.values["message_guid"], !messageGUID.isEmpty else {
+            throw AppleError.validation("reply target message is missing a strict GUID")
+        }
+        guard case .integer(let fromMeRaw)? = row.values["is_from_me"], fromMeRaw == 0 || fromMeRaw == 1 else {
+            throw AppleError.validation("reply target ownership is malformed")
+        }
+        return (chatGUID, messageGUID, fromMeRaw != 0)
+    }
+
+    private func validateExactReplyMembershipEvidence(chatRowid: Int64) throws {
+        _ = try requiredColumns("chat_message_join", ["chat_id", "message_id"])
+        _ = try requiredColumns("message", ["ROWID"])
+        let malformed = try reader.rows("""
+            SELECT cmj.chat_id AS join_chat_id, cmj.message_id AS join_message_id, m.ROWID AS rowid
+            FROM chat_message_join cmj
+            LEFT JOIN message m ON m.ROWID = cmj.message_id
+            WHERE cmj.chat_id = CAST(?1 AS INTEGER)
+              AND (typeof(cmj.chat_id) != 'integer'
+                   OR typeof(cmj.message_id) != 'integer'
+                   OR m.ROWID IS NULL)
+            LIMIT 1
+            """, [String(chatRowid)])
+        guard malformed.isEmpty else {
+            throw AppleError.upstream("Messages database reply chat membership evidence is malformed")
+        }
+    }
+
+    private mutating func shapeExactReplyRows(_ rows: [SQLiteReader.Row], chatRowid: Int64,
+                                              schema: ExactReadSchema) throws -> [ExactReplyRow] {
+        try rows.map { row in
+            let rowid = try requiredStrictInteger(row, "rowid")
+            guard case .integer(let joinedChat)? = row.values["join_chat_id"], joinedChat == chatRowid,
+                  case .integer(let joinedMessage)? = row.values["join_message_id"], joinedMessage == rowid else {
+                throw AppleError.upstream("Messages database reply row membership evidence is malformed")
+            }
+            guard case .integer(let selectedChat)? = row.values["selected_chat_rowid"], selectedChat == chatRowid else {
+                throw AppleError.upstream("Messages database reply row selected chat evidence is malformed")
+            }
+            let guidInfo = strictOptionalText(row.values["message_guid"])
+            let ownership = strictReplyOwnership(row.values["is_from_me"])
+            let body = strictReplyBody(row)
+            return ExactReplyRow(rowid: rowid,
+                                 message_guid: guidInfo.text,
+                                 messageGUIDMalformed: guidInfo.malformed,
+                                 selected_chat_rowid: selectedChat,
+                                 ownershipKnown: ownership.known,
+                                 is_from_me: ownership.isFromMe,
+                                 bodyKnown: body.known,
+                                 body: body.body,
+                                 thread_originator: exactThreadOriginator(row, schema: schema))
+        }
+    }
+
+    private func requiredStrictInteger(_ row: SQLiteReader.Row, _ column: String) throws -> Int64 {
+        guard case .integer(let value)? = row.values[column] else {
+            throw AppleError.upstream("Messages database query did not return strict integer column '\(column)'")
+        }
+        return value
+    }
+
+    private func strictOptionalText(_ value: SQLiteReader.Row.Value?) -> (text: String?, malformed: Bool) {
+        switch value {
+        case .text(let text)?: return (text, false)
+        case .null?, nil: return (nil, false)
+        default: return (nil, true)
+        }
+    }
+
+    private func strictReplyOwnership(_ value: SQLiteReader.Row.Value?) -> (known: Bool, isFromMe: Bool) {
+        guard case .integer(let raw)? = value, raw == 0 || raw == 1 else { return (false, false) }
+        return (true, raw != 0)
+    }
+
+    private func strictReplyBody(_ row: SQLiteReader.Row) -> (known: Bool, body: String?) {
+        switch row.values["text"] {
+        case .text(let text)?: return (true, text)
+        case .null?, nil: break
+        default: return (false, nil)
+        }
+        switch row.values["attributedBody"] {
+        case .blob(let data)?:
+            guard let decoded = AttributedBody.decode(data) else { return (false, nil) }
+            return (true, decoded)
+        case .null?, nil:
+            return (true, nil)
+        default:
+            return (false, nil)
+        }
+    }
+
+    private static func replyUncertain(_ reason: String) -> ExactReplyCorrespondence {
+        ExactReplyCorrespondence(status: "uncertain", reason: reason, message_rowid: nil,
+                                 message_guid: nil, parent_message_guid: nil, parent_native_part: nil)
+    }
+
+    private func resolveExactReplyPart(_ message: ExactMessage, requested: Int?) throws -> Int {
+        if let requested {
+            guard requested >= 0 else { throw AppleError.validation("partIndex must be >= 0") }
+            guard message.native_parts_available, let parts = message.native_parts,
+                  parts.contains(where: { $0.index == requested }) else {
+                throw AppleError.validation("reply target native part is not proven")
+            }
+            return requested
+        }
+        guard message.native_parts_available, let parts = message.native_parts else {
+            throw AppleError.validation("reply target native parts are unavailable: \(message.native_parts_reason)")
+        }
+        let indexes = Set(parts.map(\.index))
+        guard indexes.count == 1, let only = indexes.first else {
+            throw AppleError.validation("reply target requires an explicit native part")
+        }
+        return only
     }
 
     private func reactionColumns() throws -> (available: Bool, missing: [String], hasCustomEmoji: Bool) {
