@@ -933,6 +933,25 @@ public struct ChatDB {
         }
     }
 
+    public struct ExactThreadOriginator: Encodable, Equatable, Sendable {
+        public let available: Bool
+        public let reason: String
+        public let message_guid: String?
+        public let raw_part: String?
+        public let native_part: Int?
+
+        enum CodingKeys: String, CodingKey { case available, reason, message_guid, raw_part, native_part }
+
+        public func encode(to encoder: Encoder) throws {
+            var c = encoder.container(keyedBy: CodingKeys.self)
+            try c.encode(available, forKey: .available)
+            try c.encode(reason, forKey: .reason)
+            try encodeOrNull(&c, message_guid, .message_guid)
+            try encodeOrNull(&c, raw_part, .raw_part)
+            try encodeOrNull(&c, native_part, .native_part)
+        }
+    }
+
     public struct ExactMessage: Encodable {
         public let rowid: Int64
         public let message_guid: String?
@@ -957,12 +976,13 @@ public struct ChatDB {
         public let native_parts_available: Bool
         public let native_parts_reason: String
         public let native_parts: [ExactNativePart]?
+        public let thread_originator: ExactThreadOriginator
 
         enum CodingKeys: String, CodingKey {
             case rowid, message_guid, selected_chat_rowid, chat_guid, chat_identifier
             case date, date_local, timestamp, normalized_seconds, normalized_nanoseconds, is_from_me, sender, handle
             case service, body, body_availability, group_name, is_group, has_attachments
-            case attachments, native_parts_available, native_parts_reason, native_parts
+            case attachments, native_parts_available, native_parts_reason, native_parts, thread_originator
         }
 
         public func encode(to encoder: Encoder) throws {
@@ -990,6 +1010,7 @@ public struct ChatDB {
             try c.encode(native_parts_available, forKey: .native_parts_available)
             try c.encode(native_parts_reason, forKey: .native_parts_reason)
             try encodeOrNull(&c, native_parts, .native_parts)
+            try c.encode(thread_originator, forKey: .thread_originator)
         }
     }
 
@@ -1090,9 +1111,17 @@ public struct ChatDB {
         END
         """
 
+    private struct ExactReadSchema {
+        let threadOriginatorColumnsAvailable: Bool
+    }
+
     private static func exactMessageSelect(seconds: String = ChatDB.normalizedSecondsSQL,
-                                           nanos: String = ChatDB.normalizedNanosecondsSQL) -> String {
-        """
+                                           nanos: String = ChatDB.normalizedNanosecondsSQL,
+                                           schema: ExactReadSchema) -> String {
+        let originatorSelect = schema.threadOriginatorColumnsAvailable
+            ? "m.thread_originator_guid AS thread_originator_guid, m.thread_originator_part AS thread_originator_part"
+            : "NULL AS thread_originator_guid, NULL AS thread_originator_part"
+        return """
         SELECT m.ROWID AS rowid, m.guid AS message_guid, m.date AS date,
                \(seconds) AS normalized_seconds,
                \(nanos) AS normalized_nanoseconds,
@@ -1100,6 +1129,7 @@ public struct ChatDB {
                m.is_from_me AS is_from_me, m.handle_id AS handle_rowid,
                m.cache_roomnames AS cache_roomnames, m.service AS service,
                m.cache_has_attachments AS cache_has_attachments,
+               \(originatorSelect),
                h.id AS address,
                c.ROWID AS selected_chat_rowid, c.chat_identifier AS chat_identifier,
                c.guid AS chat_guid, c.display_name AS selected_display_name,
@@ -1112,7 +1142,7 @@ public struct ChatDB {
     }
 
     public mutating func exactConversations(limit: Int, order: ExactOrder, cursor: String?) throws -> ExactPage<ExactConversation> {
-        try requireExactReadSchema()
+        _ = try requireExactReadSchema()
         let firstMaxMessage = try maxRowid(table: "message")
         let firstMaxChat = try maxRowid(table: "chat")
         let decoded = try decodeCursor(cursor, op: "conversations", chat: nil, order: order)
@@ -1197,7 +1227,7 @@ public struct ChatDB {
 
     public mutating func exactHistory(chat selector: ExactChatSelector, limit: Int,
                                       order: ExactOrder, cursor: String?) throws -> ExactPage<ExactMessage> {
-        try requireExactReadSchema()
+        let schema = try requireExactReadSchema()
         let chat = try resolveExactChat(selector)
         let decoded = try decodeCursor(cursor, op: "history", chat: chat, order: order)
         let maxMessage: Int64
@@ -1207,7 +1237,7 @@ public struct ChatDB {
             maxMessage = try maxRowid(table: "message")
         }
         let orderSQL = order == .desc ? "DESC" : "ASC"
-        var sql = ChatDB.exactMessageSelect() + """
+        var sql = ChatDB.exactMessageSelect(schema: schema) + """
 
         WHERE c.ROWID = ?1 AND m.ROWID <= ?2
         """
@@ -1243,7 +1273,7 @@ public struct ChatDB {
         ORDER BY \(nullOrder), normalized_seconds \(orderSQL), normalized_nanoseconds \(orderSQL), m.ROWID \(orderSQL)
         LIMIT \(limit + 1)
         """
-        let messages = try shapeExactMessages(rows: reader.rows(sql, binds))
+        let messages = try shapeExactMessages(rows: reader.rows(sql, binds), schema: schema)
         let visible = Array(messages.prefix(limit))
         let next = try messages.count > limit ? visible.last.map {
             try encodeCursor(ExactCursor(v: ChatDB.exactCursorVersion, op: "history",
@@ -1259,7 +1289,7 @@ public struct ChatDB {
 
     public mutating func exactGet(chat selector: ExactChatSelector,
                                   message messageSelector: ExactMessageSelector) throws -> (ResolvedExactChat, ExactMessage) {
-        try requireExactReadSchema()
+        let schema = try requireExactReadSchema()
         let chat = try resolveExactChat(selector)
         let messagePredicate: String
         let bind: String
@@ -1276,12 +1306,12 @@ public struct ChatDB {
             messagePredicate = "m.ROWID = ?2"
             bind = String(try requiredInt(rows[0], "ROWID"))
         }
-        let sql = ChatDB.exactMessageSelect() + """
+        let sql = ChatDB.exactMessageSelect(schema: schema) + """
 
         WHERE c.ROWID = ?1 AND \(messagePredicate)
         LIMIT 1
         """
-        let messages = try shapeExactMessages(rows: reader.rows(sql, [String(chat.rowid), bind]))
+        let messages = try shapeExactMessages(rows: reader.rows(sql, [String(chat.rowid), bind]), schema: schema)
         guard let message = messages.first else {
             throw AppleError.notFound("message is not a member of the selected conversation")
         }
@@ -1807,7 +1837,7 @@ public struct ChatDB {
         }
     }
 
-    private mutating func shapeExactMessages(rows: [SQLiteReader.Row]) throws -> [ExactMessage] {
+    private mutating func shapeExactMessages(rows: [SQLiteReader.Row], schema: ExactReadSchema) throws -> [ExactMessage] {
         let ids = rows.compactMap { $0.int("rowid") }
         let attachments = try strictAttachmentsByMessage(ids: ids)
         var out: [ExactMessage] = []
@@ -1817,6 +1847,7 @@ public struct ChatDB {
             let joined = attachments[rowid] ?? []
             let bodyInfo = exactBody(row, attachments: joined)
             let nativePartsInfo = exactNativeParts(row)
+            let threadOriginator = exactThreadOriginator(row, schema: schema)
             let rawDate = row.int("date")
             let date = rawDate.map(MessageTime.date(fromRaw:))
             let isFromMe = (row.int("is_from_me") ?? 0) != 0
@@ -1850,10 +1881,74 @@ public struct ChatDB {
                 attachments: joined,
                 native_parts_available: nativePartsInfo.available,
                 native_parts_reason: nativePartsInfo.reason,
-                native_parts: nativePartsInfo.parts
+                native_parts: nativePartsInfo.parts,
+                thread_originator: threadOriginator
             ))
         }
         return out
+    }
+
+    private func exactThreadOriginator(_ row: SQLiteReader.Row, schema: ExactReadSchema) -> ExactThreadOriginator {
+        guard schema.threadOriginatorColumnsAvailable else {
+            return ExactThreadOriginator(available: false, reason: "missing-schema",
+                                         message_guid: nil, raw_part: nil, native_part: nil)
+        }
+        let guid = originatorText(row.values["thread_originator_guid"])
+        let part = originatorText(row.values["thread_originator_part"])
+        let hasGUID = guid.text?.isEmpty == false
+        let hasPart = part.text?.isEmpty == false
+        if guid.wrongType || part.wrongType {
+            return ExactThreadOriginator(available: false, reason: "malformed",
+                                         message_guid: hasGUID ? guid.text : nil,
+                                         raw_part: hasPart ? part.text : nil,
+                                         native_part: nil)
+        }
+        guard hasGUID || hasPart else {
+            return ExactThreadOriginator(available: true, reason: "no-linkage",
+                                         message_guid: nil, raw_part: nil, native_part: nil)
+        }
+        guard let guidText = guid.text, hasGUID, let rawPart = part.text, hasPart else {
+            return ExactThreadOriginator(available: false, reason: "partial",
+                                         message_guid: hasGUID ? guid.text : nil,
+                                         raw_part: hasPart ? part.text : nil,
+                                         native_part: nil)
+        }
+        let parsed = parseThreadOriginatorPart(rawPart)
+        return ExactThreadOriginator(available: parsed.available, reason: parsed.reason,
+                                     message_guid: guidText, raw_part: rawPart,
+                                     native_part: parsed.nativePart)
+    }
+
+    private func originatorText(_ value: SQLiteReader.Row.Value?) -> (text: String?, wrongType: Bool) {
+        switch value {
+        case .text(let text)?: return (text, false)
+        case .null?: return (nil, false)
+        default: return (nil, true)
+        }
+    }
+
+    private func parseThreadOriginatorPart(_ raw: String) -> (available: Bool, reason: String, nativePart: Int?) {
+        let prefix = raw.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)[0]
+        guard !prefix.isEmpty else { return (false, "malformed", nil) }
+        let bytes = prefix.utf8
+        guard bytes.allSatisfy({ (48...57).contains($0) }) else {
+            return (false, "malformed", nil)
+        }
+        guard prefix == "0" || !prefix.hasPrefix("0") else {
+            return (false, "malformed", nil)
+        }
+        if prefix == String(UInt64.max) {
+            return (false, "unsupported-part-marker", nil)
+        }
+        var value = 0
+        for byte in bytes {
+            let digit = Int(byte - 48)
+            guard value <= (Int.max - digit) / 10 else {
+                return (false, "malformed", nil)
+            }
+            value = value * 10 + digit
+        }
+        return (true, "available", value)
     }
 
     private func exactNativeParts(_ row: SQLiteReader.Row) -> (available: Bool, reason: String, parts: [ExactNativePart]?) {
@@ -1979,8 +2074,8 @@ public struct ChatDB {
                                  style: row.int("style"))
     }
 
-    private func requireExactReadSchema() throws {
-        _ = try requiredColumns("message", [
+    private func requireExactReadSchema() throws -> ExactReadSchema {
+        let messageColumns = try requiredColumns("message", [
             "ROWID", "guid", "text", "attributedBody", "is_from_me", "handle_id",
             "cache_roomnames", "service", "cache_has_attachments", "date",
         ])
@@ -1993,6 +2088,11 @@ public struct ChatDB {
         _ = try requiredColumns("handle", ["ROWID", "id"])
         _ = try requiredColumns("message_attachment_join", ["message_id", "attachment_id"])
         _ = try requiredColumns("attachment", ["ROWID"])
+        return ExactReadSchema(
+            threadOriginatorColumnsAvailable: messageColumns.isSuperset(of: [
+                "thread_originator_guid", "thread_originator_part",
+            ])
+        )
     }
 
     private func requiredColumns(_ table: String, _ required: Set<String>) throws -> Set<String> {

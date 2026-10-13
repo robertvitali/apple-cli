@@ -2462,6 +2462,7 @@ struct MessagesCommandDependencyTests {
 
     @Test func exactCommandOutputCarriesNativePartsNullAndArrayShapes() throws {
         let fx = try ChatFixture()
+        try fx.addThreadOriginatorColumns()
         let blob = commandNativeArchive("Alice", [
             (commandNativePartKey, NSNumber(value: 2), NSRange(location: 0, length: 5))
         ])
@@ -2470,6 +2471,7 @@ struct MessagesCommandDependencyTests {
         try fx.insertMessage(rowid: 61, guid: "native-command-empty",
                              attributedBody: commandNativeArchive("plain"),
                              chatRowid: 3, date: fx.base - 61)
+        try fx.setThreadOriginator(rowid: 60, guidSQL: "'origin-command'", partSQL: "'2:opaque'")
         let deps = fixtureDependencies(fx)
 
         let getOutput = try payload(from: captureStdout {
@@ -2486,6 +2488,12 @@ struct MessagesCommandDependencyTests {
         #expect(ranges[0]["location"] as? Int == 0)
         #expect(ranges[0]["length"] as? Int == 5)
         #expect(getParts[0]["attachment_guid"] is NSNull)
+        let getOriginator = try #require(getMessage["thread_originator"] as? [String: Any])
+        #expect(getOriginator["available"] as? Bool == true)
+        #expect(getOriginator["reason"] as? String == "available")
+        #expect(getOriginator["message_guid"] as? String == "origin-command")
+        #expect(getOriginator["raw_part"] as? String == "2:opaque")
+        #expect(getOriginator["native_part"] as? Int == 2)
 
         let historyOutput = try payload(from: captureStdout {
             try History.parse(["--chat-rowid", "3", "--limit", "100"]).run(dependencies: deps)
@@ -2500,6 +2508,12 @@ struct MessagesCommandDependencyTests {
         #expect(empty["native_parts_available"] as? Bool == true)
         #expect(empty["native_parts_reason"] as? String == "empty-known")
         #expect((empty["native_parts"] as? [[String: Any]])?.isEmpty == true)
+        let emptyOriginator = try #require(empty["thread_originator"] as? [String: Any])
+        #expect(emptyOriginator["available"] as? Bool == true)
+        #expect(emptyOriginator["reason"] as? String == "no-linkage")
+        #expect(emptyOriginator["message_guid"] is NSNull)
+        #expect(emptyOriginator["raw_part"] is NSNull)
+        #expect(emptyOriginator["native_part"] is NSNull)
 
         let absentOutput = try payload(from: captureStdout {
             try Get.parse(["--chat-rowid", "3", "--message-rowid", "6"]).run(dependencies: deps)
@@ -2508,6 +2522,12 @@ struct MessagesCommandDependencyTests {
         #expect(absent["native_parts"] is NSNull)
         #expect(absent["native_parts_available"] as? Bool == false)
         #expect(absent["native_parts_reason"] as? String == "absent-blob")
+        let absentOriginator = try #require(absent["thread_originator"] as? [String: Any])
+        #expect(absentOriginator["available"] as? Bool == true)
+        #expect(absentOriginator["reason"] as? String == "no-linkage")
+        #expect(absentOriginator["message_guid"] is NSNull)
+        #expect(absentOriginator["raw_part"] is NSNull)
+        #expect(absentOriginator["native_part"] is NSNull)
     }
 
     @Test func exactReadCursorsRejectWrongScopeAndMalformedInput() throws {

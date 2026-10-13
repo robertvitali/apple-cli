@@ -535,5 +535,20 @@ stickers/data detectors unavailable. Automation verification is a separate
 increment of the expanded capability design in
 [`beeper-imessage-port.md`](../discovery/beeper-imessage-port.md).
 
+When the native `message` table exposes both `thread_originator_guid` and
+`thread_originator_part`, exact reads also include an always-present
+`thread_originator` object. It reports availability, a bounded reason, the raw
+originator GUID, the raw part marker and a parsed native part index when the
+marker has a canonical ASCII nonnegative integer prefix. Present columns with
+both values null or empty mean `available: true` with `reason: "no-linkage"`.
+If either column is absent, reads return `available: false` with
+`reason: "missing-schema"` and explicit null values. Partial metadata,
+non-text SQLite storage classes, noncanonical numeric prefixes, overflows and
+the native UInt64.max sentinel are unavailable rather than guessed. The suffix
+after the first colon is retained only as opaque raw metadata. This field does
+not identify an immediate parent or root, does not perform an originator row
+lookup, and must not authorize a mutation without a later exact-chat
+verification step.
+
 These commands use read-only database snapshots and never drive Messages UI or
 mark conversations read. They retain JSON envelope schema version 1.

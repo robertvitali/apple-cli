@@ -234,6 +234,23 @@ final class ChatFixture {
             UPDATE message SET cache_has_attachments=1 WHERE ROWID=\(messageRowid);
             """)
     }
+
+    func addThreadOriginatorColumns(guid: Bool = true, part: Bool = true) throws {
+        if guid {
+            try exec("ALTER TABLE message ADD COLUMN thread_originator_guid;")
+        }
+        if part {
+            try exec("ALTER TABLE message ADD COLUMN thread_originator_part;")
+        }
+    }
+
+    func setThreadOriginator(rowid: Int64, guidSQL: String, partSQL: String) throws {
+        try exec("""
+            UPDATE message
+            SET thread_originator_guid = \(guidSQL), thread_originator_part = \(partSQL)
+            WHERE ROWID = \(rowid);
+            """)
+    }
 }
 
 private let nativePartKey = NSAttributedString.Key("__kIMMessagePartAttributeName")
@@ -943,6 +960,114 @@ struct ChatDBFixtureTests {
         #expect(corrupt.native_parts_available == false)
         #expect(corrupt.native_parts_reason != "absent-blob")
         #expect(corrupt.native_parts == nil)
+    }
+
+    @Test func exactThreadOriginatorDistinguishesMissingSchemaFromNoLinkage() throws {
+        let missing = try ChatFixture()
+        var missingDB = try makeDB(missing, book: friendBook)
+        let (_, missingMessage) = try missingDB.exactGet(chat: .rowid(3), message: .rowid(1))
+        #expect(missingMessage.thread_originator == ChatDB.ExactThreadOriginator(
+            available: false, reason: "missing-schema", message_guid: nil,
+            raw_part: nil, native_part: nil
+        ))
+
+        let oneColumn = try ChatFixture()
+        try oneColumn.addThreadOriginatorColumns(guid: true, part: false)
+        var oneColumnDB = try makeDB(oneColumn, book: friendBook)
+        let (_, oneColumnMessage) = try oneColumnDB.exactGet(chat: .rowid(3), message: .rowid(1))
+        #expect(oneColumnMessage.thread_originator.reason == "missing-schema")
+        #expect(oneColumnMessage.thread_originator.available == false)
+
+        let present = try ChatFixture()
+        try present.addThreadOriginatorColumns()
+        try present.setThreadOriginator(rowid: 2, guidSQL: "''", partSQL: "''")
+        var presentDB = try makeDB(present, book: friendBook)
+        let (_, nulls) = try presentDB.exactGet(chat: .rowid(3), message: .rowid(1))
+        #expect(nulls.thread_originator == ChatDB.ExactThreadOriginator(
+            available: true, reason: "no-linkage", message_guid: nil,
+            raw_part: nil, native_part: nil
+        ))
+        let (_, empties) = try presentDB.exactGet(chat: .rowid(3), message: .rowid(2))
+        #expect(empties.thread_originator == nulls.thread_originator)
+    }
+
+    @Test func exactThreadOriginatorParsesValidAndPartialMetadataOnGetAndHistory() throws {
+        let fx = try ChatFixture()
+        try fx.addThreadOriginatorColumns()
+        try fx.insertMessage(rowid: 60, guid: "thread-zero", text: "thread zero",
+                             chatRowid: 3, date: fx.base - 60)
+        try fx.insertMessage(rowid: 61, guid: "thread-nonzero", text: "thread nonzero",
+                             chatRowid: 3, date: fx.base - 61)
+        try fx.insertMessage(rowid: 62, guid: "thread-partial-guid", text: "thread partial guid",
+                             chatRowid: 3, date: fx.base - 62)
+        try fx.insertMessage(rowid: 63, guid: "thread-partial-part", text: "thread partial part",
+                             chatRowid: 3, date: fx.base - 63)
+        try fx.setThreadOriginator(rowid: 60, guidSQL: "'origin-zero'", partSQL: "'0'")
+        try fx.setThreadOriginator(rowid: 61, guidSQL: "'origin-nonzero'", partSQL: "'12:opaque:suffix'")
+        try fx.setThreadOriginator(rowid: 62, guidSQL: "'origin-only'", partSQL: "NULL")
+        try fx.setThreadOriginator(rowid: 63, guidSQL: "NULL", partSQL: "'5:suffix'")
+        var db = try makeDB(fx, book: friendBook)
+
+        let (_, zero) = try db.exactGet(chat: .rowid(3), message: .rowid(60))
+        #expect(zero.thread_originator == ChatDB.ExactThreadOriginator(
+            available: true, reason: "available", message_guid: "origin-zero",
+            raw_part: "0", native_part: 0
+        ))
+
+        let history = try db.exactHistory(chat: .rowid(3), limit: 100, order: .desc, cursor: nil).items
+        let nonzero = try #require(history.first { $0.rowid == 61 })
+        #expect(nonzero.thread_originator == ChatDB.ExactThreadOriginator(
+            available: true, reason: "available", message_guid: "origin-nonzero",
+            raw_part: "12:opaque:suffix", native_part: 12
+        ))
+        let partialGUID = try #require(history.first { $0.rowid == 62 })
+        #expect(partialGUID.thread_originator == ChatDB.ExactThreadOriginator(
+            available: false, reason: "partial", message_guid: "origin-only",
+            raw_part: nil, native_part: nil
+        ))
+        let partialPart = try #require(history.first { $0.rowid == 63 })
+        #expect(partialPart.thread_originator == ChatDB.ExactThreadOriginator(
+            available: false, reason: "partial", message_guid: nil,
+            raw_part: "5:suffix", native_part: nil
+        ))
+    }
+
+    @Test func exactThreadOriginatorRejectsSentinelMalformedAndWrongSQLiteTypes() throws {
+        let fx = try ChatFixture()
+        try fx.addThreadOriginatorColumns()
+        let cases: [(rowid: Int64, guid: String, guidSQL: String, partSQL: String, reason: String, rawPart: String?)] = [
+            (70, "thread-sentinel", "'origin-sentinel'", "'18446744073709551615:suffix'", "unsupported-part-marker", "18446744073709551615:suffix"),
+            (71, "thread-int-overflow", "'origin-int-overflow'", "'9223372036854775808'", "malformed", "9223372036854775808"),
+            (72, "thread-uint-overflow", "'origin-uint-overflow'", "'18446744073709551616'", "malformed", "18446744073709551616"),
+            (73, "thread-sign", "'origin-sign'", "'-1'", "malformed", "-1"),
+            (74, "thread-whitespace", "'origin-whitespace'", "' 1'", "malformed", " 1"),
+            (75, "thread-unicode-digit", "'origin-unicode-digit'", "'١'", "malformed", "١"),
+            (76, "thread-leading-zero", "'origin-leading-zero'", "'01'", "malformed", "01"),
+            (77, "thread-empty-prefix", "'origin-empty-prefix'", "':suffix'", "malformed", ":suffix"),
+            (78, "thread-plus", "'origin-plus'", "'+1'", "malformed", "+1"),
+            (79, "thread-trailing-whitespace", "'origin-trailing-whitespace'", "'1 '", "malformed", "1 "),
+            (80, "thread-decimal", "'origin-decimal'", "'1.0'", "malformed", "1.0"),
+            (81, "thread-integer-guid", "7", "'1'", "malformed", "1"),
+            (82, "thread-integer-part", "'origin-integer-part'", "7", "malformed", nil),
+            (83, "thread-real-part", "'origin-real-part'", "7.5", "malformed", nil),
+            (84, "thread-blob-part", "'origin-blob-part'", "X'31'", "malformed", nil),
+        ]
+        for (rowid, guid, _, _, _, _) in cases {
+            try fx.insertMessage(rowid: rowid, guid: guid, text: guid, chatRowid: 3, date: fx.base - rowid)
+        }
+        for (rowid, _, guidSQL, partSQL, _, _) in cases {
+            try fx.setThreadOriginator(rowid: rowid, guidSQL: guidSQL, partSQL: partSQL)
+        }
+        var db = try makeDB(fx, book: friendBook)
+        let history = try db.exactHistory(chat: .rowid(3), limit: 100, order: .desc, cursor: nil).items
+
+        for (rowid, _, _, _, reason, rawPart) in cases {
+            let message = try #require(history.first { $0.rowid == rowid })
+            #expect(message.thread_originator.available == false)
+            #expect(message.thread_originator.reason == reason)
+            #expect(message.thread_originator.native_part == nil)
+            #expect(message.thread_originator.raw_part == rawPart)
+        }
     }
 
     @Test func exactNativePartsPreserveBodyColumnAndExposeArchivedUTF16Ranges() throws {
