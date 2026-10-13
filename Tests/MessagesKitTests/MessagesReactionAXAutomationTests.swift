@@ -2866,6 +2866,144 @@ struct MessagesReactionAXAutomationTests {
         #expect(driver.button.performed == ["AXPress"])
     }
 
+    @Test func initialRouteWaitsForSelectedMessageWithoutRepeatingOpen() throws {
+        let driver = FakeReactionDriver()
+        let clock = FakeReadinessClock()
+        var selectedReads = 0
+        driver.message.isSelected = false
+        driver.message.onSelectedRead = {
+            selectedReads += 1
+            if selectedReads == 2 { driver.message.isSelected = true }
+        }
+
+        #expect(try apply(driver, clock: clock) == .ack("reaction-set-changed-verified"))
+        #expect(driver.openedURLs.count == 1)
+        #expect(driver.message.performed.count == 1)
+        #expect(driver.button.performed == ["AXPress"])
+        #expect(clock.pauses.first == 50_000_000)
+    }
+
+    @Test func initialRouteAlreadyReadyDoesNotPauseBeforeMenuOpen() throws {
+        let driver = FakeReactionDriver()
+        let clock = FakeReadinessClock()
+        var menuActionsAtPause: [Int] = []
+        clock.onPause = { menuActionsAtPause.append(driver.message.performed.count) }
+
+        #expect(try apply(driver, clock: clock) == .ack("reaction-set-changed-verified"))
+        #expect(!menuActionsAtPause.contains(0))
+        #expect(driver.openedURLs.count == 1)
+        #expect(driver.message.performed.count == 1)
+        #expect(driver.button.performed == ["AXPress"])
+    }
+
+    @Test func initialRoutePersistentAbsenceIsBoundedAndNeverActs() throws {
+        let driver = FakeReactionDriver()
+        let clock = FakeReadinessClock()
+        driver.message.isSelected = false
+
+        #expect(try apply(driver, clock: clock) == .refused("target-drift-initial-route"))
+        #expect(clock.pauses.count == 15)
+        #expect(clock.pauses.allSatisfy { $0 > 0 && $0 <= 50_000_000 })
+        #expect(driver.openedURLs.count == 1)
+        #expect(driver.message.performed.isEmpty)
+        #expect(driver.button.performed.isEmpty)
+    }
+
+    @Test(arguments: ["navigator", "reaction"])
+    func initialRouteLocalDeadlineFailureDuringZeroSelectedRetryDoesNotAct(_ source: String) throws {
+        let driver = FakeReactionDriver()
+        let clock = FakeReadinessClock()
+        driver.message.isSelected = false
+        clock.onPause = {
+            if source == "navigator" {
+                driver.message.readError = MessagesAXNavigationError.deadlineExpired
+            } else {
+                driver.message.actionsError = MessagesReactionAXError.deadlineExpired
+            }
+        }
+
+        #expect(try apply(driver, clock: clock) == .refused("target-drift-initial-route"))
+        #expect(clock.pauses.count == 1)
+        #expect(driver.openedURLs.count == 1)
+        #expect(driver.message.performed.isEmpty)
+        #expect(driver.button.performed.isEmpty)
+    }
+
+    @Test(arguments: ["zero", "multiple"])
+    func initialRouteRefusesTranscriptCountMismatchWithoutRetry(_ count: String) throws {
+        let driver = FakeReactionDriver()
+        let clock = FakeReadinessClock()
+        switch count {
+        case "zero":
+            driver.shouldRestoreTranscriptOnOpen = { false }
+            driver.window.nodes.removeAll { $0.sameIdentity(as: driver.transcript) }
+        default:
+            driver.window.nodes.append(driver.transcript.clone())
+        }
+
+        #expect(try apply(driver, clock: clock) == .refused("target-drift-initial-route"))
+        #expect(clock.pauses.isEmpty)
+        #expect(driver.openedURLs.count == 1)
+        #expect(driver.message.performed.isEmpty)
+        #expect(driver.button.performed.isEmpty)
+    }
+
+    @Test func initialRouteLocalCapIsCheckedAfterReadBeforeAcceptingReadyMessage() throws {
+        let driver = FakeReactionDriver()
+        let clock = FakeReadinessClock()
+        driver.message.onSelectedRead = { clock.now = 750_000_000 }
+
+        #expect(try apply(driver, clock: clock) == .refused("target-drift-initial-route"))
+        #expect(clock.pauses.isEmpty)
+        #expect(driver.openedURLs.count == 1)
+        #expect(driver.message.performed.isEmpty)
+        #expect(driver.button.performed.isEmpty)
+    }
+
+    @Test(arguments: [
+        ("process", "target-drift-initial-route"),
+        ("pid", "target-drift-initial-route"),
+        ("window", "target-drift-initial-route-window-mismatch"),
+        ("transcript", "target-drift-initial-route"),
+    ])
+    func initialRouteReadinessRefusesIdentityDrift(_ drift: String, _ expected: String) throws {
+        let driver = FakeReactionDriver()
+        let clock = FakeReadinessClock()
+        driver.message.isSelected = false
+        clock.onPause = { driver.replace(drift) }
+
+        #expect(try apply(driver, clock: clock) == .refused(expected))
+        #expect(clock.pauses.count == 1)
+        #expect(driver.openedURLs.count == 1)
+        #expect(driver.message.performed.isEmpty)
+        #expect(driver.button.performed.isEmpty)
+    }
+
+    @Test(arguments: ["ambiguous-selected", "unknown-selected", "transport"])
+    func initialRouteReadinessOnlyRetriesZeroSelectedMessages(_ failure: String) throws {
+        let driver = FakeReactionDriver()
+        let clock = FakeReadinessClock()
+        switch failure {
+        case "ambiguous-selected":
+            driver.transcript.nodes.append(driver.message.clone())
+        case "unknown-selected":
+            driver.message.isSelected = nil
+        default:
+            driver.message.selectedError = MessagesReactionAXError.axFailure
+        }
+
+        let expected: MessagesReactionAXOutcome = switch failure {
+        case "ambiguous-selected": .refused("ambiguous-selected-message")
+        case "unknown-selected": .refused("unknown-ax-value")
+        default: .failed("ax-failure-initial-route")
+        }
+        #expect(try apply(driver, clock: clock) == expected)
+        #expect(clock.pauses.isEmpty)
+        #expect(driver.openedURLs.count == 1)
+        #expect(driver.message.performed.isEmpty)
+        #expect(driver.button.performed.isEmpty)
+    }
+
     private func apply(_ driver: FakeReactionDriver, _ operation: MessagesReactionWorkerPayload.Operation = .set,
                        clock: FakeReadinessClock, experimentalUIHandoff: Bool = false,
                        deadline: WorkerDeadline = .millisecondsFromNow(10_000)) throws -> MessagesReactionAXOutcome {
@@ -3967,6 +4105,7 @@ private final class FakeAXNode: MessagesAXElement {
     var readError: (any Error)?
     var childrenReadError: (any Error)?
     var selectedError: (any Error)?
+    var actionsError: (any Error)?
     var onSelectedRead: (() -> Void)?
     var onActionsRead: (() -> Void)?
     var onChildren: (() -> Void)?
@@ -4005,6 +4144,8 @@ private final class FakeAXNode: MessagesAXElement {
         copy.onDirectWindowsCountRead = onDirectWindowsCountRead
         copy.onProcessIdentifierRead = onProcessIdentifierRead
         copy.childrenReadError = childrenReadError
+        copy.selectedError = selectedError
+        copy.actionsError = actionsError
         copy.parentNode = parentNode
         return copy
     }
@@ -4052,6 +4193,7 @@ private final class FakeAXNode: MessagesAXElement {
     }
     func actions(deadline: WorkerDeadline) throws -> [String] {
         try check(deadline)
+        if let actionsError { throw actionsError }
         onActionsRead?()
         return actionNames
     }

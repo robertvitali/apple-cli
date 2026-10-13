@@ -438,7 +438,7 @@ struct MessagesReactionAXAutomation {
             stage = .open
             let process = try driver.openMessages(url: targetURL, deadline: deadline)
             stage = .initialRoute
-            let route = try captureRoute(process: process, titles: titles, deadline: deadline)
+            let route = try captureInitialRoute(process: process, titles: titles, deadline: deadline)
             try revalidate(route, titles: titles, deadline: deadline)
             guard let action = try reactAction(on: route.selected, titles: titles, deadline: deadline) else {
                 throw MessagesReactionAXError.targetDrift
@@ -593,6 +593,17 @@ struct MessagesReactionAXAutomation {
         try navigator.captureRoute(process: process, isTargetEligible: { element, deadline in
             try reactAction(on: element, titles: titles, deadline: deadline) != nil
         }, deadline: deadline)
+    }
+
+    private func captureInitialRoute(process: MessagesAXProcess, titles: [String], deadline: WorkerDeadline) throws -> Route {
+        do {
+            return try navigator.captureInitialRoute(process: process, isTargetEligible: { element, deadline in
+                try reactAction(on: element, titles: titles, deadline: deadline) != nil
+            }, deadline: deadline)
+        } catch MessagesReactionAXError.deadlineExpired {
+            try checkDeadline(deadline)
+            throw MessagesAXNavigationError.targetDrift
+        }
     }
 
     private func checkProcess(_ expected: MessagesAXProcess, deadline: WorkerDeadline) throws {

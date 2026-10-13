@@ -599,6 +599,13 @@ JSON output are stable per the versioning policy — breaking changes bump
 
 ### Fixed
 
+- **Messages reaction writes now tolerate a short initial native-open selection
+  delay before opening the Tapback menu.** After a single exact native URL open,
+  the worker waits up to 750 ms for Messages to expose one selected eligible
+  message in the same canonical process, root window and transcript. It still
+  refuses immediately on ambiguous selected messages, unreadable AX state,
+  ownership drift or identity replacement, and later route checks remain strict.
+
 - **Exact Messages reaction button presses now wait for picker animation for every
   state-changing native Tapback button.** Standard set/remove and custom removal
   share the same bounded 750 ms settle before the single exact-button press,

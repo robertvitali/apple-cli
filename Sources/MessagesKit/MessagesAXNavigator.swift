@@ -24,11 +24,81 @@ struct MessagesAXNavigator {
 
     func captureRoute(process: MessagesAXProcess, isTargetEligible: TargetEligibility,
                       deadline: WorkerDeadline) throws -> MessagesAXRoute {
+        try captureRouteSnapshot(process: process, isTargetEligible: isTargetEligible,
+                                 expectedWindow: nil, expectedTranscript: nil, deadline: deadline).route()
+    }
+
+    func captureInitialRoute(process: MessagesAXProcess, isTargetEligible: TargetEligibility,
+                             deadline: WorkerDeadline) throws -> MessagesAXRoute {
+        let started = readinessNow()
+        let cap: UInt64 = 750_000_000
+        let localDeadline = WorkerDeadline.millisecondsFromNow(750)
+        let readDeadline = deadline.remainingNanoseconds <= localDeadline.remainingNanoseconds ? deadline : localDeadline
+        var expectedWindow: (any MessagesAXElement)?
+        var expectedTranscript: (any MessagesAXElement)?
+        func remainingLocalBudget() throws -> UInt64 {
+            try checkMessagesAXDeadline(deadline)
+            if readDeadline.expired { throw MessagesAXNavigationError.targetDrift }
+            let now = readinessNow()
+            guard now >= started, now - started < cap else { throw MessagesAXNavigationError.targetDrift }
+            return cap - (now - started)
+        }
+        for attempt in 0...15 {
+            try checkMessagesAXDeadline(deadline)
+            do {
+                let snapshot = try captureRouteSnapshot(process: process, isTargetEligible: isTargetEligible,
+                                                        expectedWindow: expectedWindow,
+                                                        expectedTranscript: expectedTranscript,
+                                                        deadline: readDeadline)
+                _ = try remainingLocalBudget()
+                switch snapshot {
+                case .available(let route):
+                    try checkMessagesAXDeadline(deadline)
+                    return route
+                case .zeroSelected(let window, let transcript):
+                    expectedWindow = window
+                    expectedTranscript = transcript
+                }
+            } catch MessagesAXNavigationError.deadlineExpired {
+                try checkMessagesAXDeadline(deadline)
+                throw MessagesAXNavigationError.targetDrift
+            }
+            guard attempt < 15 else { throw MessagesAXNavigationError.targetDrift }
+            let pause = min(50_000_000, try remainingLocalBudget(), readDeadline.remainingNanoseconds)
+            guard pause > 0 else { throw MessagesAXNavigationError.targetDrift }
+            readinessPause(pause)
+            try checkMessagesAXDeadline(deadline)
+        }
+        throw MessagesAXNavigationError.targetDrift
+    }
+
+    private enum CaptureRouteSnapshot {
+        case available(MessagesAXRoute)
+        case zeroSelected(any MessagesAXElement, any MessagesAXElement)
+
+        func route() throws -> MessagesAXRoute {
+            switch self {
+            case .available(let route): return route
+            case .zeroSelected: throw MessagesAXNavigationError.targetDrift
+            }
+        }
+    }
+
+    private func captureRouteSnapshot(process: MessagesAXProcess, isTargetEligible: TargetEligibility,
+                                      expectedWindow: (any MessagesAXElement)?,
+                                      expectedTranscript: (any MessagesAXElement)?,
+                                      deadline: WorkerDeadline) throws -> CaptureRouteSnapshot {
         let rootWindow = try uniqueRootWindow(process: process, deadline: deadline)
+        if let expectedWindow, !rootWindow.sameIdentity(as: expectedWindow) {
+            throw MessagesAXRouteDrift(.windowMismatch)
+        }
         let transcripts = try collect(from: rootWindow, window: rootWindow, deadline: deadline) { _, role, identifier in
             (role == "AXGroup" || role == "AXCollection") && identifier == "TranscriptCollectionView"
         }
         guard transcripts.count == 1, let transcript = transcripts.first else {
+            throw MessagesAXNavigationError.targetDrift
+        }
+        if let expectedTranscript, !transcript.sameIdentity(as: expectedTranscript) {
             throw MessagesAXNavigationError.targetDrift
         }
         let messages = try collect(from: transcript, window: rootWindow, deadline: deadline) { element, _, _ in
@@ -38,10 +108,11 @@ struct MessagesAXNavigator {
             }
             return selected
         }
-        guard messages.count == 1 else {
-            throw messages.isEmpty ? MessagesAXNavigationError.targetDrift : .ambiguousSelectedMessage
+        guard messages.count <= 1 else {
+            throw MessagesAXNavigationError.ambiguousSelectedMessage
         }
-        return MessagesAXRoute(process: process, window: rootWindow, transcript: transcript, selected: messages[0])
+        guard let message = messages.first else { return .zeroSelected(rootWindow, transcript) }
+        return .available(MessagesAXRoute(process: process, window: rootWindow, transcript: transcript, selected: message))
     }
 
     func revalidate(_ route: MessagesAXRoute, isTargetEligible: TargetEligibility,
