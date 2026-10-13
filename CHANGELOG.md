@@ -599,6 +599,12 @@ JSON output are stable per the versioning policy — breaking changes bump
 
 ### Fixed
 
+- **Exact Messages reaction button presses now wait for picker animation for every
+  state-changing native Tapback button.** Standard set/remove and custom removal
+  share the same bounded 750 ms settle before the single exact-button press,
+  then revalidate the retained route, picker, button, selected state and action
+  before pressing. No-op reactions still skip the wait and only dismiss the picker.
+
 - **Custom reaction removal waits for picker animation before pressing.** A bounded
   750 ms settling interval precedes the single exact-button press, with retained
   route, picker, button and selected-state revalidation after the wait. Insufficient

@@ -936,7 +936,7 @@ struct MessagesReactionAXAutomationTests {
         }
 
         #expect(try apply(driver, clock: clock) == .refused("ambiguous-selected-message"))
-        #expect(clock.pauses.isEmpty)
+        #expect(clock.pauses == [750_000_000])
         #expect(driver.button.performed == ["AXPress"])
     }
 
@@ -950,12 +950,13 @@ struct MessagesReactionAXAutomationTests {
             driver.root.nodes = [otherWindow]
         }
         clock.onPause = {
+            guard driver.button.performed == ["AXPress"] else { return }
             driver.window.nodes = [driver.transcript]
             driver.root.nodes = [driver.window]
         }
 
         #expect(try apply(driver, clock: clock) == .refused("post-press-window-drift"))
-        #expect(clock.pauses.isEmpty)
+        #expect(clock.pauses == [750_000_000])
         #expect(driver.button.performed == ["AXPress"])
         withExtendedLifetime(otherWindow) {}
     }
@@ -973,12 +974,13 @@ struct MessagesReactionAXAutomationTests {
             driver.root.nodes = [driver.window, otherWindow]
         }
         clock.onPause = {
+            guard driver.button.performed == ["AXPress"] else { return }
             driver.window.nodes = [driver.transcript]
             driver.root.nodes = [driver.window]
         }
 
         #expect(try apply(driver, clock: clock) == .refused("post-press-window-drift"))
-        #expect(clock.pauses.isEmpty)
+        #expect(clock.pauses == [750_000_000])
         #expect(driver.button.performed == ["AXPress"])
         withExtendedLifetime(otherWindow) {}
     }
@@ -1024,8 +1026,8 @@ struct MessagesReactionAXAutomationTests {
 
         #expect(try apply(driver, clock: clock, experimentalUIHandoff: true, deadline: .millisecondsFromNow(10_000)) ==
                 .refused("exact-existing-verify-discovery-drift-missing-transcript"))
-        #expect(clock.pauses.count == 160)
-        #expect(clock.now == 8_000_000_000)
+        #expect(clock.pauses.count == 161)
+        #expect(clock.now == 8_750_000_000)
         #expect(driver.button.performed == ["AXPress"])
         #expect(driver.message.performed.count == 1)
         #expect(driver.openedURLs.count == 1)
@@ -1034,7 +1036,7 @@ struct MessagesReactionAXAutomationTests {
     @Test func postPressRetainedRouteUsesShorterGlobalReadDeadline() throws {
         let driver = FakeReactionDriver()
         let clock = FakeReadinessClock()
-        let global = WorkerDeadline.millisecondsFromNow(500)
+        let global = WorkerDeadline.millisecondsFromNow(1_000)
         var observedEffectiveDeadline: WorkerDeadline?
         driver.button.onAction = { _ in
             driver.button.isSelected = true
@@ -3197,7 +3199,7 @@ struct MessagesReactionAXAutomationTests {
     func globalDeadlineIsCheckedAfterReadinessWork(_ phase: String) throws {
         let driver = FakeReactionDriver()
         let clock = FakeReadinessClock()
-        let deadline = WorkerDeadline.millisecondsFromNow(100)
+        let deadline = WorkerDeadline.millisecondsFromNow(phase == "press" ? 1_000 : 100)
         let expire = {
             Thread.sleep(forTimeInterval: Double(deadline.remainingNanoseconds) / 1_000_000_000 + 0.005)
         }
@@ -3209,7 +3211,7 @@ struct MessagesReactionAXAutomationTests {
         default: driver.button.onAction = { _ in expire() }
         }
         #expect(try apply(driver, clock: clock, deadline: deadline) == .failed("deadline-expired"))
-        #expect(clock.pauses.count == (phase == "pause" ? 1 : 0))
+        #expect(clock.pauses.count == (phase == "pause" || phase == "press" ? 1 : 0))
         #expect(driver.message.performed.count == 1)
         #expect(driver.button.performed.count == (phase == "press" ? 1 : 0))
     }
@@ -3276,9 +3278,72 @@ struct MessagesReactionAXAutomationTests {
             else { driver.picker.nodes = [] }
         }
         #expect(try apply(driver, clock: clock) == .refused(missing == "picker" ? "picker-unavailable" : "reaction-unavailable"))
-        #expect(clock.pauses.isEmpty)
+        #expect(clock.pauses == [750_000_000])
         #expect(driver.message.performed.count == 1)
         #expect(driver.button.performed.isEmpty)
+    }
+
+    @Test(arguments: [MessagesReactionWorkerPayload.Operation.set, .remove])
+    func exactPickerPressWaitsForStandardMutationToSettle(_ operation: MessagesReactionWorkerPayload.Operation) throws {
+        let driver = FakeReactionDriver()
+        let clock = FakeReadinessClock()
+        driver.button.isSelected = operation == .remove
+        driver.button.onAction = { _ in
+            if clock.now >= 750_000_000 { driver.button.isSelected = operation == .set }
+        }
+
+        #expect(try apply(driver, operation, clock: clock, experimentalUIHandoff: true) ==
+                .ack(operation == .set ? "reaction-set-changed-verified" : "reaction-remove-changed-verified"))
+        #expect(clock.pauses.first == 750_000_000)
+        #expect(driver.button.performed == ["AXPress"])
+        #expect(driver.message.performed.count == 1)
+    }
+
+    @Test(arguments: [
+        ("process", "target-drift-pre-press"),
+        ("window", "target-drift-pre-press-window-mismatch"),
+        ("picker", "target-drift-pre-press-picker-mismatch"),
+        ("button", "target-drift-pre-press-button-mismatch"),
+        ("selected", "target-drift-pre-press-selected-state-changed"),
+        ("action", "target-drift-pre-press"),
+    ])
+    func exactPickerPressRevalidatesAfterSettlingPause(_ drift: String, _ expected: String) throws {
+        let driver = FakeReactionDriver()
+        let clock = FakeReadinessClock()
+        clock.onPause = {
+            switch drift {
+            case "selected": driver.button.isSelected = true
+            case "action": driver.button.actionNames = []
+            default: driver.replace(drift)
+            }
+        }
+
+        #expect(try apply(driver, clock: clock) == .refused(expected))
+        #expect(clock.pauses == [750_000_000])
+        #expect(driver.button.performed.isEmpty)
+        #expect(driver.message.performed.count == 1)
+    }
+
+    @Test func exactPickerPressDeadlineExpiryDuringSettlingNeverPressesButton() throws {
+        let driver = FakeReactionDriver()
+        let clock = FakeReadinessClock()
+
+        #expect(try apply(driver, clock: clock, deadline: .millisecondsFromNow(700)) == .failed("deadline-expired"))
+        #expect(clock.pauses.isEmpty)
+        #expect(driver.button.performed.isEmpty)
+        #expect(driver.message.performed.count == 1)
+    }
+
+    @Test func exactPickerNoopDoesNotSettleAgainBeforeCleanup() throws {
+        let driver = FakeReactionDriver()
+        let clock = FakeReadinessClock()
+        driver.button.isSelected = true
+
+        #expect(try apply(driver, clock: clock) == .ack("reaction-set-unchanged-verified"))
+        #expect(clock.pauses.isEmpty)
+        #expect(driver.button.performed.isEmpty)
+        #expect(driver.picker.performed == ["AXCancel"])
+        #expect(driver.message.performed.count == 1)
     }
 
     @Test(arguments: [MessagesReactionWorkerPayload.Operation.set, .remove])
@@ -3359,7 +3424,10 @@ struct MessagesReactionAXAutomationTests {
         let driver = FakeReactionDriver()
         let clock = FakeReadinessClock()
         driver.button.onAction = { _ in }
-        clock.onPause = { driver.replace("window") }
+        clock.onPause = {
+            guard driver.button.performed == ["AXPress"] else { return }
+            driver.replace("window")
+        }
 
         #expect(try apply(driver, clock: clock, experimentalUIHandoff: true) == .refused("post-press-window-drift"))
         #expect(driver.button.performed == ["AXPress"])
@@ -3373,7 +3441,10 @@ struct MessagesReactionAXAutomationTests {
         let driver = FakeReactionDriver()
         let clock = FakeReadinessClock()
         driver.button.onAction = { _ in }
-        clock.onPause = { driver.replace(drift) }
+        clock.onPause = {
+            guard driver.button.performed == ["AXPress"] else { return }
+            driver.replace(drift)
+        }
 
         #expect(try apply(driver, clock: clock, experimentalUIHandoff: true) == .refused(detail))
         #expect(driver.button.performed == ["AXPress"])
@@ -3385,7 +3456,10 @@ struct MessagesReactionAXAutomationTests {
         let driver = FakeReactionDriver()
         let clock = FakeReadinessClock()
         driver.button.onAction = { _ in }
-        clock.onPause = { driver.button.isSelected = nil }
+        clock.onPause = {
+            guard driver.button.performed == ["AXPress"] else { return }
+            driver.button.isSelected = nil
+        }
 
         #expect(try apply(driver, clock: clock, experimentalUIHandoff: true) == .refused("post-press-selected-unknown"))
         #expect(driver.button.performed == ["AXPress"])
@@ -3481,7 +3555,7 @@ struct MessagesReactionAXAutomationTests {
 
         #expect(try apply(driver, clock: clock, experimentalUIHandoff: true, deadline: .millisecondsFromNow(10_000)) ==
                 .refused("exact-existing-verify-discovery-drift-missing-retained-message"))
-        #expect(clock.now == 8_000_000_000)
+        #expect(clock.now == 8_750_000_000)
         #expect(driver.message.performed.count == 1)
         #expect(driver.openedURLs.count == 1)
     }
@@ -3608,7 +3682,7 @@ struct MessagesReactionAXAutomationTests {
         let target = phase == "tapback" ? driver.message : driver.button
         target.onAction = { _ in throw MessagesReactionAXError.axFailure }
         #expect(try apply(driver, clock: clock) == .failed(phase == "tapback" ? "ax-failure-menu-open" : "ax-failure-press"))
-        #expect(clock.pauses.isEmpty)
+        #expect(clock.pauses == (phase == "press" ? [750_000_000] : []))
         #expect(driver.message.performed.count == 1)
         #expect(driver.button.performed.count == (phase == "press" ? 1 : 0))
     }

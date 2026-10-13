@@ -482,10 +482,10 @@ struct MessagesReactionAXAutomation {
             guard try button.actions(deadline: deadline).contains("AXPress") else {
                 throw MessagesReactionAXError.reactionUnavailable
             }
-            try settleExactCustomRemoveBeforePressIfNeeded(request: request, route: route, titles: titles,
-                                                          picker: picker, button: button,
-                                                          initialSelected: initialSelected,
-                                                          deadline: deadline)
+            try settleExactPickerBeforePress(request: request, route: route, titles: titles,
+                                             picker: picker, button: button,
+                                             initialSelected: initialSelected,
+                                             deadline: deadline)
             // Last route validation is after picker traversal as well. Public AX is
             // not atomic: external UI interference remains an experimental limitation.
             _ = try validatePostMenuPicker(route: route, titles: titles, picker: picker, button: button,
@@ -909,12 +909,11 @@ struct MessagesReactionAXAutomation {
         return selected
     }
 
-    private func settleExactCustomRemoveBeforePressIfNeeded(request: MessagesReactionRequest, route: Route,
-                                                           titles: [String], picker: any MessagesAXElement,
-                                                           button: any MessagesAXElement, initialSelected: Bool,
-                                                           deadline: WorkerDeadline) throws {
-        guard request.operation == .remove, case .custom = request.reaction else { return }
-        try customChooserPause(750_000_000, deadline: deadline)
+    private func settleExactPickerBeforePress(request: MessagesReactionRequest, route: Route,
+                                             titles: [String], picker: any MessagesAXElement,
+                                             button: any MessagesAXElement, initialSelected: Bool,
+                                             deadline: WorkerDeadline) throws {
+        try boundedReadinessPause(750_000_000, deadline: deadline)
         _ = try validatePostMenuPicker(route: route, titles: titles, picker: picker, button: button,
                                        initialSelected: initialSelected,
                                        identifier: request.reaction.pickerIdentifier,
@@ -1380,6 +1379,10 @@ struct MessagesReactionAXAutomation {
     }
 
     private func customChooserPause(_ nanoseconds: UInt64, deadline: WorkerDeadline) throws {
+        try boundedReadinessPause(nanoseconds, deadline: deadline)
+    }
+
+    private func boundedReadinessPause(_ nanoseconds: UInt64, deadline: WorkerDeadline) throws {
         try checkDeadline(deadline)
         guard deadline.remainingNanoseconds > nanoseconds else { throw MessagesReactionAXError.deadlineExpired }
         readinessPause(nanoseconds)
