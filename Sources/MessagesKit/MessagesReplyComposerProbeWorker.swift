@@ -27,7 +27,7 @@ package struct MessagesReplyAttachmentFileStat: Codable, Equatable, Sendable {
                  modifiedSeconds: Int64, modifiedNanoseconds: Int64,
                  changedSeconds: Int64, changedNanoseconds: Int64) throws {
         guard device > 0, inode > 0,
-              size >= 0, size <= 65_536,
+              size >= 0, size <= AttachmentSource.maxBytes,
               mode == 0o600 || mode == 0o700,
               uid == UInt32(getuid()),
               modifiedNanoseconds >= 0, modifiedNanoseconds < 1_000_000_000,
@@ -61,6 +61,7 @@ package struct MessagesReplyAttachmentFileStat: Codable, Equatable, Sendable {
 
 package struct MessagesReplyAttachmentDraftEvidence: Codable, Equatable, Sendable {
     package let copyPath: String
+    package let copyBasename: String
     package let copySHA256: String
     package let copySize: Int
     package let copyStat: MessagesReplyAttachmentFileStat
@@ -69,6 +70,7 @@ package struct MessagesReplyAttachmentDraftEvidence: Codable, Equatable, Sendabl
 
     enum CodingKeys: String, CodingKey {
         case copyPath = "copy_path"
+        case copyBasename = "copy_basename"
         case copySHA256 = "copy_sha256"
         case copySize = "copy_size"
         case copyStat = "copy_stat"
@@ -76,8 +78,9 @@ package struct MessagesReplyAttachmentDraftEvidence: Codable, Equatable, Sendabl
         case directoryStat = "directory_stat"
     }
 
-    package init(copyPath: String, copySHA256: String, copySize: Int, copyStat: MessagesReplyAttachmentFileStat,
+    package init(copyPath: String, copyBasename: String, copySHA256: String, copySize: Int, copyStat: MessagesReplyAttachmentFileStat,
                  directoryPath: String, directoryStat: MessagesReplyAttachmentFileStat) throws {
+        try validateReplyAttachmentDraftBasename(copyBasename)
         guard !copyPath.isEmpty, copyPath.utf8.count <= 1024,
               !directoryPath.isEmpty, directoryPath.utf8.count <= 1024,
               copySHA256.hasPrefix("sha256:"), copySHA256.utf8.count == 71,
@@ -86,13 +89,14 @@ package struct MessagesReplyAttachmentDraftEvidence: Codable, Equatable, Sendabl
               (directoryPath as NSString).isAbsolutePath,
               URL(fileURLWithPath: copyPath).standardizedFileURL.path == copyPath,
               URL(fileURLWithPath: directoryPath, isDirectory: true).standardizedFileURL.path == directoryPath,
-              copySize >= 1, copySize <= 65_536,
+              copySize >= 1, copySize <= AttachmentSource.maxBytes,
               copyStat.mode == 0o600, directoryStat.mode == 0o700,
               copyStat.uid == UInt32(getuid()), directoryStat.uid == UInt32(getuid()),
               copyStat.size == Int64(copySize), directoryStat.size >= 0,
               URL(fileURLWithPath: copyPath).standardizedFileURL.deletingLastPathComponent().path == URL(fileURLWithPath: directoryPath, isDirectory: true).standardizedFileURL.path,
-              URL(fileURLWithPath: copyPath).lastPathComponent == replyAttachmentDraftCopyBasename() else { throw MessagesReplyComposerAXError.invalidPayload }
+              URL(fileURLWithPath: copyPath).lastPathComponent.utf8.elementsEqual(copyBasename.utf8) else { throw MessagesReplyComposerAXError.invalidPayload }
         self.copyPath = copyPath
+        self.copyBasename = copyBasename
         self.copySHA256 = copySHA256
         self.copySize = copySize
         self.copyStat = copyStat
@@ -103,6 +107,7 @@ package struct MessagesReplyAttachmentDraftEvidence: Codable, Equatable, Sendabl
     package init(from decoder: any Decoder) throws {
         let c = try decoder.container(keyedBy: CodingKeys.self)
         try self.init(copyPath: c.decode(String.self, forKey: .copyPath),
+                      copyBasename: c.decode(String.self, forKey: .copyBasename),
                       copySHA256: c.decode(String.self, forKey: .copySHA256),
                       copySize: c.decode(Int.self, forKey: .copySize),
                       copyStat: c.decode(MessagesReplyAttachmentFileStat.self, forKey: .copyStat),
@@ -367,7 +372,7 @@ private struct MessagesReplyComposerProbeWorkerOperation: WorkerOperation, @unch
 }
 
 
-private enum MessagesReplyComposerParentError: String, Error, CustomStringConvertible {
+enum MessagesReplyComposerParentError: String, Error, CustomStringConvertible {
     case targetDrift = "reply-composer-target-drift"
     case participantDrift = "reply-composer-participant-drift"
     case nativePartDrift = "reply-composer-native-part-drift"
@@ -449,145 +454,8 @@ package enum MessagesReplyComposerProbeParent {
 
     private static func prepareAttachmentDraft(rawFilePath: String, scratchRoot: String, repoRoot: String, home: String,
                                                deadline: WorkerDeadline) throws -> MessagesReplyAttachmentDraftEvidence {
-        try checkMessagesAXDeadline(deadline)
-        let sourcePath = try AttachmentSource.resolve(rawFilePath, home: home)
-        let canonicalSource = URL(fileURLWithPath: sourcePath).resolvingSymlinksInPath().standardizedFileURL.path
-        let canonicalRepo = URL(fileURLWithPath: repoRoot, isDirectory: true).resolvingSymlinksInPath().standardizedFileURL.path
-        let canonicalScratch = URL(fileURLWithPath: scratchRoot, isDirectory: true).resolvingSymlinksInPath().standardizedFileURL.path
-        guard canonicalSource != canonicalRepo,
-              !canonicalSource.hasPrefix(canonicalRepo.hasSuffix("/") ? canonicalRepo : canonicalRepo + "/"),
-              canonicalScratch != canonicalRepo,
-              !canonicalScratch.hasPrefix(canonicalRepo.hasSuffix("/") ? canonicalRepo : canonicalRepo + "/") else {
-            throw MessagesReplyComposerParentError.unsafeInputFile
-        }
-        let sourceFD = open(canonicalSource, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
-        guard sourceFD >= 0 else { throw MessagesReplyComposerParentError.unsafeInputFile }
-        defer { close(sourceFD) }
-        var sourceBefore = stat()
-        guard fstat(sourceFD, &sourceBefore) == 0,
-              (sourceBefore.st_mode & S_IFMT) == S_IFREG,
-              sourceBefore.st_uid == getuid(),
-              sourceBefore.st_size >= 1,
-              sourceBefore.st_size <= 65_536 else { throw MessagesReplyComposerParentError.unsafeInputFile }
-        let handle = FileHandle(fileDescriptor: sourceFD, closeOnDealloc: false)
-        let bytes = try handle.read(upToCount: 65_537) ?? Data()
-        try checkMessagesAXDeadline(deadline)
-        var sourceAfter = stat()
-        var sourcePathState = stat()
-        guard fstat(sourceFD, &sourceAfter) == 0, stat(canonicalSource, &sourcePathState) == 0,
-              fileIdentity(sourceBefore, equals: sourceAfter), fileIdentity(sourceBefore, equals: sourcePathState),
-              bytes.count == sourceBefore.st_size, !bytes.isEmpty, bytes.count <= 65_536 else {
-            throw MessagesReplyComposerParentError.unsafeInputFile
-        }
-        let directory = URL(fileURLWithPath: canonicalScratch, isDirectory: true).appendingPathComponent(UUID().uuidString, isDirectory: true).path
-        guard directory.utf8.count <= 1024 else { throw MessagesReplyComposerParentError.unsafeInputFile }
-        var dirFD: Int32 = -1
-        var copyFD: Int32 = -1
-        var ownedDirectory: stat?
-        var ownedCopy: stat?
-        defer {
-            if copyFD >= 0 { close(copyFD) }
-            if dirFD >= 0 { close(dirFD) }
-        }
-        do {
-            guard mkdir(directory, 0o700) == 0 else { throw MessagesReplyComposerParentError.unsafeInputFile }
-            dirFD = open(directory, O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
-            guard dirFD >= 0 else { throw MessagesReplyComposerParentError.unsafeInputFile }
-            var dirStat = stat()
-            guard fstat(dirFD, &dirStat) == 0,
-                  (dirStat.st_mode & S_IFMT) == S_IFDIR,
-                  (dirStat.st_mode & 0o777) == 0o700,
-                  dirStat.st_uid == getuid() else { throw MessagesReplyComposerParentError.unsafeInputFile }
-            ownedDirectory = dirStat
-            let copyName = replyAttachmentDraftCopyBasename()
-            let copyPath = URL(fileURLWithPath: directory, isDirectory: true).appendingPathComponent(copyName).path
-            guard copyPath.utf8.count <= 1024 else { throw MessagesReplyComposerParentError.unsafeInputFile }
-            copyFD = openat(dirFD, copyName, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
-            guard copyFD >= 0 else { throw MessagesReplyComposerParentError.unsafeInputFile }
-            var createdStat = stat()
-            guard fstat(copyFD, &createdStat) == 0 else { throw MessagesReplyComposerParentError.unsafeInputFile }
-            ownedCopy = createdStat
-            var writeOffset = 0
-            while writeOffset < bytes.count {
-                try checkMessagesAXDeadline(deadline)
-                let wrote = bytes.withUnsafeBytes { raw in
-                    write(copyFD, raw.baseAddress!.advanced(by: writeOffset), bytes.count - writeOffset)
-                }
-                guard wrote > 0 else { throw MessagesReplyComposerParentError.unsafeInputFile }
-                writeOffset += wrote
-            }
-            guard fchmod(copyFD, 0o600) == 0 else { throw MessagesReplyComposerParentError.unsafeInputFile }
-            let closeResult = close(copyFD)
-            copyFD = -1
-            guard closeResult == 0 else { throw MessagesReplyComposerParentError.unsafeInputFile }
-            try checkMessagesAXDeadline(deadline)
-            let reopened = openat(dirFD, copyName, O_RDONLY | O_NOFOLLOW | O_CLOEXEC)
-            guard reopened >= 0 else { throw MessagesReplyComposerParentError.unsafeInputFile }
-            defer { close(reopened) }
-            var copyStat = stat()
-            guard fstat(reopened, &copyStat) == 0,
-                  (copyStat.st_mode & S_IFMT) == S_IFREG,
-                  (copyStat.st_mode & 0o777) == 0o600,
-                  copyStat.st_uid == getuid(), copyStat.st_size == bytes.count else {
-                throw MessagesReplyComposerParentError.unsafeInputFile
-            }
-            let copyBytes = try FileHandle(fileDescriptor: reopened, closeOnDealloc: false).read(upToCount: 65_537) ?? Data()
-            guard copyBytes == bytes else { throw MessagesReplyComposerParentError.unsafeInputFile }
-            guard fstat(dirFD, &dirStat) == 0,
-                  (dirStat.st_mode & S_IFMT) == S_IFDIR,
-                  (dirStat.st_mode & 0o777) == 0o700,
-                  dirStat.st_uid == getuid() else { throw MessagesReplyComposerParentError.unsafeInputFile }
-            let digest = "sha256:" + SHA256.hash(data: bytes).map { String(format: "%02x", $0) }.joined()
-            let evidence = try MessagesReplyAttachmentDraftEvidence(copyPath: copyPath,
-                                                                     copySHA256: digest,
-                                                                     copySize: bytes.count,
-                                                                     copyStat: try statEvidence(copyStat),
-                                                                     directoryPath: directory,
-                                                                     directoryStat: try statEvidence(dirStat))
-            _ = try validateReplyAttachmentDraftCopy(evidence, deadline: deadline)
-            return evidence
-        } catch {
-            // Keep the directory descriptor open through cleanup. Only remove a
-            // name still bound to the exact inode created here, including a
-            // partially written file. Never follow a replaced path.
-            if dirFD >= 0, let ownedDirectory {
-                if let ownedCopy {
-                    var current = stat()
-                    if fstatat(dirFD, replyAttachmentDraftCopyBasename(), &current, AT_SYMLINK_NOFOLLOW) == 0,
-                       current.st_dev == ownedCopy.st_dev, current.st_ino == ownedCopy.st_ino,
-                       current.st_uid == ownedCopy.st_uid, (current.st_mode & S_IFMT) == S_IFREG {
-                        _ = unlinkat(dirFD, replyAttachmentDraftCopyBasename(), 0)
-                    }
-                }
-                var currentDirectory = stat()
-                if lstat(directory, &currentDirectory) == 0,
-                   currentDirectory.st_dev == ownedDirectory.st_dev,
-                   currentDirectory.st_ino == ownedDirectory.st_ino,
-                   currentDirectory.st_uid == ownedDirectory.st_uid,
-                   (currentDirectory.st_mode & S_IFMT) == S_IFDIR {
-                    _ = rmdir(directory) // Empty only; unexpected content is preserved.
-                }
-            }
-            throw error
-        }
+        try prepareReplyAttachmentDraftCopy(rawFilePath: rawFilePath, scratchRoot: scratchRoot, home: home, deadline: deadline, excludedRoot: repoRoot)
     }
-
-    private static func fileIdentity(_ lhs: stat, equals rhs: stat) -> Bool {
-        lhs.st_dev == rhs.st_dev && lhs.st_ino == rhs.st_ino && lhs.st_size == rhs.st_size &&
-        lhs.st_mode == rhs.st_mode && lhs.st_uid == rhs.st_uid &&
-        lhs.st_mtimespec.tv_sec == rhs.st_mtimespec.tv_sec && lhs.st_mtimespec.tv_nsec == rhs.st_mtimespec.tv_nsec &&
-        lhs.st_ctimespec.tv_sec == rhs.st_ctimespec.tv_sec && lhs.st_ctimespec.tv_nsec == rhs.st_ctimespec.tv_nsec
-    }
-
-    private static func statEvidence(_ value: stat) throws -> MessagesReplyAttachmentFileStat {
-        try MessagesReplyAttachmentFileStat(device: UInt64(value.st_dev), inode: UInt64(value.st_ino), size: Int64(value.st_size),
-                                            mode: UInt16(value.st_mode & 0o777), uid: UInt32(value.st_uid),
-                                            modifiedSeconds: Int64(value.st_mtimespec.tv_sec),
-                                            modifiedNanoseconds: Int64(value.st_mtimespec.tv_nsec),
-                                            changedSeconds: Int64(value.st_ctimespec.tv_sec),
-                                            changedNanoseconds: Int64(value.st_ctimespec.tv_nsec))
-    }
-
 
     package static func payloadData(fromFile path: String, repoRoot: String) throws -> Data {
         guard !path.isEmpty else { throw MessagesReplyComposerParentError.unsafeInputFile }

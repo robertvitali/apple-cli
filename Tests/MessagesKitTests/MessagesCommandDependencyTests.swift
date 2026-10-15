@@ -1954,6 +1954,242 @@ struct MessagesCommandDependencyTests {
         #expect(launched.value == false)
     }
 
+    @Test func replySendDryRunWithFileResolvesTargetAndAttachmentWithoutWorker() throws {
+        let fx = try ChatFixture()
+        try fx.insertReplyTarget(rowid: 70, guid: "reply-target")
+        let fileURL = try scratch.directory().appendingPathComponent("apple-cli-test-file.txt")
+        try Data("apple-cli-test attachment".utf8).write(to: fileURL)
+        let launched = LockedBox(false)
+        let deps = replyDependencies(fx, allowedRecipients: ["+12125550100"]) { _ in
+            launched.withLock { $0 = true }
+            return .timedOut
+        }
+
+        let output = try payload(from: captureStdout {
+            try ReplySend.parse(["--chat-rowid", "3", "--message-rowid", "70", "--part-index", "2",
+                                 "--file", fileURL.path, "--dry-run", "--test-mode"])
+                .run(dependencies: deps)
+        })
+
+        #expect(output["dry_run"] as? Bool == true)
+        #expect(output["executed"] as? Bool == false)
+        #expect(output["text"] as? String == nil)
+        #expect(output["text_utf8_bytes"] as? Int == nil)
+        let attachment = try #require(output["attachment"] as? [String: Any])
+        #expect(attachment["path"] as? String == fileURL.path)
+        #expect(attachment["basename"] as? String == "apple-cli-test-file.txt")
+        #expect(attachment["size"] as? Int == "apple-cli-test attachment".utf8.count)
+        #expect(launched.value == false)
+        #expect(FileManager.default.fileExists(atPath: fx.homePath + "/messages-automation") == false)
+    }
+
+    @Test func replySendAttachmentExecuteAcceptsFilesUnderHomeAndSourceStyleDirectories() throws {
+        for variant in ["home", "source"] {
+            let fx = try ChatFixture()
+            try fx.insertReplyTarget(rowid: 70, guid: "reply-target")
+            let root: URL
+            if variant == "home" {
+                root = URL(fileURLWithPath: fx.homePath, isDirectory: true).appendingPathComponent("Documents", isDirectory: true)
+            } else {
+                root = try scratch.directory().appendingPathComponent("source-dir", isDirectory: true)
+            }
+            try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+            let fileURL = root.appendingPathComponent("apple-cli-test-file.txt")
+            try Data("apple-cli-test attachment".utf8).write(to: fileURL)
+            let reachedWorker = LockedBox(false)
+            let preparedCopy = LockedBox<String?>(nil)
+            let deps = replyDependencies(fx, allowedRecipients: ["+12125550100"]) { action in
+                let resolved = try action.resolve()
+                let payload = try #require(resolved.command.payload)
+                let request = try JSONDecoder().decode(MessagesReplySendRequest.self, from: payload)
+                let draft = try #require(request.attachmentDraft)
+                reachedWorker.withLock { $0 = true }
+                preparedCopy.withLock { $0 = draft.copyPath }
+                #expect(FileManager.default.fileExists(atPath: draft.copyPath) == true)
+                return .requestNotSent("synthetic request not sent")
+            }
+
+            let result = try captureCommand {
+                try ReplySend.parse(["--chat-rowid", "3", "--message-rowid", "70", "--part-index", "2",
+                                     "--file", fileURL.path, "--experimental-ui-handoff", "--test-mode"])
+                    .run(dependencies: deps)
+            }
+
+            #expect(result.exitCode == AppleExit.upstream, Comment(rawValue: variant + result.stdout))
+            #expect(reachedWorker.value == true)
+            let copy = try #require(preparedCopy.value)
+            #expect(FileManager.default.fileExists(atPath: copy) == false)
+        }
+    }
+
+    @Test func replySendRequiresExactlyOneBodyOrFileInput() throws {
+        let fx = try ChatFixture()
+        try fx.insertReplyTarget(rowid: 70, guid: "reply-target")
+        let fileURL = try scratch.directory().appendingPathComponent("apple-cli-test-file.txt")
+        try Data("apple-cli-test attachment".utf8).write(to: fileURL)
+        let deps = replyDependencies(fx, allowedRecipients: ["+12125550100"])
+
+        let both = try captureCommand {
+            try ReplySend.parse(["--chat-rowid", "3", "--message-rowid", "70", "--part-index", "2",
+                                 "--body", "apple-cli-test reply", "--file", fileURL.path, "--dry-run", "--test-mode"])
+                .run(dependencies: deps)
+        }
+        #expect(both.exitCode == AppleExit.usage)
+
+        let neither = try captureCommand {
+            try ReplySend.parse(["--chat-rowid", "3", "--message-rowid", "70", "--part-index", "2",
+                                 "--dry-run", "--test-mode"])
+                .run(dependencies: deps)
+        }
+        #expect(neither.exitCode == AppleExit.usage)
+    }
+
+    @Test func replySendAttachmentRequestNotSentCleansPreparedCopy() throws {
+        let fx = try ChatFixture()
+        try fx.insertReplyTarget(rowid: 70, guid: "reply-target")
+        let fileURL = try scratch.directory().appendingPathComponent("apple-cli-test-file.txt")
+        try Data("apple-cli-test attachment".utf8).write(to: fileURL)
+        let preparedCopy = LockedBox<String?>(nil)
+        let deps = replyDependencies(fx, allowedRecipients: ["+12125550100"]) { action in
+            let resolved = try action.resolve()
+            let payload = try #require(resolved.command.payload)
+            let request = try JSONDecoder().decode(MessagesReplySendRequest.self, from: payload)
+            let draft = try #require(request.attachmentDraft)
+            preparedCopy.withLock { $0 = draft.copyPath }
+            #expect(FileManager.default.fileExists(atPath: draft.copyPath) == true)
+            return .requestNotSent("synthetic request not sent")
+        }
+
+        let result = try captureCommand {
+            try ReplySend.parse(["--chat-rowid", "3", "--message-rowid", "70", "--part-index", "2",
+                                 "--file", fileURL.path, "--experimental-ui-handoff", "--test-mode"])
+                .run(dependencies: deps)
+        }
+
+        #expect(result.exitCode == AppleExit.upstream)
+        let copy = try #require(preparedCopy.value)
+        #expect(FileManager.default.fileExists(atPath: copy) == false)
+    }
+
+    @Test func replySendAttachmentLauncherThrowBeforeHandoffCleansPreparedCopy() throws {
+        let fx = try ChatFixture()
+        try fx.insertReplyTarget(rowid: 70, guid: "reply-target")
+        let fileURL = try scratch.directory().appendingPathComponent("apple-cli-test-file.txt")
+        try Data("apple-cli-test attachment".utf8).write(to: fileURL)
+        let preparedCopy = LockedBox<String?>(nil)
+        let deps = replyDependencies(fx, allowedRecipients: ["+12125550100"]) { action in
+            let resolved = try action.resolve()
+            let payload = try #require(resolved.command.payload)
+            let request = try JSONDecoder().decode(MessagesReplySendRequest.self, from: payload)
+            let draft = try #require(request.attachmentDraft)
+            preparedCopy.withLock { $0 = draft.copyPath }
+            #expect(FileManager.default.fileExists(atPath: draft.copyPath) == true)
+            throw AppleError.upstream("synthetic launcher failure before handoff")
+        }
+
+        let result = try captureCommand {
+            try ReplySend.parse(["--chat-rowid", "3", "--message-rowid", "70", "--part-index", "2",
+                                 "--file", fileURL.path, "--experimental-ui-handoff", "--test-mode"])
+                .run(dependencies: deps)
+        }
+
+        #expect(result.exitCode == AppleExit.upstream)
+        let copy = try #require(preparedCopy.value)
+        #expect(FileManager.default.fileExists(atPath: copy) == false)
+    }
+
+    @Test func replySendAttachmentUncertainHandoffPreservesPreparedCopy() throws {
+        let fx = try ChatFixture()
+        try fx.insertReplyTarget(rowid: 70, guid: "reply-target")
+        let fileURL = try scratch.directory().appendingPathComponent("apple-cli-test-file.txt")
+        try Data("apple-cli-test attachment".utf8).write(to: fileURL)
+        let preparedCopy = LockedBox<String?>(nil)
+        let deps = replyDependencies(fx, allowedRecipients: ["+12125550100"]) { action in
+            let resolved = try action.resolve()
+            let payload = try #require(resolved.command.payload)
+            let request = try JSONDecoder().decode(MessagesReplySendRequest.self, from: payload)
+            let draft = try #require(request.attachmentDraft)
+            preparedCopy.withLock { $0 = draft.copyPath }
+            let context = WorkerObservedContext(deadline: action.deadline, isCancelled: { false })
+            #expect(try action.preflight(resolved, context) == .requiresMutation)
+            return .childRefusedOrFailed("synthetic child failure after possible handoff")
+        }
+
+        let result = try captureCommand {
+            try ReplySend.parse(["--chat-rowid", "3", "--message-rowid", "70", "--part-index", "2",
+                                 "--file", fileURL.path, "--experimental-ui-handoff", "--test-mode"])
+                .run(dependencies: deps)
+        }
+
+        #expect(result.exitCode == AppleExit.upstream)
+        let copy = try #require(preparedCopy.value)
+        #expect(FileManager.default.fileExists(atPath: copy) == true)
+    }
+
+    @Test(arguments: ["success", "cancelled", "timeout", "journal-failure", "cleanup-failure"])
+    func replySendAttachmentRetainsCopyUntilDurableSuccess(finish: String) throws {
+        let fx = try ChatFixture()
+        try fx.insertReplyTarget(rowid: 70, guid: "reply-target")
+        let fileURL = try scratch.directory().appendingPathComponent("apple-cli-test-file.txt")
+        let bytes = Data("apple-cli-test attachment".utf8)
+        try bytes.write(to: fileURL)
+        let operationID = UUID(uuidString: "44444444-4444-4444-8444-444444444444")!
+        let replyDBPath = fx.path
+        let replyBase = fx.base
+        let homePath = fx.homePath
+        let preparedCopy = LockedBox<String?>(nil)
+        try fx.exec("ALTER TABLE message ADD COLUMN is_sent INTEGER DEFAULT 1;")
+        let deps = replyDependencies(fx, allowedRecipients: ["+12125550100"]) { action in
+            let resolved = try action.resolve()
+            let payload = try #require(resolved.command.payload)
+            let request = try JSONDecoder().decode(MessagesReplySendRequest.self, from: payload)
+            let draft = try #require(request.attachmentDraft)
+            preparedCopy.withLock { $0 = draft.copyPath }
+            let context = WorkerObservedContext(deadline: action.deadline, isCancelled: { false })
+            #expect(try action.preflight(resolved, context) == .requiresMutation)
+            let sentURL = URL(fileURLWithPath: homePath).appendingPathComponent("Library/Messages/Attachments/zz/sent-reply.bin")
+            try Data(contentsOf: URL(fileURLWithPath: draft.copyPath)).write(to: sentURL)
+            try insertAttachmentReplyResultRow(path: replyDBPath, rowid: 1_000_000, guid: "sent-attachment-reply",
+                                               attachmentRowid: 900, attachmentGUID: "sent-attachment-guid",
+                                               filename: "~/Library/Messages/Attachments/zz/sent-reply.bin",
+                                               totalBytes: draft.copySize, base: replyBase)
+            let response = WorkerResponse(schemaVersion: 1, operationID: operationID, nonce: operationID,
+                                          category: .ack, detail: MessagesReplySendACKDetail.alreadyRestoredVerified)
+            let verification = try #require(try action.verify(resolved, response, context))
+            #expect(FileManager.default.fileExists(atPath: draft.copyPath) == true)
+            switch finish {
+            case "cancelled": return .cancelled
+            case "timeout": return .timedOut
+            case "journal-failure": return .protocolViolation("synthetic journal commit failure")
+            case "cleanup-failure": try Data("changed copy".utf8).write(to: URL(fileURLWithPath: draft.copyPath))
+            default: break
+            }
+            return .observedState(operationID: operationID, verification: verification)
+        }
+
+        let result = try captureCommand {
+            try ReplySend.parse(["--chat-rowid", "3", "--message-rowid", "70", "--part-index", "2",
+                                 "--file", fileURL.path, "--experimental-ui-handoff", "--test-mode"])
+                .run(dependencies: deps)
+        }
+
+        let copy = try #require(preparedCopy.value)
+        if ["cancelled", "timeout", "journal-failure"].contains(finish) {
+            #expect(result.exitCode == AppleExit.upstream)
+            #expect(FileManager.default.fileExists(atPath: copy))
+            return
+        }
+        #expect(result.exitCode == nil, Comment(rawValue: result.stdout))
+        let output = try payload(from: result.stdout)
+        #expect(output["sent_message_guid"] as? String == "sent-attachment-reply")
+        #expect(output["verification_source"] as? String == MessagesReplySendACKDetail.attachmentVerificationSource)
+        let attachment = try #require(output["attachment"] as? [String: Any])
+        #expect(attachment["attachment_guid"] as? String == "sent-attachment-guid")
+        #expect(attachment["attachment_size"] as? Int == bytes.count)
+        #expect(attachment["copy_cleanup"] as? String == (finish == "cleanup-failure" ? "incomplete" : "complete"))
+        #expect(FileManager.default.fileExists(atPath: copy) == (finish == "cleanup-failure"))
+    }
+
     @Test func replySendAcceptsMaximumRawTextButRejectsOverflow() throws {
         let fx = try ChatFixture()
         try fx.insertReplyTarget(rowid: 70, guid: "reply-target")
@@ -3856,6 +4092,21 @@ private func insertReplyResultRow(path: String, rowid: Int64, guid: String, text
         INSERT INTO message (ROWID,guid,text,is_from_me,handle_id,service,date,error,thread_originator_guid,thread_originator_part)
         VALUES (\(rowid),'\(guid)','\(text)',\(isFromMe),1,'iMessage',\(base + rowid),0,'\(parentGUID)','\(parentPart)');
         INSERT INTO chat_message_join VALUES (\(chatRowid),\(rowid));
+        """)
+}
+
+private func insertAttachmentReplyResultRow(path: String, rowid: Int64, guid: String,
+                                            attachmentRowid: Int64, attachmentGUID: String,
+                                            filename: String, totalBytes: Int, base: Int64,
+                                            chatRowid: Int64 = 3, parentGUID: String = "reply-target",
+                                            parentPart: String = "2") throws {
+    try execReplySQL(path: path, """
+        INSERT INTO message (ROWID,guid,text,is_from_me,handle_id,service,date,error,thread_originator_guid,thread_originator_part,cache_has_attachments)
+        VALUES (\(rowid),'\(guid)',NULL,1,1,'iMessage',\(base + rowid),0,'\(parentGUID)','\(parentPart)',1);
+        INSERT INTO chat_message_join VALUES (\(chatRowid),\(rowid));
+        INSERT INTO attachment (ROWID,guid,filename,mime_type,uti,transfer_name,total_bytes,is_sticker,hide_attachment)
+        VALUES (\(attachmentRowid),'\(attachmentGUID)','\(filename)','application/octet-stream','public.data','reply.bin',\(totalBytes),0,0);
+        INSERT INTO message_attachment_join VALUES (\(rowid),\(attachmentRowid));
         """)
 }
 

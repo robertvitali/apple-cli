@@ -1,6 +1,7 @@
 import Foundation
 import AppleKit
 import Darwin
+import CryptoKit
 
 /// Read layer over `~/Library/Messages/chat.db` (WAL-aware, via the shared
 /// `SQLiteReader` with `copyToTemp` for hot/locked data reads). Ports the SQL +
@@ -1072,6 +1073,21 @@ public struct ChatDB {
         }
     }
 
+
+    struct ExactReplyAttachmentCorrespondence: Encodable, Equatable, Sendable {
+        let status: String
+        let reason: String?
+        let message_rowid: Int64?
+        let message_guid: String?
+        let parent_message_guid: String?
+        let parent_native_part: Int?
+        let attachment_rowid: Int64?
+        let attachment_guid: String?
+        let attachment_filename: String?
+        let attachment_sha256: String?
+        let attachment_size: Int?
+    }
+
     public struct ExactConversation: Encodable {
         public let chat_rowid: Int64
         public let chat_guid: String?
@@ -1500,6 +1516,274 @@ public struct ChatDB {
                                         message_guid: match.message_guid,
                                         parent_message_guid: match.thread_originator.message_guid,
                                         parent_native_part: match.thread_originator.native_part)
+    }
+
+
+    mutating func exactReplyAttachmentCorrespondence(chatRowid: Int64, afterHighwater: Int64,
+                                                     target: ExactReplyTarget,
+                                                     expectedAttachmentSHA256: String,
+                                                     expectedAttachmentSize: Int,
+                                                     checkpoint: () throws -> Void = {}) throws -> ExactReplyAttachmentCorrespondence {
+        try checkpoint()
+        guard expectedAttachmentSHA256.hasPrefix("sha256:"), expectedAttachmentSHA256.utf8.count == 71,
+              expectedAttachmentSize >= 1, expectedAttachmentSize <= AttachmentSource.maxBytes else {
+            throw AppleError.validation("expected attachment proof is malformed")
+        }
+        let scan = try exactReplyRows(chatRowid: chatRowid, afterHighwater: afterHighwater)
+        if scan.overflow { return attachmentReplyUncertain("row-limit-exceeded") }
+        var matches: [ExactReplyRow] = []
+        for row in scan.rows {
+            guard row.ownershipKnown else { return attachmentReplyUncertain("unknown-ownership") }
+            guard row.is_from_me else { continue }
+            guard row.bodyKnown else { return attachmentReplyUncertain("unknown-outgoing-body") }
+            guard row.rowid > scan.after_highwater, row.rowid > 0 else { return attachmentReplyUncertain("matching-row-malformed") }
+            guard row.selected_chat_rowid == target.chat_rowid else { return attachmentReplyUncertain("matching-row-wrong-chat") }
+            guard Self.attachmentReplyBodyIsEmptyOrMarker(row.body) else { continue }
+            guard !row.messageGUIDMalformed, let guid = row.message_guid, !guid.isEmpty else {
+                return attachmentReplyUncertain("matching-row-missing-guid")
+            }
+            let originator = row.thread_originator
+            guard originator.available, originator.reason == "available",
+                  let parentGUID = originator.message_guid,
+                  parentGUID.utf8.elementsEqual(target.message_guid.utf8),
+                  originator.native_part == target.native_part else {
+                return attachmentReplyUncertain("matching-row-wrong-parent")
+            }
+            _ = guid
+            matches.append(row)
+        }
+        guard let match = matches.first else {
+            return ExactReplyAttachmentCorrespondence(status: "waiting", reason: nil, message_rowid: nil, message_guid: nil,
+                                                     parent_message_guid: nil, parent_native_part: nil,
+                                                     attachment_rowid: nil, attachment_guid: nil, attachment_filename: nil,
+                                                     attachment_sha256: nil, attachment_size: nil)
+        }
+        guard matches.count == 1 else { return attachmentReplyUncertain("duplicate-matching-replies") }
+        switch try attachmentReplySendState(match) {
+        case .sent: break
+        case .pending:
+            return ExactReplyAttachmentCorrespondence(status: "waiting", reason: nil, message_rowid: nil, message_guid: nil,
+                                                     parent_message_guid: nil, parent_native_part: nil,
+                                                     attachment_rowid: nil, attachment_guid: nil, attachment_filename: nil,
+                                                     attachment_sha256: nil, attachment_size: nil)
+        case .uncertain(let reason): return attachmentReplyUncertain(reason)
+        }
+        try checkpoint()
+        let attachment = try exactSingleAttachmentJoin(forMessageRowid: match.rowid)
+        switch attachment {
+        case .uncertain(let reason): return attachmentReplyUncertain(reason)
+        case .waiting: return ExactReplyAttachmentCorrespondence(status: "waiting", reason: nil, message_rowid: nil, message_guid: nil,
+                                                                 parent_message_guid: nil, parent_native_part: nil,
+                                                                 attachment_rowid: nil, attachment_guid: nil, attachment_filename: nil,
+                                                                 attachment_sha256: nil, attachment_size: nil)
+        case .row(let row):
+            guard row.totalBytes == expectedAttachmentSize else { return attachmentReplyUncertain("attachment-content-mismatch") }
+            let proof = try verifyAttachmentFile(filename: row.filename, expectedSHA256: expectedAttachmentSHA256,
+                                                 expectedSize: expectedAttachmentSize, checkpoint: checkpoint)
+            switch proof {
+            case .verified(let digest, let size):
+                return ExactReplyAttachmentCorrespondence(status: "verified", reason: nil,
+                                                         message_rowid: match.rowid, message_guid: match.message_guid,
+                                                         parent_message_guid: match.thread_originator.message_guid,
+                                                         parent_native_part: match.thread_originator.native_part,
+                                                         attachment_rowid: row.attachmentRowid, attachment_guid: row.attachmentGUID,
+                                                         attachment_filename: row.filename,
+                                                         attachment_sha256: digest, attachment_size: size)
+            case .uncertain(let reason):
+                return attachmentReplyUncertain(reason)
+            }
+        }
+    }
+
+    private enum AttachmentReplySendState {
+        case sent
+        case pending
+        case uncertain(String)
+    }
+
+    private func attachmentReplySendState(_ candidate: ExactReplyRow) throws -> AttachmentReplySendState {
+        let columns = try requiredColumns("message", ["ROWID"])
+        guard columns.isSuperset(of: ["error", "is_sent"]) else {
+            return .uncertain("matching-row-send-state-unavailable")
+        }
+        let rows = try reader.rows("""
+            SELECT guid, is_from_me, thread_originator_guid, thread_originator_part, error, is_sent
+            FROM message WHERE ROWID = CAST(?1 AS INTEGER) LIMIT 2
+            """, [String(candidate.rowid)])
+        guard rows.count == 1, let row = rows.first,
+              case .text(let guid)? = row.values["guid"], guid == candidate.message_guid,
+              case .integer(1)? = row.values["is_from_me"],
+              case .text(let parent)? = row.values["thread_originator_guid"], parent == candidate.thread_originator.message_guid,
+              case .text(let part)? = row.values["thread_originator_part"], part == candidate.thread_originator.raw_part,
+              case .integer(let error)? = row.values["error"] else {
+            return .uncertain("matching-row-send-state-unavailable")
+        }
+        guard error == 0 else { return .uncertain("matching-row-send-failed") }
+        guard case .integer(let sent)? = row.values["is_sent"], sent == 0 || sent == 1 else {
+            return .uncertain("matching-row-send-state-unavailable")
+        }
+        return sent == 1 ? .sent : .pending
+    }
+
+    private static func attachmentReplyBodyIsEmptyOrMarker(_ body: String?) -> Bool {
+        guard let body else { return true }
+        return body.isEmpty || body == "\u{fffc}" || body == "\u{fffc}\n"
+    }
+
+    private struct ExactReplyAttachmentJoinRow {
+        let attachmentRowid: Int64
+        let attachmentGUID: String
+        let filename: String
+        let totalBytes: Int
+    }
+
+    private enum ExactReplyAttachmentJoinResult {
+        case waiting
+        case uncertain(String)
+        case row(ExactReplyAttachmentJoinRow)
+    }
+
+    private func exactSingleAttachmentJoin(forMessageRowid messageRowid: Int64) throws -> ExactReplyAttachmentJoinResult {
+        let joinRows = try reader.rows("""
+            SELECT message_id, attachment_id
+            FROM message_attachment_join
+            WHERE message_id = CAST(?1 AS INTEGER) OR message_id = ?1
+            ORDER BY attachment_id
+            LIMIT 2
+            """, [String(messageRowid)])
+        guard let join = joinRows.first else { return .waiting }
+        guard joinRows.count == 1 else { return .uncertain("duplicate-attachment-joins") }
+        guard case .integer(let joinMessage)? = join.values["message_id"], joinMessage == messageRowid,
+              case .integer(let attachmentRowid)? = join.values["attachment_id"], attachmentRowid > 0 else {
+            return .uncertain("malformed-attachment-join")
+        }
+        let rows = try reader.rows("""
+            SELECT ROWID AS attachment_rowid, guid AS attachment_guid,
+                   filename AS attachment_filename, total_bytes
+            FROM attachment
+            WHERE ROWID = CAST(?1 AS INTEGER)
+            LIMIT 2
+            """, [String(attachmentRowid)])
+        guard let row = rows.first, rows.count == 1,
+              case .integer(let storedRowid)? = row.values["attachment_rowid"], storedRowid == attachmentRowid else {
+            return .uncertain("malformed-attachment-join")
+        }
+        guard case .text(let guid)? = row.values["attachment_guid"], !guid.isEmpty,
+              case .text(let filename)? = row.values["attachment_filename"], !filename.isEmpty,
+              case .integer(let totalBytesRaw)? = row.values["total_bytes"], totalBytesRaw >= 1, totalBytesRaw <= Int64(AttachmentSource.maxBytes) else {
+            return .uncertain("malformed-attachment-row")
+        }
+        return .row(ExactReplyAttachmentJoinRow(attachmentRowid: attachmentRowid, attachmentGUID: guid,
+                                               filename: filename, totalBytes: Int(totalBytesRaw)))
+    }
+
+    private enum AttachmentContentProof {
+        case verified(String, Int)
+        case uncertain(String)
+    }
+
+    private func verifyAttachmentFile(filename raw: String, expectedSHA256: String, expectedSize: Int,
+                                      checkpoint: () throws -> Void) throws -> AttachmentContentProof {
+        try checkpoint()
+        guard let path = attachmentPathUnderMessagesRoot(raw) else { return .uncertain("unsafe-attachment-path") }
+        let fd: Int32
+        do { fd = try openAttachmentFileNoFollow(path) } catch { return .uncertain("unsafe-attachment-path") }
+        defer { close(fd) }
+        var before = stat()
+        guard fstat(fd, &before) == 0,
+              (before.st_mode & S_IFMT) == S_IFREG,
+              before.st_uid == getuid(),
+              before.st_size == expectedSize else { return .uncertain("attachment-content-mismatch") }
+        var digest = SHA256()
+        var total = 0
+        let handle = FileHandle(fileDescriptor: fd, closeOnDealloc: false)
+        while total <= AttachmentSource.maxBytes {
+            try checkpoint()
+            let chunk = try handle.read(upToCount: 1_048_576) ?? Data()
+            if chunk.isEmpty { break }
+            total += chunk.count
+            guard total <= AttachmentSource.maxBytes else { return .uncertain("attachment-content-mismatch") }
+            digest.update(data: chunk)
+        }
+        try checkpoint()
+        var after = stat()
+        guard fstat(fd, &after) == 0,
+              before.st_dev == after.st_dev, before.st_ino == after.st_ino,
+              before.st_size == after.st_size, before.st_mode == after.st_mode,
+              before.st_uid == after.st_uid,
+              before.st_mtimespec.tv_sec == after.st_mtimespec.tv_sec,
+              before.st_mtimespec.tv_nsec == after.st_mtimespec.tv_nsec,
+              before.st_ctimespec.tv_sec == after.st_ctimespec.tv_sec,
+              before.st_ctimespec.tv_nsec == after.st_ctimespec.tv_nsec,
+              total == expectedSize else { return .uncertain("attachment-content-mismatch") }
+        let found = "sha256:" + digest.finalize().map { String(format: "%02x", $0) }.joined()
+        guard found == expectedSHA256 else { return .uncertain("attachment-content-mismatch") }
+        return .verified(found, total)
+    }
+
+    private func attachmentPathUnderMessagesRoot(_ raw: String) -> String? {
+        guard !raw.unicodeScalars.contains(where: { $0.value == 0 || $0.value < 0x20 || $0.value == 0x7f }) else { return nil }
+        let home = Self.canonicalPath(Self.realpath(homeDirectoryForTilde) ?? URL(fileURLWithPath: homeDirectoryForTilde, isDirectory: true).standardizedFileURL.path)
+        let root = home + "/Library/Messages/Attachments"
+        let displayRoot = URL(fileURLWithPath: homeDirectoryForTilde, isDirectory: true)
+            .appendingPathComponent("Library/Messages/Attachments", isDirectory: true)
+            .standardizedFileURL.path
+        let canonicalDisplayRoot = Self.canonicalPath(displayRoot)
+        let relativeRaw: String
+        if raw.hasPrefix("~/Library/Messages/Attachments/") {
+            relativeRaw = String(raw.dropFirst("~/Library/Messages/Attachments/".count))
+        } else if raw.hasPrefix(root + "/") {
+            relativeRaw = String(raw.dropFirst(root.count + 1))
+        } else if raw.hasPrefix(displayRoot + "/") {
+            relativeRaw = String(raw.dropFirst(displayRoot.count + 1))
+        } else if raw.hasPrefix(canonicalDisplayRoot + "/") {
+            relativeRaw = String(raw.dropFirst(canonicalDisplayRoot.count + 1))
+        } else {
+            return nil
+        }
+        let rawComponents = relativeRaw.split(separator: "/", omittingEmptySubsequences: false)
+        guard !rawComponents.isEmpty,
+              !rawComponents.contains(where: { $0 == "." || $0 == ".." || $0.isEmpty }) else { return nil }
+        let path = root + "/" + relativeRaw
+        guard path.hasPrefix(root + "/") else { return nil }
+        return path
+    }
+
+    private static func realpath(_ path: String) -> String? {
+        guard let resolved = Darwin.realpath(path, nil) else { return nil }
+        defer { free(resolved) }
+        return String(cString: resolved)
+    }
+
+    private static func canonicalPath(_ path: String) -> String {
+        path.hasPrefix("/var/") ? "/private" + path : path
+    }
+
+    private func openAttachmentFileNoFollow(_ absolutePath: String) throws -> Int32 {
+        let components = absolutePath.split(separator: "/").map(String.init)
+        guard !components.isEmpty else { throw AppleError.upstream("unsafe attachment path") }
+        var current = open("/", O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+        guard current >= 0 else { throw AppleError.upstream("unsafe attachment path") }
+        for (index, component) in components.enumerated() {
+            if component == "." || component == ".." || component.isEmpty {
+                close(current); throw AppleError.upstream("unsafe attachment path")
+            }
+            let flags = index == components.count - 1
+                ? (O_RDONLY | O_NONBLOCK | O_NOFOLLOW | O_CLOEXEC)
+                : (O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC)
+            let next = openat(current, component, flags)
+            close(current)
+            guard next >= 0 else { throw AppleError.upstream("unsafe attachment path") }
+            current = next
+        }
+        return current
+    }
+
+    private func attachmentReplyUncertain(_ reason: String) -> ExactReplyAttachmentCorrespondence {
+        ExactReplyAttachmentCorrespondence(status: "uncertain", reason: reason, message_rowid: nil, message_guid: nil,
+                                          parent_message_guid: nil, parent_native_part: nil,
+                                          attachment_rowid: nil, attachment_guid: nil, attachment_filename: nil,
+                                          attachment_sha256: nil, attachment_size: nil)
     }
 
     public mutating func exactReactionInspect(chat selector: ExactChatSelector,

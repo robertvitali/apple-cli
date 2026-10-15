@@ -5,6 +5,7 @@ enum MessagesReplySendACKDetail {
     static let alreadyRestoredVerified = "reply-send-already-restored-clean-verified"
     static let retainedEmptyCancelledVerified = "reply-send-empty-owned-composer-closed-verified"
     static let verificationSource = "ui_clean_state_and_database_correspondence"
+    static let attachmentVerificationSource = "ui_clean_state_database_correspondence_and_attachment_content"
 
     static func isVerified(_ detail: String?) -> Bool {
         detail == alreadyRestoredVerified || detail == retainedEmptyCancelledVerified
@@ -23,7 +24,8 @@ struct MessagesReplySendRequest: Codable, Equatable, Sendable {
     let expectedBodySHA256: String
     let expectedBodyUTF8Length: Int
     let requiredBodyPrefix: String
-    let text: String
+    let text: String?
+    let attachmentDraft: MessagesReplyAttachmentDraftEvidence?
 
     enum CodingKeys: String, CodingKey {
         case chatGUID = "chat_guid"
@@ -38,6 +40,7 @@ struct MessagesReplySendRequest: Codable, Equatable, Sendable {
         case expectedBodyUTF8Length = "expected_body_utf8_length"
         case requiredBodyPrefix = "required_body_prefix"
         case text
+        case attachmentDraft = "attachment_draft"
     }
 
     init(chatGUID: String,
@@ -51,16 +54,24 @@ struct MessagesReplySendRequest: Codable, Equatable, Sendable {
          expectedBodySHA256: String,
          expectedBodyUTF8Length: Int,
          requiredBodyPrefix: String,
-         text: String) throws {
+         text: String?,
+         attachmentDraft: MessagesReplyAttachmentDraftEvidence? = nil) throws {
         guard !chatGUID.isEmpty, chatGUID.utf8.count <= 512,
               expectedChatRowID > 0, expectedMessageRowID > 0,
               !expectedParticipantHandles.isEmpty, expectedParticipantHandles.count <= 32,
               expectedParticipantHandles.allSatisfy({ !$0.isEmpty && $0.utf8.count <= 512 }),
               expectedBodySHA256.hasPrefix("sha256:"), expectedBodySHA256.utf8.count == 71,
               expectedBodyUTF8Length > 0, expectedBodyUTF8Length <= 4096,
-              requiredBodyPrefix == TestMode.canonicalSandboxPrefix,
-              !text.isEmpty, text.utf8.count <= 2048
+              requiredBodyPrefix == TestMode.canonicalSandboxPrefix
         else { throw MessagesReplyComposerAXError.invalidPayload }
+        switch (text, attachmentDraft) {
+        case (.some(let value), nil):
+            guard !value.isEmpty, value.utf8.count <= 2048 else { throw MessagesReplyComposerAXError.invalidPayload }
+        case (nil, .some):
+            break
+        default:
+            throw MessagesReplyComposerAXError.invalidPayload
+        }
         try NativeMessagesURL.validate(messageGUID: messageGUID, nativePartIndex: nativePartIndex, nativePartGUID: nativePartGUID)
         self.chatGUID = chatGUID
         self.messageGUID = messageGUID
@@ -74,6 +85,7 @@ struct MessagesReplySendRequest: Codable, Equatable, Sendable {
         self.expectedBodyUTF8Length = expectedBodyUTF8Length
         self.requiredBodyPrefix = requiredBodyPrefix
         self.text = text
+        self.attachmentDraft = attachmentDraft
         guard try workerPayloadData().count <= 4096 else { throw MessagesReplyComposerAXError.invalidPayload }
     }
 
@@ -90,7 +102,8 @@ struct MessagesReplySendRequest: Codable, Equatable, Sendable {
                       expectedBodySHA256: c.decode(String.self, forKey: .expectedBodySHA256),
                       expectedBodyUTF8Length: c.decode(Int.self, forKey: .expectedBodyUTF8Length),
                       requiredBodyPrefix: c.decode(String.self, forKey: .requiredBodyPrefix),
-                      text: c.decode(String.self, forKey: .text))
+                      text: c.decodeIfPresent(String.self, forKey: .text),
+                      attachmentDraft: c.decodeIfPresent(MessagesReplyAttachmentDraftEvidence.self, forKey: .attachmentDraft))
     }
 
     func encode(to encoder: any Encoder) throws {
@@ -106,7 +119,8 @@ struct MessagesReplySendRequest: Codable, Equatable, Sendable {
         try c.encode(expectedBodySHA256, forKey: .expectedBodySHA256)
         try c.encode(expectedBodyUTF8Length, forKey: .expectedBodyUTF8Length)
         try c.encode(requiredBodyPrefix, forKey: .requiredBodyPrefix)
-        try c.encode(text, forKey: .text)
+        try c.encodeIfPresent(text, forKey: .text)
+        try c.encodeIfPresent(attachmentDraft, forKey: .attachmentDraft)
     }
 
     func workerPayloadData() throws -> Data {

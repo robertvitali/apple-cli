@@ -1,4 +1,5 @@
 import Foundation
+import CryptoKit
 import SQLite3
 import Testing
 @testable import MessagesKit
@@ -330,11 +331,223 @@ struct ReplyDBProofTests {
         #expect(second.status == "verified")
         #expect(second.message_guid == "delayed")
     }
+
+    @Test(arguments: ["0", "1", "NULL", "'invalid'", "0.5", "X'00'"], ["1", "0", "NULL", "'invalid'", "0.5", "X'00'"])
+    func attachmentReplyProofRequiresOneJoinedAttachmentWithMatchingContent(errorSQL: String, sentSQL: String) throws {
+        let fx = try replyFixture()
+        let attachmentURL = URL(fileURLWithPath: fx.homePath)
+            .appendingPathComponent("Library/Messages/Attachments/zz/apple-cli-reply.bin")
+        let bytes = Data("apple-cli-test attachment reply".utf8)
+        try bytes.write(to: attachmentURL)
+        var db = try makeDB(fx)
+        let target = try db.exactReplyTarget(chat: .rowid(3), message: .rowid(60), partIndex: 2)
+        let highwater = try db.exactReplyHighwater(chatRowid: 3)
+        try insertAttachmentReplyResult(fx, rowid: highwater + 1, guid: "attachment-reply",
+                                        textSQL: "NULL", chatRowid: 3,
+                                        parentGUID: "reply-root", parentPart: "2",
+                                        attachmentRowid: 401, attachmentGUID: "attachment-guid",
+                                        filename: "~/Library/Messages/Attachments/zz/apple-cli-reply.bin",
+                                        totalBytesSQL: String(bytes.count))
+        try fx.exec("UPDATE message SET error=\(errorSQL),is_sent=\(sentSQL) WHERE ROWID=\(highwater + 1);")
+        db = try makeDB(fx)
+
+        let proof = try db.exactReplyAttachmentCorrespondence(chatRowid: 3, afterHighwater: highwater,
+                                                             target: target, expectedAttachmentSHA256: sha256(bytes),
+                                                             expectedAttachmentSize: bytes.count)
+
+        if errorSQL != "0" {
+            #expect(proof.status == "uncertain")
+            #expect(proof.reason == (errorSQL == "1" ? "matching-row-send-failed" : "matching-row-send-state-unavailable"))
+            return
+        }
+        if sentSQL != "1" {
+            #expect(proof.status == (sentSQL == "0" ? "waiting" : "uncertain"))
+            #expect(proof.reason == (sentSQL == "0" ? nil : "matching-row-send-state-unavailable"))
+            return
+        }
+        #expect(proof.status == "verified")
+        #expect(proof.message_guid == "attachment-reply")
+        #expect(proof.attachment_guid == "attachment-guid")
+        #expect(proof.attachment_filename == "~/Library/Messages/Attachments/zz/apple-cli-reply.bin")
+        #expect(proof.attachment_sha256 == sha256(bytes))
+        #expect(proof.attachment_size == bytes.count)
+    }
+
+    @Test func attachmentReplyProofRejectsMalformedJoinsPathsRowsAndContent() throws {
+        for (name, mutation, reason) in [
+            ("wrong-chat", { (fx: ChatFixture, _: Int64, _: URL, bytes: Data) throws in
+                try insertAttachmentReplyResult(fx, rowid: 91, guid: "wrong-chat", textSQL: "NULL", chatRowid: 1,
+                                                parentGUID: "reply-root", parentPart: "2", attachmentRowid: 501,
+                                                attachmentGUID: "a501", filename: "~/Library/Messages/Attachments/zz/a.bin",
+                                                totalBytesSQL: String(bytes.count))
+            }, "waiting"),
+            ("wrong-parent", { (fx: ChatFixture, highwater: Int64, _: URL, bytes: Data) throws in
+                try insertAttachmentReplyResult(fx, rowid: highwater + 1, guid: "wrong-parent", textSQL: "NULL", chatRowid: 3,
+                                                parentGUID: "other-root", parentPart: "2", attachmentRowid: 502,
+                                                attachmentGUID: "a502", filename: "~/Library/Messages/Attachments/zz/a.bin",
+                                                totalBytesSQL: String(bytes.count))
+            }, "matching-row-wrong-parent"),
+            ("duplicate-fresh-reply", { (fx: ChatFixture, highwater: Int64, _: URL, bytes: Data) throws in
+                try insertAttachmentReplyResult(fx, rowid: highwater + 1, guid: "duplicate-a", textSQL: "NULL", chatRowid: 3,
+                                                parentGUID: "reply-root", parentPart: "2", attachmentRowid: 503,
+                                                attachmentGUID: "a503", filename: "~/Library/Messages/Attachments/zz/a.bin",
+                                                totalBytesSQL: String(bytes.count))
+                try insertAttachmentReplyResult(fx, rowid: highwater + 2, guid: "duplicate-b", textSQL: "NULL", chatRowid: 3,
+                                                parentGUID: "reply-root", parentPart: "2", attachmentRowid: 504,
+                                                attachmentGUID: "a504", filename: "~/Library/Messages/Attachments/zz/a.bin",
+                                                totalBytesSQL: String(bytes.count))
+            }, "duplicate-matching-replies"),
+            ("malformed-join-storage", { (fx: ChatFixture, highwater: Int64, _: URL, bytes: Data) throws in
+                try insertAttachmentReplyResult(fx, rowid: highwater + 1, guid: "malformed-join", textSQL: "NULL", chatRowid: 3,
+                                                parentGUID: "reply-root", parentPart: "2", attachmentRowid: 505,
+                                                attachmentGUID: "a505", filename: "~/Library/Messages/Attachments/zz/a.bin",
+                                                totalBytesSQL: String(bytes.count))
+                try weakenMessageAttachmentJoinAffinity(fx)
+                try fx.exec("DELETE FROM message_attachment_join WHERE message_id=\(highwater + 1); INSERT INTO message_attachment_join(message_id, attachment_id) VALUES (\(highwater + 1),'505');")
+            }, "malformed-attachment-join"),
+            ("duplicate-join", { (fx: ChatFixture, highwater: Int64, _: URL, bytes: Data) throws in
+                try insertAttachmentReplyResult(fx, rowid: highwater + 1, guid: "duplicate-join", textSQL: "NULL", chatRowid: 3,
+                                                parentGUID: "reply-root", parentPart: "2", attachmentRowid: 506,
+                                                attachmentGUID: "a506", filename: "~/Library/Messages/Attachments/zz/a.bin",
+                                                totalBytesSQL: String(bytes.count))
+                try fx.exec("""
+                    INSERT INTO attachment (ROWID,guid,filename,mime_type,uti,transfer_name,total_bytes,is_sticker,hide_attachment)
+                    VALUES (507,'a507','~/Library/Messages/Attachments/zz/a.bin','application/octet-stream','public.data','reply.bin',\(bytes.count),0,0);
+                    INSERT INTO message_attachment_join VALUES (\(highwater + 1),507);
+                    """)
+            }, "duplicate-attachment-joins"),
+            ("orphan-join", { (fx: ChatFixture, highwater: Int64, _: URL, bytes: Data) throws in
+                try insertAttachmentReplyResult(fx, rowid: highwater + 1, guid: "orphan-join", textSQL: "NULL", chatRowid: 3,
+                                                parentGUID: "reply-root", parentPart: "2", attachmentRowid: 508,
+                                                attachmentGUID: "a508", filename: "~/Library/Messages/Attachments/zz/a.bin",
+                                                totalBytesSQL: String(bytes.count))
+                try fx.exec("DELETE FROM attachment WHERE ROWID=508;")
+            }, "malformed-attachment-join"),
+            ("null-filename", { (fx: ChatFixture, highwater: Int64, _: URL, bytes: Data) throws in
+                try insertAttachmentReplyResult(fx, rowid: highwater + 1, guid: "null-filename", textSQL: "NULL", chatRowid: 3,
+                                                parentGUID: "reply-root", parentPart: "2", attachmentRowid: 509,
+                                                attachmentGUID: "a509", filename: "~/Library/Messages/Attachments/zz/a.bin",
+                                                totalBytesSQL: String(bytes.count))
+                try fx.exec("UPDATE attachment SET filename=NULL WHERE ROWID=509;")
+            }, "malformed-attachment-row"),
+            ("malformed-total-bytes", { (fx: ChatFixture, highwater: Int64, _: URL, bytes: Data) throws in
+                try insertAttachmentReplyResult(fx, rowid: highwater + 1, guid: "malformed-total", textSQL: "NULL", chatRowid: 3,
+                                                parentGUID: "reply-root", parentPart: "2", attachmentRowid: 510,
+                                                attachmentGUID: "a510", filename: "~/Library/Messages/Attachments/zz/a.bin",
+                                                totalBytesSQL: "'abc'")
+            }, "malformed-attachment-row"),
+            ("raw-dotdot-normalizes-inside-root", { (fx: ChatFixture, highwater: Int64, _: URL, bytes: Data) throws in
+                try insertAttachmentReplyResult(fx, rowid: highwater + 1, guid: "raw-dotdot", textSQL: "NULL", chatRowid: 3,
+                                                parentGUID: "reply-root", parentPart: "2", attachmentRowid: 511,
+                                                attachmentGUID: "a511", filename: "~/Library/Messages/Attachments/zz/../zz/a.bin",
+                                                totalBytesSQL: String(bytes.count))
+            }, "unsafe-attachment-path"),
+            ("symlink-ancestor", { (fx: ChatFixture, highwater: Int64, _: URL, bytes: Data) throws in
+                try insertAttachmentReplyResult(fx, rowid: highwater + 1, guid: "symlink-ancestor", textSQL: "NULL", chatRowid: 3,
+                                                parentGUID: "reply-root", parentPart: "2", attachmentRowid: 512,
+                                                attachmentGUID: "a512", filename: "~/Library/Messages/Attachments/link/a.bin",
+                                                totalBytesSQL: String(bytes.count))
+            }, "unsafe-attachment-path"),
+            ("symlink-final", { (fx: ChatFixture, highwater: Int64, url: URL, bytes: Data) throws in
+                let link = url.deletingLastPathComponent().appendingPathComponent("link.bin")
+                try? FileManager.default.removeItem(at: link)
+                try FileManager.default.createSymbolicLink(at: link, withDestinationURL: url)
+                try insertAttachmentReplyResult(fx, rowid: highwater + 1, guid: "symlink-final", textSQL: "NULL", chatRowid: 3,
+                                                parentGUID: "reply-root", parentPart: "2", attachmentRowid: 513,
+                                                attachmentGUID: "a513", filename: "~/Library/Messages/Attachments/zz/link.bin",
+                                                totalBytesSQL: String(bytes.count))
+            }, "unsafe-attachment-path"),
+            ("same-size-wrong-hash", { (fx: ChatFixture, highwater: Int64, url: URL, bytes: Data) throws in
+                try Data(repeating: 0x78, count: bytes.count).write(to: url)
+                try insertAttachmentReplyResult(fx, rowid: highwater + 1, guid: "wrong-hash", textSQL: "NULL", chatRowid: 3,
+                                                parentGUID: "reply-root", parentPart: "2", attachmentRowid: 514,
+                                                attachmentGUID: "a514", filename: "~/Library/Messages/Attachments/zz/a.bin",
+                                                totalBytesSQL: String(bytes.count))
+            }, "attachment-content-mismatch"),
+        ] as [(String, (ChatFixture, Int64, URL, Data) throws -> Void, String)] {
+            let fx = try replyFixture()
+            let url = URL(fileURLWithPath: fx.homePath).appendingPathComponent("Library/Messages/Attachments/zz/a.bin")
+            let bytes = Data("apple-cli-test attachment reply".utf8)
+            try bytes.write(to: url)
+            var db = try makeDB(fx)
+            let target = try db.exactReplyTarget(chat: .rowid(3), message: .rowid(60), partIndex: 2)
+            let highwater = try db.exactReplyHighwater(chatRowid: 3)
+            try mutation(fx, highwater, url, bytes)
+            db = try makeDB(fx)
+
+            let proof = try db.exactReplyAttachmentCorrespondence(chatRowid: 3, afterHighwater: highwater,
+                                                                 target: target, expectedAttachmentSHA256: sha256(bytes),
+                                                                 expectedAttachmentSize: bytes.count)
+            #expect(proof.status == (reason == "waiting" ? "waiting" : "uncertain"), "\(name)")
+            #expect(proof.reason == (reason == "waiting" ? nil : reason), "\(name)")
+        }
+    }
+
+    @Test func attachmentReplyProofRefusesFIFOBeforeReadingContent() throws {
+        let fx = try replyFixture()
+        var db = try makeDB(fx)
+        let target = try db.exactReplyTarget(chat: .rowid(3), message: .rowid(60), partIndex: 2)
+        let highwater = try db.exactReplyHighwater(chatRowid: 3)
+        let path = URL(fileURLWithPath: fx.homePath).appendingPathComponent("Library/Messages/Attachments/zz/pipe.bin").path
+        try insertAttachmentReplyResult(fx, rowid: highwater + 1, guid: "attachment-reply", textSQL: "NULL", chatRowid: 3,
+                                        parentGUID: "reply-root", parentPart: "2", attachmentRowid: 401, attachmentGUID: "attachment-guid",
+                                        filename: path, totalBytesSQL: "1")
+        db = try makeDB(fx)
+        try assertFIFORefusedWithoutWaiting(path: path) {
+            let proof = try db.exactReplyAttachmentCorrespondence(chatRowid: 3, afterHighwater: highwater, target: target,
+                                                                 expectedAttachmentSHA256: sha256(Data([0])), expectedAttachmentSize: 1)
+            #expect(proof.status == "uncertain")
+            #expect(proof.reason == "attachment-content-mismatch")
+        }
+    }
+
+    @Test func attachmentReplyProofChecksCancellationDuringContentRead() throws {
+        let fx = try replyFixture()
+        var db = try makeDB(fx)
+        let target = try db.exactReplyTarget(chat: .rowid(3), message: .rowid(60), partIndex: 2)
+        let highwater = try db.exactReplyHighwater(chatRowid: 3)
+        let path = URL(fileURLWithPath: fx.homePath).appendingPathComponent("Library/Messages/Attachments/zz/checkpoint.bin")
+        let bytes = Data(repeating: 1, count: 2_097_152)
+        try bytes.write(to: path)
+        try insertAttachmentReplyResult(fx, rowid: highwater + 1, guid: "attachment-reply", textSQL: "NULL", chatRowid: 3,
+                                        parentGUID: "reply-root", parentPart: "2", attachmentRowid: 401, attachmentGUID: "attachment-guid",
+                                        filename: path.path, totalBytesSQL: String(bytes.count))
+        db = try makeDB(fx)
+        var checkpoints = 0
+        #expect(throws: WorkerProtocolError.cancelled) {
+            _ = try db.exactReplyAttachmentCorrespondence(chatRowid: 3, afterHighwater: highwater, target: target,
+                                                          expectedAttachmentSHA256: sha256(bytes), expectedAttachmentSize: bytes.count,
+                                                          checkpoint: {
+                                                              checkpoints += 1
+                                                              if checkpoints == 5 { throw WorkerProtocolError.cancelled }
+                                                          })
+        }
+        #expect(checkpoints == 5)
+    }
+
+    @Test(arguments: ["error", "is_sent"])
+    func attachmentReplyProofRefusesUnavailableSendColumns(column: String) throws {
+        let fx = try replyFixture()
+        var db = try makeDB(fx)
+        let target = try db.exactReplyTarget(chat: .rowid(3), message: .rowid(60), partIndex: 2)
+        let highwater = try db.exactReplyHighwater(chatRowid: 3)
+        try insertAttachmentReplyResult(fx, rowid: highwater + 1, guid: "attachment-reply", textSQL: "NULL", chatRowid: 3,
+                                        parentGUID: "reply-root", parentPart: "2", attachmentRowid: 401, attachmentGUID: "attachment-guid",
+                                        filename: "~/Library/Messages/Attachments/zz/file.bin", totalBytesSQL: "1")
+        try fx.exec("ALTER TABLE message DROP COLUMN \(column);")
+        db = try makeDB(fx)
+        let proof = try db.exactReplyAttachmentCorrespondence(chatRowid: 3, afterHighwater: highwater, target: target,
+                                                             expectedAttachmentSHA256: sha256(Data([0])), expectedAttachmentSize: 1)
+        #expect(proof.status == "uncertain")
+        #expect(proof.reason == "matching-row-send-state-unavailable")
+    }
+
 }
 
 private func replyFixture() throws -> ChatFixture {
     let fx = try ChatFixture()
     try fx.addThreadOriginatorColumns()
+    try fx.exec("ALTER TABLE message ADD COLUMN is_sent INTEGER DEFAULT 1;")
     let text = "Root text"
     let singlePart = nativeReplyArchive(text, [(replyNativePartKey, NSNumber(value: 2), nativeReplyRange(text, "Root"))])
     try fx.insertMessage(rowid: 60, guid: "reply-root", attributedBody: singlePart, chatRowid: 3, date: fx.base - 60)
@@ -438,4 +651,31 @@ private func weakenChatHandleJoinAffinity(_ fx: ChatFixture) throws {
         INSERT INTO chat_handle_join SELECT chat_id, handle_id FROM chat_handle_join_old;
         DROP TABLE chat_handle_join_old;
         """)
+}
+
+private func insertAttachmentReplyResult(_ fx: ChatFixture, rowid: Int64, guid: String, textSQL: String,
+                                         chatRowid: Int64, parentGUID: String, parentPart: String,
+                                         attachmentRowid: Int64, attachmentGUID: String,
+                                         filename: String, totalBytesSQL: String) throws {
+    try fx.exec("""
+        INSERT INTO message (ROWID,guid,text,is_from_me,handle_id,service,date,error,thread_originator_guid,thread_originator_part,cache_has_attachments)
+        VALUES (\(rowid),\(sqlString(guid)),\(textSQL),1,1,'iMessage',\(fx.base + rowid),0,\(sqlString(parentGUID)),\(sqlString(parentPart)),1);
+        INSERT INTO chat_message_join VALUES (\(chatRowid),\(rowid));
+        INSERT INTO attachment (ROWID,guid,filename,mime_type,uti,transfer_name,total_bytes,is_sticker,hide_attachment)
+        VALUES (\(attachmentRowid),\(sqlString(attachmentGUID)),\(sqlString(filename)),'application/octet-stream','public.data','reply.bin',\(totalBytesSQL),0,0);
+        INSERT INTO message_attachment_join VALUES (\(rowid),\(attachmentRowid));
+        """)
+}
+
+private func weakenMessageAttachmentJoinAffinity(_ fx: ChatFixture) throws {
+    try fx.exec("""
+        ALTER TABLE message_attachment_join RENAME TO message_attachment_join_old;
+        CREATE TABLE message_attachment_join(message_id, attachment_id);
+        INSERT INTO message_attachment_join SELECT message_id, attachment_id FROM message_attachment_join_old;
+        DROP TABLE message_attachment_join_old;
+        """)
+}
+
+private func sha256(_ data: Data) -> String {
+    "sha256:" + SHA256.hash(data: data).map { String(format: "%02x", $0) }.joined()
 }

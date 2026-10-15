@@ -30,7 +30,8 @@ struct MessagesReplyComposerAXAutomationTests {
     }
 
 
-    private func sendRequest(text: String = "apple-cli-test reply") throws -> MessagesReplySendRequest {
+    private func sendRequest(text: String = "apple-cli-test reply",
+                             attachmentDraft: MessagesReplyAttachmentDraftEvidence? = nil) throws -> MessagesReplySendRequest {
         try MessagesReplySendRequest(chatGUID: "iMessage;-;+12125550100",
                                      messageGUID: "message-guid",
                                      nativePartIndex: 2,
@@ -42,7 +43,8 @@ struct MessagesReplyComposerAXAutomationTests {
                                      expectedBodySHA256: AppleAutomationJournal.targetDigest(forOpaqueIdentifier: "apple-cli-test target").value,
                                      expectedBodyUTF8Length: "apple-cli-test target".utf8.count,
                                      requiredBodyPrefix: "apple-cli-test",
-                                     text: text)
+                                     text: attachmentDraft == nil ? text : nil,
+                                     attachmentDraft: attachmentDraft)
     }
 
     private func dbFixture() throws -> ChatFixture {
@@ -1362,7 +1364,7 @@ struct MessagesReplyComposerAXAutomationTests {
 
     @Test func attachmentDraftPreparationCreatesBoundedOwnedCopyPayload() throws {
         let sourceDir = try scratch.directory()
-        let source = sourceDir.appendingPathComponent("apple-cli-test-source.txt")
+        let source = sourceDir.appendingPathComponent("apple-cli-test source.txt")
         let bytes = Data("apple-cli-test attachment".utf8)
         FileManager.default.createFile(atPath: source.path, contents: bytes)
         chmod(source.path, 0o600)
@@ -1375,7 +1377,7 @@ struct MessagesReplyComposerAXAutomationTests {
         #expect(decoded.phase == "replyAttachmentDraftInspect")
         let attachment = try #require(decoded.attachmentDraft)
         #expect(attachment.copyPath.hasPrefix(copyRoot.path))
-        #expect(!attachment.copyPath.contains(source.lastPathComponent))
+        #expect(URL(fileURLWithPath: attachment.copyPath).lastPathComponent == source.lastPathComponent)
         #expect(attachment.copySize == bytes.count)
         #expect(try Data(contentsOf: URL(fileURLWithPath: attachment.copyPath)) == bytes)
         var st = stat()
@@ -1385,6 +1387,282 @@ struct MessagesReplyComposerAXAutomationTests {
         #expect(MessagesReplyComposerProbeWorkerRegistry(driver: FakeReplyDriver()).operation(for: try WorkerCommand(name: "messages.reply.inspect", payload: payload)) != nil)
         #expect(MessagesWorkerRegistry().operation(for: try WorkerCommand(name: "messages.reply.inspect", payload: payload)) == nil)
         #expect(WorkerOperationResult(.ack, detail: MessagesReplyComposerProbeDetail.attachmentDraftVerified).detail == MessagesReplyComposerProbeDetail.attachmentDraftVerified)
+    }
+
+    @Test func attachmentDraftPreparationUsesSharedTwentyFiveMiBLimit() throws {
+        let sourceDir = try scratch.directory()
+        let source = sourceDir.appendingPathComponent("apple-cli-test-large.bin")
+        let bytes = Data(repeating: 0x41, count: 70_000)
+        FileManager.default.createFile(atPath: source.path, contents: bytes)
+        chmod(source.path, 0o600)
+        let payload = try MessagesReplyComposerProbeParent.payloadDataForAttachmentDraft(base: request(), rawFilePath: source.path,
+                                                                                        scratchRoot: try scratch.directory().path,
+                                                                                        repoRoot: FileManager.default.currentDirectoryPath,
+                                                                                        deadline: .millisecondsFromNow(5_000))
+        let decoded = try JSONDecoder().decode(MessagesReplyComposerProbeRequest.self, from: payload)
+        let attachment = try #require(decoded.attachmentDraft)
+        #expect(attachment.copySize == bytes.count)
+        #expect(try Data(contentsOf: URL(fileURLWithPath: attachment.copyPath)).count == bytes.count)
+    }
+
+    @Test func sendAttachmentRequiresConfiguredNativeMarkerShapeBeforeReturn() throws {
+        let driver = FakeReplyDriver()
+        let (_, attachment) = try attachmentDraftPayload()
+        let request = try sendRequest(attachmentDraft: attachment)
+        let clipboard = FakeMessagesClipboard()
+        let evidence = MessagesPasteKeyEvidence(inputSourceID: "source", layoutSHA256: "sha256:" + String(repeating: "a", count: 64), keyboardType: 40, keyCode: 9)
+        var pastePresses = 0
+        var returnPresses = 0
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in },
+                                                            sendReturnKey: { _, _ in returnPresses += 1 },
+                                                            clipboardFactory: { clipboard },
+                                                            pasteKeyResolver: FakePasteKeyResolver([evidence, evidence]),
+                                                            sendPasteKey: { _, _, _ in
+                                                                pastePresses += 1
+                                                                let node = FakeReplyNode(roleValue: "AXImage", identifierValue: "attachment")
+                                                                driver.replyBody.staticChildren = [node]
+                                                                driver.replyBody.applyBodyText("\u{fffc}")
+                                                            })
+            .send(request, deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .refused("reply-attachment-draft-unverified"))
+        #expect(pastePresses == 1)
+        #expect(returnPresses == 0)
+        #expect(driver.replyTranscript.performed.isEmpty)
+        #expect(clipboard.restoredSnapshots.map(\.items) == [clipboard.original.items])
+    }
+
+    @Test func sendAttachmentPastesOnceSendsOnceWithConfiguredNativeMarkerShape() throws {
+        let driver = FakeReplyDriver()
+        let (_, attachment) = try attachmentDraftPayload()
+        let request = try sendRequest(attachmentDraft: attachment)
+        let clipboard = FakeMessagesClipboard()
+        let evidence = MessagesPasteKeyEvidence(inputSourceID: "source", layoutSHA256: "sha256:" + String(repeating: "a", count: 64), keyboardType: 40, keyCode: 9)
+        var pastePresses = 0
+        var returnPresses = 0
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in },
+                                                            sendReturnKey: { _, _ in
+                                                                returnPresses += 1
+                                                                driver.replyVisible = false
+                                                            },
+                                                            clipboardFactory: { clipboard },
+                                                            pasteKeyResolver: FakePasteKeyResolver([evidence, evidence]),
+                                                            allowedAttachmentDraftMarkers: ["\u{fffc}"],
+                                                            sendPasteKey: { _, _, _ in
+                                                                pastePresses += 1
+                                                                let node = FakeReplyNode(roleValue: "AXImage", identifierValue: "attachment")
+                                                                driver.replyBody.staticChildren = [node]
+                                                                driver.replyBody.applyBodyText("\u{fffc}")
+                                                            })
+            .send(request, deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .ack(MessagesReplySendACKDetail.alreadyRestoredVerified))
+        #expect(pastePresses == 1)
+        #expect(returnPresses == 1)
+        #expect(clipboard.restoredSnapshots.map(\.items) == [clipboard.original.items])
+    }
+
+    @Test(arguments: [false, true])
+    func sendAttachmentAcceptsNativeMarkerWithoutBodyAttachmentChild(retainedMainPresent: Bool) throws {
+        let result = try simulateNativeAttachmentSend { driver in
+            if retainedMainPresent { driver.extraWindowChildren = [driver.mainTranscript] }
+        }
+        #expect(result.outcome == .ack(MessagesReplySendACKDetail.alreadyRestoredVerified))
+        #expect(result.pastes == 1)
+        #expect(result.sends == 1)
+        #expect(result.clipboard.restoredSnapshots.map(\.items) == [result.clipboard.original.items])
+    }
+
+    @Test(arguments: ["replacement-main", "third-transcript", "missing-target", "replaced-target", "foreign-target"])
+    func sendAttachmentRefusesUnownedTranscriptStructure(kind: String) throws {
+        let result = try simulateNativeAttachmentSend { driver in
+            driver.extraWindowChildren = [driver.mainTranscript]
+            switch kind {
+            case "replacement-main":
+                driver.extraWindowChildren = [FakeReplyNode(roleValue: "AXGroup", identifierValue: "TranscriptCollectionView", descriptionValue: "Messages")]
+            case "third-transcript":
+                driver.extraWindowChildren.append(FakeReplyNode(roleValue: "AXGroup", identifierValue: "TranscriptCollectionView"))
+            case "missing-target": driver.mainTranscript.staticChildren = []
+            case "replaced-target":
+                driver.mainTranscript.staticChildren = [FakeReplyNode(roleValue: "AXGroup", selectedValue: true, actionNames: driver.message.actionNames)]
+            default: driver.message.processIdentifierValue = 456
+            }
+        }
+        #expect(result.outcome == .refused("reply-composer-ownership-drift"))
+        #expect(result.sends == 0)
+        #expect(result.driver.replyTranscript.performed.isEmpty)
+    }
+
+    @Test(arguments: ["", "\u{fffc}", "\u{fffc}\nextra", "\u{fffc}\u{fffc}\n", "\n\u{fffc}\n"])
+    func sendAttachmentRefusesUnexpectedNativeMarker(text: String) throws {
+        let result = try simulateNativeAttachmentSend { driver in driver.replyBody.applyBodyText(text) }
+        #expect(result.outcome == .refused("reply-attachment-draft-unverified"))
+        #expect(result.sends == 0)
+    }
+
+    @Test(arguments: ["main", "reply", "foreign-process", "foreign-window", "unknown-transcript", "two-attachments"])
+    func sendAttachmentValidatesExposedBodyReferences(kind: String) throws {
+        let result = try simulateNativeAttachmentSend { driver in
+            driver.extraWindowChildren = [driver.mainTranscript]
+            switch kind {
+            case "main": driver.replyBody.staticLinked = [driver.mainTranscript]
+            case "reply": driver.replyBody.staticLinked = [driver.replyTranscript]
+            case "two-attachments":
+                driver.replyBody.staticChildren = [FakeReplyNode(roleValue: "AXImage"), FakeReplyNode(roleValue: "AXImage")]
+            default:
+                let link = FakeReplyNode(roleValue: "AXGroup", identifierValue: "TranscriptCollectionView")
+                if kind == "foreign-window" {
+                    let owner = FakeReplyNode(roleValue: "AXWindow")
+                    driver.extraWindowChildren.append(owner)
+                    link.parentNode = owner
+                } else {
+                    link.parentNode = driver.window
+                }
+                if kind == "foreign-process" { link.processIdentifierValue = 456 }
+                driver.replyBody.staticLinked = [link]
+            }
+        }
+        #expect(result.sends == (["main", "reply"].contains(kind) ? 1 : 0))
+        if ["main", "reply"].contains(kind) {
+            #expect(result.outcome == .ack(MessagesReplySendACKDetail.alreadyRestoredVerified))
+        }
+    }
+
+    @Test func sendAttachmentPreservesDraftWhenModalAppearsAfterPaste() throws {
+        let result = try simulateNativeAttachmentSend { driver in
+            driver.extraWindowChildren = [FakeReplyNode(roleValue: "AXSheet")]
+        }
+        #expect(result.outcome == .refused("reply-composer-ownership-drift"))
+        #expect(result.sends == 0)
+        #expect(result.driver.replyTranscript.performed.isEmpty)
+    }
+
+    @Test(arguments: [false, true])
+    func sendAttachmentPreservesNonemptyDraftOnFailure(beforePaste: Bool) throws {
+        let driver = FakeReplyDriver()
+        let (_, attachment) = try attachmentDraftPayload()
+        let request = try sendRequest(attachmentDraft: attachment)
+        let clipboard = FakeMessagesClipboard()
+        let evidence = MessagesPasteKeyEvidence(inputSourceID: "source", layoutSHA256: "sha256:" + String(repeating: "a", count: 64), keyboardType: 40, keyCode: 9)
+        if beforePaste {
+            clipboard.onPublish = { driver.replyBody.applyBodyText("\u{fffc}\n") }
+        } else {
+            clipboard.writeSucceeds = false
+        }
+        var pastes = 0
+        var sends = 0
+        _ = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in },
+                                                   sendReturnKey: { _, _ in sends += 1 },
+                                                   clipboardFactory: { clipboard },
+                                                   pasteKeyResolver: FakePasteKeyResolver([evidence, evidence]),
+                                                   sendPasteKey: { _, _, _ in
+                                                       pastes += 1
+                                                       driver.replyBody.applyBodyText("\u{fffc}\n")
+                                                   })
+            .send(request, deadline: .millisecondsFromNow(5_000))
+        #expect(pastes == (beforePaste ? 0 : 1))
+        #expect(sends == 0)
+        #expect(driver.replyTranscript.performed.isEmpty)
+        #expect(driver.replyBody.bodyText == "\u{fffc}\n")
+    }
+
+    @Test func sendAttachmentRefusesLayoutDriftBeforePaste() throws {
+        let driver = FakeReplyDriver()
+        let (_, attachment) = try attachmentDraftPayload()
+        let request = try sendRequest(attachmentDraft: attachment)
+        let clipboard = FakeMessagesClipboard()
+        let first = MessagesPasteKeyEvidence(inputSourceID: "source", layoutSHA256: "sha256:" + String(repeating: "a", count: 64), keyboardType: 40, keyCode: 9)
+        let second = MessagesPasteKeyEvidence(inputSourceID: "other", layoutSHA256: "sha256:" + String(repeating: "b", count: 64), keyboardType: 40, keyCode: 8)
+        var pastes = 0
+        var sends = 0
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in },
+                                                            sendReturnKey: { _, _ in sends += 1 },
+                                                            clipboardFactory: { clipboard }, pasteKeyResolver: FakePasteKeyResolver([first, second]),
+                                                            sendPasteKey: { _, _, _ in pastes += 1 })
+            .send(request, deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .refused("reply-attachment-layout-drift"))
+        #expect(pastes == 0)
+        #expect(sends == 0)
+    }
+
+    @Test func sendAttachmentRestoresClipboardWhenClearVerificationThrows() throws {
+        let driver = FakeReplyDriver()
+        let (_, attachment) = try attachmentDraftPayload()
+        let request = try sendRequest(attachmentDraft: attachment)
+        let clipboard = FakeMessagesClipboard()
+        clipboard.throwOnReadAfterNextClear = true
+        let evidence = MessagesPasteKeyEvidence(inputSourceID: "source", layoutSHA256: "sha256:" + String(repeating: "a", count: 64), keyboardType: 40, keyCode: 9)
+        var pastes = 0
+        var sends = 0
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in },
+                                                            sendReturnKey: { _, _ in sends += 1 },
+                                                            clipboardFactory: { clipboard }, pasteKeyResolver: FakePasteKeyResolver([evidence]),
+                                                            sendPasteKey: { _, _, _ in pastes += 1 })
+            .send(request, deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .refused("reply-attachment-clipboard-drift"))
+        #expect(pastes == 0)
+        #expect(sends == 0)
+        #expect(clipboard.restoredSnapshots.map(\.items) == [clipboard.original.items])
+    }
+
+    @Test(arguments: ["\u{fffc}\nuser text", "\u{fffc}\u{fffc}\n"])
+    func sendAttachmentPreservesDraftChangedDuringFinalFocusCheck(text: String) throws {
+        let result = try simulateNativeAttachmentSend { driver in
+            var focusReadsAfterPaste = 0
+            driver.onAppFocusRead = {
+                focusReadsAfterPaste += 1
+                if focusReadsAfterPaste == 2 { driver.replyBody.applyBodyText(text) }
+            }
+        }
+        #expect(result.outcome == .refused("reply-attachment-draft-unverified"))
+        #expect(result.sends == 0)
+        #expect(result.driver.replyTranscript.performed.isEmpty)
+        #expect(result.driver.replyBody.bodyText == text)
+    }
+
+    @Test func sendAttachmentClosesRetainedEmptyReplyWithOriginalMainPresent() throws {
+        let result = try simulateNativeAttachmentSend(retainEmptyAfterSend: true) { driver in
+            driver.extraWindowChildren = [driver.mainTranscript]
+            driver.replyTranscript.onAction = { [weak driver] name in
+                guard name == "AXCancel", let driver else { throw MessagesReplyComposerAXError.replyComposerCleanupUnavailable }
+                driver.replyVisible = false
+                driver.extraWindowChildren = []
+            }
+        }
+        #expect(result.outcome == .ack(MessagesReplySendACKDetail.retainedEmptyCancelledVerified))
+        #expect(result.sends == 1)
+        #expect(result.driver.replyTranscript.performed == ["AXCancel"])
+    }
+
+    private func simulateNativeAttachmentSend(retainEmptyAfterSend: Bool = false,
+                                              mutateAfterPaste: (FakeReplyDriver) -> Void) throws ->
+        (outcome: MessagesReplyComposerAXOutcome, pastes: Int, sends: Int, driver: FakeReplyDriver, clipboard: FakeMessagesClipboard) {
+        let driver = FakeReplyDriver()
+        let (_, attachment) = try attachmentDraftPayload()
+        let request = try sendRequest(attachmentDraft: attachment)
+        let clipboard = FakeMessagesClipboard()
+        let evidence = MessagesPasteKeyEvidence(inputSourceID: "source", layoutSHA256: "sha256:" + String(repeating: "a", count: 64), keyboardType: 40, keyCode: 9)
+        var pastes = 0
+        var sends = 0
+        let outcome = try withoutActuallyEscaping(mutateAfterPaste) { mutate in
+            try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in },
+                                                   sendReturnKey: { _, _ in
+                                                       sends += 1
+                                                       if retainEmptyAfterSend {
+                                                           driver.replyBody.applyBodyText("")
+                                                       } else {
+                                                           driver.replyVisible = false
+                                                           driver.extraWindowChildren = []
+                                                       }
+                                                   },
+                                                   clipboardFactory: { clipboard },
+                                                   pasteKeyResolver: FakePasteKeyResolver([evidence, evidence]),
+                                                   sendPasteKey: { _, _, _ in
+                                                       pastes += 1
+                                                       driver.replyBody.applyBodyText("\u{fffc}\n")
+                                                       mutate(driver)
+                                                   })
+                .send(request, deadline: .millisecondsFromNow(5_000))
+        }
+        return (outcome, pastes, sends, driver, clipboard)
     }
 
     @Test func attachmentDraftInspectPastesOneCommandVAndCancelsExactOwnedDraft() throws {
@@ -1807,12 +2085,29 @@ struct MessagesReplyComposerAXAutomationTests {
         }
     }
 
+    @Test func attachmentDraftRestorationAcceptsOwnedNonemptyClipboardWithoutWriteCountAdvance() throws {
+        let clipboard = FakeMessagesClipboard()
+        try clipboard.restore(clipboard.original, deadline: .millisecondsFromNow(5_000))
+        #expect(clipboard.current.items == clipboard.original.items)
+        #expect(clipboard.current.changeCount == clipboard.original.changeCount + 1)
+        #expect(clipboard.restoredSnapshots.count == 1)
+    }
+
+    @Test func attachmentDraftPublishRejectsExternalClipboardCountDrift() throws {
+        let clipboard = FakeMessagesClipboard()
+        let cleared = try clipboard.clearAndVerifyEmpty(deadline: .millisecondsFromNow(5_000))
+        clipboard.mutateAfterPublish = true
+        #expect(throws: Error.self) {
+            _ = try clipboard.publishAndVerifyFileURL(URL(fileURLWithPath: "/tmp/apple-cli-test.bin"), ownerCount: cleared, deadline: .millisecondsFromNow(5_000))
+        }
+    }
+
     @Test func attachmentDraftRestorationRefusesPartialWriteCountAndContentFailures() throws {
         for failure in 0..<3 {
             let clipboard = FakeMessagesClipboard()
             if failure == 0 { clipboard.writeSucceeds = false }
             if failure == 1 { clipboard.mutateAfterWrite = true }
-            if failure == 2 { clipboard.changeCountAfterWrite = true }
+            if failure == 2 { clipboard.externalChangeCountAfterWrite = true }
             #expect(throws: Error.self) { try clipboard.restore(clipboard.original, deadline: .millisecondsFromNow(5_000)) }
             #expect(clipboard.restoredSnapshots.count == 1)
             #expect(clipboard.current.changeCount > clipboard.original.changeCount)
@@ -1824,7 +2119,7 @@ struct MessagesReplyComposerAXAutomationTests {
         let expired = WorkerDeadline.millisecondsFromNow(0)
         #expect(throws: Error.self) { _ = try clipboard.snapshot(deadline: expired) }
         #expect(throws: Error.self) { _ = try clipboard.clearContentsReturningCount(deadline: expired) }
-        #expect(throws: Error.self) { try clipboard.publishAndVerifyFileURL(URL(fileURLWithPath: "/tmp/apple-cli-test.bin"), ownerCount: 1, deadline: expired) }
+        #expect(throws: Error.self) { _ = try clipboard.publishAndVerifyFileURL(URL(fileURLWithPath: "/tmp/apple-cli-test.bin"), ownerCount: 1, deadline: expired) }
         #expect(throws: Error.self) { try clipboard.restore(clipboard.original, deadline: expired) }
         #expect(clipboard.current == clipboard.original)
         #expect(clipboard.restoredSnapshots.isEmpty)
@@ -2077,6 +2372,7 @@ private final class FakeReplyNode: MessagesAXElement {
     var bodyEvidenceSequence: [MessagesAXBodyValueEvidence] = []
     var bodyText: String = ""
     var onChildrenRead: (() throws -> Void)?
+    var staticLinked: [FakeReplyNode] = []
     var onLinkedElementsRead: (() -> Void)?
     var onActionsRead: (() -> Void)?
     var onBodyEvidenceRead: (() -> Void)?
@@ -2148,7 +2444,8 @@ private final class FakeReplyNode: MessagesAXElement {
     func childrenInNavigationOrder(limit: Int, deadline: WorkerDeadline) throws -> [any MessagesAXElement]? { nil }
     func linkedElements(limit: Int, deadline: WorkerDeadline) throws -> [any MessagesAXElement] {
         onLinkedElementsRead?()
-        return []
+        guard staticLinked.count <= limit else { throw MessagesAXNavigationError.traversalLimit }
+        return staticLinked
     }
     func setValue(_ value: String, deadline: WorkerDeadline) throws {
         try onSetValue?(value)
@@ -2201,8 +2498,9 @@ private final class FakeMessagesClipboard: MessagesClipboarding, MessagesClipboa
     var emptyTypesWhenNilItems = false
     var writeSucceeds = true
     var mutateAfterWrite = false
-    var changeCountAfterWrite = false
+    var externalChangeCountAfterWrite = false
     var readCount = 0
+    var onPublish: (() -> Void)?
 
     init() { current = original }
 
@@ -2238,7 +2536,8 @@ private final class FakeMessagesClipboard: MessagesClipboarding, MessagesClipboa
     }
 
     func publishFileURLData(_ data: Data, deadline: WorkerDeadline) throws -> Bool {
-        let count = mutateAfterPublish ? current.changeCount + 1 : current.changeCount
+        onPublish?()
+        let count = current.changeCount + (mutateAfterPublish ? 1 : 0)
         current = MessagesClipboardSnapshot(changeCount: count, items: [[MessagesClipboardRepresentation(type: NSPasteboard.PasteboardType.fileURL.rawValue, data: data)]])
         if publishThrows { throw MessagesReplyComposerAXError.replyAttachmentClipboardDrift }
         return publishSucceeds
@@ -2247,7 +2546,7 @@ private final class FakeMessagesClipboard: MessagesClipboarding, MessagesClipboa
     func writeItems(_ items: [[MessagesClipboardRepresentation]], deadline: WorkerDeadline) throws -> Bool {
         restoredSnapshots.append(MessagesClipboardSnapshot(changeCount: current.changeCount, items: items))
         let restored = mutateAfterWrite ? [[MessagesClipboardRepresentation(type: "public.utf8-plain-text", data: Data("drift".utf8))]] : items
-        current = MessagesClipboardSnapshot(changeCount: current.changeCount + (changeCountAfterWrite ? 1 : 0), items: restored)
+        current = MessagesClipboardSnapshot(changeCount: current.changeCount + (externalChangeCountAfterWrite ? 1 : 0), items: restored)
         return writeSucceeds
     }
 }

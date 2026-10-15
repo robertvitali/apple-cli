@@ -1,6 +1,6 @@
 # apple messages reply send
 
-Send a text reply to an exact root message in a direct chat.
+Send a text or attachment reply to an exact root message in a direct chat.
 
 ## Synopsis
 
@@ -10,18 +10,20 @@ apple messages reply send [flags]
 
 ## Description
 
-Sends a bounded text reply to one exact root message in a direct Messages conversation. Select the conversation with exactly one of `--chat-rowid` or `--chat-guid`; select the root message with exactly one of `--message-rowid` or `--message-guid`; pass `--part-index` for the decoded native part and `--body` for the reply text.
+Sends a bounded text reply or one single-file attachment reply to one exact root message in a direct Messages conversation. Select the conversation with exactly one of `--chat-rowid` or `--chat-guid`; select the root message with exactly one of `--message-rowid` or `--message-guid`; pass `--part-index` for the decoded native part and exactly one of `--body` or `--file` for reply content.
 
 ## Options
 
 - `--body` `<body>`
-  <br>Reply text. Must be nonempty and no more than 2048 UTF-8 bytes.
+  <br>Reply text. Must be nonempty and no more than 2048 UTF-8 bytes. Mutually exclusive with --file.
 - `--chat-guid` `<chat-guid>`
   <br>Conversation GUID from chat.guid.
 - `--chat-rowid` `<chat-rowid>`
   <br>Local conversation ROWID from chat.ROWID.
 - `--experimental-ui-handoff`
   <br>Allow the bounded Messages UI handoff required to send the reply.
+- `--file` `<file>`
+  <br>Single attachment file to send as the reply. Mutually exclusive with --body.
 - `--message-guid` `<message-guid>`
   <br>Message GUID from message.guid.
 - `--message-rowid` `<message-rowid>`
@@ -46,21 +48,33 @@ Sends a bounded text reply to one exact root message in a direct Messages conver
 
 ## Examples
 
-Preview a sandboxed exact reply
+Preview a sandboxed exact text reply
 
 ```console
 apple messages reply send --chat-rowid 42 --message-rowid 123 --part-index 2 --body 'apple-cli-test reply' --dry-run --test-mode
 ```
 
-Execute with explicit UI handoff opt-in
+Preview a sandboxed exact attachment reply
+
+```console
+apple messages reply send --chat-rowid 42 --message-rowid 123 --part-index 2 --file ./apple-cli-test.png --dry-run --test-mode
+```
+
+Execute a text reply with explicit UI handoff opt-in
 
 ```console
 APPLE_TEST_MODE=1 apple messages reply send --chat-rowid 42 --message-rowid 123 --part-index 2 --body 'apple-cli-test reply' --experimental-ui-handoff
 ```
 
+Execute an attachment reply with explicit UI handoff opt-in
+
+```console
+APPLE_TEST_MODE=1 apple messages reply send --chat-rowid 42 --message-rowid 123 --part-index 2 --file ./apple-cli-test.png --experimental-ui-handoff
+```
+
 ## Notes
 
-The reply body must be nonempty and at most 2048 UTF-8 bytes; the encoded worker payload is capped at 4096 bytes. `--body` is used instead of `--text` because `--text` is the global output-format flag. Execution opens the exact native Messages URL, retains the original process/window/transcript and normal composer identities, opens one owned Reply composer, writes the body once, snapshots exact UTF-8 text with UTF-16 character-count consistency, posts one Return key pair to Messages and then verifies both UI cleanup and fresh database correspondence before clearing the pending operation. A successful result reports `verification_source: ui_clean_state_and_database_correspondence`, `sent_message_rowid`, `sent_message_guid`, `parent_message_guid`, `parent_native_part`, and the exact target. If Messages already restored the clean main composer after send, no cancel is sent; if an owned reply composer remains empty, exactly one `AXCancel` closes it. After the first send dispatch, the command never retries Return and never clears a nonempty composer. Database thread-originator metadata alone never authorizes a write; the parent accepts the worker ACK only after strict same-chat new-row proof. Dry run performs no UI work and creates no journal entry.
+Pass exactly one of `--body` or `--file`. Text replies must be nonempty and at most 2048 UTF-8 bytes; `--body` is used instead of `--text` because `--text` is the global output-format flag. Attachment replies accept one local regular file through the shared attachment source policy, capped at 25 MiB. Execution copies that file into an operation-owned private draft location before the UI handoff, pastes exactly once, accepts only the observed native attachment marker shape as pre-send UI readiness, posts one Return key pair, and then requires strict database proof for one fresh outgoing reply row in the selected chat with integer `is_sent = 1` and `error = 0`, plus one attachment join whose safe Messages attachment file matches the copied content hash and size. Pending send status is polled within the operation deadline; unavailable, malformed or failed status cannot verify success. This is local observed state, not a recipient-delivery or cross-device synchronization guarantee. Draft UI metadata is not treated as file identity proof. Successful text results report `verification_source: ui_clean_state_and_database_correspondence`; successful attachment results report `verification_source: ui_clean_state_database_correspondence_and_attachment_content` and an `attachment` object with `attachment_rowid`, `attachment_guid`, `attachment_filename`, `attachment_sha256`, `attachment_size`, and `copy_cleanup`. The private copy is reclaimed only after the journal durably records observed success. `copy_cleanup: complete` means reclamation finished; `incomplete` means some private staging content may remain, with `copy_directory` identifying its directory for inspection. Incomplete copy cleanup does not reverse a verified send and must not prompt a resend. A process crash between journal resolution and reclamation can also leave staging content behind. Both modes report `sent_message_rowid`, `sent_message_guid`, `parent_message_guid`, `parent_native_part`, and the exact target. Dry run performs no UI work, creates no journal entry, and for attachments creates no draft copy. If Messages already restored the clean main composer after send, no cancel is sent; if an owned reply composer remains empty, exactly one `AXCancel` closes it. The command preserves nonempty drafts on failure because the native marker cannot prove attachment ownership. After the first send dispatch, it never retries Return. Database thread-originator metadata alone never authorizes a write; the parent accepts the worker ACK only after strict same-chat new-row proof. If verification or UI/clipboard cleanup fails after handoff, the command reports uncertainty and acknowledges the send may have occurred.
 
 ## Output
 

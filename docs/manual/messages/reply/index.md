@@ -10,11 +10,11 @@ apple messages reply
 
 ## Description
 
-Groups experimental exact threaded reply sends for Messages. The current subcommand sends a text reply to a proven root message in a direct conversation.
+Groups experimental exact threaded reply sends for Messages. The current subcommand sends either bounded text or one single-file attachment reply to a proven root message in a direct conversation.
 
 ## Subcommands
 
-- [`send`](./send.md) — Send a text reply to an exact root message in a direct chat.
+- [`send`](./send.md) — Send a text or attachment reply to an exact root message in a direct chat.
 
 ## Inherited options
 
@@ -39,9 +39,15 @@ Preview an exact text reply
 apple messages reply send --chat-rowid 42 --message-rowid 123 --part-index 2 --body 'apple-cli-test reply' --dry-run
 ```
 
+Preview an exact attachment reply
+
+```console
+apple messages reply send --chat-rowid 42 --message-rowid 123 --part-index 2 --file ./apple-cli-test.png --dry-run
+```
+
 ## Notes
 
-Reply sends are experimental UI handoffs. Dry run resolves the exact root target and sandbox policy without driving Messages UI or creating journal state. Execution requires `--experimental-ui-handoff`, the shared Messages automation journal, Accessibility trust and a direct one-recipient conversation. Group replies and attachment replies are not enabled in this unit. Agent-run live writes must use the sandbox and target only operator-approved test recipients.
+Reply sends are experimental UI handoffs. Dry run resolves the exact root target and sandbox policy without driving Messages UI or creating journal state; attachment dry runs also resolve the shared attachment source and preview the selected file path, basename and byte count without creating a draft copy. Execution requires `--experimental-ui-handoff`, the shared Messages automation journal, Accessibility trust and a direct one-recipient conversation. Group replies are not enabled in this unit. Agent-run live writes must use the sandbox and target only operator-approved test recipients.
 
 ## Output
 
