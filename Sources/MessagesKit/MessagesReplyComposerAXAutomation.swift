@@ -56,6 +56,31 @@ enum MessagesReplyComposerAXError: String, Error, CustomStringConvertible, CaseI
     var description: String { rawValue }
 }
 
+/// Fixed structural diagnostics only: no AX values, identifiers, or action names.
+private enum ReplyAttachmentOwnershipReason: String, Error {
+    case transcriptCount = "transcript-count"
+    case replyTranscript = "reply-transcript"
+    case transcriptProcess = "transcript-process"
+    case mainTranscript = "main-transcript"
+    case mainTargetMissing = "main-target-missing"
+    case mainTargetProcess = "main-target-process"
+    case mainTargetActionMissing = "main-target-action-missing"
+    case other
+}
+
+private struct ReplyAttachmentOwnershipFailure: Error {
+    enum Phase: String {
+        case beforePaste = "before-paste"
+        case afterPaste = "after-paste"
+        case beforeReturn = "before-return"
+        case returnStarted = "return-started"
+        case afterReturn = "after-return"
+    }
+    let phase: Phase
+    let reason: ReplyAttachmentOwnershipReason
+    var detail: String { "reply-attachment-ownership-\(phase.rawValue)-\(reason.rawValue)" }
+}
+
 protocol MessagesReplyComposerAXDriving: MessagesAXProcessDriving {
     func replyActionTitles(deadline: WorkerDeadline) throws -> [String]
     func normalComposePlaceholders(deadline: WorkerDeadline) throws -> [String]
@@ -300,6 +325,7 @@ struct MessagesReplyComposerAXAutomation {
 
     func send(_ request: MessagesReplySendRequest, deadline: WorkerDeadline) throws -> MessagesReplyComposerAXOutcome {
         do { return try executeSend(request, deadline: deadline) }
+        catch let error as ReplyAttachmentOwnershipFailure { return .refused(error.detail) }
         catch let error as MessagesReplyComposerStagedAXFailure { return .failed(error.detail) }
         catch let error as MessagesReplyComposerStagedTargetDrift { return .refused(error.detail) }
         catch let error as MessagesReplyComposerAXError {
@@ -804,6 +830,7 @@ struct MessagesReplyComposerAXAutomation {
         var clipboardOwnerCount: Int?
         var publishedURL: URL?
         var sendStarted = false
+        var ownershipPhase = ReplyAttachmentOwnershipFailure.Phase.beforePaste
         do {
             let copyURL = try validateReplyAttachmentDraftCopy(attachment, deadline: deadline)
             let layoutBefore = try pasteKeyResolver.resolvePasteKey(deadline: deadline)
@@ -837,6 +864,7 @@ struct MessagesReplyComposerAXAutomation {
                 throw MessagesReplyComposerAXError.replyAttachmentLayoutDrift
             }
             try sendPasteKey(route.process.identity.pid, layoutBefore.keyCode, deadline)
+            ownershipPhase = .afterPaste
             let afterPaste = try retainedOwnedComposer(route: route, original: composer, titles: titles,
                                                        replyDescription: replyDescription, allowRetainedMainTranscript: true, deadline: deadline)
             guard try afterPaste.transcript.actions(deadline: deadline).contains("AXCancel") else {
@@ -851,6 +879,7 @@ struct MessagesReplyComposerAXAutomation {
             try restoreClipboardIfOwned(clipboard: clipboard, original: originalClipboard, ownerCount: clipboardOwnerCount,
                                         url: publishedURL, deadline: deadline)
             activeClipboard = nil
+            ownershipPhase = .beforeReturn
             let beforeSend = try retainedOwnedComposer(route: route, original: composer, titles: titles,
                                                        replyDescription: replyDescription, allowRetainedMainTranscript: true,
                                                        deadline: deadline)
@@ -866,7 +895,9 @@ struct MessagesReplyComposerAXAutomation {
             }
             stage = .verification
             sendStarted = true
+            ownershipPhase = .returnStarted
             try sendReturnKey(pid_t(route.process.identity.pid), deadline)
+            ownershipPhase = .afterReturn
             return try verifyAfterSend(route: route, originalComposer: composer, titles: titles,
                                        replyDescription: replyDescription, originalDraft: originalDraft,
                                        normalPlaceholders: normalPlaceholders, allowRetainedMainTranscript: true, deadline: deadline)
@@ -883,6 +914,12 @@ struct MessagesReplyComposerAXAutomation {
                     try? restoreClipboardIfOwned(clipboard: activeClipboard, original: originalClipboard,
                                                  ownerCount: clipboardOwnerCount, url: publishedURL, deadline: deadline)
                 }
+            }
+            if let reason = error as? ReplyAttachmentOwnershipReason {
+                throw ReplyAttachmentOwnershipFailure(phase: ownershipPhase, reason: reason)
+            }
+            if let error = error as? MessagesReplyComposerAXError, error == .replyComposerOwnershipDrift {
+                throw ReplyAttachmentOwnershipFailure(phase: ownershipPhase, reason: .other)
             }
             throw error
         }
@@ -1129,26 +1166,32 @@ struct MessagesReplyComposerAXAutomation {
         let transcripts = try navigator.collect(from: window, window: window, deadline: deadline) { _, role, identifier in
             (role == "AXGroup" || role == "AXCollection") && identifier == "TranscriptCollectionView"
         }
-        guard (1...2).contains(transcripts.count),
-              transcripts.filter({ $0.sameIdentity(as: composer.transcript) }).count == 1 else {
-            throw MessagesReplyComposerAXError.replyComposerOwnershipDrift
+        guard (1...2).contains(transcripts.count) else {
+            throw ReplyAttachmentOwnershipReason.transcriptCount
+        }
+        guard transcripts.filter({ $0.sameIdentity(as: composer.transcript) }).count == 1 else {
+            throw ReplyAttachmentOwnershipReason.replyTranscript
         }
         for transcript in transcripts {
             guard try transcript.processIdentifier(deadline: deadline) == route.process.identity.pid else {
-                throw MessagesReplyComposerAXError.replyComposerOwnershipDrift
+                throw ReplyAttachmentOwnershipReason.transcriptProcess
             }
         }
         guard transcripts.count == 2 else { return }
         guard transcripts.filter({ $0.sameIdentity(as: route.transcript) }).count == 1 else {
-            throw MessagesReplyComposerAXError.replyComposerOwnershipDrift
+            throw ReplyAttachmentOwnershipReason.mainTranscript
         }
         let targets = try navigator.collect(from: route.transcript, window: window, deadline: deadline) { element, _, _ in
             element.sameIdentity(as: route.selected)
         }
-        guard targets.count == 1, let target = targets.first,
-              try target.processIdentifier(deadline: deadline) == route.process.identity.pid,
-              try replyAction(on: target, titles: titles, deadline: deadline) != nil else {
-            throw MessagesReplyComposerAXError.replyComposerOwnershipDrift
+        guard targets.count == 1, let target = targets.first else {
+            throw ReplyAttachmentOwnershipReason.mainTargetMissing
+        }
+        guard try target.processIdentifier(deadline: deadline) == route.process.identity.pid else {
+            throw ReplyAttachmentOwnershipReason.mainTargetProcess
+        }
+        guard try replyAction(on: target, titles: titles, deadline: deadline) != nil else {
+            throw ReplyAttachmentOwnershipReason.mainTargetActionMissing
         }
     }
 

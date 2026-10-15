@@ -335,6 +335,9 @@ struct AutomationWorkerTests {
 
         for diagnosticDetail in [
             "target-drift-initial-route",
+            "reply-attachment-ownership-after-paste-main-target-missing",
+            "reply-attachment-ownership-before-return-main-target-action-missing",
+            "reply-attachment-ownership-after-return-other",
             "target-drift-picker-readiness",
             "target-drift-pre-press",
             "target-drift-picker-readiness-window-mismatch",
@@ -448,6 +451,9 @@ struct AutomationWorkerTests {
         }
 
         for privateLookingDetail in ["unsafe detail", "555-0100", "Alice", "token_ABC123",
+                                     "reply-attachment-ownership-after-paste-main-target-missing-extra",
+                                     "reply-attachment-ownership-private-main-target-missing",
+                                     "reply-attachment-ownership-after-paste-Alice",
                                      "reaction-set-unknown-verified", "reaction-remove-changed",
                                      "target-drift-verify_route", "target-drift-private-stage",
                                      "target-drift-post-open-safety-private",

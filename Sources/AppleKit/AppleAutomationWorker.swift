@@ -253,8 +253,20 @@ package struct WorkerOperationResult: Equatable, Sendable {
     private static func safeDetail(_ value: String?) -> String? {
         guard let value, value.utf8.count <= 128 else { return nil }
         guard publicDetails.contains(value) || isSafeTargetDriftDetail(value) || isSafeVerificationDetail(value) ||
-            isSafeCustomChooserAXFailureDetail(value) || isSafeCustomChooserReactionUnavailableDetail(value) else { return nil }
+            isSafeCustomChooserAXFailureDetail(value) || isSafeCustomChooserReactionUnavailableDetail(value) ||
+            isSafeReplyAttachmentOwnershipDetail(value) else { return nil }
         return value
+    }
+
+    private static func isSafeReplyAttachmentOwnershipDetail(_ value: String) -> Bool {
+        let phases = ["before-paste", "after-paste", "before-return", "return-started", "after-return"]
+        let reasons: Set<String> = ["transcript-count", "reply-transcript", "transcript-process", "main-transcript",
+                                    "main-target-missing", "main-target-process", "main-target-action-missing", "other"]
+        for phase in phases {
+            let prefix = "reply-attachment-ownership-\(phase)-"
+            if value.hasPrefix(prefix) { return reasons.contains(String(value.dropFirst(prefix.count))) }
+        }
+        return false
     }
 
     private static func isSafeTargetDriftDetail(_ value: String) -> Bool {

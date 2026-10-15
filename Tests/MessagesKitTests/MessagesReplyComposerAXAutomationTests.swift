@@ -1486,7 +1486,14 @@ struct MessagesReplyComposerAXAutomationTests {
             default: driver.message.processIdentifierValue = 456
             }
         }
-        #expect(result.outcome == .refused("reply-composer-ownership-drift"))
+        let reason: String
+        switch kind {
+        case "replacement-main": reason = "main-transcript"
+        case "third-transcript": reason = "transcript-count"
+        case "foreign-target": reason = "main-target-process"
+        default: reason = "main-target-missing"
+        }
+        #expect(result.outcome == .refused("reply-attachment-ownership-after-paste-\(reason)"))
         #expect(result.sends == 0)
         #expect(result.driver.replyTranscript.performed.isEmpty)
     }
@@ -1496,6 +1503,45 @@ struct MessagesReplyComposerAXAutomationTests {
         let result = try simulateNativeAttachmentSend { driver in driver.replyBody.applyBodyText(text) }
         #expect(result.outcome == .refused("reply-attachment-draft-unverified"))
         #expect(result.sends == 0)
+    }
+
+    @Test(arguments: ["missing-target", "missing-action"])
+    func attachmentOwnershipDiagnosticDistinguishesLinkedMainTargetFailures(kind: String) throws {
+        let result = try simulateNativeAttachmentSend { driver in
+            driver.mainTranscript.parentNode = driver.window
+            driver.replyBody.staticLinked = [driver.mainTranscript]
+            if kind == "missing-target" { driver.mainTranscript.staticChildren = [] }
+            else { driver.message.actionNames = [] }
+        }
+        let reason = kind == "missing-target" ? "main-target-missing" : "main-target-action-missing"
+        #expect(result.outcome == .refused("reply-attachment-ownership-after-paste-\(reason)"))
+        #expect(result.pastes == 1)
+        #expect(result.sends == 0)
+        #expect(result.driver.replyTranscript.performed.isEmpty)
+        #expect(result.driver.replyBody.bodyText == "\u{fffc}\n")
+        #expect(result.clipboard.restoredSnapshots.map(\.items) == [result.clipboard.original.items])
+    }
+
+    @Test func attachmentOwnershipDiagnosticDistinguishesFinalValidation() throws {
+        let driver = FakeReplyDriver()
+        let (_, attachment) = try attachmentDraftPayload()
+        let clipboard = FakeMessagesClipboard()
+        let evidence = MessagesPasteKeyEvidence(inputSourceID: "source", layoutSHA256: "sha256:" + String(repeating: "a", count: 64), keyboardType: 40, keyCode: 9)
+        var sends = 0
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in },
+                                                            sendReturnKey: { _, _ in sends += 1 },
+                                                            clipboardFactory: { clipboard },
+                                                            pasteKeyResolver: FakePasteKeyResolver([evidence, evidence]),
+                                                            sendPasteKey: { _, _, _ in
+                                                                driver.mainTranscript.parentNode = driver.window
+                                                                driver.replyBody.staticLinked = [driver.mainTranscript]
+                                                                driver.replyBody.applyBodyText("\u{fffc}\n")
+                                                                driver.onAppFocusRead = { driver.message.actionNames = [] }
+                                                            })
+            .send(sendRequest(attachmentDraft: attachment), deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .refused("reply-attachment-ownership-before-return-main-target-action-missing"))
+        #expect(sends == 0)
+        #expect(driver.replyTranscript.performed.isEmpty)
     }
 
     @Test(arguments: ["main", "reply", "foreign-process", "foreign-window", "unknown-transcript", "two-attachments"])
@@ -1530,7 +1576,7 @@ struct MessagesReplyComposerAXAutomationTests {
         let result = try simulateNativeAttachmentSend { driver in
             driver.extraWindowChildren = [FakeReplyNode(roleValue: "AXSheet")]
         }
-        #expect(result.outcome == .refused("reply-composer-ownership-drift"))
+        #expect(result.outcome == .refused("reply-attachment-ownership-after-paste-other"))
         #expect(result.sends == 0)
         #expect(result.driver.replyTranscript.performed.isEmpty)
     }
