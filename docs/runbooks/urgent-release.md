@@ -664,7 +664,7 @@ jobs:
           (cd "$out" && shasum -a 256 "apple-v$NEW-macos-arm64.tar.gz" > "apple-v$NEW-macos-arm64.tar.gz.sha256")
           cat "$out/apple-v$NEW-macos-arm64.tar.gz.sha256"   # the operator matches this log line to the artifact
 
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7.0.1
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: urgent-release-${{ github.run_id }}-${{ github.run_attempt }}
           path: ${{ runner.temp }}/urgent-release-artifact/
