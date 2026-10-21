@@ -1016,6 +1016,14 @@ public struct ChatDB {
         }
     }
 
+    struct ExactReplyThreadRoot {
+        let message_rowid: Int64
+        let message_guid: String
+        let native_part: Int
+        let part_guid: String?
+        let is_from_me: Bool
+    }
+
     struct ExactReplyTarget {
         let chat_rowid: Int64
         let chat_guid: String?
@@ -1024,7 +1032,11 @@ public struct ChatDB {
         let native_part: Int
         let part_guid: String?
         let participant_handle: String
-        let root_is_from_me: Bool
+        let is_from_me: Bool
+        let thread_root: ExactReplyThreadRoot
+        let thread_originator: ExactThreadOriginator
+
+        var root_is_from_me: Bool { thread_root.is_from_me }
     }
 
     struct ExactReplyRow {
@@ -1394,7 +1406,8 @@ public struct ChatDB {
 
     mutating func exactReplyTarget(chat selector: ExactChatSelector,
                                            message messageSelector: ExactMessageSelector,
-                                           partIndex: Int? = nil) throws -> ExactReplyTarget {
+                                           partIndex: Int? = nil,
+                                           allowingNested: Bool = false) throws -> ExactReplyTarget {
         let (chat, message) = try exactGet(chat: selector, message: messageSelector)
         guard message.selected_chat_rowid == chat.rowid else {
             throw AppleError.validation("reply target message is not in the selected conversation")
@@ -1404,11 +1417,55 @@ public struct ChatDB {
         guard participants.count == 1 else {
             throw AppleError.validation("reply target direct conversation must have exactly one participant")
         }
-        guard message.thread_originator.available, message.thread_originator.reason == "no-linkage" else {
+        let isRoot = message.thread_originator.reason == "no-linkage"
+        // Production callers remain root-only until worker relationship binding is implemented.
+        guard allowingNested || (message.thread_originator.available && isRoot) else {
             throw AppleError.validation("reply target must be a root message")
+        }
+        guard message.thread_originator.available else {
+            throw AppleError.validation("reply target thread relationship is unavailable")
         }
         let nativePart = try resolveExactReplyPart(message, requested: partIndex)
         let partGUID = message.native_parts?.first(where: { $0.index == nativePart })?.attachment_guid
+        let root: ExactReplyThreadRoot
+        if isRoot {
+            root = ExactReplyThreadRoot(message_rowid: message.rowid, message_guid: strictTarget.messageGUID,
+                                       native_part: nativePart, part_guid: partGUID, is_from_me: strictTarget.isFromMe)
+        } else {
+            guard message.native_parts?.count == 1,
+                  message.thread_originator.reason == "available",
+                  let rootGUID = message.thread_originator.message_guid,
+                  let rootPart = message.thread_originator.native_part,
+                  !rootGUID.utf8.elementsEqual(strictTarget.messageGUID.utf8) else {
+                throw AppleError.validation("nested reply target relationship is unsupported")
+            }
+            guard try exactReplyGUIDRowid(strictTarget.messageGUID) == message.rowid else {
+                throw AppleError.validation("nested reply target identity is ambiguous")
+            }
+            try validateNestedReplyMembership(chatRowid: chat.rowid, messageRowid: message.rowid,
+                                              requiringUnlinkedRoot: false)
+            let rootRowid = try exactReplyGUIDRowid(rootGUID)
+            guard rootRowid != message.rowid else {
+                throw AppleError.validation("nested reply target cannot reference itself")
+            }
+            // Resolve exactly one ancestor, never recurse or search by message text.
+            let (_, rootMessage) = try exactGet(chat: .rowid(chat.rowid), message: .rowid(rootRowid))
+            let strictRoot = try exactReplyTargetEvidence(chatRowid: chat.rowid, messageRowid: rootRowid)
+            try validateNestedReplyMembership(chatRowid: chat.rowid, messageRowid: rootRowid,
+                                              requiringUnlinkedRoot: true)
+            guard strictRoot.messageGUID.utf8.elementsEqual(rootGUID.utf8),
+                  strictRoot.chatGUID.utf8.elementsEqual(strictTarget.chatGUID.utf8),
+                  rootMessage.thread_originator.available,
+                  rootMessage.thread_originator.reason == "no-linkage",
+                  rootMessage.native_parts_available, rootMessage.native_parts?.count == 1 else {
+                throw AppleError.validation("nested reply target requires a unique single-part thread root")
+            }
+            let resolvedRootPart = try resolveExactReplyPart(rootMessage, requested: rootPart)
+            root = ExactReplyThreadRoot(message_rowid: rootRowid, message_guid: strictRoot.messageGUID,
+                                       native_part: resolvedRootPart,
+                                       part_guid: rootMessage.native_parts?.first(where: { $0.index == resolvedRootPart })?.attachment_guid,
+                                       is_from_me: strictRoot.isFromMe)
+        }
         return ExactReplyTarget(chat_rowid: chat.rowid,
                                 chat_guid: strictTarget.chatGUID,
                                 message_rowid: message.rowid,
@@ -1416,7 +1473,44 @@ public struct ChatDB {
                                 native_part: nativePart,
                                 part_guid: partGUID,
                                 participant_handle: participants[0],
-                                root_is_from_me: strictTarget.isFromMe)
+                                is_from_me: strictTarget.isFromMe,
+                                thread_root: root,
+                                thread_originator: message.thread_originator)
+    }
+
+    private func exactReplyGUIDRowid(_ guid: String) throws -> Int64 {
+        let rows = try reader.rows("SELECT ROWID AS rowid, guid FROM message WHERE guid = ?1 LIMIT 2", [guid])
+        guard rows.count == 1,
+              case .integer(let rowid)? = rows[0].values["rowid"], rowid > 0,
+              case .text(let storedGUID)? = rows[0].values["guid"],
+              storedGUID.utf8.elementsEqual(guid.utf8) else {
+            throw AppleError.validation("nested reply message GUID must identify one exact message")
+        }
+        return rowid
+    }
+
+    private func validateNestedReplyMembership(chatRowid: Int64, messageRowid: Int64,
+                                              requiringUnlinkedRoot: Bool) throws {
+        // Inspect every membership, including joins whose stored IDs SQLite coerces.
+        let rows = try reader.rows("""
+            SELECT cmj.chat_id AS join_chat_id, cmj.message_id AS join_message_id,
+                   m.thread_originator_guid, m.thread_originator_part
+            FROM chat_message_join cmj
+            JOIN message m ON m.ROWID = cmj.message_id
+            WHERE m.ROWID = CAST(?1 AS INTEGER)
+            LIMIT 2
+            """, [String(messageRowid)])
+        guard rows.count == 1,
+              case .integer(let joinedChat)? = rows[0].values["join_chat_id"], joinedChat == chatRowid,
+              case .integer(let joinedMessage)? = rows[0].values["join_message_id"], joinedMessage == messageRowid else {
+            throw AppleError.validation("nested reply message must belong to exactly one conversation")
+        }
+        if requiringUnlinkedRoot {
+            guard case .null? = rows[0].values["thread_originator_guid"],
+                  case .null? = rows[0].values["thread_originator_part"] else {
+                throw AppleError.validation("nested reply thread root must have absent native linkage")
+            }
+        }
     }
 
     func exactReplyHighwater(chatRowid: Int64) throws -> Int64 {

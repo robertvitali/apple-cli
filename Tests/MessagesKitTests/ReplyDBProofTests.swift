@@ -26,6 +26,140 @@ struct ReplyDBProofTests {
         #expect(target.part_guid == nil)
         #expect(target.participant_handle == "+12125550100")
         #expect(target.root_is_from_me == false)
+        #expect(target.is_from_me == false)
+        #expect(target.thread_root.message_rowid == target.message_rowid)
+        #expect(target.thread_root.message_guid == target.message_guid)
+        #expect(target.thread_root.native_part == target.native_part)
+        #expect(target.thread_originator.reason == "no-linkage")
+    }
+
+    @Test(arguments: ["2", "2:0", "2:4", "2:opaque:suffix"])
+    func nestedCandidateRetainsSelectedIdentitySeparateFromRoot(rawPart: String) throws {
+        let fx = try replyFixture()
+        try fx.setThreadOriginator(rowid: 61, guidSQL: "'reply-root'", partSQL: sqlString(rawPart))
+        try fx.exec("UPDATE message SET is_from_me = 1 WHERE ROWID = 61;")
+        var db = try makeDB(fx)
+        // No production caller opts in during this preparatory unit.
+        #expect(throws: (any Error).self) {
+            _ = try db.exactReplyTarget(chat: .rowid(3), message: .rowid(61), partIndex: 2)
+        }
+        let target = try db.exactReplyTarget(chat: .rowid(3), message: .rowid(61), allowingNested: true)
+        #expect(target.message_rowid == 61)
+        #expect(target.message_guid == "nested-root")
+        #expect(target.native_part == 2)
+        #expect(target.is_from_me)
+        #expect(!target.root_is_from_me)
+        #expect(target.thread_root.message_rowid == 60)
+        #expect(target.thread_root.message_guid == "reply-root")
+        #expect(target.thread_root.native_part == 2)
+        #expect(target.thread_originator.raw_part == rawPart)
+    }
+
+    @Test(arguments: ["0", "0:0", "0:4"])
+    func nestedCandidateSupportsNativePartZero(rawPart: String) throws {
+        let fx = try replyFixture()
+        let body = "apple-cli-test root"
+        let archive = nativeReplyArchive(body, [(replyNativePartKey, NSNumber(value: 0), nativeReplyRange(body, "root"))])
+        try fx.insertMessage(rowid: 80, guid: "zero-root", attributedBody: archive, chatRowid: 3, date: fx.base)
+        try fx.setThreadOriginator(rowid: 61, guidSQL: "'zero-root'", partSQL: sqlString(rawPart))
+        var db = try makeDB(fx)
+        let target = try db.exactReplyTarget(chat: .rowid(3), message: .rowid(61), allowingNested: true)
+        #expect(!target.is_from_me)
+        #expect(target.thread_root.message_rowid == 80)
+        #expect(target.thread_root.native_part == 0)
+        #expect(target.thread_originator.raw_part == rawPart)
+    }
+
+    @Test(arguments: ["NULL", "''", "'02'", "'-2'", "'٢'", "'2/2:0'", "':2'",
+                      "'18446744073709551615'", "'99999999999999999999999999999'", "X'32'"])
+    func nestedCandidateRejectsInvalidOrPartialNativeMarker(partSQL: String) throws {
+        let fx = try replyFixture()
+        try fx.setThreadOriginator(rowid: 61, guidSQL: "'reply-root'", partSQL: partSQL)
+        var db = try makeDB(fx)
+        #expect(throws: (any Error).self) {
+            _ = try db.exactReplyTarget(chat: .rowid(3), message: .rowid(61), allowingNested: true)
+        }
+    }
+
+    @Test(arguments: [
+        "UPDATE message SET thread_originator_guid = NULL WHERE ROWID = 61;",
+        "UPDATE message SET thread_originator_guid = X'7265706c792d726f6f74' WHERE ROWID = 61;",
+        "UPDATE message SET thread_originator_guid = 'absent' WHERE ROWID = 61;",
+        "UPDATE message SET thread_originator_guid = 'nested-root' WHERE ROWID = 61;",
+        "UPDATE message SET thread_originator_guid = 'group-root' WHERE ROWID = 61;",
+        "UPDATE message SET thread_originator_part = '3' WHERE ROWID = 61;",
+        "UPDATE message SET thread_originator_guid = 'multi-root', thread_originator_part = '4' WHERE ROWID = 61;",
+        "UPDATE message SET thread_originator_guid = 'nested-root', thread_originator_part = '2' WHERE ROWID = 60;",
+        "UPDATE message SET thread_originator_guid = 'another-root', thread_originator_part = '2' WHERE ROWID = 60;",
+        "UPDATE message SET thread_originator_guid = 'partial' WHERE ROWID = 60;",
+        "UPDATE message SET guid = 'reply-root' WHERE ROWID = 62;",
+        "UPDATE message SET guid = 'nested-root' WHERE ROWID = 70;",
+        "UPDATE message SET is_from_me = 2 WHERE ROWID = 60;",
+        "UPDATE message SET is_from_me = X'31' WHERE ROWID = 61;",
+        "UPDATE message SET attributedBody = X'000102' WHERE ROWID = 60;",
+        "UPDATE message SET attributedBody = (SELECT attributedBody FROM message WHERE ROWID = 62) WHERE ROWID = 61;",
+        "INSERT INTO chat_message_join VALUES (3,60);",
+        "INSERT INTO chat_message_join VALUES (3,61);",
+        "INSERT INTO chat_message_join VALUES (1,60);",
+        "INSERT INTO chat_message_join VALUES (1,61);",
+        "INSERT INTO chat_message_join VALUES (1,'60');",
+        "INSERT INTO chat_message_join VALUES (1,'61');",
+        "UPDATE message SET thread_originator_guid = '' WHERE ROWID = 60;",
+        "UPDATE message SET thread_originator_part = '' WHERE ROWID = 60;",
+        "UPDATE message SET thread_originator_guid = '', thread_originator_part = '' WHERE ROWID = 60;",
+        "UPDATE chat_message_join SET chat_id = 1 WHERE message_id = 60;",
+        "ALTER TABLE message DROP COLUMN thread_originator_guid;",
+    ])
+    func nestedCandidateRejectsInvalidRootGraphAndStorage(mutation: String) throws {
+        let fx = try replyFixture()
+        try fx.setThreadOriginator(rowid: 61, guidSQL: "'reply-root'", partSQL: "'2'")
+        try fx.exec(mutation)
+        var db = try makeDB(fx)
+        #expect(throws: (any Error).self) {
+            _ = try db.exactReplyTarget(chat: .rowid(3), message: .rowid(61), partIndex: 2, allowingNested: true)
+        }
+    }
+
+    @Test(arguments: ["60", "61"], [false, true])
+    func nestedCandidateRejectsMalformedJoinStorage(rowid: String, additionalConversation: Bool) throws {
+        let fx = try replyFixture()
+        try fx.setThreadOriginator(rowid: 61, guidSQL: "'reply-root'", partSQL: "'2'")
+        try weakenChatMessageJoinAffinity(fx)
+        if additionalConversation {
+            try fx.exec("INSERT INTO chat_message_join VALUES (1,'\(rowid)');")
+        } else {
+            try fx.exec("UPDATE chat_message_join SET message_id = '\(rowid)' WHERE message_id = \(rowid);")
+        }
+        var db = try makeDB(fx)
+        #expect(throws: (any Error).self) {
+            _ = try db.exactReplyTarget(chat: .rowid(3), message: .rowid(61), allowingNested: true)
+        }
+    }
+
+    @Test func nestedCandidateRejectsCompleteTwoHopChain() throws {
+        let fx = try replyFixture()
+        try fx.setThreadOriginator(rowid: 61, guidSQL: "'reply-root'", partSQL: "'2'")
+        try fx.setThreadOriginator(rowid: 60, guidSQL: "'multi-root'", partSQL: "'4'")
+        var db = try makeDB(fx)
+        #expect(throws: (any Error).self) {
+            _ = try db.exactReplyTarget(chat: .rowid(3), message: .rowid(61), allowingNested: true)
+        }
+    }
+
+    @Test(arguments: ["nested-root", "reply-root"])
+    func nestedCandidateDoesNotRelaxSelectedParentCorrespondence(observedParent: String) throws {
+        let fx = try replyFixture()
+        try fx.setThreadOriginator(rowid: 61, guidSQL: "'reply-root'", partSQL: "'2:0'")
+        var db = try makeDB(fx)
+        let target = try db.exactReplyTarget(chat: .rowid(3), message: .rowid(61), allowingNested: true)
+        let highwater = try db.exactReplyHighwater(chatRowid: 3)
+        try insertReplyResult(fx, rowid: highwater + 1, guid: "nested-result", text: "sent", chatRowid: 3,
+                              parentGUID: observedParent, parentPart: "2", isFromMe: 1)
+        db = try makeDB(fx)
+        let proof = try ChatDB.judgeExactReplyCorrespondence(
+            scan: db.exactReplyRows(chatRowid: 3, afterHighwater: highwater), target: target, expectedText: "sent")
+        #expect(proof.status == (observedParent == "nested-root" ? "verified" : "uncertain"))
+        #expect(proof.reason == (observedParent == "nested-root" ? nil : "matching-row-wrong-parent"))
     }
 
     @Test func replyTargetRejectsGroupMultiParticipantNestedAndAmbiguousPart() throws {
@@ -265,7 +399,11 @@ struct ReplyDBProofTests {
     @Test func replyProofRejectsMatchingRowsWithMissingGuidOrWrongChat() throws {
         let target = ChatDB.ExactReplyTarget(chat_rowid: 3, chat_guid: "chat-guid", message_rowid: 60,
                                             message_guid: "reply-root", native_part: 2, part_guid: nil,
-                                            participant_handle: "+12125550100", root_is_from_me: false)
+                                            participant_handle: "+12125550100", is_from_me: false,
+                                            thread_root: .init(message_rowid: 60, message_guid: "reply-root", native_part: 2,
+                                                               part_guid: nil, is_from_me: false),
+                                            thread_originator: .init(available: true, reason: "no-linkage",
+                                                                     message_guid: nil, raw_part: nil, native_part: nil))
         let originator = ChatDB.ExactThreadOriginator(available: true, reason: "available",
                                                       message_guid: "reply-root", raw_part: "2", native_part: 2)
         let missingGUID = ChatDB.ExactReplyRow(rowid: 61, message_guid: nil, messageGUIDMalformed: false,
