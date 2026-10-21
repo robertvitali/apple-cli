@@ -231,7 +231,20 @@ private struct MessagesReplyComposerStagedAXFailure: Error {
 
 private struct MessagesReplyComposerStagedTargetDrift: Error {
     let stage: MessagesReplyComposerAXStage
-    var detail: String { stage.targetDriftDetail }
+    let reason: MessagesAXRouteDriftReason?
+
+    init(stage: MessagesReplyComposerAXStage, reason: MessagesAXRouteDriftReason? = nil) {
+        self.stage = stage
+        self.reason = reason
+    }
+
+    var detail: String {
+        if stage == .composerReadiness, let reason,
+           reason == .relationshipCountChanged || reason == .windowMismatch {
+            return "\(stage.targetDriftDetail)-\(reason.rawValue)"
+        }
+        return stage.targetDriftDetail
+    }
 }
 
 struct MessagesReplyComposerAXAutomation {
@@ -517,8 +530,10 @@ struct MessagesReplyComposerAXAutomation {
             throw MessagesReplyComposerStagedAXFailure(stage: stage)
         } catch MessagesReplyComposerAXError.targetDrift {
             throw MessagesReplyComposerStagedTargetDrift(stage: stage)
-        } catch _ as MessagesAXRouteDrift {
-            throw MessagesReplyComposerStagedTargetDrift(stage: stage)
+        } catch let error as MessagesAXRouteDrift {
+            // Retain only allowlisted, value-free readiness detail for the
+            // no-send probe. Public send and attachment inspection stay unchanged.
+            throw MessagesReplyComposerStagedTargetDrift(stage: stage, reason: error.reason)
         }
     }
 

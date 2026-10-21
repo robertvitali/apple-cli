@@ -1036,6 +1036,79 @@ struct MessagesReplyComposerAXAutomationTests {
         #expect(outcome == .failed("ax-failure-composer-readiness"))
     }
 
+    @Test(arguments: ["window-mismatch", "relationship-count-changed"])
+    func replyInspectPreservesReadinessDriftReason(reason: String) throws {
+        let driver = FakeReplyDriver()
+        var sends = 0
+        var pastes = 0
+        var writes = 0
+        driver.replyBody.onSetValue = { _ in writes += 1 }
+        driver.message.onAction = { [weak driver] _ in
+            guard let driver else { return }
+            driver.replyVisible = true
+            if reason == "window-mismatch" {
+                driver.replyTranscript.windowOverride = FakeReplyNode(roleValue: "AXWindow")
+            } else {
+                driver.replyTranscript.onChildrenRead = {
+                    throw MessagesAXRouteDrift(.relationshipCountChanged)
+                }
+            }
+        }
+        let outcome = try MessagesReplyComposerAXAutomation(
+            driver: driver, readinessPause: { _ in },
+            sendReturnKey: { _, _ in sends += 1 },
+            sendPasteKey: { _, _, _ in pastes += 1 }
+        ).inspect(request(), deadline: .millisecondsFromNow(5_000))
+        let detail = "target-drift-composer-readiness-\(reason)"
+        #expect(outcome == .refused(detail))
+        #expect(WorkerOperationResult(.refused, detail: detail).detail == detail)
+        #expect(WorkerOperationResult(.refused, detail: detail + "-untrusted").detail == nil)
+        #expect(driver.message.performed.count == 1)
+        #expect(driver.replyTranscript.performed.isEmpty)
+        #expect(sends == 0 && pastes == 0 && writes == 0)
+    }
+
+    @Test(arguments: ["process", "unrecognized-route-reason"])
+    func replyInspectKeepsUnclassifiedReadinessDriftGeneric(kind: String) throws {
+        let driver = FakeReplyDriver()
+        driver.message.onAction = { [weak driver] _ in
+            guard let driver else { return }
+            driver.replyVisible = true
+            if kind == "process" {
+                driver.identity = MessagesAXProcessIdentity(
+                    pid: 456, bundleURL: driver.identity.bundleURL,
+                    launchDate: driver.identity.launchDate
+                )
+            } else {
+                driver.replyTranscript.onChildrenRead = {
+                    throw MessagesAXRouteDrift(.missingTranscript)
+                }
+            }
+        }
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in })
+            .inspect(request(), deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .refused("target-drift-composer-readiness"))
+        #expect(driver.message.performed.count == 1)
+        #expect(driver.replyTranscript.performed.isEmpty)
+    }
+
+    @Test(arguments: [MessagesAXRouteDriftReason.windowMismatch, .relationshipCountChanged])
+    func replySendKeepsExistingReadinessDriftDetail(reason: MessagesAXRouteDriftReason) throws {
+        let driver = FakeReplyDriver()
+        var sends = 0
+        driver.message.onAction = { [weak driver] _ in
+            driver?.replyVisible = true
+            driver?.replyTranscript.onChildrenRead = { throw MessagesAXRouteDrift(reason) }
+        }
+        let outcome = try MessagesReplyComposerAXAutomation(
+            driver: driver, readinessPause: { _ in }, sendReturnKey: { _, _ in sends += 1 }
+        ).send(sendRequest(), deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .refused("target-drift-composer-readiness"))
+        #expect(driver.message.performed.count == 1)
+        #expect(driver.replyTranscript.performed.isEmpty)
+        #expect(sends == 0)
+    }
+
     @Test func replyInspectReportsCleanupAXFailureStage() throws {
         let driver = FakeReplyDriver()
         driver.replyTranscript.onAction = { _ in throw MessagesAXNavigationError.axFailure }
