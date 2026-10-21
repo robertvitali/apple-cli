@@ -4,6 +4,11 @@ import AppleKit
 struct MessagesAXNavigator {
     typealias TargetEligibility = (any MessagesAXElement, WorkerDeadline) throws -> Bool
 
+    enum TraversalPolicy {
+        case childrenAndLinks
+        case childrenOnly
+    }
+
     let driver: any MessagesAXProcessDriving
     let maxTraversalNodes: Int
     let maxTraversalDepth: Int
@@ -141,8 +146,7 @@ struct MessagesAXNavigator {
     }
 
     func uniqueRootWindow(process: MessagesAXProcess, deadline: WorkerDeadline) throws -> any MessagesAXElement {
-        try checkProcess(process, deadline: deadline)
-        let windows = try process.root.directWindows(limit: maxChildren, deadline: deadline)
+        let windows = try conversationWindows(process: process, deadline: deadline)
         guard windows.count == 1, let window = windows.first else {
             throw MessagesAXRouteDrift(.windowMismatch)
         }
@@ -152,6 +156,80 @@ struct MessagesAXNavigator {
         }
         try checkProcess(process, deadline: deadline)
         return window
+    }
+
+    // Window sharing adds a non-conversation AXDialog beside SceneWindow.
+    // Recognize only its observed, inert structure; other dialogs and unknown
+    // attributes remain ambiguous. Never act on the sharing control itself.
+    func conversationWindows(process: MessagesAXProcess, deadline: WorkerDeadline) throws -> [any MessagesAXElement] {
+        try checkProcess(process, deadline: deadline)
+        let windows = try process.root.directWindows(limit: maxChildren, deadline: deadline)
+        guard windows.count > 1 else { return windows }
+        let first = try sharingWindowSnapshot(windows, process: process, deadline: deadline)
+        let current = try process.root.directWindows(limit: maxChildren, deadline: deadline)
+        let second = try sharingWindowSnapshot(current, process: process, deadline: deadline)
+        guard first.scene.sameIdentity(as: second.scene),
+              first.overlay.sameIdentity(as: second.overlay),
+              first.button.sameIdentity(as: second.button),
+              first.relationships == second.relationships else {
+            throw MessagesAXRouteDrift(.windowMismatch)
+        }
+        try checkProcess(process, deadline: deadline)
+        return [first.scene]
+    }
+
+    private func sharingWindowSnapshot(_ windows: [any MessagesAXElement], process: MessagesAXProcess,
+                                       deadline: WorkerDeadline) throws -> (scene: any MessagesAXElement,
+                                                                          overlay: any MessagesAXElement,
+                                                                          button: any MessagesAXElement,
+                                                                          relationships: [MessagesAXRelationshipCount]) {
+        guard windows.count == 2, !windows[0].sameIdentity(as: windows[1]) else {
+            throw MessagesAXRouteDrift(.windowMismatch)
+        }
+        for window in windows {
+            guard try window.role(deadline: deadline) == "AXWindow",
+                  try window.processIdentifier(deadline: deadline) == process.identity.pid,
+                  let parent = try window.parent(deadline: deadline), parent.sameIdentity(as: process.root) else {
+                throw MessagesAXRouteDrift(.windowMismatch)
+            }
+        }
+        let sceneIndex: Int
+        if try windows[0].identifier(deadline: deadline) == "SceneWindow" { sceneIndex = 0 }
+        else { sceneIndex = 1 }
+        let scene = windows[sceneIndex]
+        let overlay = windows[1 - sceneIndex]
+        guard try scene.identifier(deadline: deadline) == "SceneWindow",
+              try scene.subrole(deadline: deadline) == "AXStandardWindow",
+              try overlay.identifier(deadline: deadline) != "SceneWindow",
+              try overlay.subrole(deadline: deadline) == "AXDialog",
+              try overlay.mainWindow(deadline: deadline) == false,
+              try overlay.focused(deadline: deadline) == false else {
+            throw MessagesAXRouteDrift(.windowMismatch)
+        }
+        let children = try overlay.children(limit: maxChildren, deadline: deadline)
+        guard children.count == 1, let button = children.first,
+              try button.role(deadline: deadline) == "AXButton",
+              try button.axTitle(deadline: deadline) == "WindowSharingSessionButton",
+              try button.processIdentifier(deadline: deadline) == process.identity.pid,
+              let parent = try button.parent(deadline: deadline), parent.sameIdentity(as: overlay),
+              try button.window(deadline: deadline) == nil else {
+            throw MessagesAXRouteDrift(.windowMismatch)
+        }
+        let overlayLinks = try overlay.relationshipCount(.linkedElements, limit: maxChildren, deadline: deadline)
+        let buttonChildren = try button.relationshipCount(.children, limit: maxChildren, deadline: deadline)
+        let buttonLinks = try button.relationshipCount(.linkedElements, limit: maxChildren, deadline: deadline)
+        // The system sharing affordance reports unsupported links and no-value
+        // leaf children on current macOS. These explicit states are part of the
+        // recognized shape, not claims that an array was successfully read.
+        // Require the same states in both complete snapshots; reject other
+        // absence states, positive counts, errors and every unknown adapter.
+        guard (overlayLinks == .unsupported || overlayLinks == .available(0)),
+              (buttonChildren == .noValue || buttonChildren == .available(0)),
+              (buttonLinks == .unsupported || buttonLinks == .available(0)) else {
+            throw MessagesAXRouteDrift(.windowMismatch)
+        }
+        try checkMessagesAXDeadline(deadline)
+        return (scene, overlay, button, [overlayLinks, buttonChildren, buttonLinks])
     }
 
     func checkProcess(_ expected: MessagesAXProcess, deadline: WorkerDeadline) throws {
@@ -192,6 +270,7 @@ struct MessagesAXNavigator {
     }
 
     func collect(from root: any MessagesAXElement, window: (any MessagesAXElement)? = nil,
+                 traversalPolicy: TraversalPolicy = .childrenAndLinks,
                  deadline: WorkerDeadline,
                  matching predicate: (any MessagesAXElement, String, String?) throws -> Bool) throws -> [any MessagesAXElement] {
         guard maxTraversalNodes > 0, maxTraversalDepth >= 0, maxChildren >= 0 else {
@@ -223,11 +302,15 @@ struct MessagesAXNavigator {
             let children = try next.children(limit: maxChildren, deadline: deadline)
             try checkMessagesAXDeadline(deadline)
             guard children.count <= maxChildren else { throw MessagesAXNavigationError.traversalLimit }
-            let remaining = maxChildren - children.count
-            let linked = try next.linkedElements(limit: remaining, deadline: deadline)
-            try checkMessagesAXDeadline(deadline)
-            guard linked.count <= remaining else { throw MessagesAXNavigationError.traversalLimit }
-            for candidate in children + linked {
+            var relationships = children
+            if traversalPolicy == .childrenAndLinks {
+                let remaining = maxChildren - children.count
+                let linked = try next.linkedElements(limit: remaining, deadline: deadline)
+                try checkMessagesAXDeadline(deadline)
+                guard linked.count <= remaining else { throw MessagesAXNavigationError.traversalLimit }
+                relationships += linked
+            }
+            for candidate in relationships {
                 let known = try discovered.contains { entry in
                     try checkMessagesAXDeadline(deadline)
                     return entry.element.sameIdentity(as: candidate)

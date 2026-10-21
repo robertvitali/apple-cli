@@ -261,6 +261,7 @@ package struct WorkerOperationResult: Equatable, Sendable {
     private static func isSafeReplyAttachmentOwnershipDetail(_ value: String) -> Bool {
         let phases = ["before-paste", "after-paste", "before-return", "return-started", "after-return"]
         let reasons: Set<String> = ["transcript-count", "reply-transcript", "transcript-process", "main-transcript",
+                                    "child-transcript-drift", "body-main-link-missing",
                                     "main-target-missing", "main-target-process", "main-target-action-missing", "other"]
         for phase in phases {
             let prefix = "reply-attachment-ownership-\(phase)-"

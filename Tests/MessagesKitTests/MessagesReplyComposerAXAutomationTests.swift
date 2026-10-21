@@ -889,6 +889,51 @@ struct MessagesReplyComposerAXAutomationTests {
         }
     }
 
+    @Test(arguments: ["clean", "draft", "attachment", "modal", "unknown-overlay", "not-frontmost"])
+    func sharingAffordancePreservesComposerSafety(state: String) throws {
+        let driver = FakeReplyDriver()
+        driver.window.identifierValue = "SceneWindow"
+        driver.window.subroleValue = "AXStandardWindow"
+        let overlay = FakeReplyNode(roleValue: "AXWindow", focusedValue: false)
+        overlay.subroleValue = "AXDialog"
+        overlay.mainValue = false
+        let button = FakeReplyNode(roleValue: "AXButton")
+        button.titleValue = "WindowSharingSessionButton"
+        button.windowUnavailable = true
+        overlay.staticChildren = [button]
+        driver.root.dynamicChildren = { [weak driver] in driver.map { [$0.window, overlay] } ?? [] }
+        switch state {
+        case "draft": driver.normalBody.applyBodyText("apple-cli-test existing draft")
+        case "attachment": driver.normalBody.staticChildren = [FakeReplyNode(roleValue: "AXImage")]
+        case "modal": driver.extraWindowChildren = [FakeReplyNode(roleValue: "AXSheet")]
+        case "unknown-overlay": button.titleValue = "Continue"
+        case "not-frontmost": driver.frontmostResults = [false]
+        default: break
+        }
+        var returnPresses = 0
+        let automation = MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in }, sendReturnKey: { _, _ in
+            returnPresses += 1
+        })
+        let outcome = try state == "not-frontmost"
+            ? automation.send(sendRequest(), deadline: .millisecondsFromNow(5_000))
+            : automation.inspect(request(), deadline: .millisecondsFromNow(5_000))
+        if state == "clean" {
+            #expect(outcome == .ack(MessagesReplyComposerProbeDetail.verified))
+            #expect(driver.message.performed.count == 1)
+        } else {
+            #expect(outcome != .ack(MessagesReplyComposerProbeDetail.verified))
+            if state == "not-frontmost" {
+                #expect(outcome == .refused("reply-composer-ownership-drift"))
+                #expect(driver.replyTranscript.performed == ["AXCancel"])
+            } else {
+                #expect(driver.message.performed.isEmpty)
+            }
+        }
+        #expect(returnPresses == 0)
+        #expect(overlay.performed.isEmpty)
+        #expect(button.performed.isEmpty)
+    }
+
     @Test func postCancelNormalComposerAttachmentDriftIsRefused() throws {
         let driver = FakeReplyDriver()
         driver.replyTranscript.onAction = { [weak driver] name in
@@ -1449,6 +1494,8 @@ struct MessagesReplyComposerAXAutomationTests {
                                                             allowedAttachmentDraftMarkers: ["\u{fffc}"],
                                                             sendPasteKey: { _, _, _ in
                                                                 pastePresses += 1
+                                                                driver.mainTranscript.parentNode = driver.window
+                                                                driver.replyBody.staticLinked = [driver.mainTranscript]
                                                                 let node = FakeReplyNode(roleValue: "AXImage", identifierValue: "attachment")
                                                                 driver.replyBody.staticChildren = [node]
                                                                 driver.replyBody.applyBodyText("\u{fffc}")
@@ -1471,13 +1518,16 @@ struct MessagesReplyComposerAXAutomationTests {
         #expect(result.clipboard.restoredSnapshots.map(\.items) == [result.clipboard.original.items])
     }
 
-    @Test(arguments: ["replacement-main", "third-transcript", "missing-target", "replaced-target", "foreign-target"])
+    @Test(arguments: ["replacement-main", "third-transcript", "missing-target", "replaced-target", "foreign-target", "missing-action"])
     func sendAttachmentRefusesUnownedTranscriptStructure(kind: String) throws {
         let result = try simulateNativeAttachmentSend { driver in
             driver.extraWindowChildren = [driver.mainTranscript]
+            driver.replyBody.staticLinked = [driver.mainTranscript]
             switch kind {
+            case "missing-action": driver.message.actionNames = []
             case "replacement-main":
                 driver.extraWindowChildren = [FakeReplyNode(roleValue: "AXGroup", identifierValue: "TranscriptCollectionView", descriptionValue: "Messages")]
+                driver.replyBody.staticLinked = driver.extraWindowChildren
             case "third-transcript":
                 driver.extraWindowChildren.append(FakeReplyNode(roleValue: "AXGroup", identifierValue: "TranscriptCollectionView"))
             case "missing-target": driver.mainTranscript.staticChildren = []
@@ -1491,6 +1541,7 @@ struct MessagesReplyComposerAXAutomationTests {
         case "replacement-main": reason = "main-transcript"
         case "third-transcript": reason = "transcript-count"
         case "foreign-target": reason = "main-target-process"
+        case "missing-action": reason = "main-target-action-missing"
         default: reason = "main-target-missing"
         }
         #expect(result.outcome == .refused("reply-attachment-ownership-after-paste-\(reason)"))
@@ -1505,21 +1556,282 @@ struct MessagesReplyComposerAXAutomationTests {
         #expect(result.sends == 0)
     }
 
-    @Test(arguments: ["missing-target", "missing-action"])
-    func attachmentOwnershipDiagnosticDistinguishesLinkedMainTargetFailures(kind: String) throws {
+    @Test(arguments: [false, true])
+    func attachmentRetainedAncestryAcceptsAbsentBodyLink(mainInGraph: Bool) throws {
         let result = try simulateNativeAttachmentSend { driver in
             driver.mainTranscript.parentNode = driver.window
-            driver.replyBody.staticLinked = [driver.mainTranscript]
-            if kind == "missing-target" { driver.mainTranscript.staticChildren = [] }
-            else { driver.message.actionNames = [] }
+            driver.mainTranscript.staticChildren = []
+            driver.replyTranscript.staticLinked = mainInGraph ? [driver.mainTranscript] : []
+            driver.replyBody.staticLinked = []
         }
-        let reason = kind == "missing-target" ? "main-target-missing" : "main-target-action-missing"
-        #expect(result.outcome == .refused("reply-attachment-ownership-after-paste-\(reason)"))
+        #expect(result.outcome == .ack(MessagesReplySendACKDetail.alreadyRestoredVerified))
+        #expect(result.pastes == 1)
+        #expect(result.sends == 1)
+        #expect(result.clipboard.restoredSnapshots.map(\.items) == [result.clipboard.original.items])
+    }
+
+    @Test func attachmentAbsentLinkDoesNotRetryOrRepeatPaste() throws {
+        var pauses = 0
+        let result = try simulateNativeAttachmentSend(readinessPause: { _, _ in pauses += 1 }) { driver in
+            driver.mainTranscript.staticChildren = []
+            driver.replyTranscript.staticLinked = [driver.mainTranscript]
+            driver.replyBody.staticLinked = []
+        }
+        #expect(result.outcome == .ack(MessagesReplySendACKDetail.alreadyRestoredVerified))
+        #expect(pauses == 0)
+        #expect(result.pastes == 1)
+        #expect(result.sends == 1)
+    }
+
+    @Test(arguments: [MessagesAXRelationshipCount.unsupported, .noValue, .available(1)])
+    func attachmentRequiresKnownEmptyRelationship(count: MessagesAXRelationshipCount) throws {
+        let result = try simulateNativeAttachmentSend { driver in
+            driver.mainTranscript.staticChildren = []
+            driver.replyTranscript.staticLinked = [driver.mainTranscript]
+            driver.replyBody.staticLinked = []
+            driver.replyBody.linkedCountOverride = count
+        }
+        #expect(result.outcome == .refused("reply-attachment-ownership-after-paste-body-main-link-missing"))
+        #expect(result.pastes == 1)
+        #expect(result.sends == 0)
+        #expect(result.clipboard.restoredSnapshots.map(\.items) == [result.clipboard.original.items])
+    }
+
+    @Test(arguments: ["body-parent", "reply-parent", "cycle", "depth", "foreign-parent", "foreign-window", "duplicate-child"], [false, true])
+    func attachmentRefusesAncestryDrift(kind: String, beforeReturn: Bool) throws {
+        let result = try simulateNativeAttachmentSend(mutateBeforeReturn: beforeReturn ? { driver in
+            changeAttachmentAncestry(driver, kind: kind)
+        } : nil) { driver in
+            if !beforeReturn { changeAttachmentAncestry(driver, kind: kind) }
+        }
+        guard case .refused = result.outcome else { Issue.record("Changed ancestry must refuse"); return }
         #expect(result.pastes == 1)
         #expect(result.sends == 0)
         #expect(result.driver.replyTranscript.performed.isEmpty)
         #expect(result.driver.replyBody.bodyText == "\u{fffc}\n")
         #expect(result.clipboard.restoredSnapshots.map(\.items) == [result.clipboard.original.items])
+    }
+
+    @Test(arguments: ["cycle", "depth", "foreign-parent", "foreign-window", "duplicate-child"])
+    func attachmentRejectsInvalidInitialAncestryBeforeClipboardMutation(kind: String) throws {
+        let result = try simulateNativeAttachmentSend(configure: { driver, _ in
+            driver.message.onAction = { _ in
+                driver.replyVisible = true
+                changeAttachmentAncestry(driver, kind: kind)
+            }
+        }) { _ in }
+        guard case .refused = result.outcome else { Issue.record("Invalid initial ancestry must refuse"); return }
+        #expect(result.pastes == 0)
+        #expect(result.sends == 0)
+        #expect(result.clipboard.current == result.clipboard.original)
+        #expect(result.clipboard.restoredSnapshots.isEmpty)
+    }
+
+    @Test(arguments: ["process", "window", "focus", "modal", "text", "foreign-link", "extra-link", "ax-error"], [false, true])
+    func attachmentRefusesObservedDrift(kind: String, beforeReturn: Bool) throws {
+        let change: (FakeReplyDriver) -> Void = { driver in
+            switch kind {
+            case "process":
+                driver.identity = MessagesAXProcessIdentity(pid: 456, bundleURL: driver.identity.bundleURL,
+                                                            launchDate: driver.identity.launchDate)
+            case "window": driver.root.dynamicChildren = { [FakeReplyNode(roleValue: "AXWindow")] }
+            case "focus": driver.appFocusedOverride = driver.normalBody
+            case "modal": driver.extraWindowChildren = [FakeReplyNode(roleValue: "AXSheet")]
+            case "text": driver.replyBody.applyBodyText("replacement draft")
+            case "foreign-link":
+                let foreign = FakeReplyNode(roleValue: "AXGroup")
+                foreign.parentNode = driver.window
+                driver.replyBody.staticLinked = [foreign]
+            case "extra-link": driver.replyBody.staticLinked = [driver.mainTranscript, driver.replyTranscript]
+            default: driver.replyBody.onChildrenRead = { throw MessagesAXNavigationError.unknownAXValue }
+            }
+        }
+        let result = try simulateNativeAttachmentSend(mutateBeforeReturn: beforeReturn ? change : nil) { driver in
+            if !beforeReturn { change(driver) }
+        }
+        guard case .refused = result.outcome else { Issue.record("Changed ownership must refuse"); return }
+        #expect(result.pastes == 1)
+        #expect(result.sends == 0)
+        #expect(result.driver.replyTranscript.performed.isEmpty)
+        #expect(result.driver.replyBody.bodyText == (kind == "text" ? "replacement draft" : "\u{fffc}\n"))
+    }
+
+    @Test func attachmentFinalFocusReadFollowsAllGraphTraversal() throws {
+        var finalFocusRead = false
+        let result = try simulateNativeAttachmentSend(configure: { driver, clipboard in
+            clipboard.onRestore = {
+                driver.onAppFocusRead = {
+                    finalFocusRead = true
+                    driver.window.onChildrenRead = {
+                        Issue.record("Graph traversal after the final focus read")
+                        throw MessagesAXNavigationError.unknownAXValue
+                    }
+                }
+            }
+        }, mutateAfterReturn: { driver in
+            driver.window.onChildrenRead = nil
+            driver.onAppFocusRead = nil
+        }) { _ in }
+        #expect(result.outcome == .ack(MessagesReplySendACKDetail.alreadyRestoredVerified))
+        #expect(finalFocusRead)
+        #expect(result.sends == 1)
+    }
+
+    @Test(arguments: ["missing-target", "missing-action", "moved-target"])
+    func sendAttachmentAcceptsLinkedOnlyMainWithoutHistoricalTargetProof(kind: String) throws {
+        let result = try simulateNativeAttachmentSend { driver in
+            driver.mainTranscript.parentNode = driver.window
+            driver.replyBody.staticLinked = [driver.mainTranscript]
+            if kind == "missing-action" { driver.message.actionNames = [] }
+            else {
+                driver.mainTranscript.staticChildren = []
+                if kind == "moved-target" { driver.replyTranscript.staticChildren = [driver.message] }
+            }
+        }
+        #expect(result.outcome == .ack(MessagesReplySendACKDetail.alreadyRestoredVerified))
+        #expect(result.pastes == 1)
+        #expect(result.sends == 1)
+        #expect(result.driver.replyTranscript.performed.isEmpty)
+        #expect(result.driver.replyBody.bodyText == "\u{fffc}\n")
+        #expect(result.clipboard.restoredSnapshots.map(\.items) == [result.clipboard.original.items])
+    }
+
+    @Test(arguments: ["replacement-main", "linked-third", "linked-reply", "contradictory-child-scan"])
+    func sendAttachmentRefusesUnprovenLinkedOnlyTopology(kind: String) throws {
+        let result = try simulateNativeAttachmentSend { driver in
+            driver.mainTranscript.parentNode = driver.window
+            driver.mainTranscript.staticChildren = []
+            driver.replyBody.staticLinked = [driver.mainTranscript]
+            switch kind {
+            case "replacement-main":
+                let replacement = FakeReplyNode(roleValue: "AXGroup", identifierValue: "TranscriptCollectionView", descriptionValue: "Messages")
+                replacement.parentNode = driver.window
+                driver.replyBody.staticLinked = [replacement]
+            case "linked-third":
+                let third = FakeReplyNode(roleValue: "AXGroup", identifierValue: "TranscriptCollectionView")
+                third.parentNode = driver.window
+                driver.mainTranscript.staticLinked = [third]
+            case "linked-reply":
+                driver.replyTranscript.parentNode = driver.window
+                driver.replyWindowChildrenOverride = { [driver.replyBody] }
+                driver.window.staticLinked = [driver.replyTranscript]
+            default:
+                // The first two scans discover the composer and body. Change the
+                // child tree during the following full-graph ownership scan.
+                var mainReads = 0
+                driver.mainTranscript.onChildrenRead = {
+                    mainReads += 1
+                    if mainReads == 3 {
+                        driver.extraWindowChildren = [FakeReplyNode(roleValue: "AXGroup", identifierValue: "TranscriptCollectionView")]
+                    }
+                }
+            }
+        }
+        let reason: String
+        switch kind {
+        case "linked-third": reason = "transcript-count"
+        case "linked-reply": reason = "other"
+        case "contradictory-child-scan": reason = "child-transcript-drift"
+        default: reason = "main-transcript"
+        }
+        #expect(result.outcome == .refused("reply-attachment-ownership-after-paste-\(reason)"))
+        #expect(result.sends == 0)
+        #expect(result.driver.replyTranscript.performed.isEmpty)
+        #expect(result.driver.replyBody.bodyText == "\u{fffc}\n")
+    }
+
+    @Test(arguments: ["reply", "body"], [false, true])
+    func sendAttachmentRefusesCapturedIdentityReplacement(kind: String, beforeReturn: Bool) throws {
+        let result = try simulateNativeAttachmentSend { driver in
+            driver.mainTranscript.parentNode = driver.window
+            driver.mainTranscript.staticChildren = []
+            driver.replyBody.staticLinked = [driver.mainTranscript]
+            let replace = {
+                if kind == "reply" {
+                    driver.replyTranscriptOverride = FakeReplyNode(roleValue: "AXGroup", identifierValue: "TranscriptCollectionView",
+                                                                   descriptionValue: "Reply transcript", actionNames: ["AXCancel"])
+                } else {
+                    let body = FakeReplyNode(roleValue: "AXTextField", identifierValue: "messageBodyField",
+                                             enabledValue: true, focusedValue: true, settableValue: true)
+                    body.bodyEvidence = driver.replyBody.bodyEvidence
+                    body.bodyText = driver.replyBody.bodyText
+                    body.staticLinked = [driver.mainTranscript]
+                    driver.replyBodyOverride = body
+                }
+            }
+            if beforeReturn { driver.onAppFocusRead = replace }
+            else { replace() }
+        }
+        let phase = beforeReturn ? "before-return" : "after-paste"
+        #expect(result.outcome == .refused("reply-attachment-ownership-\(phase)-other"))
+        #expect(result.sends == 0)
+        #expect(result.driver.replyTranscript.performed.isEmpty)
+        #expect(result.driver.replyTranscriptOverride?.performed.isEmpty ?? true)
+        #expect(result.driver.replyBody.bodyText == "\u{fffc}\n")
+    }
+
+    @Test(arguments: ["retained-main", "linked-third"])
+    func sendAttachmentRechecksTopologyBeforeReturn(kind: String) throws {
+        let result = try simulateNativeAttachmentSend { driver in
+            driver.mainTranscript.parentNode = driver.window
+            driver.mainTranscript.staticChildren = []
+            driver.replyBody.staticLinked = [driver.mainTranscript]
+            driver.onAppFocusRead = {
+                switch kind {
+                case "retained-main": driver.extraWindowChildren = [driver.mainTranscript]
+                default:
+                    let third = FakeReplyNode(roleValue: "AXGroup", identifierValue: "TranscriptCollectionView")
+                    third.parentNode = driver.window
+                    driver.mainTranscript.staticLinked = [third]
+                }
+            }
+        }
+        let reason = kind == "retained-main" ? "main-target-missing" : "transcript-count"
+        #expect(result.outcome == .refused("reply-attachment-ownership-before-return-\(reason)"))
+        #expect(result.sends == 0)
+        #expect(result.driver.replyTranscript.performed.isEmpty)
+        #expect(result.driver.replyBody.bodyText == "\u{fffc}\n")
+    }
+
+    @Test func sendAttachmentClosesLinkedOnlyMainRetainedEmptyReply() throws {
+        let result = try simulateNativeAttachmentSend(retainEmptyAfterSend: true) { driver in
+            driver.mainTranscript.parentNode = driver.window
+            driver.mainTranscript.staticChildren = []
+            driver.replyBody.staticLinked = [driver.mainTranscript]
+        }
+        #expect(result.outcome == .ack(MessagesReplySendACKDetail.retainedEmptyCancelledVerified))
+        #expect(result.sends == 1)
+        #expect(result.driver.replyTranscript.performed == ["AXCancel"])
+        #expect(!result.driver.replyVisible)
+    }
+
+    @Test(arguments: ["nonempty", "replaced-reply", "replaced-body"])
+    func sendAttachmentProtectsLinkedOnlyComposerAfterReturn(kind: String) throws {
+        let result = try simulateNativeAttachmentSend(retainEmptyAfterSend: true, mutateAfterReturn: { driver in
+            switch kind {
+            case "nonempty": driver.replyBody.applyBodyText("apple-cli-test changed")
+            case "replaced-reply":
+                driver.replyTranscriptOverride = FakeReplyNode(roleValue: "AXGroup", identifierValue: "TranscriptCollectionView",
+                                                               descriptionValue: "Reply transcript", actionNames: ["AXCancel"])
+            default:
+                let body = FakeReplyNode(roleValue: "AXTextField", identifierValue: "messageBodyField",
+                                         enabledValue: true, focusedValue: true, settableValue: true)
+                body.bodyEvidence = driver.replyBody.bodyEvidence
+                body.staticLinked = [driver.mainTranscript]
+                driver.replyBodyOverride = body
+            }
+        }) { driver in
+            driver.mainTranscript.parentNode = driver.window
+            driver.mainTranscript.staticChildren = []
+            driver.replyBody.staticLinked = [driver.mainTranscript]
+        }
+        let reason = kind == "nonempty" ? "reply-composer-possible-draft-remains" : "reply-composer-cleanup-failed"
+        #expect(result.outcome == .refused(reason))
+        #expect(result.sends == 1)
+        #expect(result.driver.replyTranscript.performed.isEmpty)
+        #expect(result.driver.replyTranscriptOverride?.performed.isEmpty ?? true)
+        #expect(result.driver.replyVisible)
+        if kind == "nonempty" { #expect(result.driver.replyBody.bodyText == "apple-cli-test changed") }
     }
 
     @Test func attachmentOwnershipDiagnosticDistinguishesFinalValidation() throws {
@@ -1533,7 +1845,7 @@ struct MessagesReplyComposerAXAutomationTests {
                                                             clipboardFactory: { clipboard },
                                                             pasteKeyResolver: FakePasteKeyResolver([evidence, evidence]),
                                                             sendPasteKey: { _, _, _ in
-                                                                driver.mainTranscript.parentNode = driver.window
+                                                                driver.extraWindowChildren = [driver.mainTranscript]
                                                                 driver.replyBody.staticLinked = [driver.mainTranscript]
                                                                 driver.replyBody.applyBodyText("\u{fffc}\n")
                                                                 driver.onAppFocusRead = { driver.message.actionNames = [] }
@@ -1566,8 +1878,8 @@ struct MessagesReplyComposerAXAutomationTests {
                 driver.replyBody.staticLinked = [link]
             }
         }
-        #expect(result.sends == (["main", "reply"].contains(kind) ? 1 : 0))
-        if ["main", "reply"].contains(kind) {
+        #expect(result.sends == (kind == "main" ? 1 : 0))
+        if kind == "main" {
             #expect(result.outcome == .ack(MessagesReplySendACKDetail.alreadyRestoredVerified))
         }
     }
@@ -1679,17 +1991,25 @@ struct MessagesReplyComposerAXAutomationTests {
     }
 
     private func simulateNativeAttachmentSend(retainEmptyAfterSend: Bool = false,
+                                              configure: ((FakeReplyDriver, FakeMessagesClipboard) -> Void)? = nil,
+                                              mutateBeforeReturn: ((FakeReplyDriver) -> Void)? = nil,
+                                              readinessNow: @escaping () -> UInt64 = { DispatchTime.now().uptimeNanoseconds },
+                                              readinessPause: ((FakeReplyDriver, UInt64) -> Void)? = nil,
+                                              mutateAfterReturn: ((FakeReplyDriver) -> Void)? = nil,
                                               mutateAfterPaste: (FakeReplyDriver) -> Void) throws ->
         (outcome: MessagesReplyComposerAXOutcome, pastes: Int, sends: Int, driver: FakeReplyDriver, clipboard: FakeMessagesClipboard) {
         let driver = FakeReplyDriver()
         let (_, attachment) = try attachmentDraftPayload()
         let request = try sendRequest(attachmentDraft: attachment)
         let clipboard = FakeMessagesClipboard()
+        clipboard.onRestore = { mutateBeforeReturn?(driver) }
+        configure?(driver, clipboard)
         let evidence = MessagesPasteKeyEvidence(inputSourceID: "source", layoutSHA256: "sha256:" + String(repeating: "a", count: 64), keyboardType: 40, keyCode: 9)
         var pastes = 0
         var sends = 0
         let outcome = try withoutActuallyEscaping(mutateAfterPaste) { mutate in
-            try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in },
+            try MessagesReplyComposerAXAutomation(driver: driver, readinessNow: readinessNow,
+                                                   readinessPause: { readinessPause?(driver, $0) },
                                                    sendReturnKey: { _, _ in
                                                        sends += 1
                                                        if retainEmptyAfterSend {
@@ -1698,12 +2018,15 @@ struct MessagesReplyComposerAXAutomationTests {
                                                            driver.replyVisible = false
                                                            driver.extraWindowChildren = []
                                                        }
+                                                       mutateAfterReturn?(driver)
                                                    },
                                                    clipboardFactory: { clipboard },
                                                    pasteKeyResolver: FakePasteKeyResolver([evidence, evidence]),
                                                    sendPasteKey: { _, _, _ in
                                                        pastes += 1
                                                        driver.replyBody.applyBodyText("\u{fffc}\n")
+                                                       driver.mainTranscript.parentNode = driver.window
+                                                       driver.replyBody.staticLinked = [driver.mainTranscript]
                                                        mutate(driver)
                                                    })
                 .send(request, deadline: .millisecondsFromNow(5_000))
@@ -2315,6 +2638,37 @@ private func replyRange(_ text: String, _ needle: String) -> NSRange {
     return range
 }
 
+private func changeAttachmentAncestry(_ driver: FakeReplyDriver, kind: String) {
+    let target = kind == "reply-parent" ? driver.replyTranscript : driver.replyBody
+    if kind == "duplicate-child" {
+        driver.replyWindowChildrenOverride = { [driver.replyTranscript, driver.replyBody, driver.replyBody] }
+        return
+    }
+    let container = FakeReplyNode(roleValue: "AXGroup", staticChildren: [target])
+    container.parentNode = driver.window
+    target.windowOverride = driver.window
+    if kind == "foreign-window" { target.windowOverride = FakeReplyNode(roleValue: "AXWindow") }
+    if kind == "foreign-parent" { container.processIdentifierValue = 456 }
+    if kind == "cycle" {
+        target.parentOverride = { target }
+        target.staticChildren = [target]
+        return
+    }
+    var outer = container
+    if kind == "depth" {
+        for _ in 0..<16 {
+            let parent = FakeReplyNode(roleValue: "AXGroup", staticChildren: [outer])
+            outer.parentNode = parent
+            outer = parent
+        }
+    }
+    let rootContainer = outer
+    rootContainer.parentNode = driver.window
+    driver.replyWindowChildrenOverride = {
+        kind == "reply-parent" ? [rootContainer, driver.replyBody] : [driver.replyTranscript, rootContainer]
+    }
+}
+
 private final class FakeReplyDriver: MessagesReplyComposerAXDriving {
     let root = FakeReplyNode(roleValue: "AXApplication")
     let window = FakeReplyNode(roleValue: "AXWindow")
@@ -2403,7 +2757,13 @@ private final class FakeReplyDriver: MessagesReplyComposerAXDriving {
 
 private final class FakeReplyNode: MessagesAXElement {
     let roleValue: String
-    let identifierValue: String?
+    var identifierValue: String?
+    var subroleValue: String?
+    var titleValue: String?
+    var mainValue: Bool?
+    var windowUnavailable = false
+    var windowOverride: FakeReplyNode?
+    var parentOverride: (() -> FakeReplyNode?)?
     let descriptionValue: String?
     var selectedValue: Bool?
     var selectedValues: [Bool?] = []
@@ -2420,6 +2780,7 @@ private final class FakeReplyNode: MessagesAXElement {
     var onChildrenRead: (() throws -> Void)?
     var staticLinked: [FakeReplyNode] = []
     var onLinkedElementsRead: (() -> Void)?
+    var linkedCountOverride: MessagesAXRelationshipCount?
     var onActionsRead: (() -> Void)?
     var onBodyEvidenceRead: (() -> Void)?
     var onControlRead: (() -> Void)?
@@ -2448,7 +2809,7 @@ private final class FakeReplyNode: MessagesAXElement {
     func axDescription(deadline: WorkerDeadline) throws -> String? { descriptionValue }
     func axValue(deadline: WorkerDeadline) throws -> String? { nil }
     func candidateValueText(deadline: WorkerDeadline) throws -> String? { nil }
-    func axTitle(deadline: WorkerDeadline) throws -> String? { nil }
+    func axTitle(deadline: WorkerDeadline) throws -> String? { titleValue }
     var stringAttributes: [String: String] = [:]
     var fileURLAttributes: [String: URL] = [:]
     func stringAttribute(named name: String, deadline: WorkerDeadline) throws -> String? { stringAttributes[name] }
@@ -2459,7 +2820,8 @@ private final class FakeReplyNode: MessagesAXElement {
         guard let url = URL(string: value), url.isFileURL else { throw MessagesAXNavigationError.unknownAXValue }
         return url.standardizedFileURL
     }
-    func subrole(deadline: WorkerDeadline) throws -> String? { nil }
+    func subrole(deadline: WorkerDeadline) throws -> String? { subroleValue }
+    func mainWindow(deadline: WorkerDeadline) throws -> Bool? { mainValue }
     func enabled(deadline: WorkerDeadline) throws -> Bool? {
         onControlRead?()
         return enabledValue
@@ -2468,9 +2830,9 @@ private final class FakeReplyNode: MessagesAXElement {
         if !selectedValues.isEmpty { return selectedValues.removeFirst() }
         return selectedValue
     }
-    func window(deadline: WorkerDeadline) throws -> (any MessagesAXElement)? { rootWindow() }
+    func window(deadline: WorkerDeadline) throws -> (any MessagesAXElement)? { windowUnavailable ? nil : (windowOverride ?? rootWindow()) }
     func directWindows(limit: Int, deadline: WorkerDeadline) throws -> [any MessagesAXElement] { try children(limit: limit, deadline: deadline) }
-    func parent(deadline: WorkerDeadline) throws -> (any MessagesAXElement)? { parentNode }
+    func parent(deadline: WorkerDeadline) throws -> (any MessagesAXElement)? { parentOverride?() ?? parentNode }
     func processIdentifier(deadline: WorkerDeadline) throws -> Int32? { processIdentifierValue }
     func valueSettable(deadline: WorkerDeadline) throws -> Bool? {
         onControlRead?()
@@ -2486,6 +2848,13 @@ private final class FakeReplyNode: MessagesAXElement {
         for node in nodes { node.parentNode = self }
         guard nodes.count <= limit else { throw MessagesAXNavigationError.traversalLimit }
         return nodes
+    }
+    func relationshipCount(_ attribute: MessagesAXRelationshipAttribute, limit: Int,
+                           deadline: WorkerDeadline) throws -> MessagesAXRelationshipCount {
+        switch attribute {
+        case .children: return .available(try children(limit: limit, deadline: deadline).count)
+        case .linkedElements: return try linkedCountOverride ?? .available(linkedElements(limit: limit, deadline: deadline).count)
+        }
     }
     func childrenInNavigationOrder(limit: Int, deadline: WorkerDeadline) throws -> [any MessagesAXElement]? { nil }
     func linkedElements(limit: Int, deadline: WorkerDeadline) throws -> [any MessagesAXElement] {
@@ -2521,7 +2890,9 @@ private final class FakeReplyNode: MessagesAXElement {
 
     private func rootWindow() -> FakeReplyNode? {
         var node: FakeReplyNode? = self
+        var visited: Set<ObjectIdentifier> = []
         while let current = node {
+            guard visited.insert(ObjectIdentifier(current)).inserted else { return nil }
             if current.roleValue == "AXWindow" { return current }
             node = current.parentNode
         }
@@ -2547,6 +2918,7 @@ private final class FakeMessagesClipboard: MessagesClipboarding, MessagesClipboa
     var externalChangeCountAfterWrite = false
     var readCount = 0
     var onPublish: (() -> Void)?
+    var onRestore: (() -> Void)?
 
     init() { current = original }
 
@@ -2593,6 +2965,7 @@ private final class FakeMessagesClipboard: MessagesClipboarding, MessagesClipboa
         restoredSnapshots.append(MessagesClipboardSnapshot(changeCount: current.changeCount, items: items))
         let restored = mutateAfterWrite ? [[MessagesClipboardRepresentation(type: "public.utf8-plain-text", data: Data("drift".utf8))]] : items
         current = MessagesClipboardSnapshot(changeCount: current.changeCount + (externalChangeCountAfterWrite ? 1 : 0), items: restored)
+        onRestore?()
         return writeSucceeds
     }
 }

@@ -62,6 +62,8 @@ private enum ReplyAttachmentOwnershipReason: String, Error {
     case replyTranscript = "reply-transcript"
     case transcriptProcess = "transcript-process"
     case mainTranscript = "main-transcript"
+    case childTranscriptDrift = "child-transcript-drift"
+    case bodyMainLinkMissing = "body-main-link-missing"
     case mainTargetMissing = "main-target-missing"
     case mainTargetProcess = "main-target-process"
     case mainTargetActionMissing = "main-target-action-missing"
@@ -832,6 +834,10 @@ struct MessagesReplyComposerAXAutomation {
         var sendStarted = false
         var ownershipPhase = ReplyAttachmentOwnershipFailure.Phase.beforePaste
         do {
+            let emptyComposer = try revalidateOwnedComposer(route: route, original: composer, titles: titles,
+                                                            replyDescription: replyDescription, deadline: deadline)
+            let ownership = try captureAttachmentComposerOwnership(route: route, composer: emptyComposer,
+                                                                    titles: titles, deadline: deadline)
             let copyURL = try validateReplyAttachmentDraftCopy(attachment, deadline: deadline)
             let layoutBefore = try pasteKeyResolver.resolvePasteKey(deadline: deadline)
             let clipboard = clipboardFactory()
@@ -857,6 +863,8 @@ struct MessagesReplyComposerAXAutomation {
                   try hasNoLocalModalEvidence(in: route.window, window: route.window, deadline: deadline) else {
                 throw MessagesReplyComposerAXError.replyComposerAttachmentEvidence
             }
+            try validateAttachmentComposerOwnership(ownership, in: route.window, route: route,
+                                                     composer: finalComposer, titles: titles, deadline: deadline)
             try validateAppRootFocus(route: route, composer: finalComposer, deadline: deadline)
             guard let ownerCount = clipboardOwnerCount else { throw MessagesReplyComposerAXError.replyAttachmentClipboardDrift }
             try clipboard.verifyOwnedPayload(ownerCount: ownerCount, url: copyURL, deadline: deadline)
@@ -866,7 +874,8 @@ struct MessagesReplyComposerAXAutomation {
             try sendPasteKey(route.process.identity.pid, layoutBefore.keyCode, deadline)
             ownershipPhase = .afterPaste
             let afterPaste = try retainedOwnedComposer(route: route, original: composer, titles: titles,
-                                                       replyDescription: replyDescription, allowRetainedMainTranscript: true, deadline: deadline)
+                                                       replyDescription: replyDescription, attachmentOwnership: ownership,
+                                                       deadline: deadline)
             guard try afterPaste.transcript.actions(deadline: deadline).contains("AXCancel") else {
                 throw MessagesReplyComposerAXError.replyComposerCleanupUnavailable
             }
@@ -880,27 +889,17 @@ struct MessagesReplyComposerAXAutomation {
                                         url: publishedURL, deadline: deadline)
             activeClipboard = nil
             ownershipPhase = .beforeReturn
-            let beforeSend = try retainedOwnedComposer(route: route, original: composer, titles: titles,
-                                                       replyDescription: replyDescription, allowRetainedMainTranscript: true,
-                                                       deadline: deadline)
-            _ = try validateReplyAttachmentDraftCopy(attachment, deadline: deadline)
-            guard try hasNoLocalModalEvidence(in: route.window, window: route.window, deadline: deadline) else {
-                throw MessagesReplyComposerAXError.replyComposerOwnershipDrift
-            }
-            try validateAppRootFocus(route: route, composer: beforeSend, deadline: deadline)
-            try validateAttachmentDraftReadyForSend(in: beforeSend, route: route, deadline: deadline)
-            let finalSnapshot = try beforeSend.body.bodyTextSnapshot(deadline: deadline)
-            guard allowedAttachmentDraftMarkers.contains(where: { $0.utf8.elementsEqual(finalSnapshot.text.utf8) }) else {
-                throw MessagesReplyComposerAXError.replyAttachmentDraftUnverified
-            }
+            try validateAttachmentBeforeReturn(attachment, ownership: ownership, route: route, composer: composer,
+                                               titles: titles, replyDescription: replyDescription, deadline: deadline)
             stage = .verification
             sendStarted = true
             ownershipPhase = .returnStarted
+            try checkMessagesAXDeadline(deadline)
             try sendReturnKey(pid_t(route.process.identity.pid), deadline)
             ownershipPhase = .afterReturn
             return try verifyAfterSend(route: route, originalComposer: composer, titles: titles,
                                        replyDescription: replyDescription, originalDraft: originalDraft,
-                                       normalPlaceholders: normalPlaceholders, allowRetainedMainTranscript: true, deadline: deadline)
+                                       normalPlaceholders: normalPlaceholders, attachmentOwnership: ownership, deadline: deadline)
         } catch {
             if !sendStarted {
                 var cleanupCancelStarted = false
@@ -976,7 +975,12 @@ struct MessagesReplyComposerAXAutomation {
     }
 
     private func refuseUnsafeExistingState(process: MessagesAXProcess, normalPlaceholders: [String], replyDescription: String?, deadline: WorkerDeadline) throws {
-        let windows = try process.root.directWindows(limit: maxChildren, deadline: deadline)
+        let windows: [any MessagesAXElement]
+        do {
+            windows = try navigator.conversationWindows(process: process, deadline: deadline)
+        } catch is MessagesAXRouteDrift {
+            throw MessagesReplyComposerAXError.replyComposerAmbiguous
+        }
         guard windows.count <= 1 else { throw MessagesReplyComposerAXError.replyComposerAmbiguous }
         for window in windows {
             guard try window.role(deadline: deadline) == "AXWindow" else { throw MessagesReplyComposerAXError.replyComposerAmbiguous }
@@ -1146,29 +1150,108 @@ struct MessagesReplyComposerAXAutomation {
     }
 
     private func currentOwnedComposerAllowingText(route: MessagesAXRoute, titles: [String], replyDescription: String?,
-                                                  allowRetainedMainTranscript: Bool = false, deadline: WorkerDeadline) throws -> ComposerSurface? {
+                                                  attachmentOwnership: AttachmentComposerOwnership? = nil, deadline: WorkerDeadline) throws -> ComposerSurface? {
         let window = try retainedWindow(route: route, deadline: deadline)
         guard let composer = try replyComposer(in: window, replyDescription: replyDescription, deadline: deadline) else { return nil }
         guard !composer.transcript.sameIdentity(as: route.transcript) else {
             throw MessagesReplyComposerAXError.replyComposerOwnershipDrift
         }
-        if allowRetainedMainTranscript {
-            try validateAttachmentReplyTranscripts(in: window, route: route, composer: composer,
-                                                  titles: titles, deadline: deadline)
+        if let attachmentOwnership {
+            try validateAttachmentComposerOwnership(attachmentOwnership, in: window, route: route, composer: composer,
+                                                     titles: titles, deadline: deadline)
         } else if try restoredMainTranscriptIsPresent(in: window, route: route, deadline: deadline) {
             throw MessagesReplyComposerAXError.replyComposerOwnershipDrift
         }
         return composer
     }
 
+    private enum AttachmentMainVisibility {
+        case child, graphOnly, absent
+    }
+
+    // Captured only from the exact, newly opened, empty attachment reply.
+    // Parent chains are observed ownership evidence, not an atomic UI lock.
+    private struct AttachmentComposerOwnership {
+        let bodyChain: [any MessagesAXElement]
+        let replyChain: [any MessagesAXElement]
+        let mainTranscript: any MessagesAXElement
+        let initialMainVisibility: AttachmentMainVisibility
+    }
+
+    private func attachmentParentChain(from element: any MessagesAXElement, route: MessagesAXRoute,
+                                       deadline: WorkerDeadline) throws -> [any MessagesAXElement] {
+        var chain: [any MessagesAXElement] = []
+        var next = element
+        for _ in 0..<16 {
+            try checkMessagesAXDeadline(deadline)
+            guard !chain.contains(where: { $0.sameIdentity(as: next) }),
+                  try next.processIdentifier(deadline: deadline) == route.process.identity.pid else {
+                throw MessagesReplyComposerAXError.replyComposerOwnershipDrift
+            }
+            chain.append(next)
+            if next.sameIdentity(as: route.window) { return chain }
+            guard let window = try next.window(deadline: deadline), window.sameIdentity(as: route.window),
+                  let parent = try next.parent(deadline: deadline) else {
+                throw MessagesReplyComposerAXError.replyComposerOwnershipDrift
+            }
+            let children = try parent.children(limit: maxChildren, deadline: deadline)
+            guard children.count <= maxChildren,
+                  children.filter({ $0.sameIdentity(as: next) }).count == 1 else {
+                throw MessagesReplyComposerAXError.replyComposerOwnershipDrift
+            }
+            next = parent
+        }
+        throw MessagesReplyComposerAXError.replyComposerOwnershipDrift
+    }
+
+    private func sameChain(_ lhs: [any MessagesAXElement], _ rhs: [any MessagesAXElement]) -> Bool {
+        lhs.count == rhs.count && zip(lhs, rhs).allSatisfy { $0.sameIdentity(as: $1) }
+    }
+
+    private func captureAttachmentComposerOwnership(route: MessagesAXRoute, composer: ComposerSurface,
+                                                    titles: [String], deadline: WorkerDeadline) throws -> AttachmentComposerOwnership {
+        try validateOwnedComposer(composer, deadline: deadline)
+        let bodyChain = try attachmentParentChain(from: composer.body, route: route, deadline: deadline)
+        let replyChain = try attachmentParentChain(from: composer.transcript, route: route, deadline: deadline)
+        let visibility = try validateAttachmentReplyTranscripts(in: route.window, route: route, composer: composer,
+                                                               titles: titles, deadline: deadline)
+        let ownership = AttachmentComposerOwnership(bodyChain: bodyChain, replyChain: replyChain,
+                                                     mainTranscript: route.transcript, initialMainVisibility: visibility)
+        try validateAttachmentParentChains(ownership, route: route, composer: composer, deadline: deadline)
+        // Capture may span several AX reads; require the composer still be empty.
+        guard try composer.body.bodyTextSnapshot(deadline: deadline).provenEmpty else {
+            throw MessagesReplyComposerAXError.replyComposerNotEmpty
+        }
+        return ownership
+    }
+
+    private func validateAttachmentParentChains(_ ownership: AttachmentComposerOwnership, route: MessagesAXRoute,
+                                                composer: ComposerSurface, deadline: WorkerDeadline) throws {
+        guard ownership.mainTranscript.sameIdentity(as: route.transcript),
+              sameChain(ownership.bodyChain, try attachmentParentChain(from: composer.body, route: route, deadline: deadline)),
+              sameChain(ownership.replyChain, try attachmentParentChain(from: composer.transcript, route: route, deadline: deadline)) else {
+            throw MessagesReplyComposerAXError.replyComposerOwnershipDrift
+        }
+    }
+
+    private func validateAttachmentComposerOwnership(_ ownership: AttachmentComposerOwnership, in window: any MessagesAXElement,
+                                                     route: MessagesAXRoute, composer: ComposerSurface, titles: [String],
+                                                     deadline: WorkerDeadline) throws {
+        try validateAttachmentParentChains(ownership, route: route, composer: composer, deadline: deadline)
+        // Native Messages may change among all three visibility modes after paste.
+        // Every mode uses the same retained ancestry and current topology guards.
+        _ = try validateAttachmentReplyTranscripts(in: window, route: route, composer: composer,
+                                                   titles: titles, deadline: deadline)
+        try validateAttachmentParentChains(ownership, route: route, composer: composer, deadline: deadline)
+    }
+
     private func validateAttachmentReplyTranscripts(in window: any MessagesAXElement, route: MessagesAXRoute,
-                                                    composer: ComposerSurface, titles: [String], deadline: WorkerDeadline) throws {
+                                                    composer: ComposerSurface, titles: [String],
+                                                    deadline: WorkerDeadline) throws -> AttachmentMainVisibility {
         let transcripts = try navigator.collect(from: window, window: window, deadline: deadline) { _, role, identifier in
             (role == "AXGroup" || role == "AXCollection") && identifier == "TranscriptCollectionView"
         }
-        guard (1...2).contains(transcripts.count) else {
-            throw ReplyAttachmentOwnershipReason.transcriptCount
-        }
+        guard (1...2).contains(transcripts.count) else { throw ReplyAttachmentOwnershipReason.transcriptCount }
         guard transcripts.filter({ $0.sameIdentity(as: composer.transcript) }).count == 1 else {
             throw ReplyAttachmentOwnershipReason.replyTranscript
         }
@@ -1176,34 +1259,94 @@ struct MessagesReplyComposerAXAutomation {
             guard try transcript.processIdentifier(deadline: deadline) == route.process.identity.pid else {
                 throw ReplyAttachmentOwnershipReason.transcriptProcess
             }
+            guard transcript.sameIdentity(as: composer.transcript) || transcript.sameIdentity(as: route.transcript) else {
+                throw ReplyAttachmentOwnershipReason.mainTranscript
+            }
         }
-        guard transcripts.count == 2 else { return }
-        guard transcripts.filter({ $0.sameIdentity(as: route.transcript) }).count == 1 else {
-            throw ReplyAttachmentOwnershipReason.mainTranscript
+        let children = try navigator.collect(from: window, window: window, traversalPolicy: .childrenOnly,
+                                             deadline: deadline) { element, role, identifier in
+            element.sameIdentity(as: composer.body) ||
+                ((role == "AXGroup" || role == "AXCollection") && identifier == "TranscriptCollectionView")
+        }
+        guard children.filter({ $0.sameIdentity(as: composer.body) }).count == 1,
+              children.filter({ $0.sameIdentity(as: composer.transcript) }).count == 1 else {
+            throw ReplyAttachmentOwnershipReason.replyTranscript
+        }
+        let childTranscripts = children.filter { !$0.sameIdentity(as: composer.body) }
+        guard childTranscripts.allSatisfy({ child in transcripts.contains { $0.sameIdentity(as: child) } }) else {
+            throw ReplyAttachmentOwnershipReason.childTranscriptDrift
+        }
+        let linked = try composer.body.linkedElements(limit: maxChildren, deadline: deadline)
+        guard linked.count <= 1,
+              try composer.body.relationshipCount(.linkedElements, limit: maxChildren, deadline: deadline) == .available(linked.count) else {
+            throw ReplyAttachmentOwnershipReason.bodyMainLinkMissing
+        }
+        if let main = linked.first {
+            guard main.sameIdentity(as: route.transcript),
+                  transcripts.contains(where: { $0.sameIdentity(as: main) }),
+                  try main.processIdentifier(deadline: deadline) == route.process.identity.pid,
+                  let owner = try main.window(deadline: deadline), owner.sameIdentity(as: window) else {
+                throw ReplyAttachmentOwnershipReason.bodyMainLinkMissing
+            }
+        }
+        guard childTranscripts.contains(where: { $0.sameIdentity(as: route.transcript) }) else {
+            return transcripts.contains(where: { $0.sameIdentity(as: route.transcript) }) ? .graphOnly : .absent
         }
         let targets = try navigator.collect(from: route.transcript, window: window, deadline: deadline) { element, _, _ in
             element.sameIdentity(as: route.selected)
         }
-        guard targets.count == 1, let target = targets.first else {
-            throw ReplyAttachmentOwnershipReason.mainTargetMissing
-        }
+        guard targets.count == 1, let target = targets.first else { throw ReplyAttachmentOwnershipReason.mainTargetMissing }
         guard try target.processIdentifier(deadline: deadline) == route.process.identity.pid else {
             throw ReplyAttachmentOwnershipReason.mainTargetProcess
         }
         guard try replyAction(on: target, titles: titles, deadline: deadline) != nil else {
             throw ReplyAttachmentOwnershipReason.mainTargetActionMissing
         }
+        return .child
+    }
+
+    private func validateAttachmentBeforeReturn(_ attachment: MessagesReplyAttachmentDraftEvidence,
+                                                ownership: AttachmentComposerOwnership, route: MessagesAXRoute,
+                                                composer: ComposerSurface, titles: [String], replyDescription: String?,
+                                                deadline: WorkerDeadline) throws {
+        let current = try retainedOwnedComposer(route: route, original: composer, titles: titles,
+                                                replyDescription: replyDescription, attachmentOwnership: ownership,
+                                                deadline: deadline)
+        _ = try validateReplyAttachmentDraftCopy(attachment, deadline: deadline)
+        guard try hasNoLocalModalEvidence(in: route.window, window: route.window, deadline: deadline) else {
+            throw MessagesReplyComposerAXError.replyComposerOwnershipDrift
+        }
+        try validateAttachmentDraftReadyForSend(in: current, route: route, deadline: deadline)
+        try validateAttachmentParentChains(ownership, route: route, composer: current, deadline: deadline)
+        try validateOwnedComposerControls(current, deadline: deadline)
+        // Finish process/window traversal BEFORE the last focus read. There is no
+        // atomic AX/key-event transaction; persisted target verification is required.
+        _ = try retainedWindow(route: route, deadline: deadline)
+        guard try driver.messagesProcessIsFrontmost(route.process, deadline: deadline),
+              let focused = try driver.focusedElement(in: route.process, deadline: deadline),
+              focused.sameIdentity(as: current.body),
+              try focused.processIdentifier(deadline: deadline) == route.process.identity.pid,
+              let window = try focused.window(deadline: deadline), window.sameIdentity(as: route.window) else {
+            throw MessagesReplyComposerAXError.replyComposerOwnershipDrift
+        }
+        // A local text read is still necessary: focus lookup itself may race
+        // with typing. This does not walk children, links, or parent chains.
+        let finalSnapshot = try current.body.bodyTextSnapshot(deadline: deadline)
+        guard allowedAttachmentDraftMarkers.contains(where: { $0.utf8.elementsEqual(finalSnapshot.text.utf8) }) else {
+            throw MessagesReplyComposerAXError.replyAttachmentDraftUnverified
+        }
+        try checkMessagesAXDeadline(deadline)
     }
 
     private func retainedOwnedComposer(route: MessagesAXRoute, original: ComposerSurface, titles: [String],
-                                       replyDescription: String?, allowRetainedMainTranscript: Bool = false,
+                                       replyDescription: String?, attachmentOwnership: AttachmentComposerOwnership? = nil,
                                        deadline: WorkerDeadline) throws -> ComposerSurface {
         guard try driver.messagesProcessIsFrontmost(route.process, deadline: deadline) else {
             throw MessagesReplyComposerAXError.replyComposerOwnershipDrift
         }
         guard let current = try currentOwnedComposerAllowingText(route: route, titles: titles,
                                                                 replyDescription: replyDescription,
-                                                                allowRetainedMainTranscript: allowRetainedMainTranscript,
+                                                                attachmentOwnership: attachmentOwnership,
                                                                 deadline: deadline),
               current.transcript.sameIdentity(as: original.transcript),
               current.body.sameIdentity(as: original.body) else {
@@ -1243,10 +1386,10 @@ struct MessagesReplyComposerAXAutomation {
     }
 
     private func finalOwnedEmptyComposerForCancel(route: MessagesAXRoute, original: ComposerSurface, titles: [String],
-                                                  replyDescription: String?, allowRetainedMainTranscript: Bool = false,
+                                                  replyDescription: String?, attachmentOwnership: AttachmentComposerOwnership? = nil,
                                                   deadline: WorkerDeadline) throws -> ComposerSurface {
         let current = try retainedOwnedComposer(route: route, original: original, titles: titles,
-                                                replyDescription: replyDescription, allowRetainedMainTranscript: allowRetainedMainTranscript, deadline: deadline)
+                                                replyDescription: replyDescription, attachmentOwnership: attachmentOwnership, deadline: deadline)
         try validateOwnedComposerControls(current, deadline: deadline)
         guard try bodyHasNoLocalAttachmentEvidence(in: current.body, window: route.window, deadline: deadline) else {
             throw MessagesReplyComposerAXError.replyComposerAttachmentEvidence
@@ -1305,7 +1448,7 @@ struct MessagesReplyComposerAXAutomation {
 
     private func verifyAfterSend(route: MessagesAXRoute, originalComposer: ComposerSurface, titles: [String], replyDescription: String?,
                                  originalDraft: NormalComposerProof, normalPlaceholders: [String],
-                                 allowRetainedMainTranscript: Bool = false, deadline: WorkerDeadline) throws -> MessagesReplyComposerAXOutcome {
+                                 attachmentOwnership: AttachmentComposerOwnership? = nil, deadline: WorkerDeadline) throws -> MessagesReplyComposerAXOutcome {
         let started = readinessNow()
         let cap: UInt64 = 1_500_000_000
         var retainedNonemptyObserved = false
@@ -1331,12 +1474,12 @@ struct MessagesReplyComposerAXAutomation {
                 let snapshot = try composer.body.bodyTextSnapshot(deadline: deadline)
                 if snapshot.provenEmpty {
                     let transcript = try retainedOwnedComposer(route: route, original: originalComposer, titles: titles,
-                                                               replyDescription: replyDescription, allowRetainedMainTranscript: allowRetainedMainTranscript, deadline: deadline).transcript
+                                                               replyDescription: replyDescription, attachmentOwnership: attachmentOwnership, deadline: deadline).transcript
                     guard try transcript.actions(deadline: deadline).contains("AXCancel") else {
                         throw MessagesReplyComposerAXError.replyComposerCleanupUnavailable
                     }
                     let empty = try finalOwnedEmptyComposerForCancel(route: route, original: originalComposer, titles: titles,
-                                                                     replyDescription: replyDescription, allowRetainedMainTranscript: allowRetainedMainTranscript, deadline: deadline)
+                                                                     replyDescription: replyDescription, attachmentOwnership: attachmentOwnership, deadline: deadline)
                     try empty.transcript.performAction(named: "AXCancel", deadline: deadline)
                     try verifyCleanup(route: route, titles: titles, replyDescription: replyDescription,
                                       originalDraft: originalDraft, normalPlaceholders: normalPlaceholders, deadline: deadline)

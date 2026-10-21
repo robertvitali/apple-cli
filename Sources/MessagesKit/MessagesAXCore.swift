@@ -44,6 +44,20 @@ struct MessagesAXBodyTextSnapshot: Equatable, Sendable {
     var provenEmpty: Bool { text.isEmpty && characterCount == 0 }
 }
 
+enum MessagesAXRelationshipAttribute: String {
+    case children = "AXChildren"
+    case linkedElements = "AXLinkedUIElements"
+}
+
+// Preserve explicit API absence separately from a successful empty array.
+// Callers that recognize a platform-specific shape must choose which states
+// that shape permits; transport failures never become absence evidence.
+enum MessagesAXRelationshipCount: Equatable {
+    case available(Int)
+    case noValue
+    case unsupported
+}
+
 protocol MessagesAXElement: AnyObject {
     func sameIdentity(as other: any MessagesAXElement) -> Bool
     func role(deadline: WorkerDeadline) throws -> String
@@ -66,15 +80,23 @@ protocol MessagesAXElement: AnyObject {
     func children(limit: Int, deadline: WorkerDeadline) throws -> [any MessagesAXElement]
     func childrenInNavigationOrder(limit: Int, deadline: WorkerDeadline) throws -> [any MessagesAXElement]?
     func linkedElements(limit: Int, deadline: WorkerDeadline) throws -> [any MessagesAXElement]
+    func relationshipCount(_ attribute: MessagesAXRelationshipAttribute, limit: Int,
+                           deadline: WorkerDeadline) throws -> MessagesAXRelationshipCount
     func setValue(_ value: String, deadline: WorkerDeadline) throws
     func focused(deadline: WorkerDeadline) throws -> Bool?
+    func mainWindow(deadline: WorkerDeadline) throws -> Bool?
     func bodyValueEvidence(deadline: WorkerDeadline) throws -> MessagesAXBodyValueEvidence
     func bodyTextSnapshot(deadline: WorkerDeadline) throws -> MessagesAXBodyTextSnapshot
     func performAction(named name: String, deadline: WorkerDeadline) throws
 }
 
 extension MessagesAXElement {
+    func relationshipCount(_ attribute: MessagesAXRelationshipAttribute, limit: Int,
+                           deadline: WorkerDeadline) throws -> MessagesAXRelationshipCount {
+        throw MessagesAXNavigationError.unknownAXValue
+    }
     func focused(deadline: WorkerDeadline) throws -> Bool? { nil }
+    func mainWindow(deadline: WorkerDeadline) throws -> Bool? { nil }
     func stringAttribute(named name: String, deadline: WorkerDeadline) throws -> String? { nil }
     func fileURLAttribute(named name: String, deadline: WorkerDeadline) throws -> URL? {
         guard let value = try stringAttribute(named: name, deadline: deadline), !value.isEmpty else { return nil }
@@ -299,6 +321,10 @@ final class LiveAXElement: MessagesAXElement {
         try Self.checkedBoolean(attribute(kAXFocusedAttribute, deadline: deadline))
     }
 
+    func mainWindow(deadline: WorkerDeadline) throws -> Bool? {
+        try Self.checkedBoolean(attribute(kAXMainAttribute, deadline: deadline))
+    }
+
 
     func stringAttribute(named name: String, deadline: WorkerDeadline) throws -> String? {
         guard let raw = try attribute(name, deadline: deadline) else { return nil }
@@ -488,6 +514,34 @@ final class LiveAXElement: MessagesAXElement {
 
     func linkedElements(limit: Int, deadline: WorkerDeadline) throws -> [any MessagesAXElement] {
         try relationship(kAXLinkedUIElementsAttribute, limit: limit, deadline: deadline)
+    }
+
+    static func checkedRelationshipCount(status: AXError, count: CFIndex,
+                                         limit: Int) throws -> MessagesAXRelationshipCount {
+        guard limit >= 0 else { throw MessagesAXNavigationError.traversalLimit }
+        switch status {
+        case .noValue: return .noValue
+        case .attributeUnsupported: return .unsupported
+        case .success:
+            guard count >= 0 else { throw MessagesAXNavigationError.unknownAXValue }
+            guard count <= limit else { throw MessagesAXNavigationError.traversalLimit }
+            return .available(count)
+        default: throw MessagesAXNavigationError.axFailure
+        }
+    }
+
+    func relationshipCount(_ attribute: MessagesAXRelationshipAttribute, limit: Int,
+                           deadline: WorkerDeadline) throws -> MessagesAXRelationshipCount {
+        func read() throws -> MessagesAXRelationshipCount {
+            try prepare(deadline)
+            var count: CFIndex = 0
+            let status = AXUIElementGetAttributeValueCount(element, attribute.rawValue as CFString, &count)
+            try checkMessagesAXDeadline(deadline)
+            return try Self.checkedRelationshipCount(status: status, count: count, limit: limit)
+        }
+        let first = try read()
+        guard try read() == first else { throw MessagesAXRouteDrift(.relationshipCountChanged) }
+        return first
     }
 
     static func checkedFullRelationship(initialStatus: AXError, initialCount: CFIndex, copiedValue: CFTypeRef?,
