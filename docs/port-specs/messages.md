@@ -613,3 +613,28 @@ verification step.
 
 These commands use read-only database snapshots and never drive Messages UI or
 mark conversations read. They retain JSON envelope schema version 1.
+
+
+### Native delivery, error and read metadata on exact reads
+
+Exact get/history add `native_status` with five independent fields: `error`,
+`is_delivered`, `is_read`, `date_delivered`, and `date_read`. Each preserves a
+strict integer `raw` and reports `status`; absent columns, SQL NULL and other
+storage types are respectively `missing-schema`, `null`, and `wrong-type`.
+Unavailable parsed values are explicit JSON nulls. Error integers derive only
+`is_error = raw != 0`; flags accept only 0/1 and report `invalid-boolean` otherwise.
+
+Timestamps distinguish `zero-sentinel` and `negative` from unavailable schema or
+values. Positive integers use the existing seconds/nanoseconds compatibility
+heuristic: through 9,999,999,999 they are Apple-epoch seconds; larger values are
+Apple-epoch nanoseconds. `normalized_seconds` and `normalized_nanoseconds` form
+whole seconds plus a nonnegative subsecond remainder. UTC `date` and `date_local`
+use whole-second Gregorian/POSIX formatting, preserving precision separately in
+raw and remainder fields. Formatting failure reports `invalid-timestamp` with
+parsed fields null. Other valid values report `available`.
+
+Flags are never inferred from dates or vice versa. Meaning depends on direction
+and native Messages behavior; no per-recipient group receipts, synchronization
+guarantee, or mutation authority is established. These observations are separate
+from the strict database checks used to verify outgoing replies. Legacy recent
+and search output is unchanged.

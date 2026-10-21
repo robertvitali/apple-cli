@@ -979,12 +979,13 @@ public struct ChatDB {
         public let native_parts_reason: String
         public let native_parts: [ExactNativePart]?
         public let thread_originator: ExactThreadOriginator
+        public let native_status: ExactNativeStatus
 
         enum CodingKeys: String, CodingKey {
             case rowid, message_guid, selected_chat_rowid, chat_guid, chat_identifier
             case date, date_local, timestamp, normalized_seconds, normalized_nanoseconds, is_from_me, sender, handle
             case service, body, body_availability, group_name, is_group, has_attachments
-            case attachments, native_parts_available, native_parts_reason, native_parts, thread_originator
+            case attachments, native_parts_available, native_parts_reason, native_parts, thread_originator, native_status
         }
 
         public func encode(to encoder: Encoder) throws {
@@ -1013,6 +1014,7 @@ public struct ChatDB {
             try c.encode(native_parts_reason, forKey: .native_parts_reason)
             try encodeOrNull(&c, native_parts, .native_parts)
             try c.encode(thread_originator, forKey: .thread_originator)
+            try c.encode(native_status, forKey: .native_status)
         }
     }
 
@@ -1198,6 +1200,7 @@ public struct ChatDB {
         """
 
     private struct ExactReadSchema {
+        let messageColumns: Set<String>
         let threadOriginatorColumnsAvailable: Bool
     }
 
@@ -1216,6 +1219,7 @@ public struct ChatDB {
                m.cache_roomnames AS cache_roomnames, m.service AS service,
                m.cache_has_attachments AS cache_has_attachments,
                \(originatorSelect),
+               \(NativeMessageStatusDecoder.projection(columns: schema.messageColumns)),
                h.id AS address,
                c.ROWID AS selected_chat_rowid, c.chat_identifier AS chat_identifier,
                c.guid AS chat_guid, c.display_name AS selected_display_name,
@@ -2681,7 +2685,8 @@ public struct ChatDB {
                 native_parts_available: nativePartsInfo.available,
                 native_parts_reason: nativePartsInfo.reason,
                 native_parts: nativePartsInfo.parts,
-                thread_originator: threadOriginator
+                thread_originator: threadOriginator,
+                native_status: NativeMessageStatusDecoder.decode(row)
             ))
         }
         return out
@@ -2888,6 +2893,7 @@ public struct ChatDB {
         _ = try requiredColumns("message_attachment_join", ["message_id", "attachment_id"])
         _ = try requiredColumns("attachment", ["ROWID"])
         return ExactReadSchema(
+            messageColumns: messageColumns,
             threadOriginatorColumnsAvailable: messageColumns.isSuperset(of: [
                 "thread_originator_guid", "thread_originator_part",
             ])
