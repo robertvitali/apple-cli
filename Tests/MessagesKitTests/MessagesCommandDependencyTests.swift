@@ -173,6 +173,13 @@ private extension ChatFixture {
             """)
     }
 
+    func insertNestedReplyTarget() throws {
+        try insertReplyTarget(rowid: 70, guid: "reply-root")
+        try insertReactionTarget(rowid: 71, guid: "reply-selected")
+        try setThreadOriginator(rowid: 71, guidSQL: "'reply-root'", partSQL: "'2:0'")
+        try exec("UPDATE message SET is_from_me=1 WHERE ROWID=71;")
+    }
+
     func insertReaction(rowid: Int64, guid: String, associatedGUID: String, type: Int,
                         isFromMe: Int = 1, handleID: Int64? = 1, date: Int64,
                         chatRowid: Int64 = 3, emoji: String? = nil) throws {
@@ -1954,6 +1961,202 @@ struct MessagesCommandDependencyTests {
         #expect(launched.value == false)
     }
 
+    @Test(arguments: [false, true])
+    func nestedReplyDryRunSeparatesSelectedAndRootWithoutWorker(attachment: Bool) throws {
+        let fx = try ChatFixture()
+        try fx.insertNestedReplyTarget()
+        let file = try scratch.directory().appendingPathComponent("apple-cli-test.txt")
+        try Data("apple-cli-test attachment".utf8).write(to: file)
+        let launched = LockedBox(false)
+        let deps = replyDependencies(fx) { _ in
+            launched.withLock { $0 = true }
+            return .timedOut
+        }
+        let args = ["--chat-rowid", "3", "--message-rowid", "71", "--part-index", "2",
+                    "--dry-run", "--test-mode"] + (attachment ? ["--file", file.path] : ["--body", "apple-cli-test reply"])
+        let result = try captureCommand { try ReplySend.parse(args).run(dependencies: deps) }
+        #expect(result.exitCode == nil, Comment(rawValue: result.stdout))
+        let output = try payload(from: result.stdout)
+        let target = try #require(output["target"] as? [String: Any])
+        #expect(target["message_guid"] as? String == "reply-selected")
+        #expect(target["is_from_me"] as? Bool == true)
+        #expect(target["root_is_from_me"] as? Bool == false)
+        let root = try #require(target["thread_root"] as? [String: Any])
+        #expect(root["message_guid"] as? String == "reply-root")
+        #expect(root["message_rowid"] as? Int == 70)
+        #expect(root["native_part"] as? Int == 2)
+        #expect(!launched.value)
+        #expect(!FileManager.default.fileExists(atPath: fx.homePath + "/messages-automation"))
+    }
+
+    @Test func nestedReplyWorkerUsesSelectedOwnershipAndBindsRawRelationship() throws {
+        let fx = try ChatFixture()
+        try fx.insertNestedReplyTarget()
+        let dbPath = fx.path
+        let deps = replyDependencies(fx) { action in
+            let first = try action.resolve()
+            let payload = try #require(first.command.payload)
+            let request = try JSONDecoder().decode(MessagesReplySendRequest.self, from: payload)
+            #expect(request.messageGUID == "reply-selected")
+            #expect(request.expectedIsFromMe)
+            let object = try #require(JSONSerialization.jsonObject(with: payload) as? [String: Any])
+            let digest = try #require(object["expected_thread_relationship_sha256"] as? String)
+            #expect(digest.hasPrefix("sha256:") && digest.utf8.count == 71)
+            try execReplySQL(path: dbPath, "UPDATE message SET thread_originator_part='2:1' WHERE ROWID=71;")
+            let context = WorkerObservedContext(deadline: action.deadline, isCancelled: { false })
+            #expect(throws: Error.self) { _ = try action.preflight(first, context) }
+            return .verificationFailed
+        }
+        let result = try captureCommand {
+            try ReplySend.parse(["--chat-rowid", "3", "--message-rowid", "71", "--body", "apple-cli-test reply",
+                                 "--experimental-ui-handoff", "--test-mode"]).run(dependencies: deps)
+        }
+        #expect(result.exitCode == AppleExit.upstream)
+    }
+
+    @Test(arguments: [
+        "UPDATE message SET thread_originator_guid=NULL, thread_originator_part=NULL WHERE ROWID=71;",
+        "UPDATE message SET is_from_me=1 WHERE ROWID=70;",
+        "UPDATE message SET guid='changed-root' WHERE ROWID=70;",
+        "UPDATE message SET thread_originator_part='2:1' WHERE ROWID=71;",
+        "INSERT INTO chat_message_join VALUES (1,70);",
+        "INSERT INTO chat_message_join VALUES (1,71);",
+    ], [false, true])
+    func nestedReplyRefusesRelationshipDriftBeforeHandoff(mutation: String, beforeResolve: Bool) throws {
+        for attachment in [false, true] {
+            let fx = try ChatFixture()
+            try fx.insertNestedReplyTarget()
+            let file = try scratch.directory().appendingPathComponent("apple-cli-test.txt")
+            try Data("apple-cli-test attachment".utf8).write(to: file)
+            let dbPath = fx.path
+            let captureCalled = LockedBox(false)
+            let deps = replyDependencies(fx, launchObservedWorker: { action in
+                if beforeResolve {
+                    try execReplySQL(path: dbPath, mutation)
+                    #expect(throws: Error.self) { _ = try action.resolve() }
+                } else {
+                    let resolved = try action.resolve()
+                    try execReplySQL(path: dbPath, mutation)
+                    let context = WorkerObservedContext(deadline: action.deadline, isCancelled: { false })
+                    #expect(throws: Error.self) { _ = try action.preflight(resolved, context) }
+                }
+                return .verificationFailed
+            }, captureReplyCleanState: { _, _ in
+                captureCalled.withLock { $0 = true }
+                return MessagesReplyCleanStateToken("synthetic")
+            })
+            let args = ["--chat-rowid", "3", "--message-rowid", "71", "--experimental-ui-handoff", "--test-mode"] +
+                (attachment ? ["--file", file.path] : ["--body", "apple-cli-test reply"])
+            let result = try captureCommand { try ReplySend.parse(args).run(dependencies: deps) }
+            #expect(result.exitCode == AppleExit.upstream)
+            #expect(!captureCalled.value)
+        }
+    }
+
+    @Test func nestedReplySandboxDoesNotUseAncestorLabel() throws {
+        let fx = try ChatFixture()
+        try fx.insertNestedReplyTarget()
+        try fx.exec("UPDATE message SET text='unlabeled target', attributedBody=NULL WHERE ROWID=71;")
+        let body = commandNativeArchive("unlabeled target", [
+            (commandNativePartKey, NSNumber(value: 2), commandReactionRange("unlabeled target", "target")),
+        ])
+        try replaceReplyAttributedBody(path: fx.path, rowid: 71, body: body)
+        let launched = LockedBox(false)
+        let deps = replyDependencies(fx) { _ in
+            launched.withLock { $0 = true }
+            return .timedOut
+        }
+        let result = try captureCommand {
+            try ReplySend.parse(["--chat-rowid", "3", "--message-rowid", "71", "--body", "apple-cli-test reply",
+                                 "--experimental-ui-handoff", "--test-mode"]).run(dependencies: deps)
+        }
+        #expect(result.exitCode == AppleExit.permissionDenied)
+        #expect(!launched.value)
+    }
+
+    @Test(arguments: ["reply-selected", "reply-root"])
+    func nestedReplyReportsObservedOriginatorWithoutInventingImmediateParent(observedParent: String) throws {
+        let fx = try ChatFixture()
+        try fx.insertNestedReplyTarget()
+        let operationID = UUID(uuidString: "44444444-4444-4444-8444-444444444444")!
+        let path = fx.path
+        let base = fx.base
+        let verified = LockedBox(false)
+        let deps = replyDependencies(fx) { action in
+            let resolved = try action.resolve()
+            let context = WorkerObservedContext(deadline: action.deadline, isCancelled: { false })
+            #expect(try action.preflight(resolved, context) == .requiresMutation)
+            try insertReplyResultRow(path: path, rowid: 1_000_000, guid: "nested-sent", text: "apple-cli-test reply",
+                                     base: base, parentGUID: observedParent)
+            let response = WorkerResponse(schemaVersion: 1, operationID: operationID, nonce: operationID,
+                                          category: .ack, detail: MessagesReplySendACKDetail.alreadyRestoredVerified)
+            if let proof = try action.verify(resolved, response, context) {
+                verified.withLock { $0 = true }
+                return .observedState(operationID: operationID, verification: proof)
+            }
+            return .verificationFailed
+        }
+        let result = try captureCommand {
+            try ReplySend.parse(["--chat-rowid", "3", "--message-rowid", "71", "--body", "apple-cli-test reply",
+                                 "--experimental-ui-handoff", "--test-mode"]).run(dependencies: deps)
+        }
+        #expect(verified.value)
+        #expect(result.exitCode == nil)
+        guard result.exitCode == nil else { return }
+        let output = try payload(from: result.stdout)
+        #expect(output["parent_message_guid"] as? String == observedParent)
+        #expect(output["sent_message_guid"] as? String == "nested-sent")
+        #expect(output["persisted_parent_matches_requested"] as? Bool == (observedParent == "reply-selected"))
+        #expect(output["reply_relationship"] as? String == (observedParent == "reply-selected" ? "requested-target" : "thread-root"))
+        let originator = try #require(output["observed_thread_originator"] as? [String: Any])
+        #expect(originator["message_guid"] as? String == observedParent)
+        #expect(originator["native_part"] as? Int == 2)
+        #expect(output["verification_source"] as? String == MessagesReplySendACKDetail.verificationSource)
+        if observedParent == "reply-root" {
+            #expect(output["verification"] as? String == "observedState: UI clean state and database thread-root correspondence verified")
+        }
+    }
+
+    @Test(arguments: [false, true])
+    func nestedReplyRefusesRelationshipDriftAfterHandoff(duringCleanVerification: Bool) throws {
+        let fx = try ChatFixture()
+        try fx.insertNestedReplyTarget()
+        let operationID = UUID(uuidString: "44444444-4444-4444-8444-444444444444")!
+        let path = fx.path
+        let base = fx.base
+        let verified = LockedBox(false)
+        let deps = replyDependencies(fx, launchObservedWorker: { action in
+            let resolved = try action.resolve()
+            let context = WorkerObservedContext(deadline: action.deadline, isCancelled: { false })
+            #expect(try action.preflight(resolved, context) == .requiresMutation)
+            try insertReplyResultRow(path: path, rowid: 1_000_000, guid: "nested-sent", text: "apple-cli-test reply",
+                                     base: base, parentGUID: "reply-selected")
+            if !duringCleanVerification {
+                try execReplySQL(path: path, "UPDATE message SET thread_originator_part='2:changed' WHERE ROWID=71;")
+            }
+            let response = WorkerResponse(schemaVersion: 1, operationID: operationID, nonce: operationID,
+                                          category: .ack, detail: MessagesReplySendACKDetail.alreadyRestoredVerified)
+            do {
+                if let proof = try action.verify(resolved, response, context) {
+                    verified.withLock { $0 = true }
+                    return .observedState(operationID: operationID, verification: proof)
+                }
+            } catch { }
+            return .verificationFailed
+        }, verifyReplyCleanState: { _, _, _ in
+            if duringCleanVerification {
+                try execReplySQL(path: path, "UPDATE message SET is_from_me=1 WHERE ROWID=70;")
+            }
+            return "synthetic-clean"
+        })
+        let result = try captureCommand {
+            try ReplySend.parse(["--chat-rowid", "3", "--message-rowid", "71", "--body", "apple-cli-test reply",
+                                 "--experimental-ui-handoff", "--test-mode"]).run(dependencies: deps)
+        }
+        #expect(!verified.value)
+        #expect(result.exitCode == AppleExit.upstream)
+    }
+
     @Test func replySendDryRunWithFileResolvesTargetAndAttachmentWithoutWorker() throws {
         let fx = try ChatFixture()
         try fx.insertReplyTarget(rowid: 70, guid: "reply-target")
@@ -2324,15 +2527,21 @@ struct MessagesCommandDependencyTests {
         #expect(result.exitCode == AppleExit.upstream)
     }
 
-    @Test func replySendVerifyRejectsWrongACKDetailBeforeCleanProof() throws {
+    @Test(arguments: [false, true])
+    func replySendVerifyRejectsWrongACKDetailBeforeCleanProof(nested: Bool) throws {
         let fx = try ChatFixture()
-        try fx.insertReplyTarget(rowid: 70, guid: "reply-target")
+        if nested { try fx.insertNestedReplyTarget() }
+        else { try fx.insertReplyTarget(rowid: 70, guid: "reply-target") }
+        let path = fx.path
+        let base = fx.base
         let operationID = UUID()
         let verified = LockedBox(false)
         let deps = replyDependencies(fx, launchObservedWorker: { action in
             let resolved = try action.resolve()
             let context = WorkerObservedContext(deadline: action.deadline, isCancelled: { false })
             #expect(try action.preflight(resolved, context) == .requiresMutation)
+            try insertReplyResultRow(path: path, rowid: 1_000_000, guid: "unverified-result", text: "apple-cli-test reply",
+                                     base: base, parentGUID: nested ? "reply-root" : "reply-target")
             let response = WorkerResponse(schemaVersion: 1, operationID: operationID, nonce: operationID,
                                           category: .ack, detail: "reply-send-unverified")
             #expect(try action.verify(resolved, response, context) == nil)
@@ -2344,7 +2553,7 @@ struct MessagesCommandDependencyTests {
         })
 
         let result = try captureCommand {
-            try ReplySend.parse(["--chat-rowid", "3", "--message-rowid", "70", "--part-index", "2",
+            try ReplySend.parse(["--chat-rowid", "3", "--message-rowid", nested ? "71" : "70", "--part-index", "2",
                                  "--body", "apple-cli-test reply", "--experimental-ui-handoff", "--test-mode"])
                 .run(dependencies: deps)
         }

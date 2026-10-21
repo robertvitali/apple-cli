@@ -80,12 +80,87 @@ struct MessagesReplyComposerAXAutomationTests {
         #expect(driver.replyTranscript.performed.isEmpty)
     }
 
+    @Test(arguments: [false, true])
+    func sendTextRetainsExactMainTranscriptAfterInsertion(retainEmptyReply: Bool) throws {
+        let driver = FakeReplyDriver()
+        driver.replyBody.onSetValue = { [driver] _ in
+            driver.replyWindowChildrenOverride = { [driver] in
+                [driver.mainTranscript, driver.replyTranscript, driver.replyBody]
+            }
+        }
+        var returnPresses = 0
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in }, sendReturnKey: { _, deadline in
+            returnPresses += 1
+            if retainEmptyReply {
+                try driver.replyBody.setValue("", deadline: deadline)
+            } else {
+                driver.replyVisible = false
+            }
+        }).send(sendRequest(), deadline: .millisecondsFromNow(5_000))
+        #expect(returnPresses == 1)
+        #expect(outcome == .ack(retainEmptyReply ? MessagesReplySendACKDetail.retainedEmptyCancelledVerified : MessagesReplySendACKDetail.alreadyRestoredVerified))
+        #expect(driver.replyVisible == false)
+        #expect(driver.replyTranscript.performed == (retainEmptyReply ? ["AXCancel"] : []))
+    }
+
     @Test func sendCancelsRetainedEmptyOwnedComposerOnceAfterSend() throws {
         let driver = FakeReplyDriver()
         let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in }, sendReturnKey: { _, deadline in
             try driver.replyBody.setValue("", deadline: deadline)
         }).send(sendRequest(), deadline: .millisecondsFromNow(5_000))
         #expect(outcome == .ack(MessagesReplySendACKDetail.retainedEmptyCancelledVerified))
+        #expect(driver.replyTranscript.performed == ["AXCancel"])
+        #expect(driver.replyVisible == false)
+    }
+
+    @Test(arguments: ["replacement-main", "third-transcript", "missing-target", "foreign-target", "missing-action", "reparent-body", "reparent-reply"])
+    func sendTextPreservesDraftWhenRetainedOwnershipChanges(kind: String) throws {
+        let driver = FakeReplyDriver()
+        let replacement = FakeReplyNode(roleValue: "AXGroup", identifierValue: "TranscriptCollectionView")
+        let container = FakeReplyNode(roleValue: "AXGroup")
+        driver.replyBody.onSetValue = { [driver] value in
+            guard !value.isEmpty else { return }
+            var children = [driver.mainTranscript, driver.replyTranscript, driver.replyBody]
+            switch kind {
+            case "replacement-main": children[0] = replacement
+            case "third-transcript": children.append(replacement)
+            case "missing-target": driver.mainTranscript.staticChildren = []
+            case "foreign-target": driver.message.processIdentifierValue = 999
+            case "missing-action": driver.message.actionNames = []
+            case "reparent-body":
+                container.staticChildren = [driver.replyBody]
+                children[2] = container
+            default:
+                container.staticChildren = [driver.replyTranscript]
+                children[1] = container
+            }
+            driver.replyWindowChildrenOverride = { children }
+        }
+        var returnPresses = 0
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in }, sendReturnKey: { _, _ in
+            returnPresses += 1
+        }).send(sendRequest(), deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .refused("reply-composer-ownership-drift"))
+        #expect(returnPresses == 0)
+        #expect(driver.replyBody.bodyText == "apple-cli-test reply")
+        #expect(driver.replyTranscript.performed.isEmpty)
+    }
+
+    @Test func sendTextClearsOnlyExactOwnedDraftWithMainTranscriptRetained() throws {
+        let driver = FakeReplyDriver()
+        driver.replyBody.onSetValue = { [driver] _ in
+            driver.replyWindowChildrenOverride = { [driver] in
+                [driver.mainTranscript, driver.replyTranscript, driver.replyBody]
+            }
+            driver.appFocusAvailable = false
+        }
+        var returnPresses = 0
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in }, sendReturnKey: { _, _ in
+            returnPresses += 1
+        }).send(sendRequest(), deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .refused("reply-composer-ownership-drift"))
+        #expect(returnPresses == 0)
+        #expect(driver.replyBody.bodyText.isEmpty)
         #expect(driver.replyTranscript.performed == ["AXCancel"])
         #expect(driver.replyVisible == false)
     }
@@ -403,6 +478,27 @@ struct MessagesReplyComposerAXAutomationTests {
         #expect(driver.replyTranscript.performed.isEmpty)
     }
 
+    @Test(arguments: ["windows", "graph"])
+    func sendReportsPostReturnWindowDriftWithoutRetryingOrClearing(source: String) throws {
+        let driver = FakeReplyDriver()
+        var sends = 0
+        var clears = 0
+        driver.replyBody.onSetValue = { if $0.isEmpty { clears += 1 } }
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in }, sendReturnKey: { _, _ in
+            sends += 1
+            if source == "windows" {
+                driver.root.dynamicChildren = { [driver] in [driver.window, FakeReplyNode(roleValue: "AXWindow")] }
+            } else {
+                driver.replyBody.windowOverride = FakeReplyNode(roleValue: "AXWindow")
+            }
+        }).send(sendRequest(), deadline: .millisecondsFromNow(5_000))
+        #expect(outcome == .refused("target-drift-verification-window-mismatch"))
+        #expect(sends == 1)
+        #expect(clears == 0)
+        #expect(driver.replyTranscript.performed.isEmpty)
+        driver.root.dynamicChildren = nil
+    }
+
     @Test func sendCleanupRefusesIfExactTextChangesDuringCancelActionRead() throws {
         let driver = FakeReplyDriver()
         var returnPresses = 0
@@ -654,6 +750,33 @@ struct MessagesReplyComposerAXAutomationTests {
         let payload = try sendRequest().workerPayloadData()
         #expect(registry.operation(for: try WorkerCommand(name: "messages.reply.send", payload: payload)) != nil)
         #expect(registry.operation(for: try WorkerCommand(name: "messages.reply.inspect", payload: try request().workerPayloadData())) == nil)
+    }
+
+    @Test func sendRequestPreservesRootEncodingAndRoundTripsRelationshipDigest() throws {
+        let original = try sendRequest().workerPayloadData()
+        var object = try #require(JSONSerialization.jsonObject(with: original) as? [String: Any])
+        #expect(object["expected_thread_relationship_sha256"] == nil)
+        let root = try JSONDecoder().decode(MessagesReplySendRequest.self, from: original)
+        #expect(try root.workerPayloadData() == original)
+        let digest = "sha256:" + String(repeating: "a", count: 64)
+        object["expected_thread_relationship_sha256"] = digest
+        let nested = try JSONDecoder().decode(MessagesReplySendRequest.self,
+                                              from: JSONSerialization.data(withJSONObject: object))
+        #expect(nested.expectedThreadRelationshipSHA256 == digest)
+        #expect(try JSONDecoder().decode(MessagesReplySendRequest.self, from: nested.workerPayloadData()) == nested)
+        #expect(try nested.probeRequest().expectedIsFromMe == nested.expectedIsFromMe)
+    }
+
+    @Test(arguments: ["", "sha256:", "sha256:" + String(repeating: "z", count: 64),
+                      "sha256:" + String(repeating: "A", count: 64),
+                      "sha256:" + String(repeating: "a", count: 65)])
+    func sendRequestRejectsMalformedRelationshipDigest(digest: String) throws {
+        var object = try #require(JSONSerialization.jsonObject(with: sendRequest().workerPayloadData()) as? [String: Any])
+        object["expected_thread_relationship_sha256"] = digest
+        let data = try JSONSerialization.data(withJSONObject: object)
+        #expect(throws: Error.self) { _ = try JSONDecoder().decode(MessagesReplySendRequest.self, from: data) }
+        #expect(MessagesWorkerRegistry(replyDriver: FakeReplyDriver())
+            .operation(for: try WorkerCommand(name: "messages.reply.send", payload: data)) == nil)
     }
 
 

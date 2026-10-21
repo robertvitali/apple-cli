@@ -21,6 +21,7 @@ struct MessagesReplySendRequest: Codable, Equatable, Sendable {
     let expectedMessageRowID: Int64
     let expectedParticipantHandles: [String]
     let expectedIsFromMe: Bool
+    let expectedThreadRelationshipSHA256: String?
     let expectedBodySHA256: String
     let expectedBodyUTF8Length: Int
     let requiredBodyPrefix: String
@@ -36,6 +37,7 @@ struct MessagesReplySendRequest: Codable, Equatable, Sendable {
         case expectedMessageRowID = "expected_message_rowid"
         case expectedParticipantHandles = "expected_participant_handles"
         case expectedIsFromMe = "expected_is_from_me"
+        case expectedThreadRelationshipSHA256 = "expected_thread_relationship_sha256"
         case expectedBodySHA256 = "expected_body_sha256"
         case expectedBodyUTF8Length = "expected_body_utf8_length"
         case requiredBodyPrefix = "required_body_prefix"
@@ -55,7 +57,8 @@ struct MessagesReplySendRequest: Codable, Equatable, Sendable {
          expectedBodyUTF8Length: Int,
          requiredBodyPrefix: String,
          text: String?,
-         attachmentDraft: MessagesReplyAttachmentDraftEvidence? = nil) throws {
+         attachmentDraft: MessagesReplyAttachmentDraftEvidence? = nil,
+         expectedThreadRelationshipSHA256: String? = nil) throws {
         guard !chatGUID.isEmpty, chatGUID.utf8.count <= 512,
               expectedChatRowID > 0, expectedMessageRowID > 0,
               !expectedParticipantHandles.isEmpty, expectedParticipantHandles.count <= 32,
@@ -64,6 +67,12 @@ struct MessagesReplySendRequest: Codable, Equatable, Sendable {
               expectedBodyUTF8Length > 0, expectedBodyUTF8Length <= 4096,
               requiredBodyPrefix == TestMode.canonicalSandboxPrefix
         else { throw MessagesReplyComposerAXError.invalidPayload }
+        if let digest = expectedThreadRelationshipSHA256 {
+            guard digest.hasPrefix("sha256:"), digest.utf8.count == 71,
+                  digest.utf8.dropFirst(7).allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else {
+                throw MessagesReplyComposerAXError.invalidPayload
+            }
+        }
         switch (text, attachmentDraft) {
         case (.some(let value), nil):
             guard !value.isEmpty, value.utf8.count <= 2048 else { throw MessagesReplyComposerAXError.invalidPayload }
@@ -81,6 +90,7 @@ struct MessagesReplySendRequest: Codable, Equatable, Sendable {
         self.expectedMessageRowID = expectedMessageRowID
         self.expectedParticipantHandles = expectedParticipantHandles
         self.expectedIsFromMe = expectedIsFromMe
+        self.expectedThreadRelationshipSHA256 = expectedThreadRelationshipSHA256
         self.expectedBodySHA256 = expectedBodySHA256
         self.expectedBodyUTF8Length = expectedBodyUTF8Length
         self.requiredBodyPrefix = requiredBodyPrefix
@@ -103,7 +113,8 @@ struct MessagesReplySendRequest: Codable, Equatable, Sendable {
                       expectedBodyUTF8Length: c.decode(Int.self, forKey: .expectedBodyUTF8Length),
                       requiredBodyPrefix: c.decode(String.self, forKey: .requiredBodyPrefix),
                       text: c.decodeIfPresent(String.self, forKey: .text),
-                      attachmentDraft: c.decodeIfPresent(MessagesReplyAttachmentDraftEvidence.self, forKey: .attachmentDraft))
+                      attachmentDraft: c.decodeIfPresent(MessagesReplyAttachmentDraftEvidence.self, forKey: .attachmentDraft),
+                      expectedThreadRelationshipSHA256: c.decodeIfPresent(String.self, forKey: .expectedThreadRelationshipSHA256))
     }
 
     func encode(to encoder: any Encoder) throws {
@@ -116,6 +127,7 @@ struct MessagesReplySendRequest: Codable, Equatable, Sendable {
         try c.encode(expectedMessageRowID, forKey: .expectedMessageRowID)
         try c.encode(expectedParticipantHandles, forKey: .expectedParticipantHandles)
         try c.encode(expectedIsFromMe, forKey: .expectedIsFromMe)
+        try c.encodeIfPresent(expectedThreadRelationshipSHA256, forKey: .expectedThreadRelationshipSHA256)
         try c.encode(expectedBodySHA256, forKey: .expectedBodySHA256)
         try c.encode(expectedBodyUTF8Length, forKey: .expectedBodyUTF8Length)
         try c.encode(requiredBodyPrefix, forKey: .requiredBodyPrefix)

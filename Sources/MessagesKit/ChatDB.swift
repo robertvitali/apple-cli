@@ -1418,7 +1418,7 @@ public struct ChatDB {
             throw AppleError.validation("reply target direct conversation must have exactly one participant")
         }
         let isRoot = message.thread_originator.reason == "no-linkage"
-        // Production callers remain root-only until worker relationship binding is implemented.
+        // Nested callers must bind this selected/root relationship through worker verification.
         guard allowingNested || (message.thread_originator.available && isRoot) else {
             throw AppleError.validation("reply target must be a root message")
         }
@@ -1557,9 +1557,62 @@ public struct ChatDB {
                                  rows: shaped)
     }
 
+    private enum ReplyProofParent { case requested, threadRoot }
+
+    private static func replyProofParent(target: ExactReplyTarget, parent: ReplyProofParent) -> (guid: String, part: Int) {
+        switch parent {
+        case .requested: return (target.message_guid, target.native_part)
+        case .threadRoot: return (target.thread_root.message_guid, target.thread_root.native_part)
+        }
+    }
+
+    // Thread-root metadata does not identify the immediate parent. This separate
+    // proof requires an already-bound nested target and refuses concurrent sends.
+    private static func replyThreadRootUncertainty(scan: ExactReplyRowScan, target: ExactReplyTarget,
+                                                   parent: ReplyProofParent) -> String? {
+        guard parent == .threadRoot else { return nil }
+        let root = target.thread_root
+        let originator = target.thread_originator
+        guard target.message_rowid > 0, root.message_rowid > 0, root.message_rowid != target.message_rowid,
+              !target.message_guid.isEmpty, !root.message_guid.isEmpty,
+              !root.message_guid.utf8.elementsEqual(target.message_guid.utf8),
+              target.native_part >= 0, root.native_part >= 0,
+              originator.available, originator.reason == "available", originator.raw_part != nil,
+              let guid = originator.message_guid, guid.utf8.elementsEqual(root.message_guid.utf8),
+              originator.native_part == root.native_part else { return "thread-root-target-unavailable" }
+        guard scan.chat_rowid == target.chat_rowid, scan.after_highwater >= 0,
+              scan.row_limit == ExactReplyRowScan.rowLimit, scan.rows_examined == scan.rows.count else {
+            return "thread-root-scan-mismatch"
+        }
+        if scan.overflow { return "row-limit-exceeded" }
+        var outgoing = 0
+        for row in scan.rows {
+            guard row.ownershipKnown else { return "unknown-ownership" }
+            guard row.is_from_me else { continue }
+            outgoing += 1
+            if outgoing > 1 { return "multiple-fresh-outgoing" }
+        }
+        return nil
+    }
+
+    static func judgeExactReplyThreadRootCorrespondence(scan: ExactReplyRowScan,
+                                                        target: ExactReplyTarget,
+                                                        expectedText: String) throws -> ExactReplyCorrespondence {
+        try judgeExactReplyCorrespondence(scan: scan, target: target, expectedText: expectedText, parent: .threadRoot)
+    }
+
     static func judgeExactReplyCorrespondence(scan: ExactReplyRowScan,
                                                      target: ExactReplyTarget,
                                                      expectedText: String) throws -> ExactReplyCorrespondence {
+        try judgeExactReplyCorrespondence(scan: scan, target: target, expectedText: expectedText, parent: .requested)
+    }
+
+    private static func judgeExactReplyCorrespondence(scan: ExactReplyRowScan, target: ExactReplyTarget,
+                                                       expectedText: String, parent: ReplyProofParent) throws -> ExactReplyCorrespondence {
+        if let reason = replyThreadRootUncertainty(scan: scan, target: target, parent: parent) {
+            return replyUncertain(reason)
+        }
+        let nativeParent = replyProofParent(target: target, parent: parent)
         if scan.overflow {
             return replyUncertain("row-limit-exceeded")
         }
@@ -1593,8 +1646,8 @@ public struct ChatDB {
             }
             guard originator.reason == "available",
                   let parentGUID = originator.message_guid,
-                  parentGUID.utf8.elementsEqual(target.message_guid.utf8),
-                  originator.native_part == target.native_part else {
+                  parentGUID.utf8.elementsEqual(nativeParent.guid.utf8),
+                  originator.native_part == nativeParent.part else {
                 return replyUncertain("matching-row-wrong-parent")
             }
             matches.append(row)
@@ -1613,17 +1666,62 @@ public struct ChatDB {
     }
 
 
+    mutating func exactReplyThreadRootAttachmentCorrespondence(chatRowid: Int64, afterHighwater: Int64,
+                                                     target: ExactReplyTarget,
+                                                     expectedAttachmentSHA256: String,
+                                                     expectedAttachmentSize: Int,
+                                                     checkpoint: () throws -> Void = {}) throws -> ExactReplyAttachmentCorrespondence {
+        try checkpoint()
+        let scan = try exactReplyRows(chatRowid: chatRowid, afterHighwater: afterHighwater)
+        return try exactReplyThreadRootAttachmentCorrespondence(scan: scan, target: target,
+                                                   expectedAttachmentSHA256: expectedAttachmentSHA256,
+                                                   expectedAttachmentSize: expectedAttachmentSize, checkpoint: checkpoint)
+    }
+
+    mutating func exactReplyThreadRootAttachmentCorrespondence(scan: ExactReplyRowScan, target: ExactReplyTarget,
+                                                     expectedAttachmentSHA256: String,
+                                                     expectedAttachmentSize: Int,
+                                                     checkpoint: () throws -> Void = {}) throws -> ExactReplyAttachmentCorrespondence {
+        try exactReplyAttachmentCorrespondence(scan: scan, target: target,
+                                               expectedAttachmentSHA256: expectedAttachmentSHA256,
+                                               expectedAttachmentSize: expectedAttachmentSize, parent: .threadRoot, checkpoint: checkpoint)
+    }
+
     mutating func exactReplyAttachmentCorrespondence(chatRowid: Int64, afterHighwater: Int64,
                                                      target: ExactReplyTarget,
                                                      expectedAttachmentSHA256: String,
                                                      expectedAttachmentSize: Int,
                                                      checkpoint: () throws -> Void = {}) throws -> ExactReplyAttachmentCorrespondence {
         try checkpoint()
+        let scan = try exactReplyRows(chatRowid: chatRowid, afterHighwater: afterHighwater)
+        return try exactReplyAttachmentCorrespondence(scan: scan, target: target,
+                                                   expectedAttachmentSHA256: expectedAttachmentSHA256,
+                                                   expectedAttachmentSize: expectedAttachmentSize, checkpoint: checkpoint)
+    }
+
+    mutating func exactReplyAttachmentCorrespondence(scan: ExactReplyRowScan, target: ExactReplyTarget,
+                                                     expectedAttachmentSHA256: String,
+                                                     expectedAttachmentSize: Int,
+                                                     checkpoint: () throws -> Void = {}) throws -> ExactReplyAttachmentCorrespondence {
+        try exactReplyAttachmentCorrespondence(scan: scan, target: target,
+                                               expectedAttachmentSHA256: expectedAttachmentSHA256,
+                                               expectedAttachmentSize: expectedAttachmentSize, parent: .requested, checkpoint: checkpoint)
+    }
+
+    private mutating func exactReplyAttachmentCorrespondence(scan: ExactReplyRowScan, target: ExactReplyTarget,
+                                                              expectedAttachmentSHA256: String,
+                                                              expectedAttachmentSize: Int,
+                                                              parent: ReplyProofParent,
+                                                              checkpoint: () throws -> Void) throws -> ExactReplyAttachmentCorrespondence {
+        try checkpoint()
         guard expectedAttachmentSHA256.hasPrefix("sha256:"), expectedAttachmentSHA256.utf8.count == 71,
               expectedAttachmentSize >= 1, expectedAttachmentSize <= AttachmentSource.maxBytes else {
             throw AppleError.validation("expected attachment proof is malformed")
         }
-        let scan = try exactReplyRows(chatRowid: chatRowid, afterHighwater: afterHighwater)
+        if let reason = Self.replyThreadRootUncertainty(scan: scan, target: target, parent: parent) {
+            return attachmentReplyUncertain(reason)
+        }
+        let nativeParent = Self.replyProofParent(target: target, parent: parent)
         if scan.overflow { return attachmentReplyUncertain("row-limit-exceeded") }
         var matches: [ExactReplyRow] = []
         for row in scan.rows {
@@ -1639,8 +1737,8 @@ public struct ChatDB {
             let originator = row.thread_originator
             guard originator.available, originator.reason == "available",
                   let parentGUID = originator.message_guid,
-                  parentGUID.utf8.elementsEqual(target.message_guid.utf8),
-                  originator.native_part == target.native_part else {
+                  parentGUID.utf8.elementsEqual(nativeParent.guid.utf8),
+                  originator.native_part == nativeParent.part else {
                 return attachmentReplyUncertain("matching-row-wrong-parent")
             }
             _ = guid

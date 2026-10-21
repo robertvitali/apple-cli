@@ -218,10 +218,10 @@ against a historical value (Q12 [1]).
 | `get_recent_messages` | hours=6 cross-chat: every MCP output line reproduced **byte-verbatim** (attributedBody-decoded bodies, group names, sender resolution, timestamps). **This claim is bounded to the pre-attachment build and is deliberately no longer true of `--text`** — see "Attachment metadata" below for the two intentional deviations (an appended `[N attachments: …]` suffix, and a row set that now includes attachment-only messages the oracle drops). The JSON body/group/sender/timestamp shaping the claim was really about is unchanged. |
 | `fuzzy_search_messages` | See the WRatio boundary note below. |
 
-### Exact root text replies
+### Exact threaded replies
 
 `apple messages reply send` is a CLI-only experimental write built on exact read
-evidence plus the shared Messages UI automation journal. It targets a root message
+evidence plus the shared Messages UI automation journal. It targets an exact message
 inside one direct conversation by exact chat selector, exact message selector and
 native part index. It does not use body text, latest-message order, a parent lookup
 or raw `thread_originator` metadata alone to authorize the write.
@@ -231,9 +231,9 @@ and creates no journal state. Execution requires `--experimental-ui-handoff`. Th
 reply text is supplied as `--body` (the global `--text` flag is already the output
 format selector), must be nonempty, and is capped at 2048 UTF-8 bytes; the private
 worker payload is capped at 4096 encoded bytes. Sandbox mode requires the target
-root body and outgoing reply body to carry the canonical `apple-cli-test` prefix
-and requires exactly one participant in `APPLE_TEST_RECIPIENTS`. Group replies and
-attachment replies are not implemented in this unit.
+selected body and outgoing reply body to carry the canonical `apple-cli-test` prefix
+and requires exactly one participant in `APPLE_TEST_RECIPIENTS`. Group replies remain unsupported. Single-file attachment replies use the shared
+path policy, bounded private staging, and persisted file-content verification.
 
 The UI phase opens the exact native Messages URL, retains the canonical process,
 window, root transcript and normal composer, then opens exactly one owned Reply
@@ -248,12 +248,36 @@ The child ACK has two accepted cleanup shapes: Messages may already have restore
 the original clean main composer, or the retained owned reply composer may be empty
 and closed with exactly one `AXCancel`. The parent records observed state only after
 that ACK and a fresh database proof: a new outgoing row in the same chat, after the
-pre-dispatch high-water mark, whose exact UTF-8 body and native
-`thread_originator` parent GUID/part match the target. Unknown ownership, malformed
+pre-dispatch high-water mark, whose exact UTF-8 body matches the requested text.
+Its native `thread_originator` GUID/part must match the selected target under strict
+selected-parent proof, or the independently bound root under the separately
+identified thread-root proof below. Unknown ownership, malformed
 GUIDs, malformed join evidence, duplicates, overflow or wrong-chat rows leave the
 operation unverified rather than authorizing success. The result reports
 `verification_source: ui_clean_state_and_database_correspondence`, the sent row and
 GUID, the parent GUID/part, and the exact target.
+
+Nested targets additionally require a unique single-part selected message and one
+unique, single-part, unlinked root in the same direct conversation. The parent binds
+both identities, ownership, native parts and raw originator metadata before handoff,
+on every proof pass, and after final UI cleanup verification. Multi-hop chains are
+refused. The target exposes selected `is_from_me`, `thread_root`, and root ownership
+through `root_is_from_me`.
+
+If a fresh reply records the bound thread root instead of the selected reply, a
+separate thread-root proof may establish correspondence after the verified UI ACK.
+Strict and root judges use the same scan. Root mode refuses any second fresh owned
+outgoing row, even unrelated text or an attachment; incoming messages remain allowed
+within the scan limit. Attachment proof still requires sent/error state and matching
+persisted file content. Existing strict-parent proof remains unchanged.
+
+Results add `observed_thread_originator`, `persisted_parent_matches_requested`, and
+`reply_relationship` (`requested-target` or `thread-root`). Existing parent GUID/part
+fields retain the observed native pair. Root correspondence is not proof of an
+immediate-parent relationship. Existing `verification_source` strings are unchanged;
+the descriptive `verification` sentence identifies root correspondence when used.
+Dry-run previews have no observed relationship fields. No result establishes
+recipient delivery or cross-device synchronization.
 
 ### Send service control and attachments
 

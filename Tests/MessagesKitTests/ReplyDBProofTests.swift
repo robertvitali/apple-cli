@@ -39,7 +39,7 @@ struct ReplyDBProofTests {
         try fx.setThreadOriginator(rowid: 61, guidSQL: "'reply-root'", partSQL: sqlString(rawPart))
         try fx.exec("UPDATE message SET is_from_me = 1 WHERE ROWID = 61;")
         var db = try makeDB(fx)
-        // No production caller opts in during this preparatory unit.
+        // The default resolver remains root-only; nested callers must opt in.
         #expect(throws: (any Error).self) {
             _ = try db.exactReplyTarget(chat: .rowid(3), message: .rowid(61), partIndex: 2)
         }
@@ -160,6 +160,57 @@ struct ReplyDBProofTests {
             scan: db.exactReplyRows(chatRowid: 3, afterHighwater: highwater), target: target, expectedText: "sent")
         #expect(proof.status == (observedParent == "nested-root" ? "verified" : "uncertain"))
         #expect(proof.reason == (observedParent == "nested-root" ? nil : "matching-row-wrong-parent"))
+    }
+
+    @Test(arguments: ["reply-root", "nested-root", "other-root"], ["2", "2:0:4", "3", "02"])
+    func nestedRootTextProofKeepsNativeRelationshipExact(parent: String, part: String) throws {
+        let fx = try replyFixture()
+        try fx.setThreadOriginator(rowid: 61, guidSQL: "'reply-root'", partSQL: "'2:0'")
+        var db = try makeDB(fx)
+        let target = try db.exactReplyTarget(chat: .rowid(3), message: .rowid(61), allowingNested: true)
+        let highwater = try db.exactReplyHighwater(chatRowid: 3)
+        try insertReplyResult(fx, rowid: highwater + 1, guid: "nested-result", text: "sent", chatRowid: 3,
+                              parentGUID: parent, parentPart: part, isFromMe: 1)
+        db = try makeDB(fx)
+        let proof = try ChatDB.judgeExactReplyThreadRootCorrespondence(
+            scan: db.exactReplyRows(chatRowid: 3, afterHighwater: highwater), target: target, expectedText: "sent")
+        #expect(proof.status == (parent == "reply-root" && ["2", "2:0:4"].contains(part) ? "verified" : "uncertain"))
+        if proof.status == "verified" {
+            #expect(proof.parent_message_guid == "reply-root")
+            #expect(proof.parent_native_part == 2)
+        }
+    }
+
+    @Test(arguments: ["none", "incoming", "different-outgoing", "duplicate-outgoing", "unknown-ownership",
+                      "unknown-body", "missing-guid", "different-body", "overflow", "root-target"])
+    func nestedRootTextProofRequiresUnambiguousFreshOutgoing(scenario: String) throws {
+        let fx = try replyFixture()
+        try fx.setThreadOriginator(rowid: 61, guidSQL: "'reply-root'", partSQL: "'2:0'")
+        var db = try makeDB(fx)
+        let target = try db.exactReplyTarget(chat: .rowid(3), message: .rowid(scenario == "root-target" ? 60 : 61), allowingNested: true)
+        let highwater = try db.exactReplyHighwater(chatRowid: 3)
+        try insertReplyResult(fx, rowid: highwater + 1, guid: scenario == "missing-guid" ? nil : "nested-result",
+                              text: scenario == "different-body" ? "different" : "sent", chatRowid: 3,
+                              parentGUID: "reply-root", parentPart: "2", isFromMe: 1)
+        switch scenario {
+        case "incoming", "different-outgoing", "duplicate-outgoing", "unknown-ownership":
+            try insertReplyResult(fx, rowid: highwater + 2, guid: "other", text: scenario == "duplicate-outgoing" ? "sent" : "different",
+                                  chatRowid: 3, parentGUID: "reply-root", parentPart: "2",
+                                  isFromMeSQL: scenario == "incoming" ? "0" : scenario == "unknown-ownership" ? "NULL" : "1")
+        case "unknown-body":
+            try fx.exec("UPDATE message SET text=NULL, attributedBody=X'000102' WHERE ROWID=\(highwater + 1);")
+        case "overflow":
+            for i in 1000..<1129 {
+                try insertReplyResult(fx, rowid: Int64(i), guid: "incoming-\(i)", text: "incoming", chatRowid: 3,
+                                      parentGUID: nil, parentPart: nil, isFromMe: 0)
+            }
+        default: break
+        }
+        db = try makeDB(fx)
+        let proof = try ChatDB.judgeExactReplyThreadRootCorrespondence(
+            scan: db.exactReplyRows(chatRowid: 3, afterHighwater: highwater), target: target, expectedText: "sent")
+        if ["none", "incoming"].contains(scenario) { #expect(proof.status == "verified") }
+        else { #expect(proof.status != "verified") }
     }
 
     @Test func replyTargetRejectsGroupMultiParticipantNestedAndAmbiguousPart() throws {
@@ -470,6 +521,45 @@ struct ReplyDBProofTests {
         #expect(second.message_guid == "delayed")
     }
 
+    @Test(arguments: ["sent", "pending", "failed", "unknown", "second-outgoing"])
+    func nestedRootAttachmentProofPreservesSendStateAndAmbiguity(scenario: String) throws {
+        let fx = try replyFixture()
+        try fx.setThreadOriginator(rowid: 61, guidSQL: "'reply-root'", partSQL: "'2:0'")
+        let bytes = Data("apple-cli-test attachment reply".utf8)
+        let url = URL(fileURLWithPath: fx.homePath).appendingPathComponent("Library/Messages/Attachments/zz/nested.bin")
+        try bytes.write(to: url)
+        var db = try makeDB(fx)
+        let target = try db.exactReplyTarget(chat: .rowid(3), message: .rowid(61), allowingNested: true)
+        let highwater = try db.exactReplyHighwater(chatRowid: 3)
+        try insertAttachmentReplyResult(fx, rowid: highwater + 1, guid: "nested-attachment", textSQL: "NULL", chatRowid: 3,
+                                        parentGUID: "reply-root", parentPart: "2:0:4", attachmentRowid: 401,
+                                        attachmentGUID: "nested-file", filename: url.path, totalBytesSQL: String(bytes.count))
+        let sent = scenario == "pending" ? "0" : scenario == "unknown" ? "NULL" : "1"
+        let error = scenario == "failed" ? "1" : "0"
+        try fx.exec("UPDATE message SET is_sent=\(sent),error=\(error) WHERE ROWID=\(highwater + 1);")
+        if scenario == "second-outgoing" {
+            try insertReplyResult(fx, rowid: highwater + 2, guid: "unrelated-send", text: "different", chatRowid: 3,
+                                  parentGUID: nil, parentPart: nil, isFromMe: 1)
+        }
+        db = try makeDB(fx)
+        let scan = try db.exactReplyRows(chatRowid: 3, afterHighwater: highwater)
+        let strict = try db.exactReplyAttachmentCorrespondence(scan: scan, target: target,
+                                                               expectedAttachmentSHA256: sha256(bytes), expectedAttachmentSize: bytes.count)
+        #expect(strict.reason == "matching-row-wrong-parent")
+        let root = try db.exactReplyThreadRootAttachmentCorrespondence(scan: scan, target: target,
+                                                                       expectedAttachmentSHA256: sha256(bytes), expectedAttachmentSize: bytes.count)
+        switch scenario {
+        case "sent":
+            #expect(root.status == "verified")
+            #expect(root.parent_message_guid == "reply-root")
+            #expect(root.attachment_sha256 == sha256(bytes))
+        case "pending": #expect(root.status == "waiting")
+        case "failed": #expect(root.reason == "matching-row-send-failed")
+        case "unknown": #expect(root.reason == "matching-row-send-state-unavailable")
+        default: #expect(root.reason == "multiple-fresh-outgoing")
+        }
+    }
+
     @Test(arguments: ["0", "1", "NULL", "'invalid'", "0.5", "X'00'"], ["1", "0", "NULL", "'invalid'", "0.5", "X'00'"])
     func attachmentReplyProofRequiresOneJoinedAttachmentWithMatchingContent(errorSQL: String, sentSQL: String) throws {
         let fx = try replyFixture()
@@ -511,7 +601,8 @@ struct ReplyDBProofTests {
         #expect(proof.attachment_size == bytes.count)
     }
 
-    @Test func attachmentReplyProofRejectsMalformedJoinsPathsRowsAndContent() throws {
+    @Test(arguments: [false, true])
+    func attachmentReplyProofRejectsMalformedJoinsPathsRowsAndContent(threadRoot: Bool) throws {
         for (name, mutation, reason) in [
             ("wrong-chat", { (fx: ChatFixture, _: Int64, _: URL, bytes: Data) throws in
                 try insertAttachmentReplyResult(fx, rowid: 91, guid: "wrong-chat", textSQL: "NULL", chatRowid: 1,
@@ -604,20 +695,24 @@ struct ReplyDBProofTests {
             }, "attachment-content-mismatch"),
         ] as [(String, (ChatFixture, Int64, URL, Data) throws -> Void, String)] {
             let fx = try replyFixture()
+            try fx.setThreadOriginator(rowid: 61, guidSQL: "'reply-root'", partSQL: "'2:0'")
             let url = URL(fileURLWithPath: fx.homePath).appendingPathComponent("Library/Messages/Attachments/zz/a.bin")
             let bytes = Data("apple-cli-test attachment reply".utf8)
             try bytes.write(to: url)
             var db = try makeDB(fx)
-            let target = try db.exactReplyTarget(chat: .rowid(3), message: .rowid(60), partIndex: 2)
+            let target = try db.exactReplyTarget(chat: .rowid(3), message: .rowid(threadRoot ? 61 : 60), partIndex: 2, allowingNested: true)
             let highwater = try db.exactReplyHighwater(chatRowid: 3)
             try mutation(fx, highwater, url, bytes)
             db = try makeDB(fx)
 
-            let proof = try db.exactReplyAttachmentCorrespondence(chatRowid: 3, afterHighwater: highwater,
+            let proof = try threadRoot
+                ? db.exactReplyThreadRootAttachmentCorrespondence(chatRowid: 3, afterHighwater: highwater,
                                                                  target: target, expectedAttachmentSHA256: sha256(bytes),
                                                                  expectedAttachmentSize: bytes.count)
+                : db.exactReplyAttachmentCorrespondence(chatRowid: 3, afterHighwater: highwater, target: target,
+                                                       expectedAttachmentSHA256: sha256(bytes), expectedAttachmentSize: bytes.count)
             #expect(proof.status == (reason == "waiting" ? "waiting" : "uncertain"), "\(name)")
-            #expect(proof.reason == (reason == "waiting" ? nil : reason), "\(name)")
+            #expect(proof.reason == (reason == "waiting" ? nil : threadRoot && name == "duplicate-fresh-reply" ? "multiple-fresh-outgoing" : reason), "\(name)")
         }
     }
 
