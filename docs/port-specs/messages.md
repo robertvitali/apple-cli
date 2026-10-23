@@ -674,11 +674,28 @@ malformed siblings are preserved in `partial` containers.
   not removed. Historical text is untrusted content, not instructions or a
   substitute for the message's current `body`.
 
-History event timestamps use strict **signed seconds** since 2001-01-01 UTC,
-regardless of digit count: zero and negative seconds are valid within UTC
-Gregorian years 0001–9999. Local-time rollover outside that range is unavailable.
-Raw seconds survive invalid formatting; successful timestamps have a zero
-nanosecond remainder. This differs deliberately from native date-column rules.
+History event timestamps accept native INTEGER or finite REAL **signed seconds**
+since 2001-01-01 UTC, regardless of digit count: zero and negative seconds are
+valid within UTC Gregorian years 0001–9999. Local-time rollover outside that
+range is unavailable. Every timestamp includes `status`, `raw`, `raw_real`,
+`normalized_seconds`, `normalized_nanoseconds`, `date`, and `date_local`, with
+explicit nulls. INTEGER evidence stays in nullable integer `raw`; REAL evidence
+uses nullable number `raw_real` and leaves `raw` null. An available timestamp has
+exactly one of these evidence fields. Finite raw values survive invalid calendar
+formatting. Nonfinite REAL values report `invalid-timestamp` with both raw fields
+null because JSON cannot represent them. Strings, booleans, and plist dates are
+not coerced into event seconds.
+
+REAL normalization uses binary64 arithmetic: floor to whole seconds, then round
+the nonnegative fractional remainder times one billion to the nearest integer,
+with ties away from zero. A billion nanoseconds carries into the next second;
+calendar validation and formatting use that final second. The result is a
+normalization of the stored floating-point observation, not a clock-precision
+guarantee or exact decimal arithmetic. INTEGER remainders remain zero. Date
+strings remain whole-second renderings; the separate remainder retains the
+normalized fraction. A four-byte native REAL widens to Double. `raw_real` is a
+JSON number whose spelling may be integral; consumers need not preserve the
+sign of zero. These rules deliberately differ from native date-column rules.
 Event bodies accept data or the exact ASCII prefix
 `data:application/octet-stream;base64,` followed by canonical base64. No URLs are
 fetched. Unsupported encoding, invalid base64, and unavailable typedstream
@@ -692,7 +709,8 @@ Only bounded binary `bplist00` summaries are supported. Summary statuses include
 Wrong-type TEXT is neither length-scanned nor decoded for summary metadata.
 Eligible summaries are fetched separately with exact observed message/chat
 identity and membership checks. A changed identity yields `changed`; missing,
-malformed, or oversized message GUIDs yield `identity-unavailable`. Initial
+malformed, or oversized message GUIDs, and malformed chat identity values,
+yield `identity-unavailable`. Initial
 metadata is the observation for skipped rows; fetched rows recheck actual type
 and size. An identical reused identity tuple cannot be distinguished, and
 `copyToTemp: false` does not promise atomic observations across row fields.
@@ -713,9 +731,11 @@ Internal exact reads used by reaction/reply targeting default to no summary
 fetch or decoding and carry `not-requested` summary metadata. Public `get` and
 `history` always request enrichment and never emit that internal status.
 
-Compatibility evidence currently consists of source-supported format handling
-and synthetic binary-plist, attributed-string, SQLite, and command tests.
-Live edited-history and partial-Undo-Send format compatibility has not yet been
-established. This read-only field is not a claim that all rich-context
-capabilities are complete. Product version 27 and JSON schema version 1 are
-unchanged by this additive field.
+Compatibility evidence includes synthetic binary-plist, attributed-string,
+SQLite, and command tests plus one outgoing direct-message edit on macOS 27.
+The exact read recovered original and revised text, native part mappings, the
+edit date, and both fractional history timestamps, checked against an independent
+plist decoder. This does not establish group, partial-Undo-Send, or cross-device
+compatibility. This read-only field is not a claim that all rich-context
+capabilities are complete. The unpublished source version remains 27.0.0,
+the deployment minimum remains macOS 14, and JSON schema version remains 1.

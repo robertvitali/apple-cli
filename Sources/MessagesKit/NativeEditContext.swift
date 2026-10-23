@@ -70,8 +70,40 @@ extension ChatDB {
         public struct HistoryEvent: Encodable, Equatable, Sendable {
             public let position: Int
             public let status: String
-            public let timestamp: ExactNativeStatus.TimestampField
+            public let timestamp: HistoryTimestamp
             public let body: HistoryBody
+        }
+
+        /// History uses native seconds, including REAL values; database date
+        /// columns retain their separate integer-only normalization policy.
+        public struct HistoryTimestamp: Encodable, Equatable, Sendable {
+            public let status: String
+            public let raw: Int64?
+            public let raw_real: Double?
+            public let normalized_seconds: Int64?
+            public let normalized_nanoseconds: Int64?
+            public let date: String?
+            public let date_local: String?
+
+            enum CodingKeys: String, CodingKey {
+                case status, raw, raw_real, normalized_seconds, normalized_nanoseconds, date, date_local
+            }
+
+            public func encode(to encoder: Encoder) throws {
+                var c = encoder.container(keyedBy: CodingKeys.self)
+                try c.encode(status, forKey: .status)
+                try encodeOrNull(&c, raw, .raw)
+                try encodeOrNull(&c, raw_real, .raw_real)
+                try encodeOrNull(&c, normalized_seconds, .normalized_seconds)
+                try encodeOrNull(&c, normalized_nanoseconds, .normalized_nanoseconds)
+                try encodeOrNull(&c, date, .date)
+                try encodeOrNull(&c, date_local, .date_local)
+            }
+
+            static func unavailable(_ status: String, raw: Int64? = nil, rawReal: Double? = nil) -> Self {
+                .init(status: status, raw: raw, raw_real: rawReal, normalized_seconds: nil,
+                      normalized_nanoseconds: nil, date: nil, date_local: nil)
+            }
         }
 
         public struct HistoryBody: Encodable, Equatable, Sendable {
@@ -139,28 +171,58 @@ enum NativeEditContextDecoder {
     }
 
     static func timestamp(_ value: Value?, timeZone: TimeZone = .current,
-                          format: (Int64, TimeZone) -> (String, String) = NativeMessageTimestamp.formatSeconds) -> ChatDB.ExactNativeStatus.TimestampField {
-        guard let value else { return NativeMessageTimestamp.unavailable("missing-key") }
-        if case .null = value { return NativeMessageTimestamp.unavailable("null") }
-        guard case .integer(let raw) = value else { return NativeMessageTimestamp.unavailable("wrong-type") }
-        // Event d is always signed Apple-epoch seconds, not a date-column sentinel.
-        guard (-63_113_904_000...252_423_993_599).contains(raw) else {
-            return NativeMessageTimestamp.unavailable("invalid-timestamp", raw: raw)
+                          format: (Int64, TimeZone) -> (String, String) = NativeMessageTimestamp.formatSeconds) -> Context.HistoryTimestamp {
+        guard let value else { return .unavailable("missing-key") }
+        if case .null = value { return .unavailable("null") }
+        let rawInteger: Int64?
+        let rawReal: Double?
+        var seconds: Int64
+        var nanoseconds: Int64
+        switch value {
+        case .integer(let raw):
+            rawInteger = raw
+            rawReal = nil
+            seconds = raw
+            nanoseconds = 0
+        case .real(let raw):
+            // JSON has no nonfinite number representation. Validate before
+            // conversion, retaining finite raw values even outside the calendar.
+            guard raw.isFinite else { return .unavailable("invalid-timestamp") }
+            guard raw >= -63_113_904_000, raw < 252_423_993_600 else {
+                return .unavailable("invalid-timestamp", rawReal: raw)
+            }
+            rawInteger = nil
+            rawReal = raw
+            seconds = Int64(raw.rounded(.down))
+            // Normalize with binary64 arithmetic, not decimal reconstruction.
+            // The raw observation remains the source of subsecond precision.
+            nanoseconds = Int64(((raw - Double(seconds)) * 1_000_000_000).rounded(.toNearestOrAwayFromZero))
+            if nanoseconds == 1_000_000_000 {
+                seconds += 1
+                nanoseconds = 0
+            }
+        default:
+            return .unavailable("wrong-type")
         }
-        let (utc, local) = format(raw, timeZone)
+        // Event d is always signed Apple-epoch seconds, not a date-column sentinel.
+        guard (-63_113_904_000...252_423_993_599).contains(seconds),
+              (0...999_999_999).contains(nanoseconds) else {
+            return .unavailable("invalid-timestamp", raw: rawInteger, rawReal: rawReal)
+        }
+        let (utc, local) = format(seconds, timeZone)
         guard NativeMessageTimestamp.valid(utc: utc, local: local), !local.hasPrefix("0000-") else {
-            return NativeMessageTimestamp.unavailable("invalid-timestamp", raw: raw)
+            return .unavailable("invalid-timestamp", raw: rawInteger, rawReal: rawReal)
         }
         // yyyy does not expose BCE, and Calendar's historical Gregorian cutover
         // differs from the formatter's proleptic calendar. Validate local wall
         // seconds directly, including the zone's offset at this exact instant.
-        let date = Date(timeIntervalSince1970: Double(raw) + MessageTime.appleUnixOffset)
-        let (localSeconds, overflow) = raw.addingReportingOverflow(Int64(timeZone.secondsFromGMT(for: date)))
+        let date = Date(timeIntervalSince1970: Double(seconds) + MessageTime.appleUnixOffset)
+        let (localSeconds, overflow) = seconds.addingReportingOverflow(Int64(timeZone.secondsFromGMT(for: date)))
         guard !overflow, (-63_113_904_000...252_423_993_599).contains(localSeconds) else {
-            return NativeMessageTimestamp.unavailable("invalid-timestamp", raw: raw)
+            return .unavailable("invalid-timestamp", raw: rawInteger, rawReal: rawReal)
         }
-        return .init(status: "available", raw: raw, normalized_seconds: raw,
-                     normalized_nanoseconds: 0, date: utc, date_local: local)
+        return .init(status: "available", raw: rawInteger, raw_real: rawReal, normalized_seconds: seconds,
+                     normalized_nanoseconds: nanoseconds, date: utc, date_local: local)
     }
 
     private static func integer(_ value: Value?) -> Int64? {
@@ -274,7 +336,7 @@ enum NativeEditContextDecoder {
 
         mutating func event(_ value: Value, position: Int, checkCancellation: () throws -> Void) throws -> Context.HistoryEvent {
             guard case .dictionary(let fields) = value else {
-                return .init(position: position, status: "invalid-event", timestamp: NativeMessageTimestamp.unavailable("unavailable"),
+                return .init(position: position, status: "invalid-event", timestamp: .unavailable("unavailable"),
                              body: .init(status: "unavailable", reason: "invalid-event", text: nil))
             }
             let stamp = timestamp(fields["d"])

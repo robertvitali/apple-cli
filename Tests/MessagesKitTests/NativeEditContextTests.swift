@@ -171,7 +171,7 @@ import Testing
         #expect(failed.status == "invalid-timestamp")
         #expect(failed.raw == 1)
         #expect(NativeEditContextDecoder.timestamp(.null).status == "null")
-        #expect(NativeEditContextDecoder.timestamp(.real(1)).status == "wrong-type")
+        #expect(NativeEditContextDecoder.timestamp(.date(1)).status == "wrong-type")
     }
 
     @Test func eventAndTextBudgetsDiscardWholeSummaryWithoutRefund() throws {
@@ -226,7 +226,7 @@ import Testing
         #expect(event.timestamp.status == "null")
         #expect(event.body.status == "null")
         let stamp = try json(event.timestamp)
-        #expect(Set(stamp.keys) == ["status", "raw", "normalized_seconds", "normalized_nanoseconds", "date", "date_local"])
+        #expect(Set(stamp.keys) == ["status", "raw", "raw_real", "normalized_seconds", "normalized_nanoseconds", "date", "date_local"])
         for key in stamp.keys where key != "status" { #expect(stamp[key] is NSNull) }
         let body = try json(event.body)
         #expect(body["reason"] is NSNull)
