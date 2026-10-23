@@ -653,4 +653,28 @@ public final class SQLiteReader {
         }
         return out
     }
+
+    /// Run a coherent, streamed read without changing the legacy reader's open policy.
+    /// Cancellation and deadlines are cooperative: SQLite work and callback returns are checked,
+    /// but an arbitrary callback or kernel I/O call cannot be preempted by this API.
+    public static func withBoundedReadTransaction<T>(
+        path: String, limits: SQLiteReadTransaction.Limits,
+        isCancelled: @escaping () -> Bool = { false },
+        _ body: (SQLiteReadTransaction) throws -> T
+    ) throws -> T {
+        let scope = try SQLiteReadTransaction(limits: limits, isCancelled: isCancelled)
+        try scope.checkpoint()
+        guard path.hasPrefix("/"), !path.utf8.contains(0) else {
+            throw SQLiteReadTransaction.Failure.couldNotOpen
+        }
+        let reader: SQLiteReader
+        do { reader = try SQLiteReader(path: path, directOpen: .walAware) }
+        catch {
+            try scope.checkpoint()
+            throw SQLiteReadTransaction.Failure.couldNotOpen
+        }
+        return try withExtendedLifetime(reader) {
+            try scope.run(on: reader.db!, body)
+        }
+    }
 }
