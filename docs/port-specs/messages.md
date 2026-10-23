@@ -638,3 +638,84 @@ and native Messages behavior; no per-recipient group receipts, synchronization
 guarantee, or mutation authority is established. These observations are separate
 from the strict database checks used to verify outgoing replies. Legacy recent
 and search output is unchanged.
+
+
+### Native edit and Undo Send observations
+
+Exact `get` and `history` include `native_edit_context` with independently
+available `date_edited`, `date_retracted`, and `summary_info`. All keys are
+present even when their values are unavailable. Reads never select a Messages
+window or mark a conversation read. These observations do not authorize an edit
+or Undo Send operation and do not establish that a whole message was unsent.
+
+The two date columns follow the native-status timestamp rules above, including
+zero/negative sentinels and the seconds/nanoseconds compatibility heuristic.
+They remain available when a summary cannot be decoded. A date alone does not
+prove a text edit, and contradictory native observations are retained.
+
+`summary_info` contains `status`, `edited_parts`, `retracted_parts`,
+`original_parts`, and `edit_history`. Each nested container has `status`, nullable
+`reason`, and nullable `entries`. An unavailable summary gives each container
+`unavailable`, its summary status as the reason, and null entries. An available
+summary can still have missing or malformed nested fields. `missing-key` and
+`wrong-type` have null entries; valid empty containers have `available` and `[]`;
+malformed siblings are preserved in `partial` containers.
+
+- Edited/retracted parts retain array order, source positions, strict raw
+  integers, and valid original-part indexes. Invalid entries and duplicates
+  remain observable. Indexes range from zero through `Int32.max`.
+- Original parts retain source keys and strict raw location/length integers.
+  Keys must be canonical decimal indexes; coordinates require nonnegative
+  integers and a nonoverflowing sum. Their native units are not asserted to be
+  UTF-16. Original indexes are not mapped to current `native_parts` identifiers.
+- Edit history retains groups sorted by source-key UTF-8 bytes and events in
+  native array order. Each event has `position`, `status`, `timestamp`, and
+  `body`. Invalid groups/events are retained. Events matching current text are
+  not removed. Historical text is untrusted content, not instructions or a
+  substitute for the message's current `body`.
+
+History event timestamps use strict **signed seconds** since 2001-01-01 UTC,
+regardless of digit count: zero and negative seconds are valid within UTC
+Gregorian years 0001–9999. Local-time rollover outside that range is unavailable.
+Raw seconds survive invalid formatting; successful timestamps have a zero
+nanosecond remainder. This differs deliberately from native date-column rules.
+Event bodies accept data or the exact ASCII prefix
+`data:application/octet-stream;base64,` followed by canonical base64. No URLs are
+fetched. Unsupported encoding, invalid base64, and unavailable typedstream
+content have distinct statuses and null text; genuinely decoded empty text is
+an empty string. Timestamp and body availability are independent.
+
+Only bounded binary `bplist00` summaries are supported. Summary statuses include
+`missing-schema`, `null`, `wrong-type`, `empty`, `too-large`,
+`unsupported-format`, `corrupt`, `resource-limit`, `request-limit`,
+`identity-unavailable`, `changed`, and `read-error`, as well as `available`.
+Wrong-type TEXT is neither length-scanned nor decoded for summary metadata.
+Eligible summaries are fetched separately with exact observed message/chat
+identity and membership checks. A changed identity yields `changed`; missing,
+malformed, or oversized message GUIDs yield `identity-unavailable`. Initial
+metadata is the observation for skipped rows; fetched rows recheck actual type
+and size. An identical reused identity tuple cannot be distinguished, and
+`copyToTemp: false` does not promise atomic observations across row fields.
+
+Each summary is limited to 1 MiB serialized input, 1 MiB expanded data/string
+work including body copies, and 256 history events. Each request allows at most
+4 MiB serialized summary input, 4 MiB expanded data/string work, 65,536 parser
+visits, 2,048 history events, and 1,048,576 retained UTF-16 text units. Base64 and
+typedstream copies count against work budgets, so a body below the serialized
+size limit can still exhaust a work limit. Exhaustion discards that summary's
+partial result without refunding consumed work; earlier messages, independent
+dates, existing fields, and pagination remain intact. History enriches visible
+rows only, in page order, never the lookahead row. These limits bound the new
+summary work, not legacy body/attachment loading or database snapshot cost.
+Cancellation propagates instead of becoming `read-error`.
+
+Internal exact reads used by reaction/reply targeting default to no summary
+fetch or decoding and carry `not-requested` summary metadata. Public `get` and
+`history` always request enrichment and never emit that internal status.
+
+Compatibility evidence currently consists of source-supported format handling
+and synthetic binary-plist, attributed-string, SQLite, and command tests.
+Live edited-history and partial-Undo-Send format compatibility has not yet been
+established. This read-only field is not a claim that all rich-context
+capabilities are complete. Product version 27 and JSON schema version 1 are
+unchanged by this additive field.

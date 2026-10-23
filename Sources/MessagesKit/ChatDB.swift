@@ -14,6 +14,8 @@ public struct ChatDB {
     }
 
     private let reader: SQLiteReader
+    // Internal synthetic-test seam; no command or environment control.
+    var beforeNativeEditSummaryRead: (() throws -> Void)?
     private let book: AddressBook
     private let homeDirectoryForTilde: String
     // Caches for per-invocation sender resolution.
@@ -980,12 +982,14 @@ public struct ChatDB {
         public let native_parts: [ExactNativePart]?
         public let thread_originator: ExactThreadOriginator
         public let native_status: ExactNativeStatus
+        public let native_edit_context: ExactNativeEditContext
 
         enum CodingKeys: String, CodingKey {
             case rowid, message_guid, selected_chat_rowid, chat_guid, chat_identifier
             case date, date_local, timestamp, normalized_seconds, normalized_nanoseconds, is_from_me, sender, handle
             case service, body, body_availability, group_name, is_group, has_attachments
             case attachments, native_parts_available, native_parts_reason, native_parts, thread_originator, native_status
+            case native_edit_context
         }
 
         public func encode(to encoder: Encoder) throws {
@@ -1015,6 +1019,7 @@ public struct ChatDB {
             try encodeOrNull(&c, native_parts, .native_parts)
             try c.encode(thread_originator, forKey: .thread_originator)
             try c.encode(native_status, forKey: .native_status)
+            try c.encode(native_edit_context, forKey: .native_edit_context)
         }
     }
 
@@ -1220,6 +1225,7 @@ public struct ChatDB {
                m.cache_has_attachments AS cache_has_attachments,
                \(originatorSelect),
                \(NativeMessageStatusDecoder.projection(columns: schema.messageColumns)),
+               \(NativeEditContextRead.projection(columns: schema.messageColumns)),
                h.id AS address,
                c.ROWID AS selected_chat_rowid, c.chat_identifier AS chat_identifier,
                c.guid AS chat_guid, c.display_name AS selected_display_name,
@@ -1316,7 +1322,8 @@ public struct ChatDB {
     }
 
     public mutating func exactHistory(chat selector: ExactChatSelector, limit: Int,
-                                      order: ExactOrder, cursor: String?) throws -> ExactPage<ExactMessage> {
+                                      order: ExactOrder, cursor: String?,
+                                      includeNativeEditContext: Bool = false) throws -> ExactPage<ExactMessage> {
         let schema = try requireExactReadSchema()
         let chat = try resolveExactChat(selector)
         let decoded = try decodeCursor(cursor, op: "history", chat: chat, order: order)
@@ -1363,7 +1370,9 @@ public struct ChatDB {
         ORDER BY \(nullOrder), normalized_seconds \(orderSQL), normalized_nanoseconds \(orderSQL), m.ROWID \(orderSQL)
         LIMIT \(limit + 1)
         """
-        let messages = try shapeExactMessages(rows: reader.rows(sql, binds), schema: schema)
+        let messages = try shapeExactMessages(rows: reader.rows(sql, binds), schema: schema,
+                                              includeNativeEditContext: includeNativeEditContext,
+                                              enrichmentLimit: limit)
         let visible = Array(messages.prefix(limit))
         let next = try messages.count > limit ? visible.last.map {
             try encodeCursor(ExactCursor(v: ChatDB.exactCursorVersion, op: "history",
@@ -1378,7 +1387,8 @@ public struct ChatDB {
     }
 
     public mutating func exactGet(chat selector: ExactChatSelector,
-                                  message messageSelector: ExactMessageSelector) throws -> (ResolvedExactChat, ExactMessage) {
+                                  message messageSelector: ExactMessageSelector,
+                                  includeNativeEditContext: Bool = false) throws -> (ResolvedExactChat, ExactMessage) {
         let schema = try requireExactReadSchema()
         let chat = try resolveExactChat(selector)
         let messagePredicate: String
@@ -1401,7 +1411,8 @@ public struct ChatDB {
         WHERE c.ROWID = ?1 AND \(messagePredicate)
         LIMIT 1
         """
-        let messages = try shapeExactMessages(rows: reader.rows(sql, [String(chat.rowid), bind]), schema: schema)
+        let messages = try shapeExactMessages(rows: reader.rows(sql, [String(chat.rowid), bind]), schema: schema,
+                                              includeNativeEditContext: includeNativeEditContext)
         guard let message = messages.first else {
             throw AppleError.notFound("message is not a member of the selected conversation")
         }
@@ -2640,11 +2651,14 @@ public struct ChatDB {
         }
     }
 
-    private mutating func shapeExactMessages(rows: [SQLiteReader.Row], schema: ExactReadSchema) throws -> [ExactMessage] {
+    private mutating func shapeExactMessages(rows: [SQLiteReader.Row], schema: ExactReadSchema,
+                                            includeNativeEditContext: Bool = false,
+                                            enrichmentLimit: Int = 1) throws -> [ExactMessage] {
         let ids = rows.compactMap { $0.int("rowid") }
         let attachments = try strictAttachmentsByMessage(ids: ids)
         var out: [ExactMessage] = []
-        for row in rows {
+        var editBudget = NativeEditContextRead.Budget()
+        for (index, row) in rows.enumerated() {
             let rowid = try requiredInt(row, "rowid")
             let selectedChat = try requiredInt(row, "selected_chat_rowid")
             let joined = attachments[rowid] ?? []
@@ -2661,6 +2675,12 @@ public struct ChatDB {
                let name = try exactDisplayNameForRoom(room), !name.isEmpty {
                 group = name
             }
+            let editContext = try NativeEditContextRead.context(
+                row, requested: includeNativeEditContext && index < enrichmentLimit,
+                budget: &editBudget, read: { sql, binds in
+                    try beforeNativeEditSummaryRead?()
+                    return try reader.rows(sql, binds)
+                })
             out.append(ExactMessage(
                 rowid: rowid,
                 message_guid: row.text("message_guid"),
@@ -2686,7 +2706,8 @@ public struct ChatDB {
                 native_parts_reason: nativePartsInfo.reason,
                 native_parts: nativePartsInfo.parts,
                 thread_originator: threadOriginator,
-                native_status: NativeMessageStatusDecoder.decode(row)
+                native_status: NativeMessageStatusDecoder.decode(row),
+                native_edit_context: editContext
             ))
         }
         return out

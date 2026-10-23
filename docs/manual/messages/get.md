@@ -50,6 +50,8 @@ apple messages get --chat-rowid 42 --message-rowid 123
 
 GUIDs are opaque, persistent identifiers when available; positive ROWIDs are local to this database. The result retains caller-selected chat membership even when the message also belongs to another conversation. Message, attachment, native-part and `thread_originator` fields use the same shape as `messages history`, including explicit body availability, explicit native-part null-versus-array states and explicit nullable thread-originator keys. This command reads database state only; it does not select a Messages window, mark a chat read or mutate a message. The always-present `native_status` object has the same per-field availability, explicit nulls, raw integer values and Apple-epoch timestamp semantics documented under `messages history`; it is native row metadata, not per-recipient delivery/read guarantees or mutation authority.
 
+The always-present `native_edit_context` follows the same independently available dates, summary/history fields, explicit nulls, resource limits, and compatibility limitations documented under `messages history`. This read metadata never authorizes a mutation.
+
 ## Output
 
 `stdout` carries the JSON envelope; `stderr` carries human text. See [the JSON contract](../reference/json-contract.md) and [exit codes](../reference/exit-codes.md).

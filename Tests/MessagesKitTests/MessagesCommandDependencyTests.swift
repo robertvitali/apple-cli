@@ -1552,6 +1552,42 @@ struct MessagesCommandDependencyTests {
         #expect(wrongChat.exitCode == AppleExit.notFound)
     }
 
+    @Test(arguments: [false, true])
+    func publicExactReadsAlwaysExposeNativeEditContext(_ hasSummary: Bool) throws {
+        if hasSummary {
+            try chat.exec("ALTER TABLE message ADD COLUMN message_summary_info")
+            let data = try PropertyListSerialization.data(fromPropertyList: ["ep": [0]],
+                                                          format: .binary, options: 0)
+            let hex = data.map { String(format: "%02x", $0) }.joined()
+            try chat.exec("UPDATE message SET message_summary_info=X'\(hex)' WHERE ROWID=1")
+        }
+        let deps = fixtureDependencies(chat)
+        let getText = try captureStdout {
+            try Get.parse(["--chat-rowid", "3", "--message-rowid", "1"]).run(dependencies: deps)
+        }
+        let historyText = try captureStdout {
+            try History.parse(["--chat-rowid", "3", "--limit", "1"]).run(dependencies: deps)
+        }
+        #expect(try successEnvelope(from: getText)["schema_version"] as? Int == 1)
+        #expect(try successEnvelope(from: historyText)["schema_version"] as? Int == 1)
+        let message = try #require(payload(from: getText)["message"] as? [String: Any])
+        let messages = try #require(payload(from: historyText)["messages"] as? [[String: Any]])
+        let historyMessage = try #require(messages.first)
+        #expect(message["rowid"] as? Int == historyMessage["rowid"] as? Int)
+        #expect(message["body"] as? String == "hello from friend")
+        #expect(message["native_status"] is [String: Any])
+        let context = try #require(message["native_edit_context"] as? [String: Any])
+        let historyContext = try #require(historyMessage["native_edit_context"] as? [String: Any])
+        #expect(NSDictionary(dictionary: context).isEqual(to: historyContext))
+        #expect(Set(context.keys) == ["date_edited", "date_retracted", "summary_info"])
+        let summary = try #require(context["summary_info"] as? [String: Any])
+        #expect(summary["status"] as? String == (hasSummary ? "available" : "missing-schema"))
+        #expect(summary["status"] as? String != "not-requested")
+        let date = try #require(context["date_edited"] as? [String: Any])
+        #expect(date["status"] as? String == "missing-schema")
+        #expect(date["raw"] is NSNull)
+    }
+
     @Test func reactionInspectUsesExactTargetAndReportsCurrentOutgoing() throws {
         let fx = try ChatFixture()
         try fx.addReactionColumns()

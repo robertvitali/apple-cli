@@ -777,7 +777,8 @@ struct History: ParsableCommand {
             let parsedOrder = try parseExactOrder(order)
             let book = dependencies.loadAddressBook()
             var db = try dependencies.makeChatDB(book)
-            let page = try db.exactHistory(chat: selector, limit: limit, order: parsedOrder, cursor: cursor)
+            let page = try db.exactHistory(chat: selector, limit: limit, order: parsedOrder, cursor: cursor,
+                                           includeNativeEditContext: true)
             let chat = try requireExactChat(page.chat)
             let data = HistoryData(chat_rowid: chat.rowid, chat_guid: chat.guid, limit: limit,
                                    order: parsedOrder.rawValue, cursor: cursor,
@@ -809,7 +810,8 @@ struct Get: ParsableCommand {
             let messageSelector = try parseMessageSelector(rowid: messageRowid, guid: messageGuid)
             let book = dependencies.loadAddressBook()
             var db = try dependencies.makeChatDB(book)
-            let (chat, message) = try db.exactGet(chat: chatSelector, message: messageSelector)
+            let (chat, message) = try db.exactGet(chat: chatSelector, message: messageSelector,
+                                                 includeNativeEditContext: true)
             let data = GetMessageData(chat_rowid: chat.rowid, chat_guid: chat.guid, message: message)
             try emit(global, data) { renderExactMessage(message) }
         }
