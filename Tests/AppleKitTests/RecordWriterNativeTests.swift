@@ -113,7 +113,10 @@ struct RecordWriterNativeTests {
             try check(posix_spawn_file_actions_adddup2(&actions, source, destination))
             try check(posix_spawn_file_actions_addclose(&actions, source))
         }
-        var argv = [executable.path, mode, root.path].map { strdup($0) }
+        let arguments: [String] = [executable.path, mode, root.path]
+        var argv: [UnsafeMutablePointer<CChar>?] = arguments.map { argument in
+            argument.withCString { strdup($0) }
+        }
         defer { argv.forEach { free($0) } }
         guard argv.allSatisfy({ $0 != nil }) else { throw RecordWriterProbeSetupError.failed }
         argv.append(nil)
