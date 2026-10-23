@@ -20,6 +20,11 @@ JSON output are stable per the versioning policy — breaking changes bump
 
 ### Added
 
+- Shared AppleKit record output adds LF framing, partial-write errors and cooperative
+  cancellation/deadlines while preserving borrowed descriptor and signal settings.
+  Failed writes prevent subsequent records on that writer. Existing command output
+  is unchanged; this foundation does not enable live event streaming.
+
 - Internal AppleKit code can encode compact JSON success and error envelopes without
   writing output or adding record delimiters. Existing command formatting and
   schema version 1 remain unchanged; live event streaming is not enabled yet.
