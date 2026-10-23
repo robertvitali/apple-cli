@@ -29,12 +29,35 @@ public enum NativeMessageParts {
         }
     }
 
+    public struct Mention: Equatable, Sendable {
+        public let identifier: String
+        public let utf16Range: UTF16Range
+    }
+
+    /// Optional read metadata; never evidence for mutation targeting.
+    public struct MentionObservation: Equatable, Sendable {
+        public let entries: [Mention]?
+        public let reason: String?
+    }
+
     public struct Decoded: Equatable, Sendable {
         public let text: String?
         public let status: Status
         public let nativePartsAvailable: Bool
         public let nativePartsReason: String
         public let nativeParts: [NativePart]?
+        public let mentions: MentionObservation?
+
+        init(text: String?, status: Status, nativePartsAvailable: Bool,
+                    nativePartsReason: String, nativeParts: [NativePart]?,
+                    mentions: MentionObservation? = nil) {
+            self.text = text
+            self.status = status
+            self.nativePartsAvailable = nativePartsAvailable
+            self.nativePartsReason = nativePartsReason
+            self.nativeParts = nativeParts
+            self.mentions = mentions
+        }
     }
 
     public struct Limits: Sendable {
@@ -96,10 +119,12 @@ public enum NativeMessageParts {
     private struct RunAttributes: Equatable {
         var partIndex: Int?
         var attachmentGUID: String?
+        var mentionIdentifier: String?
+        var mentionFailure: String?
     }
 
     private enum Value: Equatable {
-        case string(String)
+        case string(String, utf8Unchanged: Bool)
         case int(Int)
         case dictionary(RunAttributes)
         case skipped
@@ -113,18 +138,18 @@ public enum NativeMessageParts {
         case cString(String)
     }
 
-    public static func decode(_ data: Data?, limits: Limits = .default) -> Decoded {
+    public static func decode(_ data: Data?, limits: Limits = .default, collectMentions: Bool = false) -> Decoded {
         guard let data else {
             return Decoded(text: nil, status: .absentBlob, nativePartsAvailable: false,
                            nativePartsReason: "absent-blob", nativeParts: nil)
         }
-        return decode(data, limits: limits)
+        return decode(data, limits: limits, collectMentions: collectMentions)
     }
 
-    public static func decode(_ data: Data, limits: Limits = .default) -> Decoded {
+    public static func decode(_ data: Data, limits: Limits = .default, collectMentions: Bool = false) -> Decoded {
         do {
             guard data.count <= limits.maxBlobBytes else { throw DecodeError.fail(.corrupt, "blob-too-large") }
-            var reader = Reader(bytes: Array(data), limits: limits)
+            var reader = Reader(bytes: Array(data), limits: limits, collectMentions: collectMentions)
             return try reader.decodeAttributedString()
         } catch let error as DecodeError {
             return Decoded(text: nil, status: error.status, nativePartsAvailable: false,
@@ -138,6 +163,9 @@ public enum NativeMessageParts {
     private struct Reader {
         let bytes: [UInt8]
         let limits: Limits
+        let collectMentions: Bool
+        var mentionEntries: [Mention] = []
+        var mentionFailure: String?
         var cursor = 0
         var stringTable: [String] = []
         var slots: [Slot] = []
@@ -160,7 +188,7 @@ public enum NativeMessageParts {
                              reason: "unsupported-root-class")
 
             let textValue = try readObjectValue(depth: 0)
-            guard case .string(let text) = textValue else {
+            guard case .string(let text, _) = textValue else {
                 throw DecodeError.fail(.corrupt, "wrong-kind-root-string")
             }
             guard text.utf16.count <= limits.maxTextUTF16Units else {
@@ -177,7 +205,49 @@ public enum NativeMessageParts {
                            status: parts.isEmpty ? .noNativeKeys : .decoded,
                            nativePartsAvailable: true,
                            nativePartsReason: parts.isEmpty ? "empty-known" : "available",
-                           nativeParts: parts)
+                           nativeParts: parts,
+                           mentions: mentionObservation(text: text))
+        }
+
+        private func mentionObservation(text: String) -> MentionObservation? {
+            guard collectMentions else { return nil }
+            if let mentionFailure { return .init(entries: nil, reason: mentionFailure) }
+            if !mentionEntries.isEmpty {
+                // One bounded buffer avoids rescanning text for each endpoint.
+                let units = Array(text.utf16)
+                func scalarBoundary(_ offset: Int) -> Bool {
+                    guard offset > 0, offset < units.count else { return true }
+                    return !((0xD800...0xDBFF).contains(units[offset - 1])
+                             && (0xDC00...0xDFFF).contains(units[offset]))
+                }
+                for entry in mentionEntries {
+                    let range = entry.utf16Range
+                    guard range.location >= 0, range.length > 0,
+                          range.location <= units.count,
+                          range.length <= units.count - range.location,
+                          scalarBoundary(range.location), scalarBoundary(range.location + range.length) else {
+                        return .init(entries: nil, reason: "invalid-mention-range")
+                    }
+                }
+            }
+            return .init(entries: mentionEntries, reason: nil)
+        }
+
+        private mutating func collectMention(_ attrs: RunAttributes, location: Int, length: Int) {
+            guard collectMentions, mentionFailure == nil else { return }
+            if let failure = attrs.mentionFailure {
+                mentionFailure = failure
+            } else if let identifier = attrs.mentionIdentifier {
+                if length == 0 {
+                    mentionFailure = "invalid-mention-range"
+                } else if mentionEntries.count == 256 {
+                    mentionFailure = "mention-count-limit"
+                } else {
+                    mentionEntries.append(.init(identifier: identifier,
+                                                utf16Range: .init(location: location, length: length)))
+                }
+            }
+            if mentionFailure != nil { mentionEntries.removeAll(keepingCapacity: false) }
         }
 
         private mutating func readRuns(textUTF16Length: Int) throws -> [(Int, UTF16Range, String?)] {
@@ -217,6 +287,7 @@ public enum NativeMessageParts {
                     guard length > 0 else { throw DecodeError.fail(.corrupt, "zero-length-part-run") }
                     out.append((index, UTF16Range(location: location, length: length), attrs.attachmentGUID))
                 }
+                collectMention(attrs, location: location, length: length)
                 location += length
                 runCount += 1
             }
@@ -273,7 +344,7 @@ public enum NativeMessageParts {
             if try chainMatches(classSlot, ["NSMutableString", "NSString", "NSObject"]) ||
                 (try chainMatches(classSlot, ["NSString", "NSObject"])) {
                 try expectTypeGroup("+")
-                value = .string(try readInlineUTF8String())
+                value = try readInlineUTF8StringValue()
                 try expectByte(0x86)
             } else if try chainMatchesAny(classSlot, [["NSDictionary", "NSObject"],
                                                        ["NSMutableDictionary", "NSDictionary", "NSObject"]]) {
@@ -309,10 +380,11 @@ public enum NativeMessageParts {
             var attrs = RunAttributes()
             var seenPart = false
             var seenGuid = false
+            var seenMention = false
             for _ in 0..<count {
                 let key = try readObjectValue(depth: depth + 1)
                 let value = try readObjectValue(depth: depth + 1)
-                guard case .string(let keyString) = key else { throw DecodeError.fail(.corrupt, "wrong-kind-key") }
+                guard case .string(let keyString, let keyUTF8Unchanged) = key else { throw DecodeError.fail(.corrupt, "wrong-kind-key") }
                 switch keyString {
                 case "__kIMMessagePartAttributeName":
                     guard !seenPart else { throw DecodeError.fail(.corrupt, "duplicate-part-key") }
@@ -322,11 +394,30 @@ public enum NativeMessageParts {
                     seenPart = true
                 case "__kIMFileTransferGUIDAttributeName":
                     guard !seenGuid else { throw DecodeError.fail(.corrupt, "duplicate-guid-key") }
-                    guard case .string(let guid) = value else { throw DecodeError.fail(.corrupt, "wrong-kind-attachment-guid") }
+                    guard case .string(let guid, _) = value else { throw DecodeError.fail(.corrupt, "wrong-kind-attachment-guid") }
                     guard !guid.isEmpty else { throw DecodeError.fail(.corrupt, "empty-attachment-guid") }
                     guard guid.utf8.count <= limits.maxGUIDBytes else { throw DecodeError.fail(.corrupt, "guid-too-large") }
                     attrs.attachmentGUID = guid
                     seenGuid = true
+                case "__kIMMentionConfirmedMention" where collectMentions && keyUTF8Unchanged:
+                    if seenMention {
+                        attrs.mentionFailure = "duplicate-mention-key"
+                    } else if case .string(let identifier, let utf8Unchanged) = value {
+                        if !utf8Unchanged {
+                            attrs.mentionFailure = "invalid-mention-identifier"
+                        } else if identifier.utf8.count > 1_024 {
+                            attrs.mentionFailure = "mention-identifier-limit"
+                        } else if identifier.isEmpty || identifier.unicodeScalars.contains(where: {
+                            $0.properties.generalCategory == .control || $0.properties.generalCategory == .format
+                        }) {
+                            attrs.mentionFailure = "invalid-mention-identifier"
+                        } else {
+                            attrs.mentionIdentifier = identifier
+                        }
+                    } else {
+                        attrs.mentionFailure = "invalid-mention-identifier"
+                    }
+                    seenMention = true
                 default:
                     break
                 }
@@ -475,7 +566,7 @@ public enum NativeMessageParts {
             return value
         }
 
-        private mutating func readInlineUTF8String() throws -> String {
+        private mutating func readInlineUTF8StringValue() throws -> Value {
             let count = try readUnsignedInteger()
             guard count <= limits.maxStringBytes, cursor + count <= bytes.count else {
                 throw DecodeError.fail(.corrupt, "truncated-string")
@@ -485,7 +576,9 @@ public enum NativeMessageParts {
             guard let value = String(bytes: raw, encoding: .utf8) else {
                 throw DecodeError.fail(.corrupt, "invalid-utf8")
             }
-            return value
+            // Foundation can strip a leading BOM. Preserve legacy decoded strings,
+            // but do not expose changed bytes as an exact mention key or ID.
+            return .string(value, utf8Unchanged: !collectMentions || value.utf8.elementsEqual(raw))
         }
 
         private mutating func readReferenceIndex(reason: String) throws -> Int {
