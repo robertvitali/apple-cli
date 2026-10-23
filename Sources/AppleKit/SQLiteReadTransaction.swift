@@ -17,7 +17,8 @@ public final class SQLiteReadTransaction {
         /// bytes in 1...1,073,741,824; valueBytes in 1...16,777,216 and no larger than bytes.
         /// Integer and real values each cost 8 bytes, NULL costs 0, and TEXT/BLOB cost
         /// their payload length. A valueBytes budget below 8 therefore refuses numeric values.
-        /// `valueBytes` also sets SQLite's length limit during expression evaluation.
+        /// `valueBytes` also sets SQLite's length limit during expression evaluation and
+        /// schema loading. Oversized schema text can fail before the capture body runs.
         /// It is not a cap on the combined size of separately projected column values.
         public init(timeout: TimeInterval, rows: Int, bytes: Int, valueBytes: Int) {
             self.timeout = timeout
@@ -48,6 +49,11 @@ public final class SQLiteReadTransaction {
     private var byteCount = 0
     private var interruption: Failure?
     private var queryFailure: Error?
+    private struct TableColumnAuthorization {
+        let objectName: String
+        var observed = false
+    }
+    private var tableColumnAuthorization: TableColumnAuthorization?
 
     init(limits: Limits, isCancelled: @escaping () -> Bool) throws {
         guard limits.timeout.isFinite, limits.timeout > 0, limits.timeout <= 60,
@@ -107,16 +113,30 @@ public final class SQLiteReadTransaction {
         try executeInternal("BEGIN", on: db)
         // BEGIN is deferred. Reading the schema establishes the snapshot before body runs.
         try executeInternal("SELECT rootpage FROM sqlite_schema LIMIT 1", on: db)
-        let rc = sqlite3_set_authorizer(db, { _, action, _, function, _, _ in
+        let rc = sqlite3_set_authorizer(db, { context, action, name, argument, schema, _ in
+            guard let context else { return SQLITE_DENY }
+            let scope = Unmanaged<SQLiteReadTransaction>.fromOpaque(context).takeUnretainedValue()
             switch action {
-            case SQLITE_SELECT, SQLITE_READ, SQLITE_RECURSIVE: return SQLITE_OK
+            case SQLITE_SELECT, SQLITE_RECURSIVE: return SQLITE_OK
+            case SQLITE_READ:
+                if let name, sqlite3_stricmp(name, "pragma_table_xinfo") == 0,
+                   scope.tableColumnAuthorization == nil { return SQLITE_DENY }
+                return SQLITE_OK
+            case SQLITE_PRAGMA:
+                guard let permission = scope.tableColumnAuthorization,
+                      let name, let argument, let schema,
+                      String(cString: name) == "table_xinfo",
+                      String(cString: argument) == permission.objectName,
+                      String(cString: schema) == "main" else { return SQLITE_DENY }
+                scope.tableColumnAuthorization?.observed = true
+                return SQLITE_OK
             case SQLITE_FUNCTION:
-                guard let function else { return SQLITE_DENY }
-                return SQLiteReadTransaction.allowedFunctions.contains(String(cString: function).lowercased())
+                guard let argument else { return SQLITE_DENY }
+                return SQLiteReadTransaction.allowedFunctions.contains(String(cString: argument).lowercased())
                     ? SQLITE_OK : SQLITE_DENY
             default: return SQLITE_DENY
             }
-        }, nil)
+        }, context)
         guard rc == SQLITE_OK else { throw Failure.database(rc) }
         let result = try body(self)
         try checkpoint()
@@ -153,7 +173,56 @@ public final class SQLiteReadTransaction {
         _ sql: String, _ binds: [String] = [],
         _ consume: (SQLiteReader.Row) throws -> Void
     ) throws {
-        do { try readRows(sql, binds, consume) }
+        try withReading { db in try readRows(sql, binds, on: db, consume) }
+    }
+
+    /// Read main-schema columns in schema order within this capture's pinned snapshot.
+    /// Names must match [A-Za-z_][A-Za-z0-9_]{0,127}; SQLite lookup ignores ASCII case.
+    /// Rows contain column_id, column_name, declared_type, not_null, primary_key_order
+    /// and hidden_kind, preserving SQLite value types and including generated columns.
+    /// Defaults are omitted. Views are supported; this does not prove an ordinary table.
+    /// A missing object returns no rows; broken views and metadata failures throw.
+    /// Metadata and any collision-check row share all cumulative read budgets.
+    /// Every failure invalidates the capture; the consumer must return promptly.
+    public func forEachTableColumn(
+        _ objectName: String, _ consume: (SQLiteReader.Row) throws -> Void
+    ) throws {
+        try readTableColumns(objectName, statement: """
+            SELECT cid AS column_id, name AS column_name, type AS declared_type,
+                   "notnull" AS not_null, pk AS primary_key_order, hidden AS hidden_kind
+            FROM pragma_table_xinfo(?, 'main') ORDER BY cid
+            """, consume)
+    }
+
+    // Internal statement seam exercises missing-callback ROW/DONE paths in synthetic tests.
+    // The public entry always supplies the fixed metadata query. No guard is bypassed here.
+    func readTableColumns(
+        _ objectName: String, statement: String, _ consume: (SQLiteReader.Row) throws -> Void
+    ) throws {
+        try withReading { db in
+            let bytes = objectName.utf8
+            let isLetter: (UInt8) -> Bool = { (65...90).contains($0) || (97...122).contains($0) || $0 == 95 }
+            guard (1...128).contains(bytes.count), let first = bytes.first, isLetter(first),
+                  bytes.dropFirst().allSatisfy({ isLetter($0) || (48...57).contains($0) }) else {
+                throw Failure.invalidQuery
+            }
+            try readRows("SELECT 1 AS collision FROM main.sqlite_schema WHERE name = 'pragma_table_xinfo' COLLATE NOCASE LIMIT 1",
+                         [], on: db) { _ in throw Failure.invalidQuery }
+            tableColumnAuthorization = TableColumnAuthorization(objectName: objectName)
+            defer { tableColumnAuthorization = nil }
+            try readRows(statement, [objectName], on: db, consume)
+        }
+    }
+
+    private func withReading(_ body: (OpaquePointer) throws -> Void) throws {
+        do {
+            guard let db = handle else { throw Failure.inactive }
+            guard !reading, !checkingCancellation else { throw Failure.reentrant }
+            reading = true
+            defer { reading = false }
+            try checkpoint()
+            try body(db)
+        }
         catch {
             queryFailure = error
             throw error
@@ -161,13 +230,9 @@ public final class SQLiteReadTransaction {
     }
 
     private func readRows(
-        _ sql: String, _ binds: [String], _ consume: (SQLiteReader.Row) throws -> Void
+        _ sql: String, _ binds: [String], on db: OpaquePointer,
+        _ consume: (SQLiteReader.Row) throws -> Void
     ) throws {
-        guard let db = handle else { throw Failure.inactive }
-        guard !reading, !checkingCancellation else { throw Failure.reentrant }
-        reading = true
-        defer { reading = false }
-        try checkpoint()
         guard !sql.utf8.contains(0), sql.utf8.count <= 65_536 else { throw Failure.invalidQuery }
         guard binds.count <= 512,
               binds.allSatisfy({ $0.utf8.count <= min(limits.valueBytes, 65_536) }),
@@ -200,8 +265,11 @@ public final class SQLiteReadTransaction {
             try checkpoint()
             let result = sqlite3_step(statement)
             try checkpoint()
+            if result != SQLITE_DONE { try check(result, expecting: SQLITE_ROW) }
+            if let permission = tableColumnAuthorization, !permission.observed {
+                throw Failure.invalidQuery
+            }
             if result == SQLITE_DONE { break }
-            try check(result, expecting: SQLITE_ROW)
             guard rowCount < limits.rows else { throw Failure.rowLimit }
             rowCount += 1
             var values: [String: SQLiteReader.Row.Value] = [:]

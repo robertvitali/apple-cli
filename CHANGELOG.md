@@ -20,6 +20,10 @@ JSON output are stable per the versioning policy — breaking changes bump
 
 ### Added
 
+- Bounded SQLite captures can inspect column metadata in the same pinned snapshot
+  as data, with shared limits and explicit failure handling. This opt-in foundation
+  preserves existing command behavior and does not enable live event streaming.
+
 - Messages event foundations define exact conversation-filter identities and strict
   replay cursors with retention checks. This internal unit does not enable live
   event streaming or change existing history pagination.
