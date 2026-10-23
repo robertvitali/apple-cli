@@ -20,6 +20,10 @@ JSON output are stable per the versioning policy — breaking changes bump
 
 ### Added
 
+- Exact Messages reads expose bounded confirmed mention observations with original
+  attributed-text ranges and explicit unavailable states, preserving message body
+  and pagination. Mention identifiers are metadata, not resolved recipients.
+
 - **Exact Messages reads expose bounded native edit and Undo Send context.** `messages get` and `messages history` add independent edit/retraction dates and availability-aware original-part and edit-history observations. Malformed or limited metadata never replaces existing message fields or implies a whole-message Undo Send. History timestamps support integer and fractional native seconds, retaining REAL evidence in additive `raw_real`. Synthetic tests and one outgoing direct-message edit on macOS 27 verify original/revised text, part mappings, the edit date, and fractional history timestamps. Group, partial-Undo-Send, and cross-device compatibility remain unverified.
 
 - **Exact Messages reads expose native delivery, error and read metadata.** `messages get` and `messages history` add `native_status`, preserving strict integer values and per-field missing, null, malformed and timestamp-sentinel states. Timestamp strings use whole Apple-epoch seconds while raw values and subsecond remainders retain precision. These are native row observations, not per-recipient receipts or send-success proof.

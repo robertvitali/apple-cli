@@ -52,6 +52,8 @@ GUIDs are opaque, persistent identifiers when available; positive ROWIDs are loc
 
 The always-present `native_edit_context` follows the same independently available dates, summary/history fields, explicit nulls, resource limits, and compatibility limitations documented under `messages history`. This read metadata never authorizes a mutation.
 
+The always-present `native_mentions` object follows the text basis, UTF-16 ranges, explicit unavailable states and request limits documented under `messages history`. Mention identifiers are untrusted observed metadata, never resolved recipients or mutation targets.
+
 ## Output
 
 `stdout` carries the JSON envelope; `stderr` carries human text. See [the JSON contract](../reference/json-contract.md) and [exit codes](../reference/exit-codes.md).

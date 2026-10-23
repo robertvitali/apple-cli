@@ -1588,6 +1588,45 @@ struct MessagesCommandDependencyTests {
         #expect(date["raw"] is NSNull)
     }
 
+    @Test(arguments: [0, 1, 2])
+    func publicExactReadsAlwaysExposeNativeMentions(_ fixtureKind: Int) throws {
+        if fixtureKind > 0 {
+            let text = NSMutableAttributedString(string: "Alice")
+            if fixtureKind == 2 {
+                text.addAttribute(NSAttributedString.Key("__kIMMentionConfirmedMention"),
+                                  value: "alice@example.com", range: .init(location: 0, length: 5))
+            }
+            let data = NSArchiver.archivedData(withRootObject: text)
+            let hex = data.map { String(format: "%02x", $0) }.joined()
+            try chat.exec("UPDATE message SET attributedBody=X'\(hex)' WHERE ROWID=1")
+        }
+        let deps = fixtureDependencies(chat)
+        let get = try payload(from: captureStdout {
+            try Get.parse(["--chat-rowid", "3", "--message-rowid", "1"]).run(dependencies: deps)
+        })
+        let history = try payload(from: captureStdout {
+            try History.parse(["--chat-rowid", "3", "--limit", "1"]).run(dependencies: deps)
+        })
+        let message = try #require(get["message"] as? [String: Any])
+        let messages = try #require(history["messages"] as? [[String: Any]])
+        let context = try #require(message["native_mentions"] as? [String: Any])
+        let historyContext = try #require(messages.first?["native_mentions"] as? [String: Any])
+        #expect(NSDictionary(dictionary: context).isEqual(to: historyContext))
+        #expect(Set(context.keys) == ["status", "reason", "text", "range_encoding", "entries"])
+        #expect(context["status"] as? String == (fixtureKind == 0 ? "absent-blob" : "available"))
+        #expect(context["range_encoding"] as? String == "utf-16")
+        #expect(message["body"] as? String == "hello from friend")
+        if fixtureKind == 2 {
+            #expect(context["text"] as? String == "Alice")
+            let entries = try #require(context["entries"] as? [[String: Any]])
+            #expect(entries.count == 1 && entries.first?["identifier"] as? String == "alice@example.com")
+        } else {
+            #expect(context["text"] is NSNull)
+            if fixtureKind == 0 { #expect(context["entries"] is NSNull) }
+            else { #expect((context["entries"] as? [Any])?.isEmpty == true) }
+        }
+    }
+
     @Test func reactionInspectUsesExactTargetAndReportsCurrentOutgoing() throws {
         let fx = try ChatFixture()
         try fx.addReactionColumns()

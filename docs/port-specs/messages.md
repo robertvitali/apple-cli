@@ -739,3 +739,32 @@ plist decoder. This does not establish group, partial-Undo-Send, or cross-device
 compatibility. This read-only field is not a claim that all rich-context
 capabilities are complete. The unpublished source version remains 27.0.0,
 the deployment minimum remains macOS 14, and JSON schema version remains 1.
+
+
+### Confirmed native mention observations
+
+Exact `get` and `history` add `native_mentions` without changing legacy body,
+native-part identities, cursor ordering, or schema version 1. The object always
+encodes status, nullable reason/text/entries, and `range_encoding: "utf-16"`.
+Consumers can ignore the additive object and must tolerate its absence when
+reading output from older binaries.
+Entries preserve opaque native identifiers and original attributed-run ranges;
+those ranges reference this object's full attributed text, never the older body
+field. No normalization, merging, recipient inference or mutation authority is
+provided. Available-empty uses entries[]/text:null; unavailable uses nulls.
+
+The existing data-only typedstream parser collects confirmed mention attributes
+only when requested. Exact read commands opt in; internal mutation/proof callers
+default off. Mention-only malformed metadata leaves native parts unchanged;
+unsupported full streams retain existing parser failures. Per-message caps are
+256 entries and 1024 UTF-8 bytes per identifier. Output-content budgets reset per
+request: 2048 entries and 4 MiB of original text plus identifiers. These are not
+serialized JSON size limits. Whole-message admission follows visible page order;
+the first miss stops subsequent mention collection and emits request-limit,
+without dropping messages or changing cursors.
+
+Native key interpretation is based on the inspected upstream format; this bounded
+parser extension is independently authored. Synthetic fixtures cover scalar
+boundaries, shared attribute references, malformed metadata and request limits.
+Live group mention compatibility remains unverified. No mention-send capability
+is implied.

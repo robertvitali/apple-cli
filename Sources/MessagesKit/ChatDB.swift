@@ -983,13 +983,14 @@ public struct ChatDB {
         public let thread_originator: ExactThreadOriginator
         public let native_status: ExactNativeStatus
         public let native_edit_context: ExactNativeEditContext
+        public let native_mentions: ExactNativeMentions
 
         enum CodingKeys: String, CodingKey {
             case rowid, message_guid, selected_chat_rowid, chat_guid, chat_identifier
             case date, date_local, timestamp, normalized_seconds, normalized_nanoseconds, is_from_me, sender, handle
             case service, body, body_availability, group_name, is_group, has_attachments
             case attachments, native_parts_available, native_parts_reason, native_parts, thread_originator, native_status
-            case native_edit_context
+            case native_edit_context, native_mentions
         }
 
         public func encode(to encoder: Encoder) throws {
@@ -1020,6 +1021,7 @@ public struct ChatDB {
             try c.encode(thread_originator, forKey: .thread_originator)
             try c.encode(native_status, forKey: .native_status)
             try c.encode(native_edit_context, forKey: .native_edit_context)
+            try c.encode(native_mentions, forKey: .native_mentions)
         }
     }
 
@@ -1220,6 +1222,7 @@ public struct ChatDB {
                \(seconds) AS normalized_seconds,
                \(nanos) AS normalized_nanoseconds,
                m.text AS text, m.attributedBody AS attributedBody,
+               typeof(m.attributedBody) AS native_mentions_storage_type,
                m.is_from_me AS is_from_me, m.handle_id AS handle_rowid,
                m.cache_roomnames AS cache_roomnames, m.service AS service,
                m.cache_has_attachments AS cache_has_attachments,
@@ -1323,7 +1326,8 @@ public struct ChatDB {
 
     public mutating func exactHistory(chat selector: ExactChatSelector, limit: Int,
                                       order: ExactOrder, cursor: String?,
-                                      includeNativeEditContext: Bool = false) throws -> ExactPage<ExactMessage> {
+                                      includeNativeEditContext: Bool = false,
+                                      includeNativeMentions: Bool = false) throws -> ExactPage<ExactMessage> {
         let schema = try requireExactReadSchema()
         let chat = try resolveExactChat(selector)
         let decoded = try decodeCursor(cursor, op: "history", chat: chat, order: order)
@@ -1372,6 +1376,7 @@ public struct ChatDB {
         """
         let messages = try shapeExactMessages(rows: reader.rows(sql, binds), schema: schema,
                                               includeNativeEditContext: includeNativeEditContext,
+                                              includeNativeMentions: includeNativeMentions,
                                               enrichmentLimit: limit)
         let visible = Array(messages.prefix(limit))
         let next = try messages.count > limit ? visible.last.map {
@@ -1388,7 +1393,8 @@ public struct ChatDB {
 
     public mutating func exactGet(chat selector: ExactChatSelector,
                                   message messageSelector: ExactMessageSelector,
-                                  includeNativeEditContext: Bool = false) throws -> (ResolvedExactChat, ExactMessage) {
+                                  includeNativeEditContext: Bool = false,
+                                  includeNativeMentions: Bool = false) throws -> (ResolvedExactChat, ExactMessage) {
         let schema = try requireExactReadSchema()
         let chat = try resolveExactChat(selector)
         let messagePredicate: String
@@ -1412,7 +1418,8 @@ public struct ChatDB {
         LIMIT 1
         """
         let messages = try shapeExactMessages(rows: reader.rows(sql, [String(chat.rowid), bind]), schema: schema,
-                                              includeNativeEditContext: includeNativeEditContext)
+                                              includeNativeEditContext: includeNativeEditContext,
+                                              includeNativeMentions: includeNativeMentions)
         guard let message = messages.first else {
             throw AppleError.notFound("message is not a member of the selected conversation")
         }
@@ -2653,17 +2660,29 @@ public struct ChatDB {
 
     private mutating func shapeExactMessages(rows: [SQLiteReader.Row], schema: ExactReadSchema,
                                             includeNativeEditContext: Bool = false,
+                                            includeNativeMentions: Bool = false,
                                             enrichmentLimit: Int = 1) throws -> [ExactMessage] {
         let ids = rows.compactMap { $0.int("rowid") }
         let attachments = try strictAttachmentsByMessage(ids: ids)
         var out: [ExactMessage] = []
         var editBudget = NativeEditContextRead.Budget()
+        var mentionBudget = NativeMentionsRead.Budget()
         for (index, row) in rows.enumerated() {
             let rowid = try requiredInt(row, "rowid")
             let selectedChat = try requiredInt(row, "selected_chat_rowid")
             let joined = attachments[rowid] ?? []
             let bodyInfo = exactBody(row, attachments: joined)
-            let nativePartsInfo = exactNativeParts(row)
+            let mentionsRequested = includeNativeMentions && index < enrichmentLimit
+            if mentionsRequested { try Task.checkCancellation() }
+            let nativeDecoded = NativeMessageParts.decode(
+                row.data("attributedBody"),
+                collectMentions: NativeMentionsRead.shouldCollect(requested: mentionsRequested, budget: mentionBudget))
+            let nativePartsInfo = exactNativeParts(nativeDecoded)
+            let mentions = NativeMentionsRead.context(row.values["attributedBody"],
+                                                      storageType: row.text("native_mentions_storage_type"),
+                                                      decoded: nativeDecoded,
+                                                      requested: mentionsRequested, budget: &mentionBudget)
+            if mentionsRequested { try Task.checkCancellation() }
             let threadOriginator = exactThreadOriginator(row, schema: schema)
             let rawDate = row.int("date")
             let date = rawDate.map(MessageTime.date(fromRaw:))
@@ -2707,7 +2726,8 @@ public struct ChatDB {
                 native_parts: nativePartsInfo.parts,
                 thread_originator: threadOriginator,
                 native_status: NativeMessageStatusDecoder.decode(row),
-                native_edit_context: editContext
+                native_edit_context: editContext,
+                native_mentions: mentions
             ))
         }
         return out
@@ -2776,8 +2796,7 @@ public struct ChatDB {
         return (true, "available", value)
     }
 
-    private func exactNativeParts(_ row: SQLiteReader.Row) -> (available: Bool, reason: String, parts: [ExactNativePart]?) {
-        let decoded = NativeMessageParts.decode(row.data("attributedBody"))
+    private func exactNativeParts(_ decoded: NativeMessageParts.Decoded) -> (available: Bool, reason: String, parts: [ExactNativePart]?) {
         let parts = decoded.nativeParts.map { nativeParts in
             nativeParts.map { nativePart in
                 ExactNativePart(
