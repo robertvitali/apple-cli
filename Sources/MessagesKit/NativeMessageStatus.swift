@@ -90,19 +90,27 @@ enum NativeMessageStatusDecoder {
     }
 
     private static func integer(_ row: SQLiteReader.Row, _ column: Column) -> (status: String, raw: Int64?) {
-        guard case .text(let type)? = row.values[column.typeAlias] else { return ("wrong-type", nil) }
+        integer(storageType: row.values[column.typeAlias], value: row.values[column.valueAlias])
+    }
+
+    private static func integer(storageType: SQLiteReader.Row.Value?, value: SQLiteReader.Row.Value?) -> (status: String, raw: Int64?) {
+        guard case .text(let type)? = storageType else { return ("wrong-type", nil) }
         switch type {
         case "missing-schema": return ("missing-schema", nil)
         case "null": return ("null", nil)
         case "integer":
-            guard case .integer(let raw)? = row.values[column.valueAlias] else { return ("wrong-type", nil) }
+            guard case .integer(let raw)? = value else { return ("wrong-type", nil) }
             return ("available", raw)
         default: return ("wrong-type", nil)
         }
     }
 
     private static func boolean(_ row: SQLiteReader.Row, _ column: Column) -> Status.BooleanField {
-        let field = integer(row, column)
+        boolean(storageType: row.values[column.typeAlias], value: row.values[column.valueAlias])
+    }
+
+    static func boolean(storageType: SQLiteReader.Row.Value?, value: SQLiteReader.Row.Value?) -> ChatDB.ExactNativeStatus.BooleanField {
+        let field = integer(storageType: storageType, value: value)
         guard let raw = field.raw else { return .init(status: field.status, raw: nil, value: nil) }
         guard raw == 0 || raw == 1 else { return .init(status: "invalid-boolean", raw: raw, value: nil) }
         return .init(status: "available", raw: raw, value: raw == 1)

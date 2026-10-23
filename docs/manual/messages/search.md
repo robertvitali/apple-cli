@@ -64,6 +64,8 @@ apple messages search "receipt" --hours 720 --direct-only
 
 `messages search` first filters candidate rows by message text or attributed body, so an attachment-only row with no searchable body can appear in `messages recent` without appearing in search results. When a searched row does have joined attachments, the JSON includes the same metadata fields and conservative path-probe semantics as `messages recent`.
 
+Attachment native_flags is null here (not inspected). Use exact get/history for strict native sticker and hidden-attachment flag observations.
+
 ## Output
 
 `stdout` carries the JSON envelope; `stderr` carries human text. See [the JSON contract](../reference/json-contract.md) and [exit codes](../reference/exit-codes.md).

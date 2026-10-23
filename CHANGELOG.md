@@ -20,6 +20,9 @@ JSON output are stable per the versioning policy — breaking changes bump
 
 ### Added
 
+- Exact Messages attachment reads distinguish strict native sticker/hidden flags
+  from unavailable metadata while preserving the existing legacy flag values.
+
 - Exact Messages reads expose bounded confirmed mention observations with original
   attributed-text ranges and explicit unavailable states, preserving message body
   and pagination. Mention identifiers are metadata, not resolved recipients.

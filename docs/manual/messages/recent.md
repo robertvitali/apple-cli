@@ -66,6 +66,8 @@ apple messages recent --hours 24 --direct-only
 
 `group_name` and `chat_identifier` answer different questions and are not interchangeable: `group_name` is the chat's display name and is absent both for a 1:1 conversation and for a group that was never named, whereas `is_group` reports the chat's style directly, so an unnamed group still reads as a group. Any `chat.style` other than 43, including an absent or unrecognized one, is reported and filtered as non-group. A store old or pruned enough to lack `chat_message_join` reports null identifiers and `is_group: false` rather than failing the read, and `--direct-only` then excludes nothing, because nothing is known to be a group — that case sets `direct_only_applied: false` in the JSON and writes a warning to stderr, so a filter that could not be applied never passes silently on either channel.
 
+Attachment native_flags is null here (not inspected). Use exact get/history for strict native sticker and hidden-attachment flag observations.
+
 ## Output
 
 `stdout` carries the JSON envelope; `stderr` carries human text. See [the JSON contract](../reference/json-contract.md) and [exit codes](../reference/exit-codes.md).

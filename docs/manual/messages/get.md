@@ -54,6 +54,8 @@ The always-present `native_edit_context` follows the same independently availabl
 
 The always-present `native_mentions` object follows the text basis, UTF-16 ranges, explicit unavailable states and request limits documented under `messages history`. Mention identifiers are untrusted observed metadata, never resolved recipients or mutation targets.
 
+Exact attachment native_flags follows the strict per-field states documented under messages history, alongside unchanged legacy is_sticker and hide_attachment values.
+
 ## Output
 
 `stdout` carries the JSON envelope; `stderr` carries human text. See [the JSON contract](../reference/json-contract.md) and [exit codes](../reference/exit-codes.md).

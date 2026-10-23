@@ -768,3 +768,26 @@ parser extension is independently authored. Synthetic fixtures cover scalar
 boundaries, shared attribute references, malformed metadata and request limits.
 Live group mention compatibility remains unverified. No mention-send capability
 is implied.
+
+
+### Strict native attachment flags
+
+Exact get/history attachments add `native_flags`, preserving the existing
+`is_sticker` and `hide_attachment` properties and their integer-coercion behavior.
+The new object contains both flags as `{status, raw, value}` with explicit nulls.
+Only native INTEGER 0/1 yields available false/true; other integers are
+invalid-boolean with raw retained. Missing columns, NULL and wrong storage types
+are distinct: missing-schema, null and wrong-type, respectively.
+
+The fixed INTEGER-only projection reuses the same attachment join and the shared
+strict boolean decoder used by native message status. It introduces no extra
+query or filename/MIME inference. Unsupported values are not materialized for
+these strict fields; the unchanged legacy projection still fails the exact query
+on malformed UTF-8 TEXT. Recent/search encode `native_flags: null` rather than
+claiming inspection. Older binaries may omit the additive field.
+
+Synthetic fixtures cover each column's storage classes, integer bounds, legacy
+value invariance, joined identity, and explicit JSON nulls. Flags do not establish
+sticker renderability or file availability, and no sending/removal capability or
+live sticker compatibility is claimed. Existing attachment path checks and
+unsupported sticker-reaction markers remain unchanged.
