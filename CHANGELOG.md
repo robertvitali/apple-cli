@@ -20,6 +20,10 @@ JSON output are stable per the versioning policy — breaking changes bump
 
 ### Added
 
+- Internal AppleKit code can encode compact JSON success and error envelopes without
+  writing output or adding record delimiters. Existing command formatting and
+  schema version 1 remain unchanged; live event streaming is not enabled yet.
+
 - Bounded SQLite captures can inspect column metadata in the same pinned snapshot
   as data, with shared limits and explicit failure handling. This opt-in foundation
   preserves existing command behavior and does not enable live event streaming.

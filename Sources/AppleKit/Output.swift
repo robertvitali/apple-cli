@@ -21,22 +21,34 @@ public enum Output {
     /// call `sandboxActive: sandboxActive` is also the only expressible one; a Bool?
     /// parameter would let a plain `false` auto-promote and silently emit a third state.
     public static func encodeSuccess<T: Encodable>(tool: String, data: T, sandboxActive: Bool = false) throws -> Data {
-        try encode(SuccessEnvelope(schema_version: schemaVersion, tool: tool, ok: true,
-                                   sandbox: sandboxActive ? true : nil, data: data))
+        try encode(successEnvelope(tool: tool, data: data, sandboxActive: sandboxActive))
+    }
+
+    /// Encode one compact schema envelope without writing or adding a delimiter.
+    /// Thrown encoding errors propagate; payload allocation is not bounded here.
+    /// Consumers framing records must split on LF bytes, not Unicode line separators.
+    /// This machine JSON may contain raw Unicode controls, including C1 characters;
+    /// it is not terminal-sanitized text. Encoding does not catch precondition traps.
+    public static func encodeCompactSuccess<T: Encodable>(
+        tool: String, data: T, sandboxActive: Bool = false
+    ) throws -> Data {
+        try envelopeEncoder(pretty: false).encode(
+            successEnvelope(tool: tool, data: data, sandboxActive: sandboxActive))
+    }
+
+    /// Pure, unframed compact counterpart of `encodeError(tool:from:)`.
+    /// Carries the same public error fields and never writes a fallback envelope.
+    /// The LF-byte framing and raw Unicode caveats of `encodeCompactSuccess` apply.
+    public static func encodeCompactError(tool: String, from error: AppleError) throws -> Data {
+        try envelopeEncoder(pretty: false).encode(errorEnvelope(tool: tool, from: error))
     }
 
     public static func encodeError(tool: String, type: String, message: String,
                                    status: String? = nil, remediation: String? = nil,
                                    applied: [String]? = nil, sandbox: Bool? = nil) throws -> Data {
-        // Normalize the "never `false`" invariant AT the type boundary rather than trusting every
-        // caller to pass `true`/`nil`: a stray `false` would make the synthesized `encodeIfPresent`
-        // Payload emit `"sandbox":false` while `emitError`'s hand-rolled fallback omits it — the two
-        // encode paths must agree (only the sandbox refusal emits the key at all).
-        let sandbox: Bool? = (sandbox == true) ? true : nil
-        return try encode(ErrorEnvelope(schema_version: schemaVersion, tool: tool, ok: false,
-                                 error: .init(type: type, message: message,
-                                              status: status, remediation: remediation,
-                                              applied: applied, sandbox: sandbox)))
+        try encode(errorEnvelope(tool: tool, type: type, message: message,
+                                 status: status, remediation: remediation,
+                                 applied: applied, sandbox: sandbox))
     }
 
     // MARK: Emit (writes the encoded envelope to stdout)
@@ -137,9 +149,7 @@ public enum Output {
     /// test could only observe it by capturing file descriptors. Now the part that can be wrong —
     /// which fields get copied — is checkable directly.
     public static func encodeError(tool: String, from error: AppleError) throws -> Data {
-        try encodeError(tool: tool, type: error.type, message: error.message,
-                        status: error.status, remediation: error.remediation,
-                        applied: error.applied, sandbox: error.sandbox)
+        try encode(errorEnvelope(tool: tool, from: error))
     }
 
     /// Emit the envelope for an `AppleError`. See `encodeError(tool:from:)`.
@@ -220,13 +230,44 @@ public enum Output {
 
     // MARK: Internals
 
-    static func encode<T: Encodable>(_ value: T) throws -> Data {
+    private static func successEnvelope<T: Encodable>(
+        tool: String, data: T, sandboxActive: Bool
+    ) -> SuccessEnvelope<T> {
+        SuccessEnvelope(schema_version: schemaVersion, tool: tool, ok: true,
+                        sandbox: sandboxActive ? true : nil, data: data)
+    }
+
+    private static func errorEnvelope(tool: String, from error: AppleError) -> ErrorEnvelope {
+        errorEnvelope(tool: tool, type: error.type, message: error.message,
+                      status: error.status, remediation: error.remediation,
+                      applied: error.applied, sandbox: error.sandbox)
+    }
+
+    private static func errorEnvelope(
+        tool: String, type: String, message: String, status: String?, remediation: String?,
+        applied: [String]?, sandbox: Bool?
+    ) -> ErrorEnvelope {
+        // Both formats omit false exactly as the emitError fallback does.
+        // Normalize here: synthesized encodeIfPresent would otherwise emit sandbox:false,
+        // making the encoded and fallback error paths disagree.
+        ErrorEnvelope(schema_version: schemaVersion, tool: tool, ok: false,
+                      error: .init(type: type, message: message, status: status,
+                                   remediation: remediation, applied: applied,
+                                   sandbox: sandbox == true ? true : nil))
+    }
+
+    private static func envelopeEncoder(pretty: Bool) -> JSONEncoder {
         let enc = JSONEncoder()
         // sortedKeys keeps golden-snapshot tests deterministic; iso8601 fixes date
         // serialization once for the date-heavy domains (Calendar/Reminders/Mail/Messages).
-        enc.outputFormatting = [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes]
+        enc.outputFormatting = [.sortedKeys, .withoutEscapingSlashes]
+        if pretty { enc.outputFormatting.insert(.prettyPrinted) }
         enc.dateEncodingStrategy = .iso8601
-        return try enc.encode(value)
+        return enc
+    }
+
+    static func encode<T: Encodable>(_ value: T) throws -> Data {
+        try envelopeEncoder(pretty: true).encode(value)
     }
 
     static func write(_ data: Data) {
