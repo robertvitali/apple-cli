@@ -20,6 +20,10 @@ JSON output are stable per the versioning policy — breaking changes bump
 
 ### Added
 
+- Messages event foundations define exact conversation-filter identities and strict
+  replay cursors with retention checks. This internal unit does not enable live
+  event streaming or change existing history pagination.
+
 - Shared opt-in SQLite reads can stream one coherent WAL snapshot with cumulative
   row and byte limits, cancellation, a cooperative deadline and an explicit SQL
   function allowlist. Existing read commands retain their behavior; this foundation
