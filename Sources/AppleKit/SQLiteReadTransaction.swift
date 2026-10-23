@@ -4,12 +4,19 @@ import SQLite3
 /// A synchronous, closure-scoped read transaction. Not safe to share across threads.
 /// Rows are delivered individually; limits count selected values, not total process memory.
 public final class SQLiteReadTransaction {
+    /// Budgets cover selected values, not SQLite VM or Swift allocation overhead.
+    /// Rows and bytes accumulate across queries, including a partly decoded row that fails.
+    /// Such a failure invalidates the whole capture; counters cannot be reused afterward.
     public struct Limits: Sendable {
         public let timeout: TimeInterval
         public let rows: Int
         public let bytes: Int
         public let valueBytes: Int
 
+        /// Timeout must be finite and in (0, 60] seconds; rows in 1...1,000,000;
+        /// bytes in 1...1,073,741,824; valueBytes in 1...16,777,216 and no larger than bytes.
+        /// Integer and real values each cost 8 bytes, NULL costs 0, and TEXT/BLOB cost
+        /// their payload length. A valueBytes budget below 8 therefore refuses numeric values.
         /// `valueBytes` also sets SQLite's length limit during expression evaluation.
         /// It is not a cap on the combined size of separately projected column values.
         public init(timeout: TimeInterval, rows: Int, bytes: Int, valueBytes: Int) {
@@ -26,6 +33,10 @@ public final class SQLiteReadTransaction {
         case invalidQuery, invalidBindings, rowLimit, byteLimit, valueLimit, invalidText
         case database(Int32)
     }
+
+    private static let allowedFunctions: Set<String> = [
+        "coalesce", "count", "length", "sum", "typeof", "zeroblob"
+    ]
 
     private let limits: Limits
     private let deadline: ContinuousClock.Instant
@@ -100,9 +111,9 @@ public final class SQLiteReadTransaction {
             switch action {
             case SQLITE_SELECT, SQLITE_READ, SQLITE_RECURSIVE: return SQLITE_OK
             case SQLITE_FUNCTION:
-                guard let function, String(cString: function).lowercased() != "load_extension"
-                else { return SQLITE_DENY }
-                return SQLITE_OK
+                guard let function else { return SQLITE_DENY }
+                return SQLiteReadTransaction.allowedFunctions.contains(String(cString: function).lowercased())
+                    ? SQLITE_OK : SQLITE_DENY
             default: return SQLITE_DENY
             }
         }, nil)
@@ -133,7 +144,10 @@ public final class SQLiteReadTransaction {
         }
     }
 
-    /// Call with fixed SQL and positional text parameters. The consumer must return promptly.
+    /// Call with fixed, trusted SQL and positional text parameters. The consumer must return promptly.
+    /// Only coalesce, count, length, sum, typeof and zeroblob functions are authorized.
+    /// Other functions, including otherwise read-only built-ins, are refused.
+    /// Function-backed operators such as LIKE, GLOB, -> and ->> are also refused.
     /// Every query or consumer error fails the complete capture, even when the caller catches it.
     public func forEachRow(
         _ sql: String, _ binds: [String] = [],

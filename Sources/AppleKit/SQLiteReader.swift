@@ -655,6 +655,9 @@ public final class SQLiteReader {
     }
 
     /// Run a coherent, streamed read without changing the legacy reader's open policy.
+    /// The path must be absolute. This API provides no path confinement; callers enforce their policy.
+    /// Read-only WAL access may create or update -wal/-shm sidecars, but cannot write database user pages.
+    /// Both the cancellation predicate and row consumer must return promptly without blocking.
     /// Cancellation and deadlines are cooperative: SQLite work and callback returns are checked,
     /// but an arbitrary callback or kernel I/O call cannot be preempted by this API.
     public static func withBoundedReadTransaction<T>(
@@ -674,7 +677,8 @@ public final class SQLiteReader {
             throw SQLiteReadTransaction.Failure.couldNotOpen
         }
         return try withExtendedLifetime(reader) {
-            try scope.run(on: reader.db!, body)
+            guard let db = reader.db else { throw SQLiteReadTransaction.Failure.couldNotOpen }
+            return try scope.run(on: db, body)
         }
     }
 }

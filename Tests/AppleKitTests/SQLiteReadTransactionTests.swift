@@ -175,6 +175,29 @@ struct SQLiteReadTransactionTests {
             .rows("SELECT count(*) AS n FROM sample").first?.int("n") == 2)
     }
 
+    @Test("only documented SQL functions are authorized")
+    func functionAllowlist() throws {
+        let (url, writer) = try database()
+        defer { sqlite3_close(writer) }
+        var observed: SQLiteReader.Row?
+        try SQLiteReader.withBoundedReadTransaction(path: url.path, limits: generous) {
+            try $0.forEachRow("SELECT coalesce(NULL, 'ok') AS fallback, COUNT(*) AS n, length(zeroblob(3)) AS size, sum(value) AS total, typeof(value) AS kind FROM sample") {
+                observed = $0
+            }
+        }
+        #expect(observed?.values == ["fallback": .text("ok"), "n": .integer(2),
+                                    "size": .integer(3), "total": .integer(3), "kind": .text("integer")])
+        for sql in ["SELECT abs(-1) AS n", "SELECT randomblob(1) AS b", "SELECT sqlite_version() AS version",
+                    "SELECT 'a' LIKE 'a' AS n", "SELECT 'a' GLOB 'a' AS n",
+                    "SELECT '[1]' -> 0 AS n", "SELECT '[1]' ->> 0 AS n"] {
+            #expect(throws: Failure.self) {
+                try SQLiteReader.withBoundedReadTransaction(path: url.path, limits: generous) {
+                    try $0.forEachRow(sql) { _ in Issue.record("Unlisted function delivered a row") }
+                }
+            }
+        }
+    }
+
     @Test("query shape and binds are strict", arguments: [
         "SELECT 1 AS n; SELECT 2 AS n", "SELECT 1 AS n\0; SELECT 2 AS n",
         "SELECT 1 AS n, 2 AS n", "", "SELECT ?1 AS n"

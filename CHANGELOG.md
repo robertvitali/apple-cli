@@ -21,8 +21,9 @@ JSON output are stable per the versioning policy — breaking changes bump
 ### Added
 
 - Shared opt-in SQLite reads can stream one coherent WAL snapshot with cumulative
-  row and byte limits, cancellation and a cooperative deadline. Existing read
-  commands retain their behavior; this foundation does not enable live events yet.
+  row and byte limits, cancellation, a cooperative deadline and an explicit SQL
+  function allowlist. Existing read commands retain their behavior; this foundation
+  does not enable live events yet.
 
 - Exact Messages attachment reads distinguish strict native sticker/hidden flags
   from unavailable metadata while preserving the existing legacy flag values.
