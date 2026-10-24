@@ -20,6 +20,10 @@ JSON output are stable per the versioning policy — breaking changes bump
 
 ### Added
 
+- Internal event journals can acquire noncreating, nonblocking leases on existing
+  private local APFS state, checking ownership, permissions, directory ACLs and
+  file identity. This storage foundation does not enable live event streaming.
+
 - Shared AppleKit record output adds LF framing, partial-write errors and cooperative
   cancellation/deadlines while preserving borrowed descriptor and signal settings.
   Failed writes prevent subsequent records on that writer. Existing command output
