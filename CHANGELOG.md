@@ -20,6 +20,10 @@ JSON output are stable per the versioning policy — breaking changes bump
 
 ### Added
 
+- Internal event-state code can validate persisted filters, filter digests and
+  initialization counters. This foundation is not yet connected to replay and
+  does not enable live event streaming.
+
 - Internal event journals can acquire noncreating, nonblocking leases on existing
   private local APFS state, checking ownership, permissions, directory ACLs and
   file identity. This storage foundation does not enable live event streaming.
