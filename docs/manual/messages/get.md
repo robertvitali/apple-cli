@@ -56,6 +56,8 @@ The always-present `native_mentions` object follows the text basis, UTF-16 range
 
 Exact attachment native_flags follows the strict per-field states documented under messages history, alongside unchanged legacy is_sticker and hide_attachment values.
 
+Attachment native_transfer follows the strict native transfer observations documented under messages history. It does not establish local file readability or request a download.
+
 ## Output
 
 `stdout` carries the JSON envelope; `stderr` carries human text. See [the JSON contract](../reference/json-contract.md) and [exit codes](../reference/exit-codes.md).

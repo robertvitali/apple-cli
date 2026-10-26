@@ -791,3 +791,30 @@ value invariance, joined identity, and explicit JSON nulls. Flags do not establi
 sticker renderability or file availability, and no sending/removal capability or
 live sticker compatibility is claimed. Existing attachment path checks and
 unsupported sticker-reaction markers remain unchanged.
+
+### Native attachment transfer observations
+
+Exact get/history attachments add `native_transfer` as `{status, raw, state}`,
+with all keys present and explicit nulls. Only SQLite INTEGER values produce a
+raw observation. Values 0 through 9 map respectively to `waiting-for-accept`,
+`accepted`, `preparing`, `transferring`, `finalizing`, `finished`, `error`,
+`recoverable-error`, `rejected`, and `thumbnail`, with status `available`.
+The mapping follows Beeper's [native attachment model](https://github.com/beeper/platform-imessage/blob/fdc5640bfcf936c3d8208bc15411944b7ed9819c/src/IMessage/Sources/IMDatabase/Models/Attachment.swift).
+State names are native labels; `recoverable-error` implies no retry semantics.
+
+Other integers report `unknown-state`, retaining raw with state null. Missing
+columns report `missing-schema`; SQL NULL reports `null`; other storage classes
+report `wrong-type`. Those three outcomes have raw and state null. The fixed
+INTEGER-only projection does not materialize unsupported transfer payloads.
+SQLite's stored type governs the observation, including INTEGER-affinity
+conversion performed when data was inserted. Recent/search emit
+`native_transfer: null` because they do not inspect this field.
+
+A native `finished` state does not prove that a file exists or is readable;
+`thumbnail` does not establish a completed original-file download. This field
+does not trigger retrieval or classify local file availability. Existing path,
+exists, attachment identity, output envelope and schema_version remain unchanged.
+Clients must tolerate absence of this additive field from older binaries.
+Synthetic fixtures cover known and unknown states, storage classes, INTEGER
+affinity, joined identity, explicit JSON values/nulls and unchanged path/exists
+observations for present and missing files. Live retrieval remains unverified.

@@ -138,10 +138,12 @@ public struct ChatDB {
         public let is_sticker: Bool?
         public let hide_attachment: Bool?
         public let native_flags: NativeAttachmentFlags?
+        public let native_transfer: NativeAttachmentTransfer?
 
         init(rowid: Int64, guid: String?, filename: String?, path: String?, exists: Bool?,
              mime_type: String?, uti: String?, transfer_name: String?, total_bytes: Int64?,
-             is_sticker: Bool?, hide_attachment: Bool?, native_flags: NativeAttachmentFlags? = nil) {
+             is_sticker: Bool?, hide_attachment: Bool?, native_flags: NativeAttachmentFlags? = nil,
+             native_transfer: NativeAttachmentTransfer? = nil) {
             self.rowid = rowid
             self.guid = guid
             self.filename = filename
@@ -154,11 +156,12 @@ public struct ChatDB {
             self.is_sticker = is_sticker
             self.hide_attachment = hide_attachment
             self.native_flags = native_flags
+            self.native_transfer = native_transfer
         }
 
         enum CodingKeys: String, CodingKey {
             case rowid, guid, filename, path, exists, mime_type, uti, transfer_name, total_bytes
-            case is_sticker, hide_attachment, native_flags
+            case is_sticker, hide_attachment, native_flags, native_transfer
         }
 
         public func encode(to encoder: Encoder) throws {
@@ -195,6 +198,7 @@ public struct ChatDB {
                 try container.encodeNil(forKey: .hide_attachment)
             }
             try encodeOrNull(&container, native_flags, .native_flags)
+            try encodeOrNull(&container, native_transfer, .native_transfer)
         }
     }
 
@@ -2864,7 +2868,8 @@ public struct ChatDB {
             let placeholders = chunk.indices.map { "?\($0 + 1)" }.joined(separator: ", ")
             let sql = """
                 SELECT maj.message_id AS message_id, a.ROWID AS rowid,
-                       \(selectedColumns), \(NativeAttachmentFlagsDecoder.projection(columns: columns))
+                       \(selectedColumns), \(NativeAttachmentFlagsDecoder.projection(columns: columns)),
+                       \(NativeAttachmentTransferDecoder.projection(columns: columns))
                 FROM message_attachment_join maj
                 JOIN attachment a ON a.ROWID = maj.attachment_id
                 WHERE maj.message_id IN (\(placeholders))
@@ -2885,7 +2890,8 @@ public struct ChatDB {
                     total_bytes: row.int("total_bytes"),
                     is_sticker: row.int("is_sticker").map { $0 != 0 },
                     hide_attachment: row.int("hide_attachment").map { $0 != 0 },
-                    native_flags: NativeAttachmentFlagsDecoder.decode(row)
+                    native_flags: NativeAttachmentFlagsDecoder.decode(row),
+                    native_transfer: NativeAttachmentTransferDecoder.decode(row)
                 ))
             }
         }

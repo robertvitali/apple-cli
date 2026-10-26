@@ -19,7 +19,8 @@ MIT terms, and the specific copyright line added below before the port lands.
 - Beeper platform-imessage (MIT) — Messages: reaction mappings, native deep-link
   and Tapback Accessibility interaction design, detached emoji chooser discovery,
   localized emoji search/result indexing and PID-targeted keyboard selection,
-  and localized Reply transcript discovery/cancellation design, from commit
+  localized Reply transcript discovery/cancellation design, and attachment
+  transfer-state labels, from commit
   fdc5640bfcf936c3d8208bc15411944b7ed9819c.
 
 License verification REQUIRED before lifting any code from these references

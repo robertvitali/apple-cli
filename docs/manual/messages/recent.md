@@ -68,6 +68,8 @@ apple messages recent --hours 24 --direct-only
 
 Attachment native_flags is null here (not inspected). Use exact get/history for strict native sticker and hidden-attachment flag observations.
 
+Attachment native_transfer is null here (not inspected). Exact get/history report native transfer observations separately from file availability.
+
 ## Output
 
 `stdout` carries the JSON envelope; `stderr` carries human text. See [the JSON contract](../reference/json-contract.md) and [exit codes](../reference/exit-codes.md).

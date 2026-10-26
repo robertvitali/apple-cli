@@ -20,6 +20,12 @@ JSON output are stable per the versioning policy — breaking changes bump
 
 ### Added
 
+- Exact message get/history reads now expose strict native attachment transfer
+  observations, including unknown and unavailable states. A finished native
+  transfer does not claim that a local file is readable or trigger a download.
+  Recent/search leave this additive field explicitly uninspected; existing
+  attachment fields and `schema_version` remain unchanged.
+
 - Internal event-state code can validate persisted filters, filter digests and
   initialization counters. This foundation is not yet connected to replay and
   does not enable live event streaming.
