@@ -119,7 +119,7 @@ public enum AppleAutomationJournal {
     }
 
     public struct PendingOperation: Equatable {
-        public enum OperationType: String, Equatable, CaseIterable { case reactionSet, replySend, editMessage, undoSend, readState, muteState }
+        public enum OperationType: String, Equatable, CaseIterable { case reactionSet, replySend, editMessage, undoSend, readState, muteState, attachmentRetrieve }
         public enum Phase: String, Equatable, CaseIterable { case preparedBeforeHandoff, uncertainAfterHandoff }
         public struct MinimumEvidence: Equatable {
             public let targetHash: TargetDigest

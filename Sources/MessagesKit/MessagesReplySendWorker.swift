@@ -177,6 +177,7 @@ struct MessagesReplySendWorkerRegistry: WorkerOperationRegistry, @unchecked Send
 struct MessagesWorkerRegistry: WorkerOperationRegistry, @unchecked Sendable {
     private let reaction: MessagesReactionWorkerRegistry
     private let reply: MessagesReplySendWorkerRegistry
+    private let attachment = MessagesAttachmentRetrievalWorkerRegistry()
 
     init(reactionDriver: any MessagesReactionAXDriving = LiveMessagesReactionAXDriver(),
          replyDriver: any MessagesReplyComposerAXDriving = LiveMessagesReplyComposerAXDriver()) {
@@ -185,7 +186,7 @@ struct MessagesWorkerRegistry: WorkerOperationRegistry, @unchecked Sendable {
     }
 
     func operation(for command: WorkerCommand) -> (any WorkerOperation)? {
-        reaction.operation(for: command) ?? reply.operation(for: command)
+        reaction.operation(for: command) ?? reply.operation(for: command) ?? attachment.operation(for: command)
     }
 }
 

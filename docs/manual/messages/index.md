@@ -14,6 +14,7 @@ apple messages
 
 ## Subcommands
 
+- [`attachment`](./attachment/index.md) — Retrieve attachments from an exact Messages target.
 - [`automation`](./automation/index.md) — Read or recover shared Messages automation state.
 - [`chats`](./chats.md) — List named group chats (chat_identifier, display_name, last activity, participants).
 - [`check-addressbook`](./check-addressbook.md) — Diagnose AddressBook *.abcddb access + required tables + contact counts.

@@ -165,6 +165,11 @@ package struct WorkerOperationResult: Equatable, Sendable {
         "post-press-verify-action-missing",
         "post-press-verify-picker-state-drift",
         "custom-chooser-post-selection-unselected",
+        "attachment-retrieval-downloaded-verified",
+        "attachment-retrieval-already-downloaded-verified",
+        "attachment-retrieval-unavailable",
+        "attachment-retrieval-failed",
+        "attachment-retrieval-membership-drift",
         "reaction-remove-changed-verified",
         "reaction-remove-unchanged-verified",
         "reaction-set-changed-verified",
@@ -731,6 +736,17 @@ package struct WorkerObservedAction {
         self.preflight = preflight
         self.verify = verify
     }
+
+    /// Context-aware resolution retains the same context as preflight/verification,
+    /// while preserving existing no-argument resolver callers.
+    package init(stateRoot: String, deadline: WorkerDeadline,
+                 isCancelled: @escaping () -> Bool = { false },
+                 resolveWithContext: @escaping (WorkerObservedContext) throws -> WorkerResolvedAction,
+                 preflight: @escaping Preflight, verify: @escaping Verify) {
+        self.init(stateRoot: stateRoot, deadline: deadline, isCancelled: isCancelled,
+                  resolve: { try resolveWithContext(WorkerObservedContext(deadline: deadline, isCancelled: isCancelled)) },
+                  preflight: preflight, verify: verify)
+    }
 }
 
 package enum WorkerLaunchOutcome: CustomStringConvertible {
@@ -918,6 +934,7 @@ package struct WorkerLauncher {
                 do { resolved = try action.resolve() }
                 catch WorkerProtocolError.cancelled { return .cancelled }
                 catch WorkerProtocolError.deadlineExpired { return .timedOut }
+                catch let error as AppleError { throw error }
                 catch { return .requestNotSent(String(describing: error)) }
                 if let outcome = cancelledOrExpired() { return outcome }
                 let preflight: WorkerPreflightResult
@@ -995,6 +1012,8 @@ package struct WorkerLauncher {
             return .timedOut
         } catch WorkerProtocolError.parentIdentityMismatch {
             return .childRefusedOrFailed(WorkerProtocolError.parentIdentityMismatch.description)
+        } catch let error as AppleError {
+            throw error
         } catch {
             return .childRefusedOrFailed(String(describing: error))
         }

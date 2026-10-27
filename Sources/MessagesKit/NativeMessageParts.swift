@@ -138,18 +138,18 @@ public enum NativeMessageParts {
         case cString(String)
     }
 
-    public static func decode(_ data: Data?, limits: Limits = .default, collectMentions: Bool = false) -> Decoded {
+    public static func decode(_ data: Data?, limits: Limits = .default, collectMentions: Bool = false, requireExactText: Bool = false) -> Decoded {
         guard let data else {
             return Decoded(text: nil, status: .absentBlob, nativePartsAvailable: false,
                            nativePartsReason: "absent-blob", nativeParts: nil)
         }
-        return decode(data, limits: limits, collectMentions: collectMentions)
+        return decode(data, limits: limits, collectMentions: collectMentions, requireExactText: requireExactText)
     }
 
-    public static func decode(_ data: Data, limits: Limits = .default, collectMentions: Bool = false) -> Decoded {
+    public static func decode(_ data: Data, limits: Limits = .default, collectMentions: Bool = false, requireExactText: Bool = false) -> Decoded {
         do {
             guard data.count <= limits.maxBlobBytes else { throw DecodeError.fail(.corrupt, "blob-too-large") }
-            var reader = Reader(bytes: Array(data), limits: limits, collectMentions: collectMentions)
+            var reader = Reader(bytes: Array(data), limits: limits, collectMentions: collectMentions, requireExactText: requireExactText)
             return try reader.decodeAttributedString()
         } catch let error as DecodeError {
             return Decoded(text: nil, status: error.status, nativePartsAvailable: false,
@@ -164,6 +164,7 @@ public enum NativeMessageParts {
         let bytes: [UInt8]
         let limits: Limits
         let collectMentions: Bool
+        let requireExactText: Bool
         var mentionEntries: [Mention] = []
         var mentionFailure: String?
         var cursor = 0
@@ -188,9 +189,10 @@ public enum NativeMessageParts {
                              reason: "unsupported-root-class")
 
             let textValue = try readObjectValue(depth: 0)
-            guard case .string(let text, _) = textValue else {
+            guard case .string(let text, let unchanged) = textValue else {
                 throw DecodeError.fail(.corrupt, "wrong-kind-root-string")
             }
+            guard !requireExactText || unchanged else { throw DecodeError.fail(.corrupt, "changed-root-text-bytes") }
             guard text.utf16.count <= limits.maxTextUTF16Units else {
                 throw DecodeError.fail(.corrupt, "text-too-large")
             }
@@ -299,11 +301,13 @@ public enum NativeMessageParts {
             var guidByIndex: [Int: String?] = [:]
             var parts: [NativePart] = []
             for (index, range, guid) in runs {
-                if let known = guidByIndex[index], known != guid {
+                if let known = guidByIndex[index], known.map({ Data($0.utf8) }) != guid.map({ Data($0.utf8) }) {
                     throw DecodeError.fail(.corrupt, "conflicting-attachment-guid")
                 }
-                guidByIndex[index] = guid
-                if let existing = parts.indices.first(where: { parts[$0].index == index && parts[$0].attachmentGUID == guid }) {
+                guidByIndex.updateValue(guid, forKey: index)
+                if let existing = parts.indices.first(where: {
+                    parts[$0].index == index && parts[$0].attachmentGUID.map({ Data($0.utf8) }) == guid.map({ Data($0.utf8) })
+                }) {
                     if let last = parts[existing].utf16Ranges.last, last.location + last.length == range.location {
                         parts[existing].utf16Ranges[parts[existing].utf16Ranges.count - 1] =
                             UTF16Range(location: last.location, length: last.length + range.length)
@@ -387,14 +391,17 @@ public enum NativeMessageParts {
                 guard case .string(let keyString, let keyUTF8Unchanged) = key else { throw DecodeError.fail(.corrupt, "wrong-kind-key") }
                 switch keyString {
                 case "__kIMMessagePartAttributeName":
+                    guard keyUTF8Unchanged else { throw DecodeError.fail(.corrupt, "changed-native-key-bytes") }
                     guard !seenPart else { throw DecodeError.fail(.corrupt, "duplicate-part-key") }
                     guard case .int(let index) = value else { throw DecodeError.fail(.corrupt, "wrong-kind-part-index") }
                     guard index >= 0 else { throw DecodeError.fail(.corrupt, "negative-part-index") }
                     attrs.partIndex = index
                     seenPart = true
                 case "__kIMFileTransferGUIDAttributeName":
+                    guard keyUTF8Unchanged else { throw DecodeError.fail(.corrupt, "changed-native-key-bytes") }
                     guard !seenGuid else { throw DecodeError.fail(.corrupt, "duplicate-guid-key") }
-                    guard case .string(let guid, _) = value else { throw DecodeError.fail(.corrupt, "wrong-kind-attachment-guid") }
+                    guard case .string(let guid, let unchanged) = value else { throw DecodeError.fail(.corrupt, "wrong-kind-attachment-guid") }
+                    guard unchanged else { throw DecodeError.fail(.corrupt, "changed-attachment-guid-bytes") }
                     guard !guid.isEmpty else { throw DecodeError.fail(.corrupt, "empty-attachment-guid") }
                     guard guid.utf8.count <= limits.maxGUIDBytes else { throw DecodeError.fail(.corrupt, "guid-too-large") }
                     attrs.attachmentGUID = guid
@@ -577,8 +584,8 @@ public enum NativeMessageParts {
                 throw DecodeError.fail(.corrupt, "invalid-utf8")
             }
             // Foundation can strip a leading BOM. Preserve legacy decoded strings,
-            // but do not expose changed bytes as an exact mention key or ID.
-            return .string(value, utf8Unchanged: !collectMentions || value.utf8.elementsEqual(raw))
+            // but never expose changed bytes as an exact native key or identity.
+            return .string(value, utf8Unchanged: value.utf8.elementsEqual(raw))
         }
 
         private mutating func readReferenceIndex(reason: String) throws -> Int {

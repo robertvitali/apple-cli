@@ -17,7 +17,7 @@ public struct MessagesCommand: ParsableCommand {
         subcommands: [
             Recent.self, Send_.self, FindContact.self, Chats.self, Search.self,
             Conversations.self, History.self, Get.self,
-            Reaction.self, Reply.self, MessagesAutomation.self,
+            Reaction.self, Reply.self, MessagesAttachment.self, MessagesAutomation.self,
             CheckAvailability.self, CheckDB.self, CheckContacts.self, CheckAddressBook.self,
             Doctor.self,
         ]
@@ -29,7 +29,7 @@ public struct MessagesCommand: ParsableCommand {
     /// smoke test's ok=false contract, and gives agents a machine-readable nudge).
     public func run() throws {
         try runGuarded(tool: "messages") {
-            throw AppleError.validation("specify a subcommand: recent, send, find-contact, chats, search, conversations, history, get, reaction, reply, automation, check-availability, check-db, check-contacts, check-addressbook, doctor")
+            throw AppleError.validation("specify a subcommand: recent, send, find-contact, chats, search, conversations, history, get, reaction, reply, attachment, automation, check-availability, check-db, check-contacts, check-addressbook, doctor")
         }
     }
 }
