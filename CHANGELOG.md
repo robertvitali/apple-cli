@@ -20,6 +20,13 @@ JSON output are stable per the versioning policy — breaking changes bump
 
 ### Added
 
+- Experimental [exact-part editing](https://github.com/robertvitali/apple-cli/blob/main/docs/manual/messages/edit.md)
+  previews replacement text and checks own-message eligibility, protects existing
+  drafts, and verifies persisted content and edit history in both worker and
+  parent. Execution requires explicit UI opt-in. Native reliability remains
+  unqualified; uncertain outcomes require inspection and recovery. Existing
+  output fields and `schema_version` remain unchanged.
+
 - Experimental [attachment retrieval](https://github.com/robertvitali/apple-cli/blob/main/docs/manual/messages/attachment/retrieve.md)
   requests native loading for an exact message and attachment part, with dry-run
   preview and verification of observed local availability. Uncertain outcomes

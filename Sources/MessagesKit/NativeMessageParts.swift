@@ -363,6 +363,19 @@ public enum NativeMessageParts {
                 _ = try readObjectValue(depth: depth + 1)
                 try expectByte(0x86)
                 value = .skipped
+            } else if try chainMatchesAny(classSlot, [["NSData", "NSObject"],
+                                                       ["NSMutableData", "NSData", "NSObject"]]) {
+                // Opaque attribute metadata carries raw bytes, not object slots.
+                // Consume only its exact declared byte array; never unarchive it
+                // or permit it to supply a native part index or attachment GUID.
+                try expectTypeGroup("i")
+                let count = try readUnsignedInteger()
+                guard count <= limits.maxBlobBytes else { throw DecodeError.fail(.corrupt, "data-byte-limit") }
+                try expectTypeGroup("[\(count)c]")
+                guard count <= bytes.count - cursor else { throw DecodeError.fail(.corrupt, "truncated-data") }
+                cursor += count
+                try expectByte(0x86)
+                value = .skipped
             } else if chain.contains("NSString") || chain.contains("NSMutableString") {
                 throw DecodeError.fail(.unsupported, "unsupported-string-class")
             } else {

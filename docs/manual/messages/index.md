@@ -23,6 +23,7 @@ apple messages
 - [`check-db`](./check-db.md) — Diagnose Messages chat.db access + required tables.
 - [`conversations`](./conversations.md) — List all conversations: 1:1 chats, named groups, and unnamed groups.
 - [`doctor`](./doctor.md) — One-shot health check: FDA + Accessibility + chat.db + AddressBook diagnostics.
+- [`edit`](./edit.md) — Edit an eligible own sent text part and verify persisted content and history.
 - [`find-contact`](./find-contact.md) — Fuzzy-search contacts by name/nickname; ranked candidates with confidence scores.
 - [`get`](./get.md) — Read one message by exact conversation identity and exact message identity.
 - [`history`](./history.md) — Read one conversation by exact chat GUID or local chat ROWID.

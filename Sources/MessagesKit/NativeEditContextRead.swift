@@ -44,11 +44,13 @@ enum NativeEditContextRead {
         """
 
     static func context(_ row: Row, requested: Bool, budget: inout Budget,
+                        requireExactHistoryText: Bool = false,
                         read: (String, [String]) throws -> [Row],
                         checkCancellation: () throws -> Void = { try Task.checkCancellation() }) throws -> Context {
         let summary: Context.Summary
         if requested {
-            summary = try fetchSummary(row, budget: &budget, read: read, checkCancellation: checkCancellation)
+            summary = try fetchSummary(row, budget: &budget, requireExactHistoryText: requireExactHistoryText,
+                                       read: read, checkCancellation: checkCancellation)
         } else {
             summary = .unavailable("not-requested")
         }
@@ -89,6 +91,7 @@ enum NativeEditContextRead {
     }
 
     private static func fetchSummary(_ row: Row, budget: inout Budget,
+                                     requireExactHistoryText: Bool,
                                      read: (String, [String]) throws -> [Row],
                                      checkCancellation: () throws -> Void) throws -> Context.Summary {
         try checkCancellation()
@@ -149,6 +152,7 @@ enum NativeEditContextRead {
             return .unavailable("read-error")
         }
         budget.remainingInputBytes -= data.count
-        return try NativeEditContextDecoder.decode(data, budget: &budget.decoder, checkCancellation: checkCancellation)
+        return try NativeEditContextDecoder.decode(data, budget: &budget.decoder,
+            requireExactHistoryText: requireExactHistoryText, checkCancellation: checkCancellation)
     }
 }

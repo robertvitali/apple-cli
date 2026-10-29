@@ -202,10 +202,24 @@ Select a conversation by its exact native identity and resolve message/part
 through experimental GUID/native-part UI deep links. Database membership alone
 does not prove the selected UI conversation. Require strict stable
 process/window/transcript identity and a unique selected route before every side
-effect; when unavailable, fail closed. Forbid body/latest-message, same-contact,
+effect, except for the experimental editor phase defined below; when unavailable,
+fail closed. Forbid body/latest-message, same-contact,
 geometry-offset, focus-change and sleep-based targeting fallbacks. Evaluate a
 secondary Messages instance in isolated manual validation; never assume it
 preserves correctness or desktop state.
+
+Experimental editing requires the unique selected route before invoking Edit.
+Retain its enclosing direct message container, transcript and conversation panel
+using bounded reciprocal ancestry. During editing, selection may clear and the
+selected leaf may disappear; the container, transcript, panel, window and process
+must retain their identities and relationships. Refuse competing selection and
+require one uniquely owned sibling editor with unchanged field, confirm and
+cancel controls. Before replacement, confirmation must be disabled; after
+replacement, require the same confirmation to become enabled. Text equality is
+only a consistency check. Missing, replaced or ambiguous objects are terminal
+failures. Native qualification must demonstrate container identity across first
+and repeat edits; these relationships still do not independently prove the
+requested message GUID or causal selection completion.
 
 Application-window membership uses the canonical process root's bounded, typed
 `AXWindows` list. Require one window, stable enumeration, the expected process

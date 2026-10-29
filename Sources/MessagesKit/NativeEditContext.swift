@@ -151,13 +151,14 @@ enum NativeEditContextDecoder {
 
     /// The caller bounds serialized bytes before fetching them. The shared
     /// budget is consumed even when a summary fails or cancellation propagates.
-    static func decode(_ data: Data, budget: inout Budget,
+    static func decode(_ data: Data, budget: inout Budget, requireExactHistoryText: Bool = false,
                        checkCancellation: () throws -> Void = { try Task.checkCancellation() }) throws -> Context.Summary {
         do {
             let bytesBefore = budget.plist.remainingBytes
             let root = try MessageSummaryPlist.decode(data, budget: &budget.plist, checkCancellation: checkCancellation)
             guard case .dictionary(let fields) = root else { return .unavailable("wrong-type") }
-            var reader = Reader(budget: budget, expandedBytes: bytesBefore - budget.plist.remainingBytes)
+            var reader = Reader(budget: budget, expandedBytes: bytesBefore - budget.plist.remainingBytes,
+                                requireExactHistoryText: requireExactHistoryText)
             defer { budget = reader.budget }
             return try reader.summary(fields, checkCancellation: checkCancellation)
         } catch let failure as Failure {
@@ -245,6 +246,7 @@ enum NativeEditContextDecoder {
     private struct Reader {
         var budget: Budget
         var expandedBytes: Int
+        let requireExactHistoryText: Bool
         var eventCount = 0
 
         mutating func chargeBytes(_ count: Int) throws {
@@ -376,7 +378,7 @@ enum NativeEditContextDecoder {
             default: return .init(status: "wrong-type", reason: nil, text: nil)
             }
             try checkCancellation()
-            let decoded = NativeMessageParts.decode(data)
+            let decoded = NativeMessageParts.decode(data, requireExactText: requireExactHistoryText)
             try checkCancellation()
             guard (decoded.status == .decoded || decoded.status == .noNativeKeys), let text = decoded.text else {
                 return .init(status: "decode-unavailable", reason: decoded.nativePartsReason, text: nil)

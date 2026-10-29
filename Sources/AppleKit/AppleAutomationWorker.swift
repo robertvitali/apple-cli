@@ -165,6 +165,9 @@ package struct WorkerOperationResult: Equatable, Sendable {
         "post-press-verify-action-missing",
         "post-press-verify-picker-state-drift",
         "custom-chooser-post-selection-unselected",
+        "edit-preflight-refused",
+        "edit-unverified",
+        "edit-persisted-verified",
         "attachment-retrieval-downloaded-verified",
         "attachment-retrieval-already-downloaded-verified",
         "attachment-retrieval-unavailable",
@@ -259,8 +262,19 @@ package struct WorkerOperationResult: Equatable, Sendable {
         guard let value, value.utf8.count <= 128 else { return nil }
         guard publicDetails.contains(value) || isSafeTargetDriftDetail(value) || isSafeVerificationDetail(value) ||
             isSafeCustomChooserAXFailureDetail(value) || isSafeCustomChooserReactionUnavailableDetail(value) ||
-            isSafeReplyAttachmentOwnershipDetail(value) else { return nil }
+            isSafeReplyAttachmentOwnershipDetail(value) || isSafeEditDiagnostic(value) else { return nil }
         return value
+    }
+
+    private static func isSafeEditDiagnostic(_ value: String) -> Bool {
+        let fields = value.split(separator: ":", omittingEmptySubsequences: false)
+        guard fields.count == 3, fields[0] == "edit-unverified" else { return false }
+        let stages: Set<Substring> = ["native-action", "trust", "titles", "process", "inactive",
+            "navigation", "route", "anchor", "open-editor", "capture-editor", "replacement",
+            "confirmation", "completion", "persistence"]
+        let categories: Set<Substring> = ["deadline-expired", "target-drift", "ambiguous-selected-message",
+            "unknown-ax-value", "traversal-limit", "ax-failure", "route-drift", "cancelled", "other"]
+        return stages.contains(fields[1]) && categories.contains(fields[2])
     }
 
     private static func isSafeReplyAttachmentOwnershipDetail(_ value: String) -> Bool {
