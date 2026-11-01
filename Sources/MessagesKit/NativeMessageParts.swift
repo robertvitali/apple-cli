@@ -121,12 +121,14 @@ public enum NativeMessageParts {
         var attachmentGUID: String?
         var mentionIdentifier: String?
         var mentionFailure: String?
+        var exact: [Data: AttributeValue] = [:]
     }
 
     private enum Value: Equatable {
         case string(String, utf8Unchanged: Bool)
         case int(Int)
         case dictionary(RunAttributes)
+        case exact(AttributeValue)
         case skipped
     }
 
@@ -160,11 +162,32 @@ public enum NativeMessageParts {
         }
     }
 
+    /// Internal strict observation for persisted-transition verification.
+    /// Ordinary reads keep their existing optional metadata behavior.
+    static func decodeWithAttributes(_ data: Data, limits: Limits = .default) -> AttributeDecoded {
+        do {
+            guard data.count <= limits.maxBlobBytes else { throw DecodeError.fail(.corrupt, "blob-too-large") }
+            var reader = Reader(bytes: Array(data), limits: limits, collectMentions: false,
+                                requireExactText: true, collectAttributes: true)
+            let body = try reader.decodeAttributedString()
+            return .init(body: body, runs: reader.attributeRuns)
+        } catch let error as DecodeError {
+            return .init(body: .init(text: nil, status: error.status, nativePartsAvailable: false,
+                nativePartsReason: error.description, nativeParts: nil), runs: nil)
+        } catch {
+            return .init(body: .init(text: nil, status: .unsupported, nativePartsAvailable: false,
+                nativePartsReason: "unsupported", nativeParts: nil), runs: nil)
+        }
+    }
+
     private struct Reader {
         let bytes: [UInt8]
         let limits: Limits
         let collectMentions: Bool
         let requireExactText: Bool
+        var collectAttributes = false
+        var attributeRuns: [AttributeRun] = []
+        var remainingAttributeBytes = 4 * 1_024 * 1_024
         var mentionEntries: [Mention] = []
         var mentionFailure: String?
         var cursor = 0
@@ -198,6 +221,18 @@ public enum NativeMessageParts {
             }
 
             let runs = try readRuns(textUTF16Length: text.utf16.count)
+            if collectAttributes {
+                let units = Array(text.utf16)
+                for run in attributeRuns {
+                    for offset in [run.range.location, run.range.location + run.range.length] {
+                        if offset > 0, offset < units.count,
+                           (0xd800...0xdbff).contains(units[offset - 1]),
+                           (0xdc00...0xdfff).contains(units[offset]) {
+                            throw DecodeError.fail(.corrupt, "invalid-attribute-range")
+                        }
+                    }
+                }
+            }
             try expectByte(0x86)
             guard cursor == bytes.count else { throw DecodeError.fail(.corrupt, "trailing-bytes") }
 
@@ -290,6 +325,9 @@ public enum NativeMessageParts {
                     out.append((index, UTF16Range(location: location, length: length), attrs.attachmentGUID))
                 }
                 collectMention(attrs, location: location, length: length)
+                if collectAttributes, length > 0 {
+                    attributeRuns.append(.init(range: .init(location: location, length: length), values: attrs.exact))
+                }
                 location += length
                 runCount += 1
             }
@@ -326,7 +364,7 @@ public enum NativeMessageParts {
             try expectTypeGroup("@")
             if peek() == 0x85 {
                 cursor += 1
-                return .skipped
+                return collectAttributes ? .exact(.null) : .skipped
             }
             if isReferenceToken(peek()) {
                 let index = try readReferenceIndex(reason: "dangling-reference")
@@ -359,10 +397,10 @@ public enum NativeMessageParts {
                 try expectByte(0x86)
             } else if try chainMatches(classSlot, ["NSURL", "NSObject"]) {
                 try expectTypeGroup("c")
-                _ = try readUnsignedInteger()
-                _ = try readObjectValue(depth: depth + 1)
+                let discriminator = try readUnsignedInteger()
+                let nested = try readObjectValue(depth: depth + 1)
                 try expectByte(0x86)
-                value = .skipped
+                value = collectAttributes ? .exact(.url(discriminator, try exactValue(nested))) : .skipped
             } else if try chainMatchesAny(classSlot, [["NSData", "NSObject"],
                                                        ["NSMutableData", "NSData", "NSObject"]]) {
                 // Opaque attribute metadata carries raw bytes, not object slots.
@@ -373,9 +411,14 @@ public enum NativeMessageParts {
                 guard count <= limits.maxBlobBytes else { throw DecodeError.fail(.corrupt, "data-byte-limit") }
                 try expectTypeGroup("[\(count)c]")
                 guard count <= bytes.count - cursor else { throw DecodeError.fail(.corrupt, "truncated-data") }
+                if collectAttributes {
+                    try chargeAttributeBytes(count)
+                    value = .exact(.data(Data(bytes[cursor..<(cursor + count)])))
+                } else {
+                    value = .skipped
+                }
                 cursor += count
                 try expectByte(0x86)
-                value = .skipped
             } else if chain.contains("NSString") || chain.contains("NSMutableString") {
                 throw DecodeError.fail(.unsupported, "unsupported-string-class")
             } else {
@@ -383,6 +426,24 @@ public enum NativeMessageParts {
             }
             slots[objectSlot] = .value(value)
             return value
+        }
+
+        private mutating func chargeAttributeBytes(_ count: Int) throws {
+            guard count <= remainingAttributeBytes else { throw DecodeError.fail(.corrupt, "attribute-byte-limit") }
+            remainingAttributeBytes -= count
+        }
+
+        private mutating func exactValue(_ value: Value) throws -> AttributeValue {
+            switch value {
+            case .string(let string, let unchanged):
+                guard unchanged else { throw DecodeError.fail(.corrupt, "changed-attribute-string-bytes") }
+                try chargeAttributeBytes(string.utf8.count)
+                return .string(Data(string.utf8))
+            case .int(let integer): return .integer(integer)
+            case .dictionary(let attributes): return .dictionary(attributes.exact)
+            case .exact(let exact): return exact
+            case .skipped: throw DecodeError.fail(.unsupported, "unavailable-attribute-value")
+            }
         }
 
         private mutating func readDictionaryPayload(depth: Int) throws -> RunAttributes {
@@ -402,6 +463,13 @@ public enum NativeMessageParts {
                 let key = try readObjectValue(depth: depth + 1)
                 let value = try readObjectValue(depth: depth + 1)
                 guard case .string(let keyString, let keyUTF8Unchanged) = key else { throw DecodeError.fail(.corrupt, "wrong-kind-key") }
+                if collectAttributes {
+                    guard keyUTF8Unchanged else { throw DecodeError.fail(.corrupt, "changed-attribute-key-bytes") }
+                    try chargeAttributeBytes(keyString.utf8.count)
+                    let keyBytes = Data(keyString.utf8)
+                    guard attrs.exact[keyBytes] == nil else { throw DecodeError.fail(.corrupt, "duplicate-attribute-key") }
+                    attrs.exact[keyBytes] = try exactValue(value)
+                }
                 switch keyString {
                 case "__kIMMessagePartAttributeName":
                     guard keyUTF8Unchanged else { throw DecodeError.fail(.corrupt, "changed-native-key-bytes") }

@@ -32,12 +32,6 @@ enum MessagesUndoSendPart {
         guard decoded.status == .decoded, decoded.nativePartsAvailable,
               let parts = decoded.nativeParts, !parts.isEmpty,
               let text = decoded.text else { throw Failure.unavailableBody }
-        switch observation.textUTF8 {
-        case .null: break
-        case .value(let bytes):
-            guard bytes == Data(text.utf8) else { throw Failure.textMismatch }
-        case .wrongType: throw Failure.textMismatch
-        }
         var seen = Set<Int>()
         var selected: NativeMessageParts.NativePart?
         var selectedFragments: [String] = []
@@ -63,6 +57,10 @@ enum MessagesUndoSendPart {
             }
         }
         guard let selected else { throw Failure.invalidIndex }
+        guard try MessagesUndoSendBodyConsistency.matches(observation.textUTF8,
+            fullText: text, nativeParts: parts, checkpoint: checkpoint) else {
+            throw Failure.textMismatch
+        }
         try checkpoint()
         return Snapshot(observation: observation, fullText: text, nativeParts: parts,
                         selectedPart: selected, selectedTextFragments: selectedFragments)
