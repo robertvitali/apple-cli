@@ -467,6 +467,58 @@ import Testing
         #expect(fx.target.writes == 0)
     }
 
+    @Test(arguments: ["completion-wait", "completion-anchor", "completion-ownership", "completion-inactive"])
+    func completionDiagnosticSeparatesWaitingFromDrift(_ expectedStage: String) throws {
+        let fx = EditOwnershipFixture()
+        fx.prepareAction()
+        let diagnostic = MessagesEditDiagnostic()
+        fx.confirm.onPerform = { _ in
+            switch expectedStage {
+            case "completion-anchor": fx.target.parentNode = nil
+            case "completion-ownership": fx.field.text = "unexpected replacement"
+            case "completion-inactive":
+                fx.hideEditor()
+                let draft = EditOwnershipNode("AXTextField", text: "unrelated draft", owner: fx.window)
+                draft.id = "messageBodyField"
+                fx.panel.attach(draft)
+            default: break // Confirmation returns, but the editor remains open.
+            }
+        }
+        var pauses = 0
+        var action = try fx.action
+        action.pause = { _ in pauses += 1 }
+        #expect(throws: MessagesAXNavigationError.targetDrift) {
+            try action.perform(route: fx.route, expectedText: "original", replacement: "replacement",
+                deadline: .millisecondsFromNow(5000), validateTarget: {}, diagnostic: diagnostic)
+        }
+        #expect(diagnostic.stage.rawValue == expectedStage)
+        #expect(pauses == (expectedStage == "completion-wait" ? 15 : 0))
+        #expect(fx.target.writes == 1)
+        #expect(fx.field.writes == 1)
+        #expect(fx.confirm.writes == 1)
+        #expect(fx.cancel.writes == 0)
+    }
+
+    @Test func completionScanFailurePreservesErrorAndMutationCounts() throws {
+        let fx = EditOwnershipFixture()
+        fx.prepareAction()
+        let diagnostic = MessagesEditDiagnostic()
+        fx.confirm.onPerform = { _ in fx.field.owner = nil }
+        var pauses = 0
+        var action = try fx.action
+        action.pause = { _ in pauses += 1 }
+        #expect(throws: MessagesAXNavigationError.unknownAXValue) {
+            try action.perform(route: fx.route, expectedText: "original", replacement: "replacement",
+                deadline: .millisecondsFromNow(5000), validateTarget: {}, diagnostic: diagnostic)
+        }
+        #expect(diagnostic.stage == .completionScan)
+        #expect(pauses == 0)
+        #expect(fx.target.writes == 1)
+        #expect(fx.field.writes == 1)
+        #expect(fx.confirm.writes == 1)
+        #expect(fx.cancel.writes == 0)
+    }
+
     @Test func diagnosticObservesConfirmationFailureWithoutChangingThrownError() throws {
         let fx = EditOwnershipFixture()
         fx.prepareAction()

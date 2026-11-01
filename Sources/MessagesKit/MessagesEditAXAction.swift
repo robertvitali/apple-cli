@@ -80,15 +80,20 @@ struct MessagesEditAXAction {
         try token.confirm.performAction(named: "AXPress", deadline: deadline)
         diagnostic?.record(.completion)
         try awaitObservation(deadline: deadline) {
+            diagnostic?.record(.completionAnchor)
             try ownership.validateAnchor(anchor, route: route, deadline: deadline)
+            diagnostic?.record(.completionScan)
             let remaining = try navigator.collect(from: route.window, window: route.window,
                 traversalPolicy: .childrenOnly, deadline: deadline) { node, _, _ in
                 node.sameIdentity(as: token.field) || node.sameIdentity(as: token.confirm)
             }
             if !remaining.isEmpty {
+                diagnostic?.record(.completionOwnership)
                 try ownership.revalidate(token, route: route, expectedText: replacement, deadline: deadline)
+                diagnostic?.record(.completionWait)
                 throw MessagesEditObservationReadiness.notReady
             }
+            diagnostic?.record(.completionInactive)
             try ownership.requireInactive(route: route, deadline: deadline)
         }
         try checkpoint()

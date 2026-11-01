@@ -6,6 +6,9 @@ final class MessagesEditDiagnostic {
         case nativeAction = "native-action", trust, titles, process, inactive
         case navigation, route, anchor, openEditor = "open-editor"
         case captureEditor = "capture-editor", replacement, confirmation, completion, persistence
+        case completionAnchor = "completion-anchor", completionScan = "completion-scan"
+        case completionOwnership = "completion-ownership", completionWait = "completion-wait"
+        case completionInactive = "completion-inactive"
     }
     private(set) var stage: Stage = .nativeAction
     func record(_ stage: Stage) { self.stage = stage }

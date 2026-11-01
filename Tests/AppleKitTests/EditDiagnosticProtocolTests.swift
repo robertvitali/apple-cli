@@ -5,7 +5,8 @@ import Testing
 @Suite struct EditDiagnosticProtocolTests {
     @Test func admitsOnlyClosedEditDiagnosticFields() throws {
         let stages = ["native-action", "trust", "titles", "process", "inactive", "navigation", "route",
-            "anchor", "open-editor", "capture-editor", "replacement", "confirmation", "completion", "persistence"]
+            "anchor", "open-editor", "capture-editor", "replacement", "confirmation", "completion", "completion-anchor", "completion-scan",
+            "completion-ownership", "completion-wait", "completion-inactive", "persistence"]
         let categories = ["deadline-expired", "target-drift", "ambiguous-selected-message", "unknown-ax-value",
             "traversal-limit", "ax-failure", "route-drift", "cancelled", "other"]
         for stage in stages {

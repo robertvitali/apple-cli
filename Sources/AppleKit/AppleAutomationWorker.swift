@@ -271,7 +271,8 @@ package struct WorkerOperationResult: Equatable, Sendable {
         guard fields.count == 3, fields[0] == "edit-unverified" else { return false }
         let stages: Set<Substring> = ["native-action", "trust", "titles", "process", "inactive",
             "navigation", "route", "anchor", "open-editor", "capture-editor", "replacement",
-            "confirmation", "completion", "persistence"]
+            "confirmation", "completion", "completion-anchor", "completion-scan",
+            "completion-ownership", "completion-wait", "completion-inactive", "persistence"]
         let categories: Set<Substring> = ["deadline-expired", "target-drift", "ambiguous-selected-message",
             "unknown-ax-value", "traversal-limit", "ax-failure", "route-drift", "cancelled", "other"]
         return stages.contains(fields[1]) && categories.contains(fields[2])
