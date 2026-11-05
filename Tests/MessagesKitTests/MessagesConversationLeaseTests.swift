@@ -8,7 +8,7 @@ import os
 @Suite("Conversation creation lease ordering")
 struct MessagesConversationLeaseTests {
     private let scratch = ScratchDirs("conversation-lease")
-    private enum Stop: Error { case captured, unexpectedHandoff }
+    private enum Stop: Error, Equatable { case captured, unexpectedHandoff, setupFailure }
     private struct Observations: Sendable {
         var cancellationChecks = 0
         var contactReads = 0
@@ -29,16 +29,33 @@ struct MessagesConversationLeaseTests {
 
     @Test(arguments: [false, true])
     func waiterResolvesOnlyAfterLeaseAndPendingCheck(_ leavePending: Bool) throws {
+        try runWaiter(leavePending: leavePending)
+    }
+
+    private func runWaiter(leavePending: Bool, failSetup: Bool = false,
+                           onFinished: @escaping @Sendable () -> Void = {}) throws {
         let fx = try fixture(), path = fx.path
         let root = try scratch.directory().appendingPathComponent("journal").path
         let before = try baseline(path)
         let state = OSAllocatedUnfairLock(initialState: Observations())
-        let contending = DispatchSemaphore(value: 0), finished = DispatchSemaphore(value: 0)
+        let contending = DispatchSemaphore(value: 0), finished = DispatchGroup()
+        // Only retain these owners across threads; never access their state there.
+        let fixtureOwners = OSAllocatedUnfairLock(uncheckedState: (fx, scratch))
+        // Function scope runs after the outer journal releases its lease, including
+        // throwing setup paths. A timed-out wait cannot release the child's owners.
+        defer { #expect(finished.wait(timeout: .now() + 6) == .success) }
         var pendingID: UUID?
 
         try AppleAutomationJournal.withLockedJournal(root: root, deadline: .millisecondsFromNow(5000)) { lease in
-            DispatchQueue.global().async {
-                defer { finished.signal() }
+            // Use a dedicated thread: this test blocks while holding the lease,
+            // so a queued contender must not depend on the saturated test pool.
+            finished.enter()
+            Thread.detachNewThread {
+                defer {
+                    withExtendedLifetime(fixtureOwners) {}
+                    onFinished()
+                    finished.leave()
+                }
                 do {
                     let deadline = WorkerDeadline.millisecondsFromNow(5000)
                     let session = MessagesConversationExecution(inputs: ["Alice Example"],
@@ -77,6 +94,7 @@ struct MessagesConversationLeaseTests {
             #expect(contending.wait(timeout: .now() + 2) == .success)
             #expect(state.withLock { $0.contactReads } == 0)
             #expect(state.withLock { $0.payload } == nil)
+            if failSetup { throw Stop.setupFailure }
             try fx.exec("INSERT INTO message(ROWID,guid) VALUES(100,'synthetic-first-invocation');")
             if leavePending {
                 let planResult = try MessagesConversationPlan.build(inputs: ["+12125550100"],
@@ -107,6 +125,15 @@ struct MessagesConversationLeaseTests {
             #expect(try !request.matches(before))
             #expect(try request.matches(baseline(path)))
         }
+    }
+
+    @Test func throwingSetupDrainsContenderAfterLeaseRelease() throws {
+        let completed = OSAllocatedUnfairLock(initialState: false)
+        #expect(throws: Stop.setupFailure) {
+            try runWaiter(leavePending: false, failSetup: true,
+                          onFinished: { completed.withLock { $0 = true } })
+        }
+        #expect(completed.withLock { $0 })
     }
 
     @Test func expiredWaitDoesNotResolveContactsOrCaptureBaseline() throws {
