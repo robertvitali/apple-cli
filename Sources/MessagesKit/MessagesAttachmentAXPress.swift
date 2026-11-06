@@ -9,26 +9,39 @@ struct MessagesAttachmentAXPress {
     let isTargetEligible: MessagesAXNavigator.TargetEligibility
 
     func perform(messageGUID: String, nativePartIndex: Int, nativePartGUID: String?,
-                 deadline: WorkerDeadline, validateTarget: () throws -> MessagesAttachmentRetrievalState.Outcome) throws {
+                 deadline: WorkerDeadline, diagnostic: MessagesAttachmentDiagnostic? = nil, validateTarget: () throws -> MessagesAttachmentRetrievalState.Outcome) throws {
+        diagnostic?.record(.trust)
         try checkMessagesAXDeadline(deadline)
         let url = try NativeMessagesURL.message(messageGUID: messageGUID,
             nativePartIndex: nativePartIndex, nativePartGUID: nativePartGUID)
         guard driver.checkAccessibilityTrusted(prompt: false) else { throw Failure.accessibilityDenied }
+        diagnostic?.record(.revalidation)
         guard try needsPress(validateTarget()) else { return }
         try checkMessagesAXDeadline(deadline)
+        diagnostic?.record(.navigation)
         let process = try driver.openMessages(url: url, deadline: deadline)
         let navigator = MessagesAXNavigator(driver: driver)
+        diagnostic?.record(.route)
         let route = try navigator.captureInitialRoute(process: process, isTargetEligible: isTargetEligible, deadline: deadline)
+        diagnostic?.record(.revalidation)
         guard try needsPress(validateTarget()) else { return }
+        diagnostic?.record(.route)
         try navigator.revalidate(route, isTargetEligible: isTargetEligible, deadline: deadline)
+        diagnostic?.record(.frontmost)
         guard try driver.messagesProcessIsFrontmost(process, deadline: deadline) else { throw MessagesAXNavigationError.targetDrift }
-        guard try route.selected.enabled(deadline: deadline) == true,
-              try route.selected.actions(deadline: deadline).filter({ $0 == "AXPress" }).count == 1 else {
+        diagnostic?.record(.enabled)
+        guard try route.selected.enabled(deadline: deadline) == true else {
+            throw Failure.pressUnavailable
+        }
+        diagnostic?.record(.actions)
+        guard try route.selected.actions(deadline: deadline).filter({ $0 == "AXPress" }).count == 1 else {
             throw Failure.pressUnavailable
         }
         try checkMessagesAXDeadline(deadline)
+        diagnostic?.record(.press)
         try route.selected.performAction(named: "AXPress", deadline: deadline)
         try checkMessagesAXDeadline(deadline)
+        diagnostic?.record(.postPressProcess)
         try navigator.checkProcess(process, deadline: deadline)
     }
 

@@ -8,13 +8,16 @@ struct MessagesAttachmentRetrievalSequence {
     let observe: (WorkerDeadline) throws -> MessagesAttachmentObservation.Result
     let requestDownload: (WorkerDeadline) throws -> Void
     let pause: (UInt64) throws -> Void
+    let diagnostic: MessagesAttachmentDiagnostic?
 
     init(observe: @escaping (WorkerDeadline) throws -> MessagesAttachmentObservation.Result,
          requestDownload: @escaping (WorkerDeadline) throws -> Void,
-         pause: @escaping (UInt64) throws -> Void = { Thread.sleep(forTimeInterval: Double($0) / 1_000_000_000) }) {
+         pause: @escaping (UInt64) throws -> Void = { Thread.sleep(forTimeInterval: Double($0) / 1_000_000_000) },
+         diagnostic: MessagesAttachmentDiagnostic? = nil) {
         self.observe = observe
         self.requestDownload = requestDownload
         self.pause = pause
+        self.diagnostic = diagnostic
     }
 
     func run(expected: MessagesAttachmentMembership, deadline: WorkerDeadline,
@@ -24,11 +27,16 @@ struct MessagesAttachmentRetrievalSequence {
             if isCancelled() { throw WorkerProtocolError.cancelled }
             if deadline.expired || bounded.expired { throw WorkerProtocolError.deadlineExpired }
         }
+        diagnostic?.record(.initialRead)
         try checkpoint()
         let first = try observe(bounded)
         try checkpoint()
         guard first.membership == expected else { return .refused("attachment-retrieval-membership-drift") }
-        if first.outcome == .unavailable || first.outcome == .failed { return .refused("attachment-retrieval-unavailable") }
+        diagnostic?.record(.initialState)
+        if first.outcome == .unavailable || first.outcome == .failed {
+            return .refused(diagnostic?.detail(category: first.outcome == .failed ? .failed : .unavailable)
+                ?? "attachment-retrieval-unavailable")
+        }
         if first.outcome == .downloaded {
             return WorkerOperationResult(.ack, detail: "attachment-retrieval-already-downloaded-verified")
         }
@@ -37,14 +45,16 @@ struct MessagesAttachmentRetrievalSequence {
         try requestDownload(bounded)
         try checkpoint()
         for attempt in 0..<61 {
+            diagnostic?.record(.verificationRead)
             let current = try observe(bounded)
             try checkpoint()
             guard current.membership == expected else { return .failed("attachment-retrieval-membership-drift") }
+            diagnostic?.record(.verificationState)
             switch current.outcome {
             case .downloaded:
                 return WorkerOperationResult(.ack, detail: "attachment-retrieval-downloaded-verified")
-            case .failed: return .failed("attachment-retrieval-failed")
-            case .unavailable: return .failed("attachment-retrieval-unavailable")
+            case .failed: return .failed(diagnostic?.detail(category: .failed) ?? "attachment-retrieval-failed")
+            case .unavailable: return .failed(diagnostic?.detail(category: .unavailable) ?? "attachment-retrieval-unavailable")
             case .pending, .missing: break
             }
             if attempt < 60 {

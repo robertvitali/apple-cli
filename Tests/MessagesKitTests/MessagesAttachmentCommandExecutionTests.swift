@@ -94,4 +94,26 @@ import Testing
         #expect(try decodedData(result.0)["dry_run"] as? Bool == false)
         #expect(try decodedData(result.0)["executed"] as? Bool == true)
     }
+    @Test func diagnosticCanReportFailureButCannotVerifySuccess() throws {
+        let fx = try fixture()
+        let detail = "attachment-unverified:press:other"
+        let deps = dependencies(fx) { action in
+            let resolved = try action.resolve(), id = UUID()
+            let context = WorkerObservedContext(deadline: action.deadline, isCancelled: { false })
+            for category in [WorkerResponseCategory.ack, .failed, .refused] {
+                let response = WorkerResponse(schemaVersion: 1, operationID: id, nonce: id,
+                    category: category, detail: detail)
+                #expect(try action.verify(resolved, response, context) == nil)
+            }
+            return .childRefusedOrFailed(detail)
+        }
+        let result = try run(fx, flags: ["--experimental-ui-handoff"], dependencies: deps)
+        let envelope = try #require(JSONSerialization.jsonObject(with: Data(result.0.utf8)) as? [String: Any])
+        let error = try #require(envelope["error"] as? [String: Any])
+        #expect(envelope["ok"] as? Bool == false)
+        #expect(error["type"] as? String == "upstream_error")
+        #expect(error["message"] as? String == detail)
+        #expect(result.1 == 69)
+    }
+
 }

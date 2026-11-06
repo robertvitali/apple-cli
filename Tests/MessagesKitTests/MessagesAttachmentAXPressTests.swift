@@ -4,6 +4,36 @@ import Testing
 @testable import MessagesKit
 
 @Suite struct MessagesAttachmentAXPressTests {
+    @Test(arguments: ["navigation", "actions", "press", "revalidation"])
+    func diagnosticPreservesFailureAndPressCount(_ stage: String) throws {
+        let fx = AttachmentPressFixture()
+        let diagnostic = MessagesAttachmentDiagnostic()
+        let secret = "synthetic-private-path-and-message"
+        let sentinel = NSError(domain: secret, code: 9)
+        if stage == "navigation" { fx.onOpen = { throw sentinel } }
+        if stage == "actions" { fx.message.pressActions = [] }
+        if stage == "press" { fx.message.onPerform = { throw sentinel } }
+        var caught = false
+        do {
+            try MessagesAttachmentAXPress(driver: fx, isTargetEligible: fx.eligible).perform(
+                messageGUID: "synthetic-message", nativePartIndex: 0, nativePartGUID: nil,
+                deadline: .millisecondsFromNow(5000), diagnostic: diagnostic, validateTarget: {
+                    if stage == "revalidation" { throw sentinel }
+                    return .pending
+                })
+        } catch {
+            caught = true
+            if stage == "actions" {
+                #expect(error as? MessagesAttachmentAXPress.Failure == .pressUnavailable)
+            } else { #expect((error as NSError) === sentinel) }
+            #expect(diagnostic.stage.rawValue == stage)
+            #expect(WorkerOperationResult.failed(diagnostic.detail(error)).detail == diagnostic.detail(error))
+            #expect(!diagnostic.detail(error).contains(secret))
+        }
+        #expect(caught)
+        #expect(fx.message.performed == (stage == "press" ? ["AXPress"] : []))
+    }
+
     @Test func retainedTargetPressedOnceAfterValidation() throws {
         let fx = AttachmentPressFixture()
         var validations = 0
@@ -258,6 +288,51 @@ private final class AttachmentPressNode: MessagesAXElement {
         let request = WorkerRequest(schemaVersion: 1, operationID: UUID(), nonce: UUID(), deadline: .millisecondsFromNow(5000),
             parent: identity, workerExecutable: .init(uid: 1, gid: 1, device: 1, inode: 1, path: "/tmp/apple"), command: command)
         return try operation.run(request, deadline: request.deadline)
+    }
+
+    @Test(arguments: ["navigation", "press", "eligibility", "initial-binding", "verification-read",
+                      "initial-state", "verification-state"])
+    func workerReturnsOnlyFixedDiagnosticAndNeverRetries(_ stage: String) throws {
+        let fx = try fixture(), driver = AttachmentPressFixture()
+        let secret = "synthetic-secret /private/path\nmessage:body"
+        let sentinel = NSError(domain: secret, code: 19)
+        switch stage {
+        case "navigation": driver.onOpen = { throw sentinel }
+        case "press": driver.message.onPerform = { throw sentinel }
+        case "eligibility": driver.onOpen = { driver.message.pressActions = ["AXPress", "Name:React", "Name:React"] }
+        case "verification-read": driver.message.onPerform = { try fx.exec("ALTER TABLE message RENAME COLUMN attributedBody TO old_body") }
+        case "initial-state": try fx.exec("UPDATE attachment SET transfer_state=10")
+        case "verification-state": driver.message.onPerform = { try fx.exec("UPDATE attachment SET transfer_state=10") }
+        default: break
+        }
+        let result = try run(fx, driver: driver, afterResolution: {
+            if stage == "initial-binding" { try fx.exec("UPDATE message SET guid='synthetic-other-guid' WHERE ROWID=60") }
+        })
+        let category: String
+        switch stage {
+        case "eligibility": category = "unknown-ax-value"
+        case "initial-binding": category = "target-drift"
+        case "initial-state", "verification-state": category = "state-unavailable"
+        default: category = "other"
+        }
+        #expect(result.category == (stage == "initial-state" ? .refused : .failed))
+        #expect(result.detail == "attachment-unverified:\(stage):\(category)")
+        #expect(result.detail?.contains(secret) == false)
+        let pressed = ["press", "verification-read", "verification-state"].contains(stage)
+        #expect(driver.message.performed == (pressed ? ["AXPress"] : []))
+    }
+
+    @Test(arguments: [MessagesReactionAXError.deadlineExpired, .targetDrift,
+                      .ambiguousSelectedMessage, .unknownAXValue, .traversalLimit, .axFailure])
+    func liveDriverErrorFamilyKeepsCategoryWithoutRetry(_ error: MessagesReactionAXError) throws {
+        let fx = try fixture(), driver = AttachmentPressFixture()
+        var openings = 0
+        driver.onOpen = { openings += 1; throw error }
+        let result = try run(fx, driver: driver)
+        #expect(result.category == .failed)
+        #expect(result.detail == "attachment-unverified:navigation:\(error.rawValue)")
+        #expect(openings == 1)
+        #expect(driver.message.performed.isEmpty)
     }
 
     @Test func pendingWorkerPressesExactlyOnceAndVerifiesAvailability() throws {

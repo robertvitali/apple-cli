@@ -265,8 +265,23 @@ package struct WorkerOperationResult: Equatable, Sendable {
         guard let value, value.utf8.count <= 128 else { return nil }
         guard publicDetails.contains(value) || isSafeTargetDriftDetail(value) || isSafeVerificationDetail(value) ||
             isSafeCustomChooserAXFailureDetail(value) || isSafeCustomChooserReactionUnavailableDetail(value) ||
-            isSafeReplyAttachmentOwnershipDetail(value) || isSafeEditDiagnostic(value) else { return nil }
+            isSafeReplyAttachmentOwnershipDetail(value) || isSafeEditDiagnostic(value) ||
+            isSafeAttachmentDiagnostic(value) else { return nil }
         return value
+    }
+
+    private static func isSafeAttachmentDiagnostic(_ value: String) -> Bool {
+        let fields = value.split(separator: ":", omittingEmptySubsequences: false)
+        guard fields.count == 3, fields[0] == "attachment-unverified" else { return false }
+        let stages: Set<Substring> = ["initial-read", "initial-binding", "initial-files", "initial-state",
+            "titles", "trust", "eligibility", "navigation", "route", "revalidation", "frontmost",
+            "enabled", "actions", "press", "post-press-process", "verification-read", "verification-binding",
+            "verification-files", "verification-state"]
+        let categories: Set<Substring> = ["deadline-expired", "target-drift", "ambiguous-selected-message",
+            "unknown-ax-value", "traversal-limit", "ax-failure", "route-drift", "cancelled", "other",
+            "accessibility-denied", "press-unavailable", "observation-refused", "membership-drift",
+            "incomplete-membership", "state-unavailable", "state-failed"]
+        return stages.contains(fields[1]) && categories.contains(fields[2])
     }
 
     private static func isSafeEditDiagnostic(_ value: String) -> Bool {

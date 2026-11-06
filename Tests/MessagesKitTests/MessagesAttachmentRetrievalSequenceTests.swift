@@ -72,4 +72,22 @@ import Testing
         #expect(actions == 0)
     }
 
+    @Test(arguments: [false, true], [MessagesAttachmentRetrievalState.Outcome.failed, .unavailable])
+    func diagnosticsDistinguishBeforeAndAfterAction(_ afterAction: Bool,
+                                                  _ outcome: MessagesAttachmentRetrievalState.Outcome) throws {
+        let expected = try membership(), diagnostic = MessagesAttachmentDiagnostic()
+        var reads = 0, actions = 0
+        let sequence = MessagesAttachmentRetrievalSequence(observe: { _ in
+            reads += 1
+            return .init(membership: expected, outcome: afterAction && reads == 1 ? .pending : outcome)
+        }, requestDownload: { _ in actions += 1 }, pause: { _ in }, diagnostic: diagnostic)
+        let result = try sequence.run(expected: expected, deadline: .millisecondsFromNow(5000))
+        #expect(result.category == (afterAction ? .failed : .refused))
+        let stage = afterAction ? "verification-state" : "initial-state"
+        let category = outcome == .failed ? "state-failed" : "state-unavailable"
+        #expect(result.detail == "attachment-unverified:\(stage):\(category)")
+        #expect(actions == (afterAction ? 1 : 0))
+        #expect(reads == (afterAction ? 2 : 1))
+    }
+
 }

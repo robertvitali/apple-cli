@@ -665,6 +665,12 @@ JSON output are stable per the versioning policy — breaking changes bump
 
 ### Fixed
 
+- Experimental attachment retrieval reports fixed failure stages and categories
+  instead of collapsing observation and native-action failures into one generic
+  error. Diagnostics contain no target values or native error text and do not
+  establish whether a download occurred. Success verification and the single
+  native-action limit are unchanged; uncertain results still require inspection.
+
 - **Messages reaction writes now tolerate a short initial native-open selection
   delay before opening the Tapback menu.** After a single exact native URL open,
   the worker waits up to 750 ms for Messages to expose one selected eligible
