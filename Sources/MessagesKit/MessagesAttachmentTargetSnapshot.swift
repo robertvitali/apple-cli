@@ -12,19 +12,8 @@ enum MessagesAttachmentTargetSnapshot {
               validGUID(chatGUID), validGUID(messageGUID) else { throw Failure.invalidTarget }
         for (table, required) in [("chat", Set(["guid"])), ("message", Set(["guid"])),
                                   ("chat_message_join", Set(["chat_id", "message_id"]))] {
-            var count = 0
-            try scope.forEachRow("SELECT type, rootpage FROM sqlite_schema WHERE name=?1 COLLATE NOCASE", [table]) { row in
-                guard case .text("table")? = row.values["type"],
-                      case .integer(let root)? = row.values["rootpage"], root > 0 else { throw Failure.unsupportedSchema }
-                count += 1
-            }
-            guard count == 1 else { throw Failure.unsupportedSchema }
-            var columns = Set<String>()
-            try scope.forEachTableColumn(table) { row in
-                guard case .text(let name)? = row.values["column_name"] else { throw Failure.unsupportedSchema }
-                columns.insert(name.lowercased())
-            }
-            guard required.isSubset(of: columns), !columns.contains("_rowid_") else { throw Failure.unsupportedSchema }
+            _ = try MessagesAttachmentSnapshot.storedColumns(in: scope, table: table, required: required,
+                unsupported: Failure.unsupportedSchema)
         }
         var owners = 0
         try scope.forEachRow("SELECT _rowid_ AS id FROM message WHERE CAST(guid AS BLOB)=CAST(?1 AS BLOB) LIMIT 2", [messageGUID]) { row in
@@ -33,7 +22,7 @@ enum MessagesAttachmentTargetSnapshot {
         }
         guard owners == 1 else { throw Failure.targetDrift }
         var memberships = 0
-        try scope.forEachRow("SELECT chat_id, message_id FROM chat_message_join WHERE CAST(message_id AS INTEGER)=CAST(?1 AS INTEGER) LIMIT 2", [String(messageRowid)]) { row in
+        try scope.forEachRow("SELECT chat_id, message_id FROM chat_message_join WHERE message_id=CAST(?1 AS INTEGER) OR CAST(message_id AS INTEGER)=CAST(?1 AS INTEGER) LIMIT 2", [String(messageRowid)]) { row in
             guard case .integer(let chat)? = row.values["chat_id"], chat == chatRowid,
                   case .integer(let message)? = row.values["message_id"], message == messageRowid else { throw Failure.targetDrift }
             memberships += 1

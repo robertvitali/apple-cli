@@ -30,7 +30,10 @@ enum MessagesAttachmentTargetResolver {
                 ("message", Set(["guid", "text", "attributedbody", "is_from_me"])),
                 ("handle", Set(["id"])),
                 ("chat_handle_join", Set(["chat_id", "handle_id"]))
-            ] { try checkTable(table, columns: columns, scope: scope) }
+            ] {
+                _ = try MessagesAttachmentSnapshot.storedColumns(in: scope, table: table, required: columns,
+                    unsupported: Failure.unsupportedSchema)
+            }
 
             let chatRow: SQLiteReader.Row
             switch chat {
@@ -82,7 +85,7 @@ enum MessagesAttachmentTargetResolver {
             try scope.forEachRow("""
                 SELECT j.chat_id, j.handle_id, h._rowid_ AS actual_handle, CASE WHEN typeof(h.id)='text' THEN CAST(h.id AS BLOB) END AS address
                 FROM chat_handle_join AS j LEFT JOIN handle AS h ON h._rowid_=j.handle_id
-                WHERE CAST(j.chat_id AS INTEGER)=CAST(?1 AS INTEGER) LIMIT 33
+                WHERE j.chat_id=CAST(?1 AS INTEGER) OR CAST(j.chat_id AS INTEGER)=CAST(?1 AS INTEGER) LIMIT 33
                 """, [String(chatID)]) { row in
                 guard case .integer(let joinedChat)? = row.values["chat_id"], joinedChat == chatID,
                       case .integer(let joinedHandle)? = row.values["handle_id"], joinedHandle > 0,
@@ -121,21 +124,5 @@ enum MessagesAttachmentTargetResolver {
         }
         guard let found else { throw Failure.targetNotFound }
         return found
-    }
-
-    private static func checkTable(_ table: String, columns required: Set<String>, scope: SQLiteReadTransaction) throws {
-        var count = 0
-        try scope.forEachRow("SELECT type, rootpage FROM sqlite_schema WHERE name=?1 COLLATE NOCASE", [table]) { row in
-            guard case .text("table")? = row.values["type"],
-                  case .integer(let root)? = row.values["rootpage"], root > 0 else { throw Failure.unsupportedSchema }
-            count += 1
-        }
-        guard count == 1 else { throw Failure.unsupportedSchema }
-        var columns = Set<String>()
-        try scope.forEachTableColumn(table) { row in
-            guard case .text(let name)? = row.values["column_name"] else { throw Failure.unsupportedSchema }
-            columns.insert(name.lowercased())
-        }
-        guard required.isSubset(of: columns), !columns.contains("_rowid_") else { throw Failure.unsupportedSchema }
     }
 }

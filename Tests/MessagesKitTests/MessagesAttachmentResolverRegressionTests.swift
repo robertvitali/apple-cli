@@ -63,6 +63,32 @@ import Testing
         #expect(throws: (any Error).self) { try read(fx, sandbox: "apple-cli-test") }
     }
 
+    @Test(arguments: [
+        ("chat_handle_join", "chat_id, handle_id", "'0.3e1',999"),
+        ("chat_message_join", "chat_id, message_id", "1,'0.6e2'")
+    ]) func malformedEquivalentMembershipCannotHide(_ table: String, _ columns: String, _ edge: String) throws {
+        let fx = try fixture()
+        try fx.exec("""
+            ALTER TABLE \(table) RENAME TO old_edges;
+            CREATE TABLE \(table)(\(columns));
+            INSERT INTO \(table) SELECT \(columns) FROM old_edges;
+            INSERT INTO \(table) VALUES(\(edge));
+            """)
+        #expect(throws: (any Error).self) { try read(fx, sandbox: "apple-cli-test") }
+    }
+
+    @Test func generatedParticipantCannotSatisfyRecipientCheck() throws {
+        let fx = try fixture()
+        try fx.exec("""
+            ALTER TABLE handle RENAME COLUMN id TO original_id;
+            UPDATE handle SET original_id='+12125550199' WHERE ROWID=1;
+            ALTER TABLE handle ADD COLUMN id TEXT GENERATED ALWAYS AS ('+12125550100') VIRTUAL;
+            """)
+        #expect(throws: MessagesAttachmentTargetResolver.Failure.unsupportedSchema) {
+            try read(fx, sandbox: "apple-cli-test")
+        }
+    }
+
     @Test func commonDeadlineAndCancellationStopResolution() throws {
         let fx = try fixture()
         #expect(throws: MessagesAXNavigationError.deadlineExpired) { try read(fx, deadline: .millisecondsFromNow(0)) }

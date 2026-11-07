@@ -16,15 +16,20 @@ enum MessagesAttachmentSnapshot {
 
     static func read(in scope: SQLiteReadTransaction, messageRowid: Int64) throws -> [Item] {
         guard messageRowid > 0 else { throw Failure.invalidTarget }
-        let attachmentColumns = try columns(in: scope, table: "attachment")
-        let joinColumns = try columns(in: scope, table: "message_attachment_join")
-        guard attachmentColumns.contains("guid"), !attachmentColumns.contains("_rowid_"),
-              joinColumns.isSuperset(of: ["message_id", "attachment_id"]) else { throw Failure.unsupportedSchema }
+        let attachmentColumns = try storedColumns(in: scope, table: "attachment", required: ["guid"],
+            optional: ["filename", "transfer_state"], unsupported: Failure.unsupportedSchema)
+        _ = try storedColumns(in: scope, table: "message_attachment_join", required: ["message_id", "attachment_id"],
+            usesRowid: false, unsupported: Failure.unsupportedSchema)
         let filename = attachmentColumns.contains("filename")
             ? "CASE WHEN typeof(a.filename)='text' AND length(CAST(a.filename AS BLOB)) BETWEEN 1 AND 4096 THEN CAST(a.filename AS BLOB) END"
             : "NULL"
         // LEFT JOIN preserves dangling membership. The integer guard prevents
         // SQLite numeric coercion from manufacturing an attachment identity.
+        // Keep the usual integer index lookup bounded while also inspecting
+        // malformed keys that SQLite can coerce to this message. Nonnegative
+        // REALs truncate toward zero. TEXT and BLOB sort at or after empty
+        // TEXT. At Int64.max that same sentinel covers saturating REALs.
+        let numericCeiling = messageRowid == .max ? "''" : "(CAST(?1 AS INTEGER)+1)"
         let sql = """
             SELECT typeof(maj.message_id) AS message_type,
                    typeof(maj.attachment_id) AS edge_type,
@@ -36,7 +41,8 @@ enum MessagesAttachmentSnapshot {
                    \(NativeAttachmentTransferDecoder.projection(columns: attachmentColumns))
             FROM message_attachment_join AS maj
             LEFT JOIN attachment AS a ON typeof(maj.attachment_id)='integer' AND a._rowid_=maj.attachment_id
-            WHERE maj.message_id=CAST(?1 AS INTEGER)
+            WHERE (maj.message_id BETWEEN CAST(?1 AS INTEGER) AND \(numericCeiling) OR maj.message_id>='')
+              AND (maj.message_id=CAST(?1 AS INTEGER) OR CAST(maj.message_id AS INTEGER)=CAST(?1 AS INTEGER))
             LIMIT 1025
             """
         var items: [Item] = []
@@ -69,19 +75,28 @@ enum MessagesAttachmentSnapshot {
         return text
     }
 
-    private static func columns(in scope: SQLiteReadTransaction, table: String) throws -> Set<String> {
-        var ordinaryTables = 0
+    /// Require physical columns for every observation used by this reader.
+    /// Table metadata and values come from the same pinned snapshot.
+    static func storedColumns(in scope: SQLiteReadTransaction, table: String,
+                              required: Set<String>, optional: Set<String> = [],
+                              usesRowid: Bool = true, unsupported: any Error) throws -> Set<String> {
+        var ordinary = false
         try scope.forEachRow("SELECT type, rootpage FROM sqlite_schema WHERE name=?1 COLLATE NOCASE", [table]) { row in
-            guard case .text("table")? = row.values["type"],
-                  case .integer(let root)? = row.values["rootpage"], root > 0 else { throw Failure.unsupportedSchema }
-            ordinaryTables += 1
+            guard !ordinary, case .text("table")? = row.values["type"],
+                  case .integer(let root)? = row.values["rootpage"], root > 0 else { throw unsupported }
+            ordinary = true
         }
-        guard ordinaryTables == 1 else { throw Failure.unsupportedSchema }
-        var names = Set<String>()
+        guard ordinary else { throw unsupported }
+        let used = required.union(optional)
+        var stored = Set<String>()
         try scope.forEachTableColumn(table) { row in
-            guard case .text(let name)? = row.values["column_name"] else { throw Failure.unsupportedSchema }
-            names.insert(name.lowercased())
+            guard case .text(let name)? = row.values["column_name"],
+                  case .integer(let hidden)? = row.values["hidden_kind"] else { throw unsupported }
+            let key = name.lowercased()
+            guard !(usesRowid && key == "_rowid_"), hidden == 0 || !used.contains(key) else { throw unsupported }
+            if hidden == 0 { stored.insert(key) }
         }
-        return names
+        guard required.isSubset(of: stored) else { throw unsupported }
+        return stored
     }
 }
