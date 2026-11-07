@@ -1807,6 +1807,54 @@ struct MessagesCommandDependencyTests {
         #expect(error["sandbox"] as? Bool == true)
     }
 
+    @Test(arguments: ["43", "99", "45.5", "NULL", "'bogus'"])
+    func reactionSandboxRequiresKnownDirectStyle(_ styleSQL: String) throws {
+        let fx = try ChatFixture()
+        try fx.addReactionColumns()
+        try fx.insertReactionTarget(rowid: 70, guid: "reaction-target")
+        try fx.exec("UPDATE chat SET style=\(styleSQL) WHERE ROWID=3")
+        let deps = reactionDependencies(fx, allowedRecipients: ["+12125550100"]) { _ in
+            Issue.record("refused sandbox reaction launched worker")
+            return .timedOut
+        }
+        for mode in ["--dry-run", "--execute"] {
+            let result = try captureCommand {
+                try ReactionSet.parse(["--chat-rowid", "3", "--message-rowid", "70", "--part-index", "2",
+                                   "--reaction", "like", mode, "--test-mode"])
+                    .run(dependencies: deps)
+            }
+            #expect(result.exitCode == AppleExit.permissionDenied)
+            let error = try errorPayload(from: result.stdout)
+            #expect(error["sandbox"] as? Bool == true)
+        }
+    }
+
+    @Test(arguments: ["resolve", "preflight"])
+    func reactionSandboxRechecksDirectStyleUnderLock(_ stage: String) throws {
+        let fx = try ChatFixture()
+        try fx.addReactionColumns()
+        try fx.insertReactionTarget(rowid: 70, guid: "reaction-target")
+        let path = fx.path
+        let refused = LockedBox(false)
+        let deps = reactionDependencies(fx) { action in
+            do {
+                if stage == "resolve" { try execReplySQL(path: path, "UPDATE chat SET style=43 WHERE ROWID=3") }
+                let resolved = try action.resolve()
+                if stage == "preflight" { try execReplySQL(path: path, "UPDATE chat SET style=43 WHERE ROWID=3") }
+                _ = try action.preflight(resolved, .init(deadline: action.deadline, isCancelled: { false }))
+                Issue.record("sandbox accepted a direct-to-group transition")
+            } catch let error as AppleError {
+                refused.withLock { $0 = error.type == AppleErrorType.safetyViolation && error.sandbox == true }
+            }
+            return .requestNotSent("synthetic style transition")
+        }
+        _ = try captureCommand {
+            try ReactionSet.parse(["--chat-rowid", "3", "--message-rowid", "70", "--part-index", "2",
+                                   "--reaction", "like", "--execute", "--test-mode"]).run(dependencies: deps)
+        }
+        #expect(refused.value)
+    }
+
     @Test func reactionProductionDryRunAllowsExactGroupTargets() throws {
         let fx = try ChatFixture()
         try fx.addReactionColumns()

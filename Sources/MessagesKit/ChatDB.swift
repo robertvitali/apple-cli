@@ -997,6 +997,7 @@ public struct ChatDB {
         public let body: String?
         public let body_availability: ExactBodyAvailability
         public let group_name: String?
+        let hasDirectChatStyle: Bool
         public let is_group: Bool
         public let has_attachments: Bool
         public let attachments: [Attachment]
@@ -2741,6 +2742,7 @@ public struct ChatDB {
                 body: bodyInfo.body,
                 body_availability: bodyInfo.availability,
                 group_name: group,
+                hasDirectChatStyle: row.values["selected_style"] == .integer(ChatDB.directChatStyle),
                 is_group: row.int("selected_style") == ChatDB.groupChatStyle,
                 has_attachments: (row.int("cache_has_attachments") ?? 0) != 0 || !joined.isEmpty,
                 attachments: joined,

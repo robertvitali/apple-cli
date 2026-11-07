@@ -412,6 +412,9 @@ private func validateReactionSandbox(target: ReactionResolvedTarget, db: ChatDB,
         throw AppleError.safetyViolation("refusing reaction mutation: target message is not labeled \(gate.sandboxPrefix)", sandbox: true)
     }
     guard gate.sandboxActive else { return }
+    guard target.message.hasDirectChatStyle else {
+        throw AppleError.safetyViolation("refusing reaction mutation: sandbox requires a known direct conversation", sandbox: true)
+    }
     let participants = try db.exactParticipantHandles(chatRowid: target.inspect.target.chat_rowid)
     if participants.count != 1 {
         throw AppleError.safetyViolation("refusing reaction mutation: sandbox requires exactly one allowed participant", sandbox: true)
