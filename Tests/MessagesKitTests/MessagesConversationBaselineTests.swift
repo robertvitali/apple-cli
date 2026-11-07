@@ -83,6 +83,59 @@ struct MessagesConversationBaselineTests {
         #expect(throws: (any Error).self) { try read(fx) }
     }
 
+    private func addOtherDM(_ fx: ChatFixture, address: String) throws {
+        try fx.exec("""
+            INSERT INTO chat(ROWID,guid,style,service_name) VALUES(90,'synthetic-other',45,'iMessage');
+            INSERT INTO handle(ROWID,id,service) VALUES(90,'\(address)','iMessage');
+            INSERT INTO chat_handle_join VALUES(90,90);
+            """)
+    }
+
+    @Test func disjointStoredAddressesDoNotHideExactDMs() throws {
+        let fx = try fixture()
+        try addOtherDM(fx, address: "urn:biz:11111111-2222-3333-4444-555555555555")
+        #expect(try read(fx).matchingConversations.map(\.rowid) == [3])
+        try fx.exec("ALTER TABLE handle ADD COLUMN country TEXT;")
+        try fx.exec("UPDATE handle SET id='5550199',country='us' WHERE ROWID=90;")
+        #expect(try read(fx).matchingConversations.map(\.rowid) == [3])
+        #expect(try read(fx, ["+12125550198"]).matchingConversations.isEmpty)
+        try fx.exec("""
+            INSERT INTO chat(ROWID,guid,style,service_name) VALUES(91,'another-dm',45,'iMessage');
+            INSERT INTO chat_handle_join VALUES(91,1);
+            """)
+        #expect(try read(fx).matchingConversations.map(\.rowid) == [3, 91])
+    }
+
+    @Test(arguments: [
+        ("5550100", "'US'"), ("5550199", "NULL"), ("5550199", "'XX'"),
+        ("5550199", "X'5553'"), ("1550199", "'US'"),
+        ("urn:biz:not-a-uuid", "'US'"), ("5550199 ext 8", "'US'"),
+    ])
+    func unresolvedStoredAddressRefusesEvenWithAnExactDM(_ address: String, _ countrySQL: String) throws {
+        let fx = try fixture()
+        try addOtherDM(fx, address: address)
+        try fx.exec("ALTER TABLE handle ADD COLUMN country TEXT;")
+        try fx.exec("UPDATE handle SET country=\(countrySQL) WHERE ROWID=90;")
+        #expect(throws: MessagesConversationStore.Failure.invalidObservation) { try read(fx) }
+    }
+
+    @Test func missingOrGeneratedCountryCannotDisambiguateLocalNumber() throws {
+        let fx = try fixture()
+        try addOtherDM(fx, address: "5550199")
+        #expect(throws: MessagesConversationStore.Failure.invalidObservation) { try read(fx) }
+        try fx.exec("ALTER TABLE handle ADD COLUMN country TEXT GENERATED ALWAYS AS ('US') VIRTUAL;")
+        #expect(throws: MessagesConversationStore.Failure.invalidObservation) { try read(fx) }
+    }
+
+    @Test func businessHandleCannotMaskDuplicateOrBrokenMembership() throws {
+        let fx = try fixture()
+        try addOtherDM(fx, address: "urn:biz:11111111-2222-3333-4444-555555555555")
+        try fx.exec("INSERT INTO chat_handle_join VALUES(90,90);")
+        #expect(throws: MessagesConversationStore.Failure.invalidObservation) { try read(fx) }
+        try fx.exec("UPDATE chat_handle_join SET handle_id=999 WHERE chat_id=90;")
+        #expect(throws: MessagesConversationStore.Failure.invalidObservation) { try read(fx) }
+    }
+
     @Test func duplicateGUIDOutsideMatchingServiceStillRefusesIdentity() throws {
         let fx = try fixture()
         try fx.exec("INSERT INTO chat(ROWID,guid,style,service_name) VALUES(10,'iMessage;-;+12125550100',45,'SMS');")

@@ -38,18 +38,16 @@ enum MessagesConversationBaseline {
             throw MessagesConversationStore.Failure.invalidRequest
         }
         let requested = recipients.sorted { $0.canonical < $1.canonical }
-        try MessagesConversationStore.validateSchema(in: scope)
+        let schema = try MessagesConversationStore.validateSchema(in: scope)
         let maximumChat = try MessagesConversationStore.greatestRowid(in: .chat, scope: scope)
         let maximumMessage = try MessagesConversationStore.greatestRowid(in: .message, scope: scope)
         let headers = try MessagesConversationStore.headers(group: recipients.count > 1, in: scope)
         var matches: [MessagesConversationStore.Conversation] = []
         for header in headers {
-            let members = try MessagesConversationStore.members(chatRowid: header.rowid, in: scope)
-            // A complete empty membership cannot identify a nonempty requested set.
-            // Malformed/oversized membership throws; it is never treated as empty.
-            guard members == requested else { continue }
+            guard try MessagesConversationStore.matches(header: header, requested: requested,
+                                                        schema: schema, in: scope) else { continue }
             guard matches.count < 256 else { throw MessagesConversationStore.Failure.limitExceeded }
-            matches.append(try MessagesConversationStore.verifiedConversation(header: header, members: members, in: scope))
+            matches.append(try MessagesConversationStore.verifiedConversation(header: header, members: requested, in: scope))
         }
         return Snapshot(maximumChatRowid: maximumChat, maximumMessageRowid: maximumMessage,
                         requestedRecipients: requested, matchingConversations: matches)

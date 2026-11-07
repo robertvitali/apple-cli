@@ -5,6 +5,10 @@ import Foundation
 /// helper uses the caller's bounded transaction; none opens a second snapshot.
 enum MessagesConversationStore {
     enum Failure: Error { case invalidRequest, unsupportedSchema, invalidObservation, limitExceeded }
+    struct Schema {
+        let hasStoredHandleCountry: Bool
+    }
+
     enum WatermarkTable: String { case chat, message }
 
     struct Header {
@@ -27,7 +31,9 @@ enum MessagesConversationStore {
 
     /// Validate both baseline and known post-send field prerequisites before any
     /// handoff. Additional verifier-specific requirements must also be preflighted.
-    static func validateSchema(in scope: SQLiteReadTransaction) throws {
+    @discardableResult
+    static func validateSchema(in scope: SQLiteReadTransaction) throws -> Schema {
+        var hasStoredHandleCountry = false
         let requirements: [(String, Set<String>)] = [
             ("chat", ["guid", "style", "service_name"]),
             ("message", ["guid", "text", "attributedbody", "is_from_me", "is_sent", "error", "service"]),
@@ -56,10 +62,12 @@ enum MessagesConversationStore {
                 guard name != "_rowid_", !required.contains(name) || hidden == 0 else {
                     throw Failure.unsupportedSchema
                 }
+                if table == "handle", name == "country", hidden == 0 { hasStoredHandleCountry = true }
                 columns.insert(name)
             }
             guard required.isSubset(of: columns) else { throw Failure.unsupportedSchema }
         }
+        return Schema(hasStoredHandleCountry: hasStoredHandleCountry)
     }
 
     static func greatestRowid(in table: WatermarkTable, scope: SQLiteReadTransaction) throws -> Int64 {
@@ -96,12 +104,41 @@ enum MessagesConversationStore {
         return headers
     }
 
-    static func members(chatRowid: Int64, in scope: SQLiteReadTransaction) throws -> [MessagesConversationAddress] {
+    private struct StoredMember {
+        let raw: String
+        let hasUSCountry: Bool
+
+        /// Negative evidence only for a complete one-member DM. A local number
+        /// never identifies a recipient, even when its seven digits match.
+        func excludes(_ recipient: MessagesConversationAddress) -> Bool {
+            if raw.hasPrefix("urn:biz:") {
+                let suffix = raw.dropFirst(8)
+                guard suffix.utf8.count == 36, suffix.utf8.allSatisfy({ $0 < 128 }),
+                      let id = UUID(uuidString: String(suffix)) else { return false }
+                return id.uuidString.lowercased().utf8.elementsEqual(suffix.lowercased().utf8)
+            }
+            let local = Array(raw.utf8)
+            guard hasUSCountry, local.count == 7, (50...57).contains(local[0]),
+                  local.allSatisfy({ (48...57).contains($0) }) else { return false }
+            if recipient.kind == .email { return true }
+            let phone = Array(recipient.canonical.utf8)
+            guard phone.count == 12, phone.starts(with: "+1".utf8),
+                  (50...57).contains(phone[2]), (50...57).contains(phone[5]) else { return false }
+            return !phone.suffix(7).elementsEqual(local)
+        }
+    }
+
+    private static func storedMembers(chatRowid: Int64, hasStoredHandleCountry: Bool,
+                                      in scope: SQLiteReadTransaction) throws -> [StoredMember] {
         guard chatRowid > 0 else { throw Failure.invalidRequest }
-        var members: [MessagesConversationAddress] = []
-        var seen = Set<MessagesConversationAddress>()
+        var members: [StoredMember] = []
+        // Select only a boolean from an ordinary optional column. Byte equality
+        // prevents SQLite affinity, collation or a generated column supplying it.
+        let usCountry = hasStoredHandleCountry
+            ? "CASE WHEN typeof(h.country)='text' AND CAST(h.country AS BLOB) IN (X'5553',X'7573') THEN 1 ELSE 0 END"
+            : "0"
         try scope.forEachRow("""
-            SELECT j.chat_id,j.handle_id,h._rowid_ AS actual_handle,
+            SELECT j.chat_id,j.handle_id,h._rowid_ AS actual_handle,\(usCountry) AS us_country,
                    CASE WHEN typeof(h.id)='text' THEN CAST(h.id AS BLOB) END AS address
             FROM chat_handle_join j LEFT JOIN handle h ON h._rowid_=CAST(j.handle_id AS INTEGER)
             WHERE CAST(j.chat_id AS INTEGER)=CAST(?1 AS INTEGER) LIMIT 33
@@ -110,15 +147,34 @@ enum MessagesConversationStore {
             guard case .integer(let chat)? = row.values["chat_id"], chat == chatRowid,
                   case .integer(let joined)? = row.values["handle_id"], joined > 0,
                   case .integer(let actual)? = row.values["actual_handle"], actual == joined,
+                  case .integer(let usCountry)? = row.values["us_country"],
                   case .blob(let bytes)? = row.values["address"], bytes.count <= 512,
                   let raw = String(data: bytes, encoding: .utf8) else { throw Failure.invalidObservation }
-            let address: MessagesConversationAddress
-            do { address = try MessagesConversationAddress.parse(raw) }
-            catch { throw Failure.invalidObservation }
-            guard seen.insert(address).inserted else { throw Failure.invalidObservation }
-            members.append(address)
+            members.append(.init(raw: raw, hasUSCountry: usCountry == 1))
         }
-        return members.sorted { $0.canonical < $1.canonical }
+        return members
+    }
+
+    private static func addresses(_ stored: [StoredMember]) throws -> [MessagesConversationAddress] {
+        var seen = Set<MessagesConversationAddress>()
+        for member in stored {
+            guard let address = try? MessagesConversationAddress.parse(member.raw),
+                  seen.insert(address).inserted else { throw Failure.invalidObservation }
+        }
+        return seen.sorted { $0.canonical < $1.canonical }
+    }
+
+    static func members(chatRowid: Int64, in scope: SQLiteReadTransaction) throws -> [MessagesConversationAddress] {
+        try addresses(storedMembers(chatRowid: chatRowid, hasStoredHandleCountry: false, in: scope))
+    }
+
+    static func matches(header: Header, requested: [MessagesConversationAddress], schema: Schema,
+                        in scope: SQLiteReadTransaction) throws -> Bool {
+        let dm = header.style == 45 && requested.count == 1
+        let stored = try storedMembers(chatRowid: header.rowid, hasStoredHandleCountry: dm && schema.hasStoredHandleCountry,
+                                       in: scope)
+        if dm, stored.count == 1, stored[0].excludes(requested[0]) { return false }
+        return try addresses(stored) == requested
     }
 
     static func verifiedConversation(header: Header, members: [MessagesConversationAddress],
