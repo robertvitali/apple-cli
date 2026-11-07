@@ -19,6 +19,16 @@ private struct CreationWorkerFixture {
             recipients: plan.recipients.map(\.candidate.address), deadline: .millisecondsFromNow(5000))
         payload = try MessagesConversationRequest(plan: plan, baseline: baseline)
     }
+    func envelope() throws -> MessagesConversationNativeEnvelope {
+        let text = payload.initialText
+        return try .init(recipientAddresses: payload.recipients, service: payload.service,
+                         body: MessagesAXBodyTextSnapshot(text: text, characterCount: text.utf16.count))
+    }
+
+    func composer(send: @escaping () throws -> Void) -> MessagesConversationWorkerSequence.PreparedComposer {
+        .init(readEnvelope: envelope, send: send)
+    }
+
     func currentBaseline(_ deadline: WorkerDeadline) throws -> MessagesConversationBaseline.Snapshot {
         try MessagesConversationBaseline.read(databasePath: db.path, recipients: baseline.requestedRecipients,
                                               deadline: deadline)
@@ -91,8 +101,8 @@ struct MessagesConversationWorkerTests {
         var reads = 0, sends = 0, observations = 0
         let sequence = MessagesConversationWorkerSequence(payload: fx.payload, readBaseline: { deadline in
             reads += 1; return try fx.currentBaseline(deadline)
-        }, perform: { _, _, validate in
-            try validate(); sends += 1; try fx.send()
+        }, prepare: { _, _ in
+            fx.composer { sends += 1; try fx.send() }
         }, verify: { before, deadline in
             observations += 1; return try fx.observe(before, deadline)
         }, pause: { _ in })
@@ -107,7 +117,7 @@ struct MessagesConversationWorkerTests {
         try fx.db.exec("INSERT INTO message(ROWID,guid) VALUES(99,'synthetic-concurrent');")
         var preparations = 0
         let sequence = MessagesConversationWorkerSequence(payload: fx.payload, readBaseline: fx.currentBaseline,
-            perform: { _, _, _ in preparations += 1 }, verify: fx.observe, pause: { _ in })
+            prepare: { _, _ in preparations += 1; throw WorkerProtocolError.cancelled }, verify: fx.observe, pause: { _ in })
         let result = sequence.run(deadline: .millisecondsFromNow(5000))
         #expect(result.category == .refused)
         #expect(result.detail == "conversation-create-preflight-refused")
@@ -119,13 +129,13 @@ struct MessagesConversationWorkerTests {
         var sends = 0
         var observation: MessagesConversationVerification.Observation?
         let sequence = MessagesConversationWorkerSequence(payload: fx.payload, readBaseline: fx.currentBaseline,
-            perform: { _, _, validate in
+            prepare: { _, _ in
                 try fx.db.exec("""
                     INSERT INTO handle(ROWID,id) VALUES(99,'+12125550199');
                     INSERT INTO chat(ROWID,guid,style,service_name) VALUES(70,'synthetic-new-dm',45,'iMessage');
                     INSERT INTO chat_handle_join VALUES(70,99);
                     """)
-                try validate(); sends += 1; try fx.send(chat: 70)
+                return fx.composer { sends += 1; try fx.send(chat: 70) }
             }, verify: { before, deadline in
                 let evidence = try fx.observe(before, deadline); observation = evidence?.observation; return evidence
             }, pause: { _ in })
@@ -138,18 +148,68 @@ struct MessagesConversationWorkerTests {
         let fx = try CreationWorkerFixture()
         var sends = 0, cancelled = false
         let sequence = MessagesConversationWorkerSequence(payload: fx.payload, readBaseline: fx.currentBaseline,
-            perform: { _, _, validate in cancelled = true; try validate(); sends += 1 },
+            prepare: { _, _ in cancelled = true; return fx.composer { sends += 1 } },
             verify: fx.observe, isCancelled: { cancelled }, pause: { _ in })
         #expect(sequence.run(deadline: .millisecondsFromNow(5000)).category == .failed)
         #expect(sends == 0)
+    }
+
+    @Test(arguments: ["recipient", "service", "body", "cancel", "unavailable"])
+    func freshComposerEvidenceIsRequiredBeforeSend(_ condition: String) throws {
+        let fx = try CreationWorkerFixture()
+        var cancelled = false
+        var events: [String] = []
+        let sequence = MessagesConversationWorkerSequence(payload: fx.payload, readBaseline: fx.currentBaseline,
+            prepare: { _, _ in
+                events.append("prepare")
+                return .init(readEnvelope: {
+                    events.append("read")
+                    if condition == "unavailable" { throw MessagesAXNavigationError.targetDrift }
+                    if condition == "cancel" { cancelled = true }
+                    let expected = try fx.envelope()
+                    return .init(
+                        recipientAddresses: condition == "recipient" ? ["+12125550199"] : expected.recipientAddresses,
+                        service: condition == "service" ? "SMS" : expected.service,
+                        body: condition == "body" ? nil : expected.body)
+                }, send: { events.append("send") })
+            }, verify: { _, _ in events.append("verify"); return nil },
+            isCancelled: { cancelled }, pause: { _ in })
+        let result = sequence.run(deadline: .millisecondsFromNow(5000))
+        #expect(result.detail == "conversation-create-unverified")
+        #expect(events == ["prepare", "read"])
+    }
+
+    @Test(arguments: [false, true])
+    func expiryDuringPreparationOrEnvelopeReadPreventsSend(duringEnvelopeRead: Bool) throws {
+        let fx = try CreationWorkerFixture()
+        var events: [String] = []
+        let sequence = MessagesConversationWorkerSequence(payload: fx.payload, readBaseline: { _ in fx.baseline },
+            prepare: { _, deadline in
+                func waitForExpiry() {
+                    while !deadline.expired {
+                        Thread.sleep(forTimeInterval: Double(deadline.remainingNanoseconds) / 1_000_000_000)
+                    }
+                }
+                events.append("prepare")
+                if !duringEnvelopeRead { waitForExpiry() }
+                return .init(readEnvelope: {
+                    events.append("read")
+                    if duringEnvelopeRead { waitForExpiry() }
+                    return try fx.envelope()
+                }, send: { events.append("send") })
+            }, verify: { _, _ in events.append("verify"); return nil })
+        let result = sequence.run(deadline: .millisecondsFromNow(1000))
+        #expect(result.category == .failed)
+        #expect(result.detail == "conversation-create-unverified")
+        #expect(events == (duringEnvelopeRead ? ["prepare", "read"] : ["prepare"]))
     }
 
     @Test func throwingSendIsNeverRepeatedOrConvertedToSuccess() throws {
         let fx = try CreationWorkerFixture()
         var sends = 0, observations = 0
         let sequence = MessagesConversationWorkerSequence(payload: fx.payload, readBaseline: fx.currentBaseline,
-            perform: { _, _, validate in
-                try validate(); sends += 1; try fx.send(); throw WorkerProtocolError.deadlineExpired
+            prepare: { _, _ in
+                fx.composer { sends += 1; try fx.send(); throw WorkerProtocolError.deadlineExpired }
             }, verify: { before, deadline in observations += 1; return try fx.observe(before, deadline) }, pause: { _ in })
         let result = sequence.run(deadline: .millisecondsFromNow(5000))
         #expect(result.category == .failed)
@@ -161,7 +221,7 @@ struct MessagesConversationWorkerTests {
         let fx = try CreationWorkerFixture()
         var sends = 0, observations = 0
         let sequence = MessagesConversationWorkerSequence(payload: fx.payload, readBaseline: fx.currentBaseline,
-            perform: { _, _, validate in try validate(); sends += 1 }, verify: { before, deadline in
+            prepare: { _, _ in fx.composer { sends += 1 } }, verify: { before, deadline in
                 observations += 1
                 if observations == 3 { try fx.send() }
                 return try fx.observe(before, deadline)
@@ -174,7 +234,7 @@ struct MessagesConversationWorkerTests {
         let fx = try CreationWorkerFixture()
         var sends = 0, observations = 0
         let sequence = MessagesConversationWorkerSequence(payload: fx.payload, readBaseline: fx.currentBaseline,
-            perform: { _, _, validate in try validate(); sends += 1 }, verify: { _, _ in
+            prepare: { _, _ in fx.composer { sends += 1 } }, verify: { _, _ in
                 observations += 1; return nil
             }, pause: { _ in })
         #expect(sequence.run(deadline: .millisecondsFromNow(5000)).category == .failed)
@@ -187,7 +247,7 @@ struct MessagesConversationWorkerTests {
             var reads = 0, preparations = 0
             let sequence = MessagesConversationWorkerSequence(payload: fx.payload,
                 readBaseline: { deadline in reads += 1; return try fx.currentBaseline(deadline) },
-                perform: { _, _, _ in preparations += 1 }, verify: fx.observe,
+                prepare: { _, _ in preparations += 1; throw WorkerProtocolError.cancelled }, verify: fx.observe,
                 isCancelled: { cancelled }, pause: { _ in })
             #expect(sequence.run(deadline: .millisecondsFromNow(cancelled ? 5000 : 0)).category == .refused)
             #expect(reads == 0 && preparations == 0)
@@ -198,7 +258,7 @@ struct MessagesConversationWorkerTests {
         let fx = try CreationWorkerFixture()
         var cancelled = false, sends = 0, observations = 0
         let sequence = MessagesConversationWorkerSequence(payload: fx.payload, readBaseline: fx.currentBaseline,
-            perform: { _, _, validate in try validate(); sends += 1; try fx.send(); cancelled = true },
+            prepare: { _, _ in fx.composer { sends += 1; try fx.send(); cancelled = true } },
             verify: { before, deadline in observations += 1; return try fx.observe(before, deadline) },
             isCancelled: { cancelled }, pause: { _ in })
         #expect(sequence.run(deadline: .millisecondsFromNow(5000)).category == .failed)
@@ -209,7 +269,7 @@ struct MessagesConversationWorkerTests {
         let fx = try CreationWorkerFixture()
         var sends = 0, observations = 0
         let sequence = MessagesConversationWorkerSequence(payload: fx.payload, readBaseline: fx.currentBaseline,
-            perform: { _, _, validate in try validate(); sends += 1 }, verify: { _, _ in
+            prepare: { _, _ in fx.composer { sends += 1 } }, verify: { _, _ in
                 observations += 1; throw MessagesConversationVerification.Failure.ambiguous
             }, pause: { _ in })
         #expect(sequence.run(deadline: .millisecondsFromNow(5000)).category == .failed)

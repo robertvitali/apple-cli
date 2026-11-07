@@ -1,14 +1,21 @@
 import AppleKit
 import Foundation
 
-/// One native attempt, followed only by bounded read observations. The native
-/// adapter must retain/revalidate its composer, recipients and service before
-/// Send and invoke the supplied cancellation/deadline checkpoint at that boundary.
+/// One native send followed only by bounded persisted observations.
 struct MessagesConversationWorkerSequence {
     typealias Baseline = MessagesConversationBaseline.Snapshot
+
+    /// Both operations refer to the same retained composer. The adapter must
+    /// revalidate its ownership and all control identities when reading the
+    /// complete current envelope, then press only its retained Send control.
+    struct PreparedComposer {
+        let readEnvelope: () throws -> MessagesConversationNativeEnvelope
+        let send: () throws -> Void
+    }
+
     let payload: MessagesConversationRequest
     let readBaseline: (WorkerDeadline) throws -> Baseline
-    let perform: (Baseline, WorkerDeadline, () throws -> Void) throws -> Void
+    let prepare: (Baseline, WorkerDeadline) throws -> PreparedComposer
     let verify: (Baseline, WorkerDeadline) throws -> MessagesConversationVerification.Evidence?
     var isCancelled: () -> Bool = { Task.isCancelled }
     var pause: (UInt64) throws -> Void = { Thread.sleep(forTimeInterval: Double($0) / 1_000_000_000) }
@@ -25,7 +32,11 @@ struct MessagesConversationWorkerSequence {
         do {
             // Keep the original baseline through composition. A new conversation
             // may appear before send; recapturing it would erase that evidence.
-            try perform(baseline, deadline) { try checkpoint(deadline) }
+            let composer = try prepare(baseline, deadline)
+            try checkpoint(deadline)
+            try composer.readEnvelope().validate(request: payload)
+            try checkpoint(deadline)
+            try composer.send()
             for attempt in 0..<60 {
                 try checkpoint(deadline)
                 let evidence = try verify(baseline, deadline)
