@@ -86,14 +86,8 @@ public enum Send {
     /// Still fail-closed inside the sandbox: an EMPTY or unset `APPLE_TEST_RECIPIENTS` matches
     /// nothing, so every recipient is refused rather than every recipient being allowed.
     ///
-    /// GROUP CHATS ARE REFUSED OUTRIGHT, not left to the allowlist compare. AGENTS.md makes
-    /// group-chat send operator-verify-only precisely because a group has no self-addressed
-    /// shape — the operator cannot be the only recipient. Relying on "a chat id never matches a
-    /// phone/email entry" was WRONG: `resolve` preserves a group id verbatim (see above),
-    /// `normalizeForAllowlist` strips it to digits, and `phonesEquivalent` returns true for two
-    /// equal strings BEFORE it checks they are digits — so an operator who pasted a chat id into
-    /// `APPLE_TEST_RECIPIENTS` would have had a sandboxed group send go through to real people.
-    /// The refusal is now structural, so no allowlist content can reach that path.
+    /// A sandboxed group send is refused before inspecting its handle. Even a
+    /// phone-shaped identifier would authorize only one address, not the group.
     ///
     /// `allowedRecipients` is a REQUIRED seam, not a policy knob. It used to default to `nil`
     /// (read `APPLE_TEST_RECIPIENTS` here); that default went dead once `MessagesWriteGuard.Gate`
@@ -105,11 +99,35 @@ public enum Send {
                                               allowedRecipients: [String]) throws {
         guard sandboxActive else { return }
         guard !groupChat else { throw AllowError.groupChatInSandbox }
-        let target = normalizeForAllowlist(handle)
-        let allowed = allowedRecipients.map(normalizeForAllowlist)
-        guard allowed.contains(where: { phonesEquivalent($0, target) }) else {
+        guard isAllowlisted(handle, among: allowedRecipients) else {
             throw AllowError.notAllowed(handle)
         }
+    }
+
+    /// Compare only address-shaped operands. Removing punctuation from an opaque
+    /// chat handle can otherwise manufacture an allowlisted phone number.
+    static func isAllowlisted(_ handle: String, among entries: [String]) -> Bool {
+        guard let target = allowedIdentity(handle) else { return false }
+        return entries.contains { entry in
+            guard let allowed = allowedIdentity(entry) else { return false }
+            return phonesEquivalent(allowed, target)
+        }
+    }
+
+    private static func allowedIdentity(_ raw: String) -> String? {
+        guard !raw.unicodeScalars.contains(where: { CharacterSet.controlCharacters.contains($0) }) else { return nil }
+        let value = raw.trimmingCharacters(in: .whitespaces)
+        if value.contains("@") {
+            let parts = value.split(separator: "@", maxSplits: 2, omittingEmptySubsequences: false)
+            guard parts.count == 2, parts.allSatisfy({ !$0.isEmpty }),
+                  value.unicodeScalars.allSatisfy({ !CharacterSet.whitespacesAndNewlines.contains($0) }) else { return nil }
+        } else {
+            let digits = value.hasPrefix("+") ? value.dropFirst() : value[...]
+            guard !digits.isEmpty, digits.utf8.allSatisfy({ (48...57).contains($0) || [32, 40, 41, 45, 46].contains($0) }),
+                  digits.utf8.contains(where: { (48...57).contains($0) }) else { return nil }
+        }
+        let normalized = Send.normalizeForAllowlist(value)
+        return normalized.isEmpty ? nil : normalized
     }
 
     /// Emails → trimmed/lowercased; everything else (phones) → digits only.
@@ -120,8 +138,9 @@ public enum Send {
 
     /// Equal, or (for all-digit phone forms) equal after dropping a leading US "1".
     static func phonesEquivalent(_ a: String, _ b: String) -> Bool {
+        guard !a.isEmpty, !b.isEmpty else { return false }
         if a == b { return true }
-        guard !a.isEmpty, !b.isEmpty, a.allSatisfy(\.isNumber), b.allSatisfy(\.isNumber) else { return false }
+        guard a.allSatisfy(\.isNumber), b.allSatisfy(\.isNumber) else { return false }
         func stripCC(_ x: String) -> String { (x.count == 11 && x.hasPrefix("1")) ? String(x.dropFirst()) : x }
         return stripCC(a) == stripCC(b)
     }

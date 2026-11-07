@@ -441,13 +441,14 @@ struct MessagesCommandDependencyTests {
     /// is refused rather than every recipient allowed — the worst possible default on a surface
     /// that reaches a real human. The refusal is a `validation_error` at exit 64 carrying
     /// `error.sandbox: true`, so a caller can tell a sandbox refusal from an ordinary bad argument.
-    @Test func sandboxRefusesRecipientOutsideAllowlistAndNeverSends() throws {
+    @Test(arguments: [[], ["merchant12125550100"]])
+    func sandboxRefusesRecipientOutsideAllowlistAndNeverSends(_ allowed: [String]) throws {
         let command = try Send_.parse(["--test-mode", "+1 (212) 555-0100", "--message", "synthetic hello"])
         let result = try captureCommand {
             try command.run(dependencies: .fixture(performSend: { _ in
                 Issue.record("a sandbox-refused recipient must not invoke sender")
                 return .sent(nil)
-            }, allowedRecipients: []))
+            }, allowedRecipients: allowed))
         }
 
         #expect(result.exitCode == AppleExit.usage)
@@ -1785,6 +1786,27 @@ struct MessagesCommandDependencyTests {
         #expect(error["sandbox"] as? Bool == true)
     }
 
+    @Test(arguments: ["--dry-run", "--execute"])
+    func reactionSandboxRejectsOpaqueParticipantWithAllowedDigits(_ mode: String) throws {
+        let fx = try ChatFixture()
+        try fx.addReactionColumns()
+        try fx.insertReactionTarget(rowid: 70, guid: "reaction-target")
+        try fx.exec("UPDATE handle SET id='merchant12125550100' WHERE ROWID=1")
+        let deps = reactionDependencies(fx, allowedRecipients: ["+12125550100"]) { _ in
+            Issue.record("refused reaction launched a worker")
+            return .timedOut
+        }
+        let result = try captureCommand {
+            try ReactionSet.parse(["--chat-rowid", "3", "--message-rowid", "70", "--part-index", "2",
+                                   "--reaction", "like", mode, "--test-mode"])
+                .run(dependencies: deps)
+        }
+        #expect(result.exitCode == AppleExit.permissionDenied)
+        let error = try errorPayload(from: result.stdout)
+        #expect(error["type"] as? String == AppleErrorType.safetyViolation)
+        #expect(error["sandbox"] as? Bool == true)
+    }
+
     @Test func reactionProductionDryRunAllowsExactGroupTargets() throws {
         let fx = try ChatFixture()
         try fx.addReactionColumns()
@@ -2809,6 +2831,37 @@ struct MessagesCommandDependencyTests {
         #expect(result.exitCode == AppleExit.usage)
         let error = try errorPayload(from: result.stdout)
         #expect(error["type"] as? String == AppleErrorType.validation)
+    }
+
+    @Test(arguments: [
+        ("+12125550100", "merchant12125550100"),
+        ("merchant12125550100", "+1 (212) 555-0100"),
+        ("merchant", "unrelated"),
+        ("first@@example.com", "first@@example.com")
+    ])
+    func replySandboxRefusesMalformedRecipientIdentities(_ participant: String, _ allowed: String) throws {
+        let fx = try ChatFixture()
+        try fx.insertReplyTarget(rowid: 70, guid: "reply-target")
+        try fx.exec("UPDATE handle SET id='\(participant)' WHERE ROWID=1")
+        let launched = LockedBox(false)
+        let deps = replyDependencies(fx, allowedRecipients: [allowed]) { _ in
+            launched.withLock { $0 = true }
+            return .timedOut
+        }
+        let file = try scratch.directory().appendingPathComponent("apple-cli-test-reply.txt")
+        try Data("apple-cli-test attachment".utf8).write(to: file)
+        let target = ["--chat-rowid", "3", "--message-rowid", "70", "--part-index", "2", "--test-mode"]
+        for input in [["--body", "apple-cli-test reply"], ["--file", file.path]] {
+            for mode in ["--dry-run", "--execute"] {
+                let result = try captureCommand {
+                    try ReplySend.parse(target + input + [mode, "--experimental-ui-handoff"])
+                        .run(dependencies: deps)
+                }
+                #expect(result.exitCode == AppleExit.permissionDenied)
+                #expect(launched.value == false)
+                #expect(!FileManager.default.fileExists(atPath: fx.homePath + "/messages-automation"))
+            }
+        }
     }
 
     @Test func replySendSandboxRequiresLabeledTextAndAllowedRecipient() throws {

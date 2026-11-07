@@ -532,9 +532,7 @@ private func validateReplySandbox(target: ReplyResolvedTarget, db: ChatDB, gate:
     guard target.participants.count == 1, let participant = target.participants.first else {
         throw AppleError.safetyViolation("sandboxed Messages reply requires one direct recipient")
     }
-    let normalized = Send.normalizeForAllowlist(participant)
-    let allowed = gate.allowedRecipients.map(Send.normalizeForAllowlist)
-    guard allowed.contains(where: { Send.phonesEquivalent($0, normalized) }) else {
+    guard Send.isAllowlisted(participant, among: gate.allowedRecipients) else {
         throw AppleError.safetyViolation("recipient not allowed by APPLE_TEST_RECIPIENTS: \(participant)")
     }
 }

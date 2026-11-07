@@ -72,27 +72,9 @@ struct MessagesAttachmentRetrieve: ParsableCommand {
         if gate.sandboxActive {
             guard let participant = capture.request.participantHandles.first,
                   capture.request.participantHandles.count == 1,
-                  gate.allowedRecipients.contains(where: {
-                      guard let allowed = Self.allowedIdentity($0), let target = Self.allowedIdentity(participant) else { return false }
-                      return Send.phonesEquivalent(allowed, target)
-                  }) else { throw AppleError.safetyViolation("sandboxed attachment target requires one allowed direct recipient", sandbox: true) }
+                  Send.isAllowlisted(participant, among: gate.allowedRecipients) else { throw AppleError.safetyViolation("sandboxed attachment target requires one allowed direct recipient", sandbox: true) }
         }
         return capture.request
-    }
-
-    private static func allowedIdentity(_ raw: String) -> String? {
-        let value = raw.trimmingCharacters(in: .whitespacesAndNewlines)
-        if value.contains("@") {
-            let parts = value.split(separator: "@", omittingEmptySubsequences: false)
-            guard parts.count == 2, parts.allSatisfy({ !$0.isEmpty }),
-                  !value.unicodeScalars.contains(where: { CharacterSet.whitespacesAndNewlines.contains($0) || $0.value < 32 || $0.value == 127 }) else { return nil }
-        } else {
-            let digits = value.hasPrefix("+") ? value.dropFirst() : value[...]
-            guard !digits.isEmpty, digits.utf8.allSatisfy({ (48...57).contains($0) || [32, 40, 41, 45, 46].contains($0) }),
-                  digits.utf8.contains(where: { (48...57).contains($0) }) else { return nil }
-        }
-        let normalized = Send.normalizeForAllowlist(value)
-        return normalized.isEmpty ? nil : normalized
     }
 
     func run(dependencies: MessagesCommandDependencies, databasePath: String,

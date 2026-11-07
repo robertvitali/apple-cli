@@ -417,10 +417,7 @@ private func validateReactionSandbox(target: ReactionResolvedTarget, db: ChatDB,
         throw AppleError.safetyViolation("refusing reaction mutation: sandbox requires exactly one allowed participant", sandbox: true)
     }
     guard let only = participants.first,
-          gate.allowedRecipients.contains(where: {
-              Send.phonesEquivalent(Send.normalizeForAllowlist($0),
-                                    Send.normalizeForAllowlist(only))
-          }) else {
+          Send.isAllowlisted(only, among: gate.allowedRecipients) else {
         throw AppleError.safetyViolation("refusing reaction mutation: selected conversation is not the single allowed sandbox recipient", sandbox: true)
     }
 }

@@ -6,8 +6,8 @@ import Testing
 @testable import MessagesKit
 
 @Suite struct MessagesAttachmentErrorContractTests {
-    @Test(arguments: ["label", "group", "recipient", "empty-recipient", "nonempty-recipient", "blob-label", "rowid", "missing", "part", "native-guid", "schema"])
-    func expectedRefusalsHavePublicErrorCategories(_ scenario: String) throws {
+    @Test(arguments: ["label", "group", "recipient", "empty-recipient", "nonempty-recipient", "blob-label", "rowid", "missing", "part", "native-guid", "schema"], [false, true])
+    func expectedRefusalsHavePublicErrorCategories(_ scenario: String, _ execute: Bool) throws {
         let fx = try ChatFixture()
         let body = NSMutableAttributedString(string: scenario == "blob-label" ? "unlabeled \u{fffc}" : "apple-cli-test \u{fffc}")
         let range = NSRange(location: body.length - 1, length: 1)
@@ -44,14 +44,14 @@ import Testing
             throw WorkerProtocolError.malformedFrame
         })
         dependencies.resolveGate = { _ in
-            .init(willExecute: false, sandboxActive: sandbox, allowedRecipients: allowlist)
+            .init(willExecute: execute, sandboxActive: sandbox, allowedRecipients: allowlist)
         }
         let stdout = MemoryOutputSink(), stderr = MemoryOutputSink()
         var exitCode: Int32?
         do {
             try Output.withStreams(CLIStreams(stdout: stdout, stderr: stderr)) {
                 try MessagesAttachmentRetrieve.parse(["--chat-rowid", "3", "--message-rowid", message,
-                    "--part-index", part, "--dry-run"]).run(dependencies: dependencies, databasePath: fx.path)
+                    "--part-index", part, execute ? "--execute" : "--dry-run", "--experimental-ui-handoff"]).run(dependencies: dependencies, databasePath: fx.path)
             }
         } catch let exit as ExitCode { exitCode = exit.rawValue }
         let envelope = try #require(JSONSerialization.jsonObject(with: stdout.data) as? [String: Any])

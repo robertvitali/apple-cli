@@ -315,6 +315,22 @@ struct SendTests {
         #expect(Send.normalizeForAllowlist("  Bob@Example.COM ") == "bob@example.com")
     }
 
+    @Test func sandboxAllowlistRequiresTwoAddressIdentities() {
+        #expect(Send.isAllowlisted("+1 (212) 555-0100", among: ["212.555.0100"]))
+        #expect(Send.isAllowlisted(" Bob@Example.com ", among: ["bogus", "bob@example.COM"]))
+        #expect(!Send.isAllowlisted("merchant12125550100", among: ["+12125550100"]))
+        #expect(!Send.isAllowlisted("+12125550100", among: ["merchant12125550100"]))
+        #expect(!Send.isAllowlisted("merchant", among: ["other"]))
+        #expect(!Send.isAllowlisted("bob@example.com\n", among: ["bob@example.com"]))
+        #expect(!Send.isAllowlisted("@", among: ["@"]))
+        #expect(!Send.isAllowlisted("bob@example.com", among: ["bob@example.com\n"]))
+        for empty in ["", "   "] {
+            #expect(!Send.isAllowlisted(empty, among: [empty, "+12125550100"]))
+            #expect(!Send.isAllowlisted("+12125550100", among: [empty]))
+        }
+        #expect(!Send.phonesEquivalent("", ""))
+    }
+
     @Test func phonesEquivalentAcrossCountryCode() {
         #expect(Send.phonesEquivalent("12125550142", "2125550142"))  // CC vs no-CC
         #expect(Send.phonesEquivalent("2125550142", "2125550142"))
