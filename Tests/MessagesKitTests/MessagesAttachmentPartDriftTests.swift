@@ -68,14 +68,18 @@ import Testing
         #expect(driver.calls == 0)
     }
 
-    @Test(arguments: [4, 5], ["native-guid", "native-part-key", "native-guid-key", "database-guid", "chat-guid", "message-guid", "participant", "filename", "body-text", "blob-text", "native-root"])
+    @Test(arguments: [4, 5], ["native-guid", "native-part-key", "native-guid-key", "database-guid", "unindexed-label", "chat-guid", "message-guid", "participant", "filename", "body-text", "blob-text", "native-root"])
     func changedUTF8BytesRefuseActionAndDownloadedSuccess(_ transferState: Int, _ scenario: String) throws {
         let fx = try fixture(), driver = AttachmentPartDriftNoUIDriver()
         func archive(partKey: String = "__kIMMessagePartAttributeName",
                      guidKey: String = "__kIMFileTransferGUIDAttributeName", guid: String = "a10",
-                     text: String = "apple-cli-test \u{fffc}") -> Data {
+                     indexedLabel: Bool = true, text: String = "apple-cli-test \u{fffc}") -> Data {
             let body = NSMutableAttributedString(string: text)
             let range = NSRange(location: body.length - 1, length: 1)
+            if indexedLabel {
+                body.addAttribute(.init("__kIMMessagePartAttributeName"), value: NSNumber(value: 1),
+                                  range: NSRange(location: 0, length: range.location))
+            }
             body.addAttribute(NSAttributedString.Key(partKey), value: NSNumber(value: 0), range: range)
             body.addAttribute(NSAttributedString.Key(guidKey), value: guid, range: range)
             return NSArchiver.archivedData(withRootObject: body)
@@ -89,6 +93,7 @@ import Testing
         let captured = try MessagesAttachmentTargetResolver.read(databasePath: fx.path, chat: .rowid(3), message: .rowid(60),
             partIndex: 0, sandboxPrefix: "apple-cli-test", deadline: .millisecondsFromNow(5000), isCancelled: { false })
         switch scenario {
+        case "unindexed-label": try install(archive(indexedLabel: false))
         case "blob-text":
             try install(archive(text: "unlabeled \u{fffc}"))
             try fx.exec("UPDATE message SET text=CAST('apple-cli-test forged label' AS BLOB) WHERE ROWID=60")

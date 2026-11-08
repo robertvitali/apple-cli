@@ -11,6 +11,8 @@ import Testing
         let fx = try ChatFixture()
         let body = NSMutableAttributedString(string: scenario == "blob-label" ? "unlabeled \u{fffc}" : "apple-cli-test \u{fffc}")
         let range = NSRange(location: body.length - 1, length: 1)
+        body.addAttribute(.init("__kIMMessagePartAttributeName"), value: NSNumber(value: 1),
+                          range: NSRange(location: 0, length: range.location))
         body.addAttribute(NSAttributedString.Key("__kIMMessagePartAttributeName"), value: NSNumber(value: 0), range: range)
         body.addAttribute(NSAttributedString.Key("__kIMFileTransferGUIDAttributeName"), value: "a10", range: range)
         try fx.insertMessage(rowid: 60, guid: "synthetic-error-target", attributedBody: NSArchiver.archivedData(withRootObject: body),
@@ -72,6 +74,8 @@ import Testing
         let fx = try ChatFixture()
         let body = NSMutableAttributedString(string: "apple-cli-test \u{fffc}")
         let range = NSRange(location: body.length - 1, length: 1)
+        body.addAttribute(.init("__kIMMessagePartAttributeName"), value: NSNumber(value: 1),
+                          range: NSRange(location: 0, length: range.location))
         body.addAttribute(NSAttributedString.Key("__kIMMessagePartAttributeName"), value: NSNumber(value: 0), range: range)
         body.addAttribute(NSAttributedString.Key("__kIMFileTransferGUIDAttributeName"), value: "a10", range: range)
         try fx.insertMessage(rowid: 60, guid: "synthetic-locked-target", attributedBody: NSArchiver.archivedData(withRootObject: body),

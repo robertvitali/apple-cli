@@ -10,6 +10,8 @@ import Testing
         let fx = try ChatFixture()
         let body = NSMutableAttributedString(string: "apple-cli-test \u{fffc}")
         let range = NSRange(location: body.length - 1, length: 1)
+        body.addAttribute(.init("__kIMMessagePartAttributeName"), value: NSNumber(value: 1),
+                          range: NSRange(location: 0, length: range.location))
         body.addAttribute(NSAttributedString.Key("__kIMMessagePartAttributeName"), value: NSNumber(value: 0), range: range)
         body.addAttribute(NSAttributedString.Key("__kIMFileTransferGUIDAttributeName"), value: "a10", range: range)
         try fx.insertMessage(rowid: 60, guid: "synthetic-retrieval", attributedBody: NSArchiver.archivedData(withRootObject: body),
@@ -23,6 +25,35 @@ import Testing
                       isCancelled: @escaping () -> Bool = { false }) throws -> MessagesAttachmentTargetResolver.Capture {
         try MessagesAttachmentTargetResolver.read(databasePath: fx.path, chat: .rowid(3), message: .rowid(60),
             partIndex: 0, sandboxPrefix: sandbox, deadline: deadline, isCancelled: isCancelled)
+    }
+
+    @Test(arguments: [(0, false), (2, false), (0, true), (2, true)])
+    func attachmentRequiresOneNativeAddress(_ index: Int, _ repeated: Bool) throws {
+        let fx = try fixture()
+        let partKey = NSAttributedString.Key("__kIMMessagePartAttributeName")
+        let body = NSMutableAttributedString(string: "apple-cli-test ")
+        let attachment = NSAttributedString(string: "\u{fffc}", attributes: [
+            partKey: NSNumber(value: index), .init("__kIMFileTransferGUIDAttributeName"): "a10"
+        ])
+        if repeated {
+            body.addAttribute(partKey, value: NSNumber(value: 1), range: NSRange(location: 0, length: body.length))
+            body.append(attachment)
+            body.append(NSAttributedString(string: " ", attributes: [partKey: NSNumber(value: 1)]))
+        }
+        body.append(attachment)
+        let hex = NSArchiver.archivedData(withRootObject: body).map { String(format: "%02x", $0) }.joined()
+        try fx.exec("UPDATE message SET attributedBody=X'\(hex)' WHERE ROWID=60")
+        func resolve() throws -> MessagesAttachmentRetrievalRequest {
+            try MessagesAttachmentTargetResolver.read(databasePath: fx.path, chat: .rowid(3), message: .rowid(60),
+                partIndex: index, sandboxPrefix: "apple-cli-test", deadline: .millisecondsFromNow(5000)).request
+        }
+        if index == 0 || repeated {
+            #expect(throws: MessagesAttachmentTargetResolver.Failure.invalidTarget) { try resolve() }
+        } else {
+            let request = try resolve()
+            #expect(request.selectedAttachmentGUID == "a10")
+            #expect(request.nativePartIndex == index)
+        }
     }
 
     @Test func sandboxPolicyIsBoundAndNativeTextCanSupplyLabel() throws {

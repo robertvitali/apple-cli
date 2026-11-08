@@ -63,9 +63,12 @@ enum MessagesAttachmentTargetResolver {
             try checkpoint()
             let decoded = NativeMessageParts.decode(blob, requireExactText: true)
             try checkpoint()
-            guard decoded.nativePartsAvailable,
-                  let part = decoded.nativeParts?.first(where: { $0.index == partIndex }),
-                  let attachmentGUID = part.attachmentGUID else { throw Failure.invalidTarget }
+            guard decoded.nativePartsAvailable, let parts = decoded.nativeParts, let text = decoded.text,
+                  let part = parts.first(where: { $0.index == partIndex }),
+                  let attachmentGUID = part.attachmentGUID,
+                  NativeMessageParts.singleActionRange(for: part, among: parts, text: text) != nil else {
+                throw Failure.invalidTarget
+            }
             let body: String?
             switch (messageRow.values["text_type"], messageRow.values["text"]) {
             case (.text("text"), .blob):

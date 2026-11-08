@@ -266,6 +266,8 @@ private final class AttachmentPressNode: MessagesAXElement {
         let fx = try ChatFixture()
         let body = NSMutableAttributedString(string: "apple-cli-test \u{fffc}")
         let range = NSRange(location: body.length - 1, length: 1)
+        body.addAttribute(.init("__kIMMessagePartAttributeName"), value: NSNumber(value: 1),
+                          range: NSRange(location: 0, length: range.location))
         body.addAttribute(NSAttributedString.Key("__kIMMessagePartAttributeName"), value: NSNumber(value: 0), range: range)
         body.addAttribute(NSAttributedString.Key("__kIMFileTransferGUIDAttributeName"), value: "a10", range: range)
         try fx.insertMessage(rowid: 60, guid: "synthetic-pending", attributedBody: NSArchiver.archivedData(withRootObject: body),
@@ -333,6 +335,31 @@ private final class AttachmentPressNode: MessagesAXElement {
         #expect(result.detail == "attachment-unverified:navigation:\(error.rawValue)")
         #expect(openings == 1)
         #expect(driver.message.performed.isEmpty)
+    }
+
+    @Test(arguments: [false, true])
+    func addressCollisionDuringRetrievalCannotVerifySuccess(_ afterPress: Bool) throws {
+        let fx = try fixture(), driver = AttachmentPressFixture()
+        let body = NSMutableAttributedString(string: "apple-cli-test ")
+        body.append(NSAttributedString(string: "\u{fffc}", attributes: [
+            .init("__kIMMessagePartAttributeName"): NSNumber(value: 0),
+            .init("__kIMFileTransferGUIDAttributeName"): "a10"
+        ]))
+        let hex = NSArchiver.archivedData(withRootObject: body).map { String(format: "%02x", $0) }.joined()
+        var changes = 0
+        let introduceCollision = {
+            changes += 1
+            try fx.exec("UPDATE message SET attributedBody=X'\(hex)' WHERE ROWID=60; UPDATE attachment SET transfer_state=5 WHERE ROWID=10")
+        }
+        if afterPress {
+            driver.message.onPerform = introduceCollision
+        } else {
+            driver.onOpen = introduceCollision
+        }
+        let result = try run(fx, driver: driver)
+        #expect(changes == 1)
+        #expect(result.category == .failed)
+        #expect(driver.message.performed == (afterPress ? ["AXPress"] : []))
     }
 
     @Test func pendingWorkerPressesExactlyOnceAndVerifiesAvailability() throws {
