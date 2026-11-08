@@ -67,6 +67,21 @@ public enum NativeMessageParts {
         public let nativeParts: [NativePart]?
         public let mentions: MentionObservation?
 
+        /// Uses the strict decoded archive, independent of the displayed message text.
+        func uniqueActionPart(requested: Int?) -> NativePart? {
+            guard nativePartsAvailable, let parts = nativeParts, let text else { return nil }
+            if let requested {
+                guard let part = parts.first(where: { $0.index == requested }),
+                      NativeMessageParts.singleActionRange(for: part, among: parts, text: text) != nil else { return nil }
+                return part
+            }
+            // An omitted index is safe only if the single part covers the whole body.
+            // Unindexed text can have its own native address even when omitted from parts.
+            guard parts.count == 1, let part = parts.first, part.utf16Ranges.count == 1,
+                  part.utf16Ranges.first == UTF16Range(location: 0, length: text.utf16.count) else { return nil }
+            return part
+        }
+
         init(text: String?, status: Status, nativePartsAvailable: Bool,
                     nativePartsReason: String, nativeParts: [NativePart]?,
                     mentions: MentionObservation? = nil) {

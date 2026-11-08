@@ -531,7 +531,9 @@ package enum MessagesReplyComposerProbeParent {
     }
 
     private static func resolveTarget(request: MessagesReplyComposerProbeRequest, db: inout ChatDB) throws -> MessagesReplyComposerResolvedParentTarget {
-        let (chat, message) = try db.exactGet(chat: .rowid(request.expectedChatRowID), message: .rowid(request.expectedMessageRowID))
+        let (chat, message) = try db.exactGet(chat: .rowid(request.expectedChatRowID),
+                                              message: .rowid(request.expectedMessageRowID),
+                                              forNativeAction: true)
         guard chat.rowid == request.expectedChatRowID,
               message.rowid == request.expectedMessageRowID,
               message.selected_chat_rowid == request.expectedChatRowID,
@@ -539,8 +541,7 @@ package enum MessagesReplyComposerProbeParent {
               message.message_guid == request.messageGUID else {
             throw MessagesReplyComposerParentError.targetDrift
         }
-        guard let parts = message.native_parts, message.native_parts_available,
-              parts.contains(where: { $0.index == request.nativePartIndex }),
+        guard message.uniqueNativeActionPart(requested: request.nativePartIndex) != nil,
               request.nativePartGUID == "p:\(request.nativePartIndex)/\(request.messageGUID)" else {
             throw MessagesReplyComposerParentError.nativePartDrift
         }

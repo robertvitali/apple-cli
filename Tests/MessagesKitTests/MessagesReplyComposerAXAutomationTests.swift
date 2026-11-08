@@ -745,6 +745,60 @@ struct MessagesReplyComposerAXAutomationTests {
         #expect(driver.replyVisible == true)
     }
 
+    @Test func changedTargetAfterTextInsertionRefusesReturn() throws {
+        let fx = try dbFixture()
+        try fx.addThreadOriginatorColumns()
+        let driver = FakeReplyDriver()
+        var returns = 0
+        driver.replyBody.onSetValue = { value in
+            if !value.isEmpty { try fx.exec("UPDATE message SET guid='changed-guid' WHERE ROWID=70") }
+        }
+        let request = try sendRequest()
+        let deadline = WorkerDeadline.millisecondsFromNow(5_000)
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in },
+            sendReturnKey: { _, _ in returns += 1; driver.replyVisible = false })
+            .send(request, deadline: deadline) {
+                try MessagesReplyWorkerTarget(databasePath: fx.path).validate(request, deadline: deadline)
+            }
+        #expect(driver.replyBody.bodyText == "apple-cli-test reply")
+        #expect(returns == 0)
+        if case .refused = outcome {} else { Issue.record("expected refusal after target drift") }
+    }
+
+    @Test func changedTargetAfterReturnLeavesEmptyComposerUntouched() throws {
+        let fx = try dbFixture()
+        try fx.addThreadOriginatorColumns()
+        let driver = FakeReplyDriver()
+        let request = try sendRequest()
+        let deadline = WorkerDeadline.millisecondsFromNow(5_000)
+        var returns = 0
+        let automation = MessagesReplyComposerAXAutomation(driver: driver, readinessPause: { _ in },
+            sendReturnKey: { _, deadline in
+                returns += 1
+                try driver.replyBody.setValue("", deadline: deadline)
+                try fx.exec("UPDATE message SET guid='changed-guid' WHERE ROWID=70")
+            })
+        let outcome = try automation.send(request, deadline: deadline) {
+            try MessagesReplyWorkerTarget(databasePath: fx.path).validate(request, deadline: deadline)
+        }
+        #expect(outcome == .refused("target-drift-verification"))
+        #expect(returns == 1)
+        #expect(driver.replyVisible)
+        #expect(driver.replyTranscript.performed.isEmpty)
+    }
+
+    @Test func changedTargetAfterAttachmentPasteRefusesReturn() throws {
+        let fx = try dbFixture()
+        try fx.addThreadOriginatorColumns()
+        let result = try simulateNativeAttachmentSend(databasePath: fx.path) { _ in
+            do { try fx.exec("UPDATE message SET guid='changed-guid' WHERE ROWID=70") }
+            catch { Issue.record("synthetic target update failed") }
+        }
+        #expect(result.pastes == 1)
+        #expect(result.sends == 0)
+        if case .refused = result.outcome {} else { Issue.record("expected refusal after target drift") }
+    }
+
     @Test func combinedWorkerRegistryAcceptsReplySendButNotInspectCommand() throws {
         let registry = MessagesWorkerRegistry(replyDriver: FakeReplyDriver())
         let payload = try sendRequest().workerPayloadData()
@@ -1471,6 +1525,25 @@ struct MessagesReplyComposerAXAutomationTests {
         #expect(try action.preflight(resolved, context) == .requiresMutation)
     }
 
+    @Test func parentProbeRefusesDisjointOccurrencesWithOnePartIndex() throws {
+        let fx = try ChatFixture()
+        let text = "apple-cli-test target"
+        let archive = replyNativeArchive(text, [
+            (replyNativePartKey, NSNumber(value: 2), replyRange(text, "apple")),
+            (replyNativePartKey, NSNumber(value: 2), replyRange(text, "target"))
+        ])
+        try fx.insertMessage(rowid: 70, guid: "message-guid", text: text,
+                             attributedBody: archive, chatRowid: 3, date: fx.base + 10)
+        let dbPath = fx.path, homePath = fx.homePath
+        let action = try MessagesReplyComposerProbeParent.observedAction(
+            stateRoot: try scratch.directory().path, payloadData: request().workerPayloadData(),
+            deadline: .millisecondsFromNow(5_000),
+            makeChatDB: { try ChatDB(path: dbPath, book: AddressBook(), copyToTemp: false, homeDirectoryForTilde: homePath) },
+            automation: MessagesReplyComposerAXAutomation(driver: FakeReplyDriver(), readinessPause: { _ in })
+        )
+        #expect(throws: MessagesReplyComposerParentError.nativePartDrift) { try action.resolve() }
+    }
+
     @Test func parentResolveBindsExpectedParticipantAndNativePart() throws {
         let fx = try dbFixture()
         let dbPath = fx.path
@@ -2187,6 +2260,7 @@ struct MessagesReplyComposerAXAutomationTests {
     }
 
     private func simulateNativeAttachmentSend(retainEmptyAfterSend: Bool = false,
+                                              databasePath: String? = nil,
                                               configure: ((FakeReplyDriver, FakeMessagesClipboard) -> Void)? = nil,
                                               mutateBeforeReturn: ((FakeReplyDriver) -> Void)? = nil,
                                               readinessNow: @escaping () -> UInt64 = { DispatchTime.now().uptimeNanoseconds },
@@ -2203,6 +2277,7 @@ struct MessagesReplyComposerAXAutomationTests {
         let evidence = MessagesPasteKeyEvidence(inputSourceID: "source", layoutSHA256: "sha256:" + String(repeating: "a", count: 64), keyboardType: 40, keyCode: 9)
         var pastes = 0
         var sends = 0
+        let deadline = WorkerDeadline.millisecondsFromNow(5_000)
         let outcome = try withoutActuallyEscaping(mutateAfterPaste) { mutate in
             try MessagesReplyComposerAXAutomation(driver: driver, readinessNow: readinessNow,
                                                    readinessPause: { readinessPause?(driver, $0) },
@@ -2225,7 +2300,9 @@ struct MessagesReplyComposerAXAutomationTests {
                                                        driver.replyBody.staticLinked = [driver.mainTranscript]
                                                        mutate(driver)
                                                    })
-                .send(request, deadline: .millisecondsFromNow(5_000))
+                .send(request, deadline: deadline) {
+                    if let databasePath { try MessagesReplyWorkerTarget(databasePath: databasePath).validate(request, deadline: deadline) }
+                }
         }
         return (outcome, pastes, sends, driver, clipboard)
     }
@@ -3175,5 +3252,13 @@ private final class FakePasteKeyResolver: MessagesPasteKeyResolving, @unchecked 
     func resolvePasteKey(deadline: WorkerDeadline) throws -> MessagesPasteKeyEvidence {
         guard !values.isEmpty else { throw MessagesReplyComposerAXError.replyComposerEvidenceUnavailable }
         return values.removeFirst()
+    }
+}
+
+
+// AX-only fixtures operate on an in-memory UI. Database boundary cases supply the actual validator.
+private extension MessagesReplyComposerAXAutomation {
+    func send(_ request: MessagesReplySendRequest, deadline: WorkerDeadline) throws -> MessagesReplyComposerAXOutcome {
+        try send(request, deadline: deadline, validateTarget: {})
     }
 }

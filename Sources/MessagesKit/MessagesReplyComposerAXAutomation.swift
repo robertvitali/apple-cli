@@ -338,8 +338,16 @@ struct MessagesReplyComposerAXAutomation {
         }
     }
 
-    func send(_ request: MessagesReplySendRequest, deadline: WorkerDeadline) throws -> MessagesReplyComposerAXOutcome {
-        do { return try executeSend(request, deadline: deadline) }
+    func send(_ request: MessagesReplySendRequest, deadline: WorkerDeadline,
+              validateTarget: () throws -> Void) throws -> MessagesReplyComposerAXOutcome {
+        // Once database identity fails, cleanup cannot regain authority over this draft.
+        var failedTargetCheck = false
+        func recheck() throws {
+            guard !failedTargetCheck else { throw MessagesReplyComposerAXError.targetDrift }
+            do { try validateTarget() }
+            catch { failedTargetCheck = true; throw error }
+        }
+        do { return try executeSend(request, deadline: deadline, validateTarget: recheck) }
         catch let error as ReplyAttachmentOwnershipFailure { return .refused(error.detail) }
         catch _ as ReplyComposerOwnershipReason { return .refused(MessagesReplyComposerAXError.replyComposerOwnershipDrift.description) }
         catch let error as MessagesReplyComposerStagedAXFailure { return .failed(error.detail) }
@@ -725,7 +733,8 @@ struct MessagesReplyComposerAXAutomation {
         guard exact else { throw MessagesReplyComposerAXError.replyAttachmentDraftUnverified }
     }
 
-    private func executeSend(_ request: MessagesReplySendRequest, deadline: WorkerDeadline) throws -> MessagesReplyComposerAXOutcome {
+    private func executeSend(_ request: MessagesReplySendRequest, deadline: WorkerDeadline,
+                             validateTarget: () throws -> Void) throws -> MessagesReplyComposerAXOutcome {
         var stage = MessagesReplyComposerAXStage.preflight
         do {
             try checkMessagesAXDeadline(deadline)
@@ -734,6 +743,7 @@ struct MessagesReplyComposerAXAutomation {
             guard !titles.isEmpty else { throw MessagesReplyComposerAXError.unknownAXValue }
             let normalPlaceholders = try driver.normalComposePlaceholders(deadline: deadline)
             let replyDescription = try driver.replyTranscriptDescription(deadline: deadline)
+            try validateTarget()
             try refuseUnsafeExistingStateBeforeOpen(normalPlaceholders: normalPlaceholders, replyDescription: replyDescription, deadline: deadline)
             let targetURL = try NativeMessagesURL.message(messageGUID: request.messageGUID,
                                                           nativePartIndex: request.nativePartIndex,
@@ -748,6 +758,7 @@ struct MessagesReplyComposerAXAutomation {
                 try replyAction(on: element, titles: titles, deadline: deadline) != nil
             }, deadline: deadline)
             stage = .routeRevalidation
+            try validateTarget()
             try navigator.revalidate(route, isTargetEligible: { element, deadline in
                 try replyAction(on: element, titles: titles, deadline: deadline) != nil
             }, deadline: deadline)
@@ -772,18 +783,22 @@ struct MessagesReplyComposerAXAutomation {
                 return try executeAttachmentSendAfterComposerOpen(attachmentDraft, route: route, composer: composer,
                                                                   titles: titles, replyDescription: replyDescription,
                                                                   originalDraft: originalDraft, normalPlaceholders: normalPlaceholders,
-                                                                  stage: &stage, deadline: deadline)
+                                                                  stage: &stage, deadline: deadline, validateTarget: validateTarget)
             }
             guard let text = request.text else { throw MessagesReplyComposerAXError.invalidPayload }
             let ownership = try captureReplyComposerOwnership(route: route, composer: composer, titles: titles, deadline: deadline)
             var sendStarted = false
             do {
-                try composer.body.setValue(text, deadline: deadline)
+                try validateTarget()
+                let empty = try revalidateOwnedComposer(route: route, original: composer, titles: titles,
+                                                       replyDescription: replyDescription, deadline: deadline)
+                try empty.body.setValue(text, deadline: deadline)
                 let inserted = try revalidateComposerWithExpectedText(route: route, original: composer, expectedText: text,
                                                                       titles: titles, replyDescription: replyDescription, composerOwnership: ownership, deadline: deadline)
                 guard try inserted.transcript.actions(deadline: deadline).contains("AXCancel") else {
                     throw MessagesReplyComposerAXError.replyComposerCleanupUnavailable
                 }
+                try validateTarget()
                 let finalComposer = try revalidateComposerWithExpectedText(route: route, original: composer, expectedText: text,
                                                                            titles: titles, replyDescription: replyDescription, composerOwnership: ownership, deadline: deadline)
                 guard try bodyHasNoLocalAttachmentEvidence(in: finalComposer.body, window: route.window, deadline: deadline) else {
@@ -802,19 +817,19 @@ struct MessagesReplyComposerAXAutomation {
                 try sendReturnKey(pid_t(route.process.identity.pid), deadline)
                 return try verifyAfterSend(route: route, originalComposer: composer, titles: titles,
                                            replyDescription: replyDescription, originalDraft: originalDraft,
-                                           normalPlaceholders: normalPlaceholders, composerOwnership: ownership, deadline: deadline)
+                                           normalPlaceholders: normalPlaceholders, composerOwnership: ownership, deadline: deadline, validateTarget: validateTarget)
             } catch {
                 if !sendStarted {
                     var cleanupCancelStarted = false
                     try? clearAndCancelOwnedTextComposer(route: route, original: composer, expectedText: text,
                                                          titles: titles, replyDescription: replyDescription,
                                                          originalDraft: originalDraft, normalPlaceholders: normalPlaceholders,
-                                                         composerOwnership: ownership, deadline: deadline, cancelStarted: &cleanupCancelStarted)
+                                                         composerOwnership: ownership, deadline: deadline, cancelStarted: &cleanupCancelStarted, validateTarget: validateTarget)
                     if !cleanupCancelStarted {
                         try? cancelOwnedEmptyComposer(route: route, original: composer, titles: titles,
                                                       replyDescription: replyDescription, originalDraft: originalDraft,
                                                       normalPlaceholders: normalPlaceholders, composerOwnership: ownership, deadline: deadline,
-                                                      cancelStarted: &cleanupCancelStarted)
+                                                      cancelStarted: &cleanupCancelStarted, validateTarget: validateTarget)
                     }
                 }
                 throw error
@@ -843,7 +858,7 @@ struct MessagesReplyComposerAXAutomation {
                                                         titles: [String], replyDescription: String?,
                                                         originalDraft: NormalComposerProof, normalPlaceholders: [String],
                                                         stage: inout MessagesReplyComposerAXStage,
-                                                        deadline: WorkerDeadline) throws -> MessagesReplyComposerAXOutcome {
+                                                        deadline: WorkerDeadline, validateTarget: () throws -> Void) throws -> MessagesReplyComposerAXOutcome {
         var activeClipboard: (any MessagesClipboarding)?
         var originalClipboard: MessagesClipboardSnapshot?
         var clipboardOwnerCount: Int?
@@ -851,6 +866,7 @@ struct MessagesReplyComposerAXAutomation {
         var sendStarted = false
         var ownershipPhase = ReplyAttachmentOwnershipFailure.Phase.beforePaste
         do {
+            try validateTarget()
             let emptyComposer = try revalidateOwnedComposer(route: route, original: composer, titles: titles,
                                                             replyDescription: replyDescription, deadline: deadline)
             let ownership = try captureReplyComposerOwnership(route: route, composer: emptyComposer,
@@ -874,6 +890,7 @@ struct MessagesReplyComposerAXAutomation {
                 }
                 throw error
             }
+            try validateTarget()
             let finalComposer = try revalidateOwnedComposer(route: route, original: composer, titles: titles,
                                                             replyDescription: replyDescription, deadline: deadline)
             guard try bodyHasNoLocalAttachmentEvidence(in: finalComposer.body, window: route.window, deadline: deadline),
@@ -906,6 +923,7 @@ struct MessagesReplyComposerAXAutomation {
                                         url: publishedURL, deadline: deadline)
             activeClipboard = nil
             ownershipPhase = .beforeReturn
+            try validateTarget()
             try validateAttachmentBeforeReturn(attachment, ownership: ownership, route: route, composer: composer,
                                                titles: titles, replyDescription: replyDescription, deadline: deadline)
             stage = .verification
@@ -916,7 +934,7 @@ struct MessagesReplyComposerAXAutomation {
             ownershipPhase = .afterReturn
             return try verifyAfterSend(route: route, originalComposer: composer, titles: titles,
                                        replyDescription: replyDescription, originalDraft: originalDraft,
-                                       normalPlaceholders: normalPlaceholders, composerOwnership: ownership, deadline: deadline)
+                                       normalPlaceholders: normalPlaceholders, composerOwnership: ownership, deadline: deadline, validateTarget: validateTarget)
         } catch {
             if !sendStarted {
                 var cleanupCancelStarted = false
@@ -925,7 +943,7 @@ struct MessagesReplyComposerAXAutomation {
                 try? cancelOwnedEmptyComposer(route: route, original: composer, titles: titles,
                                                replyDescription: replyDescription, originalDraft: originalDraft,
                                                normalPlaceholders: normalPlaceholders, deadline: deadline,
-                                               cancelStarted: &cleanupCancelStarted)
+                                               cancelStarted: &cleanupCancelStarted, validateTarget: validateTarget)
                 if let activeClipboard {
                     try? restoreClipboardIfOwned(clipboard: activeClipboard, original: originalClipboard,
                                                  ownerCount: clipboardOwnerCount, url: publishedURL, deadline: deadline)
@@ -1424,7 +1442,8 @@ struct MessagesReplyComposerAXAutomation {
     private func clearAndCancelOwnedTextComposer(route: MessagesAXRoute, original: ComposerSurface, expectedText: String,
                                                  titles: [String], replyDescription: String?, originalDraft: NormalComposerProof,
                                                  normalPlaceholders: [String], composerOwnership: ReplyComposerOwnership, deadline: WorkerDeadline,
-                                                 cancelStarted: inout Bool) throws {
+                                                 cancelStarted: inout Bool, validateTarget: () throws -> Void) throws {
+        try validateTarget()
         let transcript = try retainedOwnedComposer(route: route, original: original, titles: titles,
                                                    replyDescription: replyDescription, composerOwnership: composerOwnership, deadline: deadline).transcript
         guard try transcript.actions(deadline: deadline).contains("AXCancel") else {
@@ -1433,6 +1452,7 @@ struct MessagesReplyComposerAXAutomation {
         let composer = try revalidateComposerWithExpectedText(route: route, original: original, expectedText: expectedText,
                                                               titles: titles, replyDescription: replyDescription, composerOwnership: composerOwnership, deadline: deadline)
         try composer.body.setValue("", deadline: deadline)
+        try validateTarget()
         let emptyTranscript = try retainedOwnedComposer(route: route, original: original, titles: titles,
                                                         replyDescription: replyDescription, composerOwnership: composerOwnership, deadline: deadline).transcript
         guard try emptyTranscript.actions(deadline: deadline).contains("AXCancel") else {
@@ -1448,7 +1468,8 @@ struct MessagesReplyComposerAXAutomation {
 
     private func cancelOwnedEmptyComposer(route: MessagesAXRoute, original: ComposerSurface, titles: [String], replyDescription: String?,
                                           originalDraft: NormalComposerProof, normalPlaceholders: [String], composerOwnership: ReplyComposerOwnership? = nil, deadline: WorkerDeadline,
-                                          cancelStarted: inout Bool) throws {
+                                          cancelStarted: inout Bool, validateTarget: () throws -> Void) throws {
+        try validateTarget()
         let transcript = try retainedOwnedComposer(route: route, original: original, titles: titles,
                                                    replyDescription: replyDescription, composerOwnership: composerOwnership, deadline: deadline).transcript
         guard try transcript.actions(deadline: deadline).contains("AXCancel") else {
@@ -1465,7 +1486,8 @@ struct MessagesReplyComposerAXAutomation {
 
     private func verifyAfterSend(route: MessagesAXRoute, originalComposer: ComposerSurface, titles: [String], replyDescription: String?,
                                  originalDraft: NormalComposerProof, normalPlaceholders: [String],
-                                 composerOwnership: ReplyComposerOwnership? = nil, deadline: WorkerDeadline) throws -> MessagesReplyComposerAXOutcome {
+                                 composerOwnership: ReplyComposerOwnership? = nil, deadline: WorkerDeadline,
+                                 validateTarget: () throws -> Void) throws -> MessagesReplyComposerAXOutcome {
         let started = readinessNow()
         let cap: UInt64 = 1_500_000_000
         var retainedNonemptyObserved = false
@@ -1495,6 +1517,7 @@ struct MessagesReplyComposerAXAutomation {
                     guard try transcript.actions(deadline: deadline).contains("AXCancel") else {
                         throw MessagesReplyComposerAXError.replyComposerCleanupUnavailable
                     }
+                    try validateTarget()
                     let empty = try finalOwnedEmptyComposerForCancel(route: route, original: originalComposer, titles: titles,
                                                                      replyDescription: replyDescription, composerOwnership: composerOwnership, deadline: deadline)
                     try empty.transcript.performAction(named: "AXCancel", deadline: deadline)

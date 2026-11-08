@@ -13,6 +13,72 @@ struct ReplyDBProofTests {
         try ChatDB(path: fx.path, book: friendBook, copyToTemp: false, homeDirectoryForTilde: fx.homePath)
     }
 
+    @Test(arguments: [
+        ([nil, 0], nil, false), ([nil, 0], 0, false),
+        ([nil, 2], nil, false), ([nil, 2], 2, true),
+        ([0, 1, 0], 0, false), ([0, 1, 0], 1, true),
+        ([2, 1, 2], 2, false), ([2], nil, true), ([0, 1], 0, true), ([0, 1], nil, false)
+    ] as [([Int?], Int?, Bool)])
+    func replyRequiresOneNativeActionTarget(_ indices: [Int?], _ selected: Int?, _ eligible: Bool) throws {
+        let fx = try replyFixture()
+        let body = NSMutableAttributedString(string: "")
+        for index in indices {
+            let attributes = index.map { [replyNativePartKey: NSNumber(value: $0)] } ?? [:]
+            body.append(NSAttributedString(string: "same", attributes: attributes))
+        }
+        try fx.insertMessage(rowid: 80, guid: "synthetic-reply-part", text: "same",
+            attributedBody: NSArchiver.archivedData(withRootObject: body), chatRowid: 3, date: fx.base)
+        var db = try makeDB(fx)
+        let (_, message) = try db.exactGet(chat: .rowid(3), message: .rowid(80))
+        #expect(message.body == "same")
+        #expect(message.native_parts_available)
+        #expect(Set(message.native_parts?.map(\.index) ?? []) == Set(indices.compactMap { $0 }))
+        if eligible {
+            let target = try db.exactReplyTarget(chat: .rowid(3), message: .rowid(80), partIndex: selected)
+            #expect(target.native_part == (selected ?? 2))
+        } else {
+            #expect(throws: AppleError.self) {
+                try db.exactReplyTarget(chat: .rowid(3), message: .rowid(80), partIndex: selected)
+            }
+        }
+    }
+
+    @Test func normalizedDisplayTextCannotProveAReplyAddress() throws {
+        let fx = try replyFixture()
+        let text = "apple-cli-test target"
+        var archive = nativeReplyArchive(text, [(replyNativePartKey, NSNumber(value: 2),
+                                                NSRange(location: 0, length: text.utf16.count))])
+        let bytes = Data(text.utf8)
+        let range = try #require(archive.range(of: bytes))
+        #expect(archive[range.lowerBound - 1] == UInt8(bytes.count))
+        archive[range.lowerBound - 1] = UInt8(bytes.count + 3)
+        archive.replaceSubrange(range, with: Data([0xef, 0xbb, 0xbf]) + bytes)
+        try fx.insertMessage(rowid: 80, guid: "synthetic-reply-display", attributedBody: archive,
+                             chatRowid: 3, date: fx.base)
+        var db = try makeDB(fx)
+        let (_, message) = try db.exactGet(chat: .rowid(3), message: .rowid(80))
+        #expect(message.native_parts_available)
+        #expect(message.native_parts?.first?.index == 2)
+        #expect(throws: AppleError.self) {
+            try db.exactReplyTarget(chat: .rowid(3), message: .rowid(80), partIndex: 2)
+        }
+    }
+
+    @Test(arguments: [60, 61])
+    func nestedReplyRequiresOneNativeTargetOnEachMessage(_ ambiguousRow: Int) throws {
+        let fx = try replyFixture()
+        try fx.setThreadOriginator(rowid: 61, guidSQL: "'reply-root'", partSQL: "'2'")
+        let text = "same same"
+        let archive = nativeReplyArchive(text, [(replyNativePartKey, NSNumber(value: 2),
+                                                 NSRange(location: 5, length: 4))])
+        let hex = archive.map { String(format: "%02x", $0) }.joined()
+        try fx.exec("UPDATE message SET attributedBody=X'\(hex)' WHERE ROWID=\(ambiguousRow)")
+        var db = try makeDB(fx)
+        #expect(throws: AppleError.self) {
+            try db.exactReplyTarget(chat: .rowid(3), message: .rowid(61), partIndex: 2, allowingNested: true)
+        }
+    }
+
     @Test func replyTargetAllowsIncomingDirectRootWithSingleResolvedParticipant() throws {
         let fx = try replyFixture()
         var db = try makeDB(fx)
@@ -59,7 +125,7 @@ struct ReplyDBProofTests {
     func nestedCandidateSupportsNativePartZero(rawPart: String) throws {
         let fx = try replyFixture()
         let body = "apple-cli-test root"
-        let archive = nativeReplyArchive(body, [(replyNativePartKey, NSNumber(value: 0), nativeReplyRange(body, "root"))])
+        let archive = nativeReplyArchive(body, [(replyNativePartKey, NSNumber(value: 0), NSRange(location: 0, length: body.utf16.count))])
         try fx.insertMessage(rowid: 80, guid: "zero-root", attributedBody: archive, chatRowid: 3, date: fx.base)
         try fx.setThreadOriginator(rowid: 61, guidSQL: "'zero-root'", partSQL: sqlString(rawPart))
         var db = try makeDB(fx)
@@ -782,12 +848,11 @@ private func replyFixture() throws -> ChatFixture {
     try fx.addThreadOriginatorColumns()
     try fx.exec("ALTER TABLE message ADD COLUMN is_sent INTEGER DEFAULT 1;")
     let text = "Root text"
-    let singlePart = nativeReplyArchive(text, [(replyNativePartKey, NSNumber(value: 2), nativeReplyRange(text, "Root"))])
+    let singlePart = nativeReplyArchive(text, [(replyNativePartKey, NSNumber(value: 2), NSRange(location: 0, length: text.utf16.count))])
     try fx.insertMessage(rowid: 60, guid: "reply-root", attributedBody: singlePart, chatRowid: 3, date: fx.base - 60)
     try fx.setThreadOriginator(rowid: 60, guidSQL: "NULL", partSQL: "NULL")
 
-    let nested = nativeReplyArchive(text, [(replyNativePartKey, NSNumber(value: 2), nativeReplyRange(text, "Root"))])
-    try fx.insertMessage(rowid: 61, guid: "nested-root", attributedBody: nested, chatRowid: 3, date: fx.base - 61)
+    try fx.insertMessage(rowid: 61, guid: "nested-root", attributedBody: singlePart, chatRowid: 3, date: fx.base - 61)
     try fx.setThreadOriginator(rowid: 61, guidSQL: "'ancestor'", partSQL: "'2'")
 
     let multi = "First Second"

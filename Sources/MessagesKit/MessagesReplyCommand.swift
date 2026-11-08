@@ -38,6 +38,7 @@ struct ReplySend: ParsableCommand {
 
 private struct ReplyResolvedTarget {
     let target: ChatDB.ExactReplyTarget
+    let selection: ReplySendOptions
     let message: ChatDB.ExactMessage
     let participants: [String]
     let text: String?
@@ -144,7 +145,7 @@ private func replyThreadRootOutput(_ target: ChatDB.ExactReplyTarget) -> ReplyTh
                                  native_part: root.native_part, is_from_me: root.is_from_me)
 }
 
-private func replyRelationshipDigest(_ target: ChatDB.ExactReplyTarget) throws -> String? {
+func replyRelationshipDigest(_ target: ChatDB.ExactReplyTarget) throws -> String? {
     guard target.message_rowid != target.thread_root.message_rowid else { return nil }
     let evidence = ReplyThreadRelationshipBinding(
         selected_rowid: target.message_rowid, selected_guid: target.message_guid,
@@ -351,7 +352,8 @@ private func runReplySend(global: GlobalOptions, dependencies: MessagesCommandDe
             try? cleanupReplyAttachmentDraftIfPresent(observation.target()?.attachmentDraft)
             throw replyStateError(value)
         case .childRefusedOrFailed(let value), .protocolViolation(let value):
-            throw replyStateError(value)
+            throw replyStateError(value + ". The send may have occurred. Do not resend. "
+                + "Check `messages automation status` and inspect the conversation before using `messages automation recover`.")
         }
     }
 }
@@ -430,7 +432,9 @@ private func resolveReplyTarget(db: inout ChatDB, options: any ReplyTargetOption
                                                      requiredBodyPrefix: TestMode.canonicalSandboxPrefix,
                                                      text: input.text,
                                                      attachmentDraft: attachmentDraft,
-                                                     expectedThreadRelationshipSHA256: relationshipDigest)
+                                                     expectedThreadRelationshipSHA256: relationshipDigest,
+                                                     explicitPart: options.partIndex != nil,
+                                                     expectedAttachmentGUID: target.part_guid)
             payload = built
             payloadData = try built.workerPayloadData()
         } catch {
@@ -455,7 +459,7 @@ private func resolveReplyTarget(db: inout ChatDB, options: any ReplyTargetOption
     } else {
         binding = nil
     }
-    return ReplyResolvedTarget(target: target, message: message, participants: participants, text: input.text,
+    return ReplyResolvedTarget(target: target, selection: ReplySendOptions(options), message: message, participants: participants, text: input.text,
                                attachmentDraft: attachmentDraft, highwater: highwater, payload: payload,
                                workerCommand: try payloadData.map { try WorkerCommand(name: "messages.reply.send", payload: $0) },
                                binding: binding, relationshipDigest: relationshipDigest)
@@ -476,7 +480,7 @@ private func sameReplyTargetIdentity(_ fresh: ReplyResolvedTarget, _ expected: R
 }
 
 private func loadBoundReplyTarget(db: inout ChatDB, expected: ReplyResolvedTarget, input: ReplyInput, highwater: Int64?) throws -> ReplyResolvedTarget? {
-    let fresh = try resolveReplyTarget(db: &db, options: ReplySendOptions(target: expected.target), input: input,
+    let fresh = try resolveReplyTarget(db: &db, options: expected.selection, input: input,
                                        attachmentDraft: expected.attachmentDraft, highwater: highwater)
     guard sameReplyTargetIdentity(fresh, expected) else { return nil }
     if let lhs = fresh.workerCommand, let rhs = expected.workerCommand {
@@ -493,12 +497,12 @@ private struct ReplySendOptions: ReplyTargetOptions {
     let messageRowid: Int64?
     let messageGuid: String?
     let partIndex: Int?
-    init(target: ChatDB.ExactReplyTarget) {
-        self.chatRowid = target.chat_rowid
-        self.chatGuid = nil
-        self.messageRowid = target.message_rowid
-        self.messageGuid = nil
-        self.partIndex = target.native_part
+    init(_ options: any ReplyTargetOptions) {
+        chatRowid = options.chatRowid
+        chatGuid = options.chatGuid
+        messageRowid = options.messageRowid
+        messageGuid = options.messageGuid
+        partIndex = options.partIndex
     }
 }
 

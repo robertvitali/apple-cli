@@ -1004,6 +1004,12 @@ public struct ChatDB {
         public let native_parts_available: Bool
         public let native_parts_reason: String
         public let native_parts: [ExactNativePart]?
+        // Only action lookups retain the strict decode from the selected row.
+        fileprivate let actionBody: NativeMessageParts.Decoded?
+
+        func uniqueNativeActionPart(requested: Int?) -> NativeMessageParts.NativePart? {
+            actionBody?.uniqueActionPart(requested: requested)
+        }
         public let thread_originator: ExactThreadOriginator
         public let native_status: ExactNativeStatus
         public let native_edit_context: ExactNativeEditContext
@@ -1419,6 +1425,13 @@ public struct ChatDB {
                                   message messageSelector: ExactMessageSelector,
                                   includeNativeEditContext: Bool = false,
                                   includeNativeMentions: Bool = false) throws -> (ResolvedExactChat, ExactMessage) {
+        try exactGet(chat: selector, message: messageSelector, forNativeAction: false,
+                     includeNativeEditContext: includeNativeEditContext, includeNativeMentions: includeNativeMentions)
+    }
+
+    mutating func exactGet(chat selector: ExactChatSelector, message messageSelector: ExactMessageSelector,
+                                   forNativeAction: Bool, includeNativeEditContext: Bool = false,
+                                   includeNativeMentions: Bool = false) throws -> (ResolvedExactChat, ExactMessage) {
         let schema = try requireExactReadSchema()
         let chat = try resolveExactChat(selector)
         let messagePredicate: String
@@ -1443,7 +1456,7 @@ public struct ChatDB {
         """
         let messages = try shapeExactMessages(rows: reader.rows(sql, [String(chat.rowid), bind]), schema: schema,
                                               includeNativeEditContext: includeNativeEditContext,
-                                              includeNativeMentions: includeNativeMentions)
+                                              includeNativeMentions: includeNativeMentions, forNativeAction: forNativeAction)
         guard let message = messages.first else {
             throw AppleError.notFound("message is not a member of the selected conversation")
         }
@@ -1454,7 +1467,7 @@ public struct ChatDB {
                                            message messageSelector: ExactMessageSelector,
                                            partIndex: Int? = nil,
                                            allowingNested: Bool = false) throws -> ExactReplyTarget {
-        let (chat, message) = try exactGet(chat: selector, message: messageSelector)
+        let (chat, message) = try exactGet(chat: selector, message: messageSelector, forNativeAction: true)
         guard message.selected_chat_rowid == chat.rowid else {
             throw AppleError.validation("reply target message is not in the selected conversation")
         }
@@ -1478,7 +1491,7 @@ public struct ChatDB {
             root = ExactReplyThreadRoot(message_rowid: message.rowid, message_guid: strictTarget.messageGUID,
                                        native_part: nativePart, part_guid: partGUID, is_from_me: strictTarget.isFromMe)
         } else {
-            guard message.native_parts?.count == 1,
+            guard message.uniqueNativeActionPart(requested: nil) != nil,
                   message.thread_originator.reason == "available",
                   let rootGUID = message.thread_originator.message_guid,
                   let rootPart = message.thread_originator.native_part,
@@ -1495,7 +1508,7 @@ public struct ChatDB {
                 throw AppleError.validation("nested reply target cannot reference itself")
             }
             // Resolve exactly one ancestor, never recurse or search by message text.
-            let (_, rootMessage) = try exactGet(chat: .rowid(chat.rowid), message: .rowid(rootRowid))
+            let (_, rootMessage) = try exactGet(chat: .rowid(chat.rowid), message: .rowid(rootRowid), forNativeAction: true)
             let strictRoot = try exactReplyTargetEvidence(chatRowid: chat.rowid, messageRowid: rootRowid)
             try validateNestedReplyMembership(chatRowid: chat.rowid, messageRowid: rootRowid,
                                               requiringUnlinkedRoot: true)
@@ -1503,7 +1516,7 @@ public struct ChatDB {
                   strictRoot.chatGUID.utf8.elementsEqual(strictTarget.chatGUID.utf8),
                   rootMessage.thread_originator.available,
                   rootMessage.thread_originator.reason == "no-linkage",
-                  rootMessage.native_parts_available, rootMessage.native_parts?.count == 1 else {
+                  rootMessage.uniqueNativeActionPart(requested: nil) != nil else {
                 throw AppleError.validation("nested reply target requires a unique single-part thread root")
             }
             let resolvedRootPart = try resolveExactReplyPart(rootMessage, requested: rootPart)
@@ -2264,7 +2277,7 @@ public struct ChatDB {
                                  is_from_me: ownership.isFromMe,
                                  bodyKnown: body.known,
                                  body: body.body,
-                                 thread_originator: exactThreadOriginator(row, schema: schema))
+                                 thread_originator: Self.exactThreadOriginator(row, columnsAvailable: schema.threadOriginatorColumnsAvailable))
         }
     }
 
@@ -2311,22 +2324,13 @@ public struct ChatDB {
     }
 
     private func resolveExactReplyPart(_ message: ExactMessage, requested: Int?) throws -> Int {
-        if let requested {
-            guard requested >= 0 else { throw AppleError.validation("partIndex must be >= 0") }
-            guard message.native_parts_available, let parts = message.native_parts,
-                  parts.contains(where: { $0.index == requested }) else {
-                throw AppleError.validation("reply target native part is not proven")
-            }
-            return requested
-        }
-        guard message.native_parts_available, let parts = message.native_parts else {
+        if let requested, requested < 0 { throw AppleError.validation("partIndex must be >= 0") }
+        if let part = message.uniqueNativeActionPart(requested: requested) { return part.index }
+        if requested != nil { throw AppleError.validation("reply target native part is not proven") }
+        guard message.native_parts_available else {
             throw AppleError.validation("reply target native parts are unavailable: \(message.native_parts_reason)")
         }
-        let indexes = Set(parts.map(\.index))
-        guard indexes.count == 1, let only = indexes.first else {
-            throw AppleError.validation("reply target requires an explicit native part")
-        }
-        return only
+        throw AppleError.validation("reply target requires an explicit native part")
     }
 
     private func reactionColumns() throws -> (available: Bool, missing: [String], hasCustomEmoji: Bool) {
@@ -2685,7 +2689,7 @@ public struct ChatDB {
     private mutating func shapeExactMessages(rows: [SQLiteReader.Row], schema: ExactReadSchema,
                                             includeNativeEditContext: Bool = false,
                                             includeNativeMentions: Bool = false,
-                                            enrichmentLimit: Int = 1) throws -> [ExactMessage] {
+                                            enrichmentLimit: Int = 1, forNativeAction: Bool = false) throws -> [ExactMessage] {
         let ids = rows.compactMap { $0.int("rowid") }
         let attachments = try strictAttachmentsByMessage(ids: ids)
         var out: [ExactMessage] = []
@@ -2700,14 +2704,15 @@ public struct ChatDB {
             if mentionsRequested { try Task.checkCancellation() }
             let nativeDecoded = NativeMessageParts.decode(
                 row.data("attributedBody"),
-                collectMentions: NativeMentionsRead.shouldCollect(requested: mentionsRequested, budget: mentionBudget))
+                collectMentions: NativeMentionsRead.shouldCollect(requested: mentionsRequested, budget: mentionBudget),
+                requireExactText: forNativeAction)
             let nativePartsInfo = exactNativeParts(nativeDecoded)
             let mentions = NativeMentionsRead.context(row.values["attributedBody"],
                                                       storageType: row.text("native_mentions_storage_type"),
                                                       decoded: nativeDecoded,
                                                       requested: mentionsRequested, budget: &mentionBudget)
             if mentionsRequested { try Task.checkCancellation() }
-            let threadOriginator = exactThreadOriginator(row, schema: schema)
+            let threadOriginator = Self.exactThreadOriginator(row, columnsAvailable: schema.threadOriginatorColumnsAvailable)
             let rawDate = row.int("date")
             let date = rawDate.map(MessageTime.date(fromRaw:))
             let isFromMe = (row.int("is_from_me") ?? 0) != 0
@@ -2749,6 +2754,7 @@ public struct ChatDB {
                 native_parts_available: nativePartsInfo.available,
                 native_parts_reason: nativePartsInfo.reason,
                 native_parts: nativePartsInfo.parts,
+                actionBody: forNativeAction ? nativeDecoded : nil,
                 thread_originator: threadOriginator,
                 native_status: NativeMessageStatusDecoder.decode(row),
                 native_edit_context: editContext,
@@ -2758,8 +2764,8 @@ public struct ChatDB {
         return out
     }
 
-    private func exactThreadOriginator(_ row: SQLiteReader.Row, schema: ExactReadSchema) -> ExactThreadOriginator {
-        guard schema.threadOriginatorColumnsAvailable else {
+    static func exactThreadOriginator(_ row: SQLiteReader.Row, columnsAvailable: Bool) -> ExactThreadOriginator {
+        guard columnsAvailable else {
             return ExactThreadOriginator(available: false, reason: "missing-schema",
                                          message_guid: nil, raw_part: nil, native_part: nil)
         }
@@ -2789,7 +2795,7 @@ public struct ChatDB {
                                      native_part: parsed.nativePart)
     }
 
-    private func originatorText(_ value: SQLiteReader.Row.Value?) -> (text: String?, wrongType: Bool) {
+    private static func originatorText(_ value: SQLiteReader.Row.Value?) -> (text: String?, wrongType: Bool) {
         switch value {
         case .text(let text)?: return (text, false)
         case .null?: return (nil, false)
@@ -2797,7 +2803,7 @@ public struct ChatDB {
         }
     }
 
-    private func parseThreadOriginatorPart(_ raw: String) -> (available: Bool, reason: String, nativePart: Int?) {
+    private static func parseThreadOriginatorPart(_ raw: String) -> (available: Bool, reason: String, nativePart: Int?) {
         let prefix = raw.split(separator: ":", maxSplits: 1, omittingEmptySubsequences: false)[0]
         guard !prefix.isEmpty else { return (false, "malformed", nil) }
         let bytes = prefix.utf8

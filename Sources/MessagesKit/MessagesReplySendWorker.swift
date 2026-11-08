@@ -17,6 +17,8 @@ struct MessagesReplySendRequest: Codable, Equatable, Sendable {
     let messageGUID: String
     let nativePartIndex: Int
     let nativePartGUID: String?
+    let explicitPart: Bool
+    let expectedAttachmentGUID: String?
     let expectedChatRowID: Int64
     let expectedMessageRowID: Int64
     let expectedParticipantHandles: [String]
@@ -33,6 +35,8 @@ struct MessagesReplySendRequest: Codable, Equatable, Sendable {
         case messageGUID = "message_guid"
         case nativePartIndex = "native_part_index"
         case nativePartGUID = "native_part_guid"
+        case explicitPart = "explicit_part"
+        case expectedAttachmentGUID = "expected_attachment_guid"
         case expectedChatRowID = "expected_chat_rowid"
         case expectedMessageRowID = "expected_message_rowid"
         case expectedParticipantHandles = "expected_participant_handles"
@@ -58,7 +62,8 @@ struct MessagesReplySendRequest: Codable, Equatable, Sendable {
          requiredBodyPrefix: String,
          text: String?,
          attachmentDraft: MessagesReplyAttachmentDraftEvidence? = nil,
-         expectedThreadRelationshipSHA256: String? = nil) throws {
+         expectedThreadRelationshipSHA256: String? = nil,
+         explicitPart: Bool = true, expectedAttachmentGUID: String? = nil) throws {
         guard !chatGUID.isEmpty, chatGUID.utf8.count <= 512,
               expectedChatRowID > 0, expectedMessageRowID > 0,
               !expectedParticipantHandles.isEmpty, expectedParticipantHandles.count <= 32,
@@ -67,6 +72,11 @@ struct MessagesReplySendRequest: Codable, Equatable, Sendable {
               expectedBodyUTF8Length > 0, expectedBodyUTF8Length <= 4096,
               requiredBodyPrefix == TestMode.canonicalSandboxPrefix
         else { throw MessagesReplyComposerAXError.invalidPayload }
+        if let guid = expectedAttachmentGUID, guid.isEmpty || guid.utf8.count > 512 {
+            throw MessagesReplyComposerAXError.invalidPayload
+        }
+        self.explicitPart = explicitPart
+        self.expectedAttachmentGUID = expectedAttachmentGUID
         if let digest = expectedThreadRelationshipSHA256 {
             guard digest.hasPrefix("sha256:"), digest.utf8.count == 71,
                   digest.utf8.dropFirst(7).allSatisfy({ (48...57).contains($0) || (97...102).contains($0) }) else {
@@ -114,7 +124,9 @@ struct MessagesReplySendRequest: Codable, Equatable, Sendable {
                       requiredBodyPrefix: c.decode(String.self, forKey: .requiredBodyPrefix),
                       text: c.decodeIfPresent(String.self, forKey: .text),
                       attachmentDraft: c.decodeIfPresent(MessagesReplyAttachmentDraftEvidence.self, forKey: .attachmentDraft),
-                      expectedThreadRelationshipSHA256: c.decodeIfPresent(String.self, forKey: .expectedThreadRelationshipSHA256))
+                      expectedThreadRelationshipSHA256: c.decodeIfPresent(String.self, forKey: .expectedThreadRelationshipSHA256),
+                      explicitPart: c.decodeIfPresent(Bool.self, forKey: .explicitPart) ?? false,
+                      expectedAttachmentGUID: c.decodeIfPresent(String.self, forKey: .expectedAttachmentGUID))
     }
 
     func encode(to encoder: any Encoder) throws {
@@ -123,6 +135,8 @@ struct MessagesReplySendRequest: Codable, Equatable, Sendable {
         try c.encode(messageGUID, forKey: .messageGUID)
         try c.encode(nativePartIndex, forKey: .nativePartIndex)
         try c.encodeIfPresent(nativePartGUID, forKey: .nativePartGUID)
+        if explicitPart { try c.encode(true, forKey: .explicitPart) }
+        try c.encodeIfPresent(expectedAttachmentGUID, forKey: .expectedAttachmentGUID)
         try c.encode(expectedChatRowID, forKey: .expectedChatRowID)
         try c.encode(expectedMessageRowID, forKey: .expectedMessageRowID)
         try c.encode(expectedParticipantHandles, forKey: .expectedParticipantHandles)
@@ -196,7 +210,10 @@ private struct MessagesReplySendWorkerOperation: WorkerOperation, @unchecked Sen
     let driver: any MessagesReplyComposerAXDriving
 
     func run(_ request: WorkerRequest, deadline: WorkerDeadline) throws -> WorkerOperationResult {
-        let outcome = try MessagesReplyComposerAXAutomation(driver: driver).send(payload, deadline: deadline)
+        let target = MessagesReplyWorkerTarget(databasePath: ChatDB.defaultPath())
+        let outcome = try MessagesReplyComposerAXAutomation(driver: driver).send(payload, deadline: deadline) {
+            try target.validate(payload, deadline: deadline)
+        }
         switch outcome {
         case .ack(let detail): return WorkerOperationResult(.ack, detail: detail)
         case .refused(let detail): return .refused(detail)

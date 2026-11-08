@@ -174,8 +174,14 @@ private extension ChatFixture {
     }
 
     func insertNestedReplyTarget() throws {
-        try insertReplyTarget(rowid: 70, guid: "reply-root")
-        try insertReactionTarget(rowid: 71, guid: "reply-selected")
+        try addThreadOriginatorColumns()
+        let text = "apple-cli-test target"
+        let body = commandNativeArchive(text, [
+            (commandNativePartKey, NSNumber(value: 2), NSRange(location: 0, length: text.utf16.count))
+        ])
+        for (rowid, guid) in [(Int64(70), "reply-root"), (Int64(71), "reply-selected")] {
+            try insertMessage(rowid: rowid, guid: guid, text: text, attributedBody: body, chatRowid: 3, date: base + 10)
+        }
         try setThreadOriginator(rowid: 71, guidSQL: "'reply-root'", partSQL: "'2:0'")
         try exec("UPDATE message SET is_from_me=1 WHERE ROWID=71;")
     }
@@ -2107,6 +2113,165 @@ struct MessagesCommandDependencyTests {
     }
 
     @Test(arguments: [false, true])
+    func replyPreflightRetainsImplicitOrExplicitSelection(_ explicit: Bool) throws {
+        let fx = try ChatFixture()
+        try fx.insertReplyTarget(rowid: 70, guid: "reply-target")
+        let path = fx.path, text = "apple-cli-test target"
+        let full = commandNativeArchive(text, [(commandNativePartKey, NSNumber(value: 2),
+                                               NSRange(location: 0, length: text.utf16.count))])
+        let split = commandNativeArchive(text, [(commandNativePartKey, NSNumber(value: 2),
+                                                commandReactionRange(text, "target"))])
+        try replaceReplyAttributedBody(path: path, rowid: 70, body: full)
+        let checked = LockedBox(false)
+        let deps = replyDependencies(fx, launchObservedWorker: { action in
+            let resolved = try action.resolve()
+            try replaceReplyAttributedBody(path: path, rowid: 70, body: split)
+            let context = WorkerObservedContext(deadline: action.deadline, isCancelled: { false })
+            if explicit {
+                #expect(try action.preflight(resolved, context) == .requiresMutation)
+            } else {
+                #expect(throws: AppleError.self) { try action.preflight(resolved, context) }
+            }
+            checked.withLock { $0 = true }
+            return .verificationFailed
+        }, captureReplyCleanState: { _, _ in MessagesReplyCleanStateToken("synthetic") })
+        let args = ["--chat-rowid", "3", "--message-rowid", "70", "--body", "apple-cli-test reply",
+                    "--experimental-ui-handoff", "--test-mode", "--execute"] + (explicit ? ["--part-index", "2"] : [])
+        _ = try captureCommand { try ReplySend.parse(args).run(dependencies: deps) }
+        #expect(checked.value)
+    }
+
+    @Test(arguments: [false, true])
+    func duplicatedReplyGUIDAfterResolveStopsPreflight(_ duplicateChat: Bool) throws {
+        let fx = try ChatFixture()
+        try fx.insertReplyTarget(rowid: 70, guid: "reply-target")
+        let path = fx.path
+        let checked = LockedBox(false)
+        let deps = replyDependencies(fx, launchObservedWorker: { action in
+            let resolved = try action.resolve()
+            let sql = duplicateChat
+                ? "INSERT INTO chat(ROWID,guid) SELECT 72,guid FROM chat WHERE ROWID=3"
+                : "INSERT INTO message(ROWID,guid) SELECT 72,guid FROM message WHERE ROWID=70"
+            try execReplySQL(path: path, sql)
+            let context = WorkerObservedContext(deadline: action.deadline, isCancelled: { false })
+            #expect(throws: AppleError.self) { try action.preflight(resolved, context) }
+            checked.withLock { $0 = true }
+            return .verificationFailed
+        })
+        let args = ["--chat-guid", "iMessage;-;+12125550100", "--message-guid", "reply-target", "--part-index", "2",
+                    "--body", "apple-cli-test reply", "--experimental-ui-handoff", "--test-mode", "--execute"]
+        _ = try captureCommand { try ReplySend.parse(args).run(dependencies: deps) }
+        #expect(checked.value)
+    }
+
+    @Test(arguments: ["valid", "participant", "shared-membership", "duplicate-guid", "ownership", "body",
+                      "implicit-ambiguous", "missing-selector", "nested-valid", "nested-root", "nested-link",
+                      "fractional-member", "text-member", "blob-member", "fractional-chat", "text-chat", "blob-chat"])
+    func replyWorkerRevalidatesParentPayload(_ variant: String) throws {
+        let fx = try ChatFixture()
+        let nested = variant.hasPrefix("nested-")
+        if nested { try fx.insertNestedReplyTarget() }
+        else { try fx.insertReplyTarget(rowid: 70, guid: "reply-target") }
+        let path = fx.path, checked = LockedBox(false)
+        // The only visible index has an unindexed prefix. It needs explicit selection.
+        let deps = replyDependencies(fx, launchObservedWorker: { action in
+            let resolved = try action.resolve()
+            var bytes = try #require(resolved.command.payload)
+            if variant == "implicit-ambiguous" || variant == "missing-selector" {
+                var object = try #require(JSONSerialization.jsonObject(with: bytes) as? [String: Any])
+                if variant == "implicit-ambiguous" { object["explicit_part"] = false }
+                else { object.removeValue(forKey: "explicit_part") }
+                bytes = try JSONSerialization.data(withJSONObject: object)
+            }
+            let request = try JSONDecoder().decode(MessagesReplySendRequest.self, from: bytes)
+            let target = MessagesReplyWorkerTarget(databasePath: path)
+            let drift: String?
+            switch variant {
+            case "participant": drift = "UPDATE handle SET id='changed' WHERE ROWID=1"
+            case "fractional-member": drift = "INSERT INTO chat_message_join VALUES (3,70.5)"
+            case "text-member": drift = "INSERT INTO chat_message_join VALUES (3,'70bad')"
+            case "blob-member": drift = "INSERT INTO chat_message_join VALUES (3,X'3730')"
+            case "fractional-chat": drift = "INSERT INTO chat_handle_join VALUES (3.5,1)"
+            case "text-chat": drift = "INSERT INTO chat_handle_join VALUES ('3bad',1)"
+            case "blob-chat": drift = "INSERT INTO chat_handle_join VALUES (X'33',1)"
+            case "shared-membership": drift = "INSERT INTO chat_message_join VALUES (4,70)"
+            case "duplicate-guid": drift = "INSERT INTO message(ROWID,guid) VALUES (72,'reply-target')"
+            case "ownership", "nested-root": drift = "UPDATE message SET is_from_me=1 WHERE ROWID=70"
+            case "body": drift = "UPDATE message SET text='changed' WHERE ROWID=70"
+            case "nested-link": drift = "UPDATE message SET thread_originator_part='2:1' WHERE ROWID=71"
+            default: drift = nil
+            }
+            if let drift { try execReplySQL(path: path, drift) }
+            if variant == "valid" || variant == "nested-valid" {
+                try target.validate(request, deadline: action.deadline)
+            } else {
+                #expect(throws: MessagesReplyComposerAXError.targetDrift) {
+                    try target.validate(request, deadline: action.deadline)
+                }
+            }
+            checked.withLock { $0 = true }
+            return .verificationFailed
+        })
+        let args = ["--chat-rowid", "3", "--message-rowid", nested ? "71" : "70", "--part-index", "2",
+                    "--body", "apple-cli-test reply", "--experimental-ui-handoff", "--test-mode", "--execute"]
+        _ = try captureCommand { try ReplySend.parse(args).run(dependencies: deps) }
+        #expect(checked.value)
+    }
+
+    @Test(arguments: ["chat", "message", "root"])
+    func replyWorkerRefusesNumericGUIDStorageAfterResolution(_ which: String) throws {
+        let fx = try ChatFixture()
+        if which == "root" {
+            try fx.insertNestedReplyTarget()
+            try fx.exec("UPDATE message SET guid='1e2' WHERE ROWID=70; UPDATE message SET thread_originator_guid='1e2' WHERE ROWID=71")
+        } else {
+            try fx.insertReplyTarget(rowid: 70, guid: which == "message" ? "1e2" : "reply-target")
+            if which == "chat" { try fx.exec("UPDATE chat SET guid='1e2' WHERE ROWID=3") }
+        }
+        let path = fx.path, checked = LockedBox(false)
+        let deps = replyDependencies(fx, launchObservedWorker: { action in
+            let resolved = try action.resolve()
+            let request = try JSONDecoder().decode(MessagesReplySendRequest.self, from: #require(resolved.command.payload))
+            let validator = MessagesReplyWorkerTarget(databasePath: path)
+            try validator.validate(request, deadline: action.deadline)
+            let table = which == "chat" ? "chat" : "message"
+            try execReplySQL(path: path, """
+                ALTER TABLE \(table) RENAME COLUMN guid TO prior_guid;
+                ALTER TABLE \(table) ADD COLUMN guid NUMERIC;
+                UPDATE \(table) SET guid=prior_guid;
+                """)
+            #expect(throws: MessagesReplyComposerAXError.targetDrift) {
+                try validator.validate(request, deadline: action.deadline)
+            }
+            checked.withLock { $0 = true }
+            return .verificationFailed
+        })
+        let args = ["--chat-rowid", "3", "--message-rowid", which == "root" ? "71" : "70",
+                    "--part-index", "2", "--body", "apple-cli-test reply",
+                    "--experimental-ui-handoff", "--test-mode", "--execute"]
+        _ = try captureCommand { try ReplySend.parse(args).run(dependencies: deps) }
+        #expect(checked.value)
+    }
+
+    @Test(arguments: [false, true])
+    func ambiguousReplyAddressRefusesBeforeWorker(_ execute: Bool) throws {
+        let fx = try ChatFixture()
+        // The unindexed prefix and the explicit zero share their native address.
+        try fx.insertReplyTarget(rowid: 70, guid: "reply-target", part: 0)
+        let launched = LockedBox(false)
+        let deps = replyDependencies(fx) { _ in
+            launched.withLock { $0 = true }
+            return .timedOut
+        }
+        let args = ["--chat-rowid", "3", "--message-rowid", "70", "--part-index", "0",
+                    "--body", "apple-cli-test reply", "--test-mode", "--experimental-ui-handoff",
+                    execute ? "--execute" : "--dry-run"]
+        let result = try captureCommand { try ReplySend.parse(args).run(dependencies: deps) }
+        #expect(result.exitCode == AppleExit.usage)
+        #expect(!launched.value)
+    }
+
+    @Test(arguments: [false, true])
     func nestedReplyDryRunSeparatesSelectedAndRootWithoutWorker(attachment: Bool) throws {
         let fx = try ChatFixture()
         try fx.insertNestedReplyTarget()
@@ -2203,7 +2368,7 @@ struct MessagesCommandDependencyTests {
         try fx.insertNestedReplyTarget()
         try fx.exec("UPDATE message SET text='unlabeled target', attributedBody=NULL WHERE ROWID=71;")
         let body = commandNativeArchive("unlabeled target", [
-            (commandNativePartKey, NSNumber(value: 2), commandReactionRange("unlabeled target", "target")),
+            (commandNativePartKey, NSNumber(value: 2), NSRange(location: 0, length: "unlabeled target".utf16.count)),
         ])
         try replaceReplyAttributedBody(path: fx.path, rowid: 71, body: body)
         let launched = LockedBox(false)
@@ -2446,7 +2611,8 @@ struct MessagesCommandDependencyTests {
         #expect(FileManager.default.fileExists(atPath: copy) == false)
     }
 
-    @Test func replySendAttachmentUncertainHandoffPreservesPreparedCopy() throws {
+    @Test(arguments: [false, true])
+    func replySendAttachmentUncertainHandoffPreservesPreparedCopy(protocolViolation: Bool) throws {
         let fx = try ChatFixture()
         try fx.insertReplyTarget(rowid: 70, guid: "reply-target")
         let fileURL = try scratch.directory().appendingPathComponent("apple-cli-test-file.txt")
@@ -2460,7 +2626,7 @@ struct MessagesCommandDependencyTests {
             preparedCopy.withLock { $0 = draft.copyPath }
             let context = WorkerObservedContext(deadline: action.deadline, isCancelled: { false })
             #expect(try action.preflight(resolved, context) == .requiresMutation)
-            return .childRefusedOrFailed("synthetic child failure after possible handoff")
+            return protocolViolation ? .protocolViolation("synthetic malformed reply") : .childRefusedOrFailed("target-drift-verification")
         }
 
         let result = try captureCommand {
@@ -2470,6 +2636,12 @@ struct MessagesCommandDependencyTests {
         }
 
         #expect(result.exitCode == AppleExit.upstream)
+        let message = try #require(try errorPayload(from: result.stdout)["message"] as? String)
+        #expect(message.contains(protocolViolation ? "synthetic malformed reply" : "target-drift-verification"))
+        #expect(message.contains("send may have occurred"))
+        #expect(message.contains("Do not resend"))
+        #expect(message.contains("messages automation recover"))
+        #expect(message.contains("messages automation status"))
         let copy = try #require(preparedCopy.value)
         #expect(FileManager.default.fileExists(atPath: copy) == true)
     }
